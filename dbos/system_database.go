@@ -33,7 +33,7 @@ type SystemDatabase interface {
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]WorkflowStatus, error)
 	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
-	DequeueWorkflows(ctx context.Context, queue workflowQueue) ([]string, error)
+	DequeueWorkflows(ctx context.Context, queue workflowQueue) ([]dequeuedWorkflow, error)
 }
 
 type systemDatabase struct {
@@ -704,7 +704,13 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 /******* QUEUES ********/
 /*******************************/
 
-func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQueue) ([]string, error) {
+type dequeuedWorkflow struct {
+	id    string
+	name  string
+	input string
+}
+
+func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQueue) ([]dequeuedWorkflow, error) {
 	// Begin transaction with snapshot isolation
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -832,12 +838,16 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 		fmt.Printf("[%s] dequeueing %d task(s)\n", queue.name, len(dequeuedIDs))
 	}
 
-	// Update workflows to PENDING status
-	var retIDs []string
+	// Update workflows to PENDING status and get their details
+	var retWorkflows []dequeuedWorkflow
 	for _, id := range dequeuedIDs {
 		// TODO handle rate limite
 
-		// Update workflow status to PENDING
+		retWorkflow := dequeuedWorkflow{
+			id: id,
+		}
+
+		// Update workflow status to PENDING and return name and inputs
 		updateQuery := `
 			UPDATE dbos.workflow_status
 			SET status = $1,
@@ -849,20 +859,25 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 			        THEN EXTRACT(epoch FROM NOW()) * 1000 + workflow_timeout_ms
 			        ELSE workflow_deadline_epoch_ms
 			    END
-			WHERE workflow_uuid = $5`
+			WHERE workflow_uuid = $5
+			RETURNING name, inputs`
 
-		_, err := tx.Exec(ctx, updateQuery,
+		var inputString *string
+		err := tx.QueryRow(ctx, updateQuery,
 			WorkflowStatusPending,
 			APP_VERSION,
 			EXECUTOR_ID,
 			startTimeMs,
-			id)
+			id).Scan(&retWorkflow.name, &inputString)
 
-		if err != nil {
-			return nil, fmt.Errorf("failed to update workflow %s to PENDING: %w", id, err)
+		if inputString != nil && len(*inputString) > 0 {
+			retWorkflow.input = *inputString
 		}
 
-		retIDs = append(retIDs, id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
+		}
+		retWorkflows = append(retWorkflows, retWorkflow)
 	}
 
 	// Commit the transaction
@@ -870,7 +885,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	return retIDs, nil
+	return retWorkflows, nil
 }
 
 /*******************************/

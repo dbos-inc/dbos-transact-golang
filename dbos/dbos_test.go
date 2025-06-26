@@ -63,6 +63,8 @@ var (
 	idempotencyWfWithStep = WithWorkflow(idempotencyWorkflowWithStep)
 	// Workflow for struct encoding testing
 	structWfWithStep = WithWorkflow(structWorkflowWithStep)
+
+	queue = NewWorkflowQueue("test-queue")
 )
 
 func simpleWorkflow(ctxt context.Context, input string) (string, error) {
@@ -642,22 +644,31 @@ func TestWorkflowQueues(t *testing.T) {
 	setupDBOS(t)
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
-		queue := NewWorkflowQueue("test-queue")
 		handle, err := simpleWf(context.Background(), WorkflowParams{QueueName: "test-queue", IsEnqueue: true}, "test-input")
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow: %v", err)
 		}
 
-		dequeueIDs, err := getExecutor().systemDB.DequeueWorkflows(context.Background(), queue)
-		if err != nil {
-			t.Fatalf("failed to dequeue workflows: %v", err)
+		/*
+			dequeueIDs, err := getExecutor().systemDB.DequeueWorkflows(context.Background(), queue)
+			if err != nil {
+				t.Fatalf("failed to dequeue workflows: %v", err)
 
+			}
+			if len(dequeueIDs) != 1 {
+				t.Fatalf("expected 1 workflow to be dequeued, got %d", len(dequeueIDs))
+			}
+			if dequeueIDs[0] != handle.GetWorkflowID() {
+				t.Fatalf("expected dequeued workflow ID to be %s, got %s", handle.GetWorkflowID(), dequeueIDs[0])
+			}
+		*/
+
+		res, err := handle.GetResult()
+		if err != nil {
+			t.Fatalf("expected no error but got: %v", err)
 		}
-		if len(dequeueIDs) != 1 {
-			t.Fatalf("expected 1 workflow to be dequeued, got %d", len(dequeueIDs))
-		}
-		if dequeueIDs[0] != handle.GetWorkflowID() {
-			t.Fatalf("expected dequeued workflow ID to be %s, got %s", handle.GetWorkflowID(), dequeueIDs[0])
+		if res != "test-input" {
+			t.Fatalf("expected workflow result to be 'test-input', got %v", res)
 		}
 
 	})

@@ -1,6 +1,7 @@
 package dbos
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
@@ -34,7 +35,9 @@ type Executor interface {
 
 // DBOS represents the main DBOS instance
 type executor struct {
-	systemDB SystemDatabase
+	systemDB              SystemDatabase
+	queueRunnerCtx        context.Context
+	queueRunnerCancelFunc context.CancelFunc
 }
 
 // New creates a new DBOS instance with an initialized system database
@@ -59,9 +62,18 @@ func Launch() error {
 		return fmt.Errorf("failed to create system database: %w", err)
 	}
 
+	// Create context with cancel function for queue runner
+	ctx, cancel := context.WithCancel(context.Background())
+
 	dbos = &executor{
-		systemDB: systemDB,
+		systemDB:              systemDB,
+		queueRunnerCtx:        ctx,
+		queueRunnerCancelFunc: cancel,
 	}
+
+	// Start the queue runner in a goroutine
+	go queueRunner(ctx)
+
 	return nil
 }
 
@@ -70,7 +82,14 @@ func Launch() error {
 func Destroy() {
 	if dbos == nil {
 		fmt.Println("warning: DBOS instance is nil, cannot destroy")
+		return
 	}
+
+	// Cancel the context to stop the queue runner
+	if dbos.queueRunnerCancelFunc != nil {
+		dbos.queueRunnerCancelFunc()
+	}
+
 	if dbos.systemDB != nil {
 		dbos.systemDB.Destroy()
 	}
