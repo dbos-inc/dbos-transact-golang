@@ -33,6 +33,7 @@ type SystemDatabase interface {
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]WorkflowStatus, error)
 	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
+	DequeueWorkflows(ctx context.Context, queue workflowQueue) ([]string, error)
 }
 
 type systemDatabase struct {
@@ -172,36 +173,38 @@ type InsertWorkflowStatusDBInput struct {
 }
 
 func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error) {
-	initStatus := input.Status
+	if input.Tx == nil {
+		return nil, errors.New("transaction is required for InsertWorkflowStatus")
+	}
 
 	// Set default values
 	attempts := 1
-	if initStatus.Status == WorkflowStatusEnqueued {
+	if input.Status.Status == WorkflowStatusEnqueued {
 		attempts = 0
 	}
 
 	updatedAt := time.Now()
-	if !initStatus.UpdatedAt.IsZero() {
-		updatedAt = initStatus.UpdatedAt
+	if !input.Status.UpdatedAt.IsZero() {
+		updatedAt = input.Status.UpdatedAt
 	}
 
 	var deadline *int64 = nil
-	if !initStatus.Deadline.IsZero() {
-		millis := initStatus.Deadline.UnixMilli()
+	if !input.Status.Deadline.IsZero() {
+		millis := input.Status.Deadline.UnixMilli()
 		deadline = &millis
 	}
 
 	var timeoutMs int64 = 0
-	if initStatus.Timeout > 0 {
-		timeoutMs = initStatus.Timeout.Milliseconds()
+	if input.Status.Timeout > 0 {
+		timeoutMs = input.Status.Timeout.Milliseconds()
 	}
 
 	// Serialize input using gob encoding
 	var inputBytes []byte
-	if initStatus.Input != nil {
+	if input.Status.Input != nil {
 		var buf bytes.Buffer
 		enc := gob.NewEncoder(&buf)
-		if err := enc.Encode(&initStatus.Input); err != nil {
+		if err := enc.Encode(&input.Status.Input); err != nil {
 			return nil, fmt.Errorf("failed to encode input: %w", err)
 		}
 		inputBytes = buf.Bytes()
@@ -237,64 +240,32 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
         RETURNING recovery_attempts, status, name, queue_name, workflow_deadline_epoch_ms`
 
 	var result InsertWorkflowResult
-	var err error
-
-	if input.Tx != nil {
-		err = input.Tx.QueryRow(ctx, query,
-			initStatus.ID,
-			initStatus.Status,
-			initStatus.Name,
-			initStatus.QueueName,
-			initStatus.AuthenticatedUser,
-			initStatus.AssumedRole,
-			initStatus.AuthenticatedRoles,
-			initStatus.ExecutorID,
-			initStatus.ApplicationVersion,
-			initStatus.ApplicationID,
-			initStatus.CreatedAt.UnixMilli(),
-			attempts,
-			updatedAt.UnixMilli(),
-			timeoutMs,
-			deadline,
-			inputString,
-			initStatus.DeduplicationID,
-			initStatus.Priority,
-		).Scan(
-			&result.Attempts,
-			&result.Status,
-			&result.Name,
-			&result.QueueName,
-			&result.WorkflowDeadlineEpochMs,
-		)
-	} else {
-		err = s.pool.QueryRow(ctx, query,
-			initStatus.ID,
-			initStatus.Status,
-			initStatus.Name,
-			initStatus.QueueName,
-			initStatus.AuthenticatedUser,
-			initStatus.AssumedRole,
-			initStatus.AuthenticatedRoles,
-			initStatus.ExecutorID,
-			initStatus.ApplicationVersion,
-			initStatus.ApplicationID,
-			initStatus.CreatedAt.UnixMilli(),
-			attempts,
-			updatedAt.UnixMilli(),
-			timeoutMs,
-			deadline,
-			inputString,
-			initStatus.DeduplicationID,
-			initStatus.Priority,
-		).Scan(
-			&result.Attempts,
-			&result.Status,
-			&result.Name,
-			&result.QueueName,
-			&result.WorkflowDeadlineEpochMs,
-		)
-	}
-
+	err := input.Tx.QueryRow(ctx, query,
+		input.Status.ID,
+		input.Status.Status,
+		input.Status.Name,
+		input.Status.QueueName,
+		input.Status.AuthenticatedUser,
+		input.Status.AssumedRole,
+		input.Status.AuthenticatedRoles,
+		input.Status.ExecutorID,
+		input.Status.ApplicationVersion,
+		input.Status.ApplicationID,
+		input.Status.CreatedAt.UnixMilli(),
+		attempts,
+		updatedAt.UnixMilli(),
+		timeoutMs,
+		deadline,
+		inputString,
+		input.Status.DeduplicationID,
+		input.Status.Priority,
+	).Scan(
+		&result.Attempts,
+		&result.Status,
+		&result.Name,
+		&result.QueueName,
+		&result.WorkflowDeadlineEpochMs,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert workflow status: %w", err)
 	}
@@ -727,6 +698,179 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 			time.Sleep(1 * time.Second) // Wait before checking again
 		}
 	}
+}
+
+/*******************************/
+/******* QUEUES ********/
+/*******************************/
+
+func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQueue) ([]string, error) {
+	// Begin transaction with snapshot isolation
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Set transaction isolation level to repeatable read (similar to snapshot isolation)
+	_, err = tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to set transaction isolation level: %w", err)
+	}
+
+	startTimeMs := time.Now().UnixMilli()
+
+	// Calculate max_tasks based on concurrency limits
+	maxTasks := float64(^uint(0) >> 1) // Max int value as float64 (infinity equivalent)
+
+	if queue.workerConcurrency != nil || queue.globalConcurrency != nil {
+		// Count pending workflows by executor
+		pendingQuery := `
+			SELECT executor_id, COUNT(*) as task_count
+			FROM dbos.workflow_status
+			WHERE queue_name = $1 AND status = $2
+			GROUP BY executor_id`
+
+		rows, err := tx.Query(ctx, pendingQuery, queue.name, WorkflowStatusPending)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query pending workflows: %w", err)
+		}
+		defer rows.Close()
+
+		pendingWorkflowsDict := make(map[string]int)
+		for rows.Next() {
+			var executorIDRow string
+			var taskCount int
+			if err := rows.Scan(&executorIDRow, &taskCount); err != nil {
+				return nil, fmt.Errorf("failed to scan pending workflow row: %w", err)
+			}
+			pendingWorkflowsDict[executorIDRow] = taskCount
+		}
+
+		localPendingWorkflows := pendingWorkflowsDict[EXECUTOR_ID]
+
+		// Check worker concurrency limit
+		if queue.workerConcurrency != nil {
+			workerConcurrency := *queue.workerConcurrency
+			if localPendingWorkflows > workerConcurrency {
+				fmt.Printf("WARNING: Local pending workflows (%d) on queue %s exceeds worker concurrency limit (%d)\n",
+					localPendingWorkflows, queue.name, workerConcurrency)
+			}
+			availableWorkerTasks := workerConcurrency - localPendingWorkflows
+			if availableWorkerTasks < 0 {
+				availableWorkerTasks = 0
+			}
+			maxTasks = float64(availableWorkerTasks)
+		}
+
+		// Check global concurrency limit
+		if queue.globalConcurrency != nil {
+			globalPendingWorkflows := 0
+			for _, count := range pendingWorkflowsDict {
+				globalPendingWorkflows += count
+			}
+
+			concurrency := *queue.globalConcurrency
+			if globalPendingWorkflows > concurrency {
+				fmt.Printf("WARNING: Total pending workflows (%d) on queue %s exceeds global concurrency limit (%d)\n",
+					globalPendingWorkflows, queue.name, concurrency)
+			}
+			availableTasks := concurrency - globalPendingWorkflows
+			if availableTasks < 0 {
+				availableTasks = 0
+			}
+			if float64(availableTasks) < maxTasks {
+				maxTasks = float64(availableTasks)
+			}
+		}
+	}
+
+	// Build the query to select workflows for dequeueing
+	var query string
+	if queue.priorityEnabled {
+		query = `
+			SELECT workflow_uuid
+			FROM dbos.workflow_status
+			WHERE queue_name = $1
+			  AND status = $2
+			  AND (application_version = $3 OR application_version IS NULL)
+			ORDER BY priority ASC, created_at ASC
+			FOR UPDATE NOWAIT`
+	} else {
+		query = `
+			SELECT workflow_uuid
+			FROM dbos.workflow_status
+			WHERE queue_name = $1
+			  AND status = $2
+			  AND (application_version = $3 OR application_version IS NULL)
+			ORDER BY created_at ASC
+			FOR UPDATE NOWAIT`
+	}
+
+	// Add limit if maxTasks is finite
+	if maxTasks != float64(^uint(0)>>1) && maxTasks > 0 {
+		query += fmt.Sprintf(" LIMIT %d", int(maxTasks))
+	}
+
+	// Execute the query to get workflow IDs
+	rows, err := tx.Query(ctx, query, queue.name, WorkflowStatusEnqueued, APP_VERSION)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query enqueued workflows: %w", err)
+	}
+	defer rows.Close()
+
+	var dequeuedIDs []string
+	for rows.Next() {
+		var workflowID string
+		if err := rows.Scan(&workflowID); err != nil {
+			return nil, fmt.Errorf("failed to scan workflow ID: %w", err)
+		}
+		dequeuedIDs = append(dequeuedIDs, workflowID)
+	}
+
+	if len(dequeuedIDs) > 0 {
+		fmt.Printf("[%s] dequeueing %d task(s)\n", queue.name, len(dequeuedIDs))
+	}
+
+	// Update workflows to PENDING status
+	var retIDs []string
+	for _, id := range dequeuedIDs {
+		// TODO handle rate limite
+
+		// Update workflow status to PENDING
+		updateQuery := `
+			UPDATE dbos.workflow_status
+			SET status = $1,
+			    application_version = $2,
+			    executor_id = $3,
+			    started_at_epoch_ms = $4,
+			    workflow_deadline_epoch_ms = CASE
+			        WHEN workflow_timeout_ms IS NOT NULL AND workflow_deadline_epoch_ms IS NULL
+			        THEN EXTRACT(epoch FROM NOW()) * 1000 + workflow_timeout_ms
+			        ELSE workflow_deadline_epoch_ms
+			    END
+			WHERE workflow_uuid = $5`
+
+		_, err := tx.Exec(ctx, updateQuery,
+			WorkflowStatusPending,
+			APP_VERSION,
+			EXECUTOR_ID,
+			startTimeMs,
+			id)
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to update workflow %s to PENDING: %w", id, err)
+		}
+
+		retIDs = append(retIDs, id)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return retIDs, nil
 }
 
 /*******************************/

@@ -42,7 +42,7 @@ type WorkflowStatus struct {
 	ApplicationVersion string             `json:"application_version"`
 	ApplicationID      *string            `json:"application_id"`
 	Attempts           int                `json:"attempts"`
-	QueueName          *string            `json:"queue_name"`
+	QueueName          string             `json:"queue_name"`
 	Timeout            time.Duration      `json:"timeout"`
 	Deadline           time.Time          `json:"deadline"`
 	StartedAt          time.Time          `json:"started_at"`
@@ -124,16 +124,16 @@ var registry = make(map[string]TypedErasedWorkflowWrapperFunc)
 var regMutex sync.RWMutex
 
 // Register adds a workflow function to the registry (thread-safe, only once per name)
-func registerWorkflow(fqdn string, fn TypedErasedWorkflowWrapperFunc) {
+func registerWorkflow(fqn string, fn TypedErasedWorkflowWrapperFunc) {
 	regMutex.Lock()
 	defer regMutex.Unlock()
 
-	if _, exists := registry[fqdn]; exists {
+	if _, exists := registry[fqn]; exists {
 		// TODO: consider printing a warning instead of panicking
-		panic(fmt.Sprintf("workflow function '%s' is already registered", fqdn))
+		panic(fmt.Sprintf("workflow function '%s' is already registered", fqn))
 	}
 
-	registry[fqdn] = fn
+	registry[fqn] = fn
 }
 
 func WithWorkflow[P any, R any](fn WorkflowFunc[P, R]) WorkflowWrapperFunc[P, R] {
@@ -149,11 +149,11 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R]) WorkflowWrapperFunc[P, R]
 	})
 
 	// Register a type-erased version of the durable workflow for recovery
-	fqdn := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	fqn := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	typeErasedWrapper := func(ctx context.Context, params WorkflowParams, input any) (WorkflowHandle[any], error) {
 		typedInput, ok := input.(P)
 		if !ok {
-			return nil, fmt.Errorf("invalid input type for workflow %s", fqdn)
+			return nil, fmt.Errorf("invalid input type for workflow %s", fqn)
 		}
 		handle, err := wrappedFunction(ctx, params, typedInput)
 		if err != nil {
@@ -161,7 +161,7 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R]) WorkflowWrapperFunc[P, R]
 		}
 		return &workflowPollingHandle[any]{workflowID: handle.GetWorkflowID()}, nil
 	}
-	registerWorkflow(fqdn, typeErasedWrapper)
+	registerWorkflow(fqn, typeErasedWrapper)
 
 	return wrappedFunction
 }
@@ -176,6 +176,8 @@ type WorkflowParams struct {
 	WorkflowID string
 	Timeout    time.Duration
 	Deadline   time.Time
+	QueueName  string
+	IsEnqueue  bool
 }
 
 func runAsWorkflow[P any, R any](ctx context.Context, params WorkflowParams, fn WorkflowFunc[P, R], input P) (WorkflowHandle[R], error) {
@@ -202,21 +204,29 @@ func runAsWorkflow[P any, R any](ctx context.Context, params WorkflowParams, fn 
 		workflowID = params.WorkflowID
 	}
 
+	var status WorkflowStatusType
+	if params.QueueName != "" {
+		status = WorkflowStatusEnqueued
+	} else {
+		status = WorkflowStatusPending
+	}
+
 	workflowStatus := WorkflowStatus{
 		Name:               runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // XXX the interface approach would encapsulate this
 		ApplicationVersion: APP_VERSION,
 		ExecutorID:         EXECUTOR_ID,
-		Status:             WorkflowStatusPending,
+		Status:             status,
 		ID:                 workflowID,
 		CreatedAt:          time.Now(),
 		Deadline:           params.Deadline,
 		Timeout:            params.Timeout,
 		Input:              input,
 		ApplicationID:      nil, // TODO: set application ID if available
-		QueueName:          nil, // TODO: set queue name if available
+		QueueName:          params.QueueName,
 	}
 
 	// TODO: before init status, check if we are recovering a child workflow, and return a (DB) handle for it.
+	// This check is done by looking up whether an entry was recorded in the operation outputs table
 
 	// Init status and record child workflow relationship in a single transaction
 	tx, err := getExecutor().systemDB.(*systemDatabase).pool.Begin(dbosWorkflowContext)
@@ -235,11 +245,12 @@ func runAsWorkflow[P any, R any](ctx context.Context, params WorkflowParams, fn 
 		return nil, fmt.Errorf("inserting workflow status: %w", err)
 	}
 
-	fmt.Println(insertStatusResult)
-
-	switch insertStatusResult.Status {
-	case WorkflowStatusSuccess, WorkflowStatusError:
-		// Workflow already ran, return a DB handle to get the result
+	// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
+	if params.IsEnqueue || insertStatusResult.Status == WorkflowStatusSuccess || insertStatusResult.Status == WorkflowStatusError {
+		// Commit the transaction to update the number of attempts and/or enact the enqueue
+		if err := tx.Commit(dbosWorkflowContext); err != nil {
+			return nil, fmt.Errorf("failed to commit transaction: %w", err)
+		}
 		return &workflowPollingHandle[R]{workflowID: workflowStatus.ID}, nil
 	}
 

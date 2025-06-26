@@ -36,7 +36,7 @@ func setupDBOS(t *testing.T) {
 	}
 	defer conn.Close(context.Background())
 
-	_, err = conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName)
+	_, err = conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)")
 	if err != nil {
 		t.Fatalf("failed to drop test database: %v", err)
 	}

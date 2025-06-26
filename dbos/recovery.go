@@ -28,7 +28,7 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 
 		fmt.Println("Recovering workflow:", workflow.ID, "Name:", workflow.Name, "Input:", workflow.Input)
 		// TODO: handle clearing queue assignment if needed, and append a polling handle
-		if workflow.QueueName != nil {
+		if workflow.QueueName != "" {
 			continue
 		}
 		registeredWorkflow, exists := registry[workflow.Name]
