@@ -37,14 +37,18 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 			continue
 		}
 
-		// Rebuild the parameters
-		params := WorkflowParams{
-			WorkflowID: workflow.ID,
-			Timeout:    workflow.Timeout,
-			Deadline:   workflow.Deadline,
+		// Convert workflow parameters to options
+		opts := []WorkflowOption{
+			WithWorkflowID(workflow.ID),
+		}
+		if workflow.Timeout != 0 {
+			opts = append(opts, WithTimeout(workflow.Timeout))
+		}
+		if !workflow.Deadline.IsZero() {
+			opts = append(opts, WithDeadline(workflow.Deadline))
 		}
 
-		handle, err := registeredWorkflow(ctx, params, workflow.Input)
+		handle, err := registeredWorkflow(ctx, workflow.Input, opts...)
 		if err != nil {
 			fmt.Println("Error recovering workflow:", err)
 		}

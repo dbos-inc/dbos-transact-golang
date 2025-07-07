@@ -94,14 +94,6 @@ func NewWorkflowQueue(name string, options ...QueueOption) workflowQueue {
 	return *q
 }
 
-// This does not work because the wrapped function has a different type (P, R) than any, any
-// For this to work the queue interface itself must be generic
-func (w *workflowQueue) Enqueue(ctx context.Context, params WorkflowParams, workflow WorkflowWrapperFunc[any, any], input any) error {
-	params.IsEnqueue = true
-	workflow(ctx, params, input)
-	return nil
-}
-
 func queueRunner(ctx context.Context) {
 	for {
 		select {
@@ -147,7 +139,7 @@ func queueRunner(ctx context.Context) {
 						}
 					}
 
-					_, err := registeredWorkflow(ctx, WorkflowParams{WorkflowID: workflow.id}, input)
+					_, err := registeredWorkflow(ctx, input, WithWorkflowID(workflow.id))
 					if err != nil {
 						fmt.Println("Error recovering workflow:", err)
 					}

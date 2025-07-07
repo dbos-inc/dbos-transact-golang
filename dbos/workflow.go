@@ -118,7 +118,7 @@ func (h *workflowPollingHandle[R]) GetWorkflowID() string {
 /**********************************/
 /******* WORKFLOW REGISTRY *******/
 /**********************************/
-type TypedErasedWorkflowWrapperFunc func(ctx context.Context, params WorkflowParams, input any) (WorkflowHandle[any], error)
+type TypedErasedWorkflowWrapperFunc func(ctx context.Context, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
 
 var registry = make(map[string]TypedErasedWorkflowWrapperFunc)
 var regMutex sync.RWMutex
@@ -144,18 +144,19 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R]) WorkflowWrapperFunc[P, R]
 	gob.Register(r)
 
 	// Wrap the function in a durable workflow
-	wrappedFunction := WorkflowWrapperFunc[P, R](func(ctx context.Context, params WorkflowParams, input P) (WorkflowHandle[R], error) {
-		return runAsWorkflow(ctx, params, fn, input)
+	wrappedFunction := WorkflowWrapperFunc[P, R](func(ctx context.Context, input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
+		return runAsWorkflow(ctx, fn, input, opts...)
 	})
 
 	// Register a type-erased version of the durable workflow for recovery
 	fqn := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-	typeErasedWrapper := func(ctx context.Context, params WorkflowParams, input any) (WorkflowHandle[any], error) {
+	typeErasedWrapper := func(ctx context.Context, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 		typedInput, ok := input.(P)
 		if !ok {
 			return nil, fmt.Errorf("invalid input type for workflow %s", fqn)
 		}
-		handle, err := wrappedFunction(ctx, params, typedInput)
+
+		handle, err := wrappedFunction(ctx, typedInput, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -170,7 +171,7 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R]) WorkflowWrapperFunc[P, R]
 /******* WORKFLOW FUNCTIONS *******/
 /**********************************/
 type WorkflowFunc[P any, R any] func(ctx context.Context, input P) (R, error)
-type WorkflowWrapperFunc[P any, R any] func(ctx context.Context, params WorkflowParams, input P) (WorkflowHandle[R], error)
+type WorkflowWrapperFunc[P any, R any] func(ctx context.Context, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
 
 type WorkflowParams struct {
 	WorkflowID string
@@ -180,7 +181,51 @@ type WorkflowParams struct {
 	IsEnqueue  bool
 }
 
-func runAsWorkflow[P any, R any](ctx context.Context, params WorkflowParams, fn WorkflowFunc[P, R], input P) (WorkflowHandle[R], error) {
+// WorkflowOption is a functional option for configuring workflow parameters
+type WorkflowOption func(*WorkflowParams)
+
+// WithWorkflowID sets the workflow ID
+func WithWorkflowID(id string) WorkflowOption {
+	return func(p *WorkflowParams) {
+		p.WorkflowID = id
+	}
+}
+
+// WithTimeout sets the workflow timeout
+func WithTimeout(timeout time.Duration) WorkflowOption {
+	return func(p *WorkflowParams) {
+		p.Timeout = timeout
+	}
+}
+
+// WithDeadline sets the workflow deadline
+func WithDeadline(deadline time.Time) WorkflowOption {
+	return func(p *WorkflowParams) {
+		p.Deadline = deadline
+	}
+}
+
+// WithQueue sets the queue name for the workflow
+func WithQueue(queueName string) WorkflowOption {
+	return func(p *WorkflowParams) {
+		p.QueueName = queueName
+	}
+}
+
+// WithEnqueue sets whether the workflow should be enqueued
+func WithEnqueue(enqueue bool) WorkflowOption {
+	return func(p *WorkflowParams) {
+		p.IsEnqueue = enqueue
+	}
+}
+
+func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
+	// Apply options to build params
+	params := WorkflowParams{}
+	for _, opt := range opts {
+		opt(&params)
+	}
+
 	fmt.Println("Running workflow function:", runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), "with params:", params)
 	// First, create a context for the workflow
 	dbosWorkflowContext := context.Background()
@@ -392,6 +437,7 @@ func RunAsStep[P any, R any](ctx context.Context, params StepParams, fn StepFunc
 /******* WORKFLOW MANAGEMENT *******/
 /***********************************/
 
+// XXX why can't go do type inference automatically when calling this?
 func RetrieveWorkflow[R any](workflowID string) (workflowPollingHandle[R], error) {
 	ctx := context.Background()
 	workflowStatus, err := getExecutor().systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{
