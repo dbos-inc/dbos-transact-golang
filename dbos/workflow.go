@@ -178,7 +178,6 @@ type WorkflowParams struct {
 	Timeout    time.Duration
 	Deadline   time.Time
 	QueueName  string
-	IsEnqueue  bool
 }
 
 // WorkflowOption is a functional option for configuring workflow parameters
@@ -209,13 +208,6 @@ func WithDeadline(deadline time.Time) WorkflowOption {
 func WithQueue(queueName string) WorkflowOption {
 	return func(p *WorkflowParams) {
 		p.QueueName = queueName
-	}
-}
-
-// WithEnqueue sets whether the workflow should be enqueued
-func WithEnqueue(enqueue bool) WorkflowOption {
-	return func(p *WorkflowParams) {
-		p.IsEnqueue = enqueue
 	}
 }
 
@@ -291,7 +283,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	}
 
 	// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
-	if params.IsEnqueue || insertStatusResult.Status == WorkflowStatusSuccess || insertStatusResult.Status == WorkflowStatusError {
+	if len(params.QueueName) > 0 || insertStatusResult.Status == WorkflowStatusSuccess || insertStatusResult.Status == WorkflowStatusError {
 		// Commit the transaction to update the number of attempts and/or enact the enqueue
 		if err := tx.Commit(dbosWorkflowContext); err != nil {
 			return nil, fmt.Errorf("failed to commit transaction: %w", err)

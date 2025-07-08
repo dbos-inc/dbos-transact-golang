@@ -644,7 +644,7 @@ func TestWorkflowQueues(t *testing.T) {
 	setupDBOS(t)
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
-		handle, err := simpleWf(context.Background(), "test-input", WithEnqueue(true), WithQueue(queue.name))
+		handle, err := simpleWf(context.Background(), "test-input", WithQueue(queue.name))
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow: %v", err)
 		}
