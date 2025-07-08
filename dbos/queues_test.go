@@ -487,3 +487,115 @@ func TestWorkerConcurrency(t *testing.T) {
 		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
 	}
 }
+
+var (
+	workerConcurrencyRecoveryQueue          = NewWorkflowQueue("test-worker-concurrency-recovery-queue", WithWorkerConcurrency(1))
+	workerConcurrencyRecoveryStartEvent1    = NewEvent()
+	workerConcurrencyRecoveryStartEvent2    = NewEvent()
+	workerConcurrencyRecoveryCompleteEvent1 = NewEvent()
+	workerConcurrencyRecoveryCompleteEvent2 = NewEvent()
+	workerConcurrencyRecoveryBlockingWf1    = WithWorkflow(func(ctx context.Context, input string) (string, error) {
+		workerConcurrencyRecoveryStartEvent1.Set()
+		workerConcurrencyRecoveryCompleteEvent1.Wait()
+		return input, nil
+	})
+	workerConcurrencyRecoveryBlockingWf2 = WithWorkflow(func(ctx context.Context, input string) (string, error) {
+		workerConcurrencyRecoveryStartEvent2.Set()
+		workerConcurrencyRecoveryCompleteEvent2.Wait()
+		return input, nil
+	})
+)
+
+func TestWorkerConcurrencyXRecovery(t *testing.T) {
+	setupDBOS(t)
+
+	// Enqueue two workflows on a queue with worker concurrency = 1
+	handle1, err := workerConcurrencyRecoveryBlockingWf1(context.Background(), "workflow1", WithQueue(workerConcurrencyRecoveryQueue.name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
+	if err != nil {
+		t.Fatalf("failed to enqueue blocking workflow 1: %v", err)
+	}
+	handle2, err := workerConcurrencyRecoveryBlockingWf2(context.Background(), "workflow2", WithQueue(workerConcurrencyRecoveryQueue.name), WithWorkflowID("worker-cc-x-recovery-wf-2"))
+	if err != nil {
+		t.Fatalf("failed to enqueue blocking workflow 2: %v", err)
+	}
+
+	// Start the first workflow and wait for it to start
+	workerConcurrencyRecoveryStartEvent1.Wait()
+	workerConcurrencyRecoveryStartEvent1.Clear()
+
+	// Ensure the 2nd workflow is still ENQUEUED
+	status2, err := handle2.GetStatus()
+	if err != nil {
+		t.Fatalf("failed to get status of workflow2: %v", err)
+	}
+	if status2 != WorkflowStatusEnqueued {
+		t.Fatalf("expected workflow2 to be in ENQUEUED status, got %v", status2)
+	}
+
+	// Verify workflow2 hasn't started yet
+	if workerConcurrencyRecoveryStartEvent2.IsSet {
+		t.Fatal("expected workflow2 to not start while workflow1 is running")
+	}
+
+	// Now, manually call the recoverPendingWorkflows method
+	recoveryHandles, err := recoverPendingWorkflows(context.Background(), []string{"local"})
+	if err != nil {
+		t.Fatalf("failed to recover pending workflows: %v", err)
+	}
+
+	// You should get 1 handle associated with the first workflow
+	if len(recoveryHandles) != 1 {
+		t.Fatalf("expected 1 recovery handle, got %d", len(recoveryHandles))
+	}
+
+	// The handle status should tell you the workflow is ENQUEUED
+	recoveredHandle := recoveryHandles[0]
+	if recoveredHandle.GetWorkflowID() != "worker-cc-x-recovery-wf-1" {
+		t.Fatalf("expected recovered handle to be for workflow1, got %s", recoveredHandle.GetWorkflowID())
+	}
+	wf1Status, err := recoveredHandle.GetStatus()
+	if err != nil {
+		t.Fatalf("failed to get status of recovered workflow1: %v", err)
+	}
+	if wf1Status != WorkflowStatusEnqueued {
+		t.Fatalf("expected recovered handle to be in ENQUEUED status, got %v", wf1Status)
+	}
+
+	// The 1 first workflow should have been dequeued again (FIFO ordering) and the 2nd workflow should still be enqueued
+	workerConcurrencyRecoveryStartEvent1.Wait()
+	status2, err = handle2.GetStatus()
+	if err != nil {
+		t.Fatalf("failed to get status of workflow2: %v", err)
+	}
+	if status2 != WorkflowStatusEnqueued {
+		t.Fatalf("expected workflow2 to still be in ENQUEUED status, got %v", status2)
+	}
+
+	// Let the 1st workflow complete and let the 2nd workflow start and complete
+	workerConcurrencyRecoveryCompleteEvent1.Set()
+	workerConcurrencyRecoveryStartEvent2.Wait()
+	workerConcurrencyRecoveryCompleteEvent2.Set()
+
+	// Get result from first workflow
+	result1, err := handle1.GetResult()
+	if err != nil {
+		t.Fatalf("failed to get result from workflow1: %v", err)
+	}
+	if result1 != "workflow1" {
+		t.Fatalf("expected result from workflow1 to be 'workflow1', got %v", result1)
+	}
+
+	// Get result from second workflow
+	result2, err := handle2.GetResult()
+	if err != nil {
+		t.Fatalf("failed to get result from workflow2: %v", err)
+	}
+	if result2 != "workflow2" {
+		t.Fatalf("expected result from workflow2 to be 'workflow2', got %v", result2)
+	}
+
+	// Ensure queueEntriesAreCleanedUp is set to true
+	if !queueEntriesAreCleanedUp() {
+		t.Fatal("expected queue entries to be cleaned up after worker concurrency recovery test")
+	}
+}
