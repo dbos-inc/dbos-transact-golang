@@ -137,6 +137,9 @@ func registerWorkflow(fqn string, fn TypedErasedWorkflowWrapperFunc) {
 }
 
 func WithWorkflow[P any, R any](fn WorkflowFunc[P, R]) WorkflowWrapperFunc[P, R] {
+	if fn == nil {
+		panic("workflow function cannot be nil")
+	}
 	// Registry the input/output types for gob encoding
 	var p P
 	var r R
@@ -452,7 +455,6 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 /******* WORKFLOW MANAGEMENT *******/
 /***********************************/
 
-// XXX why can't go do type inference automatically when calling this?
 func RetrieveWorkflow[R any](workflowID string) (workflowPollingHandle[R], error) {
 	ctx := context.Background()
 	workflowStatus, err := getExecutor().systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{

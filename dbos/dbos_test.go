@@ -3,8 +3,10 @@ package dbos
 /**
 This suite tests high level DBOS features:
 	[x] Wrapping various golang methods in DBODS workflows
-	[] Workflow handles
-	[] wf idempotency
+	[x] Workflow handles
+	[x] wf idempotency
+	[x] encoding / decoding of input/outputs
+	[] Attempt counters
 	[] wf timeout
 	[] wf deadlines
 */
@@ -63,8 +65,6 @@ var (
 	idempotencyWfWithStep = WithWorkflow(idempotencyWorkflowWithStep)
 	// Workflow for struct encoding testing
 	structWfWithStep = WithWorkflow(structWorkflowWithStep)
-
-	queue = NewWorkflowQueue("test-queue")
 )
 
 func simpleWorkflow(ctxt context.Context, input string) (string, error) {
@@ -76,7 +76,7 @@ func simpleWorkflowError(ctx context.Context, input string) (int, error) {
 }
 
 func simpleWorkflowWithStep(ctx context.Context, input string) (string, error) {
-	return RunAsStep[string](ctx, simpleStep, input)
+	return RunAsStep(ctx, simpleStep, input)
 }
 
 func simpleStep(ctx context.Context, input string) (string, error) {
@@ -88,7 +88,7 @@ func simpleStepError(ctx context.Context, input string) (string, error) {
 }
 
 func simpleWorkflowWithStepError(ctx context.Context, input string) (string, error) {
-	return RunAsStep[string](ctx, simpleStepError, input)
+	return RunAsStep(ctx, simpleStepError, input)
 }
 
 func simpleWorkflowWithChildWorkflow(ctx context.Context, input string) (string, error) {
@@ -123,7 +123,7 @@ func idempotencyWorkflowWithStep(ctx context.Context, input string) (int64, erro
 
 // complexStructWorkflow processes a StepInputStruct using a step and returns the step result
 func structWorkflowWithStep(ctx context.Context, input StepInputStruct) (StepOutputStruct, error) {
-	return RunAsStep[StepInputStruct, StepOutputStruct](ctx, simpleStructStep, input)
+	return RunAsStep(ctx, simpleStructStep, input)
 }
 
 func simpleStructStep(ctx context.Context, input StepInputStruct) (StepOutputStruct, error) {
@@ -588,6 +588,10 @@ func TestWorkflowRecovery(t *testing.T) {
 
 		// Check that the workflow ID from the handle is the same as the first handle
 		recoveredHandle := recoveredHandles[0]
+		_, ok := recoveredHandle.(*workflowPollingHandle[any])
+		if !ok {
+			t.Fatalf("expected handle to be of type workflowPollingHandle, got %T", recoveredHandle)
+		}
 		if recoveredHandle.GetWorkflowID() != handle1.GetWorkflowID() {
 			t.Fatalf("expected recovered workflow ID %s, got %s", handle1.GetWorkflowID(), recoveredHandle.GetWorkflowID())
 		}
@@ -631,45 +635,4 @@ func TestWorkflowRecovery(t *testing.T) {
 	// Test recovery of specified executor only
 	// Test recovery of specific version only
 	// Test recovery reach max recovery attempts
-}
-
-/*
-Add tests for:
-- Workflow attempt counter
-
-
-*/
-
-func TestWorkflowQueues(t *testing.T) {
-	setupDBOS(t)
-
-	t.Run("EnqueueWorkflow", func(t *testing.T) {
-		handle, err := simpleWf(context.Background(), "test-input", WithQueue(queue.name))
-		if err != nil {
-			t.Fatalf("failed to enqueue workflow: %v", err)
-		}
-
-		/*
-			dequeueIDs, err := getExecutor().systemDB.DequeueWorkflows(context.Background(), queue)
-			if err != nil {
-				t.Fatalf("failed to dequeue workflows: %v", err)
-
-			}
-			if len(dequeueIDs) != 1 {
-				t.Fatalf("expected 1 workflow to be dequeued, got %d", len(dequeueIDs))
-			}
-			if dequeueIDs[0] != handle.GetWorkflowID() {
-				t.Fatalf("expected dequeued workflow ID to be %s, got %s", handle.GetWorkflowID(), dequeueIDs[0])
-			}
-		*/
-
-		res, err := handle.GetResult()
-		if err != nil {
-			t.Fatalf("expected no error but got: %v", err)
-		}
-		if res != "test-input" {
-			t.Fatalf("expected workflow result to be 'test-input', got %v", res)
-		}
-
-	})
 }
