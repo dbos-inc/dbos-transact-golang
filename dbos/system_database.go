@@ -217,7 +217,6 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
 	}
 	inputString := base64.StdEncoding.EncodeToString(inputBytes)
 
-	// TODO do not update executor_id when enqueuing a workflow
 	query := `INSERT INTO dbos.workflow_status (
         workflow_uuid,
         status,
@@ -242,7 +241,10 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
         DO UPDATE SET
             recovery_attempts = workflow_status.recovery_attempts + 1,
             updated_at = EXCLUDED.updated_at,
-            executor_id = EXCLUDED.executor_id
+            executor_id = CASE
+                WHEN EXCLUDED.status = 'ENQUEUED' THEN workflow_status.executor_id
+                ELSE EXCLUDED.executor_id
+            END
         RETURNING recovery_attempts, status, name, queue_name, workflow_deadline_epoch_ms`
 
 	var result InsertWorkflowResult
@@ -404,6 +406,7 @@ func (s *systemDatabase) CheckChildWorkflow(ctx context.Context, workflowID stri
 // ListWorkflowsInput represents the input parameters for listing workflows
 type ListWorkflowsDBInput struct {
 	WorkflowName       string
+	QueueName          string
 	WorkflowIDPrefix   string
 	WorkflowIDs        []string
 	AuthenticatedUser  string
@@ -432,6 +435,9 @@ func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsD
 	// Add filters using query builder
 	if input.WorkflowName != "" {
 		qb.addWhere("name", input.WorkflowName)
+	}
+	if input.QueueName != "" {
+		qb.addWhere("queue_name", input.QueueName)
 	}
 	if input.WorkflowIDPrefix != "" {
 		qb.addWhereLike("workflow_uuid", input.WorkflowIDPrefix+"%")
@@ -923,7 +929,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 	}
 
 	// Add limit if maxTasks is finite
-	if maxTasks != MaxInt && maxTasks > 0 {
+	if maxTasks != MaxInt {
 		query += fmt.Sprintf(" LIMIT %d", int(maxTasks))
 	}
 
