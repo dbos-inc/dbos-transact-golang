@@ -394,7 +394,30 @@ type StepParams struct {
 	BackoffRate int
 }
 
-func RunAsStep[P any, R any](ctx context.Context, params StepParams, fn StepFunc[P, R], input P) (R, error) {
+// StepOption is a functional option for configuring step parameters
+type StepOption func(*StepParams)
+
+// WithMaxAttempts sets the maximum number of retry attempts for a step
+func WithMaxAttempts(maxAttempts int) StepOption {
+	return func(p *StepParams) {
+		p.MaxAttempts = maxAttempts
+	}
+}
+
+// WithBackoffRate sets the backoff rate for retries
+func WithBackoffRate(backoffRate int) StepOption {
+	return func(p *StepParams) {
+		p.BackoffRate = backoffRate
+	}
+}
+
+func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, opts ...StepOption) (R, error) {
+	// Apply options to build params
+	params := StepParams{}
+	for _, opt := range opts {
+		opt(&params)
+	}
+
 	// Get workflow state from context
 	workflowState, ok := ctx.Value("workflowState").(*WorkflowState)
 	if !ok || workflowState == nil {

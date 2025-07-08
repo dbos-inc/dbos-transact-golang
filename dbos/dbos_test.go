@@ -76,7 +76,7 @@ func simpleWorkflowError(ctx context.Context, input string) (int, error) {
 }
 
 func simpleWorkflowWithStep(ctx context.Context, input string) (string, error) {
-	return RunAsStep[string](ctx, StepParams{}, simpleStep, input)
+	return RunAsStep[string](ctx, simpleStep, input)
 }
 
 func simpleStep(ctx context.Context, input string) (string, error) {
@@ -88,7 +88,7 @@ func simpleStepError(ctx context.Context, input string) (string, error) {
 }
 
 func simpleWorkflowWithStepError(ctx context.Context, input string) (string, error) {
-	return RunAsStep[string](ctx, StepParams{}, simpleStepError, input)
+	return RunAsStep[string](ctx, simpleStepError, input)
 }
 
 func simpleWorkflowWithChildWorkflow(ctx context.Context, input string) (string, error) {
@@ -115,15 +115,15 @@ func blockingStep(ctx context.Context, input string) (string, error) {
 var idempotencyWorkflowWithStepEvent *Event
 
 func idempotencyWorkflowWithStep(ctx context.Context, input string) (int64, error) {
-	RunAsStep(ctx, StepParams{}, idempotencyWorkflow, input)
+	RunAsStep(ctx, idempotencyWorkflow, input)
 	idempotencyWorkflowWithStepEvent.Set()
-	RunAsStep(ctx, StepParams{}, blockingStep, input)
+	RunAsStep(ctx, blockingStep, input)
 	return idempotencyCounter, nil
 }
 
 // complexStructWorkflow processes a StepInputStruct using a step and returns the step result
 func structWorkflowWithStep(ctx context.Context, input StepInputStruct) (StepOutputStruct, error) {
-	return RunAsStep[StepInputStruct, StepOutputStruct](ctx, StepParams{}, simpleStructStep, input)
+	return RunAsStep[StepInputStruct, StepOutputStruct](ctx, simpleStructStep, input)
 }
 
 func simpleStructStep(ctx context.Context, input StepInputStruct) (StepOutputStruct, error) {
