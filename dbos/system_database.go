@@ -34,6 +34,8 @@ type SystemDatabase interface {
 	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
 	DequeueWorkflows(ctx context.Context, queue workflowQueue) ([]dequeuedWorkflow, error)
+	ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
+	CheckOperationExecution(ctx context.Context, input CheckOperationExecutionDBInput) (*RecordedResult, error)
 }
 
 type systemDatabase struct {
@@ -290,8 +292,7 @@ type RecordChildWorkflowDBInput struct {
 }
 
 func (s *systemDatabase) RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
-	var query string
-	query = `INSERT INTO dbos.operation_outputs
+	query := `INSERT INTO dbos.operation_outputs
             (workflow_uuid, function_id, output, error, function_name)
             VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT DO NOTHING`
@@ -414,7 +415,7 @@ func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsD
 	if input.WorkflowIDPrefix != "" {
 		qb.addWhereLike("workflow_uuid", input.WorkflowIDPrefix+"%")
 	}
-	if input.WorkflowIDs != nil && len(input.WorkflowIDs) > 0 {
+	if len(input.WorkflowIDs) > 0 {
 		qb.addWhereAny("workflow_uuid", input.WorkflowIDs)
 	}
 	if input.AuthenticatedUser != "" {
@@ -432,7 +433,7 @@ func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsD
 	if input.ApplicationVersion != "" {
 		qb.addWhere("application_version", input.ApplicationVersion)
 	}
-	if input.ExecutorIDs != nil && len(input.ExecutorIDs) > 0 {
+	if len(input.ExecutorIDs) > 0 {
 		qb.addWhereAny("executor_id", input.ExecutorIDs)
 	}
 
@@ -627,7 +628,7 @@ func (s *systemDatabase) CancelWorkflow(ctx context.Context, workflowID string) 
 		return err
 	}
 	if len(wfs) == 0 {
-		return fmt.Errorf("Workflow %s not found", workflowID)
+		return fmt.Errorf("workflow %s not found", workflowID)
 	}
 
 	wf := wfs[0]
@@ -701,6 +702,99 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 }
 
 /*******************************/
+/******* STEPS ********/
+/*******************************/
+
+type RecordedResult struct {
+	output any
+	err    error
+}
+
+type CheckOperationExecutionDBInput struct {
+	workflowID   string
+	operationID  int
+	functionName string
+}
+
+func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input CheckOperationExecutionDBInput) (*RecordedResult, error) {
+	// Create transaction for this operation
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // We never really need to commit this transaction
+
+	// First query: Retrieve the workflow status
+	workflowStatusQuery := `SELECT status FROM dbos.workflow_status WHERE workflow_uuid = $1`
+
+	// Second query: Retrieve operation outputs if they exist
+	operationOutputQuery := `SELECT output, error, function_name
+							 FROM dbos.operation_outputs
+							 WHERE workflow_uuid = $1 AND function_id = $2`
+
+	var workflowStatus WorkflowStatusType
+
+	// Execute first query to get workflow status
+	err = tx.QueryRow(ctx, workflowStatusQuery, input.workflowID).Scan(&workflowStatus)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("error: Workflow %s does not exist", input.workflowID)
+		}
+		return nil, fmt.Errorf("failed to get workflow status: %w", err)
+	}
+
+	// If the workflow is cancelled, raise the exception
+	if workflowStatus == WorkflowStatusCancelled {
+		return nil, fmt.Errorf("workflow %s is cancelled. Aborting function", input.workflowID)
+	}
+
+	// Execute second query to get operation outputs
+	var outputString *string
+	var errorStr *string
+	var recordedFunctionName string
+
+	err = tx.QueryRow(ctx, operationOutputQuery, input.workflowID, input.operationID).Scan(&outputString, &errorStr, &recordedFunctionName)
+
+	// If there are no operation outputs, return nil
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get operation outputs: %w", err)
+	}
+
+	// If the provided and recorded function name are different, throw an exception
+	if input.functionName != recordedFunctionName {
+		return nil, fmt.Errorf("unexpected step error: workflow_id=%s, step_id=%d, expected_name=%s, recorded_name=%s",
+			input.workflowID, input.operationID, input.functionName, recordedFunctionName)
+	}
+
+	// Deserialize output if present
+	var output any
+	if outputString != nil && len(*outputString) > 0 {
+		outputBytes, err := base64.StdEncoding.DecodeString(*outputString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode output: %w", err)
+		}
+		buf := bytes.NewBuffer(outputBytes)
+		dec := gob.NewDecoder(buf)
+		if err := dec.Decode(&output); err != nil {
+			return nil, fmt.Errorf("failed to decode output: %w", err)
+		}
+	}
+
+	var recordedError error
+	if errorStr != nil && *errorStr != "" {
+		recordedError = errors.New(*errorStr)
+	}
+	result := &RecordedResult{
+		output: output,
+		err:    recordedError,
+	}
+	return result, nil
+}
+
+/*******************************/
 /******* QUEUES ********/
 /*******************************/
 
@@ -762,10 +856,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 				fmt.Printf("WARNING: Local pending workflows (%d) on queue %s exceeds worker concurrency limit (%d)\n",
 					localPendingWorkflows, queue.name, workerConcurrency)
 			}
-			availableWorkerTasks := workerConcurrency - localPendingWorkflows
-			if availableWorkerTasks < 0 {
-				availableWorkerTasks = 0
-			}
+			availableWorkerTasks := max(workerConcurrency-localPendingWorkflows, 0)
 			maxTasks = float64(availableWorkerTasks)
 		}
 
@@ -781,10 +872,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 				fmt.Printf("WARNING: Total pending workflows (%d) on queue %s exceeds global concurrency limit (%d)\n",
 					globalPendingWorkflows, queue.name, concurrency)
 			}
-			availableTasks := concurrency - globalPendingWorkflows
-			if availableTasks < 0 {
-				availableTasks = 0
-			}
+			availableTasks := max(concurrency-globalPendingWorkflows, 0)
 			if float64(availableTasks) < maxTasks {
 				maxTasks = float64(availableTasks)
 			}
@@ -886,6 +974,26 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 	}
 
 	return retWorkflows, nil
+}
+
+func (s *systemDatabase) ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error) {
+	query := `UPDATE dbos.workflow_status
+			  SET status = $1, started_at_epoch_ms = NULL
+			  WHERE workflow_uuid = $2
+			    AND queue_name IS NOT NULL
+			    AND status = $3`
+
+	commandTag, err := s.pool.Exec(ctx, query,
+		WorkflowStatusEnqueued,
+		workflowID,
+		WorkflowStatusPending)
+
+	if err != nil {
+		return false, fmt.Errorf("failed to clear queue assignment for workflow %s: %w", workflowID, err)
+	}
+
+	// If no rows were affected, the workflow is not anymore in the queue or was already completed
+	return commandTag.RowsAffected() > 0, nil
 }
 
 /*******************************/

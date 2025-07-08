@@ -419,16 +419,26 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		return *new(R), fmt.Errorf("context does not contain valid workflow state, cannot run step")
 	}
 
-	// Check if cancelled
-	// Check if a result/error is already available
-
 	// Get next step ID
-	stepID := workflowState.NextStepID()
+	operationID := workflowState.NextStepID()
+
+	// Check the step is cancelled, has already completed, or is called with a different name
+	recordedOutput, err := getExecutor().systemDB.CheckOperationExecution(ctx, CheckOperationExecutionDBInput{
+		workflowID:   workflowState.WorkflowID,
+		operationID:  operationID,
+		functionName: runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(),
+	})
+	if err != nil {
+		return *new(R), fmt.Errorf("failed to check operation execution: %w", err)
+	}
+	if recordedOutput != nil {
+		return recordedOutput.output.(R), recordedOutput.err
+	}
 
 	dbInput := recordOperationResultDBInput{
 		workflowID:    workflowState.WorkflowID,
 		operationName: runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(),
-		operationID:   stepID,
+		operationID:   operationID,
 	}
 	stepOutput, stepError := fn(ctx, input)
 	if stepError != nil {

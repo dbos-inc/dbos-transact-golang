@@ -596,6 +596,9 @@ func TestWorkflowRecovery(t *testing.T) {
 			t.Fatalf("expected recovered workflow ID %s, got %s", handle1.GetWorkflowID(), recoveredHandle.GetWorkflowID())
 		}
 
+		idempotencyWorkflowWithStepEvent.Clear()
+		idempotencyWorkflowWithStepEvent.Wait()
+
 		// Check that the first step was *not* re-executed (idempotency counter is still 1)
 		if idempotencyCounter != 1 {
 			t.Fatalf("expected counter to remain 1 after recovery (idempotent), but got %d", idempotencyCounter)
