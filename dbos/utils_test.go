@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+/* Test database setup */
 func setupDBOS(t *testing.T) {
 	t.Helper()
 
@@ -56,6 +57,7 @@ func setupDBOS(t *testing.T) {
 	})
 }
 
+/* Event struct provides a simple synchronization primitive that can be used to signal between goroutines. */
 type Event struct {
 	mu    sync.Mutex
 	cond  *sync.Cond
@@ -87,4 +89,17 @@ func (e *Event) Clear() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.IsSet = false
+}
+
+/* Helpers */
+func equal(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

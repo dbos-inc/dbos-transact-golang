@@ -221,7 +221,6 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 		opt(&params)
 	}
 
-	fmt.Println("Running workflow function:", runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), "with params:", params)
 	// First, create a context for the workflow
 	dbosWorkflowContext := context.Background()
 
@@ -244,6 +243,17 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 		workflowID = params.WorkflowID
 	}
 
+	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
+	if isChildWorkflow {
+		childWorkflowID, err := getExecutor().systemDB.CheckChildWorkflow(dbosWorkflowContext, parentWorkflowState.WorkflowID, parentWorkflowState.stepCounter)
+		if err != nil {
+			return nil, fmt.Errorf("checking child workflow: %w", err)
+		}
+		if childWorkflowID != nil {
+			return &workflowPollingHandle[R]{workflowID: *childWorkflowID}, nil
+		}
+	}
+
 	var status WorkflowStatusType
 	if params.QueueName != "" {
 		status = WorkflowStatusEnqueued
@@ -264,9 +274,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 		ApplicationID:      nil, // TODO: set application ID if available
 		QueueName:          params.QueueName,
 	}
-
-	// TODO: before init status, check if we are recovering a child workflow, and return a (DB) handle for it.
-	// This check is done by looking up whether an entry was recorded in the operation outputs table
+	fmt.Println("Workflow status:", workflowStatus)
 
 	// Init status and record child workflow relationship in a single transaction
 	tx, err := getExecutor().systemDB.(*systemDatabase).pool.Begin(dbosWorkflowContext)

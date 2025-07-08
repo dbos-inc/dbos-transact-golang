@@ -33,6 +33,7 @@ type SystemDatabase interface {
 	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
 	RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
 	RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error
+	CheckChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]WorkflowStatus, error)
 	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
@@ -286,14 +287,6 @@ type recordOperationResultDBInput struct {
 	err           error
 }
 
-type RecordChildWorkflowDBInput struct {
-	ParentWorkflowID string
-	ChildWorkflowID  string
-	FunctionID       int
-	FunctionName     string
-	Tx               pgx.Tx
-}
-
 func (s *systemDatabase) RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
 	query := `INSERT INTO dbos.operation_outputs
             (workflow_uuid, function_id, output, error, function_name)
@@ -344,6 +337,14 @@ func (s *systemDatabase) RecordOperationResult(ctx context.Context, input record
 	return nil
 }
 
+type RecordChildWorkflowDBInput struct {
+	ParentWorkflowID string
+	ChildWorkflowID  string
+	FunctionID       int
+	FunctionName     string
+	Tx               pgx.Tx
+}
+
 func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error {
 	query := `INSERT INTO dbos.operation_outputs
             (workflow_uuid, function_id, function_name, child_workflow_id)
@@ -371,7 +372,7 @@ func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input RecordCh
 	if err != nil {
 		// Check for unique constraint violation (conflict ID error)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
-			return fmt.Errorf("workflow conflict ID error for parent workflow %s", input.ParentWorkflowID)
+			return fmt.Errorf("workflow conflict ID error for parent workflow %s and child workflow %s (operation ID: %d)", input.ParentWorkflowID, input.ChildWorkflowID, input.FunctionID)
 		}
 		return fmt.Errorf("failed to record child workflow: %w", err)
 	}
@@ -381,6 +382,23 @@ func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input RecordCh
 	}
 
 	return nil
+}
+
+func (s *systemDatabase) CheckChildWorkflow(ctx context.Context, workflowID string, functionID int) (*string, error) {
+	query := `SELECT child_workflow_id
+              FROM dbos.operation_outputs
+              WHERE workflow_uuid = $1 AND function_id = $2`
+
+	var childWorkflowID *string
+	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to check child workflow: %w", err)
+	}
+
+	return childWorkflowID, nil
 }
 
 // ListWorkflowsInput represents the input parameters for listing workflows
