@@ -15,7 +15,7 @@ This suite tests
 [x] workflow enqueues another workflow
 [x] recover queued workflow
 [x] global concurrency (one at a time with a single queue and a single worker)
-[] worker concurrency (2 at a time across two "workers")
+[x] worker concurrency (2 at a time across two "workers")
 [] worker concurrency X recovery
 [] rate limiter
 [] queued workflow times out

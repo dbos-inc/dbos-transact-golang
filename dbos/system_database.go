@@ -907,25 +907,35 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 	}
 
 	// Build the query to select workflows for dequeueing
+	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
+	// otherwise use NOWAIT to ensure consistent view across processes
+	skipLocks := queue.globalConcurrency == nil
+	var lockClause string
+	if skipLocks {
+		lockClause = "FOR UPDATE SKIP LOCKED"
+	} else {
+		lockClause = "FOR UPDATE NOWAIT"
+	}
+
 	var query string
 	if queue.priorityEnabled {
-		query = `
+		query = fmt.Sprintf(`
 			SELECT workflow_uuid
 			FROM dbos.workflow_status
 			WHERE queue_name = $1
 			  AND status = $2
 			  AND (application_version = $3 OR application_version IS NULL)
 			ORDER BY priority ASC, created_at ASC
-			FOR UPDATE NOWAIT`
+			%s`, lockClause)
 	} else {
-		query = `
+		query = fmt.Sprintf(`
 			SELECT workflow_uuid
 			FROM dbos.workflow_status
 			WHERE queue_name = $1
 			  AND status = $2
 			  AND (application_version = $3 OR application_version IS NULL)
 			ORDER BY created_at ASC
-			FOR UPDATE NOWAIT`
+			%s`, lockClause)
 	}
 
 	// Add limit if maxTasks is finite
