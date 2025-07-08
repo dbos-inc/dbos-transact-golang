@@ -146,7 +146,7 @@ func TestWorkflowQueues(t *testing.T) {
 }
 
 var (
-	testQueue = NewWorkflowQueue("test_queue")
+	recoveryQueue = NewWorkflowQueue("recovery-queue")
 
 	recoveryStepCounter = 0
 	recoveryStepEvents  = make([]*Event, 5) // 5 queued steps
@@ -162,7 +162,7 @@ var (
 	recoveryWorkflow = WithWorkflow(func(ctx context.Context, input string) ([]int, error) {
 		handles := make([]WorkflowHandle[int], 0, 5) // 5 queued steps
 		for i := range 5 {
-			handle, err := recoveryStepWorkflow(ctx, i, WithQueue(testQueue.name))
+			handle, err := recoveryStepWorkflow(ctx, i, WithQueue(recoveryQueue.name))
 			if err != nil {
 				return nil, fmt.Errorf("failed to enqueue step %d: %v", i, err)
 			}
@@ -276,7 +276,7 @@ func TestQueueRecovery(t *testing.T) {
 }
 
 var (
-	globalConcurrencyQueue    = NewWorkflowQueue("test-worker-concurrency-queue", WithGlobalConcurrency(1))
+	globalConcurrencyQueue    = NewWorkflowQueue("test-global-concurrency-queue", WithGlobalConcurrency(1))
 	workflowEvent1            = NewEvent()
 	workflowEvent2            = NewEvent()
 	workflowDoneEvent         = NewEvent()
