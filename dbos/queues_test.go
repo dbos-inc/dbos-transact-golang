@@ -14,7 +14,7 @@ This suite tests
 [x] enqueued workflow starts a child workflow
 [x] workflow enqueues another workflow
 [x] recover queued workflow
-[] global concurrency (one at a time with a single queue and a single worker)
+[x] global concurrency (one at a time with a single queue and a single worker)
 [] worker concurrency (2 at a time across two "workers")
 [] worker concurrency X recovery
 [] rate limiter
@@ -94,6 +94,10 @@ func TestWorkflowQueues(t *testing.T) {
 		if res != "test-input" {
 			t.Fatalf("expected workflow result to be 'test-input', got %v", res)
 		}
+
+		if !queueEntriesAreCleanedUp() {
+			t.Fatal("expected queue entries to be cleaned up after global concurrency test")
+		}
 	})
 
 	t.Run("EnqueuedWorkflowStartsChildWorkflow", func(t *testing.T) {
@@ -112,6 +116,10 @@ func TestWorkflowQueues(t *testing.T) {
 		if res != expectedResult {
 			t.Fatalf("expected workflow result to be '%s', got %v", expectedResult, res)
 		}
+
+		if !queueEntriesAreCleanedUp() {
+			t.Fatal("expected queue entries to be cleaned up after global concurrency test")
+		}
 	})
 
 	t.Run("WorkflowEnqueuesAnotherWorkflow", func(t *testing.T) {
@@ -129,6 +137,10 @@ func TestWorkflowQueues(t *testing.T) {
 		expectedResult := "test-input-enqueued"
 		if res != expectedResult {
 			t.Fatalf("expected workflow result to be '%s', got %v", expectedResult, res)
+		}
+
+		if !queueEntriesAreCleanedUp() {
+			t.Fatal("expected queue entries to be cleaned up after global concurrency test")
 		}
 	})
 }
@@ -254,11 +266,83 @@ func TestQueueRecovery(t *testing.T) {
 		t.Fatalf("expected result %v, got %v", expectedResult, rerunResult)
 	}
 
-	if stepCounter != queuedSteps*2 {
-		t.Fatalf("expected stepCounter to remain %d, got %d", queuedSteps*2, stepCounter)
+	if recoveryStepCounter != queuedSteps*2 {
+		t.Fatalf("expected recoveryStepCounter to remain %d, got %d", queuedSteps*2, recoveryStepCounter)
+	}
+
+	if !queueEntriesAreCleanedUp() {
+		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
 	}
 }
 
 var (
-	workerConcurrencyQueue = NewWorkflowQueue("test-worker-concurrency-queue", WithWorkerConcurrency(2))
+	globalConcurrencyQueue    = NewWorkflowQueue("test-worker-concurrency-queue", WithGlobalConcurrency(1))
+	workflowEvent1            = NewEvent()
+	workflowEvent2            = NewEvent()
+	workflowDoneEvent         = NewEvent()
+	globalConcurrencyWorkflow = WithWorkflow(func(ctx context.Context, input string) (string, error) {
+		switch input {
+		case "workflow1":
+			workflowEvent1.Set()
+			workflowDoneEvent.Wait()
+		case "workflow2":
+			workflowEvent2.Set()
+		}
+		return input, nil
+	})
 )
+
+func TestGlobalConcurrency(t *testing.T) {
+	setupDBOS(t)
+
+	// Enqueue two workflows
+	handle1, err := globalConcurrencyWorkflow(context.Background(), "workflow1", WithQueue(globalConcurrencyQueue.name))
+	if err != nil {
+		t.Fatalf("failed to enqueue workflow1: %v", err)
+	}
+
+	handle2, err := globalConcurrencyWorkflow(context.Background(), "workflow2", WithQueue(globalConcurrencyQueue.name))
+	if err != nil {
+		t.Fatalf("failed to enqueue workflow2: %v", err)
+	}
+
+	// Wait for the first workflow to start
+	workflowEvent1.Wait()
+
+	// Ensure the second workflow has not started yet
+	if workflowEvent2.IsSet {
+		t.Fatalf("expected workflow2 to not start while workflow1 is running")
+	}
+	status, err := handle2.GetStatus()
+	if err != nil {
+		t.Fatalf("failed to get status of workflow2: %v", err)
+	}
+	if status != WorkflowStatusEnqueued {
+		t.Fatalf("expected workflow2 to be in ENQUEUED status, got %v", status)
+	}
+
+	// Allow the first workflow to complete
+	workflowDoneEvent.Set()
+
+	result1, err := handle1.GetResult()
+	if err != nil {
+		t.Fatalf("failed to get result from workflow1: %v", err)
+	}
+	if result1 != "workflow1" {
+		t.Fatalf("expected result from workflow1 to be 'workflow1', got %v", result1)
+	}
+
+	// Wait for the second workflow to start
+	workflowEvent2.Wait()
+
+	result2, err := handle2.GetResult()
+	if err != nil {
+		t.Fatalf("failed to get result from workflow2: %v", err)
+	}
+	if result2 != "workflow2" {
+		t.Fatalf("expected result from workflow2 to be 'workflow2', got %v", result2)
+	}
+	if !queueEntriesAreCleanedUp() {
+		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -102,4 +103,38 @@ func equal(a, b []int) bool {
 		}
 	}
 	return true
+}
+
+func queueEntriesAreCleanedUp() bool {
+	maxTries := 10
+	success := false
+	for i := 0; i < maxTries; i++ {
+		// Begin transaction
+		tx, err := getExecutor().systemDB.(*systemDatabase).pool.Begin(context.Background())
+		if err != nil {
+			return false
+		}
+
+		query := `SELECT COUNT(*)
+				  FROM dbos.workflow_status
+				  WHERE queue_name IS NOT NULL
+				    AND status IN ('ENQUEUED', 'PENDING')`
+
+		var count int
+		err = tx.QueryRow(context.Background(), query).Scan(&count)
+		tx.Rollback(context.Background()) // Clean up transaction
+
+		if err != nil {
+			return false
+		}
+
+		if count == 0 {
+			success = true
+			break
+		}
+
+		time.Sleep(1 * time.Second)
+	}
+
+	return success
 }

@@ -68,6 +68,7 @@ func (ws *WorkflowState) NextStepID() int {
 /********************************/
 type WorkflowHandle[R any] interface {
 	GetResult() (R, error)
+	GetStatus() (WorkflowStatusType, error)
 	GetWorkflowID() string // XXX we could have a base struct with GetWorkflowID and then embed it in the implementations
 }
 
@@ -90,6 +91,27 @@ func (h *workflowHandle[R]) GetResult() (R, error) {
 	}
 }
 
+// GetStatus returns the current status of the workflow from the database
+// TODO optimize by caching the status in the handle on GetResult()
+func (h *workflowHandle[R]) GetStatus() (WorkflowStatusType, error) {
+	ctx := context.Background()
+	workflowStatuses, err := getExecutor().systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{
+		WorkflowIDs: []string{h.workflowID},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get workflow status: %w", err)
+	}
+	if len(workflowStatuses) == 0 {
+		return "", fmt.Errorf("workflow with ID '%s' not found", h.workflowID)
+	}
+	status := workflowStatuses[0]
+	if err != nil {
+		return "", fmt.Errorf("failed to get workflow status: %w", err)
+	}
+	return status.Status, nil
+
+}
+
 func (h *workflowHandle[R]) GetWorkflowID() string {
 	return h.workflowID
 }
@@ -109,6 +131,26 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 		return typedResult, err
 	}
 	return *new(R), err
+}
+
+// GetStatus returns the current status of the workflow from the database
+func (h *workflowPollingHandle[R]) GetStatus() (WorkflowStatusType, error) {
+	ctx := context.Background()
+	workflowStatuses, err := getExecutor().systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{
+		WorkflowIDs: []string{h.workflowID},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get workflow status: %w", err)
+	}
+	if len(workflowStatuses) == 0 {
+		return "", fmt.Errorf("workflow with ID '%s' not found", h.workflowID)
+	}
+	status := workflowStatuses[0]
+	if err != nil {
+		return "", fmt.Errorf("failed to get workflow status: %w", err)
+	}
+	return status.Status, nil
+
 }
 
 func (h *workflowPollingHandle[R]) GetWorkflowID() string {
@@ -173,6 +215,11 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R]) WorkflowWrapperFunc[P, R]
 /**********************************/
 /******* WORKFLOW FUNCTIONS *******/
 /**********************************/
+
+type contextKey string
+
+const workflowStateKey contextKey = "workflowState"
+
 type WorkflowFunc[P any, R any] func(ctx context.Context, input P) (R, error)
 type WorkflowWrapperFunc[P any, R any] func(ctx context.Context, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
 
@@ -225,7 +272,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	dbosWorkflowContext := context.Background()
 
 	// Check if we are within a workflow (and thus a child workflow)
-	parentWorkflowState, ok := ctx.Value("workflowState").(*WorkflowState)
+	parentWorkflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
 
 	// TODO Check if cancelled
@@ -344,7 +391,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	}
 
 	// Run the function in a goroutine
-	augmentUserContext := context.WithValue(ctx, "workflowState", workflowState)
+	augmentUserContext := context.WithValue(ctx, workflowStateKey, workflowState)
 	go func() {
 		result, err := fn(augmentUserContext, input)
 		if err != nil {
@@ -422,7 +469,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	}
 
 	// Get workflow state from context
-	workflowState, ok := ctx.Value("workflowState").(*WorkflowState)
+	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
 		return *new(R), fmt.Errorf("context does not contain valid workflow state, cannot run step")
 	}

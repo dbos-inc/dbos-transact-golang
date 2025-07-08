@@ -989,9 +989,11 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 		retWorkflows = append(retWorkflows, retWorkflow)
 	}
 
-	// Commit the transaction
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	// Commit only if workflows were dequeued. Avoids WAL bloat and XID advancement.
+	if len(retWorkflows) > 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("failed to commit transaction: %w", err)
+		}
 	}
 
 	return retWorkflows, nil
