@@ -346,3 +346,144 @@ func TestGlobalConcurrency(t *testing.T) {
 		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
 	}
 }
+
+var (
+	workerConcurrencyQueue = NewWorkflowQueue("test-worker-concurrency-queue", WithWorkerConcurrency(1))
+	startEvents            = []*Event{
+		NewEvent(),
+		NewEvent(),
+		NewEvent(),
+		NewEvent(),
+	}
+	completeEvents = []*Event{
+		NewEvent(),
+		NewEvent(),
+		NewEvent(),
+		NewEvent(),
+	}
+	blockingWf = WithWorkflow(func(ctx context.Context, i int) (int, error) {
+		// Simulate a blocking operation
+		startEvents[i].Set()
+		completeEvents[i].Wait()
+		return i, nil
+	})
+)
+
+func TestWorkerConcurrency(t *testing.T) {
+	setupDBOS(t)
+
+	// First enqueue four blocking workflows
+	handle1, err := blockingWf(context.Background(), 0, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-1"))
+	if err != nil {
+		t.Fatalf("failed to enqueue blocking workflow 1: %v", err)
+	}
+	handle2, err := blockingWf(context.Background(), 1, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-2"))
+	if err != nil {
+		t.Fatalf("failed to enqueue blocking workflow 2: %v", err)
+	}
+	_, err = blockingWf(context.Background(), 2, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-3"))
+	if err != nil {
+		t.Fatalf("failed to enqueue blocking workflow 3: %v", err)
+	}
+	_, err = blockingWf(context.Background(), 3, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-4"))
+	if err != nil {
+		t.Fatalf("failed to enqueue blocking workflow 4: %v", err)
+	}
+
+	// wait for the blocking workflow to start
+	startEvents[0].Wait()
+	// Ensure the three other workflows are not started yet
+	if startEvents[1].IsSet || startEvents[2].IsSet || startEvents[3].IsSet {
+		t.Fatal("expected only blocking workflow 1 to start, but others have started")
+	}
+	workflows, err := getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
+		Status:    []WorkflowStatusType{WorkflowStatusEnqueued},
+		QueueName: workerConcurrencyQueue.name,
+	})
+	if err != nil {
+		t.Fatalf("failed to list workflows: %v", err)
+	}
+	if len(workflows) != 3 {
+		t.Fatalf("expected 3 workflows to be enqueued, got %d", len(workflows))
+	}
+
+	// Change the EXECUTOR_ID global variable to a different value
+	EXECUTOR_ID = "worker-2"
+
+	// Wait for the second workflow to start on the second worker
+	startEvents[1].Wait()
+	// Ensure the two other workflows are not started yet
+	if startEvents[2].IsSet || startEvents[3].IsSet {
+		t.Fatal("expected only blocking workflow 2 to start, but others have started")
+	}
+	workflows, err = getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
+		Status:    []WorkflowStatusType{WorkflowStatusEnqueued},
+		QueueName: workerConcurrencyQueue.name,
+	})
+	if err != nil {
+		t.Fatalf("failed to list workflows: %v", err)
+	}
+	if len(workflows) != 2 {
+		t.Fatalf("expected 2 workflows to be enqueued, got %d", len(workflows))
+	}
+
+	// Unlock workflow 1, check wf 3 starts, check 4 stays blocked
+	completeEvents[0].Set()
+	result1, err := handle1.GetResult()
+	if err != nil {
+		t.Fatalf("failed to get result from blocking workflow 1: %v", err)
+	}
+	if result1 != 0 {
+		t.Fatalf("expected result from blocking workflow 1 to be 0, got %v", result1)
+	}
+	// Change the executor again and wait for the third workflow to start
+	EXECUTOR_ID = "local"
+	startEvents[2].Wait()
+	// Ensure the fourth workflow is not started yet
+	if startEvents[3].IsSet {
+		t.Fatal("expected only blocking workflow 3 to start, but workflow 4 has started")
+	}
+	// Check that only one workflow is pending
+	workflows, err = getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
+		Status:    []WorkflowStatusType{WorkflowStatusEnqueued},
+		QueueName: workerConcurrencyQueue.name,
+	})
+	if err != nil {
+		t.Fatalf("failed to list workflows: %v", err)
+	}
+	if len(workflows) != 1 {
+		t.Fatalf("expected 1 workflow to be enqueued, got %d", len(workflows))
+	}
+
+	// Unlock workflow 2 and check wf 4 starts
+	completeEvents[1].Set()
+	result2, err := handle2.GetResult()
+	if err != nil {
+		t.Fatalf("failed to get result from blocking workflow 2: %v", err)
+	}
+	if result2 != 1 {
+		t.Fatalf("expected result from blocking workflow 2 to be 1, got %v", result2)
+	}
+	// change executor again and wait for the fourth workflow to start
+	EXECUTOR_ID = "worker-2"
+	startEvents[3].Wait()
+	// Check no workflow is enqueued
+	workflows, err = getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
+		Status:    []WorkflowStatusType{WorkflowStatusEnqueued},
+		QueueName: workerConcurrencyQueue.name,
+	})
+	if err != nil {
+		t.Fatalf("failed to list workflows: %v", err)
+	}
+	if len(workflows) != 0 {
+		t.Fatalf("expected 0 workflows to be enqueued, got %d", len(workflows))
+	}
+
+	// Unblock both workflows 3 and 4
+	completeEvents[2].Set()
+	completeEvents[3].Set()
+
+	if !queueEntriesAreCleanedUp() {
+		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
+	}
+}
