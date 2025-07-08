@@ -100,8 +100,13 @@ func simpleWorkflowWithChildWorkflow(ctx context.Context, input string) (string,
 }
 
 // idempotencyWorkflow increments a global counter and returns the input
+func incrementCounter(_ context.Context, value int64) (int64, error) {
+	idempotencyCounter += value
+	return idempotencyCounter, nil
+}
+
 func idempotencyWorkflow(ctx context.Context, input string) (string, error) {
-	idempotencyCounter += 1
+	incrementCounter(ctx, 1)
 	return input, nil
 }
 
@@ -115,7 +120,7 @@ func blockingStep(ctx context.Context, input string) (string, error) {
 var idempotencyWorkflowWithStepEvent *Event
 
 func idempotencyWorkflowWithStep(ctx context.Context, input string) (int64, error) {
-	RunAsStep(ctx, idempotencyWorkflow, input)
+	RunAsStep(ctx, incrementCounter, 1)
 	idempotencyWorkflowWithStepEvent.Set()
 	RunAsStep(ctx, blockingStep, input)
 	return idempotencyCounter, nil

@@ -22,9 +22,6 @@ var (
 	queueIdempotencyWfWithStep = WithWorkflow(queueIdempotencyWorkflowWithStep)
 )
 
-// Global counter for queue recovery testing
-var queueIdempotencyCounter int64
-
 // Events for queue recovery testing
 var queueBlockingStepStopEvent *Event
 var queueIdempotencyWorkflowWithStepEvent *Event
@@ -78,18 +75,12 @@ func queueBlockingStep(ctx context.Context, input string) (string, error) {
 	return "", nil
 }
 
-// queueIdempotencyWorkflow increments a global counter and returns the input
-func queueIdempotencyWorkflow(ctx context.Context, input string) (string, error) {
-	fmt.Println("queueIdempotencyWorkflow called with input:", input)
-	queueIdempotencyCounter += 1
-	return input, nil
-}
-
+// idempotencyWorkflow increments a global counter and returns the input
 func queueIdempotencyWorkflowWithStep(ctx context.Context, input string) (int64, error) {
-	RunAsStep(ctx, queueIdempotencyWorkflow, input)
+	RunAsStep(ctx, incrementCounter, 1)
 	queueIdempotencyWorkflowWithStepEvent.Set()
 	RunAsStep(ctx, queueBlockingStep, input)
-	return queueIdempotencyCounter, nil
+	return idempotencyCounter, nil
 }
 
 func TestWorkflowQueues(t *testing.T) {
@@ -157,7 +148,7 @@ func TestWorkflowQueues(t *testing.T) {
 
 	t.Run("RecoverQueuedWorkflow", func(t *testing.T) {
 		// Reset the global counter
-		queueIdempotencyCounter = 0
+		idempotencyCounter = 0
 
 		// First execution - run the queued workflow once
 		input := "queue-recovery-test"
@@ -210,8 +201,8 @@ func TestWorkflowQueues(t *testing.T) {
 		queueIdempotencyWorkflowWithStepEvent.Wait()
 
 		// Check that the first step was *not* re-executed (idempotency counter is still 1)
-		if queueIdempotencyCounter != 1 {
-			t.Fatalf("expected counter to remain 1 after recovery (idempotent), but got %d", queueIdempotencyCounter)
+		if idempotencyCounter != 1 {
+			t.Fatalf("expected counter to remain 1 after recovery (idempotent), but got %d", idempotencyCounter)
 		}
 
 		// Using ListWorkflows, retrieve the status of the workflow after recovery
@@ -239,8 +230,8 @@ func TestWorkflowQueues(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to get result from recovered handle: %v", err)
 		}
-		if result != queueIdempotencyCounter {
-			t.Fatalf("expected result to be %d, got %v", queueIdempotencyCounter, result)
+		if result != idempotencyCounter {
+			t.Fatalf("expected result to be %d, got %v", idempotencyCounter, result)
 		}
 	})
 }
