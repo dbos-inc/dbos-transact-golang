@@ -136,21 +136,21 @@ func TestWorkflowQueues(t *testing.T) {
 var (
 	testQueue = NewWorkflowQueue("test_queue")
 
-	stepCounter = 0
-	stepEvents  = make([]*Event, 5) // 5 queued steps
-	event       = NewEvent()
+	recoveryStepCounter = 0
+	recoveryStepEvents  = make([]*Event, 5) // 5 queued steps
+	recoveryEvent       = NewEvent()
 
-	testStepWorkflow = WithWorkflow(func(ctx context.Context, i int) (int, error) {
-		stepCounter++
-		stepEvents[i].Set()
-		event.Wait()
+	recoveryStepWorkflow = WithWorkflow(func(ctx context.Context, i int) (int, error) {
+		recoveryStepCounter++
+		recoveryStepEvents[i].Set()
+		recoveryEvent.Wait()
 		return i, nil
 	})
 
-	testWorkflow = WithWorkflow(func(ctx context.Context, input string) ([]int, error) {
+	recoveryWorkflow = WithWorkflow(func(ctx context.Context, input string) ([]int, error) {
 		handles := make([]WorkflowHandle[int], 0, 5) // 5 queued steps
 		for i := range 5 {
-			handle, err := testStepWorkflow(ctx, i, WithQueue(testQueue.name))
+			handle, err := recoveryStepWorkflow(ctx, i, WithQueue(testQueue.name))
 			if err != nil {
 				return nil, fmt.Errorf("failed to enqueue step %d: %v", i, err)
 			}
@@ -174,25 +174,25 @@ func TestQueueRecovery(t *testing.T) {
 
 	queuedSteps := 5
 
-	for i := range stepEvents {
-		stepEvents[i] = NewEvent()
+	for i := range recoveryStepEvents {
+		recoveryStepEvents[i] = NewEvent()
 	}
 
 	wfid := uuid.NewString()
 
 	// Start the workflow. Wait for all steps to start. Verify that they started.
-	handle, err := testWorkflow(context.Background(), "", WithWorkflowID(wfid))
+	handle, err := recoveryWorkflow(context.Background(), "", WithWorkflowID(wfid))
 	if err != nil {
 		t.Fatalf("failed to start workflow: %v", err)
 	}
 
-	for _, e := range stepEvents {
+	for _, e := range recoveryStepEvents {
 		e.Wait()
 		e.Clear()
 	}
 
-	if stepCounter != queuedSteps {
-		t.Fatalf("expected stepCounter to be %d, got %d", queuedSteps, stepCounter)
+	if recoveryStepCounter != queuedSteps {
+		t.Fatalf("expected recoveryStepCounter to be %d, got %d", queuedSteps, recoveryStepCounter)
 	}
 
 	// Recover the workflow, then resume it.
@@ -201,10 +201,10 @@ func TestQueueRecovery(t *testing.T) {
 		t.Fatalf("failed to recover pending workflows: %v", err)
 	}
 
-	for _, e := range stepEvents {
+	for _, e := range recoveryStepEvents {
 		e.Wait()
 	}
-	event.Set()
+	recoveryEvent.Set()
 
 	if len(recoveryHandles) != queuedSteps+1 {
 		t.Fatalf("expected %d recovery handles, got %d", queuedSteps+1, len(recoveryHandles))
@@ -237,12 +237,12 @@ func TestQueueRecovery(t *testing.T) {
 		t.Fatalf("expected result %v, got %v", expectedResult, result)
 	}
 
-	if stepCounter != queuedSteps*2 {
-		t.Fatalf("expected stepCounter to be %d, got %d", queuedSteps*2, stepCounter)
+	if recoveryStepCounter != queuedSteps*2 {
+		t.Fatalf("expected recoveryStepCounter to be %d, got %d", queuedSteps*2, recoveryStepCounter)
 	}
 
 	// Rerun the workflow. Because each step is complete, none should start again.
-	rerunHandle, err := testWorkflow(context.Background(), "test-input", WithWorkflowID(wfid))
+	rerunHandle, err := recoveryWorkflow(context.Background(), "test-input", WithWorkflowID(wfid))
 	if err != nil {
 		t.Fatalf("failed to rerun workflow: %v", err)
 	}
