@@ -1,11 +1,8 @@
 package dbos
 
 import (
-	"bytes"
 	"context"
 	"embed"
-	"encoding/base64"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"os"
@@ -205,17 +202,10 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
 		timeoutMs = input.Status.Timeout.Milliseconds()
 	}
 
-	// Serialize input using gob encoding
-	var inputBytes []byte
-	if input.Status.Input != nil {
-		var buf bytes.Buffer
-		enc := gob.NewEncoder(&buf)
-		if err := enc.Encode(&input.Status.Input); err != nil {
-			return nil, fmt.Errorf("failed to encode input: %w", err)
-		}
-		inputBytes = buf.Bytes()
+	inputString, err := serialize(input.Status.Input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize input: %w", err)
 	}
-	inputString := base64.StdEncoding.EncodeToString(inputBytes)
 
 	query := `INSERT INTO dbos.workflow_status (
         workflow_uuid,
@@ -563,36 +553,15 @@ func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsD
 			wf.Error = errors.New(*errorStr)
 		}
 
-		if outputString != nil && len(*outputString) > 0 {
-			outputBytes, err := base64.StdEncoding.DecodeString(*outputString)
-			if err != nil {
-				return nil, err
-			}
-			buf := bytes.NewBuffer(outputBytes)
-			dec := gob.NewDecoder(buf)
-			var output any
-			if err := dec.Decode(&output); err != nil {
-				// If deserialization fails, record the error
-				wf.Output = fmt.Sprintf("Failed to decode output: %v", err)
-			} else {
-				wf.Output = output
-			}
+		// XXX maybe set wf.Output to outputString and run deserialize out of system DB
+		wf.Output, err = deserialize(outputString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize output: %w", err)
 		}
 
-		if inputString != nil && len(*inputString) > 0 {
-			inputBytes, err := base64.StdEncoding.DecodeString(*inputString)
-			if err != nil {
-				return nil, err
-			}
-			buf := bytes.NewBuffer(inputBytes)
-			dec := gob.NewDecoder(buf)
-			var input any
-			if err := dec.Decode(&input); err != nil {
-				// If deserialization fails, record the error
-				wf.Input = fmt.Sprintf("Failed to decode input: %v", err)
-			} else {
-				wf.Input = input
-			}
+		wf.Input, err = deserialize(inputString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize input: %w", err)
 		}
 
 		workflows = append(workflows, wf)
@@ -619,24 +588,16 @@ func (s *systemDatabase) UpdateWorkflowOutcome(ctx context.Context, input Update
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
 			  WHERE workflow_uuid = $5`
 
-	// Serialize output using gob encoding
-	var outputBytes []byte
-	if input.output != nil {
-		var buf bytes.Buffer
-		enc := gob.NewEncoder(&buf)
-		if err := enc.Encode(&input.output); err != nil {
-			return fmt.Errorf("failed to encode output: %w", err)
-		}
-		outputBytes = buf.Bytes()
+	outputString, err := serialize(input.output)
+	if err != nil {
+		return fmt.Errorf("failed to serialize output: %w", err)
 	}
-	outputString := base64.StdEncoding.EncodeToString(outputBytes)
 
 	var errorStr string
 	if input.err != nil {
 		errorStr = input.err.Error()
 	}
 
-	var err error
 	if input.tx != nil {
 		_, err = input.tx.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID)
 	} else {
@@ -715,20 +676,11 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 		switch status {
 		case WorkflowStatusSuccess:
 			// Deserialize output from TEXT to bytes then from bytes to R using gob
-			if outputString != nil && len(*outputString) > 0 {
-				outputBytes, err := base64.StdEncoding.DecodeString(*outputString)
-				if err != nil {
-					return nil, err
-				}
-				buf := bytes.NewBuffer(outputBytes)
-				dec := gob.NewDecoder(buf)
-				var output any
-				if err := dec.Decode(&output); err != nil {
-					return nil, fmt.Errorf("failed to decode workflow output: %w", err)
-				}
-				return output, nil
+			output, err := deserialize(outputString)
+			if err != nil {
+				return nil, fmt.Errorf("failed to deserialize output: %w", err)
 			}
-			return nil, nil // No output
+			return output, nil
 		case WorkflowStatusError:
 			return nil, errors.New(*errorStr) // Assuming errorStr can be converted to an error type
 		case WorkflowStatusCancelled:
@@ -806,18 +758,9 @@ func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input Chec
 		return nil, NewUnexpectedStepError(input.workflowID, input.operationID, input.functionName, recordedFunctionName)
 	}
 
-	// Deserialize output if present
-	var output any
-	if outputString != nil && len(*outputString) > 0 {
-		outputBytes, err := base64.StdEncoding.DecodeString(*outputString)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode output: %w", err)
-		}
-		buf := bytes.NewBuffer(outputBytes)
-		dec := gob.NewDecoder(buf)
-		if err := dec.Decode(&output); err != nil {
-			return nil, fmt.Errorf("failed to decode output: %w", err)
-		}
+	output, err := deserialize(outputString)
+	if err != nil {
+		return nil, fmt.Errorf("failed to deserialize output: %w", err)
 	}
 
 	var recordedError error
