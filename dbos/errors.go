@@ -110,9 +110,9 @@ func NewAwaitedWorkflowCancelledError(workflowID string) *DBOSError {
 	}
 }
 
-func NewWorkflowCancelledError(message string) *DBOSError {
+func NewWorkflowCancelledError(workflowID string) *DBOSError {
 	return &DBOSError{
-		Message: message,
+		Message: fmt.Sprintf("Workflow %s was cancelled", workflowID),
 		Code:    WorkflowCancelled,
 		IsBase:  true,
 	}

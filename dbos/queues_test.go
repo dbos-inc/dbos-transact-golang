@@ -143,6 +143,13 @@ func TestWorkflowQueues(t *testing.T) {
 			t.Fatal("expected queue entries to be cleaned up after global concurrency test")
 		}
 	})
+
+	t.Run("DynamicRegistration", func(t *testing.T) {
+		q := NewWorkflowQueue("dynamic-queue")
+		if len(q.name) > 0 {
+			t.Fatalf("expected nil queue for dynamic registration after DBOS initialization, got %v", q)
+		}
+	})
 }
 
 var (
@@ -486,6 +493,8 @@ func TestWorkerConcurrency(t *testing.T) {
 	if !queueEntriesAreCleanedUp() {
 		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
 	}
+
+	EXECUTOR_ID = "local" // Reset executor ID for future tests
 }
 
 var (
