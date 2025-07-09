@@ -34,7 +34,7 @@ type SystemDatabase interface {
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]WorkflowStatus, error)
 	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
-	DequeueWorkflows(ctx context.Context, queue workflowQueue) ([]dequeuedWorkflow, error)
+	DequeueWorkflows(ctx context.Context, queue WorkflowQueue) ([]dequeuedWorkflow, error)
 	ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
 	CheckOperationExecution(ctx context.Context, input CheckOperationExecutionDBInput) (*RecordedResult, error)
 	RecordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
@@ -817,7 +817,7 @@ type dequeuedWorkflow struct {
 	input string
 }
 
-func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQueue) ([]dequeuedWorkflow, error) {
+func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQueue) ([]dequeuedWorkflow, error) {
 	// Begin transaction with snapshot isolation
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -836,7 +836,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 	// Calculate max_tasks based on concurrency limits
 	maxTasks := MaxInt
 
-	if queue.workerConcurrency != nil || queue.globalConcurrency != nil {
+	if queue.WorkerConcurrency != nil || queue.GlobalConcurrency != nil {
 		// Count pending workflows by executor
 		pendingQuery := `
 			SELECT executor_id, COUNT(*) as task_count
@@ -844,7 +844,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 			WHERE queue_name = $1 AND status = $2
 			GROUP BY executor_id`
 
-		rows, err := tx.Query(ctx, pendingQuery, queue.name, WorkflowStatusPending)
+		rows, err := tx.Query(ctx, pendingQuery, queue.Name, WorkflowStatusPending)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query pending workflows: %w", err)
 		}
@@ -863,27 +863,27 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 		localPendingWorkflows := pendingWorkflowsDict[EXECUTOR_ID]
 
 		// Check worker concurrency limit
-		if queue.workerConcurrency != nil {
-			workerConcurrency := *queue.workerConcurrency
+		if queue.WorkerConcurrency != nil {
+			workerConcurrency := *queue.WorkerConcurrency
 			if localPendingWorkflows > workerConcurrency {
 				fmt.Printf("WARNING: Local pending workflows (%d) on queue %s exceeds worker concurrency limit (%d)\n",
-					localPendingWorkflows, queue.name, workerConcurrency)
+					localPendingWorkflows, queue.Name, workerConcurrency)
 			}
 			availableWorkerTasks := max(workerConcurrency-localPendingWorkflows, 0)
 			maxTasks = float64(availableWorkerTasks)
 		}
 
 		// Check global concurrency limit
-		if queue.globalConcurrency != nil {
+		if queue.GlobalConcurrency != nil {
 			globalPendingWorkflows := 0
 			for _, count := range pendingWorkflowsDict {
 				globalPendingWorkflows += count
 			}
 
-			concurrency := *queue.globalConcurrency
+			concurrency := *queue.GlobalConcurrency
 			if globalPendingWorkflows > concurrency {
 				fmt.Printf("WARNING: Total pending workflows (%d) on queue %s exceeds global concurrency limit (%d)\n",
-					globalPendingWorkflows, queue.name, concurrency)
+					globalPendingWorkflows, queue.Name, concurrency)
 			}
 			availableTasks := max(concurrency-globalPendingWorkflows, 0)
 			if float64(availableTasks) < maxTasks {
@@ -895,7 +895,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 	// Build the query to select workflows for dequeueing
 	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
 	// otherwise use NOWAIT to ensure consistent view across processes
-	skipLocks := queue.globalConcurrency == nil
+	skipLocks := queue.GlobalConcurrency == nil
 	var lockClause string
 	if skipLocks {
 		lockClause = "FOR UPDATE SKIP LOCKED"
@@ -904,7 +904,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 	}
 
 	var query string
-	if queue.priorityEnabled {
+	if queue.PriorityEnabled {
 		query = fmt.Sprintf(`
 			SELECT workflow_uuid
 			FROM dbos.workflow_status
@@ -930,7 +930,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 	}
 
 	// Execute the query to get workflow IDs
-	rows, err := tx.Query(ctx, query, queue.name, WorkflowStatusEnqueued, APP_VERSION)
+	rows, err := tx.Query(ctx, query, queue.Name, WorkflowStatusEnqueued, APP_VERSION)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query enqueued workflows: %w", err)
 	}
@@ -946,7 +946,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue workflowQue
 	}
 
 	if len(dequeuedIDs) > 0 {
-		fmt.Printf("[%s] dequeueing %d task(s)\n", queue.name, len(dequeuedIDs))
+		fmt.Printf("[%s] dequeueing %d task(s)\n", queue.Name, len(dequeuedIDs))
 	}
 
 	// Update workflows to PENDING status and get their details

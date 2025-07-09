@@ -94,7 +94,7 @@ func simpleWorkflowWithStepError(ctx context.Context, input string) (string, err
 }
 
 func simpleWorkflowWithChildWorkflow(ctx context.Context, input string) (string, error) {
-	childHandle, err := simpleWfWithStep(ctx, input)
+	childHandle, err := simpleWfWithStep(ctx, input) // This ctx is mandatory because it holds the DBOS state with the parent workflow ID
 	if err != nil {
 		return "", err
 	}

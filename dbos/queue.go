@@ -12,11 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-var workflowQueueRegistry = make(map[string]workflowQueue)
-
-// WorkflowQueue interface defines queue operations and properties
-type WorkflowQueue interface {
-}
+var workflowQueueRegistry = make(map[string]WorkflowQueue)
 
 // RateLimiter represents a rate limiting configuration
 /*
@@ -26,35 +22,35 @@ type RateLimiter struct {
 }
 */
 
-type workflowQueue struct {
-	name              string
-	workerConcurrency *int
-	globalConcurrency *int
-	priorityEnabled   bool
+type WorkflowQueue struct {
+	Name              string
+	WorkerConcurrency *int
+	GlobalConcurrency *int
+	PriorityEnabled   bool
 	// limiter           *RateLimiter
 }
 
 // QueueOption is a functional option for configuring a workflow queue
-type QueueOption func(*workflowQueue)
+type QueueOption func(*WorkflowQueue)
 
 // WithWorkerConcurrency sets the worker concurrency for the queue
 func WithWorkerConcurrency(concurrency int) QueueOption {
-	return func(q *workflowQueue) {
-		q.workerConcurrency = &concurrency
+	return func(q *WorkflowQueue) {
+		q.WorkerConcurrency = &concurrency
 	}
 }
 
 // WithGlobalConcurrency sets the global concurrency for the queue
 func WithGlobalConcurrency(concurrency int) QueueOption {
-	return func(q *workflowQueue) {
-		q.globalConcurrency = &concurrency
+	return func(q *WorkflowQueue) {
+		q.GlobalConcurrency = &concurrency
 	}
 }
 
 // WithPriorityEnabled enables or disables priority handling for the queue
 func WithPriorityEnabled(enabled bool) QueueOption {
-	return func(q *workflowQueue) {
-		q.priorityEnabled = enabled
+	return func(q *WorkflowQueue) {
+		q.PriorityEnabled = enabled
 	}
 }
 
@@ -68,33 +64,33 @@ func WithRateLimiter(limiter *RateLimiter) QueueOption {
 */
 
 // NewWorkflowQueue creates a new workflow queue with optional configuration
-func NewWorkflowQueue(name string, options ...QueueOption) workflowQueue {
+func NewWorkflowQueue(name string, options ...QueueOption) WorkflowQueue {
 	if getExecutor() != nil {
 		fmt.Println("warning: NewWorkflowQueue called after DBOS initialization, dynamic registration is not supported")
-		return workflowQueue{}
+		return WorkflowQueue{}
 	}
 	if _, exists := workflowQueueRegistry[name]; exists {
 		panic(NewConflictingRegistrationError(name))
 	}
 
 	// Create queue with default settings
-	q := &workflowQueue{
-		name:              name,
-		workerConcurrency: nil,
-		globalConcurrency: nil,
-		priorityEnabled:   false,
+	q := WorkflowQueue{
+		Name:              name,
+		WorkerConcurrency: nil,
+		GlobalConcurrency: nil,
+		PriorityEnabled:   false,
 		//limiter:           nil,
 	}
 
 	// Apply functional options
 	for _, option := range options {
-		option(q)
+		option(&q)
 	}
 
 	// Register the queue in the global registry
-	workflowQueueRegistry[name] = *q
+	workflowQueueRegistry[name] = q
 
-	return *q
+	return q
 }
 
 func queueRunner(ctx context.Context) {
