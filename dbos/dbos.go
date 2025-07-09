@@ -14,6 +14,7 @@ import (
 var (
 	APP_VERSION string
 	EXECUTOR_ID string
+	APP_ID      string
 )
 
 func computeApplicationVersion() string {
@@ -60,7 +61,8 @@ func init() {
 		fmt.Printf("DBOS: DBOS__VMID not set, using default: %s\n", EXECUTOR_ID)
 	}
 
-	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s\n", APP_VERSION, EXECUTOR_ID)
+	APP_ID = os.Getenv("DBOS__APPID")
+	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s, APP_ID=%s\n", APP_VERSION, EXECUTOR_ID, APP_ID)
 }
 
 type Executor interface {

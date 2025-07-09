@@ -40,7 +40,7 @@ type WorkflowStatus struct {
 	CreatedAt          time.Time          `json:"created_at"`
 	UpdatedAt          time.Time          `json:"updated_at"`
 	ApplicationVersion string             `json:"application_version"`
-	ApplicationID      *string            `json:"application_id"`
+	ApplicationID      string             `json:"application_id"`
 	Attempts           int                `json:"attempts"`
 	QueueName          string             `json:"queue_name"`
 	Timeout            time.Duration      `json:"timeout"`
@@ -80,6 +80,7 @@ type workflowHandle[R any] struct {
 }
 
 // GetResult waits for the workflow to complete and returns the result
+// TODO record get result in operations_output
 func (h *workflowHandle[R]) GetResult() (R, error) {
 	// TODO check on channels to see if they are closed
 	select {
@@ -115,6 +116,7 @@ type workflowPollingHandle[R any] struct {
 	workflowID string
 }
 
+// TODO record get result in operations_output
 func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 	ctx := context.Background()
 	result, err := getExecutor().systemDB.AwaitWorkflowResult(ctx, h.workflowID)

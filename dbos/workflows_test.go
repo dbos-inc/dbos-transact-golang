@@ -648,8 +648,4 @@ func TestWorkflowRecovery(t *testing.T) {
 		}
 
 	})
-
-	// Test recovery of specified executor only
-	// Test recovery of specific version only
-	// Test recovery reach max recovery attempts
 }
