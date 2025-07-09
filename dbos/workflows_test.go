@@ -180,6 +180,17 @@ func TestAppVersion(t *testing.T) {
 	if _, err := hex.DecodeString(APP_VERSION); err != nil {
 		t.Fatalf("APP_VERSION is not a valid hex string: %v", err)
 	}
+
+	// Replace the registry and verify the hash is different
+	registry = make(map[string]TypedErasedWorkflowWrapperFunc)
+
+	WithWorkflow(func(ctx context.Context, input string) (string, error) {
+		return "new-registry-workflow-" + input, nil
+	})
+	hash2 := computeApplicationVersion()
+	if APP_VERSION == hash2 {
+		t.Fatalf("APP_VERSION hash did not change after replacing registry")
+	}
 }
 
 func TestWorkflowsWrapping(t *testing.T) {
