@@ -55,19 +55,19 @@ func createDatabaseIfNotExists(databaseURL string) error {
 	// Connect to the postgres database
 	parsedURL, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
-		return fmt.Errorf("failed to parse database URL: %w", err)
+		return NewInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
 	}
 
 	dbName := parsedURL.Database
 	if dbName == "" {
-		return fmt.Errorf("database name not found in URL")
+		return NewInitializationError("database name not found in URL")
 	}
 
 	serverURL := parsedURL.Copy()
 	serverURL.Database = "postgres"
 	conn, err := pgx.ConnectConfig(context.Background(), serverURL)
 	if err != nil {
-		return fmt.Errorf("failed to connect to PostgreSQL server: %w", err)
+		return NewInitializationError(fmt.Sprintf("failed to connect to PostgreSQL server: %v", err))
 	}
 	defer conn.Close(context.Background())
 
@@ -76,14 +76,14 @@ func createDatabaseIfNotExists(databaseURL string) error {
 	err = conn.QueryRow(context.Background(),
 		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName).Scan(&exists)
 	if err != nil {
-		return fmt.Errorf("failed to check if database exists: %w", err)
+		return NewInitializationError(fmt.Sprintf("failed to check if database exists: %v", err))
 	}
 	if !exists {
 		// TODO: validate db name
 		createSQL := fmt.Sprintf("CREATE DATABASE %s", pgx.Identifier{dbName}.Sanitize())
 		_, err = conn.Exec(context.Background(), createSQL)
 		if err != nil {
-			return fmt.Errorf("failed to create database %s: %w", dbName, err)
+			return NewInitializationError(fmt.Sprintf("failed to create database %s: %v", dbName, err))
 		}
 	}
 
@@ -101,20 +101,20 @@ func runMigrations(databaseURL string) error {
 	// Create migration source from embedded files
 	d, err := iofs.New(migrationFiles, "migrations")
 	if err != nil {
-		return fmt.Errorf("failed to create migration source: %w", err)
+		return NewInitializationError(fmt.Sprintf("failed to create migration source: %v", err))
 	}
 
 	// Create migrator
 	m, err := migrate.NewWithSourceInstance("iofs", d, databaseURL)
 	if err != nil {
-		return fmt.Errorf("failed to create migrator: %w", err)
+		return NewInitializationError(fmt.Sprintf("failed to create migrator: %v", err))
 	}
 	defer m.Close()
 
 	// Run migrations
 	// FIXME: tolerate errors when the migration is bcz we run an older version of transact
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("failed to run migrations: %w", err)
+		return NewInitializationError(fmt.Sprintf("failed to run migrations: %v", err))
 	}
 
 	return nil
@@ -125,30 +125,30 @@ func NewSystemDatabase() (SystemDatabase, error) {
 	// TODO: pass proper config
 	databaseURL := os.Getenv("DBOS_DATABASE_URL")
 	if databaseURL == "" {
-		return nil, fmt.Errorf("DBOS_DATABASE_URL environment variable is required")
+		return nil, NewInitializationError("DBOS_DATABASE_URL environment variable is required")
 	}
 
 	// Create the database if it doesn't exist
 	if err := createDatabaseIfNotExists(databaseURL); err != nil {
-		return nil, fmt.Errorf("failed to create database: %w", err)
+		return nil, NewInitializationError(fmt.Sprintf("failed to create database: %v", err))
 	}
 
 	// Run migrations first
 	if err := runMigrations(databaseURL); err != nil {
-		return nil, fmt.Errorf("failed to run migrations: %w", err)
+		return nil, NewInitializationError(fmt.Sprintf("failed to run migrations: %v", err))
 	}
 
 	// Create pgx pool
 	pool, err := pgxpool.New(context.Background(), databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create connection pool: %w", err)
+		return nil, NewInitializationError(fmt.Sprintf("failed to create connection pool: %v", err))
 	}
 
 	// Test the connection
 	// FIXME: remove this
 	if err := pool.Ping(context.Background()); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
+		return nil, NewInitializationError(fmt.Sprintf("failed to ping database: %v", err))
 	}
 
 	return &systemDatabase{
@@ -374,7 +374,9 @@ func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input RecordCh
 	if err != nil {
 		// Check for unique constraint violation (conflict ID error)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
-			return fmt.Errorf("workflow conflict ID error for parent workflow %s and child workflow %s (operation ID: %d)", input.ParentWorkflowID, input.ChildWorkflowID, input.FunctionID)
+			return fmt.Errorf(
+				"child workflow %s already registered for parent workflow %s (operation ID: %d)",
+				input.ChildWorkflowID, input.ParentWorkflowID, input.FunctionID)
 		}
 		return fmt.Errorf("failed to record child workflow: %w", err)
 	}
@@ -655,7 +657,7 @@ func (s *systemDatabase) CancelWorkflow(ctx context.Context, workflowID string) 
 		return err
 	}
 	if len(wfs) == 0 {
-		return fmt.Errorf("workflow %s not found", workflowID)
+		return NewNonExistentWorkflowError(workflowID)
 	}
 
 	wf := wfs[0]
@@ -721,7 +723,7 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 		case WorkflowStatusError:
 			return nil, errors.New(*errorStr) // Assuming errorStr can be converted to an error type
 		case WorkflowStatusCancelled:
-			return nil, fmt.Errorf("workflow %s was cancelled", workflowID)
+			return nil, NewAwaitedWorkflowCancelledError(workflowID)
 		default:
 			time.Sleep(1 * time.Second) // Wait before checking again
 		}
@@ -765,14 +767,14 @@ func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input Chec
 	err = tx.QueryRow(ctx, workflowStatusQuery, input.workflowID).Scan(&workflowStatus)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return nil, fmt.Errorf("error: Workflow %s does not exist", input.workflowID)
+			return nil, NewNonExistentWorkflowError(input.workflowID)
 		}
 		return nil, fmt.Errorf("failed to get workflow status: %w", err)
 	}
 
 	// If the workflow is cancelled, raise the exception
 	if workflowStatus == WorkflowStatusCancelled {
-		return nil, fmt.Errorf("workflow %s is cancelled. Aborting function", input.workflowID)
+		return nil, NewWorkflowCancelledError(fmt.Sprintf("workflow %s is cancelled. Aborting function", input.workflowID))
 	}
 
 	// Execute second query to get operation outputs
@@ -792,8 +794,7 @@ func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input Chec
 
 	// If the provided and recorded function name are different, throw an exception
 	if input.functionName != recordedFunctionName {
-		return nil, fmt.Errorf("unexpected step error: workflow_id=%s, step_id=%d, expected_name=%s, recorded_name=%s",
-			input.workflowID, input.operationID, input.functionName, recordedFunctionName)
+		return nil, NewUnexpectedStepError(input.workflowID, input.operationID, input.functionName, recordedFunctionName)
 	}
 
 	// Deserialize output if present

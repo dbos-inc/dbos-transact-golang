@@ -7,13 +7,15 @@ import (
 	"encoding/gob"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var workflowQueueRegistry = make(map[string]workflowQueue)
 
 // WorkflowQueue interface defines queue operations and properties
 type WorkflowQueue interface {
-	Enqueue(ctx context.Context, params WorkflowParams, workflow WorkflowWrapperFunc[any, any], input any) error
 }
 
 // RateLimiter represents a rate limiting configuration
@@ -67,11 +69,12 @@ func WithRateLimiter(limiter *RateLimiter) QueueOption {
 
 // NewWorkflowQueue creates a new workflow queue with optional configuration
 func NewWorkflowQueue(name string, options ...QueueOption) workflowQueue {
-	// TODO: detect dynamic registration
-	// Exit early and print a warning if the queue is already registered
-	if _, exists := workflowQueueRegistry[name]; exists {
-		fmt.Println("Workflow queue '" + name + "' is already registered.")
+	if getExecutor() != nil {
+		fmt.Println("warning: NewWorkflowQueue called after DBOS initialization, dynamic registration is not supported")
 		return workflowQueue{}
+	}
+	if _, exists := workflowQueueRegistry[name]; exists {
+		panic(NewConflictingRegistrationError(name))
 	}
 
 	// Create queue with default settings
@@ -106,8 +109,19 @@ func queueRunner(ctx context.Context) {
 				// Call DequeueWorkflows for each queue
 				dequeuedWorkflows, err := getExecutor().systemDB.DequeueWorkflows(ctx, queue)
 				if err != nil {
-					fmt.Printf("Error dequeuing workflows from queue '%s': %v\n", queueName, err)
-					// XXX handle serialization errors
+					if pgErr, ok := err.(*pgconn.PgError); ok {
+						// TODO: change for polling backoff strategy
+						switch pgErr.Code {
+						case pgerrcode.SerializationFailure:
+							// Handle serialization failure
+							fmt.Printf("Serialization failure for workflow in queue '%s': %v\n", queueName, pgErr)
+						case pgerrcode.LockNotAvailable:
+							// Handle lock not available
+							fmt.Printf("Lock not available for workflow in queue '%s': %v\n", queueName, pgErr)
+						}
+					} else {
+						fmt.Printf("Error dequeuing workflows from queue '%s': %v\n", queueName, err)
+					}
 					continue
 				}
 

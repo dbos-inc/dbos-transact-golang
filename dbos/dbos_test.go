@@ -169,6 +169,12 @@ func Identity[T any](ctx context.Context, in T) (T, error) {
 	return in, nil
 }
 
+var (
+	anonymousWf = WithWorkflow(func(ctx context.Context, in string) (string, error) {
+		return "anonymous-" + in, nil
+	})
+)
+
 func TestWorkflowsWrapping(t *testing.T) {
 	setupDBOS(t)
 
@@ -295,10 +301,6 @@ func TestWorkflowsWrapping(t *testing.T) {
 		{
 			name: "AnonymousClosure",
 			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				// Create anonymous closure workflow directly in test
-				anonymousWf := WithWorkflow(func(ctx context.Context, in string) (string, error) {
-					return "anonymous-" + in, nil
-				})
 				handle, err := anonymousWf(ctx, input, opts...)
 				if err != nil {
 					return nil, err
@@ -360,31 +362,31 @@ func TestWorkflowsWrapping(t *testing.T) {
 	}
 }
 
+var (
+	parentWf = WithWorkflow(func(ctx context.Context, wfid string) (string, error) {
+		childHandle, err := simpleWfWithChildWorkflow(ctx, wfid)
+		if err != nil {
+			return "", err
+		}
+		// Verify child workflow ID follows the pattern: parentID-functionID
+		childWorkflowID := childHandle.GetWorkflowID()
+		expectedPrefix := wfid + "-0"
+		if childWorkflowID != expectedPrefix {
+			return "", fmt.Errorf("expected child workflow ID to be %s, got %s", expectedPrefix, childWorkflowID)
+		}
+
+		return childHandle.GetResult()
+	})
+)
+
 func TestChildWorkflow(t *testing.T) {
 	setupDBOS(t)
 
 	t.Run("ChildWorkflowIDPattern", func(t *testing.T) {
 		parentWorkflowID := uuid.NewString()
 
-		// Create a parent workflow that calls a child workflow
-		parentWf := WithWorkflow(func(ctx context.Context, input string) (string, error) {
-			childHandle, err := simpleWfWithChildWorkflow(ctx, input)
-			if err != nil {
-				return "", err
-			}
-
-			// Verify child workflow ID follows the pattern: parentID-functionID
-			childWorkflowID := childHandle.GetWorkflowID()
-			expectedPrefix := parentWorkflowID + "-0"
-			if childWorkflowID != expectedPrefix {
-				return "", fmt.Errorf("expected child workflow ID to be %s, got %s", expectedPrefix, childWorkflowID)
-			}
-
-			return childHandle.GetResult()
-		})
-
 		// Execute the parent workflow
-		parentHandle, err := parentWf(context.Background(), "test-input", WithWorkflowID(parentWorkflowID))
+		parentHandle, err := parentWf(context.Background(), parentWorkflowID, WithWorkflowID(parentWorkflowID))
 		if err != nil {
 			t.Fatalf("failed to execute parent workflow: %v", err)
 		}

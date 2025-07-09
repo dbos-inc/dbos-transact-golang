@@ -102,14 +102,9 @@ func (h *workflowHandle[R]) GetStatus() (WorkflowStatusType, error) {
 		return "", fmt.Errorf("failed to get workflow status: %w", err)
 	}
 	if len(workflowStatuses) == 0 {
-		return "", fmt.Errorf("workflow with ID '%s' not found", h.workflowID)
+		return "", NewNonExistentWorkflowError(h.workflowID)
 	}
-	status := workflowStatuses[0]
-	if err != nil {
-		return "", fmt.Errorf("failed to get workflow status: %w", err)
-	}
-	return status.Status, nil
-
+	return workflowStatuses[0].Status, nil
 }
 
 func (h *workflowHandle[R]) GetWorkflowID() string {
@@ -126,7 +121,8 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 	if result != nil {
 		typedResult, ok := result.(R)
 		if !ok {
-			return *new(R), fmt.Errorf("failed to cast workflow result to expected type %T", typedResult)
+			// TODO check what this looks like in practice
+			return *new(R), NewWorkflowUnexpectedResultType(h.workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", result))
 		}
 		return typedResult, err
 	}
@@ -143,14 +139,9 @@ func (h *workflowPollingHandle[R]) GetStatus() (WorkflowStatusType, error) {
 		return "", fmt.Errorf("failed to get workflow status: %w", err)
 	}
 	if len(workflowStatuses) == 0 {
-		return "", fmt.Errorf("workflow with ID '%s' not found", h.workflowID)
+		return "", NewNonExistentWorkflowError(h.workflowID)
 	}
-	status := workflowStatuses[0]
-	if err != nil {
-		return "", fmt.Errorf("failed to get workflow status: %w", err)
-	}
-	return status.Status, nil
-
+	return workflowStatuses[0].Status, nil
 }
 
 func (h *workflowPollingHandle[R]) GetWorkflowID() string {
@@ -171,14 +162,19 @@ func registerWorkflow(fqn string, fn TypedErasedWorkflowWrapperFunc) {
 	defer regMutex.Unlock()
 
 	if _, exists := registry[fqn]; exists {
-		// TODO: consider printing a warning instead of panicking
-		panic(fmt.Sprintf("workflow function '%s' is already registered", fqn))
+		fmt.Println("Error: workflow function already registered:", fqn)
+		panic(NewConflictingRegistrationError(fqn))
 	}
 
 	registry[fqn] = fn
 }
 
 func WithWorkflow[P any, R any](fn WorkflowFunc[P, R]) WorkflowWrapperFunc[P, R] {
+	if getExecutor() != nil {
+		fmt.Println("warning: WithWorkflow called after DBOS initialization, dynamic registration is not supported")
+		return nil
+	}
+
 	if fn == nil {
 		panic("workflow function cannot be nil")
 	}
@@ -198,7 +194,7 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R]) WorkflowWrapperFunc[P, R]
 	typeErasedWrapper := func(ctx context.Context, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 		typedInput, ok := input.(P)
 		if !ok {
-			return nil, fmt.Errorf("invalid input type for workflow %s", fqn)
+			return nil, NewWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
 		}
 
 		handle, err := wrappedFunction(ctx, typedInput, opts...)
@@ -294,7 +290,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	if isChildWorkflow {
 		childWorkflowID, err := getExecutor().systemDB.CheckChildWorkflow(dbosWorkflowContext, parentWorkflowState.WorkflowID, parentWorkflowState.stepCounter)
 		if err != nil {
-			return nil, fmt.Errorf("checking child workflow: %w", err)
+			return nil, NewWorkflowExecutionError(parentWorkflowState.WorkflowID, fmt.Sprintf("checking child workflow: %v", err))
 		}
 		if childWorkflowID != nil {
 			return &workflowPollingHandle[R]{workflowID: *childWorkflowID}, nil
@@ -326,7 +322,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	// Init status and record child workflow relationship in a single transaction
 	tx, err := getExecutor().systemDB.(*systemDatabase).pool.Begin(dbosWorkflowContext)
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+		return nil, NewWorkflowExecutionError(workflowID, fmt.Sprintf("failed to begin transaction: %v", err))
 	}
 	defer tx.Rollback(dbosWorkflowContext) // Rollback if not committed
 
@@ -337,14 +333,14 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	}
 	insertStatusResult, err := getExecutor().systemDB.InsertWorkflowStatus(dbosWorkflowContext, insertInput)
 	if err != nil {
-		return nil, fmt.Errorf("inserting workflow status: %w", err)
+		return nil, NewWorkflowExecutionError(workflowID, fmt.Sprintf("inserting workflow status: %v", err))
 	}
 
 	// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
 	if len(params.QueueName) > 0 || insertStatusResult.Status == WorkflowStatusSuccess || insertStatusResult.Status == WorkflowStatusError {
 		// Commit the transaction to update the number of attempts and/or enact the enqueue
 		if err := tx.Commit(dbosWorkflowContext); err != nil {
-			return nil, fmt.Errorf("failed to commit transaction: %w", err)
+			return nil, NewWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
 		}
 		return &workflowPollingHandle[R]{workflowID: workflowStatus.ID}, nil
 	}
@@ -362,13 +358,13 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 		}
 		err = getExecutor().systemDB.RecordChildWorkflow(dbosWorkflowContext, childInput)
 		if err != nil {
-			return nil, fmt.Errorf("recording child workflow: %w", err)
+			return nil, NewWorkflowExecutionError(parentWorkflowState.WorkflowID, fmt.Sprintf("recording child workflow: %v", err))
 		}
 	}
 
 	// Commit the transaction
 	if err := tx.Commit(dbosWorkflowContext); err != nil {
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+		return nil, NewWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
 	}
 
 	// Channel to receive the result from the goroutine
@@ -462,6 +458,12 @@ func WithBackoffRate(backoffRate int) StepOption {
 }
 
 func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, opts ...StepOption) (R, error) {
+	if fn == nil {
+		return *new(R), NewStepExecutionError("", "", "step function cannot be nil")
+	}
+
+	operationName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+
 	// Apply options to build params
 	params := StepParams{}
 	for _, opt := range opts {
@@ -471,7 +473,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	// Get workflow state from context
 	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
-		return *new(R), fmt.Errorf("context does not contain valid workflow state, cannot run step")
+		return *new(R), NewStepExecutionError("", operationName, "workflow state not found in context")
 	}
 
 	// Get next step ID
@@ -484,7 +486,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		functionName: runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(),
 	})
 	if err != nil {
-		return *new(R), fmt.Errorf("failed to check operation execution: %w", err)
+		return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("checking operation execution: %v", err))
 	}
 	if recordedOutput != nil {
 		return recordedOutput.output.(R), recordedOutput.err
@@ -492,7 +494,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 
 	dbInput := recordOperationResultDBInput{
 		workflowID:    workflowState.WorkflowID,
-		operationName: runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(),
+		operationName: operationName,
 		operationID:   operationID,
 	}
 	stepOutput, stepError := fn(ctx, input)
@@ -502,7 +504,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		err := getExecutor().systemDB.RecordOperationResult(ctx, dbInput)
 		if err != nil {
 			fmt.Println("failed to record step error:", err)
-			return *new(R), fmt.Errorf("failed to record step error: %w", err)
+			return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("recording step error: %v", err))
 		}
 	} else {
 		fmt.Println("step function completed successfully, output:", stepOutput)
@@ -510,7 +512,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		err := getExecutor().systemDB.RecordOperationResult(ctx, dbInput)
 		if err != nil {
 			fmt.Println("failed to record step output:", err)
-			return *new(R), fmt.Errorf("failed to record step output: %w", err)
+			return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("recording step output: %v", err))
 		}
 	}
 	return stepOutput, stepError
@@ -529,7 +531,7 @@ func RetrieveWorkflow[R any](workflowID string) (workflowPollingHandle[R], error
 		return workflowPollingHandle[R]{}, fmt.Errorf("failed to retrieve workflow status: %w", err)
 	}
 	if len(workflowStatus) == 0 {
-		return workflowPollingHandle[R]{}, fmt.Errorf("workflow with ID '%s' not found", workflowID)
+		return workflowPollingHandle[R]{}, NewNonExistentWorkflowError(workflowID)
 	}
 	return workflowPollingHandle[R]{workflowID: workflowID}, nil
 }
