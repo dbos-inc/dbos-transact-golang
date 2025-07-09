@@ -44,7 +44,6 @@ func (e *DBOSError) Error() string {
 	return fmt.Sprintf("DBOS Error %d: %s", int(e.Code), e.Message)
 }
 
-// TODO implement this check in inest worjkflow status
 func NewConflictingWorkflowError(workflowID, message string) *DBOSError {
 	msg := fmt.Sprintf("Conflicting workflow invocation with the same ID (%s)", workflowID)
 	if message != "" {
