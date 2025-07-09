@@ -37,6 +37,7 @@ type SystemDatabase interface {
 	DequeueWorkflows(ctx context.Context, queue workflowQueue) ([]dequeuedWorkflow, error)
 	ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
 	CheckOperationExecution(ctx context.Context, input CheckOperationExecutionDBInput) (*RecordedResult, error)
+	RecordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
 }
 
 type systemDatabase struct {
@@ -159,7 +160,7 @@ func (s *systemDatabase) Destroy() {
 }
 
 /*******************************/
-/******* STATUS MANAGEMENT ********/
+/******* WORKFLOWS ********/
 /*******************************/
 
 type InsertWorkflowResult struct {
@@ -238,7 +239,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
         RETURNING recovery_attempts, status, name, queue_name, workflow_deadline_epoch_ms`
 
 	var result InsertWorkflowResult
-	err := input.Tx.QueryRow(ctx, query,
+	err = input.Tx.QueryRow(ctx, query,
 		input.Status.ID,
 		input.Status.Status,
 		input.Status.Name,
@@ -278,130 +279,6 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
 	// TODO implement max retries
 
 	return &result, nil
-}
-
-type recordOperationResultDBInput struct {
-	workflowID    string
-	operationID   int
-	operationName string
-	output        any
-	err           error
-}
-
-func (s *systemDatabase) RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
-	query := `INSERT INTO dbos.operation_outputs
-            (workflow_uuid, function_id, output, error, function_name)
-            VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT DO NOTHING`
-
-	var errorString *string
-	if input.err != nil {
-		e := input.err.Error()
-		errorString = &e
-	}
-
-	var outputBytes []byte
-	if input.output != nil {
-		var buf bytes.Buffer
-		enc := gob.NewEncoder(&buf)
-		if err := enc.Encode(&input.output); err != nil {
-			return fmt.Errorf("failed to encode output: %w", err)
-		}
-		outputBytes = buf.Bytes()
-	}
-	outputString := base64.StdEncoding.EncodeToString(outputBytes)
-
-	commandTag, err := s.pool.Exec(ctx, query,
-		input.workflowID,
-		input.operationID,
-		outputString,
-		errorString,
-		input.operationName,
-	)
-
-	/*
-		fmt.Printf("RecordOperationResult - CommandTag: %v\n", commandTag)
-		fmt.Printf("RecordOperationResult - Rows affected: %d\n", commandTag.RowsAffected())
-		fmt.Printf("RecordOperationResult - SQL: %s\n", commandTag.String())
-	*/
-
-	// TODO handle serialization errors
-	if err != nil {
-		fmt.Printf("RecordOperationResult - Error occurred: %v\n", err)
-		return fmt.Errorf("failed to record operation result: %w", err)
-	}
-
-	if commandTag.RowsAffected() == 0 {
-		fmt.Printf("RecordOperationResult - WARNING: No rows were affected by the insert\n")
-	}
-
-	return nil
-}
-
-type RecordChildWorkflowDBInput struct {
-	ParentWorkflowID string
-	ChildWorkflowID  string
-	FunctionID       int
-	FunctionName     string
-	Tx               pgx.Tx
-}
-
-func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error {
-	query := `INSERT INTO dbos.operation_outputs
-            (workflow_uuid, function_id, function_name, child_workflow_id)
-            VALUES ($1, $2, $3, $4)`
-
-	var commandTag pgconn.CommandTag
-	var err error
-
-	if input.Tx != nil {
-		commandTag, err = input.Tx.Exec(ctx, query,
-			input.ParentWorkflowID,
-			input.FunctionID,
-			input.FunctionName,
-			input.ChildWorkflowID,
-		)
-	} else {
-		commandTag, err = s.pool.Exec(ctx, query,
-			input.ParentWorkflowID,
-			input.FunctionID,
-			input.FunctionName,
-			input.ChildWorkflowID,
-		)
-	}
-
-	if err != nil {
-		// Check for unique constraint violation (conflict ID error)
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
-			return fmt.Errorf(
-				"child workflow %s already registered for parent workflow %s (operation ID: %d)",
-				input.ChildWorkflowID, input.ParentWorkflowID, input.FunctionID)
-		}
-		return fmt.Errorf("failed to record child workflow: %w", err)
-	}
-
-	if commandTag.RowsAffected() == 0 {
-		fmt.Printf("RecordChildWorkflow - WARNING: No rows were affected by the insert\n")
-	}
-
-	return nil
-}
-
-func (s *systemDatabase) CheckChildWorkflow(ctx context.Context, workflowID string, functionID int) (*string, error) {
-	query := `SELECT child_workflow_id
-              FROM dbos.operation_outputs
-              WHERE workflow_uuid = $1 AND function_id = $2`
-
-	var childWorkflowID *string
-	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to check child workflow: %w", err)
-	}
-
-	return childWorkflowID, nil
 }
 
 // ListWorkflowsInput represents the input parameters for listing workflows
@@ -689,6 +566,162 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 			time.Sleep(1 * time.Second) // Wait before checking again
 		}
 	}
+}
+
+type recordOperationResultDBInput struct {
+	workflowID    string
+	operationID   int
+	operationName string
+	output        any
+	err           error
+}
+
+func (s *systemDatabase) RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
+	query := `INSERT INTO dbos.operation_outputs
+            (workflow_uuid, function_id, output, error, function_name)
+            VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT DO NOTHING`
+
+	var errorString *string
+	if input.err != nil {
+		e := input.err.Error()
+		errorString = &e
+	}
+
+	outputString, err := serialize(input.output)
+	if err != nil {
+		return fmt.Errorf("failed to serialize output: %w", err)
+	}
+
+	commandTag, err := s.pool.Exec(ctx, query,
+		input.workflowID,
+		input.operationID,
+		outputString,
+		errorString,
+		input.operationName,
+	)
+
+	/*
+		fmt.Printf("RecordOperationResult - CommandTag: %v\n", commandTag)
+		fmt.Printf("RecordOperationResult - Rows affected: %d\n", commandTag.RowsAffected())
+		fmt.Printf("RecordOperationResult - SQL: %s\n", commandTag.String())
+	*/
+
+	// TODO handle serialization errors
+	if err != nil {
+		fmt.Printf("RecordOperationResult - Error occurred: %v\n", err)
+		return fmt.Errorf("failed to record operation result: %w", err)
+	}
+
+	if commandTag.RowsAffected() == 0 {
+		fmt.Printf("RecordOperationResult - WARNING: No rows were affected by the insert\n")
+	}
+
+	return nil
+}
+
+/*******************************/
+/******* CHILD WORKFLOWS ********/
+/*******************************/
+
+type RecordChildWorkflowDBInput struct {
+	ParentWorkflowID string
+	ChildWorkflowID  string
+	FunctionID       int
+	FunctionName     string
+	Tx               pgx.Tx
+}
+
+func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error {
+	query := `INSERT INTO dbos.operation_outputs
+            (workflow_uuid, function_id, function_name, child_workflow_id)
+            VALUES ($1, $2, $3, $4)`
+
+	var commandTag pgconn.CommandTag
+	var err error
+
+	if input.Tx != nil {
+		commandTag, err = input.Tx.Exec(ctx, query,
+			input.ParentWorkflowID,
+			input.FunctionID,
+			input.FunctionName,
+			input.ChildWorkflowID,
+		)
+	} else {
+		commandTag, err = s.pool.Exec(ctx, query,
+			input.ParentWorkflowID,
+			input.FunctionID,
+			input.FunctionName,
+			input.ChildWorkflowID,
+		)
+	}
+
+	if err != nil {
+		// Check for unique constraint violation (conflict ID error)
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+			return fmt.Errorf(
+				"child workflow %s already registered for parent workflow %s (operation ID: %d)",
+				input.ChildWorkflowID, input.ParentWorkflowID, input.FunctionID)
+		}
+		return fmt.Errorf("failed to record child workflow: %w", err)
+	}
+
+	if commandTag.RowsAffected() == 0 {
+		fmt.Printf("RecordChildWorkflow - WARNING: No rows were affected by the insert\n")
+	}
+
+	return nil
+}
+
+func (s *systemDatabase) CheckChildWorkflow(ctx context.Context, workflowID string, functionID int) (*string, error) {
+	query := `SELECT child_workflow_id
+              FROM dbos.operation_outputs
+              WHERE workflow_uuid = $1 AND function_id = $2`
+
+	var childWorkflowID *string
+	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to check child workflow: %w", err)
+	}
+
+	return childWorkflowID, nil
+}
+
+type recordChildGetResultDBInput struct {
+	parentWorkflowID string
+	childWorkflowID  string
+	operationID      int
+	output           string
+	err              error
+}
+
+func (s *systemDatabase) RecordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error {
+	query := `INSERT INTO dbos.operation_outputs
+            (workflow_uuid, function_id, function_name, output, error, child_workflow_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT DO NOTHING`
+
+	var errorString *string
+	if input.err != nil {
+		e := input.err.Error()
+		errorString = &e
+	}
+
+	_, err := s.pool.Exec(ctx, query,
+		input.parentWorkflowID,
+		input.operationID,
+		"DBOS.getResult",
+		input.output,
+		errorString,
+		input.childWorkflowID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to record get result: %w", err)
+	}
+	return nil
 }
 
 /*******************************/

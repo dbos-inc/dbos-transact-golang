@@ -49,7 +49,7 @@ func queueWorkflowWithChild(ctx context.Context, input string) (string, error) {
 	}
 
 	// Get result from child workflow
-	childResult, err := childHandle.GetResult()
+	childResult, err := childHandle.GetResult(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get child result: %v", err)
 	}
@@ -65,7 +65,7 @@ func queueWorkflowThatEnqueues(ctx context.Context, input string) (string, error
 	}
 
 	// Get result from the enqueued workflow
-	enqueuedResult, err := enqueuedHandle.GetResult()
+	enqueuedResult, err := enqueuedHandle.GetResult(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get enqueued workflow result: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestWorkflowQueues(t *testing.T) {
 			t.Fatalf("expected handle to be of type workflowPollingHandle, got %T", handle)
 		}
 
-		res, err := handle.GetResult()
+		res, err := handle.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("expected no error but got: %v", err)
 		}
@@ -106,7 +106,7 @@ func TestWorkflowQueues(t *testing.T) {
 			t.Fatalf("failed to enqueue workflow with child: %v", err)
 		}
 
-		res, err := handle.GetResult()
+		res, err := handle.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("expected no error but got: %v", err)
 		}
@@ -128,7 +128,7 @@ func TestWorkflowQueues(t *testing.T) {
 			t.Fatalf("failed to enqueue workflow that enqueues another workflow: %v", err)
 		}
 
-		res, err := handle.GetResult()
+		res, err := handle.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("expected no error but got: %v", err)
 		}
@@ -178,7 +178,7 @@ var (
 
 		results := make([]int, 0, 5)
 		for _, handle := range handles {
-			result, err := handle.GetResult()
+			result, err := handle.GetResult(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get result for handle: %v", err)
 			}
@@ -232,7 +232,7 @@ func TestQueueRecovery(t *testing.T) {
 	for _, h := range recoveryHandles {
 		if h.GetWorkflowID() == wfid {
 			// Root workflow case
-			result, err := h.GetResult()
+			result, err := h.GetResult(context.Background())
 			if err != nil {
 				t.Fatalf("failed to get result from recovered root workflow handle: %v", err)
 			}
@@ -247,7 +247,7 @@ func TestQueueRecovery(t *testing.T) {
 		}
 	}
 
-	result, err := handle.GetResult()
+	result, err := handle.GetResult(context.Background())
 	if err != nil {
 		t.Fatalf("failed to get result from original handle: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestQueueRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to rerun workflow: %v", err)
 	}
-	rerunResult, err := rerunHandle.GetResult()
+	rerunResult, err := rerunHandle.GetResult(context.Background())
 	if err != nil {
 		t.Fatalf("failed to get result from rerun handle: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestGlobalConcurrency(t *testing.T) {
 	// Allow the first workflow to complete
 	workflowDoneEvent.Set()
 
-	result1, err := handle1.GetResult()
+	result1, err := handle1.GetResult(context.Background())
 	if err != nil {
 		t.Fatalf("failed to get result from workflow1: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestGlobalConcurrency(t *testing.T) {
 	// Wait for the second workflow to start
 	workflowEvent2.Wait()
 
-	result2, err := handle2.GetResult()
+	result2, err := handle2.GetResult(context.Background())
 	if err != nil {
 		t.Fatalf("failed to get result from workflow2: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestWorkerConcurrency(t *testing.T) {
 
 	// Unlock workflow 1, check wf 3 starts, check 4 stays blocked
 	completeEvents[0].Set()
-	result1, err := handle1.GetResult()
+	result1, err := handle1.GetResult(context.Background())
 	if err != nil {
 		t.Fatalf("failed to get result from blocking workflow 1: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestWorkerConcurrency(t *testing.T) {
 
 	// Unlock workflow 2 and check wf 4 starts
 	completeEvents[1].Set()
-	result2, err := handle2.GetResult()
+	result2, err := handle2.GetResult(context.Background())
 	if err != nil {
 		t.Fatalf("failed to get result from blocking workflow 2: %v", err)
 	}
@@ -586,7 +586,7 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	workerConcurrencyRecoveryCompleteEvent2.Set()
 
 	// Get result from first workflow
-	result1, err := handle1.GetResult()
+	result1, err := handle1.GetResult(context.Background())
 	if err != nil {
 		t.Fatalf("failed to get result from workflow1: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	}
 
 	// Get result from second workflow
-	result2, err := handle2.GetResult()
+	result2, err := handle2.GetResult(context.Background())
 	if err != nil {
 		t.Fatalf("failed to get result from workflow2: %v", err)
 	}

@@ -67,7 +67,7 @@ func (ws *WorkflowState) NextStepID() int {
 /******* WORKFLOW HANDLES ********/
 /********************************/
 type WorkflowHandle[R any] interface {
-	GetResult() (R, error)
+	GetResult(ctx context.Context) (R, error)
 	GetStatus() (WorkflowStatusType, error)
 	GetWorkflowID() string // XXX we could have a base struct with GetWorkflowID and then embed it in the implementations
 }
@@ -81,7 +81,7 @@ type workflowHandle[R any] struct {
 
 // GetResult waits for the workflow to complete and returns the result
 // TODO record get result in operations_output
-func (h *workflowHandle[R]) GetResult() (R, error) {
+func (h *workflowHandle[R]) GetResult(ctx context.Context) (R, error) {
 	// TODO check on channels to see if they are closed
 	select {
 	case result := <-h.resultChan:
@@ -116,15 +116,34 @@ type workflowPollingHandle[R any] struct {
 	workflowID string
 }
 
-// TODO record get result in operations_output
-func (h *workflowPollingHandle[R]) GetResult() (R, error) {
-	ctx := context.Background()
+func (h *workflowPollingHandle[R]) GetResult(ctx context.Context) (R, error) {
 	result, err := getExecutor().systemDB.AwaitWorkflowResult(ctx, h.workflowID)
 	if result != nil {
 		typedResult, ok := result.(R)
 		if !ok {
 			// TODO check what this looks like in practice
 			return *new(R), NewWorkflowUnexpectedResultType(h.workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", result))
+		}
+		// If we are calling GetResult inside a workflow, record the result as a step result
+		parentWorkflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
+		isChildWorkflow := ok && parentWorkflowState != nil
+		if isChildWorkflow {
+			decodedOutput, decErr := serialize(typedResult)
+			if decErr != nil {
+				return *new(R), NewWorkflowExecutionError(parentWorkflowState.WorkflowID, fmt.Sprintf("serializing child workflow result: %v", decErr))
+			}
+			recordGetResultInput := recordChildGetResultDBInput{
+				parentWorkflowID: parentWorkflowState.WorkflowID,
+				childWorkflowID:  h.workflowID,
+				operationID:      parentWorkflowState.NextStepID(),
+				output:           decodedOutput,
+				err:              err,
+			}
+			recordResultErr := getExecutor().systemDB.RecordChildGetResult(ctx, recordGetResultInput)
+			if recordResultErr != nil {
+				// XXX do we want to fail this?
+				fmt.Println("failed to record get result:", recordResultErr)
+			}
 		}
 		return typedResult, err
 	}

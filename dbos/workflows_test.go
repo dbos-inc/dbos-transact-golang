@@ -98,7 +98,7 @@ func simpleWorkflowWithChildWorkflow(ctx context.Context, input string) (string,
 	if err != nil {
 		return "", err
 	}
-	return childHandle.GetResult()
+	return childHandle.GetResult(ctx)
 }
 
 // idempotencyWorkflow increments a global counter and returns the input
@@ -228,7 +228,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:          "echo",
 			expectedResult: "echo",
@@ -241,7 +241,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:         "echo",
 			expectError:   true,
@@ -254,7 +254,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:          "echo",
 			expectedResult: "from step",
@@ -267,7 +267,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:          "echo",
 			expectedResult: "echo",
@@ -280,7 +280,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:          "echo",
 			expectedResult: "echo-value",
@@ -293,7 +293,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:          "echo",
 			expectedResult: "echo-example-interface",
@@ -307,7 +307,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:          "42", // input not used in this case
 			expectedResult: "42", // FIXME make this an int eventually
@@ -320,7 +320,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:          "world",
 			expectedResult: "hello-world",
@@ -333,7 +333,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:          "test",
 			expectedResult: "anonymous-test",
@@ -346,7 +346,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:          "echo",
 			expectedResult: "from step",
@@ -359,7 +359,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult()
+				return handle.GetResult(ctx)
 			},
 			input:         "echo",
 			expectError:   true,
@@ -403,7 +403,7 @@ var (
 			return "", fmt.Errorf("expected child workflow ID to be %s, got %s", expectedPrefix, childWorkflowID)
 		}
 
-		return childHandle.GetResult()
+		return childHandle.GetResult(ctx)
 	})
 )
 
@@ -420,7 +420,7 @@ func TestChildWorkflow(t *testing.T) {
 		}
 
 		// Verify the result
-		result, err := parentHandle.GetResult()
+		result, err := parentHandle.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("expected no error but got: %v", err)
 		}
@@ -448,7 +448,7 @@ func TestWorkflowIdempotency(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to execute workflow first time: %v", err)
 		}
-		result1, err := handle1.GetResult()
+		result1, err := handle1.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("failed to get result from first execution: %v", err)
 		}
@@ -458,7 +458,7 @@ func TestWorkflowIdempotency(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to execute workflow second time: %v", err)
 		}
-		result2, err := handle2.GetResult()
+		result2, err := handle2.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("failed to get result from second execution: %v", err)
 		}
@@ -486,7 +486,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Block until the workflow completes
-		_, err = handle.GetResult()
+		_, err = handle.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("expected no error but got: %v", err)
 		}
@@ -495,7 +495,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to retrieve workflow: %v", err)
 		}
-		retrievedResult, err := retrieveHandler.GetResult()
+		retrievedResult, err := retrieveHandler.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("expected no error but got: %v", err)
 		}
@@ -518,7 +518,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Block until the workflow completes
-		_, err = stepHandle.GetResult()
+		_, err = stepHandle.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("expected no error but got: %v", err)
 		}
@@ -528,7 +528,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to retrieve step workflow: %v", err)
 		}
-		stepRetrievedResult, err := stepRetrieveHandler.GetResult()
+		stepRetrievedResult, err := stepRetrieveHandler.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("expected no error but got: %v", err)
 		}
@@ -660,7 +660,7 @@ func TestWorkflowRecovery(t *testing.T) {
 
 		// unlock the workflow & wait for result
 		blockingStepStopEvent.Set() // This will allow the blocking step to complete
-		result, err := recoveredHandle.GetResult()
+		result, err := recoveredHandle.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("failed to get result from recovered handle: %v", err)
 		}
