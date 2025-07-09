@@ -228,7 +228,16 @@ func TestWorkflowsWrapping(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult(ctx)
+				result, err := handle.GetResult(ctx)
+				_, err2 := handle.GetResult(ctx)
+				if err2 == nil {
+					t.Fatal("Second call to GetResult should return an error")
+				}
+				expectedErrorMsg := "workflow result channel is already closed. Did you call GetResult() twice on the same workflow handle?"
+				if err2.Error() != expectedErrorMsg {
+					t.Fatal("Unexpected error message:", err2, "expected:", expectedErrorMsg)
+				}
+				return result, err
 			},
 			input:          "echo",
 			expectedResult: "echo",
