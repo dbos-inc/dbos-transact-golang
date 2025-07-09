@@ -222,40 +222,42 @@ type WorkflowFunc[P any, R any] func(ctx context.Context, input P) (R, error)
 type WorkflowWrapperFunc[P any, R any] func(ctx context.Context, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
 
 type WorkflowParams struct {
-	WorkflowID string
-	Timeout    time.Duration
-	Deadline   time.Time
-	QueueName  string
+	WorkflowID         string
+	Timeout            time.Duration
+	Deadline           time.Time
+	QueueName          string
+	ApplicationVersion string
 }
 
-// WorkflowOption is a functional option for configuring workflow parameters
 type WorkflowOption func(*WorkflowParams)
 
-// WithWorkflowID sets the workflow ID
 func WithWorkflowID(id string) WorkflowOption {
 	return func(p *WorkflowParams) {
 		p.WorkflowID = id
 	}
 }
 
-// WithTimeout sets the workflow timeout
 func WithTimeout(timeout time.Duration) WorkflowOption {
 	return func(p *WorkflowParams) {
 		p.Timeout = timeout
 	}
 }
 
-// WithDeadline sets the workflow deadline
 func WithDeadline(deadline time.Time) WorkflowOption {
 	return func(p *WorkflowParams) {
 		p.Deadline = deadline
 	}
 }
 
-// WithQueue sets the queue name for the workflow
 func WithQueue(queueName string) WorkflowOption {
 	return func(p *WorkflowParams) {
 		p.QueueName = queueName
+	}
+}
+
+func WithApplicationVersion(version string) WorkflowOption {
+	return func(p *WorkflowParams) {
+		p.ApplicationVersion = version
 	}
 }
 
@@ -306,9 +308,16 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 		status = WorkflowStatusPending
 	}
 
+	var appVersion string
+	if len(params.ApplicationVersion) > 0 {
+		appVersion = params.ApplicationVersion
+	} else {
+		appVersion = APP_VERSION
+	}
+
 	workflowStatus := WorkflowStatus{
 		Name:               runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // XXX the interface approach would encapsulate this
-		ApplicationVersion: APP_VERSION,
+		ApplicationVersion: appVersion,
 		ExecutorID:         EXECUTOR_ID,
 		Status:             status,
 		ID:                 workflowID,
@@ -316,7 +325,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 		Deadline:           params.Deadline,
 		Timeout:            params.Timeout,
 		Input:              input,
-		ApplicationID:      nil, // TODO: set application ID if available
+		ApplicationID:      APP_ID,
 		QueueName:          params.QueueName,
 	}
 	fmt.Println("Workflow status:", workflowStatus)
