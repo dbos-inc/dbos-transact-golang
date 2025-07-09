@@ -278,6 +278,15 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
 		return nil, fmt.Errorf("failed to insert workflow status: %w", err)
 	}
 
+	if len(input.Status.Name) > 0 && result.Name != input.Status.Name {
+		return nil, NewConflictingWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.Name, input.Status.Name))
+	}
+	if len(input.Status.QueueName) > 0 && result.QueueName != nil && input.Status.QueueName != *result.QueueName {
+		fmt.Printf("WARNING: Queue name conflict for workflow %s: %s vs %s\n", input.Status.ID, *result.QueueName, input.Status.QueueName)
+	}
+
+	// TODO implement max retries
+
 	return &result, nil
 }
 
@@ -774,7 +783,7 @@ func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input Chec
 
 	// If the workflow is cancelled, raise the exception
 	if workflowStatus == WorkflowStatusCancelled {
-		return nil, NewWorkflowCancelledError(fmt.Sprintf("workflow %s is cancelled. Aborting function", input.workflowID))
+		return nil, NewWorkflowCancelledError(input.workflowID)
 	}
 
 	// Execute second query to get operation outputs
