@@ -13,6 +13,7 @@ This suite tests high level DBOS features:
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"testing"
 
@@ -174,6 +175,12 @@ var (
 		return "anonymous-" + in, nil
 	})
 )
+
+func TestAppVersion(t *testing.T) {
+	if _, err := hex.DecodeString(APP_VERSION); err != nil {
+		t.Fatalf("APP_VERSION is not a valid hex string: %v", err)
+	}
+}
 
 func TestWorkflowsWrapping(t *testing.T) {
 	setupDBOS(t)

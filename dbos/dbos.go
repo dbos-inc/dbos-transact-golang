@@ -2,8 +2,13 @@ package dbos
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"reflect"
+	"runtime"
+	"sort"
 )
 
 var (
@@ -11,17 +16,46 @@ var (
 	EXECUTOR_ID string
 )
 
+func computeApplicationVersion() string {
+	if len(registry) == 0 {
+		fmt.Println("DBOS: No registered workflows found, cannot compute application version")
+		return ""
+	}
+
+	// Collect all function names and sort them for consistent hashing
+	var functionNames []string
+	for fqn := range registry {
+		functionNames = append(functionNames, fqn)
+	}
+	sort.Strings(functionNames)
+
+	hasher := sha256.New()
+
+	for _, fqn := range functionNames {
+		fn := registry[fqn]
+
+		// Try to get function source location and other identifying info
+		if pc := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()); pc != nil {
+			// Get the function's entry point - this reflects the actual compiled code
+			entry := pc.Entry()
+			fmt.Fprintf(hasher, "%x", entry)
+		}
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil))
+
+}
+
 func init() {
 	// Initialize with environment variables, providing defaults if not set
-	APP_VERSION := os.Getenv("DBOS__APPVERSION")
+	APP_VERSION = os.Getenv("DBOS__APPVERSION")
 	if APP_VERSION == "" {
-		APP_VERSION = "unknown" // TODO compute a version based on code hash
-		fmt.Printf("DBOS: DBOS__APPVERSION not set, using default: %s\n", APP_VERSION)
+		APP_VERSION = computeApplicationVersion()
+		fmt.Printf("DBOS: DBOS__APPVERSION not set, using computed hash: %s\n", APP_VERSION)
 	}
 
 	EXECUTOR_ID = os.Getenv("DBOS__VMID")
 	if EXECUTOR_ID == "" {
-		// Generate a default ID or leave empty based on your requirements
 		EXECUTOR_ID = "local"
 		fmt.Printf("DBOS: DBOS__VMID not set, using default: %s\n", EXECUTOR_ID)
 	}
