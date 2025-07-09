@@ -62,7 +62,7 @@ func init() {
 	}
 
 	APP_ID = os.Getenv("DBOS__APPID")
-	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s, APP_ID=%s\n", APP_VERSION, EXECUTOR_ID, APP_ID)
+	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s\n", APP_VERSION, EXECUTOR_ID)
 }
 
 type Executor interface {
