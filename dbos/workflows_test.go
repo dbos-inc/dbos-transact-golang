@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"testing"
 
 	"github.com/google/uuid"
@@ -180,6 +181,15 @@ func TestAppVersion(t *testing.T) {
 	if _, err := hex.DecodeString(APP_VERSION); err != nil {
 		t.Fatalf("APP_VERSION is not a valid hex string: %v", err)
 	}
+
+	// Save the original registry content
+	originalRegistry := make(map[string]TypedErasedWorkflowWrapperFunc)
+	maps.Copy(originalRegistry, registry)
+
+	// Restore the registry after the test
+	defer func() {
+		registry = originalRegistry
+	}()
 
 	// Replace the registry and verify the hash is different
 	registry = make(map[string]TypedErasedWorkflowWrapperFunc)
