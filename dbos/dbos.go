@@ -47,24 +47,6 @@ func computeApplicationVersion() string {
 
 }
 
-func init() {
-	// Initialize with environment variables, providing defaults if not set
-	APP_VERSION = os.Getenv("DBOS__APPVERSION")
-	if APP_VERSION == "" {
-		APP_VERSION = computeApplicationVersion()
-		fmt.Printf("DBOS: DBOS__APPVERSION not set, using computed hash: %s\n", APP_VERSION)
-	}
-
-	EXECUTOR_ID = os.Getenv("DBOS__VMID")
-	if EXECUTOR_ID == "" {
-		EXECUTOR_ID = "local"
-		fmt.Printf("DBOS: DBOS__VMID not set, using default: %s\n", EXECUTOR_ID)
-	}
-
-	APP_ID = os.Getenv("DBOS__APPID")
-	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s\n", APP_VERSION, EXECUTOR_ID)
-}
-
 type Executor interface {
 	Destroy()
 }
@@ -91,11 +73,28 @@ func Launch() error {
 		fmt.Println("warning: DBOS instance already initialized, skipping re-initialization")
 		return NewInitializationError("DBOS already initialized")
 	}
+
+	// Initialize with environment variables, providing defaults if not set
+	APP_VERSION = os.Getenv("DBOS__APPVERSION")
+	if APP_VERSION == "" {
+		APP_VERSION = computeApplicationVersion()
+		fmt.Println("DBOS: DBOS__APPVERSION not set, using computed hash")
+	}
+
+	EXECUTOR_ID = os.Getenv("DBOS__VMID")
+	if EXECUTOR_ID == "" {
+		EXECUTOR_ID = "local"
+		fmt.Printf("DBOS: DBOS__VMID not set, using default: %s\n", EXECUTOR_ID)
+	}
+
+	APP_ID = os.Getenv("DBOS__APPID")
+
 	// Create the system database
 	systemDB, err := NewSystemDatabase()
 	if err != nil {
 		return NewInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
+	fmt.Println("DBOS: System database initialized")
 
 	// Create context with cancel function for queue runner
 	ctx, cancel := context.WithCancel(context.Background())
@@ -108,7 +107,9 @@ func Launch() error {
 
 	// Start the queue runner in a goroutine
 	go queueRunner(ctx)
+	fmt.Println("DBOS: Queue runner started")
 
+	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s\n", APP_VERSION, EXECUTOR_ID)
 	return nil
 }
 
