@@ -230,10 +230,13 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
     ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
-            recovery_attempts = workflow_status.recovery_attempts + 1,
+			recovery_attempts = CASE
+                WHEN EXCLUDED.status != $19 THEN workflow_status.recovery_attempts + 1
+                ELSE workflow_status.recovery_attempts
+            END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status = 'ENQUEUED' THEN workflow_status.executor_id
+                WHEN EXCLUDED.status = $20 THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
         RETURNING recovery_attempts, status, name, queue_name, workflow_deadline_epoch_ms`
@@ -258,6 +261,8 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
 		inputString,
 		input.Status.DeduplicationID,
 		input.Status.Priority,
+		WorkflowStatusEnqueued,
+		WorkflowStatusEnqueued,
 	).Scan(
 		&result.Attempts,
 		&result.Status,

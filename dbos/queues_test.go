@@ -30,6 +30,16 @@ var (
 	queueWf             = WithWorkflow(queueWorkflow)
 	queueWfWithChild    = WithWorkflow(queueWorkflowWithChild)
 	queueWfThatEnqueues = WithWorkflow(queueWorkflowThatEnqueues)
+
+	// Variables for successive enqueue test
+	successiveEnqueueQueue         = NewWorkflowQueue("test-successive-enqueue-queue")
+	successiveEnqueueStartEvent    = NewEvent()
+	successiveEnqueueCompleteEvent = NewEvent()
+	successiveEnqueueWorkflow      = WithWorkflow(func(ctx context.Context, input string) (string, error) {
+		successiveEnqueueStartEvent.Set()
+		successiveEnqueueCompleteEvent.Wait()
+		return input, nil
+	})
 )
 
 func queueWorkflow(ctx context.Context, input string) (string, error) {
@@ -151,6 +161,45 @@ func TestWorkflowQueues(t *testing.T) {
 		q := NewWorkflowQueue("dynamic-queue")
 		if len(q.Name) > 0 {
 			t.Fatalf("expected nil queue for dynamic registration after DBOS initialization, got %v", q)
+		}
+	})
+
+	t.Run("SuccessiveEnqueuesDoNotIncreaseAttempts", func(t *testing.T) {
+		workflowID := "blocking-workflow-test"
+
+		// Enqueue the workflow for the first time
+		originalHandle, err := successiveEnqueueWorkflow(context.Background(), "test-input", WithQueue(successiveEnqueueQueue.Name), WithWorkflowID(workflowID))
+		if err != nil {
+			t.Fatalf("failed to enqueue blocking workflow: %v", err)
+		}
+
+		// Wait for the workflow to start
+		successiveEnqueueStartEvent.Wait()
+
+		// Try to enqueue the same workflow 5 more times
+		for i := 0; i < 5; i++ {
+			_, err := successiveEnqueueWorkflow(context.Background(), "test-input", WithQueue(successiveEnqueueQueue.Name), WithWorkflowID(workflowID))
+			if err != nil {
+				t.Fatalf("failed to enqueue workflow attempt %d: %v", i+1, err)
+			}
+		}
+
+		// Get the status from the original handle and check the attempts counter
+		status, err := originalHandle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get status of original workflow handle: %v", err)
+		}
+
+		// The attempts counter should still be 1 (the original enqueue)
+		if status.Attempts != 1 {
+			t.Fatalf("expected attempts to be 1, got %d", status.Attempts)
+		}
+
+		// Allow the workflow to complete
+		successiveEnqueueCompleteEvent.Set()
+
+		if !queueEntriesAreCleanedUp() {
+			t.Fatal("expected queue entries to be cleaned up after successive enqueues test")
 		}
 	})
 }
