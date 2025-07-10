@@ -76,7 +76,7 @@ type workflowOutcome[R any] struct {
 
 type WorkflowHandle[R any] interface {
 	GetResult(ctx context.Context) (R, error)
-	GetStatus() (WorkflowStatusType, error)
+	GetStatus() (WorkflowStatus, error)
 	GetWorkflowID() string // XXX we could have a base struct with GetWorkflowID and then embed it in the implementations
 }
 
@@ -119,19 +119,18 @@ func (h *workflowHandle[R]) GetResult(ctx context.Context) (R, error) {
 }
 
 // GetStatus returns the current status of the workflow from the database
-// TODO optimize by caching the status in the handle on GetResult()
-func (h *workflowHandle[R]) GetStatus() (WorkflowStatusType, error) {
+func (h *workflowHandle[R]) GetStatus() (WorkflowStatus, error) {
 	ctx := context.Background()
 	workflowStatuses, err := getExecutor().systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{
 		WorkflowIDs: []string{h.workflowID},
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to get workflow status: %w", err)
+		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
 	}
 	if len(workflowStatuses) == 0 {
-		return "", NewNonExistentWorkflowError(h.workflowID)
+		return WorkflowStatus{}, NewNonExistentWorkflowError(h.workflowID)
 	}
-	return workflowStatuses[0].Status, nil
+	return workflowStatuses[0], nil
 }
 
 func (h *workflowHandle[R]) GetWorkflowID() string {
@@ -177,18 +176,18 @@ func (h *workflowPollingHandle[R]) GetResult(ctx context.Context) (R, error) {
 }
 
 // GetStatus returns the current status of the workflow from the database
-func (h *workflowPollingHandle[R]) GetStatus() (WorkflowStatusType, error) {
+func (h *workflowPollingHandle[R]) GetStatus() (WorkflowStatus, error) {
 	ctx := context.Background()
 	workflowStatuses, err := getExecutor().systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{
 		WorkflowIDs: []string{h.workflowID},
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to get workflow status: %w", err)
+		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
 	}
 	if len(workflowStatuses) == 0 {
-		return "", NewNonExistentWorkflowError(h.workflowID)
+		return WorkflowStatus{}, NewNonExistentWorkflowError(h.workflowID)
 	}
-	return workflowStatuses[0].Status, nil
+	return workflowStatuses[0], nil
 }
 
 func (h *workflowPollingHandle[R]) GetWorkflowID() string {

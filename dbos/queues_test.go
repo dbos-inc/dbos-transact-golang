@@ -327,8 +327,8 @@ func TestGlobalConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get status of workflow2: %v", err)
 	}
-	if status != WorkflowStatusEnqueued {
-		t.Fatalf("expected workflow2 to be in ENQUEUED status, got %v", status)
+	if status.Status != WorkflowStatusEnqueued {
+		t.Fatalf("expected workflow2 to be in ENQUEUED status, got %v", status.Status)
 	}
 
 	// Allow the first workflow to complete
@@ -540,8 +540,8 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get status of workflow2: %v", err)
 	}
-	if status2 != WorkflowStatusEnqueued {
-		t.Fatalf("expected workflow2 to be in ENQUEUED status, got %v", status2)
+	if status2.Status != WorkflowStatusEnqueued {
+		t.Fatalf("expected workflow2 to be in ENQUEUED status, got %v", status2.Status)
 	}
 
 	// Verify workflow2 hasn't started yet
@@ -569,8 +569,8 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get status of recovered workflow1: %v", err)
 	}
-	if wf1Status != WorkflowStatusEnqueued {
-		t.Fatalf("expected recovered handle to be in ENQUEUED status, got %v", wf1Status)
+	if wf1Status.Status != WorkflowStatusEnqueued {
+		t.Fatalf("expected recovered handle to be in ENQUEUED status, got %v", wf1Status.Status)
 	}
 
 	// The 1 first workflow should have been dequeued again (FIFO ordering) and the 2nd workflow should still be enqueued
@@ -579,8 +579,8 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get status of workflow2: %v", err)
 	}
-	if status2 != WorkflowStatusEnqueued {
-		t.Fatalf("expected workflow2 to still be in ENQUEUED status, got %v", status2)
+	if status2.Status != WorkflowStatusEnqueued {
+		t.Fatalf("expected workflow2 to still be in ENQUEUED status, got %v", status2.Status)
 	}
 
 	// Let the 1st workflow complete and let the 2nd workflow start and complete
@@ -702,8 +702,8 @@ func TestQueueRateLimiter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to get status for workflow %d: %v", i, err)
 		}
-		if status != WorkflowStatusSuccess {
-			t.Fatalf("expected workflow %d to have SUCCESS status, got %v", i, status)
+		if status.Status != WorkflowStatusSuccess {
+			t.Fatalf("expected workflow %d to have SUCCESS status, got %v", i, status.Status)
 		}
 	}
 
