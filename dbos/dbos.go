@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+
+	"github.com/robfig/cron/v3"
 )
 
 var (
@@ -50,6 +52,8 @@ func computeApplicationVersion() string {
 type Executor interface {
 	Shutdown()
 }
+
+var workflowScheduler *cron.Cron
 
 // DBOS represents the main DBOS instance
 type executor struct {
@@ -109,6 +113,13 @@ func Launch() error {
 	go queueRunner(ctx)
 	fmt.Println("DBOS: Queue runner started")
 
+	// Start the workflow scheduler if cron is available
+	if workflowScheduler != nil {
+		workflowScheduler.Start()
+		fmt.Println("DBOS: Workflow scheduler started")
+		fmt.Println(workflowScheduler.Entries())
+	}
+
 	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s\n", APP_VERSION, EXECUTOR_ID)
 	return nil
 }
@@ -123,6 +134,10 @@ func Shutdown() {
 	// Cancel the context to stop the queue runner
 	if dbos.queueRunnerCancelFunc != nil {
 		dbos.queueRunnerCancelFunc()
+	}
+
+	if workflowScheduler != nil {
+		workflowScheduler.Stop()
 	}
 
 	if dbos.systemDB != nil {

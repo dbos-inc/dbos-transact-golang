@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/robfig/cron/v3"
 )
 
 /*******************************/
@@ -223,7 +224,8 @@ func registerWorkflow(fqn string, fn TypedErasedWorkflowWrapperFunc, maxRetries 
 }
 
 type WorkflowRegistrationParams struct {
-	MaxRetries int
+	CronSchedule string
+	MaxRetries   int
 	// Likely we will allow a name here
 }
 
@@ -236,6 +238,12 @@ const (
 func WithMaxRetries(maxRetries int) WorkflowRegistrationOption {
 	return func(p *WorkflowRegistrationParams) {
 		p.MaxRetries = maxRetries
+	}
+}
+
+func WithSchedule(schedule string) WorkflowRegistrationOption {
+	return func(p *WorkflowRegistrationParams) {
+		p.CronSchedule = schedule
 	}
 }
 
@@ -255,6 +263,8 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 	if fn == nil {
 		panic("workflow function cannot be nil")
 	}
+	fqn := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+
 	// Registry the input/output types for gob encoding
 	var p P
 	var r R
@@ -267,8 +277,25 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 		return runAsWorkflow(ctx, fn, workflowInput, opts...)
 	})
 
+	// If this is a scheduled workflow, register a cron job
+	if registrationParams.CronSchedule != "" {
+		if workflowScheduler == nil {
+			workflowScheduler = cron.New(cron.WithSeconds())
+		}
+		_, err := workflowScheduler.AddFunc(registrationParams.CronSchedule, func() {
+			// Execute the workflow on the cron schedule once DBOS is launched
+			if getExecutor() == nil {
+				return
+			}
+			wfID := fmt.Sprintf("sched-%s-%s", fqn, time.Now())
+			wrappedFunction(context.Background(), p, WithWorkflowID(wfID))
+		})
+		if err != nil {
+			panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
+		}
+	}
+
 	// Register a type-erased version of the durable workflow for recovery
-	fqn := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	typeErasedWrapper := func(ctx context.Context, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 		typedInput, ok := input.(P)
 		if !ok {

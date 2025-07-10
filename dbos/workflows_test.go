@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"maps"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -863,6 +864,65 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			if result != 0 {
 				t.Fatalf("expected 0 result, got %v", result)
 			}
+		}
+	})
+}
+
+var (
+	startTime  = time.Now()
+	counter    = 0
+	counter1Ch = make(chan int, 100)
+	_          = WithWorkflow(func(ctx context.Context, input string) (string, error) {
+		counter++
+		select {
+		case counter1Ch <- counter:
+		default:
+		}
+		return fmt.Sprintf("Scheduled workflow executed %d times", counter), nil
+	}, WithSchedule("* * * * * *")) // Every second
+
+)
+
+func TestScheduledWorkflows(t *testing.T) {
+	setupDBOS(t)
+
+	// Helper function to wait for counter to reach target value
+	waitForCounter := func(ch chan int, target int, timeout time.Duration) (int, time.Duration, error) {
+		for {
+			select {
+			case count := <-ch:
+				if count >= target {
+					return count, time.Since(startTime), nil
+				}
+			case <-time.After(timeout):
+				return 0, time.Since(startTime), fmt.Errorf("timeout waiting for counter to reach %d", target)
+			}
+		}
+	}
+	t.Run("ScheduledWorkflowExecution", func(t *testing.T) {
+		// Wait for workflow to execute at least 4 times (should take ~3-4 seconds)
+		_, elapsed, err := waitForCounter(counter1Ch, 4, 10*time.Second)
+		if err != nil {
+			t.Fatalf("Failed to wait for scheduled workflow: %v", err)
+		}
+
+		// Verify timing - should be approximately 1 second per execution
+		expectedMinDuration := 3 * time.Second // At least 3 seconds for 4 executions
+		expectedMaxDuration := 6 * time.Second // Allow some buffer for scheduling overhead
+
+		if elapsed < expectedMinDuration {
+			t.Fatalf("Scheduled workflow executed too quickly: %v (expected at least %v)", elapsed, expectedMinDuration)
+		}
+		if elapsed > expectedMaxDuration {
+			t.Fatalf("Scheduled workflow executed too slowly: %v (expected at most %v)", elapsed, expectedMaxDuration)
+		}
+
+		// Stop the workflowScheduler and check if it stops executing
+		currentCounter := counter
+		workflowScheduler.Stop()
+		time.Sleep(3 * time.Second) // Wait a bit to ensure no more executions
+		if counter >= currentCounter+1 {
+			t.Fatalf("Scheduled workflow continued executing after stopping scheduler: %d (expected < %d)", counter, currentCounter+1)
 		}
 	})
 }
