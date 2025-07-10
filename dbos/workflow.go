@@ -377,7 +377,9 @@ func WithWorkflowMaxRetries(maxRetries int) WorkflowOption {
 
 func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	// Apply options to build params
-	params := WorkflowParams{}
+	params := WorkflowParams{
+		ApplicationVersion: APP_VERSION,
+	}
 	for _, opt := range opts {
 		opt(&params)
 	}
@@ -422,16 +424,9 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 		status = WorkflowStatusPending
 	}
 
-	var appVersion string
-	if len(params.ApplicationVersion) > 0 {
-		appVersion = params.ApplicationVersion
-	} else {
-		appVersion = APP_VERSION
-	}
-
 	workflowStatus := WorkflowStatus{
 		Name:               runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // XXX the interface approach would encapsulate this
-		ApplicationVersion: appVersion,
+		ApplicationVersion: params.ApplicationVersion,
 		ExecutorID:         EXECUTOR_ID,
 		Status:             status,
 		ID:                 workflowID,

@@ -874,7 +874,7 @@ var (
 	counter1Ch = make(chan time.Time, 100)
 	_          = WithWorkflow(func(ctx context.Context, startTime time.Time) (string, error) {
 		counter++
-		if counter == 100 {
+		if counter == 10 {
 			return "", fmt.Errorf("counter reached 100, stopping workflow")
 		}
 		select {

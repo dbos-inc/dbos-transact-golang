@@ -118,11 +118,11 @@ func queueEntriesAreCleanedUp() bool {
 		query := `SELECT COUNT(*)
 				  FROM dbos.workflow_status
 				  WHERE queue_name IS NOT NULL
-					AND queue_name != 'DBOS_INTERNAL_QUEUE_NAME'
+					AND queue_name != $1
 					AND status IN ('ENQUEUED', 'PENDING')`
 
 		var count int
-		err = tx.QueryRow(context.Background(), query).Scan(&count)
+		err = tx.QueryRow(context.Background(), query, DBOS_INTERNAL_QUEUE_NAME).Scan(&count)
 		tx.Rollback(context.Background()) // Clean up transaction
 
 		if err != nil {
