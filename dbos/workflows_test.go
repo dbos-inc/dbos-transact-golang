@@ -871,11 +871,14 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 var (
 	startTime  = time.Now()
 	counter    = 0
-	counter1Ch = make(chan int, 100)
+	counter1Ch = make(chan time.Time, 100)
 	_          = WithWorkflow(func(ctx context.Context, startTime time.Time) (string, error) {
 		counter++
+		if counter == 100 {
+			return "", fmt.Errorf("counter reached 100, stopping workflow")
+		}
 		select {
-		case counter1Ch <- counter:
+		case counter1Ch <- startTime:
 		default:
 		}
 		return fmt.Sprintf("Scheduled workflow executed at time %v", startTime), nil
@@ -886,35 +889,48 @@ var (
 func TestScheduledWorkflows(t *testing.T) {
 	setupDBOS(t)
 
-	// Helper function to wait for counter to reach target value
-	waitForCounter := func(ch chan int, target int, timeout time.Duration) (int, time.Duration, error) {
-		for {
+	// Helper function to collect execution times
+	collectExecutionTimes := func(ch chan time.Time, target int, timeout time.Duration) ([]time.Time, error) {
+		var executionTimes []time.Time
+		for len(executionTimes) < target {
 			select {
-			case count := <-ch:
-				if count >= target {
-					return count, time.Since(startTime), nil
-				}
+			case execTime := <-ch:
+				executionTimes = append(executionTimes, execTime)
 			case <-time.After(timeout):
-				return 0, time.Since(startTime), fmt.Errorf("timeout waiting for counter to reach %d", target)
+				return nil, fmt.Errorf("timeout waiting for %d executions, got %d", target, len(executionTimes))
 			}
 		}
+		return executionTimes, nil
 	}
+
 	t.Run("ScheduledWorkflowExecution", func(t *testing.T) {
 		// Wait for workflow to execute at least 4 times (should take ~3-4 seconds)
-		_, elapsed, err := waitForCounter(counter1Ch, 4, 10*time.Second)
+		executionTimes, err := collectExecutionTimes(counter1Ch, 4, 10*time.Second)
 		if err != nil {
-			t.Fatalf("Failed to wait for scheduled workflow: %v", err)
+			t.Fatalf("Failed to collect scheduled workflow execution times: %v", err)
 		}
 
-		// Verify timing - should be approximately 1 second per execution
-		expectedMinDuration := 3 * time.Second // At least 3 seconds for 4 executions
-		expectedMaxDuration := 6 * time.Second // Allow some buffer for scheduling overhead
+		// Verify timing - each execution should be approximately 1 second apart from the program start time
+		scheduleInterval := 1 * time.Second
+		allowedSlack := 1 * time.Second // Allow 500ms slack
 
-		if elapsed < expectedMinDuration {
-			t.Fatalf("Scheduled workflow executed too quickly: %v (expected at least %v)", elapsed, expectedMinDuration)
-		}
-		if elapsed > expectedMaxDuration {
-			t.Fatalf("Scheduled workflow executed too slowly: %v (expected at most %v)", elapsed, expectedMaxDuration)
+		for i, execTime := range executionTimes {
+			// Calculate expected execution time based on schedule interval
+			expectedTime := startTime.Add(time.Duration(i+1) * scheduleInterval)
+
+			// Calculate the delta between actual and expected execution time
+			delta := execTime.Sub(expectedTime)
+			if delta < 0 {
+				delta = -delta // Get absolute value
+			}
+
+			// Check if delta is within acceptable slack
+			if delta > allowedSlack {
+				t.Fatalf("Execution %d timing deviation too large: expected around %v, got %v (delta: %v, allowed slack: %v)",
+					i+1, expectedTime, execTime, delta, allowedSlack)
+			}
+
+			t.Logf("Execution %d: expected %v, actual %v, delta %v", i+1, expectedTime, execTime, delta)
 		}
 
 		// Stop the workflowScheduler and check if it stops executing

@@ -292,7 +292,7 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 			}
 			startTime := time.Now()
 			wfID := fmt.Sprintf("sched-%s-%s", fqn, startTime)
-			wrappedFunction(context.Background(), any(startTime).(P), WithWorkflowID(wfID))
+			wrappedFunction(context.Background(), any(startTime).(P), WithWorkflowID(wfID), WithQueue(DBOS_INTERNAL_QUEUE_NAME))
 		})
 		if err != nil {
 			panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))

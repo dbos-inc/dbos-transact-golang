@@ -108,7 +108,7 @@ func equal(a, b []int) bool {
 func queueEntriesAreCleanedUp() bool {
 	maxTries := 10
 	success := false
-	for i := 0; i < maxTries; i++ {
+	for range maxTries {
 		// Begin transaction
 		tx, err := getExecutor().systemDB.(*systemDatabase).pool.Begin(context.Background())
 		if err != nil {
@@ -118,7 +118,8 @@ func queueEntriesAreCleanedUp() bool {
 		query := `SELECT COUNT(*)
 				  FROM dbos.workflow_status
 				  WHERE queue_name IS NOT NULL
-				    AND status IN ('ENQUEUED', 'PENDING')`
+					AND queue_name != 'DBOS_INTERNAL_QUEUE_NAME'
+					AND status IN ('ENQUEUED', 'PENDING')`
 
 		var count int
 		err = tx.QueryRow(context.Background(), query).Scan(&count)
