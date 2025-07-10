@@ -48,7 +48,7 @@ func computeApplicationVersion() string {
 }
 
 type Executor interface {
-	Destroy()
+	Shutdown()
 }
 
 // DBOS represents the main DBOS instance
