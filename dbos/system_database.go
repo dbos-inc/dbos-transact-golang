@@ -22,7 +22,7 @@ import (
 /*******************************/
 
 type SystemDatabase interface {
-	Destroy()
+	Shutdown()
 	ResetSystemDB(ctx context.Context) error
 	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
 	RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
@@ -151,7 +151,7 @@ func NewSystemDatabase() (SystemDatabase, error) {
 	}, nil
 }
 
-func (s *systemDatabase) Destroy() {
+func (s *systemDatabase) Shutdown() {
 	fmt.Println("Closing system database connection pool")
 	s.pool.Close()
 }

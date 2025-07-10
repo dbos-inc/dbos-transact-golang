@@ -54,7 +54,7 @@ func setupDBOS(t *testing.T) {
 
 	// Register cleanup to run after test completes
 	t.Cleanup(func() {
-		Destroy()
+		Shutdown()
 	})
 }
 

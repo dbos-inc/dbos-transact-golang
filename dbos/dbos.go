@@ -114,7 +114,7 @@ func Launch() error {
 }
 
 // Close closes the DBOS instance and its resources
-func Destroy() {
+func Shutdown() {
 	if dbos == nil {
 		fmt.Println("warning: DBOS instance is nil, cannot destroy")
 		return
@@ -126,7 +126,7 @@ func Destroy() {
 	}
 
 	if dbos.systemDB != nil {
-		dbos.systemDB.Destroy()
+		dbos.systemDB.Shutdown()
 	}
 	dbos = nil // Mark the DBOS instance for garbage collection
 }
