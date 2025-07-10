@@ -15,19 +15,17 @@ import (
 var workflowQueueRegistry = make(map[string]WorkflowQueue)
 
 // RateLimiter represents a rate limiting configuration
-/*
 type RateLimiter struct {
 	Limit  int
-	Period int
+	Period float64
 }
-*/
 
 type WorkflowQueue struct {
 	Name              string
 	WorkerConcurrency *int
 	GlobalConcurrency *int
 	PriorityEnabled   bool
-	// limiter           *RateLimiter
+	Limiter           *RateLimiter
 }
 
 // QueueOption is a functional option for configuring a workflow queue
@@ -55,13 +53,11 @@ func WithPriorityEnabled(enabled bool) QueueOption {
 }
 
 // WithRateLimiter sets the rate limiter for the queue
-/*
 func WithRateLimiter(limiter *RateLimiter) QueueOption {
-	return func(q *workflowQueue) {
-		q.limiter = limiter
+	return func(q *WorkflowQueue) {
+		q.Limiter = limiter
 	}
 }
-*/
 
 // NewWorkflowQueue creates a new workflow queue with optional configuration
 func NewWorkflowQueue(name string, options ...QueueOption) WorkflowQueue {
@@ -79,7 +75,7 @@ func NewWorkflowQueue(name string, options ...QueueOption) WorkflowQueue {
 		WorkerConcurrency: nil,
 		GlobalConcurrency: nil,
 		PriorityEnabled:   false,
-		//limiter:           nil,
+		Limiter:           nil,
 	}
 
 	// Apply functional options

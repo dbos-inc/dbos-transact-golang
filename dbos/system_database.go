@@ -831,7 +831,35 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 		return nil, fmt.Errorf("failed to set transaction isolation level: %w", err)
 	}
 
+	// First check the rate limiter
 	startTimeMs := time.Now().UnixMilli()
+	var numRecentQueries int
+	if queue.Limiter != nil {
+		limiterPeriod := time.Duration(queue.Limiter.Period * float64(time.Second))
+
+		// Calculate the cutoff time: current time minus limiter period
+		cutoffTimeMs := time.Now().Add(-limiterPeriod).UnixMilli()
+
+		// Count workflows that have started in the limiter period
+		limiterQuery := `
+		SELECT COUNT(*)
+		FROM dbos.workflow_status
+		WHERE queue_name = $1
+		  AND status != $2
+		  AND started_at_epoch_ms > $3`
+
+		err := tx.QueryRow(ctx, limiterQuery,
+			queue.Name,
+			WorkflowStatusEnqueued,
+			cutoffTimeMs).Scan(&numRecentQueries)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query rate limiter: %w", err)
+		}
+
+		if numRecentQueries >= queue.Limiter.Limit {
+			return []dequeuedWorkflow{}, nil
+		}
+	}
 
 	// Calculate max_tasks based on concurrency limits
 	maxTasks := MaxInt
@@ -946,14 +974,18 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	if len(dequeuedIDs) > 0 {
-		fmt.Printf("[%s] dequeueing %d task(s)\n", queue.Name, len(dequeuedIDs))
+		fmt.Printf("[%s] attempting to dequeue %d task(s)\n", queue.Name, len(dequeuedIDs))
 	}
 
 	// Update workflows to PENDING status and get their details
 	var retWorkflows []dequeuedWorkflow
 	for _, id := range dequeuedIDs {
-		// TODO handle rate limite
-
+		// If we have a limiter, stop dequeueing workflows when the number of workflows started this period exceeds the limit.
+		if queue.Limiter != nil {
+			if len(retWorkflows)+numRecentQueries >= queue.Limiter.Limit {
+				break
+			}
+		}
 		retWorkflow := dequeuedWorkflow{
 			id: id,
 		}

@@ -373,7 +373,6 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 		ApplicationID:      APP_ID,
 		QueueName:          params.QueueName,
 	}
-	fmt.Println("Workflow status:", workflowStatus)
 
 	// Init status and record child workflow relationship in a single transaction
 	tx, err := getExecutor().systemDB.(*systemDatabase).pool.Begin(dbosWorkflowContext)
