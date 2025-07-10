@@ -113,7 +113,7 @@ func Launch() error {
 	go queueRunner(ctx)
 	fmt.Println("DBOS: Queue runner started")
 
-	// Start the workflow scheduler if cron is available
+	// Start the workflow scheduler if it has been initialized
 	if workflowScheduler != nil {
 		workflowScheduler.Start()
 		fmt.Println("DBOS: Workflow scheduler started")
