@@ -33,10 +33,10 @@ func computeApplicationVersion() string {
 	hasher := sha256.New()
 
 	for _, fqn := range functionNames {
-		fn := registry[fqn]
+		workflowEntry := registry[fqn]
 
 		// Try to get function source location and other identifying info
-		if pc := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()); pc != nil {
+		if pc := runtime.FuncForPC(reflect.ValueOf(workflowEntry.wrappedFunction).Pointer()); pc != nil {
 			// Get the function's entry point - this reflects the actual compiled code
 			entry := pc.Entry()
 			fmt.Fprintf(hasher, "%x", entry)

@@ -157,7 +157,7 @@ func queueRunner(ctx context.Context) {
 					}
 				}
 
-				_, err := registeredWorkflow(ctx, input, WithWorkflowID(workflow.id))
+				_, err := registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
 				if err != nil {
 					fmt.Println("Error recovering workflow:", err)
 				}

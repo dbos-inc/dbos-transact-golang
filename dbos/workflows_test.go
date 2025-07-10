@@ -183,7 +183,7 @@ func TestAppVersion(t *testing.T) {
 	}
 
 	// Save the original registry content
-	originalRegistry := make(map[string]TypedErasedWorkflowWrapperFunc)
+	originalRegistry := make(map[string]workflowRegistryEntry)
 	maps.Copy(originalRegistry, registry)
 
 	// Restore the registry after the test
@@ -192,7 +192,7 @@ func TestAppVersion(t *testing.T) {
 	}()
 
 	// Replace the registry and verify the hash is different
-	registry = make(map[string]TypedErasedWorkflowWrapperFunc)
+	registry = make(map[string]workflowRegistryEntry)
 
 	WithWorkflow(func(ctx context.Context, input string) (string, error) {
 		return "new-registry-workflow-" + input, nil
@@ -681,8 +681,9 @@ func TestWorkflowRecovery(t *testing.T) {
 }
 
 var (
-	deadLetterQueueWf         = WithWorkflow(deadLetterQueueWorkflow)
-	infiniteDeadLetterQueueWf = WithWorkflow(infiniteDeadLetterQueueWorkflow)
+	maxRecoveryAttempts       = 20
+	deadLetterQueueWf         = WithWorkflow(deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
+	infiniteDeadLetterQueueWf = WithWorkflow(infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
 	deadLetterQueueStartEvent *Event
 	deadLetterQueueEvent      *Event
 	recoveryCount             int64
@@ -706,12 +707,11 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 	t.Run("DeadLetterQueueBehavior", func(t *testing.T) {
 		deadLetterQueueEvent = NewEvent()
 		deadLetterQueueStartEvent = NewEvent()
-		maxRecoveryAttempts := 20
 		recoveryCount = 0
 
 		// Start a workflow that blocks forever
 		wfID := uuid.NewString()
-		handle, err := deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID), WithMaxRetries(maxRecoveryAttempts))
+		handle, err := deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID))
 		if err != nil {
 			t.Fatalf("failed to start dead letter queue workflow: %v", err)
 		}
@@ -720,7 +720,6 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Attempt to recover the blocked workflow the maximum number of times
 		for i := range maxRecoveryAttempts {
-			fmt.Println("Attempting to recover pending workflows, attempt:", i+1)
 			_, err := recoverPendingWorkflows(context.Background(), []string{"local"})
 			if err != nil {
 				t.Fatalf("failed to recover pending workflows on attempt %d: %v", i+1, err)
@@ -758,7 +757,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		}
 
 		// Verify that attempting to start a workflow with the same ID throws a DLQ error
-		_, err = deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID), WithMaxRetries(maxRecoveryAttempts))
+		_, err = deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID))
 		if err == nil {
 			t.Fatal("expected dead letter queue error when restarting workflow with same ID but got none")
 		}
@@ -772,50 +771,50 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		}
 
 		/*
-			// TODO: test resume when implemented
-			resumedHandle, err := ...
+				// TODO: test resume when implemented
+				resumedHandle, err := ...
 
-			// Recover pending workflows again - should work without error
-			_, err = recoverPendingWorkflows(context.Background(), []string{"local"})
-			if err != nil {
-				t.Fatalf("failed to recover pending workflows after resume: %v", err)
-			}
+				// Recover pending workflows again - should work without error
+				_, err = recoverPendingWorkflows(context.Background(), []string{"local"})
+				if err != nil {
+					t.Fatalf("failed to recover pending workflows after resume: %v", err)
+				}
 
-			// Complete the blocked workflow
-			deadLetterQueueEvent.Set()
+				// Complete the blocked workflow
+				deadLetterQueueEvent.Set()
 
-			// Wait for both handles to complete
-			result1, err = handle.GetResult(context.Background())
-			if err != nil {
-				t.Fatalf("failed to get result from original handle: %v", err)
-			}
+				// Wait for both handles to complete
+				result1, err = handle.GetResult(context.Background())
+				if err != nil {
+					t.Fatalf("failed to get result from original handle: %v", err)
+				}
 
-			result2, err := resumedHandle.GetResult(context.Background())
-			if err != nil {
-				t.Fatalf("failed to get result from resumed handle: %v", err)
-			}
+				result2, err := resumedHandle.GetResult(context.Background())
+				if err != nil {
+					t.Fatalf("failed to get result from resumed handle: %v", err)
+				}
 
-			if result1 != result2 {
-				t.Fatalf("expected both handles to return same result, got %v and %v", result1, result2)
-			}
+				if result1 != result2 {
+					t.Fatalf("expected both handles to return same result, got %v and %v", result1, result2)
+				}
 
-			// Verify workflow status is SUCCESS
-			status, err = handle.GetStatus()
-			if err != nil {
-				t.Fatalf("failed to get final workflow status: %v", err)
-			}
-			if status.Status != WorkflowStatusSuccess {
-				t.Fatalf("expected workflow status to be SUCCESS, got %v", status.Status)
+				// Verify workflow status is SUCCESS
+				status, err = handle.GetStatus()
+				if err != nil {
+					t.Fatalf("failed to get final workflow status: %v", err)
+				}
+				if status.Status != WorkflowStatusSuccess {
+					t.Fatalf("expected workflow status to be SUCCESS, got %v", status.Status)
+				}
+
+			// Verify that retries of a completed workflow do not raise the DLQ exception
+			for i := 0; i < maxRecoveryAttempts*2; i++ {
+				_, err = deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID))
+				if err != nil {
+					t.Fatalf("unexpected error when retrying completed workflow: %v", err)
+				}
 			}
 		*/
-
-		// Verify that retries of a completed workflow do not raise the DLQ exception
-		for i := 0; i < maxRecoveryAttempts*2; i++ {
-			_, err = deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID), WithMaxRetries(maxRecoveryAttempts))
-			if err != nil {
-				t.Fatalf("unexpected error when retrying completed workflow: %v", err)
-			}
-		}
 	})
 
 	t.Run("InfiniteRetriesWorkflow", func(t *testing.T) {
@@ -824,7 +823,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// Verify that a workflow with MaxRetries=0 (infinite retries) is retried infinitely
 		wfID := uuid.NewString()
 
-		handle, err := infiniteDeadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID), WithMaxRetries(0))
+		handle, err := infiniteDeadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID))
 		if err != nil {
 			t.Fatalf("failed to start infinite dead letter queue workflow: %v", err)
 		}

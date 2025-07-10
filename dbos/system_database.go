@@ -416,6 +416,7 @@ func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsD
 	var workflows []WorkflowStatus
 	for rows.Next() {
 		var wf WorkflowStatus
+		var queueName *string
 		var createdAtMs, updatedAtMs int64
 		var timeoutMs *int64
 		var deadlineMs, startedAtMs *int64
@@ -426,12 +427,16 @@ func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsD
 			&wf.ID, &wf.Status, &wf.Name, &wf.AuthenticatedUser, &wf.AssumedRole,
 			&wf.AuthenticatedRoles, &outputString, &errorStr, &wf.ExecutorID, &createdAtMs,
 			&updatedAtMs, &wf.ApplicationVersion, &wf.ApplicationID,
-			&wf.Attempts, &wf.QueueName, &timeoutMs,
+			&wf.Attempts, &queueName, &timeoutMs,
 			&deadlineMs, &startedAtMs, &wf.DeduplicationID,
 			&inputString, &wf.Priority,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan workflow row: %w", err)
+		}
+
+		if queueName != nil && len(*queueName) > 0 {
+			wf.QueueName = *queueName
 		}
 
 		// Convert milliseconds to time.Time
