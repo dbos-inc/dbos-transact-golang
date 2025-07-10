@@ -955,7 +955,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	// Add limit if maxTasks is finite
-	if maxTasks != MaxInt {
+	if maxTasks > 0 {
 		query += fmt.Sprintf(" LIMIT %d", int(maxTasks))
 	}
 
