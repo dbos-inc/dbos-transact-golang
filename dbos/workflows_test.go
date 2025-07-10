@@ -679,3 +679,186 @@ func TestWorkflowRecovery(t *testing.T) {
 
 	})
 }
+
+var (
+	deadLetterQueueWf         = WithWorkflow(deadLetterQueueWorkflow)
+	infiniteDeadLetterQueueWf = WithWorkflow(infiniteDeadLetterQueueWorkflow)
+	deadLetterQueueStartEvent *Event
+	deadLetterQueueEvent      *Event
+	recoveryCount             int64
+)
+
+func deadLetterQueueWorkflow(ctx context.Context, input string) (int, error) {
+	recoveryCount++
+	fmt.Printf("Dead letter queue workflow started, recovery count: %d\n", recoveryCount)
+	deadLetterQueueStartEvent.Set()
+	deadLetterQueueEvent.Wait()
+	return 0, nil
+}
+
+func infiniteDeadLetterQueueWorkflow(ctx context.Context, input string) (int, error) {
+	deadLetterQueueEvent.Wait()
+	return 0, nil
+}
+func TestWorkflowDeadLetterQueue(t *testing.T) {
+	setupDBOS(t)
+
+	t.Run("DeadLetterQueueBehavior", func(t *testing.T) {
+		deadLetterQueueEvent = NewEvent()
+		deadLetterQueueStartEvent = NewEvent()
+		maxRecoveryAttempts := 20
+		recoveryCount = 0
+
+		// Start a workflow that blocks forever
+		wfID := uuid.NewString()
+		handle, err := deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID), WithMaxRetries(maxRecoveryAttempts))
+		if err != nil {
+			t.Fatalf("failed to start dead letter queue workflow: %v", err)
+		}
+		deadLetterQueueStartEvent.Wait()
+		deadLetterQueueStartEvent.Clear()
+
+		// Attempt to recover the blocked workflow the maximum number of times
+		for i := range maxRecoveryAttempts {
+			fmt.Println("Attempting to recover pending workflows, attempt:", i+1)
+			_, err := recoverPendingWorkflows(context.Background(), []string{"local"})
+			if err != nil {
+				t.Fatalf("failed to recover pending workflows on attempt %d: %v", i+1, err)
+			}
+			deadLetterQueueStartEvent.Wait()
+			deadLetterQueueStartEvent.Clear()
+			expectedCount := int64(i + 2) // +1 for initial execution, +1 for each recovery
+			fmt.Println("Expected recovery count:", expectedCount, "Actual:", recoveryCount)
+			if recoveryCount != expectedCount {
+				t.Fatalf("expected recovery count to be %d, got %d", expectedCount, recoveryCount)
+			}
+		}
+
+		// Verify an additional attempt throws a DLQ error and puts the workflow in the DLQ status
+		_, err = recoverPendingWorkflows(context.Background(), []string{"local"})
+		if err == nil {
+			t.Fatal("expected dead letter queue error but got none")
+		}
+
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected DBOSError, got %T", err)
+		}
+		if dbosErr.Code != DeadLetterQueueError {
+			t.Fatalf("expected DeadLetterQueueError, got %v", dbosErr.Code)
+		}
+
+		// Verify workflow status is RETRIES_EXCEEDED
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusRetriesExceeded {
+			t.Fatalf("expected workflow status to be RETRIES_EXCEEDED, got %v", status.Status)
+		}
+
+		// Verify that attempting to start a workflow with the same ID throws a DLQ error
+		_, err = deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID), WithMaxRetries(maxRecoveryAttempts))
+		if err == nil {
+			t.Fatal("expected dead letter queue error when restarting workflow with same ID but got none")
+		}
+
+		dbosErr, ok = err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected DBOSError, got %T", err)
+		}
+		if dbosErr.Code != DeadLetterQueueError {
+			t.Fatalf("expected DeadLetterQueueError, got %v", dbosErr.Code)
+		}
+
+		/*
+			// TODO: test resume when implemented
+			resumedHandle, err := ...
+
+			// Recover pending workflows again - should work without error
+			_, err = recoverPendingWorkflows(context.Background(), []string{"local"})
+			if err != nil {
+				t.Fatalf("failed to recover pending workflows after resume: %v", err)
+			}
+
+			// Complete the blocked workflow
+			deadLetterQueueEvent.Set()
+
+			// Wait for both handles to complete
+			result1, err = handle.GetResult(context.Background())
+			if err != nil {
+				t.Fatalf("failed to get result from original handle: %v", err)
+			}
+
+			result2, err := resumedHandle.GetResult(context.Background())
+			if err != nil {
+				t.Fatalf("failed to get result from resumed handle: %v", err)
+			}
+
+			if result1 != result2 {
+				t.Fatalf("expected both handles to return same result, got %v and %v", result1, result2)
+			}
+
+			// Verify workflow status is SUCCESS
+			status, err = handle.GetStatus()
+			if err != nil {
+				t.Fatalf("failed to get final workflow status: %v", err)
+			}
+			if status.Status != WorkflowStatusSuccess {
+				t.Fatalf("expected workflow status to be SUCCESS, got %v", status.Status)
+			}
+		*/
+
+		// Verify that retries of a completed workflow do not raise the DLQ exception
+		for i := 0; i < maxRecoveryAttempts*2; i++ {
+			_, err = deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID), WithMaxRetries(maxRecoveryAttempts))
+			if err != nil {
+				t.Fatalf("unexpected error when retrying completed workflow: %v", err)
+			}
+		}
+	})
+
+	t.Run("InfiniteRetriesWorkflow", func(t *testing.T) {
+		deadLetterQueueEvent.Clear()
+
+		// Verify that a workflow with MaxRetries=0 (infinite retries) is retried infinitely
+		wfID := uuid.NewString()
+
+		handle, err := infiniteDeadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID), WithMaxRetries(0))
+		if err != nil {
+			t.Fatalf("failed to start infinite dead letter queue workflow: %v", err)
+		}
+
+		// Attempt to recover the blocked workflow many times (should never fail)
+		handles := []WorkflowHandle[any]{}
+		for i := range DEFAULT_MAX_RECOVERY_ATTEMPTS * 2 {
+			recoveredHandles, err := recoverPendingWorkflows(context.Background(), []string{"local"})
+			if err != nil {
+				t.Fatalf("failed to recover pending workflows on attempt %d: %v", i+1, err)
+			}
+			handles = append(handles, recoveredHandles...)
+		}
+
+		// Complete the workflow
+		deadLetterQueueEvent.Set()
+
+		result, err := handle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from infinite dead letter queue workflow: %v", err)
+		}
+		if result != 0 {
+			t.Fatalf("expected result to be 0, got %v", result)
+		}
+
+		// Wait for all handles to complete
+		for i, h := range handles {
+			result, err := h.GetResult(context.Background())
+			if err != nil {
+				t.Fatalf("failed to get result from handle %d: %v", i, err)
+			}
+			if result != 0 {
+				t.Fatalf("expected 0 result, got %v", result)
+			}
+		}
+	})
+}

@@ -55,6 +55,9 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 		if !workflow.Deadline.IsZero() {
 			opts = append(opts, WithDeadline(workflow.Deadline))
 		}
+		if workflow.MaxRetries > 0 {
+			opts = append(opts, WithMaxRetries(workflow.MaxRetries))
+		}
 
 		handle, err := registeredWorkflow(ctx, workflow.Input, opts...)
 		if err != nil {

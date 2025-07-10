@@ -169,38 +169,39 @@ type InsertWorkflowResult struct {
 }
 
 type InsertWorkflowStatusDBInput struct {
-	Status WorkflowStatus
-	Tx     pgx.Tx
+	status     WorkflowStatus
+	maxRetries int
+	tx         pgx.Tx
 }
 
 func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error) {
-	if input.Tx == nil {
+	if input.tx == nil {
 		return nil, errors.New("transaction is required for InsertWorkflowStatus")
 	}
 
 	// Set default values
 	attempts := 1
-	if input.Status.Status == WorkflowStatusEnqueued {
+	if input.status.Status == WorkflowStatusEnqueued {
 		attempts = 0
 	}
 
 	updatedAt := time.Now()
-	if !input.Status.UpdatedAt.IsZero() {
-		updatedAt = input.Status.UpdatedAt
+	if !input.status.UpdatedAt.IsZero() {
+		updatedAt = input.status.UpdatedAt
 	}
 
 	var deadline *int64 = nil
-	if !input.Status.Deadline.IsZero() {
-		millis := input.Status.Deadline.UnixMilli()
+	if !input.status.Deadline.IsZero() {
+		millis := input.status.Deadline.UnixMilli()
 		deadline = &millis
 	}
 
 	var timeoutMs int64 = 0
-	if input.Status.Timeout > 0 {
-		timeoutMs = input.Status.Timeout.Milliseconds()
+	if input.status.Timeout > 0 {
+		timeoutMs = input.status.Timeout.Milliseconds()
 	}
 
-	inputString, err := serialize(input.Status.Input)
+	inputString, err := serialize(input.status.Input)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize input: %w", err)
 	}
@@ -239,25 +240,25 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
         RETURNING recovery_attempts, status, name, queue_name, workflow_deadline_epoch_ms`
 
 	var result InsertWorkflowResult
-	err = input.Tx.QueryRow(ctx, query,
-		input.Status.ID,
-		input.Status.Status,
-		input.Status.Name,
-		input.Status.QueueName,
-		input.Status.AuthenticatedUser,
-		input.Status.AssumedRole,
-		input.Status.AuthenticatedRoles,
-		input.Status.ExecutorID,
-		input.Status.ApplicationVersion,
-		input.Status.ApplicationID,
-		input.Status.CreatedAt.UnixMilli(),
+	err = input.tx.QueryRow(ctx, query,
+		input.status.ID,
+		input.status.Status,
+		input.status.Name,
+		input.status.QueueName,
+		input.status.AuthenticatedUser,
+		input.status.AssumedRole,
+		input.status.AuthenticatedRoles,
+		input.status.ExecutorID,
+		input.status.ApplicationVersion,
+		input.status.ApplicationID,
+		input.status.CreatedAt.UnixMilli(),
 		attempts,
 		updatedAt.UnixMilli(),
 		timeoutMs,
 		deadline,
 		inputString,
-		input.Status.DeduplicationID,
-		input.Status.Priority,
+		input.status.DeduplicationID,
+		input.status.Priority,
 		WorkflowStatusEnqueued,
 		WorkflowStatusEnqueued,
 	).Scan(
@@ -271,14 +272,39 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
 		return nil, fmt.Errorf("failed to insert workflow status: %w", err)
 	}
 
-	if len(input.Status.Name) > 0 && result.Name != input.Status.Name {
-		return nil, NewConflictingWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.Name, input.Status.Name))
+	if len(input.status.Name) > 0 && result.Name != input.status.Name {
+		return nil, NewConflictingWorkflowError(input.status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.Name, input.status.Name))
 	}
-	if len(input.Status.QueueName) > 0 && result.QueueName != nil && input.Status.QueueName != *result.QueueName {
-		fmt.Printf("WARNING: Queue name conflict for workflow %s: %s vs %s\n", input.Status.ID, *result.QueueName, input.Status.QueueName)
+	if len(input.status.QueueName) > 0 && result.QueueName != nil && input.status.QueueName != *result.QueueName {
+		fmt.Printf("WARNING: Queue name conflict for workflow %s: %s vs %s\n", input.status.ID, *result.QueueName, input.status.QueueName)
 	}
 
-	// TODO implement max retries
+	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
+	// When this number becomes equal to `maxRetries + 1`, we mark the workflow as `RETRIES_EXCEEDED`.
+	if result.Status != WorkflowStatusSuccess && result.Status != WorkflowStatusError &&
+		input.maxRetries > 0 && result.Attempts > input.maxRetries+1 {
+
+		// Update workflow status to RETRIES_EXCEEDED and clear queue-related fields
+		dlqQuery := `UPDATE dbos.workflow_status
+					 SET status = $1, deduplication_id = NULL, started_at_epoch_ms = NULL, queue_name = NULL
+					 WHERE workflow_uuid = $2 AND status = $3`
+
+		_, err = input.tx.Exec(ctx, dlqQuery,
+			WorkflowStatusRetriesExceeded,
+			input.status.ID,
+			WorkflowStatusPending)
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to update workflow to RETRIES_EXCEEDED: %w", err)
+		}
+
+		// Commit the transaction before throwing the error
+		if err := input.tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("failed to commit transaction after marking workflow as RETRIES_EXCEEDED: %w", err)
+		}
+
+		return nil, NewDeadLetterQueueError(input.status.ID, input.maxRetries)
+	}
 
 	return &result, nil
 }

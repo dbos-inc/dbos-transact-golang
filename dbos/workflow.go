@@ -271,6 +271,7 @@ type WorkflowParams struct {
 	Deadline           time.Time
 	QueueName          string
 	ApplicationVersion string
+	MaxRetries         int
 }
 
 type WorkflowOption func(*WorkflowParams)
@@ -305,9 +306,21 @@ func WithApplicationVersion(version string) WorkflowOption {
 	}
 }
 
+const (
+	DEFAULT_MAX_RECOVERY_ATTEMPTS = 100
+)
+
+func WithMaxRetries(maxRetries int) WorkflowOption {
+	return func(p *WorkflowParams) {
+		p.MaxRetries = maxRetries
+	}
+}
+
 func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	// Apply options to build params
-	params := WorkflowParams{}
+	params := WorkflowParams{
+		MaxRetries: DEFAULT_MAX_RECOVERY_ATTEMPTS,
+	}
 	for _, opt := range opts {
 		opt(&params)
 	}
@@ -382,8 +395,9 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 
 	// Insert workflow status with transaction
 	insertInput := InsertWorkflowStatusDBInput{
-		Status: workflowStatus,
-		Tx:     tx,
+		status:     workflowStatus,
+		maxRetries: params.MaxRetries,
+		tx:         tx,
 	}
 	insertStatusResult, err := getExecutor().systemDB.InsertWorkflowStatus(dbosWorkflowContext, insertInput)
 	if err != nil {
