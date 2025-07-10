@@ -35,11 +35,12 @@ var (
 	successiveEnqueueQueue         = NewWorkflowQueue("test-successive-enqueue-queue")
 	successiveEnqueueStartEvent    = NewEvent()
 	successiveEnqueueCompleteEvent = NewEvent()
+	successiveEnqueueMaxRetries    = 10
 	successiveEnqueueWorkflow      = WithWorkflow(func(ctx context.Context, input string) (string, error) {
 		successiveEnqueueStartEvent.Set()
 		successiveEnqueueCompleteEvent.Wait()
 		return input, nil
-	})
+	}, WithMaxRetries(successiveEnqueueMaxRetries))
 )
 
 func queueWorkflow(ctx context.Context, input string) (string, error) {
@@ -176,8 +177,8 @@ func TestWorkflowQueues(t *testing.T) {
 		// Wait for the workflow to start
 		successiveEnqueueStartEvent.Wait()
 
-		// Try to enqueue the same workflow 5 more times
-		for i := 0; i < 5; i++ {
+		// Try to enqueue the same workflow more times
+		for i := range successiveEnqueueMaxRetries * 2 {
 			_, err := successiveEnqueueWorkflow(context.Background(), "test-input", WithQueue(successiveEnqueueQueue.Name), WithWorkflowID(workflowID))
 			if err != nil {
 				t.Fatalf("failed to enqueue workflow attempt %d: %v", i+1, err)
