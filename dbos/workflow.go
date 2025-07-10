@@ -89,7 +89,6 @@ type workflowHandle[R any] struct {
 // GetResult waits for the workflow to complete and returns the result
 func (h *workflowHandle[R]) GetResult(ctx context.Context) (R, error) {
 	outcome, ok := <-h.outcomeChan // Blocking read
-	fmt.Println("GetRESULT outcome:", outcome, "ok", ok)
 	if !ok {
 		// Return an error if the channel was closed. In normal operations this would happen if GetResul() is called twice on a handler. The first call should get the buffered result, the second call find zero values (channel is empty and closed).
 		return *new(R), errors.New("workflow result channel is already closed. Did you call GetResult() twice on the same workflow handle?")

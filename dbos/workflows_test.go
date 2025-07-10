@@ -698,6 +698,7 @@ func deadLetterQueueWorkflow(ctx context.Context, input string) (int, error) {
 }
 
 func infiniteDeadLetterQueueWorkflow(ctx context.Context, input string) (int, error) {
+	deadLetterQueueStartEvent.Set()
 	deadLetterQueueEvent.Wait()
 	return 0, nil
 }
@@ -727,7 +728,6 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			deadLetterQueueStartEvent.Wait()
 			deadLetterQueueStartEvent.Clear()
 			expectedCount := int64(i + 2) // +1 for initial execution, +1 for each recovery
-			fmt.Println("Expected recovery count:", expectedCount, "Actual:", recoveryCount)
 			if recoveryCount != expectedCount {
 				t.Fatalf("expected recovery count to be %d, got %d", expectedCount, recoveryCount)
 			}
@@ -818,7 +818,8 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 	})
 
 	t.Run("InfiniteRetriesWorkflow", func(t *testing.T) {
-		deadLetterQueueEvent.Clear()
+		deadLetterQueueEvent = NewEvent()
+		deadLetterQueueStartEvent = NewEvent()
 
 		// Verify that a workflow with MaxRetries=0 (infinite retries) is retried infinitely
 		wfID := uuid.NewString()
@@ -828,6 +829,8 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			t.Fatalf("failed to start infinite dead letter queue workflow: %v", err)
 		}
 
+		deadLetterQueueStartEvent.Wait()
+		deadLetterQueueStartEvent.Clear()
 		// Attempt to recover the blocked workflow many times (should never fail)
 		handles := []WorkflowHandle[any]{}
 		for i := range DEFAULT_MAX_RECOVERY_ATTEMPTS * 2 {
@@ -836,6 +839,8 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 				t.Fatalf("failed to recover pending workflows on attempt %d: %v", i+1, err)
 			}
 			handles = append(handles, recoveredHandles...)
+			deadLetterQueueStartEvent.Wait()
+			deadLetterQueueStartEvent.Clear()
 		}
 
 		// Complete the workflow
