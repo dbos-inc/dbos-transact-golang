@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/gob"
 	"fmt"
+	"math"
+	"math/rand"
 	"time"
 
 	"github.com/jackc/pgerrcode"
@@ -90,26 +92,37 @@ func NewWorkflowQueue(name string, options ...QueueOption) WorkflowQueue {
 }
 
 func queueRunner(ctx context.Context) {
+	const (
+		baseInterval    = 1.0   // Base interval in seconds
+		minInterval     = 1.0   // Minimum polling interval in seconds
+		maxInterval     = 120.0 // Maximum polling interval in seconds
+		backoffFactor   = 2.0   // Exponential backoff multiplier
+		scalebackFactor = 0.9   // Scale back factor for successful iterations
+		jitterMin       = 0.95  // Minimum jitter multiplier
+		jitterMax       = 1.05  // Maximum jitter multiplier
+	)
+
+	pollingInterval := baseInterval
+
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Println("Queue runner stopping due to context cancellation")
 			return
 		default:
+			hasBackoffError := false
+
 			// Iterate through all queues in the registry
 			for queueName, queue := range workflowQueueRegistry {
 				// Call DequeueWorkflows for each queue
 				dequeuedWorkflows, err := getExecutor().systemDB.DequeueWorkflows(ctx, queue)
 				if err != nil {
 					if pgErr, ok := err.(*pgconn.PgError); ok {
-						// TODO: change for polling backoff strategy
 						switch pgErr.Code {
 						case pgerrcode.SerializationFailure:
-							// Handle serialization failure
-							fmt.Printf("Serialization failure for workflow in queue '%s': %v\n", queueName, pgErr)
+							hasBackoffError = true
 						case pgerrcode.LockNotAvailable:
-							// Handle lock not available
-							fmt.Printf("Lock not available for workflow in queue '%s': %v\n", queueName, pgErr)
+							hasBackoffError = true
 						}
 					} else {
 						fmt.Printf("Error dequeuing workflows from queue '%s': %v\n", queueName, err)
@@ -152,8 +165,21 @@ func queueRunner(ctx context.Context) {
 				}
 			}
 
-			// Sleep for 1 second between dequeue cycles
-			time.Sleep(1 * time.Second)
+			// Adjust polling interval based on errors
+			if hasBackoffError {
+				// Increase polling interval using exponential backoff
+				pollingInterval = math.Min(pollingInterval*backoffFactor, maxInterval)
+			} else {
+				// Scale back polling interval on successful iteration
+				pollingInterval = math.Max(minInterval, pollingInterval*scalebackFactor)
+			}
+
+			// Apply jitter to the polling interval
+			jitter := jitterMin + rand.Float64()*(jitterMax-jitterMin)
+			sleepDuration := time.Duration(pollingInterval * jitter * float64(time.Second))
+
+			// Sleep with jittered interval
+			time.Sleep(sleepDuration)
 		}
 	}
 }
