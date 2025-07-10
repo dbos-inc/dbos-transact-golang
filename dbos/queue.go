@@ -109,81 +109,81 @@ func queueRunner(ctx context.Context) {
 	pollingInterval := baseInterval
 
 	for {
+		hasBackoffError := false
+
+		// Iterate through all queues in the registry
+		for queueName, queue := range workflowQueueRegistry {
+			// Call DequeueWorkflows for each queue
+			dequeuedWorkflows, err := getExecutor().systemDB.DequeueWorkflows(ctx, queue)
+			if err != nil {
+				if pgErr, ok := err.(*pgconn.PgError); ok {
+					switch pgErr.Code {
+					case pgerrcode.SerializationFailure:
+						hasBackoffError = true
+					case pgerrcode.LockNotAvailable:
+						hasBackoffError = true
+					}
+				} else {
+					fmt.Printf("Error dequeuing workflows from queue '%s': %v\n", queueName, err)
+				}
+				continue
+			}
+
+			// Print what was dequeued
+			if len(dequeuedWorkflows) > 0 {
+				fmt.Printf("Dequeued %d workflows from queue '%s': %v\n", len(dequeuedWorkflows), queueName, dequeuedWorkflows)
+			}
+			for _, workflow := range dequeuedWorkflows {
+				// Find the workflow in the registry
+				registeredWorkflow, exists := registry[workflow.name]
+				if !exists {
+					fmt.Println("Error: workflow function not found in registry:", workflow.name)
+					continue
+				}
+
+				// Deserialize input
+				var input any
+				if len(workflow.input) > 0 {
+					inputBytes, err := base64.StdEncoding.DecodeString(workflow.input)
+					if err != nil {
+						fmt.Printf("failed to decode input for workflow %s: %v\n", workflow.id, err)
+						continue
+					}
+					buf := bytes.NewBuffer(inputBytes)
+					dec := gob.NewDecoder(buf)
+					if err := dec.Decode(&input); err != nil {
+						fmt.Printf("failed to decode input for workflow %s: %v\n", workflow.id, err)
+						continue
+					}
+				}
+
+				_, err := registeredWorkflow(ctx, input, WithWorkflowID(workflow.id))
+				if err != nil {
+					fmt.Println("Error recovering workflow:", err)
+				}
+			}
+		}
+
+		// Adjust polling interval based on errors
+		if hasBackoffError {
+			// Increase polling interval using exponential backoff
+			pollingInterval = math.Min(pollingInterval*backoffFactor, maxInterval)
+		} else {
+			// Scale back polling interval on successful iteration
+			pollingInterval = math.Max(minInterval, pollingInterval*scalebackFactor)
+		}
+
+		// Apply jitter to the polling interval
+		jitter := jitterMin + rand.Float64()*(jitterMax-jitterMin)
+		sleepDuration := time.Duration(pollingInterval * jitter * float64(time.Second))
+
+		// Sleep with jittered interval, but allow early exit on context cancellation
 		select {
 		case <-ctx.Done():
 			fmt.Println("Queue runner stopping due to context cancellation")
 			return
-		default:
-			hasBackoffError := false
-
-			// Iterate through all queues in the registry
-			for queueName, queue := range workflowQueueRegistry {
-				// Call DequeueWorkflows for each queue
-				dequeuedWorkflows, err := getExecutor().systemDB.DequeueWorkflows(ctx, queue)
-				if err != nil {
-					if pgErr, ok := err.(*pgconn.PgError); ok {
-						switch pgErr.Code {
-						case pgerrcode.SerializationFailure:
-							hasBackoffError = true
-						case pgerrcode.LockNotAvailable:
-							hasBackoffError = true
-						}
-					} else {
-						fmt.Printf("Error dequeuing workflows from queue '%s': %v\n", queueName, err)
-					}
-					continue
-				}
-
-				// Print what was dequeued
-				if len(dequeuedWorkflows) > 0 {
-					fmt.Printf("Dequeued %d workflows from queue '%s': %v\n", len(dequeuedWorkflows), queueName, dequeuedWorkflows)
-				}
-				for _, workflow := range dequeuedWorkflows {
-					// Find the workflow in the registry
-					registeredWorkflow, exists := registry[workflow.name]
-					if !exists {
-						fmt.Println("Error: workflow function not found in registry:", workflow.name)
-						continue
-					}
-
-					// Deserialize input
-					var input any
-					if len(workflow.input) > 0 {
-						inputBytes, err := base64.StdEncoding.DecodeString(workflow.input)
-						if err != nil {
-							fmt.Printf("failed to decode input for workflow %s: %v\n", workflow.id, err)
-							continue
-						}
-						buf := bytes.NewBuffer(inputBytes)
-						dec := gob.NewDecoder(buf)
-						if err := dec.Decode(&input); err != nil {
-							fmt.Printf("failed to decode input for workflow %s: %v\n", workflow.id, err)
-							continue
-						}
-					}
-
-					_, err := registeredWorkflow(ctx, input, WithWorkflowID(workflow.id))
-					if err != nil {
-						fmt.Println("Error recovering workflow:", err)
-					}
-				}
-			}
-
-			// Adjust polling interval based on errors
-			if hasBackoffError {
-				// Increase polling interval using exponential backoff
-				pollingInterval = math.Min(pollingInterval*backoffFactor, maxInterval)
-			} else {
-				// Scale back polling interval on successful iteration
-				pollingInterval = math.Max(minInterval, pollingInterval*scalebackFactor)
-			}
-
-			// Apply jitter to the polling interval
-			jitter := jitterMin + rand.Float64()*(jitterMax-jitterMin)
-			sleepDuration := time.Duration(pollingInterval * jitter * float64(time.Second))
-
-			// Sleep with jittered interval
-			time.Sleep(sleepDuration)
+		case <-time.After(sleepDuration):
+			// Continue to next iteration
 		}
 	}
 }
