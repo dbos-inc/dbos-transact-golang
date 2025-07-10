@@ -17,9 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// MaxInt represents the maximum integer value
-const MaxInt = float64(^uint(0) >> 1)
-
 /*******************************/
 /******* INTERFACE ********/
 /*******************************/
@@ -867,7 +864,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	// Calculate max_tasks based on concurrency limits
-	maxTasks := MaxInt
+	maxTasks := queue.MaxTasksPerIteration
 
 	if queue.WorkerConcurrency != nil || queue.GlobalConcurrency != nil {
 		// Count pending workflows by executor
@@ -903,7 +900,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 					localPendingWorkflows, queue.Name, workerConcurrency)
 			}
 			availableWorkerTasks := max(workerConcurrency-localPendingWorkflows, 0)
-			maxTasks = float64(availableWorkerTasks)
+			maxTasks = uint(availableWorkerTasks)
 		}
 
 		// Check global concurrency limit
@@ -919,8 +916,8 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 					globalPendingWorkflows, queue.Name, concurrency)
 			}
 			availableTasks := max(concurrency-globalPendingWorkflows, 0)
-			if float64(availableTasks) < maxTasks {
-				maxTasks = float64(availableTasks)
+			if uint(availableTasks) < maxTasks {
+				maxTasks = uint(availableTasks)
 			}
 		}
 	}

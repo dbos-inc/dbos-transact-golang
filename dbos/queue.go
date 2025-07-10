@@ -23,41 +23,44 @@ type RateLimiter struct {
 }
 
 type WorkflowQueue struct {
-	Name              string
-	WorkerConcurrency *int
-	GlobalConcurrency *int
-	PriorityEnabled   bool
-	Limiter           *RateLimiter
+	Name                 string
+	WorkerConcurrency    *int
+	GlobalConcurrency    *int
+	PriorityEnabled      bool
+	Limiter              *RateLimiter
+	MaxTasksPerIteration uint
 }
 
 // QueueOption is a functional option for configuring a workflow queue
 type QueueOption func(*WorkflowQueue)
 
-// WithWorkerConcurrency sets the worker concurrency for the queue
 func WithWorkerConcurrency(concurrency int) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.WorkerConcurrency = &concurrency
 	}
 }
 
-// WithGlobalConcurrency sets the global concurrency for the queue
 func WithGlobalConcurrency(concurrency int) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.GlobalConcurrency = &concurrency
 	}
 }
 
-// WithPriorityEnabled enables or disables priority handling for the queue
 func WithPriorityEnabled(enabled bool) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.PriorityEnabled = enabled
 	}
 }
 
-// WithRateLimiter sets the rate limiter for the queue
 func WithRateLimiter(limiter *RateLimiter) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.Limiter = limiter
+	}
+}
+
+func WithMaxTasksPerIteration(maxTasks uint) QueueOption {
+	return func(q *WorkflowQueue) {
+		q.MaxTasksPerIteration = maxTasks
 	}
 }
 
@@ -73,11 +76,12 @@ func NewWorkflowQueue(name string, options ...QueueOption) WorkflowQueue {
 
 	// Create queue with default settings
 	q := WorkflowQueue{
-		Name:              name,
-		WorkerConcurrency: nil,
-		GlobalConcurrency: nil,
-		PriorityEnabled:   false,
-		Limiter:           nil,
+		Name:                 name,
+		WorkerConcurrency:    nil,
+		GlobalConcurrency:    nil,
+		PriorityEnabled:      false,
+		Limiter:              nil,
+		MaxTasksPerIteration: 100, // Default max tasks per iteration
 	}
 
 	// Apply functional options
