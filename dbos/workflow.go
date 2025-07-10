@@ -279,6 +279,9 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 
 	// If this is a scheduled workflow, register a cron job
 	if registrationParams.CronSchedule != "" {
+		if reflect.TypeOf(p) != reflect.TypeOf(time.Time{}) {
+			panic(fmt.Sprintf("scheduled workflow function must accept time.Time as input, got %T", p))
+		}
 		if workflowScheduler == nil {
 			workflowScheduler = cron.New(cron.WithSeconds())
 		}
@@ -287,8 +290,9 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 			if getExecutor() == nil {
 				return
 			}
-			wfID := fmt.Sprintf("sched-%s-%s", fqn, time.Now())
-			wrappedFunction(context.Background(), p, WithWorkflowID(wfID))
+			startTime := time.Now()
+			wfID := fmt.Sprintf("sched-%s-%s", fqn, startTime)
+			wrappedFunction(context.Background(), any(startTime).(P), WithWorkflowID(wfID))
 		})
 		if err != nil {
 			panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))

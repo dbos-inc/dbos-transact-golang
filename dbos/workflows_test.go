@@ -872,13 +872,13 @@ var (
 	startTime  = time.Now()
 	counter    = 0
 	counter1Ch = make(chan int, 100)
-	_          = WithWorkflow(func(ctx context.Context, input string) (string, error) {
+	_          = WithWorkflow(func(ctx context.Context, startTime time.Time) (string, error) {
 		counter++
 		select {
 		case counter1Ch <- counter:
 		default:
 		}
-		return fmt.Sprintf("Scheduled workflow executed %d times", counter), nil
+		return fmt.Sprintf("Scheduled workflow executed at time %v", startTime), nil
 	}, WithSchedule("* * * * * *")) // Every second
 
 )
