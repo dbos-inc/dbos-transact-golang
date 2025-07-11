@@ -279,7 +279,7 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 
 	// If this is a scheduled workflow, register a cron job
 	if registrationParams.CronSchedule != "" {
-		if reflect.TypeOf(p) != reflect.TypeOf(ScheduledWorkflowInput{}) {
+		if reflect.TypeOf(p) != reflect.TypeOf(time.Time{}) {
 			panic(fmt.Sprintf("scheduled workflow function must accept ScheduledWorkflowInput as input, got %T", p))
 		}
 		if workflowScheduler == nil {
@@ -299,11 +299,7 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 				scheduledTime = entry.Next
 			}
 			wfID := fmt.Sprintf("sched-%s-%s", fqn, scheduledTime) // XXX we can rethink the format
-			input := ScheduledWorkflowInput{
-				StartTime:     time.Now(),
-				ScheduledTime: scheduledTime,
-			}
-			wrappedFunction(context.Background(), any(input).(P), WithWorkflowID(wfID), WithQueue(DBOS_INTERNAL_QUEUE_NAME))
+			wrappedFunction(context.Background(), any(scheduledTime).(P), WithWorkflowID(wfID), WithQueue(DBOS_INTERNAL_QUEUE_NAME))
 		})
 		if err != nil {
 			panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
@@ -338,11 +334,6 @@ const workflowStateKey contextKey = "workflowState"
 
 type WorkflowFunc[P any, R any] func(ctx context.Context, input P) (R, error)
 type WorkflowWrapperFunc[P any, R any] func(ctx context.Context, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
-
-type ScheduledWorkflowInput struct {
-	StartTime     time.Time
-	ScheduledTime time.Time
-}
 
 type WorkflowParams struct {
 	WorkflowID         string

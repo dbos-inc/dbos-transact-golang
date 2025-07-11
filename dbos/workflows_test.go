@@ -869,19 +869,20 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 }
 
 var (
-	startTime  = time.Now()
 	counter    = 0
 	counter1Ch = make(chan time.Time, 100)
-	_          = WithWorkflow(func(ctx context.Context, input ScheduledWorkflowInput) (string, error) {
+	_          = WithWorkflow(func(ctx context.Context, scheduledTime time.Time) (string, error) {
+		startTime := time.Now()
+		// fmt.Println("scheduled time:", scheduledTime, "current time:", startTime)
 		counter++
 		if counter == 10 {
 			return "", fmt.Errorf("counter reached 100, stopping workflow")
 		}
 		select {
-		case counter1Ch <- input.StartTime:
+		case counter1Ch <- startTime:
 		default:
 		}
-		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", input.ScheduledTime, input.StartTime), nil
+		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", scheduledTime, startTime), nil
 	}, WithSchedule("* * * * * *")) // Every second
 
 )
@@ -904,19 +905,22 @@ func TestScheduledWorkflows(t *testing.T) {
 	}
 
 	t.Run("ScheduledWorkflowExecution", func(t *testing.T) {
-		// Wait for workflow to execute at least 4 times (should take ~3-4 seconds)
-		executionTimes, err := collectExecutionTimes(counter1Ch, 4, 10*time.Second)
+		// Wait for workflow to execute at least 10 times (should take ~9-10 seconds)
+		executionTimes, err := collectExecutionTimes(counter1Ch, 10, 10*time.Second)
 		if err != nil {
 			t.Fatalf("Failed to collect scheduled workflow execution times: %v", err)
 		}
+		if len(executionTimes) < 10 {
+			t.Fatalf("Expected at least 10 executions, got %d", len(executionTimes))
+		}
 
-		// Verify timing - each execution should be approximately 1 second apart from the program start time
+		// Verify timing - each execution should be approximately 1 second apart
 		scheduleInterval := 1 * time.Second
 		allowedSlack := 1 * time.Second // Allow 500ms slack
 
 		for i, execTime := range executionTimes {
 			// Calculate expected execution time based on schedule interval
-			expectedTime := startTime.Add(time.Duration(i+1) * scheduleInterval)
+			expectedTime := executionTimes[0].Add(time.Duration(i+1) * scheduleInterval)
 
 			// Calculate the delta between actual and expected execution time
 			delta := execTime.Sub(expectedTime)
