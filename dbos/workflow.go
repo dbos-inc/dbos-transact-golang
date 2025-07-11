@@ -279,20 +279,31 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 
 	// If this is a scheduled workflow, register a cron job
 	if registrationParams.CronSchedule != "" {
-		if reflect.TypeOf(p) != reflect.TypeOf(time.Time{}) {
-			panic(fmt.Sprintf("scheduled workflow function must accept time.Time as input, got %T", p))
+		if reflect.TypeOf(p) != reflect.TypeOf(ScheduledWorkflowInput{}) {
+			panic(fmt.Sprintf("scheduled workflow function must accept ScheduledWorkflowInput as input, got %T", p))
 		}
 		if workflowScheduler == nil {
 			workflowScheduler = cron.New(cron.WithSeconds())
 		}
-		_, err := workflowScheduler.AddFunc(registrationParams.CronSchedule, func() {
+		var entryID cron.EntryID
+		entryID, err := workflowScheduler.AddFunc(registrationParams.CronSchedule, func() {
 			// Execute the workflow on the cron schedule once DBOS is launched
 			if getExecutor() == nil {
 				return
 			}
-			startTime := time.Now()
-			wfID := fmt.Sprintf("sched-%s-%s", fqn, startTime)
-			wrappedFunction(context.Background(), any(startTime).(P), WithWorkflowID(wfID), WithQueue(DBOS_INTERNAL_QUEUE_NAME))
+			// Get the scheduled time from the cron entry
+			entry := workflowScheduler.Entry(entryID)
+			scheduledTime := entry.Prev
+			if scheduledTime.IsZero() {
+				// Fallback to current time if prev is not available (first run)
+				scheduledTime = time.Now()
+			}
+			wfID := fmt.Sprintf("sched-%s-%s", fqn, scheduledTime) // XXX we can rethink the format
+			input := ScheduledWorkflowInput{
+				StartTime:     time.Now(),
+				ScheduledTime: scheduledTime,
+			}
+			wrappedFunction(context.Background(), any(input).(P), WithWorkflowID(wfID), WithQueue(DBOS_INTERNAL_QUEUE_NAME))
 		})
 		if err != nil {
 			panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
@@ -327,6 +338,11 @@ const workflowStateKey contextKey = "workflowState"
 
 type WorkflowFunc[P any, R any] func(ctx context.Context, input P) (R, error)
 type WorkflowWrapperFunc[P any, R any] func(ctx context.Context, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
+
+type ScheduledWorkflowInput struct {
+	StartTime     time.Time
+	ScheduledTime time.Time
+}
 
 type WorkflowParams struct {
 	WorkflowID         string
