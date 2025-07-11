@@ -14,11 +14,9 @@ import (
 )
 
 var (
-	APP_VERSION              string
-	EXECUTOR_ID              string
-	APP_ID                   string
-	DBOS_INTERNAL_QUEUE_NAME = "_dbos_internal_queue"
-	dbosInternalQueue        = NewWorkflowQueue(DBOS_INTERNAL_QUEUE_NAME)
+	APP_VERSION string
+	EXECUTOR_ID string
+	APP_ID      string
 )
 
 func computeApplicationVersion() string {
