@@ -112,13 +112,16 @@ func queueRunner(ctx context.Context) {
 
 	pollingInterval := baseInterval
 
+	// XXX doing this lets the dequeue and the task invokation survive the context cancellation
+	// We might be OK with not doing this. During the tests it results in all sorts of error inside the two functions above due to context cancellation
+	runnerContext := context.WithoutCancel(ctx)
 	for {
 		hasBackoffError := false
 
 		// Iterate through all queues in the registry
 		for queueName, queue := range workflowQueueRegistry {
 			// Call DequeueWorkflows for each queue
-			dequeuedWorkflows, err := getExecutor().systemDB.DequeueWorkflows(ctx, queue)
+			dequeuedWorkflows, err := getExecutor().systemDB.DequeueWorkflows(runnerContext, queue)
 			if err != nil {
 				if pgErr, ok := err.(*pgconn.PgError); ok {
 					switch pgErr.Code {
@@ -161,7 +164,7 @@ func queueRunner(ctx context.Context) {
 					}
 				}
 
-				_, err := registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
+				_, err := registeredWorkflow.wrappedFunction(runnerContext, input, WithWorkflowID(workflow.id))
 				if err != nil {
 					fmt.Println("Error recovering workflow:", err)
 				}

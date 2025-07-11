@@ -61,6 +61,7 @@ type executor struct {
 	systemDB              SystemDatabase
 	queueRunnerCtx        context.Context
 	queueRunnerCancelFunc context.CancelFunc
+	queueRunnerDone       chan struct{}
 }
 
 // New creates a new DBOS instance with an initialized system database
@@ -108,10 +109,14 @@ func Launch() error {
 		systemDB:              systemDB,
 		queueRunnerCtx:        ctx,
 		queueRunnerCancelFunc: cancel,
+		queueRunnerDone:       make(chan struct{}),
 	}
 
 	// Start the queue runner in a goroutine
-	go queueRunner(ctx)
+	go func() {
+		defer close(dbos.queueRunnerDone)
+		queueRunner(ctx)
+	}()
 	fmt.Println("DBOS: Queue runner started")
 
 	// Start the workflow scheduler if it has been initialized
@@ -134,6 +139,9 @@ func Shutdown() {
 	// Cancel the context to stop the queue runner
 	if dbos.queueRunnerCancelFunc != nil {
 		dbos.queueRunnerCancelFunc()
+		// Wait for queue runner to finish
+		<-dbos.queueRunnerDone
+		fmt.Println("DBOS: Queue runner stopped")
 	}
 
 	if workflowScheduler != nil {
@@ -153,5 +161,6 @@ func Shutdown() {
 	if dbos.systemDB != nil {
 		dbos.systemDB.Shutdown()
 	}
+
 	dbos = nil // Mark the DBOS instance for garbage collection
 }
