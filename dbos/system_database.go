@@ -35,6 +35,7 @@ type SystemDatabase interface {
 	ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
 	CheckOperationExecution(ctx context.Context, input CheckOperationExecutionDBInput) (*RecordedResult, error)
 	RecordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
+	GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
 }
 
 type systemDatabase struct {
@@ -584,15 +585,16 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 		}
 
 		switch status {
-		case WorkflowStatusSuccess:
+		case WorkflowStatusSuccess, WorkflowStatusError:
 			// Deserialize output from TEXT to bytes then from bytes to R using gob
 			output, err := deserialize(outputString)
 			if err != nil {
 				return nil, fmt.Errorf("failed to deserialize output: %w", err)
 			}
-			return output, nil
-		case WorkflowStatusError:
-			return nil, errors.New(*errorStr) // Assuming errorStr can be converted to an error type
+			if errorStr == nil || len(*errorStr) == 0 {
+				return output, nil
+			}
+			return output, errors.New(*errorStr)
 		case WorkflowStatusCancelled:
 			return nil, NewAwaitedWorkflowCancelledError(workflowID)
 		default:
@@ -640,7 +642,7 @@ func (s *systemDatabase) RecordOperationResult(ctx context.Context, input record
 		fmt.Printf("RecordOperationResult - SQL: %s\n", commandTag.String())
 	*/
 
-	// TODO handle serialization errors
+	// TODO handle PG serialization errors
 	if err != nil {
 		fmt.Printf("RecordOperationResult - Error occurred: %v\n", err)
 		return fmt.Errorf("failed to record operation result: %w", err)
@@ -838,6 +840,66 @@ func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input Chec
 		err:    recordedError,
 	}
 	return result, nil
+}
+
+type StepInfo struct {
+	FunctionID      int
+	FunctionName    string
+	Output          any
+	Error           error
+	ChildWorkflowID string
+}
+
+func (s *systemDatabase) GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error) {
+	query := `SELECT function_id, function_name, output, error, child_workflow_id
+			  FROM dbos.operation_outputs
+			  WHERE workflow_uuid = $1`
+
+	rows, err := s.pool.Query(ctx, query, workflowID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query workflow steps: %w", err)
+	}
+	defer rows.Close()
+
+	var steps []StepInfo
+	for rows.Next() {
+		var step StepInfo
+		var outputString *string
+		var errorString *string
+		var childWorkflowID *string
+
+		err := rows.Scan(&step.FunctionID, &step.FunctionName, &outputString, &errorString, &childWorkflowID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan step row: %w", err)
+		}
+
+		// Deserialize output if present
+		if outputString != nil {
+			output, err := deserialize(outputString)
+			if err != nil {
+				return nil, fmt.Errorf("failed to deserialize output: %w", err)
+			}
+			step.Output = output
+		}
+
+		// Convert error string to error if present
+		if errorString != nil && *errorString != "" {
+			step.Error = errors.New(*errorString)
+		}
+
+		// Set child workflow ID if present
+		if childWorkflowID != nil {
+			step.ChildWorkflowID = *childWorkflowID
+		}
+
+		steps = append(steps, step)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over step rows: %w", err)
+	}
+
+	return steps, nil
 }
 
 /*******************************/

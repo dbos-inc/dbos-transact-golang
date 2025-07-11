@@ -612,28 +612,18 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		return recordedOutput.output.(R), recordedOutput.err
 	}
 
+	stepOutput, stepError := fn(ctx, input)
 	dbInput := recordOperationResultDBInput{
 		workflowID:    workflowState.WorkflowID,
 		operationName: operationName,
 		operationID:   operationID,
+		err:           stepError,
+		output:        stepOutput,
 	}
-	stepOutput, stepError := fn(ctx, input)
-	if stepError != nil {
-		// fmt.Println("step function returned an error:", stepError)
-		dbInput.err = stepError
-		err := getExecutor().systemDB.RecordOperationResult(ctx, dbInput)
-		if err != nil {
-			// fmt.Println("failed to record step error:", err)
-			return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("recording step error: %v", err))
-		}
-	} else {
-		// fmt.Println("step function completed successfully, output:", stepOutput)
-		dbInput.output = stepOutput
-		err := getExecutor().systemDB.RecordOperationResult(ctx, dbInput)
-		if err != nil {
-			// fmt.Println("failed to record step output:", err)
-			return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("recording step output: %v", err))
-		}
+	recErr := getExecutor().systemDB.RecordOperationResult(ctx, dbInput)
+	if recErr != nil {
+		// fmt.Println("failed to record step error:", err)
+		return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("recording step outcome: %v", err))
 	}
 	return stepOutput, stepError
 }
