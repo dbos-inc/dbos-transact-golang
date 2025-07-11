@@ -135,7 +135,7 @@ func queueRunner(ctx context.Context) {
 
 			// Print what was dequeued
 			if len(dequeuedWorkflows) > 0 {
-				fmt.Printf("Dequeued %d workflows from queue '%s': %v\n", len(dequeuedWorkflows), queueName, dequeuedWorkflows)
+				//fmt.Printf("Dequeued %d workflows from queue '%s': %v\n", len(dequeuedWorkflows), queueName, dequeuedWorkflows)
 			}
 			for _, workflow := range dequeuedWorkflows {
 				// Find the workflow in the registry

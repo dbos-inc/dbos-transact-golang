@@ -1007,7 +1007,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	if len(dequeuedIDs) > 0 {
-		fmt.Printf("[%s] attempting to dequeue %d task(s)\n", queue.Name, len(dequeuedIDs))
+		// fmt.Printf("[%s] attempting to dequeue %d task(s)\n", queue.Name, len(dequeuedIDs))
 	}
 
 	// Update workflows to PENDING status and get their details

@@ -26,7 +26,7 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 			}
 		}
 
-		fmt.Println("Recovering workflow:", workflow.ID, "Name:", workflow.Name, "Input:", workflow.Input, "QueueName:", workflow.QueueName)
+		// fmt.Println("Recovering workflow:", workflow.ID, "Name:", workflow.Name, "Input:", workflow.Input, "QueueName:", workflow.QueueName)
 		if workflow.QueueName != "" {
 			cleared, err := getExecutor().systemDB.ClearQueueAssignment(ctx, workflow.ID)
 			if err != nil {
