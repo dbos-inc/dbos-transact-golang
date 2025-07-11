@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"time"
 
 	"github.com/robfig/cron/v3"
 )
@@ -117,7 +118,6 @@ func Launch() error {
 	if workflowScheduler != nil {
 		workflowScheduler.Start()
 		fmt.Println("DBOS: Workflow scheduler started")
-		fmt.Println(workflowScheduler.Entries())
 	}
 
 	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s\n", APP_VERSION, EXECUTOR_ID)
@@ -137,7 +137,17 @@ func Shutdown() {
 	}
 
 	if workflowScheduler != nil {
-		workflowScheduler.Stop()
+		ctx := workflowScheduler.Stop()
+		// Wait for all running jobs to complete with 5-second timeout
+		timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		select {
+		case <-ctx.Done():
+			fmt.Println("DBOS: All scheduled jobs completed")
+		case <-timeoutCtx.Done():
+			fmt.Println("DBOS: Timeout waiting for jobs to complete (5s)")
+		}
 	}
 
 	if dbos.systemDB != nil {
