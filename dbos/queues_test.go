@@ -32,15 +32,15 @@ var (
 	queueWfThatEnqueues = WithWorkflow(queueWorkflowThatEnqueues)
 
 	// Variables for successive enqueue test
-	successiveEnqueueQueue         = NewWorkflowQueue("test-successive-enqueue-queue")
-	successiveEnqueueStartEvent    = NewEvent()
-	successiveEnqueueCompleteEvent = NewEvent()
-	successiveEnqueueMaxRetries    = 10
-	successiveEnqueueWorkflow      = WithWorkflow(func(ctx context.Context, input string) (string, error) {
-		successiveEnqueueStartEvent.Set()
-		successiveEnqueueCompleteEvent.Wait()
+	dlqEnqueueQueue    = NewWorkflowQueue("test-successive-enqueue-queue")
+	dlqStartEvent      = NewEvent()
+	dlqCompleteEvent   = NewEvent()
+	dlqMaxRetries      = 10
+	enqueueWorkflowDLQ = WithWorkflow(func(ctx context.Context, input string) (string, error) {
+		dlqStartEvent.Set()
+		dlqCompleteEvent.Wait()
 		return input, nil
-	}, WithMaxRetries(successiveEnqueueMaxRetries))
+	}, WithMaxRetries(dlqMaxRetries))
 )
 
 func queueWorkflow(ctx context.Context, input string) (string, error) {
@@ -165,21 +165,22 @@ func TestWorkflowQueues(t *testing.T) {
 		}
 	})
 
-	t.Run("SuccessiveEnqueuesDoNotIncreaseAttempts", func(t *testing.T) {
+	t.Run("QueueWorkflowDLQ", func(t *testing.T) {
 		workflowID := "blocking-workflow-test"
 
 		// Enqueue the workflow for the first time
-		originalHandle, err := successiveEnqueueWorkflow(context.Background(), "test-input", WithQueue(successiveEnqueueQueue.Name), WithWorkflowID(workflowID))
+		originalHandle, err := enqueueWorkflowDLQ(context.Background(), "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
 		if err != nil {
 			t.Fatalf("failed to enqueue blocking workflow: %v", err)
 		}
 
 		// Wait for the workflow to start
-		successiveEnqueueStartEvent.Wait()
+		dlqStartEvent.Wait()
+		dlqStartEvent.Clear()
 
 		// Try to enqueue the same workflow more times
-		for i := range successiveEnqueueMaxRetries * 2 {
-			_, err := successiveEnqueueWorkflow(context.Background(), "test-input", WithQueue(successiveEnqueueQueue.Name), WithWorkflowID(workflowID))
+		for i := range dlqMaxRetries * 2 {
+			_, err := enqueueWorkflowDLQ(context.Background(), "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
 			if err != nil {
 				t.Fatalf("failed to enqueue workflow attempt %d: %v", i+1, err)
 			}
@@ -196,8 +197,43 @@ func TestWorkflowQueues(t *testing.T) {
 			t.Fatalf("expected attempts to be 1, got %d", status.Attempts)
 		}
 
-		// Allow the workflow to complete
-		successiveEnqueueCompleteEvent.Set()
+		// Check that the workflow hits DLQ after re-running max retries
+		handles := make([]WorkflowHandle[any], 0, dlqMaxRetries+1)
+		for i := range dlqMaxRetries {
+			recoveryHandles, err := recoverPendingWorkflows(context.Background(), []string{"local"})
+			if err != nil {
+				t.Fatalf("failed to recover pending workflows: %v", err)
+			}
+			if len(recoveryHandles) != 1 {
+				t.Fatalf("expected 1 handle, got %d", len(recoveryHandles))
+			}
+			dlqStartEvent.Wait()
+			dlqStartEvent.Clear()
+			handle := recoveryHandles[0]
+			handles = append(handles, handle)
+			status, err := handle.GetStatus()
+			if err != nil {
+				t.Fatalf("failed to get status of recovered workflow handle: %v", err)
+			}
+			if i == dlqMaxRetries {
+				// On the last retry, the workflow should be in DLQ
+				if status.Status != WorkflowStatusRetriesExceeded {
+					t.Fatalf("expected workflow status to be %s, got %v", WorkflowStatusRetriesExceeded, status.Status)
+				}
+			}
+		}
+
+		// Check the workflow completes
+		dlqCompleteEvent.Set()
+		for _, handle := range handles {
+			result, err := handle.GetResult(context.Background())
+			if err != nil {
+				t.Fatalf("failed to get result from recovered workflow handle: %v", err)
+			}
+			if result != "test-input" {
+				t.Fatalf("expected result to be 'test-input', got %v", result)
+			}
+		}
 
 		if !queueEntriesAreCleanedUp() {
 			t.Fatal("expected queue entries to be cleaned up after successive enqueues test")
