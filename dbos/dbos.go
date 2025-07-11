@@ -125,6 +125,8 @@ func Launch() error {
 		fmt.Println("DBOS: Workflow scheduler started")
 	}
 
+	// TODO run a round of recovery on the local executor
+
 	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s\n", APP_VERSION, EXECUTOR_ID)
 	return nil
 }

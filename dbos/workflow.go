@@ -295,8 +295,8 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 			entry := workflowScheduler.Entry(entryID)
 			scheduledTime := entry.Prev
 			if scheduledTime.IsZero() {
-				// Fallback to current time if prev is not available (first run)
-				scheduledTime = time.Now()
+				// Use Next if Prev is not set, which will only happen for the first run
+				scheduledTime = entry.Next
 			}
 			wfID := fmt.Sprintf("sched-%s-%s", fqn, scheduledTime) // XXX we can rethink the format
 			input := ScheduledWorkflowInput{
