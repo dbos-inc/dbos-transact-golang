@@ -425,9 +425,6 @@ var (
 	})
 )
 
-// Test wf id generation
-// Check that the parent gets a polling handle when they call the child a 2nd time
-// Check that parent - child relationship is stored in the DB the first time the child is called
 // TODO Check timeouts behaviors for parents and children (e.g. awaited cancelled, etc)
 func TestChildWorkflow(t *testing.T) {
 	setupDBOS(t)
