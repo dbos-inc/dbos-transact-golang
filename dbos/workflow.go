@@ -95,7 +95,7 @@ func (h *workflowHandle[R]) GetResult(ctx context.Context) (R, error) {
 		return *new(R), errors.New("workflow result channel is already closed. Did you call GetResult() twice on the same workflow handle?")
 	}
 	// If we are calling GetResult inside a workflow, record the result as a step result
-	parentWorkflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
+	parentWorkflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
 	if isChildWorkflow {
 		encodedOutput, encErr := serialize(outcome.result)
@@ -150,7 +150,7 @@ func (h *workflowPollingHandle[R]) GetResult(ctx context.Context) (R, error) {
 			return *new(R), NewWorkflowUnexpectedResultType(h.workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", result))
 		}
 		// If we are calling GetResult inside a workflow, record the result as a step result
-		parentWorkflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
+		parentWorkflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
 		isChildWorkflow := ok && parentWorkflowState != nil
 		if isChildWorkflow {
 			encodedOutput, encErr := serialize(typedResult)
@@ -254,7 +254,7 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 	}
 
 	registrationParams := WorkflowRegistrationParams{
-		MaxRetries: DEFAULT_MAX_RECOVERY_ATTEMPTS, // TODO implement "infinite" retries if wanted
+		MaxRetries: DEFAULT_MAX_RECOVERY_ATTEMPTS,
 	}
 	for _, opt := range opts {
 		opt(&registrationParams)
@@ -330,7 +330,7 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrat
 
 type contextKey string
 
-const workflowStateKey contextKey = "workflowState"
+const WorkflowStateKey contextKey = "workflowState"
 
 type WorkflowFunc[P any, R any] func(ctx context.Context, input P) (R, error)
 type WorkflowWrapperFunc[P any, R any] func(ctx context.Context, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
@@ -395,7 +395,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	dbosWorkflowContext := context.Background()
 
 	// Check if we are within a workflow (and thus a child workflow)
-	parentWorkflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
+	parentWorkflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
 
 	// TODO Check if cancelled
@@ -432,7 +432,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	}
 
 	workflowStatus := WorkflowStatus{
-		Name:               runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // XXX the interface approach would encapsulate this
+		Name:               runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // TODO factor out somewhere else so we dont' have to reflect here
 		ApplicationVersion: params.ApplicationVersion,
 		ExecutorID:         EXECUTOR_ID,
 		Status:             status,
@@ -476,12 +476,12 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	if isChildWorkflow {
 		// Get the step ID that was used for generating the child workflow ID
 		stepID := parentWorkflowState.stepCounter
-		childInput := RecordChildWorkflowDBInput{
-			ParentWorkflowID: parentWorkflowState.WorkflowID,
-			ChildWorkflowID:  workflowStatus.ID,
-			FunctionName:     runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // Will need to test this
-			FunctionID:       stepID,
-			Tx:               tx,
+		childInput := recordChildWorkflowDBInput{
+			parentWorkflowID: parentWorkflowState.WorkflowID,
+			childWorkflowID:  workflowStatus.ID,
+			functionName:     runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // Will need to test this
+			functionID:       stepID,
+			tx:               tx,
 		}
 		err = getExecutor().systemDB.RecordChildWorkflow(dbosWorkflowContext, childInput)
 		if err != nil {
@@ -512,7 +512,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	}
 
 	// Run the function in a goroutine
-	augmentUserContext := context.WithValue(ctx, workflowStateKey, workflowState)
+	augmentUserContext := context.WithValue(ctx, WorkflowStateKey, workflowState)
 	go func() {
 		result, err := fn(augmentUserContext, input)
 		status := WorkflowStatusSuccess
@@ -521,8 +521,6 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 		}
 		recordErr := getExecutor().systemDB.UpdateWorkflowOutcome(dbosWorkflowContext, UpdateWorkflowOutcomeDBInput{workflowID: workflowStatus.ID, status: status, err: err, output: result})
 		if recordErr != nil {
-			fmt.Println("Failed to record workflow outcome:", recordErr)
-			// TODO: return both the recording error and the function error
 			outcomeChan <- workflowOutcome[R]{result: *new(R), err: recordErr}
 			close(outcomeChan) // Close the channel to signal completion
 			return
@@ -591,7 +589,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	}
 
 	// Get workflow state from context
-	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
+	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
 		return *new(R), NewStepExecutionError("", operationName, "workflow state not found in context")
 	}

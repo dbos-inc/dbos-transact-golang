@@ -8,11 +8,11 @@ import (
 )
 
 /** Test serialization and deserialization
-[] Built in types
-[] User defined types (structs)
-[] Workflow inputs/outputs
-[] Step inputs/outputs
-[] Direct handlers, polling handler, list workflows results, get step infos
+[x] Built in types
+[x] User defined types (structs)
+[x] Workflow inputs/outputs
+[x] Step inputs/outputs
+[x] Direct handlers, polling handler, list workflows results, get step infos
 */
 
 var (

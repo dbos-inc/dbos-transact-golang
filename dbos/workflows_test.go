@@ -1,14 +1,13 @@
 package dbos
 
 /**
-This suite tests high level DBOS features:
-	[x] Wrapping various golang methods in DBOS workflows
-	[x] wf idempotency
-	[x] encoding / decoding of input/outputs
-	[] workflow retries
-	[] workflow conflicting name
-	[] wf timeout
-	[] wf deadlines
+Test workflow and steps features
+[x] Wrapping various golang methods in DBOS workflows
+[x] workflow idempotency
+[x] workflow DLQ
+[] workflow conflicting name
+[] workflow timeout
+[] workflow deadlines
 */
 
 import (

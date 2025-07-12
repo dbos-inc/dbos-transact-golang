@@ -26,7 +26,7 @@ type SystemDatabase interface {
 	ResetSystemDB(ctx context.Context) error
 	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
 	RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
-	RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error
+	RecordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
 	CheckChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]WorkflowStatus, error)
 	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error
@@ -659,15 +659,15 @@ func (s *systemDatabase) RecordOperationResult(ctx context.Context, input record
 /******* CHILD WORKFLOWS ********/
 /*******************************/
 
-type RecordChildWorkflowDBInput struct {
-	ParentWorkflowID string
-	ChildWorkflowID  string
-	FunctionID       int
-	FunctionName     string
-	Tx               pgx.Tx
+type recordChildWorkflowDBInput struct {
+	parentWorkflowID string
+	childWorkflowID  string
+	functionID       int
+	functionName     string
+	tx               pgx.Tx
 }
 
-func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error {
+func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error {
 	query := `INSERT INTO dbos.operation_outputs
             (workflow_uuid, function_id, function_name, child_workflow_id)
             VALUES ($1, $2, $3, $4)`
@@ -675,19 +675,19 @@ func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input RecordCh
 	var commandTag pgconn.CommandTag
 	var err error
 
-	if input.Tx != nil {
-		commandTag, err = input.Tx.Exec(ctx, query,
-			input.ParentWorkflowID,
-			input.FunctionID,
-			input.FunctionName,
-			input.ChildWorkflowID,
+	if input.tx != nil {
+		commandTag, err = input.tx.Exec(ctx, query,
+			input.parentWorkflowID,
+			input.functionID,
+			input.functionName,
+			input.childWorkflowID,
 		)
 	} else {
 		commandTag, err = s.pool.Exec(ctx, query,
-			input.ParentWorkflowID,
-			input.FunctionID,
-			input.FunctionName,
-			input.ChildWorkflowID,
+			input.parentWorkflowID,
+			input.functionID,
+			input.functionName,
+			input.childWorkflowID,
 		)
 	}
 
@@ -696,7 +696,7 @@ func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input RecordCh
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
 			return fmt.Errorf(
 				"child workflow %s already registered for parent workflow %s (operation ID: %d)",
-				input.ChildWorkflowID, input.ParentWorkflowID, input.FunctionID)
+				input.childWorkflowID, input.parentWorkflowID, input.functionID)
 		}
 		return fmt.Errorf("failed to record child workflow: %w", err)
 	}
