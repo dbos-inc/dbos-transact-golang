@@ -25,11 +25,10 @@ import (
 var idempotencyCounter int64
 
 var (
-	simpleWf                  = WithWorkflow(simpleWorkflow)
-	simpleWfError             = WithWorkflow(simpleWorkflowError)
-	simpleWfWithStep          = WithWorkflow(simpleWorkflowWithStep)
-	simpleWfWithStepError     = WithWorkflow(simpleWorkflowWithStepError)
-	simpleWfWithChildWorkflow = WithWorkflow(simpleWorkflowWithChildWorkflow)
+	simpleWf              = WithWorkflow(simpleWorkflow)
+	simpleWfError         = WithWorkflow(simpleWorkflowError)
+	simpleWfWithStep      = WithWorkflow(simpleWorkflowWithStep)
+	simpleWfWithStepError = WithWorkflow(simpleWorkflowWithStepError)
 	// struct methods
 	s              = workflowStruct{}
 	simpleWfStruct = WithWorkflow(s.simpleWorkflow)
@@ -73,14 +72,6 @@ func simpleStepError(ctx context.Context, input string) (string, error) {
 
 func simpleWorkflowWithStepError(ctx context.Context, input string) (string, error) {
 	return RunAsStep(ctx, simpleStepError, input)
-}
-
-func simpleWorkflowWithChildWorkflow(ctx context.Context, input string) (string, error) {
-	childHandle, err := simpleWfWithStep(ctx, input) // This ctx is mandatory because it holds the DBOS state with the parent workflow ID
-	if err != nil {
-		return "", err
-	}
-	return childHandle.GetResult(ctx)
 }
 
 // idempotencyWorkflow increments a global counter and returns the input
@@ -147,6 +138,7 @@ var (
 	})
 )
 
+// TODO: spin into dbos_test.go
 func TestAppVersion(t *testing.T) {
 	if _, err := hex.DecodeString(APP_VERSION); err != nil {
 		t.Fatalf("APP_VERSION is not a valid hex string: %v", err)
@@ -314,19 +306,6 @@ func TestWorkflowsWrapping(t *testing.T) {
 			expectError:    false,
 		},
 		{
-			name: "SimpleWorkflowWithChildWorkflow",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := simpleWfWithChildWorkflow(ctx, input, opts...)
-				if err != nil {
-					return nil, err
-				}
-				return handle.GetResult(ctx)
-			},
-			input:          "echo",
-			expectedResult: "from step",
-			expectError:    false,
-		},
-		{
 			name: "SimpleWorkflowWithStepError",
 			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				handle, err := simpleWfWithStepError(ctx, input, opts...)
@@ -365,44 +344,102 @@ func TestWorkflowsWrapping(t *testing.T) {
 }
 
 var (
-	parentWf = WithWorkflow(func(ctx context.Context, wfid string) (string, error) {
-		childHandle, err := simpleWfWithChildWorkflow(ctx, wfid)
+	childWf = WithWorkflow(func(ctx context.Context, i int) (string, error) {
+		workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+		if !ok {
+			return "", fmt.Errorf("workflow state not found in context")
+		}
+		fmt.Println("childWf workflow state:", workflowState)
+		expectedCurrentID := fmt.Sprintf("%s-%d", workflowState.WorkflowID, i)
+		if workflowState.WorkflowID != expectedCurrentID {
+			return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedCurrentID, workflowState.WorkflowID)
+		}
+		// XXX right now the steps of a child workflow start with an incremented step ID, because the first step ID is allocated to the child workflow
+		return RunAsStep(ctx, simpleStep, "")
+	})
+	parentWf = WithWorkflow(func(ctx context.Context, i int) (string, error) {
+		workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+		if !ok {
+			return "", fmt.Errorf("workflow state not found in context")
+		}
+		fmt.Println("parentWf workflow state:", workflowState)
+
+		childHandle, err := childWf(ctx, i)
 		if err != nil {
 			return "", err
 		}
-		// Verify child workflow ID follows the pattern: parentID-functionID
-		childWorkflowID := childHandle.GetWorkflowID()
-		expectedPrefix := wfid + "-0"
-		if childWorkflowID != expectedPrefix {
-			return "", fmt.Errorf("expected child workflow ID to be %s, got %s", expectedPrefix, childWorkflowID)
+
+		// Check this wf ID is built correctly
+		expectedParentID := fmt.Sprintf("%s-%d", workflowState.WorkflowID, i)
+		if workflowState.WorkflowID != expectedParentID {
+			return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedParentID, workflowState.WorkflowID)
 		}
 
+		// Verify child workflow ID follows the pattern: parentID-functionID
+		childWorkflowID := childHandle.GetWorkflowID()
+		expectedChildID := fmt.Sprintf("%s-%d", workflowState.WorkflowID, i)
+		if childWorkflowID != expectedChildID {
+			return "", fmt.Errorf("expected childWf ID to be %s, got %s", expectedChildID, childWorkflowID)
+		}
 		return childHandle.GetResult(ctx)
+	})
+	grandParentWf = WithWorkflow(func(ctx context.Context, _ string) (string, error) {
+		for i := range 3 {
+			workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+			if !ok {
+				return "", fmt.Errorf("workflow state not found in context")
+			}
+			fmt.Println("grandParentWf workflow state:", workflowState)
+
+			childHandle, err := parentWf(ctx, i)
+			if err != nil {
+				return "", err
+			}
+
+			// The handle should a direct handle
+			_, ok = childHandle.(*workflowHandle[string])
+			if !ok {
+				return "", fmt.Errorf("expected childHandle to be of type *workflowHandle[string], got %T", childHandle)
+			}
+
+			// Verify child workflow ID follows the pattern: parentID-functionID
+			childWorkflowID := childHandle.GetWorkflowID()
+			expectedPrefix := fmt.Sprintf("%s-%d", workflowState.WorkflowID, i)
+			if childWorkflowID != expectedPrefix {
+				return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedPrefix, childWorkflowID)
+			}
+
+			// Calling the child a second time should return a polling handle
+			childHandle, err = parentWf(ctx, i, WithWorkflowID(childHandle.GetWorkflowID()))
+			if err != nil {
+				return "", err
+			}
+			_, ok = childHandle.(*workflowPollingHandle[string])
+			if !ok {
+				return "", fmt.Errorf("expected childHandle to be of type *workflowPollingHandle[string], got %T", childHandle)
+			}
+
+		}
+
+		return "", nil
 	})
 )
 
+// Test wf id generation
+// Check that the parent gets a polling handle when they call the child a 2nd time
+// Check that parent - child relationship is stored in the DB the first time the child is called
+// TODO Check timeouts behaviors for parents and children (e.g. awaited cancelled, etc)
 func TestChildWorkflow(t *testing.T) {
 	setupDBOS(t)
 
 	t.Run("ChildWorkflowIDPattern", func(t *testing.T) {
-		parentWorkflowID := uuid.NewString()
-
-		// Execute the parent workflow
-		parentHandle, err := parentWf(context.Background(), parentWorkflowID, WithWorkflowID(parentWorkflowID))
+		h, err := grandParentWf(context.Background(), "")
 		if err != nil {
-			t.Fatalf("failed to execute parent workflow: %v", err)
+			t.Fatalf("failed to execute grand parent workflow: %v", err)
 		}
-
-		// Verify the result
-		result, err := parentHandle.GetResult(context.Background())
+		_, err = h.GetResult(context.Background())
 		if err != nil {
-			t.Fatalf("expected no error but got: %v", err)
-		}
-
-		// The result should be from the child workflow's step
-		expectedResult := "from step"
-		if result != expectedResult {
-			t.Fatalf("expected result %v but got %v", expectedResult, result)
+			t.Fatalf("failed to get result from grand parent workflow: %v", err)
 		}
 	})
 }
@@ -435,6 +472,12 @@ func TestWorkflowIdempotency(t *testing.T) {
 		result2, err := handle2.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("failed to get result from second execution: %v", err)
+		}
+
+		// Verify the second handle is a polling handle
+		_, ok := handle2.(*workflowPollingHandle[string])
+		if !ok {
+			t.Fatalf("expected handle2 to be of type workflowPollingHandle, got %T", handle2)
 		}
 
 		// Verify both executions return the same result
@@ -732,7 +775,6 @@ var (
 		}
 		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", scheduledTime, startTime), nil
 	}, WithSchedule("* * * * * *")) // Every second
-
 )
 
 func TestScheduledWorkflows(t *testing.T) {
