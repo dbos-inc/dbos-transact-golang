@@ -19,6 +19,7 @@ const (
 	WorkflowExecutionError
 	StepExecutionError
 	DeadLetterQueueError
+	MaxStepRetriesExceeded
 )
 
 // DBOSError is the unified error type for all DBOS errors
@@ -38,7 +39,6 @@ type DBOSError struct {
 	ExpectedName    string
 	RecordedName    string
 	MaxRetries      int
-	Errors          []error
 }
 
 func (e *DBOSError) Error() string {
@@ -168,6 +168,17 @@ func NewDeadLetterQueueError(workflowID string, maxRetries int) *DBOSError {
 		Message:    fmt.Sprintf("Workflow %s has been moved to the dead-letter queue after exceeding the maximum of %d retries", workflowID, maxRetries),
 		Code:       DeadLetterQueueError,
 		WorkflowID: workflowID,
+		MaxRetries: maxRetries,
+		IsBase:     true,
+	}
+}
+
+func NewMaxStepRetriesExceededError(workflowID, stepName string, maxRetries int, err error) *DBOSError {
+	return &DBOSError{
+		Message:    fmt.Sprintf("Step %s has exceeded its maximum of %d retries: %v", stepName, maxRetries, err),
+		Code:       MaxStepRetriesExceeded,
+		WorkflowID: workflowID,
+		StepName:   stepName,
 		MaxRetries: maxRetries,
 		IsBase:     true,
 	}

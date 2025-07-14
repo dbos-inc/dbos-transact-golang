@@ -352,8 +352,25 @@ func stepWithinAStepWorkflow(ctx context.Context, input string) (string, error) 
 	return RunAsStep(ctx, stepWithinAStep, input)
 }
 
+// Global counter for retry testing
+var stepRetryAttemptCount int
+
+func stepRetryAlwaysFailsStep(ctx context.Context, input string) (string, error) {
+	stepRetryAttemptCount++
+	return "", fmt.Errorf("always fails - attempt %d", stepRetryAttemptCount)
+}
+
+func stepRetryWorkflow(ctx context.Context, input string) (string, error) {
+	return RunAsStep(ctx, stepRetryAlwaysFailsStep, input,
+		WithMaxAttempts(5),
+		WithBackoffRate(2.0),
+		WithBaseDelay(1*time.Millisecond),
+		WithMaxDelay(10*time.Millisecond))
+}
+
 var (
 	stepWithinAStepWf = WithWorkflow(stepWithinAStepWorkflow)
+	stepRetryWf       = WithWorkflow(stepRetryWorkflow)
 )
 
 func TestSteps(t *testing.T) {
@@ -404,6 +421,72 @@ func TestSteps(t *testing.T) {
 		}
 		if len(steps) != 1 {
 			t.Fatalf("expected 1 step, got %d", len(steps))
+		}
+	})
+
+	t.Run("StepRetryWithExponentialBackoff", func(t *testing.T) {
+		// Reset the global counter before test
+		stepRetryAttemptCount = 0
+
+		// Execute the workflow
+		handle, err := stepRetryWf(context.Background(), "test")
+		if err != nil {
+			t.Fatal("failed to start retry workflow:", err)
+		}
+
+		_, err = handle.GetResult(context.Background())
+		if err == nil {
+			t.Fatal("expected error from failing workflow but got none")
+		}
+		fmt.Println(err)
+
+		// Verify the step was called exactly 5 times (max attempts)
+		if stepRetryAttemptCount != 5 {
+			t.Fatalf("expected 5 attempts, got %d", stepRetryAttemptCount)
+		}
+
+		// Verify the error is a MaxStepRetriesExceeded error
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != MaxStepRetriesExceeded {
+			t.Fatalf("expected error code to be MaxStepRetriesExceeded, got %v", dbosErr.Code)
+		}
+
+		// Verify the error contains the step name and max retries
+		expectedErrorMessage := "dbos.stepRetryAlwaysFailsStep has exceeded its maximum of 5 retries"
+		if !strings.Contains(dbosErr.Message, expectedErrorMessage) {
+			t.Fatalf("expected error message to contain '%s', got '%s'", expectedErrorMessage, dbosErr.Message)
+		}
+
+		// Verify each error message is present in the joined error
+		for i := 1; i <= 5; i++ {
+			expectedMsg := fmt.Sprintf("always fails - attempt %d", i)
+			if !strings.Contains(dbosErr.Error(), expectedMsg) {
+				t.Fatalf("expected joined error to contain '%s', but got '%s'", expectedMsg, dbosErr.Error())
+			}
+		}
+
+		// Verify that the failed step was still recorded in the database
+		steps, err := getExecutor().systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		if err != nil {
+			t.Fatal("failed to get workflow steps:", err)
+		}
+
+		if len(steps) != 1 {
+			t.Fatalf("expected 1 recorded step, got %d", len(steps))
+		}
+
+		// Verify the recorded step has the error
+		step := steps[0]
+		if step.Error == nil {
+			t.Fatal("expected error in recorded step, got none")
+		}
+
+		if step.Error.Error() != dbosErr.Error() {
+			t.Fatalf("expected recorded step error to match joined error, got '%s', expected '%s'", step.Error.Error(), dbosErr.Error())
 		}
 	})
 }

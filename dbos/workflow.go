@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"runtime"
 	"sync"
@@ -556,7 +557,9 @@ type StepFunc[P any, R any] func(ctx context.Context, input P) (R, error)
 
 type StepParams struct {
 	MaxAttempts int
-	BackoffRate int
+	BackoffRate float64
+	BaseDelay   time.Duration
+	MaxDelay    time.Duration
 }
 
 // StepOption is a functional option for configuring step parameters
@@ -569,10 +572,24 @@ func WithMaxAttempts(maxAttempts int) StepOption {
 	}
 }
 
-// WithBackoffRate sets the backoff rate for retries
-func WithBackoffRate(backoffRate int) StepOption {
+// WithBackoffRate sets the backoff rate for retries (multiplier for exponential backoff)
+func WithBackoffRate(backoffRate float64) StepOption {
 	return func(p *StepParams) {
 		p.BackoffRate = backoffRate
+	}
+}
+
+// WithBaseDelay sets the base delay for the first retry
+func WithBaseDelay(baseDelay time.Duration) StepOption {
+	return func(p *StepParams) {
+		p.BaseDelay = baseDelay
+	}
+}
+
+// WithMaxDelay sets the maximum delay for retries
+func WithMaxDelay(maxDelay time.Duration) StepOption {
+	return func(p *StepParams) {
+		p.MaxDelay = maxDelay
 	}
 }
 
@@ -583,8 +600,15 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 
 	operationName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 
-	// Apply options to build params
-	params := StepParams{}
+	fmt.Println("running step:", operationName)
+
+	// Apply options to build params with defaults
+	params := StepParams{
+		MaxAttempts: 1,
+		BackoffRate: 2.0,
+		BaseDelay:   100 * time.Millisecond,
+		MaxDelay:    1 * time.Hour,
+	}
 	for _, opt := range opts {
 		opt(&params)
 	}
@@ -616,13 +640,54 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		return recordedOutput.output.(R), recordedOutput.err
 	}
 
+	// Execute step with exponential backoff retry
 	stepState := WorkflowState{
 		WorkflowID:   workflowState.WorkflowID,
 		stepCounter:  workflowState.stepCounter,
 		isWithinStep: true,
 	}
 	stepCtx := context.WithValue(ctx, WorkflowStateKey, &stepState)
-	stepOutput, stepError := fn(stepCtx, input)
+
+	var stepOutput R
+	var stepError error
+	var joinedErrors error
+
+	for attempt := 1; attempt <= params.MaxAttempts; attempt++ {
+		stepOutput, stepError = fn(stepCtx, input)
+
+		// If successful, break
+		if stepError == nil {
+			break
+		}
+
+		// Join the error with existing errors
+		joinedErrors = errors.Join(joinedErrors, stepError)
+
+		// If max attempts reached, create MaxStepRetriesExceeded error
+		if attempt == params.MaxAttempts {
+			stepError = NewMaxStepRetriesExceededError(workflowState.WorkflowID, operationName, params.MaxAttempts, joinedErrors)
+			break
+		}
+
+		// Calculate delay for exponential backoff
+		delay := params.BaseDelay
+		if attempt > 1 {
+			exponentialDelay := float64(params.BaseDelay) * math.Pow(params.BackoffRate, float64(attempt-1))
+			delay = time.Duration(math.Min(exponentialDelay, float64(params.MaxDelay)))
+		}
+
+		fmt.Printf("step %s failed on attempt %d/%d, retrying in %v: %v\n", operationName, attempt, params.MaxAttempts, delay, stepError)
+
+		// Wait before retry
+		select {
+		case <-ctx.Done():
+			return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("context cancelled during retry: %v", ctx.Err()))
+		case <-time.After(delay):
+			// Continue to next attempt
+		}
+	}
+
+	// Record the final result
 	dbInput := recordOperationResultDBInput{
 		workflowID:    workflowState.WorkflowID,
 		operationName: operationName,
@@ -632,8 +697,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	}
 	recErr := getExecutor().systemDB.RecordOperationResult(ctx, dbInput)
 	if recErr != nil {
-		// fmt.Println("failed to record step error:", err)
-		return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("recording step outcome: %v", err))
+		return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("recording step outcome: %v", recErr))
 	}
 
 	return stepOutput, stepError
