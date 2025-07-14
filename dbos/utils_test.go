@@ -18,9 +18,9 @@ func setupDBOS(t *testing.T) {
 
 	databaseURL := os.Getenv("DBOS_DATABASE_URL")
 	if databaseURL == "" {
-		fmt.Println("DBOS_DATABASE_URL not set, using default: postgres://postgres:${PGPASSWORD}@localhost:5432/postgres?sslmode=disable")
+		fmt.Println("DBOS_DATABASE_URL not set, using default: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
 		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
-		databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/postgres?sslmode=disable", password)
+		databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
 	}
 
 	// Clean up the test database
