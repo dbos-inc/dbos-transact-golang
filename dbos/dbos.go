@@ -167,7 +167,8 @@ func Shutdown() {
 
 	if dbos.systemDB != nil {
 		dbos.systemDB.Shutdown()
+		dbos.systemDB = nil
 	}
 
-	dbos = nil // Mark the DBOS instance for garbage collection
+	dbos = nil
 }
