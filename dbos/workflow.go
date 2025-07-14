@@ -556,7 +556,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 type StepFunc[P any, R any] func(ctx context.Context, input P) (R, error)
 
 type StepParams struct {
-	MaxAttempts int
+	MaxRetries  int
 	BackoffRate float64
 	BaseDelay   time.Duration
 	MaxDelay    time.Duration
@@ -565,10 +565,10 @@ type StepParams struct {
 // StepOption is a functional option for configuring step parameters
 type StepOption func(*StepParams)
 
-// WithMaxAttempts sets the maximum number of retry attempts for a step
-func WithMaxAttempts(maxAttempts int) StepOption {
+// WithStepMaxRetries sets the maximum number of retries for a step
+func WithStepMaxRetries(maxRetries int) StepOption {
 	return func(p *StepParams) {
-		p.MaxAttempts = maxAttempts
+		p.MaxRetries = maxRetries
 	}
 }
 
@@ -600,11 +600,9 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 
 	operationName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 
-	fmt.Println("running step:", operationName)
-
 	// Apply options to build params with defaults
 	params := StepParams{
-		MaxAttempts: 1,
+		MaxRetries:  0,
 		BackoffRate: 2.0,
 		BaseDelay:   100 * time.Millisecond,
 		MaxDelay:    1 * time.Hour,
@@ -640,7 +638,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		return recordedOutput.output.(R), recordedOutput.err
 	}
 
-	// Execute step with exponential backoff retry
+	// Execute step with retry logic if MaxRetries > 0
 	stepState := WorkflowState{
 		WorkflowID:   workflowState.WorkflowID,
 		stepCounter:  workflowState.stepCounter,
@@ -648,42 +646,47 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	}
 	stepCtx := context.WithValue(ctx, WorkflowStateKey, &stepState)
 
-	var stepOutput R
-	var stepError error
+	stepOutput, stepError := fn(stepCtx, input)
+
+	// Retry if MaxRetries > 0 and the first execution failed
 	var joinedErrors error
-
-	for attempt := 1; attempt <= params.MaxAttempts; attempt++ {
-		stepOutput, stepError = fn(stepCtx, input)
-
-		// If successful, break
-		if stepError == nil {
-			break
-		}
-
-		// Join the error with existing errors
+	if stepError != nil && params.MaxRetries > 0 {
 		joinedErrors = errors.Join(joinedErrors, stepError)
 
-		// If max attempts reached, create MaxStepRetriesExceeded error
-		if attempt == params.MaxAttempts {
-			stepError = NewMaxStepRetriesExceededError(workflowState.WorkflowID, operationName, params.MaxAttempts, joinedErrors)
-			break
-		}
+		for retry := 1; retry <= params.MaxRetries; retry++ {
+			// Calculate delay for exponential backoff
+			delay := params.BaseDelay
+			if retry > 1 {
+				exponentialDelay := float64(params.BaseDelay) * math.Pow(params.BackoffRate, float64(retry-1))
+				delay = time.Duration(math.Min(exponentialDelay, float64(params.MaxDelay)))
+			}
 
-		// Calculate delay for exponential backoff
-		delay := params.BaseDelay
-		if attempt > 1 {
-			exponentialDelay := float64(params.BaseDelay) * math.Pow(params.BackoffRate, float64(attempt-1))
-			delay = time.Duration(math.Min(exponentialDelay, float64(params.MaxDelay)))
-		}
+			fmt.Printf("step %s failed, retrying %d/%d in %v: %v\n", operationName, retry, params.MaxRetries, delay, stepError)
 
-		fmt.Printf("step %s failed on attempt %d/%d, retrying in %v: %v\n", operationName, attempt, params.MaxAttempts, delay, stepError)
+			// Wait before retry
+			select {
+			case <-ctx.Done():
+				return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("context cancelled during retry: %v", ctx.Err()))
+			case <-time.After(delay):
+				// Continue to retry
+			}
 
-		// Wait before retry
-		select {
-		case <-ctx.Done():
-			return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("context cancelled during retry: %v", ctx.Err()))
-		case <-time.After(delay):
-			// Continue to next attempt
+			// Execute the retry
+			stepOutput, stepError = fn(stepCtx, input)
+
+			// If successful, break
+			if stepError == nil {
+				break
+			}
+
+			// Join the error with existing errors
+			joinedErrors = errors.Join(joinedErrors, stepError)
+
+			// If max retries reached, create MaxStepRetriesExceeded error
+			if retry == params.MaxRetries {
+				stepError = NewMaxStepRetriesExceededError(workflowState.WorkflowID, operationName, params.MaxRetries, joinedErrors)
+				break
+			}
 		}
 	}
 

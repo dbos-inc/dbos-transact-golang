@@ -362,7 +362,7 @@ func stepRetryAlwaysFailsStep(ctx context.Context, input string) (string, error)
 
 func stepRetryWorkflow(ctx context.Context, input string) (string, error) {
 	return RunAsStep(ctx, stepRetryAlwaysFailsStep, input,
-		WithMaxAttempts(5),
+		WithStepMaxRetries(5),
 		WithBackoffRate(2.0),
 		WithBaseDelay(1*time.Millisecond),
 		WithMaxDelay(10*time.Millisecond))
@@ -440,8 +440,8 @@ func TestSteps(t *testing.T) {
 		}
 		fmt.Println(err)
 
-		// Verify the step was called exactly 5 times (max attempts)
-		if stepRetryAttemptCount != 5 {
+		// Verify the step was called exactly 6 times (max attempts + 1 initial attempt)
+		if stepRetryAttemptCount != 6 {
 			t.Fatalf("expected 5 attempts, got %d", stepRetryAttemptCount)
 		}
 
