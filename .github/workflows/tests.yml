@@ -59,7 +59,7 @@ jobs:
       run: go mod download
 
     - name: Run tests
-      run: go test -v ./...
+      run: gotestsum --format github-action
       working-directory: ./dbos
       env:
         PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
