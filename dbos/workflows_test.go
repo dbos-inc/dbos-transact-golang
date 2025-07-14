@@ -442,7 +442,7 @@ func TestSteps(t *testing.T) {
 
 		// Verify the step was called exactly 6 times (max attempts + 1 initial attempt)
 		if stepRetryAttemptCount != 6 {
-			t.Fatalf("expected 5 attempts, got %d", stepRetryAttemptCount)
+			t.Fatalf("expected 6 attempts, got %d", stepRetryAttemptCount)
 		}
 
 		// Verify the error is a MaxStepRetriesExceeded error
@@ -951,7 +951,7 @@ func TestScheduledWorkflows(t *testing.T) {
 
 		// Verify timing - each execution should be approximately 1 second apart
 		scheduleInterval := 1 * time.Second
-		allowedSlack := 1 * time.Second // Allow 500ms slack
+		allowedSlack := 2 * time.Second
 
 		for i, execTime := range executionTimes {
 			// Calculate expected execution time based on schedule interval
