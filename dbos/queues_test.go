@@ -15,6 +15,7 @@ This suite tests
 [x] enqueued workflow starts a child workflow
 [x] workflow enqueues another workflow
 [x] recover queued workflow
+[x] queued workflow DLQ
 [x] global concurrency (one at a time with a single queue and a single worker)
 [x] worker concurrency (2 at a time across two "workers")
 [x] worker concurrency X recovery

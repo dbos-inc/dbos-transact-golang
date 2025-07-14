@@ -556,10 +556,10 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 type StepFunc[P any, R any] func(ctx context.Context, input P) (R, error)
 
 type StepParams struct {
-	MaxRetries  int
-	BackoffRate float64
-	BaseDelay   time.Duration
-	MaxDelay    time.Duration
+	MaxRetries    int
+	BackoffFactor float64
+	BaseInterval  time.Duration
+	MaxInterval   time.Duration
 }
 
 // StepOption is a functional option for configuring step parameters
@@ -575,21 +575,21 @@ func WithStepMaxRetries(maxRetries int) StepOption {
 // WithBackoffRate sets the backoff rate for retries (multiplier for exponential backoff)
 func WithBackoffRate(backoffRate float64) StepOption {
 	return func(p *StepParams) {
-		p.BackoffRate = backoffRate
+		p.BackoffFactor = backoffRate
 	}
 }
 
 // WithBaseDelay sets the base delay for the first retry
 func WithBaseDelay(baseDelay time.Duration) StepOption {
 	return func(p *StepParams) {
-		p.BaseDelay = baseDelay
+		p.BaseInterval = baseDelay
 	}
 }
 
 // WithMaxDelay sets the maximum delay for retries
 func WithMaxDelay(maxDelay time.Duration) StepOption {
 	return func(p *StepParams) {
-		p.MaxDelay = maxDelay
+		p.MaxInterval = maxDelay
 	}
 }
 
@@ -602,10 +602,10 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 
 	// Apply options to build params with defaults
 	params := StepParams{
-		MaxRetries:  0,
-		BackoffRate: 2.0,
-		BaseDelay:   100 * time.Millisecond,
-		MaxDelay:    1 * time.Hour,
+		MaxRetries:    0,
+		BackoffFactor: 2.0,
+		BaseInterval:  100 * time.Millisecond,
+		MaxInterval:   1 * time.Hour,
 	}
 	for _, opt := range opts {
 		opt(&params)
@@ -655,10 +655,10 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 
 		for retry := 1; retry <= params.MaxRetries; retry++ {
 			// Calculate delay for exponential backoff
-			delay := params.BaseDelay
+			delay := params.BaseInterval
 			if retry > 1 {
-				exponentialDelay := float64(params.BaseDelay) * math.Pow(params.BackoffRate, float64(retry-1))
-				delay = time.Duration(math.Min(exponentialDelay, float64(params.MaxDelay)))
+				exponentialDelay := float64(params.BaseInterval) * math.Pow(params.BackoffFactor, float64(retry-1))
+				delay = time.Duration(math.Min(exponentialDelay, float64(params.MaxInterval)))
 			}
 
 			fmt.Printf("step %s failed, retrying %d/%d in %v: %v\n", operationName, retry, params.MaxRetries, delay, stepError)
