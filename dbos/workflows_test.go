@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"strings"
 	"testing"
 	"time"
 
@@ -341,6 +342,70 @@ func TestWorkflowsWrapping(t *testing.T) {
 			}
 		})
 	}
+}
+
+func stepWithinAStep(ctx context.Context, input string) (string, error) {
+	return RunAsStep(ctx, simpleStep, input)
+}
+
+func stepWithinAStepWorkflow(ctx context.Context, input string) (string, error) {
+	return RunAsStep(ctx, stepWithinAStep, input)
+}
+
+var (
+	stepWithinAStepWf = WithWorkflow(stepWithinAStepWorkflow)
+)
+
+func TestSteps(t *testing.T) {
+	setupDBOS(t)
+
+	t.Run("StepsMustRunInsideWorkflows", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Attempt to run a step outside of a workflow context
+		_, err := RunAsStep(ctx, simpleStep, "test")
+		if err == nil {
+			t.Fatal("expected error when running step outside of workflow context, but got none")
+		}
+
+		// Check the error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != StepExecutionError {
+			t.Fatalf("expected error code to be StepExecutionError, got %v", dbosErr.Code)
+		}
+
+		// Test the specific message from the 3rd argument
+		expectedMessagePart := "workflow state not found in context"
+		if !strings.Contains(err.Error(), expectedMessagePart) {
+			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+		}
+	})
+
+	t.Run("StepWithinAStepAreJustFunctions", func(t *testing.T) {
+		handle, err := stepWithinAStepWf(context.Background(), "test")
+		if err != nil {
+			t.Fatal("failed to run step within a step:", err)
+		}
+		result, err := handle.GetResult(context.Background())
+		if err != nil {
+			t.Fatal("failed to get result from step within a step:", err)
+		}
+		if result != "from step" {
+			t.Fatalf("expected result 'from step', got '%s'", result)
+		}
+
+		steps, err := getExecutor().systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		if err != nil {
+			t.Fatal("failed to list steps:", err)
+		}
+		if len(steps) != 1 {
+			t.Fatalf("expected 1 step, got %d", len(steps))
+		}
+	})
 }
 
 var (

@@ -55,8 +55,9 @@ type WorkflowStatus struct {
 
 // WorkflowState holds the runtime state for a workflow execution
 type WorkflowState struct {
-	WorkflowID  string
-	stepCounter int
+	WorkflowID   string
+	stepCounter  int
+	isWithinStep bool
 }
 
 // NextStepID returns the next step ID and increments the counter
@@ -594,6 +595,11 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		return *new(R), NewStepExecutionError("", operationName, "workflow state not found in context")
 	}
 
+	// If within a step, just run the function directly
+	if workflowState.isWithinStep {
+		return fn(ctx, input)
+	}
+
 	// Get next step ID
 	operationID := workflowState.NextStepID()
 
@@ -610,7 +616,13 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		return recordedOutput.output.(R), recordedOutput.err
 	}
 
-	stepOutput, stepError := fn(ctx, input)
+	stepState := WorkflowState{
+		WorkflowID:   workflowState.WorkflowID,
+		stepCounter:  workflowState.stepCounter,
+		isWithinStep: true,
+	}
+	stepCtx := context.WithValue(ctx, WorkflowStateKey, &stepState)
+	stepOutput, stepError := fn(stepCtx, input)
 	dbInput := recordOperationResultDBInput{
 		workflowID:    workflowState.WorkflowID,
 		operationName: operationName,
@@ -623,6 +635,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		// fmt.Println("failed to record step error:", err)
 		return *new(R), NewStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("recording step outcome: %v", err))
 	}
+
 	return stepOutput, stepError
 }
 
