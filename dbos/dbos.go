@@ -126,7 +126,11 @@ func Launch() error {
 		fmt.Println("DBOS: Workflow scheduler started")
 	}
 
-	// TODO run a round of recovery on the local executor
+	// Run a round of recovery on the local executor
+	_, err = recoverPendingWorkflows(context.Background(), []string{EXECUTOR_ID}) // XXX maybe use the queue runner context here to allow Shutdown to cancel it?
+	if err != nil {
+		return NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
+	}
 
 	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s\n", APP_VERSION, EXECUTOR_ID)
 	return nil
