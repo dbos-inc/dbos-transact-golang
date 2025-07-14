@@ -69,6 +69,7 @@ var dbos *executor
 
 func getExecutor() *executor {
 	if dbos == nil {
+		fmt.Println("warning: DBOS instance not initiliazed")
 		return nil
 	}
 	return dbos
