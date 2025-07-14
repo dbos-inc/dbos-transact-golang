@@ -46,9 +46,6 @@ var (
 	wfClose = WithWorkflow(func(ctx context.Context, in string) (string, error) {
 		return prefix + in, nil
 	})
-	// Workflow for idempotency testing
-	idempotencyWf         = WithWorkflow(idempotencyWorkflow)
-	idempotencyWfWithStep = WithWorkflow(idempotencyWorkflowWithStep)
 )
 
 func simpleWorkflow(ctxt context.Context, input string) (string, error) {
@@ -78,27 +75,6 @@ func simpleWorkflowWithStepError(ctx context.Context, input string) (string, err
 // idempotencyWorkflow increments a global counter and returns the input
 func incrementCounter(_ context.Context, value int64) (int64, error) {
 	idempotencyCounter += value
-	return idempotencyCounter, nil
-}
-
-func idempotencyWorkflow(ctx context.Context, input string) (string, error) {
-	incrementCounter(ctx, 1)
-	return input, nil
-}
-
-var blockingStepStopEvent *Event
-
-func blockingStep(ctx context.Context, input string) (string, error) {
-	blockingStepStopEvent.Wait()
-	return "", nil
-}
-
-var idempotencyWorkflowWithStepEvent *Event
-
-func idempotencyWorkflowWithStep(ctx context.Context, input string) (int64, error) {
-	RunAsStep(ctx, incrementCounter, 1)
-	idempotencyWorkflowWithStepEvent.Set()
-	RunAsStep(ctx, blockingStep, input)
 	return idempotencyCounter, nil
 }
 
@@ -139,7 +115,6 @@ var (
 	})
 )
 
-// TODO: spin into dbos_test.go
 func TestAppVersion(t *testing.T) {
 	if _, err := hex.DecodeString(APP_VERSION); err != nil {
 		t.Fatalf("APP_VERSION is not a valid hex string: %v", err)
@@ -589,6 +564,32 @@ func TestChildWorkflow(t *testing.T) {
 	})
 }
 
+var (
+	idempotencyWf         = WithWorkflow(idempotencyWorkflow)
+	idempotencyWfWithStep = WithWorkflow(idempotencyWorkflowWithStep)
+)
+
+func idempotencyWorkflow(ctx context.Context, input string) (string, error) {
+	incrementCounter(ctx, 1)
+	return input, nil
+}
+
+var blockingStepStopEvent *Event
+
+func blockingStep(ctx context.Context, input string) (string, error) {
+	blockingStepStopEvent.Wait()
+	return "", nil
+}
+
+var idempotencyWorkflowWithStepEvent *Event
+
+func idempotencyWorkflowWithStep(ctx context.Context, input string) (int64, error) {
+	RunAsStep(ctx, incrementCounter, 1)
+	idempotencyWorkflowWithStepEvent.Set()
+	RunAsStep(ctx, blockingStep, input)
+	return idempotencyCounter, nil
+}
+
 func TestWorkflowIdempotency(t *testing.T) {
 	setupDBOS(t)
 
@@ -639,9 +640,7 @@ func TestWorkflowIdempotency(t *testing.T) {
 
 func TestWorkflowRecovery(t *testing.T) {
 	setupDBOS(t)
-
 	t.Run("RecoveryResumeWhereItLeftOff", func(t *testing.T) {
-
 		// Reset the global counter
 		idempotencyCounter = 0
 
@@ -713,7 +712,6 @@ func TestWorkflowRecovery(t *testing.T) {
 		if result != idempotencyCounter {
 			t.Fatalf("expected result to be %s, got %s", input, result)
 		}
-
 	})
 }
 
