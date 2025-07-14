@@ -5,6 +5,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -121,7 +122,9 @@ func NewSystemDatabase() (SystemDatabase, error) {
 	// TODO: pass proper config
 	databaseURL := os.Getenv("DBOS_DATABASE_URL")
 	if databaseURL == "" {
-		return nil, NewInitializationError("DBOS_DATABASE_URL environment variable is required")
+		fmt.Println("DBOS_DATABASE_URL not set, using default: postgres://postgres:${PGPASSWORD}@localhost:5432/postgres?sslmode=disable")
+		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
+		databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/postgres?sslmode=disable", password)
 	}
 
 	// Create the database if it doesn't exist
