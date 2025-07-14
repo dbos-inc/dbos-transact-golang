@@ -62,6 +62,5 @@ jobs:
       run: go test -v ./...
       working-directory: ./dbos
       env:
-        DBOS_DATABASE_URL: postgres://postgres:a!b@c$d()e*_,/:;=?@ff[]22@localhost:5432/postgres?sslmode=disable
         PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  
