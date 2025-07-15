@@ -7,6 +7,8 @@
 
 ---
 
+This package is in alpha -- the roadmap of missing features is listed [below](#roadmap).
+
 ## What is DBOS?
 
 DBOS provides lightweight durable workflows on top of Postgres. Instead of managing your own workflow orchestrator or task queue system, you can use DBOS to add durable workflows and queues to your program in just a few lines of code.
@@ -32,33 +34,33 @@ You add durable workflows to your existing Golang program by registering ordinar
 
 ```golang
 var (
-	wf = dbos.WithWorkflow(workflow)
+    wf = dbos.WithWorkflow(workflow)
 )
 
 func workflow(ctx context.Context, _ string) (string, error) {
-	_, err := dbos.RunAsStep(ctx, step1, "")
-	if err != nil {
-		return "", err
-	}
-	return dbos.RunAsStep(ctx, step2, "")
+    _, err := dbos.RunAsStep(ctx, step1, "")
+    if err != nil {
+        return "", err
+    }
+    return dbos.RunAsStep(ctx, step2, "")
 }
 
 func step1(ctx context.Context, _ string) (string, error) {
-	fmt.Println("Executing step 1")
-	return "Step 1 completed", nil
+    fmt.Println("Executing step 1")
+    return "Step 1 completed", nil
 }
 
 func step2(ctx context.Context, _ string) (string, error) {
-	fmt.Println("Executing step 2")
-	return "Step 2 completed - Workflow finished successfully", nil
+    fmt.Println("Executing step 2")
+    return "Step 2 completed - Workflow finished successfully", nil
 }
 
 func main() {
-	err := dbos.Launch()
-	if err != nil {
-		panic(err)
-	}
-	defer dbos.Shutdown()
+    err := dbos.Launch()
+    if err != nil {
+        panic(err)
+    }
+    defer dbos.Shutdown()
 
     wf(context.Background(), "hello DBOS")
 }
@@ -89,44 +91,59 @@ They don't require a separate queueing service or message broker&mdash;just Post
 
 ```golang
 var (
-	queue  = dbos.NewWorkflowQueue("example-queue")
-	taskWf = dbos.WithWorkflow(task)
+    queue  = dbos.NewWorkflowQueue("example-queue")
+    taskWf = dbos.WithWorkflow(task)
 )
 
 func task(ctx context.Context, i int) (int, error) {
-	time.Sleep(5 * time.Second)
-	fmt.Printf("Task %d completed\n", i)
-	return i, nil
+    time.Sleep(5 * time.Second)
+    fmt.Printf("Task %d completed\n", i)
+    return i, nil
 }
 
 func main() {
-	err := dbos.Launch()
-	if err != nil {
-		panic(err)
-	}
-	defer dbos.Shutdown()
+    err := dbos.Launch()
+    if err != nil {
+        panic(err)
+    }
+    defer dbos.Shutdown()
 
-	fmt.Println("Enqueuing workflows")
-	handles := make([]dbos.WorkflowHandle[int], 10)
-	for i := range 10 {
-		handle, err := taskWf(context.Background(), i, dbos.WithQueue(queue.Name))
-		if err != nil {
-			panic(fmt.Sprintf("failed to enqueue step %d: %v", i, err))
-		}
-		handles[i] = handle
-	}
-	results := make([]int, 10)
-	for i, handle := range handles {
-		result, err := handle.GetResult(context.Background())
-		if err != nil {
-			panic(fmt.Sprintf("failed to get result for step %d: %v", i, err))
-		}
-		results[i] = result
-	}
-	fmt.Printf("Successfully completed %d steps\n", len(results))
+    fmt.Println("Enqueuing workflows")
+    handles := make([]dbos.WorkflowHandle[int], 10)
+    for i := range 10 {
+        handle, err := taskWf(context.Background(), i, dbos.WithQueue(queue.Name))
+        if err != nil {
+            panic(fmt.Sprintf("failed to enqueue step %d: %v", i, err))
+        }
+        handles[i] = handle
+    }
+    results := make([]int, 10)
+    for i, handle := range handles {
+        result, err := handle.GetResult(context.Background())
+        if err != nil {
+            panic(fmt.Sprintf("failed to get result for step %d: %v", i, err))
+        }
+        results[i] = result
+    }
+    fmt.Printf("Successfully completed %d steps\n", len(results))
 }
 ```
 </details>
+
+## Roadmap:
+* logging for DBOS internals -- consider accepting a user provided logger
+* OTel trace generation and export
+* OTel logs -- consider leveraging the user provided logger
+* config?
+* go doc
+* workflows send and recv
+* workflows set and get event
+* workflow cancellation maps
+* queue dedup
+* queue priority
+* workflow timeouts
+* DBOS Client
+* datasources & transactions
 
 ## Getting started
 
