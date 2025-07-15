@@ -58,6 +58,9 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
+    - name: Install gotestsum
+      run: go install gotest.tools/gotestsum@latest
+
     - name: Run tests
       run: gotestsum --format github-action
       working-directory: ./dbos
