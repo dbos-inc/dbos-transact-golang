@@ -130,6 +130,26 @@ func main() {
 ```
 </details>
 
+## DBOS workflows
+
+A workflow can be any function with the following signature:
+```golang
+type WorkflowFunc[P any, R any] func(ctx context.Context, input P) (R, error)
+```
+
+`P` and `R` must be concrete types (not `any`).
+
+Workflows must be registered with DBOS using the `WithWorkflow` method before DBOS is launched.
+
+Workflows can run steps, which can be any function with the following signature:
+```golang
+type StepFunc[P any, R any] func(ctx context.Context, input P) (R, error)
+```
+
+To run a step within a workflow, use `RunAsStep`. Importantly, you must pass to `RunAsStep` the context received in the workflow function.
+
+The input and output of workflows and steps are memoized in your Postgres database for workflow recovery. Under the hood, DBOS uses the [encoding/gob](https://pkg.go.dev/encoding/gob) package for serialization (this means that only exported fields will be memoized and types without exported fields will generate an error.)
+
 ## Roadmap:
 * logging for DBOS internals -- consider accepting a user provided logger
 * OTel trace generation and export
@@ -152,3 +172,5 @@ Install the DBOS Transact package in your program:
 ```shell
 github.com/dbos-inc/dbos-transact-go
 ```
+
+You can store and export a Postgres connection string in the `DBOS_DATABASE_URL` environment variable for DBOS to manage your workflows state. By default, DBOS will use `postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable`.
