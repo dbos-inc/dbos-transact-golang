@@ -413,7 +413,6 @@ func TestSteps(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error from failing workflow but got none")
 		}
-		fmt.Println(err)
 
 		// Verify the step was called exactly 6 times (max attempts + 1 initial attempt)
 		if stepRetryAttemptCount != 6 {
