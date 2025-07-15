@@ -109,21 +109,29 @@ func main() {
 	fmt.Println("Enqueuing workflows")
 	handles := make([]dbos.WorkflowHandle[int], 10)
 	for i := range 10 {
-		handle, err := taskWf(ctx, i, dbos.WithQueue(queue.Name))
+		handle, err := taskWf(context.Background(), i, dbos.WithQueue(queue.Name))
 		if err != nil {
-			return "", fmt.Errorf("failed to enqueue step %d: %w", i, err)
+			panic(fmt.Sprintf("failed to enqueue step %d: %v", i, err))
 		}
 		handles[i] = handle
 	}
 	results := make([]int, 10)
 	for i, handle := range handles {
-		result, err := handle.GetResult(ctx)
+		result, err := handle.GetResult(context.Background())
 		if err != nil {
-			return "", fmt.Errorf("failed to get result for step %d: %w", i, err)
+			panic(fmt.Sprintf("failed to get result for step %d: %v", i, err))
 		}
 		results[i] = result
 	}
-	fmt.Printf("Successfully completed %d steps\n", len(results)), nil
+	fmt.Printf("Successfully completed %d steps\n", len(results))
 }
 ```
 </details>
+
+## Getting started
+
+Install the DBOS Transact package in your program:
+
+```shell
+github.com/dbos-inc/dbos-transact-go
+```
