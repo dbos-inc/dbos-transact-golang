@@ -604,7 +604,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	params := StepParams{
 		MaxRetries:    0,
 		BackoffFactor: 2.0,
-		BaseInterval:  100 * time.Millisecond,
+		BaseInterval:  500 * time.Millisecond,
 		MaxInterval:   1 * time.Hour,
 	}
 	for _, opt := range opts {
