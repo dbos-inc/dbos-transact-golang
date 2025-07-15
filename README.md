@@ -11,13 +11,16 @@
 
 DBOS provides lightweight durable workflows on top of Postgres. Instead of managing your own workflow orchestrator or task queue system, you can use DBOS to add durable workflows and queues to your program in just a few lines of code.
 
-## Getting started
 
-Install the DBOS Transact package in your program:
+## When Should I Use DBOS?
 
-```shell
-github.com/dbos-inc/dbos-transact-go
-```
+You should consider using DBOS if your application needs to **reliably handle failures**.
+For example, you might be building a payments service that must reliably process transactions even if servers crash mid-operation, or a long-running data pipeline that needs to resume seamlessly from checkpoints rather than restart from the beginning when interrupted.
+
+Handling failures is costly and complicated, requiring complex state management and recovery logic as well as heavyweight tools like external orchestration services.
+DBOS makes it simpler: annotate your code to checkpoint it in Postgres and automatically recover from any failure.
+DBOS also provides powerful Postgres-backed primitives that makes it easier to write and operate reliable code, including durable queues, notifications, scheduling, event processing, and programmatic workflow management.
+
 
 ## Features
 <details open><summary><strong>💾 Durable Workflows</strong></summary>
