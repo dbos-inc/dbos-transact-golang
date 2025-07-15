@@ -614,7 +614,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	// Get workflow state from context
 	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
-		return *new(R), NewStepExecutionError("", operationName, "workflow state not found in context")
+		return *new(R), NewStepExecutionError("", operationName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 
 	// If within a step, just run the function directly
