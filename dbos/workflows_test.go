@@ -338,9 +338,9 @@ func stepRetryAlwaysFailsStep(ctx context.Context, input string) (string, error)
 func stepRetryWorkflow(ctx context.Context, input string) (string, error) {
 	return RunAsStep(ctx, stepRetryAlwaysFailsStep, input,
 		WithStepMaxRetries(5),
-		WithBackoffRate(2.0),
-		WithBaseDelay(1*time.Millisecond),
-		WithMaxDelay(10*time.Millisecond))
+		WithBackoffFactor(2.0),
+		WithBaseInterval(1*time.Millisecond),
+		WithMaxInterval(10*time.Millisecond))
 }
 
 var (

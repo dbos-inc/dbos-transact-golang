@@ -572,24 +572,24 @@ func WithStepMaxRetries(maxRetries int) StepOption {
 	}
 }
 
-// WithBackoffRate sets the backoff rate for retries (multiplier for exponential backoff)
-func WithBackoffRate(backoffRate float64) StepOption {
+// WithBackoffFactor sets the backoff factor for retries (multiplier for exponential backoff)
+func WithBackoffFactor(backoffFactor float64) StepOption {
 	return func(p *StepParams) {
-		p.BackoffFactor = backoffRate
+		p.BackoffFactor = backoffFactor
 	}
 }
 
-// WithBaseDelay sets the base delay for the first retry
-func WithBaseDelay(baseDelay time.Duration) StepOption {
+// WithBaseInterval sets the base delay for the first retry
+func WithBaseInterval(baseInterval time.Duration) StepOption {
 	return func(p *StepParams) {
-		p.BaseInterval = baseDelay
+		p.BaseInterval = baseInterval
 	}
 }
 
-// WithMaxDelay sets the maximum delay for retries
-func WithMaxDelay(maxDelay time.Duration) StepOption {
+// WithMaxInterval sets the maximum delay for retries
+func WithMaxInterval(maxInterval time.Duration) StepOption {
 	return func(p *StepParams) {
-		p.MaxInterval = maxDelay
+		p.MaxInterval = maxInterval
 	}
 }
 
