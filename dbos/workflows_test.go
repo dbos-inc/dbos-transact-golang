@@ -978,3 +978,62 @@ func TestScheduledWorkflows(t *testing.T) {
 		}
 	})
 }
+
+var (
+	sendWf    = WithWorkflow(sendWorkflow)
+	receiveWf = WithWorkflow(receiveWorkflow)
+)
+
+type sendWorkflowInput struct {
+	DestinationID string
+	Topic         string
+}
+
+func sendWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) {
+	fmt.Println("Starting send workflow with input:", input)
+	err := Send(ctx, WorkflowSendInput{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message1"})
+	if err != nil {
+		return "", fmt.Errorf("failed to send message: %w", err)
+	}
+	fmt.Println("Sending message on topic:", input.Topic, "to destination:", input.DestinationID)
+	return "", nil
+}
+
+func receiveWorkflow(ctx context.Context, topic string) (string, error) {
+	msg, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 10 * time.Second})
+	if err != nil {
+		return "", err
+	}
+	return msg, nil
+}
+
+func TestSendRecv(t *testing.T) {
+	setupDBOS(t)
+
+	// Start the receive workflow
+	receiveHandle, err := receiveWf(context.Background(), "test-topic")
+	if err != nil {
+		t.Fatalf("failed to start receive workflow: %v", err)
+	}
+
+	// Send a message to the receive workflow
+	handle, err := sendWf(context.Background(), sendWorkflowInput{
+		DestinationID: receiveHandle.GetWorkflowID(),
+		Topic:         "test-topic",
+	})
+	if err != nil {
+		t.Fatalf("failed to send message: %v", err)
+	}
+	_, err = handle.GetResult(context.Background())
+	if err != nil {
+		t.Fatalf("failed to get result from send workflow: %v", err)
+	}
+
+	result, err := receiveHandle.GetResult(context.Background())
+	if err != nil {
+		t.Fatalf("failed to get result from receive workflow: %v", err)
+	}
+	if result != "message1" {
+		t.Fatalf("expected received message to be 'message1', got '%s'", result)
+	}
+}

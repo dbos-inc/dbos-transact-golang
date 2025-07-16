@@ -103,6 +103,8 @@ func Launch() error {
 	}
 	fmt.Println("DBOS: System database initialized")
 
+	systemDB.Launch(context.Background())
+
 	// Create context with cancel function for queue runner
 	ctx, cancel := context.WithCancel(context.Background())
 

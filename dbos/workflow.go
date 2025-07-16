@@ -706,6 +706,42 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	return stepOutput, stepError
 }
 
+/****************************************/
+/******* WORKFLOW COMMUNICATIONS ********/
+/****************************************/
+
+type WorkflowSendInput struct {
+	DestinationID string
+	Message       any
+	Topic         string
+}
+
+func Send(ctx context.Context, input WorkflowSendInput) error {
+	return getExecutor().systemDB.Send(ctx, input)
+}
+
+type WorkflowRecvInput struct {
+	Topic   string
+	Timeout time.Duration
+}
+
+func Recv[R any](ctx context.Context, input WorkflowRecvInput) (R, error) {
+	msg, err := getExecutor().systemDB.Recv(ctx, input)
+	if err != nil {
+		return *new(R), err
+	}
+	// Type check
+	var typedMessage R
+	if msg != nil {
+		var ok bool
+		typedMessage, ok = msg.(R)
+		if !ok {
+			return *new(R), NewWorkflowUnexpectedResultType("", fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", msg))
+		}
+	}
+	return typedMessage, nil
+}
+
 /***********************************/
 /******* WORKFLOW MANAGEMENT *******/
 /***********************************/

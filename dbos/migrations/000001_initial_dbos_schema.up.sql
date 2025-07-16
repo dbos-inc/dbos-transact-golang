@@ -68,6 +68,21 @@ CREATE TABLE dbos.notifications (
 -- Create index for notifications
 CREATE INDEX idx_workflow_topic ON dbos.notifications (destination_uuid, topic);
 
+-- Create notification function
+CREATE OR REPLACE FUNCTION dbos.notifications_function() RETURNS TRIGGER AS $$
+DECLARE
+    payload text := NEW.destination_uuid || '::' || NEW.topic;
+BEGIN
+    PERFORM pg_notify('dbos_notifications_channel', payload);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create notification trigger
+CREATE TRIGGER dbos_notifications_trigger
+AFTER INSERT ON dbos.notifications
+FOR EACH ROW EXECUTE FUNCTION dbos.notifications_function();
+
 -- Create workflow_events table
 CREATE TABLE dbos.workflow_events (
     workflow_uuid TEXT NOT NULL,

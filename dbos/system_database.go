@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -23,6 +24,7 @@ import (
 /*******************************/
 
 type SystemDatabase interface {
+	Launch(ctx context.Context)
 	Shutdown()
 	ResetSystemDB(ctx context.Context) error
 	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
@@ -37,10 +39,15 @@ type SystemDatabase interface {
 	CheckOperationExecution(ctx context.Context, input CheckOperationExecutionDBInput) (*RecordedResult, error)
 	RecordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
 	GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
+	Send(ctx context.Context, input WorkflowSendInput) error
+	Recv(ctx context.Context, input WorkflowRecvInput) (any, error)
 }
 
 type systemDatabase struct {
-	pool *pgxpool.Pool
+	pool                           *pgxpool.Pool
+	notificationListenerConnection *pgconn.PgConn
+	notificationListenerLoopCancel context.CancelFunc
+	notificationsMap               *sync.Map
 }
 
 /*******************************/
@@ -150,14 +157,56 @@ func NewSystemDatabase() (SystemDatabase, error) {
 		return nil, NewInitializationError(fmt.Sprintf("failed to ping database: %v", err))
 	}
 
+	// Create a map of notification payloads to channels
+	notificationsMap := &sync.Map{}
+
+	// Create a connection to listen on notifications
+	config, err := pgconn.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, NewInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
+	}
+	config.OnNotification = func(c *pgconn.PgConn, n *pgconn.Notification) {
+		if n.Channel == "dbos_notifications_channel" {
+			// Check if an entry exists in the map, indexed by the payload
+			// If yes, send a signal to the channel so the listener can wake up
+			if ch, exists := notificationsMap.Load(n.Payload); exists {
+				select {
+				case ch.(chan bool) <- true: // Send a signal to wake up the listener
+				default:
+					fmt.Printf("Warning: notification channel for payload %s is full, skipping\n", n.Payload)
+				}
+			}
+		}
+	}
+	notificationListenerConnection, err := pgconn.ConnectConfig(context.Background(), config)
+	if err != nil {
+		return nil, NewInitializationError(fmt.Sprintf("failed to connect notification listener to database: %v", err))
+	}
+
 	return &systemDatabase{
-		pool: pool,
+		pool:                           pool,
+		notificationListenerConnection: notificationListenerConnection,
+		notificationsMap:               notificationsMap,
 	}, nil
 }
 
+func (s *systemDatabase) Launch(ctx context.Context) {
+	// Start the notification listener loop
+	var notificationListenerLoopContext context.Context
+	notificationListenerLoopContext, s.notificationListenerLoopCancel = context.WithCancel(ctx)
+	go s.notificationListenerLoop(notificationListenerLoopContext)
+	fmt.Println("DBOS: Started notification listener loop")
+}
+
 func (s *systemDatabase) Shutdown() {
-	fmt.Println("Closing system database connection pool")
-	s.pool.Close()
+	fmt.Println("DBOS: Closing system database connection pool")
+	if s.pool != nil {
+		s.pool.Close()
+	}
+	if s.notificationListenerLoopCancel != nil {
+		s.notificationListenerLoopCancel()
+	}
+	s.notificationsMap.Clear()
 }
 
 /*******************************/
@@ -612,6 +661,7 @@ type recordOperationResultDBInput struct {
 	operationName string
 	output        any
 	err           error
+	tx            pgx.Tx
 }
 
 func (s *systemDatabase) RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
@@ -631,13 +681,24 @@ func (s *systemDatabase) RecordOperationResult(ctx context.Context, input record
 		return fmt.Errorf("failed to serialize output: %w", err)
 	}
 
-	commandTag, err := s.pool.Exec(ctx, query,
-		input.workflowID,
-		input.operationID,
-		outputString,
-		errorString,
-		input.operationName,
-	)
+	var commandTag pgconn.CommandTag
+	if input.tx != nil {
+		commandTag, err = input.tx.Exec(ctx, query,
+			input.workflowID,
+			input.operationID,
+			outputString,
+			errorString,
+			input.operationName,
+		)
+	} else {
+		commandTag, err = s.pool.Exec(ctx, query,
+			input.workflowID,
+			input.operationID,
+			outputString,
+			errorString,
+			input.operationName,
+		)
+	}
 
 	/*
 		fmt.Printf("RecordOperationResult - CommandTag: %v\n", commandTag)
@@ -645,7 +706,7 @@ func (s *systemDatabase) RecordOperationResult(ctx context.Context, input record
 		fmt.Printf("RecordOperationResult - SQL: %s\n", commandTag.String())
 	*/
 
-	// TODO handle PG serialization errors
+	// TODO return DBOSWorkflowConflictIDError(result["workflow_uuid"]) on 23505 conflict ID error
 	if err != nil {
 		fmt.Printf("RecordOperationResult - Error occurred: %v\n", err)
 		return fmt.Errorf("failed to record operation result: %w", err)
@@ -775,15 +836,23 @@ type CheckOperationExecutionDBInput struct {
 	workflowID   string
 	operationID  int
 	functionName string
+	tx           pgx.Tx
 }
 
 func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input CheckOperationExecutionDBInput) (*RecordedResult, error) {
-	// Create transaction for this operation
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	var tx pgx.Tx
+	var err error
+
+	// Use provided transaction or create a new one
+	if input.tx != nil {
+		tx = input.tx
+	} else {
+		tx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer tx.Rollback(ctx) // We don't need to commit this transaction -- it is just useful for having READ COMMITTED across the reads
 	}
-	defer tx.Rollback(ctx) // We never really need to commit this transaction
 
 	// First query: Retrieve the workflow status
 	workflowStatusQuery := `SELECT status FROM dbos.workflow_status WHERE workflow_uuid = $1`
@@ -903,6 +972,268 @@ func (s *systemDatabase) GetWorkflowSteps(ctx context.Context, workflowID string
 	}
 
 	return steps, nil
+}
+
+/****************************************/
+/******* WORKFLOW COMMUNICATIONS ********/
+/****************************************/
+
+func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
+	mrr := s.notificationListenerConnection.Exec(ctx, "LISTEN dbos_notifications_channel")
+	results, err := mrr.ReadAll()
+	if err != nil {
+		fmt.Printf("Failed to listen on dbos_notifications_channel: %v\n", err)
+		return
+	}
+	mrr.Close()
+
+	for _, result := range results {
+		if result.Err != nil {
+			fmt.Printf("Error listening on dbos_notifications_channel: %v\n", result.Err)
+			return
+		}
+	}
+
+	for {
+		// Block until a notification is received. OnNotification will be called when a notification is received.
+		// WaitForNotification handles context cancellation: https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgconn/pgconn.go#L1050
+		err := s.notificationListenerConnection.WaitForNotification(ctx)
+		if err != nil {
+			if err == context.Canceled {
+				fmt.Println("Notification listener loop exiting due to context cancellation")
+				return
+			}
+			fmt.Printf("Error waiting for notification: %v\n", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+	}
+}
+
+var DBOS_NULL_TOPIC = "__null__topic__"
+
+// Send is a special type of step that sends a message to another workflow.
+// Two differences with a normal steps: durability and the function run in the same transaction, and we forbid nested step execution
+func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) error {
+	functionName := "DBOS.send"
+
+	// Get workflow state from context
+	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	if !ok || workflowState == nil {
+		return NewStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
+	}
+
+	if workflowState.isWithinStep {
+		return NewStepExecutionError(workflowState.WorkflowID, functionName, "cannot call Send within a step")
+	}
+
+	stepID := workflowState.NextStepID()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Check if operation was already executed and do nothing if so
+	checkInput := CheckOperationExecutionDBInput{
+		workflowID:   input.DestinationID,
+		operationID:  stepID,
+		functionName: functionName,
+		tx:           tx,
+	}
+	recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
+	if err != nil {
+		return fmt.Errorf("failed to check operation execution: %w", err)
+	}
+	if recordedResult != nil {
+		return nil
+	}
+
+	// Set default topic if not provided
+	topic := DBOS_NULL_TOPIC
+	if len(input.Topic) > 0 {
+		topic = input.Topic
+	}
+
+	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
+	messageString, err := serialize(input.Message)
+	if err != nil {
+		return fmt.Errorf("failed to serialize message: %w", err)
+	}
+
+	insertQuery := `INSERT INTO dbos.notifications (destination_uuid, topic, message)
+					VALUES ($1, $2, $3)`
+
+	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, messageString)
+	if err != nil {
+		// Check for foreign key violation (destination workflow doesn't exist)
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23503" {
+			return NewNonExistentWorkflowError(input.DestinationID)
+		}
+		return fmt.Errorf("failed to insert notification: %w", err)
+	}
+
+	// Record the operation result
+	recordInput := recordOperationResultDBInput{
+		workflowID:    workflowState.WorkflowID,
+		operationID:   stepID,
+		operationName: functionName,
+		output:        nil,
+		err:           nil,
+		tx:            tx,
+	}
+
+	err = s.RecordOperationResult(ctx, recordInput)
+	if err != nil {
+		return fmt.Errorf("failed to record operation result: %w", err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// Recv is a special type of step that receives a message destined for a given workflow
+func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any, error) {
+	functionName := "DBOS.recv"
+
+	// Get workflow state from context
+	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	if !ok || workflowState == nil {
+		return nil, NewStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
+	}
+
+	if workflowState.isWithinStep {
+		return nil, NewStepExecutionError(workflowState.WorkflowID, functionName, "cannot call Send within a step")
+	}
+
+	stepID := workflowState.NextStepID()
+	destinationID := workflowState.WorkflowID
+
+	// Set default topic if not provided
+	topic := DBOS_NULL_TOPIC
+	if len(input.Topic) > 0 {
+		topic = input.Topic
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Check if operation was already executed
+	// XXX this might not need to be in the transaction
+	checkInput := CheckOperationExecutionDBInput{
+		workflowID:   destinationID,
+		operationID:  stepID,
+		functionName: functionName,
+		tx:           tx,
+	}
+	recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check operation execution: %w", err)
+	}
+	if recordedResult != nil {
+		if recordedResult.output != nil {
+			return recordedResult.output, nil
+		}
+		return nil, fmt.Errorf("no output recorded in the last recv")
+	}
+
+	// First check if there is already a message available in the database.
+	// If not, we'll wait for a notification and timeout
+	var exists bool
+	query := `SELECT EXISTS (SELECT 1 FROM dbos.notifications WHERE destination_uuid = $1 AND topic = $2)`
+	err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check message: %w", err)
+	}
+	if !exists {
+		// We'll do so through registering a channel with the notification listener loop.
+		payload := fmt.Sprintf("%s::%s", destinationID, topic)
+		_, ok := s.notificationsMap.Load(payload)
+		if ok {
+			fmt.Println("Receive already called for workflow ", destinationID)
+			return nil, NewWorkflowConflictIDError(destinationID)
+		}
+		c := make(chan bool)
+		s.notificationsMap.Store(payload, c)
+		defer func() {
+			// Clean up the channel after we're done
+			s.notificationsMap.Delete(payload)
+			close(c)
+		}()
+		// Listen for notifications on the channel
+		fmt.Printf("Waiting for notification on channel %s\n", payload)
+		select {
+		case <-c:
+			fmt.Printf("Received notification on channel %s\n", payload)
+		case <-time.After(input.Timeout):
+			// If we reach the timeout, we can check if there is a message in the
+			// database, and if not, we can return nil.
+			fmt.Printf("Timeout reached for channel %s after %v\n", payload, input.Timeout)
+		}
+	}
+
+	// Find the oldest message and delete it atomically
+	query = `
+        WITH oldest_entry AS (
+            SELECT destination_uuid, topic, message, created_at_epoch_ms
+            FROM dbos.notifications
+            WHERE destination_uuid = $1 AND topic = $2
+            ORDER BY created_at_epoch_ms ASC
+            LIMIT 1
+        )
+        DELETE FROM dbos.notifications
+        WHERE destination_uuid = (SELECT destination_uuid FROM oldest_entry)
+          AND topic = (SELECT topic FROM oldest_entry)
+          AND created_at_epoch_ms = (SELECT created_at_epoch_ms FROM oldest_entry)
+        RETURNING message`
+
+	var messageString *string
+	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			// No message found, record nil result
+			messageString = nil
+		} else {
+			return nil, fmt.Errorf("failed to consume message: %w", err)
+		}
+	}
+
+	// Deserialize the message
+	var message any
+	if messageString != nil { // nil message should never happen because they'd cause an error on the send() path
+		message, err = deserialize(messageString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize message: %w", err)
+		}
+	}
+
+	// Record the operation result
+	recordInput := recordOperationResultDBInput{
+		workflowID:    destinationID,
+		operationID:   stepID,
+		operationName: functionName,
+		output:        message,
+		tx:            tx,
+	}
+	err = s.RecordOperationResult(ctx, recordInput)
+	if err != nil {
+		return nil, fmt.Errorf("failed to record operation result: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return message, nil
 }
 
 /*******************************/
