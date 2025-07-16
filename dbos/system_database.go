@@ -1011,7 +1011,7 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 	}
 }
 
-var DBOS_NULL_TOPIC = "__null__topic__"
+const DBOS_NULL_TOPIC = "__null__topic__"
 
 // Send is a special type of step that sends a message to another workflow.
 // Two differences with a normal steps: durability and the function run in the same transaction, and we forbid nested step execution
@@ -1167,7 +1167,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 		s.notificationsMap.Store(payload, c)
 		defer func() {
 			// Clean up the channel after we're done
-			// FIXME this needs to be called even if this panic
+			// XXX We should handle panics in this function and make sure we call this. Not a problem for now as panic will crash the importing package.
 			s.notificationsMap.Delete(payload)
 			close(c)
 		}()
@@ -1178,8 +1178,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 		case <-c:
 			fmt.Printf("Received notification on channel %s\n", payload)
 		case <-time.After(input.Timeout):
-			// If we reach the timeout, we can check if there is a message in the
-			// database, and if not, we can return nil.
+			// If we reach the timeout, we can check if there is a message in the database, and if not return nil.
 			fmt.Printf("Timeout reached for channel %s after %v\n", payload, input.Timeout)
 		}
 	}
