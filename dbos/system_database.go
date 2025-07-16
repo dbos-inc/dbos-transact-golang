@@ -1000,7 +1000,7 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 		err := s.notificationListenerConnection.WaitForNotification(ctx)
 		if err != nil {
 			if err == context.Canceled {
-				fmt.Println("Notification listener loop exiting due to context cancellation")
+				fmt.Println("Notification listener loop exiting due to context cancellation: ", ctx.Err())
 				return
 			}
 			fmt.Printf("Error waiting for notification: %v\n", err)
@@ -1045,7 +1045,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 	}
 	recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
 	if err != nil {
-		return fmt.Errorf("failed to check operation execution: %w", err)
+		return err
 	}
 	if recordedResult != nil {
 		return nil
@@ -1103,13 +1103,14 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	functionName := "DBOS.recv"
 
 	// Get workflow state from context
+	// XXX these checks might be better suited for outside of the system db code. We'll see when we implement the client.
 	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
 		return nil, NewStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 
 	if workflowState.isWithinStep {
-		return nil, NewStepExecutionError(workflowState.WorkflowID, functionName, "cannot call Send within a step")
+		return nil, NewStepExecutionError(workflowState.WorkflowID, functionName, "cannot call Recv within a step")
 	}
 
 	stepID := workflowState.NextStepID()
@@ -1150,7 +1151,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	// If not, we'll wait for a notification and timeout
 	var exists bool
 	query := `SELECT EXISTS (SELECT 1 FROM dbos.notifications WHERE destination_uuid = $1 AND topic = $2)`
-	err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
+	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("failed to check message: %w", err)
 	}
@@ -1166,10 +1167,12 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 		s.notificationsMap.Store(payload, c)
 		defer func() {
 			// Clean up the channel after we're done
+			// FIXME this needs to be called even if this panic
 			s.notificationsMap.Delete(payload)
 			close(c)
 		}()
 		// Listen for notifications on the channel
+		// XXX should we prevent zero or negative timeouts?
 		fmt.Printf("Waiting for notification on channel %s\n", payload)
 		select {
 		case <-c:

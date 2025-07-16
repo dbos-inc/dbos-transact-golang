@@ -993,47 +993,208 @@ func sendWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) 
 	fmt.Println("Starting send workflow with input:", input)
 	err := Send(ctx, WorkflowSendInput{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message1"})
 	if err != nil {
-		return "", fmt.Errorf("failed to send message: %w", err)
+		return "", err
+	}
+	err = Send(ctx, WorkflowSendInput{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message2"})
+	if err != nil {
+		return "", err
+	}
+	err = Send(ctx, WorkflowSendInput{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message3"})
+	if err != nil {
+		return "", err
 	}
 	fmt.Println("Sending message on topic:", input.Topic, "to destination:", input.DestinationID)
 	return "", nil
 }
 
 func receiveWorkflow(ctx context.Context, topic string) (string, error) {
-	msg, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 10 * time.Second})
+	msg1, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
 	if err != nil {
 		return "", err
 	}
-	return msg, nil
+	msg2, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+	if err != nil {
+		return "", err
+	}
+	msg3, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+	if err != nil {
+		return "", err
+	}
+	return msg1 + "-" + msg2 + "-" + msg3, nil
 }
 
 func TestSendRecv(t *testing.T) {
 	setupDBOS(t)
 
-	// Start the receive workflow
-	receiveHandle, err := receiveWf(context.Background(), "test-topic")
-	if err != nil {
-		t.Fatalf("failed to start receive workflow: %v", err)
-	}
+	t.Run("SendRecvSuccess", func(t *testing.T) {
+		// Start the receive workflow
+		receiveHandle, err := receiveWf(context.Background(), "test-topic")
+		if err != nil {
+			t.Fatalf("failed to start receive workflow: %v", err)
+		}
 
-	// Send a message to the receive workflow
-	handle, err := sendWf(context.Background(), sendWorkflowInput{
-		DestinationID: receiveHandle.GetWorkflowID(),
-		Topic:         "test-topic",
+		// Send a message to the receive workflow
+		handle, err := sendWf(context.Background(), sendWorkflowInput{
+			DestinationID: receiveHandle.GetWorkflowID(),
+			Topic:         "test-topic",
+		})
+		if err != nil {
+			t.Fatalf("failed to send message: %v", err)
+		}
+		_, err = handle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from send workflow: %v", err)
+		}
+
+		start := time.Now()
+		result, err := receiveHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from receive workflow: %v", err)
+		}
+		if result != "message1-message2-message3" {
+			t.Fatalf("expected received message to be 'message1-message2-message3', got '%s'", result)
+		}
+		// XXX let's see how this works when all the tests run
+		if time.Since(start) > 5*time.Second {
+			t.Fatalf("receive workflow took too long to complete, expected < 5s, got %v", time.Since(start))
+		}
+
+		// Send and receive again the same workflows to verify idempotency
+		_, err = sendWf(context.Background(), sendWorkflowInput{
+			DestinationID: receiveHandle.GetWorkflowID(),
+			Topic:         "test-topic",
+		}, WithWorkflowID(handle.GetWorkflowID()))
+		if err != nil {
+			t.Fatalf("failed to send message with same workflow ID: %v", err)
+		}
+		receiveHandle2, err := receiveWf(context.Background(), "test-topic", WithWorkflowID(receiveHandle.GetWorkflowID()))
+		if err != nil {
+			t.Fatalf("failed to start receive workflow with same ID: %v", err)
+		}
+		result, err = receiveHandle2.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from receive workflow with same ID: %v", err)
+		}
+		if result != "message1-message2-message3" {
+			t.Fatalf("expected received message to be 'message1-message2-message3', got '%s'", result)
+		}
+
+		// Get steps for both workflows and verify we have the expected number
+		sendSteps, err := getExecutor().systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get steps for send workflow: %v", err)
+		}
+		receiveSteps, err := getExecutor().systemDB.GetWorkflowSteps(context.Background(), receiveHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get steps for receive workflow: %v", err)
+		}
+
+		// Verify the number of steps matches the number of send() and recv() calls
+		// sendWorkflow has 3 Send() calls, receiveWorkflow has 3 Recv() calls
+		expectedSendSteps := 3
+		expectedReceiveSteps := 3
+
+		if len(sendSteps) != expectedSendSteps {
+			t.Fatalf("expected %d steps in send workflow, got %d", expectedSendSteps, len(sendSteps))
+		}
+		if len(receiveSteps) != expectedReceiveSteps {
+			t.Fatalf("expected %d steps in receive workflow, got %d", expectedReceiveSteps, len(receiveSteps))
+		}
 	})
-	if err != nil {
-		t.Fatalf("failed to send message: %v", err)
-	}
-	_, err = handle.GetResult(context.Background())
-	if err != nil {
-		t.Fatalf("failed to get result from send workflow: %v", err)
-	}
 
-	result, err := receiveHandle.GetResult(context.Background())
-	if err != nil {
-		t.Fatalf("failed to get result from receive workflow: %v", err)
-	}
-	if result != "message1" {
-		t.Fatalf("expected received message to be 'message1', got '%s'", result)
-	}
+	t.Run("SendToNonExistentUUID", func(t *testing.T) {
+		// Generate a non-existent UUID
+		destUUID := uuid.NewString()
+
+		// Send to non-existent UUID should fail
+		handle, err := sendWf(context.Background(), sendWorkflowInput{
+			DestinationID: destUUID,
+			Topic:         "testtopic",
+		})
+		if err != nil {
+			t.Fatalf("failed to start send workflow: %v", err)
+		}
+
+		_, err = handle.GetResult(context.Background())
+		if err == nil {
+			t.Fatal("expected error when sending to non-existent UUID but got none")
+		}
+
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != NonExistentWorkflowError {
+			t.Fatalf("expected error code to be NonExistentWorkflowError, got %v", dbosErr.Code)
+		}
+
+		expectedErrorMsg := fmt.Sprintf("workflow %s does not exist", destUUID)
+		if !strings.Contains(err.Error(), expectedErrorMsg) {
+			t.Fatalf("expected error message to contain '%s', got '%s'", expectedErrorMsg, err.Error())
+		}
+	})
+
+	t.Run("RecvTimeout", func(t *testing.T) {
+		// Create a receive workflow that tries to receive a message but no send happens
+		receiveHandle, err := receiveWf(context.Background(), "timeout-test-topic")
+		if err != nil {
+			t.Fatalf("failed to start receive workflow: %v", err)
+		}
+		result, err := receiveHandle.GetResult(context.Background())
+		if result != "--" {
+			t.Fatalf("expected -- result on timeout, got '%s'", result)
+		}
+		if err != nil {
+			t.Fatalf("expected no error on timeout, but got: %v", err)
+		}
+	})
+
+	t.Run("SendRecvMustRunInsideWorkflows", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Attempt to run Send outside of a workflow context
+		err := Send(ctx, WorkflowSendInput{DestinationID: "test-id", Topic: "test-topic", Message: "test-message"})
+		if err == nil {
+			t.Fatal("expected error when running Send outside of workflow context, but got none")
+		}
+
+		// Check the error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != StepExecutionError {
+			t.Fatalf("expected error code to be StepExecutionError, got %v", dbosErr.Code)
+		}
+
+		// Test the specific message from the error
+		expectedMessagePart := "workflow state not found in context"
+		if !strings.Contains(err.Error(), expectedMessagePart) {
+			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+		}
+
+		// Attempt to run Recv outside of a workflow context
+		_, err = Recv[string](ctx, WorkflowRecvInput{Topic: "test-topic", Timeout: 1 * time.Second})
+		if err == nil {
+			t.Fatal("expected error when running Recv outside of workflow context, but got none")
+		}
+
+		// Check the error type
+		dbosErr, ok = err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != StepExecutionError {
+			t.Fatalf("expected error code to be StepExecutionError, got %v", dbosErr.Code)
+		}
+
+		// Test the specific message from the error
+		if !strings.Contains(err.Error(), expectedMessagePart) {
+			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+		}
+	})
+
 }
