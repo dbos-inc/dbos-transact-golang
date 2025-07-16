@@ -1158,13 +1158,13 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	if !exists {
 		// We'll do so through registering a channel with the notification listener loop.
 		payload := fmt.Sprintf("%s::%s", destinationID, topic)
-		_, ok := s.notificationsMap.Load(payload)
-		if ok {
+		c := make(chan bool)
+		_, loaded := s.notificationsMap.LoadOrStore(payload, c)
+		if loaded {
+			close(c) // Clean up the unused channel
 			fmt.Println("Receive already called for workflow ", destinationID)
 			return nil, NewWorkflowConflictIDError(destinationID)
 		}
-		c := make(chan bool)
-		s.notificationsMap.Store(payload, c)
 		defer func() {
 			// Clean up the channel after we're done
 			// XXX We should handle panics in this function and make sure we call this. Not a problem for now as panic will crash the importing package.
