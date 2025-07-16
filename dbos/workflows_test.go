@@ -980,8 +980,10 @@ func TestScheduledWorkflows(t *testing.T) {
 }
 
 var (
-	sendWf    = WithWorkflow(sendWorkflow)
-	receiveWf = WithWorkflow(receiveWorkflow)
+	sendWf       = WithWorkflow(sendWorkflow)
+	receiveWf    = WithWorkflow(receiveWorkflow)
+	sendStructWf = WithWorkflow(sendStructWorkflow)
+	receiveStructWf = WithWorkflow(receiveStructWorkflow)
 )
 
 type sendWorkflowInput struct {
@@ -1021,6 +1023,20 @@ func receiveWorkflow(ctx context.Context, topic string) (string, error) {
 		return "", err
 	}
 	return msg1 + "-" + msg2 + "-" + msg3, nil
+}
+
+func sendStructWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) {
+	testStruct := sendRecvType{Value: "test-struct-value"}
+	err := Send(ctx, WorkflowSendInput{DestinationID: input.DestinationID, Topic: input.Topic, Message: testStruct})
+	return "", err
+}
+
+func receiveStructWorkflow(ctx context.Context, topic string) (sendRecvType, error) {
+	return Recv[sendRecvType](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+}
+
+type sendRecvType struct {
+	Value string
 }
 
 func TestSendRecv(t *testing.T) {
@@ -1099,6 +1115,39 @@ func TestSendRecv(t *testing.T) {
 		}
 		if len(receiveSteps) != expectedReceiveSteps {
 			t.Fatalf("expected %d steps in receive workflow, got %d", expectedReceiveSteps, len(receiveSteps))
+		}
+	})
+
+	t.Run("SendRecvCustomStruct", func(t *testing.T) {
+		// Start the receive workflow
+		receiveHandle, err := receiveStructWf(context.Background(), "struct-topic")
+		if err != nil {
+			t.Fatalf("failed to start receive workflow: %v", err)
+		}
+
+		// Send the struct to the receive workflow
+		sendHandle, err := sendStructWf(context.Background(), sendWorkflowInput{
+			DestinationID: receiveHandle.GetWorkflowID(),
+			Topic:         "struct-topic",
+		})
+		if err != nil {
+			t.Fatalf("failed to send struct: %v", err)
+		}
+
+		_, err = sendHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from send workflow: %v", err)
+		}
+
+		// Get the result from receive workflow
+		result, err := receiveHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from receive workflow: %v", err)
+		}
+
+		// Verify the struct was received correctly
+		if result.Value != "test-struct-value" {
+			t.Fatalf("expected received struct value to be 'test-struct-value', got '%s'", result.Value)
 		}
 	})
 

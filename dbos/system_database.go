@@ -1014,7 +1014,7 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 const DBOS_NULL_TOPIC = "__null__topic__"
 
 // Send is a special type of step that sends a message to another workflow.
-// Two differences with a normal steps: durability and the function run in the same transaction, and we forbid nested step execution
+// Three differences with a normal steps: durability and the function run in the same transaction, and we forbid nested step execution
 func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) error {
 	functionName := "DBOS.send"
 
