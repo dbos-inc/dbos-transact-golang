@@ -1158,10 +1158,10 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	if !exists {
 		// We'll do so through registering a channel with the notification listener loop.
 		payload := fmt.Sprintf("%s::%s", destinationID, topic)
-		c := make(chan bool)
+		c := make(chan bool, 1) // Make it buffered to allow the notification listener to post a signal even if the receiver has not reached its select statement yet
 		_, loaded := s.notificationsMap.LoadOrStore(payload, c)
 		if loaded {
-			close(c) // Clean up the unused channel
+			close(c)
 			fmt.Println("Receive already called for workflow ", destinationID)
 			return nil, NewWorkflowConflictIDError(destinationID)
 		}
