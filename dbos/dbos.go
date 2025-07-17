@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"reflect"
 	"runtime"
@@ -62,6 +63,7 @@ type executor struct {
 	queueRunnerCtx        context.Context
 	queueRunnerCancelFunc context.CancelFunc
 	queueRunnerDone       chan struct{}
+	logger                *slog.Logger
 }
 
 // New creates a new DBOS instance with an initialized system database
@@ -75,23 +77,42 @@ func getExecutor() *executor {
 	return dbos
 }
 
-func Launch() error {
+type config struct {
+	logger           *slog.Logger
+	otlpLogEndpoints []string
+}
+
+type LaunchOption func(*config)
+
+func WithLogger(logger *slog.Logger) LaunchOption {
+	return func(config *config) {
+		config.logger = logger
+	}
+}
+
 	if dbos != nil {
 		fmt.Println("warning: DBOS instance already initialized, skipping re-initialization")
 		return NewInitializationError("DBOS already initialized")
 	}
 
+	config := &config{}
+	for _, option := range options {
+		option(config)
+	}
+
+	logger := config.logger
+
 	// Initialize with environment variables, providing defaults if not set
 	APP_VERSION = os.Getenv("DBOS__APPVERSION")
 	if APP_VERSION == "" {
 		APP_VERSION = computeApplicationVersion()
-		fmt.Println("DBOS: DBOS__APPVERSION not set, using computed hash")
+		logger.Info("DBOS__APPVERSION not set, using computed hash")
 	}
 
 	EXECUTOR_ID = os.Getenv("DBOS__VMID")
 	if EXECUTOR_ID == "" {
 		EXECUTOR_ID = "local"
-		fmt.Printf("DBOS: DBOS__VMID not set, using default: %s\n", EXECUTOR_ID)
+		logger.Info("DBOS__VMID not set, using default", "executor_id", EXECUTOR_ID)
 	}
 
 	APP_ID = os.Getenv("DBOS__APPID")
@@ -101,7 +122,7 @@ func Launch() error {
 	if err != nil {
 		return NewInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
-	fmt.Println("DBOS: System database initialized")
+	logger.Info("System database initialized")
 
 	systemDB.Launch(context.Background())
 
@@ -113,19 +134,24 @@ func Launch() error {
 		queueRunnerCtx:        ctx,
 		queueRunnerCancelFunc: cancel,
 		queueRunnerDone:       make(chan struct{}),
+		logger:                logger,
+		otlpLoggerProvider:    otlpLogProvider,
 	}
+
+	// Create the internal workflow queue
+	NewWorkflowQueue(DBOS_INTERNAL_QUEUE_NAME)
 
 	// Start the queue runner in a goroutine
 	go func() {
 		defer close(dbos.queueRunnerDone)
 		queueRunner(ctx)
 	}()
-	fmt.Println("DBOS: Queue runner started")
+	logger.Info("Queue runner started")
 
 	// Start the workflow scheduler if it has been initialized
 	if workflowScheduler != nil {
 		workflowScheduler.Start()
-		fmt.Println("DBOS: Workflow scheduler started")
+		logger.Info("Workflow scheduler started")
 	}
 
 	// Run a round of recovery on the local executor
@@ -134,7 +160,7 @@ func Launch() error {
 		return NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
 	}
 
-	fmt.Printf("DBOS: Initialized with APP_VERSION=%s, EXECUTOR_ID=%s\n", APP_VERSION, EXECUTOR_ID)
+	logger.Info("DBOS initialized", "app_version", APP_VERSION, "executor_id", EXECUTOR_ID)
 	return nil
 }
 
@@ -145,12 +171,16 @@ func Shutdown() {
 		return
 	}
 
+	logger := dbos.logger
+
+	// XXX is there a way to ensure all workflows goroutine are done before closing?
+
 	// Cancel the context to stop the queue runner
 	if dbos.queueRunnerCancelFunc != nil {
 		dbos.queueRunnerCancelFunc()
 		// Wait for queue runner to finish
 		<-dbos.queueRunnerDone
-		fmt.Println("DBOS: Queue runner stopped")
+		logger.Info("Queue runner stopped")
 	}
 
 	if workflowScheduler != nil {
@@ -161,9 +191,9 @@ func Shutdown() {
 
 		select {
 		case <-ctx.Done():
-			fmt.Println("DBOS: All scheduled jobs completed")
+			logger.Info("All scheduled jobs completed")
 		case <-timeoutCtx.Done():
-			fmt.Println("DBOS: Timeout waiting for jobs to complete (5s)")
+			logger.Warn("Timeout waiting for jobs to complete", "timeout", "5s")
 		}
 	}
 
