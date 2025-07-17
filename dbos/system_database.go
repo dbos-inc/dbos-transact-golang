@@ -1147,7 +1147,23 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 		return nil, fmt.Errorf("no output recorded in the last recv")
 	}
 
-	// First check if there is already a message available in the database.
+	// First check if there's already a receiver for this workflow/topic to avoid unnecessary database load
+	payload := fmt.Sprintf("%s::%s", destinationID, topic)
+	c := make(chan bool, 1) // Make it buffered to allow the notification listener to post a signal even if the receiver has not reached its select statement yet
+	_, loaded := s.notificationsMap.LoadOrStore(payload, c)
+	if loaded {
+		close(c)
+		fmt.Println("Receive already called for workflow ", destinationID)
+		return nil, NewWorkflowConflictIDError(destinationID)
+	}
+	defer func() {
+		// Clean up the channel after we're done
+		// XXX We should handle panics in this function and make sure we call this. Not a problem for now as panic will crash the importing package.
+		s.notificationsMap.Delete(payload)
+		close(c)
+	}()
+
+	// Now check if there is already a message available in the database.
 	// If not, we'll wait for a notification and timeout
 	var exists bool
 	query := `SELECT EXISTS (SELECT 1 FROM dbos.notifications WHERE destination_uuid = $1 AND topic = $2)`
@@ -1156,21 +1172,6 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 		return false, fmt.Errorf("failed to check message: %w", err)
 	}
 	if !exists {
-		// We'll do so through registering a channel with the notification listener loop.
-		payload := fmt.Sprintf("%s::%s", destinationID, topic)
-		c := make(chan bool, 1) // Make it buffered to allow the notification listener to post a signal even if the receiver has not reached its select statement yet
-		_, loaded := s.notificationsMap.LoadOrStore(payload, c)
-		if loaded {
-			close(c)
-			fmt.Println("Receive already called for workflow ", destinationID)
-			return nil, NewWorkflowConflictIDError(destinationID)
-		}
-		defer func() {
-			// Clean up the channel after we're done
-			// XXX We should handle panics in this function and make sure we call this. Not a problem for now as panic will crash the importing package.
-			s.notificationsMap.Delete(payload)
-			close(c)
-		}()
 		// Listen for notifications on the channel
 		// XXX should we prevent zero or negative timeouts?
 		fmt.Printf("Waiting for notification on channel %s\n", payload)
