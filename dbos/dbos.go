@@ -88,7 +88,8 @@ func getLogger() *slog.Logger {
 }
 
 type config struct {
-	logger *slog.Logger
+	logger      *slog.Logger
+	adminServer *AdminServer
 }
 
 type LaunchOption func(*config)
@@ -96,6 +97,16 @@ type LaunchOption func(*config)
 func WithLogger(logger *slog.Logger) LaunchOption {
 	return func(config *config) {
 		config.logger = logger
+	}
+}
+
+func WithAdminServer() LaunchOption {
+	return func(config *config) {
+		if config.adminServer == nil {
+			config.adminServer = NewAdminServer()
+		} else {
+			getLogger().Warn("Admin server already initialized, ignoring duplicate call")
+		}
 	}
 }
 
