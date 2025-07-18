@@ -16,9 +16,10 @@ import (
 )
 
 var (
-	APP_VERSION string
-	EXECUTOR_ID string
-	APP_ID      string
+	APP_VERSION               string
+	EXECUTOR_ID               string
+	APP_ID                    string
+	DEFAULT_ADMIN_SERVER_PORT = 3001
 )
 
 func computeApplicationVersion() string {
@@ -62,6 +63,7 @@ type executor struct {
 	queueRunnerCtx        context.Context
 	queueRunnerCancelFunc context.CancelFunc
 	queueRunnerDone       chan struct{}
+	adminServer           *AdminServer
 }
 
 var dbos *executor
@@ -89,7 +91,7 @@ func getLogger() *slog.Logger {
 
 type config struct {
 	logger      *slog.Logger
-	adminServer *AdminServer
+	adminServer bool
 }
 
 type LaunchOption func(*config)
@@ -102,11 +104,7 @@ func WithLogger(logger *slog.Logger) LaunchOption {
 
 func WithAdminServer() LaunchOption {
 	return func(config *config) {
-		if config.adminServer == nil {
-			config.adminServer = NewAdminServer()
-		} else {
-			getLogger().Warn("Admin server already initialized, ignoring duplicate call")
-		}
+		config.adminServer = true
 	}
 }
 
@@ -149,6 +147,18 @@ func Launch(options ...LaunchOption) error {
 
 	systemDB.Launch(context.Background())
 
+	// Start the admin server if configured
+	var adminServer *AdminServer
+	if config.adminServer {
+		adminServer = NewAdminServer(DEFAULT_ADMIN_SERVER_PORT)
+		err := adminServer.Start()
+		if err != nil {
+			logger.Error("Failed to start admin server", "error", err)
+			return NewInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
+		}
+		logger.Info("Admin server started", "port", DEFAULT_ADMIN_SERVER_PORT)
+	}
+
 	// Create context with cancel function for queue runner
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -157,6 +167,7 @@ func Launch(options ...LaunchOption) error {
 		queueRunnerCtx:        ctx,
 		queueRunnerCancelFunc: cancel,
 		queueRunnerDone:       make(chan struct{}),
+		adminServer:           adminServer,
 	}
 
 	// Start the queue runner in a goroutine
@@ -216,6 +227,16 @@ func Shutdown() {
 	if dbos.systemDB != nil {
 		dbos.systemDB.Shutdown()
 		dbos.systemDB = nil
+	}
+
+	if dbos.adminServer != nil {
+		err := dbos.adminServer.Shutdown()
+		if err != nil {
+			getLogger().Error("Failed to shutdown admin server", "error", err)
+		} else {
+			getLogger().Info("Admin server shutdown complete")
+		}
+		dbos.adminServer = nil
 	}
 
 	if logger != nil {
