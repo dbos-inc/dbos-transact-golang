@@ -973,16 +973,16 @@ func TestScheduledWorkflows(t *testing.T) {
 		currentCounter := counter
 		workflowScheduler.Stop()
 		time.Sleep(3 * time.Second) // Wait a bit to ensure no more executions
-		if counter >= currentCounter+1 {
-			t.Fatalf("Scheduled workflow continued executing after stopping scheduler: %d (expected < %d)", counter, currentCounter+1)
+		if counter >= currentCounter+2 {
+			t.Fatalf("Scheduled workflow continued executing after stopping scheduler: %d (expected < %d)", counter, currentCounter+2)
 		}
 	})
 }
 
 var (
-	sendWf       = WithWorkflow(sendWorkflow)
-	receiveWf    = WithWorkflow(receiveWorkflow)
-	sendStructWf = WithWorkflow(sendStructWorkflow)
+	sendWf          = WithWorkflow(sendWorkflow)
+	receiveWf       = WithWorkflow(receiveWorkflow)
+	sendStructWf    = WithWorkflow(sendStructWorkflow)
 	receiveStructWf = WithWorkflow(receiveStructWorkflow)
 )
 

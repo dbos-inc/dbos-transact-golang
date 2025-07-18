@@ -118,6 +118,7 @@ func queueRunner(ctx context.Context) {
 
 		// Iterate through all queues in the registry
 		for queueName, queue := range workflowQueueRegistry {
+			getLogger().Debug("Processing queue", "queue_name", queueName)
 			// Call DequeueWorkflows for each queue
 			dequeuedWorkflows, err := getExecutor().systemDB.DequeueWorkflows(runnerContext, queue)
 			if err != nil {
@@ -136,7 +137,7 @@ func queueRunner(ctx context.Context) {
 
 			// Print what was dequeued
 			if len(dequeuedWorkflows) > 0 {
-				//fmt.Printf("Dequeued %d workflows from queue '%s': %v\n", len(dequeuedWorkflows), queueName, dequeuedWorkflows)
+				getLogger().Debug("Dequeued workflows from queue", "queue_name", queueName, "workflows", dequeuedWorkflows)
 			}
 			for _, workflow := range dequeuedWorkflows {
 				// Find the workflow in the registry

@@ -79,11 +79,11 @@ var logger *slog.Logger
 func getLogger() *slog.Logger {
 	if dbos == nil {
 		fmt.Println("warning: DBOS instance not initialized, using default logger")
-		return slog.Default()
+		return slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 	if logger == nil {
 		fmt.Println("warning: DBOS logger is nil, using default logger")
-		return slog.Default()
+		return slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 	return logger
 }
@@ -107,7 +107,7 @@ func Launch(options ...LaunchOption) error {
 	}
 
 	config := &config{
-		logger: slog.Default(),
+		logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 	for _, option := range options {
 		option(config)
@@ -142,15 +142,15 @@ func Launch(options ...LaunchOption) error {
 	// Create context with cancel function for queue runner
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Create the internal workflow queue
+	NewWorkflowQueue(DBOS_INTERNAL_QUEUE_NAME)
+
 	dbos = &executor{
 		systemDB:              systemDB,
 		queueRunnerCtx:        ctx,
 		queueRunnerCancelFunc: cancel,
 		queueRunnerDone:       make(chan struct{}),
 	}
-
-	// Create the internal workflow queue
-	NewWorkflowQueue(DBOS_INTERNAL_QUEUE_NAME)
 
 	// Start the queue runner in a goroutine
 	go func() {
