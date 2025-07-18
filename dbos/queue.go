@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/gob"
-	"fmt"
 	"math"
 	"math/rand"
 	"time"
@@ -70,7 +69,7 @@ func WithMaxTasksPerIteration(maxTasks uint) QueueOption {
 // NewWorkflowQueue creates a new workflow queue with optional configuration
 func NewWorkflowQueue(name string, options ...QueueOption) WorkflowQueue {
 	if getExecutor() != nil {
-		fmt.Println("warning: NewWorkflowQueue called after DBOS initialization, dynamic registration is not supported")
+		getLogger().Warn("NewWorkflowQueue called after DBOS initialization, dynamic registration is not supported")
 		return WorkflowQueue{}
 	}
 	if _, exists := workflowQueueRegistry[name]; exists {
@@ -130,7 +129,7 @@ func queueRunner(ctx context.Context) {
 						hasBackoffError = true
 					}
 				} else {
-					fmt.Printf("Error dequeuing workflows from queue '%s': %v\n", queueName, err)
+					getLogger().Error("Error dequeuing workflows from queue", "queue_name", queueName, "error", err)
 				}
 				continue
 			}
@@ -143,7 +142,7 @@ func queueRunner(ctx context.Context) {
 				// Find the workflow in the registry
 				registeredWorkflow, exists := registry[workflow.name]
 				if !exists {
-					fmt.Println("Error: workflow function not found in registry:", workflow.name)
+					getLogger().Error("workflow function not found in registry", "workflow_name", workflow.name)
 					continue
 				}
 
@@ -152,20 +151,20 @@ func queueRunner(ctx context.Context) {
 				if len(workflow.input) > 0 {
 					inputBytes, err := base64.StdEncoding.DecodeString(workflow.input)
 					if err != nil {
-						fmt.Printf("failed to decode input for workflow %s: %v\n", workflow.id, err)
+						getLogger().Error("failed to decode input for workflow", "workflow_id", workflow.id, "error", err)
 						continue
 					}
 					buf := bytes.NewBuffer(inputBytes)
 					dec := gob.NewDecoder(buf)
 					if err := dec.Decode(&input); err != nil {
-						fmt.Printf("failed to decode input for workflow %s: %v\n", workflow.id, err)
+						getLogger().Error("failed to decode input for workflow", "workflow_id", workflow.id, "error", err)
 						continue
 					}
 				}
 
 				_, err := registeredWorkflow.wrappedFunction(runnerContext, input, WithWorkflowID(workflow.id))
 				if err != nil {
-					fmt.Println("Error recovering workflow:", err)
+					getLogger().Error("Error recovering workflow", "error", err)
 				}
 			}
 		}
@@ -186,7 +185,7 @@ func queueRunner(ctx context.Context) {
 		// Sleep with jittered interval, but allow early exit on context cancellation
 		select {
 		case <-ctx.Done():
-			fmt.Println("Queue runner stopping due to context cancellation")
+			getLogger().Info("Queue runner stopping due to context cancellation")
 			return
 		case <-time.After(sleepDuration):
 			// Continue to next iteration

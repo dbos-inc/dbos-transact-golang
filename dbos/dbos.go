@@ -57,16 +57,13 @@ type Executor interface {
 
 var workflowScheduler *cron.Cron
 
-// DBOS represents the main DBOS instance
 type executor struct {
 	systemDB              SystemDatabase
 	queueRunnerCtx        context.Context
 	queueRunnerCancelFunc context.CancelFunc
 	queueRunnerDone       chan struct{}
-	logger                *slog.Logger
 }
 
-// New creates a new DBOS instance with an initialized system database
 var dbos *executor
 
 func getExecutor() *executor {
@@ -77,9 +74,22 @@ func getExecutor() *executor {
 	return dbos
 }
 
+var logger *slog.Logger
+
+func getLogger() *slog.Logger {
+	if dbos == nil {
+		fmt.Println("warning: DBOS instance not initialized, using default logger")
+		return slog.Default()
+	}
+	if logger == nil {
+		fmt.Println("warning: DBOS logger is nil, using default logger")
+		return slog.Default()
+	}
+	return logger
+}
+
 type config struct {
-	logger           *slog.Logger
-	otlpLogEndpoints []string
+	logger *slog.Logger
 }
 
 type LaunchOption func(*config)
@@ -96,12 +106,14 @@ func Launch(options ...LaunchOption) error {
 		return NewInitializationError("DBOS already initialized")
 	}
 
-	config := &config{}
+	config := &config{
+		logger: slog.Default(),
+	}
 	for _, option := range options {
 		option(config)
 	}
 
-	logger := config.logger
+	logger = config.logger
 
 	// Initialize with environment variables, providing defaults if not set
 	APP_VERSION = os.Getenv("DBOS__APPVERSION")
@@ -135,8 +147,6 @@ func Launch(options ...LaunchOption) error {
 		queueRunnerCtx:        ctx,
 		queueRunnerCancelFunc: cancel,
 		queueRunnerDone:       make(chan struct{}),
-		logger:                logger,
-		otlpLoggerProvider:    otlpLogProvider,
 	}
 
 	// Create the internal workflow queue
@@ -168,11 +178,9 @@ func Launch(options ...LaunchOption) error {
 // Close closes the DBOS instance and its resources
 func Shutdown() {
 	if dbos == nil {
-		fmt.Println("warning: DBOS instance is nil, cannot destroy")
+		fmt.Println("DBOS instance is nil, cannot destroy")
 		return
 	}
-
-	logger := dbos.logger
 
 	// XXX is there a way to ensure all workflows goroutine are done before closing?
 
@@ -181,7 +189,7 @@ func Shutdown() {
 		dbos.queueRunnerCancelFunc()
 		// Wait for queue runner to finish
 		<-dbos.queueRunnerDone
-		logger.Info("Queue runner stopped")
+		getLogger().Info("Queue runner stopped")
 	}
 
 	if workflowScheduler != nil {
@@ -192,9 +200,9 @@ func Shutdown() {
 
 		select {
 		case <-ctx.Done():
-			logger.Info("All scheduled jobs completed")
+			getLogger().Info("All scheduled jobs completed")
 		case <-timeoutCtx.Done():
-			logger.Warn("Timeout waiting for jobs to complete", "timeout", "5s")
+			getLogger().Warn("Timeout waiting for jobs to complete", "timeout", "5s")
 		}
 	}
 
@@ -203,8 +211,8 @@ func Shutdown() {
 		dbos.systemDB = nil
 	}
 
-	if dbos.logger != nil {
-		dbos.logger = nil
+	if logger != nil {
+		logger = nil
 	}
 
 	dbos = nil

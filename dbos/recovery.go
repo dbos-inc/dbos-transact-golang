@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"fmt"
 	"strings"
 )
 
@@ -21,7 +20,7 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 	for _, workflow := range pendingWorkflows {
 		if inputStr, ok := workflow.Input.(string); ok {
 			if strings.Contains(inputStr, "Failed to decode") {
-				fmt.Println("Skipping workflow recovery due to input decoding failure:", workflow.ID, "Name:", workflow.Name)
+				getLogger().Warn("Skipping workflow recovery due to input decoding failure", "workflow_id", workflow.ID, "name", workflow.Name)
 				continue
 			}
 		}
@@ -30,7 +29,7 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 		if workflow.QueueName != "" {
 			cleared, err := getExecutor().systemDB.ClearQueueAssignment(ctx, workflow.ID)
 			if err != nil {
-				fmt.Println("Error clearing queue assignment for workflow:", workflow.ID, "Name:", workflow.Name, "Error:", err)
+				getLogger().Error("Error clearing queue assignment for workflow", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
 				continue
 			}
 			if cleared {
@@ -41,7 +40,7 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 
 		registeredWorkflow, exists := registry[workflow.Name]
 		if !exists {
-			fmt.Println(NewWorkflowFunctionNotFoundError(workflow.ID, fmt.Sprintf("Workflow function %s not found in registry", workflow.Name)))
+			getLogger().Error("Workflow function not found in registry", "workflow_id", workflow.ID, "name", workflow.Name)
 			continue
 		}
 

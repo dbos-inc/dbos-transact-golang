@@ -114,7 +114,7 @@ func (h *workflowHandle[R]) GetResult(ctx context.Context) (R, error) {
 		recordResultErr := getExecutor().systemDB.RecordChildGetResult(ctx, recordGetResultInput)
 		if recordResultErr != nil {
 			// XXX do we want to fail this?
-			fmt.Println("failed to record get result:", recordResultErr)
+			getLogger().Error("failed to record get result", "error", recordResultErr)
 		}
 	}
 	return outcome.result, outcome.err
@@ -169,7 +169,7 @@ func (h *workflowPollingHandle[R]) GetResult(ctx context.Context) (R, error) {
 			recordResultErr := getExecutor().systemDB.RecordChildGetResult(ctx, recordGetResultInput)
 			if recordResultErr != nil {
 				// XXX do we want to fail this?
-				fmt.Println("failed to record get result:", recordResultErr)
+				getLogger().Error("failed to record get result", "error", recordResultErr)
 			}
 		}
 		return typedResult, err
@@ -215,7 +215,7 @@ func registerWorkflow(fqn string, fn TypedErasedWorkflowWrapperFunc, maxRetries 
 	defer regMutex.Unlock()
 
 	if _, exists := registry[fqn]; exists {
-		fmt.Println("Error: workflow function already registered:", fqn)
+		getLogger().Error("workflow function already registered", "fqn", fqn)
 		panic(NewConflictingRegistrationError(fqn))
 	}
 
@@ -251,7 +251,7 @@ func WithSchedule(schedule string) WorkflowRegistrationOption {
 
 func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...WorkflowRegistrationOption) WorkflowWrapperFunc[P, R] {
 	if getExecutor() != nil {
-		fmt.Println("warning: WithWorkflow called after DBOS initialization, dynamic registration is not supported")
+		getLogger().Warn("WithWorkflow called after DBOS initialization, dynamic registration is not supported")
 		return nil
 	}
 
@@ -534,7 +534,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	// Run the peer goroutine to handle cancellation and timeout
 	/*
 		if dbosWorkflowContext.Done() != nil {
-			fmt.Println("starting goroutine to handle workflow context cancellation or timeout")
+			getLogger().Debug("starting goroutine to handle workflow context cancellation or timeout")
 			go func() {
 				select {
 				case <-dbosWorkflowContext.Done():
@@ -661,7 +661,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 				delay = time.Duration(math.Min(exponentialDelay, float64(params.MaxInterval)))
 			}
 
-			fmt.Printf("step %s failed, retrying %d/%d in %v: %v\n", operationName, retry, params.MaxRetries, delay, stepError)
+			getLogger().Error("step failed, retrying", "step_name", operationName, "retry", retry, "max_retries", params.MaxRetries, "delay", delay, "error", stepError)
 
 			// Wait before retry
 			select {

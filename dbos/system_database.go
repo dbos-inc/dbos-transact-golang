@@ -173,7 +173,7 @@ func NewSystemDatabase() (SystemDatabase, error) {
 				select {
 				case ch.(chan bool) <- true: // Send a signal to wake up the listener
 				default:
-					fmt.Printf("Warning: notification channel for payload %s is full, skipping\n", n.Payload)
+					getLogger().Warn("notification channel for payload is full, skipping", "payload", n.Payload)
 				}
 			}
 		}
@@ -195,11 +195,12 @@ func (s *systemDatabase) Launch(ctx context.Context) {
 	var notificationListenerLoopContext context.Context
 	notificationListenerLoopContext, s.notificationListenerLoopCancel = context.WithCancel(ctx)
 	go s.notificationListenerLoop(notificationListenerLoopContext)
+	// FIXME: logger not availableyet
 	fmt.Println("DBOS: Started notification listener loop")
 }
 
 func (s *systemDatabase) Shutdown() {
-	fmt.Println("DBOS: Closing system database connection pool")
+	getLogger().Info("DBOS: Closing system database connection pool")
 	if s.pool != nil {
 		s.pool.Close()
 	}
@@ -329,7 +330,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
 		return nil, NewConflictingWorkflowError(input.status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.Name, input.status.Name))
 	}
 	if len(input.status.QueueName) > 0 && result.QueueName != nil && input.status.QueueName != *result.QueueName {
-		fmt.Printf("WARNING: Queue name conflict for workflow %s: %s vs %s\n", input.status.ID, *result.QueueName, input.status.QueueName)
+		getLogger().Warn("Queue name conflict for workflow", "workflow_id", input.status.ID, "result_queue", *result.QueueName, "status_queue", input.status.QueueName)
 	}
 
 	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
@@ -701,19 +702,19 @@ func (s *systemDatabase) RecordOperationResult(ctx context.Context, input record
 	}
 
 	/*
-		fmt.Printf("RecordOperationResult - CommandTag: %v\n", commandTag)
-		fmt.Printf("RecordOperationResult - Rows affected: %d\n", commandTag.RowsAffected())
-		fmt.Printf("RecordOperationResult - SQL: %s\n", commandTag.String())
+		getLogger().Debug("RecordOperationResult CommandTag", "command_tag", commandTag)
+		getLogger().Debug("RecordOperationResult Rows affected", "rows_affected", commandTag.RowsAffected())
+		getLogger().Debug("RecordOperationResult SQL", "sql", commandTag.String())
 	*/
 
 	// TODO return DBOSWorkflowConflictIDError(result["workflow_uuid"]) on 23505 conflict ID error
 	if err != nil {
-		fmt.Printf("RecordOperationResult - Error occurred: %v\n", err)
+		getLogger().Error("RecordOperationResult Error occurred", "error", err)
 		return fmt.Errorf("failed to record operation result: %w", err)
 	}
 
 	if commandTag.RowsAffected() == 0 {
-		fmt.Printf("RecordOperationResult - WARNING: No rows were affected by the insert\n")
+		getLogger().Warn("RecordOperationResult No rows were affected by the insert")
 	}
 
 	return nil
@@ -766,7 +767,7 @@ func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input recordCh
 	}
 
 	if commandTag.RowsAffected() == 0 {
-		fmt.Printf("RecordChildWorkflow - WARNING: No rows were affected by the insert\n")
+		getLogger().Warn("RecordChildWorkflow No rows were affected by the insert")
 	}
 
 	return nil
@@ -982,14 +983,14 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 	mrr := s.notificationListenerConnection.Exec(ctx, "LISTEN dbos_notifications_channel")
 	results, err := mrr.ReadAll()
 	if err != nil {
-		fmt.Printf("Failed to listen on dbos_notifications_channel: %v\n", err)
+		getLogger().Error("Failed to listen on dbos_notifications_channel", "error", err)
 		return
 	}
 	mrr.Close()
 
 	for _, result := range results {
 		if result.Err != nil {
-			fmt.Printf("Error listening on dbos_notifications_channel: %v\n", result.Err)
+			getLogger().Error("Error listening on dbos_notifications_channel", "error", result.Err)
 			return
 		}
 	}
@@ -1000,10 +1001,10 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 		err := s.notificationListenerConnection.WaitForNotification(ctx)
 		if err != nil {
 			if err == context.Canceled {
-				fmt.Println("Notification listener loop exiting due to context cancellation: ", ctx.Err())
+				getLogger().Info("Notification listener loop exiting due to context cancellation", "error", ctx.Err())
 				return
 			}
-			fmt.Printf("Error waiting for notification: %v\n", err)
+			getLogger().Error("Error waiting for notification", "error", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -1153,7 +1154,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	_, loaded := s.notificationsMap.LoadOrStore(payload, c)
 	if loaded {
 		close(c)
-		fmt.Println("Receive already called for workflow ", destinationID)
+		getLogger().Error("Receive already called for workflow", "destination_id", destinationID)
 		return nil, NewWorkflowConflictIDError(destinationID)
 	}
 	defer func() {
@@ -1174,13 +1175,13 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	if !exists {
 		// Listen for notifications on the channel
 		// XXX should we prevent zero or negative timeouts?
-		fmt.Printf("Waiting for notification on channel %s\n", payload)
+		getLogger().Debug("Waiting for notification on channel", "payload", payload)
 		select {
 		case <-c:
-			fmt.Printf("Received notification on channel %s\n", payload)
+			getLogger().Debug("Received notification on channel", "payload", payload)
 		case <-time.After(input.Timeout):
 			// If we reach the timeout, we can check if there is a message in the database, and if not return nil.
-			fmt.Printf("Timeout reached for channel %s after %v\n", payload, input.Timeout)
+			getLogger().Warn("Timeout reached for channel", "payload", payload, "timeout", input.Timeout)
 		}
 	}
 
@@ -1326,8 +1327,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 		if queue.WorkerConcurrency != nil {
 			workerConcurrency := *queue.WorkerConcurrency
 			if localPendingWorkflows > workerConcurrency {
-				fmt.Printf("WARNING: Local pending workflows (%d) on queue %s exceeds worker concurrency limit (%d)\n",
-					localPendingWorkflows, queue.Name, workerConcurrency)
+				getLogger().Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", queue.Name, "concurrency_limit", workerConcurrency)
 			}
 			availableWorkerTasks := max(workerConcurrency-localPendingWorkflows, 0)
 			maxTasks = uint(availableWorkerTasks)
@@ -1342,8 +1342,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 
 			concurrency := *queue.GlobalConcurrency
 			if globalPendingWorkflows > concurrency {
-				fmt.Printf("WARNING: Total pending workflows (%d) on queue %s exceeds global concurrency limit (%d)\n",
-					globalPendingWorkflows, queue.Name, concurrency)
+				getLogger().Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", queue.Name, "concurrency_limit", concurrency)
 			}
 			availableTasks := max(concurrency-globalPendingWorkflows, 0)
 			if uint(availableTasks) < maxTasks {
