@@ -90,6 +90,7 @@ func WithLogger(logger *slog.Logger) LaunchOption {
 	}
 }
 
+func Launch(options ...LaunchOption) error {
 	if dbos != nil {
 		fmt.Println("warning: DBOS instance already initialized, skipping re-initialization")
 		return NewInitializationError("DBOS already initialized")
@@ -200,6 +201,10 @@ func Shutdown() {
 	if dbos.systemDB != nil {
 		dbos.systemDB.Shutdown()
 		dbos.systemDB = nil
+	}
+
+	if dbos.logger != nil {
+		dbos.logger = nil
 	}
 
 	dbos = nil
