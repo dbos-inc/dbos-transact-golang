@@ -68,7 +68,6 @@ var dbos *executor
 
 func getExecutor() *executor {
 	if dbos == nil {
-		fmt.Println("warning: DBOS instance not initiliazed")
 		return nil
 	}
 	return dbos
@@ -141,9 +140,6 @@ func Launch(options ...LaunchOption) error {
 
 	// Create context with cancel function for queue runner
 	ctx, cancel := context.WithCancel(context.Background())
-
-	// Create the internal workflow queue
-	NewWorkflowQueue(DBOS_INTERNAL_QUEUE_NAME)
 
 	dbos = &executor{
 		systemDB:              systemDB,

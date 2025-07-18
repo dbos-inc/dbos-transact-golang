@@ -26,8 +26,8 @@ func TestLogger(t *testing.T) {
 		logger.Info("Test message from default logger")
 
 	})
-	t.Run("Custom logger", func(t *testing.T) {
 
+	t.Run("Custom logger", func(t *testing.T) {
 		// Test with custom slog logger
 		var buf bytes.Buffer
 		slogLogger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{

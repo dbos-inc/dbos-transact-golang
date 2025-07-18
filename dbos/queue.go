@@ -16,6 +16,7 @@ import (
 var (
 	workflowQueueRegistry    = make(map[string]WorkflowQueue)
 	DBOS_INTERNAL_QUEUE_NAME = "_dbos_internal_queue"
+	_                        = NewWorkflowQueue(DBOS_INTERNAL_QUEUE_NAME)
 )
 
 // RateLimiter represents a rate limiting configuration
