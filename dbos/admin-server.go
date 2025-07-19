@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -19,6 +20,41 @@ func NewAdminServer(port int) *AdminServer {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"healthy"}`))
+	})
+
+	// Recovery endpoint
+	mux.HandleFunc("/dbos-workflow-recovery", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var executorIDs []string
+		if err := json.NewDecoder(r.Body).Decode(&executorIDs); err != nil {
+			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+
+		getLogger().Info("Recovering workflows for executors", "executors", executorIDs)
+
+		handles, err := recoverPendingWorkflows(r.Context(), executorIDs)
+		if err != nil {
+			getLogger().Error("Error recovering workflows", "error", err)
+			http.Error(w, fmt.Sprintf("Recovery failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Extract workflow IDs from handles
+		workflowIDs := make([]string, len(handles))
+		for i, handle := range handles {
+			workflowIDs[i] = handle.GetWorkflowID()
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(workflowIDs); err != nil {
+			getLogger().Error("Error encoding response", "error", err)
+		}
 	})
 
 	server := &http.Server{
