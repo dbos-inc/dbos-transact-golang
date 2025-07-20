@@ -1177,7 +1177,6 @@ func TestSendRecv(t *testing.T) {
 
 		testSendCompleteEvent.Wait()
 
-		// Verify send completed without any error
 		_, err = sendHandle.GetResult(context.Background())
 		if err != nil {
 			t.Fatalf("send workflow failed: %v", err)
