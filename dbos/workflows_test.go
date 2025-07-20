@@ -981,7 +981,9 @@ func TestScheduledWorkflows(t *testing.T) {
 
 var (
 	sendWf          = WithWorkflow(sendWorkflow)
+	singleSendWf    = WithWorkflow(singleSendWorkflow)
 	receiveWf       = WithWorkflow(receiveWorkflow)
+	receiveWfSteps  = WithWorkflow(receiveWorkflowWithSteps)
 	sendStructWf    = WithWorkflow(sendStructWorkflow)
 	receiveStructWf = WithWorkflow(receiveStructWorkflow)
 )
@@ -990,6 +992,11 @@ type sendWorkflowInput struct {
 	DestinationID string
 	Topic         string
 }
+
+var (
+	testRecvStartEvent    = NewEvent()
+	testSendCompleteEvent = NewEvent()
+)
 
 func sendWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) {
 	fmt.Println("Starting send workflow with input:", input)
@@ -1009,6 +1016,20 @@ func sendWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) 
 	return "", nil
 }
 
+func singleSendWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) {
+	fmt.Println("Starting send workflow with input:", input)
+
+	testSendCompleteEvent.Set()
+	err := Send(ctx, WorkflowSendInput{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message1"})
+	if err != nil {
+		fmt.Printf("Send failed with error: %v\n", err)
+		return "", err
+	}
+
+	fmt.Println("Sending message on topic:", input.Topic, "to destination:", input.DestinationID)
+	return "", nil
+}
+
 func receiveWorkflow(ctx context.Context, topic string) (string, error) {
 	msg1, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
 	if err != nil {
@@ -1023,6 +1044,25 @@ func receiveWorkflow(ctx context.Context, topic string) (string, error) {
 		return "", err
 	}
 	return msg1 + "-" + msg2 + "-" + msg3, nil
+}
+
+func receiveWorkflowWithSteps(ctx context.Context, input string) (string, error) {
+	_, err := RunAsStep(ctx, simpleStep, input)
+	if err != nil {
+		return "", err
+	}
+
+	_, err = RunAsStep(ctx, simpleStep, input)
+	if err != nil {
+		return "", err
+	}
+
+	testRecvStartEvent.Set()
+	msg1, err := Recv[string](ctx, WorkflowRecvInput{Topic: input, Timeout: 1 * time.Second})
+	if err != nil {
+		return "", err
+	}
+	return msg1, nil
 }
 
 func sendStructWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) {
@@ -1115,6 +1155,32 @@ func TestSendRecv(t *testing.T) {
 		}
 		if len(receiveSteps) != expectedReceiveSteps {
 			t.Fatalf("expected %d steps in receive workflow, got %d", expectedReceiveSteps, len(receiveSteps))
+		}
+	})
+
+	t.Run("SendUsesCorrectWorkflowIDForIdempotency", func(t *testing.T) {
+		receiveHandle, err := receiveWfSteps(context.Background(), "test-topic")
+		if err != nil {
+			t.Fatalf("failed to start receive workflow: %v", err)
+		}
+
+		testRecvStartEvent.Wait()
+
+		sendHandle, err := singleSendWf(context.Background(), sendWorkflowInput{
+			DestinationID: receiveHandle.GetWorkflowID(),
+			Topic:         "test-topic",
+		})
+
+		if err != nil {
+			t.Fatalf("failed to send message: %v", err)
+		}
+
+		testSendCompleteEvent.Wait()
+
+		// Verify send completed without any error
+		_, err = sendHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("send workflow failed: %v", err)
 		}
 	})
 
