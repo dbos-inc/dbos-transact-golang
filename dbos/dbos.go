@@ -78,12 +78,7 @@ func getExecutor() *executor {
 var logger *slog.Logger
 
 func getLogger() *slog.Logger {
-	if dbos == nil {
-		fmt.Println("warning: DBOS instance not initialized, using default logger")
-		return slog.New(slog.NewTextHandler(os.Stderr, nil))
-	}
-	if logger == nil {
-		fmt.Println("warning: DBOS logger is nil, using default logger")
+	if dbos == nil || logger == nil {
 		return slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 	return logger

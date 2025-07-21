@@ -15,7 +15,7 @@ type configFile struct {
 	DatabaseURL string `yaml:"database_url"`
 }
 
-func LoadConfig() (*configFile, error) {
+func LoadConfigFile() (*configFile, error) {
 	v := viper.New()
 	v.SetConfigFile(dbosConfigFileName)
 	v.AutomaticEnv()
@@ -37,7 +37,7 @@ func LoadConfig() (*configFile, error) {
 // 2. configuration file
 // 3. environment variables (lowest precedence)
 func NewConfig(programmaticConfig config) *config {
-	fileConfig, err := LoadConfig()
+	fileConfig, err := LoadConfigFile()
 	if err != nil && !os.IsNotExist(err) {
 		panic(err)
 	}
