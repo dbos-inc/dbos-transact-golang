@@ -16,7 +16,7 @@ import (
 func setupDBOS(t *testing.T) {
 	t.Helper()
 
-	databaseURL := os.Getenv("DBOS_DATABASE_URL")
+	databaseURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL")
 	if databaseURL == "" {
 		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
 		databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
@@ -30,7 +30,7 @@ func setupDBOS(t *testing.T) {
 
 	dbName := parsedURL.Database
 	if dbName == "" {
-		t.Skip("DBOS_DATABASE_URL does not specify a database name, skipping integration test")
+		t.Skip("DBOS_SYSTEM_DATABASE_URL does not specify a database name, skipping integration test")
 	}
 
 	postgresURL := parsedURL.Copy()

@@ -13,9 +13,9 @@ import (
 
 func TestAdminServer(t *testing.T) {
 	// Skip if database is not available
-	databaseURL := os.Getenv("DBOS_DATABASE_URL")
+	databaseURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL")
 	if databaseURL == "" && os.Getenv("PGPASSWORD") == "" {
-		t.Skip("Database not available (DBOS_DATABASE_URL and PGPASSWORD not set), skipping DBOS integration tests")
+		t.Skip("Database not available (DBOS_SYSTEM_DATABASE_URL and PGPASSWORD not set), skipping DBOS integration tests")
 	}
 
 	t.Run("Admin server is not started without WithAdminServer option", func(t *testing.T) {

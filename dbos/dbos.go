@@ -100,7 +100,7 @@ func NewConfig(programmaticConfig config) *config {
 	dbosConfig := &config{}
 
 	// Start with environment variables (lowest precedence)
-	if dbURL := os.Getenv("DBOS_DATABASE_URL"); dbURL != "" {
+	if dbURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL"); dbURL != "" {
 		dbosConfig.databaseURL = dbURL
 	}
 
@@ -117,7 +117,7 @@ func NewConfig(programmaticConfig config) *config {
 
 	// Load defaults
 	if len(dbosConfig.databaseURL) == 0 {
-		getLogger().Info("DBOS_DATABASE_URL not set, using default: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
+		getLogger().Info("DBOS_SYSTEM_DATABASE_URL not set, using default: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
 		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
 		dbosConfig.databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
 	}
