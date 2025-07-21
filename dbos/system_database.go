@@ -5,8 +5,6 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -125,15 +123,7 @@ func runMigrations(databaseURL string) error {
 }
 
 // New creates a new SystemDatabase instance and runs migrations
-func NewSystemDatabase() (SystemDatabase, error) {
-	// TODO: pass proper config
-	databaseURL := os.Getenv("DBOS_DATABASE_URL")
-	if databaseURL == "" {
-		fmt.Println("DBOS_DATABASE_URL not set, using default: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
-		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
-		databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
-	}
-
+func NewSystemDatabase(databaseURL string) (SystemDatabase, error) {
 	// Create the database if it doesn't exist
 	if err := createDatabaseIfNotExists(databaseURL); err != nil {
 		return nil, NewInitializationError(fmt.Sprintf("failed to create database: %v", err))
