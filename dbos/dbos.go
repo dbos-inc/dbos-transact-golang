@@ -122,12 +122,14 @@ func Launch(options ...LaunchOption) error {
 		return NewInitializationError("DBOS already initialized")
 	}
 
+	// Load & process the configuration
 	config := &config{
 		logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 	for _, option := range options {
 		option(config)
 	}
+	config = NewConfig(*config)
 
 	logger = config.logger
 
@@ -145,8 +147,6 @@ func Launch(options ...LaunchOption) error {
 	}
 
 	APP_ID = os.Getenv("DBOS__APPID")
-
-	config = ProcessConfig(*config)
 
 	// Create the system database
 	systemDB, err := NewSystemDatabase(config.databaseURL)

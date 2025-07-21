@@ -32,11 +32,11 @@ func LoadConfig() (*configFile, error) {
 	return &config, nil
 }
 
-// ProcessConfig merges configuration from three sources in order of precedence:
+// NewConfig merges configuration from three sources in order of precedence:
 // 1. programmatic configuration (highest precedence)
 // 2. configuration file
 // 3. environment variables (lowest precedence)
-func ProcessConfig(programmaticConfig config) *config {
+func NewConfig(programmaticConfig config) *config {
 	fileConfig, err := LoadConfig()
 	if err != nil && !os.IsNotExist(err) {
 		panic(err)
