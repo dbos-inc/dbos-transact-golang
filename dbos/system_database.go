@@ -126,25 +126,25 @@ func runMigrations(databaseURL string) error {
 func NewSystemDatabase(databaseURL string) (SystemDatabase, error) {
 	// Create the database if it doesn't exist
 	if err := createDatabaseIfNotExists(databaseURL); err != nil {
-		return nil, NewInitializationError(fmt.Sprintf("failed to create database: %v", err))
+		return nil, fmt.Errorf("failed to create database: %v", err)
 	}
 
 	// Run migrations first
 	if err := runMigrations(databaseURL); err != nil {
-		return nil, NewInitializationError(fmt.Sprintf("failed to run migrations: %v", err))
+		return nil, fmt.Errorf("failed to run migrations: %v", err)
 	}
 
 	// Create pgx pool
 	pool, err := pgxpool.New(context.Background(), databaseURL)
 	if err != nil {
-		return nil, NewInitializationError(fmt.Sprintf("failed to create connection pool: %v", err))
+		return nil, fmt.Errorf("failed to create connection pool: %v", err)
 	}
 
 	// Test the connection
 	// FIXME: remove this
 	if err := pool.Ping(context.Background()); err != nil {
 		pool.Close()
-		return nil, NewInitializationError(fmt.Sprintf("failed to ping database: %v", err))
+		return nil, fmt.Errorf("failed to ping database: %v", err)
 	}
 
 	// Create a map of notification payloads to channels
@@ -153,7 +153,7 @@ func NewSystemDatabase(databaseURL string) (SystemDatabase, error) {
 	// Create a connection to listen on notifications
 	config, err := pgconn.ParseConfig(databaseURL)
 	if err != nil {
-		return nil, NewInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
+		return nil, fmt.Errorf("failed to parse database URL: %v", err)
 	}
 	config.OnNotification = func(c *pgconn.PgConn, n *pgconn.Notification) {
 		if n.Channel == "dbos_notifications_channel" {
@@ -170,7 +170,7 @@ func NewSystemDatabase(databaseURL string) (SystemDatabase, error) {
 	}
 	notificationListenerConnection, err := pgconn.ConnectConfig(context.Background(), config)
 	if err != nil {
-		return nil, NewInitializationError(fmt.Sprintf("failed to connect notification listener to database: %v", err))
+		return nil, fmt.Errorf("failed to connect notification listener to database: %v", err)
 	}
 
 	return &systemDatabase{
