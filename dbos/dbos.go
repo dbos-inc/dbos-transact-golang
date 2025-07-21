@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"reflect"
 	"runtime"
@@ -89,6 +90,38 @@ type config struct {
 	adminServer bool
 	databaseURL string
 	appName     string
+}
+
+// NewConfig merges configuration from two sources in order of precedence:
+// 1. programmatic configuration
+// 2. environment variables
+// Finally, it applies default values if needed.
+func NewConfig(programmaticConfig config) *config {
+	dbosConfig := &config{}
+
+	// Start with environment variables (lowest precedence)
+	if dbURL := os.Getenv("DBOS_DATABASE_URL"); dbURL != "" {
+		dbosConfig.databaseURL = dbURL
+	}
+
+	// Override with programmatic configuration (highest precedence)
+	if len(programmaticConfig.databaseURL) > 0 {
+		dbosConfig.databaseURL = programmaticConfig.databaseURL
+	}
+	if len(programmaticConfig.appName) > 0 {
+		dbosConfig.appName = programmaticConfig.appName
+	}
+	// Copy over parameters that can only be set programmatically
+	dbosConfig.logger = programmaticConfig.logger
+	dbosConfig.adminServer = programmaticConfig.adminServer
+
+	// Load defaults
+	if len(dbosConfig.databaseURL) == 0 {
+		getLogger().Info("DBOS_DATABASE_URL not set, using default: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
+		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
+		dbosConfig.databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
+	}
+	return dbosConfig
 }
 
 type LaunchOption func(*config)
