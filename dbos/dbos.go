@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"reflect"
 	"runtime"
@@ -94,6 +93,7 @@ type config struct {
 	logger      *slog.Logger
 	adminServer bool
 	databaseURL string
+	appName     string
 }
 
 type LaunchOption func(*config)
@@ -146,19 +146,10 @@ func Launch(options ...LaunchOption) error {
 
 	APP_ID = os.Getenv("DBOS__APPID")
 
+	config = ProcessConfig(*config)
+
 	// Create the system database
-	var databaseURL string
-	if config.databaseURL != "" {
-		databaseURL = config.databaseURL
-	} else {
-		databaseURL = os.Getenv("DBOS_DATABASE_URL")
-		if databaseURL == "" {
-			fmt.Println("DBOS_DATABASE_URL not set, using default: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
-			password := url.QueryEscape(os.Getenv("PGPASSWORD"))
-			databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
-		}
-	}
-	systemDB, err := NewSystemDatabase(databaseURL)
+	systemDB, err := NewSystemDatabase(config.databaseURL)
 	if err != nil {
 		return NewInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
