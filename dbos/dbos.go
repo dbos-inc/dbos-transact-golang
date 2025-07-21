@@ -117,7 +117,7 @@ func NewConfig(programmaticConfig config) *config {
 
 	// Load defaults
 	if len(dbosConfig.databaseURL) == 0 {
-		getLogger().Info("DBOS_SYSTEM_DATABASE_URL not set, using default: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
+		getLogger().Info("Using default database URL: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
 		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
 		dbosConfig.databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
 	}
