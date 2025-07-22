@@ -634,6 +634,8 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	// Start the first workflow and wait for it to start
 	workerConcurrencyRecoveryStartEvent1.Wait()
 	workerConcurrencyRecoveryStartEvent1.Clear()
+	// Wait for a few seconds to let the queue runner loop
+	time.Sleep(2 * time.Second)
 
 	// Ensure the 2nd workflow is still ENQUEUED
 	status2, err := handle2.GetStatus()
