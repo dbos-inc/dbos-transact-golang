@@ -145,6 +145,26 @@ func TestAdminServer(t *testing.T) {
 					if len(queueMetadata) == 0 {
 						t.Error("Expected at least one queue in metadata")
 					}
+					// Verify internal queue fields
+					foundInternalQueue := false
+					for _, queue := range queueMetadata {
+						if queue.Name == _DBOS_INTERNAL_QUEUE_NAME { // Internal queue name
+							foundInternalQueue = true
+							if queue.Concurrency != nil {
+								t.Errorf("Expected internal queue to have no concurrency limit, but got %v", *queue.Concurrency)
+							}
+							if queue.WorkerConcurrency != nil {
+								t.Errorf("Expected internal queue to have no worker concurrency limit, but got %v", *queue.WorkerConcurrency)
+							}
+							if queue.RateLimit != nil {
+								t.Error("Expected internal queue to have no rate limit")
+							}
+							break
+						}
+					}
+					if !foundInternalQueue {
+						t.Error("Expected to find internal queue in metadata")
+					}
 				},
 			},
 			{
