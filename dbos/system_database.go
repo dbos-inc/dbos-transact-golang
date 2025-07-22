@@ -1029,7 +1029,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 	defer tx.Rollback(ctx)
 
 	// Check if operation was already executed and do nothing if so
-	checkInput := CheckOperationExecutionDBInput{
+	checkInput := checkOperationExecutionDBInput{
 		workflowID:   workflowState.WorkflowID,
 		operationID:  stepID,
 		functionName: functionName,

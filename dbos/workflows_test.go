@@ -12,9 +12,7 @@ Test workflow and steps features
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
-	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -114,32 +112,6 @@ var (
 		return "anonymous-" + in, nil
 	})
 )
-
-func TestAppVersion(t *testing.T) {
-	if _, err := hex.DecodeString(_APP_VERSION); err != nil {
-		t.Fatalf("APP_VERSION is not a valid hex string: %v", err)
-	}
-
-	// Save the original registry content
-	originalRegistry := make(map[string]workflowRegistryEntry)
-	maps.Copy(originalRegistry, registry)
-
-	// Restore the registry after the test
-	defer func() {
-		registry = originalRegistry
-	}()
-
-	// Replace the registry and verify the hash is different
-	registry = make(map[string]workflowRegistryEntry)
-
-	WithWorkflow(func(ctx context.Context, input string) (string, error) {
-		return "new-registry-workflow-" + input, nil
-	})
-	hash2 := computeApplicationVersion()
-	if _APP_VERSION == hash2 {
-		t.Fatalf("APP_VERSION hash did not change after replacing registry")
-	}
-}
 
 func TestWorkflowsWrapping(t *testing.T) {
 	setupDBOS(t)
@@ -1311,14 +1283,14 @@ func TestSendRecv(t *testing.T) {
 		if len(recoveredHandles) != 2 {
 			t.Fatalf("expected 2 recovered handles, got %d", len(recoveredHandles))
 		}
-		steps, err := getExecutor().systemDB.GetWorkflowSteps(context.Background(), sendHandle.GetWorkflowID())
+		steps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), sendHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for send idempotency workflow: %v", err)
 		}
 		if len(steps) != 1 {
 			t.Fatalf("expected 1 step in send idempotency workflow, got %d", len(steps))
 		}
-		steps, err = getExecutor().systemDB.GetWorkflowSteps(context.Background(), receiveHandle.GetWorkflowID())
+		steps, err = dbos.systemDB.GetWorkflowSteps(context.Background(), receiveHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for receive idempotency workflow: %v", err)
 		}

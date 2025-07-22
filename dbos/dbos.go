@@ -64,103 +64,83 @@ func getLogger() *slog.Logger {
 	return logger
 }
 
-type config struct {
-	logger      *slog.Logger
-	adminServer bool
-	databaseURL string
-	appName     string
+type Config struct {
+	DatabaseURL string
+	AppName     string
+	Logger      *slog.Logger
+	AdminServer bool
 }
 
-// NewConfig merges configuration from two sources in order of precedence:
+// ProcessConfig merges configuration from two sources in order of precedence:
 // 1. programmatic configuration
 // 2. environment variables
 // Finally, it applies default values if needed.
-func NewConfig(programmaticConfig config) *config {
-	dbosConfig := &config{}
+func ProcessConfig(inputConfig *Config) (*Config, error) {
+	// First check required fields
+	if len(inputConfig.DatabaseURL) == 0 {
+		return nil, fmt.Errorf("missing required config field: databaseURL")
+	}
+	if inputConfig.AppName == "" {
+		return nil, fmt.Errorf("missing required config field: appName")
+	}
+
+	dbosConfig := &Config{}
 
 	// Start with environment variables (lowest precedence)
 	if dbURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL"); dbURL != "" {
-		dbosConfig.databaseURL = dbURL
+		dbosConfig.DatabaseURL = dbURL
 	}
 
 	// Override with programmatic configuration (highest precedence)
-	if len(programmaticConfig.databaseURL) > 0 {
-		dbosConfig.databaseURL = programmaticConfig.databaseURL
+	if len(inputConfig.DatabaseURL) > 0 {
+		dbosConfig.DatabaseURL = inputConfig.DatabaseURL
 	}
-	if len(programmaticConfig.appName) > 0 {
-		dbosConfig.appName = programmaticConfig.appName
+	if len(inputConfig.AppName) > 0 {
+		dbosConfig.AppName = inputConfig.AppName
 	}
 	// Copy over parameters that can only be set programmatically
-	dbosConfig.logger = programmaticConfig.logger
-	dbosConfig.adminServer = programmaticConfig.adminServer
+	dbosConfig.Logger = inputConfig.Logger
+	dbosConfig.AdminServer = inputConfig.AdminServer
 
 	// Load defaults
-	if len(dbosConfig.databaseURL) == 0 {
+	if len(dbosConfig.DatabaseURL) == 0 {
 		getLogger().Info("Using default database URL: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
 		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
-		dbosConfig.databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
+		dbosConfig.DatabaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
 	}
-	return dbosConfig
+
+	if dbosConfig.Logger == nil {
+		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+
+	return dbosConfig, nil
 }
 
-var dbos *Executor // DBOS singleton instance
+var dbos *executor // DBOS singleton instance
 
-type Executor struct {
+type executor struct {
 	systemDB              SystemDatabase
 	queueRunnerCtx        context.Context
 	queueRunnerCancelFunc context.CancelFunc
 	queueRunnerDone       chan struct{}
 	adminServer           *adminServer
-	config                *config
+	config                *Config
 }
 
-type executorOption func(*config)
-
-func WithLogger(logger *slog.Logger) executorOption {
-	return func(config *config) {
-		config.logger = logger
-	}
-}
-
-func WithAdminServer() executorOption {
-	return func(config *config) {
-		config.adminServer = true
-	}
-}
-
-func WithDatabaseURL(url string) executorOption {
-	return func(config *config) {
-		config.databaseURL = url
-	}
-}
-
-func WithAppName(name string) executorOption {
-	return func(config *config) {
-		config.appName = name
-	}
-}
-
-func NewExecutor(options ...executorOption) (*Executor, error) {
+func Initialize(inputConfig Config) error {
 	if dbos != nil {
 		fmt.Println("warning: DBOS instance already initialized, skipping re-initialization")
-		return nil, newInitializationError("DBOS already initialized")
-	}
-
-	// Start with default configuration
-	config := &config{
-		logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
-	}
-
-	// Apply options
-	for _, option := range options {
-		option(config)
+		return newInitializationError("DBOS already initialized")
 	}
 
 	// Load & process the configuration
-	config = NewConfig(*config)
+	config, err := ProcessConfig(&inputConfig)
+	if err != nil {
+		return newInitializationError(err.Error())
+	}
 
 	// Set global logger
-	logger = config.logger
+	logger = config.Logger
 
 	// Initialize global variables with environment variables, providing defaults if not set
 	_APP_VERSION = os.Getenv("DBOS__APPVERSION")
@@ -178,30 +158,30 @@ func NewExecutor(options ...executorOption) (*Executor, error) {
 	_APP_ID = os.Getenv("DBOS__APPID")
 
 	// Create the system database
-	systemDB, err := NewSystemDatabase(config.databaseURL)
+	systemDB, err := NewSystemDatabase(config.DatabaseURL)
 	if err != nil {
-		return nil, newInitializationError(fmt.Sprintf("failed to create system database: %v", err))
+		return newInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
 	logger.Info("System database initialized")
 
-	// Create the executor instance
-	executor := &Executor{
+	// Set the global dbos instance
+	dbos = &executor{
 		config:   config,
 		systemDB: systemDB,
 	}
 
-	// Set the global dbos instance
-	dbos = executor
-
-	return executor, nil
+	return nil
 }
 
-func (e *Executor) Launch() error {
+func Launch() error {
+	if dbos == nil {
+		return newInitializationError("DBOS instance not initialized, call Initialize first")
+	}
 	// Start the system database
-	e.systemDB.Launch(context.Background())
+	dbos.systemDB.Launch(context.Background())
 
 	// Start the admin server if configured
-	if e.config.adminServer {
+	if dbos.config.AdminServer {
 		adminServer := newAdminServer(_DEFAULT_ADMIN_SERVER_PORT)
 		err := adminServer.Start()
 		if err != nil {
@@ -209,18 +189,18 @@ func (e *Executor) Launch() error {
 			return newInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
 		}
 		logger.Info("Admin server started", "port", _DEFAULT_ADMIN_SERVER_PORT)
-		e.adminServer = adminServer
+		dbos.adminServer = adminServer
 	}
 
 	// Create context with cancel function for queue runner
 	ctx, cancel := context.WithCancel(context.Background())
-	e.queueRunnerCtx = ctx
-	e.queueRunnerCancelFunc = cancel
-	e.queueRunnerDone = make(chan struct{})
+	dbos.queueRunnerCtx = ctx
+	dbos.queueRunnerCancelFunc = cancel
+	dbos.queueRunnerDone = make(chan struct{})
 
 	// Start the queue runner in a goroutine
 	go func() {
-		defer close(e.queueRunnerDone)
+		defer close(dbos.queueRunnerDone)
 		queueRunner(ctx)
 	}()
 	logger.Info("Queue runner started")
@@ -241,19 +221,19 @@ func (e *Executor) Launch() error {
 	return nil
 }
 
-func (e *Executor) Shutdown() {
-	if e == nil {
-		fmt.Println("Executor instance is nil, cannot shutdown")
+func Shutdown() {
+	if dbos == nil {
+		fmt.Println("DBOS instance is nil, cannot shutdown")
 		return
 	}
 
 	// XXX is there a way to ensure all workflows goroutine are done before closing?
 
 	// Cancel the context to stop the queue runner
-	if e.queueRunnerCancelFunc != nil {
-		e.queueRunnerCancelFunc()
+	if dbos.queueRunnerCancelFunc != nil {
+		dbos.queueRunnerCancelFunc()
 		// Wait for queue runner to finish
-		<-e.queueRunnerDone
+		<-dbos.queueRunnerDone
 		getLogger().Info("Queue runner stopped")
 	}
 
@@ -271,26 +251,23 @@ func (e *Executor) Shutdown() {
 		}
 	}
 
-	if e.systemDB != nil {
-		e.systemDB.Shutdown()
-		e.systemDB = nil
+	if dbos.systemDB != nil {
+		dbos.systemDB.Shutdown()
+		dbos.systemDB = nil
 	}
 
-	if e.adminServer != nil {
-		err := e.adminServer.Shutdown()
+	if dbos.adminServer != nil {
+		err := dbos.adminServer.Shutdown()
 		if err != nil {
 			getLogger().Error("Failed to shutdown admin server", "error", err)
 		} else {
 			getLogger().Info("Admin server shutdown complete")
 		}
-		e.adminServer = nil
+		dbos.adminServer = nil
 	}
 
-	// Clear global references if this is the global instance
-	if dbos == e {
-		if logger != nil {
-			logger = nil
-		}
-		dbos = nil
+	if logger != nil {
+		logger = nil
 	}
+	dbos = nil
 }

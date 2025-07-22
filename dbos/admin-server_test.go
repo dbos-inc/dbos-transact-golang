@@ -5,40 +5,33 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestAdminServer(t *testing.T) {
-	// Skip if database is not available
-	databaseURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL")
-	if databaseURL == "" && os.Getenv("PGPASSWORD") == "" {
-		t.Skip("Database not available (DBOS_SYSTEM_DATABASE_URL and PGPASSWORD not set), skipping DBOS integration tests")
-	}
+	databaseURL := getDatabaseURL(t)
 
-	t.Run("Admin server is not started without WithAdminServer option", func(t *testing.T) {
+	t.Run("Admin server is not started by default", func(t *testing.T) {
 		// Ensure clean state
-		if dbos != nil {
-			dbos.Shutdown()
-		}
+		Shutdown()
 
-		// Launch DBOS without admin server option
-		executor, err := NewExecutor()
+		err := Initialize(Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-app",
+		})
 		if err != nil {
 			t.Skipf("Failed to create DBOS (database likely not available): %v", err)
 		}
-		err = executor.Launch()
+		err = Launch()
 		if err != nil {
 			t.Skipf("Failed to launch DBOS (database likely not available): %v", err)
 		}
 
 		// Ensure cleanup
 		defer func() {
-			if executor != nil {
-				executor.Shutdown()
-			}
+			Shutdown()
 		}()
 
 		// Give time for any startup processes
@@ -62,26 +55,25 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("Admin server endpoints", func(t *testing.T) {
-		// Ensure clean state
-		if dbos != nil {
-			dbos.Shutdown()
-		}
+		Shutdown()
 
 		// Launch DBOS with admin server once for all endpoint tests
-		executor, err := NewExecutor(WithAdminServer())
+		err := Initialize(Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-app",
+			AdminServer: true,
+		})
 		if err != nil {
 			t.Skipf("Failed to create DBOS with admin server (database likely not available): %v", err)
 		}
-		err = executor.Launch()
+		err = Launch()
 		if err != nil {
 			t.Skipf("Failed to launch DBOS with admin server (database likely not available): %v", err)
 		}
 
 		// Ensure cleanup
 		defer func() {
-			if executor != nil {
-				executor.Shutdown()
-			}
+			Shutdown()
 		}()
 
 		// Give the server a moment to start

@@ -8,20 +8,22 @@ import (
 )
 
 func TestLogger(t *testing.T) {
+	databaseURL := getDatabaseURL(t)
 
 	t.Run("Default logger", func(t *testing.T) {
-		executor, err := NewExecutor() // Create executor with default logger
+		err := Initialize(Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-app",
+		}) // Create executor with default logger
 		if err != nil {
 			t.Fatalf("Failed to create executor with default logger: %v", err)
 		}
-		err = executor.Launch()
+		err = Launch()
 		if err != nil {
 			t.Fatalf("Failed to launch with default logger: %v", err)
 		}
 		t.Cleanup(func() {
-			if executor != nil {
-				executor.Shutdown()
-			}
+			Shutdown()
 		})
 
 		if logger == nil {
@@ -43,18 +45,20 @@ func TestLogger(t *testing.T) {
 		// Add some context to the slog logger
 		slogLogger = slogLogger.With("service", "dbos-test", "environment", "test")
 
-		executor, err := NewExecutor(WithLogger(slogLogger))
+		err := Initialize(Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-app",
+			Logger:      slogLogger,
+		})
 		if err != nil {
 			t.Fatalf("Failed to create executor with custom logger: %v", err)
 		}
-		err = executor.Launch()
+		err = Launch()
 		if err != nil {
 			t.Fatalf("Failed to launch with custom logger: %v", err)
 		}
 		t.Cleanup(func() {
-			if executor != nil {
-				executor.Shutdown()
-			}
+			Shutdown()
 		})
 
 		if logger == nil {
