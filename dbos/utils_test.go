@@ -153,7 +153,7 @@ func queueEntriesAreCleanedUp() bool {
 					AND status IN ('ENQUEUED', 'PENDING')`
 
 		var count int
-		err = tx.QueryRow(context.Background(), query, DBOS_INTERNAL_QUEUE_NAME).Scan(&count)
+		err = tx.QueryRow(context.Background(), query, _DBOS_INTERNAL_QUEUE_NAME).Scan(&count)
 		tx.Rollback(context.Background()) // Clean up transaction
 
 		if err != nil {

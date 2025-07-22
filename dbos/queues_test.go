@@ -405,6 +405,7 @@ func TestGlobalConcurrency(t *testing.T) {
 
 	// Wait for the first workflow to start
 	workflowEvent1.Wait()
+	time.Sleep(2 * time.Second) // Wait for a few seconds to let the queue runner loop
 
 	// Ensure the second workflow has not started yet
 	if workflowEvent2.IsSet {

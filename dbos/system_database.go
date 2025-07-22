@@ -1321,7 +1321,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 				getLogger().Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", queue.Name, "concurrency_limit", workerConcurrency)
 			}
 			availableWorkerTasks := max(workerConcurrency-localPendingWorkflows, 0)
-			maxTasks = uint(availableWorkerTasks)
+			maxTasks = availableWorkerTasks
 		}
 
 		// Check global concurrency limit
@@ -1336,8 +1336,8 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 				getLogger().Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", queue.Name, "concurrency_limit", concurrency)
 			}
 			availableTasks := max(concurrency-globalPendingWorkflows, 0)
-			if uint(availableTasks) < maxTasks {
-				maxTasks = uint(availableTasks)
+			if availableTasks < maxTasks {
+				maxTasks = availableTasks
 			}
 		}
 	}
@@ -1375,7 +1375,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	// Add limit if maxTasks is finite
-	if maxTasks > 0 {
+	if maxTasks >= 0 {
 		query += fmt.Sprintf(" LIMIT %d", int(maxTasks))
 	}
 

@@ -14,9 +14,13 @@ import (
 )
 
 var (
-	workflowQueueRegistry    = make(map[string]WorkflowQueue)
-	DBOS_INTERNAL_QUEUE_NAME = "_dbos_internal_queue"
-	_                        = NewWorkflowQueue(DBOS_INTERNAL_QUEUE_NAME)
+	workflowQueueRegistry = make(map[string]WorkflowQueue)
+	_                     = NewWorkflowQueue(_DBOS_INTERNAL_QUEUE_NAME)
+)
+
+const (
+	_DBOS_INTERNAL_QUEUE_NAME        = "_dbos_internal_queue"
+	_DEFAULT_MAX_TASKS_PER_ITERATION = 100
 )
 
 // RateLimiter represents a rate limiting configuration
@@ -31,7 +35,7 @@ type WorkflowQueue struct {
 	GlobalConcurrency    *int
 	PriorityEnabled      bool
 	Limiter              *RateLimiter
-	MaxTasksPerIteration uint
+	MaxTasksPerIteration int
 }
 
 // QueueOption is a functional option for configuring a workflow queue
@@ -61,7 +65,7 @@ func WithRateLimiter(limiter *RateLimiter) QueueOption {
 	}
 }
 
-func WithMaxTasksPerIteration(maxTasks uint) QueueOption {
+func WithMaxTasksPerIteration(maxTasks int) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.MaxTasksPerIteration = maxTasks
 	}
@@ -84,7 +88,7 @@ func NewWorkflowQueue(name string, options ...QueueOption) WorkflowQueue {
 		GlobalConcurrency:    nil,
 		PriorityEnabled:      false,
 		Limiter:              nil,
-		MaxTasksPerIteration: 100, // Default max tasks per iteration
+		MaxTasksPerIteration: _DEFAULT_MAX_TASKS_PER_ITERATION,
 	}
 
 	// Apply functional options
