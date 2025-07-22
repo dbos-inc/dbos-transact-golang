@@ -8,22 +8,35 @@ import (
 	"time"
 )
 
+const (
+	HealthCheckPath           = "/dbos-healthz"
+	WorkflowRecoveryPath      = "/dbos-workflow-recovery"
+	WorkflowQueuesMetadataPath = "/dbos-workflow-queues-metadata"
+)
+
 type AdminServer struct {
 	server *http.Server
+}
+
+type QueueMetadata struct {
+	Name              string       `json:"name"`
+	Concurrency       *int         `json:"concurrency,omitempty"`
+	WorkerConcurrency *int         `json:"workerConcurrency,omitempty"`
+	RateLimit         *RateLimiter `json:"rateLimit,omitempty"`
 }
 
 func NewAdminServer(port int) *AdminServer {
 	mux := http.NewServeMux()
 
 	// Health endpoint
-	mux.HandleFunc("/dbos-healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(HealthCheckPath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"healthy"}`))
 	})
 
 	// Recovery endpoint
-	mux.HandleFunc("/dbos-workflow-recovery", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(WorkflowRecoveryPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -54,6 +67,34 @@ func NewAdminServer(port int) *AdminServer {
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(workflowIDs); err != nil {
 			getLogger().Error("Error encoding response", "error", err)
+		}
+	})
+
+	// Queue metadata endpoint
+	mux.HandleFunc(WorkflowQueuesMetadataPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var queueMetadataArray []QueueMetadata
+
+		// Iterate through all queues in the registry
+		for _, queue := range workflowQueueRegistry {
+			queueMetadata := QueueMetadata{
+				Name:              queue.Name,
+				WorkerConcurrency: queue.WorkerConcurrency,
+				Concurrency:       queue.GlobalConcurrency,
+				RateLimit:         queue.Limiter,
+			}
+
+			queueMetadataArray = append(queueMetadataArray, queueMetadata)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(queueMetadataArray); err != nil {
+			getLogger().Error("Error encoding queue metadata response", "error", err)
 		}
 	})
 

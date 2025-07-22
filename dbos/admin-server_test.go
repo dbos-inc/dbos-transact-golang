@@ -38,7 +38,7 @@ func TestAdminServer(t *testing.T) {
 
 		// Verify admin server is not running
 		client := &http.Client{Timeout: 1 * time.Second}
-		_, err = client.Get("http://localhost:3001/dbos-healthz")
+		_, err = client.Get("http://localhost:3001" + HealthCheckPath)
 		if err == nil {
 			t.Error("Expected request to fail when admin server is not started, but it succeeded")
 		}
@@ -94,13 +94,13 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Health endpoint responds correctly",
 				method:         "GET",
-				endpoint:       "http://localhost:3001/dbos-healthz",
+				endpoint:       "http://localhost:3001" + HealthCheckPath,
 				expectedStatus: http.StatusOK,
 			},
 			{
 				name:           "Recovery endpoint responds correctly with valid JSON",
 				method:         "POST",
-				endpoint:       "http://localhost:3001/dbos-workflow-recovery",
+				endpoint:       "http://localhost:3001" + WorkflowRecoveryPath,
 				body:           bytes.NewBuffer(mustMarshal([]string{"executor1", "executor2"})),
 				contentType:    "application/json",
 				expectedStatus: http.StatusOK,
@@ -117,16 +117,41 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Recovery endpoint rejects invalid methods",
 				method:         "GET",
-				endpoint:       "http://localhost:3001/dbos-workflow-recovery",
+				endpoint:       "http://localhost:3001" + WorkflowRecoveryPath,
 				expectedStatus: http.StatusMethodNotAllowed,
 			},
 			{
 				name:           "Recovery endpoint rejects invalid JSON",
 				method:         "POST",
-				endpoint:       "http://localhost:3001/dbos-workflow-recovery",
+				endpoint:       "http://localhost:3001" + WorkflowRecoveryPath,
 				body:           strings.NewReader(`{"invalid": json}`),
 				contentType:    "application/json",
 				expectedStatus: http.StatusBadRequest,
+			},
+			{
+				name:           "Queue metadata endpoint responds correctly",
+				method:         "GET",
+				endpoint:       "http://localhost:3001" + WorkflowQueuesMetadataPath,
+				expectedStatus: http.StatusOK,
+				validateResp: func(t *testing.T, resp *http.Response) {
+					var queueMetadata []QueueMetadata
+					if err := json.NewDecoder(resp.Body).Decode(&queueMetadata); err != nil {
+						t.Errorf("Failed to decode response as QueueMetadata array: %v", err)
+					}
+					if queueMetadata == nil {
+						t.Error("Expected non-nil queue metadata array")
+					}
+					// Should contain at least the internal queue
+					if len(queueMetadata) == 0 {
+						t.Error("Expected at least one queue in metadata")
+					}
+				},
+			},
+			{
+				name:           "Queue metadata endpoint rejects invalid methods",
+				method:         "POST",
+				endpoint:       "http://localhost:3001" + WorkflowQueuesMetadataPath,
+				expectedStatus: http.StatusMethodNotAllowed,
 			},
 		}
 
