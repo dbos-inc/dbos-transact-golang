@@ -97,6 +97,33 @@ func (e *Event) Clear() {
 }
 
 /* Helpers */
+
+// stopQueueRunner stops the queue runner for testing purposes
+func stopQueueRunner() {
+	if dbos != nil && dbos.queueRunnerCancelFunc != nil {
+		dbos.queueRunnerCancelFunc()
+		// Wait for queue runner to finish
+		<-dbos.queueRunnerDone
+	}
+}
+
+// restartQueueRunner restarts the queue runner for testing purposes
+func restartQueueRunner() {
+	if dbos != nil {
+		// Create new context and cancel function
+		ctx, cancel := context.WithCancel(context.Background())
+		dbos.queueRunnerCtx = ctx
+		dbos.queueRunnerCancelFunc = cancel
+		dbos.queueRunnerDone = make(chan struct{})
+		
+		// Start the queue runner in a goroutine
+		go func() {
+			defer close(dbos.queueRunnerDone)
+			queueRunner(ctx)
+		}()
+	}
+}
+
 func equal(a, b []int) bool {
 	if len(a) != len(b) {
 		return false

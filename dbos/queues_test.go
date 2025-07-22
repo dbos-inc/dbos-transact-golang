@@ -504,8 +504,12 @@ func TestWorkerConcurrency(t *testing.T) {
 		t.Fatalf("expected 3 workflows to be enqueued, got %d", len(workflows))
 	}
 
+	// Stop the queue runner before changing executor ID to avoid race conditions
+	stopQueueRunner()
 	// Change the EXECUTOR_ID global variable to a different value
 	EXECUTOR_ID = "worker-2"
+	// Restart the queue runner
+	restartQueueRunner()
 
 	// Wait for the second workflow to start on the second worker
 	startEvents[1].Wait()
@@ -533,8 +537,12 @@ func TestWorkerConcurrency(t *testing.T) {
 	if result1 != 0 {
 		t.Fatalf("expected result from blocking workflow 1 to be 0, got %v", result1)
 	}
+	// Stop the queue runner before changing executor ID to avoid race conditions
+	stopQueueRunner()
 	// Change the executor again and wait for the third workflow to start
 	EXECUTOR_ID = "local"
+	// Restart the queue runner
+	restartQueueRunner()
 	startEvents[2].Wait()
 	// Ensure the fourth workflow is not started yet
 	if startEvents[3].IsSet {
@@ -561,8 +569,12 @@ func TestWorkerConcurrency(t *testing.T) {
 	if result2 != 1 {
 		t.Fatalf("expected result from blocking workflow 2 to be 1, got %v", result2)
 	}
+	// Stop the queue runner before changing executor ID to avoid race conditions
+	stopQueueRunner()
 	// change executor again and wait for the fourth workflow to start
 	EXECUTOR_ID = "worker-2"
+	// Restart the queue runner
+	restartQueueRunner()
 	startEvents[3].Wait()
 	// Check no workflow is enqueued
 	workflows, err = getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{

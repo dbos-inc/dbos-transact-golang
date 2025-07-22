@@ -87,6 +87,7 @@ func createDatabaseIfNotExists(databaseURL string) error {
 		if err != nil {
 			return NewInitializationError(fmt.Sprintf("failed to create database %s: %v", dbName, err))
 		}
+		getLogger().Info("Database created", "name", dbName)
 	}
 
 	return nil
