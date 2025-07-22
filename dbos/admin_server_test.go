@@ -22,11 +22,11 @@ func TestAdminServer(t *testing.T) {
 			AppName:     "test-app",
 		})
 		if err != nil {
-			t.Skipf("Failed to create DBOS (database likely not available): %v", err)
+			t.Skipf("Failed to initialize DBOS: %v", err)
 		}
 		err = Launch()
 		if err != nil {
-			t.Skipf("Failed to launch DBOS (database likely not available): %v", err)
+			t.Skipf("Failed to initialize DBOS: %v", err)
 		}
 
 		// Ensure cleanup
@@ -64,11 +64,11 @@ func TestAdminServer(t *testing.T) {
 			AdminServer: true,
 		})
 		if err != nil {
-			t.Skipf("Failed to create DBOS with admin server (database likely not available): %v", err)
+			t.Skipf("Failed to initialize DBOS with admin server: %v", err)
 		}
 		err = Launch()
 		if err != nil {
-			t.Skipf("Failed to launch DBOS with admin server (database likely not available): %v", err)
+			t.Skipf("Failed to initialize DBOS with admin server: %v", err)
 		}
 
 		// Ensure cleanup

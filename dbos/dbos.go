@@ -80,7 +80,7 @@ func ProcessConfig(inputConfig *Config) (*Config, error) {
 	if len(inputConfig.DatabaseURL) == 0 {
 		return nil, fmt.Errorf("missing required config field: databaseURL")
 	}
-	if inputConfig.AppName == "" {
+	if len(inputConfig.AppName) == 0 {
 		return nil, fmt.Errorf("missing required config field: appName")
 	}
 
@@ -103,14 +103,13 @@ func ProcessConfig(inputConfig *Config) (*Config, error) {
 	dbosConfig.AdminServer = inputConfig.AdminServer
 
 	// Load defaults
-	if len(dbosConfig.DatabaseURL) == 0 {
-		getLogger().Info("Using default database URL: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
-		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
-		dbosConfig.DatabaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
-	}
-
 	if dbosConfig.Logger == nil {
 		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+	if len(dbosConfig.DatabaseURL) == 0 {
+		dbosConfig.Logger.Info("Using default database URL: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
+		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
+		dbosConfig.DatabaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
 	}
 
 	return dbosConfig, nil
