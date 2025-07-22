@@ -21,24 +21,32 @@ func TestAdminServer(t *testing.T) {
 	t.Run("Admin server is not started without WithAdminServer option", func(t *testing.T) {
 		// Ensure clean state
 		if dbos != nil {
-			Shutdown()
+			dbos.Shutdown()
 		}
 
 		// Launch DBOS without admin server option
-		err := Launch()
+		executor, err := NewExecutor()
+		if err != nil {
+			t.Skipf("Failed to create DBOS (database likely not available): %v", err)
+		}
+		err = executor.Launch()
 		if err != nil {
 			t.Skipf("Failed to launch DBOS (database likely not available): %v", err)
 		}
 
 		// Ensure cleanup
-		defer Shutdown()
+		defer func() {
+			if executor != nil {
+				executor.Shutdown()
+			}
+		}()
 
 		// Give time for any startup processes
 		time.Sleep(100 * time.Millisecond)
 
 		// Verify admin server is not running
 		client := &http.Client{Timeout: 1 * time.Second}
-		_, err = client.Get("http://localhost:3001" + HealthCheckPath)
+		_, err = client.Get("http://localhost:3001" + healthCheckPath)
 		if err == nil {
 			t.Error("Expected request to fail when admin server is not started, but it succeeded")
 		}
@@ -56,17 +64,25 @@ func TestAdminServer(t *testing.T) {
 	t.Run("Admin server endpoints", func(t *testing.T) {
 		// Ensure clean state
 		if dbos != nil {
-			Shutdown()
+			dbos.Shutdown()
 		}
 
 		// Launch DBOS with admin server once for all endpoint tests
-		err := Launch(WithAdminServer())
+		executor, err := NewExecutor(WithAdminServer())
+		if err != nil {
+			t.Skipf("Failed to create DBOS with admin server (database likely not available): %v", err)
+		}
+		err = executor.Launch()
 		if err != nil {
 			t.Skipf("Failed to launch DBOS with admin server (database likely not available): %v", err)
 		}
 
 		// Ensure cleanup
-		defer Shutdown()
+		defer func() {
+			if executor != nil {
+				executor.Shutdown()
+			}
+		}()
 
 		// Give the server a moment to start
 		time.Sleep(100 * time.Millisecond)
@@ -94,13 +110,13 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Health endpoint responds correctly",
 				method:         "GET",
-				endpoint:       "http://localhost:3001" + HealthCheckPath,
+				endpoint:       "http://localhost:3001" + healthCheckPath,
 				expectedStatus: http.StatusOK,
 			},
 			{
 				name:           "Recovery endpoint responds correctly with valid JSON",
 				method:         "POST",
-				endpoint:       "http://localhost:3001" + WorkflowRecoveryPath,
+				endpoint:       "http://localhost:3001" + workflowRecoveryPath,
 				body:           bytes.NewBuffer(mustMarshal([]string{"executor1", "executor2"})),
 				contentType:    "application/json",
 				expectedStatus: http.StatusOK,
@@ -117,13 +133,13 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Recovery endpoint rejects invalid methods",
 				method:         "GET",
-				endpoint:       "http://localhost:3001" + WorkflowRecoveryPath,
+				endpoint:       "http://localhost:3001" + workflowRecoveryPath,
 				expectedStatus: http.StatusMethodNotAllowed,
 			},
 			{
 				name:           "Recovery endpoint rejects invalid JSON",
 				method:         "POST",
-				endpoint:       "http://localhost:3001" + WorkflowRecoveryPath,
+				endpoint:       "http://localhost:3001" + workflowRecoveryPath,
 				body:           strings.NewReader(`{"invalid": json}`),
 				contentType:    "application/json",
 				expectedStatus: http.StatusBadRequest,
@@ -131,10 +147,10 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Queue metadata endpoint responds correctly",
 				method:         "GET",
-				endpoint:       "http://localhost:3001" + WorkflowQueuesMetadataPath,
+				endpoint:       "http://localhost:3001" + workflowQueuesMetadataPath,
 				expectedStatus: http.StatusOK,
 				validateResp: func(t *testing.T, resp *http.Response) {
-					var queueMetadata []QueueMetadata
+					var queueMetadata []queueMetadata
 					if err := json.NewDecoder(resp.Body).Decode(&queueMetadata); err != nil {
 						t.Errorf("Failed to decode response as QueueMetadata array: %v", err)
 					}
@@ -170,7 +186,7 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Queue metadata endpoint rejects invalid methods",
 				method:         "POST",
-				endpoint:       "http://localhost:3001" + WorkflowQueuesMetadataPath,
+				endpoint:       "http://localhost:3001" + workflowQueuesMetadataPath,
 				expectedStatus: http.StatusMethodNotAllowed,
 			},
 		}

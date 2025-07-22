@@ -74,7 +74,7 @@ func queueWorkflowWithChild(ctx context.Context, input string) (string, error) {
 
 func queueWorkflowThatEnqueues(ctx context.Context, input string) (string, error) {
 	// Enqueue another workflow to the same queue
-	enqueuedHandle, err := queueWf(ctx, input+"-enqueued", WithQueue(queue.Name))
+	enqueuedHandle, err := queueWf(ctx, input+"-enqueued", WithQueue(queue.name))
 	if err != nil {
 		return "", fmt.Errorf("failed to enqueue workflow: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestWorkflowQueues(t *testing.T) {
 	setupDBOS(t)
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
-		handle, err := queueWf(context.Background(), "test-input", WithQueue(queue.Name))
+		handle, err := queueWf(context.Background(), "test-input", WithQueue(queue.name))
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow: %v", err)
 		}
@@ -116,7 +116,7 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 
 	t.Run("EnqueuedWorkflowStartsChildWorkflow", func(t *testing.T) {
-		handle, err := queueWfWithChild(context.Background(), "test-input", WithQueue(queue.Name))
+		handle, err := queueWfWithChild(context.Background(), "test-input", WithQueue(queue.name))
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow with child: %v", err)
 		}
@@ -138,7 +138,7 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 
 	t.Run("WorkflowEnqueuesAnotherWorkflow", func(t *testing.T) {
-		handle, err := queueWfThatEnqueues(context.Background(), "test-input", WithQueue(queue.Name))
+		handle, err := queueWfThatEnqueues(context.Background(), "test-input", WithQueue(queue.name))
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow that enqueues another workflow: %v", err)
 		}
@@ -161,7 +161,7 @@ func TestWorkflowQueues(t *testing.T) {
 
 	t.Run("DynamicRegistration", func(t *testing.T) {
 		q := NewWorkflowQueue("dynamic-queue")
-		if len(q.Name) > 0 {
+		if len(q.name) > 0 {
 			t.Fatalf("expected nil queue for dynamic registration after DBOS initialization, got %v", q)
 		}
 	})
@@ -170,7 +170,7 @@ func TestWorkflowQueues(t *testing.T) {
 		workflowID := "blocking-workflow-test"
 
 		// Enqueue the workflow for the first time
-		originalHandle, err := enqueueWorkflowDLQ(context.Background(), "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
+		originalHandle, err := enqueueWorkflowDLQ(context.Background(), "test-input", WithQueue(dlqEnqueueQueue.name), WithWorkflowID(workflowID))
 		if err != nil {
 			t.Fatalf("failed to enqueue blocking workflow: %v", err)
 		}
@@ -181,7 +181,7 @@ func TestWorkflowQueues(t *testing.T) {
 
 		// Try to enqueue the same workflow more times
 		for i := range dlqMaxRetries * 2 {
-			_, err := enqueueWorkflowDLQ(context.Background(), "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
+			_, err := enqueueWorkflowDLQ(context.Background(), "test-input", WithQueue(dlqEnqueueQueue.name), WithWorkflowID(workflowID))
 			if err != nil {
 				t.Fatalf("failed to enqueue workflow attempt %d: %v", i+1, err)
 			}
@@ -259,7 +259,7 @@ var (
 	recoveryWorkflow = WithWorkflow(func(ctx context.Context, input string) ([]int, error) {
 		handles := make([]WorkflowHandle[int], 0, 5) // 5 queued steps
 		for i := range 5 {
-			handle, err := recoveryStepWorkflow(ctx, i, WithQueue(recoveryQueue.Name))
+			handle, err := recoveryStepWorkflow(ctx, i, WithQueue(recoveryQueue.name))
 			if err != nil {
 				return nil, fmt.Errorf("failed to enqueue step %d: %v", i, err)
 			}
@@ -393,12 +393,12 @@ func TestGlobalConcurrency(t *testing.T) {
 	setupDBOS(t)
 
 	// Enqueue two workflows
-	handle1, err := globalConcurrencyWorkflow(context.Background(), "workflow1", WithQueue(globalConcurrencyQueue.Name))
+	handle1, err := globalConcurrencyWorkflow(context.Background(), "workflow1", WithQueue(globalConcurrencyQueue.name))
 	if err != nil {
 		t.Fatalf("failed to enqueue workflow1: %v", err)
 	}
 
-	handle2, err := globalConcurrencyWorkflow(context.Background(), "workflow2", WithQueue(globalConcurrencyQueue.Name))
+	handle2, err := globalConcurrencyWorkflow(context.Background(), "workflow2", WithQueue(globalConcurrencyQueue.name))
 	if err != nil {
 		t.Fatalf("failed to enqueue workflow2: %v", err)
 	}
@@ -471,19 +471,19 @@ func TestWorkerConcurrency(t *testing.T) {
 	setupDBOS(t)
 
 	// First enqueue four blocking workflows
-	handle1, err := blockingWf(context.Background(), 0, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-1"))
+	handle1, err := blockingWf(context.Background(), 0, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-1"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 1: %v", err)
 	}
-	handle2, err := blockingWf(context.Background(), 1, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-2"))
+	handle2, err := blockingWf(context.Background(), 1, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-2"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 2: %v", err)
 	}
-	_, err = blockingWf(context.Background(), 2, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-3"))
+	_, err = blockingWf(context.Background(), 2, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-3"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 3: %v", err)
 	}
-	_, err = blockingWf(context.Background(), 3, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-4"))
+	_, err = blockingWf(context.Background(), 3, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-4"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 4: %v", err)
 	}
@@ -494,9 +494,9 @@ func TestWorkerConcurrency(t *testing.T) {
 	if startEvents[1].IsSet || startEvents[2].IsSet || startEvents[3].IsSet {
 		t.Fatal("expected only blocking workflow 1 to start, but others have started")
 	}
-	workflows, err := getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
-		Status:    []WorkflowStatusType{WorkflowStatusEnqueued},
-		QueueName: workerConcurrencyQueue.Name,
+	workflows, err := dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
+		queueName: workerConcurrencyQueue.name,
 	})
 	if err != nil {
 		t.Fatalf("failed to list workflows: %v", err)
@@ -508,7 +508,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	// Stop the queue runner before changing executor ID to avoid race conditions
 	stopQueueRunner()
 	// Change the EXECUTOR_ID global variable to a different value
-	EXECUTOR_ID = "worker-2"
+	_EXECUTOR_ID = "worker-2"
 	// Restart the queue runner
 	restartQueueRunner()
 
@@ -518,9 +518,9 @@ func TestWorkerConcurrency(t *testing.T) {
 	if startEvents[2].IsSet || startEvents[3].IsSet {
 		t.Fatal("expected only blocking workflow 2 to start, but others have started")
 	}
-	workflows, err = getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
-		Status:    []WorkflowStatusType{WorkflowStatusEnqueued},
-		QueueName: workerConcurrencyQueue.Name,
+	workflows, err = dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
+		queueName: workerConcurrencyQueue.name,
 	})
 	if err != nil {
 		t.Fatalf("failed to list workflows: %v", err)
@@ -541,7 +541,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	// Stop the queue runner before changing executor ID to avoid race conditions
 	stopQueueRunner()
 	// Change the executor again and wait for the third workflow to start
-	EXECUTOR_ID = "local"
+	_EXECUTOR_ID = "local"
 	// Restart the queue runner
 	restartQueueRunner()
 	startEvents[2].Wait()
@@ -550,9 +550,9 @@ func TestWorkerConcurrency(t *testing.T) {
 		t.Fatal("expected only blocking workflow 3 to start, but workflow 4 has started")
 	}
 	// Check that only one workflow is pending
-	workflows, err = getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
-		Status:    []WorkflowStatusType{WorkflowStatusEnqueued},
-		QueueName: workerConcurrencyQueue.Name,
+	workflows, err = dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
+		queueName: workerConcurrencyQueue.name,
 	})
 	if err != nil {
 		t.Fatalf("failed to list workflows: %v", err)
@@ -573,14 +573,14 @@ func TestWorkerConcurrency(t *testing.T) {
 	// Stop the queue runner before changing executor ID to avoid race conditions
 	stopQueueRunner()
 	// change executor again and wait for the fourth workflow to start
-	EXECUTOR_ID = "worker-2"
+	_EXECUTOR_ID = "worker-2"
 	// Restart the queue runner
 	restartQueueRunner()
 	startEvents[3].Wait()
 	// Check no workflow is enqueued
-	workflows, err = getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
-		Status:    []WorkflowStatusType{WorkflowStatusEnqueued},
-		QueueName: workerConcurrencyQueue.Name,
+	workflows, err = dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
+		queueName: workerConcurrencyQueue.name,
 	})
 	if err != nil {
 		t.Fatalf("failed to list workflows: %v", err)
@@ -597,7 +597,7 @@ func TestWorkerConcurrency(t *testing.T) {
 		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
 	}
 
-	EXECUTOR_ID = "local" // Reset executor ID for future tests
+	_EXECUTOR_ID = "local" // Reset executor ID for future tests
 }
 
 var (
@@ -622,11 +622,11 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	setupDBOS(t)
 
 	// Enqueue two workflows on a queue with worker concurrency = 1
-	handle1, err := workerConcurrencyRecoveryBlockingWf1(context.Background(), "workflow1", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
+	handle1, err := workerConcurrencyRecoveryBlockingWf1(context.Background(), "workflow1", WithQueue(workerConcurrencyRecoveryQueue.name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 1: %v", err)
 	}
-	handle2, err := workerConcurrencyRecoveryBlockingWf2(context.Background(), "workflow2", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-2"))
+	handle2, err := workerConcurrencyRecoveryBlockingWf2(context.Background(), "workflow2", WithQueue(workerConcurrencyRecoveryQueue.name), WithWorkflowID("worker-cc-x-recovery-wf-2"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 2: %v", err)
 	}
@@ -736,7 +736,7 @@ func TestQueueRateLimiter(t *testing.T) {
 	// executed simultaneously, followed by a wait of the period,
 	// followed by the next wave.
 	for i := 0; i < limit*numWaves; i++ {
-		handle, err := rateLimiterWorkflow(context.Background(), "", WithQueue(rateLimiterQueue.Name))
+		handle, err := rateLimiterWorkflow(context.Background(), "", WithQueue(rateLimiterQueue.name))
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow %d: %v", i, err)
 		}

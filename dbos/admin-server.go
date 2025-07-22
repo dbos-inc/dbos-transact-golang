@@ -9,34 +9,34 @@ import (
 )
 
 const (
-	HealthCheckPath           = "/dbos-healthz"
-	WorkflowRecoveryPath      = "/dbos-workflow-recovery"
-	WorkflowQueuesMetadataPath = "/dbos-workflow-queues-metadata"
+	healthCheckPath            = "/dbos-healthz"
+	workflowRecoveryPath       = "/dbos-workflow-recovery"
+	workflowQueuesMetadataPath = "/dbos-workflow-queues-metadata"
 )
 
-type AdminServer struct {
+type adminServer struct {
 	server *http.Server
 }
 
-type QueueMetadata struct {
+type queueMetadata struct {
 	Name              string       `json:"name"`
 	Concurrency       *int         `json:"concurrency,omitempty"`
 	WorkerConcurrency *int         `json:"workerConcurrency,omitempty"`
 	RateLimit         *RateLimiter `json:"rateLimit,omitempty"`
 }
 
-func NewAdminServer(port int) *AdminServer {
+func newAdminServer(port int) *adminServer {
 	mux := http.NewServeMux()
 
 	// Health endpoint
-	mux.HandleFunc(HealthCheckPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(healthCheckPath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"healthy"}`))
 	})
 
 	// Recovery endpoint
-	mux.HandleFunc(WorkflowRecoveryPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(workflowRecoveryPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -71,21 +71,21 @@ func NewAdminServer(port int) *AdminServer {
 	})
 
 	// Queue metadata endpoint
-	mux.HandleFunc(WorkflowQueuesMetadataPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(workflowQueuesMetadataPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		var queueMetadataArray []QueueMetadata
+		var queueMetadataArray []queueMetadata
 
 		// Iterate through all queues in the registry
 		for _, queue := range workflowQueueRegistry {
-			queueMetadata := QueueMetadata{
-				Name:              queue.Name,
-				WorkerConcurrency: queue.WorkerConcurrency,
-				Concurrency:       queue.GlobalConcurrency,
-				RateLimit:         queue.Limiter,
+			queueMetadata := queueMetadata{
+				Name:              queue.name,
+				WorkerConcurrency: queue.workerConcurrency,
+				Concurrency:       queue.globalConcurrency,
+				RateLimit:         queue.limiter,
 			}
 
 			queueMetadataArray = append(queueMetadataArray, queueMetadata)
@@ -103,12 +103,12 @@ func NewAdminServer(port int) *AdminServer {
 		Handler: mux,
 	}
 
-	return &AdminServer{
+	return &adminServer{
 		server: server,
 	}
 }
 
-func (as *AdminServer) Start() error {
+func (as *adminServer) Start() error {
 	getLogger().Info("Starting admin server", "port", 3001)
 
 	go func() {
@@ -120,7 +120,7 @@ func (as *AdminServer) Start() error {
 	return nil
 }
 
-func (as *AdminServer) Shutdown() error {
+func (as *adminServer) Shutdown() error {
 	getLogger().Info("Shutting down admin server")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

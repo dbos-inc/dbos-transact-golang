@@ -25,16 +25,16 @@ type SystemDatabase interface {
 	Launch(ctx context.Context)
 	Shutdown()
 	ResetSystemDB(ctx context.Context) error
-	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
+	InsertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error)
 	RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
 	RecordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
 	CheckChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
-	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]WorkflowStatus, error)
-	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error
+	ListWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error)
+	UpdateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
 	DequeueWorkflows(ctx context.Context, queue WorkflowQueue) ([]dequeuedWorkflow, error)
 	ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
-	CheckOperationExecution(ctx context.Context, input CheckOperationExecutionDBInput) (*RecordedResult, error)
+	CheckOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
 	RecordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
 	GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
 	Send(ctx context.Context, input WorkflowSendInput) error
@@ -57,19 +57,19 @@ func createDatabaseIfNotExists(databaseURL string) error {
 	// Connect to the postgres database
 	parsedURL, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
-		return NewInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
+		return newInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
 	}
 
 	dbName := parsedURL.Database
 	if dbName == "" {
-		return NewInitializationError("database name not found in URL")
+		return newInitializationError("database name not found in URL")
 	}
 
 	serverURL := parsedURL.Copy()
 	serverURL.Database = "postgres"
 	conn, err := pgx.ConnectConfig(context.Background(), serverURL)
 	if err != nil {
-		return NewInitializationError(fmt.Sprintf("failed to connect to PostgreSQL server: %v", err))
+		return newInitializationError(fmt.Sprintf("failed to connect to PostgreSQL server: %v", err))
 	}
 	defer conn.Close(context.Background())
 
@@ -78,14 +78,14 @@ func createDatabaseIfNotExists(databaseURL string) error {
 	err = conn.QueryRow(context.Background(),
 		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName).Scan(&exists)
 	if err != nil {
-		return NewInitializationError(fmt.Sprintf("failed to check if database exists: %v", err))
+		return newInitializationError(fmt.Sprintf("failed to check if database exists: %v", err))
 	}
 	if !exists {
 		// TODO: validate db name
 		createSQL := fmt.Sprintf("CREATE DATABASE %s", pgx.Identifier{dbName}.Sanitize())
 		_, err = conn.Exec(context.Background(), createSQL)
 		if err != nil {
-			return NewInitializationError(fmt.Sprintf("failed to create database %s: %v", dbName, err))
+			return newInitializationError(fmt.Sprintf("failed to create database %s: %v", dbName, err))
 		}
 		getLogger().Info("Database created", "name", dbName)
 	}
@@ -104,20 +104,20 @@ func runMigrations(databaseURL string) error {
 	// Create migration source from embedded files
 	d, err := iofs.New(migrationFiles, "migrations")
 	if err != nil {
-		return NewInitializationError(fmt.Sprintf("failed to create migration source: %v", err))
+		return newInitializationError(fmt.Sprintf("failed to create migration source: %v", err))
 	}
 
 	// Create migrator
 	m, err := migrate.NewWithSourceInstance("iofs", d, databaseURL)
 	if err != nil {
-		return NewInitializationError(fmt.Sprintf("failed to create migrator: %v", err))
+		return newInitializationError(fmt.Sprintf("failed to create migrator: %v", err))
 	}
 	defer m.Close()
 
 	// Run migrations
 	// FIXME: tolerate errors when the migration is bcz we run an older version of transact
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return NewInitializationError(fmt.Sprintf("failed to run migrations: %v", err))
+		return newInitializationError(fmt.Sprintf("failed to run migrations: %v", err))
 	}
 
 	return nil
@@ -205,21 +205,21 @@ func (s *systemDatabase) Shutdown() {
 /******* WORKFLOWS ********/
 /*******************************/
 
-type InsertWorkflowResult struct {
-	Attempts                int                `json:"attempts"`
-	Status                  WorkflowStatusType `json:"status"`
-	Name                    string             `json:"name"`
-	QueueName               *string            `json:"queue_name"`
-	WorkflowDeadlineEpochMs *int64             `json:"workflow_deadline_epoch_ms"`
+type insertWorkflowResult struct {
+	attempts                int
+	status                  WorkflowStatusType
+	name                    string
+	queueName               *string
+	workflowDeadlineEpochMs *int64
 }
 
-type InsertWorkflowStatusDBInput struct {
+type insertWorkflowStatusDBInput struct {
 	status     WorkflowStatus
 	maxRetries int
 	tx         pgx.Tx
 }
 
-func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error) {
+func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error) {
 	if input.tx == nil {
 		return nil, errors.New("transaction is required for InsertWorkflowStatus")
 	}
@@ -284,7 +284,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
             END
         RETURNING recovery_attempts, status, name, queue_name, workflow_deadline_epoch_ms`
 
-	var result InsertWorkflowResult
+	var result insertWorkflowResult
 	err = input.tx.QueryRow(ctx, query,
 		input.status.ID,
 		input.status.Status,
@@ -307,27 +307,27 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
 		WorkflowStatusEnqueued,
 		WorkflowStatusEnqueued,
 	).Scan(
-		&result.Attempts,
-		&result.Status,
-		&result.Name,
-		&result.QueueName,
-		&result.WorkflowDeadlineEpochMs,
+		&result.attempts,
+		&result.status,
+		&result.name,
+		&result.queueName,
+		&result.workflowDeadlineEpochMs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert workflow status: %w", err)
 	}
 
-	if len(input.status.Name) > 0 && result.Name != input.status.Name {
-		return nil, NewConflictingWorkflowError(input.status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.Name, input.status.Name))
+	if len(input.status.Name) > 0 && result.name != input.status.Name {
+		return nil, newConflictingWorkflowError(input.status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.name, input.status.Name))
 	}
-	if len(input.status.QueueName) > 0 && result.QueueName != nil && input.status.QueueName != *result.QueueName {
-		getLogger().Warn("Queue name conflict for workflow", "workflow_id", input.status.ID, "result_queue", *result.QueueName, "status_queue", input.status.QueueName)
+	if len(input.status.QueueName) > 0 && result.queueName != nil && input.status.QueueName != *result.queueName {
+		getLogger().Warn("Queue name conflict for workflow", "workflow_id", input.status.ID, "result_queue", *result.queueName, "status_queue", input.status.QueueName)
 	}
 
 	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
 	// When this number becomes equal to `maxRetries + 1`, we mark the workflow as `RETRIES_EXCEEDED`.
-	if result.Status != WorkflowStatusSuccess && result.Status != WorkflowStatusError &&
-		input.maxRetries > 0 && result.Attempts > input.maxRetries+1 {
+	if result.status != WorkflowStatusSuccess && result.status != WorkflowStatusError &&
+		input.maxRetries > 0 && result.attempts > input.maxRetries+1 {
 
 		// Update workflow status to RETRIES_EXCEEDED and clear queue-related fields
 		dlqQuery := `UPDATE dbos.workflow_status
@@ -348,32 +348,32 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input InsertW
 			return nil, fmt.Errorf("failed to commit transaction after marking workflow as RETRIES_EXCEEDED: %w", err)
 		}
 
-		return nil, NewDeadLetterQueueError(input.status.ID, input.maxRetries)
+		return nil, newDeadLetterQueueError(input.status.ID, input.maxRetries)
 	}
 
 	return &result, nil
 }
 
 // ListWorkflowsInput represents the input parameters for listing workflows
-type ListWorkflowsDBInput struct {
-	WorkflowName       string
-	QueueName          string
-	WorkflowIDPrefix   string
-	WorkflowIDs        []string
-	AuthenticatedUser  string
-	StartTime          time.Time
-	EndTime            time.Time
-	Status             []WorkflowStatusType
-	ApplicationVersion string
-	ExecutorIDs        []string
-	Limit              *int
-	Offset             *int
-	SortDesc           bool
-	Tx                 pgx.Tx
+type listWorkflowsDBInput struct {
+	workflowName       string
+	queueName          string
+	workflowIDPrefix   string
+	workflowIDs        []string
+	authenticatedUser  string
+	startTime          time.Time
+	endTime            time.Time
+	status             []WorkflowStatusType
+	applicationVersion string
+	executorIDs        []string
+	limit              *int
+	offset             *int
+	sortDesc           bool
+	tx                 pgx.Tx
 }
 
 // ListWorkflows retrieves a list of workflows based on the provided filters
-func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]WorkflowStatus, error) {
+func (s *systemDatabase) ListWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error) {
 	qb := newQueryBuilder()
 
 	// Build the base query
@@ -384,35 +384,35 @@ func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsD
 	          FROM dbos.workflow_status`
 
 	// Add filters using query builder
-	if input.WorkflowName != "" {
-		qb.addWhere("name", input.WorkflowName)
+	if input.workflowName != "" {
+		qb.addWhere("name", input.workflowName)
 	}
-	if input.QueueName != "" {
-		qb.addWhere("queue_name", input.QueueName)
+	if input.queueName != "" {
+		qb.addWhere("queue_name", input.queueName)
 	}
-	if input.WorkflowIDPrefix != "" {
-		qb.addWhereLike("workflow_uuid", input.WorkflowIDPrefix+"%")
+	if input.workflowIDPrefix != "" {
+		qb.addWhereLike("workflow_uuid", input.workflowIDPrefix+"%")
 	}
-	if len(input.WorkflowIDs) > 0 {
-		qb.addWhereAny("workflow_uuid", input.WorkflowIDs)
+	if len(input.workflowIDs) > 0 {
+		qb.addWhereAny("workflow_uuid", input.workflowIDs)
 	}
-	if input.AuthenticatedUser != "" {
-		qb.addWhere("authenticated_user", input.AuthenticatedUser)
+	if input.authenticatedUser != "" {
+		qb.addWhere("authenticated_user", input.authenticatedUser)
 	}
-	if !input.StartTime.IsZero() {
-		qb.addWhereGreaterEqual("created_at", input.StartTime.UnixMilli())
+	if !input.startTime.IsZero() {
+		qb.addWhereGreaterEqual("created_at", input.startTime.UnixMilli())
 	}
-	if !input.EndTime.IsZero() {
-		qb.addWhereLessEqual("created_at", input.EndTime.UnixMilli())
+	if !input.endTime.IsZero() {
+		qb.addWhereLessEqual("created_at", input.endTime.UnixMilli())
 	}
-	if len(input.Status) > 0 {
-		qb.addWhereAny("status", input.Status)
+	if len(input.status) > 0 {
+		qb.addWhereAny("status", input.status)
 	}
-	if input.ApplicationVersion != "" {
-		qb.addWhere("application_version", input.ApplicationVersion)
+	if input.applicationVersion != "" {
+		qb.addWhere("application_version", input.applicationVersion)
 	}
-	if len(input.ExecutorIDs) > 0 {
-		qb.addWhereAny("executor_id", input.ExecutorIDs)
+	if len(input.executorIDs) > 0 {
+		qb.addWhereAny("executor_id", input.executorIDs)
 	}
 
 	// Build complete query
@@ -424,31 +424,31 @@ func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsD
 	}
 
 	// Add sorting
-	if input.SortDesc {
+	if input.sortDesc {
 		query += " ORDER BY created_at DESC"
 	} else {
 		query += " ORDER BY created_at ASC"
 	}
 
 	// Add limit and offset
-	if input.Limit != nil {
+	if input.limit != nil {
 		qb.argCounter++
 		query += fmt.Sprintf(" LIMIT $%d", qb.argCounter)
-		qb.args = append(qb.args, *input.Limit)
+		qb.args = append(qb.args, *input.limit)
 	}
 
-	if input.Offset != nil {
+	if input.offset != nil {
 		qb.argCounter++
 		query += fmt.Sprintf(" OFFSET $%d", qb.argCounter)
-		qb.args = append(qb.args, *input.Offset)
+		qb.args = append(qb.args, *input.offset)
 	}
 
 	// Execute the query
 	var rows pgx.Rows
 	var err error
 
-	if input.Tx != nil {
-		rows, err = input.Tx.Query(ctx, query, qb.args...)
+	if input.tx != nil {
+		rows, err = input.tx.Query(ctx, query, qb.args...)
 	} else {
 		rows, err = s.pool.Query(ctx, query, qb.args...)
 	}
@@ -529,7 +529,7 @@ func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsD
 	return workflows, nil
 }
 
-type UpdateWorkflowOutcomeDBInput struct {
+type updateWorkflowOutcomeDBInput struct {
 	workflowID string
 	status     WorkflowStatusType
 	output     any
@@ -538,7 +538,7 @@ type UpdateWorkflowOutcomeDBInput struct {
 }
 
 // Will evolve as we serialize all output and error types
-func (s *systemDatabase) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error {
+func (s *systemDatabase) UpdateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error {
 	query := `UPDATE dbos.workflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
 			  WHERE workflow_uuid = $5`
@@ -573,16 +573,16 @@ func (s *systemDatabase) CancelWorkflow(ctx context.Context, workflowID string) 
 	defer tx.Rollback(ctx) // Rollback if not committed
 
 	// Check if workflow exists
-	listInput := ListWorkflowsDBInput{
-		WorkflowIDs: []string{workflowID},
-		Tx:          tx,
+	listInput := listWorkflowsDBInput{
+		workflowIDs: []string{workflowID},
+		tx:          tx,
 	}
 	wfs, err := s.ListWorkflows(ctx, listInput)
 	if err != nil {
 		return err
 	}
 	if len(wfs) == 0 {
-		return NewNonExistentWorkflowError(workflowID)
+		return newNonExistentWorkflowError(workflowID)
 	}
 
 	wf := wfs[0]
@@ -640,7 +640,7 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 			}
 			return output, errors.New(*errorStr)
 		case WorkflowStatusCancelled:
-			return nil, NewAwaitedWorkflowCancelledError(workflowID)
+			return nil, newAwaitedWorkflowCancelledError(workflowID)
 		default:
 			time.Sleep(1 * time.Second) // Wait before checking again
 		}
@@ -819,19 +819,19 @@ func (s *systemDatabase) RecordChildGetResult(ctx context.Context, input recordC
 /******* STEPS ********/
 /*******************************/
 
-type RecordedResult struct {
+type recordedResult struct {
 	output any
 	err    error
 }
 
-type CheckOperationExecutionDBInput struct {
+type checkOperationExecutionDBInput struct {
 	workflowID   string
 	operationID  int
 	functionName string
 	tx           pgx.Tx
 }
 
-func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input CheckOperationExecutionDBInput) (*RecordedResult, error) {
+func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error) {
 	var tx pgx.Tx
 	var err error
 
@@ -860,14 +860,14 @@ func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input Chec
 	err = tx.QueryRow(ctx, workflowStatusQuery, input.workflowID).Scan(&workflowStatus)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return nil, NewNonExistentWorkflowError(input.workflowID)
+			return nil, newNonExistentWorkflowError(input.workflowID)
 		}
 		return nil, fmt.Errorf("failed to get workflow status: %w", err)
 	}
 
 	// If the workflow is cancelled, raise the exception
 	if workflowStatus == WorkflowStatusCancelled {
-		return nil, NewWorkflowCancelledError(input.workflowID)
+		return nil, newWorkflowCancelledError(input.workflowID)
 	}
 
 	// Execute second query to get operation outputs
@@ -887,7 +887,7 @@ func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input Chec
 
 	// If the provided and recorded function name are different, throw an exception
 	if input.functionName != recordedFunctionName {
-		return nil, NewUnexpectedStepError(input.workflowID, input.operationID, input.functionName, recordedFunctionName)
+		return nil, newUnexpectedStepError(input.workflowID, input.operationID, input.functionName, recordedFunctionName)
 	}
 
 	output, err := deserialize(outputString)
@@ -899,7 +899,7 @@ func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input Chec
 	if errorStr != nil && *errorStr != "" {
 		recordedError = errors.New(*errorStr)
 	}
-	result := &RecordedResult{
+	result := &recordedResult{
 		output: output,
 		err:    recordedError,
 	}
@@ -1003,7 +1003,7 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 	}
 }
 
-const DBOS_NULL_TOPIC = "__null__topic__"
+const _DBOS_NULL_TOPIC = "__null__topic__"
 
 // Send is a special type of step that sends a message to another workflow.
 // Three differences with a normal steps: durability and the function run in the same transaction, and we forbid nested step execution
@@ -1013,11 +1013,11 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 	// Get workflow state from context
 	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
-		return NewStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
+		return newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 
 	if workflowState.isWithinStep {
-		return NewStepExecutionError(workflowState.WorkflowID, functionName, "cannot call Send within a step")
+		return newStepExecutionError(workflowState.WorkflowID, functionName, "cannot call Send within a step")
 	}
 
 	stepID := workflowState.NextStepID()
@@ -1029,7 +1029,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 	defer tx.Rollback(ctx)
 
 	// Check if operation was already executed and do nothing if so
-	checkInput := CheckOperationExecutionDBInput{
+	checkInput := checkOperationExecutionDBInput{
 		workflowID:   input.DestinationID,
 		operationID:  stepID,
 		functionName: functionName,
@@ -1044,7 +1044,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 	}
 
 	// Set default topic if not provided
-	topic := DBOS_NULL_TOPIC
+	topic := _DBOS_NULL_TOPIC
 	if len(input.Topic) > 0 {
 		topic = input.Topic
 	}
@@ -1062,7 +1062,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 	if err != nil {
 		// Check for foreign key violation (destination workflow doesn't exist)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23503" {
-			return NewNonExistentWorkflowError(input.DestinationID)
+			return newNonExistentWorkflowError(input.DestinationID)
 		}
 		return fmt.Errorf("failed to insert notification: %w", err)
 	}
@@ -1098,18 +1098,18 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	// XXX these checks might be better suited for outside of the system db code. We'll see when we implement the client.
 	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
-		return nil, NewStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
+		return nil, newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 
 	if workflowState.isWithinStep {
-		return nil, NewStepExecutionError(workflowState.WorkflowID, functionName, "cannot call Recv within a step")
+		return nil, newStepExecutionError(workflowState.WorkflowID, functionName, "cannot call Recv within a step")
 	}
 
 	stepID := workflowState.NextStepID()
 	destinationID := workflowState.WorkflowID
 
 	// Set default topic if not provided
-	topic := DBOS_NULL_TOPIC
+	topic := _DBOS_NULL_TOPIC
 	if len(input.Topic) > 0 {
 		topic = input.Topic
 	}
@@ -1122,7 +1122,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 
 	// Check if operation was already executed
 	// XXX this might not need to be in the transaction
-	checkInput := CheckOperationExecutionDBInput{
+	checkInput := checkOperationExecutionDBInput{
 		workflowID:   destinationID,
 		operationID:  stepID,
 		functionName: functionName,
@@ -1146,7 +1146,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	if loaded {
 		close(c)
 		getLogger().Error("Receive already called for workflow", "destination_id", destinationID)
-		return nil, NewWorkflowConflictIDError(destinationID)
+		return nil, newWorkflowConflictIDError(destinationID)
 	}
 	defer func() {
 		// Clean up the channel after we're done
@@ -1258,8 +1258,8 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	// First check the rate limiter
 	startTimeMs := time.Now().UnixMilli()
 	var numRecentQueries int
-	if queue.Limiter != nil {
-		limiterPeriod := time.Duration(queue.Limiter.Period * float64(time.Second))
+	if queue.limiter != nil {
+		limiterPeriod := time.Duration(queue.limiter.Period * float64(time.Second))
 
 		// Calculate the cutoff time: current time minus limiter period
 		cutoffTimeMs := time.Now().Add(-limiterPeriod).UnixMilli()
@@ -1273,22 +1273,22 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 		  AND started_at_epoch_ms > $3`
 
 		err := tx.QueryRow(ctx, limiterQuery,
-			queue.Name,
+			queue.name,
 			WorkflowStatusEnqueued,
 			cutoffTimeMs).Scan(&numRecentQueries)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query rate limiter: %w", err)
 		}
 
-		if numRecentQueries >= queue.Limiter.Limit {
+		if numRecentQueries >= queue.limiter.Limit {
 			return []dequeuedWorkflow{}, nil
 		}
 	}
 
 	// Calculate max_tasks based on concurrency limits
-	maxTasks := queue.MaxTasksPerIteration
+	maxTasks := queue.maxTasksPerIteration
 
-	if queue.WorkerConcurrency != nil || queue.GlobalConcurrency != nil {
+	if queue.workerConcurrency != nil || queue.globalConcurrency != nil {
 		// Count pending workflows by executor
 		pendingQuery := `
 			SELECT executor_id, COUNT(*) as task_count
@@ -1296,7 +1296,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 			WHERE queue_name = $1 AND status = $2
 			GROUP BY executor_id`
 
-		rows, err := tx.Query(ctx, pendingQuery, queue.Name, WorkflowStatusPending)
+		rows, err := tx.Query(ctx, pendingQuery, queue.name, WorkflowStatusPending)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query pending workflows: %w", err)
 		}
@@ -1312,28 +1312,28 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 			pendingWorkflowsDict[executorIDRow] = taskCount
 		}
 
-		localPendingWorkflows := pendingWorkflowsDict[EXECUTOR_ID]
+		localPendingWorkflows := pendingWorkflowsDict[_EXECUTOR_ID]
 
 		// Check worker concurrency limit
-		if queue.WorkerConcurrency != nil {
-			workerConcurrency := *queue.WorkerConcurrency
+		if queue.workerConcurrency != nil {
+			workerConcurrency := *queue.workerConcurrency
 			if localPendingWorkflows > workerConcurrency {
-				getLogger().Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", queue.Name, "concurrency_limit", workerConcurrency)
+				getLogger().Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", queue.name, "concurrency_limit", workerConcurrency)
 			}
 			availableWorkerTasks := max(workerConcurrency-localPendingWorkflows, 0)
 			maxTasks = availableWorkerTasks
 		}
 
 		// Check global concurrency limit
-		if queue.GlobalConcurrency != nil {
+		if queue.globalConcurrency != nil {
 			globalPendingWorkflows := 0
 			for _, count := range pendingWorkflowsDict {
 				globalPendingWorkflows += count
 			}
 
-			concurrency := *queue.GlobalConcurrency
+			concurrency := *queue.globalConcurrency
 			if globalPendingWorkflows > concurrency {
-				getLogger().Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", queue.Name, "concurrency_limit", concurrency)
+				getLogger().Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", queue.name, "concurrency_limit", concurrency)
 			}
 			availableTasks := max(concurrency-globalPendingWorkflows, 0)
 			if availableTasks < maxTasks {
@@ -1345,7 +1345,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	// Build the query to select workflows for dequeueing
 	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
 	// otherwise use NOWAIT to ensure consistent view across processes
-	skipLocks := queue.GlobalConcurrency == nil
+	skipLocks := queue.globalConcurrency == nil
 	var lockClause string
 	if skipLocks {
 		lockClause = "FOR UPDATE SKIP LOCKED"
@@ -1354,7 +1354,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	var query string
-	if queue.PriorityEnabled {
+	if queue.priorityEnabled {
 		query = fmt.Sprintf(`
 			SELECT workflow_uuid
 			FROM dbos.workflow_status
@@ -1379,7 +1379,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	// Execute the query to get workflow IDs
-	rows, err := tx.Query(ctx, query, queue.Name, WorkflowStatusEnqueued, APP_VERSION)
+	rows, err := tx.Query(ctx, query, queue.name, WorkflowStatusEnqueued, _APP_VERSION)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query enqueued workflows: %w", err)
 	}
@@ -1402,8 +1402,8 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	var retWorkflows []dequeuedWorkflow
 	for _, id := range dequeuedIDs {
 		// If we have a limiter, stop dequeueing workflows when the number of workflows started this period exceeds the limit.
-		if queue.Limiter != nil {
-			if len(retWorkflows)+numRecentQueries >= queue.Limiter.Limit {
+		if queue.limiter != nil {
+			if len(retWorkflows)+numRecentQueries >= queue.limiter.Limit {
 				break
 			}
 		}
@@ -1429,8 +1429,8 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 		var inputString *string
 		err := tx.QueryRow(ctx, updateQuery,
 			WorkflowStatusPending,
-			APP_VERSION,
-			EXECUTOR_ID,
+			_APP_VERSION,
+			_EXECUTOR_ID,
 			startTimeMs,
 			id).Scan(&retWorkflow.name, &inputString)
 

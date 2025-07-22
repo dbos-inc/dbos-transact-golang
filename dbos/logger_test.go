@@ -10,12 +10,18 @@ import (
 func TestLogger(t *testing.T) {
 
 	t.Run("Default logger", func(t *testing.T) {
-		err := Launch() // Launch with default logger
+		executor, err := NewExecutor() // Create executor with default logger
+		if err != nil {
+			t.Fatalf("Failed to create executor with default logger: %v", err)
+		}
+		err = executor.Launch()
 		if err != nil {
 			t.Fatalf("Failed to launch with default logger: %v", err)
 		}
 		t.Cleanup(func() {
-			Shutdown()
+			if executor != nil {
+				executor.Shutdown()
+			}
 		})
 
 		if logger == nil {
@@ -37,12 +43,18 @@ func TestLogger(t *testing.T) {
 		// Add some context to the slog logger
 		slogLogger = slogLogger.With("service", "dbos-test", "environment", "test")
 
-		err := Launch(WithLogger(slogLogger))
+		executor, err := NewExecutor(WithLogger(slogLogger))
+		if err != nil {
+			t.Fatalf("Failed to create executor with custom logger: %v", err)
+		}
+		err = executor.Launch()
 		if err != nil {
 			t.Fatalf("Failed to launch with custom logger: %v", err)
 		}
 		t.Cleanup(func() {
-			Shutdown()
+			if executor != nil {
+				executor.Shutdown()
+			}
 		})
 
 		if logger == nil {

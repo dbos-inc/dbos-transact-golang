@@ -98,8 +98,8 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from ListWorkflows
-		workflows, err := getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
-			WorkflowIDs: []string{directHandle.GetWorkflowID()},
+		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+			workflowIDs: []string{directHandle.GetWorkflowID()},
 		})
 		if err != nil {
 			t.Fatalf("failed to list workflows: %v", err)
@@ -136,7 +136,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from GetWorkflowSteps
-		steps, err := getExecutor().systemDB.GetWorkflowSteps(context.Background(), directHandle.GetWorkflowID())
+		steps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), directHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get workflow steps: %v", err)
 		}
@@ -215,8 +215,8 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from ListWorkflows
-		workflows, err := getExecutor().systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
-			WorkflowIDs: []string{directHandle.GetWorkflowID()},
+		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+			workflowIDs: []string{directHandle.GetWorkflowID()},
 		})
 		if err != nil {
 			t.Fatalf("failed to list workflows: %v", err)
@@ -257,7 +257,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from GetWorkflowSteps
-		steps, err := getExecutor().systemDB.GetWorkflowSteps(context.Background(), directHandle.GetWorkflowID())
+		steps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), directHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get workflow steps: %v", err)
 		}

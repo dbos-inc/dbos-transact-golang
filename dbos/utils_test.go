@@ -46,9 +46,14 @@ func setupDBOS(t *testing.T) {
 		t.Fatalf("failed to drop test database: %v", err)
 	}
 
-	err = Launch()
+	executor, err := NewExecutor()
 	if err != nil {
 		t.Fatalf("failed to create DBOS instance: %v", err)
+	}
+
+	err = executor.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch DBOS instance: %v", err)
 	}
 
 	if dbos == nil {
@@ -58,7 +63,9 @@ func setupDBOS(t *testing.T) {
 	// Register cleanup to run after test completes
 	t.Cleanup(func() {
 		fmt.Println("Cleaning up DBOS instance...")
-		Shutdown()
+		if executor != nil {
+			executor.Shutdown()
+		}
 	})
 }
 
@@ -141,7 +148,7 @@ func queueEntriesAreCleanedUp() bool {
 	success := false
 	for range maxTries {
 		// Begin transaction
-		tx, err := getExecutor().systemDB.(*systemDatabase).pool.Begin(context.Background())
+		tx, err := dbos.systemDB.(*systemDatabase).pool.Begin(context.Background())
 		if err != nil {
 			return false
 		}

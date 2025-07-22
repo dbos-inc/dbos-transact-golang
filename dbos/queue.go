@@ -30,65 +30,65 @@ type RateLimiter struct {
 }
 
 type WorkflowQueue struct {
-	Name                 string
-	WorkerConcurrency    *int
-	GlobalConcurrency    *int
-	PriorityEnabled      bool
-	Limiter              *RateLimiter
-	MaxTasksPerIteration int
+	name                 string
+	workerConcurrency    *int
+	globalConcurrency    *int
+	priorityEnabled      bool
+	limiter              *RateLimiter
+	maxTasksPerIteration int
 }
 
-// QueueOption is a functional option for configuring a workflow queue
-type QueueOption func(*WorkflowQueue)
+// queueOption is a functional option for configuring a workflow queue
+type queueOption func(*WorkflowQueue)
 
-func WithWorkerConcurrency(concurrency int) QueueOption {
+func WithWorkerConcurrency(concurrency int) queueOption {
 	return func(q *WorkflowQueue) {
-		q.WorkerConcurrency = &concurrency
+		q.workerConcurrency = &concurrency
 	}
 }
 
-func WithGlobalConcurrency(concurrency int) QueueOption {
+func WithGlobalConcurrency(concurrency int) queueOption {
 	return func(q *WorkflowQueue) {
-		q.GlobalConcurrency = &concurrency
+		q.globalConcurrency = &concurrency
 	}
 }
 
-func WithPriorityEnabled(enabled bool) QueueOption {
+func WithPriorityEnabled(enabled bool) queueOption {
 	return func(q *WorkflowQueue) {
-		q.PriorityEnabled = enabled
+		q.priorityEnabled = enabled
 	}
 }
 
-func WithRateLimiter(limiter *RateLimiter) QueueOption {
+func WithRateLimiter(limiter *RateLimiter) queueOption {
 	return func(q *WorkflowQueue) {
-		q.Limiter = limiter
+		q.limiter = limiter
 	}
 }
 
-func WithMaxTasksPerIteration(maxTasks int) QueueOption {
+func WithMaxTasksPerIteration(maxTasks int) queueOption {
 	return func(q *WorkflowQueue) {
-		q.MaxTasksPerIteration = maxTasks
+		q.maxTasksPerIteration = maxTasks
 	}
 }
 
 // NewWorkflowQueue creates a new workflow queue with optional configuration
-func NewWorkflowQueue(name string, options ...QueueOption) WorkflowQueue {
-	if getExecutor() != nil {
+func NewWorkflowQueue(name string, options ...queueOption) WorkflowQueue {
+	if dbos != nil {
 		getLogger().Warn("NewWorkflowQueue called after DBOS initialization, dynamic registration is not supported")
 		return WorkflowQueue{}
 	}
 	if _, exists := workflowQueueRegistry[name]; exists {
-		panic(NewConflictingRegistrationError(name))
+		panic(newConflictingRegistrationError(name))
 	}
 
 	// Create queue with default settings
 	q := WorkflowQueue{
-		Name:                 name,
-		WorkerConcurrency:    nil,
-		GlobalConcurrency:    nil,
-		PriorityEnabled:      false,
-		Limiter:              nil,
-		MaxTasksPerIteration: _DEFAULT_MAX_TASKS_PER_ITERATION,
+		name:                 name,
+		workerConcurrency:    nil,
+		globalConcurrency:    nil,
+		priorityEnabled:      false,
+		limiter:              nil,
+		maxTasksPerIteration: _DEFAULT_MAX_TASKS_PER_ITERATION,
 	}
 
 	// Apply functional options
@@ -122,7 +122,7 @@ func queueRunner(ctx context.Context) {
 		for queueName, queue := range workflowQueueRegistry {
 			getLogger().Debug("Processing queue", "queue_name", queueName)
 			// Call DequeueWorkflows for each queue
-			dequeuedWorkflows, err := getExecutor().systemDB.DequeueWorkflows(ctx, queue)
+			dequeuedWorkflows, err := dbos.systemDB.DequeueWorkflows(ctx, queue)
 			if err != nil {
 				if pgErr, ok := err.(*pgconn.PgError); ok {
 					switch pgErr.Code {

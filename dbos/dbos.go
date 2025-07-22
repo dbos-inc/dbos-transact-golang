@@ -17,10 +17,10 @@ import (
 )
 
 var (
-	APP_VERSION               string
-	EXECUTOR_ID               string
-	APP_ID                    string
-	DEFAULT_ADMIN_SERVER_PORT = 3001
+	_APP_VERSION               string
+	_EXECUTOR_ID               string
+	_APP_ID                    string
+	_DEFAULT_ADMIN_SERVER_PORT = 3001
 )
 
 func computeApplicationVersion() string {
@@ -53,30 +53,9 @@ func computeApplicationVersion() string {
 
 }
 
-type Executor interface {
-	Shutdown()
-}
+var workflowScheduler *cron.Cron // Global because accessed during workflow registration before the dbos singleton is initialized
 
-var workflowScheduler *cron.Cron
-
-type executor struct {
-	systemDB              SystemDatabase
-	queueRunnerCtx        context.Context
-	queueRunnerCancelFunc context.CancelFunc
-	queueRunnerDone       chan struct{}
-	adminServer           *AdminServer
-}
-
-var dbos *executor
-
-func getExecutor() *executor {
-	if dbos == nil {
-		return nil
-	}
-	return dbos
-}
-
-var logger *slog.Logger
+var logger *slog.Logger // Global because accessed everywhere inside the library
 
 func getLogger() *slog.Logger {
 	if dbos == nil || logger == nil {
@@ -124,93 +103,124 @@ func NewConfig(programmaticConfig config) *config {
 	return dbosConfig
 }
 
-type LaunchOption func(*config)
+var dbos *Executor // DBOS singleton instance
 
-func WithLogger(logger *slog.Logger) LaunchOption {
+type Executor struct {
+	systemDB              SystemDatabase
+	queueRunnerCtx        context.Context
+	queueRunnerCancelFunc context.CancelFunc
+	queueRunnerDone       chan struct{}
+	adminServer           *adminServer
+	config                *config
+}
+
+type executorOption func(*config)
+
+func WithLogger(logger *slog.Logger) executorOption {
 	return func(config *config) {
 		config.logger = logger
 	}
 }
 
-func WithAdminServer() LaunchOption {
+func WithAdminServer() executorOption {
 	return func(config *config) {
 		config.adminServer = true
 	}
 }
 
-func WithDatabaseURL(url string) LaunchOption {
+func WithDatabaseURL(url string) executorOption {
 	return func(config *config) {
 		config.databaseURL = url
 	}
 }
 
-func Launch(options ...LaunchOption) error {
+func WithAppName(name string) executorOption {
+	return func(config *config) {
+		config.appName = name
+	}
+}
+
+func NewExecutor(options ...executorOption) (*Executor, error) {
 	if dbos != nil {
 		fmt.Println("warning: DBOS instance already initialized, skipping re-initialization")
-		return NewInitializationError("DBOS already initialized")
+		return nil, newInitializationError("DBOS already initialized")
 	}
 
-	// Load & process the configuration
+	// Start with default configuration
 	config := &config{
 		logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
+
+	// Apply options
 	for _, option := range options {
 		option(config)
 	}
+
+	// Load & process the configuration
 	config = NewConfig(*config)
 
+	// Set global logger
 	logger = config.logger
 
-	// Initialize with environment variables, providing defaults if not set
-	APP_VERSION = os.Getenv("DBOS__APPVERSION")
-	if APP_VERSION == "" {
-		APP_VERSION = computeApplicationVersion()
+	// Initialize global variables with environment variables, providing defaults if not set
+	_APP_VERSION = os.Getenv("DBOS__APPVERSION")
+	if _APP_VERSION == "" {
+		_APP_VERSION = computeApplicationVersion()
 		logger.Info("DBOS__APPVERSION not set, using computed hash")
 	}
 
-	EXECUTOR_ID = os.Getenv("DBOS__VMID")
-	if EXECUTOR_ID == "" {
-		EXECUTOR_ID = "local"
-		logger.Info("DBOS__VMID not set, using default", "executor_id", EXECUTOR_ID)
+	_EXECUTOR_ID = os.Getenv("DBOS__VMID")
+	if _EXECUTOR_ID == "" {
+		_EXECUTOR_ID = "local"
+		logger.Info("DBOS__VMID not set, using default", "executor_id", _EXECUTOR_ID)
 	}
 
-	APP_ID = os.Getenv("DBOS__APPID")
+	_APP_ID = os.Getenv("DBOS__APPID")
 
 	// Create the system database
 	systemDB, err := NewSystemDatabase(config.databaseURL)
 	if err != nil {
-		return NewInitializationError(fmt.Sprintf("failed to create system database: %v", err))
+		return nil, newInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
 	logger.Info("System database initialized")
 
-	systemDB.Launch(context.Background())
+	// Create the executor instance
+	executor := &Executor{
+		config:   config,
+		systemDB: systemDB,
+	}
+
+	// Set the global dbos instance
+	dbos = executor
+
+	return executor, nil
+}
+
+func (e *Executor) Launch() error {
+	// Start the system database
+	e.systemDB.Launch(context.Background())
 
 	// Start the admin server if configured
-	var adminServer *AdminServer
-	if config.adminServer {
-		adminServer = NewAdminServer(DEFAULT_ADMIN_SERVER_PORT)
+	if e.config.adminServer {
+		adminServer := newAdminServer(_DEFAULT_ADMIN_SERVER_PORT)
 		err := adminServer.Start()
 		if err != nil {
 			logger.Error("Failed to start admin server", "error", err)
-			return NewInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
+			return newInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
 		}
-		logger.Info("Admin server started", "port", DEFAULT_ADMIN_SERVER_PORT)
+		logger.Info("Admin server started", "port", _DEFAULT_ADMIN_SERVER_PORT)
+		e.adminServer = adminServer
 	}
 
 	// Create context with cancel function for queue runner
 	ctx, cancel := context.WithCancel(context.Background())
-
-	dbos = &executor{
-		systemDB:              systemDB,
-		queueRunnerCtx:        ctx,
-		queueRunnerCancelFunc: cancel,
-		queueRunnerDone:       make(chan struct{}),
-		adminServer:           adminServer,
-	}
+	e.queueRunnerCtx = ctx
+	e.queueRunnerCancelFunc = cancel
+	e.queueRunnerDone = make(chan struct{})
 
 	// Start the queue runner in a goroutine
 	go func() {
-		defer close(dbos.queueRunnerDone)
+		defer close(e.queueRunnerDone)
 		queueRunner(ctx)
 	}()
 	logger.Info("Queue runner started")
@@ -222,29 +232,28 @@ func Launch(options ...LaunchOption) error {
 	}
 
 	// Run a round of recovery on the local executor
-	_, err = recoverPendingWorkflows(context.Background(), []string{EXECUTOR_ID}) // XXX maybe use the queue runner context here to allow Shutdown to cancel it?
+	_, err := recoverPendingWorkflows(context.Background(), []string{_EXECUTOR_ID}) // XXX maybe use the queue runner context here to allow Shutdown to cancel it?
 	if err != nil {
-		return NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
+		return newInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
 	}
 
-	logger.Info("DBOS initialized", "app_version", APP_VERSION, "executor_id", EXECUTOR_ID)
+	logger.Info("DBOS initialized", "app_version", _APP_VERSION, "executor_id", _EXECUTOR_ID)
 	return nil
 }
 
-// Close closes the DBOS instance and its resources
-func Shutdown() {
-	if dbos == nil {
-		fmt.Println("DBOS instance is nil, cannot destroy")
+func (e *Executor) Shutdown() {
+	if e == nil {
+		fmt.Println("Executor instance is nil, cannot shutdown")
 		return
 	}
 
 	// XXX is there a way to ensure all workflows goroutine are done before closing?
 
 	// Cancel the context to stop the queue runner
-	if dbos.queueRunnerCancelFunc != nil {
-		dbos.queueRunnerCancelFunc()
+	if e.queueRunnerCancelFunc != nil {
+		e.queueRunnerCancelFunc()
 		// Wait for queue runner to finish
-		<-dbos.queueRunnerDone
+		<-e.queueRunnerDone
 		getLogger().Info("Queue runner stopped")
 	}
 
@@ -262,24 +271,26 @@ func Shutdown() {
 		}
 	}
 
-	if dbos.systemDB != nil {
-		dbos.systemDB.Shutdown()
-		dbos.systemDB = nil
+	if e.systemDB != nil {
+		e.systemDB.Shutdown()
+		e.systemDB = nil
 	}
 
-	if dbos.adminServer != nil {
-		err := dbos.adminServer.Shutdown()
+	if e.adminServer != nil {
+		err := e.adminServer.Shutdown()
 		if err != nil {
 			getLogger().Error("Failed to shutdown admin server", "error", err)
 		} else {
 			getLogger().Info("Admin server shutdown complete")
 		}
-		dbos.adminServer = nil
+		e.adminServer = nil
 	}
 
-	if logger != nil {
-		logger = nil
+	// Clear global references if this is the global instance
+	if dbos == e {
+		if logger != nil {
+			logger = nil
+		}
+		dbos = nil
 	}
-
-	dbos = nil
 }

@@ -8,10 +8,10 @@ import (
 func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
-	pendingWorkflows, err := getExecutor().systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{
-		Status:             []WorkflowStatusType{WorkflowStatusPending},
-		ExecutorIDs:        executorIDs,
-		ApplicationVersion: APP_VERSION,
+	pendingWorkflows, err := dbos.systemDB.ListWorkflows(ctx, listWorkflowsDBInput{
+		status:             []WorkflowStatusType{WorkflowStatusPending},
+		executorIDs:        executorIDs,
+		applicationVersion: _APP_VERSION,
 	})
 	if err != nil {
 		return nil, err
@@ -27,7 +27,7 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 
 		// fmt.Println("Recovering workflow:", workflow.ID, "Name:", workflow.Name, "Input:", workflow.Input, "QueueName:", workflow.QueueName)
 		if workflow.QueueName != "" {
-			cleared, err := getExecutor().systemDB.ClearQueueAssignment(ctx, workflow.ID)
+			cleared, err := dbos.systemDB.ClearQueueAssignment(ctx, workflow.ID)
 			if err != nil {
 				getLogger().Error("Error clearing queue assignment for workflow", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
 				continue
@@ -45,7 +45,7 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 		}
 
 		// Convert workflow parameters to options
-		opts := []WorkflowOption{
+		opts := []workflowOption{
 			WithWorkflowID(workflow.ID),
 		}
 		// XXX we'll figure out the exact timeout/deadline settings later

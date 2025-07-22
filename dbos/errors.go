@@ -45,7 +45,7 @@ func (e *DBOSError) Error() string {
 	return fmt.Sprintf("DBOS Error %d: %s", int(e.Code), e.Message)
 }
 
-func NewConflictingWorkflowError(workflowID, message string) *DBOSError {
+func newConflictingWorkflowError(workflowID, message string) *DBOSError {
 	msg := fmt.Sprintf("Conflicting workflow invocation with the same ID (%s)", workflowID)
 	if message != "" {
 		msg += ": " + message
@@ -57,14 +57,14 @@ func NewConflictingWorkflowError(workflowID, message string) *DBOSError {
 	}
 }
 
-func NewInitializationError(message string) *DBOSError {
+func newInitializationError(message string) *DBOSError {
 	return &DBOSError{
 		Message: fmt.Sprintf("Error initializing DBOS Transact: %s", message),
 		Code:    InitializationError,
 	}
 }
 
-func NewWorkflowFunctionNotFoundError(workflowID, message string) *DBOSError {
+func newWorkflowFunctionNotFoundError(workflowID, message string) *DBOSError {
 	msg := fmt.Sprintf("Workflow function not found for workflow ID %s", workflowID)
 	if message != "" {
 		msg += ": " + message
@@ -76,7 +76,7 @@ func NewWorkflowFunctionNotFoundError(workflowID, message string) *DBOSError {
 	}
 }
 
-func NewNonExistentWorkflowError(workflowID string) *DBOSError {
+func newNonExistentWorkflowError(workflowID string) *DBOSError {
 	return &DBOSError{
 		Message:       fmt.Sprintf("workflow %s does not exist", workflowID),
 		Code:          NonExistentWorkflowError,
@@ -84,14 +84,14 @@ func NewNonExistentWorkflowError(workflowID string) *DBOSError {
 	}
 }
 
-func NewConflictingRegistrationError(name string) *DBOSError {
+func newConflictingRegistrationError(name string) *DBOSError {
 	return &DBOSError{
 		Message: fmt.Sprintf("%s is already registered", name),
 		Code:    ConflictingRegistrationError,
 	}
 }
 
-func NewUnexpectedStepError(workflowID string, stepID int, expectedName, recordedName string) *DBOSError {
+func newUnexpectedStepError(workflowID string, stepID int, expectedName, recordedName string) *DBOSError {
 	return &DBOSError{
 		Message:      fmt.Sprintf("During execution of workflow %s step %d, function %s was recorded when %s was expected. Check that your workflow is deterministic.", workflowID, stepID, recordedName, expectedName),
 		Code:         UnexpectedStep,
@@ -102,7 +102,7 @@ func NewUnexpectedStepError(workflowID string, stepID int, expectedName, recorde
 	}
 }
 
-func NewAwaitedWorkflowCancelledError(workflowID string) *DBOSError {
+func newAwaitedWorkflowCancelledError(workflowID string) *DBOSError {
 	return &DBOSError{
 		Message:    fmt.Sprintf("Awaited workflow %s was cancelled", workflowID),
 		Code:       AwaitedWorkflowCancelled,
@@ -110,7 +110,7 @@ func NewAwaitedWorkflowCancelledError(workflowID string) *DBOSError {
 	}
 }
 
-func NewWorkflowCancelledError(workflowID string) *DBOSError {
+func newWorkflowCancelledError(workflowID string) *DBOSError {
 	return &DBOSError{
 		Message: fmt.Sprintf("Workflow %s was cancelled", workflowID),
 		Code:    WorkflowCancelled,
@@ -118,7 +118,7 @@ func NewWorkflowCancelledError(workflowID string) *DBOSError {
 	}
 }
 
-func NewWorkflowConflictIDError(workflowID string) *DBOSError {
+func newWorkflowConflictIDError(workflowID string) *DBOSError {
 	return &DBOSError{
 		Message:    fmt.Sprintf("Conflicting workflow ID %s", workflowID),
 		Code:       ConflictingIDError,
@@ -127,7 +127,7 @@ func NewWorkflowConflictIDError(workflowID string) *DBOSError {
 	}
 }
 
-func NewWorkflowUnexpectedResultType(workflowID, expectedType, actualType string) *DBOSError {
+func newWorkflowUnexpectedResultType(workflowID, expectedType, actualType string) *DBOSError {
 	return &DBOSError{
 		Message:    fmt.Sprintf("Workflow %s returned unexpected result type: expected %s, got %s", workflowID, expectedType, actualType),
 		Code:       WorkflowUnexpectedTypeError,
@@ -136,7 +136,7 @@ func NewWorkflowUnexpectedResultType(workflowID, expectedType, actualType string
 	}
 }
 
-func NewWorkflowUnexpectedInputType(workflowName, expectedType, actualType string) *DBOSError {
+func newWorkflowUnexpectedInputType(workflowName, expectedType, actualType string) *DBOSError {
 	return &DBOSError{
 		Message: fmt.Sprintf("Workflow %s received unexpected input type: expected %s, got %s", workflowName, expectedType, actualType),
 		Code:    WorkflowUnexpectedTypeError,
@@ -144,7 +144,7 @@ func NewWorkflowUnexpectedInputType(workflowName, expectedType, actualType strin
 	}
 }
 
-func NewWorkflowExecutionError(workflowID, message string) *DBOSError {
+func newWorkflowExecutionError(workflowID, message string) *DBOSError {
 	return &DBOSError{
 		Message:    fmt.Sprintf("Workflow %s execution error: %s", workflowID, message),
 		Code:       WorkflowExecutionError,
@@ -153,7 +153,7 @@ func NewWorkflowExecutionError(workflowID, message string) *DBOSError {
 	}
 }
 
-func NewStepExecutionError(workflowID, stepName, message string) *DBOSError {
+func newStepExecutionError(workflowID, stepName, message string) *DBOSError {
 	return &DBOSError{
 		Message:    fmt.Sprintf("Step %s in workflow %s execution error: %s", stepName, workflowID, message),
 		Code:       StepExecutionError,
@@ -163,7 +163,7 @@ func NewStepExecutionError(workflowID, stepName, message string) *DBOSError {
 	}
 }
 
-func NewDeadLetterQueueError(workflowID string, maxRetries int) *DBOSError {
+func newDeadLetterQueueError(workflowID string, maxRetries int) *DBOSError {
 	return &DBOSError{
 		Message:    fmt.Sprintf("Workflow %s has been moved to the dead-letter queue after exceeding the maximum of %d retries", workflowID, maxRetries),
 		Code:       DeadLetterQueueError,
@@ -173,7 +173,7 @@ func NewDeadLetterQueueError(workflowID string, maxRetries int) *DBOSError {
 	}
 }
 
-func NewMaxStepRetriesExceededError(workflowID, stepName string, maxRetries int, err error) *DBOSError {
+func newMaxStepRetriesExceededError(workflowID, stepName string, maxRetries int, err error) *DBOSError {
 	return &DBOSError{
 		Message:    fmt.Sprintf("Step %s has exceeded its maximum of %d retries: %v", stepName, maxRetries, err),
 		Code:       MaxStepRetriesExceeded,
