@@ -744,6 +744,37 @@ func Recv[R any](ctx context.Context, input WorkflowRecvInput) (R, error) {
 	return typedMessage, nil
 }
 
+type WorkflowSetEventInput struct {
+	Key     string
+	Message any
+}
+
+func SetEvent(ctx context.Context, input WorkflowSetEventInput) error {
+	return dbos.systemDB.SetEvent(ctx, input)
+}
+
+type WorkflowGetEventInput struct {
+	TargetWorkflowID string
+	Key              string
+	Timeout          time.Duration
+}
+
+func GetEvent[R any](ctx context.Context, input WorkflowGetEventInput) (R, error) {
+	value, err := dbos.systemDB.GetEvent(ctx, input)
+	if err != nil {
+		return *new(R), err
+	}
+	if value == nil {
+		return *new(R), nil
+	}
+	// Type check
+	typedValue, ok := value.(R)
+	if !ok {
+		return *new(R), newWorkflowUnexpectedResultType("", fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", value))
+	}
+	return typedValue, nil
+}
+
 /***********************************/
 /******* WORKFLOW MANAGEMENT *******/
 /***********************************/

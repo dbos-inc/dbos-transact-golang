@@ -92,3 +92,18 @@ CREATE TABLE dbos.workflow_events (
     FOREIGN KEY (workflow_uuid) REFERENCES dbos.workflow_status(workflow_uuid) 
         ON UPDATE CASCADE ON DELETE CASCADE
 );
+
+-- Create events function
+CREATE OR REPLACE FUNCTION dbos.workflow_events_function() RETURNS TRIGGER AS $$
+DECLARE
+    payload text := NEW.workflow_uuid || '::' || NEW.key;
+BEGIN
+    PERFORM pg_notify('dbos_workflow_events_channel', payload);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create events trigger
+CREATE TRIGGER dbos_workflow_events_trigger
+AFTER INSERT ON dbos.workflow_events
+FOR EACH ROW EXECUTE FUNCTION dbos.workflow_events_function();

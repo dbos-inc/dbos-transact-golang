@@ -39,6 +39,8 @@ type SystemDatabase interface {
 	GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
 	Send(ctx context.Context, input WorkflowSendInput) error
 	Recv(ctx context.Context, input WorkflowRecvInput) (any, error)
+	SetEvent(ctx context.Context, input WorkflowSetEventInput) error
+	GetEvent(ctx context.Context, input WorkflowGetEventInput) (any, error)
 }
 
 type systemDatabase struct {
@@ -157,7 +159,7 @@ func NewSystemDatabase(databaseURL string) (SystemDatabase, error) {
 		return nil, fmt.Errorf("failed to parse database URL: %v", err)
 	}
 	config.OnNotification = func(c *pgconn.PgConn, n *pgconn.Notification) {
-		if n.Channel == "dbos_notifications_channel" {
+		if n.Channel == "dbos_notifications_channel" || n.Channel == "dbos_workflow_events_channel" {
 			// Check if an entry exists in the map, indexed by the payload
 			// If yes, send a signal to the channel so the listener can wake up
 			if ch, exists := notificationsMap.Load(n.Payload); exists {
@@ -971,17 +973,17 @@ func (s *systemDatabase) GetWorkflowSteps(ctx context.Context, workflowID string
 /****************************************/
 
 func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
-	mrr := s.notificationListenerConnection.Exec(ctx, "LISTEN dbos_notifications_channel")
+	mrr := s.notificationListenerConnection.Exec(ctx, "LISTEN dbos_notifications_channel; LISTEN dbos_workflow_events_channel")
 	results, err := mrr.ReadAll()
 	if err != nil {
-		getLogger().Error("Failed to listen on dbos_notifications_channel", "error", err)
+		getLogger().Error("Failed to listen on notification channels", "error", err)
 		return
 	}
 	mrr.Close()
 
 	for _, result := range results {
 		if result.Err != nil {
-			getLogger().Error("Error listening on dbos_notifications_channel", "error", result.Err)
+			getLogger().Error("Error listening on notification channels", "error", result.Err)
 			return
 		}
 	}
@@ -1229,6 +1231,188 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	}
 
 	return message, nil
+}
+
+func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInput) error {
+	functionName := "DBOS.setEvent"
+
+	// Get workflow state from context
+	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	if !ok || workflowState == nil {
+		return newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
+	}
+
+	if workflowState.isWithinStep {
+		return newStepExecutionError(workflowState.WorkflowID, functionName, "cannot call SetEvent within a step")
+	}
+
+	stepID := workflowState.NextStepID()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Check if operation was already executed and do nothing if so
+	checkInput := checkOperationExecutionDBInput{
+		workflowID:   workflowState.WorkflowID,
+		operationID:  stepID,
+		functionName: functionName,
+		tx:           tx,
+	}
+	recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
+	if err != nil {
+		return err
+	}
+	if recordedResult != nil {
+		return nil
+	}
+
+	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
+	messageString, err := serialize(input.Message)
+	if err != nil {
+		return fmt.Errorf("failed to serialize message: %w", err)
+	}
+
+	// Insert or update the event using UPSERT
+	insertQuery := `INSERT INTO dbos.workflow_events (workflow_uuid, key, value)
+					VALUES ($1, $2, $3)
+					ON CONFLICT (workflow_uuid, key)
+					DO UPDATE SET value = EXCLUDED.value`
+
+	_, err = tx.Exec(ctx, insertQuery, workflowState.WorkflowID, input.Key, messageString)
+	if err != nil {
+		return fmt.Errorf("failed to insert/update workflow event: %w", err)
+	}
+
+	// Record the operation result
+	recordInput := recordOperationResultDBInput{
+		workflowID:    workflowState.WorkflowID,
+		operationID:   stepID,
+		operationName: functionName,
+		output:        nil,
+		err:           nil,
+		tx:            tx,
+	}
+
+	err = s.RecordOperationResult(ctx, recordInput)
+	if err != nil {
+		return fmt.Errorf("failed to record operation result: %w", err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInput) (any, error) {
+	functionName := "DBOS.getEvent"
+
+	// Get workflow state from context (optional for GetEvent as we can get an event from outside a workflow)
+	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	var stepID int
+	var isInWorkflow bool
+
+	if ok && workflowState != nil {
+		isInWorkflow = true
+		if workflowState.isWithinStep {
+			return nil, newStepExecutionError(workflowState.WorkflowID, functionName, "cannot call GetEvent within a step")
+		}
+		stepID = workflowState.NextStepID()
+
+		// Check if operation was already executed (only if in workflow)
+		checkInput := checkOperationExecutionDBInput{
+			workflowID:   workflowState.WorkflowID,
+			operationID:  stepID,
+			functionName: functionName,
+		}
+		recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
+		if err != nil {
+			return nil, err
+		}
+		if recordedResult != nil {
+			return recordedResult.output, recordedResult.err
+		}
+	}
+
+	// Create notification payload and channel
+	payload := fmt.Sprintf("%s::%s", input.TargetWorkflowID, input.Key)
+	c := make(chan bool, 1)
+	_, loaded := s.notificationsMap.LoadOrStore(payload, c)
+	if loaded {
+		close(c)
+		// TODO: consider adding a specific error type for this case to help users handle it
+		getLogger().Error("GetEvent already called for target workflow", "target_workflow_id", input.TargetWorkflowID, "key", input.Key)
+		return nil, fmt.Errorf("GetEvent already called for target workflow %s and key %s", input.TargetWorkflowID, input.Key)
+	}
+	defer func() {
+		s.notificationsMap.Delete(payload)
+		close(c)
+	}()
+
+	// Check if the event already exists in the database
+	query := `SELECT value FROM dbos.workflow_events WHERE workflow_uuid = $1 AND key = $2`
+	var value any
+	var valueString *string
+
+	row := s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
+	err := row.Scan(&valueString)
+	if err != nil && err != pgx.ErrNoRows {
+		return nil, fmt.Errorf("failed to query workflow event: %w", err)
+	}
+
+	if err == pgx.ErrNoRows || valueString == nil { // XXX valueString should never be `nil`
+		// Wait for notification with timeout
+		select {
+		case <-c:
+			// Received notification
+		case <-time.After(input.Timeout):
+			// Timeout reached
+		case <-ctx.Done():
+			return nil, fmt.Errorf("context cancelled while waiting for event: %w", ctx.Err())
+		}
+
+		// Query the database again after waiting
+		row = s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
+		err = row.Scan(&valueString)
+		if err != nil {
+			if err == pgx.ErrNoRows {
+				value = nil // Event still doesn't exist
+			} else {
+				return nil, fmt.Errorf("failed to query workflow event after wait: %w", err)
+			}
+		}
+	}
+
+	// Deserialize the value if it exists XXX valueString should never be `nil`s
+	if valueString != nil {
+		value, err = deserialize(valueString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize event value: %w", err)
+		}
+	}
+
+	// Record the operation result if this is called within a workflow
+	if isInWorkflow {
+		recordInput := recordOperationResultDBInput{
+			workflowID:    workflowState.WorkflowID,
+			operationID:   stepID,
+			operationName: functionName,
+			output:        value,
+			err:           nil,
+		}
+
+		err = s.RecordOperationResult(ctx, recordInput)
+		if err != nil {
+			return nil, fmt.Errorf("failed to record operation result: %w", err)
+		}
+	}
+
+	return value, nil
 }
 
 /*******************************/
