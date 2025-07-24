@@ -71,11 +71,11 @@ type Config struct {
 	AdminServer bool
 }
 
-// ProcessConfig merges configuration from two sources in order of precedence:
+// processConfig merges configuration from two sources in order of precedence:
 // 1. programmatic configuration
 // 2. environment variables
 // Finally, it applies default values if needed.
-func ProcessConfig(inputConfig *Config) (*Config, error) {
+func processConfig(inputConfig *Config) (*Config, error) {
 	// First check required fields
 	if len(inputConfig.DatabaseURL) == 0 {
 		return nil, fmt.Errorf("missing required config field: databaseURL")
@@ -133,7 +133,7 @@ func Initialize(inputConfig Config) error {
 	}
 
 	// Load & process the configuration
-	config, err := ProcessConfig(&inputConfig)
+	config, err := processConfig(&inputConfig)
 	if err != nil {
 		return newInitializationError(err.Error())
 	}
