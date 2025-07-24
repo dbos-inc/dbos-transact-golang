@@ -1009,16 +1009,16 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 	functionName := "DBOS.send"
 
 	// Get workflow state from context
-	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
-	if !ok || workflowState == nil {
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
 		return newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 
-	if workflowState.isWithinStep {
-		return newStepExecutionError(workflowState.WorkflowID, functionName, "cannot call Send within a step")
+	if wfState.isWithinStep {
+		return newStepExecutionError(wfState.workflowID, functionName, "cannot call Send within a step")
 	}
 
-	stepID := workflowState.NextStepID()
+	stepID := wfState.NextStepID()
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1028,7 +1028,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 
 	// Check if operation was already executed and do nothing if so
 	checkInput := checkOperationExecutionDBInput{
-		workflowID: workflowState.WorkflowID,
+		workflowID: wfState.workflowID,
 		stepID:     stepID,
 		stepName:   functionName,
 		tx:         tx,
@@ -1068,7 +1068,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 
 	// Record the operation result
 	recordInput := recordOperationResultDBInput{
-		workflowID: workflowState.WorkflowID,
+		workflowID: wfState.workflowID,
 		stepID:     stepID,
 		stepName:   functionName,
 		output:     nil,
@@ -1095,17 +1095,17 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 
 	// Get workflow state from context
 	// XXX these checks might be better suited for outside of the system db code. We'll see when we implement the client.
-	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
-	if !ok || workflowState == nil {
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
 		return nil, newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 
-	if workflowState.isWithinStep {
-		return nil, newStepExecutionError(workflowState.WorkflowID, functionName, "cannot call Recv within a step")
+	if wfState.isWithinStep {
+		return nil, newStepExecutionError(wfState.workflowID, functionName, "cannot call Recv within a step")
 	}
 
-	stepID := workflowState.NextStepID()
-	destinationID := workflowState.WorkflowID
+	stepID := wfState.NextStepID()
+	destinationID := wfState.workflowID
 
 	// Set default topic if not provided
 	topic := _DBOS_NULL_TOPIC
@@ -1239,16 +1239,16 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 	functionName := "DBOS.setEvent"
 
 	// Get workflow state from context
-	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
-	if !ok || workflowState == nil {
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
 		return newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 
-	if workflowState.isWithinStep {
-		return newStepExecutionError(workflowState.WorkflowID, functionName, "cannot call SetEvent within a step")
+	if wfState.isWithinStep {
+		return newStepExecutionError(wfState.workflowID, functionName, "cannot call SetEvent within a step")
 	}
 
-	stepID := workflowState.NextStepID()
+	stepID := wfState.NextStepID()
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1258,7 +1258,7 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 
 	// Check if operation was already executed and do nothing if so
 	checkInput := checkOperationExecutionDBInput{
-		workflowID: workflowState.WorkflowID,
+		workflowID: wfState.workflowID,
 		stepID:     stepID,
 		stepName:   functionName,
 		tx:         tx,
@@ -1284,14 +1284,14 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 					ON CONFLICT (workflow_uuid, key)
 					DO UPDATE SET value = EXCLUDED.value`
 
-	_, err = tx.Exec(ctx, insertQuery, workflowState.WorkflowID, input.Key, messageString)
+	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, messageString)
 	if err != nil {
 		return fmt.Errorf("failed to insert/update workflow event: %w", err)
 	}
 
 	// Record the operation result
 	recordInput := recordOperationResultDBInput{
-		workflowID: workflowState.WorkflowID,
+		workflowID: wfState.workflowID,
 		stepID:     stepID,
 		stepName:   functionName,
 		output:     nil,
@@ -1316,20 +1316,20 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 	functionName := "DBOS.getEvent"
 
 	// Get workflow state from context (optional for GetEvent as we can get an event from outside a workflow)
-	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	var stepID int
 	var isInWorkflow bool
 
-	if ok && workflowState != nil {
+	if ok && wfState != nil {
 		isInWorkflow = true
-		if workflowState.isWithinStep {
-			return nil, newStepExecutionError(workflowState.WorkflowID, functionName, "cannot call GetEvent within a step")
+		if wfState.isWithinStep {
+			return nil, newStepExecutionError(wfState.workflowID, functionName, "cannot call GetEvent within a step")
 		}
-		stepID = workflowState.NextStepID()
+		stepID = wfState.NextStepID()
 
 		// Check if operation was already executed (only if in workflow)
 		checkInput := checkOperationExecutionDBInput{
-			workflowID: workflowState.WorkflowID,
+			workflowID: wfState.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
 		}
@@ -1412,7 +1412,7 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 	// Record the operation result if this is called within a workflow
 	if isInWorkflow {
 		recordInput := recordOperationResultDBInput{
-			workflowID: workflowState.WorkflowID,
+			workflowID: wfState.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
 			output:     value,
