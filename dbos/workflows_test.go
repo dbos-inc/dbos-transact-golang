@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1085,48 +1086,6 @@ func TestSendRecv(t *testing.T) {
 		if time.Since(start) > 5*time.Second {
 			t.Fatalf("receive workflow took too long to complete, expected < 5s, got %v", time.Since(start))
 		}
-
-		// Send and receive again the same workflows to verify idempotency
-		_, err = sendWf(context.Background(), sendWorkflowInput{
-			DestinationID: receiveHandle.GetWorkflowID(),
-			Topic:         "test-topic",
-		}, WithWorkflowID(handle.GetWorkflowID()))
-		if err != nil {
-			t.Fatalf("failed to send message with same workflow ID: %v", err)
-		}
-		receiveHandle2, err := receiveWf(context.Background(), "test-topic", WithWorkflowID(receiveHandle.GetWorkflowID()))
-		if err != nil {
-			t.Fatalf("failed to start receive workflow with same ID: %v", err)
-		}
-		result, err = receiveHandle2.GetResult(context.Background())
-		if err != nil {
-			t.Fatalf("failed to get result from receive workflow with same ID: %v", err)
-		}
-		if result != "message1-message2-message3" {
-			t.Fatalf("expected received message to be 'message1-message2-message3', got '%s'", result)
-		}
-
-		// Get steps for both workflows and verify we have the expected number
-		sendSteps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
-		if err != nil {
-			t.Fatalf("failed to get steps for send workflow: %v", err)
-		}
-		receiveSteps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), receiveHandle.GetWorkflowID())
-		if err != nil {
-			t.Fatalf("failed to get steps for receive workflow: %v", err)
-		}
-
-		// Verify the number of steps matches the number of send() and recv() calls
-		// sendWorkflow has 3 Send() calls, receiveWorkflow has 3 Recv() calls
-		expectedSendSteps := 3
-		expectedReceiveSteps := 3
-
-		if len(sendSteps) != expectedSendSteps {
-			t.Fatalf("expected %d steps in send workflow, got %d", expectedSendSteps, len(sendSteps))
-		}
-		if len(receiveSteps) != expectedReceiveSteps {
-			t.Fatalf("expected %d steps in receive workflow, got %d", expectedReceiveSteps, len(receiveSteps))
-		}
 	})
 
 	t.Run("SendRecvCustomStruct", func(t *testing.T) {
@@ -1314,6 +1273,363 @@ func TestSendRecv(t *testing.T) {
 		}
 		if result != "idempotent-send-completed" {
 			t.Fatalf("expected result to be 'idempotent-send-completed', got '%s'", result)
+		}
+	})
+}
+
+var (
+	setEventWf                    = WithWorkflow(setEventWorkflow)
+	getEventWf                    = WithWorkflow(getEventWorkflow)
+	setTwoEventsWf                = WithWorkflow(setTwoEventsWorkflow)
+	setEventIdempotencyWf         = WithWorkflow(setEventIdempotencyWorkflow)
+	getEventIdempotencyWf         = WithWorkflow(getEventIdempotencyWorkflow)
+	setEventIdempotencyEvent      = NewEvent()
+	getEventStartIdempotencyEvent = NewEvent()
+	getEventStopIdempotencyEvent  = NewEvent()
+	setSecondEventSignal          = NewEvent()
+)
+
+type setEventWorkflowInput struct {
+	Key     string
+	Message string
+}
+
+func setEventWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
+	err := SetEvent(ctx, WorkflowSetEventInput{Key: input.Key, Message: input.Message})
+	if err != nil {
+		return "", err
+	}
+	return "event-set", nil
+}
+
+func getEventWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
+	result, err := GetEvent[string](ctx, WorkflowGetEventInput{
+		TargetWorkflowID: input.Key,     // Reusing Key field as target workflow ID
+		Key:              input.Message, // Reusing Message field as event key
+		Timeout:          3 * time.Second,
+	})
+	if err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
+func setTwoEventsWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
+	// Set the first event
+	err := SetEvent(ctx, WorkflowSetEventInput{Key: "event1", Message: "first-event-message"})
+	if err != nil {
+		return "", err
+	}
+
+	// Wait for external signal before setting the second event
+	setSecondEventSignal.Wait()
+
+	// Set the second event
+	err = SetEvent(ctx, WorkflowSetEventInput{Key: "event2", Message: "second-event-message"})
+	if err != nil {
+		return "", err
+	}
+
+	return "two-events-set", nil
+}
+
+func setEventIdempotencyWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
+	err := SetEvent(ctx, WorkflowSetEventInput{Key: input.Key, Message: input.Message})
+	if err != nil {
+		return "", err
+	}
+	setEventIdempotencyEvent.Wait()
+	return "idempotent-set-completed", nil
+}
+
+func getEventIdempotencyWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
+	result, err := GetEvent[string](ctx, WorkflowGetEventInput{
+		TargetWorkflowID: input.Key,
+		Key:              input.Message,
+		Timeout:          3 * time.Second,
+	})
+	if err != nil {
+		return "", err
+	}
+	getEventStartIdempotencyEvent.Set()
+	getEventStopIdempotencyEvent.Wait()
+	return result, nil
+}
+
+func TestSetGetEvent(t *testing.T) {
+	setupDBOS(t)
+
+	t.Run("SetGetEventFromWorkflow", func(t *testing.T) {
+		// Clear the signal event before starting
+		setSecondEventSignal.Clear()
+
+		// Start the workflow that sets two events
+		setHandle, err := setTwoEventsWf(context.Background(), setEventWorkflowInput{
+			Key:     "test-workflow",
+			Message: "unused",
+		})
+		if err != nil {
+			t.Fatalf("failed to start set two events workflow: %v", err)
+		}
+
+		// Start a workflow to get the first event
+		getFirstEventHandle, err := getEventWf(context.Background(), setEventWorkflowInput{
+			Key:     setHandle.GetWorkflowID(), // Target workflow ID
+			Message: "event1",                  // Event key
+		})
+		if err != nil {
+			t.Fatalf("failed to start get first event workflow: %v", err)
+		}
+
+		// Verify we can get the first event
+		firstMessage, err := getFirstEventHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from first event workflow: %v", err)
+		}
+		if firstMessage != "first-event-message" {
+			t.Fatalf("expected first message to be 'first-event-message', got '%s'", firstMessage)
+		}
+
+		// Signal the workflow to set the second event
+		setSecondEventSignal.Set()
+
+		// Start a workflow to get the second event
+		getSecondEventHandle, err := getEventWf(context.Background(), setEventWorkflowInput{
+			Key:     setHandle.GetWorkflowID(), // Target workflow ID
+			Message: "event2",                  // Event key
+		})
+		if err != nil {
+			t.Fatalf("failed to start get second event workflow: %v", err)
+		}
+
+		// Verify we can get the second event
+		secondMessage, err := getSecondEventHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from second event workflow: %v", err)
+		}
+		if secondMessage != "second-event-message" {
+			t.Fatalf("expected second message to be 'second-event-message', got '%s'", secondMessage)
+		}
+
+		// Wait for the workflow to complete
+		result, err := setHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from set two events workflow: %v", err)
+		}
+		if result != "two-events-set" {
+			t.Fatalf("expected result to be 'two-events-set', got '%s'", result)
+		}
+	})
+
+	t.Run("GetEventFromOutsideWorkflow", func(t *testing.T) {
+		// Start a workflow that sets an event
+		setHandle, err := setEventWf(context.Background(), setEventWorkflowInput{
+			Key:     "test-key",
+			Message: "test-message",
+		})
+		if err != nil {
+			t.Fatalf("failed to start set event workflow: %v", err)
+		}
+
+		// Wait for the event to be set
+		_, err = setHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from set event workflow: %v", err)
+		}
+
+		// Start a workflow that gets the event from outside the original workflow
+		message, err := GetEvent[string](context.Background(), WorkflowGetEventInput{
+			TargetWorkflowID: setHandle.GetWorkflowID(),
+			Key:              "test-key",
+			Timeout:          3 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("failed to get event from outside workflow: %v", err)
+		}
+		if message != "test-message" {
+			t.Fatalf("expected received message to be 'test-message', got '%s'", message)
+		}
+	})
+
+	t.Run("GetEventTimeout", func(t *testing.T) {
+		// Try to get an event from a non-existent workflow
+		nonExistentID := uuid.NewString()
+		message, err := GetEvent[string](context.Background(), WorkflowGetEventInput{
+			TargetWorkflowID: nonExistentID,
+			Key:              "test-key",
+			Timeout:          3 * time.Second,
+		})
+		if err != nil {
+			t.Fatal("failed to get event from non-existent workflow:", err)
+		}
+		if message != "" {
+			t.Fatalf("expected empty result on timeout, got '%s'", message)
+		}
+
+		// Try to get an event from an existing workflow but with a key that doesn't exist
+		setHandle, err := setEventWf(context.Background(), setEventWorkflowInput{
+			Key:     "test-key",
+			Message: "test-message",
+		})
+		if err != nil {
+			t.Fatal("failed to set event:", err)
+		}
+		_, err = setHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatal("failed to get result from set event workflow:", err)
+		}
+		message, err = GetEvent[string](context.Background(), WorkflowGetEventInput{
+			TargetWorkflowID: setHandle.GetWorkflowID(),
+			Key:              "non-existent-key",
+			Timeout:          3 * time.Second,
+		})
+		if err != nil {
+			t.Fatal("failed to get event with non-existent key:", err)
+		}
+		if message != "" {
+			t.Fatalf("expected empty result on timeout with non-existent key, got '%s'", message)
+		}
+	})
+
+	t.Run("SetGetEventMustRunInsideWorkflows", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Attempt to run SetEvent outside of a workflow context
+		err := SetEvent(ctx, WorkflowSetEventInput{Key: "test-key", Message: "test-message"})
+		if err == nil {
+			t.Fatal("expected error when running SetEvent outside of workflow context, but got none")
+		}
+
+		// Check the error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != StepExecutionError {
+			t.Fatalf("expected error code to be StepExecutionError, got %v", dbosErr.Code)
+		}
+
+		// Test the specific message from the error
+		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
+		if !strings.Contains(err.Error(), expectedMessagePart) {
+			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+		}
+	})
+
+	t.Run("SetGetEventIdempotency", func(t *testing.T) {
+		// Start the set event workflow
+		setHandle, err := setEventIdempotencyWf(context.Background(), setEventWorkflowInput{
+			Key:     "idempotency-key",
+			Message: "idempotency-message",
+		})
+		if err != nil {
+			t.Fatalf("failed to start set event idempotency workflow: %v", err)
+		}
+
+		// Start the get event workflow
+		getHandle, err := getEventIdempotencyWf(context.Background(), setEventWorkflowInput{
+			Key:     setHandle.GetWorkflowID(),
+			Message: "idempotency-key",
+		})
+		if err != nil {
+			t.Fatalf("failed to start get event idempotency workflow: %v", err)
+		}
+
+		// Wait for the get event workflow to signal it has received the event
+		getEventStartIdempotencyEvent.Wait()
+
+		// Attempt recovering both workflows. Each should have exactly 1 step.
+		recoveredHandles, err := recoverPendingWorkflows(context.Background(), []string{"local"})
+		if err != nil {
+			t.Fatalf("failed to recover pending workflows: %v", err)
+		}
+		if len(recoveredHandles) != 2 {
+			t.Fatalf("expected 2 recovered handles, got %d", len(recoveredHandles))
+		}
+
+		// Verify step counts
+		setSteps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), setHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get steps for set event idempotency workflow: %v", err)
+		}
+		if len(setSteps) != 1 {
+			t.Fatalf("expected 1 step in set event idempotency workflow, got %d", len(setSteps))
+		}
+
+		getSteps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), getHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get steps for get event idempotency workflow: %v", err)
+		}
+		if len(getSteps) != 1 {
+			t.Fatalf("expected 1 step in get event idempotency workflow, got %d", len(getSteps))
+		}
+
+		// Complete the workflows
+		setEventIdempotencyEvent.Set()
+		getEventStopIdempotencyEvent.Set()
+
+		setResult, err := setHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from set event idempotency workflow: %v", err)
+		}
+		if setResult != "idempotent-set-completed" {
+			t.Fatalf("expected result to be 'idempotent-set-completed', got '%s'", setResult)
+		}
+
+		getResult, err := getHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from get event idempotency workflow: %v", err)
+		}
+		if getResult != "idempotency-message" {
+			t.Fatalf("expected result to be 'idempotency-message', got '%s'", getResult)
+		}
+	})
+
+	t.Run("ConcurrentGetEvent", func(t *testing.T) {
+		// Set event
+		setHandle, err := setEventWf(context.Background(), setEventWorkflowInput{
+			Key:     "concurrent-event-key",
+			Message: "concurrent-event-message",
+		})
+		if err != nil {
+			t.Fatalf("failed to start set event workflow: %v", err)
+		}
+
+		// Wait for the set event workflow to complete
+		_, err = setHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from set event workflow: %v", err)
+		}
+		// Start a few goroutines that'll concurrently get the event
+		numGoroutines := 5
+		var wg sync.WaitGroup
+		errors := make(chan error, numGoroutines)
+		wg.Add(numGoroutines)
+		for range numGoroutines {
+			go func() {
+				defer wg.Done()
+				res, err := GetEvent[string](context.Background(), WorkflowGetEventInput{
+					TargetWorkflowID: setHandle.GetWorkflowID(),
+					Key:              "concurrent-event-key",
+					Timeout:          10 * time.Second,
+				})
+				if err != nil {
+					errors <- fmt.Errorf("failed to get event in goroutine: %v", err)
+					return
+				}
+				if res != "concurrent-event-message" {
+					errors <- fmt.Errorf("expected result in goroutine to be 'concurrent-event-message', got '%s'", res)
+					return
+				}
+			}()
+		}
+		wg.Wait()
+		close(errors)
+
+		// Check for any errors from goroutines
+		for err := range errors {
+			t.Fatal(err)
 		}
 	})
 }
