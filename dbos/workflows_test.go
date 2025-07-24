@@ -1647,6 +1647,7 @@ func TestSetGetEvent(t *testing.T) {
 
 		// Wait for the get event workflow to signal it has received the event
 		getEventStartIdempotencyEvent.Wait()
+		getEventStartIdempotencyEvent.Clear()
 
 		// Attempt recovering both workflows. Each should have exactly 1 step.
 		recoveredHandles, err := recoverPendingWorkflows(context.Background(), []string{"local"})
@@ -1656,6 +1657,8 @@ func TestSetGetEvent(t *testing.T) {
 		if len(recoveredHandles) != 2 {
 			t.Fatalf("expected 2 recovered handles, got %d", len(recoveredHandles))
 		}
+
+		getEventStartIdempotencyEvent.Wait()
 
 		// Verify step counts
 		setSteps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), setHandle.GetWorkflowID())
