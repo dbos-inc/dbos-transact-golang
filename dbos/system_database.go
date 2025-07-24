@@ -1125,7 +1125,6 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 		return nil, fmt.Errorf("failed to check operation execution: %w", err)
 	}
 	if recordedResult != nil {
-		// XXX should we simply return recordedResult.output, recordedResult.err?
 		if recordedResult.output != nil {
 			return recordedResult.output, nil
 		}

@@ -200,10 +200,10 @@ func (h *workflowPollingHandle[R]) GetWorkflowID() string {
 /**********************************/
 /******* WORKFLOW REGISTRY *******/
 /**********************************/
-type TypedErasedWorkflowWrapperFunc func(ctx context.Context, input any, opts ...workflowOption) (WorkflowHandle[any], error)
+type typedErasedWorkflowWrapperFunc func(ctx context.Context, input any, opts ...workflowOption) (WorkflowHandle[any], error)
 
 type workflowRegistryEntry struct {
-	wrappedFunction TypedErasedWorkflowWrapperFunc
+	wrappedFunction typedErasedWorkflowWrapperFunc
 	maxRetries      int
 }
 
@@ -211,7 +211,7 @@ var registry = make(map[string]workflowRegistryEntry)
 var regMutex sync.RWMutex
 
 // Register adds a workflow function to the registry (thread-safe, only once per name)
-func registerWorkflow(fqn string, fn TypedErasedWorkflowWrapperFunc, maxRetries int) {
+func registerWorkflow(fqn string, fn typedErasedWorkflowWrapperFunc, maxRetries int) {
 	regMutex.Lock()
 	defer regMutex.Unlock()
 
