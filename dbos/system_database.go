@@ -5,6 +5,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -98,7 +99,8 @@ func createDatabaseIfNotExists(databaseURL string) error {
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-// TODO: must use the systemdb name
+const _DBOS_MIGRATION_TABLE = "dbos_schema_migrations"
+
 func runMigrations(databaseURL string) error {
 	// Change the driver to pgx5
 	databaseURL = "pgx5://" + strings.TrimPrefix(databaseURL, "postgres://")
@@ -108,6 +110,20 @@ func runMigrations(databaseURL string) error {
 	if err != nil {
 		return newInitializationError(fmt.Sprintf("failed to create migration source: %v", err))
 	}
+
+	// Add custom migration table name to avoid conflicts with user migrations
+	// Parse the URL to properly determine where to add the query parameter
+	parsedURL, err := url.Parse(databaseURL)
+	if err != nil {
+		return newInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
+	}
+
+	// Check if query parameters already exist
+	separator := "?"
+	if parsedURL.RawQuery != "" {
+		separator = "&"
+	}
+	databaseURL += separator + "x-migrations-table=" + _DBOS_MIGRATION_TABLE
 
 	// Create migrator
 	m, err := migrate.NewWithSourceInstance("iofs", d, databaseURL)
