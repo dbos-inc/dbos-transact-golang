@@ -1009,7 +1009,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 	functionName := "DBOS.send"
 
 	// Get workflow state from context
-	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
 		return newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
 	}
@@ -1095,7 +1095,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 
 	// Get workflow state from context
 	// XXX these checks might be better suited for outside of the system db code. We'll see when we implement the client.
-	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
 		return nil, newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
 	}
@@ -1239,7 +1239,7 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 	functionName := "DBOS.setEvent"
 
 	// Get workflow state from context
-	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
 		return newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
 	}
@@ -1316,7 +1316,7 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 	functionName := "DBOS.getEvent"
 
 	// Get workflow state from context (optional for GetEvent as we can get an event from outside a workflow)
-	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	var stepID int
 	var isInWorkflow bool
 

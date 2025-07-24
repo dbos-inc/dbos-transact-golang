@@ -98,7 +98,7 @@ func (h *workflowHandle[R]) GetResult(ctx context.Context) (R, error) {
 		return *new(R), errors.New("workflow result channel is already closed. Did you call GetResult() twice on the same workflow handle?")
 	}
 	// If we are calling GetResult inside a workflow, record the result as a step result
-	parentWorkflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	parentWorkflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
 	if isChildWorkflow {
 		encodedOutput, encErr := serialize(outcome.result)
@@ -153,7 +153,7 @@ func (h *workflowPollingHandle[R]) GetResult(ctx context.Context) (R, error) {
 			return *new(R), newWorkflowUnexpectedResultType(h.workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", result))
 		}
 		// If we are calling GetResult inside a workflow, record the result as a step result
-		parentWorkflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+		parentWorkflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 		isChildWorkflow := ok && parentWorkflowState != nil
 		if isChildWorkflow {
 			encodedOutput, encErr := serialize(typedResult)
@@ -334,7 +334,7 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...workflowRegistrat
 type contextKey string
 
 // TODO this should be a private type, once we have proper getter for a workflow state
-const WorkflowStateKey contextKey = "workflowState"
+const workflowStateKey contextKey = "workflowState"
 
 type WorkflowFunc[P any, R any] func(ctx context.Context, input P) (R, error)
 type WorkflowWrapperFunc[P any, R any] func(ctx context.Context, input P, opts ...workflowOption) (WorkflowHandle[R], error)
@@ -399,7 +399,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	dbosWorkflowContext := context.Background()
 
 	// Check if we are within a workflow (and thus a child workflow)
-	parentWorkflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	parentWorkflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
 
 	// TODO Check if cancelled
@@ -516,7 +516,7 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	}
 
 	// Run the function in a goroutine
-	augmentUserContext := context.WithValue(ctx, WorkflowStateKey, workflowState)
+	augmentUserContext := context.WithValue(ctx, workflowStateKey, workflowState)
 	go func() {
 		result, err := fn(augmentUserContext, input)
 		status := WorkflowStatusSuccess
@@ -614,7 +614,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	}
 
 	// Get workflow state from context
-	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
 		return *new(R), newStepExecutionError("", operationName, "workflow state not found in context: are you running this step within a workflow?")
 	}
@@ -646,7 +646,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		stepCounter:  workflowState.stepCounter,
 		isWithinStep: true,
 	}
-	stepCtx := context.WithValue(ctx, WorkflowStateKey, &stepState)
+	stepCtx := context.WithValue(ctx, workflowStateKey, &stepState)
 
 	stepOutput, stepError := fn(stepCtx, input)
 
@@ -778,6 +778,15 @@ func GetEvent[R any](ctx context.Context, input WorkflowGetEventInput) (R, error
 /***********************************/
 /******* WORKFLOW MANAGEMENT *******/
 /***********************************/
+
+// GetWorkflowID retrieves the workflow ID from the context if called within a DBOS workflow
+func GetWorkflowID(ctx context.Context) (string, error) {
+	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
+	if !ok || workflowState == nil {
+		return "", errors.New("not within a DBOS workflow context")
+	}
+	return workflowState.WorkflowID, nil
+}
 
 func RetrieveWorkflow[R any](workflowID string) (workflowPollingHandle[R], error) {
 	ctx := context.Background()

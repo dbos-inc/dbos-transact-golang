@@ -455,24 +455,23 @@ func TestSteps(t *testing.T) {
 
 var (
 	childWf = WithWorkflow(func(ctx context.Context, i int) (string, error) {
-		workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
-		if !ok {
-			return "", fmt.Errorf("workflow state not found in context")
+		workflowID, err := GetWorkflowID(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get workflow ID: %v", err)
 		}
-		fmt.Println("childWf workflow state:", workflowState)
-		expectedCurrentID := fmt.Sprintf("%s-%d", workflowState.WorkflowID, i)
-		if workflowState.WorkflowID != expectedCurrentID {
-			return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedCurrentID, workflowState.WorkflowID)
+		expectedCurrentID := fmt.Sprintf("%s-%d", workflowID, i)
+		if workflowID != expectedCurrentID {
+			return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedCurrentID, workflowID)
 		}
 		// XXX right now the steps of a child workflow start with an incremented step ID, because the first step ID is allocated to the child workflow
 		return RunAsStep(ctx, simpleStep, "")
 	})
 	parentWf = WithWorkflow(func(ctx context.Context, i int) (string, error) {
-		workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
-		if !ok {
-			return "", fmt.Errorf("workflow state not found in context")
+		workflowID, err := GetWorkflowID(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get workflow ID: %v", err)
 		}
-		fmt.Println("parentWf workflow state:", workflowState)
+		fmt.Println("parentWf workflow ID:", workflowID)
 
 		childHandle, err := childWf(ctx, i)
 		if err != nil {
@@ -480,14 +479,14 @@ var (
 		}
 
 		// Check this wf ID is built correctly
-		expectedParentID := fmt.Sprintf("%s-%d", workflowState.WorkflowID, i)
-		if workflowState.WorkflowID != expectedParentID {
-			return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedParentID, workflowState.WorkflowID)
+		expectedParentID := fmt.Sprintf("%s-%d", workflowID, i)
+		if workflowID != expectedParentID {
+			return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedParentID, workflowID)
 		}
 
 		// Verify child workflow ID follows the pattern: parentID-functionID
 		childWorkflowID := childHandle.GetWorkflowID()
-		expectedChildID := fmt.Sprintf("%s-%d", workflowState.WorkflowID, i)
+		expectedChildID := fmt.Sprintf("%s-%d", workflowID, i)
 		if childWorkflowID != expectedChildID {
 			return "", fmt.Errorf("expected childWf ID to be %s, got %s", expectedChildID, childWorkflowID)
 		}
@@ -495,11 +494,11 @@ var (
 	})
 	grandParentWf = WithWorkflow(func(ctx context.Context, _ string) (string, error) {
 		for i := range 3 {
-			workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
-			if !ok {
-				return "", fmt.Errorf("workflow state not found in context")
+			workflowID, err := GetWorkflowID(ctx)
+			if err != nil {
+				return "", fmt.Errorf("failed to get workflow ID: %v", err)
 			}
-			fmt.Println("grandParentWf workflow state:", workflowState)
+			fmt.Println("grandParentWf workflow ID:", workflowID)
 
 			childHandle, err := parentWf(ctx, i)
 			if err != nil {
@@ -507,14 +506,14 @@ var (
 			}
 
 			// The handle should a direct handle
-			_, ok = childHandle.(*workflowHandle[string])
+			_, ok := childHandle.(*workflowHandle[string])
 			if !ok {
 				return "", fmt.Errorf("expected childHandle to be of type *workflowHandle[string], got %T", childHandle)
 			}
 
 			// Verify child workflow ID follows the pattern: parentID-functionID
 			childWorkflowID := childHandle.GetWorkflowID()
-			expectedPrefix := fmt.Sprintf("%s-%d", workflowState.WorkflowID, i)
+			expectedPrefix := fmt.Sprintf("%s-%d", workflowID, i)
 			if childWorkflowID != expectedPrefix {
 				return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedPrefix, childWorkflowID)
 			}
