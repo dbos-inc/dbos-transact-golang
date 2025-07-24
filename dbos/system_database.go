@@ -1113,19 +1113,12 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 		topic = input.Topic
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
 	// Check if operation was already executed
 	// XXX this might not need to be in the transaction
 	checkInput := checkOperationExecutionDBInput{
 		workflowID:   destinationID,
 		operationID:  stepID,
 		functionName: functionName,
-		tx:           tx,
 	}
 	recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
 	if err != nil {
@@ -1157,7 +1150,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	// If not, we'll wait for a notification and timeout
 	var exists bool
 	query := `SELECT EXISTS (SELECT 1 FROM dbos.notifications WHERE destination_uuid = $1 AND topic = $2)`
-	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
+	err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("failed to check message: %w", err)
 	}
@@ -1183,6 +1176,11 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	}
 
 	// Find the oldest message and delete it atomically
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
 	query = `
         WITH oldest_entry AS (
             SELECT destination_uuid, topic, message, created_at_epoch_ms
