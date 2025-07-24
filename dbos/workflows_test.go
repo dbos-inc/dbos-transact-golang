@@ -1028,6 +1028,10 @@ func receiveWorkflowCoordinated(ctx context.Context, input struct {
 
 	// Do a single Recv call with timeout
 	msg, err := Recv[string](ctx, WorkflowRecvInput{Topic: input.Topic, Timeout: 3 * time.Second})
+<<<<<<< HEAD
+=======
+	fmt.Println(err)
+>>>>>>> origin/main
 	if err != nil {
 		return "", err
 	}

@@ -1116,9 +1116,15 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	// Check if operation was already executed
 	// XXX this might not need to be in the transaction
 	checkInput := checkOperationExecutionDBInput{
+<<<<<<< HEAD
 		workflowID: destinationID,
 		stepID:     stepID,
 		stepName:   functionName,
+=======
+		workflowID:   destinationID,
+		operationID:  stepID,
+		functionName: functionName,
+>>>>>>> origin/main
 	}
 	recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
 	if err != nil {
@@ -1239,6 +1245,7 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 	functionName := "DBOS.setEvent"
 
 	// Get workflow state from context
+<<<<<<< HEAD
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
@@ -1249,6 +1256,18 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 	}
 
 	stepID := wfState.NextStepID()
+=======
+	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	if !ok || workflowState == nil {
+		return newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
+	}
+
+	if workflowState.isWithinStep {
+		return newStepExecutionError(workflowState.WorkflowID, functionName, "cannot call SetEvent within a step")
+	}
+
+	stepID := workflowState.NextStepID()
+>>>>>>> origin/main
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1258,10 +1277,17 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 
 	// Check if operation was already executed and do nothing if so
 	checkInput := checkOperationExecutionDBInput{
+<<<<<<< HEAD
 		workflowID: wfState.workflowID,
 		stepID:     stepID,
 		stepName:   functionName,
 		tx:         tx,
+=======
+		workflowID:   workflowState.WorkflowID,
+		operationID:  stepID,
+		functionName: functionName,
+		tx:           tx,
+>>>>>>> origin/main
 	}
 	recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
 	if err != nil {
@@ -1284,19 +1310,32 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 					ON CONFLICT (workflow_uuid, key)
 					DO UPDATE SET value = EXCLUDED.value`
 
+<<<<<<< HEAD
 	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, messageString)
+=======
+	_, err = tx.Exec(ctx, insertQuery, workflowState.WorkflowID, input.Key, messageString)
+>>>>>>> origin/main
 	if err != nil {
 		return fmt.Errorf("failed to insert/update workflow event: %w", err)
 	}
 
 	// Record the operation result
 	recordInput := recordOperationResultDBInput{
+<<<<<<< HEAD
 		workflowID: wfState.workflowID,
 		stepID:     stepID,
 		stepName:   functionName,
 		output:     nil,
 		err:        nil,
 		tx:         tx,
+=======
+		workflowID:    workflowState.WorkflowID,
+		operationID:   stepID,
+		operationName: functionName,
+		output:        nil,
+		err:           nil,
+		tx:            tx,
+>>>>>>> origin/main
 	}
 
 	err = s.RecordOperationResult(ctx, recordInput)
@@ -1316,6 +1355,7 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 	functionName := "DBOS.getEvent"
 
 	// Get workflow state from context (optional for GetEvent as we can get an event from outside a workflow)
+<<<<<<< HEAD
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	var stepID int
 	var isInWorkflow bool
@@ -1332,6 +1372,24 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 			workflowID: wfState.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
+=======
+	workflowState, ok := ctx.Value(WorkflowStateKey).(*WorkflowState)
+	var stepID int
+	var isInWorkflow bool
+
+	if ok && workflowState != nil {
+		isInWorkflow = true
+		if workflowState.isWithinStep {
+			return nil, newStepExecutionError(workflowState.WorkflowID, functionName, "cannot call GetEvent within a step")
+		}
+		stepID = workflowState.NextStepID()
+
+		// Check if operation was already executed (only if in workflow)
+		checkInput := checkOperationExecutionDBInput{
+			workflowID:   workflowState.WorkflowID,
+			operationID:  stepID,
+			functionName: functionName,
+>>>>>>> origin/main
 		}
 		recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
 		if err != nil {
@@ -1414,11 +1472,19 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 	// Record the operation result if this is called within a workflow
 	if isInWorkflow {
 		recordInput := recordOperationResultDBInput{
+<<<<<<< HEAD
 			workflowID: wfState.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
 			output:     value,
 			err:        nil,
+=======
+			workflowID:    workflowState.WorkflowID,
+			operationID:   stepID,
+			operationName: functionName,
+			output:        value,
+			err:           nil,
+>>>>>>> origin/main
 		}
 
 		err = s.RecordOperationResult(ctx, recordInput)
