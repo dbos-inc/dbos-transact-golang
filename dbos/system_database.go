@@ -1038,6 +1038,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 		return err
 	}
 	if recordedResult != nil {
+		// when hitting this case, recordedResult will be &{<nil> <nil>}
 		return nil
 	}
 
@@ -1269,6 +1270,7 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 		return err
 	}
 	if recordedResult != nil {
+		// when hitting this case, recordedResult will be &{<nil> <nil>}
 		return nil
 	}
 
