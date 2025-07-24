@@ -211,9 +211,12 @@ func Launch() error {
 	}
 
 	// Run a round of recovery on the local executor
-	_, err := recoverPendingWorkflows(context.Background(), []string{_EXECUTOR_ID}) // XXX maybe use the queue runner context here to allow Shutdown to cancel it?
+	recoveryHandles, err := recoverPendingWorkflows(context.Background(), []string{_EXECUTOR_ID}) // XXX maybe use the queue runner context here to allow Shutdown to cancel it?
 	if err != nil {
 		return newInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
+	}
+	if len(recoveryHandles) > 0 {
+		logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
 	}
 
 	logger.Info("DBOS initialized", "app_version", _APP_VERSION, "executor_id", _EXECUTOR_ID)
