@@ -352,7 +352,7 @@ func TestSteps(t *testing.T) {
 		}
 
 		// Test the specific message from the 3rd argument
-		expectedMessagePart := "workflow state not found in context"
+		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
 		if !strings.Contains(err.Error(), expectedMessagePart) {
 			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
 		}
@@ -1205,7 +1205,7 @@ func TestSendRecv(t *testing.T) {
 		}
 
 		// Test the specific message from the error
-		expectedMessagePart := "workflow state not found in context"
+		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
 		if !strings.Contains(err.Error(), expectedMessagePart) {
 			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
 		}
@@ -1739,15 +1739,10 @@ func TestSetGetEvent(t *testing.T) {
 }
 
 var (
-	sleepWf         = WithWorkflow(sleepWorkflow)
 	sleepRecoveryWf = WithWorkflow(sleepRecoveryWorkflow)
 	sleepStartEvent *Event
 	sleepStopEvent  *Event
 )
-
-func sleepWorkflow(ctx context.Context, duration time.Duration) (time.Duration, error) {
-	return Sleep(ctx, duration)
-}
 
 func sleepRecoveryWorkflow(ctx context.Context, duration time.Duration) (time.Duration, error) {
 	result, err := Sleep(ctx, duration)
@@ -1834,7 +1829,7 @@ func TestSleep(t *testing.T) {
 		}
 
 		// Test the specific message from the error
-		expectedMessagePart := "workflow state not found in context"
+		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
 		if !strings.Contains(err.Error(), expectedMessagePart) {
 			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
 		}
