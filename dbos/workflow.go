@@ -108,7 +108,7 @@ func (h *workflowHandle[R]) GetResult(ctx context.Context) (R, error) {
 		recordGetResultInput := recordChildGetResultDBInput{
 			parentWorkflowID: parentWorkflowState.WorkflowID,
 			childWorkflowID:  h.workflowID,
-			operationID:      parentWorkflowState.NextStepID(),
+			stepID:           parentWorkflowState.NextStepID(),
 			output:           encodedOutput,
 			err:              outcome.err,
 		}
@@ -163,7 +163,7 @@ func (h *workflowPollingHandle[R]) GetResult(ctx context.Context) (R, error) {
 			recordGetResultInput := recordChildGetResultDBInput{
 				parentWorkflowID: parentWorkflowState.WorkflowID,
 				childWorkflowID:  h.workflowID,
-				operationID:      parentWorkflowState.NextStepID(),
+				stepID:           parentWorkflowState.NextStepID(),
 				output:           encodedOutput,
 				err:              err,
 			}
@@ -483,8 +483,8 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 		childInput := recordChildWorkflowDBInput{
 			parentWorkflowID: parentWorkflowState.WorkflowID,
 			childWorkflowID:  workflowStatus.ID,
-			functionName:     runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // Will need to test this
-			functionID:       stepID,
+			stepName:         runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // Will need to test this
+			stepID:           stepID,
 			tx:               tx,
 		}
 		err = dbos.systemDB.RecordChildWorkflow(dbosWorkflowContext, childInput)
@@ -600,7 +600,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 		return *new(R), newStepExecutionError("", "", "step function cannot be nil")
 	}
 
-	operationName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 
 	// Apply options to build params with defaults
 	params := StepParams{
@@ -616,7 +616,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	// Get workflow state from context
 	workflowState, ok := ctx.Value(workflowStateKey).(*WorkflowState)
 	if !ok || workflowState == nil {
-		return *new(R), newStepExecutionError("", operationName, "workflow state not found in context: are you running this step within a workflow?")
+		return *new(R), newStepExecutionError("", stepName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 
 	// If within a step, just run the function directly
@@ -625,16 +625,16 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	}
 
 	// Get next step ID
-	operationID := workflowState.NextStepID()
+	stepID := workflowState.NextStepID()
 
 	// Check the step is cancelled, has already completed, or is called with a different name
 	recordedOutput, err := dbos.systemDB.CheckOperationExecution(ctx, checkOperationExecutionDBInput{
-		workflowID:   workflowState.WorkflowID,
-		operationID:  operationID,
-		functionName: runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(),
+		workflowID: workflowState.WorkflowID,
+		stepID:     stepID,
+		stepName:   runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(),
 	})
 	if err != nil {
-		return *new(R), newStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("checking operation execution: %v", err))
+		return *new(R), newStepExecutionError(workflowState.WorkflowID, stepName, fmt.Sprintf("checking operation execution: %v", err))
 	}
 	if recordedOutput != nil {
 		return recordedOutput.output.(R), recordedOutput.err
@@ -663,12 +663,12 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 				delay = time.Duration(math.Min(exponentialDelay, float64(params.MaxInterval)))
 			}
 
-			getLogger().Error("step failed, retrying", "step_name", operationName, "retry", retry, "max_retries", params.MaxRetries, "delay", delay, "error", stepError)
+			getLogger().Error("step failed, retrying", "step_name", stepName, "retry", retry, "max_retries", params.MaxRetries, "delay", delay, "error", stepError)
 
 			// Wait before retry
 			select {
 			case <-ctx.Done():
-				return *new(R), newStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("context cancelled during retry: %v", ctx.Err()))
+				return *new(R), newStepExecutionError(workflowState.WorkflowID, stepName, fmt.Sprintf("context cancelled during retry: %v", ctx.Err()))
 			case <-time.After(delay):
 				// Continue to retry
 			}
@@ -686,7 +686,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 
 			// If max retries reached, create MaxStepRetriesExceeded error
 			if retry == params.MaxRetries {
-				stepError = newMaxStepRetriesExceededError(workflowState.WorkflowID, operationName, params.MaxRetries, joinedErrors)
+				stepError = newMaxStepRetriesExceededError(workflowState.WorkflowID, stepName, params.MaxRetries, joinedErrors)
 				break
 			}
 		}
@@ -694,15 +694,15 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 
 	// Record the final result
 	dbInput := recordOperationResultDBInput{
-		workflowID:    workflowState.WorkflowID,
-		operationName: operationName,
-		operationID:   operationID,
-		err:           stepError,
-		output:        stepOutput,
+		workflowID: workflowState.WorkflowID,
+		stepName:   stepName,
+		stepID:     stepID,
+		err:        stepError,
+		output:     stepOutput,
 	}
 	recErr := dbos.systemDB.RecordOperationResult(ctx, dbInput)
 	if recErr != nil {
-		return *new(R), newStepExecutionError(workflowState.WorkflowID, operationName, fmt.Sprintf("recording step outcome: %v", recErr))
+		return *new(R), newStepExecutionError(workflowState.WorkflowID, stepName, fmt.Sprintf("recording step outcome: %v", recErr))
 	}
 
 	return stepOutput, stepError
