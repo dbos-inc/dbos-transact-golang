@@ -970,6 +970,7 @@ func TestScheduledWorkflows(t *testing.T) {
 var (
 	sendWf                       = WithWorkflow(sendWorkflow)
 	receiveWf                    = WithWorkflow(receiveWorkflow)
+	receiveWfCoordinated         = WithWorkflow(receiveWorkflowCoordinated)
 	sendStructWf                 = WithWorkflow(sendStructWorkflow)
 	receiveStructWf              = WithWorkflow(receiveStructWorkflow)
 	sendIdempotencyWf            = WithWorkflow(sendIdempotencyWorkflow)
@@ -977,6 +978,9 @@ var (
 	recvIdempotencyWf            = WithWorkflow(receiveIdempotencyWorkflow)
 	receiveIdempotencyStartEvent = NewEvent()
 	receiveIdempotencyStopEvent  = NewEvent()
+	numConcurrentRecvWfs         = 5
+	concurrentRecvReadyEvents    = make([]*Event, numConcurrentRecvWfs)
+	concurrentRecvStartEvent     = NewEvent()
 )
 
 type sendWorkflowInput struct {
@@ -1016,6 +1020,26 @@ func receiveWorkflow(ctx context.Context, topic string) (string, error) {
 		return "", err
 	}
 	return msg1 + "-" + msg2 + "-" + msg3, nil
+}
+
+func receiveWorkflowCoordinated(ctx context.Context, input struct {
+	Topic string
+	i     int
+}) (string, error) {
+	// Signal that this workflow has started and is ready
+	concurrentRecvReadyEvents[input.i].Set()
+
+	// Wait for the coordination event before starting to receive
+
+	concurrentRecvStartEvent.Wait()
+
+	// Do a single Recv call with timeout
+	msg, err := Recv[string](ctx, WorkflowRecvInput{Topic: input.Topic, Timeout: 3 * time.Second})
+	fmt.Println(err)
+	if err != nil {
+		return "", err
+	}
+	return msg, nil
 }
 
 func sendStructWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) {
@@ -1273,6 +1297,91 @@ func TestSendRecv(t *testing.T) {
 		}
 		if result != "idempotent-send-completed" {
 			t.Fatalf("expected result to be 'idempotent-send-completed', got '%s'", result)
+		}
+	})
+
+	t.Run("ConcurrentRecv", func(t *testing.T) {
+		// Test concurrent receivers - only 1 should timeout, others should get errors
+		receiveTopic := "concurrent-recv-topic"
+
+		// Start multiple concurrent receive workflows - no messages will be sent
+		numReceivers := 5
+		var wg sync.WaitGroup
+		results := make(chan string, numReceivers)
+		errors := make(chan error, numReceivers)
+		receiverHandles := make([]WorkflowHandle[string], numReceivers)
+
+		// Start all receivers - they will signal when ready and wait for coordination
+		for i := range numReceivers {
+			concurrentRecvReadyEvents[i] = NewEvent()
+			receiveHandle, err := receiveWfCoordinated(context.Background(), struct {
+				Topic string
+				i     int
+			}{
+				Topic: receiveTopic,
+				i:     i,
+			}, WithWorkflowID("concurrent-recv-wfid"))
+			if err != nil {
+				t.Fatalf("failed to start receive workflow %d: %v", i, err)
+			}
+			receiverHandles[i] = receiveHandle
+		}
+
+		// Wait for all workflows to signal they are ready
+		for i := range numReceivers {
+			concurrentRecvReadyEvents[i].Wait()
+		}
+
+		// Now unblock all receivers simultaneously so they race to the Recv call
+		concurrentRecvStartEvent.Set()
+
+		// Collect results from all receivers concurrently
+		// Only 1 should timeout (winner of the CV), others should get errors
+		wg.Add(numReceivers)
+		for i := range numReceivers {
+			go func(index int) {
+				defer wg.Done()
+				result, err := receiverHandles[index].GetResult(context.Background())
+				if err != nil {
+					errors <- err
+				} else {
+					results <- result
+				}
+			}(i)
+		}
+
+		wg.Wait()
+		close(results)
+		close(errors)
+
+		// Count timeout results and errors
+		timeoutCount := 0
+		errorCount := 0
+
+		for result := range results {
+			if result == "" {
+				// Empty string indicates a timeout - only 1 receiver should get this
+				timeoutCount++
+			}
+		}
+
+		for err := range errors {
+			t.Logf("Receiver error (expected): %v", err)
+			errorCount++
+		}
+
+		// Verify that exactly 1 receiver timed out and 4 got errors
+		if timeoutCount != 1 {
+			t.Fatalf("expected exactly 1 receiver to timeout, got %d timeouts", timeoutCount)
+		}
+
+		if errorCount != 4 {
+			t.Fatalf("expected exactly 4 receivers to get errors, got %d errors", errorCount)
+		}
+
+		// Ensure total results match expected
+		if timeoutCount+errorCount != numReceivers {
+			t.Fatalf("expected total results (%d) to equal number of receivers (%d)", timeoutCount+errorCount, numReceivers)
 		}
 	})
 }
