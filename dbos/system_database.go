@@ -1354,8 +1354,10 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 	// Defer broadcast to ensure any waiting goroutines eventually unlock
 	defer func() {
 		cond.Broadcast()
-		// Clean up the condition variable after we're done
-		s.notificationsMap.Delete(payload)
+		// Clean up the condition variable after we're done, if we created it
+		if !loaded {
+			s.notificationsMap.Delete(payload)
+		}
 	}()
 
 	// Check if the event already exists in the database
