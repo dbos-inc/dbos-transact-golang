@@ -161,13 +161,9 @@ func NewSystemDatabase(databaseURL string) (SystemDatabase, error) {
 	config.OnNotification = func(c *pgconn.PgConn, n *pgconn.Notification) {
 		if n.Channel == "dbos_notifications_channel" || n.Channel == "dbos_workflow_events_channel" {
 			// Check if an entry exists in the map, indexed by the payload
-			// If yes, send a signal to the channel so the listener can wake up
-			if ch, exists := notificationsMap.Load(n.Payload); exists {
-				select {
-				case ch.(chan bool) <- true: // Send a signal to wake up the listener
-				default:
-					getLogger().Warn("notification channel for payload is full, skipping", "payload", n.Payload)
-				}
+			// If yes, broadcast on the condition variable so listeners can wake up
+			if cond, exists := notificationsMap.Load(n.Payload); exists {
+				cond.(*sync.Cond).Broadcast()
 			}
 		}
 	}
@@ -1143,18 +1139,17 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 
 	// First check if there's already a receiver for this workflow/topic to avoid unnecessary database load
 	payload := fmt.Sprintf("%s::%s", destinationID, topic)
-	c := make(chan bool, 1) // Make it buffered to allow the notification listener to post a signal even if the receiver has not reached its select statement yet
-	_, loaded := s.notificationsMap.LoadOrStore(payload, c)
+	cond := sync.NewCond(&sync.Mutex{})
+	_, loaded := s.notificationsMap.LoadOrStore(payload, cond)
 	if loaded {
-		close(c)
 		getLogger().Error("Receive already called for workflow", "destination_id", destinationID)
 		return nil, newWorkflowConflictIDError(destinationID)
 	}
 	defer func() {
-		// Clean up the channel after we're done
+		// Clean up the condition variable after we're done and broadcast to wake up any waiting goroutines
 		// XXX We should handle panics in this function and make sure we call this. Not a problem for now as panic will crash the importing package.
+		cond.Broadcast()
 		s.notificationsMap.Delete(payload)
-		close(c)
 	}()
 
 	// Now check if there is already a message available in the database.
@@ -1166,15 +1161,23 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 		return false, fmt.Errorf("failed to check message: %w", err)
 	}
 	if !exists {
-		// Listen for notifications on the channel
+		// Wait for notifications using condition variable with timeout pattern
 		// XXX should we prevent zero or negative timeouts?
-		getLogger().Debug("Waiting for notification on channel", "payload", payload)
+		getLogger().Debug("Waiting for notification on condition variable", "payload", payload)
+
+		done := make(chan struct{})
+		go func() {
+			cond.L.Lock()
+			defer cond.L.Unlock()
+			cond.Wait()
+			close(done)
+		}()
+
 		select {
-		case <-c:
-			getLogger().Debug("Received notification on channel", "payload", payload)
+		case <-done:
+			getLogger().Debug("Received notification on condition variable", "payload", payload)
 		case <-time.After(input.Timeout):
-			// If we reach the timeout, we can check if there is a message in the database, and if not return nil.
-			getLogger().Warn("Timeout reached for channel", "payload", payload, "timeout", input.Timeout)
+			getLogger().Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
 		}
 	}
 
@@ -1339,19 +1342,20 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 		}
 	}
 
-	// Create notification payload and channel
+	// Create notification payload and condition variable
 	payload := fmt.Sprintf("%s::%s", input.TargetWorkflowID, input.Key)
-	c := make(chan bool, 1)
-	_, loaded := s.notificationsMap.LoadOrStore(payload, c)
+	cond := sync.NewCond(&sync.Mutex{})
+	existingCond, loaded := s.notificationsMap.LoadOrStore(payload, cond)
 	if loaded {
-		close(c)
-		// TODO: consider adding a specific error type for this case to help users handle it
-		getLogger().Error("GetEvent already called for target workflow", "target_workflow_id", input.TargetWorkflowID, "key", input.Key)
-		return nil, fmt.Errorf("GetEvent already called for target workflow %s and key %s", input.TargetWorkflowID, input.Key)
+		// Reuse the existing condition variable
+		cond = existingCond.(*sync.Cond)
 	}
+
+	// Defer broadcast to ensure any waiting goroutines eventually unlock
 	defer func() {
+		cond.Broadcast()
+		// Clean up the condition variable after we're done
 		s.notificationsMap.Delete(payload)
-		close(c)
 	}()
 
 	// Check if the event already exists in the database
@@ -1366,12 +1370,21 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 	}
 
 	if err == pgx.ErrNoRows || valueString == nil { // XXX valueString should never be `nil`
-		// Wait for notification with timeout
+		// Wait for notification with timeout using condition variable
+		done := make(chan struct{})
+		go func() {
+			cond.L.Lock()
+			defer cond.L.Unlock()
+			cond.Wait()
+			close(done)
+		}()
+
 		select {
-		case <-c:
+		case <-done:
 			// Received notification
 		case <-time.After(input.Timeout):
 			// Timeout reached
+			getLogger().Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
 		case <-ctx.Done():
 			return nil, fmt.Errorf("context cancelled while waiting for event: %w", ctx.Err())
 		}
@@ -1388,7 +1401,7 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 		}
 	}
 
-	// Deserialize the value if it exists XXX valueString should never be `nil`s
+	// Deserialize the value if it exists
 	if valueString != nil {
 		value, err = deserialize(valueString)
 		if err != nil {
