@@ -312,7 +312,6 @@ var stepIdempotencyCounter int
 
 func stepIdempotencyTest(ctx context.Context, input string) (string, error) {
 	stepIdempotencyCounter++
-	fmt.Println("Executing idempotency step:", stepIdempotencyCounter)
 	return input, nil
 }
 
@@ -471,7 +470,6 @@ var (
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %v", err)
 		}
-		fmt.Println("parentWf workflow ID:", workflowID)
 
 		childHandle, err := childWf(ctx, i)
 		if err != nil {
@@ -498,7 +496,6 @@ var (
 			if err != nil {
 				return "", fmt.Errorf("failed to get workflow ID: %v", err)
 			}
-			fmt.Println("grandParentWf workflow ID:", workflowID)
 
 			childHandle, err := parentWf(ctx, i)
 			if err != nil {
@@ -893,7 +890,6 @@ var (
 	counter1Ch = make(chan time.Time, 100)
 	_          = WithWorkflow(func(ctx context.Context, scheduledTime time.Time) (string, error) {
 		startTime := time.Now()
-		// fmt.Println("scheduled time:", scheduledTime, "current time:", startTime)
 		counter++
 		if counter == 10 {
 			return "", fmt.Errorf("counter reached 100, stopping workflow")
@@ -988,7 +984,6 @@ type sendWorkflowInput struct {
 }
 
 func sendWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) {
-	fmt.Println("Starting send workflow with input:", input)
 	err := Send(ctx, WorkflowSendInput{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message1"})
 	if err != nil {
 		return "", err
@@ -1001,7 +996,6 @@ func sendWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	fmt.Println("Sending message on topic:", input.Topic, "to destination:", input.DestinationID)
 	return "", nil
 }
 
@@ -1034,7 +1028,6 @@ func receiveWorkflowCoordinated(ctx context.Context, input struct {
 
 	// Do a single Recv call with timeout
 	msg, err := Recv[string](ctx, WorkflowRecvInput{Topic: input.Topic, Timeout: 3 * time.Second})
-	fmt.Println(err)
 	if err != nil {
 		return "", err
 	}
