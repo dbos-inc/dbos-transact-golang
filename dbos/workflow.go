@@ -775,6 +775,10 @@ func GetEvent[R any](ctx context.Context, input WorkflowGetEventInput) (R, error
 	return typedValue, nil
 }
 
+func Sleep(ctx context.Context, duration time.Duration) (time.Duration, error) {
+	return dbos.systemDB.Sleep(ctx, duration)
+}
+
 /***********************************/
 /******* WORKFLOW MANAGEMENT *******/
 /***********************************/

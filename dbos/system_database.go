@@ -42,6 +42,7 @@ type SystemDatabase interface {
 	Recv(ctx context.Context, input WorkflowRecvInput) (any, error)
 	SetEvent(ctx context.Context, input WorkflowSetEventInput) error
 	GetEvent(ctx context.Context, input WorkflowGetEventInput) (any, error)
+	Sleep(ctx context.Context, duration time.Duration) (time.Duration, error)
 }
 
 type systemDatabase struct {
@@ -712,10 +713,12 @@ func (s *systemDatabase) RecordOperationResult(ctx context.Context, input record
 		getLogger().Debug("RecordOperationResult SQL", "sql", commandTag.String())
 	*/
 
-	// TODO return DBOSWorkflowConflictIDError(result["workflow_uuid"]) on 23505 conflict ID error
 	if err != nil {
 		getLogger().Error("RecordOperationResult Error occurred", "error", err)
-		return fmt.Errorf("failed to record operation result: %w", err)
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+			return newWorkflowConflictIDError(input.workflowID)
+		}
+		return err
 	}
 
 	if commandTag.RowsAffected() == 0 {
@@ -978,6 +981,86 @@ func (s *systemDatabase) GetWorkflowSteps(ctx context.Context, workflowID string
 	}
 
 	return steps, nil
+}
+
+// Sleep is a special type of step that sleeps for a specified duration
+// A wakeup time is computed and recorded in the database
+// If we sleep is re-executed, it will only sleep for the remaining duration until the wakeup time
+func (s *systemDatabase) Sleep(ctx context.Context, duration time.Duration) (time.Duration, error) {
+	functionName := "DBOS.sleep"
+
+	// Get workflow state from context
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return 0, newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
+	}
+
+	if wfState.isWithinStep {
+		return 0, newStepExecutionError(wfState.workflowID, functionName, "cannot call Sleep within a step")
+	}
+
+	stepID := wfState.NextStepID()
+
+	// Check if operation was already executed
+	checkInput := checkOperationExecutionDBInput{
+		workflowID: wfState.workflowID,
+		stepID:     stepID,
+		stepName:   functionName,
+	}
+	recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check operation execution: %w", err)
+	}
+
+	var endTime time.Time
+
+	if recordedResult != nil {
+		if recordedResult.output == nil { // This should never happen
+			return 0, fmt.Errorf("no recorded end time for recorded sleep operation")
+		}
+
+		// The output should be a time.Time representing the end time
+		endTimeInterface, ok := recordedResult.output.(time.Time)
+		if !ok {
+			return 0, fmt.Errorf("recorded output is not a time.Time: %T", recordedResult.output)
+		}
+		endTime = endTimeInterface
+
+		if recordedResult.err != nil { // This should never happen
+			return 0, recordedResult.err
+		}
+	} else {
+		// First execution: calculate and record the end time
+		getLogger().Debug("Durable sleep", "stepID", stepID, "duration", duration)
+
+		endTime = time.Now().Add(duration)
+
+		// Record the operation result with the calculated end time
+		recordInput := recordOperationResultDBInput{
+			workflowID: wfState.workflowID,
+			stepID:     stepID,
+			stepName:   functionName,
+			output:     endTime,
+			err:        nil,
+		}
+
+		err = s.RecordOperationResult(ctx, recordInput)
+		if err != nil {
+			// Check if this is a ConflictingWorkflowError (operation already recorded by another process)
+			if dbosErr, ok := err.(*DBOSError); ok && dbosErr.Code == ConflictingIDError {
+			} else {
+				return 0, fmt.Errorf("failed to record sleep operation result: %w", err)
+			}
+		}
+	}
+
+	// Calculate remaining duration until wake up time
+	remainingDuration := max(0, time.Until(endTime))
+
+	// Actually sleep for the remaining duration
+	time.Sleep(remainingDuration)
+
+	return remainingDuration, nil
 }
 
 /****************************************/

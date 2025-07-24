@@ -1737,3 +1737,106 @@ func TestSetGetEvent(t *testing.T) {
 		}
 	})
 }
+
+var (
+	sleepWf         = WithWorkflow(sleepWorkflow)
+	sleepRecoveryWf = WithWorkflow(sleepRecoveryWorkflow)
+	sleepStartEvent *Event
+	sleepStopEvent  *Event
+)
+
+func sleepWorkflow(ctx context.Context, duration time.Duration) (time.Duration, error) {
+	return Sleep(ctx, duration)
+}
+
+func sleepRecoveryWorkflow(ctx context.Context, duration time.Duration) (time.Duration, error) {
+	result, err := Sleep(ctx, duration)
+	if err != nil {
+		return 0, err
+	}
+	// Block after sleep so we can recover a pending workflow
+	sleepStartEvent.Set()
+	sleepStopEvent.Wait()
+	return result, nil
+}
+
+func TestSleep(t *testing.T) {
+	setupDBOS(t)
+
+	t.Run("SleepDurableRecovery", func(t *testing.T) {
+		sleepStartEvent = NewEvent()
+		sleepStopEvent = NewEvent()
+
+		// Start a workflow that sleeps for 2 seconds then blocks
+		sleepDuration := 2 * time.Second
+
+		handle, err := sleepRecoveryWf(context.Background(), sleepDuration)
+		if err != nil {
+			t.Fatalf("failed to start sleep recovery workflow: %v", err)
+		}
+
+		sleepStartEvent.Wait()
+		sleepStartEvent.Clear()
+
+		// Run the workflow again and check the return time was less than the durable sleep
+		startTime := time.Now()
+		_, err = sleepRecoveryWf(context.Background(), sleepDuration, WithWorkflowID(handle.GetWorkflowID()))
+		if err != nil {
+			t.Fatalf("failed to start second sleep recovery workflow: %v", err)
+		}
+
+		sleepStartEvent.Wait()
+		// Time elapsed should be at most the sleep duration
+		elapsed := time.Since(startTime)
+		if elapsed >= sleepDuration {
+			t.Fatalf("expected elapsed time to be less than %v, got %v", sleepDuration, elapsed)
+		}
+
+		// Verify the sleep step was recorded correctly
+		steps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps: %v", err)
+		}
+
+		if len(steps) != 1 {
+			t.Fatalf("expected 1 step (the sleep), got %d", len(steps))
+		}
+
+		step := steps[0]
+		if step.FunctionName != "DBOS.sleep" {
+			t.Fatalf("expected step name to be 'DBOS.sleep', got '%s'", step.FunctionName)
+		}
+
+		if step.Error != nil {
+			t.Fatalf("expected step to have no error, got %v", step.Error)
+		}
+
+		sleepStopEvent.Set()
+	})
+
+	t.Run("SleepCannotBeCalledOutsideWorkflow", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Attempt to call Sleep outside of a workflow context
+		_, err := Sleep(ctx, 1*time.Second)
+		if err == nil {
+			t.Fatal("expected error when calling Sleep outside of workflow context, but got none")
+		}
+
+		// Check the error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != StepExecutionError {
+			t.Fatalf("expected error code to be StepExecutionError, got %v", dbosErr.Code)
+		}
+
+		// Test the specific message from the error
+		expectedMessagePart := "workflow state not found in context"
+		if !strings.Contains(err.Error(), expectedMessagePart) {
+			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+		}
+	})
+}
