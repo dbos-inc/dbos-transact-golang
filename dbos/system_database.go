@@ -1103,21 +1103,23 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 const _DBOS_NULL_TOPIC = "__null__topic__"
 
 // Send is a special type of step that sends a message to another workflow.
-// Three differences with a normal steps: durability and the function run in the same transaction, and we forbid nested step execution
+// Can be called both within a workflow (as a step) or outside a workflow (directly).
+// When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution
 func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) error {
 	functionName := "DBOS.send"
 
-	// Get workflow state from context
+	// Get workflow state from context (optional for Send as we can send from outside a workflow)
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	if !ok || wfState == nil {
-		return newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
-	}
+	var stepID int
+	var isInWorkflow bool
 
-	if wfState.isWithinStep {
-		return newStepExecutionError(wfState.workflowID, functionName, "cannot call Send within a step")
+	if ok && wfState != nil {
+		isInWorkflow = true
+		if wfState.isWithinStep {
+			return newStepExecutionError(wfState.workflowID, functionName, "cannot call Send within a step")
+		}
+		stepID = wfState.NextStepID()
 	}
-
-	stepID := wfState.NextStepID()
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1125,20 +1127,22 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 	}
 	defer tx.Rollback(ctx)
 
-	// Check if operation was already executed and do nothing if so
-	checkInput := checkOperationExecutionDBInput{
-		workflowID: wfState.workflowID,
-		stepID:     stepID,
-		stepName:   functionName,
-		tx:         tx,
-	}
-	recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
-	if err != nil {
-		return err
-	}
-	if recordedResult != nil {
-		// when hitting this case, recordedResult will be &{<nil> <nil>}
-		return nil
+	// Check if operation was already executed and do nothing if so (only if in workflow)
+	if isInWorkflow {
+		checkInput := checkOperationExecutionDBInput{
+			workflowID: wfState.workflowID,
+			stepID:     stepID,
+			stepName:   functionName,
+			tx:         tx,
+		}
+		recordedResult, err := s.CheckOperationExecution(ctx, checkInput)
+		if err != nil {
+			return err
+		}
+		if recordedResult != nil {
+			// when hitting this case, recordedResult will be &{<nil> <nil>}
+			return nil
+		}
 	}
 
 	// Set default topic if not provided
@@ -1153,9 +1157,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
 
-	insertQuery := `INSERT INTO dbos.notifications (destination_uuid, topic, message)
-					VALUES ($1, $2, $3)`
-
+	insertQuery := `INSERT INTO dbos.notifications (destination_uuid, topic, message) VALUES ($1, $2, $3)`
 	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, messageString)
 	if err != nil {
 		// Check for foreign key violation (destination workflow doesn't exist)
@@ -1165,19 +1167,21 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 		return fmt.Errorf("failed to insert notification: %w", err)
 	}
 
-	// Record the operation result
-	recordInput := recordOperationResultDBInput{
-		workflowID: wfState.workflowID,
-		stepID:     stepID,
-		stepName:   functionName,
-		output:     nil,
-		err:        nil,
-		tx:         tx,
-	}
+	// Record the operation result if this is called within a workflow
+	if isInWorkflow {
+		recordInput := recordOperationResultDBInput{
+			workflowID: wfState.workflowID,
+			stepID:     stepID,
+			stepName:   functionName,
+			output:     nil,
+			err:        nil,
+			tx:         tx,
+		}
 
-	err = s.RecordOperationResult(ctx, recordInput)
-	if err != nil {
-		return fmt.Errorf("failed to record operation result: %w", err)
+		err = s.RecordOperationResult(ctx, recordInput)
+		if err != nil {
+			return fmt.Errorf("failed to record operation result: %w", err)
+		}
 	}
 
 	// Commit transaction
