@@ -1355,6 +1355,15 @@ func TestSendRecv(t *testing.T) {
 		if !strings.Contains(err.Error(), expectedMessagePart) {
 			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
 		}
+
+		// Wait for the receive workflow to time out
+		result, err := receiveHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from receive workflow: %v", err)
+		}
+		if result != "--" {
+			t.Fatalf("expected receive workflow result to be '--' (timeout), got '%s'", result)
+		}
 	})
 
 	t.Run("ConcurrentRecv", func(t *testing.T) {
