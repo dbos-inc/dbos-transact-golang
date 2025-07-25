@@ -744,13 +744,21 @@ func Recv[R any](ctx context.Context, input WorkflowRecvInput) (R, error) {
 	return typedMessage, nil
 }
 
-type WorkflowSetEventInput struct {
+type WorkflowSetEventInput[R any] struct {
 	Key     string
-	Message any
+	Message R
 }
 
-func SetEvent(ctx context.Context, input WorkflowSetEventInput) error {
-	return dbos.systemDB.SetEvent(ctx, input)
+// Sets an event from a workflow.
+// The event is a key value pair
+// SetEvent automatically registers the type of R for gob encoding
+func SetEvent[R any](ctx context.Context, input WorkflowSetEventInput[R]) error {
+	var typedMessage R
+	gob.Register(typedMessage) // Register the type for gob encoding
+	return dbos.systemDB.SetEvent(ctx, workflowSetEventInputInternal{
+		key:     input.Key,
+		message: input.Message,
+	})
 }
 
 type WorkflowGetEventInput struct {

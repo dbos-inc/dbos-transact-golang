@@ -40,7 +40,7 @@ type SystemDatabase interface {
 	GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
 	Send(ctx context.Context, input WorkflowSendInput) error
 	Recv(ctx context.Context, input WorkflowRecvInput) (any, error)
-	SetEvent(ctx context.Context, input WorkflowSetEventInput) error
+	SetEvent(ctx context.Context, input workflowSetEventInputInternal) error
 	GetEvent(ctx context.Context, input WorkflowGetEventInput) (any, error)
 	Sleep(ctx context.Context, duration time.Duration) (time.Duration, error)
 }
@@ -1338,7 +1338,12 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	return message, nil
 }
 
-func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInput) error {
+type workflowSetEventInputInternal struct {
+	key     string
+	message any
+}
+
+func (s *systemDatabase) SetEvent(ctx context.Context, input workflowSetEventInputInternal) error {
 	functionName := "DBOS.setEvent"
 
 	// Get workflow state from context
@@ -1376,7 +1381,7 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 	}
 
 	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := serialize(input.Message)
+	messageString, err := serialize(input.message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
@@ -1387,7 +1392,7 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 					ON CONFLICT (workflow_uuid, key)
 					DO UPDATE SET value = EXCLUDED.value`
 
-	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, messageString)
+	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.key, messageString)
 	if err != nil {
 		return fmt.Errorf("failed to insert/update workflow event: %w", err)
 	}

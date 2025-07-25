@@ -1461,7 +1461,7 @@ type setEventWorkflowInput struct {
 }
 
 func setEventWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
-	err := SetEvent(ctx, WorkflowSetEventInput{Key: input.Key, Message: input.Message})
+	err := SetEvent(ctx, WorkflowSetEventInput[string]{Key: input.Key, Message: input.Message})
 	if err != nil {
 		return "", err
 	}
@@ -1482,7 +1482,7 @@ func getEventWorkflow(ctx context.Context, input setEventWorkflowInput) (string,
 
 func setTwoEventsWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
 	// Set the first event
-	err := SetEvent(ctx, WorkflowSetEventInput{Key: "event1", Message: "first-event-message"})
+	err := SetEvent(ctx, WorkflowSetEventInput[string]{Key: "event1", Message: "first-event-message"})
 	if err != nil {
 		return "", err
 	}
@@ -1491,7 +1491,7 @@ func setTwoEventsWorkflow(ctx context.Context, input setEventWorkflowInput) (str
 	setSecondEventSignal.Wait()
 
 	// Set the second event
-	err = SetEvent(ctx, WorkflowSetEventInput{Key: "event2", Message: "second-event-message"})
+	err = SetEvent(ctx, WorkflowSetEventInput[string]{Key: "event2", Message: "second-event-message"})
 	if err != nil {
 		return "", err
 	}
@@ -1500,7 +1500,7 @@ func setTwoEventsWorkflow(ctx context.Context, input setEventWorkflowInput) (str
 }
 
 func setEventIdempotencyWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
-	err := SetEvent(ctx, WorkflowSetEventInput{Key: input.Key, Message: input.Message})
+	err := SetEvent(ctx, WorkflowSetEventInput[string]{Key: input.Key, Message: input.Message})
 	if err != nil {
 		return "", err
 	}
@@ -1661,7 +1661,7 @@ func TestSetGetEvent(t *testing.T) {
 		ctx := context.Background()
 
 		// Attempt to run SetEvent outside of a workflow context
-		err := SetEvent(ctx, WorkflowSetEventInput{Key: "test-key", Message: "test-message"})
+		err := SetEvent(ctx, WorkflowSetEventInput[string]{Key: "test-key", Message: "test-message"})
 		if err == nil {
 			t.Fatal("expected error when running SetEvent outside of workflow context, but got none")
 		}
@@ -1897,6 +1897,93 @@ func TestSleep(t *testing.T) {
 		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
 		if !strings.Contains(err.Error(), expectedMessagePart) {
 			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+		}
+	})
+}
+
+// UserDefinedEventData is a custom struct declared outside of any workflow
+// This struct should never appear in the signature of a function registered as a DBOS workflow
+type UserDefinedEventData struct {
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	Details struct {
+		Description string   `json:"description"`
+		Tags        []string `json:"tags"`
+	} `json:"details"`
+}
+
+func setEventUserDefinedTypeWorkflow(ctx context.Context, input string) (string, error) {
+	// Create an instance of our user-defined type inside the workflow
+	eventData := UserDefinedEventData{
+		ID:   42,
+		Name: "test-event",
+		Details: struct {
+			Description string   `json:"description"`
+			Tags        []string `json:"tags"`
+		}{
+			Description: "This is a test event with user-defined data",
+			Tags:        []string{"test", "user-defined", "serialization"},
+		},
+	}
+
+	// SetEvent should automatically register this type with gob
+	// Note the explicit type parameter since compiler cannot infer UserDefinedEventData from string input
+	err := SetEvent(ctx, WorkflowSetEventInput[UserDefinedEventData]{Key: input, Message: eventData})
+	if err != nil {
+		return "", err
+	}
+	return "user-defined-event-set", nil
+}
+
+var setEventUserDefinedTypeWf = WithWorkflow(setEventUserDefinedTypeWorkflow)
+
+func TestSetEventSerializeUserDefinedType(t *testing.T) {
+	setupDBOS(t)
+
+	t.Run("SetEventUserDefinedType", func(t *testing.T) {
+		// Start a workflow that sets an event with a user-defined type
+		setHandle, err := setEventUserDefinedTypeWf(context.Background(), "user-defined-key")
+		if err != nil {
+			t.Fatalf("failed to start workflow with user-defined event type: %v", err)
+		}
+
+		// Wait for the workflow to complete
+		result, err := setHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from user-defined event workflow: %v", err)
+		}
+		if result != "user-defined-event-set" {
+			t.Fatalf("expected result to be 'user-defined-event-set', got '%s'", result)
+		}
+
+		// Retrieve the event to verify it was properly serialized and can be deserialized
+		retrievedEvent, err := GetEvent[UserDefinedEventData](context.Background(), WorkflowGetEventInput{
+			TargetWorkflowID: setHandle.GetWorkflowID(),
+			Key:              "user-defined-key",
+			Timeout:          3 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("failed to get user-defined event: %v", err)
+		}
+
+		// Verify the retrieved data matches what we set
+		if retrievedEvent.ID != 42 {
+			t.Fatalf("expected ID to be 42, got %d", retrievedEvent.ID)
+		}
+		if retrievedEvent.Name != "test-event" {
+			t.Fatalf("expected Name to be 'test-event', got '%s'", retrievedEvent.Name)
+		}
+		if retrievedEvent.Details.Description != "This is a test event with user-defined data" {
+			t.Fatalf("expected Description to be 'This is a test event with user-defined data', got '%s'", retrievedEvent.Details.Description)
+		}
+		if len(retrievedEvent.Details.Tags) != 3 {
+			t.Fatalf("expected 3 tags, got %d", len(retrievedEvent.Details.Tags))
+		}
+		expectedTags := []string{"test", "user-defined", "serialization"}
+		for i, tag := range retrievedEvent.Details.Tags {
+			if tag != expectedTags[i] {
+				t.Fatalf("expected tag %d to be '%s', got '%s'", i, expectedTags[i], tag)
+			}
 		}
 	})
 }

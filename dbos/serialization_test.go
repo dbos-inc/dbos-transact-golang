@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 /** Test serialization and deserialization
@@ -13,6 +14,7 @@ import (
 [x] Workflow inputs/outputs
 [x] Step inputs/outputs
 [x] Direct handlers, polling handler, list workflows results, get step infos
+[x] Set/get event with user defined types
 */
 
 var (
@@ -286,6 +288,93 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 		if step.Error != nil {
 			t.Fatalf("expected step error to be nil, got %v", step.Error)
+		}
+	})
+}
+
+// UserDefinedEventData is a custom struct declared outside of any workflow
+// This struct should never appear in the signature of a function registered as a DBOS workflow
+type UserDefinedEventData struct {
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	Details struct {
+		Description string   `json:"description"`
+		Tags        []string `json:"tags"`
+	} `json:"details"`
+}
+
+func setEventUserDefinedTypeWorkflow(ctx context.Context, input string) (string, error) {
+	// Create an instance of our user-defined type inside the workflow
+	eventData := UserDefinedEventData{
+		ID:   42,
+		Name: "test-event",
+		Details: struct {
+			Description string   `json:"description"`
+			Tags        []string `json:"tags"`
+		}{
+			Description: "This is a test event with user-defined data",
+			Tags:        []string{"test", "user-defined", "serialization"},
+		},
+	}
+
+	// SetEvent should automatically register this type with gob
+	// Note the explicit type parameter since compiler cannot infer UserDefinedEventData from string input
+	err := SetEvent(ctx, WorkflowSetEventInput[UserDefinedEventData]{Key: input, Message: eventData})
+	if err != nil {
+		return "", err
+	}
+	return "user-defined-event-set", nil
+}
+
+var setEventUserDefinedTypeWf = WithWorkflow(setEventUserDefinedTypeWorkflow)
+
+func TestSetEventSerializeUserDefinedType(t *testing.T) {
+	setupDBOS(t)
+
+	t.Run("SetEventUserDefinedType", func(t *testing.T) {
+		// Start a workflow that sets an event with a user-defined type
+		setHandle, err := setEventUserDefinedTypeWf(context.Background(), "user-defined-key")
+		if err != nil {
+			t.Fatalf("failed to start workflow with user-defined event type: %v", err)
+		}
+
+		// Wait for the workflow to complete
+		result, err := setHandle.GetResult(context.Background())
+		if err != nil {
+			t.Fatalf("failed to get result from user-defined event workflow: %v", err)
+		}
+		if result != "user-defined-event-set" {
+			t.Fatalf("expected result to be 'user-defined-event-set', got '%s'", result)
+		}
+
+		// Retrieve the event to verify it was properly serialized and can be deserialized
+		retrievedEvent, err := GetEvent[UserDefinedEventData](context.Background(), WorkflowGetEventInput{
+			TargetWorkflowID: setHandle.GetWorkflowID(),
+			Key:              "user-defined-key",
+			Timeout:          3 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("failed to get user-defined event: %v", err)
+		}
+
+		// Verify the retrieved data matches what we set
+		if retrievedEvent.ID != 42 {
+			t.Fatalf("expected ID to be 42, got %d", retrievedEvent.ID)
+		}
+		if retrievedEvent.Name != "test-event" {
+			t.Fatalf("expected Name to be 'test-event', got '%s'", retrievedEvent.Name)
+		}
+		if retrievedEvent.Details.Description != "This is a test event with user-defined data" {
+			t.Fatalf("expected Description to be 'This is a test event with user-defined data', got '%s'", retrievedEvent.Details.Description)
+		}
+		if len(retrievedEvent.Details.Tags) != 3 {
+			t.Fatalf("expected 3 tags, got %d", len(retrievedEvent.Details.Tags))
+		}
+		expectedTags := []string{"test", "user-defined", "serialization"}
+		for i, tag := range retrievedEvent.Details.Tags {
+			if tag != expectedTags[i] {
+				t.Fatalf("expected tag %d to be '%s', got '%s'", i, expectedTags[i], tag)
+			}
 		}
 	})
 }
