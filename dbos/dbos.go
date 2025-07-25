@@ -1,10 +1,15 @@
 package dbos
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"net/url"
 	"os"
@@ -22,36 +27,6 @@ var (
 	_APP_ID                    string
 	_DEFAULT_ADMIN_SERVER_PORT = 3001
 )
-
-func computeApplicationVersion() string {
-	if len(registry) == 0 {
-		fmt.Println("DBOS: No registered workflows found, cannot compute application version")
-		return ""
-	}
-
-	// Collect all function names and sort them for consistent hashing
-	var functionNames []string
-	for fqn := range registry {
-		functionNames = append(functionNames, fqn)
-	}
-	sort.Strings(functionNames)
-
-	hasher := sha256.New()
-
-	for _, fqn := range functionNames {
-		workflowEntry := registry[fqn]
-
-		// Try to get function source location and other identifying info
-		if pc := runtime.FuncForPC(reflect.ValueOf(workflowEntry.wrappedFunction).Pointer()); pc != nil {
-			// Get the function's entry point - this reflects the actual compiled code
-			entry := pc.Entry()
-			fmt.Fprintf(hasher, "%x", entry)
-		}
-	}
-
-	return hex.EncodeToString(hasher.Sum(nil))
-
-}
 
 var workflowScheduler *cron.Cron // Global because accessed during workflow registration before the dbos singleton is initialized
 
@@ -272,4 +247,91 @@ func Shutdown() {
 		logger = nil
 	}
 	dbos = nil
+}
+
+func computeApplicationVersion() string {
+	if len(registry) == 0 {
+		fmt.Println("DBOS: No registered workflows found, cannot compute application version")
+		return ""
+	}
+
+	// Create a file set for parsing Go source files
+	fset := token.NewFileSet()
+
+	// Collect function hashes instead of names for more precise versioning
+	var functionHashes []string
+
+	// Iterate through all registered workflow functions
+	for fqn := range registry {
+		workflowEntry := registry[fqn]
+
+		// Get runtime program counter for the function to find its source location
+		if pc := runtime.FuncForPC(reflect.ValueOf(workflowEntry.wrappedFunction).Pointer()); pc != nil {
+			// Get the source file path and line number where function is defined
+			file, line := pc.FileLine(pc.Entry())
+
+			// Parse the Go source file containing this function
+			src, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+			if err != nil {
+				// If parsing fails, fallback to using function name as identifier
+				getLogger().Warn("Failed to parse source file, using function name", "file", file, "function", fqn, "error", err)
+				functionHashes = append(functionHashes, fqn)
+				continue
+			}
+
+			// Extract the actual source code of the function
+			funcSource := extractFunctionSource(src, fset, line)
+			if funcSource != "" {
+				// Hash the function's source code
+				hasher := sha256.New()
+				hasher.Write([]byte(funcSource))
+				functionHashes = append(functionHashes, hex.EncodeToString(hasher.Sum(nil)))
+			} else {
+				// If we can't find the function source, use the function name
+				getLogger().Warn("Could not extract function source, using function name", "function", fqn, "line", line)
+				functionHashes = append(functionHashes, fqn)
+			}
+		} else {
+			// If we can't get runtime info, use the function name
+			functionHashes = append(functionHashes, fqn)
+		}
+	}
+
+	// Sort hashes for consistent ordering across runs
+	sort.Strings(functionHashes)
+
+	// Create final application version hash from all function hashes
+	finalHasher := sha256.New()
+	for _, hash := range functionHashes {
+		fmt.Fprintf(finalHasher, "%s", hash)
+	}
+
+	return hex.EncodeToString(finalHasher.Sum(nil))
+}
+
+// extractFunctionSource finds and returns the source code of a function at the given line
+func extractFunctionSource(file *ast.File, fset *token.FileSet, targetLine int) string {
+	// Walk through all declarations in the file
+	for _, decl := range file.Decls {
+		// Check if this declaration is a function declaration
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			// Get the position information for this function
+			startPos := fset.Position(fn.Pos())
+			endPos := fset.Position(fn.End())
+
+			// Check if the target line falls within this function's range
+			if startPos.Line <= targetLine && targetLine <= endPos.Line {
+				// Format the function AST back to source code
+				var buf bytes.Buffer
+				err := format.Node(&buf, fset, fn)
+				if err != nil {
+					getLogger().Warn("Failed to format function source", "function", fn.Name, "error", err)
+					return ""
+				}
+				return buf.String()
+			}
+		}
+	}
+	// Function not found at the target line
+	return ""
 }
