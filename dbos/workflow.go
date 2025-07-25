@@ -712,14 +712,22 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 /******* WORKFLOW COMMUNICATIONS ********/
 /****************************************/
 
-type WorkflowSendInput struct {
+type WorkflowSendInput[R any] struct {
 	DestinationID string
-	Message       any
+	Message       R
 	Topic         string
 }
 
-func Send(ctx context.Context, input WorkflowSendInput) error {
-	return dbos.systemDB.Send(ctx, input)
+// Send sends a message to another workflow.
+// Send automatically registers the type of R for gob encoding
+func Send[R any](ctx context.Context, input WorkflowSendInput[R]) error {
+	var typedMessage R
+	gob.Register(typedMessage) // Register the type for gob encoding
+	return dbos.systemDB.Send(ctx, workflowSendInputInternal{
+		destinationID: input.DestinationID,
+		message:       input.Message,
+		topic:         input.Topic,
+	})
 }
 
 type WorkflowRecvInput struct {

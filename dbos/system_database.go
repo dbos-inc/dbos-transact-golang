@@ -38,7 +38,7 @@ type SystemDatabase interface {
 	CheckOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
 	RecordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
 	GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
-	Send(ctx context.Context, input WorkflowSendInput) error
+	Send(ctx context.Context, input workflowSendInputInternal) error
 	Recv(ctx context.Context, input WorkflowRecvInput) (any, error)
 	SetEvent(ctx context.Context, input workflowSetEventInputInternal) error
 	GetEvent(ctx context.Context, input WorkflowGetEventInput) (any, error)
@@ -1102,10 +1102,16 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 
 const _DBOS_NULL_TOPIC = "__null__topic__"
 
+type workflowSendInputInternal struct {
+	destinationID string
+	message       any
+	topic         string
+}
+
 // Send is a special type of step that sends a message to another workflow.
 // Can be called both within a workflow (as a step) or outside a workflow (directly).
 // When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution
-func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) error {
+func (s *systemDatabase) Send(ctx context.Context, input workflowSendInputInternal) error {
 	functionName := "DBOS.send"
 
 	// Get workflow state from context (optional for Send as we can send from outside a workflow)
@@ -1147,22 +1153,22 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInput) erro
 
 	// Set default topic if not provided
 	topic := _DBOS_NULL_TOPIC
-	if len(input.Topic) > 0 {
-		topic = input.Topic
+	if len(input.topic) > 0 {
+		topic = input.topic
 	}
 
 	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := serialize(input.Message)
+	messageString, err := serialize(input.message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
 
 	insertQuery := `INSERT INTO dbos.notifications (destination_uuid, topic, message) VALUES ($1, $2, $3)`
-	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, messageString)
+	_, err = tx.Exec(ctx, insertQuery, input.destinationID, topic, messageString)
 	if err != nil {
 		// Check for foreign key violation (destination workflow doesn't exist)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23503" {
-			return newNonExistentWorkflowError(input.DestinationID)
+			return newNonExistentWorkflowError(input.destinationID)
 		}
 		return fmt.Errorf("failed to insert notification: %w", err)
 	}
