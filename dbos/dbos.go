@@ -3,6 +3,7 @@ package dbos
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/gob"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -140,6 +141,10 @@ func Initialize(inputConfig Config) error {
 
 	// Set global logger
 	logger = config.Logger
+
+	// Register types we serialize with gob
+	var t time.Time
+	gob.Register(t)
 
 	// Initialize global variables with environment variables, providing defaults if not set
 	_APP_VERSION = os.Getenv("DBOS__APPVERSION")
