@@ -292,8 +292,6 @@ func TestWorkflowEncoding(t *testing.T) {
 	})
 }
 
-// UserDefinedEventData is a custom struct declared outside of any workflow
-// This struct should never appear in the signature of a function registered as a DBOS workflow
 type UserDefinedEventData struct {
 	ID      int    `json:"id"`
 	Name    string `json:"name"`
@@ -304,7 +302,6 @@ type UserDefinedEventData struct {
 }
 
 func setEventUserDefinedTypeWorkflow(ctx context.Context, input string) (string, error) {
-	// Create an instance of our user-defined type inside the workflow
 	eventData := UserDefinedEventData{
 		ID:   42,
 		Name: "test-event",
@@ -317,8 +314,6 @@ func setEventUserDefinedTypeWorkflow(ctx context.Context, input string) (string,
 		},
 	}
 
-	// SetEvent should automatically register this type with gob
-	// Note the explicit type parameter since compiler cannot infer UserDefinedEventData from string input
 	err := SetEvent(ctx, WorkflowSetEventInput[UserDefinedEventData]{Key: input, Message: eventData})
 	if err != nil {
 		return "", err
@@ -379,19 +374,10 @@ func TestSetEventSerialize(t *testing.T) {
 	})
 }
 
-// UserDefinedSendData is a custom struct for testing Send serialization
-type UserDefinedSendData struct {
-	ID      int    `json:"id"`
-	Name    string `json:"name"`
-	Details struct {
-		Description string   `json:"description"`
-		Tags        []string `json:"tags"`
-	} `json:"details"`
-}
 
 func sendUserDefinedTypeWorkflow(ctx context.Context, destinationID string) (string, error) {
 	// Create an instance of our user-defined type inside the workflow
-	sendData := UserDefinedSendData{
+	sendData := UserDefinedEventData{
 		ID:   42,
 		Name: "test-send-message",
 		Details: struct {
@@ -404,8 +390,8 @@ func sendUserDefinedTypeWorkflow(ctx context.Context, destinationID string) (str
 	}
 
 	// Send should automatically register this type with gob
-	// Note the explicit type parameter since compiler cannot infer UserDefinedSendData from string input
-	err := Send(ctx, WorkflowSendInput[UserDefinedSendData]{
+	// Note the explicit type parameter since compiler cannot infer UserDefinedEventData from string input
+	err := Send(ctx, WorkflowSendInput[UserDefinedEventData]{
 		DestinationID: destinationID,
 		Topic:         "user-defined-topic",
 		Message:       sendData,
@@ -416,9 +402,9 @@ func sendUserDefinedTypeWorkflow(ctx context.Context, destinationID string) (str
 	return "user-defined-message-sent", nil
 }
 
-func recvUserDefinedTypeWorkflow(ctx context.Context, input string) (UserDefinedSendData, error) {
+func recvUserDefinedTypeWorkflow(ctx context.Context, input string) (UserDefinedEventData, error) {
 	// Receive the user-defined type message
-	result, err := Recv[UserDefinedSendData](ctx, WorkflowRecvInput{
+	result, err := Recv[UserDefinedEventData](ctx, WorkflowRecvInput{
 		Topic:   "user-defined-topic",
 		Timeout: 3 * time.Second,
 	})

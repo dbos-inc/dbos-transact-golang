@@ -722,7 +722,7 @@ type WorkflowSendInput[R any] struct {
 // Send automatically registers the type of R for gob encoding
 func Send[R any](ctx context.Context, input WorkflowSendInput[R]) error {
 	var typedMessage R
-	gob.Register(typedMessage) // Register the type for gob encoding
+	gob.Register(typedMessage)
 	return dbos.systemDB.Send(ctx, workflowSendInputInternal{
 		destinationID: input.DestinationID,
 		message:       input.Message,
@@ -762,7 +762,7 @@ type WorkflowSetEventInput[R any] struct {
 // SetEvent automatically registers the type of R for gob encoding
 func SetEvent[R any](ctx context.Context, input WorkflowSetEventInput[R]) error {
 	var typedMessage R
-	gob.Register(typedMessage) // Register the type for gob encoding
+	gob.Register(typedMessage)
 	return dbos.systemDB.SetEvent(ctx, workflowSetEventInputInternal{
 		key:     input.Key,
 		message: input.Message,
