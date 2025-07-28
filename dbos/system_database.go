@@ -1638,7 +1638,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 			pendingWorkflowsDict[executorIDRow] = taskCount
 		}
 
-		localPendingWorkflows := pendingWorkflowsDict[_EXECUTOR_ID]
+		localPendingWorkflows := pendingWorkflowsDict[dbos.executorID]
 
 		// Check worker concurrency limit
 		if queue.workerConcurrency != nil {
@@ -1705,7 +1705,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	// Execute the query to get workflow IDs
-	rows, err := tx.Query(ctx, query, queue.name, WorkflowStatusEnqueued, _APP_VERSION)
+	rows, err := tx.Query(ctx, query, queue.name, WorkflowStatusEnqueued, dbos.applicationVersion)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query enqueued workflows: %w", err)
 	}
@@ -1755,8 +1755,8 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 		var inputString *string
 		err := tx.QueryRow(ctx, updateQuery,
 			WorkflowStatusPending,
-			_APP_VERSION,
-			_EXECUTOR_ID,
+			dbos.applicationVersion,
+			dbos.executorID,
 			startTimeMs,
 			id).Scan(&retWorkflow.name, &inputString)
 

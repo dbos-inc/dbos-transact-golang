@@ -11,7 +11,7 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 	pendingWorkflows, err := dbos.systemDB.ListWorkflows(ctx, listWorkflowsDBInput{
 		status:             []WorkflowStatusType{WorkflowStatusPending},
 		executorIDs:        executorIDs,
-		applicationVersion: _APP_VERSION,
+		applicationVersion: dbos.applicationVersion,
 	})
 	if err != nil {
 		return nil, err

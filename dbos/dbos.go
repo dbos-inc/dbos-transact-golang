@@ -16,9 +16,6 @@ import (
 )
 
 var (
-	_APP_VERSION               string
-	_EXECUTOR_ID               string
-	_APP_ID                    string
 	_DEFAULT_ADMIN_SERVER_PORT = 3001
 )
 
@@ -93,6 +90,9 @@ type executor struct {
 	queueRunnerDone       chan struct{}
 	adminServer           *adminServer
 	config                *Config
+	applicationVersion    string
+	applicationID         string
+	executorID            string
 }
 
 func Initialize(inputConfig Config) error {
@@ -101,11 +101,14 @@ func Initialize(inputConfig Config) error {
 		return newInitializationError("DBOS already initialized")
 	}
 
+	initExecutor := &executor{}
+
 	// Load & process the configuration
 	config, err := processConfig(&inputConfig)
 	if err != nil {
 		return newInitializationError(err.Error())
 	}
+	initExecutor.config = config
 
 	// Set global logger
 	logger = config.Logger
@@ -115,32 +118,30 @@ func Initialize(inputConfig Config) error {
 	gob.Register(t)
 
 	// Initialize global variables with environment variables, providing defaults if not set
-	_APP_VERSION = os.Getenv("DBOS__APPVERSION")
-	if _APP_VERSION == "" {
-		_APP_VERSION = computeApplicationVersion()
+	initExecutor.applicationVersion = os.Getenv("DBOS__APPVERSION")
+	if initExecutor.applicationVersion == "" {
+		initExecutor.applicationVersion = computeApplicationVersion()
 		logger.Info("DBOS__APPVERSION not set, using computed hash")
 	}
 
-	_EXECUTOR_ID = os.Getenv("DBOS__VMID")
-	if _EXECUTOR_ID == "" {
-		_EXECUTOR_ID = "local"
-		logger.Info("DBOS__VMID not set, using default", "executor_id", _EXECUTOR_ID)
+	initExecutor.executorID = os.Getenv("DBOS__VMID")
+	if initExecutor.executorID == "" {
+		initExecutor.executorID = "local"
+		logger.Info("DBOS__VMID not set, using default", "executor_id", initExecutor.executorID)
 	}
 
-	_APP_ID = os.Getenv("DBOS__APPID")
+	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 
 	// Create the system database
 	systemDB, err := NewSystemDatabase(config.DatabaseURL)
 	if err != nil {
 		return newInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
+	initExecutor.systemDB = systemDB
 	logger.Info("System database initialized")
 
 	// Set the global dbos instance
-	dbos = &executor{
-		config:   config,
-		systemDB: systemDB,
-	}
+	dbos = initExecutor
 
 	return nil
 }
@@ -184,7 +185,7 @@ func Launch() error {
 	}
 
 	// Run a round of recovery on the local executor
-	recoveryHandles, err := recoverPendingWorkflows(context.Background(), []string{_EXECUTOR_ID}) // XXX maybe use the queue runner context here to allow Shutdown to cancel it?
+	recoveryHandles, err := recoverPendingWorkflows(context.Background(), []string{dbos.executorID}) // XXX maybe use the queue runner context here to allow Shutdown to cancel it?
 	if err != nil {
 		return newInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
 	}
@@ -192,7 +193,7 @@ func Launch() error {
 		logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
 	}
 
-	logger.Info("DBOS initialized", "app_version", _APP_VERSION, "executor_id", _EXECUTOR_ID)
+	logger.Info("DBOS initialized", "app_version", dbos.applicationVersion, "executor_id", dbos.executorID)
 	return nil
 }
 

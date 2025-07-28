@@ -389,7 +389,7 @@ func WithWorkflowMaxRetries(maxRetries int) workflowOption {
 func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], input P, opts ...workflowOption) (WorkflowHandle[R], error) {
 	// Apply options to build params
 	params := workflowParams{
-		applicationVersion: _APP_VERSION,
+		applicationVersion: dbos.applicationVersion,
 	}
 	for _, opt := range opts {
 		opt(&params)
@@ -438,14 +438,14 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 	workflowStatus := WorkflowStatus{
 		Name:               runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // TODO factor out somewhere else so we dont' have to reflect here
 		ApplicationVersion: params.applicationVersion,
-		ExecutorID:         _EXECUTOR_ID,
+		ExecutorID:         dbos.executorID,
 		Status:             status,
 		ID:                 workflowID,
 		CreatedAt:          time.Now(),
 		Deadline:           params.deadline, // TODO compute the deadline based on the timeout
 		Timeout:            params.timeout,
 		Input:              input,
-		ApplicationID:      _APP_ID,
+		ApplicationID:      dbos.applicationID,
 		QueueName:          params.queueName,
 	}
 

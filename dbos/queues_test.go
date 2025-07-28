@@ -507,8 +507,8 @@ func TestWorkerConcurrency(t *testing.T) {
 
 	// Stop the queue runner before changing executor ID to avoid race conditions
 	stopQueueRunner()
-	// Change the EXECUTOR_ID global variable to a different value
-	_EXECUTOR_ID = "worker-2"
+	// Change the executor ID to a different value
+	dbos.executorID = "worker-2"
 	// Restart the queue runner
 	restartQueueRunner()
 
@@ -541,7 +541,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	// Stop the queue runner before changing executor ID to avoid race conditions
 	stopQueueRunner()
 	// Change the executor again and wait for the third workflow to start
-	_EXECUTOR_ID = "local"
+	dbos.executorID = "local"
 	// Restart the queue runner
 	restartQueueRunner()
 	startEvents[2].Wait()
@@ -573,7 +573,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	// Stop the queue runner before changing executor ID to avoid race conditions
 	stopQueueRunner()
 	// change executor again and wait for the fourth workflow to start
-	_EXECUTOR_ID = "worker-2"
+	dbos.executorID = "worker-2"
 	// Restart the queue runner
 	restartQueueRunner()
 	startEvents[3].Wait()
@@ -597,7 +597,7 @@ func TestWorkerConcurrency(t *testing.T) {
 		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
 	}
 
-	_EXECUTOR_ID = "local" // Reset executor ID for future tests
+	dbos.executorID = "local" // Reset executor ID for future tests
 }
 
 var (
