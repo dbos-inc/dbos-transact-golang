@@ -15,11 +15,11 @@ import (
 func getDatabaseURL(t *testing.T) string {
 	databaseURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL")
 	if databaseURL == "" {
-		if os.Getenv("PGPASSWORD") == "" {
-			t.Skip("PGPASSWORD not set, cannot construct database URL")
+		password := os.Getenv("PGPASSWORD")
+		if password == "" {
+			password = "dbos"
 		}
-		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
-		databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
+		databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", url.QueryEscape(password))
 	}
 	return databaseURL
 }
