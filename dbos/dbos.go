@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -38,10 +37,7 @@ type Config struct {
 	AdminServer bool
 }
 
-// processConfig merges configuration from two sources in order of precedence:
-// 1. programmatic configuration
-// 2. environment variables
-// Finally, it applies default values if needed.
+// processConfig enforces mandatory fields and applies defaults.
 func processConfig(inputConfig *Config) (*Config, error) {
 	// First check required fields
 	if len(inputConfig.DatabaseURL) == 0 {
@@ -51,35 +47,16 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		return nil, fmt.Errorf("missing required config field: appName")
 	}
 
-	dbosConfig := &Config{}
-
-	// Start with environment variables (lowest precedence)
-	if dbURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL"); dbURL != "" {
-		dbosConfig.DatabaseURL = dbURL
+	dbosConfig := &Config{
+		DatabaseURL: inputConfig.DatabaseURL,
+		AppName:     inputConfig.AppName,
+		Logger:      inputConfig.Logger,
+		AdminServer: inputConfig.AdminServer,
 	}
-
-	// Override with programmatic configuration (highest precedence)
-	if len(inputConfig.DatabaseURL) > 0 {
-		dbosConfig.DatabaseURL = inputConfig.DatabaseURL
-	}
-	if len(inputConfig.AppName) > 0 {
-		dbosConfig.AppName = inputConfig.AppName
-	}
-	// Copy over parameters that can only be set programmatically
-	dbosConfig.Logger = inputConfig.Logger
-	dbosConfig.AdminServer = inputConfig.AdminServer
 
 	// Load defaults
 	if dbosConfig.Logger == nil {
 		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
-	}
-	if len(dbosConfig.DatabaseURL) == 0 {
-		dbosConfig.Logger.Info("Using default database URL: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
-		password := os.Getenv("PGPASSWORD")
-		if password == "" {
-			password = "dbos"
-		}
-		dbosConfig.DatabaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", url.QueryEscape(password))
 	}
 
 	return dbosConfig, nil
