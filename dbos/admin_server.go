@@ -64,9 +64,10 @@ func newAdminServer(port int) *adminServer {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(workflowIDs); err != nil {
 			getLogger().Error("Error encoding response", "error", err)
+			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+			return
 		}
 	})
 
@@ -92,9 +93,10 @@ func newAdminServer(port int) *adminServer {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(queueMetadataArray); err != nil {
 			getLogger().Error("Error encoding queue metadata response", "error", err)
+			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+			return
 		}
 	})
 
