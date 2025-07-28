@@ -114,8 +114,8 @@ func (h *workflowHandle[R]) GetResult(ctx context.Context) (R, error) {
 		}
 		recordResultErr := dbos.systemDB.RecordChildGetResult(ctx, recordGetResultInput)
 		if recordResultErr != nil {
-			// XXX do we want to fail this?
 			getLogger().Error("failed to record get result", "error", recordResultErr)
+			return *new(R), newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("recording child workflow result: %v", recordResultErr))
 		}
 	}
 	return outcome.result, outcome.err
