@@ -167,7 +167,7 @@ func queueRunner(ctx context.Context) {
 
 				_, err := registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
 				if err != nil {
-					getLogger().Error("Error recovering workflow", "error", err)
+					getLogger().Error("Error running queued workflow", "error", err)
 				}
 			}
 		}
