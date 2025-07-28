@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -93,6 +94,7 @@ type executor struct {
 	applicationVersion    string
 	applicationID         string
 	executorID            string
+	workflowsWg           *sync.WaitGroup
 }
 
 func Initialize(inputConfig Config) error {
@@ -101,7 +103,9 @@ func Initialize(inputConfig Config) error {
 		return newInitializationError("DBOS already initialized")
 	}
 
-	initExecutor := &executor{}
+	initExecutor := &executor{
+		workflowsWg: &sync.WaitGroup{},
+	}
 
 	// Load & process the configuration
 	config, err := processConfig(&inputConfig)
@@ -204,6 +208,7 @@ func Shutdown() {
 	}
 
 	// XXX is there a way to ensure all workflows goroutine are done before closing?
+	dbos.workflowsWg.Wait()
 
 	// Cancel the context to stop the queue runner
 	if dbos.queueRunnerCancelFunc != nil {

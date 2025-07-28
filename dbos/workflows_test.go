@@ -788,6 +788,8 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			t.Fatalf("expected DeadLetterQueueError, got %v", dbosErr.Code)
 		}
 
+		// Unlock the workflow to allow it to complete
+		deadLetterQueueEvent.Set()
 		/*
 				// TODO: test resume when implemented
 				resumedHandle, err := ...

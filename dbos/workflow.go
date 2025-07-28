@@ -517,7 +517,9 @@ func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], inp
 
 	// Run the function in a goroutine
 	augmentUserContext := context.WithValue(ctx, workflowStateKey, wfState)
+	dbos.workflowsWg.Add(1)
 	go func() {
+		defer dbos.workflowsWg.Done()
 		result, err := fn(augmentUserContext, input)
 		status := WorkflowStatusSuccess
 		if err != nil {
