@@ -631,7 +631,7 @@ func RunAsStep[P any, R any](ctx context.Context, fn StepFunc[P, R], input P, op
 	recordedOutput, err := dbos.systemDB.CheckOperationExecution(ctx, checkOperationExecutionDBInput{
 		workflowID: wfState.workflowID,
 		stepID:     stepID,
-		stepName:   runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(),
+		stepName:   stepName,
 	})
 	if err != nil {
 		return *new(R), newStepExecutionError(wfState.workflowID, stepName, fmt.Sprintf("checking operation execution: %v", err))
