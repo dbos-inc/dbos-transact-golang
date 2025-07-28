@@ -75,8 +75,11 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 	if len(dbosConfig.DatabaseURL) == 0 {
 		dbosConfig.Logger.Info("Using default database URL: postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable")
-		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
-		dbosConfig.DatabaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", password)
+		password := os.Getenv("PGPASSWORD")
+		if password == "" {
+			password = "dbos"
+		}
+		dbosConfig.DatabaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", url.QueryEscape(password))
 	}
 
 	return dbosConfig, nil
