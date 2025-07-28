@@ -334,7 +334,6 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...workflowRegistrat
 
 type contextKey string
 
-// TODO this should be a private type, once we have proper getter for a workflow state
 const workflowStateKey contextKey = "workflowState"
 
 type WorkflowFunc[P any, R any] func(ctx context.Context, input P) (R, error)
