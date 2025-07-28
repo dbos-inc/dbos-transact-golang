@@ -307,6 +307,7 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...workflowRegistrat
 		if err != nil {
 			panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
 		}
+		getLogger().Info("Registered scheduled workflow", "fqn", fqn, "cron_schedule", registrationParams.cronSchedule)
 	}
 
 	// Register a type-erased version of the durable workflow for recovery
