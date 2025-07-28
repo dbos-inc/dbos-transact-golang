@@ -23,26 +23,39 @@ import (
 /*******************************/
 
 type SystemDatabase interface {
+	// SysDB management
 	Launch(ctx context.Context)
 	Shutdown()
 	ResetSystemDB(ctx context.Context) error
+
+	// Workflows
 	InsertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error)
-	RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
-	RecordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
-	CheckChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
 	ListWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error)
 	UpdateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
-	DequeueWorkflows(ctx context.Context, queue WorkflowQueue) ([]dequeuedWorkflow, error)
-	ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
-	CheckOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
+
+	// Child workflows
+	RecordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
+	CheckChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
 	RecordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
+
+	// Steps
+	RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
+	CheckOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
 	GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
+
+	// Communication (special steps)
 	Send(ctx context.Context, input workflowSendInputInternal) error
 	Recv(ctx context.Context, input WorkflowRecvInput) (any, error)
 	SetEvent(ctx context.Context, input workflowSetEventInputInternal) error
 	GetEvent(ctx context.Context, input WorkflowGetEventInput) (any, error)
+
+	// Timers (special steps)
 	Sleep(ctx context.Context, duration time.Duration) (time.Duration, error)
+
+	// Queues
+	DequeueWorkflows(ctx context.Context, queue WorkflowQueue) ([]dequeuedWorkflow, error)
+	ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
 }
 
 type systemDatabase struct {
