@@ -143,7 +143,7 @@ func queueRunner(ctx context.Context) {
 			}
 			for _, workflow := range dequeuedWorkflows {
 				// Find the workflow in the registry
-				registeredWorkflow, exists := registry[workflow.name]
+				registeredWorkflow, exists := dbos.workflowRegistry[workflow.name]
 				if !exists {
 					getLogger().Error("workflow function not found in registry", "workflow_name", workflow.name)
 					continue

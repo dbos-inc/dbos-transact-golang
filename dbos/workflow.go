@@ -8,7 +8,6 @@ import (
 	"math"
 	"reflect"
 	"runtime"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -207,23 +206,44 @@ type workflowRegistryEntry struct {
 	maxRetries      int
 }
 
-var registry = make(map[string]workflowRegistryEntry)
-var regMutex sync.RWMutex
-
 // Register adds a workflow function to the registry (thread-safe, only once per name)
-func registerWorkflow(fqn string, fn typedErasedWorkflowWrapperFunc, maxRetries int) {
-	regMutex.Lock()
-	defer regMutex.Unlock()
+func (e *executor) RegisterWorkflow(fqn string, fn typedErasedWorkflowWrapperFunc, maxRetries int) {
+	e.workflowRegMutex.Lock()
+	defer e.workflowRegMutex.Unlock()
 
-	if _, exists := registry[fqn]; exists {
+	if _, exists := e.workflowRegistry[fqn]; exists {
 		getLogger().Error("workflow function already registered", "fqn", fqn)
 		panic(newConflictingRegistrationError(fqn))
 	}
 
-	registry[fqn] = workflowRegistryEntry{
+	e.workflowRegistry[fqn] = workflowRegistryEntry{
 		wrappedFunction: fn,
 		maxRetries:      maxRetries,
 	}
+}
+
+func (e *executor) RegisterScheduledWorkflow(fqn string, fn typedErasedWorkflowWrapperFunc, cronSchedule string, maxRetries int) {
+	e.GetWorkflowScheduler().Start()
+	var entryID cron.EntryID
+	entryID, err := e.GetWorkflowScheduler().AddFunc(cronSchedule, func() {
+		// Execute the workflow on the cron schedule once DBOS is launched
+		if e == nil {
+			return
+		}
+		// Get the scheduled time from the cron entry
+		entry := e.GetWorkflowScheduler().Entry(entryID)
+		scheduledTime := entry.Prev
+		if scheduledTime.IsZero() {
+			// Use Next if Prev is not set, which will only happen for the first run
+			scheduledTime = entry.Next
+		}
+		wfID := fmt.Sprintf("sched-%s-%s", fqn, scheduledTime) // XXX we can rethink the format
+		fn(context.Background(), scheduledTime, WithWorkflowID(wfID), WithQueue(_DBOS_INTERNAL_QUEUE_NAME))
+	})
+	if err != nil {
+		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
+	}
+	getLogger().Info("Registered scheduled workflow", "fqn", fqn, "cron_schedule", cronSchedule)
 }
 
 type workflowRegistrationParams struct {
@@ -250,9 +270,10 @@ func WithSchedule(schedule string) workflowRegistrationOption {
 	}
 }
 
-func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...workflowRegistrationOption) WorkflowWrapperFunc[P, R] {
-	if dbos != nil {
-		getLogger().Warn("WithWorkflow called after DBOS initialization, dynamic registration is not supported")
+func WithWorkflow[P any, R any](dbosExecutor DBOSExecutor, fn WorkflowFunc[P, R], opts ...workflowRegistrationOption) WorkflowWrapperFunc[P, R] {
+	if dbosExecutor == nil {
+		// TODO: consider panic here
+		getLogger().Error("Provide a valid DBOS executor instance")
 		return nil
 	}
 
@@ -277,38 +298,8 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...workflowRegistrat
 	// Wrap the function in a durable workflow
 	wrappedFunction := WorkflowWrapperFunc[P, R](func(ctx context.Context, workflowInput P, opts ...workflowOption) (WorkflowHandle[R], error) {
 		opts = append(opts, WithWorkflowMaxRetries(registrationParams.maxRetries))
-		return runAsWorkflow(ctx, fn, workflowInput, opts...)
+		return runAsWorkflow(ctx, dbosExecutor, fn, workflowInput, opts...)
 	})
-
-	// If this is a scheduled workflow, register a cron job
-	if registrationParams.cronSchedule != "" {
-		if reflect.TypeOf(p) != reflect.TypeOf(time.Time{}) {
-			panic(fmt.Sprintf("scheduled workflow function must accept ScheduledWorkflowInput as input, got %T", p))
-		}
-		if workflowScheduler == nil {
-			workflowScheduler = cron.New(cron.WithSeconds())
-		}
-		var entryID cron.EntryID
-		entryID, err := workflowScheduler.AddFunc(registrationParams.cronSchedule, func() {
-			// Execute the workflow on the cron schedule once DBOS is launched
-			if dbos == nil {
-				return
-			}
-			// Get the scheduled time from the cron entry
-			entry := workflowScheduler.Entry(entryID)
-			scheduledTime := entry.Prev
-			if scheduledTime.IsZero() {
-				// Use Next if Prev is not set, which will only happen for the first run
-				scheduledTime = entry.Next
-			}
-			wfID := fmt.Sprintf("sched-%s-%s", fqn, scheduledTime) // XXX we can rethink the format
-			wrappedFunction(context.Background(), any(scheduledTime).(P), WithWorkflowID(wfID), WithQueue(_DBOS_INTERNAL_QUEUE_NAME))
-		})
-		if err != nil {
-			panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
-		}
-		getLogger().Info("Registered scheduled workflow", "fqn", fqn, "cron_schedule", registrationParams.cronSchedule)
-	}
 
 	// Register a type-erased version of the durable workflow for recovery
 	typeErasedWrapper := func(ctx context.Context, input any, opts ...workflowOption) (WorkflowHandle[any], error) {
@@ -323,7 +314,15 @@ func WithWorkflow[P any, R any](fn WorkflowFunc[P, R], opts ...workflowRegistrat
 		}
 		return &workflowPollingHandle[any]{workflowID: handle.GetWorkflowID()}, nil
 	}
-	registerWorkflow(fqn, typeErasedWrapper, registrationParams.maxRetries)
+	dbosExecutor.RegisterWorkflow(fqn, typeErasedWrapper, registrationParams.maxRetries)
+
+	// If this is a scheduled workflow, register a cron job
+	if registrationParams.cronSchedule != "" {
+		if reflect.TypeOf(p) != reflect.TypeOf(time.Time{}) {
+			panic(fmt.Sprintf("scheduled workflow function must accept a time.Time as input, got %T", p))
+		}
+		dbosExecutor.RegisterScheduledWorkflow(fqn, typeErasedWrapper, registrationParams.cronSchedule, registrationParams.maxRetries)
+	}
 
 	return wrappedFunction
 }
@@ -386,10 +385,10 @@ func WithWorkflowMaxRetries(maxRetries int) workflowOption {
 	}
 }
 
-func runAsWorkflow[P any, R any](ctx context.Context, fn WorkflowFunc[P, R], input P, opts ...workflowOption) (WorkflowHandle[R], error) {
+func runAsWorkflow[P any, R any](ctx context.Context, dbosExecutor DBOSExecutor, fn WorkflowFunc[P, R], input P, opts ...workflowOption) (WorkflowHandle[R], error) {
 	// Apply options to build params
 	params := workflowParams{
-		applicationVersion: dbos.applicationVersion,
+		applicationVersion: dbosExecutor.GetApplicationVersion(),
 	}
 	for _, opt := range opts {
 		opt(&params)

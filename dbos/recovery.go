@@ -38,7 +38,7 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 			continue
 		}
 
-		registeredWorkflow, exists := registry[workflow.Name]
+		registeredWorkflow, exists := dbos.workflowRegistry[workflow.Name]
 		if !exists {
 			getLogger().Error("Workflow function not found in registry", "workflow_id", workflow.ID, "name", workflow.Name)
 			continue

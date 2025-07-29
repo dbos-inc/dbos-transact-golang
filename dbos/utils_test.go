@@ -25,7 +25,7 @@ func getDatabaseURL(t *testing.T) string {
 }
 
 /* Test database setup */
-func setupDBOS(t *testing.T) {
+func setupDBOS(t *testing.T) DBOSExecutor {
 	t.Helper()
 
 	databaseURL := getDatabaseURL(t)
@@ -54,7 +54,7 @@ func setupDBOS(t *testing.T) {
 		t.Fatalf("failed to drop test database: %v", err)
 	}
 
-	err = Initialize(Config{
+	executor, err := Initialize(Config{
 		DatabaseURL: databaseURL,
 		AppName:     "test-app",
 	})
@@ -62,20 +62,25 @@ func setupDBOS(t *testing.T) {
 		t.Fatalf("failed to create DBOS instance: %v", err)
 	}
 
-	err = Launch()
+	err = executor.Launch()
 	if err != nil {
 		t.Fatalf("failed to launch DBOS instance: %v", err)
 	}
 
-	if dbos == nil {
+	if executor == nil {
 		t.Fatal("expected DBOS instance but got nil")
 	}
 
 	// Register cleanup to run after test completes
 	t.Cleanup(func() {
 		fmt.Println("Cleaning up DBOS instance...")
-		Shutdown()
+		if dbos != nil {
+			dbos.Shutdown()
+			dbos = nil
+		}
 	})
+
+	return executor
 }
 
 /* Event struct provides a simple synchronization primitive that can be used to signal between goroutines. */
