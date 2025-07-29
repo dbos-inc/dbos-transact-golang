@@ -259,8 +259,6 @@ func (e *executor) Shutdown() {
 	if logger != nil {
 		logger = nil
 	}
-	// XX now responsiblity of the caller right?
-	e = nil
 }
 
 func GetBinaryHash() (string, error) {

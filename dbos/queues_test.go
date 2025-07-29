@@ -27,21 +27,13 @@ This suite tests
 */
 
 var (
-	queue               = NewWorkflowQueue("test-queue")
-	queueWf             = WithWorkflow(queueWorkflow)
-	queueWfWithChild    = WithWorkflow(queueWorkflowWithChild)
-	queueWfThatEnqueues = WithWorkflow(queueWorkflowThatEnqueues)
+	queue = NewWorkflowQueue("test-queue")
 
 	// Variables for successive enqueue test
-	dlqEnqueueQueue    = NewWorkflowQueue("test-successive-enqueue-queue")
-	dlqStartEvent      = NewEvent()
-	dlqCompleteEvent   = NewEvent()
-	dlqMaxRetries      = 10
-	enqueueWorkflowDLQ = WithWorkflow(func(ctx context.Context, input string) (string, error) {
-		dlqStartEvent.Set()
-		dlqCompleteEvent.Wait()
-		return input, nil
-	}, WithMaxRetries(dlqMaxRetries))
+	dlqEnqueueQueue  = NewWorkflowQueue("test-successive-enqueue-queue")
+	dlqStartEvent    = NewEvent()
+	dlqCompleteEvent = NewEvent()
+	dlqMaxRetries    = 10
 )
 
 func queueWorkflow(ctx context.Context, input string) (string, error) {
@@ -56,40 +48,52 @@ func queueStep(ctx context.Context, input string) (string, error) {
 	return input, nil
 }
 
-func queueWorkflowWithChild(ctx context.Context, input string) (string, error) {
-	// Start a child workflow
-	childHandle, err := queueWf(ctx, input+"-child")
-	if err != nil {
-		return "", fmt.Errorf("failed to start child workflow: %v", err)
-	}
-
-	// Get result from child workflow
-	childResult, err := childHandle.GetResult(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to get child result: %v", err)
-	}
-
-	return childResult, nil
-}
-
-func queueWorkflowThatEnqueues(ctx context.Context, input string) (string, error) {
-	// Enqueue another workflow to the same queue
-	enqueuedHandle, err := queueWf(ctx, input+"-enqueued", WithQueue(queue.name))
-	if err != nil {
-		return "", fmt.Errorf("failed to enqueue workflow: %v", err)
-	}
-
-	// Get result from the enqueued workflow
-	enqueuedResult, err := enqueuedHandle.GetResult(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to get enqueued workflow result: %v", err)
-	}
-
-	return enqueuedResult, nil
-}
 
 func TestWorkflowQueues(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+	
+	// Setup workflows with executor
+	queueWf := WithWorkflow(executor, queueWorkflow)
+	
+	// Create workflow with child that can call the main workflow
+	queueWfWithChild := WithWorkflow(executor, func(ctx context.Context, input string) (string, error) {
+		// Start a child workflow
+		childHandle, err := queueWf(ctx, input+"-child")
+		if err != nil {
+			return "", fmt.Errorf("failed to start child workflow: %v", err)
+		}
+
+		// Get result from child workflow
+		childResult, err := childHandle.GetResult(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get child result: %v", err)
+		}
+
+		return childResult, nil
+	})
+	
+	// Create workflow that enqueues another workflow
+	queueWfThatEnqueues := WithWorkflow(executor, func(ctx context.Context, input string) (string, error) {
+		// Enqueue another workflow to the same queue
+		enqueuedHandle, err := queueWf(ctx, input+"-enqueued", WithQueue(queue.name))
+		if err != nil {
+			return "", fmt.Errorf("failed to enqueue workflow: %v", err)
+		}
+
+		// Get result from the enqueued workflow
+		enqueuedResult, err := enqueuedHandle.GetResult(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get enqueued workflow result: %v", err)
+		}
+
+		return enqueuedResult, nil
+	})
+	
+	enqueueWorkflowDLQ := WithWorkflow(executor, func(ctx context.Context, input string) (string, error) {
+		dlqStartEvent.Set()
+		dlqCompleteEvent.Wait()
+		return input, nil
+	}, WithMaxRetries(dlqMaxRetries))
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
 		handle, err := queueWf(context.Background(), "test-input", WithQueue(queue.name))
@@ -249,14 +253,23 @@ var (
 	recoveryStepEvents  = make([]*Event, 5) // 5 queued steps
 	recoveryEvent       = NewEvent()
 
-	recoveryStepWorkflow = WithWorkflow(func(ctx context.Context, i int) (int, error) {
+)
+
+func TestQueueRecovery(t *testing.T) {
+	executor := setupDBOS(t)
+	
+	// Create workflows with executor
+	var recoveryStepWorkflow func(context.Context, int, ...workflowOption) (WorkflowHandle[int], error)
+	var recoveryWorkflow func(context.Context, string, ...workflowOption) (WorkflowHandle[[]int], error)
+	
+	recoveryStepWorkflow = WithWorkflow(executor, func(ctx context.Context, i int) (int, error) {
 		recoveryStepCounter++
 		recoveryStepEvents[i].Set()
 		recoveryEvent.Wait()
 		return i, nil
 	})
 
-	recoveryWorkflow = WithWorkflow(func(ctx context.Context, input string) ([]int, error) {
+	recoveryWorkflow = WithWorkflow(executor, func(ctx context.Context, input string) ([]int, error) {
 		handles := make([]WorkflowHandle[int], 0, 5) // 5 queued steps
 		for i := range 5 {
 			handle, err := recoveryStepWorkflow(ctx, i, WithQueue(recoveryQueue.name))
@@ -276,10 +289,6 @@ var (
 		}
 		return results, nil
 	})
-)
-
-func TestQueueRecovery(t *testing.T) {
-	setupDBOS(t)
 
 	queuedSteps := 5
 
@@ -377,7 +386,13 @@ var (
 	workflowEvent1            = NewEvent()
 	workflowEvent2            = NewEvent()
 	workflowDoneEvent         = NewEvent()
-	globalConcurrencyWorkflow = WithWorkflow(func(ctx context.Context, input string) (string, error) {
+)
+
+func TestGlobalConcurrency(t *testing.T) {
+	executor := setupDBOS(t)
+	
+	// Create workflow with executor
+	globalConcurrencyWorkflow := WithWorkflow(executor, func(ctx context.Context, input string) (string, error) {
 		switch input {
 		case "workflow1":
 			workflowEvent1.Set()
@@ -387,10 +402,6 @@ var (
 		}
 		return input, nil
 	})
-)
-
-func TestGlobalConcurrency(t *testing.T) {
-	setupDBOS(t)
 
 	// Enqueue two workflows
 	handle1, err := globalConcurrencyWorkflow(context.Background(), "workflow1", WithQueue(globalConcurrencyQueue.name))
@@ -459,16 +470,18 @@ var (
 		NewEvent(),
 		NewEvent(),
 	}
-	blockingWf = WithWorkflow(func(ctx context.Context, i int) (int, error) {
+)
+
+func TestWorkerConcurrency(t *testing.T) {
+	executor := setupDBOS(t)
+	
+	// Create workflow with executor
+	blockingWf := WithWorkflow(executor, func(ctx context.Context, i int) (int, error) {
 		// Simulate a blocking operation
 		startEvents[i].Set()
 		completeEvents[i].Wait()
 		return i, nil
 	})
-)
-
-func TestWorkerConcurrency(t *testing.T) {
-	setupDBOS(t)
 
 	// First enqueue four blocking workflows
 	handle1, err := blockingWf(context.Background(), 0, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-1"))
@@ -606,20 +619,22 @@ var (
 	workerConcurrencyRecoveryStartEvent2    = NewEvent()
 	workerConcurrencyRecoveryCompleteEvent1 = NewEvent()
 	workerConcurrencyRecoveryCompleteEvent2 = NewEvent()
-	workerConcurrencyRecoveryBlockingWf1    = WithWorkflow(func(ctx context.Context, input string) (string, error) {
+)
+
+func TestWorkerConcurrencyXRecovery(t *testing.T) {
+	executor := setupDBOS(t)
+	
+	// Create workflows with executor
+	workerConcurrencyRecoveryBlockingWf1 := WithWorkflow(executor, func(ctx context.Context, input string) (string, error) {
 		workerConcurrencyRecoveryStartEvent1.Set()
 		workerConcurrencyRecoveryCompleteEvent1.Wait()
 		return input, nil
 	})
-	workerConcurrencyRecoveryBlockingWf2 = WithWorkflow(func(ctx context.Context, input string) (string, error) {
+	workerConcurrencyRecoveryBlockingWf2 := WithWorkflow(executor, func(ctx context.Context, input string) (string, error) {
 		workerConcurrencyRecoveryStartEvent2.Set()
 		workerConcurrencyRecoveryCompleteEvent2.Wait()
 		return input, nil
 	})
-)
-
-func TestWorkerConcurrencyXRecovery(t *testing.T) {
-	setupDBOS(t)
 
 	// Enqueue two workflows on a queue with worker concurrency = 1
 	handle1, err := workerConcurrencyRecoveryBlockingWf1(context.Background(), "workflow1", WithQueue(workerConcurrencyRecoveryQueue.name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
@@ -715,8 +730,7 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 }
 
 var (
-	rateLimiterQueue    = NewWorkflowQueue("test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: 1.8}))
-	rateLimiterWorkflow = WithWorkflow(rateLimiterTestWorkflow)
+	rateLimiterQueue = NewWorkflowQueue("test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: 1.8}))
 )
 
 func rateLimiterTestWorkflow(ctx context.Context, _ string) (time.Time, error) {
@@ -724,7 +738,10 @@ func rateLimiterTestWorkflow(ctx context.Context, _ string) (time.Time, error) {
 }
 
 func TestQueueRateLimiter(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+	
+	// Create workflow with executor
+	rateLimiterWorkflow := WithWorkflow(executor, rateLimiterTestWorkflow)
 
 	limit := 5
 	period := 1.8

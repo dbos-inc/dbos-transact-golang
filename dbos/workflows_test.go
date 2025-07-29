@@ -24,29 +24,6 @@ import (
 // Global counter for idempotency testing
 var idempotencyCounter int64
 
-var (
-	simpleWf              = WithWorkflow(simpleWorkflow)
-	simpleWfError         = WithWorkflow(simpleWorkflowError)
-	simpleWfWithStep      = WithWorkflow(simpleWorkflowWithStep)
-	simpleWfWithStepError = WithWorkflow(simpleWorkflowWithStepError)
-	// struct methods
-	s              = workflowStruct{}
-	simpleWfStruct = WithWorkflow(s.simpleWorkflow)
-	simpleWfValue  = WithWorkflow(s.simpleWorkflowValue)
-	// interface method workflow
-	workflowIface TestWorkflowInterface = &workflowImplementation{
-		field: "example",
-	}
-	simpleWfIface = WithWorkflow(workflowIface.Execute)
-	// Generic workflow
-	wfInt = WithWorkflow(Identity[string]) // FIXME make this an int eventually
-	// Closure with captured state
-	prefix  = "hello-"
-	wfClose = WithWorkflow(func(ctx context.Context, in string) (string, error) {
-		return prefix + in, nil
-	})
-)
-
 func simpleWorkflow(ctxt context.Context, input string) (string, error) {
 	return input, nil
 }
@@ -108,14 +85,34 @@ func Identity[T any](ctx context.Context, in T) (T, error) {
 	return in, nil
 }
 
-var (
-	anonymousWf = WithWorkflow(func(ctx context.Context, in string) (string, error) {
+func TestWorkflowsWrapping(t *testing.T) {
+	executor := setupDBOS(t)
+
+	// Setup workflows with executor
+	simpleWf := WithWorkflow(executor, simpleWorkflow)
+	simpleWfError := WithWorkflow(executor, simpleWorkflowError)
+	simpleWfWithStep := WithWorkflow(executor, simpleWorkflowWithStep)
+	simpleWfWithStepError := WithWorkflow(executor, simpleWorkflowWithStepError)
+	// struct methods
+	s := workflowStruct{}
+	simpleWfStruct := WithWorkflow(executor, s.simpleWorkflow)
+	simpleWfValue := WithWorkflow(executor, s.simpleWorkflowValue)
+	// interface method workflow
+	workflowIface := TestWorkflowInterface(&workflowImplementation{
+		field: "example",
+	})
+	simpleWfIface := WithWorkflow(executor, workflowIface.Execute)
+	// Generic workflow
+	wfInt := WithWorkflow(executor, Identity[string]) // FIXME make this an int eventually
+	// Closure with captured state
+	prefix := "hello-"
+	wfClose := WithWorkflow(executor, func(ctx context.Context, in string) (string, error) {
+		return prefix + in, nil
+	})
+	// Anonymous workflow
+	anonymousWf := WithWorkflow(executor, func(ctx context.Context, in string) (string, error) {
 		return "anonymous-" + in, nil
 	})
-)
-
-func TestWorkflowsWrapping(t *testing.T) {
-	setupDBOS(t)
 
 	type testCase struct {
 		name           string
@@ -324,13 +321,12 @@ func stepRetryWorkflow(ctx context.Context, input string) (string, error) {
 		WithMaxInterval(10*time.Millisecond))
 }
 
-var (
-	stepWithinAStepWf = WithWorkflow(stepWithinAStepWorkflow)
-	stepRetryWf       = WithWorkflow(stepRetryWorkflow)
-)
-
 func TestSteps(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+
+	// Create workflows with executor
+	stepWithinAStepWf := WithWorkflow(executor, stepWithinAStepWorkflow)
+	stepRetryWf := WithWorkflow(executor, stepRetryWorkflow)
 
 	t.Run("StepsMustRunInsideWorkflows", func(t *testing.T) {
 		ctx := context.Background()
@@ -452,8 +448,14 @@ func TestSteps(t *testing.T) {
 	})
 }
 
-var (
-	childWf = WithWorkflow(func(ctx context.Context, i int) (string, error) {
+// Functions that create child workflows - moved to test function where executor is available
+
+// TODO Check timeouts behaviors for parents and children (e.g. awaited cancelled, etc)
+func TestChildWorkflow(t *testing.T) {
+	executor := setupDBOS(t)
+
+	// Create child workflows with executor
+	childWf := WithWorkflow(executor, func(ctx context.Context, i int) (string, error) {
 		workflowID, err := GetWorkflowID(ctx)
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %v", err)
@@ -465,7 +467,8 @@ var (
 		// XXX right now the steps of a child workflow start with an incremented step ID, because the first step ID is allocated to the child workflow
 		return RunAsStep(ctx, simpleStep, "")
 	})
-	parentWf = WithWorkflow(func(ctx context.Context, i int) (string, error) {
+
+	parentWf := WithWorkflow(executor, func(ctx context.Context, i int) (string, error) {
 		workflowID, err := GetWorkflowID(ctx)
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %v", err)
@@ -490,7 +493,8 @@ var (
 		}
 		return childHandle.GetResult(ctx)
 	})
-	grandParentWf = WithWorkflow(func(ctx context.Context, _ string) (string, error) {
+
+	grandParentWf := WithWorkflow(executor, func(ctx context.Context, _ string) (string, error) {
 		for i := range 3 {
 			workflowID, err := GetWorkflowID(ctx)
 			if err != nil {
@@ -529,11 +533,6 @@ var (
 
 		return "", nil
 	})
-)
-
-// TODO Check timeouts behaviors for parents and children (e.g. awaited cancelled, etc)
-func TestChildWorkflow(t *testing.T) {
-	setupDBOS(t)
 
 	t.Run("ChildWorkflowIDPattern", func(t *testing.T) {
 		h, err := grandParentWf(context.Background(), "")
@@ -547,10 +546,7 @@ func TestChildWorkflow(t *testing.T) {
 	})
 }
 
-var (
-	idempotencyWf         = WithWorkflow(idempotencyWorkflow)
-	idempotencyWfWithStep = WithWorkflow(idempotencyWorkflowWithStep)
-)
+// Idempotency workflows moved to test functions
 
 func idempotencyWorkflow(ctx context.Context, input string) (string, error) {
 	incrementCounter(ctx, 1)
@@ -574,7 +570,8 @@ func idempotencyWorkflowWithStep(ctx context.Context, input string) (int64, erro
 }
 
 func TestWorkflowIdempotency(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+	idempotencyWf := WithWorkflow(executor, idempotencyWorkflow)
 
 	t.Run("WorkflowExecutedOnlyOnce", func(t *testing.T) {
 		idempotencyCounter = 0
@@ -622,7 +619,8 @@ func TestWorkflowIdempotency(t *testing.T) {
 }
 
 func TestWorkflowRecovery(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+	idempotencyWfWithStep := WithWorkflow(executor, idempotencyWorkflowWithStep)
 	t.Run("RecoveryResumeWhereItLeftOff", func(t *testing.T) {
 		// Reset the global counter
 		idempotencyCounter = 0
@@ -700,8 +698,6 @@ func TestWorkflowRecovery(t *testing.T) {
 
 var (
 	maxRecoveryAttempts       = 20
-	deadLetterQueueWf         = WithWorkflow(deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
-	infiniteDeadLetterQueueWf = WithWorkflow(infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
 	deadLetterQueueStartEvent *Event
 	deadLetterQueueEvent      *Event
 	recoveryCount             int64
@@ -721,7 +717,9 @@ func infiniteDeadLetterQueueWorkflow(ctx context.Context, input string) (int, er
 	return 0, nil
 }
 func TestWorkflowDeadLetterQueue(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+	deadLetterQueueWf := WithWorkflow(executor, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
+	infiniteDeadLetterQueueWf := WithWorkflow(executor, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
 
 	t.Run("DeadLetterQueueBehavior", func(t *testing.T) {
 		deadLetterQueueEvent = NewEvent()
@@ -890,7 +888,11 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 var (
 	counter    = 0
 	counter1Ch = make(chan time.Time, 100)
-	_          = WithWorkflow(func(ctx context.Context, scheduledTime time.Time) (string, error) {
+)
+
+func TestScheduledWorkflows(t *testing.T) {
+	executor := setupDBOS(t)
+	_ = WithWorkflow(executor, func(ctx context.Context, scheduledTime time.Time) (string, error) {
 		startTime := time.Now()
 		counter++
 		if counter == 10 {
@@ -902,10 +904,6 @@ var (
 		}
 		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", scheduledTime, startTime), nil
 	}, WithSchedule("* * * * * *")) // Every second
-)
-
-func TestScheduledWorkflows(t *testing.T) {
-	setupDBOS(t)
 
 	// Helper function to collect execution times
 	collectExecutionTimes := func(ch chan time.Time, target int, timeout time.Duration) ([]time.Time, error) {
@@ -956,7 +954,7 @@ func TestScheduledWorkflows(t *testing.T) {
 
 		// Stop the workflowScheduler and check if it stops executing
 		currentCounter := counter
-		workflowScheduler.Stop()
+		executor.GetWorkflowScheduler().Stop()
 		time.Sleep(3 * time.Second) // Wait a bit to ensure no more executions
 		if counter >= currentCounter+2 {
 			t.Fatalf("Scheduled workflow continued executing after stopping scheduler: %d (expected < %d)", counter, currentCounter+2)
@@ -965,17 +963,9 @@ func TestScheduledWorkflows(t *testing.T) {
 }
 
 var (
-	sendWf                       = WithWorkflow(sendWorkflow)
-	receiveWf                    = WithWorkflow(receiveWorkflow)
-	receiveWfCoordinated         = WithWorkflow(receiveWorkflowCoordinated)
-	sendStructWf                 = WithWorkflow(sendStructWorkflow)
-	receiveStructWf              = WithWorkflow(receiveStructWorkflow)
-	sendIdempotencyWf            = WithWorkflow(sendIdempotencyWorkflow)
 	sendIdempotencyEvent         = NewEvent()
-	recvIdempotencyWf            = WithWorkflow(receiveIdempotencyWorkflow)
 	receiveIdempotencyStartEvent = NewEvent()
 	receiveIdempotencyStopEvent  = NewEvent()
-	sendWithinStepWf             = WithWorkflow(workflowThatCallsSendInStep)
 	numConcurrentRecvWfs         = 5
 	concurrentRecvReadyEvents    = make([]*Event, numConcurrentRecvWfs)
 	concurrentRecvStartEvent     = NewEvent()
@@ -1087,7 +1077,17 @@ type sendRecvType struct {
 }
 
 func TestSendRecv(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+
+	// Register all send/recv workflows with executor
+	sendWf := WithWorkflow(executor, sendWorkflow)
+	receiveWf := WithWorkflow(executor, receiveWorkflow)
+	receiveWfCoordinated := WithWorkflow(executor, receiveWorkflowCoordinated)
+	sendStructWf := WithWorkflow(executor, sendStructWorkflow)
+	receiveStructWf := WithWorkflow(executor, receiveStructWorkflow)
+	sendIdempotencyWf := WithWorkflow(executor, sendIdempotencyWorkflow)
+	recvIdempotencyWf := WithWorkflow(executor, receiveIdempotencyWorkflow)
+	sendWithinStepWf := WithWorkflow(executor, workflowThatCallsSendInStep)
 
 	t.Run("SendRecvSuccess", func(t *testing.T) {
 		// Start the receive workflow
@@ -1455,11 +1455,6 @@ func TestSendRecv(t *testing.T) {
 }
 
 var (
-	setEventWf                    = WithWorkflow(setEventWorkflow)
-	getEventWf                    = WithWorkflow(getEventWorkflow)
-	setTwoEventsWf                = WithWorkflow(setTwoEventsWorkflow)
-	setEventIdempotencyWf         = WithWorkflow(setEventIdempotencyWorkflow)
-	getEventIdempotencyWf         = WithWorkflow(getEventIdempotencyWorkflow)
 	setEventIdempotencyEvent      = NewEvent()
 	getEventStartIdempotencyEvent = NewEvent()
 	getEventStopIdempotencyEvent  = NewEvent()
@@ -1534,7 +1529,14 @@ func getEventIdempotencyWorkflow(ctx context.Context, input setEventWorkflowInpu
 }
 
 func TestSetGetEvent(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+
+	// Register all set/get event workflows with executor
+	setEventWf := WithWorkflow(executor, setEventWorkflow)
+	getEventWf := WithWorkflow(executor, getEventWorkflow)
+	setTwoEventsWf := WithWorkflow(executor, setTwoEventsWorkflow)
+	setEventIdempotencyWf := WithWorkflow(executor, setEventIdempotencyWorkflow)
+	getEventIdempotencyWf := WithWorkflow(executor, getEventIdempotencyWorkflow)
 
 	t.Run("SetGetEventFromWorkflow", func(t *testing.T) {
 		// Clear the signal event before starting
@@ -1815,7 +1817,6 @@ func TestSetGetEvent(t *testing.T) {
 }
 
 var (
-	sleepRecoveryWf = WithWorkflow(sleepRecoveryWorkflow)
 	sleepStartEvent *Event
 	sleepStopEvent  *Event
 )
@@ -1832,7 +1833,8 @@ func sleepRecoveryWorkflow(ctx context.Context, duration time.Duration) (time.Du
 }
 
 func TestSleep(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+	sleepRecoveryWf := WithWorkflow(executor, sleepRecoveryWorkflow)
 
 	t.Run("SleepDurableRecovery", func(t *testing.T) {
 		sleepStartEvent = NewEvent()

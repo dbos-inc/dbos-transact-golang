@@ -15,23 +15,29 @@ func TestAdminServer(t *testing.T) {
 
 	t.Run("Admin server is not started by default", func(t *testing.T) {
 		// Ensure clean state
-		Shutdown()
+		if dbos != nil {
+			dbos.Shutdown()
+			dbos = nil
+		}
 
-		err := Initialize(Config{
+		executor, err := Initialize(Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 		})
 		if err != nil {
 			t.Skipf("Failed to initialize DBOS: %v", err)
 		}
-		err = Launch()
+		err = executor.Launch()
 		if err != nil {
 			t.Skipf("Failed to initialize DBOS: %v", err)
 		}
 
 		// Ensure cleanup
 		defer func() {
-			Shutdown()
+			if dbos != nil {
+			dbos.Shutdown()
+			dbos = nil
+		}
 		}()
 
 		// Give time for any startup processes
@@ -55,10 +61,13 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("Admin server endpoints", func(t *testing.T) {
-		Shutdown()
+		if dbos != nil {
+			dbos.Shutdown()
+			dbos = nil
+		}
 
 		// Launch DBOS with admin server once for all endpoint tests
-		err := Initialize(Config{
+		executor, err := Initialize(Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 			AdminServer: true,
@@ -66,14 +75,17 @@ func TestAdminServer(t *testing.T) {
 		if err != nil {
 			t.Skipf("Failed to initialize DBOS with admin server: %v", err)
 		}
-		err = Launch()
+		err = executor.Launch()
 		if err != nil {
 			t.Skipf("Failed to initialize DBOS with admin server: %v", err)
 		}
 
 		// Ensure cleanup
 		defer func() {
-			Shutdown()
+			if dbos != nil {
+			dbos.Shutdown()
+			dbos = nil
+		}
 		}()
 
 		// Give the server a moment to start

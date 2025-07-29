@@ -17,11 +17,6 @@ import (
 [x] Set/get event with user defined types
 */
 
-var (
-	builtinWf = WithWorkflow(encodingWorkflowBuiltinTypes)
-	structWf  = WithWorkflow(encodingWorkflowStruct)
-)
-
 // Builtin types
 func encodingStepBuiltinTypes(_ context.Context, input int) (int, error) {
 	return input, errors.New("step error")
@@ -68,7 +63,11 @@ func encodingStepStruct(ctx context.Context, input StepInputStruct) (StepOutputS
 }
 
 func TestWorkflowEncoding(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+
+	// Create workflows with executor
+	builtinWf := WithWorkflow(executor, encodingWorkflowBuiltinTypes)
+	structWf := WithWorkflow(executor, encodingWorkflowStruct)
 
 	t.Run("BuiltinTypes", func(t *testing.T) {
 		// Test a workflow that uses a built-in type (string)
@@ -321,10 +320,11 @@ func setEventUserDefinedTypeWorkflow(ctx context.Context, input string) (string,
 	return "user-defined-event-set", nil
 }
 
-var setEventUserDefinedTypeWf = WithWorkflow(setEventUserDefinedTypeWorkflow)
-
 func TestSetEventSerialize(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+
+	// Create workflow with executor
+	setEventUserDefinedTypeWf := WithWorkflow(executor, setEventUserDefinedTypeWorkflow)
 
 	t.Run("SetEventUserDefinedType", func(t *testing.T) {
 		// Start a workflow that sets an event with a user-defined type
@@ -374,7 +374,6 @@ func TestSetEventSerialize(t *testing.T) {
 	})
 }
 
-
 func sendUserDefinedTypeWorkflow(ctx context.Context, destinationID string) (string, error) {
 	// Create an instance of our user-defined type inside the workflow
 	sendData := UserDefinedEventData{
@@ -411,11 +410,12 @@ func recvUserDefinedTypeWorkflow(ctx context.Context, input string) (UserDefined
 	return result, err
 }
 
-var sendUserDefinedTypeWf = WithWorkflow(sendUserDefinedTypeWorkflow)
-var recvUserDefinedTypeWf = WithWorkflow(recvUserDefinedTypeWorkflow)
-
 func TestSendSerialize(t *testing.T) {
-	setupDBOS(t)
+	executor := setupDBOS(t)
+
+	// Create workflows with executor
+	sendUserDefinedTypeWf := WithWorkflow(executor, sendUserDefinedTypeWorkflow)
+	recvUserDefinedTypeWf := WithWorkflow(executor, recvUserDefinedTypeWorkflow)
 
 	t.Run("SendUserDefinedType", func(t *testing.T) {
 		// Start a receiver workflow first
