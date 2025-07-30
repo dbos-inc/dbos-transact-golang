@@ -25,7 +25,7 @@ func getDatabaseURL(t *testing.T) string {
 }
 
 /* Test database setup */
-func setupDBOS(t *testing.T) DBOSExecutor {
+func setupDBOS(t *testing.T) DBOSContext {
 	t.Helper()
 
 	databaseURL := getDatabaseURL(t)
@@ -54,7 +54,7 @@ func setupDBOS(t *testing.T) DBOSExecutor {
 		t.Fatalf("failed to drop test database: %v", err)
 	}
 
-	executor, err := Initialize(Config{
+	executor, err := NewDBOSContext(Config{
 		DatabaseURL: databaseURL,
 		AppName:     "test-app",
 	})
@@ -74,9 +74,8 @@ func setupDBOS(t *testing.T) DBOSExecutor {
 	// Register cleanup to run after test completes
 	t.Cleanup(func() {
 		fmt.Println("Cleaning up DBOS instance...")
-		if dbos != nil {
-			dbos.Shutdown()
-			dbos = nil
+		if executor != nil {
+			executor.Shutdown()
 		}
 	})
 
@@ -120,27 +119,31 @@ func (e *Event) Clear() {
 /* Helpers */
 
 // stopQueueRunner stops the queue runner for testing purposes
-func stopQueueRunner() {
-	if dbos != nil && dbos.queueRunnerCancelFunc != nil {
-		dbos.queueRunnerCancelFunc()
-		// Wait for queue runner to finish
-		<-dbos.queueRunnerDone
+func stopQueueRunner(executor DBOSContext) {
+	if executor != nil {
+		exec := executor.(*dbosContext)
+		if exec.queueRunnerCancelFunc != nil {
+			exec.queueRunnerCancelFunc()
+			// Wait for queue runner to finish
+			<-exec.queueRunnerDone
+		}
 	}
 }
 
 // restartQueueRunner restarts the queue runner for testing purposes
-func restartQueueRunner() {
-	if dbos != nil {
+func restartQueueRunner(executor DBOSContext) {
+	if executor != nil {
+		exec := executor.(*dbosContext)
 		// Create new context and cancel function
 		ctx, cancel := context.WithCancel(context.Background())
-		dbos.queueRunnerCtx = ctx
-		dbos.queueRunnerCancelFunc = cancel
-		dbos.queueRunnerDone = make(chan struct{})
+		exec.queueRunnerCtx = ctx
+		exec.queueRunnerCancelFunc = cancel
+		exec.queueRunnerDone = make(chan struct{})
 
 		// Start the queue runner in a goroutine
 		go func() {
-			defer close(dbos.queueRunnerDone)
-			queueRunner(ctx)
+			defer close(exec.queueRunnerDone)
+			queueRunner(ctx, exec)
 		}()
 	}
 }
@@ -157,12 +160,13 @@ func equal(a, b []int) bool {
 	return true
 }
 
-func queueEntriesAreCleanedUp() bool {
+func queueEntriesAreCleanedUp(executor DBOSContext) bool {
 	maxTries := 10
 	success := false
 	for range maxTries {
 		// Begin transaction
-		tx, err := dbos.systemDB.(*systemDatabase).pool.Begin(context.Background())
+		exec := executor.(*dbosContext)
+		tx, err := exec.systemDB.(*systemDatabase).pool.Begin(context.Background())
 		if err != nil {
 			return false
 		}

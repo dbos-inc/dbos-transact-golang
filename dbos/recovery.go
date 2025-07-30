@@ -1,17 +1,16 @@
 package dbos
 
 import (
-	"context"
 	"strings"
 )
 
-func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]WorkflowHandle[any], error) {
+func recoverPendingWorkflows(dbosCtx *dbosContext, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
-	pendingWorkflows, err := dbos.systemDB.ListWorkflows(ctx, listWorkflowsDBInput{
+	pendingWorkflows, err := dbosCtx.systemDB.ListWorkflows(dbosCtx.GetContext(), listWorkflowsDBInput{
 		status:             []WorkflowStatusType{WorkflowStatusPending},
 		executorIDs:        executorIDs,
-		applicationVersion: dbos.applicationVersion,
+		applicationVersion: dbosCtx.applicationVersion,
 	})
 	if err != nil {
 		return nil, err
@@ -27,18 +26,18 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 
 		// fmt.Println("Recovering workflow:", workflow.ID, "Name:", workflow.Name, "Input:", workflow.Input, "QueueName:", workflow.QueueName)
 		if workflow.QueueName != "" {
-			cleared, err := dbos.systemDB.ClearQueueAssignment(ctx, workflow.ID)
+			cleared, err := dbosCtx.systemDB.ClearQueueAssignment(dbosCtx.GetContext(), workflow.ID)
 			if err != nil {
 				getLogger().Error("Error clearing queue assignment for workflow", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
 				continue
 			}
 			if cleared {
-				workflowHandles = append(workflowHandles, &workflowPollingHandle[any]{workflowID: workflow.ID})
+				workflowHandles = append(workflowHandles, &workflowPollingHandle[any]{workflowID: workflow.ID, systemDB: dbosCtx.systemDB})
 			}
 			continue
 		}
 
-		registeredWorkflow, exists := dbos.workflowRegistry[workflow.Name]
+		registeredWorkflow, exists := dbosCtx.workflowRegistry[workflow.Name]
 		if !exists {
 			getLogger().Error("Workflow function not found in registry", "workflow_id", workflow.ID, "name", workflow.Name)
 			continue
@@ -56,7 +55,9 @@ func recoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]Workf
 			opts = append(opts, WithDeadline(workflow.Deadline))
 		}
 
-		handle, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, opts...)
+		// Create a workflow context from the executor context
+		workflowCtx := dbosCtx.WithValue(dbosCtx.GetContext(), nil)
+		handle, err := registeredWorkflow.wrappedFunction(workflowCtx, workflow.Input, opts...)
 		if err != nil {
 			return nil, err
 		}

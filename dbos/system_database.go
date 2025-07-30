@@ -45,16 +45,16 @@ type SystemDatabase interface {
 	GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
 
 	// Communication (special steps)
-	Send(ctx context.Context, input workflowSendInputInternal) error
+	Send(ctx context.Context, input WorkflowSendInputInternal) error
 	Recv(ctx context.Context, input WorkflowRecvInput) (any, error)
-	SetEvent(ctx context.Context, input workflowSetEventInputInternal) error
+	SetEvent(ctx context.Context, input WorkflowSetEventInputInternal) error
 	GetEvent(ctx context.Context, input WorkflowGetEventInput) (any, error)
 
 	// Timers (special steps)
 	Sleep(ctx context.Context, duration time.Duration) (time.Duration, error)
 
 	// Queues
-	DequeueWorkflows(ctx context.Context, queue WorkflowQueue) ([]dequeuedWorkflow, error)
+	DequeueWorkflows(ctx context.Context, queue WorkflowQueue, executorID, applicationVersion string) ([]dequeuedWorkflow, error)
 	ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
 }
 
@@ -239,17 +239,18 @@ type insertWorkflowResult struct {
 	name                    string
 	queueName               *string
 	workflowDeadlineEpochMs *int64
+	tx                      pgx.Tx
 }
 
 type insertWorkflowStatusDBInput struct {
 	status     WorkflowStatus
 	maxRetries int
-	tx         pgx.Tx
 }
 
 func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error) {
-	if input.tx == nil {
-		return nil, errors.New("transaction is required for InsertWorkflowStatus")
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 
 	// Set default values
@@ -312,8 +313,10 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
             END
         RETURNING recovery_attempts, status, name, queue_name, workflow_deadline_epoch_ms`
 
-	var result insertWorkflowResult
-	err = input.tx.QueryRow(ctx, query,
+	result := insertWorkflowResult{
+		tx: tx,
+	}
+	err = tx.QueryRow(ctx, query,
 		input.status.ID,
 		input.status.Status,
 		input.status.Name,
@@ -362,7 +365,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
 					 SET status = $1, deduplication_id = NULL, started_at_epoch_ms = NULL, queue_name = NULL
 					 WHERE workflow_uuid = $2 AND status = $3`
 
-		_, err = input.tx.Exec(ctx, dlqQuery,
+		_, err = tx.Exec(ctx, dlqQuery,
 			WorkflowStatusRetriesExceeded,
 			input.status.ID,
 			WorkflowStatusPending)
@@ -372,7 +375,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
 		}
 
 		// Commit the transaction before throwing the error
-		if err := input.tx.Commit(ctx); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("failed to commit transaction after marking workflow as RETRIES_EXCEEDED: %w", err)
 		}
 
@@ -1115,16 +1118,16 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 
 const _DBOS_NULL_TOPIC = "__null__topic__"
 
-type workflowSendInputInternal struct {
-	destinationID string
-	message       any
-	topic         string
+type WorkflowSendInputInternal struct {
+	DestinationID string
+	Message       any
+	Topic         string
 }
 
 // Send is a special type of step that sends a message to another workflow.
 // Can be called both within a workflow (as a step) or outside a workflow (directly).
 // When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution
-func (s *systemDatabase) Send(ctx context.Context, input workflowSendInputInternal) error {
+func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInputInternal) error {
 	functionName := "DBOS.send"
 
 	// Get workflow state from context (optional for Send as we can send from outside a workflow)
@@ -1166,22 +1169,22 @@ func (s *systemDatabase) Send(ctx context.Context, input workflowSendInputIntern
 
 	// Set default topic if not provided
 	topic := _DBOS_NULL_TOPIC
-	if len(input.topic) > 0 {
-		topic = input.topic
+	if len(input.Topic) > 0 {
+		topic = input.Topic
 	}
 
 	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := serialize(input.message)
+	messageString, err := serialize(input.Message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
 
 	insertQuery := `INSERT INTO dbos.notifications (destination_uuid, topic, message) VALUES ($1, $2, $3)`
-	_, err = tx.Exec(ctx, insertQuery, input.destinationID, topic, messageString)
+	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, messageString)
 	if err != nil {
 		// Check for foreign key violation (destination workflow doesn't exist)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23503" {
-			return newNonExistentWorkflowError(input.destinationID)
+			return newNonExistentWorkflowError(input.DestinationID)
 		}
 		return fmt.Errorf("failed to insert notification: %w", err)
 	}
@@ -1357,12 +1360,12 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	return message, nil
 }
 
-type workflowSetEventInputInternal struct {
-	key     string
-	message any
+type WorkflowSetEventInputInternal struct {
+	Key     string
+	Message any
 }
 
-func (s *systemDatabase) SetEvent(ctx context.Context, input workflowSetEventInputInternal) error {
+func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInputInternal) error {
 	functionName := "DBOS.setEvent"
 
 	// Get workflow state from context
@@ -1400,7 +1403,7 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input workflowSetEventInp
 	}
 
 	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := serialize(input.message)
+	messageString, err := serialize(input.Message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
@@ -1411,7 +1414,7 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input workflowSetEventInp
 					ON CONFLICT (workflow_uuid, key)
 					DO UPDATE SET value = EXCLUDED.value`
 
-	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.key, messageString)
+	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, messageString)
 	if err != nil {
 		return fmt.Errorf("failed to insert/update workflow event: %w", err)
 	}
@@ -1567,7 +1570,8 @@ type dequeuedWorkflow struct {
 	input string
 }
 
-func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQueue) ([]dequeuedWorkflow, error) {
+// TODO input struct
+func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQueue, executorID, applicationVersion string) ([]dequeuedWorkflow, error) {
 	// Begin transaction with snapshot isolation
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1638,7 +1642,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 			pendingWorkflowsDict[executorIDRow] = taskCount
 		}
 
-		localPendingWorkflows := pendingWorkflowsDict[dbos.executorID]
+		localPendingWorkflows := pendingWorkflowsDict[executorID]
 
 		// Check worker concurrency limit
 		if queue.workerConcurrency != nil {
@@ -1705,7 +1709,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	// Execute the query to get workflow IDs
-	rows, err := tx.Query(ctx, query, queue.name, WorkflowStatusEnqueued, dbos.applicationVersion)
+	rows, err := tx.Query(ctx, query, queue.name, WorkflowStatusEnqueued, applicationVersion)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query enqueued workflows: %w", err)
 	}
@@ -1755,8 +1759,8 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 		var inputString *string
 		err := tx.QueryRow(ctx, updateQuery,
 			WorkflowStatusPending,
-			dbos.applicationVersion,
-			dbos.executorID,
+			applicationVersion,
+			executorID,
 			startTimeMs,
 			id).Scan(&retWorkflow.name, &inputString)
 

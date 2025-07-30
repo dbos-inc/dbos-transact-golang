@@ -22,7 +22,7 @@ var (
 var logger *slog.Logger // Global because accessed everywhere inside the library
 
 func getLogger() *slog.Logger {
-	if dbos == nil || logger == nil {
+	if logger == nil {
 		return slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 	return logger
@@ -60,60 +60,139 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	return dbosConfig, nil
 }
 
-type DBOSExecutor interface {
+type DBOSContext interface {
+	context.Context // Standard Go context behavior
+
+	// Context Lifecycle
 	Launch() error
 	Shutdown()
+	WithValue(key, val any) DBOSContext
 
+	// Workflow registration
 	RegisterWorkflow(fqn string, fn typedErasedWorkflowWrapperFunc, maxRetries int)
 	RegisterScheduledWorkflow(fqn string, fn typedErasedWorkflowWrapperFunc, cronSchedule string, maxRetries int)
 
+	// Workflow operations
+	RunAsStep(fn TypeErasedStepFunc, input any, stepName string, opts ...stepOption) (any, error)
+	Send(input WorkflowSendInputInternal) error
+	Recv(input WorkflowRecvInput) (any, error)
+	SetEvent(input WorkflowSetEventInputInternal) error
+	GetEvent(input WorkflowGetEventInput) (any, error)
+	Sleep(duration time.Duration) (time.Duration, error)
+
+	// Workflow management
+	RetrieveWorkflow(workflowIDs []string) ([]WorkflowStatus, error)
+	CheckChildWorkflow(parentWorkflowID string, stepCounter int) (*string, error)
+	InsertWorkflowStatus(status WorkflowStatus, maxRetries int) (*insertWorkflowResult, error)
+	RecordChildWorkflow(input recordChildWorkflowDBInput) error
+	UpdateWorkflowOutcome(workflowID string, status WorkflowStatusType, err error, output any) error
+
+	// Context operations
+	GetWorkflowID() (string, error)
+
+	// Accessors
 	GetWorkflowScheduler() *cron.Cron
 	GetApplicationVersion() string
+	GetSystemDB() SystemDatabase
+	GetContext() context.Context
+	GetExecutorID() string
+	GetApplicationID() string
+	GetWorkflowWg() *sync.WaitGroup
 }
 
-var dbos *executor // DBOS singleton instance
-
-type executor struct {
+type dbosContext struct {
+	ctx         context.Context // Embedded context for standard behavior
 	systemDB    SystemDatabase
 	adminServer *adminServer
 	config      *Config
+
 	// Queue runner context and cancel function
 	queueRunnerCtx        context.Context
 	queueRunnerCancelFunc context.CancelFunc
 	queueRunnerDone       chan struct{}
+
 	// Application metadata
 	applicationVersion string
 	applicationID      string
 	executorID         string
+
 	// Wait group for workflow goroutines
 	workflowsWg *sync.WaitGroup
+
 	// Workflow registry
 	workflowRegistry map[string]workflowRegistryEntry
-	workflowRegMutex sync.RWMutex
+	workflowRegMutex *sync.RWMutex
+
 	// Workflow scheduler
 	workflowScheduler *cron.Cron
 }
 
-func (e *executor) GetWorkflowScheduler() *cron.Cron {
+// Implement contex.Context interface methods
+func (e *dbosContext) Deadline() (deadline time.Time, ok bool) {
+	return e.ctx.Deadline()
+}
+
+func (e *dbosContext) Done() <-chan struct{} {
+	return e.ctx.Done()
+}
+
+func (e *dbosContext) Err() error {
+	return e.ctx.Err()
+}
+
+func (e *dbosContext) Value(key any) any {
+	return e.ctx.Value(key)
+}
+
+// Create a new context
+// This is intended for workflow contexts and step contexts
+// Hence we only set the relevant fields
+func (e *dbosContext) WithValue(key, val any) DBOSContext {
+	return &dbosContext{
+		ctx:                context.WithValue(e.ctx, key, val),
+		systemDB:           e.systemDB,
+		applicationVersion: e.applicationVersion,
+		executorID:         e.executorID,
+		applicationID:      e.applicationID,
+		workflowsWg:        e.workflowsWg,
+	}
+}
+
+func (e *dbosContext) GetContext() context.Context {
+	return e.ctx
+}
+
+func (e *dbosContext) GetWorkflowScheduler() *cron.Cron {
 	if e.workflowScheduler == nil {
 		e.workflowScheduler = cron.New(cron.WithSeconds())
 	}
 	return e.workflowScheduler
 }
 
-func (e *executor) GetApplicationVersion() string {
+func (e *dbosContext) GetApplicationVersion() string {
 	return e.applicationVersion
 }
 
-// TODO: use a normal builder pattern name (NewDBOSExecutor)
-func Initialize(inputConfig Config) (DBOSExecutor, error) {
-	if dbos != nil {
-		fmt.Println("warning: DBOS instance already initialized, skipping re-initialization")
-		return nil, newInitializationError("DBOS already initialized")
-	}
+func (e *dbosContext) GetSystemDB() SystemDatabase {
+	return e.systemDB
+}
 
-	initExecutor := &executor{
+func (e *dbosContext) GetExecutorID() string {
+	return e.executorID
+}
+
+func (e *dbosContext) GetApplicationID() string {
+	return e.applicationID
+}
+
+func (e *dbosContext) GetWorkflowWg() *sync.WaitGroup {
+	return e.workflowsWg
+}
+
+func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
+	initExecutor := &dbosContext{
 		workflowsWg: &sync.WaitGroup{},
+		ctx:         context.Background(),
 	}
 
 	// Load & process the configuration
@@ -156,29 +235,27 @@ func Initialize(inputConfig Config) (DBOSExecutor, error) {
 	// Initialize the workflow registry
 	initExecutor.workflowRegistry = make(map[string]workflowRegistryEntry)
 
-	// Set the global dbos instance
-	dbos = initExecutor
-
 	return initExecutor, nil
 }
 
-func (e *executor) Launch() error {
+func (e *dbosContext) Launch() error {
 	// Start the system database
 	e.systemDB.Launch(context.Background())
 
 	// Start the admin server if configured
 	if e.config.AdminServer {
-		adminServer := newAdminServer(_DEFAULT_ADMIN_SERVER_PORT)
+		adminServer := newAdminServer(e, _DEFAULT_ADMIN_SERVER_PORT)
 		err := adminServer.Start()
 		if err != nil {
 			logger.Error("Failed to start admin server", "error", err)
 			return newInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
 		}
 		logger.Info("Admin server started", "port", _DEFAULT_ADMIN_SERVER_PORT)
-		dbos.adminServer = adminServer
+		e.adminServer = adminServer
 	}
 
 	// Create context with cancel function for queue runner
+	// XXX this can now be a cancel function on the executor itself?
 	ctx, cancel := context.WithCancel(context.Background())
 	e.queueRunnerCtx = ctx
 	e.queueRunnerCancelFunc = cancel
@@ -187,7 +264,7 @@ func (e *executor) Launch() error {
 	// Start the queue runner in a goroutine
 	go func() {
 		defer close(e.queueRunnerDone)
-		queueRunner(ctx)
+		queueRunner(e)
 	}()
 	logger.Info("Queue runner started")
 
@@ -198,7 +275,7 @@ func (e *executor) Launch() error {
 	}
 
 	// Run a round of recovery on the local executor
-	recoveryHandles, err := recoverPendingWorkflows(context.Background(), []string{e.executorID}) // XXX maybe use the queue runner context here to allow Shutdown to cancel it?
+	recoveryHandles, err := recoverPendingWorkflows(e, []string{e.executorID})
 	if err != nil {
 		return newInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
 	}
@@ -210,13 +287,8 @@ func (e *executor) Launch() error {
 	return nil
 }
 
-func (e *executor) Shutdown() {
-	if e == nil {
-		fmt.Println("DBOS instance is nil, cannot shutdown")
-		return
-	}
-
-	// XXX is there a way to ensure all workflows goroutine are done before closing?
+func (e *dbosContext) Shutdown() {
+	// Wait for all workflows to finish
 	e.workflowsWg.Wait()
 
 	// Cancel the context to stop the queue runner

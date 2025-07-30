@@ -11,7 +11,7 @@ func TestLogger(t *testing.T) {
 	databaseURL := getDatabaseURL(t)
 
 	t.Run("Default logger", func(t *testing.T) {
-		executor, err := Initialize(Config{
+		executor, err := NewDBOSContext(Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 		}) // Create executor with default logger
@@ -23,10 +23,9 @@ func TestLogger(t *testing.T) {
 			t.Fatalf("Failed to launch with default logger: %v", err)
 		}
 		t.Cleanup(func() {
-			if dbos != nil {
-			dbos.Shutdown()
-			dbos = nil
-		}
+			if executor != nil {
+				executor.Shutdown()
+			}
 		})
 
 		if logger == nil {
@@ -48,7 +47,7 @@ func TestLogger(t *testing.T) {
 		// Add some context to the slog logger
 		slogLogger = slogLogger.With("service", "dbos-test", "environment", "test")
 
-		executor, err := Initialize(Config{
+		executor, err := NewDBOSContext(Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 			Logger:      slogLogger,
@@ -61,10 +60,9 @@ func TestLogger(t *testing.T) {
 			t.Fatalf("Failed to launch with custom logger: %v", err)
 		}
 		t.Cleanup(func() {
-			if dbos != nil {
-			dbos.Shutdown()
-			dbos = nil
-		}
+			if executor != nil {
+				executor.Shutdown()
+			}
 		})
 
 		if logger == nil {

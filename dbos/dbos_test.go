@@ -12,7 +12,7 @@ func TestConfigValidationErrorTypes(t *testing.T) {
 			DatabaseURL: databaseURL,
 		}
 
-		_, err := Initialize(config)
+		_, err := NewDBOSContext(config)
 		if err == nil {
 			t.Fatal("expected error when app name is missing, but got none")
 		}
@@ -37,7 +37,7 @@ func TestConfigValidationErrorTypes(t *testing.T) {
 			AppName: "test-app",
 		}
 
-		_, err := Initialize(config)
+		_, err := NewDBOSContext(config)
 		if err == nil {
 			t.Fatal("expected error when database URL is missing, but got none")
 		}
