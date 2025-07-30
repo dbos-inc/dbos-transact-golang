@@ -99,7 +99,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from ListWorkflows
-		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
 			workflowIDs: []string{directHandle.GetWorkflowID()},
 		})
 		if err != nil {
@@ -216,7 +216,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from ListWorkflows
-		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
 			workflowIDs: []string{directHandle.GetWorkflowID()},
 		})
 		if err != nil {

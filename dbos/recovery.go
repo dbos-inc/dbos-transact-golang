@@ -7,7 +7,7 @@ import (
 func recoverPendingWorkflows(dbosCtx *dbosContext, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
-	pendingWorkflows, err := dbosCtx.systemDB.ListWorkflows(dbosCtx.GetContext(), listWorkflowsDBInput{
+	pendingWorkflows, err := dbosCtx.systemDB.ListWorkflows(dbosCtx.GetContext(), ListWorkflowsDBInput{
 		status:             []WorkflowStatusType{WorkflowStatusPending},
 		executorIDs:        executorIDs,
 		applicationVersion: dbosCtx.applicationVersion,
@@ -32,7 +32,7 @@ func recoverPendingWorkflows(dbosCtx *dbosContext, executorIDs []string) ([]Work
 				continue
 			}
 			if cleared {
-				workflowHandles = append(workflowHandles, &workflowPollingHandle[any]{workflowID: workflow.ID, systemDB: dbosCtx.systemDB})
+				workflowHandles = append(workflowHandles, &workflowPollingHandle[any]{workflowID: workflow.ID, dbosContext: dbosCtx})
 			}
 			continue
 		}
@@ -44,7 +44,7 @@ func recoverPendingWorkflows(dbosCtx *dbosContext, executorIDs []string) ([]Work
 		}
 
 		// Convert workflow parameters to options
-		opts := []workflowOption{
+		opts := []WorkflowOption{
 			WithWorkflowID(workflow.ID),
 		}
 		// XXX we'll figure out the exact timeout/deadline settings later

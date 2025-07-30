@@ -69,11 +69,11 @@ type DBOSContext interface {
 	WithValue(key, val any) DBOSContext
 
 	// Workflow registration
-	RegisterWorkflow(fqn string, fn typedErasedWorkflowWrapperFunc, maxRetries int)
-	RegisterScheduledWorkflow(fqn string, fn typedErasedWorkflowWrapperFunc, cronSchedule string, maxRetries int)
+	RegisterWorkflow(fqn string, fn WrappedWorkflowFunc, maxRetries int)
+	RegisterScheduledWorkflow(fqn string, fn WrappedWorkflowFunc, cronSchedule string, maxRetries int)
 
 	// Workflow operations
-	RunAsStep(fn TypeErasedStepFunc, input any, stepName string, opts ...stepOption) (any, error)
+	RunAsStep(fn StepFunc, input any, stepName string, opts ...StepOption) (any, error)
 	Send(input WorkflowSendInputInternal) error
 	Recv(input WorkflowRecvInput) (any, error)
 	SetEvent(input WorkflowSetEventInputInternal) error
@@ -81,14 +81,19 @@ type DBOSContext interface {
 	Sleep(duration time.Duration) (time.Duration, error)
 
 	// Workflow management
-	RetrieveWorkflow(workflowIDs []string) ([]WorkflowStatus, error)
-	CheckChildWorkflow(parentWorkflowID string, stepCounter int) (*string, error)
-	InsertWorkflowStatus(status WorkflowStatus, maxRetries int) (*insertWorkflowResult, error)
-	RecordChildWorkflow(input recordChildWorkflowDBInput) error
+	InsertWorkflowStatus(status WorkflowStatus, maxRetries int) (*InsertWorkflowResult, error)
 	UpdateWorkflowOutcome(workflowID string, status WorkflowStatusType, err error, output any) error
+	RetrieveWorkflow(workflowIDs []string) ([]WorkflowStatus, error)
+	ListWorkflows(input ListWorkflowsDBInput) ([]WorkflowStatus, error)
+	CheckChildWorkflow(parentWorkflowID string, stepCounter int) (*string, error)
+	RecordChildWorkflow(input RecordChildWorkflowDBInput) error
+	CheckOperationExecution(workflowID string, stepID int, stepName string) (*RecordedResult, error)
+	RecordOperationResult(input RecordOperationResultDBInput) error
+	RecordChildGetResult(input RecordChildGetResultDBInput) error
 
 	// Context operations
 	GetWorkflowID() (string, error)
+	AwaitWorkflowResult(workflowID string) (any, error)
 
 	// Accessors
 	GetWorkflowScheduler() *cron.Cron
@@ -191,8 +196,10 @@ func (e *dbosContext) GetWorkflowWg() *sync.WaitGroup {
 
 func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	initExecutor := &dbosContext{
-		workflowsWg: &sync.WaitGroup{},
-		ctx:         context.Background(),
+		workflowsWg:      &sync.WaitGroup{},
+		ctx:              context.Background(),
+		workflowRegistry: make(map[string]workflowRegistryEntry),
+		workflowRegMutex: &sync.RWMutex{},
 	}
 
 	// Load & process the configuration
@@ -232,9 +239,6 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	initExecutor.systemDB = systemDB
 	logger.Info("System database initialized")
 
-	// Initialize the workflow registry
-	initExecutor.workflowRegistry = make(map[string]workflowRegistryEntry)
-
 	return initExecutor, nil
 }
 
@@ -255,8 +259,8 @@ func (e *dbosContext) Launch() error {
 	}
 
 	// Create context with cancel function for queue runner
-	// XXX this can now be a cancel function on the executor itself?
-	ctx, cancel := context.WithCancel(context.Background())
+	// FIXME: cancellation now has to go through the DBOSContext
+	ctx, cancel := context.WithCancel(e.GetContext())
 	e.queueRunnerCtx = ctx
 	e.queueRunnerCancelFunc = cancel
 	e.queueRunnerDone = make(chan struct{})

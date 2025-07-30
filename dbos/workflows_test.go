@@ -116,7 +116,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 
 	type testCase struct {
 		name           string
-		workflowFunc   func(context.Context, string, ...workflowOption) (any, error)
+		workflowFunc   func(context.Context, string, ...WorkflowOption) (any, error)
 		input          string
 		expectedResult any
 		expectError    bool
@@ -126,7 +126,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 	tests := []testCase{
 		{
 			name: "SimpleWorkflow",
-			workflowFunc: func(ctx context.Context, input string, opts ...workflowOption) (any, error) {
+			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				handle, err := simpleWf(ctx, input, opts...)
 				if err != nil {
 					return nil, err
@@ -148,7 +148,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "SimpleWorkflowError",
-			workflowFunc: func(ctx context.Context, input string, opts ...workflowOption) (any, error) {
+			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				handle, err := simpleWfError(ctx, input, opts...)
 				if err != nil {
 					return nil, err
@@ -161,7 +161,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "SimpleWorkflowWithStep",
-			workflowFunc: func(ctx context.Context, input string, opts ...workflowOption) (any, error) {
+			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				handle, err := simpleWfWithStep(ctx, input, opts...)
 				if err != nil {
 					return nil, err
@@ -174,7 +174,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "SimpleWorkflowStruct",
-			workflowFunc: func(ctx context.Context, input string, opts ...workflowOption) (any, error) {
+			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				handle, err := simpleWfStruct(ctx, input, opts...)
 				if err != nil {
 					return nil, err
@@ -187,7 +187,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "ValueReceiverWorkflow",
-			workflowFunc: func(ctx context.Context, input string, opts ...workflowOption) (any, error) {
+			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				handle, err := simpleWfValue(ctx, input, opts...)
 				if err != nil {
 					return nil, err
@@ -200,7 +200,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "interfaceMethodWorkflow",
-			workflowFunc: func(ctx context.Context, input string, opts ...workflowOption) (any, error) {
+			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				handle, err := simpleWfIface(ctx, input, opts...)
 				if err != nil {
 					return nil, err
@@ -213,7 +213,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "GenericWorkflow",
-			workflowFunc: func(ctx context.Context, input string, opts ...workflowOption) (any, error) {
+			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				// For generic workflow, we need to convert string to int for testing
 				handle, err := wfInt(ctx, "42", opts...) // FIXME for now this returns a string because sys db accepts this
 				if err != nil {
@@ -227,7 +227,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "ClosureWithCapturedState",
-			workflowFunc: func(ctx context.Context, input string, opts ...workflowOption) (any, error) {
+			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				handle, err := wfClose(ctx, input, opts...)
 				if err != nil {
 					return nil, err
@@ -240,7 +240,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "AnonymousClosure",
-			workflowFunc: func(ctx context.Context, input string, opts ...workflowOption) (any, error) {
+			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				handle, err := anonymousWf(ctx, input, opts...)
 				if err != nil {
 					return nil, err
@@ -253,7 +253,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "SimpleWorkflowWithStepError",
-			workflowFunc: func(ctx context.Context, input string, opts ...workflowOption) (any, error) {
+			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
 				handle, err := simpleWfWithStepError(ctx, input, opts...)
 				if err != nil {
 					return nil, err
@@ -666,7 +666,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		}
 
 		// Using ListWorkflows, retrieve the status of the workflow
-		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
 			workflowIDs: []string{handle1.GetWorkflowID()},
 		})
 		if err != nil {

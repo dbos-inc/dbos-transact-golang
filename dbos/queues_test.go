@@ -257,8 +257,8 @@ func TestQueueRecovery(t *testing.T) {
 	executor := setupDBOS(t)
 
 	// Create workflows with executor
-	var recoveryStepWorkflow func(context.Context, int, ...workflowOption) (WorkflowHandle[int], error)
-	var recoveryWorkflow func(context.Context, string, ...workflowOption) (WorkflowHandle[[]int], error)
+	var recoveryStepWorkflow func(context.Context, int, ...WorkflowOption) (WorkflowHandle[int], error)
+	var recoveryWorkflow func(context.Context, string, ...WorkflowOption) (WorkflowHandle[[]int], error)
 
 	recoveryStepWorkflow = RegisterWorkflow(executor, func(ctx context.Context, i int) (int, error) {
 		recoveryStepCounter++
@@ -505,7 +505,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	if startEvents[1].IsSet || startEvents[2].IsSet || startEvents[3].IsSet {
 		t.Fatal("expected only blocking workflow 1 to start, but others have started")
 	}
-	workflows, err := dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+	workflows, err := dbos.systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
 		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
 		queueName: workerConcurrencyQueue.name,
 	})
@@ -529,7 +529,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	if startEvents[2].IsSet || startEvents[3].IsSet {
 		t.Fatal("expected only blocking workflow 2 to start, but others have started")
 	}
-	workflows, err = dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+	workflows, err = dbos.systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
 		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
 		queueName: workerConcurrencyQueue.name,
 	})
@@ -561,7 +561,7 @@ func TestWorkerConcurrency(t *testing.T) {
 		t.Fatal("expected only blocking workflow 3 to start, but workflow 4 has started")
 	}
 	// Check that only one workflow is pending
-	workflows, err = dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+	workflows, err = dbos.systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
 		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
 		queueName: workerConcurrencyQueue.name,
 	})
@@ -589,7 +589,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	restartQueueRunner()
 	startEvents[3].Wait()
 	// Check no workflow is enqueued
-	workflows, err = dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+	workflows, err = dbos.systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
 		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
 		queueName: workerConcurrencyQueue.name,
 	})
