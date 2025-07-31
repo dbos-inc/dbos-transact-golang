@@ -7,7 +7,7 @@ import (
 func recoverPendingWorkflows(dbosCtx *dbosContext, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
-	pendingWorkflows, err := dbosCtx.systemDB.ListWorkflows(dbosCtx.GetContext(), ListWorkflowsDBInput{
+	pendingWorkflows, err := dbosCtx.systemDB.ListWorkflows(dbosCtx.ctx, listWorkflowsDBInput{
 		status:             []WorkflowStatusType{WorkflowStatusPending},
 		executorIDs:        executorIDs,
 		applicationVersion: dbosCtx.applicationVersion,
@@ -26,7 +26,7 @@ func recoverPendingWorkflows(dbosCtx *dbosContext, executorIDs []string) ([]Work
 
 		// fmt.Println("Recovering workflow:", workflow.ID, "Name:", workflow.Name, "Input:", workflow.Input, "QueueName:", workflow.QueueName)
 		if workflow.QueueName != "" {
-			cleared, err := dbosCtx.systemDB.ClearQueueAssignment(dbosCtx.GetContext(), workflow.ID)
+			cleared, err := dbosCtx.systemDB.ClearQueueAssignment(dbosCtx.ctx, workflow.ID)
 			if err != nil {
 				getLogger().Error("Error clearing queue assignment for workflow", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
 				continue
@@ -56,7 +56,7 @@ func recoverPendingWorkflows(dbosCtx *dbosContext, executorIDs []string) ([]Work
 		}
 
 		// Create a workflow context from the executor context
-		workflowCtx := dbosCtx.WithValue(dbosCtx.GetContext(), nil)
+		workflowCtx := dbosCtx.withValue(dbosCtx.ctx, nil)
 		handle, err := registeredWorkflow.wrappedFunction(workflowCtx, workflow.Input, opts...)
 		if err != nil {
 			return nil, err

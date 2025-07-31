@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/gob"
 	"math"
@@ -119,7 +118,7 @@ func queueRunner(executor *dbosContext) {
 		for queueName, queue := range workflowQueueRegistry {
 			getLogger().Debug("Processing queue", "queue_name", queueName)
 			// Call DequeueWorkflows for each queue
-			dequeuedWorkflows, err := executor.systemDB.DequeueWorkflows(executor.GetContext(), queue, executor.executorID, executor.applicationVersion)
+			dequeuedWorkflows, err := executor.systemDB.DequeueWorkflows(executor.ctx, queue, executor.executorID, executor.applicationVersion)
 			if err != nil {
 				if pgErr, ok := err.(*pgconn.PgError); ok {
 					switch pgErr.Code {
@@ -162,9 +161,7 @@ func queueRunner(executor *dbosContext) {
 					}
 				}
 
-				// Create a workflow context from the executor context
-				workflowCtx := executor.WithValue(context.Background(), nil)
-				_, err := registeredWorkflow.wrappedFunction(workflowCtx, input, WithWorkflowID(workflow.id))
+				_, err := registeredWorkflow.wrappedFunction(executor, input, WithWorkflowID(workflow.id))
 				if err != nil {
 					getLogger().Error("Error running queued workflow", "error", err)
 				}
@@ -186,7 +183,7 @@ func queueRunner(executor *dbosContext) {
 
 		// Sleep with jittered interval, but allow early exit on context cancellation
 		select {
-		case <-executor.GetContext().Done():
+		case <-executor.ctx.Done():
 			getLogger().Info("Queue runner stopping due to context cancellation")
 			return
 		case <-time.After(sleepDuration):

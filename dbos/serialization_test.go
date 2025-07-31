@@ -99,7 +99,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from ListWorkflows
-		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
+		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
 			workflowIDs: []string{directHandle.GetWorkflowID()},
 		})
 		if err != nil {
@@ -216,7 +216,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from ListWorkflows
-		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
+		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
 			workflowIDs: []string{directHandle.GetWorkflowID()},
 		})
 		if err != nil {
@@ -313,7 +313,7 @@ func setEventUserDefinedTypeWorkflow(ctx context.Context, input string) (string,
 		},
 	}
 
-	err := SetEvent(ctx, dbos, WorkflowSetEventInput[UserDefinedEventData]{Key: input, Message: eventData})
+	err := SetEvent(ctx, dbos, WorkflowSetEventInputGeneric[UserDefinedEventData]{Key: input, Message: eventData})
 	if err != nil {
 		return "", err
 	}

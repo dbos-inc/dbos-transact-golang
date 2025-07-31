@@ -55,7 +55,7 @@ func TestWorkflowQueues(t *testing.T) {
 	queueWf := RegisterWorkflow(executor, queueWorkflow)
 
 	// Create workflow with child that can call the main workflow
-	queueWfWithChild := RegisterWorkflow(executor, func(ctx context.Context, input string) (string, error) {
+	queueWfWithChild := RegisterWorkflow[string, string](executor, func(ctx DBOSContext, input string) (string, error) {
 		// Start a child workflow
 		childHandle, err := queueWf(ctx, input+"-child")
 		if err != nil {

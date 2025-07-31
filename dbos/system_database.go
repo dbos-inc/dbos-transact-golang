@@ -29,25 +29,25 @@ type SystemDatabase interface {
 	ResetSystemDB(ctx context.Context) error
 
 	// Workflows
-	InsertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
-	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]WorkflowStatus, error)
+	InsertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error)
+	ListWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error)
 	UpdateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
 
 	// Child workflows
-	RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error
+	RecordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
 	CheckChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
-	RecordChildGetResult(ctx context.Context, input RecordChildGetResultDBInput) error
+	RecordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
 
 	// Steps
-	RecordOperationResult(ctx context.Context, input RecordOperationResultDBInput) error
-	CheckOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*RecordedResult, error)
-	GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
+	RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
+	CheckOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
+	GetWorkflowSteps(ctx context.Context, workflowID string) ([]stepInfo, error)
 
 	// Communication (special steps)
 	Send(ctx context.Context, input WorkflowSendInputInternal) error
 	Recv(ctx context.Context, input WorkflowRecvInput) (any, error)
-	SetEvent(ctx context.Context, input WorkflowSetEventInputInternal) error
+	SetEvent(ctx context.Context, input WorkflowSetEventInput) error
 	GetEvent(ctx context.Context, input WorkflowGetEventInput) (any, error)
 
 	// Timers (special steps)
@@ -233,25 +233,25 @@ func (s *systemDatabase) Shutdown() {
 /******* WORKFLOWS ********/
 /*******************************/
 
-type InsertWorkflowResult struct {
+type insertWorkflowResult struct {
 	attempts                int
 	status                  WorkflowStatusType
 	name                    string
 	queueName               *string
 	workflowDeadlineEpochMs *int64
-	tx                      pgx.Tx
 }
 
 type insertWorkflowStatusDBInput struct {
 	status     WorkflowStatus
 	maxRetries int
+	tx         pgx.Tx
 }
 
-func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*InsertWorkflowResult, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error) {
+	if input.tx == nil {
+		return nil, errors.New("transaction is required for InsertWorkflowStatus")
 	}
+	tx := input.tx
 
 	// Set default values
 	attempts := 1
@@ -313,9 +313,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
             END
         RETURNING recovery_attempts, status, name, queue_name, workflow_deadline_epoch_ms`
 
-	result := InsertWorkflowResult{
-		tx: tx,
-	}
+	result := insertWorkflowResult{}
 	err = tx.QueryRow(ctx, query,
 		input.status.ID,
 		input.status.Status,
@@ -386,7 +384,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
 }
 
 // ListWorkflowsInput represents the input parameters for listing workflows
-type ListWorkflowsDBInput struct {
+type listWorkflowsDBInput struct {
 	workflowName       string
 	queueName          string
 	workflowIDPrefix   string
@@ -404,7 +402,7 @@ type ListWorkflowsDBInput struct {
 }
 
 // ListWorkflows retrieves a list of workflows based on the provided filters
-func (s *systemDatabase) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]WorkflowStatus, error) {
+func (s *systemDatabase) ListWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error) {
 	qb := newQueryBuilder()
 
 	// Build the base query
@@ -604,7 +602,7 @@ func (s *systemDatabase) CancelWorkflow(ctx context.Context, workflowID string) 
 	defer tx.Rollback(ctx) // Rollback if not committed
 
 	// Check if workflow exists
-	listInput := ListWorkflowsDBInput{
+	listInput := listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
 		tx:          tx,
 	}
@@ -678,7 +676,7 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 	}
 }
 
-type RecordOperationResultDBInput struct {
+type recordOperationResultDBInput struct {
 	workflowID string
 	stepID     int
 	stepName   string
@@ -687,7 +685,7 @@ type RecordOperationResultDBInput struct {
 	tx         pgx.Tx
 }
 
-func (s *systemDatabase) RecordOperationResult(ctx context.Context, input RecordOperationResultDBInput) error {
+func (s *systemDatabase) RecordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
 	query := `INSERT INTO dbos.operation_outputs
             (workflow_uuid, function_id, output, error, function_name)
             VALUES ($1, $2, $3, $4, $5)
@@ -748,7 +746,7 @@ func (s *systemDatabase) RecordOperationResult(ctx context.Context, input Record
 /******* CHILD WORKFLOWS ********/
 /*******************************/
 
-type RecordChildWorkflowDBInput struct {
+type recordChildWorkflowDBInput struct {
 	parentWorkflowID string
 	childWorkflowID  string
 	stepID           int
@@ -756,7 +754,7 @@ type RecordChildWorkflowDBInput struct {
 	tx               pgx.Tx
 }
 
-func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error {
+func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error {
 	query := `INSERT INTO dbos.operation_outputs
             (workflow_uuid, function_id, function_name, child_workflow_id)
             VALUES ($1, $2, $3, $4)`
@@ -814,7 +812,7 @@ func (s *systemDatabase) CheckChildWorkflow(ctx context.Context, workflowID stri
 	return childWorkflowID, nil
 }
 
-type RecordChildGetResultDBInput struct {
+type recordChildGetResultDBInput struct {
 	parentWorkflowID string
 	childWorkflowID  string
 	stepID           int
@@ -822,7 +820,7 @@ type RecordChildGetResultDBInput struct {
 	err              error
 }
 
-func (s *systemDatabase) RecordChildGetResult(ctx context.Context, input RecordChildGetResultDBInput) error {
+func (s *systemDatabase) RecordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error {
 	query := `INSERT INTO dbos.operation_outputs
             (workflow_uuid, function_id, function_name, output, error, child_workflow_id)
             VALUES ($1, $2, $3, $4, $5, $6)
@@ -852,7 +850,7 @@ func (s *systemDatabase) RecordChildGetResult(ctx context.Context, input RecordC
 /******* STEPS ********/
 /*******************************/
 
-type RecordedResult struct {
+type recordedResult struct {
 	output any
 	err    error
 }
@@ -864,7 +862,7 @@ type checkOperationExecutionDBInput struct {
 	tx         pgx.Tx
 }
 
-func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*RecordedResult, error) {
+func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error) {
 	var tx pgx.Tx
 	var err error
 
@@ -932,14 +930,14 @@ func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input chec
 	if errorStr != nil && *errorStr != "" {
 		recordedError = errors.New(*errorStr)
 	}
-	result := &RecordedResult{
+	result := &recordedResult{
 		output: output,
 		err:    recordedError,
 	}
 	return result, nil
 }
 
-type StepInfo struct {
+type stepInfo struct {
 	FunctionID      int
 	FunctionName    string
 	Output          any
@@ -947,7 +945,7 @@ type StepInfo struct {
 	ChildWorkflowID string
 }
 
-func (s *systemDatabase) GetWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error) {
+func (s *systemDatabase) GetWorkflowSteps(ctx context.Context, workflowID string) ([]stepInfo, error) {
 	query := `SELECT function_id, function_name, output, error, child_workflow_id
 			  FROM dbos.operation_outputs
 			  WHERE workflow_uuid = $1`
@@ -958,9 +956,9 @@ func (s *systemDatabase) GetWorkflowSteps(ctx context.Context, workflowID string
 	}
 	defer rows.Close()
 
-	var steps []StepInfo
+	var steps []stepInfo
 	for rows.Next() {
-		var step StepInfo
+		var step stepInfo
 		var outputString *string
 		var errorString *string
 		var childWorkflowID *string
@@ -1052,7 +1050,7 @@ func (s *systemDatabase) Sleep(ctx context.Context, duration time.Duration) (tim
 		endTime = time.Now().Add(duration)
 
 		// Record the operation result with the calculated end time
-		recordInput := RecordOperationResultDBInput{
+		recordInput := recordOperationResultDBInput{
 			workflowID: wfState.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
@@ -1191,7 +1189,7 @@ func (s *systemDatabase) Send(ctx context.Context, input WorkflowSendInputIntern
 
 	// Record the operation result if this is called within a workflow
 	if isInWorkflow {
-		recordInput := RecordOperationResultDBInput{
+		recordInput := recordOperationResultDBInput{
 			workflowID: wfState.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
@@ -1341,7 +1339,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	}
 
 	// Record the operation result
-	recordInput := RecordOperationResultDBInput{
+	recordInput := recordOperationResultDBInput{
 		workflowID: destinationID,
 		stepID:     stepID,
 		stepName:   functionName,
@@ -1360,12 +1358,12 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	return message, nil
 }
 
-type WorkflowSetEventInputInternal struct {
+type WorkflowSetEventInput struct {
 	Key     string
 	Message any
 }
 
-func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInputInternal) error {
+func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInput) error {
 	functionName := "DBOS.setEvent"
 
 	// Get workflow state from context
@@ -1420,7 +1418,7 @@ func (s *systemDatabase) SetEvent(ctx context.Context, input WorkflowSetEventInp
 	}
 
 	// Record the operation result
-	recordInput := RecordOperationResultDBInput{
+	recordInput := recordOperationResultDBInput{
 		workflowID: wfState.workflowID,
 		stepID:     stepID,
 		stepName:   functionName,
@@ -1543,7 +1541,7 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 
 	// Record the operation result if this is called within a workflow
 	if isInWorkflow {
-		recordInput := RecordOperationResultDBInput{
+		recordInput := recordOperationResultDBInput{
 			workflowID: wfState.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
