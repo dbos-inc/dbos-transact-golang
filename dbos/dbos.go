@@ -67,10 +67,6 @@ type DBOSContext interface {
 	Launch() error
 	Shutdown()
 
-	// Workflow registration
-	RegisterWorkflow(fqn string, fn WrappedWorkflowFunc, maxRetries int)
-	RegisterScheduledWorkflow(fqn string, fn WrappedWorkflowFunc, cronSchedule string, maxRetries int)
-
 	// Workflow operations
 	RunAsStep(_ DBOSContext, fn StepFunc, input ...any) (any, error)
 	RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
@@ -92,6 +88,8 @@ type DBOSContext interface {
 
 type dbosContext struct {
 	ctx context.Context
+
+	launched bool
 
 	systemDB    SystemDatabase
 	adminServer *adminServer
@@ -224,6 +222,10 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 }
 
 func (c *dbosContext) Launch() error {
+	if c.launched {
+		return newInitializationError("DBOS is already launched")
+	}
+
 	// Start the system database
 	c.systemDB.Launch(context.Background())
 
@@ -269,6 +271,7 @@ func (c *dbosContext) Launch() error {
 	}
 
 	logger.Info("DBOS initialized", "app_version", c.applicationVersion, "executor_id", c.executorID)
+	c.launched = true
 	return nil
 }
 

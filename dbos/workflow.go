@@ -208,27 +208,41 @@ type workflowRegistryEntry struct {
 }
 
 // Register adds a workflow function to the registry (thread-safe, only once per name)
-func (c *dbosContext) RegisterWorkflow(fqn string, fn WrappedWorkflowFunc, maxRetries int) {
+func registerWorkflow(dbosCtx DBOSContext, workflowName string, fn WrappedWorkflowFunc, maxRetries int) {
+	// Skip if we don't have a concrete dbosContext
+	c, ok := dbosCtx.(*dbosContext)
+	if !ok {
+		return
+	}
+
 	c.workflowRegMutex.Lock()
 	defer c.workflowRegMutex.Unlock()
 
-	if _, exists := c.workflowRegistry[fqn]; exists {
-		getLogger().Error("workflow function already registered", "fqn", fqn)
-		panic(newConflictingRegistrationError(fqn))
+	if _, exists := c.workflowRegistry[workflowName]; exists {
+		getLogger().Error("workflow function already registered", "fqn", workflowName)
+		panic(newConflictingRegistrationError(workflowName))
 	}
 
-	c.workflowRegistry[fqn] = workflowRegistryEntry{
+	fmt.Println("registering workflow", "fqn", workflowName, "max_retries", maxRetries)
+
+	c.workflowRegistry[workflowName] = workflowRegistryEntry{
 		wrappedFunction: fn,
 		maxRetries:      maxRetries,
 	}
 }
 
-func (c *dbosContext) RegisterScheduledWorkflow(fqn string, fn WrappedWorkflowFunc, cronSchedule string, maxRetries int) {
+func registerScheduledWorkflow(dbosCtx DBOSContext, workflowName string, fn WrappedWorkflowFunc, cronSchedule string, maxRetries int) {
+	// Skip if we don't have a concrete dbosContext
+	c, ok := dbosCtx.(*dbosContext)
+	if !ok {
+		return
+	}
+
 	c.getWorkflowScheduler().Start()
 	var entryID cron.EntryID
 	entryID, err := c.getWorkflowScheduler().AddFunc(cronSchedule, func() {
 		// Execute the workflow on the cron schedule once DBOS is launched
-		if c == nil {
+		if !c.launched {
 			return
 		}
 		// Get the scheduled time from the cron entry
@@ -238,19 +252,19 @@ func (c *dbosContext) RegisterScheduledWorkflow(fqn string, fn WrappedWorkflowFu
 			// Use Next if Prev is not set, which will only happen for the first run
 			scheduledTime = entry.Next
 		}
-		wfID := fmt.Sprintf("sched-%s-%s", fqn, scheduledTime) // XXX we can rethink the format
+		wfID := fmt.Sprintf("sched-%s-%s", workflowName, scheduledTime) // XXX we can rethink the format
 		fn(c, scheduledTime, WithWorkflowID(wfID), WithQueue(_DBOS_INTERNAL_QUEUE_NAME))
 	})
 	if err != nil {
 		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
 	}
-	getLogger().Info("Registered scheduled workflow", "fqn", fqn, "cron_schedule", cronSchedule)
+	getLogger().Info("Registered scheduled workflow", "fqn", workflowName, "cron_schedule", cronSchedule)
 }
 
 type workflowRegistrationParams struct {
 	cronSchedule string
 	maxRetries   int
-	// Likely we will allow a name here
+	workflowName string
 }
 
 type workflowRegistrationOption func(*workflowRegistrationParams)
@@ -271,19 +285,27 @@ func WithSchedule(schedule string) workflowRegistrationOption {
 	}
 }
 
+func WithWorkflowName(name string) workflowRegistrationOption {
+	return func(p *workflowRegistrationParams) {
+		p.workflowName = name
+	}
+}
+
 // RegisterWorkflow registers the provided function as a durable workflow with the provided DBOSContext workflow registry
 // If the workflow is a scheduled workflow (determined by the presence of a cron schedule), it will also register a cron job to execute it
 // RegisterWorkflow is generically typed, allowing us to register the workflow input and output types for gob encoding
 // The registered workflow is wrapped in a typed-erased wrapper which performs runtime type checks and conversions
 // To execute the workflow, use DBOSContext.RunAsWorkflow
-func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[P, R], opts ...workflowRegistrationOption) {
+func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, workflowName string, fn GenericWorkflowFunc[P, R], opts ...workflowRegistrationOption) {
 	if dbosCtx == nil {
 		panic("dbosCtx cannot be nil")
 	}
 
 	registrationParams := workflowRegistrationParams{
-		maxRetries: _DEFAULT_MAX_RECOVERY_ATTEMPTS,
+		maxRetries:   _DEFAULT_MAX_RECOVERY_ATTEMPTS,
+		workflowName: runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(),
 	}
+
 	for _, opt := range opts {
 		opt(&registrationParams)
 	}
@@ -291,7 +313,6 @@ func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[
 	if fn == nil {
 		panic("workflow function cannot be nil")
 	}
-	fqn := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 
 	// Registry the input/output types for gob encoding
 	var p P
@@ -300,10 +321,10 @@ func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[
 	gob.Register(r)
 
 	// Register a type-erased version of the durable workflow for recovery
-	typeErasedWrapper := func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
+	typeErasedWrapper := WrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 		typedInput, ok := input.(P)
 		if !ok {
-			return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
+			return nil, newWorkflowUnexpectedInputType(workflowName, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
 		}
 
 		opts = append(opts, WithWorkflowMaxRetries(registrationParams.maxRetries))
@@ -312,15 +333,15 @@ func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[
 			return nil, err
 		}
 		return &workflowPollingHandle[any]{workflowID: handle.GetWorkflowID(), dbosContext: ctx}, nil
-	}
-	dbosCtx.RegisterWorkflow(fqn, typeErasedWrapper, registrationParams.maxRetries)
+	})
+	registerWorkflow(dbosCtx, registrationParams.workflowName, typeErasedWrapper, registrationParams.maxRetries)
 
 	// If this is a scheduled workflow, register a cron job
 	if registrationParams.cronSchedule != "" {
 		if reflect.TypeOf(p) != reflect.TypeOf(time.Time{}) {
 			panic(fmt.Sprintf("scheduled workflow function must accept a time.Time as input, got %T", p))
 		}
-		dbosCtx.RegisterScheduledWorkflow(fqn, typeErasedWrapper, registrationParams.cronSchedule, registrationParams.maxRetries)
+		registerScheduledWorkflow(dbosCtx, registrationParams.workflowName, typeErasedWrapper, registrationParams.cronSchedule, registrationParams.maxRetries)
 	}
 }
 
@@ -383,18 +404,7 @@ func WithWorkflowMaxRetries(maxRetries int) WorkflowOption {
 	}
 }
 
-func WithWorkflowName(name string) WorkflowOption {
-	return func(p *workflowParams) {
-		if len(p.workflowName) == 0 {
-			p.workflowName = name
-		}
-	}
-}
-
 func RunAsWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
-	// Set the workflow name in the options -- will not be applied if the user provided a name
-	opts = append(opts, WithWorkflowName(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()))
-
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 		return fn(ctx, input.(P))
 	})
