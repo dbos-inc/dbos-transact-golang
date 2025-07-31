@@ -296,7 +296,7 @@ func WithWorkflowName(name string) workflowRegistrationOption {
 // RegisterWorkflow is generically typed, allowing us to register the workflow input and output types for gob encoding
 // The registered workflow is wrapped in a typed-erased wrapper which performs runtime type checks and conversions
 // To execute the workflow, use DBOSContext.RunAsWorkflow
-func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, workflowName string, fn GenericWorkflowFunc[P, R], opts ...workflowRegistrationOption) {
+func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[P, R], opts ...workflowRegistrationOption) {
 	if dbosCtx == nil {
 		panic("dbosCtx cannot be nil")
 	}
