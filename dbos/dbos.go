@@ -72,7 +72,7 @@ type DBOSContext interface {
 	RegisterScheduledWorkflow(fqn string, fn WrappedWorkflowFunc, cronSchedule string, maxRetries int)
 
 	// Workflow operations
-	RunAsStep(_ DBOSContext, fn StepFunc, input any, stepName string, opts ...StepOption) (any, error)
+	RunAsStep(_ DBOSContext, fn StepFunc, input ...any) (any, error)
 	RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
 	Send(_ DBOSContext, input WorkflowSendInputInternal) error
 	Recv(_ DBOSContext, input WorkflowRecvInput) (any, error)
@@ -91,7 +91,8 @@ type DBOSContext interface {
 }
 
 type dbosContext struct {
-	ctx         context.Context // Embedded context for standard behavior
+	ctx context.Context
+
 	systemDB    SystemDatabase
 	adminServer *adminServer
 	config      *Config
@@ -137,15 +138,22 @@ func (c *dbosContext) Value(key any) any {
 // Create a new context
 // This is intended for workflow contexts and step contexts
 // Hence we only set the relevant fields
-func (c *dbosContext) withValue(key, val any) DBOSContext {
-	return &dbosContext{
-		ctx:                context.WithValue(c.ctx, key, val),
-		systemDB:           c.systemDB,
-		applicationVersion: c.applicationVersion,
-		executorID:         c.executorID,
-		applicationID:      c.applicationID,
-		workflowsWg:        c.workflowsWg,
+func WithValue(ctx DBOSContext, key, val any) DBOSContext {
+	if ctx == nil {
+		return nil
 	}
+	// Will do nothing if the concrete type is not dbosContext
+	if dbosCtx, ok := ctx.(*dbosContext); ok {
+		return &dbosContext{
+			ctx:                context.WithValue(dbosCtx.ctx, key, val),
+			systemDB:           dbosCtx.systemDB,
+			workflowsWg:        dbosCtx.workflowsWg,
+			applicationVersion: dbosCtx.applicationVersion,
+			executorID:         dbosCtx.executorID,
+			applicationID:      dbosCtx.applicationID,
+		}
+	}
+	return nil
 }
 
 func (c *dbosContext) getWorkflowScheduler() *cron.Cron {

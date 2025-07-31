@@ -56,14 +56,14 @@ type WorkflowStatus struct {
 // workflowState holds the runtime state for a workflow execution
 type workflowState struct {
 	workflowID   string
-	stepCounter  int
+	stepID       int
 	isWithinStep bool
 }
 
 // NextStepID returns the next step ID and increments the counter
 func (ws *workflowState) NextStepID() int {
-	ws.stepCounter++
-	return ws.stepCounter
+	ws.stepID++
+	return ws.stepID
 }
 
 /********************************/
@@ -80,24 +80,6 @@ type WorkflowHandle[R any] interface {
 	GetResult() (R, error)
 	GetStatus() (WorkflowStatus, error)
 	GetWorkflowID() string
-}
-
-type workflowHandleInternal struct {
-	workflowID     string
-	workflowStatus WorkflowStatus
-}
-
-// unimplemented
-func (h *workflowHandleInternal) GetResult() (any, error) {
-	return nil, nil
-}
-
-func (h *workflowHandleInternal) GetStatus() (WorkflowStatus, error) {
-	return h.workflowStatus, nil
-}
-
-func (h *workflowHandleInternal) GetWorkflowID() string {
-	return h.workflowID
 }
 
 // workflowHandle is a concrete implementation of WorkflowHandle
@@ -346,14 +328,15 @@ func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[
 /******* WORKFLOW FUNCTIONS *******/
 /**********************************/
 
-type contextKey string
+type DBOSContextKey string
 
-const workflowStateKey contextKey = "workflowState"
+const workflowStateKey DBOSContextKey = "workflowState"
 
 type GenericWorkflowFunc[P any, R any] func(dbosCtx DBOSContext, input P) (R, error)
-type WorkflowFunc func(ctx DBOSContext, input any) (WorkflowHandle[any], error)
+type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
 
 type workflowParams struct {
+	workflowName       string
 	workflowID         string
 	timeout            time.Duration
 	deadline           time.Time
@@ -400,23 +383,29 @@ func WithWorkflowMaxRetries(maxRetries int) WorkflowOption {
 	}
 }
 
+func WithWorkflowName(name string) WorkflowOption {
+	return func(p *workflowParams) {
+		if len(p.workflowName) == 0 {
+			p.workflowName = name
+		}
+	}
+}
+
 func RunAsWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
-	// Do the durability things
-	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (WorkflowHandle[any], error) {
-		// Dummy typed erased workflow -- we just need the name inside dbosCtx.RunAsWorkflow but want a matching signature
-		return nil, nil
+	// Set the workflow name in the options -- will not be applied if the user provided a name
+	opts = append(opts, WithWorkflowName(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()))
+
+	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
+		return fn(ctx, input.(P))
 	})
-	// Print fn name
-	fmt.Println("Running workflow function:", runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name())
-	// Print t wrapped function name
-	fmt.Println("Running typed-erased workflow function:", runtime.FuncForPC(reflect.ValueOf(typedErasedWorkflow).Pointer()).Name())
-	internalHandle, err := dbosCtx.(*dbosContext).RunAsWorkflow(dbosCtx, typedErasedWorkflow, input, opts...)
+
+	handle, err := dbosCtx.(*dbosContext).RunAsWorkflow(dbosCtx, typedErasedWorkflow, input, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	// If we got a polling handle, return it directly
-	if pollingHandle, ok := internalHandle.(*workflowPollingHandle[any]); ok {
+	// If we got a polling handle, return its typed version
+	if pollingHandle, ok := handle.(*workflowPollingHandle[any]); ok {
 		// We need to convert the polling handle to a typed handle
 		typedPollingHandle := &workflowPollingHandle[R]{
 			workflowID:  pollingHandle.workflowID,
@@ -425,50 +414,41 @@ func RunAsWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[P, 
 		return typedPollingHandle, nil
 	}
 
-	// Channel to receive the outcome from the goroutine
-	// The buffer size of 1 allows the goroutine to send the outcome without blocking
-	// In addition it allows the channel to be garbage collected
-	outcomeChan := make(chan workflowOutcome[R], 1)
+	// Create a typed channel for the user to get a typed handle
+	if handle, ok := handle.(*workflowHandle[any]); ok {
+		typedOutcomeChan := make(chan workflowOutcome[R], 1)
 
-	// Create the handle
-	handle := &workflowHandle[R]{
-		workflowID:  internalHandle.GetWorkflowID(),
-		outcomeChan: outcomeChan,
-		dbosContext: dbosCtx,
+		go func() {
+			defer close(typedOutcomeChan)
+			outcome := <-handle.outcomeChan
+
+			resultErr := outcome.err
+			var typedResult R
+			if typedRes, ok := outcome.result.(R); ok {
+				typedResult = typedRes
+			} else { // This should never happen
+				typedResult = *new(R)
+				typeErr := fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), outcome.result)
+				resultErr = errors.Join(resultErr, typeErr)
+			}
+
+			typedOutcomeChan <- workflowOutcome[R]{
+				result: typedResult,
+				err:    resultErr,
+			}
+		}()
+
+		typedHandle := &workflowHandle[R]{
+			workflowID:  handle.workflowID,
+			outcomeChan: typedOutcomeChan,
+			dbosContext: handle.dbosContext,
+		}
+
+		return typedHandle, nil
 	}
 
-	// Create workflow state to track step execution
-	wfState := &workflowState{
-		workflowID:  internalHandle.GetWorkflowID(),
-		stepCounter: -1,
-	}
-
-	// Run the function in a goroutine
-	augmentUserContext := dbosCtx.(*dbosContext).withValue(workflowStateKey, wfState)
-	dbosCtx.(*dbosContext).workflowsWg.Add(1)
-	go func() {
-		defer dbosCtx.(*dbosContext).workflowsWg.Done()
-		result, err := fn(augmentUserContext, input)
-		status := WorkflowStatusSuccess
-		if err != nil {
-			status = WorkflowStatusError
-		}
-		recordErr := dbosCtx.(*dbosContext).systemDB.UpdateWorkflowOutcome(dbosCtx.(*dbosContext).ctx, updateWorkflowOutcomeDBInput{
-			workflowID: internalHandle.GetWorkflowID(),
-			status:     status,
-			err:        err,
-			output:     result,
-		})
-		if recordErr != nil {
-			outcomeChan <- workflowOutcome[R]{result: *new(R), err: recordErr}
-			close(outcomeChan) // Close the channel to signal completion
-			return
-		}
-		outcomeChan <- workflowOutcome[R]{result: result, err: err}
-		close(outcomeChan) // Close the channel to signal completion
-	}()
-
-	return handle, nil
+	// Should never happen
+	return nil, fmt.Errorf("unexpected workflow handle type: %T", handle)
 }
 
 func (c *dbosContext) RunAsWorkflow(dbosCtx DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
@@ -483,7 +463,6 @@ func (c *dbosContext) RunAsWorkflow(dbosCtx DBOSContext, fn WorkflowFunc, input 
 	// Check if we are within a workflow (and thus a child workflow)
 	parentWorkflowState, ok := dbosCtx.Value(workflowStateKey).(*workflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
-
 	// TODO Check if cancelled
 
 	// Generate an ID for the workflow if not provided
@@ -501,7 +480,7 @@ func (c *dbosContext) RunAsWorkflow(dbosCtx DBOSContext, fn WorkflowFunc, input 
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := dbosCtx.(*dbosContext).systemDB.CheckChildWorkflow(dbosCtx.(*dbosContext).ctx, parentWorkflowState.workflowID, parentWorkflowState.stepCounter)
+		childWorkflowID, err := dbosCtx.(*dbosContext).systemDB.CheckChildWorkflow(dbosCtx.(*dbosContext).ctx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		if err != nil {
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("checking child workflow: %v", err))
 		}
@@ -518,7 +497,7 @@ func (c *dbosContext) RunAsWorkflow(dbosCtx DBOSContext, fn WorkflowFunc, input 
 	}
 
 	workflowStatus := WorkflowStatus{
-		Name:               runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // TODO factor out somewhere else so we dont' have to reflect here
+		Name:               params.workflowName,
 		ApplicationVersion: params.applicationVersion,
 		ExecutorID:         dbosCtx.GetExecutorID(),
 		Status:             status,
@@ -561,11 +540,11 @@ func (c *dbosContext) RunAsWorkflow(dbosCtx DBOSContext, fn WorkflowFunc, input 
 	// Record child workflow relationship if this is a child workflow
 	if isChildWorkflow {
 		// Get the step ID that was used for generating the child workflow ID
-		stepID := parentWorkflowState.stepCounter
+		stepID := parentWorkflowState.stepID
 		childInput := recordChildWorkflowDBInput{
 			parentWorkflowID: parentWorkflowState.workflowID,
 			childWorkflowID:  workflowStatus.ID,
-			stepName:         runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), // Will need to test this
+			stepName:         params.workflowName,
 			stepID:           stepID,
 			tx:               tx,
 		}
@@ -575,113 +554,179 @@ func (c *dbosContext) RunAsWorkflow(dbosCtx DBOSContext, fn WorkflowFunc, input 
 		}
 	}
 
+	// Channel to receive the outcome from the goroutine
+	// The buffer size of 1 allows the goroutine to send the outcome without blocking
+	// In addition it allows the channel to be garbage collected
+	outcomeChan := make(chan workflowOutcome[any], 1)
+
+	// Create workflow state to track step execution
+	wfState := &workflowState{
+		workflowID: workflowID,
+		stepID:     -1,
+	}
+
+	// Run the function in a goroutine
+	workflowCtx := WithValue(dbosCtx, workflowStateKey, wfState)
+	dbosCtx.(*dbosContext).workflowsWg.Add(1)
+	go func() {
+		defer dbosCtx.(*dbosContext).workflowsWg.Done()
+		result, err := fn(workflowCtx, input)
+		status := WorkflowStatusSuccess
+		if err != nil {
+			status = WorkflowStatusError
+		}
+		recordErr := dbosCtx.(*dbosContext).systemDB.UpdateWorkflowOutcome(dbosCtx.(*dbosContext).ctx, updateWorkflowOutcomeDBInput{
+			workflowID: workflowID,
+			status:     status,
+			err:        err,
+			output:     result,
+		})
+		if recordErr != nil {
+			outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
+			close(outcomeChan) // Close the channel to signal completion
+			return
+		}
+		outcomeChan <- workflowOutcome[any]{result: result, err: err}
+		close(outcomeChan) // Close the channel to signal completion
+	}()
+
 	// Commit the transaction
 	if err := tx.Commit(dbosCtx.(*dbosContext).ctx); err != nil {
 		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
 	}
 
-	return &workflowHandleInternal{workflowID: workflowID}, nil
+	return &workflowHandle[any]{workflowID: workflowID, outcomeChan: outcomeChan, dbosContext: dbosCtx}, nil
 }
 
 /******************************/
 /******* STEP FUNCTIONS *******/
 /******************************/
 
-type GenericStepFunc[P any, R any] func(ctx context.Context, input P) (R, error)
-type StepFunc func(ctx context.Context, input any) (any, error)
+type StepFunc func(ctx context.Context, input ...any) (any, error)
+type GenericStepFunc[R any] func(ctx context.Context, input ...any) (R, error)
+
+const StepParamsKey DBOSContextKey = "stepParams"
 
 type StepParams struct {
 	MaxRetries    int
 	BackoffFactor float64
 	BaseInterval  time.Duration
 	MaxInterval   time.Duration
+	StepName      string
 }
 
-// StepOption is a functional option for configuring step parameters
-type StepOption func(*StepParams)
-
-// WithStepMaxRetries sets the maximum number of retries for a step
-func WithStepMaxRetries(maxRetries int) StepOption {
-	return func(p *StepParams) {
-		p.MaxRetries = maxRetries
+// setStepParamDefaults returns a StepParams struct with all defaults properly set
+func setStepParamDefaults(params *StepParams, stepName string) *StepParams {
+	if params == nil {
+		return &StepParams{
+			MaxRetries:    0, // Default to no retries
+			BackoffFactor: 2.0,
+			BaseInterval:  100 * time.Millisecond, // Default base interval
+			MaxInterval:   5 * time.Second,        // Default max interval
+			StepName:      typeErasedStepNameToStepName[stepName],
+		}
 	}
-}
 
-// WithBackoffFactor sets the backoff factor for retries (multiplier for exponential backoff)
-func WithBackoffFactor(backoffFactor float64) StepOption {
-	return func(p *StepParams) {
-		p.BackoffFactor = backoffFactor
+	// Set defaults for zero values
+	if params.BackoffFactor == 0 {
+		params.BackoffFactor = 2.0 // Default backoff factor
 	}
-}
-
-// WithBaseInterval sets the base delay for the first retry
-func WithBaseInterval(baseInterval time.Duration) StepOption {
-	return func(p *StepParams) {
-		p.BaseInterval = baseInterval
+	if params.BaseInterval == 0 {
+		params.BaseInterval = 100 * time.Millisecond // Default base interval
 	}
-}
-
-// WithMaxInterval sets the maximum delay for retries
-func WithMaxInterval(maxInterval time.Duration) StepOption {
-	return func(p *StepParams) {
-		p.MaxInterval = maxInterval
+	if params.MaxInterval == 0 {
+		params.MaxInterval = 5 * time.Second // Default max interval
 	}
+	if params.StepName == "" {
+		// If the step name is not provided, use the function name
+		params.StepName = typeErasedStepNameToStepName[stepName]
+	}
+
+	return params
 }
 
-func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any, stepName string, opts ...StepOption) (any, error) {
+var typeErasedStepNameToStepName = make(map[string]string)
+
+func RunAsStep[R any](dbosCtx DBOSContext, fn GenericStepFunc[R], input ...any) (R, error) {
+	if dbosCtx == nil {
+		return *new(R), newStepExecutionError("", "", "dbosCtx cannot be nil")
+	}
+
 	if fn == nil {
-		return nil, newStepExecutionError("", "", "step function cannot be nil")
+		return *new(R), newStepExecutionError("", "", "step function cannot be nil")
 	}
 
-	// Apply options to build params with defaults
-	params := StepParams{
-		MaxRetries:    0,
-		BackoffFactor: 2.0,
-		BaseInterval:  500 * time.Millisecond,
-		MaxInterval:   1 * time.Hour,
-	}
-	for _, opt := range opts {
-		opt(&params)
+	// Type-erase the function based on its actual type
+	typeErasedFn := StepFunc(func(ctx context.Context, i ...any) (any, error) {
+		return fn(ctx, i...)
+	})
+
+	typeErasedStepNameToStepName[runtime.FuncForPC(reflect.ValueOf(typeErasedFn).Pointer()).Name()] = runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+
+	// Call the executor method
+	result, err := dbosCtx.RunAsStep(dbosCtx, typeErasedFn, input...)
+	if err != nil {
+		return *new(R), err
 	}
 
+	// Type-check and cast the result
+	typedResult, ok := result.(R)
+	if !ok {
+		return *new(R), fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), result)
+	}
+
+	return typedResult, nil
+}
+
+func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input ...any) (any, error) {
 	// Get workflow state from context
 	wfState, ok := c.ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return nil, newStepExecutionError("", stepName, "workflow state not found in context: are you running this step within a workflow?")
+		// TODO: try to print step name
+		return nil, newStepExecutionError("", "", "workflow state not found in context: are you running this step within a workflow?")
 	}
+
+	if fn == nil {
+		// TODO: try to print step name
+		return nil, newStepExecutionError(wfState.workflowID, "", "step function cannot be nil")
+	}
+
+	// Look up for step parameters in the context and set defaults
+	params, ok := c.ctx.Value(StepParamsKey).(*StepParams)
+	if !ok {
+		params = nil
+	}
+	params = setStepParamDefaults(params, runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name())
 
 	// If within a step, just run the function directly
 	if wfState.isWithinStep {
 		return fn(c.ctx, input)
 	}
 
-	// Get next step ID
-	stepID := wfState.NextStepID()
+	// Setup step state
+	stepState := workflowState{
+		workflowID:   wfState.workflowID,
+		stepID:       wfState.NextStepID(), // crucially, this increments the step ID on the *workflow* state
+		isWithinStep: true,
+	}
 
 	// Check the step is cancelled, has already completed, or is called with a different name
 	recordedOutput, err := c.systemDB.CheckOperationExecution(c.ctx, checkOperationExecutionDBInput{
-		workflowID: wfState.workflowID,
-		stepID:     stepID,
-		stepName:   stepName,
+		workflowID: stepState.workflowID,
+		stepID:     stepState.stepID,
+		stepName:   params.StepName,
 	})
 	if err != nil {
-		return nil, newStepExecutionError(wfState.workflowID, stepName, fmt.Sprintf("checking operation execution: %v", err))
+		return nil, newStepExecutionError(stepState.workflowID, params.StepName, fmt.Sprintf("checking operation execution: %v", err))
 	}
 	if recordedOutput != nil {
 		return recordedOutput.output, recordedOutput.err
 	}
 
-	// Execute step with retry logic if MaxRetries > 0
-	stepState := workflowState{
-		workflowID:   wfState.workflowID,
-		stepCounter:  wfState.stepCounter,
-		isWithinStep: true,
-	}
-
 	// Spawn a child DBOSContext with the step state
-	stepCtx := c.withValue(workflowStateKey, &stepState)
+	stepCtx := WithValue(c, workflowStateKey, &stepState)
 
-	stepOutput, stepError := fn(stepCtx, input)
+	stepOutput, stepError := fn(stepCtx, input...)
 
 	// Retry if MaxRetries > 0 and the first execution failed
 	var joinedErrors error
@@ -696,12 +741,12 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any, stepName 
 				delay = time.Duration(math.Min(exponentialDelay, float64(params.MaxInterval)))
 			}
 
-			getLogger().Error("step failed, retrying", "step_name", stepName, "retry", retry, "max_retries", params.MaxRetries, "delay", delay, "error", stepError)
+			getLogger().Error("step failed, retrying", "step_name", params.StepName, "retry", retry, "max_retries", params.MaxRetries, "delay", delay, "error", stepError)
 
 			// Wait before retry
 			select {
 			case <-c.ctx.Done():
-				return nil, newStepExecutionError(wfState.workflowID, stepName, fmt.Sprintf("context cancelled during retry: %v", c.ctx.Err()))
+				return nil, newStepExecutionError(stepState.workflowID, params.StepName, fmt.Sprintf("context cancelled during retry: %v", c.ctx.Err()))
 			case <-time.After(delay):
 				// Continue to retry
 			}
@@ -719,7 +764,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any, stepName 
 
 			// If max retries reached, create MaxStepRetriesExceeded error
 			if retry == params.MaxRetries {
-				stepError = newMaxStepRetriesExceededError(wfState.workflowID, stepName, params.MaxRetries, joinedErrors)
+				stepError = newMaxStepRetriesExceededError(stepState.workflowID, params.StepName, params.MaxRetries, joinedErrors)
 				break
 			}
 		}
@@ -727,52 +772,18 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any, stepName 
 
 	// Record the final result
 	dbInput := recordOperationResultDBInput{
-		workflowID: wfState.workflowID,
-		stepName:   stepName,
-		stepID:     stepID,
+		workflowID: stepState.workflowID,
+		stepName:   params.StepName,
+		stepID:     stepState.stepID,
 		err:        stepError,
 		output:     stepOutput,
 	}
 	recErr := c.systemDB.RecordOperationResult(c.ctx, dbInput)
 	if recErr != nil {
-		return nil, newStepExecutionError(wfState.workflowID, stepName, fmt.Sprintf("recording step outcome: %v", recErr))
+		return nil, newStepExecutionError(stepState.workflowID, params.StepName, fmt.Sprintf("recording step outcome: %v", recErr))
 	}
 
 	return stepOutput, stepError
-}
-
-func RunAsStep[P any, R any](dbosCtx DBOSContext, fn GenericStepFunc[P, R], input P, opts ...StepOption) (R, error) {
-	if dbosCtx == nil {
-		return *new(R), errors.New("dbosCtx cannot be nil")
-	}
-	if fn == nil {
-		return *new(R), newStepExecutionError("", "", "step function cannot be nil")
-	}
-
-	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-
-	// Type-erase the function
-	typeErasedFn := func(ctx context.Context, input any) (any, error) {
-		typedInput, ok := input.(P)
-		if !ok {
-			return nil, fmt.Errorf("unexpected input type: expected %T, got %T", *new(P), input)
-		}
-		return fn(ctx, typedInput)
-	}
-
-	// Call the executor method
-	result, err := dbosCtx.RunAsStep(dbosCtx, typeErasedFn, input, stepName, opts...)
-	if err != nil {
-		return *new(R), err
-	}
-
-	// Type-check and cast the result
-	typedResult, ok := result.(R)
-	if !ok {
-		return *new(R), fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), result)
-	}
-
-	return typedResult, nil
 }
 
 /****************************************/

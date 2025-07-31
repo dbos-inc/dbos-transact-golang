@@ -56,8 +56,7 @@ func recoverPendingWorkflows(dbosCtx *dbosContext, executorIDs []string) ([]Work
 		}
 
 		// Create a workflow context from the executor context
-		workflowCtx := dbosCtx.withValue(dbosCtx.ctx, nil)
-		handle, err := registeredWorkflow.wrappedFunction(workflowCtx, workflow.Input, opts...)
+		handle, err := registeredWorkflow.wrappedFunction(dbosCtx, workflow.Input, opts...)
 		if err != nil {
 			return nil, err
 		}
