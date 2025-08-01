@@ -223,8 +223,6 @@ func registerWorkflow(dbosCtx DBOSContext, workflowName string, fn WrappedWorkfl
 		panic(newConflictingRegistrationError(workflowName))
 	}
 
-	fmt.Println("registering workflow", "fqn", workflowName, "max_retries", maxRetries)
-
 	c.workflowRegistry[workflowName] = workflowRegistryEntry{
 		wrappedFunction: fn,
 		maxRetries:      maxRetries,
@@ -324,7 +322,7 @@ func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[
 	typeErasedWrapper := WrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 		typedInput, ok := input.(P)
 		if !ok {
-			return nil, newWorkflowUnexpectedInputType(workflowName, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
+			return nil, newWorkflowUnexpectedInputType(registrationParams.workflowName, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
 		}
 
 		opts = append(opts, WithWorkflowMaxRetries(registrationParams.maxRetries))
@@ -702,7 +700,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input ...any) (any, 
 	}
 
 	// Look up for step parameters in the context and set defaults
-	params, ok := c.ctx.Value(StepParamsKey).(*StepParams)
+	params, ok := c.Value(StepParamsKey).(*StepParams)
 	if !ok {
 		params = nil
 	}

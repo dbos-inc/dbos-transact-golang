@@ -61,7 +61,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 }
 
 type DBOSContext interface {
-	context.Context // Standard Go context behavior
+	context.Context
 
 	// Context Lifecycle
 	Launch() error
