@@ -146,6 +146,8 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 			ctx:                context.WithValue(dbosCtx.ctx, key, val),
 			systemDB:           dbosCtx.systemDB,
 			workflowsWg:        dbosCtx.workflowsWg,
+			workflowRegistry:   dbosCtx.workflowRegistry,
+			workflowRegMutex:   dbosCtx.workflowRegMutex,
 			applicationVersion: dbosCtx.applicationVersion,
 			executorID:         dbosCtx.executorID,
 			applicationID:      dbosCtx.applicationID,
