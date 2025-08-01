@@ -645,6 +645,12 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 	query := `SELECT status, output, error FROM dbos.workflow_status WHERE workflow_uuid = $1`
 	var status WorkflowStatusType
 	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		row := s.pool.QueryRow(ctx, query, workflowID)
 		var outputString *string
 		var errorStr *string
@@ -671,7 +677,7 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 		case WorkflowStatusCancelled:
 			return nil, newAwaitedWorkflowCancelledError(workflowID)
 		default:
-			time.Sleep(1 * time.Second) // Wait before checking again
+			time.Sleep(1 * time.Second)
 		}
 	}
 }
