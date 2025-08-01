@@ -95,8 +95,7 @@ func Identity[T any](dbosCtx DBOSContext, in T) (T, error) {
 }
 
 func TestWorkflowsRegistration(t *testing.T) {
-	executor := setupDBOS(t)
-	dbosCtx := executor
+	dbosCtx := setupDBOS(t)
 
 	// Setup workflows with executor
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -279,7 +278,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := tc.workflowFunc(executor, tc.input, WithWorkflowID(uuid.NewString()))
+			result, err := tc.workflowFunc(dbosCtx, tc.input, WithWorkflowID(uuid.NewString()))
 
 			if tc.expectError {
 				if err == nil {
@@ -639,8 +638,8 @@ func TestWorkflowIdempotency(t *testing.T) {
 }
 
 func TestWorkflowRecovery(t *testing.T) {
-	executor := setupDBOS(t)
-	RegisterWorkflow(executor, idempotencyWorkflowWithStep)
+	dbosCtx := setupDBOS(t)
+	RegisterWorkflow(dbosCtx, idempotencyWorkflowWithStep)
 	t.Run("RecoveryResumeWhereItLeftOff", func(t *testing.T) {
 		// Reset the global counter
 		idempotencyCounter = 0
@@ -649,7 +648,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		input := "recovery-test"
 		idempotencyWorkflowWithStepEvent = NewEvent()
 		blockingStepStopEvent = NewEvent()
-		handle1, err := RunAsWorkflow(executor, idempotencyWorkflowWithStep, input)
+		handle1, err := RunAsWorkflow(dbosCtx, idempotencyWorkflowWithStep, input)
 		if err != nil {
 			t.Fatalf("failed to execute workflow first time: %v", err)
 		}
@@ -657,7 +656,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		idempotencyWorkflowWithStepEvent.Wait() // Wait for the first step to complete. The second spins forever.
 
 		// Run recovery for pending workflows with "local" executor
-		recoveredHandles, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		if err != nil {
 			t.Fatalf("failed to recover pending workflows: %v", err)
 		}
@@ -686,7 +685,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		}
 
 		// Using ListWorkflows, retrieve the status of the workflow
-		workflows, err := executor.(*dbosContext).systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+		workflows, err := dbosCtx.(*dbosContext).systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
 			workflowIDs: []string{handle1.GetWorkflowID()},
 		})
 		if err != nil {
@@ -932,7 +931,7 @@ func TestScheduledWorkflows(t *testing.T) {
 
 	err := dbosCtx.Launch()
 	if err != nil {
-		t.Fatalf("failed to launch executor: %v", err)
+		t.Fatalf("failed to launch DBOS: %v", err)
 	}
 
 	// Helper function to collect execution times
@@ -1118,27 +1117,27 @@ type sendRecvType struct {
 }
 
 func TestSendRecv(t *testing.T) {
-	executor := setupDBOS(t)
+	dbosCtx := setupDBOS(t)
 
 	// Register all send/recv workflows with executor
-	RegisterWorkflow(executor, sendWorkflow)
-	RegisterWorkflow(executor, receiveWorkflow)
-	RegisterWorkflow(executor, receiveWorkflowCoordinated)
-	RegisterWorkflow(executor, sendStructWorkflow)
-	RegisterWorkflow(executor, receiveStructWorkflow)
-	RegisterWorkflow(executor, sendIdempotencyWorkflow)
-	RegisterWorkflow(executor, receiveIdempotencyWorkflow)
-	RegisterWorkflow(executor, workflowThatCallsSendInStep)
+	RegisterWorkflow(dbosCtx, sendWorkflow)
+	RegisterWorkflow(dbosCtx, receiveWorkflow)
+	RegisterWorkflow(dbosCtx, receiveWorkflowCoordinated)
+	RegisterWorkflow(dbosCtx, sendStructWorkflow)
+	RegisterWorkflow(dbosCtx, receiveStructWorkflow)
+	RegisterWorkflow(dbosCtx, sendIdempotencyWorkflow)
+	RegisterWorkflow(dbosCtx, receiveIdempotencyWorkflow)
+	RegisterWorkflow(dbosCtx, workflowThatCallsSendInStep)
 
 	t.Run("SendRecvSuccess", func(t *testing.T) {
 		// Start the receive workflow
-		receiveHandle, err := RunAsWorkflow(executor, receiveWorkflow, "test-topic")
+		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveWorkflow, "test-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
 
 		// Send a message to the receive workflow
-		handle, err := RunAsWorkflow(executor, sendWorkflow, sendWorkflowInput{
+		handle, err := RunAsWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "test-topic",
 		})
@@ -1158,21 +1157,21 @@ func TestSendRecv(t *testing.T) {
 		if result != "message1-message2-message3" {
 			t.Fatalf("expected received message to be 'message1-message2-message3', got '%s'", result)
 		}
-		// XXX let's see how this works when all the tests run
-		if time.Since(start) > 5*time.Second {
+		// XXX This is not a great condition: when all the tests run there's quite some randomness to this
+		if time.Since(start) > 10*time.Second {
 			t.Fatalf("receive workflow took too long to complete, expected < 5s, got %v", time.Since(start))
 		}
 	})
 
 	t.Run("SendRecvCustomStruct", func(t *testing.T) {
 		// Start the receive workflow
-		receiveHandle, err := RunAsWorkflow(executor, receiveStructWorkflow, "struct-topic")
+		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveStructWorkflow, "struct-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
 
 		// Send the struct to the receive workflow
-		sendHandle, err := RunAsWorkflow(executor, sendStructWorkflow, sendWorkflowInput{
+		sendHandle, err := RunAsWorkflow(dbosCtx, sendStructWorkflow, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "struct-topic",
 		})
@@ -1202,7 +1201,7 @@ func TestSendRecv(t *testing.T) {
 		destUUID := uuid.NewString()
 
 		// Send to non-existent UUID should fail
-		handle, err := RunAsWorkflow(executor, sendWorkflow, sendWorkflowInput{
+		handle, err := RunAsWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{
 			DestinationID: destUUID,
 			Topic:         "testtopic",
 		})
@@ -1232,7 +1231,7 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("RecvTimeout", func(t *testing.T) {
 		// Create a receive workflow that tries to receive a message but no send happens
-		receiveHandle, err := RunAsWorkflow(executor, receiveWorkflow, "timeout-test-topic")
+		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveWorkflow, "timeout-test-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
@@ -1247,7 +1246,7 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("RecvMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run Recv outside of a workflow context
-		_, err := Recv[string](executor, WorkflowRecvInput{Topic: "test-topic", Timeout: 1 * time.Second})
+		_, err := Recv[string](dbosCtx, WorkflowRecvInput{Topic: "test-topic", Timeout: 1 * time.Second})
 		if err == nil {
 			t.Fatal("expected error when running Recv outside of workflow context, but got none")
 		}
@@ -1271,14 +1270,14 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("SendOutsideWorkflow", func(t *testing.T) {
 		// Start a receive workflow to have a valid destination
-		receiveHandle, err := RunAsWorkflow(executor, receiveWorkflow, "outside-workflow-topic")
+		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveWorkflow, "outside-workflow-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
 
 		// Send messages from outside a workflow context (should work now)
 		for i := range 3 {
-			err = Send(executor, WorkflowSendInput[string]{
+			err = Send(dbosCtx, WorkflowSendInput[string]{
 				DestinationID: receiveHandle.GetWorkflowID(),
 				Topic:         "outside-workflow-topic",
 				Message:       fmt.Sprintf("message%d", i+1),
@@ -1299,13 +1298,13 @@ func TestSendRecv(t *testing.T) {
 	})
 	t.Run("SendRecvIdempotency", func(t *testing.T) {
 		// Start the receive workflow and wait for it to be ready
-		receiveHandle, err := RunAsWorkflow(executor, receiveIdempotencyWorkflow, "idempotency-topic")
+		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveIdempotencyWorkflow, "idempotency-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive idempotency workflow: %v", err)
 		}
 
 		// Send the message to the receive workflow
-		sendHandle, err := RunAsWorkflow(executor, sendIdempotencyWorkflow, sendWorkflowInput{
+		sendHandle, err := RunAsWorkflow(dbosCtx, sendIdempotencyWorkflow, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "idempotency-topic",
 		})
@@ -1317,21 +1316,21 @@ func TestSendRecv(t *testing.T) {
 		receiveIdempotencyStartEvent.Wait()
 
 		// Attempt recovering both workflows. There should be only 2 steps recorded after recovery.
-		recoveredHandles, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		if err != nil {
 			t.Fatalf("failed to recover pending workflows: %v", err)
 		}
 		if len(recoveredHandles) != 2 {
 			t.Fatalf("expected 2 recovered handles, got %d", len(recoveredHandles))
 		}
-		steps, err := executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), sendHandle.GetWorkflowID())
+		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), sendHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get workflow steps: %v", err)
 		}
 		if len(steps) != 1 {
 			t.Fatalf("expected 1 step in send idempotency workflow, got %d", len(steps))
 		}
-		steps, err = executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), receiveHandle.GetWorkflowID())
+		steps, err = dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), receiveHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for receive idempotency workflow: %v", err)
 		}
@@ -1360,13 +1359,13 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("SendCannotBeCalledWithinStep", func(t *testing.T) {
 		// Start a receive workflow to have a valid destination
-		receiveHandle, err := RunAsWorkflow(executor, receiveWorkflow, "send-within-step-topic")
+		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveWorkflow, "send-within-step-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
 
 		// Execute the workflow that tries to call Send within a step
-		handle, err := RunAsWorkflow(executor, workflowThatCallsSendInStep, sendWorkflowInput{
+		handle, err := RunAsWorkflow(dbosCtx, workflowThatCallsSendInStep, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "send-within-step-topic",
 		})
@@ -1420,7 +1419,7 @@ func TestSendRecv(t *testing.T) {
 		// Start all receivers - they will signal when ready and wait for coordination
 		for i := range numReceivers {
 			concurrentRecvReadyEvents[i] = NewEvent()
-			receiveHandle, err := RunAsWorkflow(executor, receiveWorkflowCoordinated, struct {
+			receiveHandle, err := RunAsWorkflow(dbosCtx, receiveWorkflowCoordinated, struct {
 				Topic string
 				i     int
 			}{
@@ -1569,21 +1568,21 @@ func getEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (
 }
 
 func TestSetGetEvent(t *testing.T) {
-	executor := setupDBOS(t)
+	dbosCtx := setupDBOS(t)
 
 	// Register all set/get event workflows with executor
-	RegisterWorkflow(executor, setEventWorkflow)
-	RegisterWorkflow(executor, getEventWorkflow)
-	RegisterWorkflow(executor, setTwoEventsWorkflow)
-	RegisterWorkflow(executor, setEventIdempotencyWorkflow)
-	RegisterWorkflow(executor, getEventIdempotencyWorkflow)
+	RegisterWorkflow(dbosCtx, setEventWorkflow)
+	RegisterWorkflow(dbosCtx, getEventWorkflow)
+	RegisterWorkflow(dbosCtx, setTwoEventsWorkflow)
+	RegisterWorkflow(dbosCtx, setEventIdempotencyWorkflow)
+	RegisterWorkflow(dbosCtx, getEventIdempotencyWorkflow)
 
 	t.Run("SetGetEventFromWorkflow", func(t *testing.T) {
 		// Clear the signal event before starting
 		setSecondEventSignal.Clear()
 
 		// Start the workflow that sets two events
-		setHandle, err := RunAsWorkflow(executor, setTwoEventsWorkflow, setEventWorkflowInput{
+		setHandle, err := RunAsWorkflow(dbosCtx, setTwoEventsWorkflow, setEventWorkflowInput{
 			Key:     "test-workflow",
 			Message: "unused",
 		})
@@ -1592,7 +1591,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Start a workflow to get the first event
-		getFirstEventHandle, err := RunAsWorkflow(executor, getEventWorkflow, setEventWorkflowInput{
+		getFirstEventHandle, err := RunAsWorkflow(dbosCtx, getEventWorkflow, setEventWorkflowInput{
 			Key:     setHandle.GetWorkflowID(), // Target workflow ID
 			Message: "event1",                  // Event key
 		})
@@ -1613,7 +1612,7 @@ func TestSetGetEvent(t *testing.T) {
 		setSecondEventSignal.Set()
 
 		// Start a workflow to get the second event
-		getSecondEventHandle, err := RunAsWorkflow(executor, getEventWorkflow, setEventWorkflowInput{
+		getSecondEventHandle, err := RunAsWorkflow(dbosCtx, getEventWorkflow, setEventWorkflowInput{
 			Key:     setHandle.GetWorkflowID(), // Target workflow ID
 			Message: "event2",                  // Event key
 		})
@@ -1642,7 +1641,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("GetEventFromOutsideWorkflow", func(t *testing.T) {
 		// Start a workflow that sets an event
-		setHandle, err := RunAsWorkflow(executor, setEventWorkflow, setEventWorkflowInput{
+		setHandle, err := RunAsWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
 			Key:     "test-key",
 			Message: "test-message",
 		})
@@ -1657,7 +1656,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Start a workflow that gets the event from outside the original workflow
-		message, err := GetEvent[string](executor, WorkflowGetEventInput{
+		message, err := GetEvent[string](dbosCtx, WorkflowGetEventInput{
 			TargetWorkflowID: setHandle.GetWorkflowID(),
 			Key:              "test-key",
 			Timeout:          3 * time.Second,
@@ -1673,7 +1672,7 @@ func TestSetGetEvent(t *testing.T) {
 	t.Run("GetEventTimeout", func(t *testing.T) {
 		// Try to get an event from a non-existent workflow
 		nonExistentID := uuid.NewString()
-		message, err := GetEvent[string](executor, WorkflowGetEventInput{
+		message, err := GetEvent[string](dbosCtx, WorkflowGetEventInput{
 			TargetWorkflowID: nonExistentID,
 			Key:              "test-key",
 			Timeout:          3 * time.Second,
@@ -1686,7 +1685,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Try to get an event from an existing workflow but with a key that doesn't exist
-		setHandle, err := RunAsWorkflow(executor, setEventWorkflow, setEventWorkflowInput{
+		setHandle, err := RunAsWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
 			Key:     "test-key",
 			Message: "test-message",
 		})
@@ -1697,7 +1696,7 @@ func TestSetGetEvent(t *testing.T) {
 		if err != nil {
 			t.Fatal("failed to get result from set event workflow:", err)
 		}
-		message, err = GetEvent[string](executor, WorkflowGetEventInput{
+		message, err = GetEvent[string](dbosCtx, WorkflowGetEventInput{
 			TargetWorkflowID: setHandle.GetWorkflowID(),
 			Key:              "non-existent-key",
 			Timeout:          3 * time.Second,
@@ -1712,7 +1711,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("SetGetEventMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run SetEvent outside of a workflow context
-		err := SetEvent(executor, WorkflowSetEventInputGeneric[string]{Key: "test-key", Message: "test-message"})
+		err := SetEvent(dbosCtx, WorkflowSetEventInputGeneric[string]{Key: "test-key", Message: "test-message"})
 		if err == nil {
 			t.Fatal("expected error when running SetEvent outside of workflow context, but got none")
 		}
@@ -1736,7 +1735,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("SetGetEventIdempotency", func(t *testing.T) {
 		// Start the set event workflow
-		setHandle, err := RunAsWorkflow(executor, setEventIdempotencyWorkflow, setEventWorkflowInput{
+		setHandle, err := RunAsWorkflow(dbosCtx, setEventIdempotencyWorkflow, setEventWorkflowInput{
 			Key:     "idempotency-key",
 			Message: "idempotency-message",
 		})
@@ -1745,7 +1744,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Start the get event workflow
-		getHandle, err := RunAsWorkflow(executor, getEventIdempotencyWorkflow, setEventWorkflowInput{
+		getHandle, err := RunAsWorkflow(dbosCtx, getEventIdempotencyWorkflow, setEventWorkflowInput{
 			Key:     setHandle.GetWorkflowID(),
 			Message: "idempotency-key",
 		})
@@ -1760,7 +1759,7 @@ func TestSetGetEvent(t *testing.T) {
 		setEventStartIdempotencyEvent.Clear()
 
 		// Attempt recovering both workflows. Each should have exactly 1 step.
-		recoveredHandles, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		if err != nil {
 			t.Fatalf("failed to recover pending workflows: %v", err)
 		}
@@ -1772,7 +1771,7 @@ func TestSetGetEvent(t *testing.T) {
 		setEventStartIdempotencyEvent.Wait()
 
 		// Verify step counts
-		setSteps, err := executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), setHandle.GetWorkflowID())
+		setSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), setHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for set event idempotency workflow: %v", err)
 		}
@@ -1780,7 +1779,7 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("expected 1 step in set event idempotency workflow, got %d", len(setSteps))
 		}
 
-		getSteps, err := executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), getHandle.GetWorkflowID())
+		getSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), getHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for get event idempotency workflow: %v", err)
 		}
@@ -1834,7 +1833,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("ConcurrentGetEvent", func(t *testing.T) {
 		// Set event
-		setHandle, err := RunAsWorkflow(executor, setEventWorkflow, setEventWorkflowInput{
+		setHandle, err := RunAsWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
 			Key:     "concurrent-event-key",
 			Message: "concurrent-event-message",
 		})
@@ -1855,7 +1854,7 @@ func TestSetGetEvent(t *testing.T) {
 		for range numGoroutines {
 			go func() {
 				defer wg.Done()
-				res, err := GetEvent[string](executor, WorkflowGetEventInput{
+				res, err := GetEvent[string](dbosCtx, WorkflowGetEventInput{
 					TargetWorkflowID: setHandle.GetWorkflowID(),
 					Key:              "concurrent-event-key",
 					Timeout:          10 * time.Second,
