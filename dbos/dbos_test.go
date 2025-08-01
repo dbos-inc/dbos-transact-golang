@@ -5,7 +5,7 @@ import (
 )
 
 func TestConfigValidationErrorTypes(t *testing.T) {
-	databaseURL := getDatabaseURL(t)
+	databaseURL := getDatabaseURL()
 
 	t.Run("FailsWithoutAppName", func(t *testing.T) {
 		config := Config{

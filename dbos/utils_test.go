@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func getDatabaseURL(t *testing.T) string {
+func getDatabaseURL() string {
 	databaseURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL")
 	if databaseURL == "" {
 		password := os.Getenv("PGPASSWORD")
@@ -28,7 +28,7 @@ func getDatabaseURL(t *testing.T) string {
 func setupDBOS(t *testing.T) DBOSContext {
 	t.Helper()
 
-	databaseURL := getDatabaseURL(t)
+	databaseURL := getDatabaseURL()
 
 	// Clean up the test database
 	parsedURL, err := pgx.ParseConfig(databaseURL)
@@ -113,9 +113,9 @@ func (e *Event) Clear() {
 /* Helpers */
 
 // stopQueueRunner stops the queue runner for testing purposes
-func stopQueueRunner(executor DBOSContext) {
-	if executor != nil {
-		exec := executor.(*dbosContext)
+func stopQueueRunner(ctx DBOSContext) {
+	if ctx != nil {
+		exec := ctx.(*dbosContext)
 		if exec.queueRunnerCancelFunc != nil {
 			exec.queueRunnerCancelFunc()
 			// Wait for queue runner to finish
@@ -125,9 +125,9 @@ func stopQueueRunner(executor DBOSContext) {
 }
 
 // restartQueueRunner restarts the queue runner for testing purposes
-func restartQueueRunner(executor DBOSContext) {
-	if executor != nil {
-		exec := executor.(*dbosContext)
+func restartQueueRunner(ctx DBOSContext) {
+	if ctx != nil {
+		exec := ctx.(*dbosContext)
 		// Create new context and cancel function
 		// FIXME: cancellation now has to go through the DBOSContext
 		ctx, cancel := context.WithCancel(context.Background())
@@ -155,12 +155,12 @@ func equal(a, b []int) bool {
 	return true
 }
 
-func queueEntriesAreCleanedUp(executor DBOSContext) bool {
+func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 	maxTries := 10
 	success := false
 	for range maxTries {
 		// Begin transaction
-		exec := executor.(*dbosContext)
+		exec := ctx.(*dbosContext)
 		tx, err := exec.systemDB.(*systemDatabase).pool.Begin(context.Background())
 		if err != nil {
 			return false

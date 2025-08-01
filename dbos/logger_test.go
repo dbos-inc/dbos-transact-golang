@@ -8,7 +8,7 @@ import (
 )
 
 func TestLogger(t *testing.T) {
-	databaseURL := getDatabaseURL(t)
+	databaseURL := getDatabaseURL()
 
 	t.Run("Default logger", func(t *testing.T) {
 		dbosCtx, err := NewDBOSContext(Config{

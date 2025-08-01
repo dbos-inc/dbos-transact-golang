@@ -20,12 +20,15 @@ import (
 // Builtin types
 func encodingStepBuiltinTypes(_ context.Context, input ...any) (int, error) {
 	if len(input) == 0 {
+		fmt.Println("No input provided to encodingStepBuiltinTypes")
 		return 0, errors.New("step error")
 	}
 	val, ok := input[0].(int)
+	fmt.Println("Input to encodingStepBuiltinTypes:", val, "ok:", ok)
 	if !ok {
 		return 0, errors.New("step error")
 	}
+	fmt.Println("Processing input in encodingStepBuiltinTypes:", val)
 	return val, errors.New("step error")
 }
 

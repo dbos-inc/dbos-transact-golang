@@ -36,6 +36,7 @@ func simpleWorkflowWithStep(dbosCtx DBOSContext, input string) (string, error) {
 }
 
 func simpleStep(ctx context.Context, input ...any) (string, error) {
+	fmt.Println("simpleStep called with input:", input)
 	return "from step", nil
 }
 
@@ -724,7 +725,11 @@ var (
 
 func deadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error) {
 	recoveryCount++
-	fmt.Printf("Dead letter queue workflow started, recovery count: %d\n", recoveryCount)
+	wfid, err := ctx.GetWorkflowID()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get workflow ID: %v", err)
+	}
+	fmt.Printf("Dead letter queue workflow %s started, recovery count: %d\n", wfid, recoveryCount)
 	deadLetterQueueStartEvent.Set()
 	deadLetterQueueEvent.Wait()
 	return 0, nil
@@ -736,9 +741,9 @@ func infiniteDeadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error)
 	return 0, nil
 }
 func TestWorkflowDeadLetterQueue(t *testing.T) {
-	executor := setupDBOS(t)
-	RegisterWorkflow(executor, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
-	RegisterWorkflow(executor, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
+	dbosCtx := setupDBOS(t)
+	RegisterWorkflow(dbosCtx, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
+	RegisterWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
 
 	t.Run("DeadLetterQueueBehavior", func(t *testing.T) {
 		deadLetterQueueEvent = NewEvent()
@@ -747,7 +752,8 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Start a workflow that blocks forever
 		wfID := uuid.NewString()
-		handle, err := RunAsWorkflow(executor, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
+		fmt.Println(wfID)
+		handle, err := RunAsWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		if err != nil {
 			t.Fatalf("failed to start dead letter queue workflow: %v", err)
 		}
@@ -756,7 +762,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Attempt to recover the blocked workflow the maximum number of times
 		for i := range maxRecoveryAttempts {
-			_, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
+			_, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 			if err != nil {
 				t.Fatalf("failed to recover pending workflows on attempt %d: %v", i+1, err)
 			}
@@ -769,7 +775,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		}
 
 		// Verify an additional attempt throws a DLQ error and puts the workflow in the DLQ status
-		_, err = recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
+		_, err = recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		if err == nil {
 			t.Fatal("expected dead letter queue error but got none")
 		}
@@ -792,7 +798,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		}
 
 		// Verify that attempting to start a workflow with the same ID throws a DLQ error
-		_, err = RunAsWorkflow(executor, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
+		_, err = RunAsWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		if err == nil {
 			t.Fatal("expected dead letter queue error when restarting workflow with same ID but got none")
 		}
@@ -861,7 +867,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// Verify that a workflow with MaxRetries=0 (infinite retries) is retried infinitely
 		wfID := uuid.NewString()
 
-		handle, err := RunAsWorkflow(executor, infiniteDeadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
+		handle, err := RunAsWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		if err != nil {
 			t.Fatalf("failed to start infinite dead letter queue workflow: %v", err)
 		}
@@ -871,7 +877,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// Attempt to recover the blocked workflow many times (should never fail)
 		handles := []WorkflowHandle[any]{}
 		for i := range _DEFAULT_MAX_RECOVERY_ATTEMPTS * 2 {
-			recoveredHandles, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
+			recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 			if err != nil {
 				t.Fatalf("failed to recover pending workflows on attempt %d: %v", i+1, err)
 			}
@@ -910,15 +916,24 @@ var (
 )
 
 func TestScheduledWorkflows(t *testing.T) {
-	executor := setupDBOS(t)
-	RegisterWorkflow(executor, func(ctx DBOSContext, scheduledTime time.Time) (string, error) {
+	dbosCtx := setupDBOS(t)
+	RegisterWorkflow(dbosCtx, func(ctx DBOSContext, scheduledTime time.Time) (string, error) {
 		startTime := time.Now()
 		counter++
 		if counter == 10 {
 			return "", fmt.Errorf("counter reached 10, stopping workflow")
 		}
-		return fmt.Sprintf("Scheduled workflow executed at %v", startTime), nil
+		select {
+		case counter1Ch <- startTime:
+		default:
+		}
+		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", scheduledTime, startTime), nil
 	}, WithSchedule("* * * * * *")) // Every second
+
+	err := dbosCtx.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch executor: %v", err)
+	}
 
 	// Helper function to collect execution times
 	collectExecutionTimes := func(ch chan time.Time, target int, timeout time.Duration) ([]time.Time, error) {
@@ -969,7 +984,7 @@ func TestScheduledWorkflows(t *testing.T) {
 
 		// Stop the workflowScheduler and check if it stops executing
 		currentCounter := counter
-		executor.(*dbosContext).getWorkflowScheduler().Stop()
+		dbosCtx.(*dbosContext).getWorkflowScheduler().Stop()
 		time.Sleep(3 * time.Second) // Wait a bit to ensure no more executions
 		if counter >= currentCounter+2 {
 			t.Fatalf("Scheduled workflow continued executing after stopping scheduler: %d (expected < %d)", counter, currentCounter+2)
@@ -1079,12 +1094,19 @@ func stepThatCallsSend(ctx context.Context, input ...any) (string, error) {
 	if len(input) == 0 {
 		return "", fmt.Errorf("expected sendWorkflowInput")
 	}
-	_, ok := input[0].(sendWorkflowInput)
+	i, ok := input[0].(sendWorkflowInput)
 	if !ok {
 		return "", fmt.Errorf("expected sendWorkflowInput, got %T", input[0])
 	}
-	// Note: Send cannot be called from within steps, this should fail
-	return "", fmt.Errorf("Send cannot be called from within a step")
+	err := Send(ctx.(DBOSContext), WorkflowSendInput[string]{
+		DestinationID: i.DestinationID,
+		Topic:         i.Topic,
+		Message:       "message-from-step",
+	})
+	if err != nil {
+		return "", err
+	}
+	return "send-completed", nil
 }
 
 func workflowThatCallsSendInStep(ctx DBOSContext, input sendWorkflowInput) (string, error) {
@@ -1384,7 +1406,7 @@ func TestSendRecv(t *testing.T) {
 		}
 	})
 
-	t.Run("ConcurrentRecv", func(t *testing.T) {
+	t.Run("TestSendRecv", func(t *testing.T) {
 		// Test concurrent receivers - only 1 should timeout, others should get errors
 		receiveTopic := "concurrent-recv-topic"
 
@@ -1835,20 +1857,8 @@ var (
 	sleepStopEvent  *Event
 )
 
-func sleepStep(ctx context.Context, input ...any) (time.Duration, error) {
-	if len(input) == 0 {
-		return 0, fmt.Errorf("expected duration")
-	}
-	duration, ok := input[0].(time.Duration)
-	if !ok {
-		return 0, fmt.Errorf("expected time.Duration, got %T", input[0])
-	}
-	time.Sleep(duration)
-	return duration, nil
-}
-
-func sleepRecoveryWorkflow(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
-	result, err := RunAsStep(ctx, sleepStep, duration)
+func sleepRecoveryWorkflow(dbosCtx DBOSContext, duration time.Duration) (time.Duration, error) {
+	result, err := dbosCtx.Sleep(duration)
 	if err != nil {
 		return 0, err
 	}
@@ -1859,8 +1869,8 @@ func sleepRecoveryWorkflow(ctx DBOSContext, duration time.Duration) (time.Durati
 }
 
 func TestSleep(t *testing.T) {
-	executor := setupDBOS(t)
-	RegisterWorkflow(executor, sleepRecoveryWorkflow)
+	dbosCtx := setupDBOS(t)
+	RegisterWorkflow(dbosCtx, sleepRecoveryWorkflow)
 
 	t.Run("SleepDurableRecovery", func(t *testing.T) {
 		sleepStartEvent = NewEvent()
@@ -1869,7 +1879,7 @@ func TestSleep(t *testing.T) {
 		// Start a workflow that sleeps for 2 seconds then blocks
 		sleepDuration := 2 * time.Second
 
-		handle, err := RunAsWorkflow(executor, sleepRecoveryWorkflow, sleepDuration)
+		handle, err := RunAsWorkflow(dbosCtx, sleepRecoveryWorkflow, sleepDuration)
 		if err != nil {
 			t.Fatalf("failed to start sleep recovery workflow: %v", err)
 		}
@@ -1879,7 +1889,7 @@ func TestSleep(t *testing.T) {
 
 		// Run the workflow again and check the return time was less than the durable sleep
 		startTime := time.Now()
-		_, err = RunAsWorkflow(executor, sleepRecoveryWorkflow, sleepDuration, WithWorkflowID(handle.GetWorkflowID()))
+		_, err = RunAsWorkflow(dbosCtx, sleepRecoveryWorkflow, sleepDuration, WithWorkflowID(handle.GetWorkflowID()))
 		if err != nil {
 			t.Fatalf("failed to start second sleep recovery workflow: %v", err)
 		}
@@ -1892,7 +1902,7 @@ func TestSleep(t *testing.T) {
 		}
 
 		// Verify the sleep step was recorded correctly
-		steps, err := executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get workflow steps: %v", err)
 		}
@@ -1902,8 +1912,8 @@ func TestSleep(t *testing.T) {
 		}
 
 		step := steps[0]
-		if step.FunctionName != "dbos.sleepStep" {
-			t.Fatalf("expected step name to be 'dbos.sleepStep', got '%s'", step.FunctionName)
+		if step.FunctionName != "DBOS.sleep" {
+			t.Fatalf("expected step name to be 'DBOS.sleep', got '%s'", step.FunctionName)
 		}
 
 		if step.Error != nil {
@@ -1915,7 +1925,7 @@ func TestSleep(t *testing.T) {
 
 	t.Run("SleepCannotBeCalledOutsideWorkflow", func(t *testing.T) {
 		// Attempt to call Sleep outside of a workflow context
-		_, err := RunAsStep(executor, sleepStep, 1*time.Second)
+		_, err := dbosCtx.Sleep(1 * time.Second)
 		if err == nil {
 			t.Fatal("expected error when calling Sleep outside of workflow context, but got none")
 		}

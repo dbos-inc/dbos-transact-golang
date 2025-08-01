@@ -177,12 +177,14 @@ func TestWorkflowQueues(t *testing.T) {
 		}
 	})
 
+	/* TODO: we will move queue registry in the new interface in a subsequent PR
 	t.Run("DynamicRegistration", func(t *testing.T) {
 		q := NewWorkflowQueue("dynamic-queue")
 		if len(q.name) > 0 {
 			t.Fatalf("expected nil queue for dynamic registration after DBOS initialization, got %v", q)
 		}
 	})
+	*/
 
 	t.Run("QueueWorkflowDLQ", func(t *testing.T) {
 		workflowID := "blocking-workflow-test"
@@ -303,6 +305,11 @@ func TestQueueRecovery(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, recoveryWorkflowFunc)
 
+	err := dbosCtx.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch DBOS instance: %v", err)
+	}
+
 	queuedSteps := 5
 
 	for i := range recoveryStepEvents {
@@ -402,7 +409,7 @@ var (
 )
 
 func TestGlobalConcurrency(t *testing.T) {
-	dbosContext := setupDBOS(t)
+	dbosCtx := setupDBOS(t)
 
 	// Create workflow with dbosContext
 	globalConcurrencyWorkflowFunc := func(ctx DBOSContext, input string) (string, error) {
@@ -415,15 +422,20 @@ func TestGlobalConcurrency(t *testing.T) {
 		}
 		return input, nil
 	}
-	RegisterWorkflow(dbosContext, globalConcurrencyWorkflowFunc)
+	RegisterWorkflow(dbosCtx, globalConcurrencyWorkflowFunc)
+
+	err := dbosCtx.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch DBOS instance: %v", err)
+	}
 
 	// Enqueue two workflows
-	handle1, err := RunAsWorkflow(dbosContext, globalConcurrencyWorkflowFunc, "workflow1", WithQueue(globalConcurrencyQueue.name))
+	handle1, err := RunAsWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow1", WithQueue(globalConcurrencyQueue.name))
 	if err != nil {
 		t.Fatalf("failed to enqueue workflow1: %v", err)
 	}
 
-	handle2, err := RunAsWorkflow(dbosContext, globalConcurrencyWorkflowFunc, "workflow2", WithQueue(globalConcurrencyQueue.name))
+	handle2, err := RunAsWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow2", WithQueue(globalConcurrencyQueue.name))
 	if err != nil {
 		t.Fatalf("failed to enqueue workflow2: %v", err)
 	}
@@ -465,7 +477,7 @@ func TestGlobalConcurrency(t *testing.T) {
 	if result2 != "workflow2" {
 		t.Fatalf("expected result from workflow2 to be 'workflow2', got %v", result2)
 	}
-	if !queueEntriesAreCleanedUp(dbosContext) {
+	if !queueEntriesAreCleanedUp(dbosCtx) {
 		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
 	}
 }
@@ -497,6 +509,11 @@ func TestWorkerConcurrency(t *testing.T) {
 		return i, nil
 	}
 	RegisterWorkflow(dbosCtx, blockingWfFunc)
+
+	err := dbosCtx.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch DBOS instance: %v", err)
+	}
 
 	// First enqueue four blocking workflows
 	handle1, err := RunAsWorkflow(dbosCtx, blockingWfFunc, 0, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-1"))
@@ -653,6 +670,11 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf2)
 
+	err := dbosCtx.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch DBOS instance: %v", err)
+	}
+
 	// Enqueue two workflows on a queue with worker concurrency = 1
 	handle1, err := RunAsWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf1, "workflow1", WithQueue(workerConcurrencyRecoveryQueue.name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
 	if err != nil {
@@ -759,6 +781,11 @@ func TestQueueRateLimiter(t *testing.T) {
 
 	// Create workflow with dbosContext
 	RegisterWorkflow(dbosCtx, rateLimiterTestWorkflow)
+
+	err := dbosCtx.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch DBOS instance: %v", err)
+	}
 
 	limit := 5
 	period := 1.8

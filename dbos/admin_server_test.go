@@ -11,26 +11,26 @@ import (
 )
 
 func TestAdminServer(t *testing.T) {
-	databaseURL := getDatabaseURL(t)
+	databaseURL := getDatabaseURL()
 
 	t.Run("Admin server is not started by default", func(t *testing.T) {
 
-		executor, err := NewDBOSContext(Config{
+		ctx, err := NewDBOSContext(Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 		})
 		if err != nil {
 			t.Skipf("Failed to initialize DBOS: %v", err)
 		}
-		err = executor.Launch()
+		err = ctx.Launch()
 		if err != nil {
 			t.Skipf("Failed to initialize DBOS: %v", err)
 		}
 
 		// Ensure cleanup
 		defer func() {
-			if executor != nil {
-				executor.Shutdown()
+			if ctx != nil {
+				ctx.Shutdown()
 			}
 		}()
 
@@ -45,11 +45,11 @@ func TestAdminServer(t *testing.T) {
 		}
 
 		// Verify the DBOS executor doesn't have an admin server instance
-		if executor == nil {
+		if ctx == nil {
 			t.Fatal("Expected DBOS instance to be created")
 		}
 
-		exec := executor.(*dbosContext)
+		exec := ctx.(*dbosContext)
 		if exec.adminServer != nil {
 			t.Error("Expected admin server to be nil when not configured")
 		}
@@ -60,7 +60,7 @@ func TestAdminServer(t *testing.T) {
 		// (This will be handled by the individual executor cleanup)
 
 		// Launch DBOS with admin server once for all endpoint tests
-		executor, err := NewDBOSContext(Config{
+		ctx, err := NewDBOSContext(Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 			AdminServer: true,
@@ -68,15 +68,15 @@ func TestAdminServer(t *testing.T) {
 		if err != nil {
 			t.Skipf("Failed to initialize DBOS with admin server: %v", err)
 		}
-		err = executor.Launch()
+		err = ctx.Launch()
 		if err != nil {
 			t.Skipf("Failed to initialize DBOS with admin server: %v", err)
 		}
 
 		// Ensure cleanup
 		defer func() {
-			if executor != nil {
-				executor.Shutdown()
+			if ctx != nil {
+				ctx.Shutdown()
 			}
 		}()
 
@@ -84,11 +84,11 @@ func TestAdminServer(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		// Verify the DBOS executor has an admin server instance
-		if executor == nil {
+		if ctx == nil {
 			t.Fatal("Expected DBOS instance to be created")
 		}
 
-		exec := executor.(*dbosContext)
+		exec := ctx.(*dbosContext)
 		if exec.adminServer == nil {
 			t.Fatal("Expected admin server to be created in DBOS instance")
 		}
