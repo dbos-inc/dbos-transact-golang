@@ -335,7 +335,7 @@ func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[
 		}
 
 		opts = append(opts, withWorkflowName(fqn)) // Append the name so dbosCtx.RunAsWorkflow can look it up from the registry to apply registration-time options
-		handle, err := dbosCtx.RunAsWorkflow(ctx, typedErasedWorkflow, typedInput, opts...)
+		handle, err := ctx.RunAsWorkflow(ctx, typedErasedWorkflow, typedInput, opts...)
 		if err != nil {
 			return nil, err
 		}
