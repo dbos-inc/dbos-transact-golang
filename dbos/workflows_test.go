@@ -1493,7 +1493,8 @@ func TestSendRecv(t *testing.T) {
 }
 
 var (
-	setEventIdempotencyEvent      = NewEvent()
+	setEventStartIdempotencyEvent = NewEvent()
+	setEvenStopIdempotencyEvent   = NewEvent()
 	getEventStartIdempotencyEvent = NewEvent()
 	getEventStopIdempotencyEvent  = NewEvent()
 	setSecondEventSignal          = NewEvent()
@@ -1548,7 +1549,8 @@ func setEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (
 	if err != nil {
 		return "", err
 	}
-	setEventIdempotencyEvent.Wait()
+	setEventStartIdempotencyEvent.Set()
+	setEvenStopIdempotencyEvent.Wait()
 	return "idempotent-set-completed", nil
 }
 
@@ -1751,9 +1753,11 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("failed to start get event idempotency workflow: %v", err)
 		}
 
-		// Wait for the get event workflow to signal it has received the event
+		// Wait for the workflows to signal it has received the event
 		getEventStartIdempotencyEvent.Wait()
 		getEventStartIdempotencyEvent.Clear()
+		setEventStartIdempotencyEvent.Wait()
+		setEventStartIdempotencyEvent.Clear()
 
 		// Attempt recovering both workflows. Each should have exactly 1 step.
 		recoveredHandles, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
@@ -1765,6 +1769,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		getEventStartIdempotencyEvent.Wait()
+		setEventStartIdempotencyEvent.Wait()
 
 		// Verify step counts
 		setSteps, err := executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), setHandle.GetWorkflowID())
@@ -1784,7 +1789,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Complete the workflows
-		setEventIdempotencyEvent.Set()
+		setEvenStopIdempotencyEvent.Set()
 		getEventStopIdempotencyEvent.Set()
 
 		setResult, err := setHandle.GetResult()
@@ -1801,6 +1806,29 @@ func TestSetGetEvent(t *testing.T) {
 		}
 		if getResult != "idempotency-message" {
 			t.Fatalf("expected result to be 'idempotency-message', got '%s'", getResult)
+		}
+
+		// Check the recovered handle returns the same result
+		for _, recoveredHandle := range recoveredHandles {
+			if recoveredHandle.GetWorkflowID() == setHandle.GetWorkflowID() {
+				recoveredSetResult, err := recoveredHandle.GetResult()
+				if err != nil {
+					t.Fatalf("failed to get result from recovered set event idempotency workflow: %v", err)
+				}
+				if recoveredSetResult != "idempotent-set-completed" {
+					t.Fatalf("expected recovered result to be 'idempotent-set-completed', got '%s'", recoveredSetResult)
+
+				}
+			}
+			if recoveredHandle.GetWorkflowID() == getHandle.GetWorkflowID() {
+				recoveredGetResult, err := recoveredHandle.GetResult()
+				if err != nil {
+					t.Fatalf("failed to get result from recovered get event idempotency workflow: %v", err)
+				}
+				if recoveredGetResult != "idempotency-message" {
+					t.Fatalf("expected recovered result to be 'idempotency-message', got '%s'", recoveredGetResult)
+				}
+			}
 		}
 	})
 
