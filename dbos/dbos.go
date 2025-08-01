@@ -276,11 +276,18 @@ func (c *dbosContext) Launch() error {
 }
 
 func (c *dbosContext) Shutdown() {
+	if !c.launched {
+		logger.Warn("DBOS is not launched, nothing to shutdown")
+		return
+	}
+
 	// Wait for all workflows to finish
+	getLogger().Info("Waiting for all workflows to finish")
 	c.workflowsWg.Wait()
 
 	// Cancel the context to stop the queue runner
 	if c.queueRunnerCancelFunc != nil {
+		getLogger().Info("Stopping queue runner")
 		c.queueRunnerCancelFunc()
 		// Wait for queue runner to finish
 		<-c.queueRunnerDone
@@ -288,6 +295,7 @@ func (c *dbosContext) Shutdown() {
 	}
 
 	if c.workflowScheduler != nil {
+		getLogger().Info("Stopping workflow scheduler")
 		ctx := c.workflowScheduler.Stop()
 		// Wait for all running jobs to complete with 5-second timeout
 		timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -302,11 +310,13 @@ func (c *dbosContext) Shutdown() {
 	}
 
 	if c.systemDB != nil {
+		getLogger().Info("Shutting down system database")
 		c.systemDB.Shutdown()
 		c.systemDB = nil
 	}
 
 	if c.adminServer != nil {
+		getLogger().Info("Shutting down admin server")
 		err := c.adminServer.Shutdown()
 		if err != nil {
 			getLogger().Error("Failed to shutdown admin server", "error", err)
