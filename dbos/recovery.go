@@ -24,7 +24,6 @@ func recoverPendingWorkflows(dbosCtx *dbosContext, executorIDs []string) ([]Work
 			}
 		}
 
-		// fmt.Println("Recovering workflow:", workflow.ID, "Name:", workflow.Name, "Input:", workflow.Input, "QueueName:", workflow.QueueName)
 		if workflow.QueueName != "" {
 			cleared, err := dbosCtx.systemDB.ClearQueueAssignment(dbosCtx.ctx, workflow.ID)
 			if err != nil {
@@ -47,14 +46,6 @@ func recoverPendingWorkflows(dbosCtx *dbosContext, executorIDs []string) ([]Work
 		opts := []WorkflowOption{
 			WithWorkflowID(workflow.ID),
 		}
-		// XXX we'll figure out the exact timeout/deadline settings later
-		if workflow.Timeout != 0 {
-			opts = append(opts, WithTimeout(workflow.Timeout))
-		}
-		if !workflow.Deadline.IsZero() {
-			opts = append(opts, WithDeadline(workflow.Deadline))
-		}
-
 		// Create a workflow context from the executor context
 		handle, err := registeredWorkflow.wrappedFunction(dbosCtx, workflow.Input, opts...)
 		if err != nil {
