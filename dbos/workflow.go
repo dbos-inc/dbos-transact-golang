@@ -320,7 +320,12 @@ func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[
 
 	// Register a type-erased version of the durable workflow for recovery
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
-		return fn(ctx, input.(P))
+		// This type check is redundant with the one in the wrapper, but I'd better be safe than sorry
+		typedInput, ok := input.(P)
+		if !ok {
+			return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
+		}
+		return fn(ctx, typedInput)
 	})
 
 	typeErasedWrapper := WrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
