@@ -481,7 +481,7 @@ func RunAsWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[P, 
 	return nil, fmt.Errorf("unexpected workflow handle type: %T", handle)
 }
 
-func (c *dbosContext) RunAsWorkflow(w_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
+func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 	// Apply options to build params
 	params := workflowParams{
 		applicationVersion: c.GetApplicationVersion(),
