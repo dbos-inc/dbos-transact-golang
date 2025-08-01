@@ -18,18 +18,8 @@ import (
 */
 
 // Builtin types
-func encodingStepBuiltinTypes(_ context.Context, input ...any) (int, error) {
-	if len(input) == 0 {
-		fmt.Println("No input provided to encodingStepBuiltinTypes")
-		return 0, errors.New("step error")
-	}
-	val, ok := input[0].(int)
-	fmt.Println("Input to encodingStepBuiltinTypes:", val, "ok:", ok)
-	if !ok {
-		return 0, errors.New("step error")
-	}
-	fmt.Println("Processing input in encodingStepBuiltinTypes:", val)
-	return val, errors.New("step error")
+func encodingStepBuiltinTypes(_ context.Context, input int) (int, error) {
+	return input, errors.New("step error")
 }
 
 func encodingWorkflowBuiltinTypes(ctx DBOSContext, input string) (string, error) {
@@ -65,16 +55,9 @@ func encodingWorkflowStruct(ctx DBOSContext, input WorkflowInputStruct) (StepOut
 	})
 }
 
-func encodingStepStruct(ctx context.Context, input ...any) (StepOutputStruct, error) {
-	if len(input) == 0 {
-		return StepOutputStruct{}, nil
-	}
-	stepInput, ok := input[0].(StepInputStruct)
-	if !ok {
-		return StepOutputStruct{}, nil
-	}
+func encodingStepStruct(ctx context.Context, input StepInputStruct) (StepOutputStruct, error) {
 	return StepOutputStruct{
-		A: stepInput,
+		A: input,
 		B: "processed by encodingStepStruct",
 	}, nil
 }

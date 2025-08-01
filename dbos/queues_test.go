@@ -44,15 +44,8 @@ func queueWorkflow(ctx DBOSContext, input string) (string, error) {
 	return step1, nil
 }
 
-func queueStep(ctx context.Context, input ...any) (string, error) {
-	if len(input) == 0 {
-		return "", nil
-	}
-	str, ok := input[0].(string)
-	if !ok {
-		return "", fmt.Errorf("expected string input, got %T", input[0])
-	}
-	return str, nil
+func queueStep(ctx context.Context, input string) (string, error) {
+	return input, nil
 }
 
 func TestWorkflowQueues(t *testing.T) {

@@ -35,12 +35,11 @@ func simpleWorkflowWithStep(dbosCtx DBOSContext, input string) (string, error) {
 	return RunAsStep(dbosCtx, simpleStep, input)
 }
 
-func simpleStep(ctx context.Context, input ...any) (string, error) {
-	fmt.Println("simpleStep called with input:", input)
+func simpleStep(ctx context.Context, input string) (string, error) {
 	return "from step", nil
 }
 
-func simpleStepError(ctx context.Context, input ...any) (string, error) {
+func simpleStepError(ctx context.Context, input string) (string, error) {
 	return "", fmt.Errorf("step failure")
 }
 
@@ -49,17 +48,8 @@ func simpleWorkflowWithStepError(dbosCtx DBOSContext, input string) (string, err
 }
 
 // idempotencyWorkflow increments a global counter and returns the input
-func incrementCounter(_ context.Context, value ...any) (int64, error) {
-	if len(value) == 0 {
-		return 0, fmt.Errorf("expected int64 value")
-	}
-	val, ok := value[0].(int64)
-	if !ok {
-		return 0, fmt.Errorf("expected int64, got %T", value[0])
-	}
-	fmt.Println("incrementCounter called with value:", val)
-	idempotencyCounter += val
-	fmt.Println("Current idempotency counter:", idempotencyCounter)
+func incrementCounter(_ context.Context, value int64) (int64, error) {
+	idempotencyCounter += value
 	return idempotencyCounter, nil
 }
 
@@ -299,8 +289,8 @@ func TestWorkflowsRegistration(t *testing.T) {
 	}
 }
 
-func stepWithinAStep(ctx context.Context, input ...any) (string, error) {
-	return simpleStep(ctx, input...)
+func stepWithinAStep(ctx context.Context, input string) (string, error) {
+	return simpleStep(ctx, input)
 }
 
 func stepWithinAStepWorkflow(dbosCtx DBOSContext, input string) (string, error) {
@@ -310,20 +300,15 @@ func stepWithinAStepWorkflow(dbosCtx DBOSContext, input string) (string, error) 
 // Global counter for retry testing
 var stepRetryAttemptCount int
 
-func stepRetryAlwaysFailsStep(ctx context.Context, input ...any) (string, error) {
+func stepRetryAlwaysFailsStep(ctx context.Context, input string) (string, error) {
 	stepRetryAttemptCount++
 	return "", fmt.Errorf("always fails - attempt %d", stepRetryAttemptCount)
 }
 
 var stepIdempotencyCounter int
 
-func stepIdempotencyTest(ctx context.Context, input ...any) (string, error) {
+func stepIdempotencyTest(ctx context.Context, input int) (string, error) {
 	stepIdempotencyCounter++
-	if len(input) > 0 {
-		if str, ok := input[0].(string); ok {
-			return str, nil
-		}
-	}
 	return "", nil
 }
 
@@ -335,7 +320,7 @@ func stepRetryWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 		MaxInterval:  10 * time.Millisecond,
 	})
 
-	return RunAsStep[string](stepCtx, stepRetryAlwaysFailsStep, input)
+	return RunAsStep(stepCtx, stepRetryAlwaysFailsStep, input)
 }
 
 // TODO: step params
@@ -574,7 +559,7 @@ func idempotencyWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 
 var blockingStepStopEvent *Event
 
-func blockingStep(ctx context.Context, input ...any) (string, error) {
+func blockingStep(ctx context.Context, input string) (string, error) {
 	blockingStepStopEvent.Wait()
 	return "", nil
 }
@@ -617,6 +602,10 @@ func TestWorkflowIdempotency(t *testing.T) {
 		result2, err := handle2.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from second execution: %v", err)
+		}
+
+		if handle1.GetWorkflowID() != handle2.GetWorkflowID() {
+			t.Fatalf("expected both handles to represent the same workflow ID, got %s and %s", handle2.GetWorkflowID(), handle1.GetWorkflowID())
 		}
 
 		// Verify the second handle is a polling handle
@@ -751,7 +740,6 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Start a workflow that blocks forever
 		wfID := uuid.NewString()
-		fmt.Println(wfID)
 		handle, err := RunAsWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		if err != nil {
 			t.Fatalf("failed to start dead letter queue workflow: %v", err)
@@ -1089,17 +1077,10 @@ func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 	return msg, nil
 }
 
-func stepThatCallsSend(ctx context.Context, input ...any) (string, error) {
-	if len(input) == 0 {
-		return "", fmt.Errorf("expected sendWorkflowInput")
-	}
-	i, ok := input[0].(sendWorkflowInput)
-	if !ok {
-		return "", fmt.Errorf("expected sendWorkflowInput, got %T", input[0])
-	}
+func stepThatCallsSend(ctx context.Context, input sendWorkflowInput) (string, error) {
 	err := Send(ctx.(DBOSContext), WorkflowSendInput[string]{
-		DestinationID: i.DestinationID,
-		Topic:         i.Topic,
+		DestinationID: input.DestinationID,
+		Topic:         input.Topic,
 		Message:       "message-from-step",
 	})
 	if err != nil {
@@ -1948,6 +1929,11 @@ func TestSleep(t *testing.T) {
 		}
 
 		sleepStopEvent.Set()
+
+		_, err = handle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get sleep workflow result: %v", err)
+		}
 	})
 
 	t.Run("SleepCannotBeCalledOutsideWorkflow", func(t *testing.T) {
