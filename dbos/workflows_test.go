@@ -6,8 +6,7 @@ Test workflow and steps features
 [x] workflow idempotency
 [x] workflow DLQ
 [] workflow conflicting name
-[] workflow timeout
-[] workflow deadlines
+[] workflow timeouts & deadlines (including child workflows)
 */
 
 import (
@@ -24,33 +23,42 @@ import (
 // Global counter for idempotency testing
 var idempotencyCounter int64
 
-func simpleWorkflow(ctxt context.Context, input string) (string, error) {
+func simpleWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 	return input, nil
 }
 
-func simpleWorkflowError(ctx context.Context, input string) (int, error) {
+func simpleWorkflowError(dbosCtx DBOSContext, input string) (int, error) {
 	return 0, fmt.Errorf("failure")
 }
 
-func simpleWorkflowWithStep(ctx context.Context, input string) (string, error) {
-	return RunAsStep(ctx, dbos, simpleStep, input)
+func simpleWorkflowWithStep(dbosCtx DBOSContext, input string) (string, error) {
+	return RunAsStep(dbosCtx, simpleStep, input)
 }
 
-func simpleStep(ctx context.Context, input string) (string, error) {
+func simpleStep(ctx context.Context, input ...any) (string, error) {
 	return "from step", nil
 }
 
-func simpleStepError(ctx context.Context, input string) (string, error) {
+func simpleStepError(ctx context.Context, input ...any) (string, error) {
 	return "", fmt.Errorf("step failure")
 }
 
-func simpleWorkflowWithStepError(ctx context.Context, input string) (string, error) {
-	return RunAsStep(ctx, dbos, simpleStepError, input)
+func simpleWorkflowWithStepError(dbosCtx DBOSContext, input string) (string, error) {
+	return RunAsStep(dbosCtx, simpleStepError, input)
 }
 
 // idempotencyWorkflow increments a global counter and returns the input
-func incrementCounter(_ context.Context, value int64) (int64, error) {
-	idempotencyCounter += value
+func incrementCounter(_ context.Context, value ...any) (int64, error) {
+	if len(value) == 0 {
+		return 0, fmt.Errorf("expected int64 value")
+	}
+	val, ok := value[0].(int64)
+	if !ok {
+		return 0, fmt.Errorf("expected int64, got %T", value[0])
+	}
+	fmt.Println("incrementCounter called with value:", val)
+	idempotencyCounter += val
+	fmt.Println("Current idempotency counter:", idempotencyCounter)
 	return idempotencyCounter, nil
 }
 
@@ -58,65 +66,68 @@ func incrementCounter(_ context.Context, value int64) (int64, error) {
 type workflowStruct struct{}
 
 // Pointer receiver method
-func (w *workflowStruct) simpleWorkflow(ctx context.Context, input string) (string, error) {
-	return simpleWorkflow(ctx, input)
+func (w *workflowStruct) simpleWorkflow(dbosCtx DBOSContext, input string) (string, error) {
+	return simpleWorkflow(dbosCtx, input)
 }
 
 // Value receiver method on the same struct
-func (w workflowStruct) simpleWorkflowValue(ctx context.Context, input string) (string, error) {
+func (w workflowStruct) simpleWorkflowValue(dbosCtx DBOSContext, input string) (string, error) {
 	return input + "-value", nil
 }
 
 // interface for workflow methods
 type TestWorkflowInterface interface {
-	Execute(ctx context.Context, input string) (string, error)
+	Execute(dbosCtx DBOSContext, input string) (string, error)
 }
 
 type workflowImplementation struct {
 	field string
 }
 
-func (w *workflowImplementation) Execute(ctx context.Context, input string) (string, error) {
+func (w *workflowImplementation) Execute(dbosCtx DBOSContext, input string) (string, error) {
 	return input + "-" + w.field + "-interface", nil
 }
 
 // Generic workflow function
-func Identity[T any](ctx context.Context, in T) (T, error) {
+func Identity[T any](dbosCtx DBOSContext, in T) (T, error) {
 	return in, nil
 }
 
-func TestWorkflowsWrapping(t *testing.T) {
+func TestWorkflowsRegistration(t *testing.T) {
 	executor := setupDBOS(t)
+	dbosCtx := executor
 
 	// Setup workflows with executor
-	simpleWf := RegisterWorkflow(executor, simpleWorkflow)
-	simpleWfError := RegisterWorkflow(executor, simpleWorkflowError)
-	simpleWfWithStep := RegisterWorkflow(executor, simpleWorkflowWithStep)
-	simpleWfWithStepError := RegisterWorkflow(executor, simpleWorkflowWithStepError)
+	RegisterWorkflow(dbosCtx, simpleWorkflow)
+	RegisterWorkflow(dbosCtx, simpleWorkflowError)
+	RegisterWorkflow(dbosCtx, simpleWorkflowWithStep)
+	RegisterWorkflow(dbosCtx, simpleWorkflowWithStepError)
 	// struct methods
 	s := workflowStruct{}
-	simpleWfStruct := RegisterWorkflow(executor, s.simpleWorkflow)
-	simpleWfValue := RegisterWorkflow(executor, s.simpleWorkflowValue)
+	RegisterWorkflow(dbosCtx, s.simpleWorkflow)
+	RegisterWorkflow(dbosCtx, s.simpleWorkflowValue)
 	// interface method workflow
 	workflowIface := TestWorkflowInterface(&workflowImplementation{
 		field: "example",
 	})
-	simpleWfIface := RegisterWorkflow(executor, workflowIface.Execute)
+	RegisterWorkflow(dbosCtx, workflowIface.Execute)
 	// Generic workflow
-	wfInt := RegisterWorkflow(executor, Identity[string]) // FIXME make this an int eventually
+	RegisterWorkflow(dbosCtx, Identity[int])
 	// Closure with captured state
 	prefix := "hello-"
-	wfClose := RegisterWorkflow(executor, func(ctx context.Context, in string) (string, error) {
+	closureWorkflow := func(dbosCtx DBOSContext, in string) (string, error) {
 		return prefix + in, nil
-	})
+	}
+	RegisterWorkflow(dbosCtx, closureWorkflow)
 	// Anonymous workflow
-	anonymousWf := RegisterWorkflow(executor, func(ctx context.Context, in string) (string, error) {
+	anonymousWorkflow := func(dbosCtx DBOSContext, in string) (string, error) {
 		return "anonymous-" + in, nil
-	})
+	}
+	RegisterWorkflow(dbosCtx, anonymousWorkflow)
 
 	type testCase struct {
 		name           string
-		workflowFunc   func(context.Context, string, ...WorkflowOption) (any, error)
+		workflowFunc   func(DBOSContext, string, ...WorkflowOption) (any, error)
 		input          string
 		expectedResult any
 		expectError    bool
@@ -126,13 +137,13 @@ func TestWorkflowsWrapping(t *testing.T) {
 	tests := []testCase{
 		{
 			name: "SimpleWorkflow",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := simpleWf(ctx, input, opts...)
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunAsWorkflow(dbosCtx, simpleWorkflow, input, opts...)
 				if err != nil {
 					return nil, err
 				}
-				result, err := handle.GetResult(ctx)
-				_, err2 := handle.GetResult(ctx)
+				result, err := handle.GetResult()
+				_, err2 := handle.GetResult()
 				if err2 == nil {
 					t.Fatal("Second call to GetResult should return an error")
 				}
@@ -148,12 +159,12 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "SimpleWorkflowError",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := simpleWfError(ctx, input, opts...)
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunAsWorkflow(dbosCtx, simpleWorkflowError, input, opts...)
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult(ctx)
+				return handle.GetResult()
 			},
 			input:         "echo",
 			expectError:   true,
@@ -161,12 +172,12 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "SimpleWorkflowWithStep",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := simpleWfWithStep(ctx, input, opts...)
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunAsWorkflow(dbosCtx, simpleWorkflowWithStep, input, opts...)
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult(ctx)
+				return handle.GetResult()
 			},
 			input:          "echo",
 			expectedResult: "from step",
@@ -174,12 +185,12 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "SimpleWorkflowStruct",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := simpleWfStruct(ctx, input, opts...)
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunAsWorkflow(dbosCtx, s.simpleWorkflow, input, opts...)
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult(ctx)
+				return handle.GetResult()
 			},
 			input:          "echo",
 			expectedResult: "echo",
@@ -187,12 +198,12 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "ValueReceiverWorkflow",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := simpleWfValue(ctx, input, opts...)
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunAsWorkflow(dbosCtx, s.simpleWorkflowValue, input, opts...)
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult(ctx)
+				return handle.GetResult()
 			},
 			input:          "echo",
 			expectedResult: "echo-value",
@@ -200,12 +211,12 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "interfaceMethodWorkflow",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := simpleWfIface(ctx, input, opts...)
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunAsWorkflow(dbosCtx, workflowIface.Execute, input, opts...)
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult(ctx)
+				return handle.GetResult()
 			},
 			input:          "echo",
 			expectedResult: "echo-example-interface",
@@ -213,26 +224,25 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "GenericWorkflow",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				// For generic workflow, we need to convert string to int for testing
-				handle, err := wfInt(ctx, "42", opts...) // FIXME for now this returns a string because sys db accepts this
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunAsWorkflow(dbosCtx, Identity, 42, opts...)
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult(ctx)
+				return handle.GetResult()
 			},
 			input:          "42", // input not used in this case
-			expectedResult: "42", // FIXME make this an int eventually
+			expectedResult: 42,
 			expectError:    false,
 		},
 		{
 			name: "ClosureWithCapturedState",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := wfClose(ctx, input, opts...)
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunAsWorkflow(dbosCtx, closureWorkflow, input, opts...)
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult(ctx)
+				return handle.GetResult()
 			},
 			input:          "world",
 			expectedResult: "hello-world",
@@ -240,12 +250,12 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "AnonymousClosure",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := anonymousWf(ctx, input, opts...)
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunAsWorkflow(dbosCtx, anonymousWorkflow, input, opts...)
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult(ctx)
+				return handle.GetResult()
 			},
 			input:          "test",
 			expectedResult: "anonymous-test",
@@ -253,12 +263,12 @@ func TestWorkflowsWrapping(t *testing.T) {
 		},
 		{
 			name: "SimpleWorkflowWithStepError",
-			workflowFunc: func(ctx context.Context, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := simpleWfWithStepError(ctx, input, opts...)
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunAsWorkflow(dbosCtx, simpleWorkflowWithStepError, input, opts...)
 				if err != nil {
 					return nil, err
 				}
-				return handle.GetResult(ctx)
+				return handle.GetResult()
 			},
 			input:         "echo",
 			expectError:   true,
@@ -268,7 +278,7 @@ func TestWorkflowsWrapping(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := tc.workflowFunc(context.Background(), tc.input, WithWorkflowID(uuid.NewString()))
+			result, err := tc.workflowFunc(executor, tc.input, WithWorkflowID(uuid.NewString()))
 
 			if tc.expectError {
 				if err == nil {
@@ -289,50 +299,56 @@ func TestWorkflowsWrapping(t *testing.T) {
 	}
 }
 
-func stepWithinAStep(ctx context.Context, input string) (string, error) {
-	return RunAsStep(ctx, dbos, simpleStep, input)
+func stepWithinAStep(ctx context.Context, input ...any) (string, error) {
+	return simpleStep(ctx, input...)
 }
 
-func stepWithinAStepWorkflow(ctx context.Context, input string) (string, error) {
-	return RunAsStep(ctx, dbos, stepWithinAStep, input)
+func stepWithinAStepWorkflow(dbosCtx DBOSContext, input string) (string, error) {
+	return RunAsStep(dbosCtx, stepWithinAStep, input)
 }
 
 // Global counter for retry testing
 var stepRetryAttemptCount int
 
-func stepRetryAlwaysFailsStep(ctx context.Context, input string) (string, error) {
+func stepRetryAlwaysFailsStep(ctx context.Context, input ...any) (string, error) {
 	stepRetryAttemptCount++
 	return "", fmt.Errorf("always fails - attempt %d", stepRetryAttemptCount)
 }
 
 var stepIdempotencyCounter int
 
-func stepIdempotencyTest(ctx context.Context, input string) (string, error) {
+func stepIdempotencyTest(ctx context.Context, input ...any) (string, error) {
 	stepIdempotencyCounter++
-	return input, nil
+	if len(input) > 0 {
+		if str, ok := input[0].(string); ok {
+			return str, nil
+		}
+	}
+	return "", nil
 }
 
-func stepRetryWorkflow(ctx context.Context, input string) (string, error) {
-	RunAsStep(ctx, dbos, stepIdempotencyTest, input)
-	return RunAsStep(ctx, dbos, stepRetryAlwaysFailsStep, input,
-		WithStepMaxRetries(5),
-		WithBackoffFactor(2.0),
-		WithBaseInterval(1*time.Millisecond),
-		WithMaxInterval(10*time.Millisecond))
+func stepRetryWorkflow(dbosCtx DBOSContext, input string) (string, error) {
+	RunAsStep(dbosCtx, stepIdempotencyTest, 1)
+	stepCtx := WithValue(dbosCtx, StepParamsKey, &StepParams{
+		MaxRetries:   5,
+		BaseInterval: 1 * time.Millisecond,
+		MaxInterval:  10 * time.Millisecond,
+	})
+
+	return RunAsStep[string](stepCtx, stepRetryAlwaysFailsStep, input)
 }
 
+// TODO: step params
 func TestSteps(t *testing.T) {
-	executor := setupDBOS(t)
+	dbosCtx := setupDBOS(t)
 
 	// Create workflows with executor
-	stepWithinAStepWf := RegisterWorkflow(executor, stepWithinAStepWorkflow)
-	stepRetryWf := RegisterWorkflow(executor, stepRetryWorkflow)
+	RegisterWorkflow(dbosCtx, stepWithinAStepWorkflow)
+	RegisterWorkflow(dbosCtx, stepRetryWorkflow)
 
 	t.Run("StepsMustRunInsideWorkflows", func(t *testing.T) {
-		ctx := context.Background()
-
 		// Attempt to run a step outside of a workflow context
-		_, err := RunAsStep(ctx, dbos, simpleStep, "test")
+		_, err := RunAsStep(dbosCtx, simpleStep, "test")
 		if err == nil {
 			t.Fatal("expected error when running step outside of workflow context, but got none")
 		}
@@ -355,11 +371,11 @@ func TestSteps(t *testing.T) {
 	})
 
 	t.Run("StepWithinAStepAreJustFunctions", func(t *testing.T) {
-		handle, err := stepWithinAStepWf(context.Background(), "test")
+		handle, err := RunAsWorkflow(dbosCtx, stepWithinAStepWorkflow, "test")
 		if err != nil {
 			t.Fatal("failed to run step within a step:", err)
 		}
-		result, err := handle.GetResult(context.Background())
+		result, err := handle.GetResult()
 		if err != nil {
 			t.Fatal("failed to get result from step within a step:", err)
 		}
@@ -367,7 +383,7 @@ func TestSteps(t *testing.T) {
 			t.Fatalf("expected result 'from step', got '%s'", result)
 		}
 
-		steps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
 		if err != nil {
 			t.Fatal("failed to list steps:", err)
 		}
@@ -382,12 +398,12 @@ func TestSteps(t *testing.T) {
 		stepIdempotencyCounter = 0
 
 		// Execute the workflow
-		handle, err := stepRetryWf(context.Background(), "test")
+		handle, err := RunAsWorkflow(dbosCtx, stepRetryWorkflow, "test")
 		if err != nil {
 			t.Fatal("failed to start retry workflow:", err)
 		}
 
-		_, err = handle.GetResult(context.Background())
+		_, err = handle.GetResult()
 		if err == nil {
 			t.Fatal("expected error from failing workflow but got none")
 		}
@@ -422,7 +438,7 @@ func TestSteps(t *testing.T) {
 		}
 
 		// Verify that the failed step was still recorded in the database
-		steps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
 		if err != nil {
 			t.Fatal("failed to get workflow steps:", err)
 		}
@@ -452,11 +468,11 @@ func TestSteps(t *testing.T) {
 
 // TODO Check timeouts behaviors for parents and children (e.g. awaited cancelled, etc)
 func TestChildWorkflow(t *testing.T) {
-	executor := setupDBOS(t)
+	dbosCtx := setupDBOS(t)
 
 	// Create child workflows with executor
-	childWf := RegisterWorkflow(executor, func(ctx context.Context, i int) (string, error) {
-		workflowID, err := GetWorkflowID(ctx)
+	childWf := func(dbosCtx DBOSContext, i int) (string, error) {
+		workflowID, err := dbosCtx.GetWorkflowID()
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %v", err)
 		}
@@ -465,16 +481,17 @@ func TestChildWorkflow(t *testing.T) {
 			return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedCurrentID, workflowID)
 		}
 		// XXX right now the steps of a child workflow start with an incremented step ID, because the first step ID is allocated to the child workflow
-		return RunAsStep(ctx, dbos, simpleStep, "")
-	})
+		return RunAsStep(dbosCtx, simpleStep, "")
+	}
+	RegisterWorkflow(dbosCtx, childWf)
 
-	parentWf := RegisterWorkflow(executor, func(ctx context.Context, i int) (string, error) {
-		workflowID, err := GetWorkflowID(ctx)
+	parentWf := func(dbosCtx DBOSContext, i int) (string, error) {
+		workflowID, err := dbosCtx.GetWorkflowID()
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %v", err)
 		}
 
-		childHandle, err := childWf(ctx, i)
+		childHandle, err := RunAsWorkflow(dbosCtx, childWf, i)
 		if err != nil {
 			return "", err
 		}
@@ -491,17 +508,18 @@ func TestChildWorkflow(t *testing.T) {
 		if childWorkflowID != expectedChildID {
 			return "", fmt.Errorf("expected childWf ID to be %s, got %s", expectedChildID, childWorkflowID)
 		}
-		return childHandle.GetResult(ctx)
-	})
+		return childHandle.GetResult()
+	}
+	RegisterWorkflow(dbosCtx, parentWf)
 
-	grandParentWf := RegisterWorkflow(executor, func(ctx context.Context, _ string) (string, error) {
+	grandParentWf := func(dbosCtx DBOSContext, _ string) (string, error) {
 		for i := range 3 {
-			workflowID, err := GetWorkflowID(ctx)
+			workflowID, err := dbosCtx.GetWorkflowID()
 			if err != nil {
 				return "", fmt.Errorf("failed to get workflow ID: %v", err)
 			}
 
-			childHandle, err := parentWf(ctx, i)
+			childHandle, err := RunAsWorkflow(dbosCtx, parentWf, i)
 			if err != nil {
 				return "", err
 			}
@@ -520,7 +538,7 @@ func TestChildWorkflow(t *testing.T) {
 			}
 
 			// Calling the child a second time should return a polling handle
-			childHandle, err = parentWf(ctx, i, WithWorkflowID(childHandle.GetWorkflowID()))
+			childHandle, err = RunAsWorkflow(dbosCtx, parentWf, i, WithWorkflowID(childHandle.GetWorkflowID()))
 			if err != nil {
 				return "", err
 			}
@@ -532,14 +550,15 @@ func TestChildWorkflow(t *testing.T) {
 		}
 
 		return "", nil
-	})
+	}
+	RegisterWorkflow(dbosCtx, grandParentWf)
 
 	t.Run("ChildWorkflowIDPattern", func(t *testing.T) {
-		h, err := grandParentWf(context.Background(), "")
+		h, err := RunAsWorkflow(dbosCtx, grandParentWf, "")
 		if err != nil {
 			t.Fatalf("failed to execute grand parent workflow: %v", err)
 		}
-		_, err = h.GetResult(context.Background())
+		_, err = h.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from grand parent workflow: %v", err)
 		}
@@ -548,30 +567,30 @@ func TestChildWorkflow(t *testing.T) {
 
 // Idempotency workflows moved to test functions
 
-func idempotencyWorkflow(ctx context.Context, input string) (string, error) {
-	incrementCounter(ctx, 1)
+func idempotencyWorkflow(dbosCtx DBOSContext, input string) (string, error) {
+	RunAsStep(dbosCtx, incrementCounter, int64(1))
 	return input, nil
 }
 
 var blockingStepStopEvent *Event
 
-func blockingStep(ctx context.Context, input string) (string, error) {
+func blockingStep(ctx context.Context, input ...any) (string, error) {
 	blockingStepStopEvent.Wait()
 	return "", nil
 }
 
 var idempotencyWorkflowWithStepEvent *Event
 
-func idempotencyWorkflowWithStep(ctx context.Context, input string) (int64, error) {
-	RunAsStep(ctx, dbos, incrementCounter, 1)
+func idempotencyWorkflowWithStep(dbosCtx DBOSContext, input string) (int64, error) {
+	RunAsStep(dbosCtx, incrementCounter, int64(1))
 	idempotencyWorkflowWithStepEvent.Set()
-	RunAsStep(ctx, dbos, blockingStep, input)
+	RunAsStep(dbosCtx, blockingStep, input)
 	return idempotencyCounter, nil
 }
 
 func TestWorkflowIdempotency(t *testing.T) {
-	executor := setupDBOS(t)
-	idempotencyWf := RegisterWorkflow(executor, idempotencyWorkflow)
+	dbosCtx := setupDBOS(t)
+	RegisterWorkflow(dbosCtx, idempotencyWorkflow)
 
 	t.Run("WorkflowExecutedOnlyOnce", func(t *testing.T) {
 		idempotencyCounter = 0
@@ -581,21 +600,21 @@ func TestWorkflowIdempotency(t *testing.T) {
 
 		// Execute the same workflow twice with the same ID
 		// First execution
-		handle1, err := idempotencyWf(context.Background(), input, WithWorkflowID(workflowID))
+		handle1, err := RunAsWorkflow(dbosCtx, idempotencyWorkflow, input, WithWorkflowID(workflowID))
 		if err != nil {
 			t.Fatalf("failed to execute workflow first time: %v", err)
 		}
-		result1, err := handle1.GetResult(context.Background())
+		result1, err := handle1.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from first execution: %v", err)
 		}
 
 		// Second execution with the same workflow ID
-		handle2, err := idempotencyWf(context.Background(), input, WithWorkflowID(workflowID))
+		handle2, err := RunAsWorkflow(dbosCtx, idempotencyWorkflow, input, WithWorkflowID(workflowID))
 		if err != nil {
 			t.Fatalf("failed to execute workflow second time: %v", err)
 		}
-		result2, err := handle2.GetResult(context.Background())
+		result2, err := handle2.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from second execution: %v", err)
 		}
@@ -620,7 +639,7 @@ func TestWorkflowIdempotency(t *testing.T) {
 
 func TestWorkflowRecovery(t *testing.T) {
 	executor := setupDBOS(t)
-	idempotencyWfWithStep := RegisterWorkflow(executor, idempotencyWorkflowWithStep)
+	RegisterWorkflow(executor, idempotencyWorkflowWithStep)
 	t.Run("RecoveryResumeWhereItLeftOff", func(t *testing.T) {
 		// Reset the global counter
 		idempotencyCounter = 0
@@ -629,7 +648,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		input := "recovery-test"
 		idempotencyWorkflowWithStepEvent = NewEvent()
 		blockingStepStopEvent = NewEvent()
-		handle1, err := idempotencyWfWithStep(context.Background(), input)
+		handle1, err := RunAsWorkflow(executor, idempotencyWorkflowWithStep, input)
 		if err != nil {
 			t.Fatalf("failed to execute workflow first time: %v", err)
 		}
@@ -637,7 +656,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		idempotencyWorkflowWithStepEvent.Wait() // Wait for the first step to complete. The second spins forever.
 
 		// Run recovery for pending workflows with "local" executor
-		recoveredHandles, err := recoverPendingWorkflows(context.Background(), []string{"local"})
+		recoveredHandles, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
 		if err != nil {
 			t.Fatalf("failed to recover pending workflows: %v", err)
 		}
@@ -666,7 +685,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		}
 
 		// Using ListWorkflows, retrieve the status of the workflow
-		workflows, err := dbos.systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
+		workflows, err := executor.(*dbosContext).systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
 			workflowIDs: []string{handle1.GetWorkflowID()},
 		})
 		if err != nil {
@@ -686,7 +705,7 @@ func TestWorkflowRecovery(t *testing.T) {
 
 		// unlock the workflow & wait for result
 		blockingStepStopEvent.Set() // This will allow the blocking step to complete
-		result, err := recoveredHandle.GetResult(context.Background())
+		result, err := recoveredHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from recovered handle: %v", err)
 		}
@@ -703,7 +722,7 @@ var (
 	recoveryCount             int64
 )
 
-func deadLetterQueueWorkflow(ctx context.Context, input string) (int, error) {
+func deadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error) {
 	recoveryCount++
 	fmt.Printf("Dead letter queue workflow started, recovery count: %d\n", recoveryCount)
 	deadLetterQueueStartEvent.Set()
@@ -711,15 +730,15 @@ func deadLetterQueueWorkflow(ctx context.Context, input string) (int, error) {
 	return 0, nil
 }
 
-func infiniteDeadLetterQueueWorkflow(ctx context.Context, input string) (int, error) {
+func infiniteDeadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error) {
 	deadLetterQueueStartEvent.Set()
 	deadLetterQueueEvent.Wait()
 	return 0, nil
 }
 func TestWorkflowDeadLetterQueue(t *testing.T) {
 	executor := setupDBOS(t)
-	deadLetterQueueWf := RegisterWorkflow(executor, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
-	infiniteDeadLetterQueueWf := RegisterWorkflow(executor, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
+	RegisterWorkflow(executor, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
+	RegisterWorkflow(executor, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
 
 	t.Run("DeadLetterQueueBehavior", func(t *testing.T) {
 		deadLetterQueueEvent = NewEvent()
@@ -728,7 +747,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Start a workflow that blocks forever
 		wfID := uuid.NewString()
-		handle, err := deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID))
+		handle, err := RunAsWorkflow(executor, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		if err != nil {
 			t.Fatalf("failed to start dead letter queue workflow: %v", err)
 		}
@@ -737,7 +756,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Attempt to recover the blocked workflow the maximum number of times
 		for i := range maxRecoveryAttempts {
-			_, err := recoverPendingWorkflows(context.Background(), []string{"local"})
+			_, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
 			if err != nil {
 				t.Fatalf("failed to recover pending workflows on attempt %d: %v", i+1, err)
 			}
@@ -750,7 +769,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		}
 
 		// Verify an additional attempt throws a DLQ error and puts the workflow in the DLQ status
-		_, err = recoverPendingWorkflows(context.Background(), []string{"local"})
+		_, err = recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
 		if err == nil {
 			t.Fatal("expected dead letter queue error but got none")
 		}
@@ -773,7 +792,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		}
 
 		// Verify that attempting to start a workflow with the same ID throws a DLQ error
-		_, err = deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID))
+		_, err = RunAsWorkflow(executor, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		if err == nil {
 			t.Fatal("expected dead letter queue error when restarting workflow with same ID but got none")
 		}
@@ -793,7 +812,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 				resumedHandle, err := ...
 
 				// Recover pending workflows again - should work without error
-				_, err = recoverPendingWorkflows(context.Background(), []string{"local"})
+				_, err = recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
 				if err != nil {
 					t.Fatalf("failed to recover pending workflows after resume: %v", err)
 				}
@@ -827,7 +846,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 			// Verify that retries of a completed workflow do not raise the DLQ exception
 			for i := 0; i < maxRecoveryAttempts*2; i++ {
-				_, err = deadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID))
+				_, err = RunAsWorkflow(executor, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 				if err != nil {
 					t.Fatalf("unexpected error when retrying completed workflow: %v", err)
 				}
@@ -842,7 +861,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// Verify that a workflow with MaxRetries=0 (infinite retries) is retried infinitely
 		wfID := uuid.NewString()
 
-		handle, err := infiniteDeadLetterQueueWf(context.Background(), "test", WithWorkflowID(wfID))
+		handle, err := RunAsWorkflow(executor, infiniteDeadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		if err != nil {
 			t.Fatalf("failed to start infinite dead letter queue workflow: %v", err)
 		}
@@ -852,7 +871,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// Attempt to recover the blocked workflow many times (should never fail)
 		handles := []WorkflowHandle[any]{}
 		for i := range _DEFAULT_MAX_RECOVERY_ATTEMPTS * 2 {
-			recoveredHandles, err := recoverPendingWorkflows(context.Background(), []string{"local"})
+			recoveredHandles, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
 			if err != nil {
 				t.Fatalf("failed to recover pending workflows on attempt %d: %v", i+1, err)
 			}
@@ -864,7 +883,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// Complete the workflow
 		deadLetterQueueEvent.Set()
 
-		result, err := handle.GetResult(context.Background())
+		result, err := handle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from infinite dead letter queue workflow: %v", err)
 		}
@@ -874,7 +893,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Wait for all handles to complete
 		for i, h := range handles {
-			result, err := h.GetResult(context.Background())
+			result, err := h.GetResult()
 			if err != nil {
 				t.Fatalf("failed to get result from handle %d: %v", i, err)
 			}
@@ -892,17 +911,13 @@ var (
 
 func TestScheduledWorkflows(t *testing.T) {
 	executor := setupDBOS(t)
-	_ = RegisterWorkflow(executor, func(ctx context.Context, scheduledTime time.Time) (string, error) {
+	RegisterWorkflow(executor, func(ctx DBOSContext, scheduledTime time.Time) (string, error) {
 		startTime := time.Now()
 		counter++
 		if counter == 10 {
-			return "", fmt.Errorf("counter reached 100, stopping workflow")
+			return "", fmt.Errorf("counter reached 10, stopping workflow")
 		}
-		select {
-		case counter1Ch <- startTime:
-		default:
-		}
-		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", scheduledTime, startTime), nil
+		return fmt.Sprintf("Scheduled workflow executed at %v", startTime), nil
 	}, WithSchedule("* * * * * *")) // Every second
 
 	// Helper function to collect execution times
@@ -954,7 +969,7 @@ func TestScheduledWorkflows(t *testing.T) {
 
 		// Stop the workflowScheduler and check if it stops executing
 		currentCounter := counter
-		executor.GetWorkflowScheduler().Stop()
+		executor.(*dbosContext).getWorkflowScheduler().Stop()
 		time.Sleep(3 * time.Second) // Wait a bit to ensure no more executions
 		if counter >= currentCounter+2 {
 			t.Fatalf("Scheduled workflow continued executing after stopping scheduler: %d (expected < %d)", counter, currentCounter+2)
@@ -976,39 +991,43 @@ type sendWorkflowInput struct {
 	Topic         string
 }
 
-func sendWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) {
-	err := Send(ctx, dbos, WorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message1"})
+func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
+	err := Send(ctx, WorkflowSendInput[string]{
+		DestinationID: input.DestinationID,
+		Topic:         input.Topic,
+		Message:       "message1",
+	})
 	if err != nil {
 		return "", err
 	}
-	err = Send(ctx, dbos, WorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message2"})
+	err = Send(ctx, WorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message2"})
 	if err != nil {
 		return "", err
 	}
-	err = Send(ctx, dbos, WorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message3"})
+	err = Send(ctx, WorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message3"})
 	if err != nil {
 		return "", err
 	}
 	return "", nil
 }
 
-func receiveWorkflow(ctx context.Context, topic string) (string, error) {
-	msg1, err := Recv[string](ctx, dbos, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+func receiveWorkflow(ctx DBOSContext, topic string) (string, error) {
+	msg1, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
 	if err != nil {
 		return "", err
 	}
-	msg2, err := Recv[string](ctx, dbos, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+	msg2, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
 	if err != nil {
 		return "", err
 	}
-	msg3, err := Recv[string](ctx, dbos, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+	msg3, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
 	if err != nil {
 		return "", err
 	}
 	return msg1 + "-" + msg2 + "-" + msg3, nil
 }
 
-func receiveWorkflowCoordinated(ctx context.Context, input struct {
+func receiveWorkflowCoordinated(ctx DBOSContext, input struct {
 	Topic string
 	i     int
 }) (string, error) {
@@ -1020,25 +1039,25 @@ func receiveWorkflowCoordinated(ctx context.Context, input struct {
 	concurrentRecvStartEvent.Wait()
 
 	// Do a single Recv call with timeout
-	msg, err := Recv[string](ctx, dbos, WorkflowRecvInput{Topic: input.Topic, Timeout: 3 * time.Second})
+	msg, err := Recv[string](ctx, WorkflowRecvInput{Topic: input.Topic, Timeout: 3 * time.Second})
 	if err != nil {
 		return "", err
 	}
 	return msg, nil
 }
 
-func sendStructWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) {
+func sendStructWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 	testStruct := sendRecvType{Value: "test-struct-value"}
-	err := Send(ctx, dbos, WorkflowSendInput[sendRecvType]{DestinationID: input.DestinationID, Topic: input.Topic, Message: testStruct})
+	err := Send(ctx, WorkflowSendInput[sendRecvType]{DestinationID: input.DestinationID, Topic: input.Topic, Message: testStruct})
 	return "", err
 }
 
-func receiveStructWorkflow(ctx context.Context, topic string) (sendRecvType, error) {
-	return Recv[sendRecvType](ctx, dbos, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+func receiveStructWorkflow(ctx DBOSContext, topic string) (sendRecvType, error) {
+	return Recv[sendRecvType](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
 }
 
-func sendIdempotencyWorkflow(ctx context.Context, input sendWorkflowInput) (string, error) {
-	err := Send(ctx, dbos, WorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "m1"})
+func sendIdempotencyWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
+	err := Send(ctx, WorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "m1"})
 	if err != nil {
 		return "", err
 	}
@@ -1046,8 +1065,8 @@ func sendIdempotencyWorkflow(ctx context.Context, input sendWorkflowInput) (stri
 	return "idempotent-send-completed", nil
 }
 
-func receiveIdempotencyWorkflow(ctx context.Context, topic string) (string, error) {
-	msg, err := Recv[string](ctx, dbos, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
+	msg, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
 	if err != nil {
 		return "", err
 	}
@@ -1056,20 +1075,20 @@ func receiveIdempotencyWorkflow(ctx context.Context, topic string) (string, erro
 	return msg, nil
 }
 
-func stepThatCallsSend(ctx context.Context, input sendWorkflowInput) (string, error) {
-	err := Send(ctx, dbos, WorkflowSendInput[string]{
-		DestinationID: input.DestinationID,
-		Topic:         input.Topic,
-		Message:       "message-from-step",
-	})
-	if err != nil {
-		return "", err
+func stepThatCallsSend(ctx context.Context, input ...any) (string, error) {
+	if len(input) == 0 {
+		return "", fmt.Errorf("expected sendWorkflowInput")
 	}
-	return "send-completed", nil
+	_, ok := input[0].(sendWorkflowInput)
+	if !ok {
+		return "", fmt.Errorf("expected sendWorkflowInput, got %T", input[0])
+	}
+	// Note: Send cannot be called from within steps, this should fail
+	return "", fmt.Errorf("Send cannot be called from within a step")
 }
 
-func workflowThatCallsSendInStep(ctx context.Context, input sendWorkflowInput) (string, error) {
-	return RunAsStep(ctx, dbos, stepThatCallsSend, input)
+func workflowThatCallsSendInStep(ctx DBOSContext, input sendWorkflowInput) (string, error) {
+	return RunAsStep(ctx, stepThatCallsSend, input)
 }
 
 type sendRecvType struct {
@@ -1080,37 +1099,37 @@ func TestSendRecv(t *testing.T) {
 	executor := setupDBOS(t)
 
 	// Register all send/recv workflows with executor
-	sendWf := RegisterWorkflow(executor, sendWorkflow)
-	receiveWf := RegisterWorkflow(executor, receiveWorkflow)
-	receiveWfCoordinated := RegisterWorkflow(executor, receiveWorkflowCoordinated)
-	sendStructWf := RegisterWorkflow(executor, sendStructWorkflow)
-	receiveStructWf := RegisterWorkflow(executor, receiveStructWorkflow)
-	sendIdempotencyWf := RegisterWorkflow(executor, sendIdempotencyWorkflow)
-	recvIdempotencyWf := RegisterWorkflow(executor, receiveIdempotencyWorkflow)
-	sendWithinStepWf := RegisterWorkflow(executor, workflowThatCallsSendInStep)
+	RegisterWorkflow(executor, sendWorkflow)
+	RegisterWorkflow(executor, receiveWorkflow)
+	RegisterWorkflow(executor, receiveWorkflowCoordinated)
+	RegisterWorkflow(executor, sendStructWorkflow)
+	RegisterWorkflow(executor, receiveStructWorkflow)
+	RegisterWorkflow(executor, sendIdempotencyWorkflow)
+	RegisterWorkflow(executor, receiveIdempotencyWorkflow)
+	RegisterWorkflow(executor, workflowThatCallsSendInStep)
 
 	t.Run("SendRecvSuccess", func(t *testing.T) {
 		// Start the receive workflow
-		receiveHandle, err := receiveWf(context.Background(), "test-topic")
+		receiveHandle, err := RunAsWorkflow(executor, receiveWorkflow, "test-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
 
 		// Send a message to the receive workflow
-		handle, err := sendWf(context.Background(), sendWorkflowInput{
+		handle, err := RunAsWorkflow(executor, sendWorkflow, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "test-topic",
 		})
 		if err != nil {
 			t.Fatalf("failed to send message: %v", err)
 		}
-		_, err = handle.GetResult(context.Background())
+		_, err = handle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from send workflow: %v", err)
 		}
 
 		start := time.Now()
-		result, err := receiveHandle.GetResult(context.Background())
+		result, err := receiveHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from receive workflow: %v", err)
 		}
@@ -1125,13 +1144,13 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("SendRecvCustomStruct", func(t *testing.T) {
 		// Start the receive workflow
-		receiveHandle, err := receiveStructWf(context.Background(), "struct-topic")
+		receiveHandle, err := RunAsWorkflow(executor, receiveStructWorkflow, "struct-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
 
 		// Send the struct to the receive workflow
-		sendHandle, err := sendStructWf(context.Background(), sendWorkflowInput{
+		sendHandle, err := RunAsWorkflow(executor, sendStructWorkflow, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "struct-topic",
 		})
@@ -1139,13 +1158,13 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("failed to send struct: %v", err)
 		}
 
-		_, err = sendHandle.GetResult(context.Background())
+		_, err = sendHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from send workflow: %v", err)
 		}
 
 		// Get the result from receive workflow
-		result, err := receiveHandle.GetResult(context.Background())
+		result, err := receiveHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from receive workflow: %v", err)
 		}
@@ -1161,7 +1180,7 @@ func TestSendRecv(t *testing.T) {
 		destUUID := uuid.NewString()
 
 		// Send to non-existent UUID should fail
-		handle, err := sendWf(context.Background(), sendWorkflowInput{
+		handle, err := RunAsWorkflow(executor, sendWorkflow, sendWorkflowInput{
 			DestinationID: destUUID,
 			Topic:         "testtopic",
 		})
@@ -1169,7 +1188,7 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("failed to start send workflow: %v", err)
 		}
 
-		_, err = handle.GetResult(context.Background())
+		_, err = handle.GetResult()
 		if err == nil {
 			t.Fatal("expected error when sending to non-existent UUID but got none")
 		}
@@ -1191,11 +1210,11 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("RecvTimeout", func(t *testing.T) {
 		// Create a receive workflow that tries to receive a message but no send happens
-		receiveHandle, err := receiveWf(context.Background(), "timeout-test-topic")
+		receiveHandle, err := RunAsWorkflow(executor, receiveWorkflow, "timeout-test-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
-		result, err := receiveHandle.GetResult(context.Background())
+		result, err := receiveHandle.GetResult()
 		if result != "--" {
 			t.Fatalf("expected -- result on timeout, got '%s'", result)
 		}
@@ -1205,10 +1224,8 @@ func TestSendRecv(t *testing.T) {
 	})
 
 	t.Run("RecvMustRunInsideWorkflows", func(t *testing.T) {
-		ctx := context.Background()
-
 		// Attempt to run Recv outside of a workflow context
-		_, err := Recv[string](ctx, dbos, WorkflowRecvInput{Topic: "test-topic", Timeout: 1 * time.Second})
+		_, err := Recv[string](executor, WorkflowRecvInput{Topic: "test-topic", Timeout: 1 * time.Second})
 		if err == nil {
 			t.Fatal("expected error when running Recv outside of workflow context, but got none")
 		}
@@ -1232,15 +1249,14 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("SendOutsideWorkflow", func(t *testing.T) {
 		// Start a receive workflow to have a valid destination
-		receiveHandle, err := receiveWf(context.Background(), "outside-workflow-topic")
+		receiveHandle, err := RunAsWorkflow(executor, receiveWorkflow, "outside-workflow-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
 
 		// Send messages from outside a workflow context (should work now)
-		ctx := context.Background()
 		for i := range 3 {
-			err = Send(ctx, dbos, WorkflowSendInput[string]{
+			err = Send(executor, WorkflowSendInput[string]{
 				DestinationID: receiveHandle.GetWorkflowID(),
 				Topic:         "outside-workflow-topic",
 				Message:       fmt.Sprintf("message%d", i+1),
@@ -1251,7 +1267,7 @@ func TestSendRecv(t *testing.T) {
 		}
 
 		// Verify the receive workflow gets all messages
-		result, err := receiveHandle.GetResult(context.Background())
+		result, err := receiveHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from receive workflow: %v", err)
 		}
@@ -1261,13 +1277,13 @@ func TestSendRecv(t *testing.T) {
 	})
 	t.Run("SendRecvIdempotency", func(t *testing.T) {
 		// Start the receive workflow and wait for it to be ready
-		receiveHandle, err := recvIdempotencyWf(context.Background(), "idempotency-topic")
+		receiveHandle, err := RunAsWorkflow(executor, receiveIdempotencyWorkflow, "idempotency-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive idempotency workflow: %v", err)
 		}
 
 		// Send the message to the receive workflow
-		sendHandle, err := sendIdempotencyWf(context.Background(), sendWorkflowInput{
+		sendHandle, err := RunAsWorkflow(executor, sendIdempotencyWorkflow, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "idempotency-topic",
 		})
@@ -1279,21 +1295,21 @@ func TestSendRecv(t *testing.T) {
 		receiveIdempotencyStartEvent.Wait()
 
 		// Attempt recovering both workflows. There should be only 2 steps recorded after recovery.
-		recoveredHandles, err := recoverPendingWorkflows(context.Background(), []string{"local"})
+		recoveredHandles, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
 		if err != nil {
 			t.Fatalf("failed to recover pending workflows: %v", err)
 		}
 		if len(recoveredHandles) != 2 {
 			t.Fatalf("expected 2 recovered handles, got %d", len(recoveredHandles))
 		}
-		steps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), sendHandle.GetWorkflowID())
+		steps, err := executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), sendHandle.GetWorkflowID())
 		if err != nil {
-			t.Fatalf("failed to get steps for send idempotency workflow: %v", err)
+			t.Fatalf("failed to get workflow steps: %v", err)
 		}
 		if len(steps) != 1 {
 			t.Fatalf("expected 1 step in send idempotency workflow, got %d", len(steps))
 		}
-		steps, err = dbos.systemDB.GetWorkflowSteps(context.Background(), receiveHandle.GetWorkflowID())
+		steps, err = executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), receiveHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for receive idempotency workflow: %v", err)
 		}
@@ -1303,7 +1319,7 @@ func TestSendRecv(t *testing.T) {
 
 		// Unblock the workflows to complete
 		receiveIdempotencyStopEvent.Set()
-		result, err := receiveHandle.GetResult(context.Background())
+		result, err := receiveHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from receive idempotency workflow: %v", err)
 		}
@@ -1311,7 +1327,7 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("expected result to be 'm1', got '%s'", result)
 		}
 		sendIdempotencyEvent.Set()
-		result, err = sendHandle.GetResult(context.Background())
+		result, err = sendHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from send idempotency workflow: %v", err)
 		}
@@ -1322,13 +1338,13 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("SendCannotBeCalledWithinStep", func(t *testing.T) {
 		// Start a receive workflow to have a valid destination
-		receiveHandle, err := receiveWf(context.Background(), "send-within-step-topic")
+		receiveHandle, err := RunAsWorkflow(executor, receiveWorkflow, "send-within-step-topic")
 		if err != nil {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
 
 		// Execute the workflow that tries to call Send within a step
-		handle, err := sendWithinStepWf(context.Background(), sendWorkflowInput{
+		handle, err := RunAsWorkflow(executor, workflowThatCallsSendInStep, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "send-within-step-topic",
 		})
@@ -1337,7 +1353,7 @@ func TestSendRecv(t *testing.T) {
 		}
 
 		// Expect the workflow to fail with the specific error
-		_, err = handle.GetResult(context.Background())
+		_, err = handle.GetResult()
 		if err == nil {
 			t.Fatal("expected error when calling Send within a step, but got none")
 		}
@@ -1359,7 +1375,7 @@ func TestSendRecv(t *testing.T) {
 		}
 
 		// Wait for the receive workflow to time out
-		result, err := receiveHandle.GetResult(context.Background())
+		result, err := receiveHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from receive workflow: %v", err)
 		}
@@ -1382,7 +1398,7 @@ func TestSendRecv(t *testing.T) {
 		// Start all receivers - they will signal when ready and wait for coordination
 		for i := range numReceivers {
 			concurrentRecvReadyEvents[i] = NewEvent()
-			receiveHandle, err := receiveWfCoordinated(context.Background(), struct {
+			receiveHandle, err := RunAsWorkflow(executor, receiveWorkflowCoordinated, struct {
 				Topic string
 				i     int
 			}{
@@ -1409,7 +1425,7 @@ func TestSendRecv(t *testing.T) {
 		for i := range numReceivers {
 			go func(index int) {
 				defer wg.Done()
-				result, err := receiverHandles[index].GetResult(context.Background())
+				result, err := receiverHandles[index].GetResult()
 				if err != nil {
 					errors <- err
 				} else {
@@ -1466,16 +1482,16 @@ type setEventWorkflowInput struct {
 	Message string
 }
 
-func setEventWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
-	err := SetEvent(ctx, dbos, WorkflowSetEventInput[string]{Key: input.Key, Message: input.Message})
+func setEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
+	err := SetEvent(ctx, WorkflowSetEventInputGeneric[string]{Key: input.Key, Message: input.Message})
 	if err != nil {
 		return "", err
 	}
 	return "event-set", nil
 }
 
-func getEventWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
-	result, err := GetEvent[string](ctx, dbos, WorkflowGetEventInput{
+func getEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
+	result, err := GetEvent[string](ctx, WorkflowGetEventInput{
 		TargetWorkflowID: input.Key,     // Reusing Key field as target workflow ID
 		Key:              input.Message, // Reusing Message field as event key
 		Timeout:          3 * time.Second,
@@ -1486,9 +1502,9 @@ func getEventWorkflow(ctx context.Context, input setEventWorkflowInput) (string,
 	return result, nil
 }
 
-func setTwoEventsWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
+func setTwoEventsWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
 	// Set the first event
-	err := SetEvent(ctx, dbos, WorkflowSetEventInput[string]{Key: "event1", Message: "first-event-message"})
+	err := SetEvent(ctx, WorkflowSetEventInputGeneric[string]{Key: "event1", Message: "first-event-message"})
 	if err != nil {
 		return "", err
 	}
@@ -1497,7 +1513,7 @@ func setTwoEventsWorkflow(ctx context.Context, input setEventWorkflowInput) (str
 	setSecondEventSignal.Wait()
 
 	// Set the second event
-	err = SetEvent(ctx, dbos, WorkflowSetEventInput[string]{Key: "event2", Message: "second-event-message"})
+	err = SetEvent(ctx, WorkflowSetEventInputGeneric[string]{Key: "event2", Message: "second-event-message"})
 	if err != nil {
 		return "", err
 	}
@@ -1505,8 +1521,8 @@ func setTwoEventsWorkflow(ctx context.Context, input setEventWorkflowInput) (str
 	return "two-events-set", nil
 }
 
-func setEventIdempotencyWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
-	err := SetEvent(ctx, dbos, WorkflowSetEventInput[string]{Key: input.Key, Message: input.Message})
+func setEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
+	err := SetEvent(ctx, WorkflowSetEventInputGeneric[string]{Key: input.Key, Message: input.Message})
 	if err != nil {
 		return "", err
 	}
@@ -1514,8 +1530,8 @@ func setEventIdempotencyWorkflow(ctx context.Context, input setEventWorkflowInpu
 	return "idempotent-set-completed", nil
 }
 
-func getEventIdempotencyWorkflow(ctx context.Context, input setEventWorkflowInput) (string, error) {
-	result, err := GetEvent[string](ctx, dbos, WorkflowGetEventInput{
+func getEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
+	result, err := GetEvent[string](ctx, WorkflowGetEventInput{
 		TargetWorkflowID: input.Key,
 		Key:              input.Message,
 		Timeout:          3 * time.Second,
@@ -1532,18 +1548,18 @@ func TestSetGetEvent(t *testing.T) {
 	executor := setupDBOS(t)
 
 	// Register all set/get event workflows with executor
-	setEventWf := RegisterWorkflow(executor, setEventWorkflow)
-	getEventWf := RegisterWorkflow(executor, getEventWorkflow)
-	setTwoEventsWf := RegisterWorkflow(executor, setTwoEventsWorkflow)
-	setEventIdempotencyWf := RegisterWorkflow(executor, setEventIdempotencyWorkflow)
-	getEventIdempotencyWf := RegisterWorkflow(executor, getEventIdempotencyWorkflow)
+	RegisterWorkflow(executor, setEventWorkflow)
+	RegisterWorkflow(executor, getEventWorkflow)
+	RegisterWorkflow(executor, setTwoEventsWorkflow)
+	RegisterWorkflow(executor, setEventIdempotencyWorkflow)
+	RegisterWorkflow(executor, getEventIdempotencyWorkflow)
 
 	t.Run("SetGetEventFromWorkflow", func(t *testing.T) {
 		// Clear the signal event before starting
 		setSecondEventSignal.Clear()
 
 		// Start the workflow that sets two events
-		setHandle, err := setTwoEventsWf(context.Background(), setEventWorkflowInput{
+		setHandle, err := RunAsWorkflow(executor, setTwoEventsWorkflow, setEventWorkflowInput{
 			Key:     "test-workflow",
 			Message: "unused",
 		})
@@ -1552,7 +1568,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Start a workflow to get the first event
-		getFirstEventHandle, err := getEventWf(context.Background(), setEventWorkflowInput{
+		getFirstEventHandle, err := RunAsWorkflow(executor, getEventWorkflow, setEventWorkflowInput{
 			Key:     setHandle.GetWorkflowID(), // Target workflow ID
 			Message: "event1",                  // Event key
 		})
@@ -1561,7 +1577,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Verify we can get the first event
-		firstMessage, err := getFirstEventHandle.GetResult(context.Background())
+		firstMessage, err := getFirstEventHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from first event workflow: %v", err)
 		}
@@ -1573,7 +1589,7 @@ func TestSetGetEvent(t *testing.T) {
 		setSecondEventSignal.Set()
 
 		// Start a workflow to get the second event
-		getSecondEventHandle, err := getEventWf(context.Background(), setEventWorkflowInput{
+		getSecondEventHandle, err := RunAsWorkflow(executor, getEventWorkflow, setEventWorkflowInput{
 			Key:     setHandle.GetWorkflowID(), // Target workflow ID
 			Message: "event2",                  // Event key
 		})
@@ -1582,7 +1598,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Verify we can get the second event
-		secondMessage, err := getSecondEventHandle.GetResult(context.Background())
+		secondMessage, err := getSecondEventHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from second event workflow: %v", err)
 		}
@@ -1591,7 +1607,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Wait for the workflow to complete
-		result, err := setHandle.GetResult(context.Background())
+		result, err := setHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from set two events workflow: %v", err)
 		}
@@ -1602,7 +1618,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("GetEventFromOutsideWorkflow", func(t *testing.T) {
 		// Start a workflow that sets an event
-		setHandle, err := setEventWf(context.Background(), setEventWorkflowInput{
+		setHandle, err := RunAsWorkflow(executor, setEventWorkflow, setEventWorkflowInput{
 			Key:     "test-key",
 			Message: "test-message",
 		})
@@ -1611,13 +1627,13 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Wait for the event to be set
-		_, err = setHandle.GetResult(context.Background())
+		_, err = setHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from set event workflow: %v", err)
 		}
 
 		// Start a workflow that gets the event from outside the original workflow
-		message, err := GetEvent[string](context.Background(), dbos, WorkflowGetEventInput{
+		message, err := GetEvent[string](executor, WorkflowGetEventInput{
 			TargetWorkflowID: setHandle.GetWorkflowID(),
 			Key:              "test-key",
 			Timeout:          3 * time.Second,
@@ -1633,7 +1649,7 @@ func TestSetGetEvent(t *testing.T) {
 	t.Run("GetEventTimeout", func(t *testing.T) {
 		// Try to get an event from a non-existent workflow
 		nonExistentID := uuid.NewString()
-		message, err := GetEvent[string](context.Background(), dbos, WorkflowGetEventInput{
+		message, err := GetEvent[string](executor, WorkflowGetEventInput{
 			TargetWorkflowID: nonExistentID,
 			Key:              "test-key",
 			Timeout:          3 * time.Second,
@@ -1646,18 +1662,18 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Try to get an event from an existing workflow but with a key that doesn't exist
-		setHandle, err := setEventWf(context.Background(), setEventWorkflowInput{
+		setHandle, err := RunAsWorkflow(executor, setEventWorkflow, setEventWorkflowInput{
 			Key:     "test-key",
 			Message: "test-message",
 		})
 		if err != nil {
 			t.Fatal("failed to set event:", err)
 		}
-		_, err = setHandle.GetResult(context.Background())
+		_, err = setHandle.GetResult()
 		if err != nil {
 			t.Fatal("failed to get result from set event workflow:", err)
 		}
-		message, err = GetEvent[string](context.Background(), dbos, WorkflowGetEventInput{
+		message, err = GetEvent[string](executor, WorkflowGetEventInput{
 			TargetWorkflowID: setHandle.GetWorkflowID(),
 			Key:              "non-existent-key",
 			Timeout:          3 * time.Second,
@@ -1671,10 +1687,8 @@ func TestSetGetEvent(t *testing.T) {
 	})
 
 	t.Run("SetGetEventMustRunInsideWorkflows", func(t *testing.T) {
-		ctx := context.Background()
-
 		// Attempt to run SetEvent outside of a workflow context
-		err := SetEvent(ctx, dbos, WorkflowSetEventInput[string]{Key: "test-key", Message: "test-message"})
+		err := SetEvent(executor, WorkflowSetEventInputGeneric[string]{Key: "test-key", Message: "test-message"})
 		if err == nil {
 			t.Fatal("expected error when running SetEvent outside of workflow context, but got none")
 		}
@@ -1698,7 +1712,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("SetGetEventIdempotency", func(t *testing.T) {
 		// Start the set event workflow
-		setHandle, err := setEventIdempotencyWf(context.Background(), setEventWorkflowInput{
+		setHandle, err := RunAsWorkflow(executor, setEventIdempotencyWorkflow, setEventWorkflowInput{
 			Key:     "idempotency-key",
 			Message: "idempotency-message",
 		})
@@ -1707,7 +1721,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Start the get event workflow
-		getHandle, err := getEventIdempotencyWf(context.Background(), setEventWorkflowInput{
+		getHandle, err := RunAsWorkflow(executor, getEventIdempotencyWorkflow, setEventWorkflowInput{
 			Key:     setHandle.GetWorkflowID(),
 			Message: "idempotency-key",
 		})
@@ -1720,7 +1734,7 @@ func TestSetGetEvent(t *testing.T) {
 		getEventStartIdempotencyEvent.Clear()
 
 		// Attempt recovering both workflows. Each should have exactly 1 step.
-		recoveredHandles, err := recoverPendingWorkflows(context.Background(), []string{"local"})
+		recoveredHandles, err := recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
 		if err != nil {
 			t.Fatalf("failed to recover pending workflows: %v", err)
 		}
@@ -1731,7 +1745,7 @@ func TestSetGetEvent(t *testing.T) {
 		getEventStartIdempotencyEvent.Wait()
 
 		// Verify step counts
-		setSteps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), setHandle.GetWorkflowID())
+		setSteps, err := executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), setHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for set event idempotency workflow: %v", err)
 		}
@@ -1739,7 +1753,7 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("expected 1 step in set event idempotency workflow, got %d", len(setSteps))
 		}
 
-		getSteps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), getHandle.GetWorkflowID())
+		getSteps, err := executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), getHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for get event idempotency workflow: %v", err)
 		}
@@ -1751,7 +1765,7 @@ func TestSetGetEvent(t *testing.T) {
 		setEventIdempotencyEvent.Set()
 		getEventStopIdempotencyEvent.Set()
 
-		setResult, err := setHandle.GetResult(context.Background())
+		setResult, err := setHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from set event idempotency workflow: %v", err)
 		}
@@ -1759,7 +1773,7 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("expected result to be 'idempotent-set-completed', got '%s'", setResult)
 		}
 
-		getResult, err := getHandle.GetResult(context.Background())
+		getResult, err := getHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from get event idempotency workflow: %v", err)
 		}
@@ -1770,7 +1784,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("ConcurrentGetEvent", func(t *testing.T) {
 		// Set event
-		setHandle, err := setEventWf(context.Background(), setEventWorkflowInput{
+		setHandle, err := RunAsWorkflow(executor, setEventWorkflow, setEventWorkflowInput{
 			Key:     "concurrent-event-key",
 			Message: "concurrent-event-message",
 		})
@@ -1779,7 +1793,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Wait for the set event workflow to complete
-		_, err = setHandle.GetResult(context.Background())
+		_, err = setHandle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from set event workflow: %v", err)
 		}
@@ -1791,7 +1805,7 @@ func TestSetGetEvent(t *testing.T) {
 		for range numGoroutines {
 			go func() {
 				defer wg.Done()
-				res, err := GetEvent[string](context.Background(), dbos, WorkflowGetEventInput{
+				res, err := GetEvent[string](executor, WorkflowGetEventInput{
 					TargetWorkflowID: setHandle.GetWorkflowID(),
 					Key:              "concurrent-event-key",
 					Timeout:          10 * time.Second,
@@ -1821,8 +1835,20 @@ var (
 	sleepStopEvent  *Event
 )
 
-func sleepRecoveryWorkflow(ctx context.Context, duration time.Duration) (time.Duration, error) {
-	result, err := Sleep(ctx, dbos, duration)
+func sleepStep(ctx context.Context, input ...any) (time.Duration, error) {
+	if len(input) == 0 {
+		return 0, fmt.Errorf("expected duration")
+	}
+	duration, ok := input[0].(time.Duration)
+	if !ok {
+		return 0, fmt.Errorf("expected time.Duration, got %T", input[0])
+	}
+	time.Sleep(duration)
+	return duration, nil
+}
+
+func sleepRecoveryWorkflow(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
+	result, err := RunAsStep(ctx, sleepStep, duration)
 	if err != nil {
 		return 0, err
 	}
@@ -1834,7 +1860,7 @@ func sleepRecoveryWorkflow(ctx context.Context, duration time.Duration) (time.Du
 
 func TestSleep(t *testing.T) {
 	executor := setupDBOS(t)
-	sleepRecoveryWf := RegisterWorkflow(executor, sleepRecoveryWorkflow)
+	RegisterWorkflow(executor, sleepRecoveryWorkflow)
 
 	t.Run("SleepDurableRecovery", func(t *testing.T) {
 		sleepStartEvent = NewEvent()
@@ -1843,7 +1869,7 @@ func TestSleep(t *testing.T) {
 		// Start a workflow that sleeps for 2 seconds then blocks
 		sleepDuration := 2 * time.Second
 
-		handle, err := sleepRecoveryWf(context.Background(), sleepDuration)
+		handle, err := RunAsWorkflow(executor, sleepRecoveryWorkflow, sleepDuration)
 		if err != nil {
 			t.Fatalf("failed to start sleep recovery workflow: %v", err)
 		}
@@ -1853,7 +1879,7 @@ func TestSleep(t *testing.T) {
 
 		// Run the workflow again and check the return time was less than the durable sleep
 		startTime := time.Now()
-		_, err = sleepRecoveryWf(context.Background(), sleepDuration, WithWorkflowID(handle.GetWorkflowID()))
+		_, err = RunAsWorkflow(executor, sleepRecoveryWorkflow, sleepDuration, WithWorkflowID(handle.GetWorkflowID()))
 		if err != nil {
 			t.Fatalf("failed to start second sleep recovery workflow: %v", err)
 		}
@@ -1866,7 +1892,7 @@ func TestSleep(t *testing.T) {
 		}
 
 		// Verify the sleep step was recorded correctly
-		steps, err := dbos.systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		steps, err := executor.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get workflow steps: %v", err)
 		}
@@ -1876,8 +1902,8 @@ func TestSleep(t *testing.T) {
 		}
 
 		step := steps[0]
-		if step.FunctionName != "DBOS.sleep" {
-			t.Fatalf("expected step name to be 'DBOS.sleep', got '%s'", step.FunctionName)
+		if step.FunctionName != "dbos.sleepStep" {
+			t.Fatalf("expected step name to be 'dbos.sleepStep', got '%s'", step.FunctionName)
 		}
 
 		if step.Error != nil {
@@ -1888,10 +1914,8 @@ func TestSleep(t *testing.T) {
 	})
 
 	t.Run("SleepCannotBeCalledOutsideWorkflow", func(t *testing.T) {
-		ctx := context.Background()
-
 		// Attempt to call Sleep outside of a workflow context
-		_, err := Sleep(ctx, dbos, 1*time.Second)
+		_, err := RunAsStep(executor, sleepStep, 1*time.Second)
 		if err == nil {
 			t.Fatal("expected error when calling Sleep outside of workflow context, but got none")
 		}

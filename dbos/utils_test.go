@@ -54,32 +54,26 @@ func setupDBOS(t *testing.T) DBOSContext {
 		t.Fatalf("failed to drop test database: %v", err)
 	}
 
-	executor, err := NewDBOSContext(Config{
+	dbosContext, err := NewDBOSContext(Config{
 		DatabaseURL: databaseURL,
 		AppName:     "test-app",
 	})
 	if err != nil {
 		t.Fatalf("failed to create DBOS instance: %v", err)
 	}
-
-	err = executor.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch DBOS instance: %v", err)
-	}
-
-	if executor == nil {
+	if dbosContext == nil {
 		t.Fatal("expected DBOS instance but got nil")
 	}
 
 	// Register cleanup to run after test completes
 	t.Cleanup(func() {
 		fmt.Println("Cleaning up DBOS instance...")
-		if executor != nil {
-			executor.Shutdown()
+		if dbosContext != nil {
+			dbosContext.Shutdown()
 		}
 	})
 
-	return executor
+	return dbosContext
 }
 
 /* Event struct provides a simple synchronization primitive that can be used to signal between goroutines. */
@@ -135,6 +129,7 @@ func restartQueueRunner(executor DBOSContext) {
 	if executor != nil {
 		exec := executor.(*dbosContext)
 		// Create new context and cancel function
+		// FIXME: cancellation now has to go through the DBOSContext
 		ctx, cancel := context.WithCancel(context.Background())
 		exec.queueRunnerCtx = ctx
 		exec.queueRunnerCancelFunc = cancel
@@ -143,7 +138,7 @@ func restartQueueRunner(executor DBOSContext) {
 		// Start the queue runner in a goroutine
 		go func() {
 			defer close(exec.queueRunnerDone)
-			queueRunner(ctx, exec)
+			queueRunner(exec)
 		}()
 	}
 }
