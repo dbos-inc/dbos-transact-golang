@@ -98,7 +98,7 @@ func NewWorkflowQueue(name string, options ...queueOption) WorkflowQueue {
 	return q
 }
 
-func queueRunner(executor *dbosContext) {
+func queueRunner(ctx *dbosContext) {
 	const (
 		baseInterval    = 1.0   // Base interval in seconds
 		minInterval     = 1.0   // Minimum polling interval in seconds
@@ -118,7 +118,7 @@ func queueRunner(executor *dbosContext) {
 		for queueName, queue := range workflowQueueRegistry {
 			getLogger().Debug("Processing queue", "queue_name", queueName)
 			// Call DequeueWorkflows for each queue
-			dequeuedWorkflows, err := executor.systemDB.DequeueWorkflows(executor.queueRunnerCtx, queue, executor.executorID, executor.applicationVersion)
+			dequeuedWorkflows, err := ctx.systemDB.DequeueWorkflows(ctx.queueRunnerCtx, queue, ctx.executorID, ctx.applicationVersion)
 			if err != nil {
 				if pgErr, ok := err.(*pgconn.PgError); ok {
 					switch pgErr.Code {
@@ -139,7 +139,7 @@ func queueRunner(executor *dbosContext) {
 			}
 			for _, workflow := range dequeuedWorkflows {
 				// Find the workflow in the registry
-				registeredWorkflow, exists := executor.workflowRegistry[workflow.name]
+				registeredWorkflow, exists := ctx.workflowRegistry[workflow.name]
 				if !exists {
 					getLogger().Error("workflow function not found in registry", "workflow_name", workflow.name)
 					continue
@@ -161,7 +161,8 @@ func queueRunner(executor *dbosContext) {
 					}
 				}
 
-				_, err := registeredWorkflow.wrappedFunction(executor, input, WithWorkflowID(workflow.id))
+				// XXX this demonstrate why contexts cannot be used globally -- the task does not inherit the context used in the program that enqueued it
+				_, err := registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
 				if err != nil {
 					getLogger().Error("Error running queued workflow", "error", err)
 				}
@@ -183,7 +184,7 @@ func queueRunner(executor *dbosContext) {
 
 		// Sleep with jittered interval, but allow early exit on context cancellation
 		select {
-		case <-executor.queueRunnerCtx.Done():
+		case <-ctx.queueRunnerCtx.Done():
 			getLogger().Info("Queue runner stopping due to context cancellation")
 			return
 		case <-time.After(sleepDuration):
