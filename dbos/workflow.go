@@ -200,7 +200,7 @@ func (h *workflowPollingHandle[R]) GetWorkflowID() string {
 /**********************************/
 /******* WORKFLOW REGISTRY *******/
 /**********************************/
-type GenericWrappedWorkflowFunc[P any, R any] func(dbosCtx DBOSContext, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
+type GenericWrappedWorkflowFunc[P any, R any] func(ctx DBOSContext, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
 type WrappedWorkflowFunc func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
 
 type workflowRegistryEntry struct {
@@ -209,9 +209,9 @@ type workflowRegistryEntry struct {
 }
 
 // Register adds a workflow function to the registry (thread-safe, only once per name)
-func registerWorkflow(dbosCtx DBOSContext, workflowName string, fn WrappedWorkflowFunc, maxRetries int) {
+func registerWorkflow(ctx DBOSContext, workflowName string, fn WrappedWorkflowFunc, maxRetries int) {
 	// Skip if we don't have a concrete dbosContext
-	c, ok := dbosCtx.(*dbosContext)
+	c, ok := ctx.(*dbosContext)
 	if !ok {
 		return
 	}
@@ -230,9 +230,9 @@ func registerWorkflow(dbosCtx DBOSContext, workflowName string, fn WrappedWorkfl
 	}
 }
 
-func registerScheduledWorkflow(dbosCtx DBOSContext, workflowName string, fn WorkflowFunc, cronSchedule string) {
+func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn WorkflowFunc, cronSchedule string) {
 	// Skip if we don't have a concrete dbosContext
-	c, ok := dbosCtx.(*dbosContext)
+	c, ok := ctx.(*dbosContext)
 	if !ok {
 		return
 	}
@@ -257,7 +257,7 @@ func registerScheduledWorkflow(dbosCtx DBOSContext, workflowName string, fn Work
 			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),
 			withWorkflowName(workflowName),
 		}
-		dbosCtx.RunAsWorkflow(dbosCtx, fn, scheduledTime, opts...)
+		ctx.RunAsWorkflow(ctx, fn, scheduledTime, opts...)
 	})
 	if err != nil {
 		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
@@ -293,9 +293,9 @@ func WithSchedule(schedule string) workflowRegistrationOption {
 // RegisterWorkflow is generically typed, allowing us to register the workflow input and output types for gob encoding
 // The registered workflow is wrapped in a typed-erased wrapper which performs runtime type checks and conversions
 // To execute the workflow, use DBOSContext.RunAsWorkflow
-func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[P, R], opts ...workflowRegistrationOption) {
-	if dbosCtx == nil {
-		panic("dbosCtx cannot be nil")
+func RegisterWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R], opts ...workflowRegistrationOption) {
+	if ctx == nil {
+		panic("ctx cannot be nil")
 	}
 
 	if fn == nil {
@@ -334,21 +334,21 @@ func RegisterWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[
 			return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
 		}
 
-		opts = append(opts, withWorkflowName(fqn)) // Append the name so dbosCtx.RunAsWorkflow can look it up from the registry to apply registration-time options
+		opts = append(opts, withWorkflowName(fqn)) // Append the name so ctx.RunAsWorkflow can look it up from the registry to apply registration-time options
 		handle, err := ctx.RunAsWorkflow(ctx, typedErasedWorkflow, typedInput, opts...)
 		if err != nil {
 			return nil, err
 		}
 		return &workflowPollingHandle[any]{workflowID: handle.GetWorkflowID(), dbosContext: ctx}, nil
 	})
-	registerWorkflow(dbosCtx, fqn, typeErasedWrapper, registrationParams.maxRetries)
+	registerWorkflow(ctx, fqn, typeErasedWrapper, registrationParams.maxRetries)
 
 	// If this is a scheduled workflow, register a cron job
 	if registrationParams.cronSchedule != "" {
 		if reflect.TypeOf(p) != reflect.TypeOf(time.Time{}) {
 			panic(fmt.Sprintf("scheduled workflow function must accept a time.Time as input, got %T", p))
 		}
-		registerScheduledWorkflow(dbosCtx, fqn, typedErasedWorkflow, registrationParams.cronSchedule)
+		registerScheduledWorkflow(ctx, fqn, typedErasedWorkflow, registrationParams.cronSchedule)
 	}
 }
 
@@ -417,9 +417,9 @@ func withWorkflowName(name string) WorkflowOption {
 	}
 }
 
-func RunAsWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
-	if dbosCtx == nil {
-		return nil, fmt.Errorf("dbosCtx cannot be nil")
+func RunAsWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("ctx cannot be nil")
 	}
 
 	// Add the fn name to the options so we can communicate it with DBOSContext.RunAsWorkflow
@@ -429,7 +429,7 @@ func RunAsWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[P, 
 		return fn(ctx, input.(P))
 	})
 
-	handle, err := dbosCtx.(*dbosContext).RunAsWorkflow(dbosCtx, typedErasedWorkflow, input, opts...)
+	handle, err := ctx.(*dbosContext).RunAsWorkflow(ctx, typedErasedWorkflow, input, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +439,7 @@ func RunAsWorkflow[P any, R any](dbosCtx DBOSContext, fn GenericWorkflowFunc[P, 
 		// We need to convert the polling handle to a typed handle
 		typedPollingHandle := &workflowPollingHandle[R]{
 			workflowID:  pollingHandle.workflowID,
-			dbosContext: dbosCtx,
+			dbosContext: ctx,
 		}
 		return typedPollingHandle, nil
 	}
@@ -687,9 +687,9 @@ func setStepParamDefaults(params *StepParams, stepName string) *StepParams {
 
 var typeErasedStepNameToStepName = make(map[string]string)
 
-func RunAsStep[P any, R any](dbosCtx DBOSContext, fn GenericStepFunc[P, R], input P) (R, error) {
-	if dbosCtx == nil {
-		return *new(R), newStepExecutionError("", "", "dbosCtx cannot be nil")
+func RunAsStep[P any, R any](ctx DBOSContext, fn GenericStepFunc[P, R], input P) (R, error) {
+	if ctx == nil {
+		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
 	}
 
 	if fn == nil {
@@ -704,7 +704,7 @@ func RunAsStep[P any, R any](dbosCtx DBOSContext, fn GenericStepFunc[P, R], inpu
 	typeErasedStepNameToStepName[runtime.FuncForPC(reflect.ValueOf(typeErasedFn).Pointer()).Name()] = runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 
 	// Call the executor method
-	result, err := dbosCtx.RunAsStep(dbosCtx, typeErasedFn, input)
+	result, err := ctx.RunAsStep(ctx, typeErasedFn, input)
 	if err != nil {
 		// In case the errors comes from the DBOS step logic, the result will be nil and we must handle it
 		if result == nil {
@@ -846,13 +846,13 @@ func (c *dbosContext) Send(_ DBOSContext, input WorkflowSendInputInternal) error
 
 // Send sends a message to another workflow.
 // Send automatically registers the type of R for gob encoding
-func Send[R any](dbosCtx DBOSContext, input WorkflowSendInput[R]) error {
-	if dbosCtx == nil {
-		return errors.New("dbosCtx cannot be nil")
+func Send[R any](ctx DBOSContext, input WorkflowSendInput[R]) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
 	}
 	var typedMessage R
 	gob.Register(typedMessage)
-	return dbosCtx.Send(dbosCtx, WorkflowSendInputInternal{
+	return ctx.Send(ctx, WorkflowSendInputInternal{
 		DestinationID: input.DestinationID,
 		Message:       input.Message,
 		Topic:         input.Topic,
@@ -868,11 +868,11 @@ func (c *dbosContext) Recv(_ DBOSContext, input WorkflowRecvInput) (any, error) 
 	return c.systemDB.Recv(c.ctx, input)
 }
 
-func Recv[R any](dbosCtx DBOSContext, input WorkflowRecvInput) (R, error) {
-	if dbosCtx == nil {
-		return *new(R), errors.New("dbosCtx cannot be nil")
+func Recv[R any](ctx DBOSContext, input WorkflowRecvInput) (R, error) {
+	if ctx == nil {
+		return *new(R), errors.New("ctx cannot be nil")
 	}
-	msg, err := dbosCtx.Recv(dbosCtx, input)
+	msg, err := ctx.Recv(ctx, input)
 	if err != nil {
 		return *new(R), err
 	}
@@ -900,13 +900,13 @@ func (c *dbosContext) SetEvent(_ DBOSContext, input WorkflowSetEventInput) error
 // Sets an event from a workflow.
 // The event is a key value pair
 // SetEvent automatically registers the type of R for gob encoding
-func SetEvent[R any](dbosCtx DBOSContext, input WorkflowSetEventInputGeneric[R]) error {
-	if dbosCtx == nil {
-		return errors.New("dbosCtx cannot be nil")
+func SetEvent[R any](ctx DBOSContext, input WorkflowSetEventInputGeneric[R]) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
 	}
 	var typedMessage R
 	gob.Register(typedMessage)
-	return dbosCtx.SetEvent(dbosCtx, WorkflowSetEventInput{
+	return ctx.SetEvent(ctx, WorkflowSetEventInput{
 		Key:     input.Key,
 		Message: input.Message,
 	})
@@ -922,11 +922,11 @@ func (c *dbosContext) GetEvent(_ DBOSContext, input WorkflowGetEventInput) (any,
 	return c.systemDB.GetEvent(c.ctx, input)
 }
 
-func GetEvent[R any](dbosCtx DBOSContext, input WorkflowGetEventInput) (R, error) {
-	if dbosCtx == nil {
+func GetEvent[R any](ctx DBOSContext, input WorkflowGetEventInput) (R, error) {
+	if ctx == nil {
 		return *new(R), errors.New("dbosCtx cannot be nil")
 	}
-	value, err := dbosCtx.GetEvent(dbosCtx, input)
+	value, err := ctx.GetEvent(ctx, input)
 	if err != nil {
 		return *new(R), err
 	}
@@ -971,11 +971,11 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 	return &workflowPollingHandle[any]{workflowID: workflowID, dbosContext: c}, nil
 }
 
-func RetrieveWorkflow[R any](dbosCtx DBOSContext, workflowID string) (workflowPollingHandle[R], error) {
-	if dbosCtx == nil {
+func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (workflowPollingHandle[R], error) {
+	if ctx == nil {
 		return workflowPollingHandle[R]{}, errors.New("dbosCtx cannot be nil")
 	}
-	workflowStatus, err := dbosCtx.(*dbosContext).systemDB.ListWorkflows(dbosCtx.(*dbosContext).ctx, listWorkflowsDBInput{
+	workflowStatus, err := ctx.(*dbosContext).systemDB.ListWorkflows(ctx.(*dbosContext).ctx, listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
 	})
 	if err != nil {
@@ -984,5 +984,5 @@ func RetrieveWorkflow[R any](dbosCtx DBOSContext, workflowID string) (workflowPo
 	if len(workflowStatus) == 0 {
 		return workflowPollingHandle[R]{}, newNonExistentWorkflowError(workflowID)
 	}
-	return workflowPollingHandle[R]{workflowID: workflowID, dbosContext: dbosCtx}, nil
+	return workflowPollingHandle[R]{workflowID: workflowID, dbosContext: ctx}, nil
 }

@@ -25,7 +25,7 @@ type queueMetadata struct {
 	RateLimit         *RateLimiter `json:"rateLimit,omitempty"`
 }
 
-func newAdminServer(dbosCtx *dbosContext, port int) *adminServer {
+func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	mux := http.NewServeMux()
 
 	// Health endpoint
@@ -50,7 +50,7 @@ func newAdminServer(dbosCtx *dbosContext, port int) *adminServer {
 
 		getLogger().Info("Recovering workflows for executors", "executors", executorIDs)
 
-		handles, err := recoverPendingWorkflows(dbosCtx, executorIDs)
+		handles, err := recoverPendingWorkflows(ctx, executorIDs)
 		if err != nil {
 			getLogger().Error("Error recovering workflows", "error", err)
 			http.Error(w, fmt.Sprintf("Recovery failed: %v", err), http.StatusInternalServerError)

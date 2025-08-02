@@ -56,9 +56,6 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("Admin server endpoints", func(t *testing.T) {
-		// Clean up any existing instance
-		// (This will be handled by the individual executor cleanup)
-
 		// Launch DBOS with admin server once for all endpoint tests
 		ctx, err := NewDBOSContext(Config{
 			DatabaseURL: databaseURL,
