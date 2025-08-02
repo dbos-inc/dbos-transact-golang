@@ -692,7 +692,11 @@ func RunAsStep[P any, R any](ctx DBOSContext, fn GenericStepFunc[P, R], input P)
 
 	// Type-erase the function based on its actual type
 	typeErasedFn := StepFunc(func(ctx context.Context, input any) (any, error) {
-		return fn(ctx, input.(P))
+		typedInput, ok := input.(P)
+		if !ok {
+			return nil, newStepExecutionError("", "", fmt.Sprintf("unexpected input type: expected %T, got %T", *new(P), input))
+		}
+		return fn(ctx, typedInput)
 	})
 
 	typeErasedStepNameToStepName[runtime.FuncForPC(reflect.ValueOf(typeErasedFn).Pointer()).Name()] = runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
@@ -718,7 +722,7 @@ func RunAsStep[P any, R any](ctx DBOSContext, fn GenericStepFunc[P, R], input P)
 
 func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, error) {
 	// Get workflow state from context
-	wfState, ok := c.ctx.Value(workflowStateKey).(*workflowState)
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		// TODO: try to print step name
 		return nil, newStepExecutionError("", "", "workflow state not found in context: are you running this step within a workflow?")
@@ -738,7 +742,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, err
 
 	// If within a step, just run the function directly
 	if wfState.isWithinStep {
-		return fn(c.ctx, input)
+		return fn(c, input)
 	}
 
 	// Setup step state
