@@ -290,7 +290,7 @@ func WithSchedule(schedule string) workflowRegistrationOption {
 
 // RegisterWorkflow registers the provided function as a durable workflow with the provided DBOSContext workflow registry
 // If the workflow is a scheduled workflow (determined by the presence of a cron schedule), it will also register a cron job to execute it
-// RegisterWorkflow is generically typed, allowing us to register the workflow input and output types for gob encoding
+// RegisterWorkflow is generically typed, providing compile-time type checking and allowing us to register the workflow input and output types for gob encoding
 // The registered workflow is wrapped in a typed-erased wrapper which performs runtime type checks and conversions
 // To execute the workflow, use DBOSContext.RunAsWorkflow
 func RegisterWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R], opts ...workflowRegistrationOption) {
@@ -402,12 +402,6 @@ func WithQueue(queueName string) WorkflowOption {
 func WithApplicationVersion(version string) WorkflowOption {
 	return func(p *workflowParams) {
 		p.applicationVersion = version
-	}
-}
-
-func WithWorkflowMaxRetries(maxRetries int) WorkflowOption {
-	return func(p *workflowParams) {
-		p.maxRetries = maxRetries
 	}
 }
 
