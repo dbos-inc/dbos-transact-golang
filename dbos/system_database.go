@@ -251,7 +251,6 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
 	if input.tx == nil {
 		return nil, errors.New("transaction is required for InsertWorkflowStatus")
 	}
-	tx := input.tx
 
 	// Set default values
 	attempts := 1
@@ -313,8 +312,8 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
             END
         RETURNING recovery_attempts, status, name, queue_name, workflow_deadline_epoch_ms`
 
-	result := insertWorkflowResult{}
-	err = tx.QueryRow(ctx, query,
+	var result insertWorkflowResult
+	err = input.tx.QueryRow(ctx, query,
 		input.status.ID,
 		input.status.Status,
 		input.status.Name,
@@ -363,7 +362,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
 					 SET status = $1, deduplication_id = NULL, started_at_epoch_ms = NULL, queue_name = NULL
 					 WHERE workflow_uuid = $2 AND status = $3`
 
-		_, err = tx.Exec(ctx, dlqQuery,
+		_, err = input.tx.Exec(ctx, dlqQuery,
 			WorkflowStatusRetriesExceeded,
 			input.status.ID,
 			WorkflowStatusPending)
@@ -373,7 +372,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
 		}
 
 		// Commit the transaction before throwing the error
-		if err := tx.Commit(ctx); err != nil {
+		if err := input.tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("failed to commit transaction after marking workflow as RETRIES_EXCEEDED: %w", err)
 		}
 
