@@ -28,12 +28,13 @@ func TestLogger(t *testing.T) {
 			}
 		})
 
-		if logger == nil {
+		ctx := dbosCtx.(*dbosContext)
+		if ctx.logger == nil {
 			t.Fatal("Logger is nil")
 		}
 
 		// Test logger access
-		logger.Info("Test message from default logger")
+		ctx.logger.Info("Test message from default logger")
 
 	})
 
@@ -65,12 +66,13 @@ func TestLogger(t *testing.T) {
 			}
 		})
 
-		if logger == nil {
+		ctx := dbosCtx.(*dbosContext)
+		if ctx.logger == nil {
 			t.Fatal("Logger is nil")
 		}
 
 		// Test that we can use the logger and it maintains context
-		logger.Info("Test message from custom logger", "test_key", "test_value")
+		ctx.logger.Info("Test message from custom logger", "test_key", "test_value")
 
 		// Check that our custom logger was used and captured the output
 		logOutput := buf.String()

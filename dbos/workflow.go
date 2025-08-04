@@ -113,7 +113,7 @@ func (h *workflowHandle[R]) GetResult() (R, error) {
 		}
 		recordResultErr := h.dbosContext.(*dbosContext).systemDB.RecordChildGetResult(h.dbosContext.(*dbosContext).ctx, recordGetResultInput)
 		if recordResultErr != nil {
-			getLogger().Error("failed to record get result", "error", recordResultErr)
+			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
 			return *new(R), newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("recording child workflow result: %v", recordResultErr))
 		}
 	}
@@ -171,7 +171,7 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 			recordResultErr := h.dbosContext.(*dbosContext).systemDB.RecordChildGetResult(h.dbosContext.(*dbosContext).ctx, recordGetResultInput)
 			if recordResultErr != nil {
 				// XXX do we want to fail this?
-				getLogger().Error("failed to record get result", "error", recordResultErr)
+				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
 			}
 		}
 		return typedResult, err
@@ -220,7 +220,7 @@ func registerWorkflow(ctx DBOSContext, workflowName string, fn WrappedWorkflowFu
 	defer c.workflowRegMutex.Unlock()
 
 	if _, exists := c.workflowRegistry[workflowName]; exists {
-		getLogger().Error("workflow function already registered", "fqn", workflowName)
+		c.logger.Error("workflow function already registered", "fqn", workflowName)
 		panic(newConflictingRegistrationError(workflowName))
 	}
 
@@ -262,7 +262,7 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 	if err != nil {
 		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
 	}
-	getLogger().Info("Registered scheduled workflow", "fqn", workflowName, "cron_schedule", cronSchedule)
+	c.logger.Info("Registered scheduled workflow", "fqn", workflowName, "cron_schedule", cronSchedule)
 }
 
 type workflowRegistrationParams struct {
@@ -783,7 +783,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, err
 				delay = time.Duration(math.Min(exponentialDelay, float64(params.MaxInterval)))
 			}
 
-			getLogger().Error("step failed, retrying", "step_name", params.StepName, "retry", retry, "max_retries", params.MaxRetries, "delay", delay, "error", stepError)
+			c.logger.Error("step failed, retrying", "step_name", params.StepName, "retry", retry, "max_retries", params.MaxRetries, "delay", delay, "error", stepError)
 
 			// Wait before retry
 			select {

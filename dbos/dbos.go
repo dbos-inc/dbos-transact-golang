@@ -19,15 +19,6 @@ var (
 	_DEFAULT_ADMIN_SERVER_PORT = 3001
 )
 
-var logger *slog.Logger // Global because accessed everywhere inside the library
-
-func getLogger() *slog.Logger {
-	if logger == nil {
-		return slog.New(slog.NewTextHandler(os.Stderr, nil))
-	}
-	return logger
-}
-
 type Config struct {
 	DatabaseURL string
 	AppName     string
@@ -114,6 +105,9 @@ type dbosContext struct {
 
 	// Workflow scheduler
 	workflowScheduler *cron.Cron
+
+	// logger
+	logger *slog.Logger
 }
 
 // Implement contex.Context interface methods
@@ -144,6 +138,7 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
 		return &dbosContext{
 			ctx:                context.WithValue(dbosCtx.ctx, key, val),
+			logger:             dbosCtx.logger,
 			systemDB:           dbosCtx.systemDB,
 			workflowsWg:        dbosCtx.workflowsWg,
 			workflowRegistry:   dbosCtx.workflowRegistry,
@@ -191,7 +186,7 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	initExecutor.config = config
 
 	// Set global logger
-	logger = config.Logger
+	initExecutor.logger = config.Logger
 
 	// Register types we serialize with gob
 	var t time.Time
@@ -201,24 +196,24 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	initExecutor.applicationVersion = os.Getenv("DBOS__APPVERSION")
 	if initExecutor.applicationVersion == "" {
 		initExecutor.applicationVersion = computeApplicationVersion()
-		logger.Info("DBOS__APPVERSION not set, using computed hash")
+		initExecutor.logger.Info("DBOS__APPVERSION not set, using computed hash")
 	}
 
 	initExecutor.executorID = os.Getenv("DBOS__VMID")
 	if initExecutor.executorID == "" {
 		initExecutor.executorID = "local"
-		logger.Info("DBOS__VMID not set, using default", "executor_id", initExecutor.executorID)
+		initExecutor.logger.Info("DBOS__VMID not set, using default", "executor_id", initExecutor.executorID)
 	}
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 
 	// Create the system database
-	systemDB, err := NewSystemDatabase(config.DatabaseURL)
+	systemDB, err := NewSystemDatabase(config.DatabaseURL, config.Logger)
 	if err != nil {
 		return nil, newInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
 	initExecutor.systemDB = systemDB
-	logger.Info("System database initialized")
+	initExecutor.logger.Info("System database initialized")
 
 	return initExecutor, nil
 }
@@ -236,10 +231,10 @@ func (c *dbosContext) Launch() error {
 		adminServer := newAdminServer(c, _DEFAULT_ADMIN_SERVER_PORT)
 		err := adminServer.Start()
 		if err != nil {
-			logger.Error("Failed to start admin server", "error", err)
+			c.logger.Error("Failed to start admin server", "error", err)
 			return newInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
 		}
-		logger.Info("Admin server started", "port", _DEFAULT_ADMIN_SERVER_PORT)
+		c.logger.Info("Admin server started", "port", _DEFAULT_ADMIN_SERVER_PORT)
 		c.adminServer = adminServer
 	}
 
@@ -255,12 +250,12 @@ func (c *dbosContext) Launch() error {
 		defer close(c.queueRunnerDone)
 		queueRunner(c)
 	}()
-	logger.Info("Queue runner started")
+	c.logger.Info("Queue runner started")
 
 	// Start the workflow scheduler if it has been initialized
 	if c.workflowScheduler != nil {
 		c.workflowScheduler.Start()
-		logger.Info("Workflow scheduler started")
+		c.logger.Info("Workflow scheduler started")
 	}
 
 	// Run a round of recovery on the local executor
@@ -269,35 +264,35 @@ func (c *dbosContext) Launch() error {
 		return newInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
 	}
 	if len(recoveryHandles) > 0 {
-		logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
+		c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
 	}
 
-	logger.Info("DBOS initialized", "app_version", c.applicationVersion, "executor_id", c.executorID)
+	c.logger.Info("DBOS initialized", "app_version", c.applicationVersion, "executor_id", c.executorID)
 	c.launched = true
 	return nil
 }
 
 func (c *dbosContext) Shutdown() {
+	// Wait for all workflows to finish
+	c.logger.Info("Waiting for all workflows to finish")
+	c.workflowsWg.Wait()
+
 	if !c.launched {
-		logger.Warn("DBOS is not launched, nothing to shutdown")
+		c.logger.Warn("DBOS is not launched, nothing to shutdown")
 		return
 	}
 
-	// Wait for all workflows to finish
-	getLogger().Info("Waiting for all workflows to finish")
-	c.workflowsWg.Wait()
-
 	// Cancel the context to stop the queue runner
 	if c.queueRunnerCancelFunc != nil {
-		getLogger().Info("Stopping queue runner")
+		c.logger.Info("Stopping queue runner")
 		c.queueRunnerCancelFunc()
 		// Wait for queue runner to finish
 		<-c.queueRunnerDone
-		getLogger().Info("Queue runner stopped")
+		c.logger.Info("Queue runner stopped")
 	}
 
 	if c.workflowScheduler != nil {
-		getLogger().Info("Stopping workflow scheduler")
+		c.logger.Info("Stopping workflow scheduler")
 		ctx := c.workflowScheduler.Stop()
 		// Wait for all running jobs to complete with 5-second timeout
 		timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -305,32 +300,29 @@ func (c *dbosContext) Shutdown() {
 
 		select {
 		case <-ctx.Done():
-			getLogger().Info("All scheduled jobs completed")
+			c.logger.Info("All scheduled jobs completed")
 		case <-timeoutCtx.Done():
-			getLogger().Warn("Timeout waiting for jobs to complete", "timeout", "5s")
+			c.logger.Warn("Timeout waiting for jobs to complete", "timeout", "5s")
 		}
 	}
 
 	if c.systemDB != nil {
-		getLogger().Info("Shutting down system database")
+		c.logger.Info("Shutting down system database")
 		c.systemDB.Shutdown()
 		c.systemDB = nil
 	}
 
 	if c.adminServer != nil {
-		getLogger().Info("Shutting down admin server")
+		c.logger.Info("Shutting down admin server")
 		err := c.adminServer.Shutdown()
 		if err != nil {
-			getLogger().Error("Failed to shutdown admin server", "error", err)
+			c.logger.Error("Failed to shutdown admin server", "error", err)
 		} else {
-			getLogger().Info("Admin server shutdown complete")
+			c.logger.Info("Admin server shutdown complete")
 		}
 		c.adminServer = nil
 	}
 
-	if logger != nil {
-		logger = nil
-	}
 }
 
 func GetBinaryHash() (string, error) {

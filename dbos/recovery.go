@@ -19,7 +19,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 	for _, workflow := range pendingWorkflows {
 		if inputStr, ok := workflow.Input.(string); ok {
 			if strings.Contains(inputStr, "Failed to decode") {
-				getLogger().Warn("Skipping workflow recovery due to input decoding failure", "workflow_id", workflow.ID, "name", workflow.Name)
+				ctx.logger.Warn("Skipping workflow recovery due to input decoding failure", "workflow_id", workflow.ID, "name", workflow.Name)
 				continue
 			}
 		}
@@ -27,7 +27,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 		if workflow.QueueName != "" {
 			cleared, err := ctx.systemDB.ClearQueueAssignment(ctx.ctx, workflow.ID)
 			if err != nil {
-				getLogger().Error("Error clearing queue assignment for workflow", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
+				ctx.logger.Error("Error clearing queue assignment for workflow", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
 				continue
 			}
 			if cleared {
@@ -38,7 +38,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 
 		registeredWorkflow, exists := ctx.workflowRegistry[workflow.Name]
 		if !exists {
-			getLogger().Error("Workflow function not found in registry", "workflow_id", workflow.ID, "name", workflow.Name)
+			ctx.logger.Error("Workflow function not found in registry", "workflow_id", workflow.ID, "name", workflow.Name)
 			continue
 		}
 

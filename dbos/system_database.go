@@ -5,6 +5,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"sync"
@@ -63,6 +64,7 @@ type systemDatabase struct {
 	notificationListenerConnection *pgconn.PgConn
 	notificationListenerLoopCancel context.CancelFunc
 	notificationsMap               *sync.Map
+	logger                         *slog.Logger
 }
 
 /*******************************/
@@ -70,7 +72,7 @@ type systemDatabase struct {
 /*******************************/
 
 // createDatabaseIfNotExists creates the database if it doesn't exist
-func createDatabaseIfNotExists(databaseURL string) error {
+func createDatabaseIfNotExists(databaseURL string, logger *slog.Logger) error {
 	// Connect to the postgres database
 	parsedURL, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
@@ -104,7 +106,7 @@ func createDatabaseIfNotExists(databaseURL string) error {
 		if err != nil {
 			return newInitializationError(fmt.Sprintf("failed to create database %s: %v", dbName, err))
 		}
-		getLogger().Info("Database created", "name", dbName)
+		logger.Info("Database created", "name", dbName)
 	}
 
 	return nil
@@ -156,9 +158,9 @@ func runMigrations(databaseURL string) error {
 }
 
 // New creates a new SystemDatabase instance and runs migrations
-func NewSystemDatabase(databaseURL string) (SystemDatabase, error) {
+func NewSystemDatabase(databaseURL string, logger *slog.Logger) (SystemDatabase, error) {
 	// Create the database if it doesn't exist
-	if err := createDatabaseIfNotExists(databaseURL); err != nil {
+	if err := createDatabaseIfNotExists(databaseURL, logger); err != nil {
 		return nil, fmt.Errorf("failed to create database: %v", err)
 	}
 
@@ -206,6 +208,7 @@ func NewSystemDatabase(databaseURL string) (SystemDatabase, error) {
 		pool:                           pool,
 		notificationListenerConnection: notificationListenerConnection,
 		notificationsMap:               notificationsMap,
+		logger:                         logger,
 	}, nil
 }
 
@@ -219,7 +222,7 @@ func (s *systemDatabase) Launch(ctx context.Context) {
 }
 
 func (s *systemDatabase) Shutdown() {
-	getLogger().Info("DBOS: Closing system database connection pool")
+	s.logger.Info("DBOS: Closing system database connection pool")
 	if s.pool != nil {
 		s.pool.Close()
 	}
@@ -349,7 +352,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
 		return nil, newConflictingWorkflowError(input.status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.name, input.status.Name))
 	}
 	if len(input.status.QueueName) > 0 && result.queueName != nil && input.status.QueueName != *result.queueName {
-		getLogger().Warn("Queue name conflict for workflow", "workflow_id", input.status.ID, "result_queue", *result.queueName, "status_queue", input.status.QueueName)
+		s.logger.Warn("Queue name conflict for workflow", "workflow_id", input.status.ID, "result_queue", *result.queueName, "status_queue", input.status.QueueName)
 	}
 
 	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
@@ -727,13 +730,13 @@ func (s *systemDatabase) RecordOperationResult(ctx context.Context, input record
 	}
 
 	/*
-		getLogger().Debug("RecordOperationResult CommandTag", "command_tag", commandTag)
-		getLogger().Debug("RecordOperationResult Rows affected", "rows_affected", commandTag.RowsAffected())
-		getLogger().Debug("RecordOperationResult SQL", "sql", commandTag.String())
+		s.logger.Debug("RecordOperationResult CommandTag", "command_tag", commandTag)
+		s.logger.Debug("RecordOperationResult Rows affected", "rows_affected", commandTag.RowsAffected())
+		s.logger.Debug("RecordOperationResult SQL", "sql", commandTag.String())
 	*/
 
 	if err != nil {
-		getLogger().Error("RecordOperationResult Error occurred", "error", err)
+		s.logger.Error("RecordOperationResult Error occurred", "error", err)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
 			return newWorkflowConflictIDError(input.workflowID)
 		}
@@ -741,7 +744,7 @@ func (s *systemDatabase) RecordOperationResult(ctx context.Context, input record
 	}
 
 	if commandTag.RowsAffected() == 0 {
-		getLogger().Warn("RecordOperationResult No rows were affected by the insert")
+		s.logger.Warn("RecordOperationResult No rows were affected by the insert")
 	}
 
 	return nil
@@ -794,7 +797,7 @@ func (s *systemDatabase) RecordChildWorkflow(ctx context.Context, input recordCh
 	}
 
 	if commandTag.RowsAffected() == 0 {
-		getLogger().Warn("RecordChildWorkflow No rows were affected by the insert")
+		s.logger.Warn("RecordChildWorkflow No rows were affected by the insert")
 	}
 
 	return nil
@@ -1050,7 +1053,7 @@ func (s *systemDatabase) Sleep(ctx context.Context, duration time.Duration) (tim
 		}
 	} else {
 		// First execution: calculate and record the end time
-		getLogger().Debug("Durable sleep", "stepID", stepID, "duration", duration)
+		s.logger.Debug("Durable sleep", "stepID", stepID, "duration", duration)
 
 		endTime = time.Now().Add(duration)
 
@@ -1090,14 +1093,14 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 	mrr := s.notificationListenerConnection.Exec(ctx, "LISTEN dbos_notifications_channel; LISTEN dbos_workflow_events_channel")
 	results, err := mrr.ReadAll()
 	if err != nil {
-		getLogger().Error("Failed to listen on notification channels", "error", err)
+		s.logger.Error("Failed to listen on notification channels", "error", err)
 		return
 	}
 	mrr.Close()
 
 	for _, result := range results {
 		if result.Err != nil {
-			getLogger().Error("Error listening on notification channels", "error", result.Err)
+			s.logger.Error("Error listening on notification channels", "error", result.Err)
 			return
 		}
 	}
@@ -1108,10 +1111,10 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 		err := s.notificationListenerConnection.WaitForNotification(ctx)
 		if err != nil {
 			if err == context.Canceled {
-				getLogger().Info("Notification listener loop exiting due to context cancellation", "error", ctx.Err())
+				s.logger.Info("Notification listener loop exiting due to context cancellation", "error", ctx.Err())
 				return
 			}
-			getLogger().Error("Error waiting for notification", "error", err)
+			s.logger.Error("Error waiting for notification", "error", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -1264,7 +1267,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	cond := sync.NewCond(&sync.Mutex{})
 	_, loaded := s.notificationsMap.LoadOrStore(payload, cond)
 	if loaded {
-		getLogger().Error("Receive already called for workflow", "destination_id", destinationID)
+		s.logger.Error("Receive already called for workflow", "destination_id", destinationID)
 		return nil, newWorkflowConflictIDError(destinationID)
 	}
 	defer func() {
@@ -1285,7 +1288,7 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 	if !exists {
 		// Wait for notifications using condition variable with timeout pattern
 		// XXX should we prevent zero or negative timeouts?
-		getLogger().Debug("Waiting for notification on condition variable", "payload", payload)
+		s.logger.Debug("Waiting for notification on condition variable", "payload", payload)
 
 		done := make(chan struct{})
 		go func() {
@@ -1297,9 +1300,9 @@ func (s *systemDatabase) Recv(ctx context.Context, input WorkflowRecvInput) (any
 
 		select {
 		case <-done:
-			getLogger().Debug("Received notification on condition variable", "payload", payload)
+			s.logger.Debug("Received notification on condition variable", "payload", payload)
 		case <-time.After(input.Timeout):
-			getLogger().Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
+			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
 		}
 	}
 
@@ -1519,7 +1522,7 @@ func (s *systemDatabase) GetEvent(ctx context.Context, input WorkflowGetEventInp
 			// Received notification
 		case <-time.After(input.Timeout):
 			// Timeout reached
-			getLogger().Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
+			s.logger.Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
 		case <-ctx.Done():
 			return nil, fmt.Errorf("context cancelled while waiting for event: %w", ctx.Err())
 		}
@@ -1651,7 +1654,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 		if queue.workerConcurrency != nil {
 			workerConcurrency := *queue.workerConcurrency
 			if localPendingWorkflows > workerConcurrency {
-				getLogger().Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", queue.name, "concurrency_limit", workerConcurrency)
+				s.logger.Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", queue.name, "concurrency_limit", workerConcurrency)
 			}
 			availableWorkerTasks := max(workerConcurrency-localPendingWorkflows, 0)
 			maxTasks = availableWorkerTasks
@@ -1666,7 +1669,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 
 			concurrency := *queue.globalConcurrency
 			if globalPendingWorkflows > concurrency {
-				getLogger().Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", queue.name, "concurrency_limit", concurrency)
+				s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", queue.name, "concurrency_limit", concurrency)
 			}
 			availableTasks := max(concurrency-globalPendingWorkflows, 0)
 			if availableTasks < maxTasks {

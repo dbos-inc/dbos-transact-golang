@@ -71,6 +71,7 @@ func setupDBOS(t *testing.T) DBOSContext {
 		if dbosContext != nil {
 			dbosContext.Shutdown()
 		}
+		dbosContext = nil
 	})
 
 	return dbosContext

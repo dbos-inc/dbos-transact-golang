@@ -116,7 +116,7 @@ func queueRunner(ctx *dbosContext) {
 
 		// Iterate through all queues in the registry
 		for queueName, queue := range workflowQueueRegistry {
-			getLogger().Debug("Processing queue", "queue_name", queueName)
+			ctx.logger.Debug("Processing queue", "queue_name", queueName)
 			// Call DequeueWorkflows for each queue
 			dequeuedWorkflows, err := ctx.systemDB.DequeueWorkflows(ctx.queueRunnerCtx, queue, ctx.executorID, ctx.applicationVersion)
 			if err != nil {
@@ -128,20 +128,20 @@ func queueRunner(ctx *dbosContext) {
 						hasBackoffError = true
 					}
 				} else {
-					getLogger().Error("Error dequeuing workflows from queue", "queue_name", queueName, "error", err)
+					ctx.logger.Error("Error dequeuing workflows from queue", "queue_name", queueName, "error", err)
 				}
 				continue
 			}
 
 			// Print what was dequeued
 			if len(dequeuedWorkflows) > 0 {
-				getLogger().Debug("Dequeued workflows from queue", "queue_name", queueName, "workflows", dequeuedWorkflows)
+				ctx.logger.Debug("Dequeued workflows from queue", "queue_name", queueName, "workflows", dequeuedWorkflows)
 			}
 			for _, workflow := range dequeuedWorkflows {
 				// Find the workflow in the registry
 				registeredWorkflow, exists := ctx.workflowRegistry[workflow.name]
 				if !exists {
-					getLogger().Error("workflow function not found in registry", "workflow_name", workflow.name)
+					ctx.logger.Error("workflow function not found in registry", "workflow_name", workflow.name)
 					continue
 				}
 
@@ -150,13 +150,13 @@ func queueRunner(ctx *dbosContext) {
 				if len(workflow.input) > 0 {
 					inputBytes, err := base64.StdEncoding.DecodeString(workflow.input)
 					if err != nil {
-						getLogger().Error("failed to decode input for workflow", "workflow_id", workflow.id, "error", err)
+						ctx.logger.Error("failed to decode input for workflow", "workflow_id", workflow.id, "error", err)
 						continue
 					}
 					buf := bytes.NewBuffer(inputBytes)
 					dec := gob.NewDecoder(buf)
 					if err := dec.Decode(&input); err != nil {
-						getLogger().Error("failed to decode input for workflow", "workflow_id", workflow.id, "error", err)
+						ctx.logger.Error("failed to decode input for workflow", "workflow_id", workflow.id, "error", err)
 						continue
 					}
 				}
@@ -164,7 +164,7 @@ func queueRunner(ctx *dbosContext) {
 				// XXX this demonstrate why contexts cannot be used globally -- the task does not inherit the context used in the program that enqueued it
 				_, err := registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
 				if err != nil {
-					getLogger().Error("Error running queued workflow", "error", err)
+					ctx.logger.Error("Error running queued workflow", "error", err)
 				}
 			}
 		}
@@ -185,7 +185,7 @@ func queueRunner(ctx *dbosContext) {
 		// Sleep with jittered interval, but allow early exit on context cancellation
 		select {
 		case <-ctx.queueRunnerCtx.Done():
-			getLogger().Info("Queue runner stopping due to context cancellation")
+			ctx.logger.Info("Queue runner stopping due to context cancellation")
 			return
 		case <-time.After(sleepDuration):
 			// Continue to next iteration
