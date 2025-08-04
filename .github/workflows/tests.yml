@@ -6,7 +6,6 @@ on:
         - main
     pull_request:
       branches:
-        - main
       types:
         - ready_for_review
         - opened
