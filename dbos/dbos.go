@@ -5,17 +5,19 @@ import (
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/robfig/cron/v3"
 )
 
-var (
+const (
 	_DEFAULT_ADMIN_SERVER_PORT = 3001
 )
 
@@ -78,18 +80,17 @@ type DBOSContext interface {
 }
 
 type dbosContext struct {
-	ctx context.Context
+	ctx           context.Context
+	ctxCancelFunc context.CancelCauseFunc
 
-	launched bool
+	launched atomic.Bool
 
 	systemDB    SystemDatabase
 	adminServer *adminServer
 	config      *Config
 
-	// Queue runner context and cancel function
-	queueRunnerCtx        context.Context
-	queueRunnerCancelFunc context.CancelFunc
-	queueRunnerDone       chan struct{}
+	// Queue runner
+	queueRunner *queueRunner
 
 	// Application metadata
 	applicationVersion string
@@ -171,9 +172,11 @@ func (c *dbosContext) GetApplicationID() string {
 }
 
 func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
+	ctx, cancelFunc := context.WithCancelCause(context.Background())
 	initExecutor := &dbosContext{
 		workflowsWg:      &sync.WaitGroup{},
-		ctx:              context.Background(),
+		ctx:              ctx,
+		ctxCancelFunc:    cancelFunc,
 		workflowRegistry: make(map[string]workflowRegistryEntry),
 		workflowRegMutex: &sync.RWMutex{},
 	}
@@ -207,24 +210,34 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 
+	initExecutor.logger = initExecutor.logger.With(
+		//"app_version", initExecutor.applicationVersion, // This is really verbose...
+		"executor_id", initExecutor.executorID,
+		//"app_id", initExecutor.applicationID, // This should stay internal
+	)
+
 	// Create the system database
-	systemDB, err := NewSystemDatabase(config.DatabaseURL, config.Logger)
+	systemDB, err := newSystemDatabase(initExecutor, config.DatabaseURL, initExecutor.logger)
 	if err != nil {
 		return nil, newInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
 	initExecutor.systemDB = systemDB
 	initExecutor.logger.Info("System database initialized")
 
+	// Initialize the queue runner and register DBOS internal queue
+	initExecutor.queueRunner = newQueueRunner()
+	NewWorkflowQueue(initExecutor, _DBOS_INTERNAL_QUEUE_NAME)
+
 	return initExecutor, nil
 }
 
 func (c *dbosContext) Launch() error {
-	if c.launched {
+	if c.launched.Load() {
 		return newInitializationError("DBOS is already launched")
 	}
 
 	// Start the system database
-	c.systemDB.Launch(context.Background())
+	c.systemDB.Launch(c)
 
 	// Start the admin server if configured
 	if c.config.AdminServer {
@@ -238,17 +251,9 @@ func (c *dbosContext) Launch() error {
 		c.adminServer = adminServer
 	}
 
-	// Create context with cancel function for queue runner
-	// FIXME: cancellation now has to go through the DBOSContext
-	ctx, cancel := context.WithCancel(c.ctx)
-	c.queueRunnerCtx = ctx
-	c.queueRunnerCancelFunc = cancel
-	c.queueRunnerDone = make(chan struct{})
-
 	// Start the queue runner in a goroutine
 	go func() {
-		defer close(c.queueRunnerDone)
-		queueRunner(c)
+		c.queueRunner.run(c)
 	}()
 	c.logger.Info("Queue runner started")
 
@@ -268,61 +273,61 @@ func (c *dbosContext) Launch() error {
 	}
 
 	c.logger.Info("DBOS initialized", "app_version", c.applicationVersion, "executor_id", c.executorID)
-	c.launched = true
+	c.launched.Store(true)
 	return nil
 }
 
+// We might consider renaming this to "Cancel" to me more idiomatic
 func (c *dbosContext) Shutdown() {
+	c.logger.Info("Shutting down DBOS context")
+
+	// Cancel the context to signal all resources to stop
+	c.ctxCancelFunc(errors.New("DBOS shutdown initiated"))
+
 	// Wait for all workflows to finish
 	c.logger.Info("Waiting for all workflows to finish")
 	c.workflowsWg.Wait()
+	c.logger.Info("All workflows completed")
 
-	if !c.launched {
-		c.logger.Warn("DBOS is not launched, nothing to shutdown")
-		return
-	}
-
-	// Cancel the context to stop the queue runner
-	if c.queueRunnerCancelFunc != nil {
-		c.logger.Info("Stopping queue runner")
-		c.queueRunnerCancelFunc()
-		// Wait for queue runner to finish
-		<-c.queueRunnerDone
-		c.logger.Info("Queue runner stopped")
-	}
-
-	if c.workflowScheduler != nil {
-		c.logger.Info("Stopping workflow scheduler")
-		ctx := c.workflowScheduler.Stop()
-		// Wait for all running jobs to complete with 5-second timeout
-		timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		select {
-		case <-ctx.Done():
-			c.logger.Info("All scheduled jobs completed")
-		case <-timeoutCtx.Done():
-			c.logger.Warn("Timeout waiting for jobs to complete", "timeout", "5s")
-		}
-	}
-
+	// Close the pool and the notification listener if started
 	if c.systemDB != nil {
 		c.logger.Info("Shutting down system database")
-		c.systemDB.Shutdown()
+		c.systemDB.Shutdown(c)
 		c.systemDB = nil
 	}
 
-	if c.adminServer != nil {
-		c.logger.Info("Shutting down admin server")
-		err := c.adminServer.Shutdown()
-		if err != nil {
-			c.logger.Error("Failed to shutdown admin server", "error", err)
-		} else {
-			c.logger.Info("Admin server shutdown complete")
-		}
-		c.adminServer = nil
-	}
+	if c.launched.Load() {
+		// Wait for queue runner to finish
+		<-c.queueRunner.completionChan
+		c.logger.Info("Queue runner completed")
 
+		if c.workflowScheduler != nil {
+			c.logger.Info("Stopping workflow scheduler")
+			ctx := c.workflowScheduler.Stop()
+			// Wait for all running jobs to complete with 5-second timeout
+			timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+
+			select {
+			case <-ctx.Done():
+				c.logger.Info("All scheduled jobs completed")
+			case <-timeoutCtx.Done():
+				c.logger.Warn("Timeout waiting for jobs to complete. Moving on", "timeout", "5s")
+			}
+		}
+
+		if c.adminServer != nil {
+			c.logger.Info("Shutting down admin server")
+			err := c.adminServer.Shutdown(c)
+			if err != nil {
+				c.logger.Error("Failed to shutdown admin server", "error", err)
+			} else {
+				c.logger.Info("Admin server shutdown complete")
+			}
+			c.adminServer = nil
+		}
+	}
+	c.launched.Store(false)
 }
 
 func GetBinaryHash() (string, error) {

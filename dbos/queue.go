@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/gob"
 	"math"
@@ -10,11 +11,6 @@ import (
 
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
-)
-
-var (
-	workflowQueueRegistry = make(map[string]WorkflowQueue)
-	_                     = NewWorkflowQueue(_DBOS_INTERNAL_QUEUE_NAME)
 )
 
 const (
@@ -29,12 +25,12 @@ type RateLimiter struct {
 }
 
 type WorkflowQueue struct {
-	name                 string
-	workerConcurrency    *int
-	globalConcurrency    *int
-	priorityEnabled      bool
-	limiter              *RateLimiter
-	maxTasksPerIteration int
+	Name                 string       `json:"name"`
+	WorkerConcurrency    *int         `json:"workerConcurrency,omitempty"`
+	GlobalConcurrency    *int         `json:"concurrency,omitempty"` // Different key to match other transact APIs
+	PriorityEnabled      bool         `json:"priorityEnabled,omitempty"`
+	RateLimit            *RateLimiter `json:"rateLimit,omitempty"` // Named after other Transact APIs
+	MaxTasksPerIteration int          `json:"maxTasksPerIteration"`
 }
 
 // queueOption is a functional option for configuring a workflow queue
@@ -42,49 +38,57 @@ type queueOption func(*WorkflowQueue)
 
 func WithWorkerConcurrency(concurrency int) queueOption {
 	return func(q *WorkflowQueue) {
-		q.workerConcurrency = &concurrency
+		q.WorkerConcurrency = &concurrency
 	}
 }
 
 func WithGlobalConcurrency(concurrency int) queueOption {
 	return func(q *WorkflowQueue) {
-		q.globalConcurrency = &concurrency
+		q.GlobalConcurrency = &concurrency
 	}
 }
 
 func WithPriorityEnabled(enabled bool) queueOption {
 	return func(q *WorkflowQueue) {
-		q.priorityEnabled = enabled
+		q.PriorityEnabled = enabled
 	}
 }
 
 func WithRateLimiter(limiter *RateLimiter) queueOption {
 	return func(q *WorkflowQueue) {
-		q.limiter = limiter
+		q.RateLimit = limiter
 	}
 }
 
 func WithMaxTasksPerIteration(maxTasks int) queueOption {
 	return func(q *WorkflowQueue) {
-		q.maxTasksPerIteration = maxTasks
+		q.MaxTasksPerIteration = maxTasks
 	}
 }
 
 // NewWorkflowQueue creates a new workflow queue with optional configuration
-func NewWorkflowQueue(name string, options ...queueOption) WorkflowQueue {
-	// TODO: Add runtime check for post-initialization registration if needed
-	if _, exists := workflowQueueRegistry[name]; exists {
+func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...queueOption) WorkflowQueue {
+	ctx, ok := dbosCtx.(*dbosContext)
+	if !ok {
+		return WorkflowQueue{} // Do nothing if the concrete type is not dbosContext
+	}
+	if ctx.launched.Load() {
+		panic("Cannot register workflow queue after DBOS has launched")
+	}
+	ctx.logger.Debug("Creating new workflow queue", "queue_name", name)
+
+	if _, exists := ctx.queueRunner.workflowQueueRegistry[name]; exists {
 		panic(newConflictingRegistrationError(name))
 	}
 
 	// Create queue with default settings
 	q := WorkflowQueue{
-		name:                 name,
-		workerConcurrency:    nil,
-		globalConcurrency:    nil,
-		priorityEnabled:      false,
-		limiter:              nil,
-		maxTasksPerIteration: _DEFAULT_MAX_TASKS_PER_ITERATION,
+		Name:                 name,
+		WorkerConcurrency:    nil,
+		GlobalConcurrency:    nil,
+		PriorityEnabled:      false,
+		RateLimit:            nil,
+		MaxTasksPerIteration: _DEFAULT_MAX_TASKS_PER_ITERATION,
 	}
 
 	// Apply functional options
@@ -93,32 +97,60 @@ func NewWorkflowQueue(name string, options ...queueOption) WorkflowQueue {
 	}
 
 	// Register the queue in the global registry
-	workflowQueueRegistry[name] = q
+	ctx.queueRunner.workflowQueueRegistry[name] = q
 
 	return q
 }
 
-func queueRunner(ctx *dbosContext) {
-	const (
-		baseInterval    = 1.0   // Base interval in seconds
-		minInterval     = 1.0   // Minimum polling interval in seconds
-		maxInterval     = 120.0 // Maximum polling interval in seconds
-		backoffFactor   = 2.0   // Exponential backoff multiplier
-		scalebackFactor = 0.9   // Scale back factor for successful iterations
-		jitterMin       = 0.95  // Minimum jitter multiplier
-		jitterMax       = 1.05  // Maximum jitter multiplier
-	)
+type queueRunner struct {
+	// Queue runner iteration parameters
+	baseInterval    float64
+	minInterval     float64
+	maxInterval     float64
+	backoffFactor   float64
+	scalebackFactor float64
+	jitterMin       float64
+	jitterMax       float64
 
-	pollingInterval := baseInterval
+	// Queue registry
+	workflowQueueRegistry map[string]WorkflowQueue
+
+	// Channel to signal completion back to the DBOS context
+	completionChan chan bool
+}
+
+func newQueueRunner() *queueRunner {
+	return &queueRunner{
+		baseInterval:          1.0,
+		minInterval:           1.0,
+		maxInterval:           120.0,
+		backoffFactor:         2.0,
+		scalebackFactor:       0.9,
+		jitterMin:             0.95,
+		jitterMax:             1.05,
+		workflowQueueRegistry: make(map[string]WorkflowQueue),
+		completionChan:        make(chan bool),
+	}
+}
+
+func (qr *queueRunner) listQueues() []WorkflowQueue {
+	queues := make([]WorkflowQueue, 0, len(qr.workflowQueueRegistry))
+	for _, queue := range qr.workflowQueueRegistry {
+		queues = append(queues, queue)
+	}
+	return queues
+}
+
+func (qr *queueRunner) run(ctx *dbosContext) {
+	pollingInterval := qr.baseInterval
 
 	for {
 		hasBackoffError := false
 
 		// Iterate through all queues in the registry
-		for queueName, queue := range workflowQueueRegistry {
-			ctx.logger.Debug("Processing queue", "queue_name", queueName)
+		for queueName, queue := range qr.workflowQueueRegistry {
 			// Call DequeueWorkflows for each queue
-			dequeuedWorkflows, err := ctx.systemDB.DequeueWorkflows(ctx.queueRunnerCtx, queue, ctx.executorID, ctx.applicationVersion)
+			dequeuedWorkflows, err := ctx.systemDB.DequeueWorkflows(ctx, queue, ctx.executorID, ctx.applicationVersion)
 			if err != nil {
 				if pgErr, ok := err.(*pgconn.PgError); ok {
 					switch pgErr.Code {
@@ -133,7 +165,6 @@ func queueRunner(ctx *dbosContext) {
 				continue
 			}
 
-			// Print what was dequeued
 			if len(dequeuedWorkflows) > 0 {
 				ctx.logger.Debug("Dequeued workflows from queue", "queue_name", queueName, "workflows", dequeuedWorkflows)
 			}
@@ -172,20 +203,21 @@ func queueRunner(ctx *dbosContext) {
 		// Adjust polling interval based on errors
 		if hasBackoffError {
 			// Increase polling interval using exponential backoff
-			pollingInterval = math.Min(pollingInterval*backoffFactor, maxInterval)
+			pollingInterval = math.Min(pollingInterval*qr.backoffFactor, qr.maxInterval)
 		} else {
 			// Scale back polling interval on successful iteration
-			pollingInterval = math.Max(minInterval, pollingInterval*scalebackFactor)
+			pollingInterval = math.Max(qr.minInterval, pollingInterval*qr.scalebackFactor)
 		}
 
 		// Apply jitter to the polling interval
-		jitter := jitterMin + rand.Float64()*(jitterMax-jitterMin)
+		jitter := qr.jitterMin + rand.Float64()*(qr.jitterMax-qr.jitterMin)
 		sleepDuration := time.Duration(pollingInterval * jitter * float64(time.Second))
 
 		// Sleep with jittered interval, but allow early exit on context cancellation
 		select {
-		case <-ctx.queueRunnerCtx.Done():
-			ctx.logger.Info("Queue runner stopping due to context cancellation")
+		case <-ctx.Done():
+			ctx.logger.Info("Queue runner stopping due to context cancellation", "cause", context.Cause(ctx))
+			qr.completionChan <- true
 			return
 		case <-time.After(sleepDuration):
 			// Continue to next iteration

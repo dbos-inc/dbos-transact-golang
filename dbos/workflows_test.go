@@ -85,7 +85,7 @@ func Identity[T any](dbosCtx DBOSContext, in T) (T, error) {
 }
 
 func TestWorkflowsRegistration(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
 
 	// Setup workflows with executor
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -325,7 +325,7 @@ func stepRetryWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 
 // TODO: step params
 func TestSteps(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
 
 	// Create workflows with executor
 	RegisterWorkflow(dbosCtx, stepWithinAStepWorkflow)
@@ -453,7 +453,7 @@ func TestSteps(t *testing.T) {
 
 // TODO Check timeouts behaviors for parents and children (e.g. awaited cancelled, etc)
 func TestChildWorkflow(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
 
 	// Create child workflows with executor
 	childWf := func(dbosCtx DBOSContext, i int) (string, error) {
@@ -574,7 +574,7 @@ func idempotencyWorkflowWithStep(dbosCtx DBOSContext, input string) (int64, erro
 }
 
 func TestWorkflowIdempotency(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
 	RegisterWorkflow(dbosCtx, idempotencyWorkflow)
 
 	t.Run("WorkflowExecutedOnlyOnce", func(t *testing.T) {
@@ -627,7 +627,7 @@ func TestWorkflowIdempotency(t *testing.T) {
 }
 
 func TestWorkflowRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
 	RegisterWorkflow(dbosCtx, idempotencyWorkflowWithStep)
 	t.Run("RecoveryResumeWhereItLeftOff", func(t *testing.T) {
 		// Reset the global counter
@@ -729,7 +729,7 @@ func infiniteDeadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error)
 	return 0, nil
 }
 func TestWorkflowDeadLetterQueue(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
 	RegisterWorkflow(dbosCtx, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
 	RegisterWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
 
@@ -903,7 +903,8 @@ var (
 )
 
 func TestScheduledWorkflows(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
+
 	RegisterWorkflow(dbosCtx, func(ctx DBOSContext, scheduledTime time.Time) (string, error) {
 		startTime := time.Now()
 		counter++
@@ -1098,7 +1099,7 @@ type sendRecvType struct {
 }
 
 func TestSendRecv(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
 
 	// Register all send/recv workflows with executor
 	RegisterWorkflow(dbosCtx, sendWorkflow)
@@ -1549,7 +1550,7 @@ func getEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (
 }
 
 func TestSetGetEvent(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
 
 	// Register all set/get event workflows with executor
 	RegisterWorkflow(dbosCtx, setEventWorkflow)
@@ -1877,7 +1878,7 @@ func sleepRecoveryWorkflow(dbosCtx DBOSContext, duration time.Duration) (time.Du
 }
 
 func TestSleep(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
 	RegisterWorkflow(dbosCtx, sleepRecoveryWorkflow)
 
 	t.Run("SleepDurableRecovery", func(t *testing.T) {

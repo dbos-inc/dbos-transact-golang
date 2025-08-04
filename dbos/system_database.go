@@ -26,7 +26,7 @@ import (
 type SystemDatabase interface {
 	// SysDB management
 	Launch(ctx context.Context)
-	Shutdown()
+	Shutdown(ctx context.Context)
 	ResetSystemDB(ctx context.Context) error
 
 	// Workflows
@@ -62,9 +62,10 @@ type SystemDatabase interface {
 type systemDatabase struct {
 	pool                           *pgxpool.Pool
 	notificationListenerConnection *pgconn.PgConn
-	notificationListenerLoopCancel context.CancelFunc
+	notificationLoopDone           chan bool
 	notificationsMap               *sync.Map
 	logger                         *slog.Logger
+	launched                       bool
 }
 
 /*******************************/
@@ -72,7 +73,7 @@ type systemDatabase struct {
 /*******************************/
 
 // createDatabaseIfNotExists creates the database if it doesn't exist
-func createDatabaseIfNotExists(databaseURL string, logger *slog.Logger) error {
+func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *slog.Logger) error {
 	// Connect to the postgres database
 	parsedURL, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
@@ -86,15 +87,15 @@ func createDatabaseIfNotExists(databaseURL string, logger *slog.Logger) error {
 
 	serverURL := parsedURL.Copy()
 	serverURL.Database = "postgres"
-	conn, err := pgx.ConnectConfig(context.Background(), serverURL)
+	conn, err := pgx.ConnectConfig(ctx, serverURL)
 	if err != nil {
 		return newInitializationError(fmt.Sprintf("failed to connect to PostgreSQL server: %v", err))
 	}
-	defer conn.Close(context.Background())
+	defer conn.Close(ctx)
 
 	// Create the system database if it doesn't exist
 	var exists bool
-	err = conn.QueryRow(context.Background(),
+	err = conn.QueryRow(ctx,
 		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName).Scan(&exists)
 	if err != nil {
 		return newInitializationError(fmt.Sprintf("failed to check if database exists: %v", err))
@@ -102,7 +103,7 @@ func createDatabaseIfNotExists(databaseURL string, logger *slog.Logger) error {
 	if !exists {
 		// TODO: validate db name
 		createSQL := fmt.Sprintf("CREATE DATABASE %s", pgx.Identifier{dbName}.Sanitize())
-		_, err = conn.Exec(context.Background(), createSQL)
+		_, err = conn.Exec(ctx, createSQL)
 		if err != nil {
 			return newInitializationError(fmt.Sprintf("failed to create database %s: %v", dbName, err))
 		}
@@ -158,9 +159,9 @@ func runMigrations(databaseURL string) error {
 }
 
 // New creates a new SystemDatabase instance and runs migrations
-func NewSystemDatabase(databaseURL string, logger *slog.Logger) (SystemDatabase, error) {
+func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Logger) (SystemDatabase, error) {
 	// Create the database if it doesn't exist
-	if err := createDatabaseIfNotExists(databaseURL, logger); err != nil {
+	if err := createDatabaseIfNotExists(ctx, databaseURL, logger); err != nil {
 		return nil, fmt.Errorf("failed to create database: %v", err)
 	}
 
@@ -170,14 +171,13 @@ func NewSystemDatabase(databaseURL string, logger *slog.Logger) (SystemDatabase,
 	}
 
 	// Create pgx pool
-	pool, err := pgxpool.New(context.Background(), databaseURL)
+	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection pool: %v", err)
 	}
 
 	// Test the connection
-	// FIXME: remove this
-	if err := pool.Ping(context.Background()); err != nil {
+	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("failed to ping database: %v", err)
 	}
@@ -199,7 +199,7 @@ func NewSystemDatabase(databaseURL string, logger *slog.Logger) (SystemDatabase,
 			}
 		}
 	}
-	notificationListenerConnection, err := pgconn.ConnectConfig(context.Background(), config)
+	notificationListenerConnection, err := pgconn.ConnectConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect notification listener to database: %v", err)
 	}
@@ -208,28 +208,40 @@ func NewSystemDatabase(databaseURL string, logger *slog.Logger) (SystemDatabase,
 		pool:                           pool,
 		notificationListenerConnection: notificationListenerConnection,
 		notificationsMap:               notificationsMap,
+		notificationLoopDone:           make(chan bool),
 		logger:                         logger,
 	}, nil
 }
 
 func (s *systemDatabase) Launch(ctx context.Context) {
 	// Start the notification listener loop
-	var notificationListenerLoopContext context.Context
-	notificationListenerLoopContext, s.notificationListenerLoopCancel = context.WithCancel(ctx)
-	go s.notificationListenerLoop(notificationListenerLoopContext)
-	// FIXME: logger not availableyet
-	fmt.Println("DBOS: Started notification listener loop")
+	go s.notificationListenerLoop(ctx)
+	s.launched = true
 }
 
-func (s *systemDatabase) Shutdown() {
+func (s *systemDatabase) Shutdown(ctx context.Context) {
 	s.logger.Info("DBOS: Closing system database connection pool")
 	if s.pool != nil {
 		s.pool.Close()
 	}
-	if s.notificationListenerLoopCancel != nil {
-		s.notificationListenerLoopCancel()
+
+	// Context wasn't cancelled, let's manually close
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		s.notificationListenerConnection.Close(ctx)
 	}
+
+	if s.launched {
+		// Wait for the notification loop to exit
+		<-s.notificationLoopDone
+	}
+
 	s.notificationsMap.Clear()
+	// Allow pgx health checks to complete
+	// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
+	// These trigger go-leak alerts
+	time.Sleep(500 * time.Millisecond)
+
+	s.launched = false
 }
 
 /*******************************/
@@ -1090,6 +1102,11 @@ func (s *systemDatabase) Sleep(ctx context.Context, duration time.Duration) (tim
 /****************************************/
 
 func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
+	defer func() {
+		s.notificationLoopDone <- true
+	}()
+
+	s.logger.Info("DBOS: Starting notification listener loop")
 	mrr := s.notificationListenerConnection.Exec(ctx, "LISTEN dbos_notifications_channel; LISTEN dbos_workflow_events_channel")
 	results, err := mrr.ReadAll()
 	if err != nil {
@@ -1110,15 +1127,23 @@ func (s *systemDatabase) notificationListenerLoop(ctx context.Context) {
 		// WaitForNotification handles context cancellation: https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgconn/pgconn.go#L1050
 		err := s.notificationListenerConnection.WaitForNotification(ctx)
 		if err != nil {
-			if err == context.Canceled {
-				s.logger.Info("Notification listener loop exiting due to context cancellation", "error", ctx.Err())
+			// Context cancellation
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				s.logger.Info("Notification listener loop exiting due to context cancellation", "cause", context.Cause(ctx), "error", err)
 				return
 			}
+
+			// Connection closed (during shutdown) - exit gracefully
+			if s.notificationListenerConnection.IsClosed() {
+				s.logger.Info("Notification listener loop exiting due to connection closure")
+				return
+			}
+
+			// Other errors - log and retry. XXX eventually add exponential backoff + jitter
 			s.logger.Error("Error waiting for notification", "error", err)
-			time.Sleep(1 * time.Second)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
-
 	}
 }
 
@@ -1594,8 +1619,8 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	// First check the rate limiter
 	startTimeMs := time.Now().UnixMilli()
 	var numRecentQueries int
-	if queue.limiter != nil {
-		limiterPeriod := time.Duration(queue.limiter.Period * float64(time.Second))
+	if queue.RateLimit != nil {
+		limiterPeriod := time.Duration(queue.RateLimit.Period * float64(time.Second))
 
 		// Calculate the cutoff time: current time minus limiter period
 		cutoffTimeMs := time.Now().Add(-limiterPeriod).UnixMilli()
@@ -1609,22 +1634,22 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 		  AND started_at_epoch_ms > $3`
 
 		err := tx.QueryRow(ctx, limiterQuery,
-			queue.name,
+			queue.Name,
 			WorkflowStatusEnqueued,
 			cutoffTimeMs).Scan(&numRecentQueries)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query rate limiter: %w", err)
 		}
 
-		if numRecentQueries >= queue.limiter.Limit {
+		if numRecentQueries >= queue.RateLimit.Limit {
 			return []dequeuedWorkflow{}, nil
 		}
 	}
 
 	// Calculate max_tasks based on concurrency limits
-	maxTasks := queue.maxTasksPerIteration
+	maxTasks := queue.MaxTasksPerIteration
 
-	if queue.workerConcurrency != nil || queue.globalConcurrency != nil {
+	if queue.WorkerConcurrency != nil || queue.GlobalConcurrency != nil {
 		// Count pending workflows by executor
 		pendingQuery := `
 			SELECT executor_id, COUNT(*) as task_count
@@ -1632,7 +1657,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 			WHERE queue_name = $1 AND status = $2
 			GROUP BY executor_id`
 
-		rows, err := tx.Query(ctx, pendingQuery, queue.name, WorkflowStatusPending)
+		rows, err := tx.Query(ctx, pendingQuery, queue.Name, WorkflowStatusPending)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query pending workflows: %w", err)
 		}
@@ -1651,25 +1676,25 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 		localPendingWorkflows := pendingWorkflowsDict[executorID]
 
 		// Check worker concurrency limit
-		if queue.workerConcurrency != nil {
-			workerConcurrency := *queue.workerConcurrency
+		if queue.WorkerConcurrency != nil {
+			workerConcurrency := *queue.WorkerConcurrency
 			if localPendingWorkflows > workerConcurrency {
-				s.logger.Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", queue.name, "concurrency_limit", workerConcurrency)
+				s.logger.Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", queue.Name, "concurrency_limit", workerConcurrency)
 			}
 			availableWorkerTasks := max(workerConcurrency-localPendingWorkflows, 0)
 			maxTasks = availableWorkerTasks
 		}
 
 		// Check global concurrency limit
-		if queue.globalConcurrency != nil {
+		if queue.GlobalConcurrency != nil {
 			globalPendingWorkflows := 0
 			for _, count := range pendingWorkflowsDict {
 				globalPendingWorkflows += count
 			}
 
-			concurrency := *queue.globalConcurrency
+			concurrency := *queue.GlobalConcurrency
 			if globalPendingWorkflows > concurrency {
-				s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", queue.name, "concurrency_limit", concurrency)
+				s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", queue.Name, "concurrency_limit", concurrency)
 			}
 			availableTasks := max(concurrency-globalPendingWorkflows, 0)
 			if availableTasks < maxTasks {
@@ -1681,7 +1706,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	// Build the query to select workflows for dequeueing
 	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
 	// otherwise use NOWAIT to ensure consistent view across processes
-	skipLocks := queue.globalConcurrency == nil
+	skipLocks := queue.GlobalConcurrency == nil
 	var lockClause string
 	if skipLocks {
 		lockClause = "FOR UPDATE SKIP LOCKED"
@@ -1690,7 +1715,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	var query string
-	if queue.priorityEnabled {
+	if queue.PriorityEnabled {
 		query = fmt.Sprintf(`
 			SELECT workflow_uuid
 			FROM dbos.workflow_status
@@ -1715,7 +1740,7 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	}
 
 	// Execute the query to get workflow IDs
-	rows, err := tx.Query(ctx, query, queue.name, WorkflowStatusEnqueued, applicationVersion)
+	rows, err := tx.Query(ctx, query, queue.Name, WorkflowStatusEnqueued, applicationVersion)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query enqueued workflows: %w", err)
 	}
@@ -1723,6 +1748,13 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 
 	var dequeuedIDs []string
 	for rows.Next() {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			s.logger.Warn("DequeueWorkflows context cancelled while reading dequeue results", "cause", context.Cause(ctx))
+			return nil, ctx.Err()
+		default:
+		}
 		var workflowID string
 		if err := rows.Scan(&workflowID); err != nil {
 			return nil, fmt.Errorf("failed to scan workflow ID: %w", err)
@@ -1738,8 +1770,8 @@ func (s *systemDatabase) DequeueWorkflows(ctx context.Context, queue WorkflowQue
 	var retWorkflows []dequeuedWorkflow
 	for _, id := range dequeuedIDs {
 		// If we have a limiter, stop dequeueing workflows when the number of workflows started this period exceeds the limit.
-		if queue.limiter != nil {
-			if len(retWorkflows)+numRecentQueries >= queue.limiter.Limit {
+		if queue.RateLimit != nil {
+			if len(retWorkflows)+numRecentQueries >= queue.RateLimit.Limit {
 				break
 			}
 		}

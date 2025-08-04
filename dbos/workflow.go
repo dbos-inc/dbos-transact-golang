@@ -216,6 +216,10 @@ func registerWorkflow(ctx DBOSContext, workflowName string, fn WrappedWorkflowFu
 		return
 	}
 
+	if c.launched.Load() {
+		panic("Cannot register workflow after DBOS has launched")
+	}
+
 	c.workflowRegMutex.Lock()
 	defer c.workflowRegMutex.Unlock()
 
@@ -237,11 +241,15 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 		return
 	}
 
+	if c.launched.Load() {
+		panic("Cannot register scheduled workflow after DBOS has launched")
+	}
+
 	c.getWorkflowScheduler().Start()
 	var entryID cron.EntryID
 	entryID, err := c.getWorkflowScheduler().AddFunc(cronSchedule, func() {
 		// Execute the workflow on the cron schedule once DBOS is launched
-		if !c.launched {
+		if !c.launched.Load() {
 			return
 		}
 		// Get the scheduled time from the cron entry

@@ -3,6 +3,8 @@ package dbos
 import (
 	"context"
 	"fmt"
+	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,16 +28,6 @@ This suite tests
 [] scheduled workflow enqueues another workflow
 */
 
-var (
-	queue = NewWorkflowQueue("test-queue")
-
-	// Variables for successive enqueue test
-	dlqEnqueueQueue  = NewWorkflowQueue("test-successive-enqueue-queue")
-	dlqStartEvent    = NewEvent()
-	dlqCompleteEvent = NewEvent()
-	dlqMaxRetries    = 10
-)
-
 func queueWorkflow(ctx DBOSContext, input string) (string, error) {
 	step1, err := RunAsStep(ctx, queueStep, input)
 	if err != nil {
@@ -49,7 +41,14 @@ func queueStep(ctx context.Context, input string) (string, error) {
 }
 
 func TestWorkflowQueues(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
+
+	queue := NewWorkflowQueue(dbosCtx, "test-queue")
+	dlqEnqueueQueue := NewWorkflowQueue(dbosCtx, "test-successive-enqueue-queue")
+
+	dlqStartEvent := NewEvent()
+	dlqCompleteEvent := NewEvent()
+	dlqMaxRetries := 10
 
 	// Register workflows with dbosContext
 	RegisterWorkflow(dbosCtx, queueWorkflow)
@@ -75,7 +74,7 @@ func TestWorkflowQueues(t *testing.T) {
 	// Create workflow that enqueues another workflow
 	queueWorkflowThatEnqueues := func(ctx DBOSContext, input string) (string, error) {
 		// Enqueue another workflow to the same queue
-		enqueuedHandle, err := RunAsWorkflow(ctx, queueWorkflow, input+"-enqueued", WithQueue(queue.name))
+		enqueuedHandle, err := RunAsWorkflow(ctx, queueWorkflow, input+"-enqueued", WithQueue(queue.Name))
 		if err != nil {
 			return "", fmt.Errorf("failed to enqueue workflow: %v", err)
 		}
@@ -103,7 +102,7 @@ func TestWorkflowQueues(t *testing.T) {
 	}
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
-		handle, err := RunAsWorkflow(dbosCtx, queueWorkflow, "test-input", WithQueue(queue.name))
+		handle, err := RunAsWorkflow(dbosCtx, queueWorkflow, "test-input", WithQueue(queue.Name))
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow: %v", err)
 		}
@@ -127,7 +126,7 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 
 	t.Run("EnqueuedWorkflowStartsChildWorkflow", func(t *testing.T) {
-		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowWithChild, "test-input", WithQueue(queue.name))
+		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowWithChild, "test-input", WithQueue(queue.Name))
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow with child: %v", err)
 		}
@@ -149,7 +148,7 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 
 	t.Run("WorkflowEnqueuesAnotherWorkflow", func(t *testing.T) {
-		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowThatEnqueues, "test-input", WithQueue(queue.name))
+		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowThatEnqueues, "test-input", WithQueue(queue.Name))
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow that enqueues another workflow: %v", err)
 		}
@@ -183,7 +182,7 @@ func TestWorkflowQueues(t *testing.T) {
 		workflowID := "blocking-workflow-test"
 
 		// Enqueue the workflow for the first time
-		originalHandle, err := RunAsWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.name), WithWorkflowID(workflowID))
+		originalHandle, err := RunAsWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
 		if err != nil {
 			t.Fatalf("failed to enqueue blocking workflow: %v", err)
 		}
@@ -194,7 +193,7 @@ func TestWorkflowQueues(t *testing.T) {
 
 		// Try to enqueue the same workflow more times
 		for i := range dlqMaxRetries * 2 {
-			_, err := RunAsWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.name), WithWorkflowID(workflowID))
+			_, err := RunAsWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
 			if err != nil {
 				t.Fatalf("failed to enqueue workflow attempt %d: %v", i+1, err)
 			}
@@ -255,21 +254,16 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 }
 
-var (
-	recoveryQueue = NewWorkflowQueue("recovery-queue")
-
-	recoveryStepCounter = 0
-	recoveryStepEvents  = make([]*Event, 5) // 5 queued steps
-	recoveryEvent       = NewEvent()
-)
-
 func TestQueueRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
 
-	// Create workflows with dbosContext
+	recoveryQueue := NewWorkflowQueue(dbosCtx, "recovery-queue")
+	var recoveryStepCounter int64
+	recoveryStepEvents := make([]*Event, 5) // 5 queued steps
+	recoveryEvent := NewEvent()
 
 	recoveryStepWorkflowFunc := func(ctx DBOSContext, i int) (int, error) {
-		recoveryStepCounter++
+		atomic.AddInt64(&recoveryStepCounter, 1)
 		recoveryStepEvents[i].Set()
 		recoveryEvent.Wait()
 		return i, nil
@@ -279,7 +273,7 @@ func TestQueueRecovery(t *testing.T) {
 	recoveryWorkflowFunc := func(ctx DBOSContext, input string) ([]int, error) {
 		handles := make([]WorkflowHandle[int], 0, 5) // 5 queued steps
 		for i := range 5 {
-			handle, err := RunAsWorkflow(ctx, recoveryStepWorkflowFunc, i, WithQueue(recoveryQueue.name))
+			handle, err := RunAsWorkflow(ctx, recoveryStepWorkflowFunc, i, WithQueue(recoveryQueue.Name))
 			if err != nil {
 				return nil, fmt.Errorf("failed to enqueue step %d: %v", i, err)
 			}
@@ -322,8 +316,8 @@ func TestQueueRecovery(t *testing.T) {
 		e.Clear()
 	}
 
-	if recoveryStepCounter != queuedSteps {
-		t.Fatalf("expected recoveryStepCounter to be %d, got %d", queuedSteps, recoveryStepCounter)
+	if atomic.LoadInt64(&recoveryStepCounter) != int64(queuedSteps) {
+		t.Fatalf("expected recoveryStepCounter to be %d, got %d", queuedSteps, atomic.LoadInt64(&recoveryStepCounter))
 	}
 
 	// Recover the workflow, then resume it.
@@ -368,8 +362,8 @@ func TestQueueRecovery(t *testing.T) {
 		t.Fatalf("expected result %v, got %v", expectedResult, result)
 	}
 
-	if recoveryStepCounter != queuedSteps*2 {
-		t.Fatalf("expected recoveryStepCounter to be %d, got %d", queuedSteps*2, recoveryStepCounter)
+	if atomic.LoadInt64(&recoveryStepCounter) != int64(queuedSteps*2) {
+		t.Fatalf("expected recoveryStepCounter to be %d, got %d", queuedSteps*2, atomic.LoadInt64(&recoveryStepCounter))
 	}
 
 	// Rerun the workflow. Because each step is complete, none should start again.
@@ -385,8 +379,8 @@ func TestQueueRecovery(t *testing.T) {
 		t.Fatalf("expected result %v, got %v", expectedResult, rerunResult)
 	}
 
-	if recoveryStepCounter != queuedSteps*2 {
-		t.Fatalf("expected recoveryStepCounter to remain %d, got %d", queuedSteps*2, recoveryStepCounter)
+	if atomic.LoadInt64(&recoveryStepCounter) != int64(queuedSteps*2) {
+		t.Fatalf("expected recoveryStepCounter to remain %d, got %d", queuedSteps*2, atomic.LoadInt64(&recoveryStepCounter))
 	}
 
 	if !queueEntriesAreCleanedUp(dbosCtx) {
@@ -394,15 +388,14 @@ func TestQueueRecovery(t *testing.T) {
 	}
 }
 
-var (
-	globalConcurrencyQueue = NewWorkflowQueue("test-global-concurrency-queue", WithGlobalConcurrency(1))
-	workflowEvent1         = NewEvent()
-	workflowEvent2         = NewEvent()
-	workflowDoneEvent      = NewEvent()
-)
-
+// TODO: we can update this test to have the same logic than TestWorkerConcurrency
 func TestGlobalConcurrency(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
+
+	globalConcurrencyQueue := NewWorkflowQueue(dbosCtx, "test-global-concurrency-queue", WithGlobalConcurrency(1))
+	workflowEvent1 := NewEvent()
+	workflowEvent2 := NewEvent()
+	workflowDoneEvent := NewEvent()
 
 	// Create workflow with dbosContext
 	globalConcurrencyWorkflowFunc := func(ctx DBOSContext, input string) (string, error) {
@@ -423,12 +416,12 @@ func TestGlobalConcurrency(t *testing.T) {
 	}
 
 	// Enqueue two workflows
-	handle1, err := RunAsWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow1", WithQueue(globalConcurrencyQueue.name))
+	handle1, err := RunAsWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow1", WithQueue(globalConcurrencyQueue.Name))
 	if err != nil {
 		t.Fatalf("failed to enqueue workflow1: %v", err)
 	}
 
-	handle2, err := RunAsWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow2", WithQueue(globalConcurrencyQueue.name))
+	handle2, err := RunAsWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow2", WithQueue(globalConcurrencyQueue.Name))
 	if err != nil {
 		t.Fatalf("failed to enqueue workflow2: %v", err)
 	}
@@ -475,97 +468,114 @@ func TestGlobalConcurrency(t *testing.T) {
 	}
 }
 
-var (
-	workerConcurrencyQueue = NewWorkflowQueue("test-worker-concurrency-queue", WithWorkerConcurrency(1))
-	startEvents            = []*Event{
-		NewEvent(),
-		NewEvent(),
-		NewEvent(),
-		NewEvent(),
-	}
-	completeEvents = []*Event{
-		NewEvent(),
-		NewEvent(),
-		NewEvent(),
-		NewEvent(),
-	}
-)
-
 func TestWorkerConcurrency(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	// Create two contexts that will represent 2 DBOS executors
+	os.Setenv("DBOS__VMID", "worker1")
+	dbosCtx1 := setupDBOS(t, true, true)
+	os.Setenv("DBOS__VMID", "worker2")
+	dbosCtx2 := setupDBOS(t, false, false) // Don't check for leaks because t.Cancel is called in LIFO order. Also don't reset the DB here.
+	os.Unsetenv("DBOS__VMID")
+
+	if dbosCtx1.GetExecutorID() != "worker1" || dbosCtx2.GetExecutorID() != "worker2" {
+		t.Fatalf("expected executor IDs to be 'worker1' and 'worker2', got '%s' and '%s'", dbosCtx1.GetExecutorID(), dbosCtx2.GetExecutorID())
+	}
+
+	workerConcurrencyQueue := NewWorkflowQueue(dbosCtx1, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
+	NewWorkflowQueue(dbosCtx2, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
+	startEvents := []*Event{
+		NewEvent(),
+		NewEvent(),
+		NewEvent(),
+		NewEvent(),
+	}
+	completeEvents := []*Event{
+		NewEvent(),
+		NewEvent(),
+		NewEvent(),
+		NewEvent(),
+	}
+
+	// Helper function to check the status of workflows in the queue
+	checkWorkflowStatus := func(t *testing.T, expectedPendingPerExecutor, expectedEnqueued int) {
+		workflows, err := dbosCtx1.(*dbosContext).systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+			queueName: workerConcurrencyQueue.Name,
+		})
+		if err != nil {
+			t.Fatalf("failed to list workflows: %v", err)
+		}
+
+		pendings := make(map[string]int)
+		enqueuedCount := 0
+
+		for _, wf := range workflows {
+			switch wf.Status {
+			case WorkflowStatusPending:
+				pendings[wf.ExecutorID]++
+			case WorkflowStatusEnqueued:
+				enqueuedCount++
+			}
+		}
+
+		for executorID, count := range pendings {
+			if count != expectedPendingPerExecutor {
+				t.Fatalf("expected %d pending workflow on executor %s, got %d", expectedPendingPerExecutor, executorID, count)
+			}
+		}
+
+		if enqueuedCount != expectedEnqueued {
+			t.Fatalf("expected %d workflows to be enqueued, got %d", expectedEnqueued, enqueuedCount)
+		}
+	}
 
 	// Create workflow with dbosContext
 	blockingWfFunc := func(ctx DBOSContext, i int) (int, error) {
 		// Simulate a blocking operation
+		fmt.Println("Blocking workflow started", i)
 		startEvents[i].Set()
 		completeEvents[i].Wait()
 		return i, nil
 	}
-	RegisterWorkflow(dbosCtx, blockingWfFunc)
+	RegisterWorkflow(dbosCtx1, blockingWfFunc)
+	RegisterWorkflow(dbosCtx2, blockingWfFunc)
 
-	err := dbosCtx.Launch()
+	err := dbosCtx1.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch DBOS instance: %v", err)
+	}
+
+	err = dbosCtx2.Launch()
 	if err != nil {
 		t.Fatalf("failed to launch DBOS instance: %v", err)
 	}
 
 	// First enqueue four blocking workflows
-	handle1, err := RunAsWorkflow(dbosCtx, blockingWfFunc, 0, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-1"))
+	handle1, err := RunAsWorkflow(dbosCtx1, blockingWfFunc, 0, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-1"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 1: %v", err)
 	}
-	handle2, err := RunAsWorkflow(dbosCtx, blockingWfFunc, 1, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-2"))
+	handle2, err := RunAsWorkflow(dbosCtx1, blockingWfFunc, 1, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-2"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 2: %v", err)
 	}
-	_, err = RunAsWorkflow(dbosCtx, blockingWfFunc, 2, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-3"))
+	_, err = RunAsWorkflow(dbosCtx1, blockingWfFunc, 2, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-3"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 3: %v", err)
 	}
-	_, err = RunAsWorkflow(dbosCtx, blockingWfFunc, 3, WithQueue(workerConcurrencyQueue.name), WithWorkflowID("worker-cc-wf-4"))
+	_, err = RunAsWorkflow(dbosCtx1, blockingWfFunc, 3, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-4"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 4: %v", err)
 	}
 
-	// wait for the blocking workflow to start
+	// The two first workflows should dequeue on both workers
 	startEvents[0].Wait()
-	// Ensure the three other workflows are not started yet
-	if startEvents[1].IsSet || startEvents[2].IsSet || startEvents[3].IsSet {
-		t.Fatal("expected only blocking workflow 1 to start, but others have started")
-	}
-	workflows, err := dbosCtx.(*dbosContext).systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
-		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
-		queueName: workerConcurrencyQueue.name,
-	})
-	if err != nil {
-		t.Fatalf("failed to list workflows: %v", err)
-	}
-	if len(workflows) != 3 {
-		t.Fatalf("expected 3 workflows to be enqueued, got %d", len(workflows))
-	}
-
-	// Stop the queue runner before changing dbosContext ID to avoid race conditions
-	stopQueueRunner(dbosCtx)
-	// Change the dbosContext ID to a different value
-	dbosCtx.(*dbosContext).executorID = "worker-2"
-	// Restart the queue runner
-	restartQueueRunner(dbosCtx)
-
-	// Wait for the second workflow to start on the second worker
 	startEvents[1].Wait()
 	// Ensure the two other workflows are not started yet
 	if startEvents[2].IsSet || startEvents[3].IsSet {
-		t.Fatal("expected only blocking workflow 2 to start, but others have started")
+		t.Fatal("expected only blocking workflow 1 and 2 to start, but others have started")
 	}
-	workflows, err = dbosCtx.(*dbosContext).systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
-		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
-		queueName: workerConcurrencyQueue.name,
-	})
-	if err != nil {
-		t.Fatalf("failed to list workflows: %v", err)
-	}
-	if len(workflows) != 2 {
-		t.Fatalf("expected 2 workflows to be enqueued, got %d", len(workflows))
-	}
+
+	// Expect 1 workflow pending on each executor and 2 workflows enqueued
+	checkWorkflowStatus(t, 1, 2)
 
 	// Unlock workflow 1, check wf 3 starts, check 4 stays blocked
 	completeEvents[0].Set()
@@ -576,28 +586,15 @@ func TestWorkerConcurrency(t *testing.T) {
 	if result1 != 0 {
 		t.Fatalf("expected result from blocking workflow 1 to be 0, got %v", result1)
 	}
-	// Stop the queue runner before changing dbosContext ID to avoid race conditions
-	stopQueueRunner(dbosCtx)
-	// Change the dbosContext again and wait for the third workflow to start
-	dbosCtx.(*dbosContext).executorID = "local"
-	// Restart the queue runner
-	restartQueueRunner(dbosCtx)
+	// 3rd workflow should start
 	startEvents[2].Wait()
 	// Ensure the fourth workflow is not started yet
 	if startEvents[3].IsSet {
 		t.Fatal("expected only blocking workflow 3 to start, but workflow 4 has started")
 	}
-	// Check that only one workflow is pending
-	workflows, err = dbosCtx.(*dbosContext).systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
-		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
-		queueName: workerConcurrencyQueue.name,
-	})
-	if err != nil {
-		t.Fatalf("failed to list workflows: %v", err)
-	}
-	if len(workflows) != 1 {
-		t.Fatalf("expected 1 workflow to be enqueued, got %d", len(workflows))
-	}
+
+	// Check that 1 workflow is pending on each executor and 1 workflow is enqueued
+	checkWorkflowStatus(t, 1, 1)
 
 	// Unlock workflow 2 and check wf 4 starts
 	completeEvents[1].Set()
@@ -608,46 +605,28 @@ func TestWorkerConcurrency(t *testing.T) {
 	if result2 != 1 {
 		t.Fatalf("expected result from blocking workflow 2 to be 1, got %v", result2)
 	}
-	// Stop the queue runner before changing dbosContext ID to avoid race conditions
-	stopQueueRunner(dbosCtx)
-	// change dbosContext again and wait for the fourth workflow to start
-	dbosCtx.(*dbosContext).executorID = "worker-2"
-	// Restart the queue runner
-	restartQueueRunner(dbosCtx)
+	// 4th workflow should start now
 	startEvents[3].Wait()
-	// Check no workflow is enqueued
-	workflows, err = dbosCtx.(*dbosContext).systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
-		status:    []WorkflowStatusType{WorkflowStatusEnqueued},
-		queueName: workerConcurrencyQueue.name,
-	})
-	if err != nil {
-		t.Fatalf("failed to list workflows: %v", err)
-	}
-	if len(workflows) != 0 {
-		t.Fatalf("expected 0 workflows to be enqueued, got %d", len(workflows))
-	}
+	// workflow 3 and 4 should be pending, one per executor, and no workflows enqueued
+	checkWorkflowStatus(t, 1, 0)
 
 	// Unblock both workflows 3 and 4
 	completeEvents[2].Set()
 	completeEvents[3].Set()
 
-	if !queueEntriesAreCleanedUp(dbosCtx) {
+	if !queueEntriesAreCleanedUp(dbosCtx1) {
 		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
 	}
-
-	dbosCtx.(*dbosContext).executorID = "local" // Reset executor ID for future tests
 }
 
-var (
-	workerConcurrencyRecoveryQueue          = NewWorkflowQueue("test-worker-concurrency-recovery-queue", WithWorkerConcurrency(1))
-	workerConcurrencyRecoveryStartEvent1    = NewEvent()
-	workerConcurrencyRecoveryStartEvent2    = NewEvent()
-	workerConcurrencyRecoveryCompleteEvent1 = NewEvent()
-	workerConcurrencyRecoveryCompleteEvent2 = NewEvent()
-)
-
 func TestWorkerConcurrencyXRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
+
+	workerConcurrencyRecoveryQueue := NewWorkflowQueue(dbosCtx, "test-worker-concurrency-recovery-queue", WithWorkerConcurrency(1))
+	workerConcurrencyRecoveryStartEvent1 := NewEvent()
+	workerConcurrencyRecoveryStartEvent2 := NewEvent()
+	workerConcurrencyRecoveryCompleteEvent1 := NewEvent()
+	workerConcurrencyRecoveryCompleteEvent2 := NewEvent()
 
 	// Create workflows with dbosContext
 	workerConcurrencyRecoveryBlockingWf1 := func(ctx DBOSContext, input string) (string, error) {
@@ -669,11 +648,11 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	}
 
 	// Enqueue two workflows on a queue with worker concurrency = 1
-	handle1, err := RunAsWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf1, "workflow1", WithQueue(workerConcurrencyRecoveryQueue.name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
+	handle1, err := RunAsWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf1, "workflow1", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 1: %v", err)
 	}
-	handle2, err := RunAsWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf2, "workflow2", WithQueue(workerConcurrencyRecoveryQueue.name), WithWorkflowID("worker-cc-x-recovery-wf-2"))
+	handle2, err := RunAsWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf2, "workflow2", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-2"))
 	if err != nil {
 		t.Fatalf("failed to enqueue blocking workflow 2: %v", err)
 	}
@@ -761,16 +740,14 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	}
 }
 
-var (
-	rateLimiterQueue = NewWorkflowQueue("test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: 1.8}))
-)
-
 func rateLimiterTestWorkflow(ctx DBOSContext, _ string) (time.Time, error) {
 	return time.Now(), nil // Return current time
 }
 
 func TestQueueRateLimiter(t *testing.T) {
-	dbosCtx := setupDBOS(t)
+	dbosCtx := setupDBOS(t, true, true)
+
+	rateLimiterQueue := NewWorkflowQueue(dbosCtx, "test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: 1.8}))
 
 	// Create workflow with dbosContext
 	RegisterWorkflow(dbosCtx, rateLimiterTestWorkflow)
@@ -792,7 +769,7 @@ func TestQueueRateLimiter(t *testing.T) {
 	// executed simultaneously, followed by a wait of the period,
 	// followed by the next wave.
 	for i := 0; i < limit*numWaves; i++ {
-		handle, err := RunAsWorkflow(dbosCtx, rateLimiterTestWorkflow, "", WithQueue(rateLimiterQueue.name))
+		handle, err := RunAsWorkflow(dbosCtx, rateLimiterTestWorkflow, "", WithQueue(rateLimiterQueue.Name))
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow %d: %v", i, err)
 		}

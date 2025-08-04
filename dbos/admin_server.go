@@ -20,13 +20,6 @@ type adminServer struct {
 	logger *slog.Logger
 }
 
-type queueMetadata struct {
-	Name              string       `json:"name"`
-	Concurrency       *int         `json:"concurrency,omitempty"`
-	WorkerConcurrency *int         `json:"workerConcurrency,omitempty"`
-	RateLimit         *RateLimiter `json:"rateLimit,omitempty"`
-}
-
 func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	mux := http.NewServeMux()
 
@@ -80,19 +73,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			return
 		}
 
-		var queueMetadataArray []queueMetadata
-
-		// Iterate through all queues in the registry
-		for _, queue := range workflowQueueRegistry {
-			queueMetadata := queueMetadata{
-				Name:              queue.name,
-				WorkerConcurrency: queue.workerConcurrency,
-				Concurrency:       queue.globalConcurrency,
-				RateLimit:         queue.limiter,
-			}
-
-			queueMetadataArray = append(queueMetadataArray, queueMetadata)
-		}
+		queueMetadataArray := ctx.queueRunner.listQueues()
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(queueMetadataArray); err != nil {
@@ -125,10 +106,11 @@ func (as *adminServer) Start() error {
 	return nil
 }
 
-func (as *adminServer) Shutdown() error {
+func (as *adminServer) Shutdown(ctx context.Context) error {
 	as.logger.Info("Shutting down admin server")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// XXX consider moving the grace period to DBOSContext.Shutdown()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if err := as.server.Shutdown(ctx); err != nil {

@@ -63,7 +63,7 @@ func encodingStepStruct(ctx context.Context, input StepInputStruct) (StepOutputS
 }
 
 func TestWorkflowEncoding(t *testing.T) {
-	executor := setupDBOS(t)
+	executor := setupDBOS(t, true, true)
 
 	// Register workflows with executor
 	RegisterWorkflow(executor, encodingWorkflowBuiltinTypes)
@@ -321,7 +321,7 @@ func setEventUserDefinedTypeWorkflow(ctx DBOSContext, input string) (string, err
 }
 
 func TestSetEventSerialize(t *testing.T) {
-	executor := setupDBOS(t)
+	executor := setupDBOS(t, true, true)
 
 	// Register workflow with executor
 	RegisterWorkflow(executor, setEventUserDefinedTypeWorkflow)
@@ -411,7 +411,7 @@ func recvUserDefinedTypeWorkflow(ctx DBOSContext, input string) (UserDefinedEven
 }
 
 func TestSendSerialize(t *testing.T) {
-	executor := setupDBOS(t)
+	executor := setupDBOS(t, true, true)
 
 	// Register workflows with executor
 	RegisterWorkflow(executor, sendUserDefinedTypeWorkflow)

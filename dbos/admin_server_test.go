@@ -144,7 +144,7 @@ func TestAdminServer(t *testing.T) {
 				endpoint:       "http://localhost:3001" + workflowQueuesMetadataPath,
 				expectedStatus: http.StatusOK,
 				validateResp: func(t *testing.T, resp *http.Response) {
-					var queueMetadata []queueMetadata
+					var queueMetadata []WorkflowQueue
 					if err := json.NewDecoder(resp.Body).Decode(&queueMetadata); err != nil {
 						t.Errorf("Failed to decode response as QueueMetadata array: %v", err)
 					}
@@ -160,8 +160,8 @@ func TestAdminServer(t *testing.T) {
 					for _, queue := range queueMetadata {
 						if queue.Name == _DBOS_INTERNAL_QUEUE_NAME { // Internal queue name
 							foundInternalQueue = true
-							if queue.Concurrency != nil {
-								t.Errorf("Expected internal queue to have no concurrency limit, but got %v", *queue.Concurrency)
+							if queue.GlobalConcurrency != nil {
+								t.Errorf("Expected internal queue to have no concurrency limit, but got %v", *queue.GlobalConcurrency)
 							}
 							if queue.WorkerConcurrency != nil {
 								t.Errorf("Expected internal queue to have no worker concurrency limit, but got %v", *queue.WorkerConcurrency)
