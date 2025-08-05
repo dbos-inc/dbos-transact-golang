@@ -192,7 +192,6 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 					}
 				}
 
-				// XXX this demonstrate why contexts cannot be used globally -- the task does not inherit the context used in the program that enqueued it
 				_, err := registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
 				if err != nil {
 					ctx.logger.Error("Error running queued workflow", "error", err)

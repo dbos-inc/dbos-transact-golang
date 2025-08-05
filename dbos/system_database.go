@@ -286,9 +286,10 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
 		deadline = &millis
 	}
 
-	var timeoutMs int64 = 0
+	var timeoutMs *int64 = nil
 	if input.status.Timeout > 0 {
-		timeoutMs = input.status.Timeout.Milliseconds()
+		millis := input.status.Timeout.Milliseconds()
+		timeoutMs = &millis
 	}
 
 	inputString, err := serialize(input.status.Input)
