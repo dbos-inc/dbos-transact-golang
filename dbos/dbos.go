@@ -293,6 +293,7 @@ func (c *dbosContext) Shutdown() {
 
 	if c.workflowScheduler != nil {
 		c.logger.Info("Stopping workflow scheduler")
+
 		ctx := c.workflowScheduler.Stop()
 		// Wait for all running jobs to complete with 5-second timeout
 		timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -314,6 +315,7 @@ func (c *dbosContext) Shutdown() {
 
 	if c.adminServer != nil {
 		c.logger.Info("Shutting down admin server")
+
 		err := c.adminServer.Shutdown()
 		if err != nil {
 			c.logger.Error("Failed to shutdown admin server", "error", err)
@@ -322,7 +324,6 @@ func (c *dbosContext) Shutdown() {
 		}
 		c.adminServer = nil
 	}
-
 }
 
 func GetBinaryHash() (string, error) {
