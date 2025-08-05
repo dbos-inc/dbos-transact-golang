@@ -2279,4 +2279,59 @@ func TestWorkflowTimeout(t *testing.T) {
 			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
 		}
 	})
+
+	t.Run("RecoverWaitForCancelWorkflow", func(t *testing.T) {
+		start := time.Now()
+		timeout := 1 * time.Second
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, timeout)
+		defer cancelFunc()
+		handle, err := RunAsWorkflow(cancelCtx, waitForCancelWorkflow, "recover-wait-for-cancel")
+		if err != nil {
+			t.Fatalf("failed to start wait for cancel workflow: %v", err)
+		}
+
+		// Recover the pending workflow
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		if err != nil {
+			t.Fatalf("failed to recover pending workflows: %v", err)
+		}
+		if len(recoveredHandles) != 1 {
+			t.Fatalf("expected 1 recovered handle, got %d", len(recoveredHandles))
+		}
+		recoveredHandle := recoveredHandles[0]
+		if recoveredHandle.GetWorkflowID() != handle.GetWorkflowID() {
+			t.Fatalf("expected recovered handle to have ID %s, got %s", handle.GetWorkflowID(), recoveredHandle.GetWorkflowID())
+		}
+
+		// Wait for the workflow to complete and check the result. Should we AwaitedWorkflowCancelled
+		result, err := recoveredHandle.GetResult()
+		if result != "" {
+			t.Fatalf("expected result to be an empty string, got '%s'", result)
+		}
+		// Check the error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != AwaitedWorkflowCancelled {
+			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
+		}
+
+		// Check the workflow status: should be cancelled
+		status, err := recoveredHandle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get recovered workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected recovered workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+
+		// Check the deadline on the status was is within an expected range (start time + timeout * .1)
+		// XXX this might be flaky and frankly not super useful
+		expectedDeadline := start.Add(timeout * 10 / 100)
+		if status.Deadline.Before(expectedDeadline) || status.Deadline.After(start.Add(timeout)) {
+			t.Fatalf("expected workflow deadline to be within %v and %v, got %v", expectedDeadline, start.Add(timeout), status.Deadline)
+		}
+	})
 }
