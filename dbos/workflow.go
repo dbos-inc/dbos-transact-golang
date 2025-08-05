@@ -374,8 +374,6 @@ type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
 type workflowParams struct {
 	workflowName       string
 	workflowID         string
-	timeout            time.Duration
-	deadline           time.Time
 	queueName          string
 	applicationVersion string
 	maxRetries         int
@@ -386,18 +384,6 @@ type WorkflowOption func(*workflowParams)
 func WithWorkflowID(id string) WorkflowOption {
 	return func(p *workflowParams) {
 		p.workflowID = id
-	}
-}
-
-func WithTimeout(timeout time.Duration) WorkflowOption {
-	return func(p *workflowParams) {
-		p.timeout = timeout
-	}
-}
-
-func WithDeadline(deadline time.Time) WorkflowOption {
-	return func(p *workflowParams) {
-		p.deadline = deadline
 	}
 }
 
@@ -505,8 +491,6 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	parentWorkflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
 
-	// TODO Check if cancelled
-
 	// Generate an ID for the workflow if not provided
 	var workflowID string
 	if params.workflowID == "" {
@@ -538,6 +522,24 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		status = WorkflowStatusPending
 	}
 
+	// Check if the context has a deadline
+	deadline, ok := c.Deadline()
+	if !ok {
+		deadline = time.Time{} // No deadline set
+	}
+	// Compute the timeout based on the deadline
+	var timeout time.Duration
+	if !deadline.IsZero() {
+		timeout = time.Until(deadline)
+		/* unclear to me if this is a real use case:
+		if timeout < 0 {
+			return nil, newWorkflowExecutionError(workflowID, "deadline is in the past")
+		}
+		*/
+	} else {
+		timeout = 0 // No timeout set
+	}
+
 	workflowStatus := WorkflowStatus{
 		Name:               params.workflowName,
 		ApplicationVersion: params.applicationVersion,
@@ -545,8 +547,8 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		Status:             status,
 		ID:                 workflowID,
 		CreatedAt:          time.Now(),
-		Deadline:           params.deadline, // TODO compute the deadline based on the timeout
-		Timeout:            params.timeout,
+		Deadline:           deadline,
+		Timeout:            timeout,
 		Input:              input,
 		ApplicationID:      c.GetApplicationID(),
 		QueueName:          params.queueName,
@@ -607,8 +609,16 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		stepID:     -1,
 	}
 
-	// Run the function in a goroutine
 	workflowCtx := WithValue(c, workflowStateKey, wfState)
+
+	// If the workflow has a deadline, set it in the context. We use what was returned by InsertWorkflowStatus
+	if !insertStatusResult.workflowDeadline.IsZero() {
+		// FIXME: we should make the cancel function available to the user. Likely through the handler.
+		workflowCtx, _ = WithTimeout(c, time.Until(insertStatusResult.workflowDeadline))
+		// Make sure to register AfterFunc
+	}
+
+	// Run the function in a goroutine
 	c.workflowsWg.Add(1)
 	go func() {
 		defer c.workflowsWg.Done()

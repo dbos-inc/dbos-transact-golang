@@ -128,9 +128,6 @@ func (c *dbosContext) Value(key any) any {
 	return c.ctx.Value(key)
 }
 
-// Create a new context
-// This is intended for workflow contexts and step contexts
-// Hence we only set the relevant fields
 func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 	if ctx == nil {
 		return nil
@@ -138,7 +135,7 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 	// Will do nothing if the concrete type is not dbosContext
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
 		return &dbosContext{
-			ctx:                context.WithValue(dbosCtx.ctx, key, val),
+			ctx:                context.WithValue(dbosCtx.ctx, key, val), // Spawn a new child context with the value set
 			logger:             dbosCtx.logger,
 			systemDB:           dbosCtx.systemDB,
 			workflowsWg:        dbosCtx.workflowsWg,
@@ -150,6 +147,45 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 		}
 	}
 	return nil
+}
+
+func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) {
+	if ctx == nil {
+		return nil, func() {}
+	}
+	if dbosCtx, ok := ctx.(*dbosContext); ok {
+		// Spawn a new child context with a deadline and a cancel function
+		newCtx, cancelFunc := context.WithTimeoutCause(dbosCtx.ctx, timeout, errors.New("DBOS context timeout"))
+
+		dbosCancelFunction := func() {
+			wfid, err := dbosCtx.GetWorkflowID()
+			if err != nil {
+				dbosCtx.logger.Error("Failed to get workflow ID for cancellation", "error", err)
+				return
+			}
+			err = dbosCtx.systemDB.CancelWorkflow(newCtx, wfid)
+			if err != nil {
+				dbosCtx.logger.Error("Failed to cancel workflow", "error", err)
+				return
+			}
+		}
+		// Call dbosCancelFunction in a new goroutine when the context is cancelled (either manually by the user or by timeout)
+		// I don't think we need to use the returned stop() function here
+		context.AfterFunc(newCtx, dbosCancelFunction)
+
+		return &dbosContext{
+			ctx:                newCtx,
+			logger:             dbosCtx.logger,
+			systemDB:           dbosCtx.systemDB,
+			workflowsWg:        dbosCtx.workflowsWg,
+			workflowRegistry:   dbosCtx.workflowRegistry,
+			workflowRegMutex:   dbosCtx.workflowRegMutex,
+			applicationVersion: dbosCtx.applicationVersion,
+			executorID:         dbosCtx.executorID,
+			applicationID:      dbosCtx.applicationID,
+		}, cancelFunc
+	}
+	return nil, func() {}
 }
 
 func (c *dbosContext) getWorkflowScheduler() *cron.Cron {

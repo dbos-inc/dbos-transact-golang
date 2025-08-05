@@ -11,6 +11,7 @@ Test workflow and steps features
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
