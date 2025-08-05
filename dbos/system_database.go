@@ -694,19 +694,20 @@ func (s *systemDatabase) AwaitWorkflowResult(ctx context.Context, workflowID str
 			return nil, fmt.Errorf("failed to query workflow status: %w", err)
 		}
 
+		// Deserialize output from TEXT to bytes then from bytes to R using gob
+		output, err := deserialize(outputString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize output: %w", err)
+		}
+
 		switch status {
 		case WorkflowStatusSuccess, WorkflowStatusError:
-			// Deserialize output from TEXT to bytes then from bytes to R using gob
-			output, err := deserialize(outputString)
-			if err != nil {
-				return nil, fmt.Errorf("failed to deserialize output: %w", err)
-			}
 			if errorStr == nil || len(*errorStr) == 0 {
 				return output, nil
 			}
 			return output, errors.New(*errorStr)
 		case WorkflowStatusCancelled:
-			return nil, newAwaitedWorkflowCancelledError(workflowID)
+			return output, newAwaitedWorkflowCancelledError(workflowID)
 		default:
 			time.Sleep(1 * time.Second)
 		}

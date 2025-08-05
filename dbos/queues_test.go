@@ -531,7 +531,6 @@ func TestWorkerConcurrency(t *testing.T) {
 	// Create workflow with dbosContext
 	blockingWfFunc := func(ctx DBOSContext, i int) (int, error) {
 		// Simulate a blocking operation
-		fmt.Println("Blocking workflow started", i)
 		startEvents[i].Set()
 		completeEvents[i].Wait()
 		return i, nil

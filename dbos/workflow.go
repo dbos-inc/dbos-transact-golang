@@ -638,19 +638,18 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		result, err := fn(workflowCtx, input)
 		status := WorkflowStatusSuccess
 
-		// If the afterFunc has started, the workflow was cancelled. Set the outcome
+		// If an error occurred, set the status to error
+		if err != nil {
+			status = WorkflowStatusError
+		}
+
+		// If the afterFunc has started, the workflow was cancelled and the status should be set to cancelled
 		if stopFunc != nil && !stopFunc() {
 			// Wait for the cancel function to complete
 			// Note this must happen before we write on the outcome channel (and signal the handler's GetResult)
 			<-cancelFuncCompleted
-			outcomeChan <- workflowOutcome[any]{result: result, err: workflowCtx.Err()}
-			close(outcomeChan)
-			return
-		}
-
-		// Otherwise, proceed to normal outcome recording
-		if err != nil {
-			status = WorkflowStatusError
+			// Set the status to cancelled and move on so we still record the outcome in the DB
+			status = WorkflowStatusCancelled
 		}
 
 		recordErr := c.systemDB.UpdateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
@@ -660,6 +659,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 			output:     result,
 		})
 		if recordErr != nil {
+			c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
 			outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
 			close(outcomeChan)
 			return

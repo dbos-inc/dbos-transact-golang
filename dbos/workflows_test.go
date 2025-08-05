@@ -2041,16 +2041,16 @@ func TestWorkflowTimeout(t *testing.T) {
 		return "", ctx.Err()
 	}
 
-	waitForCancelInStepWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+	waitForCancelWorkflowWithStep := func(ctx DBOSContext, _ string) (string, error) {
 		return RunAsStep(ctx, waitForCancelStep, "trigger-cancellation")
 	}
-	RegisterWorkflow(dbosCtx, waitForCancelInStepWorkflow)
+	RegisterWorkflow(dbosCtx, waitForCancelWorkflowWithStep)
 
 	t.Run("WorkflowWithStepTimeout", func(t *testing.T) {
 		// Start a workflow that will run a step that triggers cancellation
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
-		handle, err := RunAsWorkflow(cancelCtx, waitForCancelInStepWorkflow, "wf-with-step-timeout")
+		handle, err := RunAsWorkflow(cancelCtx, waitForCancelWorkflowWithStep, "wf-with-step-timeout")
 		if err != nil {
 			t.Fatalf("failed to start workflow with step timeout: %v", err)
 		}
@@ -2133,7 +2133,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		if res != "detached-step-completed" {
 			t.Fatalf("expected detached step result to be 'detached-step-completed', got '%s'", res)
 		}
-		return res, nil
+		return res, ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, detachedStepWorkflow)
 
@@ -2184,7 +2184,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		if status.Status != WorkflowStatusCancelled {
 			t.Fatalf("expected child workflow status to be WorkflowStatusCancelled, got %v", status.Status)
 		}
-		return result, nil
+		return result, ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelParent)
 
@@ -2247,7 +2247,8 @@ func TestWorkflowTimeout(t *testing.T) {
 		if status.Status != WorkflowStatusSuccess {
 			t.Fatalf("expected child workflow status to be WorkflowStatusSuccess, got %v", status.Status)
 		}
-		return result, nil
+		// The child spun for timeout*2 so ctx.Err() should be context.DeadlineExceeded
+		return result, ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, detachedChildWorkflowParent)
 
