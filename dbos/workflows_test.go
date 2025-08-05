@@ -1962,3 +1962,324 @@ func TestSleep(t *testing.T) {
 		}
 	})
 }
+
+func TestWorkflowTimeout(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	waitForCancelWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		// This workflow will wait indefinitely until it is cancelled
+		<-ctx.Done()
+		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("workflow was cancelled, but context error is not context.Canceled: %v", ctx.Err())
+		}
+		return "", ctx.Err()
+	}
+
+	RegisterWorkflow(dbosCtx, waitForCancelWorkflow)
+
+	t.Run("WorkflowTimeout", func(t *testing.T) {
+		// Start a workflow that will wait indefinitely
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		defer cancelFunc() // Ensure we clean up the context
+		handle, err := RunAsWorkflow(cancelCtx, waitForCancelWorkflow, "wait-for-cancel")
+		if err != nil {
+			t.Fatalf("failed to start wait for cancel workflow: %v", err)
+		}
+
+		// Wait for the workflow to complete and get the result
+		result, err := handle.GetResult()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Expected deadline exceeded error, got: %v", err)
+		}
+		if result != "" {
+			t.Fatalf("expected result to be an empty string, got '%s'", result)
+		}
+
+		// Check the workflow status: should be cancelled
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+	})
+
+	t.Run("ManuallyCancelWorkflow", func(t *testing.T) {
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Second)
+		defer cancelFunc() // Ensure we clean up the context
+		handle, err := RunAsWorkflow(cancelCtx, waitForCancelWorkflow, "manual-cancel")
+		if err != nil {
+			t.Fatalf("failed to start manual cancel workflow: %v", err)
+		}
+
+		// Cancel the workflow manually
+		cancelFunc()
+		result, err := handle.GetResult()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled error, got: %v", err)
+		}
+		if result != "" {
+			t.Fatalf("expected result to be an empty string, got '%s'", result)
+		}
+
+		// Check the workflow status: should be cancelled
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+	})
+
+	waitForCancelStep := func(ctx context.Context, _ string) (string, error) {
+		// This step will trigger cancellation of the entire workflow context
+		<-ctx.Done()
+		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("step was cancelled, but context error is not context.Canceled: %v", ctx.Err())
+		}
+		return "", ctx.Err()
+	}
+
+	waitForCancelInStepWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		return RunAsStep(ctx, waitForCancelStep, "trigger-cancellation")
+	}
+
+	RegisterWorkflow(dbosCtx, waitForCancelInStepWorkflow)
+
+	t.Run("WorkflowWithStepTimeout", func(t *testing.T) {
+		// Start a workflow that will run a step that triggers cancellation
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		defer cancelFunc() // Ensure we clean up the context
+		handle, err := RunAsWorkflow(cancelCtx, waitForCancelInStepWorkflow, "wf-with-step-timeout")
+		if err != nil {
+			t.Fatalf("failed to start workflow with step timeout: %v", err)
+		}
+
+		// Wait for the workflow to complete and get the result
+		result, err := handle.GetResult()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Expected deadline exceeded error, got: %v", err)
+		}
+		if result != "" {
+			t.Fatalf("expected result to be an empty string, got '%s'", result)
+		}
+
+		// Check the workflow status: should be cancelled
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+	})
+
+	shorterStepTimeoutWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		// This workflow will run a step that has a shorter timeout than the workflow itself
+		// The timeout will trigger a step error, the workflow can do whatever it wants with that error
+		stepCtx, stepCancelFunc := WithTimeout(ctx, 1*time.Millisecond)
+		defer stepCancelFunc() // Ensure we clean up the context
+		_, err := RunAsStep(stepCtx, waitForCancelStep, "short-step-timeout")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected step to timeout, got: %v", err)
+		}
+		return "step-timed-out", nil
+	}
+	RegisterWorkflow(dbosCtx, shorterStepTimeoutWorkflow)
+
+	t.Run("ShorterStepTimeout", func(t *testing.T) {
+		// Start a workflow that runs a step with a shorter timeout than the workflow itself
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Second)
+		defer cancelFunc() // Ensure we clean up the context
+		handle, err := RunAsWorkflow(cancelCtx, shorterStepTimeoutWorkflow, "shorter-step-timeout")
+		if err != nil {
+			t.Fatalf("failed to start shorter step timeout workflow: %v", err)
+		}
+		// Wait for the workflow to complete and get the result
+		result, err := handle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from shorter step timeout workflow: %v", err)
+		}
+		if result != "step-timed-out" {
+			t.Fatalf("expected result to be 'step-timed-out', got '%s'", result)
+		}
+		// Status is SUCCESS
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusSuccess {
+			t.Fatalf("expected workflow status to be WorkflowStatusSuccess, got %v", status.Status)
+		}
+	})
+
+	detachedStep := func(ctx context.Context, timeout time.Duration) (string, error) {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(timeout):
+		}
+		return "detached-step-completed", nil
+	}
+
+	detachedStepWorkflow := func(ctx DBOSContext, timeout time.Duration) (string, error) {
+		// This workflow will run a step that is not cancelable.
+		// What this means is the workflow *will* be cancelled, but the step will run normally
+		stepCtx := WithoutCancel(ctx)
+		res, err := RunAsStep(stepCtx, detachedStep, timeout*2)
+		if err != nil {
+			t.Fatalf("failed to run detached step: %v", err)
+		}
+		if res != "detached-step-completed" {
+			t.Fatalf("expected detached step result to be 'detached-step-completed', got '%s'", res)
+		}
+		return res, nil
+	}
+	RegisterWorkflow(dbosCtx, detachedStepWorkflow)
+
+	t.Run("DetachedStepWorkflow", func(t *testing.T) {
+		// Start a workflow that runs a step that is not cancelable
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		defer cancelFunc() // Ensure we clean up the context
+
+		handle, err := RunAsWorkflow(cancelCtx, detachedStepWorkflow, 1*time.Second)
+		if err != nil {
+			t.Fatalf("failed to start detached step workflow: %v", err)
+		}
+		// Wait for the workflow to complete and get the result
+		result, err := handle.GetResult()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Expected deadline exceeded error, got: %v", err)
+		}
+		if result != "detached-step-completed" {
+			t.Fatalf("expected result to be 'detached-step-completed', got '%s'", result)
+		}
+		// Check the workflow status: should be cancelled
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+	})
+
+	waitForCancelParent := func(ctx DBOSContext, _ string) (string, error) {
+		// This workflow will run a child workflow that waits indefinitely until it is cancelled
+		childHandle, err := RunAsWorkflow(ctx, waitForCancelWorkflow, "child-wait-for-cancel")
+		if err != nil {
+			t.Fatalf("failed to start child workflow: %v", err)
+		}
+
+		// Wait for the child workflow to complete
+		result, err := childHandle.GetResult()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected child workflow to be cancelled, got: %v", err)
+		}
+		// Check the child workflow status: should be cancelled
+		status, err := childHandle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get child workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected child workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+		return result, nil
+	}
+
+	RegisterWorkflow(dbosCtx, waitForCancelParent)
+
+	t.Run("ChildWorkflowTimesout", func(t *testing.T) {
+		// Start a parent workflow that runs a child workflow that waits indefinitely
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		defer cancelFunc() // Ensure we clean up the context
+
+		handle, err := RunAsWorkflow(cancelCtx, waitForCancelParent, "parent-wait-for-child-cancel")
+		if err != nil {
+			t.Fatalf("failed to start parent workflow: %v", err)
+		}
+
+		// Wait for the parent workflow to complete and get the result
+		result, err := handle.GetResult()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Expected deadline exceeded error, got: %v", err)
+		}
+		if result != "" {
+			t.Fatalf("expected result to be an empty string, got '%s'", result)
+		}
+
+		// Check the workflow status: should be cancelled
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+	})
+
+	detachedChild := func(ctx DBOSContext, timeout time.Duration) (string, error) {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(timeout):
+		}
+		return "detached-step-completed", nil
+	}
+
+	detachedChildWorkflowParent := func(ctx DBOSContext, timeout time.Duration) (string, error) {
+		childCtx := WithoutCancel(ctx)
+		childHandle, err := RunAsWorkflow(childCtx, detachedChild, timeout*2)
+		if err != nil {
+			t.Fatalf("failed to start child workflow: %v", err)
+		}
+
+		// Wait for the child workflow to complete
+		result, err := childHandle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from child workflow: %v", err)
+		}
+		// Check the child workflow status: should be cancelled
+		status, err := childHandle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get child workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusSuccess {
+			t.Fatalf("expected child workflow status to be WorkflowStatusSuccess, got %v", status.Status)
+		}
+		return result, nil
+	}
+
+	RegisterWorkflow(dbosCtx, detachedChild)
+	RegisterWorkflow(dbosCtx, detachedChildWorkflowParent)
+
+	t.Run("ChildWorkflowDetached", func(t *testing.T) {
+		timeout := 500 * time.Millisecond
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, timeout)
+		defer cancelFunc()
+		handle, err := RunAsWorkflow(cancelCtx, detachedChildWorkflowParent, timeout)
+		if err != nil {
+			t.Fatalf("failed to start parent workflow with detached child: %v", err)
+		}
+
+		// Wait for the parent workflow to complete and get the result
+		result, err := handle.GetResult()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Expected deadline exceeded error, got: %v", err)
+		}
+		if result != "detached-step-completed" {
+			t.Fatalf("expected result to be 'detached-step-completed', got '%s'", result)
+		}
+
+		// Check the workflow status: should be cancelled
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+	})
+}

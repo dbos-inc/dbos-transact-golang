@@ -149,6 +149,28 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 	return nil
 }
 
+func WithoutCancel(ctx DBOSContext) DBOSContext {
+	if ctx == nil {
+		return nil
+	}
+	if dbosCtx, ok := ctx.(*dbosContext); ok {
+		// Spawn a new child context without the cancel function
+		return &dbosContext{
+			ctx:                context.WithoutCancel(dbosCtx.ctx),
+			logger:             dbosCtx.logger,
+			systemDB:           dbosCtx.systemDB,
+			workflowsWg:        dbosCtx.workflowsWg,
+			workflowRegistry:   dbosCtx.workflowRegistry,
+			workflowRegMutex:   dbosCtx.workflowRegMutex,
+			applicationVersion: dbosCtx.applicationVersion,
+			executorID:         dbosCtx.executorID,
+			applicationID:      dbosCtx.applicationID,
+		}
+	}
+	return nil
+
+}
+
 func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) {
 	if ctx == nil {
 		return nil, func() {}
@@ -156,23 +178,6 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
 		// Spawn a new child context with a deadline and a cancel function
 		newCtx, cancelFunc := context.WithTimeoutCause(dbosCtx.ctx, timeout, errors.New("DBOS context timeout"))
-
-		dbosCancelFunction := func() {
-			wfid, err := dbosCtx.GetWorkflowID()
-			if err != nil {
-				dbosCtx.logger.Error("Failed to get workflow ID for cancellation", "error", err)
-				return
-			}
-			err = dbosCtx.systemDB.CancelWorkflow(newCtx, wfid)
-			if err != nil {
-				dbosCtx.logger.Error("Failed to cancel workflow", "error", err)
-				return
-			}
-		}
-		// Call dbosCancelFunction in a new goroutine when the context is cancelled (either manually by the user or by timeout)
-		// I don't think we need to use the returned stop() function here
-		context.AfterFunc(newCtx, dbosCancelFunction)
-
 		return &dbosContext{
 			ctx:                newCtx,
 			logger:             dbosCtx.logger,
@@ -363,7 +368,6 @@ func (c *dbosContext) Shutdown() {
 			c.adminServer = nil
 		}
 	}
-	c.launched.Store(false)
 }
 
 func GetBinaryHash() (string, error) {

@@ -653,10 +653,10 @@ func (s *systemDatabase) CancelWorkflow(ctx context.Context, workflowID string) 
 		return nil
 	}
 
-	// Clear queue-related fields and set the workflow's status to CANCELLED
-	// Note we leave the queue name because it is informative and won't block the queue
+	// Set the workflow's status to CANCELLED and started_at_epoch_ms to NULL (so it does not block the queue, if any)
+	// XXX set dedup id to null? Fix it when we implement deduplication
 	updateStatusQuery := `UPDATE dbos.workflow_status
-						  SET status = $1, updated_at = $2, deduplication_id = NULL, started_at_epoch_ms = NULL, priority = NULL
+						  SET status = $1, updated_at = $2, started_at_epoch_ms = NULL, deduplication_id = NULL
 						  WHERE workflow_uuid = $3`
 
 	_, err = tx.Exec(ctx, updateStatusQuery, WorkflowStatusCancelled, time.Now().UnixMilli(), workflowID)

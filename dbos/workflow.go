@@ -504,9 +504,13 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		workflowID = params.workflowID
 	}
 
+	// Create an uncancellable context for the DBOS operations
+	// This detaches it from any deadline or cancellation signal set by the user
+	uncancellableCtx := WithoutCancel(c)
+
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := c.systemDB.CheckChildWorkflow(c.ctx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
+		childWorkflowID, err := c.systemDB.CheckChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		if err != nil {
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("checking child workflow: %v", err))
 		}
@@ -522,7 +526,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		status = WorkflowStatusPending
 	}
 
-	// Check if the context has a deadline
+	// Check if the user-provided context has a deadline
 	deadline, ok := c.Deadline()
 	if !ok {
 		deadline = time.Time{} // No deadline set
@@ -555,11 +559,11 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	}
 
 	// Init status and record child workflow relationship in a single transaction
-	tx, err := c.systemDB.(*systemDatabase).pool.Begin(c.ctx)
+	tx, err := c.systemDB.(*systemDatabase).pool.Begin(uncancellableCtx)
 	if err != nil {
 		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to begin transaction: %v", err))
 	}
-	defer tx.Rollback(c.ctx) // Rollback if not committed
+	defer tx.Rollback(uncancellableCtx) // Rollback if not committed
 
 	// Insert workflow status with transaction
 	insertInput := insertWorkflowStatusDBInput{
@@ -567,7 +571,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		maxRetries: params.maxRetries,
 		tx:         tx,
 	}
-	insertStatusResult, err := c.systemDB.InsertWorkflowStatus(c.ctx, insertInput)
+	insertStatusResult, err := c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 	if err != nil {
 		return nil, err
 	}
@@ -575,7 +579,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
 	if len(params.queueName) > 0 || insertStatusResult.status == WorkflowStatusSuccess || insertStatusResult.status == WorkflowStatusError {
 		// Commit the transaction to update the number of attempts and/or enact the enqueue
-		if err := tx.Commit(c.ctx); err != nil {
+		if err := tx.Commit(uncancellableCtx); err != nil {
 			return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
 		}
 		return &workflowPollingHandle[any]{workflowID: workflowStatus.ID, dbosContext: c}, nil
@@ -592,7 +596,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 			stepID:           stepID,
 			tx:               tx,
 		}
-		err = c.systemDB.RecordChildWorkflow(c.ctx, childInput)
+		err = c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput)
 		if err != nil {
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("recording child workflow: %v", err))
 		}
@@ -612,10 +616,21 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	workflowCtx := WithValue(c, workflowStateKey, wfState)
 
 	// If the workflow has a deadline, set it in the context. We use what was returned by InsertWorkflowStatus
+	var stopFunc func() bool
+	cancelFuncCompleted := make(chan struct{})
 	if !insertStatusResult.workflowDeadline.IsZero() {
 		// FIXME: we should make the cancel function available to the user. Likely through the handler.
-		workflowCtx, _ = WithTimeout(c, time.Until(insertStatusResult.workflowDeadline))
-		// Make sure to register AfterFunc
+		workflowCtx, _ = WithTimeout(workflowCtx, time.Until(insertStatusResult.workflowDeadline))
+		// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
+		dbosCancelFunction := func() {
+			c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
+			err = c.systemDB.CancelWorkflow(uncancellableCtx, workflowID)
+			if err != nil {
+				c.logger.Error("Failed to cancel workflow", "error", err)
+			}
+			close(cancelFuncCompleted)
+		}
+		stopFunc = context.AfterFunc(workflowCtx, dbosCancelFunction)
 	}
 
 	// Run the function in a goroutine
@@ -624,10 +639,23 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		defer c.workflowsWg.Done()
 		result, err := fn(workflowCtx, input)
 		status := WorkflowStatusSuccess
+
+		// If the afterFunc has started, the workflow was cancelled. Set the outcome
+		if stopFunc != nil && !stopFunc() {
+			// Wait for the cancel function to complete
+			// Note this must happen before we write on the outcome channel (and signal the handler's GetResult)
+			<-cancelFuncCompleted
+			outcomeChan <- workflowOutcome[any]{result: result, err: workflowCtx.Err()}
+			close(outcomeChan)
+			return
+		}
+
+		// Otherwise, proceed to normal outcome recording
 		if err != nil {
 			status = WorkflowStatusError
 		}
-		recordErr := c.systemDB.UpdateWorkflowOutcome(c.ctx, updateWorkflowOutcomeDBInput{
+
+		recordErr := c.systemDB.UpdateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
 			workflowID: workflowID,
 			status:     status,
 			err:        err,
@@ -635,19 +663,19 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		})
 		if recordErr != nil {
 			outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
-			close(outcomeChan) // Close the channel to signal completion
+			close(outcomeChan)
 			return
 		}
 		outcomeChan <- workflowOutcome[any]{result: result, err: err}
-		close(outcomeChan) // Close the channel to signal completion
+		close(outcomeChan)
 	}()
 
 	// Commit the transaction
-	if err := tx.Commit(c.ctx); err != nil {
+	if err := tx.Commit(uncancellableCtx); err != nil {
 		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
 	}
 
-	return &workflowHandle[any]{workflowID: workflowID, outcomeChan: outcomeChan, dbosContext: c}, nil
+	return &workflowHandle[any]{workflowID: workflowID, outcomeChan: outcomeChan, dbosContext: uncancellableCtx}, nil
 }
 
 /******************************/
@@ -770,8 +798,11 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, err
 		isWithinStep: true,
 	}
 
+	// Uncancellable context for DBOS operations
+	uncancellableCtx := WithoutCancel(c)
+
 	// Check the step is cancelled, has already completed, or is called with a different name
-	recordedOutput, err := c.systemDB.CheckOperationExecution(c.ctx, checkOperationExecutionDBInput{
+	recordedOutput, err := c.systemDB.CheckOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 		workflowID: stepState.workflowID,
 		stepID:     stepState.stepID,
 		stepName:   params.StepName,
@@ -805,8 +836,8 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, err
 
 			// Wait before retry
 			select {
-			case <-c.ctx.Done():
-				return nil, newStepExecutionError(stepState.workflowID, params.StepName, fmt.Sprintf("context cancelled during retry: %v", c.ctx.Err()))
+			case <-c.Done():
+				return nil, newStepExecutionError(stepState.workflowID, params.StepName, fmt.Sprintf("context cancelled during retry: %v", c.Err()))
 			case <-time.After(delay):
 				// Continue to retry
 			}
@@ -838,7 +869,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, err
 		err:        stepError,
 		output:     stepOutput,
 	}
-	recErr := c.systemDB.RecordOperationResult(c.ctx, dbInput)
+	recErr := c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
 	if recErr != nil {
 		return nil, newStepExecutionError(stepState.workflowID, params.StepName, fmt.Sprintf("recording step outcome: %v", recErr))
 	}
@@ -857,7 +888,7 @@ type WorkflowSendInput[R any] struct {
 }
 
 func (c *dbosContext) Send(_ DBOSContext, input WorkflowSendInputInternal) error {
-	return c.systemDB.Send(c.ctx, input)
+	return c.systemDB.Send(c, input)
 }
 
 // Send sends a message to another workflow.
@@ -881,7 +912,7 @@ type WorkflowRecvInput struct {
 }
 
 func (c *dbosContext) Recv(_ DBOSContext, input WorkflowRecvInput) (any, error) {
-	return c.systemDB.Recv(c.ctx, input)
+	return c.systemDB.Recv(c, input)
 }
 
 func Recv[R any](ctx DBOSContext, input WorkflowRecvInput) (R, error) {
@@ -910,7 +941,7 @@ type WorkflowSetEventInputGeneric[R any] struct {
 }
 
 func (c *dbosContext) SetEvent(_ DBOSContext, input WorkflowSetEventInput) error {
-	return c.systemDB.SetEvent(c.ctx, input)
+	return c.systemDB.SetEvent(c, input)
 }
 
 // Sets an event from a workflow.
@@ -935,7 +966,7 @@ type WorkflowGetEventInput struct {
 }
 
 func (c *dbosContext) GetEvent(_ DBOSContext, input WorkflowGetEventInput) (any, error) {
-	return c.systemDB.GetEvent(c.ctx, input)
+	return c.systemDB.GetEvent(c, input)
 }
 
 func GetEvent[R any](ctx DBOSContext, input WorkflowGetEventInput) (R, error) {
@@ -958,7 +989,7 @@ func GetEvent[R any](ctx DBOSContext, input WorkflowGetEventInput) (R, error) {
 }
 
 func (c *dbosContext) Sleep(duration time.Duration) (time.Duration, error) {
-	return c.systemDB.Sleep(c.ctx, duration)
+	return c.systemDB.Sleep(c, duration)
 }
 
 /***********************************/
@@ -967,7 +998,7 @@ func (c *dbosContext) Sleep(duration time.Duration) (time.Duration, error) {
 
 // GetWorkflowID retrieves the workflow ID from the context if called within a DBOS workflow
 func (c *dbosContext) GetWorkflowID() (string, error) {
-	wfState, ok := c.ctx.Value(workflowStateKey).(*workflowState)
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return "", errors.New("not within a DBOS workflow context")
 	}
@@ -975,7 +1006,7 @@ func (c *dbosContext) GetWorkflowID() (string, error) {
 }
 
 func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
-	workflowStatus, err := c.systemDB.ListWorkflows(c.ctx, listWorkflowsDBInput{
+	workflowStatus, err := c.systemDB.ListWorkflows(c, listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
 	})
 	if err != nil {
