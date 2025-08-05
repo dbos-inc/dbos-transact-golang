@@ -1974,7 +1974,6 @@ func TestWorkflowTimeout(t *testing.T) {
 		}
 		return "", ctx.Err()
 	}
-
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflow)
 
 	t.Run("WorkflowTimeout", func(t *testing.T) {
@@ -2045,7 +2044,6 @@ func TestWorkflowTimeout(t *testing.T) {
 	waitForCancelInStepWorkflow := func(ctx DBOSContext, _ string) (string, error) {
 		return RunAsStep(ctx, waitForCancelStep, "trigger-cancellation")
 	}
-
 	RegisterWorkflow(dbosCtx, waitForCancelInStepWorkflow)
 
 	t.Run("WorkflowWithStepTimeout", func(t *testing.T) {
@@ -2188,7 +2186,6 @@ func TestWorkflowTimeout(t *testing.T) {
 		}
 		return result, nil
 	}
-
 	RegisterWorkflow(dbosCtx, waitForCancelParent)
 
 	t.Run("ChildWorkflowTimesout", func(t *testing.T) {
@@ -2228,6 +2225,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		}
 		return "detached-step-completed", nil
 	}
+	RegisterWorkflow(dbosCtx, detachedChild)
 
 	detachedChildWorkflowParent := func(ctx DBOSContext, timeout time.Duration) (string, error) {
 		childCtx := WithoutCancel(ctx)
@@ -2251,8 +2249,6 @@ func TestWorkflowTimeout(t *testing.T) {
 		}
 		return result, nil
 	}
-
-	RegisterWorkflow(dbosCtx, detachedChild)
 	RegisterWorkflow(dbosCtx, detachedChildWorkflowParent)
 
 	t.Run("ChildWorkflowDetached", func(t *testing.T) {

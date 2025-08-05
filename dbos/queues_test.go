@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync/atomic"
@@ -24,7 +25,7 @@ This suite tests
 [x] rate limiter
 [] queue deduplication
 [] queue priority
-[] queued workflow times out
+[x] queued workflow times out
 [] scheduled workflow enqueues another workflow
 */
 
@@ -844,4 +845,216 @@ func TestQueueRateLimiter(t *testing.T) {
 	if !queueEntriesAreCleanedUp(dbosCtx) {
 		t.Fatal("expected queue entries to be cleaned up after rate limiter test")
 	}
+}
+
+func TestQueueTimeouts(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	timeoutQueue := NewWorkflowQueue(dbosCtx, "timeout-queue")
+
+	queuedWaitForCancelWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		// This workflow will wait indefinitely until it is cancelled
+		<-ctx.Done()
+		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("workflow was cancelled, but context error is not context.Canceled: %v", ctx.Err())
+		}
+		return "", ctx.Err()
+	}
+	RegisterWorkflow(dbosCtx, queuedWaitForCancelWorkflow)
+
+	enqueuedWorkflowEnqueuesATimeoutWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		// This workflow will enqueue a workflow that waits indefinitely until it is cancelled
+		handle, err := RunAsWorkflow(ctx, queuedWaitForCancelWorkflow, "enqueued-wait-for-cancel", WithQueue(timeoutQueue.Name))
+		if err != nil {
+			t.Fatalf("failed to start enqueued wait for cancel workflow: %v", err)
+		}
+		// Workflow should get AwaitedWorkflowCancelled DBOSError
+		_, err = handle.GetResult()
+		if err == nil {
+			t.Fatal("expected error when waiting for enqueued workflow to complete, but got none")
+		}
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+		if dbosErr.Code != AwaitedWorkflowCancelled {
+			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
+		}
+		return "should-never-see-this", nil
+	}
+	RegisterWorkflow(dbosCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow)
+
+	detachedWorkflow := func(ctx DBOSContext, timeout time.Duration) (string, error) {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(timeout):
+			return "detached-workflow-completed", nil
+		}
+	}
+
+	enqueuedWorkflowEnqueuesADetachedWorkflow := func(ctx DBOSContext, timeout time.Duration) (string, error) {
+		// This workflow will enqueue a workflow that is not cancelable
+		childCtx := WithoutCancel(ctx)
+		handle, err := RunAsWorkflow(childCtx, detachedWorkflow, timeout*2, WithQueue(timeoutQueue.Name))
+		if err != nil {
+			t.Fatalf("failed to start enqueued detached workflow: %v", err)
+		}
+
+		// Wait for the enqueued workflow to complete
+		result, err := handle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from enqueued detached workflow: %v", err)
+		}
+		if result != "detached-workflow-completed" {
+			t.Fatalf("expected result to be 'detached-workflow-completed', got '%s'", result)
+		}
+		// Check the workflow status: should be success
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get enqueued detached workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusSuccess {
+			t.Fatalf("expected enqueued detached workflow status to be WorkflowStatusSuccess, got %v", status.Status)
+		}
+		return result, nil
+	}
+
+	RegisterWorkflow(dbosCtx, detachedWorkflow)
+	RegisterWorkflow(dbosCtx, enqueuedWorkflowEnqueuesADetachedWorkflow)
+
+	dbosCtx.Launch()
+
+	t.Run("EnqueueWorkflowTimeout", func(t *testing.T) {
+		// Start a workflow that will wait indefinitely
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		defer cancelFunc() // Ensure we clean up the context
+
+		handle, err := RunAsWorkflow(cancelCtx, queuedWaitForCancelWorkflow, "enqueue-wait-for-cancel", WithQueue(timeoutQueue.Name))
+		if err != nil {
+			t.Fatalf("failed to enqueue wait for cancel workflow: %v", err)
+		}
+
+		// Wait for the workflow to complete and get the result
+		result, err := handle.GetResult()
+		if err == nil {
+			t.Fatal("expected error but got none")
+		}
+
+		// Check the error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != AwaitedWorkflowCancelled {
+			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
+		}
+
+		if result != "" {
+			t.Fatalf("expected result to be an empty string, got '%s'", result)
+		}
+
+		// Check the workflow status: should be cancelled
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+
+		if !queueEntriesAreCleanedUp(dbosCtx) {
+			t.Fatal("expected queue entries to be cleaned up after workflow cancellation, but they are not")
+		}
+	})
+
+	t.Run("EnqueueWorkflowThatEnqueuesATimeoutWorkflow", func(t *testing.T) {
+		// Start a workflow that enqueues another workflow that waits indefinitely
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		defer cancelFunc() // Ensure we clean up the context
+
+		handle, err := RunAsWorkflow(cancelCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow, "enqueue-timeout-workflow", WithQueue(timeoutQueue.Name))
+		if err != nil {
+			t.Fatalf("failed to start enqueued workflow: %v", err)
+		}
+
+		// Wait for the workflow to complete and get the result
+		result, err := handle.GetResult()
+		if err == nil {
+			t.Fatal("expected error but got none")
+		}
+
+		// Check the error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != AwaitedWorkflowCancelled {
+			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
+		}
+
+		if result != "" {
+			t.Fatalf("expected result to be an empty string, got '%s'", result)
+		}
+
+		// Check the workflow status: should be cancelled
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+
+		if !queueEntriesAreCleanedUp(dbosCtx) {
+			t.Fatal("expected queue entries to be cleaned up after workflow cancellation, but they are not")
+		}
+	})
+
+	t.Run("EnqueueWorkflowThatEnqueuesADetachedWorkflow", func(t *testing.T) {
+		// Start a workflow that enqueues another workflow that is not cancelable
+		timeout := 100 * time.Millisecond
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, timeout)
+		defer cancelFunc() // Ensure we clean up the context
+
+		handle, err := RunAsWorkflow(cancelCtx, enqueuedWorkflowEnqueuesADetachedWorkflow, timeout, WithQueue(timeoutQueue.Name))
+		if err != nil {
+			t.Fatalf("failed to start enqueued detached workflow: %v", err)
+		}
+
+		// Wait for the workflow to complete and get the result
+		result, err := handle.GetResult()
+		if err == nil {
+			t.Fatalf("expected error but got none")
+		}
+
+		// Check the error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != AwaitedWorkflowCancelled {
+			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
+		}
+
+		if result != "" {
+			t.Fatalf("expected result to be an empty string, got '%s'", result)
+		}
+
+		// Check the workflow status: should be cancelled
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get enqueued detached workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected enqueued detached workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+
+		if !queueEntriesAreCleanedUp(dbosCtx) {
+			t.Fatal("expected queue entries to be cleaned up after workflow completion, but they are not")
+		}
+	})
 }
