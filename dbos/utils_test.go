@@ -72,7 +72,7 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 	t.Cleanup(func() {
 		dbosCtx.(*dbosContext).logger.Info("Cleaning up DBOS instance...")
 		if dbosCtx != nil {
-			dbosCtx.Shutdown()
+			dbosCtx.Cancel()
 		}
 		dbosCtx = nil
 		if checkLeaks {

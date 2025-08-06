@@ -30,7 +30,7 @@ func TestAdminServer(t *testing.T) {
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Shutdown()
+				ctx.Cancel()
 			}
 		}()
 
@@ -73,7 +73,7 @@ func TestAdminServer(t *testing.T) {
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Shutdown()
+				ctx.Cancel()
 			}
 		}()
 

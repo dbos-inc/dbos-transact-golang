@@ -58,7 +58,7 @@ type DBOSContext interface {
 
 	// Context Lifecycle
 	Launch() error
-	Shutdown()
+	Cancel()
 
 	// Workflow operations
 	RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, error)
@@ -315,9 +315,8 @@ func (c *dbosContext) Launch() error {
 	return nil
 }
 
-// We might consider renaming this to "Cancel" to me more idiomatic
 // TODO: shutdown should really have a timeout and return an error if it wasn't able to shutdown everything
-func (c *dbosContext) Shutdown() {
+func (c *dbosContext) Cancel() {
 	c.logger.Info("Shutting down DBOS context")
 
 	// Cancel the context to signal all resources to stop

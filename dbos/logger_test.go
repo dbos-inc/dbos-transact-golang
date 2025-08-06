@@ -24,7 +24,7 @@ func TestLogger(t *testing.T) {
 		}
 		t.Cleanup(func() {
 			if dbosCtx != nil {
-				dbosCtx.Shutdown()
+				dbosCtx.Cancel()
 			}
 		})
 
@@ -62,7 +62,7 @@ func TestLogger(t *testing.T) {
 		}
 		t.Cleanup(func() {
 			if dbosCtx != nil {
-				dbosCtx.Shutdown()
+				dbosCtx.Cancel()
 			}
 		})
 

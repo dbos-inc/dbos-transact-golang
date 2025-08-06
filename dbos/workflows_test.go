@@ -1072,6 +1072,8 @@ func sendIdempotencyWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, 
 func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 	msg, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
 	if err != nil {
+		// Unlock the test in this case
+		receiveIdempotencyStartEvent.Set()
 		return "", err
 	}
 	receiveIdempotencyStartEvent.Set()

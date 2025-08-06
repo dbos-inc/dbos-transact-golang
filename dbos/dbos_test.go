@@ -20,7 +20,7 @@ func TestConfigValidationErrorTypes(t *testing.T) {
 		}
 		defer func() {
 			if ctx != nil {
-				ctx.Shutdown()
+				ctx.Cancel()
 			}
 		}() // Clean up executor
 
