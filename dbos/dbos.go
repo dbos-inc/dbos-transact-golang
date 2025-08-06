@@ -368,6 +368,7 @@ func (c *dbosContext) Shutdown() {
 			c.adminServer = nil
 		}
 	}
+	c.launched.Store(false)
 }
 
 func GetBinaryHash() (string, error) {
