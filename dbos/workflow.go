@@ -1022,7 +1022,7 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (workflowPollin
 	if ctx == nil {
 		return workflowPollingHandle[R]{}, errors.New("dbosCtx cannot be nil")
 	}
-	workflowStatus, err := ctx.(*dbosContext).systemDB.ListWorkflows(ctx.(*dbosContext).ctx, listWorkflowsDBInput{
+	workflowStatus, err := ctx.(*dbosContext).systemDB.ListWorkflows(ctx, listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
 	})
 	if err != nil {
