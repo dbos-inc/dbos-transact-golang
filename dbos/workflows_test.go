@@ -13,6 +13,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -324,7 +326,6 @@ func stepRetryWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 	return RunAsStep(stepCtx, stepRetryAlwaysFailsStep, input)
 }
 
-// TODO: step params
 func TestSteps(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 
@@ -450,89 +451,177 @@ func TestSteps(t *testing.T) {
 	})
 }
 
-// Functions that create child workflows - moved to test function where executor is available
-
-// TODO Check timeouts behaviors for parents and children (e.g. awaited cancelled, etc)
 func TestChildWorkflow(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 
+	type Inheritance struct {
+		ParentID string
+		Index    int
+	}
+
 	// Create child workflows with executor
-	childWf := func(dbosCtx DBOSContext, i int) (string, error) {
+	childWf := func(dbosCtx DBOSContext, input Inheritance) (string, error) {
 		workflowID, err := dbosCtx.GetWorkflowID()
 		if err != nil {
-			return "", fmt.Errorf("failed to get workflow ID: %v", err)
+			return "", fmt.Errorf("failed to get workflow ID: %w", err)
 		}
-		expectedCurrentID := fmt.Sprintf("%s-%d", workflowID, i)
+		expectedCurrentID := fmt.Sprintf("%s-1", input.ParentID)
 		if workflowID != expectedCurrentID {
-			return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedCurrentID, workflowID)
+			return "", fmt.Errorf("expected childWf workflow ID to be %s, got %s", expectedCurrentID, workflowID)
 		}
-		// XXX right now the steps of a child workflow start with an incremented step ID, because the first step ID is allocated to the child workflow
+		// Steps of a child workflow start with an incremented step ID, because the first step ID is allocated to the child workflow
 		return RunAsStep(dbosCtx, simpleStep, "")
 	}
 	RegisterWorkflow(dbosCtx, childWf)
 
-	parentWf := func(dbosCtx DBOSContext, i int) (string, error) {
-		workflowID, err := dbosCtx.GetWorkflowID()
+	parentWf := func(ctx DBOSContext, input Inheritance) (string, error) {
+		workflowID, err := ctx.GetWorkflowID()
 		if err != nil {
-			return "", fmt.Errorf("failed to get workflow ID: %v", err)
+			return "", fmt.Errorf("failed to get workflow ID: %w", err)
 		}
 
-		childHandle, err := RunAsWorkflow(dbosCtx, childWf, i)
+		childHandle, err := RunAsWorkflow(ctx, childWf, Inheritance{ParentID: workflowID})
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("failed to run child workflow: %w", err)
 		}
 
 		// Check this wf ID is built correctly
-		expectedParentID := fmt.Sprintf("%s-%d", workflowID, i)
+		expectedParentID := fmt.Sprintf("%s-%d", input.ParentID, input.Index)
 		if workflowID != expectedParentID {
 			return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedParentID, workflowID)
 		}
-
-		// Verify child workflow ID follows the pattern: parentID-functionID
-		childWorkflowID := childHandle.GetWorkflowID()
-		expectedChildID := fmt.Sprintf("%s-%d", workflowID, i)
-		if childWorkflowID != expectedChildID {
-			return "", fmt.Errorf("expected childWf ID to be %s, got %s", expectedChildID, childWorkflowID)
+		res, err := childHandle.GetResult()
+		if err != nil {
+			return "", fmt.Errorf("failed to get result from child workflow: %w", err)
 		}
-		return childHandle.GetResult()
+
+		// Check the steps from this workflow
+		steps, err := ctx.(*dbosContext).systemDB.GetWorkflowSteps(ctx, workflowID)
+		if err != nil {
+			return "", fmt.Errorf("failed to get workflow steps: %w", err)
+		}
+		if len(steps) != 2 {
+			return "", fmt.Errorf("expected 2 recorded steps, got %d", len(steps))
+		}
+		// Verify the first step is the child workflow
+		if steps[0].StepID != 1 {
+			return "", fmt.Errorf("expected first step ID to be 1, got %d", steps[0].StepID)
+		}
+		if steps[0].StepName != runtime.FuncForPC(reflect.ValueOf(childWf).Pointer()).Name() {
+			return "", fmt.Errorf("expected first step to be child workflow, got %s", steps[0].StepName)
+		}
+		if steps[0].Output != nil {
+			return "", fmt.Errorf("expected first step output to be nil, got %s", steps[0].Output)
+		}
+		if steps[1].Error != nil {
+			return "", fmt.Errorf("expected second step error to be nil, got %s", steps[1].Error)
+		}
+		if steps[0].ChildWorkflowID != childHandle.GetWorkflowID() {
+			return "", fmt.Errorf("expected first step child workflow ID to be %s, got %s", childHandle.GetWorkflowID(), steps[0].ChildWorkflowID)
+		}
+
+		// The second step is the result from the child workflow
+		if steps[1].StepID != 2 {
+			return "", fmt.Errorf("expected second step ID to be 2, got %d", steps[1].StepID)
+		}
+		if steps[1].StepName != "DBOS.getResult" {
+			return "", fmt.Errorf("expected second step name to be getResult, got %s", steps[1].StepName)
+		}
+		if steps[1].Output != "from step" {
+			return "", fmt.Errorf("expected second step output to be 'from step', got %s", steps[1].Output)
+		}
+		if steps[1].Error != nil {
+			return "", fmt.Errorf("expected second step error to be nil, got %s", steps[1].Error)
+		}
+		if steps[1].ChildWorkflowID != childHandle.GetWorkflowID() {
+			return "", fmt.Errorf("expected second step child workflow ID to be %s, got %s", childHandle.GetWorkflowID(), steps[1].ChildWorkflowID)
+		}
+
+		return res, nil
 	}
 	RegisterWorkflow(dbosCtx, parentWf)
 
-	grandParentWf := func(dbosCtx DBOSContext, _ string) (string, error) {
-		for i := range 3 {
-			workflowID, err := dbosCtx.GetWorkflowID()
+	grandParentWf := func(ctx DBOSContext, r int) (string, error) {
+		workflowID, err := ctx.GetWorkflowID()
+		if err != nil {
+			return "", fmt.Errorf("failed to get workflow ID: %w", err)
+		}
+
+		// 2 steps per loop: spawn child and get result
+		for i := range r {
+			expectedStepID := (2 * i) + 1
+			parentHandle, err := RunAsWorkflow(ctx, parentWf, Inheritance{ParentID: workflowID, Index: expectedStepID})
 			if err != nil {
-				return "", fmt.Errorf("failed to get workflow ID: %v", err)
+				return "", fmt.Errorf("failed to run parent workflow: %w", err)
 			}
 
-			childHandle, err := RunAsWorkflow(dbosCtx, parentWf, i)
+			// Verify parent (this workflow's child) ID follows the pattern: parentID-functionID
+			parentWorkflowID := parentHandle.GetWorkflowID()
+
+			expectedParentID := fmt.Sprintf("%s-%d", workflowID, expectedStepID)
+			if parentWorkflowID != expectedParentID {
+				return "", fmt.Errorf("expected parent workflow ID to be %s, got %s", expectedParentID, parentWorkflowID)
+			}
+
+			result, err := parentHandle.GetResult()
 			if err != nil {
-				return "", err
+				return "", fmt.Errorf("failed to get result from parent workflow: %w", err)
+			}
+			if result != "from step" {
+				return "", fmt.Errorf("expected result from parent workflow to be 'from step', got %s", result)
 			}
 
-			// The handle should a direct handle
-			_, ok := childHandle.(*workflowHandle[string])
-			if !ok {
-				return "", fmt.Errorf("expected childHandle to be of type *workflowHandle[string], got %T", childHandle)
+		}
+		// Check the steps from this workflow
+		steps, err := ctx.(*dbosContext).systemDB.GetWorkflowSteps(ctx, workflowID)
+		if err != nil {
+			return "", fmt.Errorf("failed to get workflow steps: %w", err)
+		}
+		if len(steps) != r*2 {
+			return "", fmt.Errorf("expected 2 recorded steps, got %d", len(steps))
+		}
+
+		// We do expect the steps to be returned in the order of execution, which seems to be the case even without an ORDER BY function_id ASC clause in the SQL query
+		for i := 0; i < r; i += 2 {
+			expectedStepID := i + 1
+			expectedChildID := fmt.Sprintf("%s-%d", workflowID, i+1)
+			childWfStep := steps[i]
+			getResultStep := steps[i+1]
+
+			if childWfStep.StepID != expectedStepID {
+				return "", fmt.Errorf("expected child wf step ID to be %d, got %d", expectedStepID, childWfStep.StepID)
+			}
+			if getResultStep.StepID != expectedStepID+1 {
+				return "", fmt.Errorf("expected get result step ID to be %d, got %d", expectedStepID+1, getResultStep.StepID)
+			}
+			expectedName := runtime.FuncForPC(reflect.ValueOf(parentWf).Pointer()).Name()
+			if childWfStep.StepName != expectedName {
+				return "", fmt.Errorf("expected child wf step name to be %s, got %s", expectedName, childWfStep.StepName)
+			}
+			expectedName = "DBOS.getResult"
+			if getResultStep.StepName != expectedName {
+				return "", fmt.Errorf("expected get result step name to be %s, got %s", expectedName, getResultStep.StepName)
 			}
 
-			// Verify child workflow ID follows the pattern: parentID-functionID
-			childWorkflowID := childHandle.GetWorkflowID()
-			expectedPrefix := fmt.Sprintf("%s-%d", workflowID, i)
-			if childWorkflowID != expectedPrefix {
-				return "", fmt.Errorf("expected parentWf workflow ID to be %s, got %s", expectedPrefix, childWorkflowID)
+			if childWfStep.Output != nil {
+				return "", fmt.Errorf("expected child wf step output to be nil, got %s", childWfStep.Output)
+			}
+			if getResultStep.Output != "from step" {
+				return "", fmt.Errorf("expected get result step output to be 'from step', got %s", getResultStep.Output)
 			}
 
-			// Calling the child a second time should return a polling handle
-			childHandle, err = RunAsWorkflow(dbosCtx, parentWf, i, WithWorkflowID(childHandle.GetWorkflowID()))
-			if err != nil {
-				return "", err
+			if childWfStep.Error != nil {
+				return "", fmt.Errorf("expected child wf step error to be nil, got %s", childWfStep.Error)
 			}
-			_, ok = childHandle.(*workflowPollingHandle[string])
-			if !ok {
-				return "", fmt.Errorf("expected childHandle to be of type *workflowPollingHandle[string], got %T", childHandle)
+			if getResultStep.Error != nil {
+				return "", fmt.Errorf("expected get result step error to be nil, got %s", getResultStep.Error)
 			}
-
+			if childWfStep.ChildWorkflowID != expectedChildID {
+				return "", fmt.Errorf("expected step child workflow ID to be %s, got %s", expectedChildID, childWfStep.ChildWorkflowID)
+			}
+			if getResultStep.ChildWorkflowID != expectedChildID {
+				return "", fmt.Errorf("expected step child workflow ID to be %s, got %s", expectedChildID, getResultStep.ChildWorkflowID)
+			}
 		}
 
 		return "", nil
@@ -540,7 +629,8 @@ func TestChildWorkflow(t *testing.T) {
 	RegisterWorkflow(dbosCtx, grandParentWf)
 
 	t.Run("ChildWorkflowIDPattern", func(t *testing.T) {
-		h, err := RunAsWorkflow(dbosCtx, grandParentWf, "")
+		r := 3
+		h, err := RunAsWorkflow(dbosCtx, grandParentWf, r)
 		if err != nil {
 			t.Fatalf("failed to execute grand parent workflow: %v", err)
 		}
@@ -1924,8 +2014,8 @@ func TestSleep(t *testing.T) {
 		}
 
 		step := steps[0]
-		if step.FunctionName != "DBOS.sleep" {
-			t.Fatalf("expected step name to be 'DBOS.sleep', got '%s'", step.FunctionName)
+		if step.StepName != "DBOS.sleep" {
+			t.Fatalf("expected step name to be 'DBOS.sleep', got '%s'", step.StepName)
 		}
 
 		if step.Error != nil {

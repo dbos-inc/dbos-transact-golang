@@ -975,8 +975,8 @@ func (s *systemDatabase) CheckOperationExecution(ctx context.Context, input chec
 }
 
 type stepInfo struct {
-	FunctionID      int
-	FunctionName    string
+	StepID          int
+	StepName        string
 	Output          any
 	Error           error
 	ChildWorkflowID string
@@ -1000,7 +1000,7 @@ func (s *systemDatabase) GetWorkflowSteps(ctx context.Context, workflowID string
 		var errorString *string
 		var childWorkflowID *string
 
-		err := rows.Scan(&step.FunctionID, &step.FunctionName, &outputString, &errorString, &childWorkflowID)
+		err := rows.Scan(&step.StepID, &step.StepName, &outputString, &errorString, &childWorkflowID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan step row: %w", err)
 		}

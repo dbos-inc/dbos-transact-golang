@@ -97,24 +97,24 @@ func (h *workflowHandle[R]) GetResult() (R, error) {
 		return *new(R), errors.New("workflow result channel is already closed. Did you call GetResult() twice on the same workflow handle?")
 	}
 	// If we are calling GetResult inside a workflow, record the result as a step result
-	parentWorkflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
-	isChildWorkflow := ok && parentWorkflowState != nil
-	if isChildWorkflow {
+	workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if isWithinWorkflow {
 		encodedOutput, encErr := serialize(outcome.result)
 		if encErr != nil {
-			return *new(R), newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("serializing child workflow result: %v", encErr))
+			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Sprintf("serializing child workflow result: %v", encErr))
 		}
 		recordGetResultInput := recordChildGetResultDBInput{
-			parentWorkflowID: parentWorkflowState.workflowID,
+			parentWorkflowID: workflowState.workflowID,
 			childWorkflowID:  h.workflowID,
-			stepID:           parentWorkflowState.NextStepID(),
+			stepID:           workflowState.NextStepID(),
 			output:           encodedOutput,
 			err:              outcome.err,
 		}
 		recordResultErr := h.dbosContext.(*dbosContext).systemDB.RecordChildGetResult(h.dbosContext, recordGetResultInput)
 		if recordResultErr != nil {
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
-			return *new(R), newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("recording child workflow result: %v", recordResultErr))
+			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Sprintf("recording child workflow result: %v", recordResultErr))
 		}
 	}
 	return outcome.result, outcome.err
@@ -144,8 +144,6 @@ type workflowPollingHandle[R any] struct {
 }
 
 func (h *workflowPollingHandle[R]) GetResult() (R, error) {
-	// FIXME this should use a context available to the user, so they can cancel it instead of infinite waiting
-	ctx := context.Background()
 	result, err := h.dbosContext.(*dbosContext).systemDB.AwaitWorkflowResult(h.dbosContext, h.workflowID)
 	if result != nil {
 		typedResult, ok := result.(R)
@@ -154,17 +152,17 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 			return *new(R), newWorkflowUnexpectedResultType(h.workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", result))
 		}
 		// If we are calling GetResult inside a workflow, record the result as a step result
-		parentWorkflowState, ok := ctx.Value(workflowStateKey).(*workflowState)
-		isChildWorkflow := ok && parentWorkflowState != nil
-		if isChildWorkflow {
+		workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
+		isWithinWorkflow := ok && workflowState != nil
+		if isWithinWorkflow {
 			encodedOutput, encErr := serialize(typedResult)
 			if encErr != nil {
-				return *new(R), newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("serializing child workflow result: %v", encErr))
+				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Sprintf("serializing child workflow result: %v", encErr))
 			}
 			recordGetResultInput := recordChildGetResultDBInput{
-				parentWorkflowID: parentWorkflowState.workflowID,
+				parentWorkflowID: workflowState.workflowID,
 				childWorkflowID:  h.workflowID,
-				stepID:           parentWorkflowState.NextStepID(),
+				stepID:           workflowState.NextStepID(),
 				output:           encodedOutput,
 				err:              err,
 			}
@@ -491,11 +489,15 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	parentWorkflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
 
+	if isChildWorkflow {
+		// Advance step ID if we are a child workflow
+		parentWorkflowState.NextStepID()
+	}
 	// Generate an ID for the workflow if not provided
 	var workflowID string
 	if params.workflowID == "" {
 		if isChildWorkflow {
-			stepID := parentWorkflowState.NextStepID()
+			stepID := parentWorkflowState.stepID
 			workflowID = fmt.Sprintf("%s-%d", parentWorkflowState.workflowID, stepID)
 		} else {
 			workflowID = uuid.New().String()
@@ -588,12 +590,11 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	// Record child workflow relationship if this is a child workflow
 	if isChildWorkflow {
 		// Get the step ID that was used for generating the child workflow ID
-		stepID := parentWorkflowState.stepID
 		childInput := recordChildWorkflowDBInput{
 			parentWorkflowID: parentWorkflowState.workflowID,
-			childWorkflowID:  workflowStatus.ID,
+			childWorkflowID:  workflowID,
 			stepName:         params.workflowName,
-			stepID:           stepID,
+			stepID:           parentWorkflowState.stepID,
 			tx:               tx,
 		}
 		err = c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput)
@@ -611,12 +612,11 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID: workflowID,
-		stepID:     -1,
 	}
 
 	workflowCtx := WithValue(c, workflowStateKey, wfState)
 
-	// If the workflow has a deadline, set it in the context. We use what was returned by InsertWorkflowStatus
+	// If the workflow has a durable deadline, set it in the context.
 	var stopFunc func() bool
 	cancelFuncCompleted := make(chan struct{})
 	if !insertStatusResult.workflowDeadline.IsZero() {
