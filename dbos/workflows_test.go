@@ -1970,7 +1970,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// This workflow will wait indefinitely until it is cancelled
 		<-ctx.Done()
 		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("workflow was cancelled, but context error is not context.Canceled: %v", ctx.Err())
+			t.Fatalf("workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
 		}
 		return "", ctx.Err()
 	}
@@ -2036,7 +2036,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// This step will trigger cancellation of the entire workflow context
 		<-ctx.Done()
 		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("step was cancelled, but context error is not context.Canceled: %v", ctx.Err())
+			t.Fatalf("step was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
 		}
 		return "", ctx.Err()
 	}

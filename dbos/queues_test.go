@@ -855,7 +855,7 @@ func TestQueueTimeouts(t *testing.T) {
 		// This workflow will wait indefinitely until it is cancelled
 		<-ctx.Done()
 		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("workflow was cancelled, but context error is not context.Canceled: %v", ctx.Err())
+			t.Fatalf("workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
 		}
 		return "", ctx.Err()
 	}
@@ -879,6 +879,16 @@ func TestQueueTimeouts(t *testing.T) {
 		if dbosErr.Code != AwaitedWorkflowCancelled {
 			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
 		}
+
+		// enqueud workflow should have been cancelled
+		status, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get status of enqueued workflow: %v", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected enqueued workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+		}
+
 		return "should-never-see-this", nil
 	}
 	RegisterWorkflow(dbosCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow)
