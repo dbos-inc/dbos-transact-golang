@@ -572,6 +572,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	}
 	insertStatusResult, err := c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 	if err != nil {
+		c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
 		return nil, err
 	}
 
@@ -597,6 +598,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		}
 		err = c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput)
 		if err != nil {
+			c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("recording child workflow: %v", err))
 		}
 	}
@@ -629,6 +631,11 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 			close(cancelFuncCompleted)
 		}
 		stopFunc = context.AfterFunc(workflowCtx, dbosCancelFunction)
+	}
+
+	// Commit the transaction. This must happen before we start the goroutine to ensure the workflow is found by steps in the database
+	if err := tx.Commit(uncancellableCtx); err != nil {
+		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
 	}
 
 	// Run the function in a goroutine
@@ -667,11 +674,6 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		outcomeChan <- workflowOutcome[any]{result: result, err: err}
 		close(outcomeChan)
 	}()
-
-	// Commit the transaction
-	if err := tx.Commit(uncancellableCtx); err != nil {
-		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
-	}
 
 	return &workflowHandle[any]{workflowID: workflowID, outcomeChan: outcomeChan, dbosContext: uncancellableCtx}, nil
 }

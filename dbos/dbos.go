@@ -154,7 +154,6 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 		return nil
 	}
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		// Spawn a new child context without the cancel function
 		return &dbosContext{
 			ctx:                context.WithoutCancel(dbosCtx.ctx),
 			logger:             dbosCtx.logger,
@@ -168,7 +167,6 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 		}
 	}
 	return nil
-
 }
 
 func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) {
@@ -176,7 +174,6 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 		return nil, func() {}
 	}
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		// Spawn a new child context with a deadline and a cancel function
 		newCtx, cancelFunc := context.WithTimeoutCause(dbosCtx.ctx, timeout, errors.New("DBOS context timeout"))
 		return &dbosContext{
 			ctx:                newCtx,
@@ -319,6 +316,7 @@ func (c *dbosContext) Launch() error {
 }
 
 // We might consider renaming this to "Cancel" to me more idiomatic
+// TODO: shutdown should really have a timeout and return an error if it wasn't able to shutdown everything
 func (c *dbosContext) Shutdown() {
 	c.logger.Info("Shutting down DBOS context")
 
