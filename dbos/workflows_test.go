@@ -35,7 +35,7 @@ func simpleWorkflowError(dbosCtx DBOSContext, input string) (int, error) {
 }
 
 func simpleWorkflowWithStep(dbosCtx DBOSContext, input string) (string, error) {
-	return RunAsStep(dbosCtx, simpleStep, input)
+	return RunAsStep[string](dbosCtx, simpleStep, input)
 }
 
 func simpleStep(ctx context.Context, input string) (string, error) {
@@ -47,7 +47,7 @@ func simpleStepError(ctx context.Context, input string) (string, error) {
 }
 
 func simpleWorkflowWithStepError(dbosCtx DBOSContext, input string) (string, error) {
-	return RunAsStep(dbosCtx, simpleStepError, input)
+	return RunAsStep[string](dbosCtx, simpleStepError, input)
 }
 
 // idempotencyWorkflow increments a global counter and returns the input
@@ -297,7 +297,7 @@ func stepWithinAStep(ctx context.Context, input string) (string, error) {
 }
 
 func stepWithinAStepWorkflow(dbosCtx DBOSContext, input string) (string, error) {
-	return RunAsStep(dbosCtx, stepWithinAStep, input)
+	return RunAsStep[string](dbosCtx, stepWithinAStep, input)
 }
 
 // Global counter for retry testing
@@ -316,14 +316,14 @@ func stepIdempotencyTest(ctx context.Context, input int) (string, error) {
 }
 
 func stepRetryWorkflow(dbosCtx DBOSContext, input string) (string, error) {
-	RunAsStep(dbosCtx, stepIdempotencyTest, 1)
+	RunAsStep[string](dbosCtx, stepIdempotencyTest, 1)
 	stepCtx := WithValue(dbosCtx, StepParamsKey, &StepParams{
 		MaxRetries:   5,
 		BaseInterval: 1 * time.Millisecond,
 		MaxInterval:  10 * time.Millisecond,
 	})
 
-	return RunAsStep(stepCtx, stepRetryAlwaysFailsStep, input)
+	return RunAsStep[string](stepCtx, stepRetryAlwaysFailsStep, input)
 }
 
 func TestSteps(t *testing.T) {
@@ -335,7 +335,7 @@ func TestSteps(t *testing.T) {
 
 	t.Run("StepsMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run a step outside of a workflow context
-		_, err := RunAsStep(dbosCtx, simpleStep, "test")
+		_, err := RunAsStep[string](dbosCtx, simpleStep, "test")
 		if err == nil {
 			t.Fatal("expected error when running step outside of workflow context, but got none")
 		}
@@ -470,7 +470,7 @@ func TestChildWorkflow(t *testing.T) {
 			return "", fmt.Errorf("expected childWf workflow ID to be %s, got %s", expectedCurrentID, workflowID)
 		}
 		// Steps of a child workflow start with an incremented step ID, because the first step ID is allocated to the child workflow
-		return RunAsStep(dbosCtx, simpleStep, "")
+		return RunAsStep[string](dbosCtx, simpleStep, "")
 	}
 	RegisterWorkflow(dbosCtx, childWf)
 
@@ -644,7 +644,7 @@ func TestChildWorkflow(t *testing.T) {
 		customChildID := uuid.NewString()
 
 		simpleChildWf := func(dbosCtx DBOSContext, input string) (string, error) {
-			return RunAsStep(dbosCtx, simpleStep, input)
+			return RunAsStep[string](dbosCtx, simpleStep, input)
 		}
 		RegisterWorkflow(dbosCtx, simpleChildWf)
 
@@ -713,7 +713,7 @@ func TestChildWorkflow(t *testing.T) {
 // Idempotency workflows moved to test functions
 
 func idempotencyWorkflow(dbosCtx DBOSContext, input string) (string, error) {
-	RunAsStep(dbosCtx, incrementCounter, int64(1))
+	RunAsStep[int64](dbosCtx, incrementCounter, int64(1))
 	return input, nil
 }
 
@@ -727,9 +727,9 @@ func blockingStep(ctx context.Context, input string) (string, error) {
 var idempotencyWorkflowWithStepEvent *Event
 
 func idempotencyWorkflowWithStep(dbosCtx DBOSContext, input string) (int64, error) {
-	RunAsStep(dbosCtx, incrementCounter, int64(1))
+	RunAsStep[int64](dbosCtx, incrementCounter, int64(1))
 	idempotencyWorkflowWithStepEvent.Set()
-	RunAsStep(dbosCtx, blockingStep, input)
+	RunAsStep[string](dbosCtx, blockingStep, input)
 	return idempotencyCounter, nil
 }
 
@@ -1253,7 +1253,7 @@ func stepThatCallsSend(ctx context.Context, input sendWorkflowInput) (string, er
 }
 
 func workflowThatCallsSendInStep(ctx DBOSContext, input sendWorkflowInput) (string, error) {
-	return RunAsStep(ctx, stepThatCallsSend, input)
+	return RunAsStep[string](ctx, stepThatCallsSend, input)
 }
 
 type sendRecvType struct {
@@ -2203,7 +2203,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	}
 
 	waitForCancelWorkflowWithStep := func(ctx DBOSContext, _ string) (string, error) {
-		return RunAsStep(ctx, waitForCancelStep, "trigger-cancellation")
+		return RunAsStep[string](ctx, waitForCancelStep, "trigger-cancellation")
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflowWithStep)
 
@@ -2240,7 +2240,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// The timeout will trigger a step error, the workflow can do whatever it wants with that error
 		stepCtx, stepCancelFunc := WithTimeout(ctx, 1*time.Millisecond)
 		defer stepCancelFunc() // Ensure we clean up the context
-		_, err := RunAsStep(stepCtx, waitForCancelStep, "short-step-timeout")
+		_, err := RunAsStep[string](stepCtx, waitForCancelStep, "short-step-timeout")
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("expected step to timeout, got: %v", err)
 		}
@@ -2287,7 +2287,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// This workflow will run a step that is not cancelable.
 		// What this means is the workflow *will* be cancelled, but the step will run normally
 		stepCtx := WithoutCancel(ctx)
-		res, err := RunAsStep(stepCtx, detachedStep, timeout*2)
+		res, err := RunAsStep[string](stepCtx, detachedStep, timeout*2)
 		if err != nil {
 			t.Fatalf("failed to run detached step: %v", err)
 		}

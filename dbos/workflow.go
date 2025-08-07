@@ -729,7 +729,7 @@ func setStepParamDefaults(params *StepParams, stepName string) *StepParams {
 
 var typeErasedStepNameToStepName = make(map[string]string)
 
-func RunAsStep[P any, R any](ctx DBOSContext, fn GenericStepFunc[P, R], input P) (R, error) {
+func RunAsStep[R any](ctx DBOSContext, fn any, input ...any) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
 	}
@@ -738,19 +738,79 @@ func RunAsStep[P any, R any](ctx DBOSContext, fn GenericStepFunc[P, R], input P)
 		return *new(R), newStepExecutionError("", "", "step function cannot be nil")
 	}
 
-	// Type-erase the function based on its actual type
-	typeErasedFn := StepFunc(func(ctx context.Context, input any) (any, error) {
-		typedInput, ok := input.(P)
-		if !ok {
-			return nil, newStepExecutionError("", "", fmt.Sprintf("unexpected input type: expected %T, got %T", *new(P), input))
+	// Check if fn is a valid function
+	fnType := reflect.TypeOf(fn)
+	if fnType.Kind() != reflect.Func {
+		return *new(R), fmt.Errorf("fn must be a function, got %T", fn)
+	}
+
+	// Check that the first argument implements context.Context
+	if fnType.NumIn() == 0 || fnType.In(0) != reflect.TypeOf((*context.Context)(nil)).Elem() {
+		return *new(R), fmt.Errorf("first argument of fn must be context.Context, got %s", fnType.In(0).String())
+	}
+
+	// Check the function returns one output and it is an error
+	if fnType.NumOut() != 2 || fnType.Out(1) != reflect.TypeOf((*error)(nil)).Elem() {
+		return *new(R), fmt.Errorf("fn must return exactly two values: the result and an error, got %d outputs", fnType.NumOut())
+	}
+
+	// Check the number of inputs matches the expected function signature
+	if len(input) != fnType.NumIn()-1 {
+		return *new(R), fmt.Errorf("fn expects %d inputs, got %d", fnType.NumIn()-1, len(input))
+	}
+
+	// Prepare the arguments -- we must call fnValue.Call() with a slice of reflect.Value
+	typedInput := make([]reflect.Value, fnType.NumIn())
+	typedInput[0] = reflect.ValueOf(ctx) // First argument is always context.Context
+	for i := 1; i < fnType.NumIn(); i++ {
+		if i-1 < len(input) {
+			// Convert the input to the expected type
+			inputValue := reflect.ValueOf(input[i-1])
+			if !inputValue.IsValid() || !inputValue.Type().AssignableTo(fnType.In(i)) {
+				return *new(R), fmt.Errorf("input %d is not assignable to %s, got %T", i-1, fnType.In(i).String(), input[i-1])
+			}
+			typedInput[i] = inputValue
 		}
-		return fn(ctx, typedInput)
-	})
+	}
+
+	// Type-erase the function based on its actual type
+	typeErasedFn := func(ctx context.Context) (any, error) {
+		fnValue := reflect.ValueOf(fn)
+		results := fnValue.Call(typedInput)
+		// Convert the results to the expected types
+		if len(results) != 2 {
+			return nil, fmt.Errorf("fn must return exactly two values: the result and an error, got %d outputs", len(results))
+		}
+
+		// Convert the results to the expected types
+		var result any
+		if results[0].IsValid() && results[0].CanInterface() {
+			if results[0].Kind() == reflect.Ptr || results[0].Kind() == reflect.Interface {
+				if !results[0].IsNil() {
+					result = results[0].Interface().(R) // Cast the result to the expected type R
+				}
+			} else {
+				result = results[0].Interface().(R) // Cast the result to the expected type R
+			}
+		}
+		var err error
+		if results[1].IsValid() && results[1].CanInterface() {
+			if results[1].Kind() == reflect.Ptr || results[1].Kind() == reflect.Interface {
+				if !results[1].IsNil() {
+					err = results[1].Interface().(error)
+				}
+			} else {
+				err = results[1].Interface().(error)
+			}
+		}
+
+		return result, err
+	}
 
 	typeErasedStepNameToStepName[runtime.FuncForPC(reflect.ValueOf(typeErasedFn).Pointer()).Name()] = runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 
 	// Call the executor method
-	result, err := ctx.RunAsStep(ctx, typeErasedFn, input)
+	result, err := ctx.RunAsStep(ctx, typeErasedFn)
 	if err != nil {
 		// In case the errors comes from the DBOS step logic, the result will be nil and we must handle it
 		if result == nil {
@@ -768,7 +828,7 @@ func RunAsStep[P any, R any](ctx DBOSContext, fn GenericStepFunc[P, R], input P)
 	return typedResult, nil
 }
 
-func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, error) {
+func (c *dbosContext) RunAsStep(_ DBOSContext, fn func(ctx context.Context) (any, error)) (any, error) {
 	// Get workflow state from context
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
@@ -790,7 +850,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, err
 
 	// If within a step, just run the function directly
 	if wfState.isWithinStep {
-		return fn(c, input)
+		return fn(c)
 	}
 
 	// Setup step state
@@ -819,7 +879,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, err
 	// Spawn a child DBOSContext with the step state
 	stepCtx := WithValue(c, workflowStateKey, &stepState)
 
-	stepOutput, stepError := fn(stepCtx, input)
+	stepOutput, stepError := fn(stepCtx)
 
 	// Retry if MaxRetries > 0 and the first execution failed
 	var joinedErrors error
@@ -845,7 +905,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, input any) (any, err
 			}
 
 			// Execute the retry
-			stepOutput, stepError = fn(stepCtx, input)
+			stepOutput, stepError = fn(stepCtx)
 
 			// If successful, break
 			if stepError == nil {
