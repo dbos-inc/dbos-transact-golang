@@ -549,31 +549,63 @@ func TestSteps(t *testing.T) {
 				fn       interface{}
 				expected string
 			}{
-				{"NonFunction", nonFunction, "fn must be a function, got string"},
-				{"NilFunction", nilFunction, "step function cannot be nil"},
+				{"NonFunction", nonFunction, "unexpected result type: expected string, got <nil>"},
+				{"NilFunction", nilFunction, "unexpected result type: expected string, got <nil>"},
 				{"NilParameter", nil, "step function cannot be nil"},
 			}
 
 			for _, tc := range testCases {
 				t.Run(tc.name, func(t *testing.T) {
-					var err error
-					if tc.name == "NilFunction" {
-						// Nil function case - don't provide any input
-						_, err = RunAsStep[string](dbosCtx, tc.fn)
-					} else {
-						_, err = RunAsStep[string](dbosCtx, tc.fn, "test")
-					}
-					if err == nil {
-						t.Fatal("expected error for invalid function type, but got none")
-					}
-					// For NilFunction case, the error will be about workflow context because nil functions
-					// pass the initial nil check and fail later in the execution
-					if tc.name == "NilFunction" && strings.Contains(err.Error(), "workflow state not found in context") {
-						// This is expected - the nil function passes initial validation but fails during execution
-						return
-					}
-					if !strings.Contains(err.Error(), tc.expected) {
-						t.Fatalf("expected error message to contain %q, got %q", tc.expected, err.Error())
+					// Create a wrapper workflow that calls RunAsStep to test reflection panics
+					switch tc.name {
+					case "NonFunction":
+						testWorkflow := func(ctx DBOSContext, input string) (string, error) {
+							return RunAsStep[string](ctx, tc.fn, input)
+						}
+						RegisterWorkflow(dbosCtx, testWorkflow)
+						handle, err := RunAsWorkflow(dbosCtx, testWorkflow, "test")
+						if err != nil {
+							t.Fatalf("failed to start workflow: %v", err)
+						}
+						_, err = handle.GetResult()
+						if err == nil {
+							t.Fatal("expected error for invalid function type, but got none")
+						}
+						if !strings.Contains(err.Error(), tc.expected) {
+							t.Fatalf("expected error message to contain %q, got %q", tc.expected, err.Error())
+						}
+					case "NilFunction":
+						testWorkflow2 := func(ctx DBOSContext, input string) (string, error) {
+							return RunAsStep[string](ctx, tc.fn)
+						}
+						RegisterWorkflow(dbosCtx, testWorkflow2)
+						handle, err := RunAsWorkflow(dbosCtx, testWorkflow2, "test")
+						if err != nil {
+							t.Fatalf("failed to start workflow: %v", err)
+						}
+						_, err = handle.GetResult()
+						if err == nil {
+							t.Fatal("expected error for invalid function type, but got none")
+						}
+						if !strings.Contains(err.Error(), tc.expected) {
+							t.Fatalf("expected error message to contain %q, got %q", tc.expected, err.Error())
+						}
+					case "NilParameter":
+						testWorkflow3 := func(ctx DBOSContext, input string) (string, error) {
+							return RunAsStep[string](ctx, tc.fn, input)
+						}
+						RegisterWorkflow(dbosCtx, testWorkflow3)
+						handle, err := RunAsWorkflow(dbosCtx, testWorkflow3, "test")
+						if err != nil {
+							t.Fatalf("failed to start workflow: %v", err)
+						}
+						_, err = handle.GetResult()
+						if err == nil {
+							t.Fatal("expected error for invalid function type, but got none")
+						}
+						if !strings.Contains(err.Error(), tc.expected) {
+							t.Fatalf("expected error message to contain %q, got %q", tc.expected, err.Error())
+						}
 					}
 				})
 			}

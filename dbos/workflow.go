@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"reflect"
 	"runtime"
@@ -685,11 +686,15 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 /******************************/
 
 // safeExecute wraps an operation that might panic and converts panics to errors
-func safeExecute(operation func() (any, error), workflowID, stepName string) (result any, err error) {
+func safeExecute(operation func() (any, error), workflowID, stepName string, logger *slog.Logger) (result any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			result = nil
 			err = newStepExecutionError(workflowID, stepName, fmt.Sprintf("panic recovered: %v", r))
+			// Log the panic if we have a logger
+			if logger != nil {
+				logger.Error("panic recovered in step execution", "workflowID", workflowID, "stepName", stepName, "panic", r)
+			}
 		}
 	}()
 	return operation()
@@ -747,58 +752,40 @@ func RunAsStep[R any](ctx DBOSContext, fn any, input ...any) (R, error) {
 		return *new(R), newStepExecutionError("", "", "step function cannot be nil")
 	}
 
-	// Check if fn is a valid function
-	fnType := reflect.TypeOf(fn)
-	if fnType.Kind() != reflect.Func {
-		return *new(R), fmt.Errorf("fn must be a function, got %T", fn)
-	}
-
-	// Check that the first argument implements context.Context
-	if fnType.NumIn() == 0 || fnType.In(0) != reflect.TypeOf((*context.Context)(nil)).Elem() {
-		return *new(R), fmt.Errorf("first argument of fn must be context.Context, got %s", fnType.In(0).String())
-	}
-
-	// Check the function returns one output and it is an error
-	if fnType.NumOut() != 2 || fnType.Out(1) != reflect.TypeOf((*error)(nil)).Elem() {
-		return *new(R), fmt.Errorf("fn must return exactly two values: the result and an error, got %d outputs", fnType.NumOut())
-	}
-
-	// Check the number of inputs matches the expected function signature
-	if len(input) != fnType.NumIn()-1 {
-		return *new(R), fmt.Errorf("fn expects %d inputs, got %d", fnType.NumIn()-1, len(input))
-	}
-
-	// Prepare the arguments -- we must call fnValue.Call() with a slice of reflect.Value
-	typedInput := make([]reflect.Value, fnType.NumIn())
-	typedInput[0] = reflect.ValueOf(ctx) // First argument is always context.Context
-	for i := 1; i < fnType.NumIn(); i++ {
-		if i-1 < len(input) {
-			// Convert the input to the expected type
-			inputValue := reflect.ValueOf(input[i-1])
-			if !inputValue.IsValid() || !inputValue.Type().AssignableTo(fnType.In(i)) {
-				return *new(R), fmt.Errorf("input %d is not assignable to %s, got %T", i-1, fnType.In(i).String(), input[i-1])
-			}
-			typedInput[i] = inputValue
-		}
-	}
-
-	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return *new(R), newStepExecutionError("", stepName, "workflow state not found in context: are you running this step within a workflow?")
+		return *new(R), newStepExecutionError("", "", "workflow state not found in context: are you running this step within a workflow?")
 	}
 	workflowID := wfState.workflowID
-
+	
+	// Resolve step name in separate safeExecute to use it outside of main execution
+	stepNameResult, stepNameErr := safeExecute(func() (any, error) {
+		return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), nil
+	}, workflowID, "", nil)
+	
+	if stepNameErr != nil {
+		return *new(R), stepNameErr
+	}
+	
+	stepName := stepNameResult.(string)
+	
 	// Type-erase the function based on its actual type
 	typeErasedFn := func(ctx context.Context) (any, error) {
 		return safeExecute(func() (any, error) {
+			// All reflection operations are protected
+			
+			// Prepare the arguments -- we must call fnValue.Call() with a slice of reflect.Value
+			fnType := reflect.TypeOf(fn)
+			typedInput := make([]reflect.Value, fnType.NumIn())
+			typedInput[0] = reflect.ValueOf(ctx) // First argument is always context.Context
+			for i := 1; i < fnType.NumIn(); i++ {
+				if i-1 < len(input) {
+					typedInput[i] = reflect.ValueOf(input[i-1])
+				}
+			}
+
 			fnValue := reflect.ValueOf(fn)
 			results := fnValue.Call(typedInput)
-			// Convert the results to the expected types
-			if len(results) != 2 {
-				return nil, fmt.Errorf("fn must return exactly two values: the result and an error, got %d outputs", len(results))
-			}
 
 			// Convert the results to the expected types
 			var result any
@@ -823,9 +810,10 @@ func RunAsStep[R any](ctx DBOSContext, fn any, input ...any) (R, error) {
 			}
 
 			return result, err
-		}, workflowID, stepName)
+		}, workflowID, stepName, nil)
 	}
 
+	// Map type-erased function name to original step name
 	typeErasedStepNameToStepName[runtime.FuncForPC(reflect.ValueOf(typeErasedFn).Pointer()).Name()] = stepName
 
 	// Call the executor method
@@ -837,7 +825,7 @@ func RunAsStep[R any](ctx DBOSContext, fn any, input ...any) (R, error) {
 			return casted, nil
 		}
 		return nil, fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), result)
-	}, workflowID, stepName)
+	}, workflowID, stepName, nil)
 	if castErr != nil {
 		return *new(R), castErr
 	}
@@ -868,7 +856,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn func(ctx context.Context) (any
 
 	// If within a step, just run the function directly with panic recovery
 	if wfState.isWithinStep {
-		return safeExecute(func() (any, error) { return fn(c) }, wfState.workflowID, params.StepName)
+		return safeExecute(func() (any, error) { return fn(c) }, wfState.workflowID, params.StepName, c.logger)
 	}
 
 	// Setup step state
@@ -897,7 +885,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn func(ctx context.Context) (any
 	// Spawn a child DBOSContext with the step state
 	stepCtx := WithValue(c, workflowStateKey, &stepState)
 
-	stepOutput, stepError := safeExecute(func() (any, error) { return fn(stepCtx) }, stepState.workflowID, params.StepName)
+	stepOutput, stepError := safeExecute(func() (any, error) { return fn(stepCtx) }, stepState.workflowID, params.StepName, c.logger)
 
 	// Retry if MaxRetries > 0 and the first execution failed
 	var joinedErrors error
@@ -923,7 +911,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn func(ctx context.Context) (any
 			}
 
 			// Execute the retry with panic recovery
-			stepOutput, stepError = safeExecute(func() (any, error) { return fn(stepCtx) }, stepState.workflowID, params.StepName)
+			stepOutput, stepError = safeExecute(func() (any, error) { return fn(stepCtx) }, stepState.workflowID, params.StepName, c.logger)
 
 			// If successful, break
 			if stepError == nil {
