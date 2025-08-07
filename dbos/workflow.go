@@ -684,8 +684,16 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 /******* STEP FUNCTIONS *******/
 /******************************/
 
-type StepFunc func(ctx context.Context, input any) (any, error)
-type GenericStepFunc[P any, R any] func(ctx context.Context, input P) (R, error)
+// safeExecute wraps an operation that might panic and converts panics to errors
+func safeExecute(operation func() (any, error), workflowID, stepName string) (result any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+			err = newStepExecutionError(workflowID, stepName, fmt.Sprintf("panic recovered: %v", r))
+		}
+	}()
+	return operation()
+}
 
 const StepParamsKey DBOSContextKey = "stepParams"
 
@@ -730,16 +738,6 @@ func setStepParamDefaults(params *StepParams, stepName string) *StepParams {
 var typeErasedStepNameToStepName = make(map[string]string)
 
 func RunAsStep[R any](ctx DBOSContext, fn any, input ...any) (R, error) {
-	// safeExecute wraps an operation that might panic and converts panics to errors
-	safeExecute := func(operation func() (any, error), workflowID, stepName string) (result any, err error) {
-		defer func() {
-			if r := recover(); r != nil {
-				result = nil
-				err = newStepExecutionError(workflowID, stepName, fmt.Sprintf("panic recovered: %v", r))
-			}
-		}()
-		return operation()
-	}
 
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
@@ -848,16 +846,6 @@ func RunAsStep[R any](ctx DBOSContext, fn any, input ...any) (R, error) {
 }
 
 func (c *dbosContext) RunAsStep(_ DBOSContext, fn func(ctx context.Context) (any, error)) (any, error) {
-	// safeExecuteStep wraps step function execution with panic recovery
-	safeExecuteStep := func(stepFn func(ctx context.Context) (any, error), ctx context.Context, workflowID, stepName string) (result any, err error) {
-		defer func() {
-			if r := recover(); r != nil {
-				result = nil
-				err = newStepExecutionError(workflowID, stepName, fmt.Sprintf("panic recovered: %v", r))
-			}
-		}()
-		return stepFn(ctx)
-	}
 
 	// Get workflow state from context
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
@@ -880,7 +868,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn func(ctx context.Context) (any
 
 	// If within a step, just run the function directly with panic recovery
 	if wfState.isWithinStep {
-		return safeExecuteStep(fn, c, wfState.workflowID, params.StepName)
+		return safeExecute(func() (any, error) { return fn(c) }, wfState.workflowID, params.StepName)
 	}
 
 	// Setup step state
@@ -909,7 +897,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn func(ctx context.Context) (any
 	// Spawn a child DBOSContext with the step state
 	stepCtx := WithValue(c, workflowStateKey, &stepState)
 
-	stepOutput, stepError := safeExecuteStep(fn, stepCtx, stepState.workflowID, params.StepName)
+	stepOutput, stepError := safeExecute(func() (any, error) { return fn(stepCtx) }, stepState.workflowID, params.StepName)
 
 	// Retry if MaxRetries > 0 and the first execution failed
 	var joinedErrors error
@@ -935,7 +923,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn func(ctx context.Context) (any
 			}
 
 			// Execute the retry with panic recovery
-			stepOutput, stepError = safeExecuteStep(fn, stepCtx, stepState.workflowID, params.StepName)
+			stepOutput, stepError = safeExecute(func() (any, error) { return fn(stepCtx) }, stepState.workflowID, params.StepName)
 
 			// If successful, break
 			if stepError == nil {
