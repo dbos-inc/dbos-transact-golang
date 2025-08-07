@@ -628,7 +628,7 @@ func TestChildWorkflow(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, grandParentWf)
 
-	t.Run("ChildWorkflowIDPattern", func(t *testing.T) {
+	t.Run("ChildWorkflowIDGeneration", func(t *testing.T) {
 		r := 3
 		h, err := RunAsWorkflow(dbosCtx, grandParentWf, r)
 		if err != nil {
@@ -637,6 +637,75 @@ func TestChildWorkflow(t *testing.T) {
 		_, err = h.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from grand parent workflow: %v", err)
+		}
+	})
+
+	t.Run("ChildWorkflowWithCustomID", func(t *testing.T) {
+		customChildID := uuid.NewString()
+
+		simpleChildWf := func(dbosCtx DBOSContext, input string) (string, error) {
+			return RunAsStep(dbosCtx, simpleStep, input)
+		}
+		RegisterWorkflow(dbosCtx, simpleChildWf)
+
+		// Simple parent that starts one child with a custom workflow ID
+		parentWf := func(ctx DBOSContext, input string) (string, error) {
+			childHandle, err := RunAsWorkflow(ctx, simpleChildWf, "test-child-input", WithWorkflowID(customChildID))
+			if err != nil {
+				return "", fmt.Errorf("failed to run child workflow: %w", err)
+			}
+
+			result, err := childHandle.GetResult()
+			if err != nil {
+				return "", fmt.Errorf("failed to get result from child workflow: %w", err)
+			}
+
+			return result, nil
+		}
+		RegisterWorkflow(dbosCtx, parentWf)
+
+		parentHandle, err := RunAsWorkflow(dbosCtx, parentWf, "test-input")
+		if err != nil {
+			t.Fatalf("failed to start parent workflow: %v", err)
+		}
+
+		result, err := parentHandle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from parent workflow: %v", err)
+		}
+		if result != "from step" {
+			t.Fatalf("expected result 'from step', got '%s'", result)
+		}
+
+		// Verify the child workflow was recorded as step 0
+		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), parentHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps: %v", err)
+		}
+		if len(steps) != 2 {
+			t.Fatalf("expected 2 recorded steps, got %d", len(steps))
+		}
+
+		// Verify first step is the child workflow with stepID=0
+		if steps[0].StepID != 0 {
+			t.Fatalf("expected first step ID to be 0, got %d", steps[0].StepID)
+		}
+		if steps[0].StepName != runtime.FuncForPC(reflect.ValueOf(simpleChildWf).Pointer()).Name() {
+			t.Fatalf("expected first step to be child workflow, got %s", steps[0].StepName)
+		}
+		if steps[0].ChildWorkflowID != customChildID {
+			t.Fatalf("expected first step child workflow ID to be %s, got %s", customChildID, steps[0].ChildWorkflowID)
+		}
+
+		// Verify second step is the getResult call with stepID=1
+		if steps[1].StepID != 1 {
+			t.Fatalf("expected second step ID to be 1, got %d", steps[1].StepID)
+		}
+		if steps[1].StepName != "DBOS.getResult" {
+			t.Fatalf("expected second step name to be getResult, got %s", steps[1].StepName)
+		}
+		if steps[1].ChildWorkflowID != customChildID {
+			t.Fatalf("expected second step child workflow ID to be %s, got %s", customChildID, steps[1].ChildWorkflowID)
 		}
 	})
 }
