@@ -465,7 +465,7 @@ func TestChildWorkflow(t *testing.T) {
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %w", err)
 		}
-		expectedCurrentID := fmt.Sprintf("%s-1", input.ParentID)
+		expectedCurrentID := fmt.Sprintf("%s-0", input.ParentID)
 		if workflowID != expectedCurrentID {
 			return "", fmt.Errorf("expected childWf workflow ID to be %s, got %s", expectedCurrentID, workflowID)
 		}
@@ -504,8 +504,8 @@ func TestChildWorkflow(t *testing.T) {
 			return "", fmt.Errorf("expected 2 recorded steps, got %d", len(steps))
 		}
 		// Verify the first step is the child workflow
-		if steps[0].StepID != 1 {
-			return "", fmt.Errorf("expected first step ID to be 1, got %d", steps[0].StepID)
+		if steps[0].StepID != 0 {
+			return "", fmt.Errorf("expected first step ID to be 0, got %d", steps[0].StepID)
 		}
 		if steps[0].StepName != runtime.FuncForPC(reflect.ValueOf(childWf).Pointer()).Name() {
 			return "", fmt.Errorf("expected first step to be child workflow, got %s", steps[0].StepName)
@@ -521,8 +521,8 @@ func TestChildWorkflow(t *testing.T) {
 		}
 
 		// The second step is the result from the child workflow
-		if steps[1].StepID != 2 {
-			return "", fmt.Errorf("expected second step ID to be 2, got %d", steps[1].StepID)
+		if steps[1].StepID != 1 {
+			return "", fmt.Errorf("expected second step ID to be 1, got %d", steps[1].StepID)
 		}
 		if steps[1].StepName != "DBOS.getResult" {
 			return "", fmt.Errorf("expected second step name to be getResult, got %s", steps[1].StepName)
@@ -549,7 +549,7 @@ func TestChildWorkflow(t *testing.T) {
 
 		// 2 steps per loop: spawn child and get result
 		for i := range r {
-			expectedStepID := (2 * i) + 1
+			expectedStepID := (2 * i)
 			parentHandle, err := RunAsWorkflow(ctx, parentWf, Inheritance{ParentID: workflowID, Index: expectedStepID})
 			if err != nil {
 				return "", fmt.Errorf("failed to run parent workflow: %w", err)
@@ -583,8 +583,8 @@ func TestChildWorkflow(t *testing.T) {
 
 		// We do expect the steps to be returned in the order of execution, which seems to be the case even without an ORDER BY function_id ASC clause in the SQL query
 		for i := 0; i < r; i += 2 {
-			expectedStepID := i + 1
-			expectedChildID := fmt.Sprintf("%s-%d", workflowID, i+1)
+			expectedStepID := i
+			expectedChildID := fmt.Sprintf("%s-%d", workflowID, i)
 			childWfStep := steps[i]
 			getResultStep := steps[i+1]
 

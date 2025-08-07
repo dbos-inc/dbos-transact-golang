@@ -612,6 +612,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID: workflowID,
+		stepID:     -1, // Steps are O-indexed
 	}
 
 	workflowCtx := WithValue(c, workflowStateKey, wfState)
