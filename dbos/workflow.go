@@ -493,6 +493,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		// Advance step ID if we are a child workflow
 		parentWorkflowState.NextStepID()
 	}
+
 	// Generate an ID for the workflow if not provided
 	var workflowID string
 	if params.workflowID == "" {
