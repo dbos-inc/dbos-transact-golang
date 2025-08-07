@@ -475,8 +475,7 @@ func TestSteps(t *testing.T) {
 
 		// Invalid function types (non-functions)
 		nonFunction := "not a function"
-		var nilFunction func(context.Context) (string, error)
-		nilFunction = nil
+		var nilFunction func(context.Context) (string, error) = nil
 
 		// Invalid signatures - wrong context
 		noContext := func() (string, error) { return "no context", nil }
@@ -703,10 +702,6 @@ func TestSteps(t *testing.T) {
 				t.Fatalf("expected error about input type, got %q", err.Error())
 			}
 		})
-
-		// NOTE: ReturnTypeCasting test removed - it exposes a bug in RunAsStep where
-		// type casting panics are not properly handled, causing unrecoverable goroutine panics.
-		// This is a known limitation that should be fixed in the RunAsStep implementation.
 
 		// Test nil return values handling
 		t.Run("NilReturnHandling", func(t *testing.T) {
@@ -2824,7 +2819,6 @@ func TestRunAsStepPanicRecovery(t *testing.T) {
 	divideByZeroPanicStep := func(ctx context.Context, input int) (int, error) {
 		return 10 / input, nil // Panics when input is 0
 	}
-
 
 	sliceOutOfBoundsPanicStep := func(ctx context.Context, input []int) (int, error) {
 		return input[10], nil // Panics if slice has fewer than 11 elements
