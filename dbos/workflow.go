@@ -744,7 +744,7 @@ func RunAsStep[P any, R any](ctx DBOSContext, fn GenericStepFunc[R]) (R, error) 
 	typeErasedFn := StepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
 	typeErasedStepNameToStepName[runtime.FuncForPC(reflect.ValueOf(typeErasedFn).Pointer()).Name()] = stepName
 
-	// Call the executor method
+	// Call the executor method and pass through the result/error
 	result, err := ctx.RunAsStep(ctx, typeErasedFn)
 	// Step function could return a nil result
 	if result == nil {
@@ -755,7 +755,7 @@ func RunAsStep[P any, R any](ctx DBOSContext, fn GenericStepFunc[R]) (R, error) 
 	if !ok {
 		return *new(R), fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), result)
 	}
-	return typedResult, nil
+	return typedResult, err
 }
 
 func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc) (any, error) {
