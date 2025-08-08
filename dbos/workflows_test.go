@@ -867,6 +867,8 @@ func TestSteps(t *testing.T) {
 		t.Run("NilReturnHandling", func(t *testing.T) {
 			nilPointerReturn := func(ctx context.Context) (*string, error) { return nil, nil }
 			nilInterfaceReturn := func(ctx context.Context) (any, error) { return nil, nil }
+			nilConcreteReturn := func(ctx context.Context) (string, error) { return "", nil } // Zero value, not nil
+			trueNilNilReturn := func(ctx context.Context) (interface{}, error) { return nil, nil } // Both nil
 
 			// Test that nil pointers fail with type casting error (as expected)
 			testWorkflowNilPointer := func(dbosCtx DBOSContext, input string) (string, error) {
@@ -917,6 +919,67 @@ func TestSteps(t *testing.T) {
 			if result2 != "nil-interface-error-expected" {
 				t.Fatalf("expected result 'nil-interface-error-expected', got %q", result2)
 			}
+
+			// Test concrete type with zero value (should work)
+			t.Run("ConcreteZeroValue", func(t *testing.T) {
+				testWorkflowZeroValue := func(dbosCtx DBOSContext, input string) (string, error) {
+					result, err := RunAsStep[string](dbosCtx, nilConcreteReturn)
+					if err != nil {
+						return "zero-value-error", err
+					}
+					return fmt.Sprintf("zero-value-success: %q", result), nil
+				}
+				RegisterWorkflow(dbosCtx, testWorkflowZeroValue)
+
+				handle, err := RunAsWorkflow(dbosCtx, testWorkflowZeroValue, "input")
+				if err != nil {
+					t.Fatal("failed to run workflow with zero value:", err)
+				}
+
+				result, err := handle.GetResult()
+				if err != nil {
+					t.Fatal("failed to get result from zero value workflow:", err)
+				}
+
+				if result != "zero-value-success: \"\"" {
+					t.Fatalf("expected result 'zero-value-success: \"\"', got %q", result)
+				}
+			})
+
+			// Test true (nil, nil) return - both result and error are nil
+			t.Run("TrueNilNilReturn", func(t *testing.T) {
+				testWorkflowNilNil := func(dbosCtx DBOSContext, input string) (string, error) {
+					result, err := RunAsStep[interface{}](dbosCtx, trueNilNilReturn)
+					if err != nil {
+						// This is expected due to the type casting issue with nil interface{}
+						if strings.Contains(err.Error(), "unexpected result type") {
+							return "nil-nil-type-error-expected", nil
+						}
+						return "nil-nil-other-error", err
+					}
+					if result == nil {
+						return "nil-nil-success: got nil result", nil
+					}
+					return fmt.Sprintf("nil-nil-unexpected: got %v", result), nil
+				}
+				RegisterWorkflow(dbosCtx, testWorkflowNilNil)
+
+				handle, err := RunAsWorkflow(dbosCtx, testWorkflowNilNil, "input")
+				if err != nil {
+					t.Fatal("failed to run workflow with nil-nil return:", err)
+				}
+
+				result, err := handle.GetResult()
+				if err != nil {
+					t.Fatal("failed to get result from nil-nil workflow:", err)
+				}
+
+				// This demonstrates that (nil, nil) with interface{} return causes type casting issues
+				// This is a known limitation of the reflection-based approach
+				if result != "nil-nil-type-error-expected" && result != "nil-nil-success: got nil result" {
+					t.Fatalf("expected 'nil-nil-type-error-expected' or success, got %q", result)
+				}
+			})
 		})
 	})
 

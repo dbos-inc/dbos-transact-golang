@@ -757,24 +757,25 @@ func RunAsStep[R any](ctx DBOSContext, fn any, input ...any) (R, error) {
 		return *new(R), newStepExecutionError("", "", "workflow state not found in context: are you running this step within a workflow?")
 	}
 	workflowID := wfState.workflowID
-	
-	// Resolve step name in separate safeExecute to use it outside of main execution
-	stepNameResult, stepNameErr := safeExecute(func() (any, error) {
+
+	// Resolve step name in safeExecute
+	stepNameResult, err := safeExecute(func() (any, error) {
 		return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name(), nil
 	}, workflowID, "", nil)
-	
-	if stepNameErr != nil {
-		return *new(R), stepNameErr
+
+	if err != nil {
+		return *new(R), err
 	}
-	
-	stepName := stepNameResult.(string)
-	
+
+	stepName, ok := stepNameResult.(string)
+	if !ok { // This should never happen, but we check for safety
+		return *new(R), newStepExecutionError(workflowID, "", fmt.Sprintf("unexpected step function type: expected string, got %T", stepNameResult))
+	}
+
 	// Type-erase the function based on its actual type
 	typeErasedFn := func(ctx context.Context) (any, error) {
 		return safeExecute(func() (any, error) {
-			// All reflection operations are protected
-			
-			// Prepare the arguments -- we must call fnValue.Call() with a slice of reflect.Value
+			// Prepare the arguments
 			fnType := reflect.TypeOf(fn)
 			typedInput := make([]reflect.Value, fnType.NumIn())
 			typedInput[0] = reflect.ValueOf(ctx) // First argument is always context.Context
@@ -787,9 +788,10 @@ func RunAsStep[R any](ctx DBOSContext, fn any, input ...any) (R, error) {
 			fnValue := reflect.ValueOf(fn)
 			results := fnValue.Call(typedInput)
 
-			// Convert the results to the expected types
+			// Convert the results to the expected types (R and error)
 			var result any
 			if results[0].IsValid() && results[0].CanInterface() {
+				// If the result is a pointer or interface, check if it's nil before casting
 				if results[0].Kind() == reflect.Ptr || results[0].Kind() == reflect.Interface {
 					if !results[0].IsNil() {
 						result = results[0].Interface().(R) // Cast the result to the expected type R
@@ -800,6 +802,7 @@ func RunAsStep[R any](ctx DBOSContext, fn any, input ...any) (R, error) {
 			}
 			var err error
 			if results[1].IsValid() && results[1].CanInterface() {
+				// Handle the case were the return value is an interface or pointer that implements the error interface
 				if results[1].Kind() == reflect.Ptr || results[1].Kind() == reflect.Interface {
 					if !results[1].IsNil() {
 						err = results[1].Interface().(error)
@@ -820,6 +823,8 @@ func RunAsStep[R any](ctx DBOSContext, fn any, input ...any) (R, error) {
 	result, err := ctx.RunAsStep(ctx, typeErasedFn)
 
 	// Type-check and cast the result with panic recovery
+	// The result should already be of type R (casted in the inner function), but ctx.RunAsStep returns an `any` type, so we need to cast it back to R
+	// err is the step error, if any, and already of type error
 	typedResult, castErr := safeExecute(func() (any, error) {
 		if casted, ok := result.(R); ok {
 			return casted, nil
