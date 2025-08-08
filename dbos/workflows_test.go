@@ -1153,9 +1153,9 @@ func TestScheduledWorkflows(t *testing.T) {
 		}
 
 		// Stop the workflowScheduler and check if it stops executing
-		currentCounter := counter
 		dbosCtx.(*dbosContext).getWorkflowScheduler().Stop()
 		time.Sleep(3 * time.Second) // Wait a bit to ensure no more executions
+		currentCounter := counter   // If more scheduled executions happen, this can also trigger a data race. If the scheduler is correct, there should be no race.
 		if counter >= currentCounter+2 {
 			t.Fatalf("Scheduled workflow continued executing after stopping scheduler: %d (expected < %d)", counter, currentCounter+2)
 		}
