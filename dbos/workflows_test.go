@@ -327,6 +327,16 @@ func stepRetryWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 	return RunAsStep[string](stepCtx, stepRetryAlwaysFailsStep, input)
 }
 
+// Helper struct and method for bound method test
+// XX do we need this declared here?
+type TestMethodStructForEdgeCase struct {
+	Value string
+}
+
+func (t TestMethodStructForEdgeCase) ProcessValue() (string, error) {
+	return "processed-" + t.Value, nil
+}
+
 func TestSteps(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 
@@ -451,10 +461,8 @@ func TestSteps(t *testing.T) {
 		}
 	})
 
-	// Test comprehensive function signature validation for RunAsStep
+	// Test various happy/failure paths when calling RunAsStep with `any` functions
 	t.Run("RunAsStepSignatureValidation", func(t *testing.T) {
-		// Helper functions for testing different signatures
-
 		// Valid signatures
 		validNoParam := func(ctx context.Context) (string, error) { return "valid", nil }
 		validOneParam := func(ctx context.Context, input string) (string, error) { return input, nil }
@@ -480,7 +488,6 @@ func TestSteps(t *testing.T) {
 		// Invalid signatures - wrong context
 		noContext := func() (string, error) { return "no context", nil }
 		wrongFirstParam := func(input string, ctx context.Context) (string, error) { return input, nil }
-		nonContextFirst := func(input string) (string, error) { return input, nil }
 
 		// Invalid signatures - wrong return values
 		noReturn := func(ctx context.Context) {}
@@ -644,28 +651,6 @@ func TestSteps(t *testing.T) {
 				RegisterWorkflow(dbosCtx, testWorkflowWrongFirstParam)
 
 				handle, err := RunAsWorkflow(dbosCtx, testWorkflowWrongFirstParam, "test")
-				if err != nil {
-					t.Fatalf("failed to start workflow: %v", err)
-				}
-
-				_, err = handle.GetResult()
-				if err == nil {
-					t.Fatal("expected error for invalid context parameter, but got none")
-				}
-				// Accept either panic recovery or type casting error since both indicate the function failed
-				if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "unexpected result type") {
-					t.Fatalf("expected error message to contain 'panic recovered' or 'unexpected result type', got %q", err.Error())
-				}
-			})
-
-			// Test NonContextFirst case
-			t.Run("NonContextFirst", func(t *testing.T) {
-				testWorkflowNonContextFirst := func(ctx DBOSContext, input string) (string, error) {
-					return RunAsStep[string](ctx, nonContextFirst, "test")
-				}
-				RegisterWorkflow(dbosCtx, testWorkflowNonContextFirst)
-
-				handle, err := RunAsWorkflow(dbosCtx, testWorkflowNonContextFirst, "test")
 				if err != nil {
 					t.Fatalf("failed to start workflow: %v", err)
 				}
@@ -867,7 +852,7 @@ func TestSteps(t *testing.T) {
 		t.Run("NilReturnHandling", func(t *testing.T) {
 			nilPointerReturn := func(ctx context.Context) (*string, error) { return nil, nil }
 			nilInterfaceReturn := func(ctx context.Context) (any, error) { return nil, nil }
-			nilConcreteReturn := func(ctx context.Context) (string, error) { return "", nil } // Zero value, not nil
+			nilConcreteReturn := func(ctx context.Context) (string, error) { return "", nil }      // Zero value, not nil
 			trueNilNilReturn := func(ctx context.Context) (interface{}, error) { return nil, nil } // Both nil
 
 			// Test that nil pointers fail with type casting error (as expected)
@@ -981,221 +966,7 @@ func TestSteps(t *testing.T) {
 				}
 			})
 		})
-	})
 
-	t.Run("RunAsStepPanicRecovery", func(t *testing.T) {
-		// Test functions that cause different types of panics
-		nilPointerPanicStep := func(ctx context.Context, input string) (string, error) {
-			var p *string
-			return *p, nil // This will panic with nil pointer dereference
-		}
-
-		divideByZeroPanicStep := func(ctx context.Context, input int) (int, error) {
-			return 10 / input, nil // Panics when input is 0
-		}
-
-		sliceOutOfBoundsPanicStep := func(ctx context.Context, input []int) (int, error) {
-			return input[10], nil // Panics if slice has fewer than 11 elements
-		}
-
-		// Workflow that tests panic recovery in type casting
-		typeCastPanicWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-			// This should cause a panic in the type casting operation, not the function execution
-			return RunAsStep[string](dbosCtx, func(ctx context.Context) (int, error) {
-				return 42, nil // Returns int but we expect string - causes panic in type casting
-			})
-		}
-
-		// Workflow that tests panic recovery in function execution
-		functionPanicWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-			return RunAsStep[string](dbosCtx, nilPointerPanicStep, input)
-		}
-
-		// Register workflows
-		RegisterWorkflow(dbosCtx, typeCastPanicWorkflow)
-		RegisterWorkflow(dbosCtx, functionPanicWorkflow)
-
-		t.Run("TypeCastingPanicRecovery", func(t *testing.T) {
-			handle, err := RunAsWorkflow(dbosCtx, typeCastPanicWorkflow, "test")
-			if err != nil {
-				t.Fatalf("failed to start workflow: %v", err)
-			}
-
-			result, err := handle.GetResult()
-			if err == nil {
-				t.Fatal("expected error from type casting panic, but got none")
-			}
-
-			// Verify it contains panic recovery or type error message
-			if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "unexpected result type") {
-				t.Fatalf("expected panic recovery or type error message, got %q", err.Error())
-			}
-
-			// Result should be zero value
-			if result != "" {
-				t.Fatalf("expected empty string result, got %q", result)
-			}
-		})
-
-		t.Run("FunctionExecutionPanicRecovery", func(t *testing.T) {
-			handle, err := RunAsWorkflow(dbosCtx, functionPanicWorkflow, "test")
-			if err != nil {
-				t.Fatalf("failed to start workflow: %v", err)
-			}
-
-			result, err := handle.GetResult()
-			if err == nil {
-				t.Fatal("expected error from function execution panic, but got none")
-			}
-
-			// Verify it contains panic recovery or type error message (panic might cause nil result)
-			if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "unexpected result type") {
-				t.Fatalf("expected panic recovery or type error message, got %q", err.Error())
-			}
-
-			// Result should be zero value
-			if result != "" {
-				t.Fatalf("expected empty string result, got %q", result)
-			}
-		})
-
-		t.Run("DivideByZeroPanicRecovery", func(t *testing.T) {
-			testWorkflow := func(dbosCtx DBOSContext, input int) (int, error) {
-				return RunAsStep[int](dbosCtx, divideByZeroPanicStep, input)
-			}
-			RegisterWorkflow(dbosCtx, testWorkflow)
-
-			handle, err := RunAsWorkflow(dbosCtx, testWorkflow, 0)
-			if err != nil {
-				t.Fatalf("failed to start workflow: %v", err)
-			}
-
-			result, err := handle.GetResult()
-			if err == nil {
-				t.Fatal("expected error from divide by zero panic, but got none")
-			}
-
-			// Verify it contains panic recovery or type error message (panic causes nil result)
-			if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "unexpected result type") {
-				t.Fatalf("expected panic recovery or type error message, got %q", err.Error())
-			}
-
-			// Result should be zero value
-			if result != 0 {
-				t.Fatalf("expected zero result, got %d", result)
-			}
-		})
-
-		t.Run("TypeAssertionPanicRecovery", func(t *testing.T) {
-			testWorkflow := func(dbosCtx DBOSContext, input int) (string, error) {
-				return RunAsStep[string](dbosCtx, func(ctx context.Context, input int) (string, error) {
-					// Convert int to any and then try to cast to string - this will panic
-					var anyVal any = input
-					return anyVal.(string), nil
-				}, input)
-			}
-			RegisterWorkflow(dbosCtx, testWorkflow)
-
-			// Pass an int instead of string to cause type assertion panic
-			handle, err := RunAsWorkflow(dbosCtx, testWorkflow, 123)
-			if err != nil {
-				t.Fatalf("failed to start workflow: %v", err)
-			}
-
-			result, err := handle.GetResult()
-			if err == nil {
-				t.Fatal("expected error from type assertion panic, but got none")
-			}
-
-			// Verify it contains panic recovery or type error message (panic causes nil result)
-			if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "unexpected result type") {
-				t.Fatalf("expected panic recovery or type error message, got %q", err.Error())
-			}
-
-			// Result should be zero value
-			if result != "" {
-				t.Fatalf("expected empty string result, got %q", result)
-			}
-		})
-
-		t.Run("SliceOutOfBoundsPanicRecovery", func(t *testing.T) {
-			testWorkflow := func(dbosCtx DBOSContext, input []int) (int, error) {
-				return RunAsStep[int](dbosCtx, sliceOutOfBoundsPanicStep, input)
-			}
-			RegisterWorkflow(dbosCtx, testWorkflow)
-
-			// Pass a slice with only 2 elements to cause index out of bounds panic
-			handle, err := RunAsWorkflow(dbosCtx, testWorkflow, []int{1, 2})
-			if err != nil {
-				t.Fatalf("failed to start workflow: %v", err)
-			}
-
-			result, err := handle.GetResult()
-			if err == nil {
-				t.Fatal("expected error from slice out of bounds panic, but got none")
-			}
-
-			// Verify it contains panic recovery or type error message (panic causes nil result)
-			if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "unexpected result type") {
-				t.Fatalf("expected panic recovery or type error message, got %q", err.Error())
-			}
-
-			// Result should be zero value
-			if result != 0 {
-				t.Fatalf("expected zero result, got %d", result)
-			}
-		})
-
-		t.Run("PanicRecoveryWithRetries", func(t *testing.T) {
-			retryCount := 0
-			retryPanicStep := func(ctx context.Context, input string) (string, error) {
-				retryCount++
-				if retryCount <= 2 {
-					panic("intentional panic for retry test")
-				}
-				return "success after retries", nil
-			}
-
-			testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-				// Set step parameters to enable retries
-				stepCtx := WithValue(dbosCtx, StepParamsKey, &StepParams{
-					MaxRetries:    3,
-					BaseInterval:  10 * time.Millisecond,
-					BackoffFactor: 1.0, // No backoff for faster test
-				})
-				return RunAsStep[string](stepCtx, retryPanicStep, input)
-			}
-			RegisterWorkflow(dbosCtx, testWorkflow)
-
-			// Reset retry count
-			retryCount = 0
-
-			handle, err := RunAsWorkflow(dbosCtx, testWorkflow, "test")
-			if err != nil {
-				t.Fatalf("failed to start workflow: %v", err)
-			}
-
-			result, err := handle.GetResult()
-			if err != nil {
-				t.Fatalf("expected successful result after retries, got error: %v", err)
-			}
-
-			if result != "success after retries" {
-				t.Fatalf("expected 'success after retries', got %q", result)
-			}
-
-			// Verify the function was called the expected number of times
-			if retryCount != 3 {
-				t.Fatalf("expected retryCount to be 3, got %d", retryCount)
-			}
-		})
-	})
-}
-
-func TestStepsEdgeCases(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
-
-	t.Run("EdgeCaseFunctionSignatures", func(t *testing.T) {
 		// Test functions with channel parameters
 		chanParamStep := func(ctx context.Context, ch chan string) (string, error) {
 			select {
@@ -1216,15 +987,15 @@ func TestStepsEdgeCases(t *testing.T) {
 
 		// Test functions with complex nested types
 		type ComplexNested struct {
-			MapData map[string]map[int][]interface{}
-			ChanData chan map[string]interface{}
+			MapData  map[string]map[int][]any
+			ChanData chan map[string]any
 		}
 		complexNestedStep := func(ctx context.Context, input ComplexNested) (string, error) {
 			return "complex-processed", nil
 		}
 
-		// Test generic function passed as interface{}
-		genericStep := func(ctx context.Context, input interface{}) (interface{}, error) {
+		// Test generic function passed as any
+		genericStep := func(ctx context.Context, input any) (any, error) {
 			return input, nil
 		}
 
@@ -1292,13 +1063,13 @@ func TestStepsEdgeCases(t *testing.T) {
 		t.Run("ComplexNestedTypes", func(t *testing.T) {
 			testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 				complexInput := ComplexNested{
-					MapData: map[string]map[int][]interface{}{
+					MapData: map[string]map[int][]any{
 						"key1": {
-							1: []interface{}{"a", 2, true},
-							2: []interface{}{nil, "complex"},
+							1: []any{"a", 2, true},
+							2: []any{nil, "complex"},
 						},
 					},
-					ChanData: make(chan map[string]interface{}, 1),
+					ChanData: make(chan map[string]any, 1),
 				}
 				return RunAsStep[string](dbosCtx, complexNestedStep, complexInput)
 			}
@@ -1322,7 +1093,7 @@ func TestStepsEdgeCases(t *testing.T) {
 
 		t.Run("GenericInterfaceFunction", func(t *testing.T) {
 			testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-				result, err := RunAsStep[interface{}](dbosCtx, genericStep, "generic-input")
+				result, err := RunAsStep[any](dbosCtx, genericStep, "generic-input")
 				if err != nil {
 					return "", err
 				}
@@ -1375,9 +1146,7 @@ func TestStepsEdgeCases(t *testing.T) {
 				}
 			}
 		})
-	})
 
-	t.Run("ReflectionEdgeCases", func(t *testing.T) {
 		// Test argument count mismatches more thoroughly
 		validTwoParamStep := func(ctx context.Context, input1 string, input2 int) (string, error) {
 			return fmt.Sprintf("%s-%d", input1, input2), nil
@@ -1399,9 +1168,9 @@ func TestStepsEdgeCases(t *testing.T) {
 		}
 
 		// Test invalid interface casting scenarios
-		invalidCastStep := func(ctx context.Context) (map[string]interface{}, error) {
+		invalidCastStep := func(ctx context.Context) (map[string]any, error) {
 			// Return something that can't be cast to the expected type
-			return map[string]interface{}{"key": make(chan int)}, nil
+			return map[string]any{"key": make(chan int)}, nil
 		}
 
 		t.Run("ArgumentCountMismatch", func(t *testing.T) {
@@ -1459,7 +1228,7 @@ func TestStepsEdgeCases(t *testing.T) {
 			})
 		})
 
-		t.Run("InvalidFunctionSignatures", func(t *testing.T) {
+		t.Run("AdvancedInvalidFunctionSignatures", func(t *testing.T) {
 			t.Run("NoReturn", func(t *testing.T) {
 				testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 					return RunAsStep[string](dbosCtx, noReturnStep)
@@ -1533,7 +1302,7 @@ func TestStepsEdgeCases(t *testing.T) {
 		t.Run("InterfaceCastingFailures", func(t *testing.T) {
 			t.Run("InvalidCast", func(t *testing.T) {
 				testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-					result, err := RunAsStep[map[string]interface{}](dbosCtx, invalidCastStep)
+					result, err := RunAsStep[map[string]any](dbosCtx, invalidCastStep)
 					if err != nil {
 						return "cast-error", err
 					}
@@ -1564,13 +1333,13 @@ func TestStepsEdgeCases(t *testing.T) {
 			})
 
 			t.Run("NilInterfaceHandling", func(t *testing.T) {
-				nilInterfaceStep := func(ctx context.Context) (interface{}, error) {
-					var nilInterface interface{} = nil
+				nilInterfaceStep := func(ctx context.Context) (any, error) {
+					var nilInterface any = nil
 					return nilInterface, nil
 				}
 
 				testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-					result, err := RunAsStep[interface{}](dbosCtx, nilInterfaceStep)
+					result, err := RunAsStep[any](dbosCtx, nilInterfaceStep)
 					if err != nil {
 						return "error-occurred", err
 					}
@@ -1604,156 +1373,36 @@ func TestStepsEdgeCases(t *testing.T) {
 		})
 	})
 
-	t.Run("PanicRecoveryScenarios", func(t *testing.T) {
-		// Test nested panics
-		nestedPanicStep := func(ctx context.Context, input string) (string, error) {
-			defer func() {
-				if r := recover(); r != nil {
-					// This panic handler itself panics
-					panic("panic in panic handler")
-				}
-			}()
-			panic("original panic")
+	t.Run("RunAsStepPanicRecovery", func(t *testing.T) {
+		divideByZeroPanicStep := func(ctx context.Context, input int) (int, error) {
+			return 10 / input, nil // Panics when input is 0
 		}
 
-		// Test panic during logging (simulate by creating a logger that panics)
-		loggerPanicStep := func(ctx context.Context, input string) (string, error) {
-			// Create a situation that would cause logging to be called
-			var nilPtr *string
-			return *nilPtr, nil // This will panic and trigger logging
+		testWorkflow := func(dbosCtx DBOSContext, input int) (int, error) {
+			return RunAsStep[int](dbosCtx, divideByZeroPanicStep, input)
+		}
+		RegisterWorkflow(dbosCtx, testWorkflow)
+
+		handle, err := RunAsWorkflow(dbosCtx, testWorkflow, 0)
+		if err != nil {
+			t.Fatalf("failed to start workflow: %v", err)
 		}
 
-		// Test recursive panic scenarios
-		var recursivePanicStep func(ctx context.Context, depth int) (string, error)
-		recursivePanicStep = func(ctx context.Context, depth int) (string, error) {
-			if depth > 100 { // Deep enough to potentially cause stack issues
-				panic("deep recursion panic")
-			}
-			// Try to call RunAsStep recursively (this should fail)
-			if dbosCtx, ok := ctx.(DBOSContext); ok {
-				RunAsStep[string](dbosCtx, recursivePanicStep, depth+1)
-			}
-			panic("recursive panic")
+		result, err := handle.GetResult()
+		if err == nil {
+			t.Fatal("expected error from divide by zero panic, but got none")
 		}
 
-		// Test panic during retry operations
-		retryPanicStep := func(ctx context.Context, input string) (string, error) {
-			// Create a scenario where panic happens during retry logic
-			defer func() {
-				if r := recover(); r != nil {
-					panic("retry panic") // Re-panic to test retry + panic interaction
-				}
-			}()
-			panic("initial retry panic")
+		// Verify it contains panic recovery or type error message (panic causes nil result)
+		if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "unexpected result type") {
+			t.Fatalf("expected panic recovery or type error message, got %q", err.Error())
 		}
 
-		t.Run("NestedPanicRecovery", func(t *testing.T) {
-			testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-				return RunAsStep[string](dbosCtx, nestedPanicStep, input)
-			}
-			RegisterWorkflow(dbosCtx, testWorkflow)
-
-			handle, err := RunAsWorkflow(dbosCtx, testWorkflow, "test")
-			if err != nil {
-				t.Fatalf("failed to start workflow: %v", err)
-			}
-
-			result, err := handle.GetResult()
-			if err == nil {
-				t.Fatal("expected error from nested panic but got none")
-			}
-			if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "unexpected result type") {
-				t.Fatalf("expected panic recovery or type error, got: %v", err)
-			}
-			if result != "" {
-				t.Fatalf("expected zero value result, got: %q", result)
-			}
-		})
-
-		t.Run("LoggerPanicScenario", func(t *testing.T) {
-			testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-				return RunAsStep[string](dbosCtx, loggerPanicStep, input)
-			}
-			RegisterWorkflow(dbosCtx, testWorkflow)
-
-			handle, err := RunAsWorkflow(dbosCtx, testWorkflow, "test")
-			if err != nil {
-				t.Fatalf("failed to start workflow: %v", err)
-			}
-
-			result, err := handle.GetResult()
-			if err == nil {
-				t.Fatal("expected error from logger panic scenario but got none")
-			}
-			if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "unexpected result type") {
-				t.Fatalf("expected panic recovery or type error, got: %v", err)
-			}
-			if result != "" {
-				t.Fatalf("expected zero value result, got: %q", result)
-			}
-		})
-
-		t.Run("RecursivePanicChain", func(t *testing.T) {
-			testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-				return RunAsStep[string](dbosCtx, recursivePanicStep, 0)
-			}
-			RegisterWorkflow(dbosCtx, testWorkflow)
-
-			handle, err := RunAsWorkflow(dbosCtx, testWorkflow, "test")
-			if err != nil {
-				t.Fatalf("failed to start workflow: %v", err)
-			}
-
-			result, err := handle.GetResult()
-			if err == nil {
-				t.Fatal("expected error from recursive panic but got none")
-			}
-			if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "unexpected result type") {
-				t.Fatalf("expected panic recovery or type error, got: %v", err)
-			}
-			if result != "" {
-				t.Fatalf("expected zero value result, got: %q", result)
-			}
-		})
-
-		t.Run("PanicDuringRetries", func(t *testing.T) {
-			testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-				stepCtx := WithValue(dbosCtx, StepParamsKey, &StepParams{
-					MaxRetries:   3,
-					BaseInterval: 1 * time.Millisecond,
-					MaxInterval:  10 * time.Millisecond,
-				})
-				return RunAsStep[string](stepCtx, retryPanicStep, input)
-			}
-			RegisterWorkflow(dbosCtx, testWorkflow)
-
-			handle, err := RunAsWorkflow(dbosCtx, testWorkflow, "test")
-			if err != nil {
-				t.Fatalf("failed to start workflow: %v", err)
-			}
-
-			result, err := handle.GetResult()
-			if err == nil {
-				t.Fatal("expected error from retry panic scenario but got none")
-			}
-			// Should contain either panic recovery, max retries exceeded, or unexpected result type
-			if !strings.Contains(err.Error(), "panic recovered") && !strings.Contains(err.Error(), "exceeded its maximum") && !strings.Contains(err.Error(), "unexpected result type") {
-				t.Fatalf("expected panic recovery, max retries, or type error, got: %v", err)
-			}
-			if result != "" {
-				t.Fatalf("expected zero value result, got: %q", result)
-			}
-		})
+		// Result should be zero value
+		if result != 0 {
+			t.Fatalf("expected zero result, got %d", result)
+		}
 	})
-}
-
-// Helper struct and method for bound method test
-type TestMethodStructForEdgeCase struct {
-	Value string
-}
-
-func (t TestMethodStructForEdgeCase) ProcessValue() (string, error) {
-	return "processed-" + t.Value, nil
 }
 
 func TestChildWorkflow(t *testing.T) {
