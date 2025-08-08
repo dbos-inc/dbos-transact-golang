@@ -983,7 +983,6 @@ func TestSteps(t *testing.T) {
 		})
 	})
 
-	// Test panic recovery in RunAsStep
 	t.Run("RunAsStepPanicRecovery", func(t *testing.T) {
 		// Test functions that cause different types of panics
 		nilPointerPanicStep := func(ctx context.Context, input string) (string, error) {
