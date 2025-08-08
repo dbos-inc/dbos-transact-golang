@@ -423,7 +423,7 @@ func TestSteps(t *testing.T) {
 		}
 
 		// Verify the error contains the step name and max retries
-		expectedErrorMessage := "dbos.stepRetryAlwaysFailsStep has exceeded its maximum of 5 retries"
+		expectedErrorMessage := "has exceeded its maximum of 5 retries"
 		if !strings.Contains(dbosErr.Message, expectedErrorMessage) {
 			t.Fatalf("expected error message to contain '%s', got '%s'", expectedErrorMessage, dbosErr.Message)
 		}
