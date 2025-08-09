@@ -2993,3 +2993,33 @@ func TestConcurrentWorkflows(t *testing.T) {
 		}
 	})
 }
+
+func TestWorkflowAtVersion(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	RegisterWorkflow(dbosCtx, simpleWorkflow)
+
+	version := "test-app-version-12345"
+	handle, err := RunAsWorkflow(dbosCtx, simpleWorkflow, "input", WithApplicationVersion(version))
+	if err != nil {
+		t.Fatalf("failed to start workflow: %v", err)
+	}
+
+	_, err = handle.GetResult()
+	if err != nil {
+		t.Fatalf("failed to get workflow result: %v", err)
+	}
+
+	retrieved, err := RetrieveWorkflow[string](dbosCtx, handle.GetWorkflowID())
+	if err != nil {
+		t.Fatalf("failed to retrieve workflow: %v", err)
+	}
+
+	status, err := retrieved.GetStatus()
+	if err != nil {
+		t.Fatalf("failed to get workflow status: %v", err)
+	}
+	if status.ApplicationVersion != version {
+		t.Fatalf("expected application version %q, got %q", version, status.ApplicationVersion)
+	}
+}
