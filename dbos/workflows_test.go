@@ -382,7 +382,7 @@ func TestSteps(t *testing.T) {
 			t.Fatalf("expected result 'from step', got '%s'", result)
 		}
 
-		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		if err != nil {
 			t.Fatal("failed to list steps:", err)
 		}
@@ -437,7 +437,7 @@ func TestSteps(t *testing.T) {
 		}
 
 		// Verify that the failed step was still recorded in the database
-		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		if err != nil {
 			t.Fatal("failed to get workflow steps:", err)
 		}
@@ -694,7 +694,7 @@ func TestChildWorkflow(t *testing.T) {
 		}
 
 		// Verify the child workflow was recorded as step 0
-		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), parentHandle.GetWorkflowID())
+		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, parentHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get workflow steps: %v", err)
 		}
@@ -1329,6 +1329,40 @@ func TestSendRecv(t *testing.T) {
 		if time.Since(start) > 10*time.Second {
 			t.Fatalf("receive workflow took too long to complete, expected < 5s, got %v", time.Since(start))
 		}
+
+		// Verify step counting for send workflow (sendWorkflow calls Send 3 times)
+		sendSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps for send workflow: %v", err)
+		}
+		if len(sendSteps) != 3 {
+			t.Fatalf("expected 3 steps in send workflow (3 Send calls), got %d", len(sendSteps))
+		}
+		for i, step := range sendSteps {
+			if step.StepID != i {
+				t.Fatalf("expected step %d to have StepID %d, got %d", i, i, step.StepID)
+			}
+			if step.StepName != "DBOS.send" {
+				t.Fatalf("expected step %d to have StepName 'DBOS.send', got '%s'", i, step.StepName)
+			}
+		}
+
+		// Verify step counting for receive workflow (receiveWorkflow calls Recv 3 times)
+		receiveSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps for receive workflow: %v", err)
+		}
+		if len(receiveSteps) != 3 {
+			t.Fatalf("expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
+		}
+		for i, step := range receiveSteps {
+			if step.StepID != i {
+				t.Fatalf("expected step %d to have StepID %d, got %d", i, i, step.StepID)
+			}
+			if step.StepName != "DBOS.recv" {
+				t.Fatalf("expected step %d to have StepName 'DBOS.recv', got '%s'", i, step.StepName)
+			}
+		}
 	})
 
 	t.Run("SendRecvCustomStruct", func(t *testing.T) {
@@ -1361,6 +1395,36 @@ func TestSendRecv(t *testing.T) {
 		// Verify the struct was received correctly
 		if result.Value != "test-struct-value" {
 			t.Fatalf("expected received struct value to be 'test-struct-value', got '%s'", result.Value)
+		}
+
+		// Verify step counting for sendStructWorkflow (calls Send 1 time)
+		sendSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, sendHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps for send struct workflow: %v", err)
+		}
+		if len(sendSteps) != 1 {
+			t.Fatalf("expected 1 step in send struct workflow (1 Send call), got %d", len(sendSteps))
+		}
+		if sendSteps[0].StepID != 0 {
+			t.Fatalf("expected step to have StepID 0, got %d", sendSteps[0].StepID)
+		}
+		if sendSteps[0].StepName != "DBOS.send" {
+			t.Fatalf("expected step to have StepName 'DBOS.send', got '%s'", sendSteps[0].StepName)
+		}
+
+		// Verify step counting for receiveStructWorkflow (calls Recv 1 time)
+		receiveSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps for receive struct workflow: %v", err)
+		}
+		if len(receiveSteps) != 1 {
+			t.Fatalf("expected 1 step in receive struct workflow (1 Recv call), got %d", len(receiveSteps))
+		}
+		if receiveSteps[0].StepID != 0 {
+			t.Fatalf("expected step to have StepID 0, got %d", receiveSteps[0].StepID)
+		}
+		if receiveSteps[0].StepName != "DBOS.recv" {
+			t.Fatalf("expected step to have StepName 'DBOS.recv', got '%s'", receiveSteps[0].StepName)
 		}
 	})
 
@@ -1463,6 +1527,23 @@ func TestSendRecv(t *testing.T) {
 		if result != "message1-message2-message3" {
 			t.Fatalf("expected result to be 'message1-message2-message3', got '%s'", result)
 		}
+
+		// Verify step counting for receive workflow (calls Recv 3 times)
+		receiveSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps for receive workflow: %v", err)
+		}
+		if len(receiveSteps) != 3 {
+			t.Fatalf("expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
+		}
+		for i, step := range receiveSteps {
+			if step.StepID != i {
+				t.Fatalf("expected step %d to have StepID %d, got %d", i, i, step.StepID)
+			}
+			if step.StepName != "DBOS.recv" {
+				t.Fatalf("expected step %d to have StepName 'DBOS.recv', got '%s'", i, step.StepName)
+			}
+		}
 	})
 	t.Run("SendRecvIdempotency", func(t *testing.T) {
 		// Start the receive workflow and wait for it to be ready
@@ -1491,19 +1572,31 @@ func TestSendRecv(t *testing.T) {
 		if len(recoveredHandles) != 2 {
 			t.Fatalf("expected 2 recovered handles, got %d", len(recoveredHandles))
 		}
-		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), sendHandle.GetWorkflowID())
+		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, sendHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get workflow steps: %v", err)
 		}
 		if len(steps) != 1 {
 			t.Fatalf("expected 1 step in send idempotency workflow, got %d", len(steps))
 		}
-		steps, err = dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), receiveHandle.GetWorkflowID())
+		if steps[0].StepID != 0 {
+			t.Fatalf("expected send idempotency step to have StepID 0, got %d", steps[0].StepID)
+		}
+		if steps[0].StepName != "DBOS.send" {
+			t.Fatalf("expected send idempotency step to have StepName 'DBOS.send', got '%s'", steps[0].StepName)
+		}
+		steps, err = dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for receive idempotency workflow: %v", err)
 		}
 		if len(steps) != 1 {
 			t.Fatalf("expected 1 step in receive idempotency workflow, got %d", len(steps))
+		}
+		if steps[0].StepID != 0 {
+			t.Fatalf("expected receive idempotency step to have StepID 0, got %d", steps[0].StepID)
+		}
+		if steps[0].StepName != "DBOS.recv" {
+			t.Fatalf("expected receive idempotency step to have StepName 'DBOS.recv', got '%s'", steps[0].StepName)
 		}
 
 		// Unblock the workflows to complete
@@ -1805,6 +1898,53 @@ func TestSetGetEvent(t *testing.T) {
 		if result != "two-events-set" {
 			t.Fatalf("expected result to be 'two-events-set', got '%s'", result)
 		}
+
+		// Verify step counting for setTwoEventsWorkflow (calls SetEvent 2 times)
+		setSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps for set two events workflow: %v", err)
+		}
+		if len(setSteps) != 2 {
+			t.Fatalf("expected 2 steps in set two events workflow (2 SetEvent calls), got %d", len(setSteps))
+		}
+		for i, step := range setSteps {
+			if step.StepID != i {
+				t.Fatalf("expected step %d to have StepID %d, got %d", i, i, step.StepID)
+			}
+			if step.StepName != "DBOS.setEvent" {
+				t.Fatalf("expected step %d to have StepName 'DBOS.setEvent', got '%s'", i, step.StepName)
+			}
+		}
+
+		// Verify step counting for getFirstEventHandle (calls GetEvent 1 time)
+		getFirstSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, getFirstEventHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps for get first event workflow: %v", err)
+		}
+		if len(getFirstSteps) != 1 {
+			t.Fatalf("expected 1 step in get first event workflow (1 GetEvent call), got %d", len(getFirstSteps))
+		}
+		if getFirstSteps[0].StepID != 0 {
+			t.Fatalf("expected step to have StepID 0, got %d", getFirstSteps[0].StepID)
+		}
+		if getFirstSteps[0].StepName != "DBOS.getEvent" {
+			t.Fatalf("expected step to have StepName 'DBOS.getEvent', got '%s'", getFirstSteps[0].StepName)
+		}
+
+		// Verify step counting for getSecondEventHandle (calls GetEvent 1 time)
+		getSecondSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, getSecondEventHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps for get second event workflow: %v", err)
+		}
+		if len(getSecondSteps) != 1 {
+			t.Fatalf("expected 1 step in get second event workflow (1 GetEvent call), got %d", len(getSecondSteps))
+		}
+		if getSecondSteps[0].StepID != 0 {
+			t.Fatalf("expected step to have StepID 0, got %d", getSecondSteps[0].StepID)
+		}
+		if getSecondSteps[0].StepName != "DBOS.getEvent" {
+			t.Fatalf("expected step to have StepName 'DBOS.getEvent', got '%s'", getSecondSteps[0].StepName)
+		}
 	})
 
 	t.Run("GetEventFromOutsideWorkflow", func(t *testing.T) {
@@ -1834,6 +1974,21 @@ func TestSetGetEvent(t *testing.T) {
 		}
 		if message != "test-message" {
 			t.Fatalf("expected received message to be 'test-message', got '%s'", message)
+		}
+
+		// Verify step counting for setEventWorkflow (calls SetEvent 1 time)
+		setSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
+		if err != nil {
+			t.Fatalf("failed to get workflow steps for set event workflow: %v", err)
+		}
+		if len(setSteps) != 1 {
+			t.Fatalf("expected 1 step in set event workflow (1 SetEvent call), got %d", len(setSteps))
+		}
+		if setSteps[0].StepID != 0 {
+			t.Fatalf("expected step to have StepID 0, got %d", setSteps[0].StepID)
+		}
+		if setSteps[0].StepName != "DBOS.setEvent" {
+			t.Fatalf("expected step to have StepName 'DBOS.setEvent', got '%s'", setSteps[0].StepName)
 		}
 	})
 
@@ -1939,20 +2094,32 @@ func TestSetGetEvent(t *testing.T) {
 		setEventStartIdempotencyEvent.Wait()
 
 		// Verify step counts
-		setSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), setHandle.GetWorkflowID())
+		setSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for set event idempotency workflow: %v", err)
 		}
 		if len(setSteps) != 1 {
 			t.Fatalf("expected 1 step in set event idempotency workflow, got %d", len(setSteps))
 		}
+		if setSteps[0].StepID != 0 {
+			t.Fatalf("expected set event idempotency step to have StepID 0, got %d", setSteps[0].StepID)
+		}
+		if setSteps[0].StepName != "DBOS.setEvent" {
+			t.Fatalf("expected set event idempotency step to have StepName 'DBOS.setEvent', got '%s'", setSteps[0].StepName)
+		}
 
-		getSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), getHandle.GetWorkflowID())
+		getSteps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, getHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for get event idempotency workflow: %v", err)
 		}
 		if len(getSteps) != 1 {
 			t.Fatalf("expected 1 step in get event idempotency workflow, got %d", len(getSteps))
+		}
+		if getSteps[0].StepID != 0 {
+			t.Fatalf("expected get event idempotency step to have StepID 0, got %d", getSteps[0].StepID)
+		}
+		if getSteps[0].StepName != "DBOS.getEvent" {
+			t.Fatalf("expected get event idempotency step to have StepName 'DBOS.getEvent', got '%s'", getSteps[0].StepName)
 		}
 
 		// Complete the workflows
@@ -2097,7 +2264,7 @@ func TestSleep(t *testing.T) {
 		}
 
 		// Verify the sleep step was recorded correctly
-		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(context.Background(), handle.GetWorkflowID())
+		steps, err := dbosCtx.(*dbosContext).systemDB.GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get workflow steps: %v", err)
 		}
@@ -2107,6 +2274,9 @@ func TestSleep(t *testing.T) {
 		}
 
 		step := steps[0]
+		if step.StepID != 0 {
+			t.Fatalf("expected step to have StepID 0, got %d", step.StepID)
+		}
 		if step.StepName != "DBOS.sleep" {
 			t.Fatalf("expected step name to be 'DBOS.sleep', got '%s'", step.StepName)
 		}
