@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -705,7 +706,7 @@ func setStepParamDefaults(params *StepParams, stepName string) *StepParams {
 			BackoffFactor: 2.0,
 			BaseInterval:  100 * time.Millisecond, // Default base interval
 			MaxInterval:   5 * time.Second,        // Default max interval
-			StepName:      typeErasedStepNameToStepName[stepName],
+			StepName:      getTypeErasedStepName(stepName),
 		}
 	}
 
@@ -721,13 +722,22 @@ func setStepParamDefaults(params *StepParams, stepName string) *StepParams {
 	}
 	if params.StepName == "" {
 		// If the step name is not provided, use the function name
-		params.StepName = typeErasedStepNameToStepName[stepName]
+		params.StepName = getTypeErasedStepName(stepName)
 	}
 
 	return params
 }
 
-var typeErasedStepNameToStepName = make(map[string]string)
+var (
+	typeErasedStepNameToStepName = make(map[string]string)
+	typeErasedStepNameMutex      sync.RWMutex
+)
+
+func getTypeErasedStepName(stepName string) string {
+	typeErasedStepNameMutex.RLock()
+	defer typeErasedStepNameMutex.RUnlock()
+	return typeErasedStepNameToStepName[stepName]
+}
 
 func RunAsStep[R any](ctx DBOSContext, fn GenericStepFunc[R]) (R, error) {
 	if ctx == nil {
@@ -742,7 +752,10 @@ func RunAsStep[R any](ctx DBOSContext, fn GenericStepFunc[R]) (R, error) {
 
 	// Type-erase the function
 	typeErasedFn := StepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
-	typeErasedStepNameToStepName[runtime.FuncForPC(reflect.ValueOf(typeErasedFn).Pointer()).Name()] = stepName
+	typeErasedFnName := runtime.FuncForPC(reflect.ValueOf(typeErasedFn).Pointer()).Name()
+	typeErasedStepNameMutex.Lock()
+	typeErasedStepNameToStepName[typeErasedFnName] = stepName
+	typeErasedStepNameMutex.Unlock()
 
 	// Call the executor method and pass through the result/error
 	result, err := ctx.RunAsStep(ctx, typeErasedFn)
