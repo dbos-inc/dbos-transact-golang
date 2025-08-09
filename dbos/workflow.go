@@ -729,7 +729,7 @@ func setStepParamDefaults(params *StepParams, stepName string) *StepParams {
 
 var typeErasedStepNameToStepName = make(map[string]string)
 
-func RunAsStep[P any, R any](ctx DBOSContext, fn GenericStepFunc[R]) (R, error) {
+func RunAsStep[R any](ctx DBOSContext, fn GenericStepFunc[R]) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
 	}
