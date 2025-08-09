@@ -142,11 +142,11 @@ func TestWorkflowsRegistration(t *testing.T) {
 				result, err := handle.GetResult()
 				_, err2 := handle.GetResult()
 				if err2 == nil {
-					t.Fatal("Second call to GetResult should return an error")
+					return nil, fmt.Errorf("Second call to GetResult should return an error")
 				}
 				expectedErrorMsg := "workflow result channel is already closed. Did you call GetResult() twice on the same workflow handle?"
 				if err2.Error() != expectedErrorMsg {
-					t.Fatal("Unexpected error message:", err2, "expected:", expectedErrorMsg)
+					return nil, fmt.Errorf("Unexpected error message: %v, expected: %s", err2, expectedErrorMsg)
 				}
 				return result, err
 			},
@@ -2391,7 +2391,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// This step will trigger cancellation of the entire workflow context
 		<-ctx.Done()
 		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("step was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
+			return "", fmt.Errorf("step was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
 		}
 		return "", ctx.Err()
 	}
