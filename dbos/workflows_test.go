@@ -44,6 +44,12 @@ func simpleStep(_ context.Context) (string, error) {
 	return "from step", nil
 }
 
+func concurrentSimpleWorkflow(dbosCtx DBOSContext, input int) (int, error) {
+	return RunAsStep(dbosCtx, func(ctx context.Context) (int, error) {
+		return input * 2, nil
+	})
+}
+
 func simpleStepError(_ context.Context) (string, error) {
 	return "", fmt.Errorf("step failure")
 }
@@ -2693,6 +2699,69 @@ func TestWorkflowTimeout(t *testing.T) {
 		expectedDeadline := start.Add(timeout * 10 / 100)
 		if status.Deadline.Before(expectedDeadline) || status.Deadline.After(start.Add(timeout)) {
 			t.Fatalf("expected workflow deadline to be within %v and %v, got %v", expectedDeadline, start.Add(timeout), status.Deadline)
+		}
+	})
+}
+
+func TestConcurrentWorkflows(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+	RegisterWorkflow(dbosCtx, concurrentSimpleWorkflow)
+
+	t.Run("SimpleWorkflow", func(t *testing.T) {
+		const numGoroutines = 100
+		var wg sync.WaitGroup
+		results := make(chan int, numGoroutines)
+		errors := make(chan error, numGoroutines)
+
+		wg.Add(numGoroutines)
+		for i := range numGoroutines {
+			go func(input int) {
+				defer wg.Done()
+				handle, err := RunAsWorkflow(dbosCtx, concurrentSimpleWorkflow, input)
+				if err != nil {
+					errors <- fmt.Errorf("failed to start workflow %d: %w", input, err)
+					return
+				}
+				result, err := handle.GetResult()
+				if err != nil {
+					errors <- fmt.Errorf("failed to get result for workflow %d: %w", input, err)
+					return
+				}
+				results <- result
+			}(i)
+		}
+
+		wg.Wait()
+		close(results)
+		close(errors)
+
+		if len(errors) > 0 {
+			for err := range errors {
+				t.Errorf("Workflow error: %v", err)
+			}
+			t.Fatalf("Expected no errors from concurrent workflows, got %d errors", len(errors))
+		}
+
+		resultCount := 0
+		receivedResults := make(map[int]bool)
+		for result := range results {
+			resultCount++
+			if result < 0 || result >= numGoroutines*2 || result%2 != 0 {
+				t.Errorf("Unexpected result %d", result)
+			} else {
+				receivedResults[result] = true
+			}
+		}
+
+		if resultCount != numGoroutines {
+			t.Fatalf("Expected %d results, got %d", numGoroutines, resultCount)
+		}
+
+		for i := range numGoroutines {
+			expectedResult := i * 2
+			if !receivedResults[expectedResult] {
+				t.Errorf("Expected result %d not found", expectedResult)
+			}
 		}
 	})
 }
