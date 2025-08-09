@@ -2703,12 +2703,62 @@ func TestWorkflowTimeout(t *testing.T) {
 	})
 }
 
+func notificationWaiterWorkflow(ctx DBOSContext, pairID int) (string, error) {
+	result, err := GetEvent[string](ctx, WorkflowGetEventInput{
+		TargetWorkflowID: fmt.Sprintf("notification-setter-%d", pairID),
+		Key:              "event-key",
+		Timeout:          10 * time.Second,
+	})
+	if err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
+func notificationSetterWorkflow(ctx DBOSContext, pairID int) (string, error) {
+	err := SetEvent(ctx, WorkflowSetEventInputGeneric[string]{
+		Key:     "event-key",
+		Message: fmt.Sprintf("notification-message-%d", pairID),
+	})
+	if err != nil {
+		return "", err
+	}
+	return "event-set", nil
+}
+
+func sendRecvReceiverWorkflow(ctx DBOSContext, pairID int) (string, error) {
+	result, err := Recv[string](ctx, WorkflowRecvInput{
+		Topic:   "send-recv-topic",
+		Timeout: 10 * time.Second,
+	})
+	if err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
+func sendRecvSenderWorkflow(ctx DBOSContext, pairID int) (string, error) {
+	err := Send(ctx, WorkflowSendInput[string]{
+		DestinationID: fmt.Sprintf("send-recv-receiver-%d", pairID),
+		Topic:         "send-recv-topic",
+		Message:       fmt.Sprintf("send-recv-message-%d", pairID),
+	})
+	if err != nil {
+		return "", err
+	}
+	return "message-sent", nil
+}
+
 func TestConcurrentWorkflows(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 	RegisterWorkflow(dbosCtx, concurrentSimpleWorkflow)
+	RegisterWorkflow(dbosCtx, notificationWaiterWorkflow)
+	RegisterWorkflow(dbosCtx, notificationSetterWorkflow)
+	RegisterWorkflow(dbosCtx, sendRecvReceiverWorkflow)
+	RegisterWorkflow(dbosCtx, sendRecvSenderWorkflow)
 
 	t.Run("SimpleWorkflow", func(t *testing.T) {
-		const numGoroutines = 100
+		const numGoroutines = 500
 		var wg sync.WaitGroup
 		results := make(chan int, numGoroutines)
 		errors := make(chan error, numGoroutines)
@@ -2761,6 +2811,184 @@ func TestConcurrentWorkflows(t *testing.T) {
 			expectedResult := i * 2
 			if !receivedResults[expectedResult] {
 				t.Errorf("Expected result %d not found", expectedResult)
+			}
+		}
+	})
+
+	t.Run("NotificationWorkflows", func(t *testing.T) {
+		const numPairs = 500
+		var wg sync.WaitGroup
+		waiterResults := make(chan string, numPairs)
+		setterResults := make(chan string, numPairs)
+		errors := make(chan error, numPairs*2)
+
+		wg.Add(numPairs * 2)
+
+		for i := range numPairs {
+			go func(pairID int) {
+				defer wg.Done()
+				handle, err := RunAsWorkflow(dbosCtx, notificationSetterWorkflow, pairID, WithWorkflowID(fmt.Sprintf("notification-setter-%d", pairID)))
+				if err != nil {
+					errors <- fmt.Errorf("failed to start setter workflow %d: %w", pairID, err)
+					return
+				}
+				result, err := handle.GetResult()
+				if err != nil {
+					errors <- fmt.Errorf("failed to get result for setter workflow %d: %w", pairID, err)
+					return
+				}
+				setterResults <- result
+			}(i)
+
+			go func(pairID int) {
+				defer wg.Done()
+				handle, err := RunAsWorkflow(dbosCtx, notificationWaiterWorkflow, pairID)
+				if err != nil {
+					errors <- fmt.Errorf("failed to start waiter workflow %d: %w", pairID, err)
+					return
+				}
+				result, err := handle.GetResult()
+				if err != nil {
+					errors <- fmt.Errorf("failed to get result for waiter workflow %d: %w", pairID, err)
+					return
+				}
+				expectedMessage := fmt.Sprintf("notification-message-%d", pairID)
+				if result != expectedMessage {
+					errors <- fmt.Errorf("waiter workflow %d: expected message '%s', got '%s'", pairID, expectedMessage, result)
+					return
+				}
+				waiterResults <- result
+			}(i)
+		}
+
+		wg.Wait()
+		close(waiterResults)
+		close(setterResults)
+		close(errors)
+
+		if len(errors) > 0 {
+			for err := range errors {
+				t.Errorf("Workflow error: %v", err)
+			}
+			t.Fatalf("Expected no errors from notification workflows, got %d errors", len(errors))
+		}
+
+		waiterCount := 0
+		receivedWaiterResults := make(map[string]bool)
+		for result := range waiterResults {
+			waiterCount++
+			receivedWaiterResults[result] = true
+		}
+
+		setterCount := 0
+		for result := range setterResults {
+			setterCount++
+			if result != "event-set" {
+				t.Errorf("Expected setter result to be 'event-set', got '%s'", result)
+			}
+		}
+
+		if waiterCount != numPairs {
+			t.Fatalf("Expected %d waiter results, got %d", numPairs, waiterCount)
+		}
+
+		if setterCount != numPairs {
+			t.Fatalf("Expected %d setter results, got %d", numPairs, setterCount)
+		}
+
+		for i := range numPairs {
+			expectedWaiterResult := fmt.Sprintf("notification-message-%d", i)
+			if !receivedWaiterResults[expectedWaiterResult] {
+				t.Errorf("Expected waiter result '%s' not found", expectedWaiterResult)
+			}
+		}
+	})
+
+	t.Run("SendRecvWorkflows", func(t *testing.T) {
+		const numPairs = 500
+		var wg sync.WaitGroup
+		receiverResults := make(chan string, numPairs)
+		senderResults := make(chan string, numPairs)
+		errors := make(chan error, numPairs*2)
+
+		wg.Add(numPairs * 2)
+
+		for i := range numPairs {
+			go func(pairID int) {
+				defer wg.Done()
+				handle, err := RunAsWorkflow(dbosCtx, sendRecvReceiverWorkflow, pairID, WithWorkflowID(fmt.Sprintf("send-recv-receiver-%d", pairID)))
+				if err != nil {
+					errors <- fmt.Errorf("failed to start receiver workflow %d: %w", pairID, err)
+					return
+				}
+				result, err := handle.GetResult()
+				if err != nil {
+					errors <- fmt.Errorf("failed to get result for receiver workflow %d: %w", pairID, err)
+					return
+				}
+				expectedMessage := fmt.Sprintf("send-recv-message-%d", pairID)
+				if result != expectedMessage {
+					errors <- fmt.Errorf("receiver workflow %d: expected message '%s', got '%s'", pairID, expectedMessage, result)
+					return
+				}
+				receiverResults <- result
+			}(i)
+
+			go func(pairID int) {
+				defer wg.Done()
+				handle, err := RunAsWorkflow(dbosCtx, sendRecvSenderWorkflow, pairID)
+				if err != nil {
+					errors <- fmt.Errorf("failed to start sender workflow %d: %w", pairID, err)
+					return
+				}
+				result, err := handle.GetResult()
+				if err != nil {
+					errors <- fmt.Errorf("failed to get result for sender workflow %d: %w", pairID, err)
+					return
+				}
+				senderResults <- result
+			}(i)
+		}
+
+		wg.Wait()
+		close(receiverResults)
+		close(senderResults)
+		close(errors)
+
+		if len(errors) > 0 {
+			for err := range errors {
+				t.Errorf("Workflow error: %v", err)
+			}
+			t.Fatalf("Expected no errors from send/recv workflows, got %d errors", len(errors))
+		}
+
+		receiverCount := 0
+		receivedReceiverResults := make(map[string]bool)
+		for result := range receiverResults {
+			receiverCount++
+			receivedReceiverResults[result] = true
+		}
+
+		senderCount := 0
+		for result := range senderResults {
+			senderCount++
+			if result != "message-sent" {
+				t.Errorf("Expected sender result to be 'message-sent', got '%s'", result)
+			}
+		}
+
+		if receiverCount != numPairs {
+			t.Fatalf("Expected %d receiver results, got %d", numPairs, receiverCount)
+		}
+
+		if senderCount != numPairs {
+			t.Fatalf("Expected %d sender results, got %d", numPairs, senderCount)
+		}
+
+		for i := range numPairs {
+			expectedReceiverResult := fmt.Sprintf("send-recv-message-%d", i)
+			if !receivedReceiverResults[expectedReceiverResult] {
+				t.Errorf("Expected receiver result '%s' not found", expectedReceiverResult)
 			}
 		}
 	})
