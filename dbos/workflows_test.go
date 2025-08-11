@@ -798,6 +798,106 @@ func TestChildWorkflow(t *testing.T) {
 			t.Fatalf("expected second step child workflow ID to be %s, got %s", customChildID, steps[1].ChildWorkflowID)
 		}
 	})
+
+	t.Run("RecoveredChildWorkflowPollingHandle", func(t *testing.T) {
+		pollingHandleStartEvent := NewEvent()
+		pollingHandleCompleteEvent := NewEvent()
+		knownChildID := "known-child-workflow-id"
+		knownParentID := "known-parent-workflow-id"
+		counter := 0
+
+		// Simple child workflow that returns a result
+		pollingHandleChildWf := func(dbosCtx DBOSContext, input string) (string, error) {
+			// Signal the child workflow is started
+			pollingHandleStartEvent.Set()
+			// Wait
+			pollingHandleCompleteEvent.Wait()
+			return input + "-result", nil
+		}
+		RegisterWorkflow(dbosCtx, pollingHandleChildWf)
+
+		pollingHandleParentWf := func(ctx DBOSContext, input string) (string, error) {
+			counter++
+
+			// Run child workflow with a known ID
+			childHandle, err := RunAsWorkflow(ctx, pollingHandleChildWf, "child-input", WithWorkflowID(knownChildID))
+			if err != nil {
+				return "", fmt.Errorf("failed to run child workflow: %w", err)
+			}
+
+			switch counter {
+			case 1:
+				// First handle will be a direct handle
+				_, ok := childHandle.(*workflowHandle[string])
+				if !ok {
+					return "", fmt.Errorf("expected child handle to be of type workflowDirectHandle, got %T", childHandle)
+				}
+			case 2:
+				// Second handle will be a polling handle
+				_, ok := childHandle.(*workflowPollingHandle[string])
+				if !ok {
+					return "", fmt.Errorf("expected recovered child handle to be of type workflowPollingHandle, got %T", childHandle)
+				}
+			}
+
+			result, err := childHandle.GetResult()
+			if err != nil {
+				return "", fmt.Errorf("failed to get result from child workflow: %w", err)
+			}
+			return result, nil
+		}
+		RegisterWorkflow(dbosCtx, pollingHandleParentWf)
+
+		// Execute parent workflow - it will block after starting the child
+		parentHandle, err := RunAsWorkflow(dbosCtx, pollingHandleParentWf, "parent-input", WithWorkflowID(knownParentID))
+		if err != nil {
+			t.Fatalf("failed to start parent workflow: %v", err)
+		}
+
+		// Wait for the child workflow to start
+		pollingHandleStartEvent.Wait()
+
+		// Recover pending workflows - this should give us both parent and child handles
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		if err != nil {
+			t.Fatalf("failed to recover pending workflows: %v", err)
+		}
+
+		// Should have recovered both parent and child workflows
+		if len(recoveredHandles) != 2 {
+			t.Fatalf("expected 2 recovered handles (parent and child), got %d", len(recoveredHandles))
+		}
+
+		// Find the child handle and verify it's a polling handle with the correct ID
+		var childRecoveredHandle WorkflowHandle[any]
+		for _, handle := range recoveredHandles {
+			if handle.GetWorkflowID() == knownChildID {
+				childRecoveredHandle = handle
+				break
+			}
+		}
+
+		if childRecoveredHandle == nil {
+			t.Fatalf("failed to find recovered child workflow handle with ID %s", knownChildID)
+		}
+
+		// Complete both workflows
+		pollingHandleCompleteEvent.Set()
+		result, err := parentHandle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from original parent workflow: %v", err)
+		}
+		if result != "child-input-result" {
+			t.Fatalf("expected result 'child-input-result', got '%s'", result)
+		}
+		childResult, err := childRecoveredHandle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from recovered child handle: %v", err)
+		}
+		if childResult != result {
+			t.Fatalf("expected child result '%s', got '%s'", result, childResult)
+		}
+	})
 }
 
 // Idempotency workflows moved to test functions
