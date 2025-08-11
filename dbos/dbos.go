@@ -1,3 +1,8 @@
+// Package dbos provides a Go SDK for building durable applications with DBOS Transact.
+//
+// DBOS Transact enables developers to write resilient distributed applications using workflows
+// and steps backed by PostgreSQL. All application state is automatically persisted, providing
+// exactly-once execution guarantees and automatic recovery from failures.
 package dbos
 
 import (
@@ -21,11 +26,13 @@ const (
 	_DEFAULT_ADMIN_SERVER_PORT = 3001
 )
 
+// Config holds configuration parameters for initializing a DBOS context.
+// DatabaseURL and AppName are required.
 type Config struct {
-	DatabaseURL string
-	AppName     string
-	Logger      *slog.Logger
-	AdminServer bool
+	DatabaseURL string       // PostgreSQL connection string (required)
+	AppName     string       // Application name for identification (required)
+	Logger      *slog.Logger // Custom logger instance (defaults to a new slog logger)
+	AdminServer bool         // Enable Transact admin HTTP server
 }
 
 // processConfig enforces mandatory fields and applies defaults.
@@ -47,36 +54,42 @@ func processConfig(inputConfig *Config) (*Config, error) {
 
 	// Load defaults
 	if dbosConfig.Logger == nil {
-		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 
 	return dbosConfig, nil
 }
 
+// DBOSContext represents a DBOS execution context that provides workflow orchestration capabilities.
+// It extends the standard Go context.Context and adds methods for running workflows and steps,
+// inter-workflow communication, and state management.
+//
+// The context manages the lifecycle of workflows, provides durability guarantees, and enables
+// recovery of interrupted workflows.
 type DBOSContext interface {
 	context.Context
 
 	// Context Lifecycle
-	Launch() error
-	Cancel()
+	Launch() error // Launch the DBOS runtime including system database, queues, admin server, and workflow recovery
+	Cancel()       // Gracefully shutdown the DBOS runtime, waiting for workflows to complete and cleaning up resources
 
 	// Workflow operations
-	RunAsStep(_ DBOSContext, fn StepFunc) (any, error)
-	RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
-	Send(_ DBOSContext, input WorkflowSendInputInternal) error
-	Recv(_ DBOSContext, input WorkflowRecvInput) (any, error)
-	SetEvent(_ DBOSContext, input WorkflowSetEventInput) error
-	GetEvent(_ DBOSContext, input WorkflowGetEventInput) (any, error)
-	Sleep(duration time.Duration) (time.Duration, error)
-	GetWorkflowID() (string, error)
+	RunAsStep(_ DBOSContext, fn StepFunc) (any, error)                                                            // Execute a function as a durable step within a workflow
+	RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
+	Send(_ DBOSContext, input WorkflowSendInputInternal) error                                                    // Send a message to another workflow
+	Recv(_ DBOSContext, input WorkflowRecvInput) (any, error)                                                     // Receive a message sent to this workflow
+	SetEvent(_ DBOSContext, input WorkflowSetEventInput) error                                                    // Set a key-value event for this workflow
+	GetEvent(_ DBOSContext, input WorkflowGetEventInput) (any, error)                                             // Get a key-value event from a target workflow
+	Sleep(duration time.Duration) (time.Duration, error)                                                          // Durable sleep that survives workflow recovery
+	GetWorkflowID() (string, error)                                                                               // Get the current workflow ID (only available within workflows)
 
 	// Workflow management
-	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)
+	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) // Get a handle to an existing workflow
 
 	// Accessors
-	GetApplicationVersion() string
-	GetExecutorID() string
-	GetApplicationID() string
+	GetApplicationVersion() string // Get the application version for this context
+	GetExecutorID() string         // Get the executor ID for this context
+	GetApplicationID() string      // Get the application ID for this context
 }
 
 type dbosContext struct {
@@ -128,6 +141,9 @@ func (c *dbosContext) Value(key any) any {
 	return c.ctx.Value(key)
 }
 
+// WithValue returns a copy of the DBOS context with the given key-value pair.
+// This is similar to context.WithValue but maintains DBOS context capabilities.
+// No-op if the provided context is not a concrete dbos.dbosContext.
 func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 	if ctx == nil {
 		return nil
@@ -149,6 +165,9 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 	return nil
 }
 
+// WithoutCancel returns a copy of the DBOS context that is not canceled when the parent context is canceled.
+// This is useful for operations that should continue even after a workflow is cancelled.
+// No-op if the provided context is not a concrete dbos.dbosContext.
 func WithoutCancel(ctx DBOSContext) DBOSContext {
 	if ctx == nil {
 		return nil
@@ -169,6 +188,9 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 	return nil
 }
 
+// WithTimeout returns a copy of the DBOS context with a timeout.
+// The returned context will be canceled after the specified duration.
+// No-op if the provided context is not a concrete dbos.dbosContext.
 func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) {
 	if ctx == nil {
 		return nil, func() {}
@@ -209,6 +231,26 @@ func (c *dbosContext) GetApplicationID() string {
 	return c.applicationID
 }
 
+// NewDBOSContext creates a new DBOS context with the provided configuration.
+// The context must be launched with Launch() before use and should be shut down with Cancel().
+// This function initializes the DBOS system database, sets up the queue sub-system,
+// and prepares the workflow registry.
+//
+// Example:
+//
+//	config := dbos.Config{
+//	    DatabaseURL: "postgres://user:pass@localhost:5432/dbname",
+//	    AppName:     "my-app",
+//	}
+//	ctx, err := dbos.NewDBOSContext(config)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer ctx.Cancel()
+//
+//	if err := ctx.Launch(); err != nil {
+//	    log.Fatal(err)
+//	}
 func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	ctx, cancelFunc := context.WithCancelCause(context.Background())
 	initExecutor := &dbosContext{
@@ -269,6 +311,12 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	return initExecutor, nil
 }
 
+// Launch initializes and starts the DBOS runtime components including the system database,
+// admin server (if configured), queue runner, workflow scheduler, and performs recovery
+// of any pending workflows on this executor. This method must be called before using the DBOS context
+// for workflow execution and should only be called once.
+//
+// Returns an error if the context is already launched or if any component fails to start.
 func (c *dbosContext) Launch() error {
 	if c.launched.Load() {
 		return newInitializationError("DBOS is already launched")
@@ -315,7 +363,13 @@ func (c *dbosContext) Launch() error {
 	return nil
 }
 
-// TODO: shutdown should really have a timeout and return an error if it wasn't able to shutdown everything
+// Cancel gracefully shuts down the DBOS runtime by canceling the context, waiting for
+// all workflows to complete, and cleaning up system resources including the database
+// connection pool, queue runner, workflow scheduler, and admin server.
+// All workflows and steps contexts will be canceled, which one can check using their context's Done() method.
+//
+// This method blocks until all workflows finish and all resources are properly cleaned up.
+// It should be called when the application is shutting down to ensure data consistency.
 func (c *dbosContext) Cancel() {
 	c.logger.Info("Shutting down DBOS context")
 
