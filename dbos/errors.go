@@ -2,45 +2,48 @@ package dbos
 
 import "fmt"
 
-// DBOSErrorCode represents the different types of DBOS errors
+// DBOSErrorCode represents the different types of errors that can occur in DBOS operations.
 type DBOSErrorCode int
 
 const (
-	ConflictingIDError DBOSErrorCode = iota + 1
-	InitializationError
-	WorkflowFunctionNotFound
-	NonExistentWorkflowError
-	ConflictingWorkflowError
-	WorkflowCancelled
-	UnexpectedStep
-	AwaitedWorkflowCancelled
-	ConflictingRegistrationError
-	WorkflowUnexpectedTypeError
-	WorkflowExecutionError
-	StepExecutionError
-	DeadLetterQueueError
-	MaxStepRetriesExceeded
+	ConflictingIDError           DBOSErrorCode = iota + 1 // Workflow ID conflicts or duplicate operations
+	InitializationError                                   // DBOS context initialization failures
+	WorkflowFunctionNotFound                              // Workflow function not registered
+	NonExistentWorkflowError                              // Referenced workflow does not exist
+	ConflictingWorkflowError                              // Workflow with same ID already exists with different parameters
+	WorkflowCancelled                                     // Workflow was cancelled during execution
+	UnexpectedStep                                        // Step function mismatch during recovery (non-deterministic workflow)
+	AwaitedWorkflowCancelled                              // A workflow being awaited was cancelled
+	ConflictingRegistrationError                          // Attempting to register a workflow/queue that already exists
+	WorkflowUnexpectedTypeError                           // Type mismatch in workflow input/output
+	WorkflowExecutionError                                // General workflow execution error
+	StepExecutionError                                    // General step execution error
+	DeadLetterQueueError                                  // Workflow moved to dead letter queue after max retries
+	MaxStepRetriesExceeded                                // Step exceeded maximum retry attempts
 )
 
-// DBOSError is the unified error type for all DBOS errors
+// DBOSError is the unified error type for all DBOS operations.
+// It provides structured error information with context-specific fields
+// and error codes for programmatic handling.
 type DBOSError struct {
-	Message    string
-	Code       DBOSErrorCode
-	StatusCode *int
-	IsBase     bool // true for errors that shouldn't be caught by user code
+	Message string        // Human-readable error message
+	Code    DBOSErrorCode // Error type code for programmatic handling
+	IsBase  bool          // Internal errors that shouldn't be caught by user code
 
-	// Optional context fields - only set when relevant
-	WorkflowID      string
-	DestinationID   string
-	StepName        string
-	QueueName       string
-	DeduplicationID string
-	StepID          int
-	ExpectedName    string
-	RecordedName    string
-	MaxRetries      int
+	// Optional context fields - only set when relevant to the error
+	WorkflowID      string // Associated workflow identifier
+	DestinationID   string // Target workflow identifier (for communication errors)
+	StepName        string // Step function name (for step errors)
+	QueueName       string // Queue name (for queue-related errors)
+	DeduplicationID string // Deduplication identifier
+	StepID          int    // Step sequence number
+	ExpectedName    string // Expected function name (for determinism errors)
+	RecordedName    string // Actually recorded function name (for determinism errors)
+	MaxRetries      int    // Maximum retry limit (for retry-related errors)
 }
 
+// Error returns a formatted error message including the error code.
+// This implements the standard Go error interface.
 func (e *DBOSError) Error() string {
 	return fmt.Sprintf("DBOS Error %d: %s", int(e.Code), e.Message)
 }
