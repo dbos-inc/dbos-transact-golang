@@ -380,7 +380,7 @@ func (s *systemDatabase) InsertWorkflowStatus(ctx context.Context, input insertW
 		return nil, newConflictingWorkflowError(input.status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.name, input.status.Name))
 	}
 	if len(input.status.QueueName) > 0 && result.queueName != nil && input.status.QueueName != *result.queueName {
-		s.logger.Warn("Queue name conflict for workflow", "workflow_id", input.status.ID, "result_queue", *result.queueName, "status_queue", input.status.QueueName)
+		return nil, newConflictingWorkflowError(input.status.ID, fmt.Sprintf("Workflow already exists in a different queue: %s, but the provided queue is: %s", *result.queueName, input.status.QueueName))
 	}
 
 	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.

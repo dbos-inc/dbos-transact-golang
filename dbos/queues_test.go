@@ -297,7 +297,7 @@ func TestWorkflowQueues(t *testing.T) {
 		}
 
 		// Check that the error message contains queue information
-		expectedMsgPart := "different queue"
+		expectedMsgPart := "Workflow already exists in a different queue"
 		if !strings.Contains(err.Error(), expectedMsgPart) {
 			t.Fatalf("expected error message to contain '%s', got '%s'", expectedMsgPart, err.Error())
 		}
