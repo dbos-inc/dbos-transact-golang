@@ -205,10 +205,11 @@ type WrappedWorkflowFunc func(ctx DBOSContext, input any, opts ...WorkflowOption
 type workflowRegistryEntry struct {
 	wrappedFunction WrappedWorkflowFunc
 	maxRetries      int
+	name            string
 }
 
 // Register adds a workflow function to the registry (thread-safe, only once per name)
-func registerWorkflow(ctx DBOSContext, workflowName string, fn WrappedWorkflowFunc, maxRetries int) {
+func registerWorkflow(ctx DBOSContext, workflowFQN string, fn WrappedWorkflowFunc, maxRetries int, customName string) {
 	// Skip if we don't have a concrete dbosContext
 	c, ok := ctx.(*dbosContext)
 	if !ok {
@@ -222,14 +223,15 @@ func registerWorkflow(ctx DBOSContext, workflowName string, fn WrappedWorkflowFu
 	c.workflowRegMutex.Lock()
 	defer c.workflowRegMutex.Unlock()
 
-	if _, exists := c.workflowRegistry[workflowName]; exists {
-		c.logger.Error("workflow function already registered", "fqn", workflowName)
-		panic(newConflictingRegistrationError(workflowName))
+	if _, exists := c.workflowRegistry[workflowFQN]; exists {
+		c.logger.Error("workflow function already registered", "fqn", workflowFQN)
+		panic(newConflictingRegistrationError(workflowFQN))
 	}
 
-	c.workflowRegistry[workflowName] = workflowRegistryEntry{
+	c.workflowRegistry[workflowFQN] = workflowRegistryEntry{
 		wrappedFunction: fn,
 		maxRetries:      maxRetries,
+		name:            customName,
 	}
 }
 
@@ -275,6 +277,7 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 type workflowRegistrationParams struct {
 	cronSchedule string
 	maxRetries   int
+	name         string
 }
 
 type workflowRegistrationOption func(*workflowRegistrationParams)
@@ -292,6 +295,12 @@ func WithMaxRetries(maxRetries int) workflowRegistrationOption {
 func WithSchedule(schedule string) workflowRegistrationOption {
 	return func(p *workflowRegistrationParams) {
 		p.cronSchedule = schedule
+	}
+}
+
+func WithWorkflowName(name string) workflowRegistrationOption {
+	return func(p *workflowRegistrationParams) {
+		p.name = name
 	}
 }
 
@@ -348,7 +357,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R
 		}
 		return &workflowPollingHandle[any]{workflowID: handle.GetWorkflowID(), dbosContext: ctx}, nil // this is only used by recovery and queue runner so far -- queue runner dismisses it
 	})
-	registerWorkflow(ctx, fqn, typeErasedWrapper, registrationParams.maxRetries)
+	registerWorkflow(ctx, fqn, typeErasedWrapper, registrationParams.maxRetries, registrationParams.name)
 
 	// If this is a scheduled workflow, register a cron job
 	if registrationParams.cronSchedule != "" {
@@ -398,6 +407,7 @@ func WithApplicationVersion(version string) WorkflowOption {
 	}
 }
 
+// An internal option we use to map the reflection function name to the registration options.
 func withWorkflowName(name string) WorkflowOption {
 	return func(p *workflowParams) {
 		p.workflowName = name
@@ -484,6 +494,11 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	}
 	if registeredWorkflow.maxRetries > 0 {
 		params.maxRetries = registeredWorkflow.maxRetries
+	}
+
+	// Use the custom workflow name if it was provided during registration
+	if registeredWorkflow.name != "" {
+		params.workflowName = registeredWorkflow.name
 	}
 
 	// Check if we are within a workflow (and thus a child workflow)

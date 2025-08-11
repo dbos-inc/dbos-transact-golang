@@ -300,6 +300,74 @@ func TestWorkflowsRegistration(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("DoubleRegistrationWithoutName", func(t *testing.T) {
+		// Create a fresh DBOS context for this test
+		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
+
+		// First registration should work
+		RegisterWorkflow(freshCtx, simpleWorkflow)
+
+		// Second registration of the same workflow should panic with ConflictingRegistrationError
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic from double registration but got none")
+			}
+			dbosErr, ok := r.(*DBOSError)
+			if !ok {
+				t.Fatalf("expected panic to be *DBOSError, got %T", r)
+			}
+			if dbosErr.Code != ConflictingRegistrationError {
+				t.Fatalf("expected ConflictingRegistrationError, got %v", dbosErr.Code)
+			}
+		}()
+		RegisterWorkflow(freshCtx, simpleWorkflow)
+	})
+
+	t.Run("DoubleRegistrationWithCustomName", func(t *testing.T) {
+		// Create a fresh DBOS context for this test
+		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
+
+		// First registration with custom name should work
+		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("custom-workflow"))
+
+		// Second registration with same custom name should panic with ConflictingRegistrationError
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic from double registration with custom name but got none")
+			}
+			dbosErr, ok := r.(*DBOSError)
+			if !ok {
+				t.Fatalf("expected panic to be *DBOSError, got %T", r)
+			}
+			if dbosErr.Code != ConflictingRegistrationError {
+				t.Fatalf("expected ConflictingRegistrationError, got %v", dbosErr.Code)
+			}
+		}()
+		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("custom-workflow"))
+	})
+
+	t.Run("RegisterAfterLaunchPanics", func(t *testing.T) {
+		// Create a fresh DBOS context for this test
+		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
+
+		// Launch DBOS context
+		err := freshCtx.Launch()
+		if err != nil {
+			t.Fatalf("failed to launch DBOS context: %v", err)
+		}
+		defer freshCtx.Cancel()
+
+		// Attempting to register after launch should panic
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic from registration after launch but got none")
+			}
+		}()
+		RegisterWorkflow(freshCtx, simpleWorkflow)
+	})
 }
 
 func stepWithinAStep(ctx context.Context) (string, error) {
