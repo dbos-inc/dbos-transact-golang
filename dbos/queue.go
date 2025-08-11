@@ -18,55 +18,84 @@ const (
 	_DEFAULT_MAX_TASKS_PER_ITERATION = 100
 )
 
-// RateLimiter represents a rate limiting configuration
+// RateLimiter configures rate limiting for workflow queue execution.
+// Rate limits prevent overwhelming external services and provide backpressure.
 type RateLimiter struct {
-	Limit  int
-	Period float64
+	Limit  int     // Maximum number of workflows to start within the period
+	Period float64 // Time period in seconds for the rate limit
 }
 
+// WorkflowQueue defines a named queue for workflow execution.
+// Queues provide controlled workflow execution with concurrency limits, priority scheduling, and rate limiting.
 type WorkflowQueue struct {
-	Name                 string       `json:"name"`
-	WorkerConcurrency    *int         `json:"workerConcurrency,omitempty"`
-	GlobalConcurrency    *int         `json:"concurrency,omitempty"` // Different key to match other transact APIs
-	PriorityEnabled      bool         `json:"priorityEnabled,omitempty"`
-	RateLimit            *RateLimiter `json:"rateLimit,omitempty"` // Named after other Transact APIs
-	MaxTasksPerIteration int          `json:"maxTasksPerIteration"`
+	Name                 string       `json:"name"`                        // Unique queue name
+	WorkerConcurrency    *int         `json:"workerConcurrency,omitempty"` // Max concurrent workflows per executor
+	GlobalConcurrency    *int         `json:"concurrency,omitempty"`       // Max concurrent workflows across all executors
+	PriorityEnabled      bool         `json:"priorityEnabled,omitempty"`   // Enable priority-based scheduling
+	RateLimit            *RateLimiter `json:"rateLimit,omitempty"`         // Rate limiting configuration
+	MaxTasksPerIteration int          `json:"maxTasksPerIteration"`        // Max workflows to dequeue per iteration
 }
 
 // queueOption is a functional option for configuring a workflow queue
 type queueOption func(*WorkflowQueue)
 
+// WithWorkerConcurrency limits the number of workflows this executor can run concurrently from the queue.
+// This provides per-executor concurrency control.
 func WithWorkerConcurrency(concurrency int) queueOption {
 	return func(q *WorkflowQueue) {
 		q.WorkerConcurrency = &concurrency
 	}
 }
 
+// WithGlobalConcurrency limits the total number of workflows that can run concurrently from the queue
+// across all executors. This provides global concurrency control.
 func WithGlobalConcurrency(concurrency int) queueOption {
 	return func(q *WorkflowQueue) {
 		q.GlobalConcurrency = &concurrency
 	}
 }
 
+// WithPriorityEnabled enables priority-based scheduling for the queue.
+// When enabled, workflows with lower priority numbers are executed first.
 func WithPriorityEnabled(enabled bool) queueOption {
 	return func(q *WorkflowQueue) {
 		q.PriorityEnabled = enabled
 	}
 }
 
+// WithRateLimiter configures rate limiting for the queue to prevent overwhelming external services.
+// The rate limiter enforces a maximum number of workflow starts within a time period.
 func WithRateLimiter(limiter *RateLimiter) queueOption {
 	return func(q *WorkflowQueue) {
 		q.RateLimit = limiter
 	}
 }
 
+// WithMaxTasksPerIteration sets the maximum number of workflows to dequeue in a single iteration.
+// This controls batch sizes for queue processing.
 func WithMaxTasksPerIteration(maxTasks int) queueOption {
 	return func(q *WorkflowQueue) {
 		q.MaxTasksPerIteration = maxTasks
 	}
 }
 
-// NewWorkflowQueue creates a new workflow queue with optional configuration
+// NewWorkflowQueue creates a new workflow queue with the specified name and configuration options.
+// The queue must be created before workflows can be enqueued to it using the WithQueue option in RunAsWorkflow.
+// Queues provide controlled execution with support for concurrency limits, priority scheduling, and rate limiting.
+//
+// Example:
+//
+//	queue := dbos.NewWorkflowQueue(ctx, "email-queue",
+//	    dbos.WithWorkerConcurrency(5),
+//	    dbos.WithRateLimiter(&dbos.RateLimiter{
+//	        Limit:  100,
+//	        Period: 60.0, // 100 workflows per minute
+//	    }),
+//	    dbos.WithPriorityEnabled(true),
+//	)
+//
+//	// Enqueue workflows to this queue:
+//	handle, err := dbos.RunAsWorkflow(ctx, SendEmailWorkflow, emailData, dbos.WithQueue("email-queue"))
 func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...queueOption) WorkflowQueue {
 	ctx, ok := dbosCtx.(*dbosContext)
 	if !ok {
