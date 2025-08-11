@@ -252,7 +252,7 @@ func receiveWorkflow(ctx dbos.DBOSContext, topic string) (string, error) {
 }
 
 // Start a receiver in the background
-recvHandle, err := dbos.RunAsWorkflow(dbosCtx, receiveWorkflow, "topic", dbos.WithWorkflowID("receiver  ID"))
+recvHandle, err := dbos.RunAsWorkflow(dbosCtx, receiveWorkflow, "topic", dbos.WithWorkflowID("receiverID"))
 
 // Send a message
 sendHandle, err := dbos.RunAsWorkflow(dbosCtx, sendWorkflow, "hola!")
