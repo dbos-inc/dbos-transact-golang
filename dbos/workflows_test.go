@@ -44,12 +44,6 @@ func simpleStep(_ context.Context) (string, error) {
 	return "from step", nil
 }
 
-func concurrentSimpleWorkflow(dbosCtx DBOSContext, input int) (int, error) {
-	return RunAsStep(dbosCtx, func(ctx context.Context) (int, error) {
-		return input * 2, nil
-	})
-}
-
 func simpleStepError(_ context.Context) (string, error) {
 	return "", fmt.Errorf("step failure")
 }
@@ -808,8 +802,6 @@ func TestChildWorkflow(t *testing.T) {
 
 		// Simple child workflow that returns a result
 		pollingHandleChildWf := func(dbosCtx DBOSContext, input string) (string, error) {
-			// Signal the child workflow is started
-			pollingHandleStartEvent.Set()
 			// Wait
 			pollingHandleCompleteEvent.Wait()
 			return input + "-result", nil
@@ -840,6 +832,9 @@ func TestChildWorkflow(t *testing.T) {
 				}
 			}
 
+			// Signal the child workflow is started
+			pollingHandleStartEvent.Set()
+
 			result, err := childHandle.GetResult()
 			if err != nil {
 				return "", fmt.Errorf("failed to get result from child workflow: %w", err)
@@ -854,7 +849,7 @@ func TestChildWorkflow(t *testing.T) {
 			t.Fatalf("failed to start parent workflow: %v", err)
 		}
 
-		// Wait for the child workflow to start
+		// Wait for the workflows to start
 		pollingHandleStartEvent.Wait()
 
 		// Recover pending workflows - this should give us both parent and child handles
@@ -3056,6 +3051,12 @@ func sendRecvSenderWorkflow(ctx DBOSContext, pairID int) (string, error) {
 	return "message-sent", nil
 }
 
+func concurrentSimpleWorkflow(dbosCtx DBOSContext, input int) (int, error) {
+	return RunAsStep(dbosCtx, func(ctx context.Context) (int, error) {
+		return input * 2, nil
+	})
+}
+
 func TestConcurrentWorkflows(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 	RegisterWorkflow(dbosCtx, concurrentSimpleWorkflow)
@@ -3082,6 +3083,11 @@ func TestConcurrentWorkflows(t *testing.T) {
 				result, err := handle.GetResult()
 				if err != nil {
 					errors <- fmt.Errorf("failed to get result for workflow %d: %w", input, err)
+					return
+				}
+				expectedResult := input * 2
+				if result != expectedResult {
+					errors <- fmt.Errorf("workflow %d: expected result %d, got %d", input, expectedResult, result)
 					return
 				}
 				results <- result
@@ -3112,13 +3118,6 @@ func TestConcurrentWorkflows(t *testing.T) {
 
 		if resultCount != numGoroutines {
 			t.Fatalf("Expected %d results, got %d", numGoroutines, resultCount)
-		}
-
-		for i := range numGoroutines {
-			expectedResult := i * 2
-			if !receivedResults[expectedResult] {
-				t.Errorf("Expected result %d not found", expectedResult)
-			}
 		}
 	})
 

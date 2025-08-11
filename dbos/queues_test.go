@@ -265,18 +265,18 @@ func TestWorkflowQueues(t *testing.T) {
 		workflowID := "conflicting-workflow-id"
 
 		// Enqueue the same workflow ID on the first queue
-		handle1, err := RunAsWorkflow(dbosCtx, queueWorkflow, "test-input-1", WithQueue(conflictQueue1.Name), WithWorkflowID(workflowID))
+		handle, err := RunAsWorkflow(dbosCtx, queueWorkflow, "test-input-1", WithQueue(conflictQueue1.Name), WithWorkflowID(workflowID))
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow on first queue: %v", err)
 		}
 
 		// Get the result from the first workflow to ensure it completes
-		result1, err := handle1.GetResult()
+		result, err := handle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from first workflow: %v", err)
 		}
-		if result1 != "test-input-1" {
-			t.Fatalf("expected 'test-input-1', got %v", result1)
+		if result != "test-input-1" {
+			t.Fatalf("expected 'test-input-1', got %v", result)
 		}
 
 		// Now try to enqueue the same workflow ID on a different queue
