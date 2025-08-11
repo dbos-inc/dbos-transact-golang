@@ -5,7 +5,7 @@ Test workflow and steps features
 [x] Wrapping various golang methods in DBOS workflows
 [x] workflow idempotency
 [x] workflow DLQ
-[] workflow conflicting name
+[x] workflow conflicting name
 [] workflow timeouts & deadlines (including child workflows)
 */
 
@@ -1900,6 +1900,153 @@ func getEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (
 	getEventStartIdempotencyEvent.Set()
 	getEventStopIdempotencyEvent.Wait()
 	return result, nil
+}
+
+// Test workflows and steps for parameter mismatch validation
+func conflictWorkflowA(dbosCtx DBOSContext, input string) (string, error) {
+	return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+		return conflictStepA(ctx)
+	})
+}
+
+func conflictWorkflowB(dbosCtx DBOSContext, input string) (string, error) {
+	return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+		return conflictStepB(ctx)
+	})
+}
+
+func conflictStepA(_ context.Context) (string, error) {
+	return "step-a-result", nil
+}
+
+func conflictStepB(_ context.Context) (string, error) {
+	return "step-b-result", nil
+}
+
+func workflowWithMultipleSteps(dbosCtx DBOSContext, input string) (string, error) {
+	// First step
+	result1, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+		return conflictStepA(ctx)
+	})
+	if err != nil {
+		return "", err
+	}
+
+	// Second step - this is where we'll test step name conflicts
+	result2, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+		return conflictStepB(ctx)
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return result1 + "-" + result2, nil
+}
+
+func TestWorkflowExecutionMismatch(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	// Register workflows for testing
+	RegisterWorkflow(dbosCtx, conflictWorkflowA)
+	RegisterWorkflow(dbosCtx, conflictWorkflowB)
+	RegisterWorkflow(dbosCtx, workflowWithMultipleSteps)
+
+	t.Run("WorkflowNameConflict", func(t *testing.T) {
+		workflowID := uuid.NewString()
+
+		// First, run conflictWorkflowA with a specific workflow ID
+		handle1, err := RunAsWorkflow(dbosCtx, conflictWorkflowA, "test-input", WithWorkflowID(workflowID))
+		if err != nil {
+			t.Fatalf("failed to start first workflow: %v", err)
+		}
+
+		// Get the result to ensure it completes
+		result1, err := handle1.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from first workflow: %v", err)
+		}
+		if result1 != "step-a-result" {
+			t.Fatalf("expected 'step-a-result', got '%s'", result1)
+		}
+
+		// Now try to run conflictWorkflowB with the same workflow ID
+		// This should return a ConflictingWorkflowError
+		_, err = RunAsWorkflow(dbosCtx, conflictWorkflowB, "test-input", WithWorkflowID(workflowID))
+		if err == nil {
+			t.Fatal("expected ConflictingWorkflowError when running different workflow with same ID, but got none")
+		}
+
+		// Check that it's the correct error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != ConflictingWorkflowError {
+			t.Fatalf("expected error code to be ConflictingWorkflowError, got %v", dbosErr.Code)
+		}
+
+		// Check that the error message contains the workflow names
+		expectedMsgPart := "Workflow already exists with a different name"
+		if !strings.Contains(err.Error(), expectedMsgPart) {
+			t.Fatalf("expected error message to contain '%s', got '%s'", expectedMsgPart, err.Error())
+		}
+	})
+
+	t.Run("StepNameConflict", func(t *testing.T) {
+		// This test simulates a scenario where a workflow is recovered but
+		// the step implementation has changed, causing a step name mismatch
+
+		// First, start a workflow and let it complete partially
+		handle1, err := RunAsWorkflow(dbosCtx, workflowWithMultipleSteps, "test-input")
+		if err != nil {
+			t.Fatalf("failed to start workflow: %v", err)
+		}
+
+		// Complete the workflow
+		result, err := handle1.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from workflow: %v", err)
+		}
+		if result != "step-a-result-step-b-result" {
+			t.Fatalf("expected 'step-a-result-step-b-result', got '%s'", result)
+		}
+
+		// Now simulate what happens if we try to check operation execution
+		// with a different step name for the same step ID
+		workflowID := handle1.GetWorkflowID()
+
+		// This directly tests the CheckOperationExecution method with mismatched step name
+		// We'll check step ID 0 (first step) but with wrong step name
+		wrongStepName := "wrong-step-name"
+		_, err = dbosCtx.(*dbosContext).systemDB.CheckOperationExecution(dbosCtx, checkOperationExecutionDBInput{
+			workflowID: workflowID,
+			stepID:     0,
+			stepName:   wrongStepName,
+		})
+
+		if err == nil {
+			t.Fatal("expected UnexpectedStep error when checking operation with wrong step name, but got none")
+		}
+
+		// Check that it's the correct error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != UnexpectedStep {
+			t.Fatalf("expected error code to be UnexpectedStep, got %v", dbosErr.Code)
+		}
+
+		// Check that the error message contains step information
+		if !strings.Contains(err.Error(), "Check that your workflow is deterministic") {
+			t.Fatalf("expected error message to contain 'Check that your workflow is deterministic', got '%s'", err.Error())
+		}
+		if !strings.Contains(err.Error(), wrongStepName) {
+			t.Fatalf("expected error message to contain wrong step name '%s', got '%s'", wrongStepName, err.Error())
+		}
+	})
 }
 
 func TestSetGetEvent(t *testing.T) {

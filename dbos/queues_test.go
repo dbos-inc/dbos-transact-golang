@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ This suite tests
 [x] worker concurrency (2 at a time across two "workers")
 [x] worker concurrency X recovery
 [x] rate limiter
+[x] conflicting workflow on different queues
 [] queue deduplication
 [] queue priority
 [x] queued workflow times out
@@ -48,6 +50,8 @@ func TestWorkflowQueues(t *testing.T) {
 
 	queue := NewWorkflowQueue(dbosCtx, "test-queue")
 	dlqEnqueueQueue := NewWorkflowQueue(dbosCtx, "test-successive-enqueue-queue")
+	conflictQueue1 := NewWorkflowQueue(dbosCtx, "conflict-queue-1")
+	conflictQueue2 := NewWorkflowQueue(dbosCtx, "conflict-queue-2")
 
 	dlqStartEvent := NewEvent()
 	dlqCompleteEvent := NewEvent()
@@ -172,14 +176,15 @@ func TestWorkflowQueues(t *testing.T) {
 		}
 	})
 
-	/* TODO: we will move queue registry in the new interface in a subsequent PR
 	t.Run("DynamicRegistration", func(t *testing.T) {
-		q := NewWorkflowQueue("dynamic-queue")
-		if len(q.name) > 0 {
-			t.Fatalf("expected nil queue for dynamic registration after DBOS initialization, got %v", q)
-		}
+		// Attempting to register a queue after launch should panic
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic from queue registration after launch but got none")
+			}
+		}()
+		NewWorkflowQueue(dbosCtx, "dynamic-queue")
 	})
-	*/
 
 	t.Run("QueueWorkflowDLQ", func(t *testing.T) {
 		workflowID := "blocking-workflow-test"
@@ -253,6 +258,52 @@ func TestWorkflowQueues(t *testing.T) {
 
 		if !queueEntriesAreCleanedUp(dbosCtx) {
 			t.Fatal("expected queue entries to be cleaned up after successive enqueues test")
+		}
+	})
+
+	t.Run("ConflictingWorkflowOnDifferentQueues", func(t *testing.T) {
+		workflowID := "conflicting-workflow-id"
+
+		// Enqueue the same workflow ID on the first queue
+		handle1, err := RunAsWorkflow(dbosCtx, queueWorkflow, "test-input-1", WithQueue(conflictQueue1.Name), WithWorkflowID(workflowID))
+		if err != nil {
+			t.Fatalf("failed to enqueue workflow on first queue: %v", err)
+		}
+
+		// Get the result from the first workflow to ensure it completes
+		result1, err := handle1.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from first workflow: %v", err)
+		}
+		if result1 != "test-input-1" {
+			t.Fatalf("expected 'test-input-1', got %v", result1)
+		}
+
+		// Now try to enqueue the same workflow ID on a different queue
+		// This should trigger a ConflictingWorkflowError
+		_, err = RunAsWorkflow(dbosCtx, queueWorkflow, "test-input-2", WithQueue(conflictQueue2.Name), WithWorkflowID(workflowID))
+		if err == nil {
+			t.Fatal("expected ConflictingWorkflowError when enqueueing same workflow ID on different queue, but got none")
+		}
+
+		// Check that it's the correct error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != ConflictingWorkflowError {
+			t.Fatalf("expected error code to be ConflictingWorkflowError, got %v", dbosErr.Code)
+		}
+
+		// Check that the error message contains queue information
+		expectedMsgPart := "different queue"
+		if !strings.Contains(err.Error(), expectedMsgPart) {
+			t.Fatalf("expected error message to contain '%s', got '%s'", expectedMsgPart, err.Error())
+		}
+
+		if !queueEntriesAreCleanedUp(dbosCtx) {
+			t.Fatal("expected queue entries to be cleaned up after conflicting workflow test")
 		}
 	})
 }
