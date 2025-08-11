@@ -19,39 +19,42 @@ import (
 /******* WORKFLOW STATUS *******/
 /*******************************/
 
+// WorkflowStatusType represents the current execution state of a workflow.
 type WorkflowStatusType string
 
 const (
-	WorkflowStatusPending         WorkflowStatusType = "PENDING"
-	WorkflowStatusEnqueued        WorkflowStatusType = "ENQUEUED"
-	WorkflowStatusSuccess         WorkflowStatusType = "SUCCESS"
-	WorkflowStatusError           WorkflowStatusType = "ERROR"
-	WorkflowStatusCancelled       WorkflowStatusType = "CANCELLED"
-	WorkflowStatusRetriesExceeded WorkflowStatusType = "RETRIES_EXCEEDED"
+	WorkflowStatusPending         WorkflowStatusType = "PENDING"          // Workflow is running or ready to run
+	WorkflowStatusEnqueued        WorkflowStatusType = "ENQUEUED"         // Workflow is queued and waiting for execution
+	WorkflowStatusSuccess         WorkflowStatusType = "SUCCESS"          // Workflow completed successfully
+	WorkflowStatusError           WorkflowStatusType = "ERROR"            // Workflow completed with an error
+	WorkflowStatusCancelled       WorkflowStatusType = "CANCELLED"        // Workflow was cancelled (manually or due to timeout)
+	WorkflowStatusRetriesExceeded WorkflowStatusType = "RETRIES_EXCEEDED" // Workflow exceeded maximum retry attempts
 )
 
+// WorkflowStatus contains comprehensive information about a workflow's current state and execution history.
+// This struct is returned by workflow status queries and contains both metadata and execution details.
 type WorkflowStatus struct {
-	ID                 string             `json:"workflow_uuid"`
-	Status             WorkflowStatusType `json:"status"`
-	Name               string             `json:"name"`
-	AuthenticatedUser  *string            `json:"authenticated_user"`
-	AssumedRole        *string            `json:"assumed_role"`
-	AuthenticatedRoles *string            `json:"authenticated_roles"`
-	Output             any                `json:"output"`
-	Error              error              `json:"error"`
-	ExecutorID         string             `json:"executor_id"`
-	CreatedAt          time.Time          `json:"created_at"`
-	UpdatedAt          time.Time          `json:"updated_at"`
-	ApplicationVersion string             `json:"application_version"`
-	ApplicationID      string             `json:"application_id"`
-	Attempts           int                `json:"attempts"`
-	QueueName          string             `json:"queue_name"`
-	Timeout            time.Duration      `json:"timeout"`
-	Deadline           time.Time          `json:"deadline"`
-	StartedAt          time.Time          `json:"started_at"`
-	DeduplicationID    *string            `json:"deduplication_id"`
-	Input              any                `json:"input"`
-	Priority           int                `json:"priority"`
+	ID                 string             `json:"workflow_uuid"`       // Unique identifier for the workflow
+	Status             WorkflowStatusType `json:"status"`              // Current execution status
+	Name               string             `json:"name"`                // Function name of the workflow
+	AuthenticatedUser  *string            `json:"authenticated_user"`  // User who initiated the workflow (if applicable)
+	AssumedRole        *string            `json:"assumed_role"`        // Role assumed during execution (if applicable)
+	AuthenticatedRoles *string            `json:"authenticated_roles"` // Roles available to the user (if applicable)
+	Output             any                `json:"output"`              // Workflow output (available after completion)
+	Error              error              `json:"error"`               // Error information (if status is ERROR)
+	ExecutorID         string             `json:"executor_id"`         // ID of the executor running this workflow
+	CreatedAt          time.Time          `json:"created_at"`          // When the workflow was created
+	UpdatedAt          time.Time          `json:"updated_at"`          // When the workflow status was last updated
+	ApplicationVersion string             `json:"application_version"` // Version of the application that created this workflow
+	ApplicationID      string             `json:"application_id"`      // Application identifier
+	Attempts           int                `json:"attempts"`            // Number of execution attempts
+	QueueName          string             `json:"queue_name"`          // Queue name (if workflow was enqueued)
+	Timeout            time.Duration      `json:"timeout"`             // Workflow timeout duration
+	Deadline           time.Time          `json:"deadline"`            // Absolute deadline for workflow completion
+	StartedAt          time.Time          `json:"started_at"`          // When the workflow execution actually started
+	DeduplicationID    *string            `json:"deduplication_id"`    // Deduplication identifier (if applicable)
+	Input              any                `json:"input"`               // Input parameters passed to the workflow
+	Priority           int                `json:"priority"`            // Execution priority (lower numbers have higher priority)
 }
 
 // workflowState holds the runtime state for a workflow execution
@@ -77,10 +80,13 @@ type workflowOutcome[R any] struct {
 	err    error
 }
 
+// WorkflowHandle provides methods to interact with a running or completed workflow.
+// The type parameter R represents the expected return type of the workflow.
+// Handles can be used to wait for workflow completion, check status, and retrieve results.
 type WorkflowHandle[R any] interface {
-	GetResult() (R, error)
-	GetStatus() (WorkflowStatus, error)
-	GetWorkflowID() string
+	GetResult() (R, error)              // Wait for workflow completion and return the result
+	GetStatus() (WorkflowStatus, error) // Get current workflow status without waiting
+	GetWorkflowID() string              // Get the unique workflow identifier
 }
 
 // workflowHandle is a concrete implementation of WorkflowHandle
@@ -286,12 +292,18 @@ const (
 	_DEFAULT_MAX_RECOVERY_ATTEMPTS = 100
 )
 
+// WithMaxRetries sets the maximum number of retry attempts for workflow recovery.
+// If a workflow fails or is interrupted, it will be retried up to this many times.
+// After exceeding max retries, the workflow status becomes RETRIES_EXCEEDED.
 func WithMaxRetries(maxRetries int) workflowRegistrationOption {
 	return func(p *workflowRegistrationParams) {
 		p.maxRetries = maxRetries
 	}
 }
 
+// WithSchedule registers the workflow as a scheduled workflow using cron syntax.
+// The schedule string follows standard cron format with second precision.
+// Scheduled workflows automatically receive a time.Time input parameter.
 func WithSchedule(schedule string) workflowRegistrationOption {
 	return func(p *workflowRegistrationParams) {
 		p.cronSchedule = schedule
@@ -304,11 +316,31 @@ func WithWorkflowName(name string) workflowRegistrationOption {
 	}
 }
 
-// RegisterWorkflow registers the provided function as a durable workflow with the provided DBOSContext workflow registry
-// If the workflow is a scheduled workflow (determined by the presence of a cron schedule), it will also register a cron job to execute it
-// RegisterWorkflow is generically typed, providing compile-time type checking and allowing us to register the workflow input and output types for gob encoding
-// The registered workflow is wrapped in a typed-erased wrapper which performs runtime type checks and conversions
-// To execute the workflow, use DBOSContext.RunAsWorkflow
+// RegisterWorkflow registers a function as a durable workflow that can be executed and recovered.
+// The function is registered with type safety - P represents the input type and R the return type.
+// Types are automatically registered with gob encoding for serialization.
+//
+// Registration options include:
+//   - WithMaxRetries: Set maximum retry attempts for workflow recovery
+//   - WithSchedule: Register as a scheduled workflow with cron syntax
+//   - WithWorkflowName:: Set a custom name for the workflow
+//
+// Scheduled workflows receive a time.Time as input representing the scheduled execution time.
+//
+// Example:
+//
+//	func MyWorkflow(ctx dbos.DBOSContext, input string) (int, error) {
+//	    // workflow implementation
+//	    return len(input), nil
+//	}
+//
+//	dbos.RegisterWorkflow(ctx, MyWorkflow)
+//
+//	// With options:
+//	dbos.RegisterWorkflow(ctx, MyWorkflow,
+//	    dbos.WithMaxRetries(5),
+//	    dbos.WithSchedule("0 0 * * *")) // daily at midnight
+//		dbos.WithWorkflowName("MyCustomWorkflowName") // Custom name for the workflow
 func RegisterWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R], opts ...workflowRegistrationOption) {
 	if ctx == nil {
 		panic("ctx cannot be nil")
@@ -376,7 +408,12 @@ type DBOSContextKey string
 
 const workflowStateKey DBOSContextKey = "workflowState"
 
+// GenericWorkflowFunc represents a type-safe workflow function with specific input and output types.
+// P is the input parameter type and R is the return type.
+// All workflow functions must accept a DBOSContext as their first parameter.
 type GenericWorkflowFunc[P any, R any] func(ctx DBOSContext, input P) (R, error)
+
+// WorkflowFunc represents a type-erased workflow function used internally.
 type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
 
 type workflowParams struct {
@@ -387,20 +424,27 @@ type workflowParams struct {
 	maxRetries         int
 }
 
+// WorkflowOption is a functional option for configuring workflow execution parameters.
 type WorkflowOption func(*workflowParams)
 
+// WithWorkflowID sets a custom workflow ID instead of generating one automatically.
+// This is useful for idempotent workflow execution and workflow retrieval.
 func WithWorkflowID(id string) WorkflowOption {
 	return func(p *workflowParams) {
 		p.workflowID = id
 	}
 }
 
+// WithQueue enqueues the workflow to the specified queue instead of executing immediately.
+// Queued workflows will be processed by the queue runner according to the queue's configuration.
 func WithQueue(queueName string) WorkflowOption {
 	return func(p *workflowParams) {
 		p.queueName = queueName
 	}
 }
 
+// WithApplicationVersion overrides the DBOS Context application version for this workflow.
+// This affects workflow recovery.
 func WithApplicationVersion(version string) WorkflowOption {
 	return func(p *workflowParams) {
 		p.applicationVersion = version
@@ -414,6 +458,26 @@ func withWorkflowName(name string) WorkflowOption {
 	}
 }
 
+// RunAsWorkflow executes a workflow function with type safety and durability guarantees.
+// The workflow can be executed immediately or enqueued for later execution based on options.
+// Returns a typed handle that can be used to wait for completion and retrieve results.
+//
+// The workflow will be automatically recovered if the process crashes or is interrupted.
+// All workflow state is persisted to ensure exactly-once execution semantics.
+//
+// Example:
+//
+//	handle, err := dbos.RunAsWorkflow(ctx, MyWorkflow, "input string", dbos.WithWorkflowID("my-custom-id"))
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	result, err := handle.GetResult() // blocks until completion
+//	if err != nil {
+//	    log.Printf("Workflow failed: %v", err)
+//	} else {
+//	    log.Printf("Result: %v", result)
+//	}
 func RunAsWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("ctx cannot be nil")
@@ -698,17 +762,24 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 /******* STEP FUNCTIONS *******/
 /******************************/
 
+// StepFunc represents a type-erased step function used internally.
 type StepFunc func(ctx context.Context) (any, error)
+
+// GenericStepFunc represents a type-safe step function with a specific output type R.
 type GenericStepFunc[R any] func(ctx context.Context) (R, error)
 
+// StepParamsKey is the context key for setting StepParams in a workflow context.
+// Use this key with the dbos.WithValue to configure steps.
 const StepParamsKey DBOSContextKey = "stepParams"
 
+// StepParams configures retry behavior and identification for step execution.
+// These parameters can be set in the context using the StepParamsKey.
 type StepParams struct {
-	MaxRetries    int
-	BackoffFactor float64
-	BaseInterval  time.Duration
-	MaxInterval   time.Duration
-	StepName      string
+	MaxRetries    int           // Maximum number of retry attempts (0 = no retries)
+	BackoffFactor float64       // Exponential backoff multiplier between retries (default: 2.0)
+	BaseInterval  time.Duration // Initial delay between retries (default: 100ms)
+	MaxInterval   time.Duration // Maximum delay between retries (default: 5s)
+	StepName      string        // Custom name for the step (defaults to function name)
 }
 
 // setStepParamDefaults returns a StepParams struct with all defaults properly set
@@ -750,6 +821,40 @@ func setStepParamDefaults(params *StepParams, stepName string) *StepParams {
 
 var typeErasedStepNameToStepName sync.Map
 
+// RunAsStep executes a function as a durable step within a workflow.
+// Steps provide at-least-once execution guarantees and automatic retry capabilities.
+// If a step has already been executed (e.g., during workflow recovery), its recorded
+// result is returned instead of re-executing the function.
+//
+// Steps can be configured with retry parameters by setting StepParams in the context:
+//
+//	stepCtx = context.WithValue(ctx, dbos.StepParamsKey, &dbos.StepParams{
+//	    MaxRetries: 3,
+//	    BaseInterval: 500 * time.Millisecond,
+//	})
+//
+// Example:
+//
+//	func MyStep(ctx context.Context, url string) ([]byte, error) {
+//	    resp, err := http.Get(url)
+//	    if err != nil {
+//	        return nil, err
+//	    }
+//	    defer resp.Body.Close()
+//	    return io.ReadAll(resp.Body)
+//	}
+//
+//	// Within a workflow:
+//	data, err := dbos.RunAsStep(stepCtx, func(ctx context.Context) ([]byte, error) {
+//	    return MyStep(ctx, "https://api.example.com/data")
+//	})
+//	if err != nil {
+//	    return nil, err
+//	}
+//
+// Note that the function passed to RunAsStep must accept a context.Context as its first parameter
+// and this context *must* be the one specified in the function's signature (not the context passed to RunAsStep).
+// Under the hood, DBOS will augment the step's context and pass it to the function when executing it durably.
 func RunAsStep[R any](ctx DBOSContext, fn GenericStepFunc[R]) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
@@ -895,18 +1000,30 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc) (any, error) {
 /******* WORKFLOW COMMUNICATIONS ********/
 /****************************************/
 
+// WorkflowSendInput defines the parameters for sending a message to another workflow.
 type WorkflowSendInput[R any] struct {
-	DestinationID string
-	Message       R
-	Topic         string
+	DestinationID string // Workflow ID to send the message to
+	Message       R      // Message payload (must be gob-encodable)
+	Topic         string // Optional topic for message filtering
 }
 
 func (c *dbosContext) Send(_ DBOSContext, input WorkflowSendInputInternal) error {
 	return c.systemDB.send(c, input)
 }
 
-// Send sends a message to another workflow.
-// Send automatically registers the type of R for gob encoding
+// Send sends a message to another workflow with type safety.
+// The message type R is automatically registered for gob encoding.
+//
+// Send can be called from within a workflow (as a durable step) or from outside workflows.
+// When called within a workflow, the send operation becomes part of the workflow's durable state.
+//
+// Example:
+//
+//	err := dbos.Send(ctx, dbos.WorkflowSendInput[string]{
+//	    DestinationID: "target-workflow-id",
+//	    Message:       "Hello from sender",
+//	    Topic:         "notifications",
+//	})
 func Send[R any](ctx DBOSContext, input WorkflowSendInput[R]) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
@@ -920,15 +1037,34 @@ func Send[R any](ctx DBOSContext, input WorkflowSendInput[R]) error {
 	})
 }
 
+// WorkflowRecvInput defines the parameters for receiving messages sent to this workflow.
 type WorkflowRecvInput struct {
-	Topic   string
-	Timeout time.Duration
+	Topic   string        // Topic to listen for (empty string receives from default topic)
+	Timeout time.Duration // Maximum time to wait for a message
 }
 
 func (c *dbosContext) Recv(_ DBOSContext, input WorkflowRecvInput) (any, error) {
-	return c.systemDB.Recv(c, input)
+	return c.systemDB.recv(c, input)
 }
 
+// Recv receives a message sent to this workflow with type safety.
+// This function blocks until a message is received or the timeout is reached.
+// Messages are consumed in FIFO order and each message is delivered exactly once.
+//
+// Recv can only be called from within a workflow and becomes part of the workflow's durable state.
+// If the workflow is recovered, previously received messages are not re-delivered.
+//
+// Example:
+//
+//	message, err := dbos.Recv[string](ctx, dbos.WorkflowRecvInput{
+//	    Topic:   "notifications",
+//	    Timeout: 30 * time.Second,
+//	})
+//	if err != nil {
+//	    // Handle timeout or error
+//	    return err
+//	}
+//	log.Printf("Received: %s", message)
 func Recv[R any](ctx DBOSContext, input WorkflowRecvInput) (R, error) {
 	if ctx == nil {
 		return *new(R), errors.New("ctx cannot be nil")
@@ -949,18 +1085,29 @@ func Recv[R any](ctx DBOSContext, input WorkflowRecvInput) (R, error) {
 	return typedMessage, nil
 }
 
+// WorkflowSetEventInputGeneric defines the parameters for setting a workflow event.
 type WorkflowSetEventInputGeneric[R any] struct {
-	Key     string
-	Message R
+	Key     string // Event key identifier
+	Message R      // Event value (must be gob-encodable)
 }
 
 func (c *dbosContext) SetEvent(_ DBOSContext, input WorkflowSetEventInput) error {
 	return c.systemDB.setEvent(c, input)
 }
 
-// Sets an event from a workflow.
-// The event is a key value pair
-// SetEvent automatically registers the type of R for gob encoding
+// SetEvent sets a key-value event for the current workflow with type safety.
+// Events are persistent and can be retrieved by other workflows using GetEvent.
+// The event type R is automatically registered for gob encoding.
+//
+// SetEvent can only be called from within a workflow and becomes part of the workflow's durable state.
+// Setting an event with the same key will overwrite the previous value.
+//
+// Example:
+//
+//	err := dbos.SetEvent(ctx, dbos.WorkflowSetEventInputGeneric[string]{
+//	    Key:     "status",
+//	    Message: "processing-complete",
+//	})
 func SetEvent[R any](ctx DBOSContext, input WorkflowSetEventInputGeneric[R]) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
@@ -973,16 +1120,35 @@ func SetEvent[R any](ctx DBOSContext, input WorkflowSetEventInputGeneric[R]) err
 	})
 }
 
+// WorkflowGetEventInput defines the parameters for retrieving an event from a workflow.
 type WorkflowGetEventInput struct {
-	TargetWorkflowID string
-	Key              string
-	Timeout          time.Duration
+	TargetWorkflowID string        // Workflow ID to get the event from
+	Key              string        // Event key to retrieve
+	Timeout          time.Duration // Maximum time to wait for the event to be set
 }
 
 func (c *dbosContext) GetEvent(_ DBOSContext, input WorkflowGetEventInput) (any, error) {
 	return c.systemDB.getEvent(c, input)
 }
 
+// GetEvent retrieves a key-value event from a target workflow with type safety.
+// This function blocks until the event is set or the timeout is reached.
+//
+// When called within a workflow, the get operation becomes part of the workflow's durable state.
+// The returned value is of type R and will be type-checked at runtime.
+//
+// Example:
+//
+//	status, err := dbos.GetEvent[string](ctx, dbos.WorkflowGetEventInput{
+//	    TargetWorkflowID: "target-workflow-id",
+//	    Key:              "status",
+//	    Timeout:          30 * time.Second,
+//	})
+//	if err != nil {
+//	    // Handle timeout or error
+//	    return err
+//	}
+//	log.Printf("Status: %s", status)
 func GetEvent[R any](ctx DBOSContext, input WorkflowGetEventInput) (R, error) {
 	if ctx == nil {
 		return *new(R), errors.New("dbosCtx cannot be nil")
@@ -1017,6 +1183,15 @@ func (c *dbosContext) GetWorkflowID() (string, error) {
 		return "", errors.New("not within a DBOS workflow context")
 	}
 	return wfState.workflowID, nil
+}
+
+// GetStepID retrieves the current step ID from the context if called within a DBOS workflow
+func (c *dbosContext) GetStepID() (int, error) {
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return -1, errors.New("not within a DBOS workflow context")
+	}
+	return wfState.stepID, nil
 }
 
 func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
