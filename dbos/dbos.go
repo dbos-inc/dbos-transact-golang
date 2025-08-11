@@ -368,7 +368,10 @@ func (c *dbosContext) Cancel() {
 	c.launched.Store(false)
 }
 
-func GetBinaryHash() (string, error) {
+// getBinaryHash computes and returns the SHA-256 hash of the current executable.
+// This is used for application versioning to ensure workflow compatibility across deployments.
+// Returns the hexadecimal representation of the hash or an error if the executable cannot be read.
+func getBinaryHash() (string, error) {
 	execPath, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -389,7 +392,7 @@ func GetBinaryHash() (string, error) {
 }
 
 func computeApplicationVersion() string {
-	hash, err := GetBinaryHash()
+	hash, err := getBinaryHash()
 	if err != nil {
 		fmt.Printf("DBOS: Failed to compute binary hash: %v\n", err)
 		return ""
