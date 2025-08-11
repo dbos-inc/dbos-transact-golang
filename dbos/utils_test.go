@@ -70,6 +70,7 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 
 	// Register cleanup to run after test completes
 	t.Cleanup(func() {
+		fmt.Println("Cleaning up DBOS instance...")
 		dbosCtx.(*dbosContext).logger.Info("Cleaning up DBOS instance...")
 		if dbosCtx != nil {
 			dbosCtx.Cancel()
