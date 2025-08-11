@@ -2055,18 +2055,18 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 		workflowID := uuid.NewString()
 
 		// First, run conflictWorkflowA with a specific workflow ID
-		handle1, err := RunAsWorkflow(dbosCtx, conflictWorkflowA, "test-input", WithWorkflowID(workflowID))
+		handle, err := RunAsWorkflow(dbosCtx, conflictWorkflowA, "test-input", WithWorkflowID(workflowID))
 		if err != nil {
 			t.Fatalf("failed to start first workflow: %v", err)
 		}
 
 		// Get the result to ensure it completes
-		result1, err := handle1.GetResult()
+		result, err := handle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from first workflow: %v", err)
 		}
-		if result1 != "step-a-result" {
-			t.Fatalf("expected 'step-a-result', got '%s'", result1)
+		if result != "step-a-result" {
+			t.Fatalf("expected 'step-a-result', got '%s'", result)
 		}
 
 		// Now try to run conflictWorkflowB with the same workflow ID
@@ -2094,17 +2094,11 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 	})
 
 	t.Run("StepNameConflict", func(t *testing.T) {
-		// This test simulates a scenario where a workflow is recovered but
-		// the step implementation has changed, causing a step name mismatch
-
-		// First, start a workflow and let it complete partially
-		handle1, err := RunAsWorkflow(dbosCtx, workflowWithMultipleSteps, "test-input")
+		handle, err := RunAsWorkflow(dbosCtx, workflowWithMultipleSteps, "test-input")
 		if err != nil {
 			t.Fatalf("failed to start workflow: %v", err)
 		}
-
-		// Complete the workflow
-		result, err := handle1.GetResult()
+		result, err := handle.GetResult()
 		if err != nil {
 			t.Fatalf("failed to get result from workflow: %v", err)
 		}
@@ -2112,12 +2106,10 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 			t.Fatalf("expected 'step-a-result-step-b-result', got '%s'", result)
 		}
 
-		// Now simulate what happens if we try to check operation execution
-		// with a different step name for the same step ID
-		workflowID := handle1.GetWorkflowID()
+		// Check operation execution with a different step name for the same step ID
+		workflowID := handle.GetWorkflowID()
 
 		// This directly tests the CheckOperationExecution method with mismatched step name
-		// We'll check step ID 0 (first step) but with wrong step name
 		wrongStepName := "wrong-step-name"
 		_, err = dbosCtx.(*dbosContext).systemDB.CheckOperationExecution(dbosCtx, checkOperationExecutionDBInput{
 			workflowID: workflowID,
