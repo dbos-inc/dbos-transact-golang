@@ -551,7 +551,7 @@ func TestWorkerConcurrency(t *testing.T) {
 
 	// Helper function to check the status of workflows in the queue
 	checkWorkflowStatus := func(t *testing.T, expectedPendingPerExecutor, expectedEnqueued int) {
-		workflows, err := dbosCtx1.(*dbosContext).systemDB.ListWorkflows(context.Background(), listWorkflowsDBInput{
+		workflows, err := dbosCtx1.(*dbosContext).systemDB.listWorkflows(context.Background(), listWorkflowsDBInput{
 			queueName: workerConcurrencyQueue.Name,
 		})
 		if err != nil {

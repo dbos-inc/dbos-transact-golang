@@ -112,7 +112,7 @@ func (h *workflowHandle[R]) GetResult() (R, error) {
 			output:           encodedOutput,
 			err:              outcome.err,
 		}
-		recordResultErr := h.dbosContext.(*dbosContext).systemDB.RecordChildGetResult(h.dbosContext, recordGetResultInput)
+		recordResultErr := h.dbosContext.(*dbosContext).systemDB.recordChildGetResult(h.dbosContext, recordGetResultInput)
 		if recordResultErr != nil {
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Sprintf("recording child workflow result: %v", recordResultErr))
@@ -123,7 +123,7 @@ func (h *workflowHandle[R]) GetResult() (R, error) {
 
 // GetStatus returns the current status of the workflow from the database
 func (h *workflowHandle[R]) GetStatus() (WorkflowStatus, error) {
-	workflowStatuses, err := h.dbosContext.(*dbosContext).systemDB.ListWorkflows(h.dbosContext, listWorkflowsDBInput{
+	workflowStatuses, err := h.dbosContext.(*dbosContext).systemDB.listWorkflows(h.dbosContext, listWorkflowsDBInput{
 		workflowIDs: []string{h.workflowID},
 	})
 	if err != nil {
@@ -145,7 +145,7 @@ type workflowPollingHandle[R any] struct {
 }
 
 func (h *workflowPollingHandle[R]) GetResult() (R, error) {
-	result, err := h.dbosContext.(*dbosContext).systemDB.AwaitWorkflowResult(h.dbosContext, h.workflowID)
+	result, err := h.dbosContext.(*dbosContext).systemDB.awaitWorkflowResult(h.dbosContext, h.workflowID)
 	if result != nil {
 		typedResult, ok := result.(R)
 		if !ok {
@@ -167,7 +167,7 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 				output:           encodedOutput,
 				err:              err,
 			}
-			recordResultErr := h.dbosContext.(*dbosContext).systemDB.RecordChildGetResult(h.dbosContext, recordGetResultInput)
+			recordResultErr := h.dbosContext.(*dbosContext).systemDB.recordChildGetResult(h.dbosContext, recordGetResultInput)
 			if recordResultErr != nil {
 				// XXX do we want to fail this?
 				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -180,7 +180,7 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 
 // GetStatus returns the current status of the workflow from the database
 func (h *workflowPollingHandle[R]) GetStatus() (WorkflowStatus, error) {
-	workflowStatuses, err := h.dbosContext.(*dbosContext).systemDB.ListWorkflows(h.dbosContext, listWorkflowsDBInput{
+	workflowStatuses, err := h.dbosContext.(*dbosContext).systemDB.listWorkflows(h.dbosContext, listWorkflowsDBInput{
 		workflowIDs: []string{h.workflowID},
 	})
 	if err != nil {
@@ -527,7 +527,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := c.systemDB.CheckChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
+		childWorkflowID, err := c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		if err != nil {
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("checking child workflow: %v", err))
 		}
@@ -575,7 +575,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	}
 
 	// Init status and record child workflow relationship in a single transaction
-	tx, err := c.systemDB.(*systemDatabase).pool.Begin(uncancellableCtx)
+	tx, err := c.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
 	if err != nil {
 		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to begin transaction: %v", err))
 	}
@@ -587,7 +587,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		maxRetries: params.maxRetries,
 		tx:         tx,
 	}
-	insertStatusResult, err := c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
+	insertStatusResult, err := c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
 	if err != nil {
 		c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
 		return nil, err
@@ -612,7 +612,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 			stepID:           parentWorkflowState.stepID,
 			tx:               tx,
 		}
-		err = c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput)
+		err = c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
 		if err != nil {
 			c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("recording child workflow: %v", err))
@@ -640,7 +640,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
 		dbosCancelFunction := func() {
 			c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
-			err = c.systemDB.CancelWorkflow(uncancellableCtx, workflowID)
+			err = c.systemDB.cancelWorkflow(uncancellableCtx, workflowID)
 			if err != nil {
 				c.logger.Error("Failed to cancel workflow", "error", err)
 			}
@@ -675,7 +675,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 			status = WorkflowStatusCancelled
 		}
 
-		recordErr := c.systemDB.UpdateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
+		recordErr := c.systemDB.updateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
 			workflowID: workflowID,
 			status:     status,
 			err:        err,
@@ -816,7 +816,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc) (any, error) {
 	uncancellableCtx := WithoutCancel(c)
 
 	// Check the step is cancelled, has already completed, or is called with a different name
-	recordedOutput, err := c.systemDB.CheckOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
+	recordedOutput, err := c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 		workflowID: stepState.workflowID,
 		stepID:     stepState.stepID,
 		stepName:   params.StepName,
@@ -883,7 +883,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc) (any, error) {
 		err:        stepError,
 		output:     stepOutput,
 	}
-	recErr := c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
+	recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
 	if recErr != nil {
 		return nil, newStepExecutionError(stepState.workflowID, params.StepName, fmt.Sprintf("recording step outcome: %v", recErr))
 	}
@@ -902,7 +902,7 @@ type WorkflowSendInput[R any] struct {
 }
 
 func (c *dbosContext) Send(_ DBOSContext, input WorkflowSendInputInternal) error {
-	return c.systemDB.Send(c, input)
+	return c.systemDB.send(c, input)
 }
 
 // Send sends a message to another workflow.
@@ -955,7 +955,7 @@ type WorkflowSetEventInputGeneric[R any] struct {
 }
 
 func (c *dbosContext) SetEvent(_ DBOSContext, input WorkflowSetEventInput) error {
-	return c.systemDB.SetEvent(c, input)
+	return c.systemDB.setEvent(c, input)
 }
 
 // Sets an event from a workflow.
@@ -980,7 +980,7 @@ type WorkflowGetEventInput struct {
 }
 
 func (c *dbosContext) GetEvent(_ DBOSContext, input WorkflowGetEventInput) (any, error) {
-	return c.systemDB.GetEvent(c, input)
+	return c.systemDB.getEvent(c, input)
 }
 
 func GetEvent[R any](ctx DBOSContext, input WorkflowGetEventInput) (R, error) {
@@ -1003,7 +1003,7 @@ func GetEvent[R any](ctx DBOSContext, input WorkflowGetEventInput) (R, error) {
 }
 
 func (c *dbosContext) Sleep(duration time.Duration) (time.Duration, error) {
-	return c.systemDB.Sleep(c, duration)
+	return c.systemDB.sleep(c, duration)
 }
 
 /***********************************/
@@ -1020,7 +1020,7 @@ func (c *dbosContext) GetWorkflowID() (string, error) {
 }
 
 func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
-	workflowStatus, err := c.systemDB.ListWorkflows(c, listWorkflowsDBInput{
+	workflowStatus, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
 	})
 	if err != nil {
@@ -1032,11 +1032,28 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 	return &workflowPollingHandle[any]{workflowID: workflowID, dbosContext: c}, nil
 }
 
+// RetrieveWorkflow returns a typed handle to an existing workflow.
+// The handle can be used to check status and wait for results.
+// The type parameter R must match the workflow's actual return type.
+//
+// Example:
+//
+//	handle, err := dbos.RetrieveWorkflow[int](ctx, "workflow-id")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	result, err := handle.GetResult() // blocks until completion
+//	if err != nil {
+//	    log.Printf("Workflow failed: %v", err)
+//	} else {
+//	    log.Printf("Result: %d", result)
+//	}
 func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (workflowPollingHandle[R], error) {
 	if ctx == nil {
 		return workflowPollingHandle[R]{}, errors.New("dbosCtx cannot be nil")
 	}
-	workflowStatus, err := ctx.(*dbosContext).systemDB.ListWorkflows(ctx, listWorkflowsDBInput{
+	workflowStatus, err := ctx.(*dbosContext).systemDB.listWorkflows(ctx, listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
 	})
 	if err != nil {

@@ -137,7 +137,7 @@ func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 	for range maxTries {
 		// Begin transaction
 		exec := ctx.(*dbosContext)
-		tx, err := exec.systemDB.(*systemDatabase).pool.Begin(ctx)
+		tx, err := exec.systemDB.(*sysDB).pool.Begin(ctx)
 		if err != nil {
 			return false
 		}

@@ -85,7 +85,7 @@ type dbosContext struct {
 
 	launched atomic.Bool
 
-	systemDB    SystemDatabase
+	systemDB    systemDatabase
 	adminServer *adminServer
 	config      *Config
 
@@ -275,7 +275,7 @@ func (c *dbosContext) Launch() error {
 	}
 
 	// Start the system database
-	c.systemDB.Launch(c)
+	c.systemDB.launch(c)
 
 	// Start the admin server if configured
 	if c.config.AdminServer {
@@ -330,7 +330,7 @@ func (c *dbosContext) Cancel() {
 	// Close the pool and the notification listener if started
 	if c.systemDB != nil {
 		c.logger.Info("Shutting down system database")
-		c.systemDB.Shutdown(c)
+		c.systemDB.shutdown(c)
 		c.systemDB = nil
 	}
 
