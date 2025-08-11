@@ -495,9 +495,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	if registeredWorkflow.maxRetries > 0 {
 		params.maxRetries = registeredWorkflow.maxRetries
 	}
-
-	// Use the custom workflow name if it was provided during registration
-	if registeredWorkflow.name != "" {
+	if len(registeredWorkflow.name) > 0 {
 		params.workflowName = registeredWorkflow.name
 	}
 
