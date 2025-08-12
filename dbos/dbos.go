@@ -84,10 +84,11 @@ type DBOSContext interface {
 	GetWorkflowID() (string, error)                                                                               // Get the current workflow ID (only available within workflows)
 
 	// Workflow management
-	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) // Get a handle to an existing workflow
-	Enqueue(_ DBOSContext, params EnqueueOptions) (WorkflowHandle[any], error)      // Enqueue a new workflow with parameters
-	CancelWorkflow(workflowID string) error                                         // Cancel a workflow by setting its status to CANCELLED
-	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)   // Resume a cancelled workflow
+	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                 // Get a handle to an existing workflow
+	Enqueue(_ DBOSContext, params EnqueueOptions) (WorkflowHandle[any], error)                                      // Enqueue a new workflow with parameters
+	CancelWorkflow(workflowID string) error                                                                         // Cancel a workflow by setting its status to CANCELLED
+	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                   // Resume a cancelled workflow
+	ForkWorkflow(_ DBOSContext, originalWorkflowID string, opts ...ForkWorkflowOption) (WorkflowHandle[any], error) // Fork a workflow from a specific step
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context

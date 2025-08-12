@@ -3,6 +3,7 @@ package dbos
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -380,4 +381,254 @@ func TestCancelResume(t *testing.T) {
 			t.Fatalf("expected DestinationID to be %s, got %s", nonExistentWorkflowID, dbosErr.DestinationID)
 		}
 	})
+}
+
+func TestForkWorkflow(t *testing.T) {
+	// Global counters for tracking execution (no mutex needed since workflows run solo)
+	var (
+		stepCount1  int
+		stepCount2  int
+		child1Count int
+		child2Count int
+	)
+
+	// Setup server context - this will process tasks
+	serverCtx := setupDBOS(t, true, true)
+
+	// Create queue for communication between client and server
+	queue := NewWorkflowQueue(serverCtx, "fork-workflow-queue")
+
+	// Simple child workflows (no steps, just increment counters)
+	childWorkflow1 := func(ctx DBOSContext, input string) (string, error) {
+		child1Count++
+		return "child1-" + input, nil
+	}
+	RegisterWorkflow(serverCtx, childWorkflow1, WithWorkflowName("ChildWorkflow1"))
+
+	childWorkflow2 := func(ctx DBOSContext, input string) (string, error) {
+		child2Count++
+		return "child2-" + input, nil
+	}
+	RegisterWorkflow(serverCtx, childWorkflow2, WithWorkflowName("ChildWorkflow2"))
+
+	// Parent workflow with 2 steps and 2 child workflows
+	parentWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		// Step 1
+		step1Result, err := RunAsStep(ctx, func(ctx context.Context) (string, error) {
+			stepCount1++
+			return "step1-" + input, nil
+		})
+		if err != nil {
+			return "", err
+		}
+
+		// Child workflow 1
+		child1Handle, err := RunAsWorkflow(ctx, childWorkflow1, input)
+		if err != nil {
+			return "", err
+		}
+		child1Result, err := child1Handle.GetResult()
+		if err != nil {
+			return "", err
+		}
+
+		// Step 2
+		step2Result, err := RunAsStep(ctx, func(ctx context.Context) (string, error) {
+			stepCount2++
+			return "step2-" + input, nil
+		})
+		if err != nil {
+			return "", err
+		}
+
+		// Child workflow 2
+		child2Handle, err := RunAsWorkflow(ctx, childWorkflow2, input)
+		if err != nil {
+			return "", err
+		}
+		child2Result, err := child2Handle.GetResult()
+		if err != nil {
+			return "", err
+		}
+
+		return step1Result + "+" + step2Result + "+" + child1Result + "+" + child2Result, nil
+	}
+	RegisterWorkflow(serverCtx, parentWorkflow, WithWorkflowName("ParentWorkflow"))
+
+	// Launch the server context to start processing tasks
+	err := serverCtx.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch server DBOS instance: %v", err)
+	}
+
+	// Setup client context
+	clientCtx := setupDBOS(t, false, false)
+
+	t.Run("ForkAtAllSteps", func(t *testing.T) {
+		// Reset counters
+		stepCount1, stepCount2, child1Count, child2Count = 0, 0, 0, 0
+
+		originalWorkflowID := "original-workflow-fork-test"
+
+		// 1. Run the entire workflow first and check counters are 1
+		handle, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
+			WorkflowName:       "ParentWorkflow",
+			QueueName:          queue.Name,
+			WorkflowID:         originalWorkflowID,
+			WorkflowInput:      "test",
+			ApplicationVersion: serverCtx.GetApplicationVersion(),
+		})
+		if err != nil {
+			t.Fatalf("failed to enqueue original workflow: %v", err)
+		}
+
+		// Wait for the original workflow to complete
+		result, err := handle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from original workflow: %v", err)
+		}
+
+		expectedResult := "step1-test+step2-test+child1-test+child2-test"
+		if result != expectedResult {
+			t.Fatalf("expected result to be '%s', got '%s'", expectedResult, result)
+		}
+
+		// Verify all counters are 1 after original workflow
+		if stepCount1 != 1 || stepCount2 != 1 || child1Count != 1 || child2Count != 1 {
+			t.Fatalf("expected counters to be (step1:1, step2:1, child1:1, child2:1), got (step1:%d, step2:%d, child1:%d, child2:%d)", stepCount1, stepCount2, child1Count, child2Count)
+		}
+
+		// 2. Fork from each step 1 to 6 and verify results
+		// Note: there's 6 steps: 2 steps 2 children and 2 GetResults
+		for step := 1; step <= 6; step++ {
+			t.Logf("Forking at step %d", step)
+
+			customForkedWorkflowID := fmt.Sprintf("forked-workflow-step-%d", step)
+			forkedHandle, err := ForkWorkflow[string](clientCtx, originalWorkflowID, WithForkWorkflowID(customForkedWorkflowID), WithForkStartStep(uint(step-1)))
+			if err != nil {
+				t.Fatalf("failed to fork workflow at step %d: %v", step, err)
+			}
+
+			forkedWorkflowID := forkedHandle.GetWorkflowID()
+			if forkedWorkflowID != customForkedWorkflowID {
+				t.Fatalf("expected forked workflow ID to be '%s', got '%s'", customForkedWorkflowID, forkedWorkflowID)
+			}
+
+			forkedResult, err := forkedHandle.GetResult()
+			if err != nil {
+				t.Fatalf("failed to get result from forked workflow at step %d: %v", step, err)
+			}
+
+			// 1) Verify workflow result is correct
+			if forkedResult != expectedResult {
+				t.Fatalf("forked workflow at step %d: expected result '%s', got '%s'", step, expectedResult, forkedResult)
+			}
+
+			// 2) Verify counters are at expected totals based on the step where we're forking
+			t.Logf("Step %d: actual counters - step1:%d, step2:%d, child1:%d, child2:%d", step, stepCount1, stepCount2, child1Count, child2Count)
+
+			// First step is executed only once
+			if stepCount1 != 1+1 {
+				t.Fatalf("forked workflow at step %d: step1 counter should be 2, got %d", step, stepCount1)
+			}
+
+			// First child will be executed twice
+			if step < 3 {
+				if child1Count != 1+step {
+					t.Fatalf("forked workflow at step %d: child1 counter should be %d, got %d", step, 1+step, child1Count)
+				}
+			} else {
+				if child1Count != 1+2 {
+					t.Fatalf("forked workflow at step %d: child2 counter should be 3, got %d", step, child1Count)
+				}
+			}
+
+			// Second step (in reality step 4) will be executed 4 times
+			if step < 5 {
+				if stepCount2 != 1+step {
+					t.Fatalf("forked workflow at step %d: step2 counter should be %d, got %d", step, 1+step, stepCount2)
+				}
+			} else {
+				if stepCount2 != 1+4 {
+					t.Fatalf("forked workflow at step %d: step2 counter should be 5, got %d", step, stepCount2)
+				}
+			}
+
+			// Second child will be executed 5 times
+			if step < 6 {
+				if child2Count != 1+step {
+					t.Fatalf("forked workflow at step %d: child2 counter should be %d, got %d", step, 1+step, child2Count)
+				}
+			} else {
+				if child2Count != 1+5 {
+					t.Fatalf("forked workflow at step %d: child2 counter should be 6, got %d", step, child2Count)
+				}
+			}
+
+			t.Logf("Step %d: all counter totals verified correctly", step)
+		}
+
+		t.Logf("Final counters after all forks - steps:%d, child1:%d, child2:%d", stepCount1, child1Count, child2Count)
+	})
+
+	t.Run("ForkNonExistentWorkflow", func(t *testing.T) {
+		nonExistentWorkflowID := "non-existent-workflow-for-fork"
+
+		// Try to fork a non-existent workflow
+		_, err := clientCtx.ForkWorkflow(clientCtx, nonExistentWorkflowID, WithForkStartStep(1))
+		if err == nil {
+			t.Fatal("expected error when forking non-existent workflow, but got none")
+		}
+
+		// Verify error type
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != NonExistentWorkflowError {
+			t.Fatalf("expected error code to be NonExistentWorkflowError, got %v", dbosErr.Code)
+		}
+
+		if dbosErr.DestinationID != nonExistentWorkflowID {
+			t.Fatalf("expected DestinationID to be %s, got %s", nonExistentWorkflowID, dbosErr.DestinationID)
+		}
+	})
+
+	t.Run("ForkWithInvalidStep", func(t *testing.T) {
+		originalWorkflowID := "original-workflow-invalid-step"
+
+		// Create an original workflow first
+		handle, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
+			WorkflowName:       "ParentWorkflow",
+			QueueName:          queue.Name,
+			WorkflowID:         originalWorkflowID,
+			WorkflowInput:      "test",
+			ApplicationVersion: serverCtx.GetApplicationVersion(),
+		})
+		if err != nil {
+			t.Fatalf("failed to enqueue original workflow: %v", err)
+		}
+
+		// Wait for completion
+		_, err = handle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from original workflow: %v", err)
+		}
+
+		// Try to fork at step 999 (beyond workflow's actual steps)
+		_, err = clientCtx.ForkWorkflow(clientCtx, originalWorkflowID, WithForkStartStep(999))
+		if err == nil {
+			t.Fatal("expected error when forking at step 999, but got none")
+		}
+		// Verify the error message
+		if !strings.Contains(err.Error(), "exceeds workflow's maximum step") {
+			t.Fatalf("expected error message to contain 'exceeds workflow's maximum step', got: %v", err)
+		}
+	})
+
+	// Verify all queue entries are cleaned up
+	if !queueEntriesAreCleanedUp(serverCtx) {
+		t.Fatal("expected queue entries to be cleaned up after fork workflow tests")
+	}
 }

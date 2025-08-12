@@ -36,6 +36,7 @@ type systemDatabase interface {
 	awaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
 	cancelWorkflow(ctx context.Context, workflowID string) error
 	resumeWorkflow(ctx context.Context, workflowID string) error
+	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) error
 
 	// Child workflows
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
@@ -540,10 +541,11 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var errorStr *string
 		var deduplicationID *string
 		var applicationVersion *string
+		var executorID *string
 
 		err := rows.Scan(
 			&wf.ID, &wf.Status, &wf.Name, &wf.AuthenticatedUser, &wf.AssumedRole,
-			&wf.AuthenticatedRoles, &outputString, &errorStr, &wf.ExecutorID, &createdAtMs,
+			&wf.AuthenticatedRoles, &outputString, &errorStr, &executorID, &createdAtMs,
 			&updatedAtMs, &applicationVersion, &wf.ApplicationID,
 			&wf.Attempts, &queueName, &timeoutMs,
 			&deadlineMs, &startedAtMs, &deduplicationID,
@@ -555,6 +557,11 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 
 		if queueName != nil && len(*queueName) > 0 {
 			wf.QueueName = *queueName
+		}
+
+		// Handle NULL executorID
+		if executorID != nil && len(*executorID) > 0 {
+			wf.ExecutorID = *executorID
 		}
 
 		// We work with strings -- the DB could return NULL values
@@ -741,6 +748,124 @@ func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 		workflowID)
 	if err != nil {
 		return fmt.Errorf("failed to update workflow status to ENQUEUED: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+type forkWorkflowDBInput struct {
+	originalWorkflowID string
+	forkedWorkflowID   string
+	startStep          int
+	applicationVersion string
+}
+
+func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) error {
+	// Validate startStep
+	if input.startStep < 0 {
+		return fmt.Errorf("startStep must be >= 0, got %d", input.startStep)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Get the original workflow status
+	listInput := listWorkflowsDBInput{
+		workflowIDs: []string{input.originalWorkflowID},
+		tx:          tx,
+	}
+	wfs, err := s.listWorkflows(ctx, listInput)
+	if err != nil {
+		return fmt.Errorf("failed to list workflows: %w", err)
+	}
+	if len(wfs) == 0 {
+		return newNonExistentWorkflowError(input.originalWorkflowID)
+	}
+
+	originalWorkflow := wfs[0]
+
+	// Check if the workflow has completed successfully (required for forking)
+	if originalWorkflow.Status != WorkflowStatusSuccess {
+		return fmt.Errorf("cannot fork workflow %s: workflow must be in SUCCESS state, current state: %s", input.originalWorkflowID, originalWorkflow.Status)
+	}
+
+	// Validate that startStep doesn't exceed the workflow's actual steps
+	maxStepQuery := `SELECT COALESCE(MAX(function_id), 0) FROM dbos.operation_outputs WHERE workflow_uuid = $1`
+	var maxStepID int
+	err = tx.QueryRow(ctx, maxStepQuery, input.originalWorkflowID).Scan(&maxStepID)
+	if err != nil {
+		return fmt.Errorf("failed to query max step ID: %w", err)
+	}
+	if input.startStep > maxStepID && maxStepID > 0 {
+		return fmt.Errorf("startStep %d exceeds workflow's maximum step %d", input.startStep, maxStepID)
+	}
+
+	// Determine the application version to use
+	appVersion := originalWorkflow.ApplicationVersion
+	if input.applicationVersion != "" {
+		appVersion = input.applicationVersion
+	}
+
+	// Create an entry for the forked workflow with the same initial values as the original
+	insertQuery := `INSERT INTO dbos.workflow_status (
+		workflow_uuid,
+		status,
+		name,
+		authenticated_user,
+		assumed_role,
+		authenticated_roles,
+		application_version,
+		application_id,
+		queue_name,
+		inputs,
+		created_at,
+		updated_at,
+		recovery_attempts
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
+
+	inputString, err := serialize(originalWorkflow.Input)
+	if err != nil {
+		return fmt.Errorf("failed to serialize input: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, insertQuery,
+		input.forkedWorkflowID,
+		WorkflowStatusEnqueued,
+		originalWorkflow.Name,
+		originalWorkflow.AuthenticatedUser,
+		originalWorkflow.AssumedRole,
+		originalWorkflow.AuthenticatedRoles,
+		&appVersion,
+		originalWorkflow.ApplicationID,
+		_DBOS_INTERNAL_QUEUE_NAME,
+		inputString,
+		time.Now().UnixMilli(),
+		time.Now().UnixMilli(),
+		0)
+
+	if err != nil {
+		return fmt.Errorf("failed to insert forked workflow status: %w", err)
+	}
+
+	// If startStep > 0, copy the original workflow's outputs into the forked workflow
+	if input.startStep > 0 {
+		copyOutputsQuery := `INSERT INTO dbos.operation_outputs
+			(workflow_uuid, function_id, output, error, function_name, child_workflow_id)
+			SELECT $1, function_id, output, error, function_name, child_workflow_id
+			FROM dbos.operation_outputs
+			WHERE workflow_uuid = $2 AND function_id < $3`
+
+		_, err = tx.Exec(ctx, copyOutputsQuery, input.forkedWorkflowID, input.originalWorkflowID, input.startStep)
+		if err != nil {
+			return fmt.Errorf("failed to copy operation outputs: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
