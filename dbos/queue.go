@@ -209,6 +209,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 				registeredWorkflow, exists := ctx.workflowRegistry[wfName.(string)]
 				if !exists {
 					ctx.logger.Error("workflow function not found in registry", "workflow_name", workflow.name)
+					continue
 				}
 
 				// Deserialize input
