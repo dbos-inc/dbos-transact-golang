@@ -317,7 +317,7 @@ func setEventUserDefinedTypeWorkflow(ctx DBOSContext, input string) (string, err
 		},
 	}
 
-	err := SetEvent(ctx, WorkflowSetEventInputGeneric[UserDefinedEventData]{Key: input, Message: eventData})
+	err := SetEvent(ctx, GenericWorkflowSetEventInput[UserDefinedEventData]{Key: input, Message: eventData})
 	if err != nil {
 		return "", err
 	}
@@ -394,7 +394,7 @@ func sendUserDefinedTypeWorkflow(ctx DBOSContext, destinationID string) (string,
 
 	// Send should automatically register this type with gob
 	// Note the explicit type parameter since compiler cannot infer UserDefinedEventData from string input
-	err := Send(ctx, WorkflowSendInput[UserDefinedEventData]{
+	err := Send(ctx, GenericWorkflowSendInput[UserDefinedEventData]{
 		DestinationID: destinationID,
 		Topic:         "user-defined-topic",
 		Message:       sendData,

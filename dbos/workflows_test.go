@@ -1346,7 +1346,7 @@ type sendWorkflowInput struct {
 }
 
 func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
-	err := Send(ctx, WorkflowSendInput[string]{
+	err := Send(ctx, GenericWorkflowSendInput[string]{
 		DestinationID: input.DestinationID,
 		Topic:         input.Topic,
 		Message:       "message1",
@@ -1354,11 +1354,11 @@ func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	err = Send(ctx, WorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message2"})
+	err = Send(ctx, GenericWorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message2"})
 	if err != nil {
 		return "", err
 	}
-	err = Send(ctx, WorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message3"})
+	err = Send(ctx, GenericWorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message3"})
 	if err != nil {
 		return "", err
 	}
@@ -1402,7 +1402,7 @@ func receiveWorkflowCoordinated(ctx DBOSContext, input struct {
 
 func sendStructWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 	testStruct := sendRecvType{Value: "test-struct-value"}
-	err := Send(ctx, WorkflowSendInput[sendRecvType]{DestinationID: input.DestinationID, Topic: input.Topic, Message: testStruct})
+	err := Send(ctx, GenericWorkflowSendInput[sendRecvType]{DestinationID: input.DestinationID, Topic: input.Topic, Message: testStruct})
 	return "", err
 }
 
@@ -1411,7 +1411,7 @@ func receiveStructWorkflow(ctx DBOSContext, topic string) (sendRecvType, error) 
 }
 
 func sendIdempotencyWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
-	err := Send(ctx, WorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "m1"})
+	err := Send(ctx, GenericWorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "m1"})
 	if err != nil {
 		return "", err
 	}
@@ -1432,7 +1432,7 @@ func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 }
 
 func stepThatCallsSend(ctx context.Context, input sendWorkflowInput) (string, error) {
-	err := Send(ctx.(DBOSContext), WorkflowSendInput[string]{
+	err := Send(ctx.(DBOSContext), GenericWorkflowSendInput[string]{
 		DestinationID: input.DestinationID,
 		Topic:         input.Topic,
 		Message:       "message-from-step",
@@ -1678,7 +1678,7 @@ func TestSendRecv(t *testing.T) {
 
 		// Send messages from outside a workflow context (should work now)
 		for i := range 3 {
-			err = Send(dbosCtx, WorkflowSendInput[string]{
+			err = Send(dbosCtx, GenericWorkflowSendInput[string]{
 				DestinationID: receiveHandle.GetWorkflowID(),
 				Topic:         "outside-workflow-topic",
 				Message:       fmt.Sprintf("message%d", i+1),
@@ -1935,7 +1935,7 @@ type setEventWorkflowInput struct {
 }
 
 func setEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	err := SetEvent(ctx, WorkflowSetEventInputGeneric[string]{Key: input.Key, Message: input.Message})
+	err := SetEvent(ctx, GenericWorkflowSetEventInput[string]{Key: input.Key, Message: input.Message})
 	if err != nil {
 		return "", err
 	}
@@ -1956,7 +1956,7 @@ func getEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, err
 
 func setTwoEventsWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
 	// Set the first event
-	err := SetEvent(ctx, WorkflowSetEventInputGeneric[string]{Key: "event1", Message: "first-event-message"})
+	err := SetEvent(ctx, GenericWorkflowSetEventInput[string]{Key: "event1", Message: "first-event-message"})
 	if err != nil {
 		return "", err
 	}
@@ -1965,7 +1965,7 @@ func setTwoEventsWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string,
 	setSecondEventSignal.Wait()
 
 	// Set the second event
-	err = SetEvent(ctx, WorkflowSetEventInputGeneric[string]{Key: "event2", Message: "second-event-message"})
+	err = SetEvent(ctx, GenericWorkflowSetEventInput[string]{Key: "event2", Message: "second-event-message"})
 	if err != nil {
 		return "", err
 	}
@@ -1974,7 +1974,7 @@ func setTwoEventsWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string,
 }
 
 func setEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	err := SetEvent(ctx, WorkflowSetEventInputGeneric[string]{Key: input.Key, Message: input.Message})
+	err := SetEvent(ctx, GenericWorkflowSetEventInput[string]{Key: input.Key, Message: input.Message})
 	if err != nil {
 		return "", err
 	}
@@ -2342,7 +2342,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("SetGetEventMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run SetEvent outside of a workflow context
-		err := SetEvent(dbosCtx, WorkflowSetEventInputGeneric[string]{Key: "test-key", Message: "test-message"})
+		err := SetEvent(dbosCtx, GenericWorkflowSetEventInput[string]{Key: "test-key", Message: "test-message"})
 		if err == nil {
 			t.Fatal("expected error when running SetEvent outside of workflow context, but got none")
 		}
@@ -3018,7 +3018,7 @@ func notificationWaiterWorkflow(ctx DBOSContext, pairID int) (string, error) {
 }
 
 func notificationSetterWorkflow(ctx DBOSContext, pairID int) (string, error) {
-	err := SetEvent(ctx, WorkflowSetEventInputGeneric[string]{
+	err := SetEvent(ctx, GenericWorkflowSetEventInput[string]{
 		Key:     "event-key",
 		Message: fmt.Sprintf("notification-message-%d", pairID),
 	})
@@ -3040,7 +3040,7 @@ func sendRecvReceiverWorkflow(ctx DBOSContext, pairID int) (string, error) {
 }
 
 func sendRecvSenderWorkflow(ctx DBOSContext, pairID int) (string, error) {
-	err := Send(ctx, WorkflowSendInput[string]{
+	err := Send(ctx, GenericWorkflowSendInput[string]{
 		DestinationID: fmt.Sprintf("send-recv-receiver-%d", pairID),
 		Topic:         "send-recv-topic",
 		Message:       fmt.Sprintf("send-recv-message-%d", pairID),

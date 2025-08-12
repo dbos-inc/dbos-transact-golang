@@ -199,10 +199,16 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 			}
 			for _, workflow := range dequeuedWorkflows {
 				// Find the workflow in the registry
-				registeredWorkflow, exists := ctx.workflowRegistry[workflow.name]
+
+				wfName, ok := ctx.workflowCustomNametoFQN.Load(workflow.name)
+				if !ok {
+					ctx.logger.Error("Workflow not found in registry", "workflow_name", workflow.name)
+					continue
+				}
+
+				registeredWorkflow, exists := ctx.workflowRegistry[wfName.(string)]
 				if !exists {
 					ctx.logger.Error("workflow function not found in registry", "workflow_name", workflow.name)
-					continue
 				}
 
 				// Deserialize input

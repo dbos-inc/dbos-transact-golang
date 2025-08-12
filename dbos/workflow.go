@@ -52,7 +52,7 @@ type WorkflowStatus struct {
 	Timeout            time.Duration      `json:"timeout"`             // Workflow timeout duration
 	Deadline           time.Time          `json:"deadline"`            // Absolute deadline for workflow completion
 	StartedAt          time.Time          `json:"started_at"`          // When the workflow execution actually started
-	DeduplicationID    *string            `json:"deduplication_id"`    // Deduplication identifier (if applicable)
+	DeduplicationID    string             `json:"deduplication_id"`    // Deduplication identifier (if applicable)
 	Input              any                `json:"input"`               // Input parameters passed to the workflow
 	Priority           int                `json:"priority"`            // Execution priority (lower numbers have higher priority)
 }
@@ -234,10 +234,18 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn WrappedWorkflowFun
 		panic(newConflictingRegistrationError(workflowFQN))
 	}
 
+	// We must keep the registry indexed by FQN (because RunAsWorkflow uses reflection to find the function name and uses that to look it up in the registry)
 	c.workflowRegistry[workflowFQN] = workflowRegistryEntry{
 		wrappedFunction: fn,
 		maxRetries:      maxRetries,
 		name:            customName,
+	}
+
+	// We need to get a mapping from custom name to FQN for registry lookups that might not know the FQN (queue, recovery)
+	if len(customName) > 0 {
+		c.workflowCustomNametoFQN.Store(customName, workflowFQN)
+	} else {
+		c.workflowCustomNametoFQN.Store(workflowFQN, workflowFQN) // Store the FQN as the custom name if none was provided
 	}
 }
 
@@ -1000,14 +1008,14 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc) (any, error) {
 /******* WORKFLOW COMMUNICATIONS ********/
 /****************************************/
 
-// WorkflowSendInput defines the parameters for sending a message to another workflow.
-type WorkflowSendInput[R any] struct {
+// GenericWorkflowSendInput defines the parameters for sending a message to another workflow.
+type GenericWorkflowSendInput[P any] struct {
 	DestinationID string // Workflow ID to send the message to
-	Message       R      // Message payload (must be gob-encodable)
+	Message       P      // Message payload (must be gob-encodable)
 	Topic         string // Optional topic for message filtering
 }
 
-func (c *dbosContext) Send(_ DBOSContext, input WorkflowSendInputInternal) error {
+func (c *dbosContext) Send(_ DBOSContext, input WorkflowSendInput) error {
 	return c.systemDB.send(c, input)
 }
 
@@ -1024,13 +1032,13 @@ func (c *dbosContext) Send(_ DBOSContext, input WorkflowSendInputInternal) error
 //	    Message:       "Hello from sender",
 //	    Topic:         "notifications",
 //	})
-func Send[R any](ctx DBOSContext, input WorkflowSendInput[R]) error {
+func Send[P any](ctx DBOSContext, input GenericWorkflowSendInput[P]) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	var typedMessage R
+	var typedMessage P
 	gob.Register(typedMessage)
-	return ctx.Send(ctx, WorkflowSendInputInternal{
+	return ctx.Send(ctx, WorkflowSendInput{
 		DestinationID: input.DestinationID,
 		Message:       input.Message,
 		Topic:         input.Topic,
@@ -1085,10 +1093,10 @@ func Recv[R any](ctx DBOSContext, input WorkflowRecvInput) (R, error) {
 	return typedMessage, nil
 }
 
-// WorkflowSetEventInputGeneric defines the parameters for setting a workflow event.
-type WorkflowSetEventInputGeneric[R any] struct {
+// GenericWorkflowSetEventInput defines the parameters for setting a workflow event.
+type GenericWorkflowSetEventInput[P any] struct {
 	Key     string // Event key identifier
-	Message R      // Event value (must be gob-encodable)
+	Message P      // Event value (must be gob-encodable)
 }
 
 func (c *dbosContext) SetEvent(_ DBOSContext, input WorkflowSetEventInput) error {
@@ -1108,11 +1116,11 @@ func (c *dbosContext) SetEvent(_ DBOSContext, input WorkflowSetEventInput) error
 //	    Key:     "status",
 //	    Message: "processing-complete",
 //	})
-func SetEvent[R any](ctx DBOSContext, input WorkflowSetEventInputGeneric[R]) error {
+func SetEvent[P any](ctx DBOSContext, input GenericWorkflowSetEventInput[P]) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	var typedMessage R
+	var typedMessage P
 	gob.Register(typedMessage)
 	return ctx.SetEvent(ctx, WorkflowSetEventInput{
 		Key:     input.Key,
@@ -1151,7 +1159,7 @@ func (c *dbosContext) GetEvent(_ DBOSContext, input WorkflowGetEventInput) (any,
 //	log.Printf("Status: %s", status)
 func GetEvent[R any](ctx DBOSContext, input WorkflowGetEventInput) (R, error) {
 	if ctx == nil {
-		return *new(R), errors.New("dbosCtx cannot be nil")
+		return *new(R), errors.New("ctx cannot be nil")
 	}
 	value, err := ctx.GetEvent(ctx, input)
 	if err != nil {
@@ -1238,4 +1246,105 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (workflowPollin
 		return workflowPollingHandle[R]{}, newNonExistentWorkflowError(workflowID)
 	}
 	return workflowPollingHandle[R]{workflowID: workflowID, dbosContext: ctx}, nil
+}
+
+type EnqueueOptions struct {
+	WorkflowName       string
+	QueueName          string
+	WorkflowID         string
+	ApplicationVersion string
+	DeduplicationID    string
+	WorkflowTimeout    time.Duration
+	WorkflowInput      any
+}
+
+func (c *dbosContext) Enqueue(_ DBOSContext, params EnqueueOptions) (WorkflowHandle[any], error) {
+	workflowID := params.WorkflowID
+	if workflowID == "" {
+		workflowID = uuid.New().String()
+	}
+
+	var deadline time.Time
+	if params.WorkflowTimeout > 0 {
+		deadline = time.Now().Add(params.WorkflowTimeout)
+	}
+
+	status := WorkflowStatus{
+		Name:               params.WorkflowName,
+		ApplicationVersion: params.ApplicationVersion,
+		Status:             WorkflowStatusEnqueued,
+		ID:                 workflowID,
+		CreatedAt:          time.Now(),
+		Deadline:           deadline,
+		Timeout:            params.WorkflowTimeout,
+		Input:              params.WorkflowInput,
+		QueueName:          params.QueueName,
+		DeduplicationID:    params.DeduplicationID,
+	}
+
+	uncancellableCtx := WithoutCancel(c)
+
+	tx, err := c.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
+	if err != nil {
+		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to begin transaction: %v", err))
+	}
+	defer tx.Rollback(uncancellableCtx) // Rollback if not committed
+
+	// Insert workflow status with transaction
+	insertInput := insertWorkflowStatusDBInput{
+		status: status,
+		tx:     tx,
+	}
+	_, err = c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
+	if err != nil {
+		c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
+		return nil, err
+	}
+
+	if err := tx.Commit(uncancellableCtx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return &workflowPollingHandle[any]{
+		workflowID:  workflowID,
+		dbosContext: uncancellableCtx,
+	}, nil
+}
+
+type GenericEnqueueOptions[P any] struct {
+	WorkflowName       string
+	QueueName          string
+	WorkflowID         string
+	ApplicationVersion string
+	DeduplicationID    string
+	WorkflowTimeout    time.Duration
+	WorkflowInput      P
+}
+
+func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (WorkflowHandle[R], error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+
+	// Register the input and outputs for gob encoding
+	var typedInput P
+	gob.Register(typedInput)
+	var typedOutput R
+	gob.Register(typedOutput)
+
+	// Call typed erased enqueue
+	handle, err := ctx.Enqueue(ctx, EnqueueOptions{
+		WorkflowName:       params.WorkflowName,
+		QueueName:          params.QueueName,
+		WorkflowID:         params.WorkflowID,
+		ApplicationVersion: params.ApplicationVersion,
+		DeduplicationID:    params.DeduplicationID,
+		WorkflowInput:      params.WorkflowInput,
+		WorkflowTimeout:    params.WorkflowTimeout,
+	})
+
+	return &workflowPollingHandle[R]{
+		workflowID:  handle.GetWorkflowID(),
+		dbosContext: ctx,
+	}, err
 }

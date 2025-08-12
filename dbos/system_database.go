@@ -47,7 +47,7 @@ type systemDatabase interface {
 	getWorkflowSteps(ctx context.Context, workflowID string) ([]stepInfo, error)
 
 	// Communication (special steps)
-	send(ctx context.Context, input WorkflowSendInputInternal) error
+	send(ctx context.Context, input WorkflowSendInput) error
 	recv(ctx context.Context, input WorkflowRecvInput) (any, error)
 	setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	getEvent(ctx context.Context, input WorkflowGetEventInput) (any, error)
@@ -297,6 +297,17 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		return nil, fmt.Errorf("failed to serialize input: %w", err)
 	}
 
+	// Our DB works with NULL values
+	var applicationVersion *string
+	if len(input.status.ApplicationVersion) > 0 {
+		applicationVersion = &input.status.ApplicationVersion
+	}
+
+	var deduplicationID *string
+	if len(input.status.DeduplicationID) > 0 {
+		deduplicationID = &input.status.DeduplicationID
+	}
+
 	query := `INSERT INTO dbos.workflow_status (
         workflow_uuid,
         status,
@@ -342,7 +353,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		input.status.AssumedRole,
 		input.status.AuthenticatedRoles,
 		input.status.ExecutorID,
-		input.status.ApplicationVersion,
+		applicationVersion,
 		input.status.ApplicationID,
 		input.status.CreatedAt.UnixMilli(),
 		attempts,
@@ -350,7 +361,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		timeoutMs,
 		deadline,
 		inputString,
-		input.status.DeduplicationID,
+		deduplicationID,
 		input.status.Priority,
 		WorkflowStatusEnqueued,
 		WorkflowStatusEnqueued,
@@ -526,13 +537,15 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var deadlineMs, startedAtMs *int64
 		var outputString, inputString *string
 		var errorStr *string
+		var deduplicationID *string
+		var applicationVersion *string
 
 		err := rows.Scan(
 			&wf.ID, &wf.Status, &wf.Name, &wf.AuthenticatedUser, &wf.AssumedRole,
 			&wf.AuthenticatedRoles, &outputString, &errorStr, &wf.ExecutorID, &createdAtMs,
-			&updatedAtMs, &wf.ApplicationVersion, &wf.ApplicationID,
+			&updatedAtMs, &applicationVersion, &wf.ApplicationID,
 			&wf.Attempts, &queueName, &timeoutMs,
-			&deadlineMs, &startedAtMs, &wf.DeduplicationID,
+			&deadlineMs, &startedAtMs, &deduplicationID,
 			&inputString, &wf.Priority,
 		)
 		if err != nil {
@@ -541,6 +554,15 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 
 		if queueName != nil && len(*queueName) > 0 {
 			wf.QueueName = *queueName
+		}
+
+		// We work with strings -- the DB could return NULL values
+		if applicationVersion != nil && len(*applicationVersion) > 0 {
+			wf.ApplicationVersion = *applicationVersion
+		}
+
+		if deduplicationID != nil && len(*deduplicationID) > 0 {
+			wf.DeduplicationID = *deduplicationID
 		}
 
 		// Convert milliseconds to time.Time
@@ -1166,7 +1188,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 
 const _DBOS_NULL_TOPIC = "__null__topic__"
 
-type WorkflowSendInputInternal struct {
+type WorkflowSendInput struct {
 	DestinationID string
 	Message       any
 	Topic         string
@@ -1175,7 +1197,7 @@ type WorkflowSendInputInternal struct {
 // Send is a special type of step that sends a message to another workflow.
 // Can be called both within a workflow (as a step) or outside a workflow (directly).
 // When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution
-func (s *sysDB) send(ctx context.Context, input WorkflowSendInputInternal) error {
+func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	functionName := "DBOS.send"
 
 	// Get workflow state from context (optional for Send as we can send from outside a workflow)
