@@ -1238,6 +1238,11 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (workflowPollin
 	if ctx == nil {
 		return workflowPollingHandle[R]{}, errors.New("dbosCtx cannot be nil")
 	}
+
+	// Register the output for gob encoding
+	var r R
+	gob.Register(r)
+
 	workflowStatus, err := ctx.(*dbosContext).systemDB.listWorkflows(ctx, listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
 	})
@@ -1395,6 +1400,11 @@ func ResumeWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
+
+	// Register the output for gob encoding
+	var r R
+	gob.Register(r)
+
 	_, err := ctx.ResumeWorkflow(ctx, workflowID)
 	if err != nil {
 		return nil, err
@@ -1525,6 +1535,10 @@ func ForkWorkflow[R any](ctx DBOSContext, originalWorkflowID string, opts ...For
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
+
+	// Register the output for gob encoding
+	var r R
+	gob.Register(r)
 
 	handle, err := ctx.ForkWorkflow(ctx, originalWorkflowID, opts...)
 	if err != nil {
