@@ -1350,3 +1350,54 @@ func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (Wo
 		dbosContext: ctx,
 	}, err
 }
+
+// CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED.
+// Once cancelled, the workflow will stop executing and cannot be resumed.
+// If the workflow has already completed (SUCCESS or ERROR), this operation has no effect.
+// The workflow's final status and any partial results remain accessible through its handle.
+//
+// Parameters:
+//   - workflowID: The unique identifier of the workflow to cancel
+//
+// Returns an error if the workflow does not exist or if the cancellation operation fails.
+func (c *dbosContext) CancelWorkflow(workflowID string) error {
+	return c.systemDB.cancelWorkflow(c, workflowID)
+}
+
+func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
+	err := c.systemDB.resumeWorkflow(c, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	return &workflowPollingHandle[any]{workflowID: workflowID, dbosContext: c}, nil
+}
+
+// ResumeWorkflow resumes a cancelled workflow by setting its status back to ENQUEUED.
+// The workflow will be picked up by the queue processor and execution will continue
+// from where it left off. If the workflow is already completed, this is a no-op.
+// Returns a handle that can be used to wait for completion and retrieve results.
+// Returns an error if the workflow does not exist or if the cancellation operation fails.
+//
+// Example:
+//
+//	handle, err := dbos.ResumeWorkflow[int](ctx, "workflow-id")
+//	if err != nil {
+//	    log.Printf("Failed to resume workflow: %v", err)
+//	} else {
+//	    result, err := handle.GetResult() // blocks until completion
+//	    if err != nil {
+//	        log.Printf("Workflow failed: %v", err)
+//	    } else {
+//	        log.Printf("Result: %d", result)
+//	    }
+//	}
+func ResumeWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R], error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	_, err := ctx.ResumeWorkflow(ctx, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	return &workflowPollingHandle[R]{workflowID: workflowID, dbosContext: ctx}, nil
+}

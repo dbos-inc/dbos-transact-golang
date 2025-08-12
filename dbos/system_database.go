@@ -35,6 +35,7 @@ type systemDatabase interface {
 	updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error
 	awaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
 	cancelWorkflow(ctx context.Context, workflowID string) error
+	resumeWorkflow(ctx context.Context, workflowID string) error
 
 	// Child workflows
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
@@ -684,6 +685,62 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
 	_, err = tx.Exec(ctx, updateStatusQuery, WorkflowStatusCancelled, time.Now().UnixMilli(), workflowID)
 	if err != nil {
 		return fmt.Errorf("failed to update workflow status to CANCELLED: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Execute with snapshot isolation in case of concurrent calls on the same workflow
+	_, err = tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+	if err != nil {
+		return fmt.Errorf("failed to set transaction isolation level: %w", err)
+	}
+
+	// Check the status of the workflow. If it is complete, do nothing.
+	listInput := listWorkflowsDBInput{
+		workflowIDs: []string{workflowID},
+		tx:          tx,
+	}
+	wfs, err := s.listWorkflows(ctx, listInput)
+	if err != nil {
+		s.logger.Error("ResumeWorkflow: failed to list workflows", "error", err)
+		return err
+	}
+	if len(wfs) == 0 {
+		return newNonExistentWorkflowError(workflowID)
+	}
+
+	wf := wfs[0]
+	if wf.Status == WorkflowStatusSuccess || wf.Status == WorkflowStatusError {
+		return nil // Workflow is complete, do nothing
+	}
+
+	// Set the workflow's status to ENQUEUED and clear its recovery attempts and deadline
+	updateStatusQuery := `UPDATE dbos.workflow_status
+						  SET status = $1, queue_name = $2, recovery_attempts = $3, 
+						      workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, 
+						      started_at_epoch_ms = NULL, updated_at = $4
+						  WHERE workflow_uuid = $5`
+
+	_, err = tx.Exec(ctx, updateStatusQuery,
+		WorkflowStatusEnqueued,
+		_DBOS_INTERNAL_QUEUE_NAME,
+		0,
+		time.Now().UnixMilli(),
+		workflowID)
+	if err != nil {
+		return fmt.Errorf("failed to update workflow status to ENQUEUED: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

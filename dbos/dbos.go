@@ -86,6 +86,8 @@ type DBOSContext interface {
 	// Workflow management
 	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) // Get a handle to an existing workflow
 	Enqueue(_ DBOSContext, params EnqueueOptions) (WorkflowHandle[any], error)      // Enqueue a new workflow with parameters
+	CancelWorkflow(workflowID string) error                                         // Cancel a workflow by setting its status to CANCELLED
+	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)   // Resume a cancelled workflow
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context

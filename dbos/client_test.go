@@ -1,12 +1,13 @@
 package dbos
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 )
 
-func TestClientEnqueue(t *testing.T) {
+func TestEnqueue(t *testing.T) {
 	// Setup server context - this will process tasks
 	serverCtx := setupDBOS(t, true, true)
 
@@ -172,4 +173,211 @@ func TestClientEnqueue(t *testing.T) {
 	if !queueEntriesAreCleanedUp(serverCtx) {
 		t.Fatal("expected queue entries to be cleaned up after client tests")
 	}
+}
+
+func TestCancelResume(t *testing.T) {
+	var stepsCompleted int
+
+	// Setup server context - this will process tasks
+	serverCtx := setupDBOS(t, true, true)
+
+	// Create queue for communication between client and server
+	queue := NewWorkflowQueue(serverCtx, "cancel-resume-queue")
+
+	// Step functions
+	step := func(ctx context.Context) (string, error) {
+		stepsCompleted++
+		return "step-complete", nil
+	}
+
+	// Events for synchronization
+	workflowStarted := NewEvent()
+	proceedSignal := NewEvent()
+
+	// Workflow that executes steps with blocking behavior
+	cancelResumeWorkflow := func(ctx DBOSContext, input int) (int, error) {
+		// Execute step one
+		_, err := RunAsStep(ctx, step)
+		if err != nil {
+			return 0, err
+		}
+
+		// Signal that workflow has started and step one completed
+		workflowStarted.Set()
+
+		// Wait for signal from main test to proceed
+		proceedSignal.Wait()
+
+		// Execute step two (will only happen if not cancelled)
+		_, err = RunAsStep(ctx, step)
+		if err != nil {
+			return 0, err
+		}
+
+		return input, nil
+	}
+	RegisterWorkflow(serverCtx, cancelResumeWorkflow, WithWorkflowName("CancelResumeWorkflow"))
+
+	// Launch the server context to start processing tasks
+	err := serverCtx.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch server DBOS instance: %v", err)
+	}
+
+	// Setup client context - this will enqueue tasks
+	clientCtx := setupDBOS(t, false, false) // Don't drop DB, don't check for leaks
+
+	t.Run("CancelAndResume", func(t *testing.T) {
+		// Reset the global counter
+		stepsCompleted = 0
+		input := 5
+		workflowID := "test-cancel-resume-workflow"
+
+		// Start the workflow - it will execute step one and then wait
+		handle, err := Enqueue[int, int](clientCtx, GenericEnqueueOptions[int]{
+			WorkflowName:       "CancelResumeWorkflow",
+			QueueName:          queue.Name,
+			WorkflowID:         workflowID,
+			WorkflowInput:      input,
+			ApplicationVersion: serverCtx.GetApplicationVersion(),
+		})
+		if err != nil {
+			t.Fatalf("failed to enqueue workflow from client: %v", err)
+		}
+
+		// Wait for workflow to signal it has started and step one completed
+		workflowStarted.Wait()
+
+		// Verify step one completed but step two hasn't
+		if stepsCompleted != 1 {
+			t.Fatalf("expected steps completed to be 1, got %d", stepsCompleted)
+		}
+
+		// Cancel the workflow
+		err = clientCtx.CancelWorkflow(workflowID)
+		if err != nil {
+			t.Fatalf("failed to cancel workflow: %v", err)
+		}
+
+		// Verify workflow is cancelled
+		cancelStatus, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status: %v", err)
+		}
+
+		if cancelStatus.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected workflow status to be CANCELLED, got %v", cancelStatus.Status)
+		}
+
+		// Resume the workflow
+		resumeHandle, err := ResumeWorkflow[int](clientCtx, workflowID)
+		if err != nil {
+			t.Fatalf("failed to resume workflow: %v", err)
+		}
+
+		// Wait for workflow completion
+		proceedSignal.Set() // Allow the workflow to proceed to step two
+		result, err := resumeHandle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from resumed workflow: %v", err)
+		}
+
+		// Verify the result
+		if result != input {
+			t.Fatalf("expected result to be %d, got %d", input, result)
+		}
+
+		// Verify both steps completed
+		if stepsCompleted != 2 {
+			t.Fatalf("expected steps completed to be 2, got %d", stepsCompleted)
+		}
+
+		// Check final status
+		finalStatus, err := resumeHandle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get final workflow status: %v", err)
+		}
+
+		if finalStatus.Status != WorkflowStatusSuccess {
+			t.Fatalf("expected final workflow status to be SUCCESS, got %v", finalStatus.Status)
+		}
+
+		// After resume, the queue name should change to the internal queue name
+		if finalStatus.QueueName != _DBOS_INTERNAL_QUEUE_NAME {
+			t.Fatalf("expected queue name to be %s, got '%s'", _DBOS_INTERNAL_QUEUE_NAME, finalStatus.QueueName)
+		}
+
+		// Resume the workflow again - should not run again
+		resumeAgainHandle, err := ResumeWorkflow[int](clientCtx, workflowID)
+		if err != nil {
+			t.Fatalf("failed to resume workflow again: %v", err)
+		}
+
+		resultAgain, err := resumeAgainHandle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from second resume: %v", err)
+		}
+
+		if resultAgain != input {
+			t.Fatalf("expected second resume result to be %d, got %d", input, resultAgain)
+		}
+
+		// Verify steps didn't run again
+		if stepsCompleted != 2 {
+			t.Fatalf("expected steps completed to remain 2 after second resume, got %d", stepsCompleted)
+		}
+
+		if !queueEntriesAreCleanedUp(serverCtx) {
+			t.Fatal("expected queue entries to be cleaned up after cancel/resume test")
+		}
+	})
+
+	t.Run("CancelNonExistentWorkflow", func(t *testing.T) {
+		nonExistentWorkflowID := "non-existent-workflow-id"
+
+		// Try to cancel a non-existent workflow
+		err := clientCtx.CancelWorkflow(nonExistentWorkflowID)
+		if err == nil {
+			t.Fatal("expected error when canceling non-existent workflow, but got none")
+		}
+
+		// Verify error type and code
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != NonExistentWorkflowError {
+			t.Fatalf("expected error code to be NonExistentWorkflowError, got %v", dbosErr.Code)
+		}
+
+		if dbosErr.DestinationID != nonExistentWorkflowID {
+			t.Fatalf("expected DestinationID to be %s, got %s", nonExistentWorkflowID, dbosErr.DestinationID)
+		}
+	})
+
+	t.Run("ResumeNonExistentWorkflow", func(t *testing.T) {
+		nonExistentWorkflowID := "non-existent-resume-workflow-id"
+
+		// Try to resume a non-existent workflow
+		_, err := ResumeWorkflow[int](clientCtx, nonExistentWorkflowID)
+		fmt.Println(err)
+		if err == nil {
+			t.Fatal("expected error when resuming non-existent workflow, but got none")
+		}
+
+		// Verify error type and code
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != NonExistentWorkflowError {
+			t.Fatalf("expected error code to be NonExistentWorkflowError, got %v", dbosErr.Code)
+		}
+
+		if dbosErr.DestinationID != nonExistentWorkflowID {
+			t.Fatalf("expected DestinationID to be %s, got %s", nonExistentWorkflowID, dbosErr.DestinationID)
+		}
+	})
 }
