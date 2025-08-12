@@ -739,7 +739,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 1: List all workflows (no filters)
-		allWorkflows, err := ListWorkflows(clientCtx)
+		allWorkflows, err := clientCtx.ListWorkflows()
 		if err != nil {
 			t.Fatalf("failed to list all workflows: %v", err)
 		}
@@ -749,7 +749,7 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 2: Filter by workflow IDs
 		expectedIDs := workflowIDs[:3]
-		specificWorkflows, err := ListWorkflows(clientCtx, WithWorkflowIDs(expectedIDs))
+		specificWorkflows, err := clientCtx.ListWorkflows(WithWorkflowIDs(expectedIDs))
 		if err != nil {
 			t.Fatalf("failed to list workflows by IDs: %v", err)
 		}
@@ -768,7 +768,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 3: Filter by workflow ID prefix
-		batchWorkflows, err := ListWorkflows(clientCtx, WithWorkflowIDPrefix("test-batch-"))
+		batchWorkflows, err := clientCtx.ListWorkflows(WithWorkflowIDPrefix("test-batch-"))
 		if err != nil {
 			t.Fatalf("failed to list workflows by prefix: %v", err)
 		}
@@ -783,7 +783,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 4: Filter by status - SUCCESS
-		successWorkflows, err := ListWorkflows(clientCtx,
+		successWorkflows, err := clientCtx.ListWorkflows(
 			WithWorkflowIDPrefix("test-"), // Only our test workflows
 			WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}))
 		if err != nil {
@@ -800,7 +800,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 5: Filter by status - ERROR
-		errorWorkflows, err := ListWorkflows(clientCtx,
+		errorWorkflows, err := clientCtx.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithStatus([]WorkflowStatusType{WorkflowStatusError}))
 		if err != nil {
@@ -818,7 +818,7 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 6: Filter by time range - first 5 workflows (start to start+500ms)
 		firstHalfTime := testStartTime.Add(500 * time.Millisecond)
-		firstHalfWorkflows, err := ListWorkflows(clientCtx,
+		firstHalfWorkflows, err := clientCtx.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithEndTime(firstHalfTime))
 		if err != nil {
@@ -829,7 +829,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 6b: Filter by time range - last 5 workflows (start+500ms to end)
-		secondHalfWorkflows, err := ListWorkflows(clientCtx,
+		secondHalfWorkflows, err := clientCtx.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithStartTime(firstHalfTime))
 		if err != nil {
@@ -840,7 +840,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 7: Test sorting order (ascending - default)
-		ascWorkflows, err := ListWorkflows(clientCtx,
+		ascWorkflows, err := clientCtx.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithSortDesc(false))
 		if err != nil {
@@ -848,7 +848,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 8: Test sorting order (descending)
-		descWorkflows, err := ListWorkflows(clientCtx,
+		descWorkflows, err := clientCtx.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithSortDesc(true))
 		if err != nil {
@@ -882,7 +882,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 9: Test limit and offset
-		limitedWorkflows, err := ListWorkflows(clientCtx,
+		limitedWorkflows, err := clientCtx.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithLimit(5))
 		if err != nil {
@@ -899,7 +899,7 @@ func TestListWorkflows(t *testing.T) {
 			}
 		}
 
-		offsetWorkflows, err := ListWorkflows(clientCtx,
+		offsetWorkflows, err := clientCtx.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithOffset(5),
 			WithLimit(3))
@@ -918,7 +918,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 10: Test input/output loading
-		noDataWorkflows, err := ListWorkflows(clientCtx,
+		noDataWorkflows, err := clientCtx.ListWorkflows(
 			WithWorkflowIDs(workflowIDs[:2]),
 			WithLoadInput(false),
 			WithLoadOutput(false))

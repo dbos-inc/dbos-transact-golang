@@ -1697,15 +1697,14 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 // It wraps the system database's listWorkflows functionality with type-safe functional options.
 //
 // The function supports filtering by workflow IDs, status, time ranges, names, application versions,
-// authenticated users, and more. It also supports pagination through limit/offset parameters and
-// sorting control.
+// authenticated users, workflow ID prefixes, and more. It also supports pagination through
+// limit/offset parameters and sorting control (ascending by default, or descending with WithSortDesc).
 //
 // By default, both input and output data are loaded for each workflow. This can be controlled
 // using WithLoadInput(false) and WithLoadOutput(false) options for better performance when
 // the data is not needed.
 //
 // Parameters:
-//   - ctx: DBOS context for the operation
 //   - opts: Functional options to configure the query filters and parameters
 //
 // Returns a slice of WorkflowStatus structs containing the workflow information.
@@ -1713,7 +1712,7 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 // Example usage:
 //
 //	// List all successful workflows from the last 24 hours
-//	workflows, err := dbos.ListWorkflows(ctx,
+//	workflows, err := ctx.ListWorkflows(
 //	    dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess}),
 //	    dbos.WithStartTime(time.Now().Add(-24*time.Hour)),
 //	    dbos.WithLimit(100))
@@ -1722,7 +1721,7 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 //	}
 //
 //	// List workflows by specific IDs without loading input/output data
-//	workflows, err := dbos.ListWorkflows(ctx,
+//	workflows, err := ctx.ListWorkflows(
 //	    dbos.WithWorkflowIDs([]string{"workflow1", "workflow2"}),
 //	    dbos.WithLoadInput(false),
 //	    dbos.WithLoadOutput(false))
@@ -1731,7 +1730,7 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 //	}
 //
 //	// List workflows with pagination
-//	workflows, err := dbos.ListWorkflows(ctx,
+//	workflows, err := ctx.ListWorkflows(
 //	    dbos.WithUser("john.doe"),
 //	    dbos.WithOffset(50),
 //	    dbos.WithLimit(25),
@@ -1739,10 +1738,7 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
-	if ctx == nil {
-		return nil, errors.New("ctx cannot be nil")
-	}
+func (c *dbosContext) ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
 
 	// Initialize parameters with defaults
 	params := &listWorkflowsParams{
@@ -1772,8 +1768,8 @@ func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStat
 		loadOutput:         params.loadOutput,
 	}
 
-	// Call the system database to list workflows
-	workflows, err := ctx.(*dbosContext).systemDB.listWorkflows(ctx, dbInput)
+	// Call the context method to list workflows
+	workflows, err := c.systemDB.listWorkflows(c, dbInput)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list workflows: %w", err)
 	}
