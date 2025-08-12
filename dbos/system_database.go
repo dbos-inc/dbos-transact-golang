@@ -821,11 +821,6 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) err
 
 	originalWorkflow := wfs[0]
 
-	// Check if the workflow has completed successfully (required for forking)
-	if originalWorkflow.Status != WorkflowStatusSuccess {
-		return fmt.Errorf("cannot fork workflow %s: workflow must be in SUCCESS state, current state: %s", input.originalWorkflowID, originalWorkflow.Status)
-	}
-
 	// Validate that startStep doesn't exceed the workflow's actual steps
 	maxStepQuery := `SELECT COALESCE(MAX(function_id), 0) FROM dbos.operation_outputs WHERE workflow_uuid = $1`
 	var maxStepID int
