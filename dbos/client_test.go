@@ -6,14 +6,6 @@ import (
 	"time"
 )
 
-// Simple workflow that will be executed on the server
-func serverWorkflow(ctx DBOSContext, input string) (string, error) {
-	if input != "test-input" {
-		return "", fmt.Errorf("unexpected input: %s", input)
-	}
-	return "processed: " + input, nil
-}
-
 func TestClientEnqueue(t *testing.T) {
 	// Setup server context - this will process tasks
 	serverCtx := setupDBOS(t, true, true)
@@ -22,6 +14,15 @@ func TestClientEnqueue(t *testing.T) {
 	queue := NewWorkflowQueue(serverCtx, "client-enqueue-queue")
 
 	// Register workflows with custom names so client can reference them
+	type wfInput struct {
+		Input string
+	}
+	serverWorkflow := func(ctx DBOSContext, input wfInput) (string, error) {
+		if input.Input != "test-input" {
+			return "", fmt.Errorf("unexpected input: %s", input.Input)
+		}
+		return "processed: " + input.Input, nil
+	}
 	RegisterWorkflow(serverCtx, serverWorkflow, WithWorkflowName("ServerWorkflow"))
 
 	// Workflow that blocks until cancelled (for timeout test)
@@ -46,10 +47,10 @@ func TestClientEnqueue(t *testing.T) {
 
 	t.Run("EnqueueAndGetResult", func(t *testing.T) {
 		// Client enqueues a task using the new Enqueue method
-		handle, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
+		handle, err := Enqueue[wfInput, string](clientCtx, GenericEnqueueOptions[wfInput]{
 			WorkflowName:       "ServerWorkflow",
 			QueueName:          queue.Name,
-			WorkflowInput:      "test-input",
+			WorkflowInput:      wfInput{Input: "test-input"},
 			ApplicationVersion: serverCtx.GetApplicationVersion(),
 		})
 		if err != nil {
@@ -100,11 +101,11 @@ func TestClientEnqueue(t *testing.T) {
 		customWorkflowID := "custom-client-workflow-id"
 
 		// Client enqueues a task with a custom workflow ID
-		_, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
+		_, err := Enqueue[wfInput, string](clientCtx, GenericEnqueueOptions[wfInput]{
 			WorkflowName:  "ServerWorkflow",
 			QueueName:     queue.Name,
 			WorkflowID:    customWorkflowID,
-			WorkflowInput: "test-input",
+			WorkflowInput: wfInput{Input: "test-input"},
 		})
 		if err != nil {
 			t.Fatalf("failed to enqueue workflow with custom ID: %v", err)

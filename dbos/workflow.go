@@ -379,6 +379,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R
 		// This type check is redundant with the one in the wrapper, but I'd better be safe than sorry
 		typedInput, ok := input.(P)
 		if !ok {
+			// FIXME: we need to record the error in the database here
 			return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
 		}
 		return fn(ctx, typedInput)
@@ -387,6 +388,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R
 	typeErasedWrapper := WrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 		typedInput, ok := input.(P)
 		if !ok {
+			// FIXME: we need to record the error in the database here
 			return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
 		}
 
