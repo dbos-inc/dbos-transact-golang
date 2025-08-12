@@ -809,7 +809,6 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) err
 	listInput := listWorkflowsDBInput{
 		workflowIDs: []string{input.originalWorkflowID},
 		loadInput:   true,
-		loadOutput:  true,
 		tx:          tx,
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
