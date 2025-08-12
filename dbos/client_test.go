@@ -632,3 +632,306 @@ func TestForkWorkflow(t *testing.T) {
 		t.Fatal("expected queue entries to be cleaned up after fork workflow tests")
 	}
 }
+
+func TestListWorkflows(t *testing.T) {
+	// Setup server context
+	serverCtx := setupDBOS(t, true, true)
+
+	// Create queue for communication
+	queue := NewWorkflowQueue(serverCtx, "list-workflows-queue")
+
+	// Simple test workflow
+	type testInput struct {
+		Value int
+		ID    string
+	}
+
+	simpleWorkflow := func(ctx DBOSContext, input testInput) (string, error) {
+		if input.Value < 0 {
+			return "", fmt.Errorf("negative value: %d", input.Value)
+		}
+		return fmt.Sprintf("result-%d-%s", input.Value, input.ID), nil
+	}
+	RegisterWorkflow(serverCtx, simpleWorkflow, WithWorkflowName("SimpleWorkflow"))
+
+	// Launch server
+	err := serverCtx.Launch()
+	if err != nil {
+		t.Fatalf("failed to launch server DBOS instance: %v", err)
+	}
+
+	// Setup client context
+	clientCtx := setupDBOS(t, false, false)
+
+	t.Run("ListWorkflowsFiltering", func(t *testing.T) {
+		var workflowIDs []string
+		var handles []WorkflowHandle[string]
+
+		// Record start time for filtering tests
+		testStartTime := time.Now()
+
+		// Start 10 workflows at 100ms intervals with different patterns
+		for i := range 10 {
+			var workflowID string
+			var handle WorkflowHandle[string]
+
+			if i < 5 {
+				// First 5 workflows: use prefix "test-batch-" and succeed
+				workflowID = fmt.Sprintf("test-batch-%d", i)
+				handle, err = Enqueue[testInput, string](clientCtx, GenericEnqueueOptions[testInput]{
+					WorkflowName:       "SimpleWorkflow",
+					QueueName:          queue.Name,
+					WorkflowID:         workflowID,
+					WorkflowInput:      testInput{Value: i, ID: fmt.Sprintf("success-%d", i)},
+					ApplicationVersion: serverCtx.GetApplicationVersion(),
+				})
+			} else {
+				// Last 5 workflows: use prefix "test-other-" and some will fail
+				workflowID = fmt.Sprintf("test-other-%d", i)
+				value := i
+				if i >= 8 {
+					value = -i // These will fail
+				}
+				handle, err = Enqueue[testInput, string](clientCtx, GenericEnqueueOptions[testInput]{
+					WorkflowName:       "SimpleWorkflow",
+					QueueName:          queue.Name,
+					WorkflowID:         workflowID,
+					WorkflowInput:      testInput{Value: value, ID: fmt.Sprintf("test-%d", i)},
+					ApplicationVersion: serverCtx.GetApplicationVersion(),
+				})
+			}
+
+			if err != nil {
+				t.Fatalf("failed to enqueue workflow %d: %v", i, err)
+			}
+
+			workflowIDs = append(workflowIDs, workflowID)
+			handles = append(handles, handle)
+
+			// Wait 100ms between workflow starts
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		// Wait for all workflows to complete
+		for i, handle := range handles {
+			_, err := handle.GetResult()
+			if i < 8 {
+				// First 8 should succeed
+				if err != nil {
+					t.Fatalf("workflow %d should have succeeded but got error: %v", i, err)
+				}
+			} else {
+				// Last 2 should fail
+				if err == nil {
+					t.Fatalf("workflow %d should have failed but succeeded", i)
+				}
+			}
+		}
+
+		// Test 1: List all workflows (no filters)
+		allWorkflows, err := ListWorkflows(clientCtx)
+		if err != nil {
+			t.Fatalf("failed to list all workflows: %v", err)
+		}
+		if len(allWorkflows) < 10 {
+			t.Fatalf("expected at least 10 workflows, got %d", len(allWorkflows))
+		}
+
+		// Test 2: Filter by workflow IDs
+		expectedIDs := workflowIDs[:3]
+		specificWorkflows, err := ListWorkflows(clientCtx, WithWorkflowIDs(expectedIDs))
+		if err != nil {
+			t.Fatalf("failed to list workflows by IDs: %v", err)
+		}
+		if len(specificWorkflows) != 3 {
+			t.Fatalf("expected 3 workflows, got %d", len(specificWorkflows))
+		}
+		// Verify returned workflow IDs match expected
+		returnedIDs := make(map[string]bool)
+		for _, wf := range specificWorkflows {
+			returnedIDs[wf.ID] = true
+		}
+		for _, expectedID := range expectedIDs {
+			if !returnedIDs[expectedID] {
+				t.Fatalf("expected workflow ID %s not found in results", expectedID)
+			}
+		}
+
+		// Test 3: Filter by workflow ID prefix
+		batchWorkflows, err := ListWorkflows(clientCtx, WithWorkflowIDPrefix("test-batch-"))
+		if err != nil {
+			t.Fatalf("failed to list workflows by prefix: %v", err)
+		}
+		if len(batchWorkflows) != 5 {
+			t.Fatalf("expected 5 batch workflows, got %d", len(batchWorkflows))
+		}
+		// Verify all returned workflow IDs have the correct prefix
+		for _, wf := range batchWorkflows {
+			if !strings.HasPrefix(wf.ID, "test-batch-") {
+				t.Fatalf("workflow ID %s does not have expected prefix 'test-batch-'", wf.ID)
+			}
+		}
+
+		// Test 4: Filter by status - SUCCESS
+		successWorkflows, err := ListWorkflows(clientCtx,
+			WithWorkflowIDPrefix("test-"), // Only our test workflows
+			WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}))
+		if err != nil {
+			t.Fatalf("failed to list successful workflows: %v", err)
+		}
+		if len(successWorkflows) != 8 {
+			t.Fatalf("expected 8 successful workflows, got %d", len(successWorkflows))
+		}
+		// Verify all returned workflows have SUCCESS status
+		for _, wf := range successWorkflows {
+			if wf.Status != WorkflowStatusSuccess {
+				t.Fatalf("workflow %s has status %s, expected SUCCESS", wf.ID, wf.Status)
+			}
+		}
+
+		// Test 5: Filter by status - ERROR
+		errorWorkflows, err := ListWorkflows(clientCtx,
+			WithWorkflowIDPrefix("test-"),
+			WithStatus([]WorkflowStatusType{WorkflowStatusError}))
+		if err != nil {
+			t.Fatalf("failed to list error workflows: %v", err)
+		}
+		if len(errorWorkflows) != 2 {
+			t.Fatalf("expected 2 error workflows, got %d", len(errorWorkflows))
+		}
+		// Verify all returned workflows have ERROR status
+		for _, wf := range errorWorkflows {
+			if wf.Status != WorkflowStatusError {
+				t.Fatalf("workflow %s has status %s, expected ERROR", wf.ID, wf.Status)
+			}
+		}
+
+		// Test 6: Filter by time range - first 5 workflows (start to start+500ms)
+		firstHalfTime := testStartTime.Add(500 * time.Millisecond)
+		firstHalfWorkflows, err := ListWorkflows(clientCtx,
+			WithWorkflowIDPrefix("test-"),
+			WithEndTime(firstHalfTime))
+		if err != nil {
+			t.Fatalf("failed to list first half workflows by time range: %v", err)
+		}
+		if len(firstHalfWorkflows) != 5 {
+			t.Fatalf("expected 5 workflows in first half time range, got %d", len(firstHalfWorkflows))
+		}
+
+		// Test 6b: Filter by time range - last 5 workflows (start+500ms to end)
+		secondHalfWorkflows, err := ListWorkflows(clientCtx,
+			WithWorkflowIDPrefix("test-"),
+			WithStartTime(firstHalfTime))
+		if err != nil {
+			t.Fatalf("failed to list second half workflows by time range: %v", err)
+		}
+		if len(secondHalfWorkflows) != 5 {
+			t.Fatalf("expected 5 workflows in second half time range, got %d", len(secondHalfWorkflows))
+		}
+
+		// Test 7: Test sorting order (ascending - default)
+		ascWorkflows, err := ListWorkflows(clientCtx,
+			WithWorkflowIDPrefix("test-"),
+			WithSortDesc(false))
+		if err != nil {
+			t.Fatalf("failed to list workflows ascending: %v", err)
+		}
+
+		// Test 8: Test sorting order (descending)
+		descWorkflows, err := ListWorkflows(clientCtx,
+			WithWorkflowIDPrefix("test-"),
+			WithSortDesc(true))
+		if err != nil {
+			t.Fatalf("failed to list workflows descending: %v", err)
+		}
+
+		// Verify sorting - workflows should be ordered by creation time
+		// First workflow in desc should be last in asc (latest created)
+		if ascWorkflows[len(ascWorkflows)-1].ID != descWorkflows[0].ID {
+			t.Fatalf("sorting verification failed: asc last (%s) != desc first (%s)",
+				ascWorkflows[len(ascWorkflows)-1].ID, descWorkflows[0].ID)
+		}
+		// Last workflow in desc should be first in asc (earliest created)
+		if ascWorkflows[0].ID != descWorkflows[len(descWorkflows)-1].ID {
+			t.Fatalf("sorting verification failed: asc first (%s) != desc last (%s)",
+				ascWorkflows[0].ID, descWorkflows[len(descWorkflows)-1].ID)
+		}
+
+		// Verify ascending order: each workflow should be created at or after the previous
+		for i := 1; i < len(ascWorkflows); i++ {
+			if ascWorkflows[i].CreatedAt.Before(ascWorkflows[i-1].CreatedAt) {
+				t.Fatalf("ascending order violation: workflow at index %d created before previous", i)
+			}
+		}
+
+		// Verify descending order: each workflow should be created at or before the previous
+		for i := 1; i < len(descWorkflows); i++ {
+			if descWorkflows[i].CreatedAt.After(descWorkflows[i-1].CreatedAt) {
+				t.Fatalf("descending order violation: workflow at index %d created after previous", i)
+			}
+		}
+
+		// Test 9: Test limit and offset
+		limitedWorkflows, err := ListWorkflows(clientCtx,
+			WithWorkflowIDPrefix("test-"),
+			WithLimit(5))
+		if err != nil {
+			t.Fatalf("failed to list workflows with limit: %v", err)
+		}
+		if len(limitedWorkflows) != 5 {
+			t.Fatalf("expected 5 workflows with limit, got %d", len(limitedWorkflows))
+		}
+		// Verify we got the first 5 workflows (earliest created)
+		expectedFirstFive := ascWorkflows[:5]
+		for i, wf := range limitedWorkflows {
+			if wf.ID != expectedFirstFive[i].ID {
+				t.Fatalf("limited workflow at index %d: expected %s, got %s", i, expectedFirstFive[i].ID, wf.ID)
+			}
+		}
+
+		offsetWorkflows, err := ListWorkflows(clientCtx,
+			WithWorkflowIDPrefix("test-"),
+			WithOffset(5),
+			WithLimit(3))
+		if err != nil {
+			t.Fatalf("failed to list workflows with offset: %v", err)
+		}
+		if len(offsetWorkflows) != 3 {
+			t.Fatalf("expected 3 workflows with offset, got %d", len(offsetWorkflows))
+		}
+		// Verify we got workflows 5, 6, 7 from the ascending list
+		expectedOffsetThree := ascWorkflows[5:8]
+		for i, wf := range offsetWorkflows {
+			if wf.ID != expectedOffsetThree[i].ID {
+				t.Fatalf("offset workflow at index %d: expected %s, got %s", i, expectedOffsetThree[i].ID, wf.ID)
+			}
+		}
+
+		// Test 10: Test input/output loading
+		noDataWorkflows, err := ListWorkflows(clientCtx,
+			WithWorkflowIDs(workflowIDs[:2]),
+			WithLoadInput(false),
+			WithLoadOutput(false))
+		if err != nil {
+			t.Fatalf("failed to list workflows without data: %v", err)
+		}
+		if len(noDataWorkflows) != 2 {
+			t.Fatalf("expected 2 workflows without data, got %d", len(noDataWorkflows))
+		}
+
+		// Verify input/output are not loaded
+		for _, wf := range noDataWorkflows {
+			if wf.Input != nil {
+				t.Fatalf("expected input to be nil when LoadInput=false, got %v", wf.Input)
+			}
+			if wf.Output != nil {
+				t.Fatalf("expected output to be nil when LoadOutput=false, got %v", wf.Output)
+			}
+		}
+	})
+
+	// Verify all queue entries are cleaned up
+	if !queueEntriesAreCleanedUp(serverCtx) {
+		t.Fatal("expected queue entries to be cleaned up after list workflows tests")
+	}
+}

@@ -441,6 +441,8 @@ type listWorkflowsDBInput struct {
 	limit              *int
 	offset             *int
 	sortDesc           bool
+	loadInput          bool
+	loadOutput         bool
 	tx                 pgx.Tx
 }
 
@@ -448,12 +450,22 @@ type listWorkflowsDBInput struct {
 func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error) {
 	qb := newQueryBuilder()
 
-	// Build the base query
-	baseQuery := `SELECT workflow_uuid, status, name, authenticated_user, assumed_role, authenticated_roles,
-	                 output, error, executor_id, created_at, updated_at, application_version, application_id,
-	                 recovery_attempts, queue_name, workflow_timeout_ms, workflow_deadline_epoch_ms, started_at_epoch_ms,
-					 deduplication_id, inputs, priority
-	          FROM dbos.workflow_status`
+	// Build the base query with conditional column selection
+	loadColumns := []string{
+		"workflow_uuid", "status", "name", "authenticated_user", "assumed_role", "authenticated_roles",
+		"executor_id", "created_at", "updated_at", "application_version", "application_id",
+		"recovery_attempts", "queue_name", "workflow_timeout_ms", "workflow_deadline_epoch_ms", "started_at_epoch_ms",
+		"deduplication_id", "priority",
+	}
+
+	if input.loadOutput {
+		loadColumns = append(loadColumns, "output", "error")
+	}
+	if input.loadInput {
+		loadColumns = append(loadColumns, "inputs")
+	}
+
+	baseQuery := fmt.Sprintf("SELECT %s FROM dbos.workflow_status", strings.Join(loadColumns, ", "))
 
 	// Add filters using query builder
 	if input.workflowName != "" {
@@ -543,14 +555,23 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var applicationVersion *string
 		var executorID *string
 
-		err := rows.Scan(
+		// Build scan arguments dynamically based on loaded columns
+		scanArgs := []interface{}{
 			&wf.ID, &wf.Status, &wf.Name, &wf.AuthenticatedUser, &wf.AssumedRole,
-			&wf.AuthenticatedRoles, &outputString, &errorStr, &executorID, &createdAtMs,
+			&wf.AuthenticatedRoles, &executorID, &createdAtMs,
 			&updatedAtMs, &applicationVersion, &wf.ApplicationID,
 			&wf.Attempts, &queueName, &timeoutMs,
-			&deadlineMs, &startedAtMs, &deduplicationID,
-			&inputString, &wf.Priority,
-		)
+			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority,
+		}
+
+		if input.loadOutput {
+			scanArgs = append(scanArgs, &outputString, &errorStr)
+		}
+		if input.loadInput {
+			scanArgs = append(scanArgs, &inputString)
+		}
+
+		err := rows.Scan(scanArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan workflow row: %w", err)
 		}
@@ -592,20 +613,26 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			wf.StartedAt = time.Unix(0, *startedAtMs*int64(time.Millisecond))
 		}
 
-		// Convert error string to error type if present
-		if errorStr != nil && *errorStr != "" {
-			wf.Error = errors.New(*errorStr)
+		// Handle output and error only if loadOutput is true
+		if input.loadOutput {
+			// Convert error string to error type if present
+			if errorStr != nil && *errorStr != "" {
+				wf.Error = errors.New(*errorStr)
+			}
+
+			// XXX maybe set wf.Output to outputString and run deserialize out of system DB
+			wf.Output, err = deserialize(outputString)
+			if err != nil {
+				return nil, fmt.Errorf("failed to deserialize output: %w", err)
+			}
 		}
 
-		// XXX maybe set wf.Output to outputString and run deserialize out of system DB
-		wf.Output, err = deserialize(outputString)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize output: %w", err)
-		}
-
-		wf.Input, err = deserialize(inputString)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize input: %w", err)
+		// Handle input only if loadInput is true
+		if input.loadInput {
+			wf.Input, err = deserialize(inputString)
+			if err != nil {
+				return nil, fmt.Errorf("failed to deserialize input: %w", err)
+			}
 		}
 
 		workflows = append(workflows, wf)
@@ -664,6 +691,8 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
 	// Check if workflow exists
 	listInput := listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
+		loadInput:   true,
+		loadOutput:  true,
 		tx:          tx,
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
@@ -717,6 +746,8 @@ func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 	// Check the status of the workflow. If it is complete, do nothing.
 	listInput := listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
+		loadInput:   true,
+		loadOutput:  true,
 		tx:          tx,
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
@@ -779,6 +810,8 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) err
 	// Get the original workflow status
 	listInput := listWorkflowsDBInput{
 		workflowIDs: []string{input.originalWorkflowID},
+		loadInput:   true,
+		loadOutput:  true,
 		tx:          tx,
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
