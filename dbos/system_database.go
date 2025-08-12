@@ -580,12 +580,10 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			wf.QueueName = *queueName
 		}
 
-		// Handle NULL executorID
 		if executorID != nil && len(*executorID) > 0 {
 			wf.ExecutorID = *executorID
 		}
 
-		// We work with strings -- the DB could return NULL values
 		if applicationVersion != nil && len(*applicationVersion) > 0 {
 			wf.ApplicationVersion = *applicationVersion
 		}
