@@ -504,7 +504,11 @@ func TestForkWorkflow(t *testing.T) {
 			t.Logf("Forking at step %d", step)
 
 			customForkedWorkflowID := fmt.Sprintf("forked-workflow-step-%d", step)
-			forkedHandle, err := ForkWorkflow[string](clientCtx, originalWorkflowID, WithForkWorkflowID(customForkedWorkflowID), WithForkStartStep(uint(step-1)))
+			forkedHandle, err := ForkWorkflow[string](clientCtx, ForkWorkflowInput{
+				OriginalWorkflowID: originalWorkflowID,
+				ForkedWorkflowID:   customForkedWorkflowID,
+				StartStep:          uint(step - 1),
+			})
 			if err != nil {
 				t.Fatalf("failed to fork workflow at step %d: %v", step, err)
 			}
@@ -575,7 +579,10 @@ func TestForkWorkflow(t *testing.T) {
 		nonExistentWorkflowID := "non-existent-workflow-for-fork"
 
 		// Try to fork a non-existent workflow
-		_, err := clientCtx.ForkWorkflow(clientCtx, nonExistentWorkflowID, WithForkStartStep(1))
+		_, err := clientCtx.ForkWorkflow(clientCtx, ForkWorkflowInput{
+			OriginalWorkflowID: nonExistentWorkflowID,
+			StartStep:          1,
+		})
 		if err == nil {
 			t.Fatal("expected error when forking non-existent workflow, but got none")
 		}
@@ -617,7 +624,10 @@ func TestForkWorkflow(t *testing.T) {
 		}
 
 		// Try to fork at step 999 (beyond workflow's actual steps)
-		_, err = clientCtx.ForkWorkflow(clientCtx, originalWorkflowID, WithForkStartStep(999))
+		_, err = clientCtx.ForkWorkflow(clientCtx, ForkWorkflowInput{
+			OriginalWorkflowID: originalWorkflowID,
+			StartStep:          999,
+		})
 		if err == nil {
 			t.Fatal("expected error when forking at step 999, but got none")
 		}

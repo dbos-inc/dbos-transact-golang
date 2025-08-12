@@ -1418,126 +1418,85 @@ func ResumeWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R
 	return &workflowPollingHandle[R]{workflowID: workflowID, dbosContext: ctx}, nil
 }
 
-// forkWorkflowParams holds configuration parameters for forking workflows
-type forkWorkflowParams struct {
-	applicationVersion string
-	forkedWorkflowID   string
-	startStep          uint
+// ForkWorkflowInput holds configuration parameters for forking workflows.
+// It replaces the functional options pattern to comply with CS-5 style guidelines.
+type ForkWorkflowInput struct {
+	OriginalWorkflowID string // Required: The UUID of the original workflow to fork from
+	ForkedWorkflowID   string // Optional: Custom workflow ID for the forked workflow (auto-generated if empty)
+	StartStep          uint   // Optional: Step to start the forked workflow from (default: 0)
+	ApplicationVersion string // Optional: Application version for the forked workflow (inherits from original if empty)
 }
 
-// ForkWorkflowOption is a functional option for configuring fork workflow execution parameters.
-type ForkWorkflowOption func(*forkWorkflowParams)
-
-// WithForkApplicationVersion overrides the application version for the forked workflow.
-// If not specified, the original workflow's application version is used.
-//
-// Example:
-//
-//	dbos.ForkWorkflow[Result](ctx, originalID, 1,
-//	    dbos.WithForkApplicationVersion("v2.0.0"))
-func WithForkApplicationVersion(version string) ForkWorkflowOption {
-	return func(p *forkWorkflowParams) {
-		p.applicationVersion = version
-	}
-}
-
-// WithForkStartStep overrides the start step for the forked workflow.
-// This is an alternative to specifying the startStep as a parameter.
-// If both are specified, this option takes precedence.
-//
-// Example:
-//
-//	dbos.ForkWorkflow[Result](ctx, originalID, 1,
-//	    dbos.WithForkStartStep(5)) // Will start from step 5, not step 1
-func WithForkStartStep(startStep uint) ForkWorkflowOption {
-	return func(p *forkWorkflowParams) {
-		p.startStep = startStep
-	}
-}
-
-// WithForkWorkflowID sets a custom workflow ID for the forked workflow.
-// If not specified, a new UUID will be generated automatically.
-// The workflow ID must be unique across all workflows.
-//
-// Example:
-//
-//	dbos.ForkWorkflow[Result](ctx, originalID, 1,
-//	    dbos.WithForkWorkflowID("my-custom-fork-id"))
-func WithForkWorkflowID(workflowID string) ForkWorkflowOption {
-	return func(p *forkWorkflowParams) {
-		p.forkedWorkflowID = workflowID
-	}
-}
-
-func (c *dbosContext) ForkWorkflow(_ DBOSContext, originalWorkflowID string, opts ...ForkWorkflowOption) (WorkflowHandle[any], error) {
-	// Parse options
-	params := &forkWorkflowParams{}
-	for _, opt := range opts {
-		opt(params)
-	}
-
-	if originalWorkflowID == "" {
+func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error) {
+	if input.OriginalWorkflowID == "" {
 		return nil, errors.New("original workflow ID cannot be empty")
 	}
 
-	// Generate new workflow ID
-	if params.forkedWorkflowID == "" {
-		params.forkedWorkflowID = uuid.New().String()
+	// Generate new workflow ID if not provided
+	forkedWorkflowID := input.ForkedWorkflowID
+	if forkedWorkflowID == "" {
+		forkedWorkflowID = uuid.New().String()
 	}
 
 	// Create input for system database
-	input := forkWorkflowDBInput{
-		originalWorkflowID: originalWorkflowID,
-		forkedWorkflowID:   params.forkedWorkflowID,
-		startStep:          int(params.startStep),
-		applicationVersion: params.applicationVersion,
+	dbInput := forkWorkflowDBInput{
+		originalWorkflowID: input.OriginalWorkflowID,
+		forkedWorkflowID:   forkedWorkflowID,
+		startStep:          int(input.StartStep),
+		applicationVersion: input.ApplicationVersion,
 	}
 
 	// Call system database method
-	err := c.systemDB.forkWorkflow(c, input)
+	err := c.systemDB.forkWorkflow(c, dbInput)
 	if err != nil {
 		return nil, err
 	}
 
 	return &workflowPollingHandle[any]{
-		workflowID:  params.forkedWorkflowID,
+		workflowID:  forkedWorkflowID,
 		dbosContext: c,
 	}, nil
 }
 
 // ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.
-// The forked workflow will have a new UUID and will execute from the specified startStep.
-// If startStep > 1, the forked workflow will have the operation outputs from steps 1 to startStep-1
+// The forked workflow will have a new UUID and will execute from the specified StartStep.
+// If StartStep > 0, the forked workflow will have the operation outputs from steps 0 to StartStep-1
 // copied from the original workflow.
 //
 // Parameters:
 //   - ctx: DBOS context for the operation
-//   - originalWorkflowID: The UUID of the original workflow to fork from
-//   - opts: Optional configuration parameters for the forked workflow using functional options
+//   - input: Configuration parameters for the forked workflow
 //
-// Available functional options:
-//   - WithForkWorkflowID: Set a custom workflow ID for the forked workflow
-//   - WithForkStartStep: Override the start step (alternative to the startStep parameter)
-//   - WithForkApplicationVersion: Set a specific application version for the forked workflow
+// The input struct contains:
+//   - OriginalWorkflowID: The UUID of the original workflow to fork from (required)
+//   - ForkedWorkflowID: Custom workflow ID for the forked workflow (optional, auto-generated if empty)
+//   - StartStep: Step to start the forked workflow from (optional, default: 0)
+//   - ApplicationVersion: Application version for the forked workflow (optional, inherits from original if empty)
 //
 // Returns a typed workflow handle for the newly created forked workflow.
 //
 // Example usage:
 //
 //	// Basic fork from step 5
-//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, "original-workflow-id", 5)
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
+//	    OriginalWorkflowID: "original-workflow-id",
+//	    StartStep:          5,
+//	})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //
 //	// Fork with custom workflow ID and application version
-//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, "original-workflow-id", 3,
-//	    dbos.WithForkWorkflowID("my-custom-fork-id"),
-//	    dbos.WithForkApplicationVersion("v2.0.0"))
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
+//	    OriginalWorkflowID: "original-workflow-id",
+//	    ForkedWorkflowID:   "my-custom-fork-id",
+//	    StartStep:          3,
+//	    ApplicationVersion: "v2.0.0",
+//	})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-func ForkWorkflow[R any](ctx DBOSContext, originalWorkflowID string, opts ...ForkWorkflowOption) (WorkflowHandle[R], error) {
+func ForkWorkflow[R any](ctx DBOSContext, input ForkWorkflowInput) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
@@ -1546,7 +1505,7 @@ func ForkWorkflow[R any](ctx DBOSContext, originalWorkflowID string, opts ...For
 	var r R
 	gob.Register(r)
 
-	handle, err := ctx.ForkWorkflow(ctx, originalWorkflowID, opts...)
+	handle, err := ctx.ForkWorkflow(ctx, input)
 	if err != nil {
 		return nil, err
 	}
