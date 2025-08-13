@@ -300,9 +300,9 @@ func TestCancelResume(t *testing.T) {
 		originalDeadline := cancelStatus.Deadline
 
 		// Resume the workflow
-		resumeStart := time.Now()
 		resumeHandle, err := ResumeWorkflow[string](clientCtx, workflowID)
 		require.NoError(t, err, "failed to resume workflow")
+		resumeStart := time.Now()
 
 		// Get status after resume to check the deadline
 		resumeStatus, err := resumeHandle.GetStatus()
@@ -312,8 +312,8 @@ func TestCancelResume(t *testing.T) {
 		assert.False(t, resumeStatus.Deadline.Equal(originalDeadline), "expected deadline to be reset after resume, but it remained the same: %v", originalDeadline)
 
 		// The new deadline should be after resumeStart + workflowTimeout
-		expectedDeadline := resumeStart.Add(workflowTimeout + 100*time.Millisecond) // 100ms buffer
-		assert.False(t, resumeStatus.Deadline.Before(expectedDeadline), "deadline %v is too early (expected around %v)", resumeStatus.Deadline, expectedDeadline)
+		expectedDeadline := resumeStart.Add(workflowTimeout - 100*time.Millisecond) // Allow some leeway for processing time
+		assert.True(t, resumeStatus.Deadline.After(expectedDeadline), "deadline %v is too early (expected around %v)", resumeStatus.Deadline, expectedDeadline)
 
 		// Wait for the workflow to complete
 		_, err = resumeHandle.GetResult()
