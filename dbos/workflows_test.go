@@ -339,7 +339,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		// Attempting to register after launch should panic
 		defer func() {
 			if r := recover(); r == nil {
-				require.FailNow(t, "expected panic from registration after launch but got none")
+				t.Fatal("expected panic from registration after launch but got none")
 			}
 		}()
 		RegisterWorkflow(freshCtx, simpleWorkflow)
