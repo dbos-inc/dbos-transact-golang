@@ -362,7 +362,6 @@ func TestCancelResume(t *testing.T) {
 
 		// Try to resume a non-existent workflow
 		_, err := ResumeWorkflow[int](clientCtx, nonExistentWorkflowID)
-		fmt.Println(err)
 		if err == nil {
 			t.Fatal("expected error when resuming non-existent workflow, but got none")
 		}
