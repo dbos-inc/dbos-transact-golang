@@ -103,9 +103,9 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from ListWorkflows
-		workflows, err := executor.(*dbosContext).systemDB.listWorkflows(context.Background(), listWorkflowsDBInput{
-			workflowIDs: []string{directHandle.GetWorkflowID()},
-		})
+		workflows, err := executor.ListWorkflows(WithWorkflowIDs(
+			[]string{directHandle.GetWorkflowID()},
+		))
 		if err != nil {
 			t.Fatalf("failed to list workflows: %v", err)
 		}
@@ -220,9 +220,9 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from ListWorkflows
-		workflows, err := executor.(*dbosContext).systemDB.listWorkflows(context.Background(), listWorkflowsDBInput{
-			workflowIDs: []string{directHandle.GetWorkflowID()},
-		})
+		workflows, err := executor.ListWorkflows(WithWorkflowIDs(
+			[]string{directHandle.GetWorkflowID()},
+		))
 		if err != nil {
 			t.Fatalf("failed to list workflows: %v", err)
 		}
