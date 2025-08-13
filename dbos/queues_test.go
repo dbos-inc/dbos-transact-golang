@@ -337,9 +337,7 @@ func TestQueueRecovery(t *testing.T) {
 	require.NoError(t, err, "failed to rerun workflow")
 	rerunResult, err := rerunHandle.GetResult()
 	require.NoError(t, err, "failed to get result from rerun handle")
-	if !equal(rerunResult, expectedResult) {
-		assert.True(t, equal(rerunResult, expectedResult), "expected result %v, got %v", expectedResult, rerunResult)
-	}
+	assert.True(t, equal(rerunResult, expectedResult), "expected result %v, got %v", expectedResult, rerunResult)
 
 	assert.Equal(t, int64(queuedSteps*2), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to remain %d", queuedSteps*2)
 
@@ -711,14 +709,10 @@ func TestQueueTimeouts(t *testing.T) {
 	enqueuedWorkflowEnqueuesATimeoutWorkflow := func(ctx DBOSContext, _ string) (string, error) {
 		// This workflow will enqueue a workflow that waits indefinitely until it is cancelled
 		handle, err := RunAsWorkflow(ctx, queuedWaitForCancelWorkflow, "enqueued-wait-for-cancel", WithQueue(timeoutQueue.Name))
-		if err != nil {
-			require.NoError(t, err, "failed to start enqueued wait for cancel workflow")
-		}
+		require.NoError(t, err, "failed to start enqueued wait for cancel workflow")
 		// Workflow should get AwaitedWorkflowCancelled DBOSError
 		_, err = handle.GetResult()
-		if err == nil {
-			require.Error(t, err, "expected error when waiting for enqueued workflow to complete, but got none")
-		}
+		require.Error(t, err, "expected error when waiting for enqueued workflow to complete, but got none")
 		dbosErr, ok := err.(*DBOSError)
 		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
@@ -750,9 +744,7 @@ func TestQueueTimeouts(t *testing.T) {
 		// Wait for the enqueued workflow to complete
 		result, err := handle.GetResult()
 		require.NoError(t, err, "failed to get result from enqueued detached workflow")
-		if result != "detached-workflow-completed" {
-			assert.Equal(t, "detached-workflow-completed", result, "expected result to be 'detached-workflow-completed'")
-		}
+		assert.Equal(t, "detached-workflow-completed", result, "expected result to be 'detached-workflow-completed'")
 		// Check the workflow status: should be success
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get enqueued detached workflow status")
@@ -845,9 +837,7 @@ func TestQueueTimeouts(t *testing.T) {
 		// Check the workflow status: should be cancelled
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get enqueued detached workflow status")
-		if status.Status != WorkflowStatusCancelled {
-			assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected enqueued detached workflow status to be WorkflowStatusCancelled")
-		}
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected enqueued detached workflow status to be WorkflowStatusCancelled")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow cancellation, but they are not")
 	})
