@@ -1244,7 +1244,7 @@ func TestScheduledWorkflows(t *testing.T) {
 
 			// Check if delta is within acceptable slack
 			if delta > allowedSlack {
-				t.Fatalf("Execution %d timing deviation too large: expected around %v, got %v (delta: %v, allowed slack: %v)", i+1, execTime, delta, allowedSlack, expectedTime)
+				t.Fatalf("Execution %d timing deviation too large: expected around %v, got %v (delta: %v, allowed slack: %v)", i+1, expectedTime, execTime, delta, allowedSlack)
 			}
 
 			t.Logf("Execution %d: expected %v, actual %v, delta %v", i+1, expectedTime, execTime, delta)
