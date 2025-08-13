@@ -829,17 +829,6 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) err
 
 	originalWorkflow := wfs[0]
 
-	// Validate that startStep doesn't exceed the workflow's actual steps
-	maxStepQuery := `SELECT COALESCE(MAX(function_id), 0) FROM dbos.operation_outputs WHERE workflow_uuid = $1`
-	var maxStepID int
-	err = tx.QueryRow(ctx, maxStepQuery, input.originalWorkflowID).Scan(&maxStepID)
-	if err != nil {
-		return fmt.Errorf("failed to query max step ID: %w", err)
-	}
-	if input.startStep > maxStepID && maxStepID > 0 {
-		return fmt.Errorf("startStep %d exceeds workflow's maximum step %d", input.startStep, maxStepID)
-	}
-
 	// Determine the application version to use
 	appVersion := originalWorkflow.ApplicationVersion
 	if input.applicationVersion != "" {

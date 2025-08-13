@@ -711,41 +711,6 @@ func TestForkWorkflow(t *testing.T) {
 		}
 	})
 
-	t.Run("ForkWithInvalidStep", func(t *testing.T) {
-		originalWorkflowID := "original-workflow-invalid-step"
-
-		// Create an original workflow first
-		handle, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
-			WorkflowName:       "ParentWorkflow",
-			QueueName:          queue.Name,
-			WorkflowID:         originalWorkflowID,
-			WorkflowInput:      "test",
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
-		if err != nil {
-			t.Fatalf("failed to enqueue original workflow: %v", err)
-		}
-
-		// Wait for completion
-		_, err = handle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from original workflow: %v", err)
-		}
-
-		// Try to fork at step 999 (beyond workflow's actual steps)
-		_, err = clientCtx.ForkWorkflow(clientCtx, ForkWorkflowInput{
-			OriginalWorkflowID: originalWorkflowID,
-			StartStep:          999,
-		})
-		if err == nil {
-			t.Fatal("expected error when forking at step 999, but got none")
-		}
-		// Verify the error message
-		if !strings.Contains(err.Error(), "exceeds workflow's maximum step") {
-			t.Fatalf("expected error message to contain 'exceeds workflow's maximum step', got: %v", err)
-		}
-	})
-
 	// Verify all queue entries are cleaned up
 	if !queueEntriesAreCleanedUp(serverCtx) {
 		t.Fatal("expected queue entries to be cleaned up after fork workflow tests")
