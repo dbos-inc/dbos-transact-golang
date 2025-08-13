@@ -1186,6 +1186,24 @@ func (c *dbosContext) Sleep(duration time.Duration) (time.Duration, error) {
 	return c.systemDB.sleep(c, duration)
 }
 
+// Sleep pauses workflow execution for the specified duration.
+// This is a durable sleep - if the workflow is recovered during the sleep period,
+// it will continue sleeping for the remaining time.
+// Returns the actual duration slept.
+//
+// Example:
+//
+//	actualDuration, err := dbos.Sleep(ctx, 5*time.Second)
+//	if err != nil {
+//	    return err
+//	}
+func Sleep(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
+	if ctx == nil {
+		return 0, errors.New("ctx cannot be nil")
+	}
+	return ctx.Sleep(duration)
+}
+
 /***********************************/
 /******* WORKFLOW MANAGEMENT *******/
 /***********************************/
@@ -1206,6 +1224,42 @@ func (c *dbosContext) GetStepID() (int, error) {
 		return -1, errors.New("not within a DBOS workflow context")
 	}
 	return wfState.stepID, nil
+}
+
+// GetWorkflowID retrieves the workflow ID from the context if called within a DBOS workflow.
+// Returns an error if not called from within a workflow context.
+//
+// Example:
+//
+//	workflowID, err := dbos.GetWorkflowID(ctx)
+//	if err != nil {
+//	    log.Printf("Not in a workflow context: %v", err)
+//	} else {
+//	    log.Printf("Current workflow ID: %s", workflowID)
+//	}
+func GetWorkflowID(ctx DBOSContext) (string, error) {
+	if ctx == nil {
+		return "", errors.New("ctx cannot be nil")
+	}
+	return ctx.GetWorkflowID()
+}
+
+// GetStepID retrieves the current step ID from the context if called within a DBOS workflow.
+// Returns -1 and an error if not called from within a workflow context.
+//
+// Example:
+//
+//	stepID, err := dbos.GetStepID(ctx)
+//	if err != nil {
+//	    log.Printf("Not in a workflow context: %v", err)
+//	} else {
+//	    log.Printf("Current step ID: %d", stepID)
+//	}
+func GetStepID(ctx DBOSContext) (int, error) {
+	if ctx == nil {
+		return -1, errors.New("ctx cannot be nil")
+	}
+	return ctx.GetStepID()
 }
 
 func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
@@ -1426,6 +1480,28 @@ func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (Wo
 // Returns an error if the workflow does not exist or if the cancellation operation fails.
 func (c *dbosContext) CancelWorkflow(workflowID string) error {
 	return c.systemDB.cancelWorkflow(c, workflowID)
+}
+
+// CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED.
+// Once cancelled, the workflow will stop executing. Currently executing steps will not be interrupted.
+//
+// Parameters:
+//   - ctx: DBOS context for the operation
+//   - workflowID: The unique identifier of the workflow to cancel
+//
+// Returns an error if the workflow does not exist or if the cancellation operation fails.
+//
+// Example:
+//
+//	err := dbos.CancelWorkflow(ctx, "workflow-to-cancel")
+//	if err != nil {
+//	    log.Printf("Failed to cancel workflow: %v", err)
+//	}
+func CancelWorkflow(ctx DBOSContext, workflowID string) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.CancelWorkflow(workflowID)
 }
 
 func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
@@ -1825,4 +1901,46 @@ func (c *dbosContext) ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStat
 	}
 
 	return workflows, nil
+}
+
+// ListWorkflows retrieves a list of workflows based on the provided filters.
+//
+// The function supports filtering by workflow IDs, status, time ranges, names, application versions,
+// authenticated users, workflow ID prefixes, and more. It also supports pagination through
+// limit/offset parameters and sorting control (ascending by default, or descending with WithSortDesc).
+//
+// By default, both input and output data are loaded for each workflow. This can be controlled
+// using WithLoadInput(false) and WithLoadOutput(false) options for better performance when
+// the data is not needed.
+//
+// Parameters:
+//   - ctx: DBOS context for the operation
+//   - opts: Functional options to configure the query filters and parameters
+//
+// Returns a slice of WorkflowStatus structs containing the workflow information.
+//
+// Example usage:
+//
+//	// List all successful workflows from the last 24 hours
+//	workflows, err := dbos.ListWorkflows(ctx,
+//	    dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess}),
+//	    dbos.WithStartTime(time.Now().Add(-24*time.Hour)),
+//	    dbos.WithLimit(100))
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	// List workflows by specific IDs without loading input/output data
+//	workflows, err := dbos.ListWorkflows(ctx,
+//	    dbos.WithWorkflowIDs([]string{"workflow1", "workflow2"}),
+//	    dbos.WithLoadInput(false),
+//	    dbos.WithLoadOutput(false))
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.ListWorkflows(opts...)
 }

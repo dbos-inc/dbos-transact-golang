@@ -82,6 +82,7 @@ type DBOSContext interface {
 	GetEvent(_ DBOSContext, input WorkflowGetEventInput) (any, error)                                             // Get a key-value event from a target workflow
 	Sleep(duration time.Duration) (time.Duration, error)                                                          // Durable sleep that survives workflow recovery
 	GetWorkflowID() (string, error)                                                                               // Get the current workflow ID (only available within workflows)
+	GetStepID() (int, error)                                                                                      // Get the current step ID (only available within workflows)
 
 	// Workflow management
 	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)   // Get a handle to an existing workflow

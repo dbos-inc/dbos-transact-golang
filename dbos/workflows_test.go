@@ -541,7 +541,7 @@ func TestChildWorkflow(t *testing.T) {
 
 	// Create child workflows with executor
 	childWf := func(dbosCtx DBOSContext, input Inheritance) (string, error) {
-		workflowID, err := dbosCtx.GetWorkflowID()
+		workflowID, err := GetWorkflowID(dbosCtx)
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %w", err)
 		}
@@ -557,7 +557,7 @@ func TestChildWorkflow(t *testing.T) {
 	RegisterWorkflow(dbosCtx, childWf)
 
 	parentWf := func(ctx DBOSContext, input Inheritance) (string, error) {
-		workflowID, err := ctx.GetWorkflowID()
+		workflowID, err := GetWorkflowID(ctx)
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %w", err)
 		}
@@ -624,7 +624,7 @@ func TestChildWorkflow(t *testing.T) {
 	RegisterWorkflow(dbosCtx, parentWf)
 
 	grandParentWf := func(ctx DBOSContext, r int) (string, error) {
-		workflowID, err := ctx.GetWorkflowID()
+		workflowID, err := GetWorkflowID(ctx)
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %w", err)
 		}
@@ -1064,7 +1064,7 @@ var (
 
 func deadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error) {
 	recoveryCount++
-	wfid, err := ctx.GetWorkflowID()
+	wfid, err := GetWorkflowID(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get workflow ID: %v", err)
 	}
@@ -2528,7 +2528,7 @@ var (
 )
 
 func sleepRecoveryWorkflow(dbosCtx DBOSContext, duration time.Duration) (time.Duration, error) {
-	result, err := dbosCtx.Sleep(duration)
+	result, err := Sleep(dbosCtx, duration)
 	if err != nil {
 		return 0, err
 	}
@@ -2603,7 +2603,7 @@ func TestSleep(t *testing.T) {
 
 	t.Run("SleepCannotBeCalledOutsideWorkflow", func(t *testing.T) {
 		// Attempt to call Sleep outside of a workflow context
-		_, err := dbosCtx.Sleep(1 * time.Second)
+		_, err := Sleep(dbosCtx, 1*time.Second)
 		if err == nil {
 			t.Fatal("expected error when calling Sleep outside of workflow context, but got none")
 		}

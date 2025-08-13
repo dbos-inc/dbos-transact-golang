@@ -103,7 +103,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from ListWorkflows
-		workflows, err := executor.ListWorkflows(WithWorkflowIDs(
+		workflows, err := ListWorkflows(executor, WithWorkflowIDs(
 			[]string{directHandle.GetWorkflowID()},
 		))
 		if err != nil {
@@ -220,7 +220,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		// Test results from ListWorkflows
-		workflows, err := executor.ListWorkflows(WithWorkflowIDs(
+		workflows, err := ListWorkflows(executor, WithWorkflowIDs(
 			[]string{directHandle.GetWorkflowID()},
 		))
 		if err != nil {
