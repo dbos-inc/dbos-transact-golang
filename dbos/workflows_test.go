@@ -359,14 +359,14 @@ func stepWithinAStepWorkflow(dbosCtx DBOSContext, input string) (string, error) 
 // Global counter for retry testing
 var stepRetryAttemptCount int
 
-func stepRetryAlwaysFailsStep(ctx context.Context) (string, error) {
+func stepRetryAlwaysFailsStep(_ context.Context) (string, error) {
 	stepRetryAttemptCount++
 	return "", fmt.Errorf("always fails - attempt %d", stepRetryAttemptCount)
 }
 
 var stepIdempotencyCounter int
 
-func stepIdempotencyTest(ctx context.Context) (string, error) {
+func stepIdempotencyTest(_ context.Context) (string, error) {
 	stepIdempotencyCounter++
 	return "", nil
 }
@@ -1858,7 +1858,7 @@ type setEventWorkflowInput struct {
 }
 
 func setEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	err := SetEvent(ctx, GenericWorkflowSetEventInput[string]{Key: input.Key, Message: input.Message})
+	err := SetEvent(ctx, GenericWorkflowSetEventInput[string](input))
 	if err != nil {
 		return "", err
 	}
@@ -1897,7 +1897,7 @@ func setTwoEventsWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string,
 }
 
 func setEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	err := SetEvent(ctx, GenericWorkflowSetEventInput[string]{Key: input.Key, Message: input.Message})
+	err := SetEvent(ctx, GenericWorkflowSetEventInput[string](input))
 	if err != nil {
 		return "", err
 	}
