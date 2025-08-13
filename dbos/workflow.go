@@ -23,12 +23,12 @@ import (
 type WorkflowStatusType string
 
 const (
-	WorkflowStatusPending         WorkflowStatusType = "PENDING"          // Workflow is running or ready to run
-	WorkflowStatusEnqueued        WorkflowStatusType = "ENQUEUED"         // Workflow is queued and waiting for execution
-	WorkflowStatusSuccess         WorkflowStatusType = "SUCCESS"          // Workflow completed successfully
-	WorkflowStatusError           WorkflowStatusType = "ERROR"            // Workflow completed with an error
-	WorkflowStatusCancelled       WorkflowStatusType = "CANCELLED"        // Workflow was cancelled (manually or due to timeout)
-	WorkflowStatusRetriesExceeded WorkflowStatusType = "RETRIES_EXCEEDED" // Workflow exceeded maximum retry attempts
+	WorkflowStatusPending         WorkflowStatusType = "PENDING"                        // Workflow is running or ready to run
+	WorkflowStatusEnqueued        WorkflowStatusType = "ENQUEUED"                       // Workflow is queued and waiting for execution
+	WorkflowStatusSuccess         WorkflowStatusType = "SUCCESS"                        // Workflow completed successfully
+	WorkflowStatusError           WorkflowStatusType = "ERROR"                          // Workflow completed with an error
+	WorkflowStatusCancelled       WorkflowStatusType = "CANCELLED"                      // Workflow was cancelled (manually or due to timeout)
+	WorkflowStatusRetriesExceeded WorkflowStatusType = "MAX_RECOVERY_ATTEMPTS_EXCEEDED" // Workflow exceeded maximum retry attempts
 )
 
 // WorkflowStatus contains comprehensive information about a workflow's current state and execution history.
