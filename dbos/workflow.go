@@ -1334,6 +1334,61 @@ type GenericEnqueueOptions[P any] struct {
 	WorkflowInput      P
 }
 
+// Enqueue adds a workflow to a named queue for later execution with type safety.
+// The workflow will be persisted with ENQUEUED status until picked up by a DBOS process.
+// This provides asynchronous workflow execution with durability guarantees.
+//
+// Parameters:
+//   - ctx: DBOS context for the operation
+//   - params: Configuration parameters including workflow name, queue name, input, and options
+//
+// The params struct contains:
+//   - WorkflowName: Name of the registered workflow function to execute (required)
+//   - QueueName: Name of the queue to enqueue the workflow to (required)
+//   - WorkflowID: Custom workflow ID (optional, auto-generated if empty)
+//   - ApplicationVersion: Application version override (optional)
+//   - DeduplicationID: Deduplication identifier for idempotent enqueuing (optional)
+//   - WorkflowTimeout: Maximum execution time for the workflow (optional)
+//   - WorkflowInput: Input parameters to pass to the workflow (type P)
+//
+// Returns a typed workflow handle that can be used to check status and retrieve results.
+// The handle uses polling to check workflow completion since the execution is asynchronous.
+//
+// Example usage:
+//
+//	// Enqueue a workflow with string input and int output
+//	handle, err := dbos.Enqueue[string, int](ctx, dbos.GenericEnqueueOptions[string]{
+//	    WorkflowName:    "ProcessDataWorkflow",
+//	    QueueName:       "data-processing",
+//	    WorkflowInput:   "input data",
+//	    WorkflowTimeout: 30 * time.Minute,
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	// Check status
+//	status, err := handle.GetStatus()
+//	if err != nil {
+//	    log.Printf("Failed to get status: %v", err)
+//	}
+//
+//	// Wait for completion and get result
+//	result, err := handle.GetResult() // blocks until completion
+//	if err != nil {
+//	    log.Printf("Workflow failed: %v", err)
+//	} else {
+//	    log.Printf("Result: %d", result)
+//	}
+//
+//	// Enqueue with deduplication and custom workflow ID
+//	handle, err := dbos.Enqueue[MyInputType, MyOutputType](ctx, dbos.GenericEnqueueOptions[MyInputType]{
+//	    WorkflowName:    "MyWorkflow",
+//	    QueueName:       "my-queue",
+//	    WorkflowID:      "custom-workflow-id",
+//	    DeduplicationID: "unique-operation-id",
+//	    WorkflowInput:   MyInputType{Field: "value"},
+//	})
 func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
@@ -1363,9 +1418,7 @@ func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (Wo
 }
 
 // CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED.
-// Once cancelled, the workflow will stop executing and cannot be resumed.
-// If the workflow has already completed (SUCCESS or ERROR), this operation has no effect.
-// The workflow's final status and any partial results remain accessible through its handle.
+// Once cancelled, the workflow will stop executing. Currently executing steps will not be interrupted.
 //
 // Parameters:
 //   - workflowID: The unique identifier of the workflow to cancel
@@ -1384,7 +1437,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 }
 
 // ResumeWorkflow resumes a cancelled workflow by setting its status back to ENQUEUED.
-// The workflow will be picked up by the queue processor and execution will continue
+// The workflow will be picked up by a DBOS queue processor and execution will continue
 // from where it left off. If the workflow is already completed, this is a no-op.
 // Returns a handle that can be used to wait for completion and retrieve results.
 // Returns an error if the workflow does not exist or if the cancellation operation fails.
@@ -1419,7 +1472,6 @@ func ResumeWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R
 }
 
 // ForkWorkflowInput holds configuration parameters for forking workflows.
-// It replaces the functional options pattern to comply with CS-5 style guidelines.
 type ForkWorkflowInput struct {
 	OriginalWorkflowID string // Required: The UUID of the original workflow to fork from
 	ForkedWorkflowID   string // Optional: Custom workflow ID for the forked workflow (auto-generated if empty)
@@ -1460,7 +1512,7 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 
 // ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.
 // The forked workflow will have a new UUID and will execute from the specified StartStep.
-// If StartStep > 0, the forked workflow will have the operation outputs from steps 0 to StartStep-1
+// If StartStep > 0, the forked workflow will reuse the operation outputs from steps 0 to StartStep-1
 // copied from the original workflow.
 //
 // Parameters:
@@ -1511,7 +1563,7 @@ func ForkWorkflow[R any](ctx DBOSContext, input ForkWorkflowInput) (WorkflowHand
 	}
 	return &workflowPollingHandle[R]{
 		workflowID:  handle.GetWorkflowID(),
-		dbosContext: handle.(*workflowPollingHandle[any]).dbosContext,
+		dbosContext: ctx,
 	}, nil
 }
 
@@ -1693,8 +1745,6 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 }
 
 // ListWorkflows retrieves a list of workflows based on the provided filters.
-// This function provides a high-level interface to query workflows with various filtering options.
-// It wraps the system database's listWorkflows functionality with type-safe functional options.
 //
 // The function supports filtering by workflow IDs, status, time ranges, names, application versions,
 // authenticated users, workflow ID prefixes, and more. It also supports pagination through
