@@ -1486,11 +1486,14 @@ func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (Wo
 		WorkflowInput:      params.WorkflowInput,
 		WorkflowTimeout:    params.WorkflowTimeout,
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	return &workflowPollingHandle[R]{
 		workflowID:  handle.GetWorkflowID(),
 		dbosContext: ctx,
-	}, err
+	}, nil
 }
 
 // CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED.
