@@ -849,8 +849,6 @@ func TestQueueTimeouts(t *testing.T) {
 			assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected enqueued detached workflow status to be WorkflowStatusCancelled")
 		}
 
-		if !queueEntriesAreCleanedUp(dbosCtx) {
-			require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow completion, but they are not")
-		}
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow cancellation, but they are not")
 	})
 }
