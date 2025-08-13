@@ -54,7 +54,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 
 	// Load defaults
 	if dbosConfig.Logger == nil {
-		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
 	return dbosConfig, nil
