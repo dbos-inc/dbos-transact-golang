@@ -2907,7 +2907,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// XXX this might be flaky and frankly not super useful
 		expectedDeadline := start.Add(timeout * 10 / 100)
 		if status.Deadline.Before(expectedDeadline) || status.Deadline.After(start.Add(timeout)) {
-			t.Fatalf("expected workflow deadline to be within %v and %v, got %v", expectedDeadline, status.Deadline, start.Add(timeout))
+			t.Fatalf("expected workflow deadline to be within %v and %v, got %v", expectedDeadline, start.Add(timeout), status.Deadline)
 		}
 	})
 }
