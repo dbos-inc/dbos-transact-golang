@@ -2,6 +2,9 @@ package dbos
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConfigValidationErrorTypes(t *testing.T) {
@@ -15,35 +18,25 @@ func TestConfigValidationErrorTypes(t *testing.T) {
 			DatabaseURL: databaseURL,
 			AppName:     "test-initialize",
 		})
-		if err != nil {
-			t.Fatalf("Failed to initialize DBOS: %v", err)
-		}
+		require.NoError(t, err)
 		defer func() {
 			if ctx != nil {
 				ctx.Cancel()
 			}
 		}() // Clean up executor
 
-		if ctx == nil {
-			t.Fatal("Initialize returned nil executor")
-		}
+		require.NotNil(t, ctx)
 
 		// Test that executor implements DBOSContext interface
 		var _ DBOSContext = ctx
 
 		// Test that we can call methods on the executor
 		appVersion := ctx.GetApplicationVersion()
-		if appVersion != "v1.0.0" {
-			t.Fatal("GetApplicationVersion returned empty string")
-		}
+		assert.Equal(t, "v1.0.0", appVersion)
 		executorID := ctx.GetExecutorID()
-		if executorID != "test-executor-id" {
-			t.Fatal("GetExecutorID returned empty string")
-		}
+		assert.Equal(t, "test-executor-id", executorID)
 		appID := ctx.GetApplicationID()
-		if appID != "test-app-id" {
-			t.Fatal("GetApplicationID returned empty string")
-		}
+		assert.Equal(t, "test-app-id", appID)
 	})
 
 	t.Run("FailsWithoutAppName", func(t *testing.T) {
@@ -52,23 +45,15 @@ func TestConfigValidationErrorTypes(t *testing.T) {
 		}
 
 		_, err := NewDBOSContext(config)
-		if err == nil {
-			t.Fatal("expected error when app name is missing, but got none")
-		}
+		require.Error(t, err)
 
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected DBOSError, got %T", err)
 
-		if dbosErr.Code != InitializationError {
-			t.Fatalf("expected InitializationError code, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, InitializationError, dbosErr.Code)
 
 		expectedMsg := "Error initializing DBOS Transact: missing required config field: appName"
-		if dbosErr.Message != expectedMsg {
-			t.Fatalf("expected error message '%s', got '%s'", expectedMsg, dbosErr.Message)
-		}
+		assert.Equal(t, expectedMsg, dbosErr.Message)
 	})
 
 	t.Run("FailsWithoutDatabaseURL", func(t *testing.T) {
@@ -77,22 +62,14 @@ func TestConfigValidationErrorTypes(t *testing.T) {
 		}
 
 		_, err := NewDBOSContext(config)
-		if err == nil {
-			t.Fatal("expected error when database URL is missing, but got none")
-		}
+		require.Error(t, err)
 
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected DBOSError, got %T", err)
 
-		if dbosErr.Code != InitializationError {
-			t.Fatalf("expected InitializationError code, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, InitializationError, dbosErr.Code)
 
 		expectedMsg := "Error initializing DBOS Transact: missing required config field: databaseURL"
-		if dbosErr.Message != expectedMsg {
-			t.Fatalf("expected error message '%s', got '%s'", expectedMsg, dbosErr.Message)
-		}
+		assert.Equal(t, expectedMsg, dbosErr.Message)
 	})
 }

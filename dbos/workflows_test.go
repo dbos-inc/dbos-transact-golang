@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Global counter for idempotency testing
@@ -278,19 +280,13 @@ func TestWorkflowsRegistration(t *testing.T) {
 			result, err := tc.workflowFunc(dbosCtx, tc.input, WithWorkflowID(uuid.NewString()))
 
 			if tc.expectError {
-				if err == nil {
-					t.Fatal("expected error but got none")
-				}
-				if tc.expectedError != "" && err.Error() != tc.expectedError {
-					t.Fatalf("expected error %q but got %q", tc.expectedError, err.Error())
+				require.Error(t, err, "expected error but got none")
+				if tc.expectedError != "" {
+					assert.Equal(t, tc.expectedError, err.Error())
 				}
 			} else {
-				if err != nil {
-					t.Fatalf("expected no error but got: %v", err)
-				}
-				if result != tc.expectedResult {
-					t.Fatalf("expected result %v but got %v", tc.expectedResult, result)
-				}
+				require.NoError(t, err)
+				assert.Equal(t, tc.expectedResult, result)
 			}
 		})
 	}
@@ -305,16 +301,10 @@ func TestWorkflowsRegistration(t *testing.T) {
 		// Second registration of the same workflow should panic with ConflictingRegistrationError
 		defer func() {
 			r := recover()
-			if r == nil {
-				t.Fatal("expected panic from double registration but got none")
-			}
+			require.NotNil(t, r, "expected panic from double registration but got none")
 			dbosErr, ok := r.(*DBOSError)
-			if !ok {
-				t.Fatalf("expected panic to be *DBOSError, got %T", r)
-			}
-			if dbosErr.Code != ConflictingRegistrationError {
-				t.Fatalf("expected ConflictingRegistrationError, got %v", dbosErr.Code)
-			}
+			require.True(t, ok, "expected panic to be *DBOSError, got %T", r)
+			assert.Equal(t, ConflictingRegistrationError, dbosErr.Code)
 		}()
 		RegisterWorkflow(freshCtx, simpleWorkflow)
 	})
@@ -329,16 +319,10 @@ func TestWorkflowsRegistration(t *testing.T) {
 		// Second registration with same custom name should panic with ConflictingRegistrationError
 		defer func() {
 			r := recover()
-			if r == nil {
-				t.Fatal("expected panic from double registration with custom name but got none")
-			}
+			require.NotNil(t, r, "expected panic from double registration with custom name but got none")
 			dbosErr, ok := r.(*DBOSError)
-			if !ok {
-				t.Fatalf("expected panic to be *DBOSError, got %T", r)
-			}
-			if dbosErr.Code != ConflictingRegistrationError {
-				t.Fatalf("expected ConflictingRegistrationError, got %v", dbosErr.Code)
-			}
+			require.True(t, ok, "expected panic to be *DBOSError, got %T", r)
+			assert.Equal(t, ConflictingRegistrationError, dbosErr.Code)
 		}()
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("custom-workflow"))
 	})
@@ -349,15 +333,13 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 		// Launch DBOS context
 		err := freshCtx.Launch()
-		if err != nil {
-			t.Fatalf("failed to launch DBOS context: %v", err)
-		}
+		require.NoError(t, err)
 		defer freshCtx.Cancel()
 
 		// Attempting to register after launch should panic
 		defer func() {
 			if r := recover(); r == nil {
-				t.Fatal("expected panic from registration after launch but got none")
+				require.FailNow(t, "expected panic from registration after launch but got none")
 			}
 		}()
 		RegisterWorkflow(freshCtx, simpleWorkflow)
@@ -416,47 +398,29 @@ func TestSteps(t *testing.T) {
 		_, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
 			return simpleStep(ctx)
 		})
-		if err == nil {
-			t.Fatal("expected error when running step outside of workflow context, but got none")
-		}
+		require.Error(t, err, "expected error when running step outside of workflow context, but got none")
 
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != StepExecutionError {
-			t.Fatalf("expected error code to be StepExecutionError, got %v", dbosErr.Code)
-		}
+		require.Equal(t, StepExecutionError, dbosErr.Code, "expected error code to be StepExecutionError, got %v", dbosErr.Code)
 
 		// Test the specific message from the 3rd argument
 		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
-		if !strings.Contains(err.Error(), expectedMessagePart) {
-			t.Fatalf("expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
-		}
+		require.Contains(t, err.Error(), expectedMessagePart, "expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
 	})
 
 	t.Run("StepWithinAStepAreJustFunctions", func(t *testing.T) {
 		handle, err := RunAsWorkflow(dbosCtx, stepWithinAStepWorkflow, "test")
-		if err != nil {
-			t.Fatal("failed to run step within a step:", err)
-		}
+		require.NoError(t, err, "failed to run step within a step")
 		result, err := handle.GetResult()
-		if err != nil {
-			t.Fatal("failed to get result from step within a step:", err)
-		}
-		if result != "from step" {
-			t.Fatalf("expected result 'from step', got '%s'", result)
-		}
+		require.NoError(t, err, "failed to get result from step within a step")
+		assert.Equal(t, "from step", result)
 
 		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
-		if err != nil {
-			t.Fatal("failed to list steps:", err)
-		}
-		if len(steps) != 1 {
-			t.Fatalf("expected 1 step, got %d", len(steps))
-		}
+		require.NoError(t, err, "failed to list steps")
+		require.Len(t, steps, 1, "expected 1 step, got %d", len(steps))
 	})
 
 	t.Run("StepRetryWithExponentialBackoff", func(t *testing.T) {
@@ -466,68 +430,44 @@ func TestSteps(t *testing.T) {
 
 		// Execute the workflow
 		handle, err := RunAsWorkflow(dbosCtx, stepRetryWorkflow, "test")
-		if err != nil {
-			t.Fatal("failed to start retry workflow:", err)
-		}
+		require.NoError(t, err, "failed to start retry workflow")
 
 		_, err = handle.GetResult()
-		if err == nil {
-			t.Fatal("expected error from failing workflow but got none")
-		}
+		require.Error(t, err, "expected error from failing workflow but got none")
 
 		// Verify the step was called exactly 6 times (max attempts + 1 initial attempt)
-		if stepRetryAttemptCount != 6 {
-			t.Fatalf("expected 6 attempts, got %d", stepRetryAttemptCount)
-		}
+		assert.Equal(t, 6, stepRetryAttemptCount, "expected 6 attempts")
 
 		// Verify the error is a MaxStepRetriesExceeded error
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != MaxStepRetriesExceeded {
-			t.Fatalf("expected error code to be MaxStepRetriesExceeded, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, MaxStepRetriesExceeded, dbosErr.Code, "expected error code to be MaxStepRetriesExceeded")
 
 		// Verify the error contains the step name and max retries
 		expectedErrorMessage := "has exceeded its maximum of 5 retries"
-		if !strings.Contains(dbosErr.Message, expectedErrorMessage) {
-			t.Fatalf("expected error message to contain '%s', got '%s'", expectedErrorMessage, dbosErr.Message)
-		}
+		assert.Contains(t, dbosErr.Message, expectedErrorMessage, "expected error message to contain expected text")
 
 		// Verify each error message is present in the joined error
 		for i := 1; i <= 5; i++ {
 			expectedMsg := fmt.Sprintf("always fails - attempt %d", i)
-			if !strings.Contains(dbosErr.Error(), expectedMsg) {
-				t.Fatalf("expected joined error to contain '%s', but got '%s'", expectedMsg, dbosErr.Error())
-			}
+			assert.Contains(t, dbosErr.Error(), expectedMsg, "expected joined error to contain expected message")
 		}
 
 		// Verify that the failed step was still recorded in the database
 		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
-		if err != nil {
-			t.Fatal("failed to get workflow steps:", err)
-		}
+		require.NoError(t, err, "failed to get workflow steps")
 
-		if len(steps) != 2 {
-			t.Fatalf("expected 2 recorded step, got %d", len(steps))
-		}
+		require.Len(t, steps, 2, "expected 2 recorded steps")
 
 		// Verify the second step has the error
 		step := steps[1]
-		if step.Error == nil {
-			t.Fatal("expected error in recorded step, got none")
-		}
+		require.NotNil(t, step.Error, "expected error in recorded step, got none")
 
-		if step.Error.Error() != dbosErr.Error() {
-			t.Fatalf("expected recorded step error to match joined error, got '%s', expected '%s'", step.Error.Error(), dbosErr.Error())
-		}
+		assert.Equal(t, dbosErr.Error(), step.Error.Error(), "expected recorded step error to match joined error")
 
 		// Verify the idempotency step was executed only once
-		if stepIdempotencyCounter != 1 {
-			t.Fatalf("expected idempotency step to be executed only once, got %d", stepIdempotencyCounter)
-		}
+		assert.Equal(t, 1, stepIdempotencyCounter, "expected idempotency step to be executed only once")
 	})
 }
 
@@ -767,7 +707,7 @@ func TestChildWorkflow(t *testing.T) {
 			t.Fatalf("failed to get workflow steps: %v", err)
 		}
 		if len(steps) != 2 {
-			t.Fatalf("expected 2 recorded steps, got %d", len(steps))
+			require.Len(t, steps, 2, "expected 2 recorded steps, got %d", len(steps))
 		}
 
 		// Verify first step is the child workflow with stepID=0
@@ -860,7 +800,7 @@ func TestChildWorkflow(t *testing.T) {
 
 		// Should have recovered both parent and child workflows
 		if len(recoveredHandles) != 2 {
-			t.Fatalf("expected 2 recovered handles (parent and child), got %d", len(recoveredHandles))
+			require.Len(t, recoveredHandles, 2, "expected 2 recovered handles (parent and child), got %d", len(recoveredHandles))
 		}
 
 		// Find the child handle and verify it's a polling handle with the correct ID
@@ -872,9 +812,7 @@ func TestChildWorkflow(t *testing.T) {
 			}
 		}
 
-		if childRecoveredHandle == nil {
-			t.Fatalf("failed to find recovered child workflow handle with ID %s", knownChildID)
-		}
+		require.NotNil(t, childRecoveredHandle, "failed to find recovered child workflow handle with ID %s", knownChildID)
 
 		// Complete both workflows
 		pollingHandleCompleteEvent.Set()
@@ -1003,7 +941,7 @@ func TestWorkflowRecovery(t *testing.T) {
 
 		// Check that we have a single handle in the return list
 		if len(recoveredHandles) != 1 {
-			t.Fatalf("expected 1 recovered handle, got %d", len(recoveredHandles))
+			require.Len(t, recoveredHandles, 1, "expected 1 recovered handle, got %d", len(recoveredHandles))
 		}
 
 		// Check that the workflow ID from the handle is the same as the first handle
@@ -1033,7 +971,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		}
 
 		if len(workflows) != 1 {
-			t.Fatalf("expected 1 workflow, got %d", len(workflows))
+			require.Len(t, workflows, 1, "expected 1 workflow, got %d", len(workflows))
 		}
 
 		workflow := workflows[0]
@@ -1101,22 +1039,16 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// Attempt to recover the blocked workflow the maximum number of times
 		for i := range maxRecoveryAttempts {
 			_, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
-			if err != nil {
-				t.Fatalf("failed to recover pending workflows on attempt %d: %v", i+1, err)
-			}
+			require.NoError(t, err, "failed to recover pending workflows on attempt %d", i+1)
 			deadLetterQueueStartEvent.Wait()
 			deadLetterQueueStartEvent.Clear()
 			expectedCount := int64(i + 2) // +1 for initial execution, +1 for each recovery
-			if recoveryCount != expectedCount {
-				t.Fatalf("expected recovery count to be %d, got %d", expectedCount, recoveryCount)
-			}
+			require.Equal(t, expectedCount, recoveryCount, "expected recovery count to be %d, got %d", expectedCount, recoveryCount)
 		}
 
 		// Verify an additional attempt throws a DLQ error and puts the workflow in the DLQ status
 		_, err = recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
-		if err == nil {
-			t.Fatal("expected dead letter queue error but got none")
-		}
+		require.Error(t, err, "expected dead letter queue error but got none")
 
 		dbosErr, ok := err.(*DBOSError)
 		if !ok {
@@ -1137,9 +1069,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Verify that attempting to start a workflow with the same ID throws a DLQ error
 		_, err = RunAsWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
-		if err == nil {
-			t.Fatal("expected dead letter queue error when restarting workflow with same ID but got none")
-		}
+		require.Error(t, err, "expected dead letter queue error when restarting workflow with same ID but got none")
 
 		dbosErr, ok = err.(*DBOSError)
 		if !ok {
@@ -1314,8 +1244,7 @@ func TestScheduledWorkflows(t *testing.T) {
 
 			// Check if delta is within acceptable slack
 			if delta > allowedSlack {
-				t.Fatalf("Execution %d timing deviation too large: expected around %v, got %v (delta: %v, allowed slack: %v)",
-					i+1, expectedTime, execTime, delta, allowedSlack)
+				t.Fatalf("Execution %d timing deviation too large: expected around %v, got %v (delta: %v, allowed slack: %v)", i+1, execTime, delta, allowedSlack, expectedTime)
 			}
 
 			t.Logf("Execution %d: expected %v, actual %v, delta %v", i+1, expectedTime, execTime, delta)
@@ -1505,11 +1434,11 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("failed to get workflow steps for send workflow: %v", err)
 		}
 		if len(sendSteps) != 3 {
-			t.Fatalf("expected 3 steps in send workflow (3 Send calls), got %d", len(sendSteps))
+			require.Len(t, sendSteps, 3, "expected 3 steps in send workflow (3 Send calls), got %d", len(sendSteps))
 		}
 		for i, step := range sendSteps {
 			if step.StepID != i {
-				t.Fatalf("expected step %d to have StepID %d, got %d", i, i, step.StepID)
+				t.Fatalf("expected step %d to have StepID %d, got %d", i, step.StepID, i)
 			}
 			if step.StepName != "DBOS.send" {
 				t.Fatalf("expected step %d to have StepName 'DBOS.send', got '%s'", i, step.StepName)
@@ -1522,11 +1451,11 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("failed to get workflow steps for receive workflow: %v", err)
 		}
 		if len(receiveSteps) != 3 {
-			t.Fatalf("expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
+			require.Len(t, receiveSteps, 3, "expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
 		}
 		for i, step := range receiveSteps {
 			if step.StepID != i {
-				t.Fatalf("expected step %d to have StepID %d, got %d", i, i, step.StepID)
+				t.Fatalf("expected step %d to have StepID %d, got %d", i, step.StepID, i)
 			}
 			if step.StepName != "DBOS.recv" {
 				t.Fatalf("expected step %d to have StepName 'DBOS.recv', got '%s'", i, step.StepName)
@@ -1572,7 +1501,7 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("failed to get workflow steps for send struct workflow: %v", err)
 		}
 		if len(sendSteps) != 1 {
-			t.Fatalf("expected 1 step in send struct workflow (1 Send call), got %d", len(sendSteps))
+			require.Len(t, sendSteps, 1, "expected 1 step in send struct workflow (1 Send call), got %d", len(sendSteps))
 		}
 		if sendSteps[0].StepID != 0 {
 			t.Fatalf("expected step to have StepID 0, got %d", sendSteps[0].StepID)
@@ -1587,7 +1516,7 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("failed to get workflow steps for receive struct workflow: %v", err)
 		}
 		if len(receiveSteps) != 1 {
-			t.Fatalf("expected 1 step in receive struct workflow (1 Recv call), got %d", len(receiveSteps))
+			require.Len(t, receiveSteps, 1, "expected 1 step in receive struct workflow (1 Recv call), got %d", len(receiveSteps))
 		}
 		if receiveSteps[0].StepID != 0 {
 			t.Fatalf("expected step to have StepID 0, got %d", receiveSteps[0].StepID)
@@ -1611,9 +1540,7 @@ func TestSendRecv(t *testing.T) {
 		}
 
 		_, err = handle.GetResult()
-		if err == nil {
-			t.Fatal("expected error when sending to non-existent UUID but got none")
-		}
+		require.Error(t, err, "expected error when sending to non-existent UUID but got none")
 
 		dbosErr, ok := err.(*DBOSError)
 		if !ok {
@@ -1648,9 +1575,7 @@ func TestSendRecv(t *testing.T) {
 	t.Run("RecvMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run Recv outside of a workflow context
 		_, err := Recv[string](dbosCtx, WorkflowRecvInput{Topic: "test-topic", Timeout: 1 * time.Second})
-		if err == nil {
-			t.Fatal("expected error when running Recv outside of workflow context, but got none")
-		}
+		require.Error(t, err, "expected error when running Recv outside of workflow context, but got none")
 
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
@@ -1703,11 +1628,11 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("failed to get workflow steps for receive workflow: %v", err)
 		}
 		if len(receiveSteps) != 3 {
-			t.Fatalf("expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
+			require.Len(t, receiveSteps, 3, "expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
 		}
 		for i, step := range receiveSteps {
 			if step.StepID != i {
-				t.Fatalf("expected step %d to have StepID %d, got %d", i, i, step.StepID)
+				t.Fatalf("expected step %d to have StepID %d, got %d", i, step.StepID, i)
 			}
 			if step.StepName != "DBOS.recv" {
 				t.Fatalf("expected step %d to have StepName 'DBOS.recv', got '%s'", i, step.StepName)
@@ -1739,14 +1664,14 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("failed to recover pending workflows: %v", err)
 		}
 		if len(recoveredHandles) != 2 {
-			t.Fatalf("expected 2 recovered handles, got %d", len(recoveredHandles))
+			require.Len(t, recoveredHandles, 2, "expected 2 recovered handles, got %d", len(recoveredHandles))
 		}
 		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, sendHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get workflow steps: %v", err)
 		}
 		if len(steps) != 1 {
-			t.Fatalf("expected 1 step in send idempotency workflow, got %d", len(steps))
+			require.Len(t, steps, 1, "expected 1 step in send idempotency workflow, got %d", len(steps))
 		}
 		if steps[0].StepID != 0 {
 			t.Fatalf("expected send idempotency step to have StepID 0, got %d", steps[0].StepID)
@@ -1759,7 +1684,7 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("failed to get steps for receive idempotency workflow: %v", err)
 		}
 		if len(steps) != 1 {
-			t.Fatalf("expected 1 step in receive idempotency workflow, got %d", len(steps))
+			require.Len(t, steps, 1, "expected 1 step in receive idempotency workflow, got %d", len(steps))
 		}
 		if steps[0].StepID != 0 {
 			t.Fatalf("expected receive idempotency step to have StepID 0, got %d", steps[0].StepID)
@@ -1805,9 +1730,7 @@ func TestSendRecv(t *testing.T) {
 
 		// Expect the workflow to fail with the specific error
 		_, err = handle.GetResult()
-		if err == nil {
-			t.Fatal("expected error when calling Send within a step, but got none")
-		}
+		require.Error(t, err, "expected error when calling Send within a step, but got none")
 
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
@@ -2067,9 +1990,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 		// Now try to run conflictWorkflowB with the same workflow ID
 		// This should return a ConflictingWorkflowError
 		_, err = RunAsWorkflow(dbosCtx, conflictWorkflowB, "test-input", WithWorkflowID(workflowID))
-		if err == nil {
-			t.Fatal("expected ConflictingWorkflowError when running different workflow with same ID, but got none")
-		}
+		require.Error(t, err, "expected ConflictingWorkflowError when running different workflow with same ID, but got none")
 
 		// Check that it's the correct error type
 		dbosErr, ok := err.(*DBOSError)
@@ -2112,9 +2033,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 			stepName:   wrongStepName,
 		})
 
-		if err == nil {
-			t.Fatal("expected UnexpectedStep error when checking operation with wrong step name, but got none")
-		}
+		require.Error(t, err, "expected UnexpectedStep error when checking operation with wrong step name, but got none")
 
 		// Check that it's the correct error type
 		dbosErr, ok := err.(*DBOSError)
@@ -2213,11 +2132,11 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("failed to get workflow steps for set two events workflow: %v", err)
 		}
 		if len(setSteps) != 2 {
-			t.Fatalf("expected 2 steps in set two events workflow (2 SetEvent calls), got %d", len(setSteps))
+			require.Len(t, setSteps, 2, "expected 2 steps in set two events workflow (2 SetEvent calls), got %d", len(setSteps))
 		}
 		for i, step := range setSteps {
 			if step.StepID != i {
-				t.Fatalf("expected step %d to have StepID %d, got %d", i, i, step.StepID)
+				t.Fatalf("expected step %d to have StepID %d, got %d", i, step.StepID, i)
 			}
 			if step.StepName != "DBOS.setEvent" {
 				t.Fatalf("expected step %d to have StepName 'DBOS.setEvent', got '%s'", i, step.StepName)
@@ -2230,7 +2149,7 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("failed to get workflow steps for get first event workflow: %v", err)
 		}
 		if len(getFirstSteps) != 1 {
-			t.Fatalf("expected 1 step in get first event workflow (1 GetEvent call), got %d", len(getFirstSteps))
+			require.Len(t, getFirstSteps, 1, "expected 1 step in get first event workflow (1 GetEvent call), got %d", len(getFirstSteps))
 		}
 		if getFirstSteps[0].StepID != 0 {
 			t.Fatalf("expected step to have StepID 0, got %d", getFirstSteps[0].StepID)
@@ -2245,7 +2164,7 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("failed to get workflow steps for get second event workflow: %v", err)
 		}
 		if len(getSecondSteps) != 1 {
-			t.Fatalf("expected 1 step in get second event workflow (1 GetEvent call), got %d", len(getSecondSteps))
+			require.Len(t, getSecondSteps, 1, "expected 1 step in get second event workflow (1 GetEvent call), got %d", len(getSecondSteps))
 		}
 		if getSecondSteps[0].StepID != 0 {
 			t.Fatalf("expected step to have StepID 0, got %d", getSecondSteps[0].StepID)
@@ -2290,7 +2209,7 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("failed to get workflow steps for set event workflow: %v", err)
 		}
 		if len(setSteps) != 1 {
-			t.Fatalf("expected 1 step in set event workflow (1 SetEvent call), got %d", len(setSteps))
+			require.Len(t, setSteps, 1, "expected 1 step in set event workflow (1 SetEvent call), got %d", len(setSteps))
 		}
 		if setSteps[0].StepID != 0 {
 			t.Fatalf("expected step to have StepID 0, got %d", setSteps[0].StepID)
@@ -2308,9 +2227,7 @@ func TestSetGetEvent(t *testing.T) {
 			Key:              "test-key",
 			Timeout:          3 * time.Second,
 		})
-		if err != nil {
-			t.Fatal("failed to get event from non-existent workflow:", err)
-		}
+		require.NoError(t, err, "failed to get event from non-existent workflow")
 		if message != "" {
 			t.Fatalf("expected empty result on timeout, got '%s'", message)
 		}
@@ -2320,21 +2237,15 @@ func TestSetGetEvent(t *testing.T) {
 			Key:     "test-key",
 			Message: "test-message",
 		})
-		if err != nil {
-			t.Fatal("failed to set event:", err)
-		}
+		require.NoError(t, err, "failed to set event")
 		_, err = setHandle.GetResult()
-		if err != nil {
-			t.Fatal("failed to get result from set event workflow:", err)
-		}
+		require.NoError(t, err, "failed to get result from set event workflow")
 		message, err = GetEvent[string](dbosCtx, WorkflowGetEventInput{
 			TargetWorkflowID: setHandle.GetWorkflowID(),
 			Key:              "non-existent-key",
 			Timeout:          3 * time.Second,
 		})
-		if err != nil {
-			t.Fatal("failed to get event with non-existent key:", err)
-		}
+		require.NoError(t, err, "failed to get event with non-existent key")
 		if message != "" {
 			t.Fatalf("expected empty result on timeout with non-existent key, got '%s'", message)
 		}
@@ -2343,9 +2254,7 @@ func TestSetGetEvent(t *testing.T) {
 	t.Run("SetGetEventMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run SetEvent outside of a workflow context
 		err := SetEvent(dbosCtx, GenericWorkflowSetEventInput[string]{Key: "test-key", Message: "test-message"})
-		if err == nil {
-			t.Fatal("expected error when running SetEvent outside of workflow context, but got none")
-		}
+		require.Error(t, err, "expected error when running SetEvent outside of workflow context, but got none")
 
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
@@ -2395,7 +2304,7 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("failed to recover pending workflows: %v", err)
 		}
 		if len(recoveredHandles) != 2 {
-			t.Fatalf("expected 2 recovered handles, got %d", len(recoveredHandles))
+			require.Len(t, recoveredHandles, 2, "expected 2 recovered handles, got %d", len(recoveredHandles))
 		}
 
 		getEventStartIdempotencyEvent.Wait()
@@ -2407,7 +2316,7 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("failed to get steps for set event idempotency workflow: %v", err)
 		}
 		if len(setSteps) != 1 {
-			t.Fatalf("expected 1 step in set event idempotency workflow, got %d", len(setSteps))
+			require.Len(t, setSteps, 1, "expected 1 step in set event idempotency workflow, got %d", len(setSteps))
 		}
 		if setSteps[0].StepID != 0 {
 			t.Fatalf("expected set event idempotency step to have StepID 0, got %d", setSteps[0].StepID)
@@ -2421,7 +2330,7 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("failed to get steps for get event idempotency workflow: %v", err)
 		}
 		if len(getSteps) != 1 {
-			t.Fatalf("expected 1 step in get event idempotency workflow, got %d", len(getSteps))
+			require.Len(t, getSteps, 1, "expected 1 step in get event idempotency workflow, got %d", len(getSteps))
 		}
 		if getSteps[0].StepID != 0 {
 			t.Fatalf("expected get event idempotency step to have StepID 0, got %d", getSteps[0].StepID)
@@ -2517,7 +2426,7 @@ func TestSetGetEvent(t *testing.T) {
 
 		// Check for any errors from goroutines
 		for err := range errors {
-			t.Fatal(err)
+			require.FailNow(t, "goroutine error: %v", err)
 		}
 	})
 }
@@ -2578,7 +2487,7 @@ func TestSleep(t *testing.T) {
 		}
 
 		if len(steps) != 1 {
-			t.Fatalf("expected 1 step (the sleep), got %d", len(steps))
+			require.Len(t, steps, 1, "expected 1 step (the sleep), got %d", len(steps))
 		}
 
 		step := steps[0]
@@ -2604,9 +2513,7 @@ func TestSleep(t *testing.T) {
 	t.Run("SleepCannotBeCalledOutsideWorkflow", func(t *testing.T) {
 		// Attempt to call Sleep outside of a workflow context
 		_, err := Sleep(dbosCtx, 1*time.Second)
-		if err == nil {
-			t.Fatal("expected error when calling Sleep outside of workflow context, but got none")
-		}
+		require.Error(t, err, "expected error when calling Sleep outside of workflow context, but got none")
 
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
@@ -2965,7 +2872,7 @@ func TestWorkflowTimeout(t *testing.T) {
 			t.Fatalf("failed to recover pending workflows: %v", err)
 		}
 		if len(recoveredHandles) != 1 {
-			t.Fatalf("expected 1 recovered handle, got %d", len(recoveredHandles))
+			require.Len(t, recoveredHandles, 1, "expected 1 recovered handle, got %d", len(recoveredHandles))
 		}
 		recoveredHandle := recoveredHandles[0]
 		if recoveredHandle.GetWorkflowID() != handle.GetWorkflowID() {
@@ -3000,7 +2907,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// XXX this might be flaky and frankly not super useful
 		expectedDeadline := start.Add(timeout * 10 / 100)
 		if status.Deadline.Before(expectedDeadline) || status.Deadline.After(start.Add(timeout)) {
-			t.Fatalf("expected workflow deadline to be within %v and %v, got %v", expectedDeadline, start.Add(timeout), status.Deadline)
+			t.Fatalf("expected workflow deadline to be within %v and %v, got %v", expectedDeadline, status.Deadline, start.Add(timeout))
 		}
 	})
 }

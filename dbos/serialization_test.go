@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 /** Test serialization and deserialization
@@ -76,95 +79,51 @@ func TestWorkflowEncoding(t *testing.T) {
 	t.Run("BuiltinTypes", func(t *testing.T) {
 		// Test a workflow that uses a built-in type (string)
 		directHandle, err := RunAsWorkflow(executor, encodingWorkflowBuiltinTypes, "test")
-		if err != nil {
-			t.Fatalf("failed to execute workflow: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Test result and error from direct handle
 		directHandleResult, err := directHandle.GetResult()
-		if directHandleResult != "123" {
-			t.Fatalf("expected direct handle result to be '123', got %v", directHandleResult)
-		}
-		if err.Error() != "workflow error: step error" {
-			t.Fatalf("expected error to be 'workflow error: step error', got %v", err)
-		}
+		assert.Equal(t, "123", directHandleResult)
+		require.Error(t, err)
+		assert.Equal(t, "workflow error: step error", err.Error())
 
 		// Test result from polling handle
 		retrieveHandler, err := RetrieveWorkflow[string](executor.(*dbosContext), directHandle.GetWorkflowID())
-		if err != nil {
-			t.Fatalf("failed to retrieve workflow: %v", err)
-		}
+		require.NoError(t, err)
 		retrievedResult, err := retrieveHandler.GetResult()
-		if retrievedResult != "123" {
-			t.Fatalf("expected retrieved result to be '123', got %v", retrievedResult)
-		}
-		if err.Error() != "workflow error: step error" {
-			t.Fatalf("expected error to be 'workflow error: step error', got %v", err)
-		}
+		assert.Equal(t, "123", retrievedResult)
+		require.Error(t, err)
+		assert.Equal(t, "workflow error: step error", err.Error())
 
 		// Test results from ListWorkflows
 		workflows, err := ListWorkflows(executor, WithWorkflowIDs(
 			[]string{directHandle.GetWorkflowID()},
 		))
-		if err != nil {
-			t.Fatalf("failed to list workflows: %v", err)
-		}
-		if len(workflows) != 1 {
-			t.Fatalf("expected 1 workflow, got %d", len(workflows))
-		}
+		require.NoError(t, err)
+		require.Len(t, workflows, 1)
 		workflow := workflows[0]
-		if workflow.Input == nil {
-			t.Fatal("expected workflow input to be non-nil")
-		}
+		require.NotNil(t, workflow.Input)
 		workflowInput, ok := workflow.Input.(string)
-		if !ok {
-			t.Fatalf("expected workflow input to be of type string, got %T", workflow.Input)
-		}
-		if workflowInput != "test" {
-			t.Fatalf("expected workflow input to be 'test', got %v", workflowInput)
-		}
-		if workflow.Output == nil {
-			t.Fatal("expected workflow output to be non-nil")
-		}
+		require.True(t, ok, "expected workflow input to be of type string, got %T", workflow.Input)
+		assert.Equal(t, "test", workflowInput)
+		require.NotNil(t, workflow.Output)
 		workflowOutput, ok := workflow.Output.(string)
-		if !ok {
-			t.Fatalf("expected workflow output to be of type string, got %T", workflow.Output)
-		}
-		if workflowOutput != "123" {
-			t.Fatalf("expected workflow output to be '123', got %v", workflowOutput)
-		}
-		if workflow.Error == nil {
-			t.Fatal("expected workflow error to be non-nil")
-		}
-		if workflow.Error.Error() != "workflow error: step error" {
-			t.Fatalf("expected workflow error to be 'workflow error: step error', got %v", workflow.Error.Error())
-		}
+		require.True(t, ok, "expected workflow output to be of type string, got %T", workflow.Output)
+		assert.Equal(t, "123", workflowOutput)
+		require.NotNil(t, workflow.Error)
+		assert.Equal(t, "workflow error: step error", workflow.Error.Error())
 
 		// Test results from GetWorkflowSteps
 		steps, err := executor.(*dbosContext).systemDB.getWorkflowSteps(context.Background(), directHandle.GetWorkflowID())
-		if err != nil {
-			t.Fatalf("failed to get workflow steps: %v", err)
-		}
-		if len(steps) != 1 {
-			t.Fatalf("expected 1 step, got %d", len(steps))
-		}
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
 		step := steps[0]
-		if step.Output == nil {
-			t.Fatal("expected step output to be non-nil")
-		}
+		require.NotNil(t, step.Output)
 		stepOutput, ok := step.Output.(int)
-		if !ok {
-			t.Fatalf("expected step output to be of type int, got %T", step.Output)
-		}
-		if stepOutput != 123 {
-			t.Fatalf("expected step output to be 123, got %v", stepOutput)
-		}
-		if step.Error == nil {
-			t.Fatal("expected step error to be non-nil")
-		}
-		if step.Error.Error() != "step error" {
-			t.Fatalf("expected step error to be 'step error', got %v", step.Error.Error())
-		}
+		require.True(t, ok, "expected step output to be of type int, got %T", step.Output)
+		assert.Equal(t, 123, stepOutput)
+		require.NotNil(t, step.Error)
+		assert.Equal(t, "step error", step.Error.Error())
 	})
 
 	t.Run("StructType", func(t *testing.T) {
@@ -175,123 +134,59 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 
 		directHandle, err := RunAsWorkflow(executor, encodingWorkflowStruct, input)
-		if err != nil {
-			t.Fatalf("failed to execute step workflow: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Test result from direct handle
 		directResult, err := directHandle.GetResult()
-		if err != nil {
-			t.Fatalf("expected no error but got: %v", err)
-		}
-		if directResult.A.A.A != input.A.A {
-			t.Fatalf("expected direct result input data name to be %v, got %v", input.A.A, directResult.A.A.A)
-		}
-		if directResult.A.A.B != input.A.B {
-			t.Fatalf("expected direct result input data value to be %v, got %v", input.A.B, directResult.A.A.B)
-		}
-		if directResult.A.B != fmt.Sprintf("%d", input.B) {
-			t.Fatalf("expected direct result input ID to be %v, got %v", fmt.Sprintf("%d", input.B), directResult.A.B)
-		}
-		if directResult.B != "processed by encodingStepStruct" {
-			t.Fatalf("expected direct result step info to be 'processed by encodingStepStruct', got %v", directResult.B)
-		}
+		require.NoError(t, err)
+		assert.Equal(t, input.A.A, directResult.A.A.A)
+		assert.Equal(t, input.A.B, directResult.A.A.B)
+		assert.Equal(t, fmt.Sprintf("%d", input.B), directResult.A.B)
+		assert.Equal(t, "processed by encodingStepStruct", directResult.B)
 
 		// Test result from polling handle
 		retrieveHandler, err := RetrieveWorkflow[StepOutputStruct](executor.(*dbosContext), directHandle.GetWorkflowID())
-		if err != nil {
-			t.Fatalf("failed to retrieve step workflow: %v", err)
-		}
+		require.NoError(t, err)
 		retrievedResult, err := retrieveHandler.GetResult()
-		if err != nil {
-			t.Fatalf("expected no error but got: %v", err)
-		}
-		if retrievedResult.A.A.A != input.A.A {
-			t.Fatalf("expected retrieved result input data name to be %v, got %v", input.A.A, retrievedResult.A.A.A)
-		}
-		if retrievedResult.A.A.B != input.A.B {
-			t.Fatalf("expected retrieved result input data value to be %v, got %v", input.A.B, retrievedResult.A.A.B)
-		}
-		if retrievedResult.A.B != fmt.Sprintf("%d", input.B) {
-			t.Fatalf("expected retrieved result input ID to be %v, got %v", fmt.Sprintf("%d", input.B), retrievedResult.A.B)
-		}
-		if retrievedResult.B != "processed by encodingStepStruct" {
-			t.Fatalf("expected retrieved result step info to be 'processed by encodingStepStruct', got %v", retrievedResult.B)
-		}
+		require.NoError(t, err)
+		assert.Equal(t, input.A.A, retrievedResult.A.A.A)
+		assert.Equal(t, input.A.B, retrievedResult.A.A.B)
+		assert.Equal(t, fmt.Sprintf("%d", input.B), retrievedResult.A.B)
+		assert.Equal(t, "processed by encodingStepStruct", retrievedResult.B)
 
 		// Test results from ListWorkflows
 		workflows, err := ListWorkflows(executor, WithWorkflowIDs(
 			[]string{directHandle.GetWorkflowID()},
 		))
-		if err != nil {
-			t.Fatalf("failed to list workflows: %v", err)
-		}
+		require.NoError(t, err)
 		workflow := workflows[0]
-		if workflow.Input == nil {
-			t.Fatal("expected workflow input to be non-nil")
-		}
+		require.NotNil(t, workflow.Input)
 		workflowInput, ok := workflow.Input.(WorkflowInputStruct)
-		if !ok {
-			t.Fatalf("expected workflow input to be of type WorkflowInputStruct, got %T", workflow.Input)
-		}
-		if workflowInput.A.A != input.A.A {
-			t.Fatalf("expected workflow input data name to be %v, got %v", input.A.A, workflowInput.A.A)
-		}
-		if workflowInput.A.B != input.A.B {
-			t.Fatalf("expected workflow input data value to be %v, got %v", input.A.B, workflowInput.A.B)
-		}
-		if workflowInput.B != input.B {
-			t.Fatalf("expected workflow input ID to be %v, got %v", input.B, workflowInput.B)
-		}
+		require.True(t, ok, "expected workflow input to be of type WorkflowInputStruct, got %T", workflow.Input)
+		assert.Equal(t, input.A.A, workflowInput.A.A)
+		assert.Equal(t, input.A.B, workflowInput.A.B)
+		assert.Equal(t, input.B, workflowInput.B)
 
 		workflowOutput, ok := workflow.Output.(StepOutputStruct)
-		if !ok {
-			t.Fatalf("expected workflow output to be of type StepOutputStruct, got %T", workflow.Output)
-		}
-		if workflowOutput.A.A.A != input.A.A {
-			t.Fatalf("expected workflow output input data name to be %v, got %v", input.A.A, workflowOutput.A.A.A)
-		}
-		if workflowOutput.A.A.B != input.A.B {
-			t.Fatalf("expected workflow output input data value to be %v, got %v", input.A.B, workflowOutput.A.A.B)
-		}
-		if workflowOutput.A.B != fmt.Sprintf("%d", input.B) {
-			t.Fatalf("expected workflow output input ID to be %v, got %v", fmt.Sprintf("%d", input.B), workflowOutput.A.B)
-		}
-		if workflowOutput.B != "processed by encodingStepStruct" {
-			t.Fatalf("expected workflow output step info to be 'processed by encodingStepStruct', got %v", workflowOutput.B)
-		}
+		require.True(t, ok, "expected workflow output to be of type StepOutputStruct, got %T", workflow.Output)
+		assert.Equal(t, input.A.A, workflowOutput.A.A.A)
+		assert.Equal(t, input.A.B, workflowOutput.A.A.B)
+		assert.Equal(t, fmt.Sprintf("%d", input.B), workflowOutput.A.B)
+		assert.Equal(t, "processed by encodingStepStruct", workflowOutput.B)
 
 		// Test results from GetWorkflowSteps
 		steps, err := executor.(*dbosContext).systemDB.getWorkflowSteps(context.Background(), directHandle.GetWorkflowID())
-		if err != nil {
-			t.Fatalf("failed to get workflow steps: %v", err)
-		}
-		if len(steps) != 1 {
-			t.Fatalf("expected 1 step, got %d", len(steps))
-		}
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
 		step := steps[0]
-		if step.Output == nil {
-			t.Fatal("expected step output to be non-nil")
-		}
+		require.NotNil(t, step.Output)
 		stepOutput, ok := step.Output.(StepOutputStruct)
-		if !ok {
-			t.Fatalf("expected step output to be of type StepOutputStruct, got %T", step.Output)
-		}
-		if stepOutput.A.A.A != input.A.A {
-			t.Fatalf("expected step output input data name to be %v, got %v", input.A.A, stepOutput.A.A.A)
-		}
-		if stepOutput.A.A.B != input.A.B {
-			t.Fatalf("expected step output input data value to be %v, got %v", input.A.B, stepOutput.A.A.B)
-		}
-		if stepOutput.A.B != fmt.Sprintf("%d", input.B) {
-			t.Fatalf("expected step output input ID to be %v, got %v", fmt.Sprintf("%d", input.B), stepOutput.A.B)
-		}
-		if stepOutput.B != "processed by encodingStepStruct" {
-			t.Fatalf("expected step output step info to be 'processed by encodingStepStruct', got %v", stepOutput.B)
-		}
-		if step.Error != nil {
-			t.Fatalf("expected step error to be nil, got %v", step.Error)
-		}
+		require.True(t, ok, "expected step output to be of type StepOutputStruct, got %T", step.Output)
+		assert.Equal(t, input.A.A, stepOutput.A.A.A)
+		assert.Equal(t, input.A.B, stepOutput.A.A.B)
+		assert.Equal(t, fmt.Sprintf("%d", input.B), stepOutput.A.B)
+		assert.Equal(t, "processed by encodingStepStruct", stepOutput.B)
+		assert.Nil(t, step.Error)
 	})
 }
 
@@ -333,18 +228,12 @@ func TestSetEventSerialize(t *testing.T) {
 	t.Run("SetEventUserDefinedType", func(t *testing.T) {
 		// Start a workflow that sets an event with a user-defined type
 		setHandle, err := RunAsWorkflow(executor, setEventUserDefinedTypeWorkflow, "user-defined-key")
-		if err != nil {
-			t.Fatalf("failed to start workflow with user-defined event type: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Wait for the workflow to complete
 		result, err := setHandle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from user-defined event workflow: %v", err)
-		}
-		if result != "user-defined-event-set" {
-			t.Fatalf("expected result to be 'user-defined-event-set', got '%s'", result)
-		}
+		require.NoError(t, err)
+		assert.Equal(t, "user-defined-event-set", result)
 
 		// Retrieve the event to verify it was properly serialized and can be deserialized
 		retrievedEvent, err := GetEvent[UserDefinedEventData](executor, WorkflowGetEventInput{
@@ -352,29 +241,15 @@ func TestSetEventSerialize(t *testing.T) {
 			Key:              "user-defined-key",
 			Timeout:          3 * time.Second,
 		})
-		if err != nil {
-			t.Fatalf("failed to get user-defined event: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Verify the retrieved data matches what we set
-		if retrievedEvent.ID != 42 {
-			t.Fatalf("expected ID to be 42, got %d", retrievedEvent.ID)
-		}
-		if retrievedEvent.Name != "test-event" {
-			t.Fatalf("expected Name to be 'test-event', got '%s'", retrievedEvent.Name)
-		}
-		if retrievedEvent.Details.Description != "This is a test event with user-defined data" {
-			t.Fatalf("expected Description to be 'This is a test event with user-defined data', got '%s'", retrievedEvent.Details.Description)
-		}
-		if len(retrievedEvent.Details.Tags) != 3 {
-			t.Fatalf("expected 3 tags, got %d", len(retrievedEvent.Details.Tags))
-		}
+		assert.Equal(t, 42, retrievedEvent.ID)
+		assert.Equal(t, "test-event", retrievedEvent.Name)
+		assert.Equal(t, "This is a test event with user-defined data", retrievedEvent.Details.Description)
+		require.Len(t, retrievedEvent.Details.Tags, 3)
 		expectedTags := []string{"test", "user-defined", "serialization"}
-		for i, tag := range retrievedEvent.Details.Tags {
-			if tag != expectedTags[i] {
-				t.Fatalf("expected tag %d to be '%s', got '%s'", i, expectedTags[i], tag)
-			}
-		}
+		assert.Equal(t, expectedTags, retrievedEvent.Details.Tags)
 	})
 }
 
@@ -424,51 +299,28 @@ func TestSendSerialize(t *testing.T) {
 	t.Run("SendUserDefinedType", func(t *testing.T) {
 		// Start a receiver workflow first
 		recvHandle, err := RunAsWorkflow(executor, recvUserDefinedTypeWorkflow, "recv-input")
-		if err != nil {
-			t.Fatalf("failed to start receive workflow: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Start a sender workflow that sends a message with a user-defined type
 		sendHandle, err := RunAsWorkflow(executor, sendUserDefinedTypeWorkflow, recvHandle.GetWorkflowID())
-		if err != nil {
-			t.Fatalf("failed to start workflow with user-defined send type: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Wait for the sender workflow to complete
 		sendResult, err := sendHandle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from user-defined send workflow: %v", err)
-		}
-		if sendResult != "user-defined-message-sent" {
-			t.Fatalf("expected result to be 'user-defined-message-sent', got '%s'", sendResult)
-		}
+		require.NoError(t, err)
+		assert.Equal(t, "user-defined-message-sent", sendResult)
 
 		// Wait for the receiver workflow to complete and get the message
 		receivedData, err := recvHandle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from receive workflow: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Verify the received data matches what we sent
-		if receivedData.ID != 42 {
-			t.Fatalf("expected ID to be 42, got %d", receivedData.ID)
-		}
-		if receivedData.Name != "test-send-message" {
-			t.Fatalf("expected Name to be 'test-send-message', got '%s'", receivedData.Name)
-		}
-		if receivedData.Details.Description != "This is a test send message with user-defined data" {
-			t.Fatalf("expected Description to be 'This is a test send message with user-defined data', got '%s'", receivedData.Details.Description)
-		}
+		assert.Equal(t, 42, receivedData.ID)
+		assert.Equal(t, "test-send-message", receivedData.Name)
+		assert.Equal(t, "This is a test send message with user-defined data", receivedData.Details.Description)
 
 		// Verify tags
 		expectedTags := []string{"test", "user-defined", "serialization", "send"}
-		if len(receivedData.Details.Tags) != len(expectedTags) {
-			t.Fatalf("expected %d tags, got %d", len(expectedTags), len(receivedData.Details.Tags))
-		}
-		for i, tag := range receivedData.Details.Tags {
-			if tag != expectedTags[i] {
-				t.Fatalf("expected tag %d to be '%s', got '%s'", i, expectedTags[i], tag)
-			}
-		}
+		assert.Equal(t, expectedTags, receivedData.Details.Tags)
 	})
 }

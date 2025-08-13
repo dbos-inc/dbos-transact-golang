@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 /**
@@ -104,84 +105,55 @@ func TestWorkflowQueues(t *testing.T) {
 	RegisterWorkflow(dbosCtx, enqueueWorkflowDLQ, WithMaxRetries(dlqMaxRetries))
 
 	err := dbosCtx.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch DBOS instance: %v", err)
-	}
+	require.NoError(t, err)
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
 		handle, err := RunAsWorkflow(dbosCtx, queueWorkflow, "test-input", WithQueue(queue.Name))
-		if err != nil {
-			t.Fatalf("failed to enqueue workflow: %v", err)
-		}
+		require.NoError(t, err)
 
 		_, ok := handle.(*workflowPollingHandle[string])
-		if !ok {
-			t.Fatalf("expected handle to be of type workflowPollingHandle, got %T", handle)
-		}
+		require.True(t, ok, "expected handle to be of type workflowPollingHandle, got %T", handle)
 
 		res, err := handle.GetResult()
-		if err != nil {
-			t.Fatalf("expected no error but got: %v", err)
-		}
-		if res != "test-input" {
-			t.Fatalf("expected workflow result to be 'test-input', got %v", res)
-		}
+		require.NoError(t, err)
+		assert.Equal(t, "test-input", res)
 
-		if !queueEntriesAreCleanedUp(dbosCtx) {
-			t.Fatal("expected queue entries to be cleaned up after global concurrency test")
-		}
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
 
 	t.Run("EnqueuedWorkflowStartsChildWorkflow", func(t *testing.T) {
 		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowWithChild, "test-input", WithQueue(queue.Name))
-		if err != nil {
-			t.Fatalf("failed to enqueue workflow with child: %v", err)
-		}
+		require.NoError(t, err)
 
 		res, err := handle.GetResult()
-		if err != nil {
-			t.Fatalf("expected no error but got: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Expected result: child workflow returns "test-input-child"
 		expectedResult := "test-input-child"
-		if res != expectedResult {
-			t.Fatalf("expected workflow result to be '%s', got %v", expectedResult, res)
-		}
+		assert.Equal(t, expectedResult, res)
 
-		if !queueEntriesAreCleanedUp(dbosCtx) {
-			t.Fatal("expected queue entries to be cleaned up after global concurrency test")
-		}
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
 
 	t.Run("WorkflowEnqueuesAnotherWorkflow", func(t *testing.T) {
 		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowThatEnqueues, "test-input", WithQueue(queue.Name))
-		if err != nil {
-			t.Fatalf("failed to enqueue workflow that enqueues another workflow: %v", err)
-		}
+		require.NoError(t, err)
 
 		res, err := handle.GetResult()
-		if err != nil {
-			t.Fatalf("expected no error but got: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Expected result: enqueued workflow returns "test-input-enqueued"
 		expectedResult := "test-input-enqueued"
-		if res != expectedResult {
-			t.Fatalf("expected workflow result to be '%s', got %v", expectedResult, res)
-		}
+		assert.Equal(t, expectedResult, res)
 
-		if !queueEntriesAreCleanedUp(dbosCtx) {
-			t.Fatal("expected queue entries to be cleaned up after global concurrency test")
-		}
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
 
 	t.Run("DynamicRegistration", func(t *testing.T) {
 		// Attempting to register a queue after launch should panic
 		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic from queue registration after launch but got none")
-			}
+			r := recover()
+			assert.NotNil(t, r, "expected panic from queue registration after launch but got none")
 		}()
 		NewWorkflowQueue(dbosCtx, "dynamic-queue")
 	})
@@ -191,9 +163,7 @@ func TestWorkflowQueues(t *testing.T) {
 
 		// Enqueue the workflow for the first time
 		originalHandle, err := RunAsWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
-		if err != nil {
-			t.Fatalf("failed to enqueue blocking workflow: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Wait for the workflow to start
 		dlqStartEvent.Wait()
@@ -202,45 +172,31 @@ func TestWorkflowQueues(t *testing.T) {
 		// Try to enqueue the same workflow more times
 		for i := range dlqMaxRetries * 2 {
 			_, err := RunAsWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
-			if err != nil {
-				t.Fatalf("failed to enqueue workflow attempt %d: %v", i+1, err)
-			}
+			require.NoError(t, err, "failed to enqueue workflow attempt %d", i+1)
 		}
 
 		// Get the status from the original handle and check the attempts counter
 		status, err := originalHandle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get status of original workflow handle: %v", err)
-		}
+		require.NoError(t, err, "failed to get status of original workflow handle")
 
 		// The attempts counter should still be 1 (the original enqueue)
-		if status.Attempts != 1 {
-			t.Fatalf("expected attempts to be 1, got %d", status.Attempts)
-		}
+		assert.Equal(t, 1, status.Attempts, "expected attempts to be 1")
 
 		// Check that the workflow hits DLQ after re-running max retries
 		handles := make([]WorkflowHandle[any], 0, dlqMaxRetries+1)
 		for i := range dlqMaxRetries {
 			recoveryHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
-			if err != nil {
-				t.Fatalf("failed to recover pending workflows: %v", err)
-			}
-			if len(recoveryHandles) != 1 {
-				t.Fatalf("expected 1 handle, got %d", len(recoveryHandles))
-			}
+			require.NoError(t, err, "failed to recover pending workflows")
+			assert.Len(t, recoveryHandles, 1, "expected 1 handle")
 			dlqStartEvent.Wait()
 			dlqStartEvent.Clear()
 			handle := recoveryHandles[0]
 			handles = append(handles, handle)
 			status, err := handle.GetStatus()
-			if err != nil {
-				t.Fatalf("failed to get status of recovered workflow handle: %v", err)
-			}
+			require.NoError(t, err, "failed to get status of recovered workflow handle")
 			if i == dlqMaxRetries {
 				// On the last retry, the workflow should be in DLQ
-				if status.Status != WorkflowStatusRetriesExceeded {
-					t.Fatalf("expected workflow status to be %s, got %v", WorkflowStatusRetriesExceeded, status.Status)
-				}
+				assert.Equal(t, WorkflowStatusRetriesExceeded, status.Status, "expected workflow status to be %s", WorkflowStatusRetriesExceeded)
 			}
 		}
 
@@ -248,17 +204,11 @@ func TestWorkflowQueues(t *testing.T) {
 		dlqCompleteEvent.Set()
 		for _, handle := range handles {
 			result, err := handle.GetResult()
-			if err != nil {
-				t.Fatalf("failed to get result from recovered workflow handle: %v", err)
-			}
-			if result != "test-input" {
-				t.Fatalf("expected result to be 'test-input', got %v", result)
-			}
+			require.NoError(t, err, "failed to get result from recovered workflow handle")
+			assert.Equal(t, "test-input", result, "expected result to be 'test-input'")
 		}
 
-		if !queueEntriesAreCleanedUp(dbosCtx) {
-			t.Fatal("expected queue entries to be cleaned up after successive enqueues test")
-		}
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after successive enqueues test")
 	})
 
 	t.Run("ConflictingWorkflowOnDifferentQueues", func(t *testing.T) {
@@ -266,45 +216,29 @@ func TestWorkflowQueues(t *testing.T) {
 
 		// Enqueue the same workflow ID on the first queue
 		handle, err := RunAsWorkflow(dbosCtx, queueWorkflow, "test-input-1", WithQueue(conflictQueue1.Name), WithWorkflowID(workflowID))
-		if err != nil {
-			t.Fatalf("failed to enqueue workflow on first queue: %v", err)
-		}
+		require.NoError(t, err, "failed to enqueue workflow on first queue")
 
 		// Get the result from the first workflow to ensure it completes
 		result, err := handle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from first workflow: %v", err)
-		}
-		if result != "test-input-1" {
-			t.Fatalf("expected 'test-input-1', got %v", result)
-		}
+		require.NoError(t, err, "failed to get result from first workflow")
+		assert.Equal(t, "test-input-1", result, "expected 'test-input-1'")
 
 		// Now try to enqueue the same workflow ID on a different queue
 		// This should trigger a ConflictingWorkflowError
 		_, err = RunAsWorkflow(dbosCtx, queueWorkflow, "test-input-2", WithQueue(conflictQueue2.Name), WithWorkflowID(workflowID))
-		if err == nil {
-			t.Fatal("expected ConflictingWorkflowError when enqueueing same workflow ID on different queue, but got none")
-		}
+		require.Error(t, err, "expected ConflictingWorkflowError when enqueueing same workflow ID on different queue, but got none")
 
 		// Check that it's the correct error type
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != ConflictingWorkflowError {
-			t.Fatalf("expected error code to be ConflictingWorkflowError, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, ConflictingWorkflowError, dbosErr.Code, "expected error code to be ConflictingWorkflowError")
 
 		// Check that the error message contains queue information
 		expectedMsgPart := "Workflow already exists in a different queue"
-		if !strings.Contains(err.Error(), expectedMsgPart) {
-			t.Fatalf("expected error message to contain '%s', got '%s'", expectedMsgPart, err.Error())
-		}
+		assert.Contains(t, err.Error(), expectedMsgPart, "expected error message to contain expected part")
 
-		if !queueEntriesAreCleanedUp(dbosCtx) {
-			t.Fatal("expected queue entries to be cleaned up after conflicting workflow test")
-		}
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after conflicting workflow test")
 	})
 }
 
@@ -347,9 +281,7 @@ func TestQueueRecovery(t *testing.T) {
 	RegisterWorkflow(dbosCtx, recoveryWorkflowFunc)
 
 	err := dbosCtx.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch DBOS instance: %v", err)
-	}
+	require.NoError(t, err, "failed to launch DBOS instance")
 
 	queuedSteps := 5
 
@@ -361,23 +293,19 @@ func TestQueueRecovery(t *testing.T) {
 
 	// Start the workflow. Wait for all steps to start. Verify that they started.
 	handle, err := RunAsWorkflow(dbosCtx, recoveryWorkflowFunc, "", WithWorkflowID(wfid))
-	if err != nil {
-		t.Fatalf("failed to start workflow: %v", err)
-	}
+	require.NoError(t, err, "failed to start workflow")
 
 	for _, e := range recoveryStepEvents {
 		e.Wait()
 		e.Clear()
 	}
 
-	if atomic.LoadInt64(&recoveryStepCounter) != int64(queuedSteps) {
-		t.Fatalf("expected recoveryStepCounter to be %d, got %d", queuedSteps, atomic.LoadInt64(&recoveryStepCounter))
-	}
+	assert.Equal(t, int64(queuedSteps), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to match queuedSteps")
 
 	// Recover the workflow, then resume it.
 	recoveryHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 	if err != nil {
-		t.Fatalf("failed to recover pending workflows: %v", err)
+		require.NoError(t, err, "failed to recover pending workflows")
 	}
 
 	for _, e := range recoveryStepEvents {
@@ -385,61 +313,39 @@ func TestQueueRecovery(t *testing.T) {
 	}
 	recoveryEvent.Set()
 
-	if len(recoveryHandles) != queuedSteps+1 {
-		t.Fatalf("expected %d recovery handles, got %d", queuedSteps+1, len(recoveryHandles))
-	}
+	assert.Len(t, recoveryHandles, queuedSteps+1, "expected specific number of recovery handles")
 
 	for _, h := range recoveryHandles {
 		if h.GetWorkflowID() == wfid {
 			// Root workflow case
 			result, err := h.GetResult()
-			if err != nil {
-				t.Fatalf("failed to get result from recovered root workflow handle: %v", err)
-			}
+			require.NoError(t, err, "failed to get result from recovered root workflow handle")
 			castedResult, ok := result.([]int)
-			if !ok {
-				t.Fatalf("expected result to be of type []int for root workflow, got %T", result)
-			}
+			require.True(t, ok, "expected result to be of type []int for root workflow, got %T", result)
 			expectedResult := []int{0, 1, 2, 3, 4}
-			if !equal(castedResult, expectedResult) {
-				t.Fatalf("expected result %v, got %v", expectedResult, castedResult)
-			}
+			assert.True(t, equal(castedResult, expectedResult), "expected result %v, got %v", expectedResult, castedResult)
 		}
 	}
 
 	result, err := handle.GetResult()
-	if err != nil {
-		t.Fatalf("failed to get result from original handle: %v", err)
-	}
+	require.NoError(t, err, "failed to get result from original handle")
 	expectedResult := []int{0, 1, 2, 3, 4}
-	if !equal(result, expectedResult) {
-		t.Fatalf("expected result %v, got %v", expectedResult, result)
-	}
+	assert.True(t, equal(result, expectedResult), "expected result %v, got %v", expectedResult, result)
 
-	if atomic.LoadInt64(&recoveryStepCounter) != int64(queuedSteps*2) {
-		t.Fatalf("expected recoveryStepCounter to be %d, got %d", queuedSteps*2, atomic.LoadInt64(&recoveryStepCounter))
-	}
+	assert.Equal(t, int64(queuedSteps*2), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to be %d", queuedSteps*2)
 
 	// Rerun the workflow. Because each step is complete, none should start again.
 	rerunHandle, err := RunAsWorkflow(dbosCtx, recoveryWorkflowFunc, "test-input", WithWorkflowID(wfid))
-	if err != nil {
-		t.Fatalf("failed to rerun workflow: %v", err)
-	}
+	require.NoError(t, err, "failed to rerun workflow")
 	rerunResult, err := rerunHandle.GetResult()
-	if err != nil {
-		t.Fatalf("failed to get result from rerun handle: %v", err)
-	}
+	require.NoError(t, err, "failed to get result from rerun handle")
 	if !equal(rerunResult, expectedResult) {
-		t.Fatalf("expected result %v, got %v", expectedResult, rerunResult)
+		assert.True(t, equal(rerunResult, expectedResult), "expected result %v, got %v", expectedResult, rerunResult)
 	}
 
-	if atomic.LoadInt64(&recoveryStepCounter) != int64(queuedSteps*2) {
-		t.Fatalf("expected recoveryStepCounter to remain %d, got %d", queuedSteps*2, atomic.LoadInt64(&recoveryStepCounter))
-	}
+	assert.Equal(t, int64(queuedSteps*2), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to remain %d", queuedSteps*2)
 
-	if !queueEntriesAreCleanedUp(dbosCtx) {
-		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
-	}
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
 }
 
 // TODO: we can update this test to have the same logic than TestWorkerConcurrency
@@ -465,61 +371,39 @@ func TestGlobalConcurrency(t *testing.T) {
 	RegisterWorkflow(dbosCtx, globalConcurrencyWorkflowFunc)
 
 	err := dbosCtx.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch DBOS instance: %v", err)
-	}
+	require.NoError(t, err, "failed to launch DBOS instance")
 
 	// Enqueue two workflows
 	handle1, err := RunAsWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow1", WithQueue(globalConcurrencyQueue.Name))
-	if err != nil {
-		t.Fatalf("failed to enqueue workflow1: %v", err)
-	}
+	require.NoError(t, err, "failed to enqueue workflow1")
 
 	handle2, err := RunAsWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow2", WithQueue(globalConcurrencyQueue.Name))
-	if err != nil {
-		t.Fatalf("failed to enqueue workflow2: %v", err)
-	}
+	require.NoError(t, err, "failed to enqueue workflow2")
 
 	// Wait for the first workflow to start
 	workflowEvent1.Wait()
 	time.Sleep(2 * time.Second) // Wait for a few seconds to let the queue runner loop
 
 	// Ensure the second workflow has not started yet
-	if workflowEvent2.IsSet {
-		t.Fatalf("expected workflow2 to not start while workflow1 is running")
-	}
+	assert.False(t, workflowEvent2.IsSet, "expected workflow2 to not start while workflow1 is running")
 	status, err := handle2.GetStatus()
-	if err != nil {
-		t.Fatalf("failed to get status of workflow2: %v", err)
-	}
-	if status.Status != WorkflowStatusEnqueued {
-		t.Fatalf("expected workflow2 to be in ENQUEUED status, got %v", status.Status)
-	}
+	require.NoError(t, err, "failed to get status of workflow2")
+	assert.Equal(t, WorkflowStatusEnqueued, status.Status, "expected workflow2 to be in ENQUEUED status")
 
 	// Allow the first workflow to complete
 	workflowDoneEvent.Set()
 
 	result1, err := handle1.GetResult()
-	if err != nil {
-		t.Fatalf("failed to get result from workflow1: %v", err)
-	}
-	if result1 != "workflow1" {
-		t.Fatalf("expected result from workflow1 to be 'workflow1', got %v", result1)
-	}
+	require.NoError(t, err, "failed to get result from workflow1")
+	assert.Equal(t, "workflow1", result1, "expected result from workflow1 to be 'workflow1'")
 
 	// Wait for the second workflow to start
 	workflowEvent2.Wait()
 
 	result2, err := handle2.GetResult()
-	if err != nil {
-		t.Fatalf("failed to get result from workflow2: %v", err)
-	}
-	if result2 != "workflow2" {
-		t.Fatalf("expected result from workflow2 to be 'workflow2', got %v", result2)
-	}
-	if !queueEntriesAreCleanedUp(dbosCtx) {
-		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
-	}
+	require.NoError(t, err, "failed to get result from workflow2")
+	assert.Equal(t, "workflow2", result2, "expected result from workflow2 to be 'workflow2'")
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
 }
 
 func TestWorkerConcurrency(t *testing.T) {
@@ -530,9 +414,8 @@ func TestWorkerConcurrency(t *testing.T) {
 	dbosCtx2 := setupDBOS(t, false, false) // Don't check for leaks because t.Cancel is called in LIFO order. Also don't reset the DB here.
 	os.Unsetenv("DBOS__VMID")
 
-	if dbosCtx1.GetExecutorID() != "worker1" || dbosCtx2.GetExecutorID() != "worker2" {
-		t.Fatalf("expected executor IDs to be 'worker1' and 'worker2', got '%s' and '%s'", dbosCtx1.GetExecutorID(), dbosCtx2.GetExecutorID())
-	}
+	assert.Equal(t, "worker1", dbosCtx1.GetExecutorID(), "expected first executor ID to be 'worker1'")
+	assert.Equal(t, "worker2", dbosCtx2.GetExecutorID(), "expected second executor ID to be 'worker2'")
 
 	workerConcurrencyQueue := NewWorkflowQueue(dbosCtx1, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
 	NewWorkflowQueue(dbosCtx2, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
@@ -554,9 +437,7 @@ func TestWorkerConcurrency(t *testing.T) {
 		workflows, err := dbosCtx1.(*dbosContext).systemDB.listWorkflows(context.Background(), listWorkflowsDBInput{
 			queueName: workerConcurrencyQueue.Name,
 		})
-		if err != nil {
-			t.Fatalf("failed to list workflows: %v", err)
-		}
+		require.NoError(t, err, "failed to list workflows")
 
 		pendings := make(map[string]int)
 		enqueuedCount := 0
@@ -571,14 +452,10 @@ func TestWorkerConcurrency(t *testing.T) {
 		}
 
 		for executorID, count := range pendings {
-			if count != expectedPendingPerExecutor {
-				t.Fatalf("expected %d pending workflow on executor %s, got %d", expectedPendingPerExecutor, executorID, count)
-			}
+			assert.Equal(t, expectedPendingPerExecutor, count, "expected %d pending workflow on executor %s", expectedPendingPerExecutor, executorID)
 		}
 
-		if enqueuedCount != expectedEnqueued {
-			t.Fatalf("expected %d workflows to be enqueued, got %d", expectedEnqueued, enqueuedCount)
-		}
+		assert.Equal(t, expectedEnqueued, enqueuedCount, "expected %d workflows to be enqueued", expectedEnqueued)
 	}
 
 	// Create workflow with dbosContext
@@ -592,40 +469,26 @@ func TestWorkerConcurrency(t *testing.T) {
 	RegisterWorkflow(dbosCtx2, blockingWfFunc)
 
 	err := dbosCtx1.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch DBOS instance: %v", err)
-	}
+	require.NoError(t, err, "failed to launch DBOS instance")
 
 	err = dbosCtx2.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch DBOS instance: %v", err)
-	}
+	require.NoError(t, err, "failed to launch DBOS instance")
 
 	// First enqueue four blocking workflows
 	handle1, err := RunAsWorkflow(dbosCtx1, blockingWfFunc, 0, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-1"))
-	if err != nil {
-		t.Fatalf("failed to enqueue blocking workflow 1: %v", err)
-	}
+	require.NoError(t, err)
 	handle2, err := RunAsWorkflow(dbosCtx1, blockingWfFunc, 1, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-2"))
-	if err != nil {
-		t.Fatalf("failed to enqueue blocking workflow 2: %v", err)
-	}
+	require.NoError(t, err)
 	_, err = RunAsWorkflow(dbosCtx1, blockingWfFunc, 2, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-3"))
-	if err != nil {
-		t.Fatalf("failed to enqueue blocking workflow 3: %v", err)
-	}
+	require.NoError(t, err)
 	_, err = RunAsWorkflow(dbosCtx1, blockingWfFunc, 3, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-4"))
-	if err != nil {
-		t.Fatalf("failed to enqueue blocking workflow 4: %v", err)
-	}
+	require.NoError(t, err)
 
 	// The two first workflows should dequeue on both workers
 	startEvents[0].Wait()
 	startEvents[1].Wait()
 	// Ensure the two other workflows are not started yet
-	if startEvents[2].IsSet || startEvents[3].IsSet {
-		t.Fatal("expected only blocking workflow 1 and 2 to start, but others have started")
-	}
+	assert.False(t, startEvents[2].IsSet || startEvents[3].IsSet, "expected only blocking workflow 1 and 2 to start, but others have started")
 
 	// Expect 1 workflow pending on each executor and 2 workflows enqueued
 	checkWorkflowStatus(t, 1, 2)
@@ -633,18 +496,12 @@ func TestWorkerConcurrency(t *testing.T) {
 	// Unlock workflow 1, check wf 3 starts, check 4 stays blocked
 	completeEvents[0].Set()
 	result1, err := handle1.GetResult()
-	if err != nil {
-		t.Fatalf("failed to get result from blocking workflow 1: %v", err)
-	}
-	if result1 != 0 {
-		t.Fatalf("expected result from blocking workflow 1 to be 0, got %v", result1)
-	}
+	require.NoError(t, err, "failed to get result from blocking workflow 1")
+	assert.Equal(t, 0, result1, "expected result from blocking workflow 1 to be 0")
 	// 3rd workflow should start
 	startEvents[2].Wait()
 	// Ensure the fourth workflow is not started yet
-	if startEvents[3].IsSet {
-		t.Fatal("expected only blocking workflow 3 to start, but workflow 4 has started")
-	}
+	assert.False(t, startEvents[3].IsSet, "expected only blocking workflow 3 to start, but workflow 4 has started")
 
 	// Check that 1 workflow is pending on each executor and 1 workflow is enqueued
 	checkWorkflowStatus(t, 1, 1)
@@ -652,12 +509,8 @@ func TestWorkerConcurrency(t *testing.T) {
 	// Unlock workflow 2 and check wf 4 starts
 	completeEvents[1].Set()
 	result2, err := handle2.GetResult()
-	if err != nil {
-		t.Fatalf("failed to get result from blocking workflow 2: %v", err)
-	}
-	if result2 != 1 {
-		t.Fatalf("expected result from blocking workflow 2 to be 1, got %v", result2)
-	}
+	require.NoError(t, err, "failed to get result from blocking workflow 2")
+	assert.Equal(t, 1, result2, "expected result from blocking workflow 2 to be 1")
 	// 4th workflow should start now
 	startEvents[3].Wait()
 	// workflow 3 and 4 should be pending, one per executor, and no workflows enqueued
@@ -667,9 +520,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	completeEvents[2].Set()
 	completeEvents[3].Set()
 
-	if !queueEntriesAreCleanedUp(dbosCtx1) {
-		t.Fatal("expected queue entries to be cleaned up after global concurrency test")
-	}
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx1), "expected queue entries to be cleaned up after global concurrency test")
 }
 
 func TestWorkerConcurrencyXRecovery(t *testing.T) {
@@ -696,19 +547,13 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	RegisterWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf2)
 
 	err := dbosCtx.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch DBOS instance: %v", err)
-	}
+	require.NoError(t, err, "failed to launch DBOS instance")
 
 	// Enqueue two workflows on a queue with worker concurrency = 1
 	handle1, err := RunAsWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf1, "workflow1", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
-	if err != nil {
-		t.Fatalf("failed to enqueue blocking workflow 1: %v", err)
-	}
+	require.NoError(t, err)
 	handle2, err := RunAsWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf2, "workflow2", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-2"))
-	if err != nil {
-		t.Fatalf("failed to enqueue blocking workflow 2: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Start the first workflow and wait for it to start
 	workerConcurrencyRecoveryStartEvent1.Wait()
@@ -718,51 +563,33 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 
 	// Ensure the 2nd workflow is still ENQUEUED
 	status2, err := handle2.GetStatus()
-	if err != nil {
-		t.Fatalf("failed to get status of workflow2: %v", err)
-	}
-	if status2.Status != WorkflowStatusEnqueued {
-		t.Fatalf("expected workflow2 to be in ENQUEUED status, got %v", status2.Status)
-	}
+	require.NoError(t, err, "failed to get status of workflow2")
+	assert.Equal(t, WorkflowStatusEnqueued, status2.Status, "expected workflow2 to be in ENQUEUED status")
 
 	// Verify workflow2 hasn't started yet
-	if workerConcurrencyRecoveryStartEvent2.IsSet {
-		t.Fatal("expected workflow2 to not start while workflow1 is running")
-	}
+	assert.False(t, workerConcurrencyRecoveryStartEvent2.IsSet, "expected workflow2 to not start while workflow1 is running")
 
 	// Now, manually call the recoverPendingWorkflows method
 	recoveryHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 	if err != nil {
-		t.Fatalf("failed to recover pending workflows: %v", err)
+		require.NoError(t, err, "failed to recover pending workflows")
 	}
 
 	// You should get 1 handle associated with the first workflow
-	if len(recoveryHandles) != 1 {
-		t.Fatalf("expected 1 recovery handle, got %d", len(recoveryHandles))
-	}
+	assert.Len(t, recoveryHandles, 1, "expected 1 recovery handle")
 
 	// The handle status should tell you the workflow is ENQUEUED
 	recoveredHandle := recoveryHandles[0]
-	if recoveredHandle.GetWorkflowID() != "worker-cc-x-recovery-wf-1" {
-		t.Fatalf("expected recovered handle to be for workflow1, got %s", recoveredHandle.GetWorkflowID())
-	}
+	assert.Equal(t, "worker-cc-x-recovery-wf-1", recoveredHandle.GetWorkflowID(), "expected recovered handle to be for workflow1")
 	wf1Status, err := recoveredHandle.GetStatus()
-	if err != nil {
-		t.Fatalf("failed to get status of recovered workflow1: %v", err)
-	}
-	if wf1Status.Status != WorkflowStatusEnqueued {
-		t.Fatalf("expected recovered handle to be in ENQUEUED status, got %v", wf1Status.Status)
-	}
+	require.NoError(t, err, "failed to get status of recovered workflow1")
+	assert.Equal(t, WorkflowStatusEnqueued, wf1Status.Status, "expected recovered handle to be in ENQUEUED status")
 
 	// The 1 first workflow should have been dequeued again (FIFO ordering) and the 2nd workflow should still be enqueued
 	workerConcurrencyRecoveryStartEvent1.Wait()
 	status2, err = handle2.GetStatus()
-	if err != nil {
-		t.Fatalf("failed to get status of workflow2: %v", err)
-	}
-	if status2.Status != WorkflowStatusEnqueued {
-		t.Fatalf("expected workflow2 to still be in ENQUEUED status, got %v", status2.Status)
-	}
+	require.NoError(t, err, "failed to get status of workflow2")
+	assert.Equal(t, WorkflowStatusEnqueued, status2.Status, "expected workflow2 to still be in ENQUEUED status")
 
 	// Let the 1st workflow complete and let the 2nd workflow start and complete
 	workerConcurrencyRecoveryCompleteEvent1.Set()
@@ -771,26 +598,16 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 
 	// Get result from first workflow
 	result1, err := handle1.GetResult()
-	if err != nil {
-		t.Fatalf("failed to get result from workflow1: %v", err)
-	}
-	if result1 != "workflow1" {
-		t.Fatalf("expected result from workflow1 to be 'workflow1', got %v", result1)
-	}
+	require.NoError(t, err, "failed to get result from workflow1")
+	assert.Equal(t, "workflow1", result1, "expected result from workflow1 to be 'workflow1'")
 
 	// Get result from second workflow
 	result2, err := handle2.GetResult()
-	if err != nil {
-		t.Fatalf("failed to get result from workflow2: %v", err)
-	}
-	if result2 != "workflow2" {
-		t.Fatalf("expected result from workflow2 to be 'workflow2', got %v", result2)
-	}
+	require.NoError(t, err, "failed to get result from workflow2")
+	assert.Equal(t, "workflow2", result2, "expected result from workflow2 to be 'workflow2'")
 
 	// Ensure queueEntriesAreCleanedUp is set to true
-	if !queueEntriesAreCleanedUp(dbosCtx) {
-		t.Fatal("expected queue entries to be cleaned up after worker concurrency recovery test")
-	}
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after worker concurrency recovery test")
 }
 
 func rateLimiterTestWorkflow(ctx DBOSContext, _ string) (time.Time, error) {
@@ -806,9 +623,7 @@ func TestQueueRateLimiter(t *testing.T) {
 	RegisterWorkflow(dbosCtx, rateLimiterTestWorkflow)
 
 	err := dbosCtx.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch DBOS instance: %v", err)
-	}
+	require.NoError(t, err, "failed to launch DBOS instance")
 
 	limit := 5
 	period := 1.8
@@ -823,18 +638,14 @@ func TestQueueRateLimiter(t *testing.T) {
 	// followed by the next wave.
 	for i := 0; i < limit*numWaves; i++ {
 		handle, err := RunAsWorkflow(dbosCtx, rateLimiterTestWorkflow, "", WithQueue(rateLimiterQueue.Name))
-		if err != nil {
-			t.Fatalf("failed to enqueue workflow %d: %v", i, err)
-		}
+		require.NoError(t, err, "failed to enqueue workflow %d", i)
 		handles = append(handles, handle)
 	}
 
 	// Get results from all workflows
 	for _, handle := range handles {
 		result, err := handle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to get result from workflow")
 		// XXX in reality this should use the actual start time -- not the completion time.
 		times = append(times, result)
 	}
@@ -854,9 +665,7 @@ func TestQueueRateLimiter(t *testing.T) {
 	}
 
 	// Dynamically compute waves based on start times
-	if len(sortedTimes) == 0 {
-		t.Fatal("no workflow times recorded")
-	}
+	require.Greater(t, len(sortedTimes), 0, "no workflow times recorded")
 
 	baseTime := sortedTimes[0]
 	waveMap := make(map[int][]time.Time)
@@ -869,34 +678,23 @@ func TestQueueRateLimiter(t *testing.T) {
 	}
 	// Verify each wave has fewer than the limit
 	for waveIndex, wave := range waveMap {
-		if len(wave) > limit {
-			t.Fatalf("wave %d has %d workflows, which exceeds the limit of %d", waveIndex, len(wave), limit)
-		}
-		if len(wave) == 0 {
-			t.Fatalf("wave %d is empty, which shouldn't happen", waveIndex)
-		}
+		assert.LessOrEqual(t, len(wave), limit, "wave %d has %d workflows, which exceeds the limit of %d", waveIndex, len(wave), limit)
+		assert.Greater(t, len(wave), 0, "wave %d is empty, which shouldn't happen", waveIndex)
 	}
 	// Verify we have the expected number of waves (allowing some tolerance)
 	expectedWaves := numWaves
-	if len(waveMap) < expectedWaves-1 || len(waveMap) > expectedWaves+1 {
-		t.Fatalf("expected approximately %d waves, got %d", expectedWaves, len(waveMap))
-	}
+	assert.GreaterOrEqual(t, len(waveMap), expectedWaves-1, "expected approximately %d waves, got %d", expectedWaves, len(waveMap))
+	assert.LessOrEqual(t, len(waveMap), expectedWaves+1, "expected approximately %d waves, got %d", expectedWaves, len(waveMap))
 
 	// Verify all workflows get the SUCCESS status eventually
 	for i, handle := range handles {
 		status, err := handle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get status for workflow %d: %v", i, err)
-		}
-		if status.Status != WorkflowStatusSuccess {
-			t.Fatalf("expected workflow %d to have SUCCESS status, got %v", i, status.Status)
-		}
+		require.NoError(t, err, "failed to get status for workflow %d", i)
+		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected workflow %d to have SUCCESS status", i)
 	}
 
 	// Verify all queue entries eventually get cleaned up.
-	if !queueEntriesAreCleanedUp(dbosCtx) {
-		t.Fatal("expected queue entries to be cleaned up after rate limiter test")
-	}
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after rate limiter test")
 }
 
 func TestQueueTimeouts(t *testing.T) {
@@ -908,7 +706,7 @@ func TestQueueTimeouts(t *testing.T) {
 		// This workflow will wait indefinitely until it is cancelled
 		<-ctx.Done()
 		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
+			require.True(t, errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded), "workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
 		}
 		return "", ctx.Err()
 	}
@@ -918,29 +716,21 @@ func TestQueueTimeouts(t *testing.T) {
 		// This workflow will enqueue a workflow that waits indefinitely until it is cancelled
 		handle, err := RunAsWorkflow(ctx, queuedWaitForCancelWorkflow, "enqueued-wait-for-cancel", WithQueue(timeoutQueue.Name))
 		if err != nil {
-			t.Fatalf("failed to start enqueued wait for cancel workflow: %v", err)
+			require.NoError(t, err, "failed to start enqueued wait for cancel workflow")
 		}
 		// Workflow should get AwaitedWorkflowCancelled DBOSError
 		_, err = handle.GetResult()
 		if err == nil {
-			t.Fatal("expected error when waiting for enqueued workflow to complete, but got none")
+			require.Error(t, err, "expected error when waiting for enqueued workflow to complete, but got none")
 		}
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
-		if dbosErr.Code != AwaitedWorkflowCancelled {
-			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
 
 		// enqueud workflow should have been cancelled
 		status, err := handle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get status of enqueued workflow: %v", err)
-		}
-		if status.Status != WorkflowStatusCancelled {
-			t.Fatalf("expected enqueued workflow status to be WorkflowStatusCancelled, got %v", status.Status)
-		}
+		require.NoError(t, err, "failed to get status of enqueued workflow")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected enqueued workflow status to be WorkflowStatusCancelled")
 
 		return "should-never-see-this", nil
 	}
@@ -960,25 +750,21 @@ func TestQueueTimeouts(t *testing.T) {
 		childCtx := WithoutCancel(ctx)
 		handle, err := RunAsWorkflow(childCtx, detachedWorkflow, timeout*2, WithQueue(timeoutQueue.Name))
 		if err != nil {
-			t.Fatalf("failed to start enqueued detached workflow: %v", err)
+			require.NoError(t, err, "failed to start enqueued detached workflow")
 		}
 
 		// Wait for the enqueued workflow to complete
 		result, err := handle.GetResult()
 		if err != nil {
-			t.Fatalf("failed to get result from enqueued detached workflow: %v", err)
+			require.NoError(t, err, "failed to get result from enqueued detached workflow")
 		}
 		if result != "detached-workflow-completed" {
-			t.Fatalf("expected result to be 'detached-workflow-completed', got '%s'", result)
+			assert.Equal(t, "detached-workflow-completed", result, "expected result to be 'detached-workflow-completed'")
 		}
 		// Check the workflow status: should be success
 		status, err := handle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get enqueued detached workflow status: %v", err)
-		}
-		if status.Status != WorkflowStatusSuccess {
-			t.Fatalf("expected enqueued detached workflow status to be WorkflowStatusSuccess, got %v", status.Status)
-		}
+		require.NoError(t, err, "failed to get enqueued detached workflow status")
+		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected enqueued detached workflow status to be WorkflowStatusSuccess")
 		return result, nil
 	}
 
@@ -993,42 +779,26 @@ func TestQueueTimeouts(t *testing.T) {
 		defer cancelFunc() // Ensure we clean up the context
 
 		handle, err := RunAsWorkflow(cancelCtx, queuedWaitForCancelWorkflow, "enqueue-wait-for-cancel", WithQueue(timeoutQueue.Name))
-		if err != nil {
-			t.Fatalf("failed to enqueue wait for cancel workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to enqueue wait for cancel workflow")
 
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
-		if err == nil {
-			t.Fatal("expected error but got none")
-		}
+		require.Error(t, err, "expected error but got none")
 
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != AwaitedWorkflowCancelled {
-			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
 
-		if result != "" {
-			t.Fatalf("expected result to be an empty string, got '%s'", result)
-		}
+		assert.Equal(t, "", result, "expected result to be an empty string")
 
 		// Check the workflow status: should be cancelled
 		status, err := handle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get workflow status: %v", err)
-		}
-		if status.Status != WorkflowStatusCancelled {
-			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
-		}
+		require.NoError(t, err, "failed to get workflow status")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 
-		if !queueEntriesAreCleanedUp(dbosCtx) {
-			t.Fatal("expected queue entries to be cleaned up after workflow cancellation, but they are not")
-		}
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow cancellation, but they are not")
 	})
 
 	t.Run("EnqueueWorkflowThatEnqueuesATimeoutWorkflow", func(t *testing.T) {
@@ -1037,42 +807,26 @@ func TestQueueTimeouts(t *testing.T) {
 		defer cancelFunc() // Ensure we clean up the context
 
 		handle, err := RunAsWorkflow(cancelCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow, "enqueue-timeout-workflow", WithQueue(timeoutQueue.Name))
-		if err != nil {
-			t.Fatalf("failed to start enqueued workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to start enqueued workflow")
 
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
-		if err == nil {
-			t.Fatal("expected error but got none")
-		}
+		require.Error(t, err, "expected error but got none")
 
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != AwaitedWorkflowCancelled {
-			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
 
-		if result != "" {
-			t.Fatalf("expected result to be an empty string, got '%s'", result)
-		}
+		assert.Equal(t, "", result, "expected result to be an empty string")
 
 		// Check the workflow status: should be cancelled
 		status, err := handle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get workflow status: %v", err)
-		}
-		if status.Status != WorkflowStatusCancelled {
-			t.Fatalf("expected workflow status to be WorkflowStatusCancelled, got %v", status.Status)
-		}
+		require.NoError(t, err, "failed to get workflow status")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 
-		if !queueEntriesAreCleanedUp(dbosCtx) {
-			t.Fatal("expected queue entries to be cleaned up after workflow cancellation, but they are not")
-		}
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow cancellation, but they are not")
 	})
 
 	t.Run("EnqueueWorkflowThatEnqueuesADetachedWorkflow", func(t *testing.T) {
@@ -1083,40 +837,32 @@ func TestQueueTimeouts(t *testing.T) {
 
 		handle, err := RunAsWorkflow(cancelCtx, enqueuedWorkflowEnqueuesADetachedWorkflow, timeout, WithQueue(timeoutQueue.Name))
 		if err != nil {
-			t.Fatalf("failed to start enqueued detached workflow: %v", err)
+			require.NoError(t, err, "failed to start enqueued detached workflow")
 		}
 
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
 		if err == nil {
-			t.Fatalf("expected error but got none")
+			require.Error(t, err, "expected error but got none")
 		}
 
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != AwaitedWorkflowCancelled {
-			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
 
-		if result != "" {
-			t.Fatalf("expected result to be an empty string, got '%s'", result)
-		}
+		assert.Equal(t, "", result, "expected result to be an empty string")
 
 		// Check the workflow status: should be cancelled
 		status, err := handle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get enqueued detached workflow status: %v", err)
-		}
+		require.NoError(t, err, "failed to get enqueued detached workflow status")
 		if status.Status != WorkflowStatusCancelled {
-			t.Fatalf("expected enqueued detached workflow status to be WorkflowStatusCancelled, got %v", status.Status)
+			assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected enqueued detached workflow status to be WorkflowStatusCancelled")
 		}
 
 		if !queueEntriesAreCleanedUp(dbosCtx) {
-			t.Fatal("expected queue entries to be cleaned up after workflow completion, but they are not")
+			require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow completion, but they are not")
 		}
 	})
 }

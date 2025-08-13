@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEnqueue(t *testing.T) {
@@ -40,9 +43,7 @@ func TestEnqueue(t *testing.T) {
 
 	// Launch the server context to start processing tasks
 	err := serverCtx.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch server DBOS instance: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Setup client context - this will enqueue tasks
 	clientCtx := setupDBOS(t, false, false) // Don't drop DB, don't check for leaks
@@ -55,48 +56,28 @@ func TestEnqueue(t *testing.T) {
 			WorkflowInput:      wfInput{Input: "test-input"},
 			ApplicationVersion: serverCtx.GetApplicationVersion(),
 		})
-		if err != nil {
-			t.Fatalf("failed to enqueue workflow from client: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Verify we got a polling handle
 		_, ok := handle.(*workflowPollingHandle[string])
-		if !ok {
-			t.Fatalf("expected handle to be of type workflowPollingHandle, got %T", handle)
-		}
+		require.True(t, ok, "expected handle to be of type workflowPollingHandle, got %T", handle)
 
 		// Client retrieves the result
 		result, err := handle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from enqueued workflow: %v", err)
-		}
+		require.NoError(t, err)
 
 		expectedResult := "processed: test-input"
-		if result != expectedResult {
-			t.Fatalf("expected result to be '%s', got '%s'", expectedResult, result)
-		}
+		assert.Equal(t, expectedResult, result)
 
 		// Verify the workflow status
 		status, err := handle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get workflow status: %v", err)
-		}
+		require.NoError(t, err)
 
-		if status.Status != WorkflowStatusSuccess {
-			t.Fatalf("expected workflow status to be SUCCESS, got %v", status.Status)
-		}
+		assert.Equal(t, WorkflowStatusSuccess, status.Status)
+		assert.Equal(t, "ServerWorkflow", status.Name)
+		assert.Equal(t, queue.Name, status.QueueName)
 
-		if status.Name != "ServerWorkflow" {
-			t.Fatalf("expected workflow name to be 'ServerWorkflow', got '%s'", status.Name)
-		}
-
-		if status.QueueName != queue.Name {
-			t.Fatalf("expected queue name to be '%s', got '%s'", queue.Name, status.QueueName)
-		}
-
-		if !queueEntriesAreCleanedUp(serverCtx) {
-			t.Fatal("expected queue entries to be cleaned up after global concurrency test")
-		}
+		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
 
 	t.Run("EnqueueWithCustomWorkflowID", func(t *testing.T) {
@@ -109,28 +90,18 @@ func TestEnqueue(t *testing.T) {
 			WorkflowID:    customWorkflowID,
 			WorkflowInput: wfInput{Input: "test-input"},
 		})
-		if err != nil {
-			t.Fatalf("failed to enqueue workflow with custom ID: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Verify the workflow ID is what we set
 		retrieveHandle, err := RetrieveWorkflow[string](clientCtx, customWorkflowID)
-		if err != nil {
-			t.Fatalf("failed to retrieve workflow by custom ID: %v", err)
-		}
+		require.NoError(t, err)
 
 		result, err := retrieveHandle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from retrieved workflow: %v", err)
-		}
+		require.NoError(t, err)
 
-		if result != "processed: test-input" {
-			t.Fatalf("expected retrieved workflow result to be 'processed: test-input', got '%s'", result)
-		}
+		assert.Equal(t, "processed: test-input", result)
 
-		if !queueEntriesAreCleanedUp(serverCtx) {
-			t.Fatal("expected queue entries to be cleaned up after global concurrency test")
-		}
+		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
 
 	t.Run("EnqueueWithTimeout", func(t *testing.T) {
@@ -140,40 +111,26 @@ func TestEnqueue(t *testing.T) {
 			WorkflowInput:   "blocking-input",
 			WorkflowTimeout: 500 * time.Millisecond,
 		})
-		if err != nil {
-			t.Fatalf("failed to enqueue blocking workflow: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Should timeout when trying to get result
 		_, err = handle.GetResult()
-		if err == nil {
-			t.Fatal("expected timeout error, but got none")
-		}
+		require.Error(t, err, "expected timeout error, but got none")
 
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != AwaitedWorkflowCancelled {
-			t.Fatalf("expected error code to be AwaitedWorkflowCancelled, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code)
 
 		// Verify workflow is cancelled
 		status, err := handle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get workflow status: %v", err)
-		}
+		require.NoError(t, err)
 
-		if status.Status != WorkflowStatusCancelled {
-			t.Fatalf("expected workflow status to be CANCELLED, got %v", status.Status)
-		}
+		assert.Equal(t, WorkflowStatusCancelled, status.Status)
 	})
 
 	// Verify all queue entries are cleaned up
-	if !queueEntriesAreCleanedUp(serverCtx) {
-		t.Fatal("expected queue entries to be cleaned up after client tests")
-	}
+	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after client tests")
 }
 
 func TestCancelResume(t *testing.T) {
@@ -235,9 +192,7 @@ func TestCancelResume(t *testing.T) {
 
 	// Launch the server context to start processing tasks
 	err := serverCtx.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch server DBOS instance: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Setup client context - this will enqueue tasks
 	clientCtx := setupDBOS(t, false, false) // Don't drop DB, don't check for leaks
@@ -256,95 +211,61 @@ func TestCancelResume(t *testing.T) {
 			WorkflowInput:      input,
 			ApplicationVersion: serverCtx.GetApplicationVersion(),
 		})
-		if err != nil {
-			t.Fatalf("failed to enqueue workflow from client: %v", err)
-		}
+		require.NoError(t, err, "failed to enqueue workflow from client")
 
 		// Wait for workflow to signal it has started and step one completed
 		workflowStarted.Wait()
 
 		// Verify step one completed but step two hasn't
-		if stepsCompleted != 1 {
-			t.Fatalf("expected steps completed to be 1, got %d", stepsCompleted)
-		}
+		assert.Equal(t, 1, stepsCompleted, "expected steps completed to be 1")
 
 		// Cancel the workflow
 		err = CancelWorkflow(clientCtx, workflowID)
-		if err != nil {
-			t.Fatalf("failed to cancel workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to cancel workflow")
 
 		// Verify workflow is cancelled
 		cancelStatus, err := handle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get workflow status: %v", err)
-		}
+		require.NoError(t, err, "failed to get workflow status")
 
-		if cancelStatus.Status != WorkflowStatusCancelled {
-			t.Fatalf("expected workflow status to be CANCELLED, got %v", cancelStatus.Status)
-		}
+		assert.Equal(t, WorkflowStatusCancelled, cancelStatus.Status, "expected workflow status to be CANCELLED")
 
 		// Resume the workflow
 		resumeHandle, err := ResumeWorkflow[int](clientCtx, workflowID)
-		if err != nil {
-			t.Fatalf("failed to resume workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to resume workflow")
 
 		// Wait for workflow completion
 		proceedSignal.Set() // Allow the workflow to proceed to step two
 		result, err := resumeHandle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from resumed workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to get result from resumed workflow")
 
 		// Verify the result
-		if result != input {
-			t.Fatalf("expected result to be %d, got %d", input, result)
-		}
+		assert.Equal(t, input, result, "expected result to match input")
 
 		// Verify both steps completed
-		if stepsCompleted != 2 {
-			t.Fatalf("expected steps completed to be 2, got %d", stepsCompleted)
-		}
+		assert.Equal(t, 2, stepsCompleted, "expected steps completed to be 2")
 
 		// Check final status
 		finalStatus, err := resumeHandle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get final workflow status: %v", err)
-		}
+		require.NoError(t, err, "failed to get final workflow status")
 
-		if finalStatus.Status != WorkflowStatusSuccess {
-			t.Fatalf("expected final workflow status to be SUCCESS, got %v", finalStatus.Status)
-		}
+		assert.Equal(t, WorkflowStatusSuccess, finalStatus.Status, "expected final workflow status to be SUCCESS")
 
 		// After resume, the queue name should change to the internal queue name
-		if finalStatus.QueueName != _DBOS_INTERNAL_QUEUE_NAME {
-			t.Fatalf("expected queue name to be %s, got '%s'", _DBOS_INTERNAL_QUEUE_NAME, finalStatus.QueueName)
-		}
+		assert.Equal(t, _DBOS_INTERNAL_QUEUE_NAME, finalStatus.QueueName, "expected queue name to be %s", _DBOS_INTERNAL_QUEUE_NAME)
 
 		// Resume the workflow again - should not run again
 		resumeAgainHandle, err := ResumeWorkflow[int](clientCtx, workflowID)
-		if err != nil {
-			t.Fatalf("failed to resume workflow again: %v", err)
-		}
+		require.NoError(t, err, "failed to resume workflow again")
 
 		resultAgain, err := resumeAgainHandle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from second resume: %v", err)
-		}
+		require.NoError(t, err, "failed to get result from second resume")
 
-		if resultAgain != input {
-			t.Fatalf("expected second resume result to be %d, got %d", input, resultAgain)
-		}
+		assert.Equal(t, input, resultAgain, "expected second resume result to match input")
 
 		// Verify steps didn't run again
-		if stepsCompleted != 2 {
-			t.Fatalf("expected steps completed to remain 2 after second resume, got %d", stepsCompleted)
-		}
+		assert.Equal(t, 2, stepsCompleted, "expected steps completed to remain 2 after second resume")
 
-		if !queueEntriesAreCleanedUp(serverCtx) {
-			t.Fatal("expected queue entries to be cleaned up after cancel/resume test")
-		}
+		require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after cancel/resume test")
 	})
 
 	t.Run("CancelAndResumeTimeout", func(t *testing.T) {
@@ -360,28 +281,20 @@ func TestCancelResume(t *testing.T) {
 			WorkflowTimeout:    workflowTimeout,
 			ApplicationVersion: serverCtx.GetApplicationVersion(),
 		})
-		if err != nil {
-			t.Fatalf("failed to enqueue timeout blocking workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to enqueue timeout blocking workflow")
 
 		// Wait 500ms (well before the timeout expires)
 		time.Sleep(500 * time.Millisecond)
 
 		// Cancel the workflow before timeout expires
 		err = CancelWorkflow(clientCtx, workflowID)
-		if err != nil {
-			t.Fatalf("failed to cancel workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to cancel workflow")
 
 		// Verify workflow is cancelled
 		cancelStatus, err := handle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get workflow status after cancel: %v", err)
-		}
+		require.NoError(t, err, "failed to get workflow status after cancel")
 
-		if cancelStatus.Status != WorkflowStatusCancelled {
-			t.Fatalf("expected workflow status to be CANCELLED, got %v", cancelStatus.Status)
-		}
+		assert.Equal(t, WorkflowStatusCancelled, cancelStatus.Status, "expected workflow status to be CANCELLED")
 
 		// Record the original deadline before resume
 		originalDeadline := cancelStatus.Deadline
@@ -389,58 +302,36 @@ func TestCancelResume(t *testing.T) {
 		// Resume the workflow
 		resumeStart := time.Now()
 		resumeHandle, err := ResumeWorkflow[string](clientCtx, workflowID)
-		if err != nil {
-			t.Fatalf("failed to resume workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to resume workflow")
 
 		// Get status after resume to check the deadline
 		resumeStatus, err := resumeHandle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get workflow status after resume: %v", err)
-		}
+		require.NoError(t, err, "failed to get workflow status after resume")
 
 		// Verify the deadline was reset (should be different from original)
-		if resumeStatus.Deadline.Equal(originalDeadline) {
-			t.Fatalf("expected deadline to be reset after resume, but it remained the same: %v", originalDeadline)
-		}
+		assert.False(t, resumeStatus.Deadline.Equal(originalDeadline), "expected deadline to be reset after resume, but it remained the same: %v", originalDeadline)
 
 		// The new deadline should be after resumeStart + workflowTimeout
 		expectedDeadline := resumeStart.Add(workflowTimeout)
-		if resumeStatus.Deadline.Before(expectedDeadline) {
-			t.Fatalf("deadline %v is too early (expected around %v)", resumeStatus.Deadline, expectedDeadline)
-		}
+		assert.False(t, resumeStatus.Deadline.Before(expectedDeadline), "deadline %v is too early (expected around %v)", resumeStatus.Deadline, expectedDeadline)
 
 		// Wait for the workflow to complete
 		_, err = resumeHandle.GetResult()
-		if err == nil {
-			t.Fatal("expected timeout error, but got none")
-		}
+		require.Error(t, err, "expected timeout error, but got none")
 
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != AwaitedWorkflowCancelled {
-			t.Fatalf("expected error code to be AwaitedWorkflowCancelled (8), got %v", dbosErr.Code)
-		}
+		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
 
-		if !strings.Contains(dbosErr.Error(), "test-cancel-resume-timeout-workflow was cancelled") {
-			t.Fatalf("expected error message to contain 'test-cancel-resume-timeout-workflow was cancelled', got: %v", dbosErr.Error())
-		}
+		assert.Contains(t, dbosErr.Error(), "test-cancel-resume-timeout-workflow was cancelled", "expected error message to contain cancellation text")
 
 		finalStatus, err := resumeHandle.GetStatus()
-		if err != nil {
-			t.Fatalf("failed to get final workflow status: %v", err)
-		}
+		require.NoError(t, err, "failed to get final workflow status")
 
-		if finalStatus.Status != WorkflowStatusCancelled {
-			t.Fatalf("expected final workflow status to be CANCELLED, got %v", finalStatus.Status)
-		}
+		assert.Equal(t, WorkflowStatusCancelled, finalStatus.Status, "expected final workflow status to be CANCELLED")
 
-		if !queueEntriesAreCleanedUp(serverCtx) {
-			t.Fatal("expected queue entries to be cleaned up after cancel/resume timeout test")
-		}
+		require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after cancel/resume timeout test")
 	})
 
 	t.Run("CancelNonExistentWorkflow", func(t *testing.T) {
@@ -448,23 +339,15 @@ func TestCancelResume(t *testing.T) {
 
 		// Try to cancel a non-existent workflow
 		err := CancelWorkflow(clientCtx, nonExistentWorkflowID)
-		if err == nil {
-			t.Fatal("expected error when canceling non-existent workflow, but got none")
-		}
+		require.Error(t, err, "expected error when canceling non-existent workflow, but got none")
 
 		// Verify error type and code
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != NonExistentWorkflowError {
-			t.Fatalf("expected error code to be NonExistentWorkflowError, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
 
-		if dbosErr.DestinationID != nonExistentWorkflowID {
-			t.Fatalf("expected DestinationID to be %s, got %s", nonExistentWorkflowID, dbosErr.DestinationID)
-		}
+		assert.Equal(t, nonExistentWorkflowID, dbosErr.DestinationID, "expected DestinationID to match")
 	})
 
 	t.Run("ResumeNonExistentWorkflow", func(t *testing.T) {
@@ -472,23 +355,15 @@ func TestCancelResume(t *testing.T) {
 
 		// Try to resume a non-existent workflow
 		_, err := ResumeWorkflow[int](clientCtx, nonExistentWorkflowID)
-		if err == nil {
-			t.Fatal("expected error when resuming non-existent workflow, but got none")
-		}
+		require.Error(t, err, "expected error when resuming non-existent workflow, but got none")
 
 		// Verify error type and code
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != NonExistentWorkflowError {
-			t.Fatalf("expected error code to be NonExistentWorkflowError, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
 
-		if dbosErr.DestinationID != nonExistentWorkflowID {
-			t.Fatalf("expected DestinationID to be %s, got %s", nonExistentWorkflowID, dbosErr.DestinationID)
-		}
+		assert.Equal(t, nonExistentWorkflowID, dbosErr.DestinationID, "expected DestinationID to match")
 	})
 }
 
@@ -566,9 +441,7 @@ func TestForkWorkflow(t *testing.T) {
 
 	// Launch the server context to start processing tasks
 	err := serverCtx.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch server DBOS instance: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Setup client context
 	clientCtx := setupDBOS(t, false, false)
@@ -587,25 +460,20 @@ func TestForkWorkflow(t *testing.T) {
 			WorkflowInput:      "test",
 			ApplicationVersion: serverCtx.GetApplicationVersion(),
 		})
-		if err != nil {
-			t.Fatalf("failed to enqueue original workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to enqueue original workflow")
 
 		// Wait for the original workflow to complete
 		result, err := handle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from original workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to get result from original workflow")
 
 		expectedResult := "step1-test+step2-test+child1-test+child2-test"
-		if result != expectedResult {
-			t.Fatalf("expected result to be '%s', got '%s'", expectedResult, result)
-		}
+		assert.Equal(t, expectedResult, result, "expected result to match")
 
 		// Verify all counters are 1 after original workflow
-		if stepCount1 != 1 || stepCount2 != 1 || child1Count != 1 || child2Count != 1 {
-			t.Fatalf("expected counters to be (step1:1, step2:1, child1:1, child2:1), got (step1:%d, step2:%d, child1:%d, child2:%d)", stepCount1, stepCount2, child1Count, child2Count)
-		}
+		assert.Equal(t, 1, stepCount1, "step1 counter should be 1")
+		assert.Equal(t, 1, stepCount2, "step2 counter should be 1")
+		assert.Equal(t, 1, child1Count, "child1 counter should be 1")
+		assert.Equal(t, 1, child2Count, "child2 counter should be 1")
 
 		// 2. Fork from each step 1 to 6 and verify results
 		// Note: there's 6 steps: 2 steps 2 children and 2 GetResults
@@ -618,64 +486,42 @@ func TestForkWorkflow(t *testing.T) {
 				ForkedWorkflowID:   customForkedWorkflowID,
 				StartStep:          uint(step - 1),
 			})
-			if err != nil {
-				t.Fatalf("failed to fork workflow at step %d: %v", step, err)
-			}
+			require.NoError(t, err, "failed to fork workflow at step %d", step)
 
 			forkedWorkflowID := forkedHandle.GetWorkflowID()
-			if forkedWorkflowID != customForkedWorkflowID {
-				t.Fatalf("expected forked workflow ID to be '%s', got '%s'", customForkedWorkflowID, forkedWorkflowID)
-			}
+			assert.Equal(t, customForkedWorkflowID, forkedWorkflowID, "expected forked workflow ID to match")
 
 			forkedResult, err := forkedHandle.GetResult()
-			if err != nil {
-				t.Fatalf("failed to get result from forked workflow at step %d: %v", step, err)
-			}
+			require.NoError(t, err, "failed to get result from forked workflow at step %d", step)
 
 			// 1) Verify workflow result is correct
-			if forkedResult != expectedResult {
-				t.Fatalf("forked workflow at step %d: expected result '%s', got '%s'", step, expectedResult, forkedResult)
-			}
+			assert.Equal(t, expectedResult, forkedResult, "forked workflow at step %d: expected result to match", step)
 
 			// 2) Verify counters are at expected totals based on the step where we're forking
 			t.Logf("Step %d: actual counters - step1:%d, step2:%d, child1:%d, child2:%d", step, stepCount1, stepCount2, child1Count, child2Count)
 
 			// First step is executed only once
-			if stepCount1 != 1+1 {
-				t.Fatalf("forked workflow at step %d: step1 counter should be 2, got %d", step, stepCount1)
-			}
+			assert.Equal(t, 2, stepCount1, "forked workflow at step %d: step1 counter should be 2", step)
 
 			// First child will be executed twice
 			if step < 3 {
-				if child1Count != 1+step {
-					t.Fatalf("forked workflow at step %d: child1 counter should be %d, got %d", step, 1+step, child1Count)
-				}
+				assert.Equal(t, 1+step, child1Count, "forked workflow at step %d: child1 counter should be %d", step, 1+step)
 			} else {
-				if child1Count != 1+2 {
-					t.Fatalf("forked workflow at step %d: child2 counter should be 3, got %d", step, child1Count)
-				}
+				assert.Equal(t, 3, child1Count, "forked workflow at step %d: child1 counter should be 3", step)
 			}
 
 			// Second step (in reality step 4) will be executed 4 times
 			if step < 5 {
-				if stepCount2 != 1+step {
-					t.Fatalf("forked workflow at step %d: step2 counter should be %d, got %d", step, 1+step, stepCount2)
-				}
+				assert.Equal(t, 1+step, stepCount2, "forked workflow at step %d: step2 counter should be %d", step, 1+step)
 			} else {
-				if stepCount2 != 1+4 {
-					t.Fatalf("forked workflow at step %d: step2 counter should be 5, got %d", step, stepCount2)
-				}
+				assert.Equal(t, 5, stepCount2, "forked workflow at step %d: step2 counter should be 5", step)
 			}
 
 			// Second child will be executed 5 times
 			if step < 6 {
-				if child2Count != 1+step {
-					t.Fatalf("forked workflow at step %d: child2 counter should be %d, got %d", step, 1+step, child2Count)
-				}
+				assert.Equal(t, 1+step, child2Count, "forked workflow at step %d: child2 counter should be %d", step, 1+step)
 			} else {
-				if child2Count != 1+5 {
-					t.Fatalf("forked workflow at step %d: child2 counter should be 6, got %d", step, child2Count)
-				}
+				assert.Equal(t, 6, child2Count, "forked workflow at step %d: child2 counter should be 6", step)
 			}
 
 			t.Logf("Step %d: all counter totals verified correctly", step)
@@ -692,29 +538,19 @@ func TestForkWorkflow(t *testing.T) {
 			OriginalWorkflowID: nonExistentWorkflowID,
 			StartStep:          1,
 		})
-		if err == nil {
-			t.Fatal("expected error when forking non-existent workflow, but got none")
-		}
+		require.Error(t, err, "expected error when forking non-existent workflow, but got none")
 
 		// Verify error type
 		dbosErr, ok := err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 
-		if dbosErr.Code != NonExistentWorkflowError {
-			t.Fatalf("expected error code to be NonExistentWorkflowError, got %v", dbosErr.Code)
-		}
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
 
-		if dbosErr.DestinationID != nonExistentWorkflowID {
-			t.Fatalf("expected DestinationID to be %s, got %s", nonExistentWorkflowID, dbosErr.DestinationID)
-		}
+		assert.Equal(t, nonExistentWorkflowID, dbosErr.DestinationID, "expected DestinationID to match")
 	})
 
 	// Verify all queue entries are cleaned up
-	if !queueEntriesAreCleanedUp(serverCtx) {
-		t.Fatal("expected queue entries to be cleaned up after fork workflow tests")
-	}
+	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after fork workflow tests")
 }
 
 func TestListWorkflows(t *testing.T) {
@@ -740,9 +576,7 @@ func TestListWorkflows(t *testing.T) {
 
 	// Launch server
 	err := serverCtx.Launch()
-	if err != nil {
-		t.Fatalf("failed to launch server DBOS instance: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Setup client context
 	clientCtx := setupDBOS(t, false, false)
@@ -785,9 +619,7 @@ func TestListWorkflows(t *testing.T) {
 				})
 			}
 
-			if err != nil {
-				t.Fatalf("failed to enqueue workflow %d: %v", i, err)
-			}
+			require.NoError(t, err, "failed to enqueue workflow %d", i)
 
 			workflowIDs = append(workflowIDs, workflowID)
 			handles = append(handles, handle)
@@ -801,93 +633,61 @@ func TestListWorkflows(t *testing.T) {
 			_, err := handle.GetResult()
 			if i < 8 {
 				// First 8 should succeed
-				if err != nil {
-					t.Fatalf("workflow %d should have succeeded but got error: %v", i, err)
-				}
+				require.NoError(t, err, "workflow %d should have succeeded", i)
 			} else {
 				// Last 2 should fail
-				if err == nil {
-					t.Fatalf("workflow %d should have failed but succeeded", i)
-				}
+				require.Error(t, err, "workflow %d should have failed", i)
 			}
 		}
 
 		// Test 1: List all workflows (no filters)
 		allWorkflows, err := ListWorkflows(clientCtx)
-		if err != nil {
-			t.Fatalf("failed to list all workflows: %v", err)
-		}
-		if len(allWorkflows) < 10 {
-			t.Fatalf("expected at least 10 workflows, got %d", len(allWorkflows))
-		}
+		require.NoError(t, err, "failed to list all workflows")
+		assert.GreaterOrEqual(t, len(allWorkflows), 10, "expected at least 10 workflows")
 
 		// Test 2: Filter by workflow IDs
 		expectedIDs := workflowIDs[:3]
 		specificWorkflows, err := ListWorkflows(clientCtx, WithWorkflowIDs(expectedIDs))
-		if err != nil {
-			t.Fatalf("failed to list workflows by IDs: %v", err)
-		}
-		if len(specificWorkflows) != 3 {
-			t.Fatalf("expected 3 workflows, got %d", len(specificWorkflows))
-		}
+		require.NoError(t, err, "failed to list workflows by IDs")
+		assert.Len(t, specificWorkflows, 3, "expected 3 workflows")
 		// Verify returned workflow IDs match expected
 		returnedIDs := make(map[string]bool)
 		for _, wf := range specificWorkflows {
 			returnedIDs[wf.ID] = true
 		}
 		for _, expectedID := range expectedIDs {
-			if !returnedIDs[expectedID] {
-				t.Fatalf("expected workflow ID %s not found in results", expectedID)
-			}
+			assert.True(t, returnedIDs[expectedID], "expected workflow ID %s not found in results", expectedID)
 		}
 
 		// Test 3: Filter by workflow ID prefix
 		batchWorkflows, err := ListWorkflows(clientCtx, WithWorkflowIDPrefix("test-batch-"))
-		if err != nil {
-			t.Fatalf("failed to list workflows by prefix: %v", err)
-		}
-		if len(batchWorkflows) != 5 {
-			t.Fatalf("expected 5 batch workflows, got %d", len(batchWorkflows))
-		}
+		require.NoError(t, err, "failed to list workflows by prefix")
+		assert.Len(t, batchWorkflows, 5, "expected 5 batch workflows")
 		// Verify all returned workflow IDs have the correct prefix
 		for _, wf := range batchWorkflows {
-			if !strings.HasPrefix(wf.ID, "test-batch-") {
-				t.Fatalf("workflow ID %s does not have expected prefix 'test-batch-'", wf.ID)
-			}
+			assert.True(t, strings.HasPrefix(wf.ID, "test-batch-"), "workflow ID %s does not have expected prefix 'test-batch-'", wf.ID)
 		}
 
 		// Test 4: Filter by status - SUCCESS
 		successWorkflows, err := ListWorkflows(clientCtx,
 			WithWorkflowIDPrefix("test-"), // Only our test workflows
 			WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}))
-		if err != nil {
-			t.Fatalf("failed to list successful workflows: %v", err)
-		}
-		if len(successWorkflows) != 8 {
-			t.Fatalf("expected 8 successful workflows, got %d", len(successWorkflows))
-		}
+		require.NoError(t, err, "failed to list successful workflows")
+		assert.Len(t, successWorkflows, 8, "expected 8 successful workflows")
 		// Verify all returned workflows have SUCCESS status
 		for _, wf := range successWorkflows {
-			if wf.Status != WorkflowStatusSuccess {
-				t.Fatalf("workflow %s has status %s, expected SUCCESS", wf.ID, wf.Status)
-			}
+			assert.Equal(t, WorkflowStatusSuccess, wf.Status, "workflow %s has unexpected status", wf.ID)
 		}
 
 		// Test 5: Filter by status - ERROR
 		errorWorkflows, err := ListWorkflows(clientCtx,
 			WithWorkflowIDPrefix("test-"),
 			WithStatus([]WorkflowStatusType{WorkflowStatusError}))
-		if err != nil {
-			t.Fatalf("failed to list error workflows: %v", err)
-		}
-		if len(errorWorkflows) != 2 {
-			t.Fatalf("expected 2 error workflows, got %d", len(errorWorkflows))
-		}
+		require.NoError(t, err, "failed to list error workflows")
+		assert.Len(t, errorWorkflows, 2, "expected 2 error workflows")
 		// Verify all returned workflows have ERROR status
 		for _, wf := range errorWorkflows {
-			if wf.Status != WorkflowStatusError {
-				t.Fatalf("workflow %s has status %s, expected ERROR", wf.ID, wf.Status)
-			}
+			assert.Equal(t, WorkflowStatusError, wf.Status, "workflow %s has unexpected status", wf.ID)
 		}
 
 		// Test 6: Filter by time range - first 5 workflows (start to start+500ms)
@@ -895,100 +695,66 @@ func TestListWorkflows(t *testing.T) {
 		firstHalfWorkflows, err := ListWorkflows(clientCtx,
 			WithWorkflowIDPrefix("test-"),
 			WithEndTime(firstHalfTime))
-		if err != nil {
-			t.Fatalf("failed to list first half workflows by time range: %v", err)
-		}
-		if len(firstHalfWorkflows) != 5 {
-			t.Fatalf("expected 5 workflows in first half time range, got %d", len(firstHalfWorkflows))
-		}
+		require.NoError(t, err, "failed to list first half workflows by time range")
+		assert.Len(t, firstHalfWorkflows, 5, "expected 5 workflows in first half time range")
 
 		// Test 6b: Filter by time range - last 5 workflows (start+500ms to end)
 		secondHalfWorkflows, err := ListWorkflows(clientCtx,
 			WithWorkflowIDPrefix("test-"),
 			WithStartTime(firstHalfTime))
-		if err != nil {
-			t.Fatalf("failed to list second half workflows by time range: %v", err)
-		}
-		if len(secondHalfWorkflows) != 5 {
-			t.Fatalf("expected 5 workflows in second half time range, got %d", len(secondHalfWorkflows))
-		}
+		require.NoError(t, err, "failed to list second half workflows by time range")
+		assert.Len(t, secondHalfWorkflows, 5, "expected 5 workflows in second half time range")
 
 		// Test 7: Test sorting order (ascending - default)
 		ascWorkflows, err := ListWorkflows(clientCtx,
 			WithWorkflowIDPrefix("test-"),
 			WithSortDesc(false))
-		if err != nil {
-			t.Fatalf("failed to list workflows ascending: %v", err)
-		}
+		require.NoError(t, err, "failed to list workflows ascending")
 
 		// Test 8: Test sorting order (descending)
 		descWorkflows, err := ListWorkflows(clientCtx,
 			WithWorkflowIDPrefix("test-"),
 			WithSortDesc(true))
-		if err != nil {
-			t.Fatalf("failed to list workflows descending: %v", err)
-		}
+		require.NoError(t, err, "failed to list workflows descending")
 
 		// Verify sorting - workflows should be ordered by creation time
 		// First workflow in desc should be last in asc (latest created)
-		if ascWorkflows[len(ascWorkflows)-1].ID != descWorkflows[0].ID {
-			t.Fatalf("sorting verification failed: asc last (%s) != desc first (%s)",
-				ascWorkflows[len(ascWorkflows)-1].ID, descWorkflows[0].ID)
-		}
+		assert.Equal(t, ascWorkflows[len(ascWorkflows)-1].ID, descWorkflows[0].ID, "sorting verification failed: asc last != desc first")
 		// Last workflow in desc should be first in asc (earliest created)
-		if ascWorkflows[0].ID != descWorkflows[len(descWorkflows)-1].ID {
-			t.Fatalf("sorting verification failed: asc first (%s) != desc last (%s)",
-				ascWorkflows[0].ID, descWorkflows[len(descWorkflows)-1].ID)
-		}
+		assert.Equal(t, ascWorkflows[0].ID, descWorkflows[len(descWorkflows)-1].ID, "sorting verification failed: asc first != desc last")
 
 		// Verify ascending order: each workflow should be created at or after the previous
 		for i := 1; i < len(ascWorkflows); i++ {
-			if ascWorkflows[i].CreatedAt.Before(ascWorkflows[i-1].CreatedAt) {
-				t.Fatalf("ascending order violation: workflow at index %d created before previous", i)
-			}
+			assert.False(t, ascWorkflows[i].CreatedAt.Before(ascWorkflows[i-1].CreatedAt), "ascending order violation: workflow at index %d created before previous", i)
 		}
 
 		// Verify descending order: each workflow should be created at or before the previous
 		for i := 1; i < len(descWorkflows); i++ {
-			if descWorkflows[i].CreatedAt.After(descWorkflows[i-1].CreatedAt) {
-				t.Fatalf("descending order violation: workflow at index %d created after previous", i)
-			}
+			assert.False(t, descWorkflows[i].CreatedAt.After(descWorkflows[i-1].CreatedAt), "descending order violation: workflow at index %d created after previous", i)
 		}
 
 		// Test 9: Test limit and offset
 		limitedWorkflows, err := ListWorkflows(clientCtx,
 			WithWorkflowIDPrefix("test-"),
 			WithLimit(5))
-		if err != nil {
-			t.Fatalf("failed to list workflows with limit: %v", err)
-		}
-		if len(limitedWorkflows) != 5 {
-			t.Fatalf("expected 5 workflows with limit, got %d", len(limitedWorkflows))
-		}
+		require.NoError(t, err, "failed to list workflows with limit")
+		assert.Len(t, limitedWorkflows, 5, "expected 5 workflows with limit")
 		// Verify we got the first 5 workflows (earliest created)
 		expectedFirstFive := ascWorkflows[:5]
 		for i, wf := range limitedWorkflows {
-			if wf.ID != expectedFirstFive[i].ID {
-				t.Fatalf("limited workflow at index %d: expected %s, got %s", i, expectedFirstFive[i].ID, wf.ID)
-			}
+			assert.Equal(t, expectedFirstFive[i].ID, wf.ID, "limited workflow at index %d: unexpected ID", i)
 		}
 
 		offsetWorkflows, err := ListWorkflows(clientCtx,
 			WithWorkflowIDPrefix("test-"),
 			WithOffset(5),
 			WithLimit(3))
-		if err != nil {
-			t.Fatalf("failed to list workflows with offset: %v", err)
-		}
-		if len(offsetWorkflows) != 3 {
-			t.Fatalf("expected 3 workflows with offset, got %d", len(offsetWorkflows))
-		}
+		require.NoError(t, err, "failed to list workflows with offset")
+		assert.Len(t, offsetWorkflows, 3, "expected 3 workflows with offset")
 		// Verify we got workflows 5, 6, 7 from the ascending list
 		expectedOffsetThree := ascWorkflows[5:8]
 		for i, wf := range offsetWorkflows {
-			if wf.ID != expectedOffsetThree[i].ID {
-				t.Fatalf("offset workflow at index %d: expected %s, got %s", i, expectedOffsetThree[i].ID, wf.ID)
-			}
+			assert.Equal(t, expectedOffsetThree[i].ID, wf.ID, "offset workflow at index %d: unexpected ID", i)
 		}
 
 		// Test 10: Test input/output loading
@@ -996,26 +762,16 @@ func TestListWorkflows(t *testing.T) {
 			WithWorkflowIDs(workflowIDs[:2]),
 			WithLoadInput(false),
 			WithLoadOutput(false))
-		if err != nil {
-			t.Fatalf("failed to list workflows without data: %v", err)
-		}
-		if len(noDataWorkflows) != 2 {
-			t.Fatalf("expected 2 workflows without data, got %d", len(noDataWorkflows))
-		}
+		require.NoError(t, err, "failed to list workflows without data")
+		assert.Len(t, noDataWorkflows, 2, "expected 2 workflows without data")
 
 		// Verify input/output are not loaded
 		for _, wf := range noDataWorkflows {
-			if wf.Input != nil {
-				t.Fatalf("expected input to be nil when LoadInput=false, got %v", wf.Input)
-			}
-			if wf.Output != nil {
-				t.Fatalf("expected output to be nil when LoadOutput=false, got %v", wf.Output)
-			}
+			assert.Nil(t, wf.Input, "expected input to be nil when LoadInput=false")
+			assert.Nil(t, wf.Output, "expected output to be nil when LoadOutput=false")
 		}
 	})
 
 	// Verify all queue entries are cleaned up
-	if !queueEntriesAreCleanedUp(serverCtx) {
-		t.Fatal("expected queue entries to be cleaned up after list workflows tests")
-	}
+	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after list workflows tests")
 }

@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAdminServer(t *testing.T) {
@@ -19,13 +22,9 @@ func TestAdminServer(t *testing.T) {
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 		})
-		if err != nil {
-			t.Skipf("Failed to initialize DBOS: %v", err)
-		}
+		require.NoError(t, err)
 		err = ctx.Launch()
-		if err != nil {
-			t.Skipf("Failed to initialize DBOS: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Ensure cleanup
 		defer func() {
@@ -40,19 +39,13 @@ func TestAdminServer(t *testing.T) {
 		// Verify admin server is not running
 		client := &http.Client{Timeout: 1 * time.Second}
 		_, err = client.Get("http://localhost:3001" + healthCheckPath)
-		if err == nil {
-			t.Error("Expected request to fail when admin server is not started, but it succeeded")
-		}
+		require.Error(t, err, "Expected request to fail when admin server is not started")
 
 		// Verify the DBOS executor doesn't have an admin server instance
-		if ctx == nil {
-			t.Fatal("Expected DBOS instance to be created")
-		}
+		require.NotNil(t, ctx, "Expected DBOS instance to be created")
 
 		exec := ctx.(*dbosContext)
-		if exec.adminServer != nil {
-			t.Error("Expected admin server to be nil when not configured")
-		}
+		require.Nil(t, exec.adminServer, "Expected admin server to be nil when not configured")
 	})
 
 	t.Run("Admin server endpoints", func(t *testing.T) {
@@ -62,13 +55,9 @@ func TestAdminServer(t *testing.T) {
 			AppName:     "test-app",
 			AdminServer: true,
 		})
-		if err != nil {
-			t.Skipf("Failed to initialize DBOS with admin server: %v", err)
-		}
+		require.NoError(t, err)
 		err = ctx.Launch()
-		if err != nil {
-			t.Skipf("Failed to initialize DBOS with admin server: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Ensure cleanup
 		defer func() {
@@ -81,14 +70,10 @@ func TestAdminServer(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		// Verify the DBOS executor has an admin server instance
-		if ctx == nil {
-			t.Fatal("Expected DBOS instance to be created")
-		}
+		require.NotNil(t, ctx, "Expected DBOS instance to be created")
 
 		exec := ctx.(*dbosContext)
-		if exec.adminServer == nil {
-			t.Fatal("Expected admin server to be created in DBOS instance")
-		}
+		require.NotNil(t, exec.adminServer, "Expected admin server to be created in DBOS instance")
 
 		client := &http.Client{Timeout: 5 * time.Second}
 
@@ -116,12 +101,9 @@ func TestAdminServer(t *testing.T) {
 				expectedStatus: http.StatusOK,
 				validateResp: func(t *testing.T, resp *http.Response) {
 					var workflowIDs []string
-					if err := json.NewDecoder(resp.Body).Decode(&workflowIDs); err != nil {
-						t.Errorf("Failed to decode response as JSON array: %v", err)
-					}
-					if workflowIDs == nil {
-						t.Error("Expected non-nil workflow IDs array")
-					}
+					err := json.NewDecoder(resp.Body).Decode(&workflowIDs)
+					require.NoError(t, err, "Failed to decode response as JSON array")
+					assert.NotNil(t, workflowIDs, "Expected non-nil workflow IDs array")
 				},
 			},
 			{
@@ -145,36 +127,23 @@ func TestAdminServer(t *testing.T) {
 				expectedStatus: http.StatusOK,
 				validateResp: func(t *testing.T, resp *http.Response) {
 					var queueMetadata []WorkflowQueue
-					if err := json.NewDecoder(resp.Body).Decode(&queueMetadata); err != nil {
-						t.Errorf("Failed to decode response as QueueMetadata array: %v", err)
-					}
-					if queueMetadata == nil {
-						t.Error("Expected non-nil queue metadata array")
-					}
+					err := json.NewDecoder(resp.Body).Decode(&queueMetadata)
+					require.NoError(t, err, "Failed to decode response as QueueMetadata array")
+					assert.NotNil(t, queueMetadata, "Expected non-nil queue metadata array")
 					// Should contain at least the internal queue
-					if len(queueMetadata) == 0 {
-						t.Error("Expected at least one queue in metadata")
-					}
+					assert.Greater(t, len(queueMetadata), 0, "Expected at least one queue in metadata")
 					// Verify internal queue fields
 					foundInternalQueue := false
 					for _, queue := range queueMetadata {
 						if queue.Name == _DBOS_INTERNAL_QUEUE_NAME { // Internal queue name
 							foundInternalQueue = true
-							if queue.GlobalConcurrency != nil {
-								t.Errorf("Expected internal queue to have no concurrency limit, but got %v", *queue.GlobalConcurrency)
-							}
-							if queue.WorkerConcurrency != nil {
-								t.Errorf("Expected internal queue to have no worker concurrency limit, but got %v", *queue.WorkerConcurrency)
-							}
-							if queue.RateLimit != nil {
-								t.Error("Expected internal queue to have no rate limit")
-							}
+							assert.Nil(t, queue.GlobalConcurrency, "Expected internal queue to have no concurrency limit")
+							assert.Nil(t, queue.WorkerConcurrency, "Expected internal queue to have no worker concurrency limit")
+							assert.Nil(t, queue.RateLimit, "Expected internal queue to have no rate limit")
 							break
 						}
 					}
-					if !foundInternalQueue {
-						t.Error("Expected to find internal queue in metadata")
-					}
+					assert.True(t, foundInternalQueue, "Expected to find internal queue in metadata")
 				},
 			},
 			{
@@ -195,24 +164,17 @@ func TestAdminServer(t *testing.T) {
 				} else {
 					req, err = http.NewRequest(tt.method, tt.endpoint, nil)
 				}
-				if err != nil {
-					t.Fatalf("Failed to create request: %v", err)
-				}
+				require.NoError(t, err, "Failed to create request")
 
 				if tt.contentType != "" {
 					req.Header.Set("Content-Type", tt.contentType)
 				}
 
 				resp, err := client.Do(req)
-				if err != nil {
-					t.Fatalf("Failed to make request: %v", err)
-				}
+				require.NoError(t, err, "Failed to make request")
 				defer resp.Body.Close()
 
-				if resp.StatusCode != tt.expectedStatus {
-					body, _ := io.ReadAll(resp.Body)
-					t.Errorf("Expected status code %d, got %d. Response: %s", tt.expectedStatus, resp.StatusCode, string(body))
-				}
+				assert.Equal(t, tt.expectedStatus, resp.StatusCode)
 
 				if tt.validateResp != nil {
 					tt.validateResp(t, resp)

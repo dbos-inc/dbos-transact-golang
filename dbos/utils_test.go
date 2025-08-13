@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
@@ -33,9 +34,7 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 
 	// Clean up the test database
 	parsedURL, err := pgx.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatalf("failed to parse database URL: %v", err)
-	}
+	require.NoError(t, err)
 
 	dbName := parsedURL.Database
 	if dbName == "" {
@@ -45,28 +44,20 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 	postgresURL := parsedURL.Copy()
 	postgresURL.Database = "postgres"
 	conn, err := pgx.ConnectConfig(context.Background(), postgresURL)
-	if err != nil {
-		t.Fatalf("failed to connect to database: %v", err)
-	}
+	require.NoError(t, err)
 	defer conn.Close(context.Background())
 
 	if dropDB {
 		_, err = conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)")
-		if err != nil {
-			t.Fatalf("failed to drop test database: %v", err)
-		}
+		require.NoError(t, err)
 	}
 
 	dbosCtx, err := NewDBOSContext(Config{
 		DatabaseURL: databaseURL,
 		AppName:     "test-app",
 	})
-	if err != nil {
-		t.Fatalf("failed to create DBOS instance: %v", err)
-	}
-	if dbosCtx == nil {
-		t.Fatal("expected DBOS instance but got nil")
-	}
+	require.NoError(t, err)
+	require.NotNil(t, dbosCtx)
 
 	// Register cleanup to run after test completes
 	t.Cleanup(func() {

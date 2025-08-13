@@ -3,8 +3,10 @@ package dbos
 import (
 	"bytes"
 	"log/slog"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLogger(t *testing.T) {
@@ -15,13 +17,9 @@ func TestLogger(t *testing.T) {
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 		}) // Create executor with default logger
-		if err != nil {
-			t.Fatalf("Failed to create executor with default logger: %v", err)
-		}
+		require.NoError(t, err)
 		err = dbosCtx.Launch()
-		if err != nil {
-			t.Fatalf("Failed to launch with default logger: %v", err)
-		}
+		require.NoError(t, err)
 		t.Cleanup(func() {
 			if dbosCtx != nil {
 				dbosCtx.Cancel()
@@ -29,9 +27,7 @@ func TestLogger(t *testing.T) {
 		})
 
 		ctx := dbosCtx.(*dbosContext)
-		if ctx.logger == nil {
-			t.Fatal("Logger is nil")
-		}
+		require.NotNil(t, ctx.logger)
 
 		// Test logger access
 		ctx.logger.Info("Test message from default logger")
@@ -53,13 +49,9 @@ func TestLogger(t *testing.T) {
 			AppName:     "test-app",
 			Logger:      slogLogger,
 		})
-		if err != nil {
-			t.Fatalf("Failed to create executor with custom logger: %v", err)
-		}
+		require.NoError(t, err)
 		err = dbosCtx.Launch()
-		if err != nil {
-			t.Fatalf("Failed to launch with custom logger: %v", err)
-		}
+		require.NoError(t, err)
 		t.Cleanup(func() {
 			if dbosCtx != nil {
 				dbosCtx.Cancel()
@@ -67,23 +59,15 @@ func TestLogger(t *testing.T) {
 		})
 
 		ctx := dbosCtx.(*dbosContext)
-		if ctx.logger == nil {
-			t.Fatal("Logger is nil")
-		}
+		require.NotNil(t, ctx.logger)
 
 		// Test that we can use the logger and it maintains context
 		ctx.logger.Info("Test message from custom logger", "test_key", "test_value")
 
 		// Check that our custom logger was used and captured the output
 		logOutput := buf.String()
-		if !strings.Contains(logOutput, "service=dbos-test") {
-			t.Errorf("Expected log output to contain service=dbos-test, got: %s", logOutput)
-		}
-		if !strings.Contains(logOutput, "environment=test") {
-			t.Errorf("Expected log output to contain environment=test, got: %s", logOutput)
-		}
-		if !strings.Contains(logOutput, "test_key=test_value") {
-			t.Errorf("Expected log output to contain test_key=test_value, got: %s", logOutput)
-		}
+		assert.Contains(t, logOutput, "service=dbos-test", "Expected log output to contain service=dbos-test")
+		assert.Contains(t, logOutput, "environment=test", "Expected log output to contain environment=test")
+		assert.Contains(t, logOutput, "test_key=test_value", "Expected log output to contain test_key=test_value")
 	})
 }
