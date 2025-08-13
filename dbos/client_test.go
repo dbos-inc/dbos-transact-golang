@@ -219,6 +219,20 @@ func TestCancelResume(t *testing.T) {
 	}
 	RegisterWorkflow(serverCtx, cancelResumeWorkflow, WithWorkflowName("CancelResumeWorkflow"))
 
+	// Timeout blocking workflow that spins until context is done
+	timeoutBlockingWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		for {
+			select {
+			case <-ctx.Done():
+				return "cancelled", ctx.Err()
+			default:
+				// Small sleep to avoid tight loop
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}
+	RegisterWorkflow(serverCtx, timeoutBlockingWorkflow, WithWorkflowName("TimeoutBlockingWorkflow"))
+
 	// Launch the server context to start processing tasks
 	err := serverCtx.Launch()
 	if err != nil {
@@ -330,6 +344,102 @@ func TestCancelResume(t *testing.T) {
 
 		if !queueEntriesAreCleanedUp(serverCtx) {
 			t.Fatal("expected queue entries to be cleaned up after cancel/resume test")
+		}
+	})
+
+	t.Run("CancelAndResumeTimeout", func(t *testing.T) {
+		workflowID := "test-cancel-resume-timeout-workflow"
+		workflowTimeout := 2 * time.Second
+
+		// Start the workflow with a 2-second timeout
+		handle, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
+			WorkflowName:       "TimeoutBlockingWorkflow",
+			QueueName:          queue.Name,
+			WorkflowID:         workflowID,
+			WorkflowInput:      "timeout-test",
+			WorkflowTimeout:    workflowTimeout,
+			ApplicationVersion: serverCtx.GetApplicationVersion(),
+		})
+		if err != nil {
+			t.Fatalf("failed to enqueue timeout blocking workflow: %v", err)
+		}
+
+		// Wait 500ms (well before the timeout expires)
+		time.Sleep(500 * time.Millisecond)
+
+		// Cancel the workflow before timeout expires
+		err = clientCtx.CancelWorkflow(workflowID)
+		if err != nil {
+			t.Fatalf("failed to cancel workflow: %v", err)
+		}
+
+		// Verify workflow is cancelled
+		cancelStatus, err := handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status after cancel: %v", err)
+		}
+
+		if cancelStatus.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected workflow status to be CANCELLED, got %v", cancelStatus.Status)
+		}
+
+		// Record the original deadline before resume
+		originalDeadline := cancelStatus.Deadline
+
+		// Resume the workflow
+		resumeStart := time.Now()
+		resumeHandle, err := ResumeWorkflow[string](clientCtx, workflowID)
+		if err != nil {
+			t.Fatalf("failed to resume workflow: %v", err)
+		}
+
+		// Get status after resume to check the deadline
+		resumeStatus, err := resumeHandle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get workflow status after resume: %v", err)
+		}
+
+		// Verify the deadline was reset (should be different from original)
+		if resumeStatus.Deadline.Equal(originalDeadline) {
+			t.Fatalf("expected deadline to be reset after resume, but it remained the same: %v", originalDeadline)
+		}
+
+		// The new deadline should be after resumeStart + workflowTimeout
+		expectedDeadline := resumeStart.Add(workflowTimeout)
+		if resumeStatus.Deadline.Before(expectedDeadline) {
+			t.Fatalf("deadline %v is too early (expected around %v)", resumeStatus.Deadline, expectedDeadline)
+		}
+
+		// Wait for the workflow to complete
+		_, err = resumeHandle.GetResult()
+		if err == nil {
+			t.Fatal("expected timeout error, but got none")
+		}
+
+		dbosErr, ok := err.(*DBOSError)
+		if !ok {
+			t.Fatalf("expected error to be of type *DBOSError, got %T", err)
+		}
+
+		if dbosErr.Code != AwaitedWorkflowCancelled {
+			t.Fatalf("expected error code to be AwaitedWorkflowCancelled (8), got %v", dbosErr.Code)
+		}
+
+		if !strings.Contains(dbosErr.Error(), "test-cancel-resume-timeout-workflow was cancelled") {
+			t.Fatalf("expected error message to contain 'test-cancel-resume-timeout-workflow was cancelled', got: %v", dbosErr.Error())
+		}
+
+		finalStatus, err := resumeHandle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get final workflow status: %v", err)
+		}
+
+		if finalStatus.Status != WorkflowStatusCancelled {
+			t.Fatalf("expected final workflow status to be CANCELLED, got %v", finalStatus.Status)
+		}
+
+		if !queueEntriesAreCleanedUp(serverCtx) {
+			t.Fatal("expected queue entries to be cleaned up after cancel/resume timeout test")
 		}
 	})
 
