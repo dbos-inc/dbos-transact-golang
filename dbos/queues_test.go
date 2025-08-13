@@ -304,9 +304,7 @@ func TestQueueRecovery(t *testing.T) {
 
 	// Recover the workflow, then resume it.
 	recoveryHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
-	if err != nil {
-		require.NoError(t, err, "failed to recover pending workflows")
-	}
+	require.NoError(t, err, "failed to recover pending workflows")
 
 	for _, e := range recoveryStepEvents {
 		e.Wait()
@@ -571,9 +569,7 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 
 	// Now, manually call the recoverPendingWorkflows method
 	recoveryHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
-	if err != nil {
-		require.NoError(t, err, "failed to recover pending workflows")
-	}
+	require.NoError(t, err, "failed to recover pending workflows")
 
 	// You should get 1 handle associated with the first workflow
 	assert.Len(t, recoveryHandles, 1, "expected 1 recovery handle")
@@ -749,15 +745,11 @@ func TestQueueTimeouts(t *testing.T) {
 		// This workflow will enqueue a workflow that is not cancelable
 		childCtx := WithoutCancel(ctx)
 		handle, err := RunAsWorkflow(childCtx, detachedWorkflow, timeout*2, WithQueue(timeoutQueue.Name))
-		if err != nil {
-			require.NoError(t, err, "failed to start enqueued detached workflow")
-		}
+		require.NoError(t, err, "failed to start enqueued detached workflow")
 
 		// Wait for the enqueued workflow to complete
 		result, err := handle.GetResult()
-		if err != nil {
-			require.NoError(t, err, "failed to get result from enqueued detached workflow")
-		}
+		require.NoError(t, err, "failed to get result from enqueued detached workflow")
 		if result != "detached-workflow-completed" {
 			assert.Equal(t, "detached-workflow-completed", result, "expected result to be 'detached-workflow-completed'")
 		}
@@ -836,15 +828,11 @@ func TestQueueTimeouts(t *testing.T) {
 		defer cancelFunc() // Ensure we clean up the context
 
 		handle, err := RunAsWorkflow(cancelCtx, enqueuedWorkflowEnqueuesADetachedWorkflow, timeout, WithQueue(timeoutQueue.Name))
-		if err != nil {
-			require.NoError(t, err, "failed to start enqueued detached workflow")
-		}
+		require.NoError(t, err, "failed to start enqueued detached workflow")
 
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
-		if err == nil {
-			require.Error(t, err, "expected error but got none")
-		}
+		require.Error(t, err, "expected error but got none")
 
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
