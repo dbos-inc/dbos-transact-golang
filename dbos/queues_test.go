@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,8 +27,8 @@ This suite tests
 [x] worker concurrency X recovery
 [x] rate limiter
 [x] conflicting workflow on different queues
-[] queue deduplication
-[] queue priority
+[x] queue deduplication
+[x] queue priority
 [x] queued workflow times out
 [] scheduled workflow enqueues another workflow
 */
@@ -53,6 +54,7 @@ func TestWorkflowQueues(t *testing.T) {
 	dlqEnqueueQueue := NewWorkflowQueue(dbosCtx, "test-successive-enqueue-queue")
 	conflictQueue1 := NewWorkflowQueue(dbosCtx, "conflict-queue-1")
 	conflictQueue2 := NewWorkflowQueue(dbosCtx, "conflict-queue-2")
+	dedupQueue := NewWorkflowQueue(dbosCtx, "test-dedup-queue")
 
 	dlqStartEvent := NewEvent()
 	dlqCompleteEvent := NewEvent()
@@ -60,6 +62,33 @@ func TestWorkflowQueues(t *testing.T) {
 
 	// Register workflows with dbosContext
 	RegisterWorkflow(dbosCtx, queueWorkflow)
+
+	// Queue deduplication test workflows
+	var dedupWorkflowEvent *Event
+	childWorkflow := func(ctx DBOSContext, var1 string) (string, error) {
+		if dedupWorkflowEvent != nil {
+			dedupWorkflowEvent.Wait()
+		}
+		return var1 + "-c", nil
+	}
+	RegisterWorkflow(dbosCtx, childWorkflow)
+
+	testWorkflow := func(ctx DBOSContext, var1 string) (string, error) {
+		// Make sure the child workflow is not blocked by the same deduplication ID
+		childHandle, err := RunAsWorkflow(ctx, childWorkflow, var1, WithQueue(dedupQueue.Name))
+		if err != nil {
+			return "", fmt.Errorf("failed to enqueue child workflow: %v", err)
+		}
+		if dedupWorkflowEvent != nil {
+			dedupWorkflowEvent.Wait()
+		}
+		result, err := childHandle.GetResult()
+		if err != nil {
+			return "", fmt.Errorf("failed to get child result: %v", err)
+		}
+		return result + "-p", nil
+	}
+	RegisterWorkflow(dbosCtx, testWorkflow)
 
 	// Create workflow with child that can call the main workflow
 	queueWorkflowWithChild := func(ctx DBOSContext, input string) (string, error) {
@@ -239,6 +268,72 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Contains(t, err.Error(), expectedMsgPart, "expected error message to contain expected part")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after conflicting workflow test")
+	})
+
+	t.Run("QueueDeduplication", func(t *testing.T) {
+		workflowEvent := NewEvent()
+		dedupWorkflowEvent = workflowEvent
+		defer func() {
+			dedupWorkflowEvent = nil
+		}()
+
+		// Make sure only one workflow is running at a time
+		wfid := uuid.NewString()
+		dedupID := "my_dedup_id"
+		handle1, err := RunAsWorkflow(dbosCtx, testWorkflow, "abc", WithQueue(dedupQueue.Name), WithWorkflowID(wfid), WithDeduplicationID(dedupID))
+		require.NoError(t, err, "failed to enqueue first workflow with deduplication ID")
+
+		// Enqueue the same workflow with a different deduplication ID should be fine
+		anotherHandle, err := RunAsWorkflow(dbosCtx, testWorkflow, "ghi", WithQueue(dedupQueue.Name), WithDeduplicationID("my_other_dedup_id"))
+		require.NoError(t, err, "failed to enqueue workflow with different deduplication ID")
+
+		// Enqueue a workflow without deduplication ID should be fine
+		nodedupHandle1, err := RunAsWorkflow(dbosCtx, testWorkflow, "jkl", WithQueue(dedupQueue.Name))
+		require.NoError(t, err, "failed to enqueue workflow without deduplication ID")
+
+		// Enqueued multiple times without deduplication ID but with different inputs should be fine, but get the result of the first one
+		nodedupHandle2, err := RunAsWorkflow(dbosCtx, testWorkflow, "mno", WithQueue(dedupQueue.Name), WithWorkflowID(wfid))
+		require.NoError(t, err, "failed to enqueue workflow with same workflow ID")
+
+		// Enqueue the same workflow with the same deduplication ID should raise an exception
+		wfid2 := uuid.NewString()
+		_, err = RunAsWorkflow(dbosCtx, testWorkflow, "def", WithQueue(dedupQueue.Name), WithWorkflowID(wfid2), WithDeduplicationID(dedupID))
+		require.Error(t, err, "expected error when enqueueing workflow with same deduplication ID")
+
+		// Check that it's the correct error type and message
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		assert.Equal(t, QueueDeduplicated, dbosErr.Code, "expected error code to be QueueDeduplicated")
+
+		expectedMsgPart := fmt.Sprintf("Workflow %s was deduplicated due to an existing workflow in queue %s with deduplication ID %s", wfid2, dedupQueue.Name, dedupID)
+		assert.Contains(t, err.Error(), expectedMsgPart, "expected error message to contain deduplication information")
+
+		// Now unblock the first two workflows and wait for them to finish
+		workflowEvent.Set()
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first workflow")
+		assert.Equal(t, "abc-c-p", result1, "expected first workflow result to be 'abc-c-p'")
+
+		resultAnother, err := anotherHandle.GetResult()
+		require.NoError(t, err, "failed to get result from workflow with different dedup ID")
+		assert.Equal(t, "ghi-c-p", resultAnother, "expected another workflow result to be 'ghi-c-p'")
+
+		resultNodedup1, err := nodedupHandle1.GetResult()
+		require.NoError(t, err, "failed to get result from workflow without dedup ID")
+		assert.Equal(t, "jkl-c-p", resultNodedup1, "expected nodedup1 workflow result to be 'jkl-c-p'")
+
+		resultNodedup2, err := nodedupHandle2.GetResult()
+		require.NoError(t, err, "failed to get result from reused workflow ID")
+		assert.Equal(t, "abc-c-p", resultNodedup2, "expected nodedup2 workflow result to be 'abc-c-p'")
+
+		// Invoke the workflow again with the same deduplication ID now should be fine because it's no longer in the queue
+		handle2, err := RunAsWorkflow(dbosCtx, testWorkflow, "def", WithQueue(dedupQueue.Name), WithWorkflowID(wfid2), WithDeduplicationID(dedupID))
+		require.NoError(t, err, "failed to enqueue workflow with same dedup ID after completion")
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result from second workflow with same dedup ID")
+		assert.Equal(t, "def-c-p", result2, "expected second workflow result to be 'def-c-p'")
+
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after deduplication test")
 	})
 }
 
@@ -841,4 +936,84 @@ func TestQueueTimeouts(t *testing.T) {
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow cancellation, but they are not")
 	})
+}
+
+func TestPriorityQueue(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	// Create priority-enabled queue with max concurrency of 1
+	priorityQueue := NewWorkflowQueue(dbosCtx, "test_queue_priority", WithGlobalConcurrency(1), WithPriorityEnabled(true))
+	childQueue := NewWorkflowQueue(dbosCtx, "test_queue_child")
+
+	workflowEvent := NewEvent()
+	var wfPriorityList []int
+	var mu sync.Mutex
+
+	childWorkflow := func(ctx DBOSContext, p int) (int, error) {
+		workflowEvent.Wait()
+		return p, nil
+	}
+	RegisterWorkflow(dbosCtx, childWorkflow)
+
+	testWorkflow := func(ctx DBOSContext, priority int) (int, error) {
+		mu.Lock()
+		wfPriorityList = append(wfPriorityList, priority)
+		mu.Unlock()
+
+		// Make sure the priority is not propagated
+		childHandle, err := RunAsWorkflow(ctx, childWorkflow, priority, WithQueue(childQueue.Name))
+		if err != nil {
+			return 0, fmt.Errorf("failed to enqueue child workflow: %v", err)
+		}
+		workflowEvent.Wait()
+		result, err := childHandle.GetResult()
+		if err != nil {
+			return 0, fmt.Errorf("failed to get child result: %v", err)
+		}
+		return result + priority, nil
+	}
+	RegisterWorkflow(dbosCtx, testWorkflow)
+
+	err := dbosCtx.Launch()
+	require.NoError(t, err)
+
+	var wfHandles []WorkflowHandle[int]
+
+	// First, enqueue a workflow without priority (default to priority 0)
+	handle, err := RunAsWorkflow(dbosCtx, testWorkflow, 0, WithQueue(priorityQueue.Name))
+	require.NoError(t, err)
+	wfHandles = append(wfHandles, handle)
+
+	// Then, enqueue workflows with priority 1 to 5
+	for i := 1; i <= 5; i++ {
+		handle, err := RunAsWorkflow(dbosCtx, testWorkflow, i, WithQueue(priorityQueue.Name), WithPriority(uint(i)))
+		require.NoError(t, err)
+		wfHandles = append(wfHandles, handle)
+	}
+
+	// Finally, enqueue two workflows without priority again (default priority 0)
+	handle6, err := RunAsWorkflow(dbosCtx, testWorkflow, 6, WithQueue(priorityQueue.Name))
+	require.NoError(t, err)
+	wfHandles = append(wfHandles, handle6)
+
+	handle7, err := RunAsWorkflow(dbosCtx, testWorkflow, 7, WithQueue(priorityQueue.Name))
+	require.NoError(t, err)
+	wfHandles = append(wfHandles, handle7)
+
+	// The finish sequence should be 0, 6, 7, 1, 2, 3, 4, 5
+	// (lower priority numbers execute first, same priority follows FIFO)
+	workflowEvent.Set()
+
+	for i, handle := range wfHandles {
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from workflow %d", i)
+		assert.Equal(t, i*2, result, "expected result %d for workflow %d", i*2, i)
+	}
+
+	mu.Lock()
+	expectedOrder := []int{0, 6, 7, 1, 2, 3, 4, 5}
+	assert.Equal(t, expectedOrder, wfPriorityList, "expected workflow execution order %v, got %v", expectedOrder, wfPriorityList)
+	mu.Unlock()
+
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after priority queue test")
 }
