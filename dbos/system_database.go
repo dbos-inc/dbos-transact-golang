@@ -376,6 +376,14 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		&workflowDeadlineEpochMS,
 	)
 	if err != nil {
+		// Handle unique constraint violation for the deduplication ID (this should be the only case for a 23505)
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+			return nil, newQueueDeduplicatedError(
+				input.status.ID,
+				input.status.QueueName,
+				input.status.DeduplicationID,
+			)
+		}
 		return nil, fmt.Errorf("failed to insert workflow status: %w", err)
 	}
 

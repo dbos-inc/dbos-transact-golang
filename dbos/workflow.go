@@ -436,6 +436,8 @@ type workflowParams struct {
 	queueName          string
 	applicationVersion string
 	maxRetries         int
+	deduplicationID    string
+	priority           uint
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
@@ -462,6 +464,20 @@ func WithQueue(queueName string) WorkflowOption {
 func WithApplicationVersion(version string) WorkflowOption {
 	return func(p *workflowParams) {
 		p.applicationVersion = version
+	}
+}
+
+// WithDeduplicationID sets a deduplication ID for the workflow.
+func WithDeduplicationID(id string) WorkflowOption {
+	return func(p *workflowParams) {
+		p.deduplicationID = id
+	}
+}
+
+// WithPriority sets the execution priority for the workflow.
+func WithPriority(priority uint) WorkflowOption {
+	return func(p *workflowParams) {
+		p.priority = priority
 	}
 }
 
@@ -650,6 +666,8 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		Input:              input,
 		ApplicationID:      c.GetApplicationID(),
 		QueueName:          params.queueName,
+		DeduplicationID:    params.deduplicationID,
+		Priority:           int(params.priority),
 	}
 
 	// Init status and record child workflow relationship in a single transaction
@@ -1321,6 +1339,7 @@ type EnqueueOptions struct {
 	WorkflowID         string
 	ApplicationVersion string
 	DeduplicationID    string
+	Priority           uint
 	WorkflowTimeout    time.Duration
 	WorkflowInput      any
 }
@@ -1347,6 +1366,7 @@ func (c *dbosContext) Enqueue(_ DBOSContext, params EnqueueOptions) (WorkflowHan
 		Input:              params.WorkflowInput,
 		QueueName:          params.QueueName,
 		DeduplicationID:    params.DeduplicationID,
+		Priority:           int(params.Priority),
 	}
 
 	uncancellableCtx := WithoutCancel(c)
@@ -1384,6 +1404,7 @@ type GenericEnqueueOptions[P any] struct {
 	WorkflowID         string
 	ApplicationVersion string
 	DeduplicationID    string
+	Priority           uint
 	WorkflowTimeout    time.Duration
 	WorkflowInput      P
 }
@@ -1461,6 +1482,7 @@ func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (Wo
 		WorkflowID:         params.WorkflowID,
 		ApplicationVersion: params.ApplicationVersion,
 		DeduplicationID:    params.DeduplicationID,
+		Priority:           params.Priority,
 		WorkflowInput:      params.WorkflowInput,
 		WorkflowTimeout:    params.WorkflowTimeout,
 	})

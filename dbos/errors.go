@@ -20,6 +20,7 @@ const (
 	StepExecutionError                                    // General step execution error
 	DeadLetterQueueError                                  // Workflow moved to dead letter queue after max retries
 	MaxStepRetriesExceeded                                // Step exceeded maximum retry attempts
+	QueueDeduplicated                                     // Workflow was deduplicated in the queue
 )
 
 // DBOSError is the unified error type for all DBOS operations.
@@ -184,5 +185,15 @@ func newMaxStepRetriesExceededError(workflowID, stepName string, maxRetries int,
 		StepName:   stepName,
 		MaxRetries: maxRetries,
 		IsBase:     true,
+	}
+}
+
+func newQueueDeduplicatedError(workflowID, queueName, deduplicationID string) *DBOSError {
+	return &DBOSError{
+		Message:         fmt.Sprintf("Workflow %s was deduplicated due to an existing workflow in queue %s with deduplication ID %s", workflowID, queueName, deduplicationID),
+		Code:            QueueDeduplicated,
+		WorkflowID:      workflowID,
+		QueueName:       queueName,
+		DeduplicationID: deduplicationID,
 	}
 }
