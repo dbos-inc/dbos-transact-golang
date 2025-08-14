@@ -308,7 +308,7 @@ func TestWorkflowQueues(t *testing.T) {
 		expectedMsgPart := fmt.Sprintf("Workflow %s was deduplicated due to an existing workflow in queue %s with deduplication ID %s", wfid2, dedupQueue.Name, dedupID)
 		assert.Contains(t, err.Error(), expectedMsgPart, "expected error message to contain deduplication information")
 
-		// Now unblock the first two workflows and wait for them to finish
+		// Now unblock the workflows and wait for them to finish
 		workflowEvent.Set()
 		result1, err := handle1.GetResult()
 		require.NoError(t, err, "failed to get result from first workflow")
@@ -960,7 +960,6 @@ func TestPriorityQueue(t *testing.T) {
 		wfPriorityList = append(wfPriorityList, priority)
 		mu.Unlock()
 
-		// Make sure the priority is not propagated
 		childHandle, err := RunAsWorkflow(ctx, childWorkflow, priority, WithQueue(childQueue.Name))
 		if err != nil {
 			return 0, fmt.Errorf("failed to enqueue child workflow: %v", err)
@@ -984,11 +983,15 @@ func TestPriorityQueue(t *testing.T) {
 	require.NoError(t, err)
 	wfHandles = append(wfHandles, handle)
 
-	// Then, enqueue workflows with priority 1 to 5
-	for i := 1; i <= 5; i++ {
+	// Then, enqueue workflows with priority 5 to 1
+	reversedPriorityHandles := make([]WorkflowHandle[int], 0, 5)
+	for i := 5; i > 0; i-- {
 		handle, err := RunAsWorkflow(dbosCtx, testWorkflow, i, WithQueue(priorityQueue.Name), WithPriority(uint(i)))
 		require.NoError(t, err)
-		wfHandles = append(wfHandles, handle)
+		reversedPriorityHandles = append(reversedPriorityHandles, handle)
+	}
+	for i := 0; i < len(reversedPriorityHandles); i++ {
+		wfHandles = append(wfHandles, reversedPriorityHandles[len(reversedPriorityHandles)-i-1])
 	}
 
 	// Finally, enqueue two workflows without priority again (default priority 0)
