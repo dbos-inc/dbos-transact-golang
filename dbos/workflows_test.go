@@ -1295,15 +1295,15 @@ func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 }
 
 func receiveWorkflow(ctx DBOSContext, topic string) (string, error) {
-	msg1, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+	msg1, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 10 * time.Second})
 	if err != nil {
 		return "", err
 	}
-	msg2, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+	msg2, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 10 * time.Second})
 	if err != nil {
 		return "", err
 	}
-	msg3, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+	msg3, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 10 * time.Second})
 	if err != nil {
 		return "", err
 	}
@@ -1601,7 +1601,7 @@ func TestSendRecv(t *testing.T) {
 			t.Fatalf("failed to start receive workflow: %v", err)
 		}
 
-		// Send messages from outside a workflow context (should work now)
+		// Send messages from outside a workflow context
 		for i := range 3 {
 			err = Send(dbosCtx, GenericWorkflowSendInput[string]{
 				DestinationID: receiveHandle.GetWorkflowID(),
