@@ -210,9 +210,14 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 					continue
 				}
 
-				registeredWorkflow, exists := ctx.workflowRegistry[wfName.(string)]
+				registeredWorkflowAny, exists := ctx.workflowRegistry.Load(wfName.(string))
 				if !exists {
 					ctx.logger.Error("workflow function not found in registry", "workflow_name", workflow.name)
+					continue
+				}
+				registeredWorkflow, ok := registeredWorkflowAny.(workflowRegistryEntry)
+				if !ok {
+					ctx.logger.Error("invalid workflow registry entry type", "workflow_name", workflow.name)
 					continue
 				}
 

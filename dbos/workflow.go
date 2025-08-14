@@ -234,19 +234,16 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn WrappedWorkflowFun
 		panic("Cannot register workflow after DBOS has launched")
 	}
 
-	c.workflowRegMutex.Lock()
-	defer c.workflowRegMutex.Unlock()
-
-	if _, exists := c.workflowRegistry[workflowFQN]; exists {
-		c.logger.Error("workflow function already registered", "fqn", workflowFQN)
-		panic(newConflictingRegistrationError(workflowFQN))
-	}
-
-	// We must keep the registry indexed by FQN (because RunAsWorkflow uses reflection to find the function name and uses that to look it up in the registry)
-	c.workflowRegistry[workflowFQN] = workflowRegistryEntry{
+	// Check if workflow already exists and store atomically using LoadOrStore
+	entry := workflowRegistryEntry{
 		wrappedFunction: fn,
 		maxRetries:      maxRetries,
 		name:            customName,
+	}
+	
+	if _, exists := c.workflowRegistry.LoadOrStore(workflowFQN, entry); exists {
+		c.logger.Error("workflow function already registered", "fqn", workflowFQN)
+		panic(newConflictingRegistrationError(workflowFQN))
 	}
 
 	// We need to get a mapping from custom name to FQN for registry lookups that might not know the FQN (queue, recovery)
@@ -591,9 +588,13 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	}
 
 	// Lookup the registry for registration-time options
-	registeredWorkflow, exists := c.workflowRegistry[params.workflowName]
+	registeredWorkflowAny, exists := c.workflowRegistry.Load(params.workflowName)
 	if !exists {
 		return nil, newNonExistentWorkflowError(params.workflowName)
+	}
+	registeredWorkflow, ok := registeredWorkflowAny.(workflowRegistryEntry)
+	if !ok {
+		return nil, fmt.Errorf("invalid workflow registry entry type for workflow %s", params.workflowName)
 	}
 	if registeredWorkflow.maxRetries > 0 {
 		params.maxRetries = registeredWorkflow.maxRetries

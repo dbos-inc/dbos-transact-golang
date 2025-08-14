@@ -120,9 +120,8 @@ type dbosContext struct {
 	// Wait group for workflow goroutines
 	workflowsWg *sync.WaitGroup
 
-	// Workflow registry
-	workflowRegistry        map[string]workflowRegistryEntry
-	workflowRegMutex        *sync.RWMutex
+	// Workflow registry - read-mostly sync.Map since registration happens only before launch
+	workflowRegistry        sync.Map // map[string]workflowRegistryEntry
 	workflowCustomNametoFQN sync.Map // Maps fully qualified workflow names to custom names. Usefor when client enqueues a workflow by name because registry is indexed by FQN.
 
 	// Workflow scheduler
@@ -164,7 +163,6 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 			systemDB:           dbosCtx.systemDB,
 			workflowsWg:        dbosCtx.workflowsWg,
 			workflowRegistry:   dbosCtx.workflowRegistry,
-			workflowRegMutex:   dbosCtx.workflowRegMutex,
 			applicationVersion: dbosCtx.applicationVersion,
 			executorID:         dbosCtx.executorID,
 			applicationID:      dbosCtx.applicationID,
@@ -187,7 +185,6 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 			systemDB:           dbosCtx.systemDB,
 			workflowsWg:        dbosCtx.workflowsWg,
 			workflowRegistry:   dbosCtx.workflowRegistry,
-			workflowRegMutex:   dbosCtx.workflowRegMutex,
 			applicationVersion: dbosCtx.applicationVersion,
 			executorID:         dbosCtx.executorID,
 			applicationID:      dbosCtx.applicationID,
@@ -211,7 +208,6 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 			systemDB:           dbosCtx.systemDB,
 			workflowsWg:        dbosCtx.workflowsWg,
 			workflowRegistry:   dbosCtx.workflowRegistry,
-			workflowRegMutex:   dbosCtx.workflowRegMutex,
 			applicationVersion: dbosCtx.applicationVersion,
 			executorID:         dbosCtx.executorID,
 			applicationID:      dbosCtx.applicationID,
@@ -262,11 +258,9 @@ func (c *dbosContext) GetApplicationID() string {
 func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	ctx, cancelFunc := context.WithCancelCause(context.Background())
 	initExecutor := &dbosContext{
-		workflowsWg:      &sync.WaitGroup{},
-		ctx:              ctx,
-		ctxCancelFunc:    cancelFunc,
-		workflowRegistry: make(map[string]workflowRegistryEntry),
-		workflowRegMutex: &sync.RWMutex{},
+		workflowsWg:   &sync.WaitGroup{},
+		ctx:           ctx,
+		ctxCancelFunc: cancelFunc,
 	}
 
 	// Load and process the configuration
