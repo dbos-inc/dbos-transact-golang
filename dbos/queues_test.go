@@ -1072,3 +1072,86 @@ func TestPriorityQueue(t *testing.T) {
 
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after priority queue test")
 }
+
+func TestPriorityQueue(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	// Create priority-enabled queue with max concurrency of 1
+	priorityQueue := NewWorkflowQueue(dbosCtx, "test_queue_priority", WithGlobalConcurrency(1), WithPriorityEnabled(true))
+	childQueue := NewWorkflowQueue(dbosCtx, "test_queue_child")
+
+	workflowEvent := NewEvent()
+	var wfPriorityList []int
+	var mu sync.Mutex
+
+	childWorkflow := func(ctx DBOSContext, p int) (int, error) {
+		workflowEvent.Wait()
+		return p, nil
+	}
+	RegisterWorkflow(dbosCtx, childWorkflow)
+
+	testWorkflow := func(ctx DBOSContext, priority int) (int, error) {
+		mu.Lock()
+		wfPriorityList = append(wfPriorityList, priority)
+		mu.Unlock()
+
+		childHandle, err := RunAsWorkflow(ctx, childWorkflow, priority, WithQueue(childQueue.Name))
+		if err != nil {
+			return 0, fmt.Errorf("failed to enqueue child workflow: %v", err)
+		}
+		workflowEvent.Wait()
+		result, err := childHandle.GetResult()
+		if err != nil {
+			return 0, fmt.Errorf("failed to get child result: %v", err)
+		}
+		return result + priority, nil
+	}
+	RegisterWorkflow(dbosCtx, testWorkflow)
+
+	err := dbosCtx.Launch()
+	require.NoError(t, err)
+
+	var wfHandles []WorkflowHandle[int]
+
+	// First, enqueue a workflow without priority (default to priority 0)
+	handle, err := RunAsWorkflow(dbosCtx, testWorkflow, 0, WithQueue(priorityQueue.Name))
+	require.NoError(t, err)
+	wfHandles = append(wfHandles, handle)
+
+	// Then, enqueue workflows with priority 5 to 1
+	reversedPriorityHandles := make([]WorkflowHandle[int], 0, 5)
+	for i := 5; i > 0; i-- {
+		handle, err := RunAsWorkflow(dbosCtx, testWorkflow, i, WithQueue(priorityQueue.Name), WithPriority(uint(i)))
+		require.NoError(t, err)
+		reversedPriorityHandles = append(reversedPriorityHandles, handle)
+	}
+	for i := 0; i < len(reversedPriorityHandles); i++ {
+		wfHandles = append(wfHandles, reversedPriorityHandles[len(reversedPriorityHandles)-i-1])
+	}
+
+	// Finally, enqueue two workflows without priority again (default priority 0)
+	handle6, err := RunAsWorkflow(dbosCtx, testWorkflow, 6, WithQueue(priorityQueue.Name))
+	require.NoError(t, err)
+	wfHandles = append(wfHandles, handle6)
+
+	handle7, err := RunAsWorkflow(dbosCtx, testWorkflow, 7, WithQueue(priorityQueue.Name))
+	require.NoError(t, err)
+	wfHandles = append(wfHandles, handle7)
+
+	// The finish sequence should be 0, 6, 7, 1, 2, 3, 4, 5
+	// (lower priority numbers execute first, same priority follows FIFO)
+	workflowEvent.Set()
+
+	for i, handle := range wfHandles {
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from workflow %d", i)
+		assert.Equal(t, i*2, result, "expected result %d for workflow %d", i*2, i)
+	}
+
+	mu.Lock()
+	expectedOrder := []int{0, 6, 7, 1, 2, 3, 4, 5}
+	assert.Equal(t, expectedOrder, wfPriorityList, "expected workflow execution order %v, got %v", expectedOrder, wfPriorityList)
+	mu.Unlock()
+
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after priority queue test")
+}
