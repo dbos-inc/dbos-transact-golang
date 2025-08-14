@@ -8,7 +8,6 @@ type DBOSErrorCode int
 const (
 	ConflictingIDError           DBOSErrorCode = iota + 1 // Workflow ID conflicts or duplicate operations
 	InitializationError                                   // DBOS context initialization failures
-	WorkflowFunctionNotFound                              // Workflow function not registered
 	NonExistentWorkflowError                              // Referenced workflow does not exist
 	ConflictingWorkflowError                              // Workflow with same ID already exists with different parameters
 	WorkflowCancelled                                     // Workflow was cancelled during execution
@@ -65,18 +64,6 @@ func newInitializationError(message string) *DBOSError {
 	return &DBOSError{
 		Message: fmt.Sprintf("Error initializing DBOS Transact: %s", message),
 		Code:    InitializationError,
-	}
-}
-
-func newWorkflowFunctionNotFoundError(workflowID, message string) *DBOSError {
-	msg := fmt.Sprintf("Workflow function not found for workflow ID %s", workflowID)
-	if message != "" {
-		msg += ": " + message
-	}
-	return &DBOSError{
-		Message:    msg,
-		Code:       WorkflowFunctionNotFound,
-		WorkflowID: workflowID,
 	}
 }
 
