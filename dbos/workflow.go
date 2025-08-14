@@ -1703,6 +1703,7 @@ type listWorkflowsParams struct {
 	workflowIDPrefix string
 	loadInput        bool
 	loadOutput       bool
+	queueName        string
 }
 
 // ListWorkflowsOption is a functional option for configuring workflow listing parameters.
@@ -1865,6 +1866,19 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 	}
 }
 
+// WithQueueName filters workflows by the specified queue name.
+// This is typically used when listing queued workflows.
+//
+// Example:
+//
+//	workflows, err := dbos.ListWorkflows(ctx,
+//	    dbos.WithQueueName("data-processing"))
+func WithQueueName(queueName string) ListWorkflowsOption {
+	return func(p *listWorkflowsParams) {
+		p.queueName = queueName
+	}
+}
+
 // ListWorkflows retrieves a list of workflows based on the provided filters.
 //
 // The function supports filtering by workflow IDs, status, time ranges, names, application versions,
@@ -1937,6 +1951,7 @@ func (c *dbosContext) ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStat
 		workflowIDPrefix:   params.workflowIDPrefix,
 		loadInput:          params.loadInput,
 		loadOutput:         params.loadOutput,
+		queueName:          params.queueName,
 	}
 
 	// Call the context method to list workflows
@@ -1947,6 +1962,7 @@ func (c *dbosContext) ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStat
 
 	return workflows, nil
 }
+
 
 // ListWorkflows retrieves a list of workflows based on the provided filters.
 //
