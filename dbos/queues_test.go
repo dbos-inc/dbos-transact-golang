@@ -977,7 +977,7 @@ func TestQueueTimeouts(t *testing.T) {
 		assert.Equal(t, "blocking-done", blockingResult, "expected blocking workflow result")
 
 		// Now the second workflow should dequeue and complete successfully (timeout should be much longer than execution time)
-		// Note: this might be flaky if we hit the dequeue interval 1sec boundary...
+		// Note: this might be flaky if we the dequeue is delayed too long
 		_, err = handle.GetResult()
 		require.NoError(t, err, "unexpected error from workflow")
 
