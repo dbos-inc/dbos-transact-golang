@@ -831,6 +831,48 @@ func TestChildWorkflow(t *testing.T) {
 			t.Fatalf("expected child result '%s', got '%s'", result, childResult)
 		}
 	})
+
+	t.Run("ChildWorkflowCannotBeSpawnedFromStep", func(t *testing.T) {
+		// Child workflow for testing
+		childWf := func(dbosCtx DBOSContext, input string) (string, error) {
+			return "child-result", nil
+		}
+		RegisterWorkflow(dbosCtx, childWf)
+
+		// Step that tries to spawn a child workflow - this should fail
+		stepThatSpawnsChild := func(ctx context.Context, input string) (string, error) {
+			dbosCtx := ctx.(DBOSContext)
+			_, err := RunAsWorkflow(dbosCtx, childWf, input)
+			if err != nil {
+				return "", err
+			}
+			return "should-not-reach", nil
+		}
+
+		// Workflow that calls the step
+		parentWf := func(ctx DBOSContext, input string) (string, error) {
+			return RunAsStep(ctx, func(context context.Context) (string, error) {
+				return stepThatSpawnsChild(context, input)
+			})
+		}
+		RegisterWorkflow(dbosCtx, parentWf)
+
+		// Execute the workflow - should fail when step tries to spawn child workflow
+		handle, err := RunAsWorkflow(dbosCtx, parentWf, "test-input")
+		require.NoError(t, err, "failed to start parent workflow")
+
+		// Expect the workflow to fail
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected error when spawning child workflow from step, but got none")
+
+		// Check the error type and message
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, StepExecutionError, dbosErr.Code, "expected error code to be StepExecutionError, got %v", dbosErr.Code)
+
+		expectedMessagePart := "cannot spawn child workflow from within a step"
+		require.Contains(t, err.Error(), expectedMessagePart, "expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+	})
 }
 
 // Idempotency workflows moved to test functions

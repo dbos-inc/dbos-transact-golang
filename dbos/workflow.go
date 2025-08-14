@@ -607,6 +607,11 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	parentWorkflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
 
+	// Prevent spawning child workflows from within a step
+	if isChildWorkflow && parentWorkflowState.isWithinStep {
+		return nil, newStepExecutionError(parentWorkflowState.workflowID, params.workflowName, "cannot spawn child workflow from within a step")
+	}
+
 	if isChildWorkflow {
 		// Advance step ID if we are a child workflow
 		parentWorkflowState.NextStepID()
