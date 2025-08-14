@@ -945,6 +945,11 @@ func RunAsStep[R any](ctx DBOSContext, fn GenericStepFunc[R]) (R, error) {
 }
 
 func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc) (any, error) {
+	// This should not happen when called from the package-level RunAsStep
+	if fn == nil {
+		return nil, newStepExecutionError("", "", "step function cannot be nil")
+	}
+
 	// Look up for step parameters in the context and set defaults
 	params, ok := c.Value(StepParamsKey).(*StepParams)
 	if !ok {
@@ -956,11 +961,6 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc) (any, error) {
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return nil, newStepExecutionError("", params.StepName, "workflow state not found in context: are you running this step within a workflow?")
-	}
-
-	// This should not happen when called from the package-level RunAsStep
-	if fn == nil {
-		return nil, newStepExecutionError(wfState.workflowID, params.StepName, "step function cannot be nil")
 	}
 
 	// If within a step, just run the function directly
