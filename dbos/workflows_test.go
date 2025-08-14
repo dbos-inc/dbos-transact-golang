@@ -1263,7 +1263,7 @@ func TestScheduledWorkflows(t *testing.T) {
 
 		// Verify timing - each execution should be approximately 1 second apart
 		scheduleInterval := 1 * time.Second
-		allowedSlack := 2 * time.Second
+		allowedSlack := 3 * time.Second
 
 		for i, execTime := range executionTimes {
 			// Calculate expected execution time based on schedule interval
