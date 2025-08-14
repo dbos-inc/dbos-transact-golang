@@ -6,7 +6,7 @@ Test workflow and steps features
 [x] workflow idempotency
 [x] workflow DLQ
 [x] workflow conflicting name
-[] workflow timeouts & deadlines (including child workflows)
+[x] workflow timeouts & deadlines (including child workflows)
 */
 
 import (
@@ -1072,60 +1072,51 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		require.Error(t, err, "expected dead letter queue error when restarting workflow with same ID but got none")
 
 		dbosErr, ok = err.(*DBOSError)
-		if !ok {
-			t.Fatalf("expected DBOSError, got %T", err)
-		}
-		if dbosErr.Code != DeadLetterQueueError {
-			t.Fatalf("expected DeadLetterQueueError, got %v", dbosErr.Code)
-		}
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, dbosErr.Code, DeadLetterQueueError, "expected error code to be DeadLetterQueueError")
 
-		// Unlock the workflow to allow it to complete
+		// Now resume the workflow -- this clears the DLQ status
+		resumedHandle, err := ResumeWorkflow[int](dbosCtx, wfID)
+		require.NoError(t, err, "failed to resume workflow")
+
+		// Recover pending workflows again - should work without error
+		_, err = recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows after resume")
+
+		// Complete the blocked workflow
 		deadLetterQueueEvent.Set()
-		/*
-				// TODO: test resume when implemented
-				resumedHandle, err := ...
 
-				// Recover pending workflows again - should work without error
-				_, err = recoverPendingWorkflows(executor.(*dbosContext), []string{"local"})
-				if err != nil {
-					t.Fatalf("failed to recover pending workflows after resume: %v", err)
-				}
+		// Wait for both handles to complete
+		result1, err := handle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from original handle: %v", err)
+		}
 
-				// Complete the blocked workflow
-				deadLetterQueueEvent.Set()
+		result2, err := resumedHandle.GetResult()
+		if err != nil {
+			t.Fatalf("failed to get result from resumed handle: %v", err)
+		}
 
-				// Wait for both handles to complete
-				result1, err = handle.GetResult(context.Background())
-				if err != nil {
-					t.Fatalf("failed to get result from original handle: %v", err)
-				}
+		if result1 != result2 {
+			t.Fatalf("expected both handles to return same result, got %v and %v", result1, result2)
+		}
 
-				result2, err := resumedHandle.GetResult(context.Background())
-				if err != nil {
-					t.Fatalf("failed to get result from resumed handle: %v", err)
-				}
+		// Verify workflow status is SUCCESS
+		status, err = handle.GetStatus()
+		if err != nil {
+			t.Fatalf("failed to get final workflow status: %v", err)
+		}
+		if status.Status != WorkflowStatusSuccess {
+			t.Fatalf("expected workflow status to be SUCCESS, got %v", status.Status)
+		}
 
-				if result1 != result2 {
-					t.Fatalf("expected both handles to return same result, got %v and %v", result1, result2)
-				}
-
-				// Verify workflow status is SUCCESS
-				status, err = handle.GetStatus()
-				if err != nil {
-					t.Fatalf("failed to get final workflow status: %v", err)
-				}
-				if status.Status != WorkflowStatusSuccess {
-					t.Fatalf("expected workflow status to be SUCCESS, got %v", status.Status)
-				}
-
-			// Verify that retries of a completed workflow do not raise the DLQ exception
-			for i := 0; i < maxRecoveryAttempts*2; i++ {
-				_, err = RunAsWorkflow(executor, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
-				if err != nil {
-					t.Fatalf("unexpected error when retrying completed workflow: %v", err)
-				}
+		// Verify that retries of a completed workflow do not raise the DLQ exception
+		for i := 0; i < maxRecoveryAttempts*2; i++ {
+			_, err = RunAsWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
+			if err != nil {
+				t.Fatalf("unexpected error when retrying completed workflow: %v", err)
 			}
-		*/
+		}
 	})
 
 	t.Run("InfiniteRetriesWorkflow", func(t *testing.T) {

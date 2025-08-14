@@ -945,7 +945,6 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc) (any, error) {
 	// Get workflow state from context
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		// TODO: try to print step name
 		return nil, newStepExecutionError("", params.StepName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 
