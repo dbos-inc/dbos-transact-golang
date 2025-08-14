@@ -201,8 +201,8 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 			}
 			recordResultErr := h.dbosContext.(*dbosContext).systemDB.recordChildGetResult(h.dbosContext, recordGetResultInput)
 			if recordResultErr != nil {
-				// Note: we might want GetResult to return this error if it happens, instead of returning the real error to the program.
 				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
+				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Sprintf("recording child workflow result: %v", recordResultErr))
 			}
 		}
 		return typedResult, err
