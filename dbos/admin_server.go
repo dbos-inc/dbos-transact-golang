@@ -89,8 +89,9 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: mux,
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	return &adminServer{
