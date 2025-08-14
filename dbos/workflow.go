@@ -182,7 +182,6 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 	if result != nil {
 		typedResult, ok := result.(R)
 		if !ok {
-			// TODO check what this looks like in practice
 			return *new(R), newWorkflowUnexpectedResultType(h.workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", result))
 		}
 		// If we are calling GetResult inside a workflow, record the result as a step result

@@ -179,7 +179,11 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 		// Iterate through all queues in the registry
 		for queueName, queue := range qr.workflowQueueRegistry {
 			// Call DequeueWorkflows for each queue
-			dequeuedWorkflows, err := ctx.systemDB.dequeueWorkflows(ctx, queue, ctx.executorID, ctx.applicationVersion)
+			dequeuedWorkflows, err := ctx.systemDB.dequeueWorkflows(ctx, dequeueWorkflowsInput{
+				queue:              queue,
+				executorID:         ctx.executorID,
+				applicationVersion: ctx.applicationVersion,
+			})
 			if err != nil {
 				if pgErr, ok := err.(*pgconn.PgError); ok {
 					switch pgErr.Code {

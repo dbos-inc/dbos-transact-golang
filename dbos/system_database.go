@@ -58,7 +58,7 @@ type systemDatabase interface {
 	sleep(ctx context.Context, duration time.Duration) (time.Duration, error)
 
 	// Queues
-	dequeueWorkflows(ctx context.Context, queue WorkflowQueue, executorID, applicationVersion string) ([]dequeuedWorkflow, error)
+	dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error)
 	clearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
 }
 
@@ -1864,8 +1864,13 @@ type dequeuedWorkflow struct {
 	input string
 }
 
-// TODO input struct
-func (s *sysDB) dequeueWorkflows(ctx context.Context, queue WorkflowQueue, executorID, applicationVersion string) ([]dequeuedWorkflow, error) {
+type dequeueWorkflowsInput struct {
+	queue              WorkflowQueue
+	executorID         string
+	applicationVersion string
+}
+
+func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error) {
 	// Begin transaction with snapshot isolation
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1882,8 +1887,8 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, queue WorkflowQueue, execu
 	// First check the rate limiter
 	startTimeMs := time.Now().UnixMilli()
 	var numRecentQueries int
-	if queue.RateLimit != nil {
-		limiterPeriod := time.Duration(queue.RateLimit.Period * float64(time.Second))
+	if input.queue.RateLimit != nil {
+		limiterPeriod := time.Duration(input.queue.RateLimit.Period * float64(time.Second))
 
 		// Calculate the cutoff time: current time minus limiter period
 		cutoffTimeMs := time.Now().Add(-limiterPeriod).UnixMilli()
@@ -1897,22 +1902,22 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, queue WorkflowQueue, execu
 		  AND started_at_epoch_ms > $3`
 
 		err := tx.QueryRow(ctx, limiterQuery,
-			queue.Name,
+			input.queue.Name,
 			WorkflowStatusEnqueued,
 			cutoffTimeMs).Scan(&numRecentQueries)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query rate limiter: %w", err)
 		}
 
-		if numRecentQueries >= queue.RateLimit.Limit {
+		if numRecentQueries >= input.queue.RateLimit.Limit {
 			return []dequeuedWorkflow{}, nil
 		}
 	}
 
 	// Calculate max_tasks based on concurrency limits
-	maxTasks := queue.MaxTasksPerIteration
+	maxTasks := input.queue.MaxTasksPerIteration
 
-	if queue.WorkerConcurrency != nil || queue.GlobalConcurrency != nil {
+	if input.queue.WorkerConcurrency != nil || input.queue.GlobalConcurrency != nil {
 		// Count pending workflows by executor
 		pendingQuery := `
 			SELECT executor_id, COUNT(*) as task_count
@@ -1920,7 +1925,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, queue WorkflowQueue, execu
 			WHERE queue_name = $1 AND status = $2
 			GROUP BY executor_id`
 
-		rows, err := tx.Query(ctx, pendingQuery, queue.Name, WorkflowStatusPending)
+		rows, err := tx.Query(ctx, pendingQuery, input.queue.Name, WorkflowStatusPending)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query pending workflows: %w", err)
 		}
@@ -1936,28 +1941,28 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, queue WorkflowQueue, execu
 			pendingWorkflowsDict[executorIDRow] = taskCount
 		}
 
-		localPendingWorkflows := pendingWorkflowsDict[executorID]
+		localPendingWorkflows := pendingWorkflowsDict[input.executorID]
 
 		// Check worker concurrency limit
-		if queue.WorkerConcurrency != nil {
-			workerConcurrency := *queue.WorkerConcurrency
+		if input.queue.WorkerConcurrency != nil {
+			workerConcurrency := *input.queue.WorkerConcurrency
 			if localPendingWorkflows > workerConcurrency {
-				s.logger.Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", queue.Name, "concurrency_limit", workerConcurrency)
+				s.logger.Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", input.queue.Name, "concurrency_limit", workerConcurrency)
 			}
 			availableWorkerTasks := max(workerConcurrency-localPendingWorkflows, 0)
 			maxTasks = availableWorkerTasks
 		}
 
 		// Check global concurrency limit
-		if queue.GlobalConcurrency != nil {
+		if input.queue.GlobalConcurrency != nil {
 			globalPendingWorkflows := 0
 			for _, count := range pendingWorkflowsDict {
 				globalPendingWorkflows += count
 			}
 
-			concurrency := *queue.GlobalConcurrency
+			concurrency := *input.queue.GlobalConcurrency
 			if globalPendingWorkflows > concurrency {
-				s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", queue.Name, "concurrency_limit", concurrency)
+				s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", input.queue.Name, "concurrency_limit", concurrency)
 			}
 			availableTasks := max(concurrency-globalPendingWorkflows, 0)
 			if availableTasks < maxTasks {
@@ -1969,7 +1974,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, queue WorkflowQueue, execu
 	// Build the query to select workflows for dequeueing
 	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
 	// otherwise use NOWAIT to ensure consistent view across processes
-	skipLocks := queue.GlobalConcurrency == nil
+	skipLocks := input.queue.GlobalConcurrency == nil
 	var lockClause string
 	if skipLocks {
 		lockClause = "FOR UPDATE SKIP LOCKED"
@@ -1978,7 +1983,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, queue WorkflowQueue, execu
 	}
 
 	var query string
-	if queue.PriorityEnabled {
+	if input.queue.PriorityEnabled {
 		query = fmt.Sprintf(`
 			SELECT workflow_uuid
 			FROM dbos.workflow_status
@@ -2003,7 +2008,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, queue WorkflowQueue, execu
 	}
 
 	// Execute the query to get workflow IDs
-	rows, err := tx.Query(ctx, query, queue.Name, WorkflowStatusEnqueued, applicationVersion)
+	rows, err := tx.Query(ctx, query, input.queue.Name, WorkflowStatusEnqueued, input.applicationVersion)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query enqueued workflows: %w", err)
 	}
@@ -2026,15 +2031,15 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, queue WorkflowQueue, execu
 	}
 
 	if len(dequeuedIDs) > 0 {
-		s.logger.Debug("attempting to dequeue task(s)", "queueName", queue.Name, "numTasks", len(dequeuedIDs))
+		s.logger.Debug("attempting to dequeue task(s)", "queueName", input.queue.Name, "numTasks", len(dequeuedIDs))
 	}
 
 	// Update workflows to PENDING status and get their details
 	var retWorkflows []dequeuedWorkflow
 	for _, id := range dequeuedIDs {
 		// If we have a limiter, stop dequeueing workflows when the number of workflows started this period exceeds the limit.
-		if queue.RateLimit != nil {
-			if len(retWorkflows)+numRecentQueries >= queue.RateLimit.Limit {
+		if input.queue.RateLimit != nil {
+			if len(retWorkflows)+numRecentQueries >= input.queue.RateLimit.Limit {
 				break
 			}
 		}
@@ -2060,8 +2065,8 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, queue WorkflowQueue, execu
 		var inputString *string
 		err := tx.QueryRow(ctx, updateQuery,
 			WorkflowStatusPending,
-			applicationVersion,
-			executorID,
+			input.applicationVersion,
+			input.executorID,
 			startTimeMs,
 			id).Scan(&retWorkflow.name, &inputString)
 
