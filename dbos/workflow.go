@@ -240,7 +240,7 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn WrappedWorkflowFun
 		maxRetries:      maxRetries,
 		name:            customName,
 	}
-	
+
 	if _, exists := c.workflowRegistry.LoadOrStore(workflowFQN, entry); exists {
 		c.logger.Error("workflow function already registered", "fqn", workflowFQN)
 		panic(newConflictingRegistrationError(workflowFQN))
@@ -667,7 +667,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	}
 	// When enqueuing, we do not set a deadline. It'll be computed with the timeout during dequeue.
 	if status == WorkflowStatusEnqueued {
-		deadline = time.Time{} // No deadline for enqueued workflows
+		deadline = time.Time{}
 	}
 
 	if params.priority > uint(math.MaxInt) {
