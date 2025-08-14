@@ -1,0 +1,54 @@
+name: Security Checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+    types:
+      - ready_for_review
+      - opened
+      - reopened
+      - synchronize
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 1'  # Weekly on Monday
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25.x'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Install security tools
+      run: |
+        go install golang.org/x/vuln/cmd/govulncheck@latest
+        go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+    - name: Run govulncheck
+      run: govulncheck ./...
+
+    - name: Run gosec
+      run: gosec ./...
