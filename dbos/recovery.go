@@ -32,7 +32,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 				continue
 			}
 			if cleared {
-				workflowHandles = append(workflowHandles, &workflowPollingHandle[any]{workflowID: workflow.ID, dbosContext: ctx})
+				workflowHandles = append(workflowHandles, newWorkflowPollingHandle[any](ctx, workflow.ID))
 			}
 			continue
 		}

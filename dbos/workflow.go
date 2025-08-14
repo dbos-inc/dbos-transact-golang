@@ -89,11 +89,57 @@ type WorkflowHandle[R any] interface {
 	GetWorkflowID() string              // Get the unique workflow identifier
 }
 
+// baseWorkflowHandle contains common fields and methods for workflow handles
+type baseWorkflowHandle struct {
+	workflowID  string
+	dbosContext DBOSContext
+}
+
+// GetStatus returns the current status of the workflow from the database
+func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
+	workflowStatuses, err := h.dbosContext.(*dbosContext).systemDB.listWorkflows(h.dbosContext, listWorkflowsDBInput{
+		workflowIDs: []string{h.workflowID},
+		loadInput:   true,
+		loadOutput:  true,
+	})
+	if err != nil {
+		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
+	}
+	if len(workflowStatuses) == 0 {
+		return WorkflowStatus{}, newNonExistentWorkflowError(h.workflowID)
+	}
+	return workflowStatuses[0], nil
+}
+
+func (h *baseWorkflowHandle) GetWorkflowID() string {
+	return h.workflowID
+}
+
+// newWorkflowHandle creates a new workflowHandle with the given parameters
+func newWorkflowHandle[R any](ctx DBOSContext, workflowID string, outcomeChan chan workflowOutcome[R]) *workflowHandle[R] {
+	return &workflowHandle[R]{
+		baseWorkflowHandle: baseWorkflowHandle{
+			workflowID:  workflowID,
+			dbosContext: ctx,
+		},
+		outcomeChan: outcomeChan,
+	}
+}
+
+// newWorkflowPollingHandle creates a new workflowPollingHandle with the given parameters
+func newWorkflowPollingHandle[R any](ctx DBOSContext, workflowID string) *workflowPollingHandle[R] {
+	return &workflowPollingHandle[R]{
+		baseWorkflowHandle: baseWorkflowHandle{
+			workflowID:  workflowID,
+			dbosContext: ctx,
+		},
+	}
+}
+
 // workflowHandle is a concrete implementation of WorkflowHandle
 type workflowHandle[R any] struct {
-	workflowID  string
+	baseWorkflowHandle
 	outcomeChan chan workflowOutcome[R]
-	dbosContext DBOSContext
 }
 
 // GetResult waits for the workflow to complete and returns the result
@@ -127,29 +173,8 @@ func (h *workflowHandle[R]) GetResult() (R, error) {
 	return outcome.result, outcome.err
 }
 
-// GetStatus returns the current status of the workflow from the database
-func (h *workflowHandle[R]) GetStatus() (WorkflowStatus, error) {
-	workflowStatuses, err := h.dbosContext.(*dbosContext).systemDB.listWorkflows(h.dbosContext, listWorkflowsDBInput{
-		workflowIDs: []string{h.workflowID},
-		loadInput:   true,
-		loadOutput:  true,
-	})
-	if err != nil {
-		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
-	}
-	if len(workflowStatuses) == 0 {
-		return WorkflowStatus{}, newNonExistentWorkflowError(h.workflowID)
-	}
-	return workflowStatuses[0], nil
-}
-
-func (h *workflowHandle[R]) GetWorkflowID() string {
-	return h.workflowID
-}
-
 type workflowPollingHandle[R any] struct {
-	workflowID  string
-	dbosContext DBOSContext
+	baseWorkflowHandle
 }
 
 func (h *workflowPollingHandle[R]) GetResult() (R, error) {
@@ -184,26 +209,6 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 		return typedResult, err
 	}
 	return *new(R), err
-}
-
-// GetStatus returns the current status of the workflow from the database
-func (h *workflowPollingHandle[R]) GetStatus() (WorkflowStatus, error) {
-	workflowStatuses, err := h.dbosContext.(*dbosContext).systemDB.listWorkflows(h.dbosContext, listWorkflowsDBInput{
-		workflowIDs: []string{h.workflowID},
-		loadInput:   true,
-		loadOutput:  true,
-	})
-	if err != nil {
-		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
-	}
-	if len(workflowStatuses) == 0 {
-		return WorkflowStatus{}, newNonExistentWorkflowError(h.workflowID)
-	}
-	return workflowStatuses[0], nil
-}
-
-func (h *workflowPollingHandle[R]) GetWorkflowID() string {
-	return h.workflowID
 }
 
 /**********************************/
@@ -409,7 +414,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R
 		if err != nil {
 			return nil, err
 		}
-		return &workflowPollingHandle[any]{workflowID: handle.GetWorkflowID(), dbosContext: ctx}, nil // this is only used by recovery and queue runner so far -- queue runner dismisses it
+		return newWorkflowPollingHandle[any](ctx, handle.GetWorkflowID()), nil // this is only used by recovery and queue runner so far -- queue runner dismisses it
 	})
 	registerWorkflow(ctx, fqn, typeErasedWrapper, registrationParams.maxRetries, registrationParams.name)
 
@@ -536,10 +541,7 @@ func RunAsWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R], 
 	// If we got a polling handle, return its typed version
 	if pollingHandle, ok := handle.(*workflowPollingHandle[any]); ok {
 		// We need to convert the polling handle to a typed handle
-		typedPollingHandle := &workflowPollingHandle[R]{
-			workflowID:  pollingHandle.workflowID,
-			dbosContext: pollingHandle.dbosContext,
-		}
+		typedPollingHandle := newWorkflowPollingHandle[R](pollingHandle.dbosContext, pollingHandle.workflowID)
 		return typedPollingHandle, nil
 	}
 
@@ -567,11 +569,7 @@ func RunAsWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R], 
 			}
 		}()
 
-		typedHandle := &workflowHandle[R]{
-			workflowID:  handle.workflowID,
-			outcomeChan: typedOutcomeChan,
-			dbosContext: handle.dbosContext,
-		}
+		typedHandle := newWorkflowHandle[R](handle.dbosContext, handle.workflowID, typedOutcomeChan)
 
 		return typedHandle, nil
 	}
@@ -634,7 +632,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("checking child workflow: %v", err))
 		}
 		if childWorkflowID != nil {
-			return &workflowPollingHandle[any]{workflowID: *childWorkflowID, dbosContext: uncancellableCtx}, nil
+			return newWorkflowPollingHandle[any](uncancellableCtx, *childWorkflowID), nil
 		}
 	}
 
@@ -706,7 +704,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		if err := tx.Commit(uncancellableCtx); err != nil {
 			return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
 		}
-		return &workflowPollingHandle[any]{workflowID: workflowStatus.ID, dbosContext: uncancellableCtx}, nil
+		return newWorkflowPollingHandle[any](uncancellableCtx, workflowStatus.ID), nil
 	}
 
 	// Record child workflow relationship if this is a child workflow
@@ -798,7 +796,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		close(outcomeChan)
 	}()
 
-	return &workflowHandle[any]{workflowID: workflowID, outcomeChan: outcomeChan, dbosContext: uncancellableCtx}, nil
+	return newWorkflowHandle[any](uncancellableCtx, workflowID, outcomeChan), nil
 }
 
 /******************************/
@@ -1303,7 +1301,7 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 	if len(workflowStatus) == 0 {
 		return nil, newNonExistentWorkflowError(workflowID)
 	}
-	return &workflowPollingHandle[any]{workflowID: workflowID, dbosContext: c}, nil
+	return newWorkflowPollingHandle[any](c, workflowID), nil
 }
 
 // RetrieveWorkflow returns a typed handle to an existing workflow.
@@ -1323,9 +1321,9 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 //	} else {
 //	    log.Printf("Result: %d", result)
 //	}
-func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (workflowPollingHandle[R], error) {
+func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (*workflowPollingHandle[R], error) {
 	if ctx == nil {
-		return workflowPollingHandle[R]{}, errors.New("dbosCtx cannot be nil")
+		return nil, errors.New("dbosCtx cannot be nil")
 	}
 
 	// Register the output for gob encoding
@@ -1336,12 +1334,12 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (workflowPollin
 		workflowIDs: []string{workflowID},
 	})
 	if err != nil {
-		return workflowPollingHandle[R]{}, fmt.Errorf("failed to retrieve workflow status: %w", err)
+		return nil, fmt.Errorf("failed to retrieve workflow status: %w", err)
 	}
 	if len(workflowStatus) == 0 {
-		return workflowPollingHandle[R]{}, newNonExistentWorkflowError(workflowID)
+		return nil, newNonExistentWorkflowError(workflowID)
 	}
-	return workflowPollingHandle[R]{workflowID: workflowID, dbosContext: ctx}, nil
+	return newWorkflowPollingHandle[R](ctx, workflowID), nil
 }
 
 type EnqueueOptions struct {
@@ -1406,10 +1404,7 @@ func (c *dbosContext) Enqueue(_ DBOSContext, params EnqueueOptions) (WorkflowHan
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	return &workflowPollingHandle[any]{
-		workflowID:  workflowID,
-		dbosContext: uncancellableCtx,
-	}, nil
+	return newWorkflowPollingHandle[any](uncancellableCtx, workflowID), nil
 }
 
 type GenericEnqueueOptions[P any] struct {
@@ -1504,10 +1499,7 @@ func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (Wo
 		return nil, err
 	}
 
-	return &workflowPollingHandle[R]{
-		workflowID:  handle.GetWorkflowID(),
-		dbosContext: ctx,
-	}, nil
+	return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID()), nil
 }
 
 // CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED.
@@ -1548,7 +1540,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	if err != nil {
 		return nil, err
 	}
-	return &workflowPollingHandle[any]{workflowID: workflowID, dbosContext: c}, nil
+	return newWorkflowPollingHandle[any](c, workflowID), nil
 }
 
 // ResumeWorkflow resumes a cancelled workflow by setting its status back to ENQUEUED.
@@ -1583,7 +1575,7 @@ func ResumeWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R
 	if err != nil {
 		return nil, err
 	}
-	return &workflowPollingHandle[R]{workflowID: workflowID, dbosContext: ctx}, nil
+	return newWorkflowPollingHandle[R](ctx, workflowID), nil
 }
 
 // ForkWorkflowInput holds configuration parameters for forking workflows.
@@ -1622,10 +1614,7 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 		return nil, err
 	}
 
-	return &workflowPollingHandle[any]{
-		workflowID:  forkedWorkflowID,
-		dbosContext: c,
-	}, nil
+	return newWorkflowPollingHandle[any](c, forkedWorkflowID), nil
 }
 
 // ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.
@@ -1679,10 +1668,7 @@ func ForkWorkflow[R any](ctx DBOSContext, input ForkWorkflowInput) (WorkflowHand
 	if err != nil {
 		return nil, err
 	}
-	return &workflowPollingHandle[R]{
-		workflowID:  handle.GetWorkflowID(),
-		dbosContext: ctx,
-	}, nil
+	return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID()), nil
 }
 
 // listWorkflowsParams holds configuration parameters for listing workflows
