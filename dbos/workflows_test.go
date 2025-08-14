@@ -1414,7 +1414,7 @@ func TestSendRecv(t *testing.T) {
 		if result != "message1-message2-message3" {
 			t.Fatalf("expected received message to be 'message1-message2-message3', got '%s'", result)
 		}
-		// XXX This is not a great condition: when all the tests run there's quite some randomness to this
+		// FIXME This is not a great condition: when all the tests run there's quite some randomness to this
 		if time.Since(start) > 10*time.Second {
 			t.Fatalf("receive workflow took too long to complete, expected < 5s, got %v", time.Since(start))
 		}
@@ -2895,7 +2895,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		}
 
 		// Check the deadline on the status was is within an expected range (start time + timeout * .1)
-		// XXX this might be flaky and frankly not super useful
+		// FIXME this might be flaky and frankly not super useful
 		expectedDeadline := start.Add(timeout * 10 / 100)
 		if status.Deadline.Before(expectedDeadline) || status.Deadline.After(start.Add(timeout)) {
 			t.Fatalf("expected workflow deadline to be within %v and %v, got %v", expectedDeadline, start.Add(timeout), status.Deadline)

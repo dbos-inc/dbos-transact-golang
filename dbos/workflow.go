@@ -201,7 +201,7 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 			}
 			recordResultErr := h.dbosContext.(*dbosContext).systemDB.recordChildGetResult(h.dbosContext, recordGetResultInput)
 			if recordResultErr != nil {
-				// XXX do we want to fail this?
+				// Note: we might want GetResult to return this error if it happens, instead of returning the real error to the program.
 				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
 			}
 		}
@@ -282,7 +282,7 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 			// Use Next if Prev is not set, which will only happen for the first run
 			scheduledTime = entry.Next
 		}
-		wfID := fmt.Sprintf("sched-%s-%s", workflowName, scheduledTime) // XXX we can rethink the format
+		wfID := fmt.Sprintf("sched-%s-%s", workflowName, scheduledTime)
 		opts := []WorkflowOption{
 			WithWorkflowID(wfID),
 			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),

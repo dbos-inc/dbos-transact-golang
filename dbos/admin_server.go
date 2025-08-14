@@ -120,7 +120,7 @@ func (as *adminServer) Start() error {
 func (as *adminServer) Shutdown(ctx context.Context) error {
 	as.logger.Info("Shutting down admin server")
 
-	// XXX consider moving the grace period to DBOSContext.Shutdown()
+	// Note: consider moving the grace period to DBOSContext.Shutdown()
 	ctx, cancel := context.WithTimeout(ctx, _ADMIN_SERVER_SHUTDOWN_TIMEOUT)
 	defer cancel()
 

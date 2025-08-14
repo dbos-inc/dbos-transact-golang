@@ -1514,7 +1514,6 @@ func (s *sysDB) recv(ctx context.Context, input WorkflowRecvInput) (any, error) 
 	functionName := "DBOS.recv"
 
 	// Get workflow state from context
-	// XXX these checks might be better suited for outside of the system db code. We'll see when we implement the client.
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return nil, newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
@@ -1534,7 +1533,6 @@ func (s *sysDB) recv(ctx context.Context, input WorkflowRecvInput) (any, error) 
 	}
 
 	// Check if operation was already executed
-	// XXX this might not need to be in the transaction
 	checkInput := checkOperationExecutionDBInput{
 		workflowID: destinationID,
 		stepID:     stepID,
@@ -1561,7 +1559,6 @@ func (s *sysDB) recv(ctx context.Context, input WorkflowRecvInput) (any, error) 
 	}
 	defer func() {
 		// Clean up the condition variable after we're done and broadcast to wake up any waiting goroutines
-		// XXX We should handle panics in this function and make sure we call this. Not a problem for now as panic will crash the importing package.
 		cond.Broadcast()
 		s.notificationsMap.Delete(payload)
 	}()
@@ -1576,7 +1573,6 @@ func (s *sysDB) recv(ctx context.Context, input WorkflowRecvInput) (any, error) 
 	}
 	if !exists {
 		// Wait for notifications using condition variable with timeout pattern
-		// XXX should we prevent zero or negative timeouts?
 		s.logger.Debug("Waiting for notification on condition variable", "payload", payload)
 
 		done := make(chan struct{})
@@ -1796,7 +1792,7 @@ func (s *sysDB) getEvent(ctx context.Context, input WorkflowGetEventInput) (any,
 		return nil, fmt.Errorf("failed to query workflow event: %w", err)
 	}
 
-	if err == pgx.ErrNoRows || valueString == nil { // XXX valueString should never be `nil`
+	if err == pgx.ErrNoRows || valueString == nil { // valueString should never be `nil`
 		// Wait for notification with timeout using condition variable
 		done := make(chan struct{})
 		go func() {
