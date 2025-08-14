@@ -145,7 +145,7 @@ type queueRunner struct {
 	workflowQueueRegistry map[string]WorkflowQueue
 
 	// Channel to signal completion back to the DBOS context
-	completionChan chan bool
+	completionChan chan struct{}
 }
 
 func newQueueRunner() *queueRunner {
@@ -158,7 +158,7 @@ func newQueueRunner() *queueRunner {
 		jitterMin:             0.95,
 		jitterMax:             1.05,
 		workflowQueueRegistry: make(map[string]WorkflowQueue),
-		completionChan:        make(chan bool),
+		completionChan:        make(chan struct{}),
 	}
 }
 
@@ -252,7 +252,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 		select {
 		case <-ctx.Done():
 			ctx.logger.Info("Queue runner stopping due to context cancellation", "cause", context.Cause(ctx))
-			qr.completionChan <- true
+			qr.completionChan <- struct{}{}
 			return
 		case <-time.After(sleepDuration):
 			// Continue to next iteration

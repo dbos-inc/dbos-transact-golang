@@ -65,7 +65,7 @@ type systemDatabase interface {
 type sysDB struct {
 	pool                           *pgxpool.Pool
 	notificationListenerConnection *pgconn.PgConn
-	notificationLoopDone           chan bool
+	notificationLoopDone           chan struct{}
 	notificationsMap               *sync.Map
 	logger                         *slog.Logger
 	launched                       bool
@@ -104,7 +104,6 @@ func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *
 		return newInitializationError(fmt.Sprintf("failed to check if database exists: %v", err))
 	}
 	if !exists {
-		// TODO: validate db name
 		createSQL := fmt.Sprintf("CREATE DATABASE %s", pgx.Identifier{dbName}.Sanitize())
 		_, err = conn.Exec(ctx, createSQL)
 		if err != nil {
@@ -225,7 +224,7 @@ func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Log
 		pool:                           pool,
 		notificationListenerConnection: notificationListenerConnection,
 		notificationsMap:               notificationsMap,
-		notificationLoopDone:           make(chan bool),
+		notificationLoopDone:           make(chan struct{}),
 		logger:                         logger,
 	}, nil
 }
@@ -1363,7 +1362,7 @@ func (s *sysDB) sleep(ctx context.Context, duration time.Duration) (time.Duratio
 
 func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 	defer func() {
-		s.notificationLoopDone <- true
+		s.notificationLoopDone <- struct{}{}
 	}()
 
 	s.logger.Info("DBOS: Starting notification listener loop")
