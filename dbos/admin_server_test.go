@@ -38,7 +38,7 @@ func TestAdminServer(t *testing.T) {
 
 		// Verify admin server is not running
 		client := &http.Client{Timeout: 1 * time.Second}
-		_, err = client.Get("http://localhost:3001" + healthCheckPath)
+		_, err = client.Get("http://localhost:3001" + _HEALTHCHECK_PATH)
 		require.Error(t, err, "Expected request to fail when admin server is not started")
 
 		// Verify the DBOS executor doesn't have an admin server instance
@@ -89,13 +89,13 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Health endpoint responds correctly",
 				method:         "GET",
-				endpoint:       "http://localhost:3001" + healthCheckPath,
+				endpoint:       "http://localhost:3001" + _HEALTHCHECK_PATH,
 				expectedStatus: http.StatusOK,
 			},
 			{
 				name:           "Recovery endpoint responds correctly with valid JSON",
 				method:         "POST",
-				endpoint:       "http://localhost:3001" + workflowRecoveryPath,
+				endpoint:       "http://localhost:3001" + _WORKFLOW_RECOVERY_PATH,
 				body:           bytes.NewBuffer(mustMarshal([]string{"executor1", "executor2"})),
 				contentType:    "application/json",
 				expectedStatus: http.StatusOK,
@@ -109,13 +109,13 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Recovery endpoint rejects invalid methods",
 				method:         "GET",
-				endpoint:       "http://localhost:3001" + workflowRecoveryPath,
+				endpoint:       "http://localhost:3001" + _WORKFLOW_RECOVERY_PATH,
 				expectedStatus: http.StatusMethodNotAllowed,
 			},
 			{
 				name:           "Recovery endpoint rejects invalid JSON",
 				method:         "POST",
-				endpoint:       "http://localhost:3001" + workflowRecoveryPath,
+				endpoint:       "http://localhost:3001" + _WORKFLOW_RECOVERY_PATH,
 				body:           strings.NewReader(`{"invalid": json}`),
 				contentType:    "application/json",
 				expectedStatus: http.StatusBadRequest,
@@ -123,7 +123,7 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Queue metadata endpoint responds correctly",
 				method:         "GET",
-				endpoint:       "http://localhost:3001" + workflowQueuesMetadataPath,
+				endpoint:       "http://localhost:3001" + _WORKFLOW_QUEUES_METADATA_PATH,
 				expectedStatus: http.StatusOK,
 				validateResp: func(t *testing.T, resp *http.Response) {
 					var queueMetadata []WorkflowQueue
@@ -149,7 +149,7 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Queue metadata endpoint rejects invalid methods",
 				method:         "POST",
-				endpoint:       "http://localhost:3001" + workflowQueuesMetadataPath,
+				endpoint:       "http://localhost:3001" + _WORKFLOW_QUEUES_METADATA_PATH,
 				expectedStatus: http.StatusMethodNotAllowed,
 			},
 		}

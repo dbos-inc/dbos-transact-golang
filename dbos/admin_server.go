@@ -10,21 +10,25 @@ import (
 )
 
 const (
-	healthCheckPath            = "/dbos-healthz"
-	workflowRecoveryPath       = "/dbos-workflow-recovery"
-	workflowQueuesMetadataPath = "/dbos-workflow-queues-metadata"
+	_HEALTHCHECK_PATH              = "/dbos-healthz"
+	_WORKFLOW_RECOVERY_PATH        = "/dbos-workflow-recovery"
+	_WORKFLOW_QUEUES_METADATA_PATH = "/dbos-workflow-queues-metadata"
+
+	_ADMIN_SERVER_READ_HEADER_TIMEOUT = 5 * time.Second
+	_ADMIN_SERVER_SHUTDOWN_TIMEOUT    = 10 * time.Second
 )
 
 type adminServer struct {
 	server *http.Server
 	logger *slog.Logger
+	port   int
 }
 
 func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	mux := http.NewServeMux()
 
 	// Health endpoint
-	mux.HandleFunc(healthCheckPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(_HEALTHCHECK_PATH, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte(`{"status":"healthy"}`))
@@ -36,7 +40,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	// Recovery endpoint
-	mux.HandleFunc(workflowRecoveryPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(_WORKFLOW_RECOVERY_PATH, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -72,7 +76,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	// Queue metadata endpoint
-	mux.HandleFunc(workflowQueuesMetadataPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(_WORKFLOW_QUEUES_METADATA_PATH, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -91,17 +95,18 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: _ADMIN_SERVER_READ_HEADER_TIMEOUT,
 	}
 
 	return &adminServer{
 		server: server,
 		logger: ctx.logger,
+		port:   port,
 	}
 }
 
 func (as *adminServer) Start() error {
-	as.logger.Info("Starting admin server", "port", 3001)
+	as.logger.Info("Starting admin server", "port", as.port)
 
 	go func() {
 		if err := as.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -116,7 +121,7 @@ func (as *adminServer) Shutdown(ctx context.Context) error {
 	as.logger.Info("Shutting down admin server")
 
 	// XXX consider moving the grace period to DBOSContext.Shutdown()
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, _ADMIN_SERVER_SHUTDOWN_TIMEOUT)
 	defer cancel()
 
 	if err := as.server.Shutdown(ctx); err != nil {

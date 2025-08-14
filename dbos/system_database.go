@@ -119,7 +119,21 @@ func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-const _DBOS_MIGRATION_TABLE = "dbos_schema_migrations"
+const (
+	_DBOS_MIGRATION_TABLE = "dbos_schema_migrations"
+
+	// PostgreSQL error codes
+	_PG_ERROR_UNIQUE_VIOLATION      = "23505"
+	_PG_ERROR_FOREIGN_KEY_VIOLATION = "23503"
+
+	// Notification channels
+	_DBOS_NOTIFICATIONS_CHANNEL   = "dbos_notifications_channel"
+	_DBOS_WORKFLOW_EVENTS_CHANNEL = "dbos_workflow_events_channel"
+
+	// Database retry timeouts
+	_DB_CONNECTION_RETRY_DELAY = 500 * time.Millisecond
+	_DB_RETRY_INTERVAL         = 1 * time.Second
+)
 
 func runMigrations(databaseURL string) error {
 	// Change the driver to pgx5
@@ -194,7 +208,7 @@ func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Log
 		return nil, fmt.Errorf("failed to parse database URL: %v", err)
 	}
 	config.OnNotification = func(c *pgconn.PgConn, n *pgconn.Notification) {
-		if n.Channel == "dbos_notifications_channel" || n.Channel == "dbos_workflow_events_channel" {
+		if n.Channel == _DBOS_NOTIFICATIONS_CHANNEL || n.Channel == _DBOS_WORKFLOW_EVENTS_CHANNEL {
 			// Check if an entry exists in the map, indexed by the payload
 			// If yes, broadcast on the condition variable so listeners can wake up
 			if cond, exists := notificationsMap.Load(n.Payload); exists {
@@ -245,7 +259,7 @@ func (s *sysDB) shutdown(ctx context.Context) {
 	// Allow pgx health checks to complete
 	// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
 	// These trigger go-leak alerts
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(_DB_CONNECTION_RETRY_DELAY)
 
 	s.launched = false
 }
@@ -380,7 +394,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 	)
 	if err != nil {
 		// Handle unique constraint violation for the deduplication ID (this should be the only case for a 23505)
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
 			return nil, newQueueDeduplicatedError(
 				input.status.ID,
 				input.status.QueueName,
@@ -924,7 +938,7 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any
 		err := row.Scan(&status, &outputString, &errorStr)
 		if err != nil {
 			if err == pgx.ErrNoRows {
-				time.Sleep(1 * time.Second)
+				time.Sleep(_DB_RETRY_INTERVAL)
 				continue
 			}
 			return nil, fmt.Errorf("failed to query workflow status: %w", err)
@@ -945,7 +959,7 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any
 		case WorkflowStatusCancelled:
 			return output, newAwaitedWorkflowCancelledError(workflowID)
 		default:
-			time.Sleep(1 * time.Second)
+			time.Sleep(_DB_RETRY_INTERVAL)
 		}
 	}
 }
@@ -1003,7 +1017,7 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 
 	if err != nil {
 		s.logger.Error("RecordOperationResult Error occurred", "error", err)
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
 			return newWorkflowConflictIDError(input.workflowID)
 		}
 		return err
@@ -1054,7 +1068,7 @@ func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkfl
 
 	if err != nil {
 		// Check for unique constraint violation (conflict ID error)
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
 			return fmt.Errorf(
 				"child workflow %s already registered for parent workflow %s (operation ID: %d)",
 				input.childWorkflowID, input.parentWorkflowID, input.stepID)
@@ -1361,7 +1375,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 	}()
 
 	s.logger.Info("DBOS: Starting notification listener loop")
-	mrr := s.notificationListenerConnection.Exec(ctx, "LISTEN dbos_notifications_channel; LISTEN dbos_workflow_events_channel")
+	mrr := s.notificationListenerConnection.Exec(ctx, fmt.Sprintf("LISTEN %s; LISTEN %s", _DBOS_NOTIFICATIONS_CHANNEL, _DBOS_WORKFLOW_EVENTS_CHANNEL))
 	results, err := mrr.ReadAll()
 	if err != nil {
 		s.logger.Error("Failed to listen on notification channels", "error", err)
@@ -1399,7 +1413,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 
 			// Other errors - log and retry. XXX eventually add exponential backoff + jitter
 			s.logger.Error("Error waiting for notification", "error", err)
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(_DB_CONNECTION_RETRY_DELAY)
 			continue
 		}
 	}
@@ -1472,7 +1486,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, messageString)
 	if err != nil {
 		// Check for foreign key violation (destination workflow doesn't exist)
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23503" {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_FOREIGN_KEY_VIOLATION {
 			return newNonExistentWorkflowError(input.DestinationID)
 		}
 		return fmt.Errorf("failed to insert notification: %w", err)

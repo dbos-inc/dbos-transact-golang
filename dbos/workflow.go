@@ -305,6 +305,11 @@ type workflowRegistrationOption func(*workflowRegistrationParams)
 
 const (
 	_DEFAULT_MAX_RECOVERY_ATTEMPTS = 100
+
+	// Step retry defaults
+	_DEFAULT_STEP_BASE_INTERVAL  = 100 * time.Millisecond
+	_DEFAULT_STEP_MAX_INTERVAL   = 5 * time.Second
+	_DEFAULT_STEP_BACKOFF_FACTOR = 2.0
 )
 
 // WithMaxRetries sets the maximum number of retry attempts for workflow recovery.
@@ -825,9 +830,9 @@ func setStepParamDefaults(params *StepParams, stepName string) *StepParams {
 	if params == nil {
 		return &StepParams{
 			MaxRetries:    0, // Default to no retries
-			BackoffFactor: 2.0,
-			BaseInterval:  100 * time.Millisecond, // Default base interval
-			MaxInterval:   5 * time.Second,        // Default max interval
+			BackoffFactor: _DEFAULT_STEP_BACKOFF_FACTOR,
+			BaseInterval:  _DEFAULT_STEP_BASE_INTERVAL, // Default base interval
+			MaxInterval:   _DEFAULT_STEP_MAX_INTERVAL,  // Default max interval
 			StepName: func() string {
 				if value, ok := typeErasedStepNameToStepName.Load(stepName); ok {
 					return value.(string)
@@ -839,13 +844,13 @@ func setStepParamDefaults(params *StepParams, stepName string) *StepParams {
 
 	// Set defaults for zero values
 	if params.BackoffFactor == 0 {
-		params.BackoffFactor = 2.0 // Default backoff factor
+		params.BackoffFactor = _DEFAULT_STEP_BACKOFF_FACTOR // Default backoff factor
 	}
 	if params.BaseInterval == 0 {
-		params.BaseInterval = 100 * time.Millisecond // Default base interval
+		params.BaseInterval = _DEFAULT_STEP_BASE_INTERVAL // Default base interval
 	}
 	if params.MaxInterval == 0 {
-		params.MaxInterval = 5 * time.Second // Default max interval
+		params.MaxInterval = _DEFAULT_STEP_MAX_INTERVAL // Default max interval
 	}
 	if len(params.StepName) == 0 {
 		// If the step name is not provided, use the function name
