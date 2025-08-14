@@ -307,7 +307,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 
 	var timeoutMs *int64 = nil
 	if input.status.Timeout > 0 {
-		millis := input.status.Timeout.Milliseconds()
+		millis := input.status.Timeout.Round(time.Millisecond).Milliseconds()
 		timeoutMs = &millis
 	}
 
@@ -787,25 +787,17 @@ func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 		return nil // Workflow is complete, do nothing
 	}
 
-	// If the original workflow has a timeout, let's recompute a deadline
-	var deadline *int64 = nil
-	if wf.Timeout > 0 {
-		deadlineMs := time.Now().Add(wf.Timeout).UnixMilli()
-		deadline = &deadlineMs
-	}
-
 	// Set the workflow's status to ENQUEUED and clear its recovery attempts, set new deadline
 	updateStatusQuery := `UPDATE dbos.workflow_status
 						  SET status = $1, queue_name = $2, recovery_attempts = $3, 
-						      workflow_deadline_epoch_ms = $4, deduplication_id = NULL,
-						      started_at_epoch_ms = NULL, updated_at = $5
-						  WHERE workflow_uuid = $6`
+						      workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
+						      started_at_epoch_ms = NULL, updated_at = $4
+						  WHERE workflow_uuid = $5`
 
 	_, err = tx.Exec(ctx, updateStatusQuery,
 		WorkflowStatusEnqueued,
 		_DBOS_INTERNAL_QUEUE_NAME,
 		0,
-		deadline,
 		time.Now().UnixMilli(),
 		workflowID)
 	if err != nil {

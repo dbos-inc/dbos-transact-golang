@@ -850,6 +850,18 @@ func TestQueueTimeouts(t *testing.T) {
 	RegisterWorkflow(dbosCtx, detachedWorkflow)
 	RegisterWorkflow(dbosCtx, enqueuedWorkflowEnqueuesADetachedWorkflow)
 
+	timeoutOnDequeueQueue := NewWorkflowQueue(dbosCtx, "timeout-on-dequeue-queue", WithGlobalConcurrency(1))
+	blockingEvent := NewEvent()
+	blockingWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		blockingEvent.Wait()
+		return "blocking-done", nil
+	}
+	RegisterWorkflow(dbosCtx, blockingWorkflow)
+	fastWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		return "done", nil
+	}
+	RegisterWorkflow(dbosCtx, fastWorkflow)
+
 	dbosCtx.Launch()
 
 	t.Run("EnqueueWorkflowTimeout", func(t *testing.T) {
@@ -935,6 +947,46 @@ func TestQueueTimeouts(t *testing.T) {
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected enqueued detached workflow status to be WorkflowStatusCancelled")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow cancellation, but they are not")
+	})
+
+	t.Run("TimeoutOnlySetOnDequeue", func(t *testing.T) {
+		// Test that deadline is only set when workflow is dequeued, not when enqueued
+
+		// Enqueue blocking workflow first
+		blockingHandle, err := RunAsWorkflow(dbosCtx, blockingWorkflow, "blocking", WithQueue(timeoutOnDequeueQueue.Name))
+		require.NoError(t, err, "failed to enqueue blocking workflow")
+
+		// Set a timeout that would expire if set on enqueue
+		timeout := 2 * time.Second
+		timeoutCtx, cancelFunc := WithTimeout(dbosCtx, timeout)
+		defer cancelFunc()
+
+		// Enqueue second workflow with timeout
+		handle, err := RunAsWorkflow(timeoutCtx, fastWorkflow, "timeout-test", WithQueue(timeoutOnDequeueQueue.Name))
+		require.NoError(t, err, "failed to enqueue timeout workflow")
+
+		// Sleep for duration exceeding the timeout
+		time.Sleep(timeout * 2)
+
+		// Signal the blocking workflow to complete
+		blockingEvent.Set()
+
+		// Wait for blocking workflow to complete
+		blockingResult, err := blockingHandle.GetResult()
+		require.NoError(t, err, "failed to get result from blocking workflow")
+		assert.Equal(t, "blocking-done", blockingResult, "expected blocking workflow result")
+
+		// Now the second workflow should dequeue and complete successfully (timeout should be much longer than execution time)
+		// Note: this might be flaky if we hit the dequeue interval 1sec boundary...
+		_, err = handle.GetResult()
+		require.NoError(t, err, "unexpected error from workflow")
+
+		// Check the workflow status: should be success
+		finalStatus, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get final status of timeout workflow")
+		assert.Equal(t, WorkflowStatusSuccess, finalStatus.Status, "expected timeout workflow status to be WorkflowStatusSuccess")
+
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after test")
 	})
 }
 

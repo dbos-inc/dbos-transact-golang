@@ -643,21 +643,22 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		status = WorkflowStatusPending
 	}
 
-	// Check if the user-provided context has a deadline
+	// Compute the timeout based on the context deadline, if any
 	deadline, ok := c.Deadline()
 	if !ok {
 		deadline = time.Time{} // No deadline set
 	}
-
-	// Compute the timeout based on the deadline
 	var timeout time.Duration
 	if !deadline.IsZero() {
 		timeout = time.Until(deadline)
-		/* unclear to me if this is a real use case:
+		// The timeout could be in the past, for small deadlines, to propagation delays. If so set it to a minimal value
 		if timeout < 0 {
-			return nil, newWorkflowExecutionError(workflowID, "deadline is in the past")
+			timeout = 1 * time.Millisecond
 		}
-		*/
+	}
+	// When enqueuing, we do not set a deadline. It'll be computed with the timeout during dequeue.
+	if status == WorkflowStatusEnqueued {
+		deadline = time.Time{} // No deadline for enqueued workflows
 	}
 
 	if params.priority > uint(math.MaxInt) {
@@ -737,11 +738,19 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 
 	workflowCtx := WithValue(c, workflowStateKey, wfState)
 
-	// If the workflow has a durable deadline, set it in the context.
+	// If the workflow has a timeout but no deadline, compute the deadline from the timeout.
+	// Else use the durable deadline.
+	durableDeadline := time.Time{}
+	if insertStatusResult.timeout > 0 && insertStatusResult.workflowDeadline.IsZero() {
+		durableDeadline = time.Now().Add(insertStatusResult.timeout)
+	} else if !insertStatusResult.workflowDeadline.IsZero() {
+		durableDeadline = insertStatusResult.workflowDeadline
+	}
+
 	var stopFunc func() bool
 	cancelFuncCompleted := make(chan struct{})
-	if !insertStatusResult.workflowDeadline.IsZero() {
-		workflowCtx, _ = WithTimeout(workflowCtx, time.Until(insertStatusResult.workflowDeadline))
+	if !durableDeadline.IsZero() {
+		workflowCtx, _ = WithTimeout(workflowCtx, time.Until(durableDeadline))
 		// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
 		dbosCancelFunction := func() {
 			c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
