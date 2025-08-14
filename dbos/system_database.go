@@ -1402,7 +1402,8 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 				return
 			}
 
-			// Other errors - log and retry. XXX eventually add exponential backoff + jitter
+			// Other errors - log and retry.
+			// TODO add exponential backoff + jitter
 			s.logger.Error("Error waiting for notification", "error", err)
 			time.Sleep(_DB_CONNECTION_RETRY_DELAY)
 			continue

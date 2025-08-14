@@ -439,7 +439,7 @@ func TestQueueRecovery(t *testing.T) {
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
 }
 
-// TODO: we can update this test to have the same logic than TestWorkerConcurrency
+// Note: we could update this test to have the same logic than TestWorkerConcurrency
 func TestGlobalConcurrency(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 

@@ -392,24 +392,28 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R
 
 	// Register a type-erased version of the durable workflow for recovery
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
-		// This type check is redundant with the one in the wrapper, but I'd better be safe than sorry
 		typedInput, ok := input.(P)
 		if !ok {
-			// FIXME: we need to record the error in the database here
+			wfID, err := ctx.GetWorkflowID()
+			if err != nil {
+				return nil, fmt.Errorf("failed to get workflow ID: %w", err)
+			}
+			err = ctx.(*dbosContext).systemDB.updateWorkflowOutcome(WithoutCancel(ctx), updateWorkflowOutcomeDBInput{
+				workflowID: wfID,
+				status:     WorkflowStatusError,
+				err:        newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input)),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to record unexpected input type error: %w", err)
+			}
 			return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
 		}
 		return fn(ctx, typedInput)
 	})
 
 	typeErasedWrapper := WrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
-		typedInput, ok := input.(P)
-		if !ok {
-			// FIXME: we need to record the error in the database here
-			return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
-		}
-
 		opts = append(opts, withWorkflowName(fqn)) // Append the name so ctx.RunAsWorkflow can look it up from the registry to apply registration-time options
-		handle, err := ctx.RunAsWorkflow(ctx, typedErasedWorkflow, typedInput, opts...)
+		handle, err := ctx.RunAsWorkflow(ctx, typedErasedWorkflow, input, opts...)
 		if err != nil {
 			return nil, err
 		}
