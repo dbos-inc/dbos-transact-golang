@@ -284,7 +284,10 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),
 			withWorkflowName(workflowName),
 		}
-		ctx.RunAsWorkflow(ctx, fn, scheduledTime, opts...)
+		_, err := ctx.RunAsWorkflow(ctx, fn, scheduledTime, opts...)
+		if err != nil {
+			c.logger.Error("failed to run scheduled workflow", "fqn", workflowName, "error", err)
+		}
 	})
 	if err != nil {
 		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
@@ -654,6 +657,9 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		*/
 	}
 
+	if params.priority > uint(math.MaxInt) {
+		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.priority, math.MaxInt)
+	}
 	workflowStatus := WorkflowStatus{
 		Name:               params.workflowName,
 		ApplicationVersion: params.applicationVersion,
@@ -1355,6 +1361,9 @@ func (c *dbosContext) Enqueue(_ DBOSContext, params EnqueueOptions) (WorkflowHan
 		deadline = time.Now().Add(params.WorkflowTimeout)
 	}
 
+	if params.Priority > uint(math.MaxInt) {
+		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.Priority, math.MaxInt)
+	}
 	status := WorkflowStatus{
 		Name:               params.WorkflowName,
 		ApplicationVersion: params.ApplicationVersion,
@@ -1592,6 +1601,9 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 	}
 
 	// Create input for system database
+	if input.StartStep > uint(math.MaxInt) {
+		return nil, fmt.Errorf("start step too large: %d", input.StartStep)
+	}
 	dbInput := forkWorkflowDBInput{
 		originalWorkflowID: input.OriginalWorkflowID,
 		forkedWorkflowID:   forkedWorkflowID,

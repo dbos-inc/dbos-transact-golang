@@ -245,7 +245,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 		}
 
 		// Apply jitter to the polling interval
-		jitter := qr.jitterMin + rand.Float64()*(qr.jitterMax-qr.jitterMin)
+		jitter := qr.jitterMin + rand.Float64()*(qr.jitterMax-qr.jitterMin) // #nosec G404 -- non-crypto jitter; acceptable
 		sleepDuration := time.Duration(pollingInterval * jitter * float64(time.Second))
 
 		// Sleep with jittered interval, but allow early exit on context cancellation

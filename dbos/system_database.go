@@ -230,7 +230,10 @@ func (s *sysDB) shutdown(ctx context.Context) {
 
 	// Context wasn't cancelled, let's manually close
 	if !errors.Is(ctx.Err(), context.Canceled) {
-		s.notificationListenerConnection.Close(ctx)
+		err := s.notificationListenerConnection.Close(ctx)
+		if err != nil {
+			s.logger.Error("Failed to close notification listener connection", "error", err)
+		}
 	}
 
 	if s.launched {
@@ -1364,7 +1367,11 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 		s.logger.Error("Failed to listen on notification channels", "error", err)
 		return
 	}
-	mrr.Close()
+	err = mrr.Close()
+	if err != nil {
+		s.logger.Error("Failed to close connection after setting notification listeners", "error", err)
+		return
+	}
 
 	for _, result := range results {
 		if result.Err != nil {

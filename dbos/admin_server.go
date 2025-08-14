@@ -27,7 +27,12 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	mux.HandleFunc(healthCheckPath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"healthy"}`))
+		_, err := w.Write([]byte(`{"status":"healthy"}`))
+		if err != nil {
+			ctx.logger.Error("Error writing health check response", "error", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
 	})
 
 	// Recovery endpoint
