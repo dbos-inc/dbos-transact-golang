@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -438,7 +439,20 @@ func getBinaryHash() (string, error) {
 		return "", err
 	}
 
-	file, err := os.Open(execPath)
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve self path: %w", err)
+	}
+
+	fi, err := os.Lstat(execPath)
+	if err != nil {
+		return "", err
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("executable is not a regular file")
+	}
+
+	file, err := os.Open(execPath) // #nosec G304 -- opening our own executable, not user-supplied
 	if err != nil {
 		return "", err
 	}
