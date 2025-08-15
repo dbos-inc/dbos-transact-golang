@@ -38,7 +38,7 @@ func TestAdminServer(t *testing.T) {
 
 		// Verify admin server is not running
 		client := &http.Client{Timeout: 1 * time.Second}
-		_, err = client.Get("http://localhost:3001/dbos-healthz")
+		_, err = client.Get(fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_HEALTHCHECK_PATTERN, "GET /")))
 		require.Error(t, err, "Expected request to fail when admin server is not started")
 
 		// Verify the DBOS executor doesn't have an admin server instance
