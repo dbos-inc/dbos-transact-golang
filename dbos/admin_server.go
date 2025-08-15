@@ -20,6 +20,7 @@ const (
 	_GLOBAL_TIMEOUT_PATTERN           = "POST /dbos-global-timeout"
 	_QUEUED_WORKFLOWS_PATTERN         = "POST /queues"
 	_WORKFLOWS_PATTERN                = "POST /workflows"
+	_WORKFLOW_PATTERN                 = "GET /workflows/{id}"
 	_WORKFLOW_STEPS_PATTERN           = "GET /workflows/{id}/steps"
 	_WORKFLOW_CANCEL_PATTERN          = "POST /workflows/{id}/cancel"
 	_WORKFLOW_RESUME_PATTERN          = "POST /workflows/{id}/resume"
@@ -301,6 +302,35 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(utcWorkflows); err != nil {
 			ctx.logger.Error("Error encoding workflows response", "error", err)
+			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+		}
+	})
+
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_PATTERN)
+	mux.HandleFunc(_WORKFLOW_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+		workflowID := r.PathValue("id")
+
+		// Use ListWorkflows with the specific workflow ID filter
+		opts := []ListWorkflowsOption{WithWorkflowIDs([]string{workflowID})}
+		workflows, err := ctx.ListWorkflows(opts...)
+		if err != nil {
+			ctx.logger.Error("Failed to get workflow", "workflow_id", workflowID, "error", err)
+			http.Error(w, fmt.Sprintf("Failed to get workflow: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// If no workflow found, return 404
+		if len(workflows) == 0 {
+			http.Error(w, "Workflow not found", http.StatusNotFound)
+			return
+		}
+
+		// Return the first (and only) workflow, transformed to UTC
+		workflow := workflowStatusToUTC(workflows[0])
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(workflow); err != nil {
+			ctx.logger.Error("Error encoding workflow response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
 	})
