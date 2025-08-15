@@ -115,6 +115,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 
 	mux := http.NewServeMux()
 
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _HEALTHCHECK_PATTERN)
 	mux.HandleFunc(_HEALTHCHECK_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -126,6 +127,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 	})
 
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_RECOVERY_PATTERN)
 	mux.HandleFunc(_WORKFLOW_RECOVERY_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		var executorIDs []string
 		if err := json.NewDecoder(r.Body).Decode(&executorIDs); err != nil {
@@ -156,6 +158,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 	})
 
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _DEACTIVATE_PATTERN)
 	mux.HandleFunc(_DEACTIVATE_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		if as.isDeactivated.CompareAndSwap(0, 1) {
 			ctx.logger.Info("Deactivating DBOS executor", "executor_id", ctx.executorID, "app_version", ctx.applicationVersion)
@@ -169,6 +172,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 	})
 
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_QUEUES_METADATA_PATTERN)
 	mux.HandleFunc(_WORKFLOW_QUEUES_METADATA_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		queueMetadataArray := ctx.queueRunner.listQueues()
 
@@ -180,6 +184,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 	})
 
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _GARBAGE_COLLECT_PATTERN)
 	mux.HandleFunc(_GARBAGE_COLLECT_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		var inputs struct {
 			CutoffEpochTimestampMs *int64 `json:"cutoff_epoch_timestamp_ms"`
@@ -202,6 +207,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _GLOBAL_TIMEOUT_PATTERN)
 	mux.HandleFunc(_GLOBAL_TIMEOUT_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		var inputs struct {
 			CutoffEpochTimestampMs *int64 `json:"cutoff_epoch_timestamp_ms"`
@@ -223,6 +229,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOWS_PATTERN)
 	mux.HandleFunc(_WORKFLOWS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		var req listWorkflowsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -244,6 +251,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 	})
 
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _QUEUED_WORKFLOWS_PATTERN)
 	mux.HandleFunc(_QUEUED_WORKFLOWS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		var req listWorkflowsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -266,6 +274,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	// GET /workflows/{id}/steps
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_STEPS_PATTERN)
 	mux.HandleFunc(_WORKFLOW_STEPS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
 
@@ -284,6 +293,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	// POST /workflows/{id}/cancel
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_CANCEL_PATTERN)
 	mux.HandleFunc(_WORKFLOW_CANCEL_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
 		ctx.logger.Info("Cancelling workflow", "workflow_id", workflowID)
@@ -299,6 +309,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	// POST /workflows/{id}/resume
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_RESUME_PATTERN)
 	mux.HandleFunc(_WORKFLOW_RESUME_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
 		ctx.logger.Info("Resuming workflow", "workflow_id", workflowID)
@@ -313,6 +324,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_RESTART_PATTERN)
 	mux.HandleFunc(_WORKFLOW_RESTART_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
 		ctx.logger.Info("Restarting workflow", "workflow_id", workflowID)
@@ -340,6 +352,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 	})
 
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_FORK_PATTERN)
 	mux.HandleFunc(_WORKFLOW_FORK_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
 		var data struct {
