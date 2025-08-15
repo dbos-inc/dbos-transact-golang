@@ -356,7 +356,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		if req.QueueName == nil {
 			filtered := make([]WorkflowStatus, 0, len(workflows))
 			for _, wf := range workflows {
-				if len(wf.QueueName) > 0 && wf.QueueName != _DBOS_INTERNAL_QUEUE_NAME {
+				if len(wf.QueueName) > 0 {
 					filtered = append(filtered, wf)
 				}
 			}
