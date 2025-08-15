@@ -1077,7 +1077,7 @@ func (c *dbosContext) Send(_ DBOSContext, input WorkflowSendInput) error {
 //
 // Example:
 //
-//	err := dbos.Send(ctx, dbos.WorkflowSendInput[string]{
+//	err := dbos.Send(ctx, dbos.GenericWorkflowSendInput[string]{
 //	    DestinationID: "target-workflow-id",
 //	    Message:       "Hello from sender",
 //	    Topic:         "notifications",
@@ -1162,7 +1162,7 @@ func (c *dbosContext) SetEvent(_ DBOSContext, input WorkflowSetEventInput) error
 //
 // Example:
 //
-//	err := dbos.SetEvent(ctx, dbos.WorkflowSetEventInputGeneric[string]{
+//	err := dbos.SetEvent(ctx, dbos.GenericWorkflowSetEventInput[string]{
 //	    Key:     "status",
 //	    Message: "processing-complete",
 //	})
@@ -1962,7 +1962,6 @@ func (c *dbosContext) ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStat
 
 	return workflows, nil
 }
-
 
 // ListWorkflows retrieves a list of workflows based on the provided filters.
 //

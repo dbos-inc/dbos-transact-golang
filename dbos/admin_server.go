@@ -232,9 +232,11 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOWS_PATTERN)
 	mux.HandleFunc(_WORKFLOWS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		var req listWorkflowsRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, fmt.Sprintf("Invalid JSON input: %v", err), http.StatusBadRequest)
-			return
+		if r.ContentLength > 0 {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("Invalid JSON input: %v", err), http.StatusBadRequest)
+				return
+			}
 		}
 
 		workflows, err := ctx.ListWorkflows(req.toListWorkflowsOptions()...)
@@ -254,9 +256,11 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	ctx.logger.Debug("Registering admin server endpoint", "pattern", _QUEUED_WORKFLOWS_PATTERN)
 	mux.HandleFunc(_QUEUED_WORKFLOWS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		var req listWorkflowsRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, fmt.Sprintf("Invalid JSON input: %v", err), http.StatusBadRequest)
-			return
+		if r.ContentLength > 0 {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("Invalid JSON input: %v", err), http.StatusBadRequest)
+				return
+			}
 		}
 
 		workflows, err := ctx.ListWorkflows(req.toListWorkflowsOptions()...)
