@@ -34,8 +34,8 @@ const (
 type listWorkflowsRequest struct {
 	WorkflowUUIDs      []string             `json:"workflow_uuids"`      // Filter by specific workflow IDs
 	AuthenticatedUser  *string              `json:"authenticated_user"`  // Filter by user who initiated the workflow
-	StartTime          *int64               `json:"start_time"`          // Filter workflows created after this time (UTC timestamp in milliseconds)
-	EndTime            *int64               `json:"end_time"`            // Filter workflows created before this time (UTC timestamp in milliseconds)
+	StartTime          *time.Time           `json:"start_time"`          // Filter workflows created after this time (RFC3339 format)
+	EndTime            *time.Time           `json:"end_time"`            // Filter workflows created before this time (RFC3339 format)
 	Status             []WorkflowStatusType `json:"status"`              // Filter by workflow status(es)
 	ApplicationVersion *string              `json:"application_version"` // Filter by application version
 	WorkflowName       *string              `json:"workflow_name"`       // Filter by workflow function name
@@ -58,14 +58,10 @@ func (req *listWorkflowsRequest) toListWorkflowsOptions() []ListWorkflowsOption 
 		opts = append(opts, WithUser(*req.AuthenticatedUser))
 	}
 	if req.StartTime != nil {
-		// Convert milliseconds to time.Time
-		startTime := time.UnixMilli(*req.StartTime)
-		opts = append(opts, WithStartTime(startTime))
+		opts = append(opts, WithStartTime(*req.StartTime))
 	}
 	if req.EndTime != nil {
-		// Convert milliseconds to time.Time
-		endTime := time.UnixMilli(*req.EndTime)
-		opts = append(opts, WithEndTime(endTime))
+		opts = append(opts, WithEndTime(*req.EndTime))
 	}
 	if len(req.Status) > 0 {
 		opts = append(opts, WithStatus(req.Status))
@@ -105,6 +101,56 @@ type adminServer struct {
 	logger        *slog.Logger
 	port          int
 	isDeactivated atomic.Int32
+}
+
+// workflowStatusToUTC converts a WorkflowStatus to a map with all time fields in UTC
+// not super ergonomic but the DBOS console excepts unix timestamps
+func workflowStatusToUTC(ws WorkflowStatus) map[string]any {
+	result := map[string]any{
+		"workflow_uuid":       ws.ID,
+		"status":              ws.Status,
+		"name":                ws.Name,
+		"authenticated_user":  ws.AuthenticatedUser,
+		"assumed_role":        ws.AssumedRole,
+		"authenticated_roles": ws.AuthenticatedRoles,
+		"output":              ws.Output,
+		"error":               ws.Error,
+		"executor_id":         ws.ExecutorID,
+		"application_version": ws.ApplicationVersion,
+		"application_id":      ws.ApplicationID,
+		"attempts":            ws.Attempts,
+		"queue_name":          ws.QueueName,
+		"timeout":             ws.Timeout,
+		"deduplication_id":    ws.DeduplicationID,
+		"input":               ws.Input,
+	}
+
+	// Convert time fields to UTC Unix timestamps (milliseconds)
+	if !ws.CreatedAt.IsZero() {
+		result["created_at"] = ws.CreatedAt.UTC().UnixMilli()
+	} else {
+		result["created_at"] = nil
+	}
+
+	if !ws.UpdatedAt.IsZero() {
+		result["updated_at"] = ws.UpdatedAt.UTC().UnixMilli()
+	} else {
+		result["updated_at"] = nil
+	}
+
+	if !ws.Deadline.IsZero() {
+		result["deadline"] = ws.Deadline.UTC().UnixMilli()
+	} else {
+		result["deadline"] = nil
+	}
+
+	if !ws.StartedAt.IsZero() {
+		result["started_at"] = ws.StartedAt.UTC().UnixMilli()
+	} else {
+		result["started_at"] = nil
+	}
+
+	return result
 }
 
 func newAdminServer(ctx *dbosContext, port int) *adminServer {
@@ -246,8 +292,14 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			return
 		}
 
+		// Transform to UTC before encoding
+		utcWorkflows := make([]map[string]any, len(workflows))
+		for i, wf := range workflows {
+			utcWorkflows[i] = workflowStatusToUTC(wf)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(workflows); err != nil {
+		if err := json.NewEncoder(w).Encode(utcWorkflows); err != nil {
 			ctx.logger.Error("Error encoding workflows response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
@@ -270,8 +322,25 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			return
 		}
 
+		// If not queue was specified, filter out non-queued workflows
+		if req.QueueName == nil {
+			filtered := make([]WorkflowStatus, 0, len(workflows))
+			for _, wf := range workflows {
+				if len(wf.QueueName) > 0 && wf.QueueName != _DBOS_INTERNAL_QUEUE_NAME {
+					filtered = append(filtered, wf)
+				}
+			}
+			workflows = filtered
+		}
+
+		// Transform to UNIX timestamps before encoding
+		utcWorkflows := make([]map[string]any, len(workflows))
+		for i, wf := range workflows {
+			utcWorkflows[i] = workflowStatusToUTC(wf)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(workflows); err != nil {
+		if err := json.NewEncoder(w).Encode(utcWorkflows); err != nil {
 			ctx.logger.Error("Error encoding queued workflows response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
