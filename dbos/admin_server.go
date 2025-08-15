@@ -277,7 +277,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 	})
 
-	// GET /workflows/{id}/steps
 	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_STEPS_PATTERN)
 	mux.HandleFunc(_WORKFLOW_STEPS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
@@ -296,7 +295,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 	})
 
-	// POST /workflows/{id}/cancel
 	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_CANCEL_PATTERN)
 	mux.HandleFunc(_WORKFLOW_CANCEL_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
@@ -312,7 +310,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// POST /workflows/{id}/resume
 	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_RESUME_PATTERN)
 	mux.HandleFunc(_WORKFLOW_RESUME_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
