@@ -110,7 +110,7 @@ func workflowStatusToUTC(ws WorkflowStatus) map[string]any {
 	result := map[string]any{
 		"WorkflowUUID":       ws.ID,
 		"Status":             ws.Status,
-		"Name":               ws.Name,
+		"WorkflowName":       ws.Name,
 		"AuthenticatedUser":  ws.AuthenticatedUser,
 		"AssumedRole":        ws.AssumedRole,
 		"AuthenticatedRoles": ws.AuthenticatedRoles,
@@ -387,8 +387,20 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			return
 		}
 
+		// Transform to snake_case format with function_id and function_name
+		formattedSteps := make([]map[string]any, len(steps))
+		for i, step := range steps {
+			formattedSteps[i] = map[string]any{
+				"function_id":       step.StepID,
+				"function_name":     step.StepName,
+				"output":            step.Output,
+				"error":             step.Error,
+				"child_workflow_id": step.ChildWorkflowID,
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(steps); err != nil {
+		if err := json.NewEncoder(w).Encode(formattedSteps); err != nil {
 			ctx.logger.Error("Error encoding steps response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
