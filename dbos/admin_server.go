@@ -107,47 +107,47 @@ type adminServer struct {
 // not super ergonomic but the DBOS console excepts unix timestamps
 func workflowStatusToUTC(ws WorkflowStatus) map[string]any {
 	result := map[string]any{
-		"workflow_uuid":       ws.ID,
-		"status":              ws.Status,
-		"name":                ws.Name,
-		"authenticated_user":  ws.AuthenticatedUser,
-		"assumed_role":        ws.AssumedRole,
-		"authenticated_roles": ws.AuthenticatedRoles,
-		"output":              ws.Output,
-		"error":               ws.Error,
-		"executor_id":         ws.ExecutorID,
-		"application_version": ws.ApplicationVersion,
-		"application_id":      ws.ApplicationID,
-		"attempts":            ws.Attempts,
-		"queue_name":          ws.QueueName,
-		"timeout":             ws.Timeout,
-		"deduplication_id":    ws.DeduplicationID,
-		"input":               ws.Input,
+		"WorkflowUUID":       ws.ID,
+		"Status":             ws.Status,
+		"Name":               ws.Name,
+		"AuthenticatedUser":  ws.AuthenticatedUser,
+		"AssumedRole":        ws.AssumedRole,
+		"AuthenticatedRoles": ws.AuthenticatedRoles,
+		"Output":             ws.Output,
+		"Error":              ws.Error,
+		"ExecutorID":         ws.ExecutorID,
+		"ApplicationVersion": ws.ApplicationVersion,
+		"ApplicationID":      ws.ApplicationID,
+		"Attempts":           ws.Attempts,
+		"QueueName":          ws.QueueName,
+		"Timeout":            ws.Timeout,
+		"DeduplicationID":    ws.DeduplicationID,
+		"Input":              ws.Input,
 	}
 
 	// Convert time fields to UTC Unix timestamps (milliseconds)
 	if !ws.CreatedAt.IsZero() {
-		result["created_at"] = ws.CreatedAt.UTC().UnixMilli()
+		result["CreatedAt"] = ws.CreatedAt.UTC().UnixMilli()
 	} else {
-		result["created_at"] = nil
+		result["CreatedAt"] = nil
 	}
 
 	if !ws.UpdatedAt.IsZero() {
-		result["updated_at"] = ws.UpdatedAt.UTC().UnixMilli()
+		result["UpdatedAt"] = ws.UpdatedAt.UTC().UnixMilli()
 	} else {
-		result["updated_at"] = nil
+		result["UpdatedAt"] = nil
 	}
 
 	if !ws.Deadline.IsZero() {
-		result["deadline"] = ws.Deadline.UTC().UnixMilli()
+		result["Deadline"] = ws.Deadline.UTC().UnixMilli()
 	} else {
-		result["deadline"] = nil
+		result["Deadline"] = nil
 	}
 
 	if !ws.StartedAt.IsZero() {
-		result["started_at"] = ws.StartedAt.UTC().UnixMilli()
+		result["StartedAt"] = ws.StartedAt.UTC().UnixMilli()
 	} else {
-		result["started_at"] = nil
+		result["StartedAt"] = nil
 	}
 
 	return result

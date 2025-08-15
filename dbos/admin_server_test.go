@@ -213,18 +213,18 @@ func TestAdminServer(t *testing.T) {
 					// Verify timestamps are epoch milliseconds
 					timeBetweenMillis := timeBetween.UnixMilli()
 					for _, wf := range workflows1 {
-						_, ok := wf["created_at"].(float64)
-						require.True(t, ok, "created_at should be a number")
+						_, ok := wf["CreatedAt"].(float64)
+						require.True(t, ok, "CreatedAt should be a number")
 					}
 					// Verify the timestamp is around timeBetween (within 2 seconds before or after)
-					assert.Less(t, int64(workflows1[0]["created_at"].(float64)), timeBetweenMillis, "first workflow CreatedAt should be before timeBetween")
-					assert.Greater(t, int64(workflows1[1]["created_at"].(float64)), timeBetweenMillis, "second workflow CreatedAt should be before timeBetween")
+					assert.Less(t, int64(workflows1[0]["CreatedAt"].(float64)), timeBetweenMillis, "first workflow CreatedAt should be before timeBetween")
+					assert.Greater(t, int64(workflows1[1]["CreatedAt"].(float64)), timeBetweenMillis, "second workflow CreatedAt should be before timeBetween")
 
 					// Verify both workflow IDs are present
 					foundIDs1 := make(map[string]bool)
 					for _, wf := range workflows1 {
-						id, ok := wf["workflow_uuid"].(string)
-						require.True(t, ok, "workflow_uuid should be a string")
+						id, ok := wf["WorkflowUUID"].(string)
+						require.True(t, ok, "WorkflowUUID should be a string")
 						foundIDs1[id] = true
 					}
 					assert.True(t, foundIDs1[workflowID1], "Expected to find first workflow ID in results")
@@ -253,8 +253,8 @@ func TestAdminServer(t *testing.T) {
 					assert.Equal(t, 1, len(workflows2), "Expected exactly 1 workflow with start_time after timeBetween")
 
 					// Verify it's the second workflow
-					id2, ok := workflows2[0]["workflow_uuid"].(string)
-					require.True(t, ok, "workflow_uuid should be a string")
+					id2, ok := workflows2[0]["WorkflowUUID"].(string)
+					require.True(t, ok, "WorkflowUUID should be a string")
 					assert.Equal(t, workflowID2, id2, "Expected second workflow ID in results")
 
 					// Also test end_time filter
@@ -280,8 +280,8 @@ func TestAdminServer(t *testing.T) {
 					assert.Equal(t, 1, len(workflows3), "Expected exactly 1 workflow with end_time before timeBetween")
 
 					// Verify it's the first workflow
-					id3, ok := workflows3[0]["workflow_uuid"].(string)
-					require.True(t, ok, "workflow_uuid should be a string")
+					id3, ok := workflows3[0]["WorkflowUUID"].(string)
+					require.True(t, ok, "WorkflowUUID should be a string")
 					assert.Equal(t, workflowID1, id3, "Expected first workflow ID in results")
 
 					// Test 4: Query with empty body (should return all workflows)
@@ -304,8 +304,8 @@ func TestAdminServer(t *testing.T) {
 					// Verify both workflow IDs are present
 					foundIDs4 := make(map[string]bool)
 					for _, wf := range workflows4 {
-						id, ok := wf["workflow_uuid"].(string)
-						require.True(t, ok, "workflow_uuid should be a string")
+						id, ok := wf["WorkflowUUID"].(string)
+						require.True(t, ok, "WorkflowUUID should be a string")
 						foundIDs4[id] = true
 					}
 					assert.True(t, foundIDs4[workflowID1], "Expected to find first workflow ID in empty body results")
