@@ -127,7 +127,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	mux.HandleFunc(_WORKFLOW_RECOVERY_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-
 		var executorIDs []string
 		if err := json.NewDecoder(r.Body).Decode(&executorIDs); err != nil {
 			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
@@ -158,7 +157,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	mux.HandleFunc(_DEACTIVATE_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-
 		if as.isDeactivated.CompareAndSwap(0, 1) {
 			ctx.logger.Info("Deactivating DBOS executor", "executor_id", ctx.executorID, "app_version", ctx.applicationVersion)
 			// TODO: Stop queue runner, workflow scheduler, etc
@@ -172,7 +170,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	mux.HandleFunc(_WORKFLOW_QUEUES_METADATA_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-
 		queueMetadataArray := ctx.queueRunner.listQueues()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -184,7 +181,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	mux.HandleFunc(_GARBAGE_COLLECT_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-
 		var inputs struct {
 			CutoffEpochTimestampMs *int64 `json:"cutoff_epoch_timestamp_ms"`
 			RowsThreshold          *int   `json:"rows_threshold"`
@@ -207,7 +203,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	mux.HandleFunc(_GLOBAL_TIMEOUT_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-
 		var inputs struct {
 			CutoffEpochTimestampMs *int64 `json:"cutoff_epoch_timestamp_ms"`
 		}
@@ -229,7 +224,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	mux.HandleFunc(_WORKFLOWS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-
 		var req listWorkflowsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, fmt.Sprintf("Invalid JSON input: %v", err), http.StatusBadRequest)
@@ -251,7 +245,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	})
 
 	mux.HandleFunc(_QUEUED_WORKFLOWS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-
 		var req listWorkflowsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, fmt.Sprintf("Invalid JSON input: %v", err), http.StatusBadRequest)
@@ -275,8 +268,8 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	// GET /workflows/{id}/steps
 	mux.HandleFunc(_WORKFLOW_STEPS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
-		
-		steps, err := ctx.systemDatabase.getWorkflowSteps(r.Context(), workflowID)
+
+		steps, err := ctx.systemDB.getWorkflowSteps(ctx, workflowID)
 		if err != nil {
 			ctx.logger.Error("Failed to list workflow steps", "workflow_id", workflowID, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to list steps: %v", err), http.StatusInternalServerError)
@@ -310,48 +303,23 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		workflowID := r.PathValue("id")
 		ctx.logger.Info("Resuming workflow", "workflow_id", workflowID)
 
-		handle, err := ctx.ResumeWorkflow(ctx, workflowID)
+		_, err := ctx.ResumeWorkflow(ctx, workflowID)
 		if err != nil {
 			ctx.logger.Error("Failed to resume workflow", "workflow_id", workflowID, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to resume workflow: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		response := map[string]string{
-			"workflow_id": handle.GetWorkflowID(),
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			ctx.logger.Error("Error encoding resume response", "error", err)
-			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
-		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	mux.HandleFunc(_WORKFLOW_RESTART_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
-		var data struct {
-			ForkedWorkflowID   *string `json:"forked_workflow_id"`
-			ApplicationVersion *string `json:"application_version"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-			http.Error(w, fmt.Sprintf("Invalid JSON input: %v", err), http.StatusBadRequest)
-			return
-		}
-
 		ctx.logger.Info("Restarting workflow", "workflow_id", workflowID)
 
 		// Restart is like forking but starting at step 0
 		input := ForkWorkflowInput{
 			OriginalWorkflowID: workflowID,
-			StartStep:          0,
-		}
-		if data.ForkedWorkflowID != nil {
-			input.ForkedWorkflowID = *data.ForkedWorkflowID
-		}
-		if data.ApplicationVersion != nil {
-			input.ApplicationVersion = *data.ApplicationVersion
 		}
 
 		handle, err := ctx.ForkWorkflow(ctx, input)
@@ -376,7 +344,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		workflowID := r.PathValue("id")
 		var data struct {
 			StartStep          *uint   `json:"start_step"`
-			ForkedWorkflowID   *string `json:"forked_workflow_id"`
+			ForkedWorkflowID   *string `json:"new_workflow_id"`
 			ApplicationVersion *string `json:"application_version"`
 		}
 
