@@ -327,6 +327,24 @@ func TestWorkflowsRegistration(t *testing.T) {
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("custom-workflow"))
 	})
 
+	t.Run("DifferentWorkflowsSameCustomName", func(t *testing.T) {
+		// Create a fresh DBOS context for this test
+		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
+
+		// First registration with custom name should work
+		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("same-name"))
+
+		// Second registration of different workflow with same custom name should panic with ConflictingRegistrationError
+		defer func() {
+			r := recover()
+			require.NotNil(t, r, "expected panic from registering different workflows with same custom name but got none")
+			dbosErr, ok := r.(*DBOSError)
+			require.True(t, ok, "expected panic to be *DBOSError, got %T", r)
+			assert.Equal(t, ConflictingRegistrationError, dbosErr.Code)
+		}()
+		RegisterWorkflow(freshCtx, simpleWorkflowError, WithWorkflowName("same-name"))
+	})
+
 	t.Run("RegisterAfterLaunchPanics", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
 		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
@@ -375,15 +393,26 @@ func stepRetryWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 	RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
 		return stepIdempotencyTest(ctx)
 	})
-	stepCtx := WithValue(dbosCtx, StepParamsKey, &StepParams{
-		MaxRetries:   5,
-		BaseInterval: 1 * time.Millisecond,
-		MaxInterval:  10 * time.Millisecond,
-	})
 
-	return RunAsStep(stepCtx, func(ctx context.Context) (string, error) {
+	return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
 		return stepRetryAlwaysFailsStep(ctx)
-	})
+	}, WithStepMaxRetries(5), WithBaseInterval(1*time.Millisecond), WithMaxInterval(10*time.Millisecond))
+}
+
+func step1(_ context.Context) (string, error) {
+	return "", nil
+}
+
+func testStepWf1(dbosCtx DBOSContext, input string) (string, error) {
+	return RunAsStep(dbosCtx, step1)
+}
+
+func step2(_ context.Context) (string, error) {
+	return "", nil
+}
+
+func testStepWf2(dbosCtx DBOSContext, input string) (string, error) {
+	return RunAsStep(dbosCtx, step2)
 }
 
 func TestSteps(t *testing.T) {
@@ -392,6 +421,8 @@ func TestSteps(t *testing.T) {
 	// Create workflows with executor
 	RegisterWorkflow(dbosCtx, stepWithinAStepWorkflow)
 	RegisterWorkflow(dbosCtx, stepRetryWorkflow)
+	RegisterWorkflow(dbosCtx, testStepWf1)
+	RegisterWorkflow(dbosCtx, testStepWf2)
 
 	t.Run("StepsMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run a step outside of a workflow context
@@ -468,6 +499,82 @@ func TestSteps(t *testing.T) {
 
 		// Verify the idempotency step was executed only once
 		assert.Equal(t, 1, stepIdempotencyCounter, "expected idempotency step to be executed only once")
+	})
+
+	t.Run("checkStepName", func(t *testing.T) {
+		// Run first workflow with custom step name
+		handle1, err := RunAsWorkflow(dbosCtx, testStepWf1, "test-input-1")
+		require.NoError(t, err, "failed to run testStepWf1")
+		_, err = handle1.GetResult()
+		require.NoError(t, err, "failed to get result from testStepWf1")
+
+		// Run second workflow with custom step name
+		handle2, err := RunAsWorkflow(dbosCtx, testStepWf2, "test-input-2")
+		require.NoError(t, err, "failed to run testStepWf2")
+		_, err = handle2.GetResult()
+		require.NoError(t, err, "failed to get result from testStepWf2")
+
+		// Get workflow steps for first workflow and check step name
+		steps1, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle1.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for testStepWf1")
+		require.Len(t, steps1, 1, "expected 1 step in testStepWf1")
+		s1 := steps1[0]
+		expectedStepName1 := runtime.FuncForPC(reflect.ValueOf(step1).Pointer()).Name()
+		assert.Equal(t, expectedStepName1, s1.StepName, "expected step name to match runtime function name")
+
+		// Get workflow steps for second workflow and check step name
+		steps2, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle2.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for testStepWf2")
+		require.Len(t, steps2, 1, "expected 1 step in testStepWf2")
+		s2 := steps2[0]
+		expectedStepName2 := runtime.FuncForPC(reflect.ValueOf(step2).Pointer()).Name()
+		assert.Equal(t, expectedStepName2, s2.StepName, "expected step name to match runtime function name")
+	})
+
+	t.Run("customStepNames", func(t *testing.T) {
+		// Create a workflow that uses custom step names
+		customNameWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+			// Run a step with a custom name
+			result1, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+				return "custom-step-1-result", nil
+			}, WithStepName("MyCustomStep1"))
+			if err != nil {
+				return "", err
+			}
+
+			// Run another step with a different custom name
+			result2, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+				return "custom-step-2-result", nil
+			}, WithStepName("MyCustomStep2"))
+			if err != nil {
+				return "", err
+			}
+
+			return result1 + "-" + result2, nil
+		}
+
+		RegisterWorkflow(dbosCtx, customNameWorkflow)
+
+		// Execute the workflow
+		handle, err := RunAsWorkflow(dbosCtx, customNameWorkflow, "test-input")
+		require.NoError(t, err, "failed to run workflow with custom step names")
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from workflow with custom step names")
+		assert.Equal(t, "custom-step-1-result-custom-step-2-result", result)
+
+		// Verify the custom step names were recorded
+		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 2, "expected 2 steps")
+
+		// Check that the first step has the custom name
+		assert.Equal(t, "MyCustomStep1", steps[0].StepName, "expected first step to have custom name")
+		assert.Equal(t, 0, steps[0].StepID)
+
+		// Check that the second step has the custom name
+		assert.Equal(t, "MyCustomStep2", steps[1].StepName, "expected second step to have custom name")
+		assert.Equal(t, 1, steps[1].StepID)
 	})
 }
 
