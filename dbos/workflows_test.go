@@ -512,6 +512,52 @@ func TestSteps(t *testing.T) {
 		expectedStepName2 := runtime.FuncForPC(reflect.ValueOf(step2).Pointer()).Name()
 		assert.Equal(t, expectedStepName2, s2.StepName, "expected step name to match runtime function name")
 	})
+
+	t.Run("customStepNames", func(t *testing.T) {
+		// Create a workflow that uses custom step names
+		customNameWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+			// Run a step with a custom name
+			result1, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+				return "custom-step-1-result", nil
+			}, WithStepName("MyCustomStep1"))
+			if err != nil {
+				return "", err
+			}
+
+			// Run another step with a different custom name
+			result2, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+				return "custom-step-2-result", nil
+			}, WithStepName("MyCustomStep2"))
+			if err != nil {
+				return "", err
+			}
+
+			return result1 + "-" + result2, nil
+		}
+
+		RegisterWorkflow(dbosCtx, customNameWorkflow)
+
+		// Execute the workflow
+		handle, err := RunAsWorkflow(dbosCtx, customNameWorkflow, "test-input")
+		require.NoError(t, err, "failed to run workflow with custom step names")
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from workflow with custom step names")
+		assert.Equal(t, "custom-step-1-result-custom-step-2-result", result)
+
+		// Verify the custom step names were recorded
+		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 2, "expected 2 steps")
+
+		// Check that the first step has the custom name
+		assert.Equal(t, "MyCustomStep1", steps[0].StepName, "expected first step to have custom name")
+		assert.Equal(t, 0, steps[0].StepID)
+
+		// Check that the second step has the custom name
+		assert.Equal(t, "MyCustomStep2", steps[1].StepName, "expected second step to have custom name")
+		assert.Equal(t, 1, steps[1].StepID)
+	})
 }
 
 func TestChildWorkflow(t *testing.T) {

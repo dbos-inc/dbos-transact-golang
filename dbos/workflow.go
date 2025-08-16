@@ -951,7 +951,6 @@ func RunAsStep[R any](ctx DBOSContext, fn GenericStepFunc[R], opts ...StepOption
 	// Type-erase the function
 	typeErasedFn := StepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
 
-	// Call the interface method directly
 	result, err := ctx.RunAsStep(ctx, typeErasedFn, opts...)
 	// Step function could return a nil result
 	if result == nil {
