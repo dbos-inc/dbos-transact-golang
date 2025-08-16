@@ -486,28 +486,28 @@ func TestSteps(t *testing.T) {
 	t.Run("checkStepName", func(t *testing.T) {
 		// Run first workflow with custom step name
 		handle1, err := RunAsWorkflow(dbosCtx, testStepWf1, "test-input-1")
-		require.NoError(t, err, "failed to run customStepNameWorkflow1")
+		require.NoError(t, err, "failed to run testStepWf1")
 		_, err = handle1.GetResult()
-		require.NoError(t, err, "failed to get result from customStepNameWorkflow1")
+		require.NoError(t, err, "failed to get result from testStepWf1")
 
 		// Run second workflow with custom step name
 		handle2, err := RunAsWorkflow(dbosCtx, testStepWf2, "test-input-2")
-		require.NoError(t, err, "failed to run customStepNameWorkflow2")
+		require.NoError(t, err, "failed to run testStepWf2")
 		_, err = handle2.GetResult()
-		require.NoError(t, err, "failed to get result from customStepNameWorkflow2")
+		require.NoError(t, err, "failed to get result from testStepWf2")
 
 		// Get workflow steps for first workflow and check step name
 		steps1, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle1.GetWorkflowID())
-		require.NoError(t, err, "failed to get workflow steps for customStepNameWorkflow1")
-		require.Len(t, steps1, 1, "expected 1 step in customStepNameWorkflow1")
+		require.NoError(t, err, "failed to get workflow steps for testStepWf1")
+		require.Len(t, steps1, 1, "expected 1 step in testStepWf1")
 		s1 := steps1[0]
 		expectedStepName1 := runtime.FuncForPC(reflect.ValueOf(step1).Pointer()).Name()
 		assert.Equal(t, expectedStepName1, s1.StepName, "expected step name to match runtime function name")
 
 		// Get workflow steps for second workflow and check step name
 		steps2, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle2.GetWorkflowID())
-		require.NoError(t, err, "failed to get workflow steps for customStepNameWorkflow2")
-		require.Len(t, steps2, 1, "expected 1 step in customStepNameWorkflow2")
+		require.NoError(t, err, "failed to get workflow steps for testStepWf2")
+		require.Len(t, steps2, 1, "expected 1 step in testStepWf2")
 		s2 := steps2[0]
 		expectedStepName2 := runtime.FuncForPC(reflect.ValueOf(step2).Pointer()).Name()
 		assert.Equal(t, expectedStepName2, s2.StepName, "expected step name to match runtime function name")
