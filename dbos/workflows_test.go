@@ -375,15 +375,26 @@ func stepRetryWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 	RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
 		return stepIdempotencyTest(ctx)
 	})
-	stepCtx := WithValue(dbosCtx, StepParamsKey, &StepParams{
-		MaxRetries:   5,
-		BaseInterval: 1 * time.Millisecond,
-		MaxInterval:  10 * time.Millisecond,
-	})
 
-	return RunAsStep(stepCtx, func(ctx context.Context) (string, error) {
+	return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
 		return stepRetryAlwaysFailsStep(ctx)
-	})
+	}, WithStepMaxRetries(5), WithBaseInterval(1*time.Millisecond), WithMaxInterval(10*time.Millisecond))
+}
+
+func step1(_ context.Context) (string, error) {
+	return "", nil
+}
+
+func customStepNameWorkflow1(dbosCtx DBOSContext, input string) (string, error) {
+	return RunAsStep(dbosCtx, step1)
+}
+
+func step2(_ context.Context) (string, error) {
+	return "", nil
+}
+
+func customStepNameWorkflow2(dbosCtx DBOSContext, input string) (string, error) {
+	return RunAsStep(dbosCtx, step2)
 }
 
 func TestSteps(t *testing.T) {
@@ -392,6 +403,8 @@ func TestSteps(t *testing.T) {
 	// Create workflows with executor
 	RegisterWorkflow(dbosCtx, stepWithinAStepWorkflow)
 	RegisterWorkflow(dbosCtx, stepRetryWorkflow)
+	RegisterWorkflow(dbosCtx, customStepNameWorkflow1)
+	RegisterWorkflow(dbosCtx, customStepNameWorkflow2)
 
 	t.Run("StepsMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run a step outside of a workflow context
@@ -468,6 +481,36 @@ func TestSteps(t *testing.T) {
 
 		// Verify the idempotency step was executed only once
 		assert.Equal(t, 1, stepIdempotencyCounter, "expected idempotency step to be executed only once")
+	})
+
+	t.Run("checkStepName", func(t *testing.T) {
+		// Run first workflow with custom step name
+		handle1, err := RunAsWorkflow(dbosCtx, customStepNameWorkflow1, "test-input-1")
+		require.NoError(t, err, "failed to run customStepNameWorkflow1")
+		_, err = handle1.GetResult()
+		require.NoError(t, err, "failed to get result from customStepNameWorkflow1")
+
+		// Run second workflow with custom step name
+		handle2, err := RunAsWorkflow(dbosCtx, customStepNameWorkflow2, "test-input-2")
+		require.NoError(t, err, "failed to run customStepNameWorkflow2")
+		_, err = handle2.GetResult()
+		require.NoError(t, err, "failed to get result from customStepNameWorkflow2")
+
+		// Get workflow steps for first workflow and check step name
+		steps1, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle1.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for customStepNameWorkflow1")
+		require.Len(t, steps1, 1, "expected 1 step in customStepNameWorkflow1")
+		s1 := steps1[0]
+		expectedStepName1 := runtime.FuncForPC(reflect.ValueOf(step1).Pointer()).Name()
+		assert.Equal(t, expectedStepName1, s1.StepName, "expected step name to match runtime function name")
+
+		// Get workflow steps for second workflow and check step name
+		steps2, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle2.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for customStepNameWorkflow2")
+		require.Len(t, steps2, 1, "expected 1 step in customStepNameWorkflow2")
+		s2 := steps2[0]
+		expectedStepName2 := runtime.FuncForPC(reflect.ValueOf(step2).Pointer()).Name()
+		assert.Equal(t, expectedStepName2, s2.StepName, "expected step name to match runtime function name")
 	})
 }
 
