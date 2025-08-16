@@ -385,7 +385,7 @@ func step1(_ context.Context) (string, error) {
 	return "", nil
 }
 
-func customStepNameWorkflow1(dbosCtx DBOSContext, input string) (string, error) {
+func testStepWf1(dbosCtx DBOSContext, input string) (string, error) {
 	return RunAsStep(dbosCtx, step1)
 }
 
@@ -393,7 +393,7 @@ func step2(_ context.Context) (string, error) {
 	return "", nil
 }
 
-func customStepNameWorkflow2(dbosCtx DBOSContext, input string) (string, error) {
+func testStepWf2(dbosCtx DBOSContext, input string) (string, error) {
 	return RunAsStep(dbosCtx, step2)
 }
 
@@ -403,8 +403,8 @@ func TestSteps(t *testing.T) {
 	// Create workflows with executor
 	RegisterWorkflow(dbosCtx, stepWithinAStepWorkflow)
 	RegisterWorkflow(dbosCtx, stepRetryWorkflow)
-	RegisterWorkflow(dbosCtx, customStepNameWorkflow1)
-	RegisterWorkflow(dbosCtx, customStepNameWorkflow2)
+	RegisterWorkflow(dbosCtx, testStepWf1)
+	RegisterWorkflow(dbosCtx, testStepWf2)
 
 	t.Run("StepsMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run a step outside of a workflow context
@@ -485,13 +485,13 @@ func TestSteps(t *testing.T) {
 
 	t.Run("checkStepName", func(t *testing.T) {
 		// Run first workflow with custom step name
-		handle1, err := RunAsWorkflow(dbosCtx, customStepNameWorkflow1, "test-input-1")
+		handle1, err := RunAsWorkflow(dbosCtx, testStepWf1, "test-input-1")
 		require.NoError(t, err, "failed to run customStepNameWorkflow1")
 		_, err = handle1.GetResult()
 		require.NoError(t, err, "failed to get result from customStepNameWorkflow1")
 
 		// Run second workflow with custom step name
-		handle2, err := RunAsWorkflow(dbosCtx, customStepNameWorkflow2, "test-input-2")
+		handle2, err := RunAsWorkflow(dbosCtx, testStepWf2, "test-input-2")
 		require.NoError(t, err, "failed to run customStepNameWorkflow2")
 		_, err = handle2.GetResult()
 		require.NoError(t, err, "failed to get result from customStepNameWorkflow2")
