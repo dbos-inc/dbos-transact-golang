@@ -246,8 +246,12 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn WrappedWorkflowFun
 	}
 
 	// We need to get a mapping from custom name to FQN for registry lookups that might not know the FQN (queue, recovery)
+	// We also panic if we found the name was already registered (this could happen if registering two different workflows under the same custom name)
 	if len(customName) > 0 {
-		c.workflowCustomNametoFQN.Store(customName, workflowFQN)
+		if _, exists := c.workflowCustomNametoFQN.LoadOrStore(customName, workflowFQN); exists {
+			c.logger.Error("workflow function already registered", "custom_name", customName)
+			panic(newConflictingRegistrationError(customName))
+		}
 	} else {
 		c.workflowCustomNametoFQN.Store(workflowFQN, workflowFQN) // Store the FQN as the custom name if none was provided
 	}

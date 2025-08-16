@@ -327,6 +327,24 @@ func TestWorkflowsRegistration(t *testing.T) {
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("custom-workflow"))
 	})
 
+	t.Run("DifferentWorkflowsSameCustomName", func(t *testing.T) {
+		// Create a fresh DBOS context for this test
+		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
+
+		// First registration with custom name should work
+		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("same-name"))
+
+		// Second registration of different workflow with same custom name should panic with ConflictingRegistrationError
+		defer func() {
+			r := recover()
+			require.NotNil(t, r, "expected panic from registering different workflows with same custom name but got none")
+			dbosErr, ok := r.(*DBOSError)
+			require.True(t, ok, "expected panic to be *DBOSError, got %T", r)
+			assert.Equal(t, ConflictingRegistrationError, dbosErr.Code)
+		}()
+		RegisterWorkflow(freshCtx, simpleWorkflowError, WithWorkflowName("same-name"))
+	})
+
 	t.Run("RegisterAfterLaunchPanics", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
 		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
