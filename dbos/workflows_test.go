@@ -1426,12 +1426,9 @@ func TestSendRecv(t *testing.T) {
 		_, err = handle.GetResult()
 		require.NoError(t, err, "failed to get result from send workflow")
 
-		start := time.Now()
 		result, err := receiveHandle.GetResult()
 		require.NoError(t, err, "failed to get result from receive workflow")
 		require.Equal(t, "message1-message2-message3", result)
-		// FIXME This is not a great condition: when all the tests run there's quite some randomness to this
-		require.LessOrEqual(t, time.Since(start), 10*time.Second, "receive workflow took too long to complete")
 
 		// Verify step counting for send workflow (sendWorkflow calls Send 3 times)
 		sendSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
