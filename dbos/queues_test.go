@@ -217,16 +217,32 @@ func TestWorkflowQueues(t *testing.T) {
 			recoveryHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 			require.NoError(t, err, "failed to recover pending workflows")
 			assert.Len(t, recoveryHandles, 1, "expected 1 handle")
+			t.Logf("Recovered handle: %v, index: %d", recoveryHandles[0].GetWorkflowID(), i)
 			dlqStartEvent.Wait()
 			dlqStartEvent.Clear()
 			handle := recoveryHandles[0]
 			handles = append(handles, handle)
 			status, err := handle.GetStatus()
 			require.NoError(t, err, "failed to get status of recovered workflow handle")
-			if i == dlqMaxRetries {
-				// On the last retry, the workflow should be in DLQ
-				assert.Equal(t, WorkflowStatusRetriesExceeded, status.Status, "expected workflow status to be %s", WorkflowStatusRetriesExceeded)
+			assert.Equal(t, WorkflowStatusPending, status.Status, "expected workflow to be in PENDING status after recovery")
+		}
+
+		dlqHandle, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		assert.Len(t, dlqHandle, 1, "expected 1 handle in DLQ")
+		retries := 0
+		for {
+			dlqStatus, err := dlqHandle[0].GetStatus()
+			require.NoError(t, err, "failed to get status of DLQ workflow handle")
+			if dlqStatus.Status != WorkflowStatusRetriesExceeded && retries < 10 {
+				time.Sleep(1 * time.Second) // Wait a bit before checking again
+				retries++
+				continue
 			}
+			require.NoError(t, err, "failed to get status of DLQ workflow handle")
+			assert.Equal(t, WorkflowStatusRetriesExceeded, dlqStatus.Status, "expected workflow to be in DLQ after max retries exceeded")
+			handles = append(handles, dlqHandle[0])
+			break
 		}
 
 		// Check the workflow completes
@@ -258,8 +274,8 @@ func TestWorkflowQueues(t *testing.T) {
 		require.Error(t, err, "expected ConflictingWorkflowError when enqueueing same workflow ID on different queue, but got none")
 
 		// Check that it's the correct error type
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
 
 		assert.Equal(t, ConflictingWorkflowError, dbosErr.Code, "expected error code to be ConflictingWorkflowError")
 
@@ -301,8 +317,8 @@ func TestWorkflowQueues(t *testing.T) {
 		require.Error(t, err, "expected error when enqueueing workflow with same deduplication ID")
 
 		// Check that it's the correct error type and message
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
 		assert.Equal(t, QueueDeduplicated, dbosErr.Code, "expected error code to be QueueDeduplicated")
 
 		expectedMsgPart := fmt.Sprintf("Workflow %s was deduplicated due to an existing workflow in queue %s with deduplication ID %s", wfid2, dedupQueue.Name, dedupID)
@@ -416,14 +432,14 @@ func TestQueueRecovery(t *testing.T) {
 			castedResult, ok := result.([]int)
 			require.True(t, ok, "expected result to be of type []int for root workflow, got %T", result)
 			expectedResult := []int{0, 1, 2, 3, 4}
-			assert.True(t, equal(castedResult, expectedResult), "expected result %v, got %v", expectedResult, castedResult)
+			assert.Equal(t, expectedResult, castedResult, "expected result %v, got %v", expectedResult, castedResult)
 		}
 	}
 
 	result, err := handle.GetResult()
 	require.NoError(t, err, "failed to get result from original handle")
 	expectedResult := []int{0, 1, 2, 3, 4}
-	assert.True(t, equal(result, expectedResult), "expected result %v, got %v", expectedResult, result)
+	assert.Equal(t, expectedResult, result, "expected result %v, got %v", expectedResult, result)
 
 	assert.Equal(t, int64(queuedSteps*2), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to be %d", queuedSteps*2)
 
@@ -432,7 +448,7 @@ func TestQueueRecovery(t *testing.T) {
 	require.NoError(t, err, "failed to rerun workflow")
 	rerunResult, err := rerunHandle.GetResult()
 	require.NoError(t, err, "failed to get result from rerun handle")
-	assert.True(t, equal(rerunResult, expectedResult), "expected result %v, got %v", expectedResult, rerunResult)
+	assert.Equal(t, expectedResult, rerunResult, "expected result %v, got %v", expectedResult, rerunResult)
 
 	assert.Equal(t, int64(queuedSteps*2), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to remain %d", queuedSteps*2)
 
@@ -794,9 +810,7 @@ func TestQueueTimeouts(t *testing.T) {
 	queuedWaitForCancelWorkflow := func(ctx DBOSContext, _ string) (string, error) {
 		// This workflow will wait indefinitely until it is cancelled
 		<-ctx.Done()
-		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			assert.True(t, errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded), "workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
-		}
+		assert.True(t, errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded), "workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
 		return "", ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, queuedWaitForCancelWorkflow)
@@ -808,8 +822,8 @@ func TestQueueTimeouts(t *testing.T) {
 		// Workflow should get AwaitedWorkflowCancelled DBOSError
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error when waiting for enqueued workflow to complete, but got none")
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
 		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
 
 		// enqueud workflow should have been cancelled
@@ -877,8 +891,8 @@ func TestQueueTimeouts(t *testing.T) {
 		require.Error(t, err, "expected error but got none")
 
 		// Check the error type
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
 
 		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
 
@@ -905,8 +919,8 @@ func TestQueueTimeouts(t *testing.T) {
 		require.Error(t, err, "expected error but got none")
 
 		// Check the error type
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
 
 		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
 
@@ -934,8 +948,8 @@ func TestQueueTimeouts(t *testing.T) {
 		require.Error(t, err, "expected error but got none")
 
 		// Check the error type
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
 
 		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
 
