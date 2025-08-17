@@ -213,11 +213,10 @@ func TestWorkflowQueues(t *testing.T) {
 
 		// Check that the workflow hits DLQ after re-running max retries
 		handles := make([]WorkflowHandle[any], 0, dlqMaxRetries+1)
-		for i := range dlqMaxRetries {
+		for _ = range dlqMaxRetries {
 			recoveryHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 			require.NoError(t, err, "failed to recover pending workflows")
 			assert.Len(t, recoveryHandles, 1, "expected 1 handle")
-			t.Logf("Recovered handle: %v, index: %d", recoveryHandles[0].GetWorkflowID(), i)
 			dlqStartEvent.Wait()
 			dlqStartEvent.Clear()
 			handle := recoveryHandles[0]
