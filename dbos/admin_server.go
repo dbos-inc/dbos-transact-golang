@@ -37,7 +37,7 @@ type listWorkflowsRequest struct {
 	AuthenticatedUser  *string    `json:"authenticated_user"`  // Filter by user who initiated the workflow
 	StartTime          *time.Time `json:"start_time"`          // Filter workflows created after this time (RFC3339 format)
 	EndTime            *time.Time `json:"end_time"`            // Filter workflows created before this time (RFC3339 format)
-	Status             string     `json:"status"`              // Filter by workflow status(es)
+	Status             string     `json:"status"`              // Filter by workflow status
 	ApplicationVersion *string    `json:"application_version"` // Filter by application version
 	WorkflowName       *string    `json:"workflow_name"`       // Filter by workflow function name
 	Limit              *int       `json:"limit"`               // Maximum number of results to return

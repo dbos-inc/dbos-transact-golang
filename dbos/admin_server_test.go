@@ -170,10 +170,16 @@ func TestAdminServer(t *testing.T) {
 					var workflows []map[string]any
 					err := json.NewDecoder(resp.Body).Decode(&workflows)
 					require.NoError(t, err, "Failed to decode workflows response")
-					// We expect an empty array since these filters likely won't match any workflows
+					// We expect an empty array -- there's no workflow in the db
 					assert.NotNil(t, workflows, "Expected non-nil workflows array")
-					// No error is success - the result can be empty
+					assert.Empty(t, workflows, "Expected empty workflows array")
 				},
+			},
+			{
+				name:           "Get single workflow returns 404 for non-existent workflow",
+				method:         "GET",
+				endpoint:       "http://localhost:3001/workflow/non-existent-workflow-id",
+				expectedStatus: http.StatusNotFound,
 			},
 		}
 
