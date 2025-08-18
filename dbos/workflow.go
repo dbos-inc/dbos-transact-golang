@@ -572,7 +572,7 @@ func RunAsWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R], 
 			}
 		}()
 
-		typedHandle := newWorkflowHandle[R](handle.dbosContext, handle.workflowID, typedOutcomeChan)
+		typedHandle := newWorkflowHandle(handle.dbosContext, handle.workflowID, typedOutcomeChan)
 
 		return typedHandle, nil
 	}
