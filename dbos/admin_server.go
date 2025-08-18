@@ -24,7 +24,6 @@ const (
 	_WORKFLOW_STEPS_PATTERN           = "GET /workflows/{id}/steps"
 	_WORKFLOW_CANCEL_PATTERN          = "POST /workflows/{id}/cancel"
 	_WORKFLOW_RESUME_PATTERN          = "POST /workflows/{id}/resume"
-	_WORKFLOW_RESTART_PATTERN         = "POST /workflows/{id}/restart"
 	_WORKFLOW_FORK_PATTERN            = "POST /workflows/{id}/fork"
 
 	_ADMIN_SERVER_READ_HEADER_TIMEOUT = 5 * time.Second
@@ -436,34 +435,6 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 
 		w.WriteHeader(http.StatusNoContent)
-	})
-
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_RESTART_PATTERN)
-	mux.HandleFunc(_WORKFLOW_RESTART_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-		workflowID := r.PathValue("id")
-		ctx.logger.Info("Restarting workflow", "workflow_id", workflowID)
-
-		// Restart is like forking but starting at step 0
-		input := ForkWorkflowInput{
-			OriginalWorkflowID: workflowID,
-		}
-
-		handle, err := ctx.ForkWorkflow(ctx, input)
-		if err != nil {
-			ctx.logger.Error("Failed to restart workflow", "workflow_id", workflowID, "error", err)
-			http.Error(w, fmt.Sprintf("Failed to restart workflow: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		response := map[string]string{
-			"workflow_id": handle.GetWorkflowID(),
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			ctx.logger.Error("Error encoding restart response", "error", err)
-			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
-		}
 	})
 
 	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_FORK_PATTERN)
