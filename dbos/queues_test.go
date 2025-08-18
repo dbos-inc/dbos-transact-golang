@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1082,7 +1081,7 @@ func TestPriorityQueue(t *testing.T) {
 
 	mu.Lock()
 	expectedOrder := []int{0, 6, 7, 1, 2, 3, 4, 5}
-	assert.True(t, reflect.DeepEqual(wfPriorityList, expectedOrder), "expected workflow execution order to be %v, got %v", expectedOrder, wfPriorityList)
+	assert.Equal(t, expectedOrder, wfPriorityList, "expected workflow execution order %v, got %v", expectedOrder, wfPriorityList)
 	mu.Unlock()
 
 	// Verify that handle6 and handle7 workflows were dequeued in FIFO order
