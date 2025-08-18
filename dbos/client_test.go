@@ -136,7 +136,7 @@ func TestEnqueue(t *testing.T) {
 		require.Error(t, err, "expected timeout error, but got none")
 
 		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T (%v)", err, err)
 
 		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code)
 
