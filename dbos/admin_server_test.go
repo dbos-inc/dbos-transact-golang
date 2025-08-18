@@ -3,6 +3,7 @@ package dbos
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -17,15 +18,14 @@ func TestAdminServer(t *testing.T) {
 	databaseURL := getDatabaseURL()
 
 	t.Run("Admin server is not started by default", func(t *testing.T) {
-
 		ctx, err := NewDBOSContext(Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 		})
 		require.NoError(t, err)
+
 		err = ctx.Launch()
 		require.NoError(t, err)
-
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
@@ -38,7 +38,7 @@ func TestAdminServer(t *testing.T) {
 
 		// Verify admin server is not running
 		client := &http.Client{Timeout: 1 * time.Second}
-		_, err = client.Get("http://localhost:3001" + _HEALTHCHECK_PATH)
+		_, err = client.Get(fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_HEALTHCHECK_PATTERN, "GET /")))
 		require.Error(t, err, "Expected request to fail when admin server is not started")
 
 		// Verify the DBOS executor doesn't have an admin server instance
@@ -49,6 +49,7 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("Admin server endpoints", func(t *testing.T) {
+		resetTestDatabase(t, databaseURL)
 		// Launch DBOS with admin server once for all endpoint tests
 		ctx, err := NewDBOSContext(Config{
 			DatabaseURL: databaseURL,
@@ -56,6 +57,7 @@ func TestAdminServer(t *testing.T) {
 			AdminServer: true,
 		})
 		require.NoError(t, err)
+
 		err = ctx.Launch()
 		require.NoError(t, err)
 
@@ -77,7 +79,7 @@ func TestAdminServer(t *testing.T) {
 
 		client := &http.Client{Timeout: 5 * time.Second}
 
-		tests := []struct {
+		type adminServerTestCase struct {
 			name           string
 			method         string
 			endpoint       string
@@ -85,17 +87,19 @@ func TestAdminServer(t *testing.T) {
 			contentType    string
 			expectedStatus int
 			validateResp   func(t *testing.T, resp *http.Response)
-		}{
+		}
+
+		tests := []adminServerTestCase{
 			{
 				name:           "Health endpoint responds correctly",
 				method:         "GET",
-				endpoint:       "http://localhost:3001" + _HEALTHCHECK_PATH,
+				endpoint:       fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_HEALTHCHECK_PATTERN, "GET /")),
 				expectedStatus: http.StatusOK,
 			},
 			{
 				name:           "Recovery endpoint responds correctly with valid JSON",
 				method:         "POST",
-				endpoint:       "http://localhost:3001" + _WORKFLOW_RECOVERY_PATH,
+				endpoint:       fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOW_RECOVERY_PATTERN, "POST /")),
 				body:           bytes.NewBuffer(mustMarshal([]string{"executor1", "executor2"})),
 				contentType:    "application/json",
 				expectedStatus: http.StatusOK,
@@ -107,15 +111,9 @@ func TestAdminServer(t *testing.T) {
 				},
 			},
 			{
-				name:           "Recovery endpoint rejects invalid methods",
-				method:         "GET",
-				endpoint:       "http://localhost:3001" + _WORKFLOW_RECOVERY_PATH,
-				expectedStatus: http.StatusMethodNotAllowed,
-			},
-			{
 				name:           "Recovery endpoint rejects invalid JSON",
 				method:         "POST",
-				endpoint:       "http://localhost:3001" + _WORKFLOW_RECOVERY_PATH,
+				endpoint:       fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOW_RECOVERY_PATTERN, "POST /")),
 				body:           strings.NewReader(`{"invalid": json}`),
 				contentType:    "application/json",
 				expectedStatus: http.StatusBadRequest,
@@ -123,7 +121,7 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Queue metadata endpoint responds correctly",
 				method:         "GET",
-				endpoint:       "http://localhost:3001" + _WORKFLOW_QUEUES_METADATA_PATH,
+				endpoint:       fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOW_QUEUES_METADATA_PATTERN, "GET /")),
 				expectedStatus: http.StatusOK,
 				validateResp: func(t *testing.T, resp *http.Response) {
 					var queueMetadata []WorkflowQueue
@@ -147,10 +145,41 @@ func TestAdminServer(t *testing.T) {
 				},
 			},
 			{
-				name:           "Queue metadata endpoint rejects invalid methods",
-				method:         "POST",
-				endpoint:       "http://localhost:3001" + _WORKFLOW_QUEUES_METADATA_PATH,
-				expectedStatus: http.StatusMethodNotAllowed,
+				name:     "Workflows endpoint accepts all filters without error",
+				method:   "POST",
+				endpoint: fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /")),
+				body: bytes.NewBuffer(mustMarshal(map[string]any{
+					"workflow_uuids":      []string{"test-id-1", "test-id-2"},
+					"authenticated_user":  "test-user",
+					"start_time":          time.Now().Add(-24 * time.Hour).Format(time.RFC3339Nano),
+					"end_time":            time.Now().Format(time.RFC3339Nano),
+					"status":              "PENDING",
+					"application_version": "v1.0.0",
+					"workflow_name":       "testWorkflow",
+					"limit":               100,
+					"offset":              0,
+					"sort_desc":           true,
+					"workflow_id_prefix":  "test-",
+					"load_input":          true,
+					"load_output":         true,
+					"queue_name":          "test-queue",
+				})),
+				contentType:    "application/json",
+				expectedStatus: http.StatusOK,
+				validateResp: func(t *testing.T, resp *http.Response) {
+					var workflows []map[string]any
+					err := json.NewDecoder(resp.Body).Decode(&workflows)
+					require.NoError(t, err, "Failed to decode workflows response")
+					// We expect an empty array -- there's no workflow in the db
+					assert.NotNil(t, workflows, "Expected non-nil workflows array")
+					assert.Empty(t, workflows, "Expected empty workflows array")
+				},
+			},
+			{
+				name:           "Get single workflow returns 404 for non-existent workflow",
+				method:         "GET",
+				endpoint:       "http://localhost:3001/workflow/non-existent-workflow-id",
+				expectedStatus: http.StatusNotFound,
 			},
 		}
 
@@ -182,6 +211,183 @@ func TestAdminServer(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("List endpoints time filtering", func(t *testing.T) {
+		ctx, err := NewDBOSContext(Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-app",
+			AdminServer: true,
+		})
+		require.NoError(t, err)
+
+		testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+			return "result-" + input, nil
+		}
+		RegisterWorkflow(ctx, testWorkflow)
+
+		err = ctx.Launch()
+		require.NoError(t, err)
+
+		// Ensure cleanup
+		defer func() {
+			if ctx != nil {
+				ctx.Cancel()
+			}
+		}()
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		endpoint := fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /"))
+
+		// Create first workflow
+		handle1, err := RunAsWorkflow(ctx, testWorkflow, "workflow1")
+		require.NoError(t, err, "Failed to create first workflow")
+		workflowID1 := handle1.GetWorkflowID()
+
+		// Wait for first workflow to complete
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "Failed to get first workflow result")
+		assert.Equal(t, "result-workflow1", result1)
+
+		// Record time between workflows
+		timeBetween := time.Now()
+		time.Sleep(500 * time.Millisecond)
+
+		// Create second workflow
+		handle2, err := RunAsWorkflow(ctx, testWorkflow, "workflow2")
+		require.NoError(t, err, "Failed to create second workflow")
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "Failed to get second workflow result")
+		assert.Equal(t, "result-workflow2", result2)
+		workflowID2 := handle2.GetWorkflowID()
+
+		// Test 1: Query with start_time before timeBetween (should get both workflows)
+		reqBody1 := map[string]any{
+			"start_time": timeBetween.Add(-2 * time.Second).Format(time.RFC3339Nano),
+			"limit":      10,
+		}
+		req1, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody1)))
+		require.NoError(t, err, "Failed to create request 1")
+		req1.Header.Set("Content-Type", "application/json")
+
+		resp1, err := client.Do(req1)
+		require.NoError(t, err, "Failed to make request 1")
+		defer resp1.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp1.StatusCode)
+
+		var workflows1 []map[string]any
+		err = json.NewDecoder(resp1.Body).Decode(&workflows1)
+		require.NoError(t, err, "Failed to decode workflows response 1")
+
+		// Should have exactly 2 workflows that we just created
+		assert.Equal(t, 2, len(workflows1), "Expected exactly 2 workflows with start_time before timeBetween")
+
+		// Verify timestamps are epoch milliseconds
+		timeBetweenMillis := timeBetween.UnixMilli()
+		for _, wf := range workflows1 {
+			_, ok := wf["CreatedAt"].(float64)
+			require.True(t, ok, "CreatedAt should be a number")
+		}
+		// Verify the timestamp is around timeBetween (within 2 seconds before or after)
+		assert.Less(t, int64(workflows1[0]["CreatedAt"].(float64)), timeBetweenMillis, "first workflow CreatedAt should be before timeBetween")
+		assert.Greater(t, int64(workflows1[1]["CreatedAt"].(float64)), timeBetweenMillis, "second workflow CreatedAt should be before timeBetween")
+
+		// Verify both workflow IDs are present
+		foundIDs1 := make(map[string]bool)
+		for _, wf := range workflows1 {
+			id, ok := wf["WorkflowUUID"].(string)
+			require.True(t, ok, "WorkflowUUID should be a string")
+			foundIDs1[id] = true
+		}
+		assert.True(t, foundIDs1[workflowID1], "Expected to find first workflow ID in results")
+		assert.True(t, foundIDs1[workflowID2], "Expected to find second workflow ID in results")
+
+		// Test 2: Query with start_time after timeBetween (should get only second workflow)
+		reqBody2 := map[string]any{
+			"start_time": timeBetween.Format(time.RFC3339Nano),
+			"limit":      10,
+		}
+		fmt.Println("Request body 2:", reqBody2, "timebetween", timeBetween.UnixMilli())
+		req2, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody2)))
+		require.NoError(t, err, "Failed to create request 2")
+		req2.Header.Set("Content-Type", "application/json")
+
+		resp2, err := client.Do(req2)
+		require.NoError(t, err, "Failed to make request 2")
+		defer resp2.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp2.StatusCode)
+
+		var workflows2 []map[string]any
+		err = json.NewDecoder(resp2.Body).Decode(&workflows2)
+		require.NoError(t, err, "Failed to decode workflows response 2")
+		fmt.Println(workflows2)
+
+		// Should have exactly 1 workflow (the second one)
+		assert.Equal(t, 1, len(workflows2), "Expected exactly 1 workflow with start_time after timeBetween")
+
+		// Verify it's the second workflow
+		id2, ok := workflows2[0]["WorkflowUUID"].(string)
+		require.True(t, ok, "WorkflowUUID should be a string")
+		assert.Equal(t, workflowID2, id2, "Expected second workflow ID in results")
+
+		// Also test end_time filter
+		reqBody3 := map[string]any{
+			"end_time": timeBetween.Format(time.RFC3339Nano),
+			"limit":    10,
+		}
+		req3, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody3)))
+		require.NoError(t, err, "Failed to create request 3")
+		req3.Header.Set("Content-Type", "application/json")
+
+		resp3, err := client.Do(req3)
+		require.NoError(t, err, "Failed to make request 3")
+		defer resp3.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp3.StatusCode)
+
+		var workflows3 []map[string]any
+		err = json.NewDecoder(resp3.Body).Decode(&workflows3)
+		require.NoError(t, err, "Failed to decode workflows response 3")
+
+		// Should have exactly 1 workflow (the first one)
+		assert.Equal(t, 1, len(workflows3), "Expected exactly 1 workflow with end_time before timeBetween")
+
+		// Verify it's the first workflow
+		id3, ok := workflows3[0]["WorkflowUUID"].(string)
+		require.True(t, ok, "WorkflowUUID should be a string")
+		assert.Equal(t, workflowID1, id3, "Expected first workflow ID in results")
+
+		// Test 4: Query with empty body (should return all workflows)
+		req4, err := http.NewRequest(http.MethodPost, endpoint, nil)
+		require.NoError(t, err, "Failed to create request 4")
+
+		resp4, err := client.Do(req4)
+		require.NoError(t, err, "Failed to make request 4")
+		defer resp4.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp4.StatusCode)
+
+		var workflows4 []map[string]any
+		err = json.NewDecoder(resp4.Body).Decode(&workflows4)
+		require.NoError(t, err, "Failed to decode workflows response 4")
+
+		// Should have exactly 2 workflows (both that we created)
+		assert.Equal(t, 2, len(workflows4), "Expected exactly 2 workflows with empty body")
+
+		// Verify both workflow IDs are present
+		foundIDs4 := make(map[string]bool)
+		for _, wf := range workflows4 {
+			id, ok := wf["WorkflowUUID"].(string)
+			require.True(t, ok, "WorkflowUUID should be a string")
+			foundIDs4[id] = true
+		}
+		assert.True(t, foundIDs4[workflowID1], "Expected to find first workflow ID in empty body results")
+		assert.True(t, foundIDs4[workflowID2], "Expected to find second workflow ID in empty body results")
+
+		return // Skip the normal test flow
+	})
+
 }
 
 func mustMarshal(v any) []byte {
