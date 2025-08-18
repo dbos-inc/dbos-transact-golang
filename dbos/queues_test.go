@@ -1105,8 +1105,8 @@ func TestPriorityQueue(t *testing.T) {
 	require.NoError(t, err, "failed to get status for workflow 7")
 
 	assert.True(t, status6.StartedAt.Before(status7.StartedAt),
-		"expected workflow 6 to be dequeued before workflow 7, but got 6 started at %v and 7 started at %v",
-		status6.StartedAt, status7.StartedAt)
+		"expected workflow 6 to be dequeued before workflow 7, but got 6 started at %v (created at %v) and 7 started at %v (created at %v)",
+		status6.StartedAt, status6.CreatedAt, status7.StartedAt, status7.CreatedAt)
 
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after priority queue test")
 }
