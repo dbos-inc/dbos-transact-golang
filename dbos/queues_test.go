@@ -1065,6 +1065,7 @@ func TestPriorityQueue(t *testing.T) {
 	require.NoError(t, err)
 	wfHandles = append(wfHandles, handle6)
 
+	time.Sleep(10 * time.Millisecond) // Avoid collisions in created_at...
 	handle7, err := RunAsWorkflow(dbosCtx, testWorkflow, 7, WithQueue(priorityQueue.Name))
 	require.NoError(t, err)
 	wfHandles = append(wfHandles, handle7)

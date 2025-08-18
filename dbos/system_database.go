@@ -373,7 +373,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		input.status.ExecutorID,
 		applicationVersion,
 		input.status.ApplicationID,
-		input.status.CreatedAt.UnixMilli(),
+		input.status.CreatedAt.Round(time.Millisecond).UnixMilli(), // slightly reduce the likelihood of collisions
 		attempts,
 		updatedAt.UnixMilli(),
 		timeoutMs,
