@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1079,9 +1080,33 @@ func TestPriorityQueue(t *testing.T) {
 	}
 
 	mu.Lock()
-	expectedOrder := []int{0, 6, 7, 1, 2, 3, 4, 5}
-	assert.Equal(t, expectedOrder, wfPriorityList, "expected workflow execution order %v, got %v", expectedOrder, wfPriorityList)
+	// Check if the expected order is either {0, 6, 7, ...} or {0, 7, 6, ...}
+	// This is because while tasks are dequeued in order, they can run asynchronously
+	// and one could set a value in wfPriorityList before the other
+	expectedOrder1 := []int{0, 6, 7, 1, 2, 3, 4, 5}
+	expectedOrder2 := []int{0, 7, 6, 1, 2, 3, 4, 5}
+
+	validOrder := false
+	if reflect.DeepEqual(wfPriorityList, expectedOrder1) {
+		validOrder = true
+	} else if reflect.DeepEqual(wfPriorityList, expectedOrder2) {
+		validOrder = true
+	}
+
+	assert.True(t, validOrder, "expected workflow execution order to be either %v or %v, got %v",
+		expectedOrder1, expectedOrder2, wfPriorityList)
 	mu.Unlock()
+
+	// Verify that handle6 and handle7 workflows were dequeued in FIFO order
+	// by checking that their StartedAt time is in the correct order (6 is before 7)
+	status6, err := handle6.GetStatus()
+	require.NoError(t, err, "failed to get status for workflow 6")
+	status7, err := handle7.GetStatus()
+	require.NoError(t, err, "failed to get status for workflow 7")
+
+	assert.True(t, status6.StartedAt.Before(status7.StartedAt),
+		"expected workflow 6 to be dequeued before workflow 7, but got 6 started at %v and 7 started at %v",
+		status6.StartedAt, status7.StartedAt)
 
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after priority queue test")
 }
