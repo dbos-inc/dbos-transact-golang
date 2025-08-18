@@ -1081,21 +1081,8 @@ func TestPriorityQueue(t *testing.T) {
 	}
 
 	mu.Lock()
-	// Check if the expected order is either {0, 6, 7, ...} or {0, 7, 6, ...}
-	// This is because while tasks are dequeued in order, they can run asynchronously
-	// and one could set a value in wfPriorityList before the other
-	expectedOrder1 := []int{0, 6, 7, 1, 2, 3, 4, 5}
-	expectedOrder2 := []int{0, 7, 6, 1, 2, 3, 4, 5}
-
-	validOrder := false
-	if reflect.DeepEqual(wfPriorityList, expectedOrder1) {
-		validOrder = true
-	} else if reflect.DeepEqual(wfPriorityList, expectedOrder2) {
-		validOrder = true
-	}
-
-	assert.True(t, validOrder, "expected workflow execution order to be either %v or %v, got %v",
-		expectedOrder1, expectedOrder2, wfPriorityList)
+	expectedOrder := []int{0, 6, 7, 1, 2, 3, 4, 5}
+	assert.True(t, reflect.DeepEqual(wfPriorityList, expectedOrder), "expected workflow execution order to be %v, got %v", expectedOrder, wfPriorityList)
 	mu.Unlock()
 
 	// Verify that handle6 and handle7 workflows were dequeued in FIFO order
