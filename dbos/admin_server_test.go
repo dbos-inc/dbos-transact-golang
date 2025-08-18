@@ -151,8 +151,8 @@ func TestAdminServer(t *testing.T) {
 				body: bytes.NewBuffer(mustMarshal(map[string]any{
 					"workflow_uuids":      []string{"test-id-1", "test-id-2"},
 					"authenticated_user":  "test-user",
-					"start_time":          time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
-					"end_time":            time.Now().Format(time.RFC3339),
+					"start_time":          time.Now().Add(-24 * time.Hour).Format(time.RFC3339Nano),
+					"end_time":            time.Now().Format(time.RFC3339Nano),
 					"status":              "PENDING",
 					"application_version": "v1.0.0",
 					"workflow_name":       "testWorkflow",
@@ -249,7 +249,6 @@ func TestAdminServer(t *testing.T) {
 		assert.Equal(t, "result-workflow1", result1)
 
 		// Record time between workflows
-		time.Sleep(500 * time.Millisecond)
 		timeBetween := time.Now()
 		time.Sleep(500 * time.Millisecond)
 
@@ -263,7 +262,7 @@ func TestAdminServer(t *testing.T) {
 
 		// Test 1: Query with start_time before timeBetween (should get both workflows)
 		reqBody1 := map[string]any{
-			"start_time": timeBetween.Add(-2 * time.Second).Format(time.RFC3339),
+			"start_time": timeBetween.Add(-2 * time.Second).Format(time.RFC3339Nano),
 			"limit":      10,
 		}
 		req1, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody1)))
@@ -305,7 +304,7 @@ func TestAdminServer(t *testing.T) {
 
 		// Test 2: Query with start_time after timeBetween (should get only second workflow)
 		reqBody2 := map[string]any{
-			"start_time": timeBetween.Format(time.RFC3339),
+			"start_time": timeBetween.Format(time.RFC3339Nano),
 			"limit":      10,
 		}
 		fmt.Println("Request body 2:", reqBody2, "timebetween", timeBetween.UnixMilli())
@@ -334,7 +333,7 @@ func TestAdminServer(t *testing.T) {
 
 		// Also test end_time filter
 		reqBody3 := map[string]any{
-			"end_time": timeBetween.Format(time.RFC3339),
+			"end_time": timeBetween.Format(time.RFC3339Nano),
 			"limit":    10,
 		}
 		req3, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody3)))
