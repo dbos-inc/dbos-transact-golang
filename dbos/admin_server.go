@@ -37,7 +37,7 @@ type listWorkflowsRequest struct {
 	AuthenticatedUser  *string    `json:"authenticated_user"`  // Filter by user who initiated the workflow
 	StartTime          *time.Time `json:"start_time"`          // Filter workflows created after this time (RFC3339 format)
 	EndTime            *time.Time `json:"end_time"`            // Filter workflows created before this time (RFC3339 format)
-	Status             []string   `json:"status"`              // Filter by workflow status(es)
+	Status             string     `json:"status"`              // Filter by workflow status(es)
 	ApplicationVersion *string    `json:"application_version"` // Filter by application version
 	WorkflowName       *string    `json:"workflow_name"`       // Filter by workflow function name
 	Limit              *int       `json:"limit"`               // Maximum number of results to return
@@ -65,10 +65,8 @@ func (req *listWorkflowsRequest) toListWorkflowsOptions() []ListWorkflowsOption 
 		opts = append(opts, WithEndTime(*req.EndTime))
 	}
 	if len(req.Status) > 0 {
-		statuses := make([]WorkflowStatusType, len(req.Status))
-		for i, s := range req.Status {
-			statuses[i] = WorkflowStatusType(s)
-		}
+		statuses := make([]WorkflowStatusType, 1)
+		statuses[0] = WorkflowStatusType(req.Status)
 		opts = append(opts, WithStatus(statuses))
 	}
 	if req.ApplicationVersion != nil {
