@@ -373,7 +373,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		input.status.ExecutorID,
 		applicationVersion,
 		input.status.ApplicationID,
-		input.status.CreatedAt.UnixMilli(),
+		input.status.CreatedAt.Round(time.Millisecond).UnixMilli(), // slightly reduce the likelihood of collisions
 		attempts,
 		updatedAt.UnixMilli(),
 		timeoutMs,
@@ -1882,7 +1882,6 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	}
 
 	// First check the rate limiter
-	startTimeMs := time.Now().UnixMilli()
 	var numRecentQueries int
 	if input.queue.RateLimit != nil {
 		limiterPeriod := time.Duration(input.queue.RateLimit.Period * float64(time.Second))
@@ -2064,7 +2063,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			WorkflowStatusPending,
 			input.applicationVersion,
 			input.executorID,
-			startTimeMs,
+			time.Now().UnixMilli(),
 			id).Scan(&retWorkflow.name, &inputString)
 
 		if inputString != nil && len(*inputString) > 0 {
