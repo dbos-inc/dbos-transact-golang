@@ -160,6 +160,37 @@ func TestAdminServer(t *testing.T) {
 					// This will be overridden in the test
 				},
 			},
+			{
+				name:           "Workflows endpoint accepts all filters without error",
+				method:         "POST",
+				endpoint:       fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /")),
+				body: bytes.NewBuffer(mustMarshal(map[string]any{
+					"workflow_uuids":      []string{"test-id-1", "test-id-2"},
+					"authenticated_user":  "test-user",
+					"start_time":          time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
+					"end_time":            time.Now().Format(time.RFC3339),
+					"status":              []string{"PENDING", "SUCCESS"},
+					"application_version": "v1.0.0",
+					"workflow_name":       "testWorkflow",
+					"limit":               100,
+					"offset":              0,
+					"sort_desc":           true,
+					"workflow_id_prefix":  "test-",
+					"load_input":          true,
+					"load_output":         true,
+					"queue_name":          "test-queue",
+				})),
+				contentType:    "application/json",
+				expectedStatus: http.StatusOK,
+				validateResp: func(t *testing.T, resp *http.Response) {
+					var workflows []map[string]any
+					err := json.NewDecoder(resp.Body).Decode(&workflows)
+					require.NoError(t, err, "Failed to decode workflows response")
+					// We expect an empty array since these filters likely won't match any workflows
+					assert.NotNil(t, workflows, "Expected non-nil workflows array")
+					// No error is success - the result can be empty
+				},
+			},
 		}
 
 		for _, tt := range tests {

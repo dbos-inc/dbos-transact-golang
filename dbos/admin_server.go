@@ -33,20 +33,20 @@ const (
 
 // listWorkflowsRequest represents the request structure for listing workflows
 type listWorkflowsRequest struct {
-	WorkflowUUIDs      []string             `json:"workflow_uuids"`      // Filter by specific workflow IDs
-	AuthenticatedUser  *string              `json:"authenticated_user"`  // Filter by user who initiated the workflow
-	StartTime          *time.Time           `json:"start_time"`          // Filter workflows created after this time (RFC3339 format)
-	EndTime            *time.Time           `json:"end_time"`            // Filter workflows created before this time (RFC3339 format)
-	Status             []WorkflowStatusType `json:"status"`              // Filter by workflow status(es)
-	ApplicationVersion *string              `json:"application_version"` // Filter by application version
-	WorkflowName       *string              `json:"workflow_name"`       // Filter by workflow function name
-	Limit              *int                 `json:"limit"`               // Maximum number of results to return
-	Offset             *int                 `json:"offset"`              // Offset for pagination
-	SortDesc           *bool                `json:"sort_desc"`           // Sort in descending order by creation time
-	WorkflowIDPrefix   *string              `json:"workflow_id_prefix"`  // Filter by workflow ID prefix
-	LoadInput          *bool                `json:"load_input"`          // Include workflow input in response
-	LoadOutput         *bool                `json:"load_output"`         // Include workflow output in response
-	QueueName          *string              `json:"queue_name"`          // Filter by queue name (for queued workflows)
+	WorkflowUUIDs      []string   `json:"workflow_uuids"`      // Filter by specific workflow IDs
+	AuthenticatedUser  *string    `json:"authenticated_user"`  // Filter by user who initiated the workflow
+	StartTime          *time.Time `json:"start_time"`          // Filter workflows created after this time (RFC3339 format)
+	EndTime            *time.Time `json:"end_time"`            // Filter workflows created before this time (RFC3339 format)
+	Status             []string   `json:"status"`              // Filter by workflow status(es)
+	ApplicationVersion *string    `json:"application_version"` // Filter by application version
+	WorkflowName       *string    `json:"workflow_name"`       // Filter by workflow function name
+	Limit              *int       `json:"limit"`               // Maximum number of results to return
+	Offset             *int       `json:"offset"`              // Offset for pagination
+	SortDesc           *bool      `json:"sort_desc"`           // Sort in descending order by creation time
+	WorkflowIDPrefix   *string    `json:"workflow_id_prefix"`  // Filter by workflow ID prefix
+	LoadInput          *bool      `json:"load_input"`          // Include workflow input in response
+	LoadOutput         *bool      `json:"load_output"`         // Include workflow output in response
+	QueueName          *string    `json:"queue_name"`          // Filter by queue name (for queued workflows)
 }
 
 // buildOptions converts the request struct into a slice of ListWorkflowsOption
@@ -65,7 +65,11 @@ func (req *listWorkflowsRequest) toListWorkflowsOptions() []ListWorkflowsOption 
 		opts = append(opts, WithEndTime(*req.EndTime))
 	}
 	if len(req.Status) > 0 {
-		opts = append(opts, WithStatus(req.Status))
+		statuses := make([]WorkflowStatusType, len(req.Status))
+		for i, s := range req.Status {
+			statuses[i] = WorkflowStatusType(s)
+		}
+		opts = append(opts, WithStatus(statuses))
 	}
 	if req.ApplicationVersion != nil {
 		opts = append(opts, WithAppVersion(*req.ApplicationVersion))
