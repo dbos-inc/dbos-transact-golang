@@ -1354,16 +1354,14 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (*workflowPolli
 	var r R
 	gob.Register(r)
 
-	workflowStatus, err := ctx.(*dbosContext).systemDB.listWorkflows(ctx, listWorkflowsDBInput{
-		workflowIDs: []string{workflowID},
-	})
+	// Call the interface method
+	handle, err := ctx.RetrieveWorkflow(ctx, workflowID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve workflow status: %w", err)
+		return nil, err
 	}
-	if len(workflowStatus) == 0 {
-		return nil, newNonExistentWorkflowError(workflowID)
-	}
-	return newWorkflowPollingHandle[R](ctx, workflowID), nil
+
+	// Convert to typed polling handle
+	return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID()), nil
 }
 
 type EnqueueOptions struct {
