@@ -212,17 +212,17 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 /**********************************/
 /******* WORKFLOW REGISTRY *******/
 /**********************************/
-type GenericWrappedWorkflowFunc[P any, R any] func(ctx DBOSContext, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
-type WrappedWorkflowFunc func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
+type WrappedWorkflowFunc[P any, R any] func(ctx DBOSContext, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
+type wrappedWorkflowFunc func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
 
 type workflowRegistryEntry struct {
-	wrappedFunction WrappedWorkflowFunc
+	wrappedFunction wrappedWorkflowFunc
 	maxRetries      int
 	name            string
 }
 
 // Register adds a workflow function to the registry (thread-safe, only once per name)
-func registerWorkflow(ctx DBOSContext, workflowFQN string, fn WrappedWorkflowFunc, maxRetries int, customName string) {
+func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFunc, maxRetries int, customName string) {
 	// Skip if we don't have a concrete dbosContext
 	c, ok := ctx.(*dbosContext)
 	if !ok {
@@ -411,7 +411,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn WorkflowFunc[P, R], opts
 		return fn(ctx, typedInput)
 	})
 
-	typeErasedWrapper := WrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
+	typeErasedWrapper := wrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 		opts = append(opts, withWorkflowName(fqn)) // Append the name so ctx.RunAsWorkflow can look it up from the registry to apply registration-time options
 		handle, err := ctx.RunAsWorkflow(ctx, typedErasedWorkflow, input, opts...)
 		if err != nil {
@@ -831,8 +831,8 @@ type stepFunc func(ctx context.Context) (any, error)
 // StepFunc represents a type-safe step function with a specific output type R.
 type StepFunc[R any] func(ctx context.Context) (R, error)
 
-// stepOptions holds the configuration for step execution using functional options pattern.
-type stepOptions struct {
+// StepOptions holds the configuration for step execution using functional options pattern.
+type StepOptions struct {
 	MaxRetries    int           // Maximum number of retry attempts (0 = no retries)
 	BackoffFactor float64       // Exponential backoff multiplier between retries (default: 2.0)
 	BaseInterval  time.Duration // Initial delay between retries (default: 100ms)
@@ -841,7 +841,7 @@ type stepOptions struct {
 }
 
 // setDefaults applies default values to stepOptions
-func (opts *stepOptions) setDefaults() {
+func (opts *StepOptions) setDefaults() {
 	if opts.BackoffFactor == 0 {
 		opts.BackoffFactor = _DEFAULT_STEP_BACKOFF_FACTOR
 	}
@@ -854,13 +854,13 @@ func (opts *stepOptions) setDefaults() {
 }
 
 // StepOption is a functional option for configuring step execution parameters.
-type StepOption func(*stepOptions)
+type StepOption func(*StepOptions)
 
 // WithStepName sets a custom name for the step. If the step name has already been set
 // by a previous call to WithStepName, this option will be ignored to allow
 // multiple WithStepName calls without overriding the first one.
 func WithStepName(name string) StepOption {
-	return func(opts *stepOptions) {
+	return func(opts *StepOptions) {
 		if opts.StepName == "" {
 			opts.StepName = name
 		}
@@ -870,7 +870,7 @@ func WithStepName(name string) StepOption {
 // WithStepMaxRetries sets the maximum number of retry attempts for the step.
 // A value of 0 means no retries (default behavior).
 func WithStepMaxRetries(maxRetries int) StepOption {
-	return func(opts *stepOptions) {
+	return func(opts *StepOptions) {
 		opts.MaxRetries = maxRetries
 	}
 }
@@ -879,7 +879,7 @@ func WithStepMaxRetries(maxRetries int) StepOption {
 // The delay between retries is calculated as: BaseInterval * (BackoffFactor^(retry-1))
 // Default value is 2.0.
 func WithBackoffFactor(factor float64) StepOption {
-	return func(opts *stepOptions) {
+	return func(opts *StepOptions) {
 		opts.BackoffFactor = factor
 	}
 }
@@ -887,7 +887,7 @@ func WithBackoffFactor(factor float64) StepOption {
 // WithBaseInterval sets the initial delay between retries.
 // Default value is 100ms.
 func WithBaseInterval(interval time.Duration) StepOption {
-	return func(opts *stepOptions) {
+	return func(opts *StepOptions) {
 		opts.BaseInterval = interval
 	}
 }
@@ -895,7 +895,7 @@ func WithBaseInterval(interval time.Duration) StepOption {
 // WithMaxInterval sets the maximum delay between retries.
 // Default value is 5s.
 func WithMaxInterval(interval time.Duration) StepOption {
-	return func(opts *stepOptions) {
+	return func(opts *StepOptions) {
 		opts.MaxInterval = interval
 	}
 }
@@ -971,7 +971,7 @@ func RunAsStep[R any](ctx DBOSContext, fn StepFunc[R], opts ...StepOption) (R, e
 
 func (c *dbosContext) RunAsStep(_ DBOSContext, fn stepFunc, opts ...StepOption) (any, error) {
 	// Process functional options
-	stepOpts := &stepOptions{}
+	stepOpts := &StepOptions{}
 	for _, opt := range opts {
 		opt(stepOpts)
 	}
