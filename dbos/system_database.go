@@ -1862,7 +1862,7 @@ type dequeuedWorkflow struct {
 }
 
 type dequeueWorkflowsInput struct {
-	queue              WorkflowQueue
+	queue              QueueOptions
 	executorID         string
 	applicationVersion string
 }
