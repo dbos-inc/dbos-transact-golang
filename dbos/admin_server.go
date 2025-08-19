@@ -107,7 +107,7 @@ type adminServer struct {
 
 // toListWorkflowResponse converts a WorkflowStatus to a map with all time fields in UTC
 // not super ergonomic but the DBOS console excepts unix timestamps
-func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, err) {
+func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 	result := map[string]any{
 		"WorkflowUUID":       ws.ID,
 		"Status":             ws.Status,
