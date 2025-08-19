@@ -257,7 +257,7 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFun
 	}
 }
 
-func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn workflowFunc, cronSchedule string) {
+func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn WorkflowFunc, cronSchedule string) {
 	// Skip if we don't have a concrete dbosContext
 	c, ok := ctx.(*dbosContext)
 	if !ok {
@@ -365,7 +365,7 @@ func WithWorkflowName(name string) WorkflowRegistrationOption {
 //	    dbos.WithMaxRetries(5),
 //	    dbos.WithSchedule("0 0 * * *")) // daily at midnight
 //		dbos.WithWorkflowName("MyCustomWorkflowName") // Custom name for the workflow
-func RegisterWorkflow[P any, R any](ctx DBOSContext, fn WorkflowFunc[P, R], opts ...WorkflowRegistrationOption) {
+func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...WorkflowRegistrationOption) {
 	if ctx == nil {
 		panic("ctx cannot be nil")
 	}
@@ -391,7 +391,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn WorkflowFunc[P, R], opts
 	gob.Register(r)
 
 	// Register a type-erased version of the durable workflow for recovery
-	typedErasedWorkflow := workflowFunc(func(ctx DBOSContext, input any) (any, error) {
+	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 		typedInput, ok := input.(P)
 		if !ok {
 			wfID, err := ctx.GetWorkflowID()
@@ -438,13 +438,13 @@ type DBOSContextKey string
 
 const workflowStateKey DBOSContextKey = "workflowState"
 
-// WorkflowFunc represents a type-safe workflow function with specific input and output types.
+// Workflow represents a type-safe workflow function with specific input and output types.
 // P is the input parameter type and R is the return type.
 // All workflow functions must accept a DBOSContext as their first parameter.
-type WorkflowFunc[P any, R any] func(ctx DBOSContext, input P) (R, error)
+type Workflow[P any, R any] func(ctx DBOSContext, input P) (R, error)
 
-// workflowFunc represents a type-erased workflow function used internally.
-type workflowFunc func(ctx DBOSContext, input any) (any, error)
+// WorkflowFunc represents a type-erased workflow function used internally.
+type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
 
 type WorkflowOptions struct {
 	workflowName       string
@@ -524,7 +524,7 @@ func withWorkflowName(name string) WorkflowOption {
 //	} else {
 //	    log.Printf("Result: %v", result)
 //	}
-func RunAsWorkflow[P any, R any](ctx DBOSContext, fn WorkflowFunc[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
+func RunAsWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("ctx cannot be nil")
 	}
@@ -532,7 +532,7 @@ func RunAsWorkflow[P any, R any](ctx DBOSContext, fn WorkflowFunc[P, R], input P
 	// Add the fn name to the options so we can communicate it with DBOSContext.RunAsWorkflow
 	opts = append(opts, withWorkflowName(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()))
 
-	typedErasedWorkflow := workflowFunc(func(ctx DBOSContext, input any) (any, error) {
+	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 		return fn(ctx, input.(P))
 	})
 
@@ -581,7 +581,7 @@ func RunAsWorkflow[P any, R any](ctx DBOSContext, fn WorkflowFunc[P, R], input P
 	return nil, fmt.Errorf("unexpected workflow handle type: %T", handle)
 }
 
-func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn workflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
+func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 	// Apply options to build params
 	params := WorkflowOptions{
 		applicationVersion: c.GetApplicationVersion(),
@@ -825,11 +825,11 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn workflowFunc, input any, o
 /******* STEP FUNCTIONS *******/
 /******************************/
 
-// stepFunc represents a type-erased step function used internally.
-type stepFunc func(ctx context.Context) (any, error)
+// StepFunc represents a type-erased step function used internally.
+type StepFunc func(ctx context.Context) (any, error)
 
-// StepFunc represents a type-safe step function with a specific output type R.
-type StepFunc[R any] func(ctx context.Context) (R, error)
+// Step represents a type-safe step function with a specific output type R.
+type Step[R any] func(ctx context.Context) (R, error)
 
 // StepOptions holds the configuration for step execution using functional options pattern.
 type StepOptions struct {
@@ -940,7 +940,7 @@ func WithMaxInterval(interval time.Duration) StepOption {
 // Note that the function passed to RunAsStep must accept a context.Context as its first parameter
 // and this context *must* be the one specified in the function's signature (not the context passed to RunAsStep).
 // Under the hood, DBOS will augment the step's context and pass it to the function when executing it durably.
-func RunAsStep[R any](ctx DBOSContext, fn StepFunc[R], opts ...StepOption) (R, error) {
+func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
 	}
@@ -954,7 +954,7 @@ func RunAsStep[R any](ctx DBOSContext, fn StepFunc[R], opts ...StepOption) (R, e
 	opts = append(opts, WithStepName(stepName))
 
 	// Type-erase the function
-	typeErasedFn := stepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
+	typeErasedFn := StepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
 
 	result, err := ctx.RunAsStep(ctx, typeErasedFn, opts...)
 	// Step function could return a nil result
@@ -969,7 +969,7 @@ func RunAsStep[R any](ctx DBOSContext, fn StepFunc[R], opts ...StepOption) (R, e
 	return typedResult, err
 }
 
-func (c *dbosContext) RunAsStep(_ DBOSContext, fn stepFunc, opts ...StepOption) (any, error) {
+func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error) {
 	// Process functional options
 	stepOpts := &StepOptions{}
 	for _, opt := range opts {

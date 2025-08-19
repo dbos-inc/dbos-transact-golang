@@ -75,8 +75,8 @@ type DBOSContext interface {
 	Cancel()       // Gracefully shutdown the DBOS runtime, waiting for workflows to complete and cleaning up resources
 
 	// Workflow operations
-	RunAsStep(_ DBOSContext, fn stepFunc, opts ...StepOption) (any, error)                                        // Execute a function as a durable step within a workflow
-	RunAsWorkflow(_ DBOSContext, fn workflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
+	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                        // Execute a function as a durable step within a workflow
+	RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
 	Send(_ DBOSContext, destinationID string, message any, topic string) error                                    // Send a message to another workflow
 	Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error)                                         // Receive a message sent to this workflow
 	SetEvent(_ DBOSContext, key string, message any) error                                                        // Set a key-value event for this workflow
