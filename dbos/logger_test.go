@@ -26,7 +26,8 @@ func TestLogger(t *testing.T) {
 			}
 		})
 
-		ctx := dbosCtx.(*dbosContext)
+		ctx, ok := dbosCtx.(*dbosContext)
+		require.True(t, ok, "Expected dbosCtx to be of type *dbosContext")
 		require.NotNil(t, ctx.logger)
 
 		// Test logger access

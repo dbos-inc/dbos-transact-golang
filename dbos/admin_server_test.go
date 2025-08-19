@@ -44,7 +44,8 @@ func TestAdminServer(t *testing.T) {
 		// Verify the DBOS executor doesn't have an admin server instance
 		require.NotNil(t, ctx, "Expected DBOS instance to be created")
 
-		exec := ctx.(*dbosContext)
+		exec, ok := ctx.(*dbosContext)
+		require.True(t, ok, "Expected ctx to be of type *dbosContext")
 		require.Nil(t, exec.adminServer, "Expected admin server to be nil when not configured")
 	})
 

@@ -287,7 +287,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			}
 		}
 
-		workflows, err := ctx.ListWorkflows(req.toListWorkflowsOptions()...)
+		workflows, err := ListWorkflows(ctx, req.toListWorkflowsOptions()...)
 		if err != nil {
 			ctx.logger.Error("Failed to list workflows", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to list workflows: %v", err), http.StatusInternalServerError)
@@ -313,7 +313,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 
 		// Use ListWorkflows with the specific workflow ID filter
 		opts := []ListWorkflowsOption{WithWorkflowIDs([]string{workflowID})}
-		workflows, err := ctx.ListWorkflows(opts...)
+		workflows, err := ListWorkflows(ctx, opts...)
 		if err != nil {
 			ctx.logger.Error("Failed to get workflow", "workflow_id", workflowID, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to get workflow: %v", err), http.StatusInternalServerError)
@@ -346,7 +346,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			}
 		}
 
-		workflows, err := ctx.ListWorkflows(req.toListWorkflowsOptions()...)
+		workflows, err := ListWorkflows(ctx, req.toListWorkflowsOptions()...)
 		if err != nil {
 			ctx.logger.Error("Failed to list queued workflows", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to list queued workflows: %v", err), http.StatusInternalServerError)

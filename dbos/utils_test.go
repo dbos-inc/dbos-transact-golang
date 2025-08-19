@@ -134,7 +134,11 @@ func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 	success := false
 	for range maxTries {
 		// Begin transaction
-		exec := ctx.(*dbosContext)
+		exec, ok := ctx.(*dbosContext)
+		if !ok {
+			fmt.Println("Expected ctx to be of type *dbosContext in queueEntriesAreCleanedUp")
+			return false
+		}
 		tx, err := exec.systemDB.(*sysDB).pool.Begin(ctx)
 		if err != nil {
 			return false
