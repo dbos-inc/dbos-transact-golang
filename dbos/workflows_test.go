@@ -1308,15 +1308,15 @@ func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 }
 
 func receiveWorkflow(ctx DBOSContext, topic string) (string, error) {
-	msg1, err := Recv[string](ctx, topic, 10 * time.Second)
+	msg1, err := Recv[string](ctx, topic, 10*time.Second)
 	if err != nil {
 		return "", err
 	}
-	msg2, err := Recv[string](ctx, topic, 10 * time.Second)
+	msg2, err := Recv[string](ctx, topic, 10*time.Second)
 	if err != nil {
 		return "", err
 	}
-	msg3, err := Recv[string](ctx, topic, 10 * time.Second)
+	msg3, err := Recv[string](ctx, topic, 10*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -1335,7 +1335,7 @@ func receiveWorkflowCoordinated(ctx DBOSContext, input struct {
 	concurrentRecvStartEvent.Wait()
 
 	// Do a single Recv call with timeout
-	msg, err := Recv[string](ctx, input.Topic, 3 * time.Second)
+	msg, err := Recv[string](ctx, input.Topic, 3*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -1349,7 +1349,7 @@ func sendStructWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error
 }
 
 func receiveStructWorkflow(ctx DBOSContext, topic string) (sendRecvType, error) {
-	return Recv[sendRecvType](ctx, topic, 3 * time.Second)
+	return Recv[sendRecvType](ctx, topic, 3*time.Second)
 }
 
 func sendIdempotencyWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
@@ -1362,7 +1362,7 @@ func sendIdempotencyWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, 
 }
 
 func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
-	msg, err := Recv[string](ctx, topic, 3 * time.Second)
+	msg, err := Recv[string](ctx, topic, 3*time.Second)
 	if err != nil {
 		// Unlock the test in this case
 		receiveIdempotencyStartEvent.Set()
@@ -1511,7 +1511,7 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("RecvMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run Recv outside of a workflow context
-		_, err := Recv[string](dbosCtx, "test-topic", 1 * time.Second)
+		_, err := Recv[string](dbosCtx, "test-topic", 1*time.Second)
 		require.Error(t, err, "expected error when running Recv outside of workflow context, but got none")
 
 		// Check the error type
@@ -1722,7 +1722,7 @@ func setEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, err
 }
 
 func getEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	result, err := GetEvent[string](ctx, input.Key, input.Message, 3 * time.Second)
+	result, err := GetEvent[string](ctx, input.Key, input.Message, 3*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -1759,7 +1759,7 @@ func setEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (
 }
 
 func getEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	result, err := GetEvent[string](ctx, input.Key, input.Message, 3 * time.Second)
+	result, err := GetEvent[string](ctx, input.Key, input.Message, 3*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -1969,7 +1969,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Start a workflow that gets the event from outside the original workflow
-		message, err := GetEvent[string](dbosCtx, setHandle.GetWorkflowID(), "test-key", 3 * time.Second)
+		message, err := GetEvent[string](dbosCtx, setHandle.GetWorkflowID(), "test-key", 3*time.Second)
 		if err != nil {
 			t.Fatalf("failed to get event from outside workflow: %v", err)
 		}
@@ -1994,7 +1994,7 @@ func TestSetGetEvent(t *testing.T) {
 	t.Run("GetEventTimeout", func(t *testing.T) {
 		// Try to get an event from a non-existent workflow
 		nonExistentID := uuid.NewString()
-		message, err := GetEvent[string](dbosCtx, nonExistentID, "test-key", 3 * time.Second)
+		message, err := GetEvent[string](dbosCtx, nonExistentID, "test-key", 3*time.Second)
 		require.NoError(t, err, "failed to get event from non-existent workflow")
 		if message != "" {
 			t.Fatalf("expected empty result on timeout, got '%s'", message)
@@ -2008,7 +2008,7 @@ func TestSetGetEvent(t *testing.T) {
 		require.NoError(t, err, "failed to set event")
 		_, err = setHandle.GetResult()
 		require.NoError(t, err, "failed to get result from set event workflow")
-		message, err = GetEvent[string](dbosCtx, setHandle.GetWorkflowID(), "non-existent-key", 3 * time.Second)
+		message, err = GetEvent[string](dbosCtx, setHandle.GetWorkflowID(), "non-existent-key", 3*time.Second)
 		require.NoError(t, err, "failed to get event with non-existent key")
 		if message != "" {
 			t.Fatalf("expected empty result on timeout with non-existent key, got '%s'", message)
@@ -2155,7 +2155,7 @@ func TestSetGetEvent(t *testing.T) {
 		for range numGoroutines {
 			go func() {
 				defer wg.Done()
-				res, err := GetEvent[string](dbosCtx, setHandle.GetWorkflowID(), "concurrent-event-key", 10 * time.Second)
+				res, err := GetEvent[string](dbosCtx, setHandle.GetWorkflowID(), "concurrent-event-key", 10*time.Second)
 				if err != nil {
 					errors <- fmt.Errorf("failed to get event in goroutine: %v", err)
 					return
@@ -2260,6 +2260,18 @@ func TestWorkflowTimeout(t *testing.T) {
 		<-ctx.Done()
 		assert.True(t, errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded),
 			"workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
+		// The status of this workflow should transition to cancelled
+		maxtries := 10
+		for range maxtries {
+			isCancelled, err := checkWfStatus(ctx, WorkflowStatusCancelled)
+			if err != nil {
+				return "", err
+			}
+			if isCancelled {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
 		return "", ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflow)
@@ -2326,6 +2338,62 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
 		assert.True(t, errors.Is(err, context.DeadlineExceeded), "Expected deadline exceeded error, got: %v", err)
+		assert.Equal(t, "", result, "expected result to be an empty string")
+
+		// Check the workflow status: should be cancelled
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+	})
+
+	waitForCancelWorkflowWithStepAfterCancel := func(ctx DBOSContext, _ string) (string, error) {
+		// Wait for cancellation
+		<-ctx.Done()
+		// Check that we have the correct cancellation error
+		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
+		}
+		// The status of this workflow should transition to cancelled
+		maxtries := 10
+		for range maxtries {
+			isCancelled, err := checkWfStatus(ctx, WorkflowStatusCancelled)
+			if err != nil {
+				return "", err
+			}
+			if isCancelled {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		// After cancellation, try to run a simple step
+		// This should return a WorkflowCancelled error
+		return RunAsStep(ctx, simpleStep)
+	}
+	RegisterWorkflow(dbosCtx, waitForCancelWorkflowWithStepAfterCancel)
+
+	t.Run("WorkflowWithStepAfterTimeout", func(t *testing.T) {
+		// Start a workflow that waits for cancellation then tries to run a step
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		defer cancelFunc() // Ensure we clean up the context
+		handle, err := RunAsWorkflow(cancelCtx, waitForCancelWorkflowWithStepAfterCancel, "wf-with-step-after-timeout")
+		require.NoError(t, err, "failed to start workflow with step after timeout")
+
+		// Wait for the workflow to complete and get the result
+		result, err := handle.GetResult()
+		fmt.Println(result)
+		// The workflow should return a WorkflowCancelled error from the step
+		require.Error(t, err, "expected error from workflow")
+
+		// Check if the error is a DBOSError with WorkflowCancelled code
+		var dbosErr *DBOSError
+		if errors.As(err, &dbosErr) {
+			assert.Equal(t, WorkflowCancelled, dbosErr.Code, "expected WorkflowCancelled error code, got: %v", dbosErr.Code)
+		} else {
+			// If not a DBOSError, check if it's a context error
+			assert.True(t, errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+				"expected context.Canceled or context.DeadlineExceeded error, got: %v", err)
+		}
 		assert.Equal(t, "", result, "expected result to be an empty string")
 
 		// Check the workflow status: should be cancelled
@@ -2519,7 +2587,7 @@ func TestWorkflowTimeout(t *testing.T) {
 }
 
 func notificationWaiterWorkflow(ctx DBOSContext, pairID int) (string, error) {
-	result, err := GetEvent[string](ctx, fmt.Sprintf("notification-setter-%d", pairID), "event-key", 10 * time.Second)
+	result, err := GetEvent[string](ctx, fmt.Sprintf("notification-setter-%d", pairID), "event-key", 10*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -2535,7 +2603,7 @@ func notificationSetterWorkflow(ctx DBOSContext, pairID int) (string, error) {
 }
 
 func sendRecvReceiverWorkflow(ctx DBOSContext, pairID int) (string, error) {
-	result, err := Recv[string](ctx, "send-recv-topic", 10 * time.Second)
+	result, err := Recv[string](ctx, "send-recv-topic", 10*time.Second)
 	if err != nil {
 		return "", err
 	}
