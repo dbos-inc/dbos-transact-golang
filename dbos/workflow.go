@@ -1713,8 +1713,8 @@ func ForkWorkflow[R any](ctx DBOSContext, input ForkWorkflowInput) (WorkflowHand
 	return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID()), nil
 }
 
-// listWorkflowsParams holds configuration parameters for listing workflows
-type listWorkflowsParams struct {
+// ListWorkflowsOptions holds configuration parameters for listing workflows
+type ListWorkflowsOptions struct {
 	workflowIDs      []string
 	status           []WorkflowStatusType
 	startTime        time.Time
@@ -1732,7 +1732,7 @@ type listWorkflowsParams struct {
 }
 
 // ListWorkflowsOption is a functional option for configuring workflow listing parameters.
-type ListWorkflowsOption func(*listWorkflowsParams)
+type ListWorkflowsOption func(*ListWorkflowsOptions)
 
 // WithWorkflowIDs filters workflows by the specified workflow IDs.
 //
@@ -1741,7 +1741,7 @@ type ListWorkflowsOption func(*listWorkflowsParams)
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithWorkflowIDs([]string{"workflow1", "workflow2"}))
 func WithWorkflowIDs(workflowIDs []string) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.workflowIDs = workflowIDs
 	}
 }
@@ -1754,7 +1754,7 @@ func WithWorkflowIDs(workflowIDs []string) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess, dbos.WorkflowStatusError}))
 func WithStatus(status []WorkflowStatusType) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.status = status
 	}
 }
@@ -1766,7 +1766,7 @@ func WithStatus(status []WorkflowStatusType) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithStartTime(time.Now().Add(-24*time.Hour)))
 func WithStartTime(startTime time.Time) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.startTime = startTime
 	}
 }
@@ -1778,7 +1778,7 @@ func WithStartTime(startTime time.Time) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithEndTime(time.Now()))
 func WithEndTime(endTime time.Time) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.endTime = endTime
 	}
 }
@@ -1790,7 +1790,7 @@ func WithEndTime(endTime time.Time) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithName("MyWorkflowFunction"))
 func WithName(name string) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.name = name
 	}
 }
@@ -1802,7 +1802,7 @@ func WithName(name string) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithAppVersion("v1.0.0"))
 func WithAppVersion(appVersion string) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.appVersion = appVersion
 	}
 }
@@ -1814,7 +1814,7 @@ func WithAppVersion(appVersion string) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithUser("john.doe"))
 func WithUser(user string) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.user = user
 	}
 }
@@ -1826,7 +1826,7 @@ func WithUser(user string) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithLimit(100))
 func WithLimit(limit int) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.limit = &limit
 	}
 }
@@ -1838,7 +1838,7 @@ func WithLimit(limit int) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithOffset(50), dbos.WithLimit(25))
 func WithOffset(offset int) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.offset = &offset
 	}
 }
@@ -1850,7 +1850,7 @@ func WithOffset(offset int) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithSortDesc(true))
 func WithSortDesc(sortDesc bool) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.sortDesc = sortDesc
 	}
 }
@@ -1862,7 +1862,7 @@ func WithSortDesc(sortDesc bool) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithWorkflowIDPrefix("batch-"))
 func WithWorkflowIDPrefix(prefix string) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.workflowIDPrefix = prefix
 	}
 }
@@ -1874,7 +1874,7 @@ func WithWorkflowIDPrefix(prefix string) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithLoadInput(false))
 func WithLoadInput(loadInput bool) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.loadInput = loadInput
 	}
 }
@@ -1886,7 +1886,7 @@ func WithLoadInput(loadInput bool) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithLoadOutput(false))
 func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.loadOutput = loadOutput
 	}
 }
@@ -1899,7 +1899,7 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 //	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithQueueName("data-processing"))
 func WithQueueName(queueName string) ListWorkflowsOption {
-	return func(p *listWorkflowsParams) {
+	return func(p *ListWorkflowsOptions) {
 		p.queueName = queueName
 	}
 }
@@ -1948,10 +1948,10 @@ func WithQueueName(queueName string) ListWorkflowsOption {
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-func (c *dbosContext) ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
+func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
 
 	// Initialize parameters with defaults
-	params := &listWorkflowsParams{
+	params := &ListWorkflowsOptions{
 		loadInput:  true, // Default to loading input
 		loadOutput: true, // Default to loading output
 	}
@@ -2027,5 +2027,5 @@ func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStat
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
-	return ctx.ListWorkflows(opts...)
+	return ctx.ListWorkflows(ctx, opts...)
 }

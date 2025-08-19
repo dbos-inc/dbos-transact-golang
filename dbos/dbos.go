@@ -91,7 +91,7 @@ type DBOSContext interface {
 	CancelWorkflow(_ DBOSContext, workflowID string) error                                                                // Cancel a workflow by setting its status to CANCELLED
 	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                         // Resume a cancelled workflow
 	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)                                     // Fork a workflow from a specific step
-	ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                                                  // List workflows based on filtering criteria
+	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                                   // List workflows based on filtering criteria
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
