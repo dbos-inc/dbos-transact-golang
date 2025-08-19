@@ -105,9 +105,9 @@ type adminServer struct {
 	isDeactivated atomic.Int32
 }
 
-// workflowStatusToUTC converts a WorkflowStatus to a map with all time fields in UTC
+// toListWorkflowResponse converts a WorkflowStatus to a map with all time fields in UTC
 // not super ergonomic but the DBOS console excepts unix timestamps
-func workflowStatusToUTC(ws WorkflowStatus) map[string]any {
+func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, err) {
 	result := map[string]any{
 		"WorkflowUUID":       ws.ID,
 		"Status":             ws.Status,
@@ -152,7 +152,23 @@ func workflowStatusToUTC(ws WorkflowStatus) map[string]any {
 		result["StartedAt"] = nil
 	}
 
-	return result
+	if ws.Input != nil {
+		bytes, err := json.Marshal(ws.Input)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal input: %w", err)
+		}
+		result["Input"] = string(bytes)
+	}
+
+	if ws.Output != nil {
+		bytes, err := json.Marshal(ws.Output)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal output: %w", err)
+		}
+		result["Output"] = string(bytes)
+	}
+
+	return result, nil
 }
 
 func newAdminServer(ctx *dbosContext, port int) *adminServer {
@@ -295,13 +311,18 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 
 		// Transform to UTC before encoding
-		utcWorkflows := make([]map[string]any, len(workflows))
+		responseWorkflows := make([]map[string]any, len(workflows))
 		for i, wf := range workflows {
-			utcWorkflows[i] = workflowStatusToUTC(wf)
+			responseWorkflows[i], err = toListWorkflowResponse(wf)
+			if err != nil {
+				ctx.logger.Error("Error transforming workflow response", "error", err)
+				http.Error(w, fmt.Sprintf("Failed to format workflow response: %v", err), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(utcWorkflows); err != nil {
+		if err := json.NewEncoder(w).Encode(responseWorkflows); err != nil {
 			ctx.logger.Error("Error encoding workflows response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
@@ -327,7 +348,12 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 
 		// Return the first (and only) workflow, transformed to UTC
-		workflow := workflowStatusToUTC(workflows[0])
+		workflow, err := toListWorkflowResponse(workflows[0])
+		if err != nil {
+			ctx.logger.Error("Error transforming workflow response", "error", err)
+			http.Error(w, fmt.Sprintf("Failed to format workflow response: %v", err), http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(workflow); err != nil {
@@ -365,13 +391,18 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 
 		// Transform to UNIX timestamps before encoding
-		utcWorkflows := make([]map[string]any, len(workflows))
+		responseWorkflows := make([]map[string]any, len(workflows))
 		for i, wf := range workflows {
-			utcWorkflows[i] = workflowStatusToUTC(wf)
+			responseWorkflows[i], err = toListWorkflowResponse(wf)
+			if err != nil {
+				ctx.logger.Error("Error transforming workflow response", "error", err)
+				http.Error(w, fmt.Sprintf("Failed to format workflow response: %v", err), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(utcWorkflows); err != nil {
+		if err := json.NewEncoder(w).Encode(responseWorkflows); err != nil {
 			ctx.logger.Error("Error encoding queued workflows response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
