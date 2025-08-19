@@ -50,9 +50,9 @@ type systemDatabase interface {
 
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
-	recv(ctx context.Context, input WorkflowRecvInput) (any, error)
+	recv(ctx context.Context, input RecvInput) (any, error)
 	setEvent(ctx context.Context, input WorkflowSetEventInput) error
-	getEvent(ctx context.Context, input WorkflowGetEventInput) (any, error)
+	getEvent(ctx context.Context, input GetEventInput) (any, error)
 
 	// Timers (special steps)
 	sleep(ctx context.Context, duration time.Duration) (time.Duration, error)
@@ -642,7 +642,6 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 				wf.Error = errors.New(*errorStr)
 			}
 
-			// XXX maybe set wf.Output to outputString and run deserialize out of system DB
 			wf.Output, err = deserialize(outputString)
 			if err != nil {
 				return nil, fmt.Errorf("failed to deserialize output: %w", err)
@@ -1511,7 +1510,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 }
 
 // Recv is a special type of step that receives a message destined for a given workflow
-func (s *sysDB) recv(ctx context.Context, input WorkflowRecvInput) (any, error) {
+func (s *sysDB) recv(ctx context.Context, input RecvInput) (any, error) {
 	functionName := "DBOS.recv"
 
 	// Get workflow state from context
@@ -1734,7 +1733,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	return nil
 }
 
-func (s *sysDB) getEvent(ctx context.Context, input WorkflowGetEventInput) (any, error) {
+func (s *sysDB) getEvent(ctx context.Context, input GetEventInput) (any, error) {
 	functionName := "DBOS.getEvent"
 
 	// Get workflow state from context (optional for GetEvent as we can get an event from outside a workflow)

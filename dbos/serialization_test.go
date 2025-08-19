@@ -212,7 +212,7 @@ func setEventUserDefinedTypeWorkflow(ctx DBOSContext, input string) (string, err
 		},
 	}
 
-	err := SetEvent(ctx, GenericWorkflowSetEventInput[UserDefinedEventData]{Key: input, Message: eventData})
+	err := SetEvent(ctx, input, eventData)
 	if err != nil {
 		return "", err
 	}
@@ -236,7 +236,7 @@ func TestSetEventSerialize(t *testing.T) {
 		assert.Equal(t, "user-defined-event-set", result)
 
 		// Retrieve the event to verify it was properly serialized and can be deserialized
-		retrievedEvent, err := GetEvent[UserDefinedEventData](executor, WorkflowGetEventInput{
+		retrievedEvent, err := GetEvent[UserDefinedEventData](executor, GetEventInput{
 			TargetWorkflowID: setHandle.GetWorkflowID(),
 			Key:              "user-defined-key",
 			Timeout:          3 * time.Second,
@@ -268,12 +268,7 @@ func sendUserDefinedTypeWorkflow(ctx DBOSContext, destinationID string) (string,
 	}
 
 	// Send should automatically register this type with gob
-	// Note the explicit type parameter since compiler cannot infer UserDefinedEventData from string input
-	err := Send(ctx, GenericWorkflowSendInput[UserDefinedEventData]{
-		DestinationID: destinationID,
-		Topic:         "user-defined-topic",
-		Message:       sendData,
-	})
+	err := Send(ctx, destinationID, sendData, "user-defined-topic")
 	if err != nil {
 		return "", err
 	}
@@ -282,7 +277,7 @@ func sendUserDefinedTypeWorkflow(ctx DBOSContext, destinationID string) (string,
 
 func recvUserDefinedTypeWorkflow(ctx DBOSContext, input string) (UserDefinedEventData, error) {
 	// Receive the user-defined type message
-	result, err := Recv[UserDefinedEventData](ctx, WorkflowRecvInput{
+	result, err := Recv[UserDefinedEventData](ctx, RecvInput{
 		Topic:   "user-defined-topic",
 		Timeout: 3 * time.Second,
 	})

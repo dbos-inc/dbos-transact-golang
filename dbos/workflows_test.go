@@ -1292,19 +1292,15 @@ type sendWorkflowInput struct {
 }
 
 func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
-	err := Send(ctx, GenericWorkflowSendInput[string]{
-		DestinationID: input.DestinationID,
-		Topic:         input.Topic,
-		Message:       "message1",
-	})
+	err := Send(ctx, input.DestinationID, "message1", input.Topic)
 	if err != nil {
 		return "", err
 	}
-	err = Send(ctx, GenericWorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message2"})
+	err = Send(ctx, input.DestinationID, "message2", input.Topic)
 	if err != nil {
 		return "", err
 	}
-	err = Send(ctx, GenericWorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "message3"})
+	err = Send(ctx, input.DestinationID, "message3", input.Topic)
 	if err != nil {
 		return "", err
 	}
@@ -1312,15 +1308,15 @@ func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 }
 
 func receiveWorkflow(ctx DBOSContext, topic string) (string, error) {
-	msg1, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 10 * time.Second})
+	msg1, err := Recv[string](ctx, RecvInput{Topic: topic, Timeout: 10 * time.Second})
 	if err != nil {
 		return "", err
 	}
-	msg2, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 10 * time.Second})
+	msg2, err := Recv[string](ctx, RecvInput{Topic: topic, Timeout: 10 * time.Second})
 	if err != nil {
 		return "", err
 	}
-	msg3, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 10 * time.Second})
+	msg3, err := Recv[string](ctx, RecvInput{Topic: topic, Timeout: 10 * time.Second})
 	if err != nil {
 		return "", err
 	}
@@ -1339,7 +1335,7 @@ func receiveWorkflowCoordinated(ctx DBOSContext, input struct {
 	concurrentRecvStartEvent.Wait()
 
 	// Do a single Recv call with timeout
-	msg, err := Recv[string](ctx, WorkflowRecvInput{Topic: input.Topic, Timeout: 3 * time.Second})
+	msg, err := Recv[string](ctx, RecvInput{Topic: input.Topic, Timeout: 3 * time.Second})
 	if err != nil {
 		return "", err
 	}
@@ -1348,16 +1344,16 @@ func receiveWorkflowCoordinated(ctx DBOSContext, input struct {
 
 func sendStructWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 	testStruct := sendRecvType{Value: "test-struct-value"}
-	err := Send(ctx, GenericWorkflowSendInput[sendRecvType]{DestinationID: input.DestinationID, Topic: input.Topic, Message: testStruct})
+	err := Send(ctx, input.DestinationID, testStruct, input.Topic)
 	return "", err
 }
 
 func receiveStructWorkflow(ctx DBOSContext, topic string) (sendRecvType, error) {
-	return Recv[sendRecvType](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+	return Recv[sendRecvType](ctx, RecvInput{Topic: topic, Timeout: 3 * time.Second})
 }
 
 func sendIdempotencyWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
-	err := Send(ctx, GenericWorkflowSendInput[string]{DestinationID: input.DestinationID, Topic: input.Topic, Message: "m1"})
+	err := Send(ctx, input.DestinationID, "m1", input.Topic)
 	if err != nil {
 		return "", err
 	}
@@ -1366,7 +1362,7 @@ func sendIdempotencyWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, 
 }
 
 func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
-	msg, err := Recv[string](ctx, WorkflowRecvInput{Topic: topic, Timeout: 3 * time.Second})
+	msg, err := Recv[string](ctx, RecvInput{Topic: topic, Timeout: 3 * time.Second})
 	if err != nil {
 		// Unlock the test in this case
 		receiveIdempotencyStartEvent.Set()
@@ -1378,11 +1374,7 @@ func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 }
 
 func stepThatCallsSend(ctx context.Context, input sendWorkflowInput) (string, error) {
-	err := Send(ctx.(DBOSContext), GenericWorkflowSendInput[string]{
-		DestinationID: input.DestinationID,
-		Topic:         input.Topic,
-		Message:       "message-from-step",
-	})
+	err := Send(ctx.(DBOSContext), input.DestinationID, "message-from-step", input.Topic)
 	if err != nil {
 		return "", err
 	}
@@ -1519,7 +1511,7 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("RecvMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run Recv outside of a workflow context
-		_, err := Recv[string](dbosCtx, WorkflowRecvInput{Topic: "test-topic", Timeout: 1 * time.Second})
+		_, err := Recv[string](dbosCtx, RecvInput{Topic: "test-topic", Timeout: 1 * time.Second})
 		require.Error(t, err, "expected error when running Recv outside of workflow context, but got none")
 
 		// Check the error type
@@ -1539,11 +1531,7 @@ func TestSendRecv(t *testing.T) {
 
 		// Send messages from outside a workflow context
 		for i := range 3 {
-			err = Send(dbosCtx, GenericWorkflowSendInput[string]{
-				DestinationID: receiveHandle.GetWorkflowID(),
-				Topic:         "outside-workflow-topic",
-				Message:       fmt.Sprintf("message%d", i+1),
-			})
+			err = Send(dbosCtx, receiveHandle.GetWorkflowID(), fmt.Sprintf("message%d", i+1), "outside-workflow-topic")
 			require.NoError(t, err, "failed to send message%d from outside workflow", i+1)
 		}
 
@@ -1726,7 +1714,7 @@ type setEventWorkflowInput struct {
 }
 
 func setEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	err := SetEvent(ctx, GenericWorkflowSetEventInput[string](input))
+	err := SetEvent(ctx, input.Key, input.Message)
 	if err != nil {
 		return "", err
 	}
@@ -1734,7 +1722,7 @@ func setEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, err
 }
 
 func getEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	result, err := GetEvent[string](ctx, WorkflowGetEventInput{
+	result, err := GetEvent[string](ctx, GetEventInput{
 		TargetWorkflowID: input.Key,     // Reusing Key field as target workflow ID
 		Key:              input.Message, // Reusing Message field as event key
 		Timeout:          3 * time.Second,
@@ -1747,7 +1735,7 @@ func getEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, err
 
 func setTwoEventsWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
 	// Set the first event
-	err := SetEvent(ctx, GenericWorkflowSetEventInput[string]{Key: "event1", Message: "first-event-message"})
+	err := SetEvent(ctx, "event1", "first-event-message")
 	if err != nil {
 		return "", err
 	}
@@ -1756,7 +1744,7 @@ func setTwoEventsWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string,
 	setSecondEventSignal.Wait()
 
 	// Set the second event
-	err = SetEvent(ctx, GenericWorkflowSetEventInput[string]{Key: "event2", Message: "second-event-message"})
+	err = SetEvent(ctx, "event2", "second-event-message")
 	if err != nil {
 		return "", err
 	}
@@ -1765,7 +1753,7 @@ func setTwoEventsWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string,
 }
 
 func setEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	err := SetEvent(ctx, GenericWorkflowSetEventInput[string](input))
+	err := SetEvent(ctx, input.Key, input.Message)
 	if err != nil {
 		return "", err
 	}
@@ -1775,7 +1763,7 @@ func setEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (
 }
 
 func getEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	result, err := GetEvent[string](ctx, WorkflowGetEventInput{
+	result, err := GetEvent[string](ctx, GetEventInput{
 		TargetWorkflowID: input.Key,
 		Key:              input.Message,
 		Timeout:          3 * time.Second,
@@ -1989,7 +1977,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Start a workflow that gets the event from outside the original workflow
-		message, err := GetEvent[string](dbosCtx, WorkflowGetEventInput{
+		message, err := GetEvent[string](dbosCtx, GetEventInput{
 			TargetWorkflowID: setHandle.GetWorkflowID(),
 			Key:              "test-key",
 			Timeout:          3 * time.Second,
@@ -2018,7 +2006,7 @@ func TestSetGetEvent(t *testing.T) {
 	t.Run("GetEventTimeout", func(t *testing.T) {
 		// Try to get an event from a non-existent workflow
 		nonExistentID := uuid.NewString()
-		message, err := GetEvent[string](dbosCtx, WorkflowGetEventInput{
+		message, err := GetEvent[string](dbosCtx, GetEventInput{
 			TargetWorkflowID: nonExistentID,
 			Key:              "test-key",
 			Timeout:          3 * time.Second,
@@ -2036,7 +2024,7 @@ func TestSetGetEvent(t *testing.T) {
 		require.NoError(t, err, "failed to set event")
 		_, err = setHandle.GetResult()
 		require.NoError(t, err, "failed to get result from set event workflow")
-		message, err = GetEvent[string](dbosCtx, WorkflowGetEventInput{
+		message, err = GetEvent[string](dbosCtx, GetEventInput{
 			TargetWorkflowID: setHandle.GetWorkflowID(),
 			Key:              "non-existent-key",
 			Timeout:          3 * time.Second,
@@ -2049,7 +2037,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("SetGetEventMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run SetEvent outside of a workflow context
-		err := SetEvent(dbosCtx, GenericWorkflowSetEventInput[string]{Key: "test-key", Message: "test-message"})
+		err := SetEvent(dbosCtx, "test-key", "test-message")
 		require.Error(t, err, "expected error when running SetEvent outside of workflow context, but got none")
 
 		// Check the error type
@@ -2187,7 +2175,7 @@ func TestSetGetEvent(t *testing.T) {
 		for range numGoroutines {
 			go func() {
 				defer wg.Done()
-				res, err := GetEvent[string](dbosCtx, WorkflowGetEventInput{
+				res, err := GetEvent[string](dbosCtx, GetEventInput{
 					TargetWorkflowID: setHandle.GetWorkflowID(),
 					Key:              "concurrent-event-key",
 					Timeout:          10 * time.Second,
@@ -2555,7 +2543,7 @@ func TestWorkflowTimeout(t *testing.T) {
 }
 
 func notificationWaiterWorkflow(ctx DBOSContext, pairID int) (string, error) {
-	result, err := GetEvent[string](ctx, WorkflowGetEventInput{
+	result, err := GetEvent[string](ctx, GetEventInput{
 		TargetWorkflowID: fmt.Sprintf("notification-setter-%d", pairID),
 		Key:              "event-key",
 		Timeout:          10 * time.Second,
@@ -2567,10 +2555,7 @@ func notificationWaiterWorkflow(ctx DBOSContext, pairID int) (string, error) {
 }
 
 func notificationSetterWorkflow(ctx DBOSContext, pairID int) (string, error) {
-	err := SetEvent(ctx, GenericWorkflowSetEventInput[string]{
-		Key:     "event-key",
-		Message: fmt.Sprintf("notification-message-%d", pairID),
-	})
+	err := SetEvent(ctx, "event-key", fmt.Sprintf("notification-message-%d", pairID))
 	if err != nil {
 		return "", err
 	}
@@ -2578,7 +2563,7 @@ func notificationSetterWorkflow(ctx DBOSContext, pairID int) (string, error) {
 }
 
 func sendRecvReceiverWorkflow(ctx DBOSContext, pairID int) (string, error) {
-	result, err := Recv[string](ctx, WorkflowRecvInput{
+	result, err := Recv[string](ctx, RecvInput{
 		Topic:   "send-recv-topic",
 		Timeout: 10 * time.Second,
 	})
@@ -2589,11 +2574,7 @@ func sendRecvReceiverWorkflow(ctx DBOSContext, pairID int) (string, error) {
 }
 
 func sendRecvSenderWorkflow(ctx DBOSContext, pairID int) (string, error) {
-	err := Send(ctx, GenericWorkflowSendInput[string]{
-		DestinationID: fmt.Sprintf("send-recv-receiver-%d", pairID),
-		Topic:         "send-recv-topic",
-		Message:       fmt.Sprintf("send-recv-message-%d", pairID),
-	})
+	err := Send(ctx, fmt.Sprintf("send-recv-receiver-%d", pairID), fmt.Sprintf("send-recv-message-%d", pairID), "send-recv-topic")
 	if err != nil {
 		return "", err
 	}
