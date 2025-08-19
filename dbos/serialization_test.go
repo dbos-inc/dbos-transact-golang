@@ -236,11 +236,7 @@ func TestSetEventSerialize(t *testing.T) {
 		assert.Equal(t, "user-defined-event-set", result)
 
 		// Retrieve the event to verify it was properly serialized and can be deserialized
-		retrievedEvent, err := GetEvent[UserDefinedEventData](executor, GetEventInput{
-			TargetWorkflowID: setHandle.GetWorkflowID(),
-			Key:              "user-defined-key",
-			Timeout:          3 * time.Second,
-		})
+		retrievedEvent, err := GetEvent[UserDefinedEventData](executor, setHandle.GetWorkflowID(), "user-defined-key", 3 * time.Second)
 		require.NoError(t, err)
 
 		// Verify the retrieved data matches what we set
@@ -277,10 +273,7 @@ func sendUserDefinedTypeWorkflow(ctx DBOSContext, destinationID string) (string,
 
 func recvUserDefinedTypeWorkflow(ctx DBOSContext, input string) (UserDefinedEventData, error) {
 	// Receive the user-defined type message
-	result, err := Recv[UserDefinedEventData](ctx, RecvInput{
-		Topic:   "user-defined-topic",
-		Timeout: 3 * time.Second,
-	})
+	result, err := Recv[UserDefinedEventData](ctx, "user-defined-topic", 3 * time.Second)
 	return result, err
 }
 

@@ -246,7 +246,7 @@ func sendWorkflow(ctx dbos.DBOSContext, message string) (string, error) {
 }
 
 func receiveWorkflow(ctx dbos.DBOSContext, topic string) (string, error) {
-    return dbos.Recv[string](ctx, dbos.WorkflowRecvInput{Topic: topic, Timeout: 48 * time.Hour})
+    return dbos.Recv[string](ctx, topic, 48 * time.Hour)
 }
 
 // Start a receiver in the background

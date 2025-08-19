@@ -1116,7 +1116,11 @@ type RecvInput struct {
 	Timeout time.Duration // Maximum time to wait for a message
 }
 
-func (c *dbosContext) Recv(_ DBOSContext, input RecvInput) (any, error) {
+func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error) {
+	input := RecvInput{
+		Topic:   topic,
+		Timeout: timeout,
+	}
 	return c.systemDB.recv(c, input)
 }
 
@@ -1129,20 +1133,17 @@ func (c *dbosContext) Recv(_ DBOSContext, input RecvInput) (any, error) {
 //
 // Example:
 //
-//	message, err := dbos.Recv[string](ctx, dbos.RecvInput{
-//	    Topic:   "notifications",
-//	    Timeout: 30 * time.Second,
-//	})
+//	message, err := dbos.Recv[string](ctx, "notifications", 30 * time.Second)
 //	if err != nil {
 //	    // Handle timeout or error
 //	    return err
 //	}
 //	log.Printf("Received: %s", message)
-func Recv[R any](ctx DBOSContext, input RecvInput) (R, error) {
+func Recv[R any](ctx DBOSContext, topic string, timeout time.Duration) (R, error) {
 	if ctx == nil {
 		return *new(R), errors.New("ctx cannot be nil")
 	}
-	msg, err := ctx.Recv(ctx, input)
+	msg, err := ctx.Recv(ctx, topic, timeout)
 	if err != nil {
 		return *new(R), err
 	}
@@ -1191,7 +1192,12 @@ type GetEventInput struct {
 	Timeout          time.Duration // Maximum time to wait for the event to be set
 }
 
-func (c *dbosContext) GetEvent(_ DBOSContext, input GetEventInput) (any, error) {
+func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error) {
+	input := GetEventInput{
+		TargetWorkflowID: targetWorkflowID,
+		Key:              key,
+		Timeout:          timeout,
+	}
 	return c.systemDB.getEvent(c, input)
 }
 
@@ -1203,21 +1209,17 @@ func (c *dbosContext) GetEvent(_ DBOSContext, input GetEventInput) (any, error) 
 //
 // Example:
 //
-//	status, err := dbos.GetEvent[string](ctx, dbos.GetEventInput{
-//	    TargetWorkflowID: "target-workflow-id",
-//	    Key:              "status",
-//	    Timeout:          30 * time.Second,
-//	})
+//	status, err := dbos.GetEvent[string](ctx, "target-workflow-id", "status", 30 * time.Second)
 //	if err != nil {
 //	    // Handle timeout or error
 //	    return err
 //	}
 //	log.Printf("Status: %s", status)
-func GetEvent[R any](ctx DBOSContext, input GetEventInput) (R, error) {
+func GetEvent[R any](ctx DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (R, error) {
 	if ctx == nil {
 		return *new(R), errors.New("ctx cannot be nil")
 	}
-	value, err := ctx.GetEvent(ctx, input)
+	value, err := ctx.GetEvent(ctx, targetWorkflowID, key, timeout)
 	if err != nil {
 		return *new(R), err
 	}

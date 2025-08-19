@@ -78,9 +78,9 @@ type DBOSContext interface {
 	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                        // Execute a function as a durable step within a workflow
 	RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
 	Send(_ DBOSContext, destinationID string, message any, topic string) error                                    // Send a message to another workflow
-	Recv(_ DBOSContext, input RecvInput) (any, error)                                                             // Receive a message sent to this workflow
+	Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error)                                        // Receive a message sent to this workflow
 	SetEvent(_ DBOSContext, key string, message any) error                                                        // Set a key-value event for this workflow
-	GetEvent(_ DBOSContext, input GetEventInput) (any, error)                                                     // Get a key-value event from a target workflow
+	GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error)           // Get a key-value event from a target workflow
 	Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error)                                           // Durable sleep that survives workflow recovery
 	GetWorkflowID() (string, error)                                                                               // Get the current workflow ID (only available within workflows)
 	GetStepID() (int, error)                                                                                      // Get the current step ID (only available within workflows)
