@@ -299,13 +299,13 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn workflow
 	c.logger.Info("Registered scheduled workflow", "fqn", workflowName, "cron_schedule", cronSchedule)
 }
 
-type workflowRegistrationParams struct {
+type WorkflowRegistrationOptions struct {
 	cronSchedule string
 	maxRetries   int
 	name         string
 }
 
-type workflowRegistrationOption func(*workflowRegistrationParams)
+type WorkflowRegistrationOption func(*WorkflowRegistrationOptions)
 
 const (
 	_DEFAULT_MAX_RECOVERY_ATTEMPTS = 100
@@ -319,8 +319,8 @@ const (
 // WithMaxRetries sets the maximum number of retry attempts for workflow recovery.
 // If a workflow fails or is interrupted, it will be retried up to this many times.
 // After exceeding max retries, the workflow status becomes RETRIES_EXCEEDED.
-func WithMaxRetries(maxRetries int) workflowRegistrationOption {
-	return func(p *workflowRegistrationParams) {
+func WithMaxRetries(maxRetries int) WorkflowRegistrationOption {
+	return func(p *WorkflowRegistrationOptions) {
 		p.maxRetries = maxRetries
 	}
 }
@@ -328,14 +328,14 @@ func WithMaxRetries(maxRetries int) workflowRegistrationOption {
 // WithSchedule registers the workflow as a scheduled workflow using cron syntax.
 // The schedule string follows standard cron format with second precision.
 // Scheduled workflows automatically receive a time.Time input parameter.
-func WithSchedule(schedule string) workflowRegistrationOption {
-	return func(p *workflowRegistrationParams) {
+func WithSchedule(schedule string) WorkflowRegistrationOption {
+	return func(p *WorkflowRegistrationOptions) {
 		p.cronSchedule = schedule
 	}
 }
 
-func WithWorkflowName(name string) workflowRegistrationOption {
-	return func(p *workflowRegistrationParams) {
+func WithWorkflowName(name string) WorkflowRegistrationOption {
+	return func(p *WorkflowRegistrationOptions) {
 		p.name = name
 	}
 }
@@ -365,7 +365,7 @@ func WithWorkflowName(name string) workflowRegistrationOption {
 //	    dbos.WithMaxRetries(5),
 //	    dbos.WithSchedule("0 0 * * *")) // daily at midnight
 //		dbos.WithWorkflowName("MyCustomWorkflowName") // Custom name for the workflow
-func RegisterWorkflow[P any, R any](ctx DBOSContext, fn WorkflowFunc[P, R], opts ...workflowRegistrationOption) {
+func RegisterWorkflow[P any, R any](ctx DBOSContext, fn WorkflowFunc[P, R], opts ...WorkflowRegistrationOption) {
 	if ctx == nil {
 		panic("ctx cannot be nil")
 	}
@@ -374,7 +374,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn WorkflowFunc[P, R], opts
 		panic("workflow function cannot be nil")
 	}
 
-	registrationParams := workflowRegistrationParams{
+	registrationParams := WorkflowRegistrationOptions{
 		maxRetries: _DEFAULT_MAX_RECOVERY_ATTEMPTS,
 	}
 
