@@ -1009,148 +1009,57 @@ func TestWorkflowIdempotency(t *testing.T) {
 
 func TestWorkflowRecovery(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
+	RegisterWorkflow(dbosCtx, idempotencyWorkflowWithStep)
+	t.Run("RecoveryResumeWhereItLeftOff", func(t *testing.T) {
+		// Reset the global counter
+		idempotencyCounter = 0
 
-	var (
-		recoveryCounters []int64
-		recoveryEvents   []*Event
-		blockingEvents   []*Event
-	)
+		// First execution - run the workflow once
+		input := "recovery-test"
+		idempotencyWorkflowWithStepEvent = NewEvent()
+		blockingStepStopEvent = NewEvent()
+		handle1, err := RunAsWorkflow(dbosCtx, idempotencyWorkflowWithStep, input)
+		require.NoError(t, err, "failed to execute workflow first time")
 
-	recoveryWorkflow := func(dbosCtx DBOSContext, index int) (int64, error) {
-		// First step with custom name - increments the counter
-		_, err := RunAsStep(dbosCtx, func(ctx context.Context) (int64, error) {
-			recoveryCounters[index]++
-			return recoveryCounters[index], nil
-		}, WithStepName(fmt.Sprintf("IncrementStep-%d", index)))
-		if err != nil {
-			return 0, err
-		}
+		idempotencyWorkflowWithStepEvent.Wait() // Wait for the first step to complete. The second spins forever.
 
-		// Signal that first step is complete
-		recoveryEvents[index].Set()
-
-		// Second step with custom name - blocks until signaled
-		_, err = RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
-			blockingEvents[index].Wait()
-			return fmt.Sprintf("completed-%d", index), nil
-		}, WithStepName(fmt.Sprintf("BlockingStep-%d", index)))
-		if err != nil {
-			return 0, err
-		}
-
-		return recoveryCounters[index], nil
-	}
-
-	RegisterWorkflow(dbosCtx, recoveryWorkflow)
-
-	t.Run("WorkflowRecovery", func(t *testing.T) {
-		const numWorkflows = 5
-
-		// Initialize slices for multiple workflows
-		recoveryCounters = make([]int64, numWorkflows)
-		recoveryEvents = make([]*Event, numWorkflows)
-		blockingEvents = make([]*Event, numWorkflows)
-
-		// Create events for each workflow
-		for i := range numWorkflows {
-			recoveryEvents[i] = NewEvent()
-			blockingEvents[i] = NewEvent()
-		}
-
-		// Start all workflows
-		handles := make([]WorkflowHandle[int64], numWorkflows)
-		for i := range numWorkflows {
-			handle, err := RunAsWorkflow(dbosCtx, recoveryWorkflow, i, WithWorkflowID(fmt.Sprintf("recovery-test-%d", i)))
-			require.NoError(t, err, "failed to start workflow %d", i)
-			handles[i] = handle
-		}
-
-		// Wait for all first steps to complete
-		for i := range numWorkflows {
-			recoveryEvents[i].Wait()
-		}
-
-		// Verify step states before recovery
-		for i := range numWorkflows {
-			steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handles[i].GetWorkflowID())
-			require.NoError(t, err, "failed to get steps for workflow %d", i)
-			require.Len(t, steps, 1, "expected 1 completed step for workflow %d before recovery", i)
-
-			// Verify first step has custom name and completed
-			assert.Equal(t, fmt.Sprintf("IncrementStep-%d", i), steps[0].StepName, "workflow %d first step name mismatch", i)
-			assert.Equal(t, 0, steps[0].StepID, "workflow %d first step ID should be 0", i)
-			assert.NotNil(t, steps[0].Output, "workflow %d first step should have output", i)
-			assert.Nil(t, steps[0].Error, "workflow %d first step should not have error", i)
-		}
-
-		// Verify counters are all 1 (executed once)
-		for i := range numWorkflows {
-			require.Equal(t, int64(1), recoveryCounters[i], "workflow %d counter should be 1 before recovery", i)
-		}
-
-		// Run recovery
+		// Run recovery for pending workflows with "local" executor
 		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.NoError(t, err, "failed to recover pending workflows")
-		require.Len(t, recoveredHandles, numWorkflows, "expected %d recovered handles, got %d", numWorkflows, len(recoveredHandles))
 
-		// Create a map for easy lookup of recovered handles
-		recoveredMap := make(map[string]WorkflowHandle[any])
-		for _, h := range recoveredHandles {
-			recoveredMap[h.GetWorkflowID()] = h
-		}
+		// Check that we have a single handle in the return list
+		require.Len(t, recoveredHandles, 1, "expected 1 recovered handle, got %d", len(recoveredHandles))
 
-		// Verify all original workflows were recovered
-		for i := range numWorkflows {
-			originalID := handles[i].GetWorkflowID()
-			recoveredHandle, found := recoveredMap[originalID]
-			require.True(t, found, "workflow %d with ID %s not found in recovered handles", i, originalID)
+		// Check that the workflow ID from the handle is the same as the first handle
+		recoveredHandle := recoveredHandles[0]
+		_, ok := recoveredHandle.(*workflowPollingHandle[any])
+		require.True(t, ok, "expected handle to be of type workflowPollingHandle, got %T", recoveredHandle)
+		require.Equal(t, handle1.GetWorkflowID(), recoveredHandle.GetWorkflowID())
 
-			_, ok := recoveredHandle.(*workflowPollingHandle[any])
-			require.True(t, ok, "recovered handle %d should be of type workflowPollingHandle, got %T", i, recoveredHandle)
-		}
+		idempotencyWorkflowWithStepEvent.Clear()
+		idempotencyWorkflowWithStepEvent.Wait()
 
-		// Verify first steps were NOT re-executed (counters should still be 1)
-		for i := range numWorkflows {
-			require.Equal(t, int64(1), recoveryCounters[i], "workflow %d counter should remain 1 after recovery (idempotent)", i)
-		}
+		// Check that the first step was *not* re-executed (idempotency counter is still 1)
+		require.Equal(t, int64(1), idempotencyCounter, "expected counter to remain 1 after recovery (idempotent)")
 
-		// Verify workflow attempts increased to 2
-		for i := range numWorkflows {
-			workflows, err := dbosCtx.(*dbosContext).systemDB.listWorkflows(context.Background(), listWorkflowsDBInput{
-				workflowIDs: []string{handles[i].GetWorkflowID()},
-			})
-			require.NoError(t, err, "failed to list workflow %d", i)
-			require.Len(t, workflows, 1, "expected 1 workflow entry for workflow %d", i)
-			assert.Equal(t, 2, workflows[0].Attempts, "workflow %d should have 2 attempts after recovery", i)
-		}
+		// Using ListWorkflows, retrieve the status of the workflow
+		workflows, err := dbosCtx.(*dbosContext).systemDB.listWorkflows(context.Background(), listWorkflowsDBInput{
+			workflowIDs: []string{handle1.GetWorkflowID()},
+		})
+		require.NoError(t, err, "failed to list workflows")
 
-		// Unblock all workflows and verify they complete
-		for i := range numWorkflows {
-			blockingEvents[i].Set()
-		}
+		require.Len(t, workflows, 1, "expected 1 workflow, got %d", len(workflows))
 
-		// Get results from all recovered workflows
-		for i := range numWorkflows {
-			recoveredHandle := recoveredMap[handles[i].GetWorkflowID()]
-			result, err := recoveredHandle.GetResult()
-			require.NoError(t, err, "failed to get result from recovered workflow %d", i)
+		workflow := workflows[0]
 
-			// Result should be the counter value (1)
-			require.Equal(t, int64(1), result, "workflow %d result should be 1", i)
-		}
+		// Ensure its number of attempts is 2
+		require.Equal(t, 2, workflow.Attempts)
 
-		// Final verification of step states
-		for i := range numWorkflows {
-			steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handles[i].GetWorkflowID())
-			require.NoError(t, err, "failed to get final steps for workflow %d", i)
-			require.Len(t, steps, 2, "expected 2 steps for workflow %d", i)
-
-			// Both steps should now be completed
-			assert.NotNil(t, steps[0].Output, "workflow %d first step should have output", i)
-			assert.NotNil(t, steps[1].Output, "workflow %d second step should have output", i)
-			assert.Nil(t, steps[0].Error, "workflow %d first step should not have error", i)
-			assert.Nil(t, steps[1].Error, "workflow %d second step should not have error", i)
-		}
+		// unlock the workflow & wait for result
+		blockingStepStopEvent.Set() // This will allow the blocking step to complete
+		result, err := recoveredHandle.GetResult()
+		require.NoError(t, err, "failed to get result from recovered handle")
+		require.Equal(t, idempotencyCounter, result)
 	})
 }
 

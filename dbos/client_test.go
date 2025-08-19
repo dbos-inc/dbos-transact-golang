@@ -235,7 +235,7 @@ func TestEnqueue(t *testing.T) {
 
 		// After first workflow completes, we should be able to enqueue with same deduplication ID
 		handle5, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
-			WithEnqueueWorkflowID(wfid2),        // Reuse the workflow ID that failed before
+			WithEnqueueWorkflowID(wfid2),   // Reuse the workflow ID that failed before
 			WithEnqueueDeduplicationID(dedupID), // Same deduplication ID as first workflow
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with same dedup ID after completion")
