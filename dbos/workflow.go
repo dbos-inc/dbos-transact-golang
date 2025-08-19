@@ -1191,7 +1191,7 @@ type getEventInput struct {
 	Timeout          time.Duration // Maximum time to wait for the event to be set
 }
 
-func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error) {
+func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, timeout time.Duration) (any, error) {
 	input := getEventInput{
 		TargetWorkflowID: targetWorkflowID,
 		Key:              key,
@@ -1214,7 +1214,7 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID string, key strin
 //	    return err
 //	}
 //	log.Printf("Status: %s", status)
-func GetEvent[R any](ctx DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (R, error) {
+func GetEvent[R any](ctx DBOSContext, targetWorkflowID, key string, timeout time.Duration) (R, error) {
 	if ctx == nil {
 		return *new(R), errors.New("ctx cannot be nil")
 	}
