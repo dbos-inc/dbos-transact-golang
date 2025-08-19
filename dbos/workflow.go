@@ -1083,7 +1083,6 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 /******* WORKFLOW COMMUNICATIONS ********/
 /****************************************/
 
-
 func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string) error {
 	return c.systemDB.send(c, WorkflowSendInput{
 		DestinationID: destinationID,
@@ -1110,14 +1109,14 @@ func Send[P any](ctx DBOSContext, destinationID string, message P, topic string)
 	return ctx.Send(ctx, destinationID, message, topic)
 }
 
-// RecvInput defines the parameters for receiving messages sent to this workflow.
-type RecvInput struct {
+// recvInput defines the parameters for receiving messages sent to this workflow.
+type recvInput struct {
 	Topic   string        // Topic to listen for (empty string receives from default topic)
 	Timeout time.Duration // Maximum time to wait for a message
 }
 
 func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error) {
-	input := RecvInput{
+	input := recvInput{
 		Topic:   topic,
 		Timeout: timeout,
 	}
@@ -1185,15 +1184,15 @@ func SetEvent[P any](ctx DBOSContext, key string, message P) error {
 	return ctx.SetEvent(ctx, key, message)
 }
 
-// GetEventInput defines the parameters for retrieving an event from a workflow.
-type GetEventInput struct {
+// getEventInput defines the parameters for retrieving an event from a workflow.
+type getEventInput struct {
 	TargetWorkflowID string        // Workflow ID to get the event from
 	Key              string        // Event key to retrieve
 	Timeout          time.Duration // Maximum time to wait for the event to be set
 }
 
 func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error) {
-	input := GetEventInput{
+	input := getEventInput{
 		TargetWorkflowID: targetWorkflowID,
 		Key:              key,
 		Timeout:          timeout,
