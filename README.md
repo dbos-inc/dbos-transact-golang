@@ -1,8 +1,8 @@
 <div align="center">
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/dbos-inc/dbos-transact-go.svg)](https://pkg.go.dev/github.com/dbos-inc/dbos-transact-go)
-[![Go Report Card](https://goreportcard.com/badge/github.com/dbos-inc/dbos-transact-go)](https://goreportcard.com/report/github.com/dbos-inc/dbos-transact-go)
-[![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/dbos-inc/dbos-transact-go?sort=semver)](https://github.com/dbos-inc/dbos-transact-go/releases)
+[![Go Reference](https://pkg.go.dev/badge/github.com/dbos-inc/dbos-transact-golang.svg)](https://pkg.go.dev/github.com/dbos-inc/dbos-transact-golang)
+[![Go Report Card](https://goreportcard.com/badge/github.com/dbos-inc/dbos-transact-golang)](https://goreportcard.com/report/github.com/dbos-inc/dbos-transact-golang)
+[![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/dbos-inc/dbos-transact-golang?sort=semver)](https://github.com/dbos-inc/dbos-transact-golang/releases)
 [![Join Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/jsmC6pXGgX)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -48,7 +48,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/dbos-inc/dbos-transact-go/dbos"
+	"github.com/dbos-inc/dbos-transact-golang/dbos"
 )
 
 func workflow(dbosCtx dbos.DBOSContext, _ string) (string, error) {
@@ -136,7 +136,7 @@ import (
     "os"
     "time"
 
-    "github.com/dbos-inc/dbos-transact-go/dbos"
+    "github.com/dbos-inc/dbos-transact-golang/dbos"
 )
 
 func task(ctx dbos.DBOSContext, i int) (int, error) {
@@ -288,7 +288,7 @@ The input and output of workflows and steps are memoized in your Postgres databa
 Install the DBOS Transact package in your program:
 
 ```shell
-go get github.com/dbos-inc/dbos-transact-go
+go get github.com/dbos-inc/dbos-transact-golang
 ```
 
 You can store and export a Postgres connection string in the `DBOS_SYSTEM_DATABASE_URL` environment variable for DBOS to manage your workflows state. By default, DBOS will use `postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable`.
@@ -296,5 +296,5 @@ You can store and export a Postgres connection string in the `DBOS_SYSTEM_DATABA
 
 ## ⭐️ Like this project?
 
-[Star it on GitHub](https://github.com/dbos-inc/dbos-transact-go)  
-[![GitHub Stars](https://img.shields.io/github/stars/dbos-inc/dbos-transact-go?style=social)](https://github.com/dbos-inc/dbos-transact-go)
+[Star it on GitHub](https://github.com/dbos-inc/dbos-transact-golang)
+[![GitHub Stars](https://img.shields.io/github/stars/dbos-inc/dbos-transact-golang?style=social)](https://github.com/dbos-inc/dbos-transact-golang)
