@@ -25,9 +25,9 @@ type RateLimiter struct {
 	Period float64 // Time period in seconds for the rate limit
 }
 
-// WorkflowQueue defines a named queue for workflow execution.
+// QueueOptions defines a named queue for workflow execution.
 // Queues provide controlled workflow execution with concurrency limits, priority scheduling, and rate limiting.
-type WorkflowQueue struct {
+type QueueOptions struct {
 	Name                 string       `json:"name"`                        // Unique queue name
 	WorkerConcurrency    *int         `json:"workerConcurrency,omitempty"` // Max concurrent workflows per executor
 	GlobalConcurrency    *int         `json:"concurrency,omitempty"`       // Max concurrent workflows across all executors
@@ -36,45 +36,45 @@ type WorkflowQueue struct {
 	MaxTasksPerIteration int          `json:"maxTasksPerIteration"`        // Max workflows to dequeue per iteration
 }
 
-// queueOption is a functional option for configuring a workflow queue
-type queueOption func(*WorkflowQueue)
+// QueueOption is a functional option for configuring a workflow queue
+type QueueOption func(*QueueOptions)
 
 // WithWorkerConcurrency limits the number of workflows this executor can run concurrently from the queue.
 // This provides per-executor concurrency control.
-func WithWorkerConcurrency(concurrency int) queueOption {
-	return func(q *WorkflowQueue) {
+func WithWorkerConcurrency(concurrency int) QueueOption {
+	return func(q *QueueOptions) {
 		q.WorkerConcurrency = &concurrency
 	}
 }
 
 // WithGlobalConcurrency limits the total number of workflows that can run concurrently from the queue
 // across all executors. This provides global concurrency control.
-func WithGlobalConcurrency(concurrency int) queueOption {
-	return func(q *WorkflowQueue) {
+func WithGlobalConcurrency(concurrency int) QueueOption {
+	return func(q *QueueOptions) {
 		q.GlobalConcurrency = &concurrency
 	}
 }
 
 // WithPriorityEnabled enables priority-based scheduling for the queue.
 // When enabled, workflows with lower priority numbers are executed first.
-func WithPriorityEnabled(enabled bool) queueOption {
-	return func(q *WorkflowQueue) {
+func WithPriorityEnabled(enabled bool) QueueOption {
+	return func(q *QueueOptions) {
 		q.PriorityEnabled = enabled
 	}
 }
 
 // WithRateLimiter configures rate limiting for the queue to prevent overwhelming external services.
 // The rate limiter enforces a maximum number of workflow starts within a time period.
-func WithRateLimiter(limiter *RateLimiter) queueOption {
-	return func(q *WorkflowQueue) {
+func WithRateLimiter(limiter *RateLimiter) QueueOption {
+	return func(q *QueueOptions) {
 		q.RateLimit = limiter
 	}
 }
 
 // WithMaxTasksPerIteration sets the maximum number of workflows to dequeue in a single iteration.
 // This controls batch sizes for queue processing.
-func WithMaxTasksPerIteration(maxTasks int) queueOption {
-	return func(q *WorkflowQueue) {
+func WithMaxTasksPerIteration(maxTasks int) QueueOption {
+	return func(q *QueueOptions) {
 		q.MaxTasksPerIteration = maxTasks
 	}
 }
@@ -96,10 +96,10 @@ func WithMaxTasksPerIteration(maxTasks int) queueOption {
 //
 //	// Enqueue workflows to this queue:
 //	handle, err := dbos.RunAsWorkflow(ctx, SendEmailWorkflow, emailData, dbos.WithQueue("email-queue"))
-func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...queueOption) WorkflowQueue {
+func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) QueueOptions {
 	ctx, ok := dbosCtx.(*dbosContext)
 	if !ok {
-		return WorkflowQueue{} // Do nothing if the concrete type is not dbosContext
+		return QueueOptions{} // Do nothing if the concrete type is not dbosContext
 	}
 	if ctx.launched.Load() {
 		panic("Cannot register workflow queue after DBOS has launched")
@@ -111,7 +111,7 @@ func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...queueOption) 
 	}
 
 	// Create queue with default settings
-	q := WorkflowQueue{
+	q := QueueOptions{
 		Name:                 name,
 		WorkerConcurrency:    nil,
 		GlobalConcurrency:    nil,
@@ -142,7 +142,7 @@ type queueRunner struct {
 	jitterMax       float64
 
 	// Queue registry
-	workflowQueueRegistry map[string]WorkflowQueue
+	workflowQueueRegistry map[string]QueueOptions
 
 	// Channel to signal completion back to the DBOS context
 	completionChan chan struct{}
@@ -157,13 +157,13 @@ func newQueueRunner() *queueRunner {
 		scalebackFactor:       0.9,
 		jitterMin:             0.95,
 		jitterMax:             1.05,
-		workflowQueueRegistry: make(map[string]WorkflowQueue),
+		workflowQueueRegistry: make(map[string]QueueOptions),
 		completionChan:        make(chan struct{}),
 	}
 }
 
-func (qr *queueRunner) listQueues() []WorkflowQueue {
-	queues := make([]WorkflowQueue, 0, len(qr.workflowQueueRegistry))
+func (qr *queueRunner) listQueues() []QueueOptions {
+	queues := make([]QueueOptions, 0, len(qr.workflowQueueRegistry))
 	for _, queue := range qr.workflowQueueRegistry {
 		queues = append(queues, queue)
 	}
