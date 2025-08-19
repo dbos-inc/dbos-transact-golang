@@ -412,7 +412,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		workflowID := r.PathValue("id")
 		ctx.logger.Info("Cancelling workflow", "workflow_id", workflowID)
 
-		err := ctx.CancelWorkflow(workflowID)
+		err := ctx.CancelWorkflow(ctx, workflowID)
 		if err != nil {
 			ctx.logger.Error("Failed to cancel workflow", "workflow_id", workflowID, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to cancel workflow: %v", err), http.StatusInternalServerError)

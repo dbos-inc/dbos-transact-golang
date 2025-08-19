@@ -794,6 +794,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 
 		// If the afterFunc has started, the workflow was cancelled and the status should be set to cancelled
 		if stopFunc != nil && !stopFunc() {
+			c.logger.Info("Workflow was cancelled. Waiting for cancel function to complete", "workflow_id", workflowID)
 			// Wait for the cancel function to complete
 			// Note this must happen before we write on the outcome channel (and signal the handler's GetResult)
 			<-cancelFuncCompleted
@@ -817,7 +818,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		close(outcomeChan)
 	}()
 
-	return newWorkflowHandle[any](uncancellableCtx, workflowID, outcomeChan), nil
+	return newWorkflowHandle(uncancellableCtx, workflowID, outcomeChan), nil
 }
 
 /******************************/
@@ -1082,50 +1083,43 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 /******* WORKFLOW COMMUNICATIONS ********/
 /****************************************/
 
-// GenericWorkflowSendInput defines the parameters for sending a message to another workflow.
-type GenericWorkflowSendInput[P any] struct {
-	DestinationID string // Workflow ID to send the message to
-	Message       P      // Message payload (must be gob-encodable)
-	Topic         string // Optional topic for message filtering
-}
-
-func (c *dbosContext) Send(_ DBOSContext, input WorkflowSendInput) error {
-	return c.systemDB.send(c, input)
+func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string) error {
+	return c.systemDB.send(c, WorkflowSendInput{
+		DestinationID: destinationID,
+		Message:       message,
+		Topic:         topic,
+	})
 }
 
 // Send sends a message to another workflow with type safety.
-// The message type R is automatically registered for gob encoding.
+// The message type P is automatically registered for gob encoding.
 //
 // Send can be called from within a workflow (as a durable step) or from outside workflows.
 // When called within a workflow, the send operation becomes part of the workflow's durable state.
 //
 // Example:
 //
-//	err := dbos.Send(ctx, dbos.GenericWorkflowSendInput[string]{
-//	    DestinationID: "target-workflow-id",
-//	    Message:       "Hello from sender",
-//	    Topic:         "notifications",
-//	})
-func Send[P any](ctx DBOSContext, input GenericWorkflowSendInput[P]) error {
+//	err := dbos.Send(ctx, "target-workflow-id", "Hello from sender", "notifications")
+func Send[P any](ctx DBOSContext, destinationID string, message P, topic string) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
 	var typedMessage P
 	gob.Register(typedMessage)
-	return ctx.Send(ctx, WorkflowSendInput{
-		DestinationID: input.DestinationID,
-		Message:       input.Message,
-		Topic:         input.Topic,
-	})
+	return ctx.Send(ctx, destinationID, message, topic)
 }
 
-// WorkflowRecvInput defines the parameters for receiving messages sent to this workflow.
-type WorkflowRecvInput struct {
+// recvInput defines the parameters for receiving messages sent to this workflow.
+type recvInput struct {
 	Topic   string        // Topic to listen for (empty string receives from default topic)
 	Timeout time.Duration // Maximum time to wait for a message
 }
 
-func (c *dbosContext) Recv(_ DBOSContext, input WorkflowRecvInput) (any, error) {
+func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error) {
+	input := recvInput{
+		Topic:   topic,
+		Timeout: timeout,
+	}
 	return c.systemDB.recv(c, input)
 }
 
@@ -1138,20 +1132,17 @@ func (c *dbosContext) Recv(_ DBOSContext, input WorkflowRecvInput) (any, error) 
 //
 // Example:
 //
-//	message, err := dbos.Recv[string](ctx, dbos.WorkflowRecvInput{
-//	    Topic:   "notifications",
-//	    Timeout: 30 * time.Second,
-//	})
+//	message, err := dbos.Recv[string](ctx, "notifications", 30 * time.Second)
 //	if err != nil {
 //	    // Handle timeout or error
 //	    return err
 //	}
 //	log.Printf("Received: %s", message)
-func Recv[R any](ctx DBOSContext, input WorkflowRecvInput) (R, error) {
+func Recv[R any](ctx DBOSContext, topic string, timeout time.Duration) (R, error) {
 	if ctx == nil {
 		return *new(R), errors.New("ctx cannot be nil")
 	}
-	msg, err := ctx.Recv(ctx, input)
+	msg, err := ctx.Recv(ctx, topic, timeout)
 	if err != nil {
 		return *new(R), err
 	}
@@ -1167,49 +1158,45 @@ func Recv[R any](ctx DBOSContext, input WorkflowRecvInput) (R, error) {
 	return typedMessage, nil
 }
 
-// GenericWorkflowSetEventInput defines the parameters for setting a workflow event.
-type GenericWorkflowSetEventInput[P any] struct {
-	Key     string // Event key identifier
-	Message P      // Event value (must be gob-encodable)
-}
-
-func (c *dbosContext) SetEvent(_ DBOSContext, input WorkflowSetEventInput) error {
-	return c.systemDB.setEvent(c, input)
+func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
+	return c.systemDB.setEvent(c, WorkflowSetEventInput{
+		Key:     key,
+		Message: message,
+	})
 }
 
 // SetEvent sets a key-value event for the current workflow with type safety.
 // Events are persistent and can be retrieved by other workflows using GetEvent.
-// The event type R is automatically registered for gob encoding.
+// The event type P is automatically registered for gob encoding.
 //
 // SetEvent can only be called from within a workflow and becomes part of the workflow's durable state.
 // Setting an event with the same key will overwrite the previous value.
 //
 // Example:
 //
-//	err := dbos.SetEvent(ctx, dbos.GenericWorkflowSetEventInput[string]{
-//	    Key:     "status",
-//	    Message: "processing-complete",
-//	})
-func SetEvent[P any](ctx DBOSContext, input GenericWorkflowSetEventInput[P]) error {
+//	err := dbos.SetEvent(ctx, "status", "processing-complete")
+func SetEvent[P any](ctx DBOSContext, key string, message P) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
 	var typedMessage P
 	gob.Register(typedMessage)
-	return ctx.SetEvent(ctx, WorkflowSetEventInput{
-		Key:     input.Key,
-		Message: input.Message,
-	})
+	return ctx.SetEvent(ctx, key, message)
 }
 
-// WorkflowGetEventInput defines the parameters for retrieving an event from a workflow.
-type WorkflowGetEventInput struct {
+// getEventInput defines the parameters for retrieving an event from a workflow.
+type getEventInput struct {
 	TargetWorkflowID string        // Workflow ID to get the event from
 	Key              string        // Event key to retrieve
 	Timeout          time.Duration // Maximum time to wait for the event to be set
 }
 
-func (c *dbosContext) GetEvent(_ DBOSContext, input WorkflowGetEventInput) (any, error) {
+func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error) {
+	input := getEventInput{
+		TargetWorkflowID: targetWorkflowID,
+		Key:              key,
+		Timeout:          timeout,
+	}
 	return c.systemDB.getEvent(c, input)
 }
 
@@ -1221,21 +1208,17 @@ func (c *dbosContext) GetEvent(_ DBOSContext, input WorkflowGetEventInput) (any,
 //
 // Example:
 //
-//	status, err := dbos.GetEvent[string](ctx, dbos.WorkflowGetEventInput{
-//	    TargetWorkflowID: "target-workflow-id",
-//	    Key:              "status",
-//	    Timeout:          30 * time.Second,
-//	})
+//	status, err := dbos.GetEvent[string](ctx, "target-workflow-id", "status", 30 * time.Second)
 //	if err != nil {
 //	    // Handle timeout or error
 //	    return err
 //	}
 //	log.Printf("Status: %s", status)
-func GetEvent[R any](ctx DBOSContext, input WorkflowGetEventInput) (R, error) {
+func GetEvent[R any](ctx DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (R, error) {
 	if ctx == nil {
 		return *new(R), errors.New("ctx cannot be nil")
 	}
-	value, err := ctx.GetEvent(ctx, input)
+	value, err := ctx.GetEvent(ctx, targetWorkflowID, key, timeout)
 	if err != nil {
 		return *new(R), err
 	}
@@ -1250,7 +1233,7 @@ func GetEvent[R any](ctx DBOSContext, input WorkflowGetEventInput) (R, error) {
 	return typedValue, nil
 }
 
-func (c *dbosContext) Sleep(duration time.Duration) (time.Duration, error) {
+func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error) {
 	return c.systemDB.sleep(c, duration)
 }
 
@@ -1269,7 +1252,7 @@ func Sleep(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
 	if ctx == nil {
 		return 0, errors.New("ctx cannot be nil")
 	}
-	return ctx.Sleep(duration)
+	return ctx.Sleep(ctx, duration)
 }
 
 /***********************************/
@@ -1550,7 +1533,7 @@ func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (Wo
 //   - workflowID: The unique identifier of the workflow to cancel
 //
 // Returns an error if the workflow does not exist or if the cancellation operation fails.
-func (c *dbosContext) CancelWorkflow(workflowID string) error {
+func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	return c.systemDB.cancelWorkflow(c, workflowID)
 }
 
@@ -1573,7 +1556,7 @@ func CancelWorkflow(ctx DBOSContext, workflowID string) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.CancelWorkflow(workflowID)
+	return ctx.CancelWorkflow(ctx, workflowID)
 }
 
 func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
