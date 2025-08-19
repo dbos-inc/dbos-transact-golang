@@ -536,7 +536,7 @@ func RunAsWorkflow[P any, R any](ctx DBOSContext, fn GenericWorkflowFunc[P, R], 
 		return fn(ctx, input.(P))
 	})
 
-	handle, err := ctx.(*dbosContext).RunAsWorkflow(ctx, typedErasedWorkflow, input, opts...)
+	handle, err := ctx.RunAsWorkflow(ctx, typedErasedWorkflow, input, opts...)
 	if err != nil {
 		return nil, err
 	}
