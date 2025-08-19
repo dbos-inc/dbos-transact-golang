@@ -212,7 +212,6 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 /**********************************/
 /******* WORKFLOW REGISTRY *******/
 /**********************************/
-type WrappedWorkflowFunc[P any, R any] func(ctx DBOSContext, input P, opts ...WorkflowOption) (WorkflowHandle[R], error)
 type wrappedWorkflowFunc func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
 
 type workflowRegistryEntry struct {
