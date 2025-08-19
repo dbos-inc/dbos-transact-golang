@@ -446,7 +446,7 @@ type WorkflowFunc[P any, R any] func(ctx DBOSContext, input P) (R, error)
 // workflowFunc represents a type-erased workflow function used internally.
 type workflowFunc func(ctx DBOSContext, input any) (any, error)
 
-type workflowParams struct {
+type WorkflowOptions struct {
 	workflowName       string
 	workflowID         string
 	queueName          string
@@ -457,12 +457,12 @@ type workflowParams struct {
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
-type WorkflowOption func(*workflowParams)
+type WorkflowOption func(*WorkflowOptions)
 
 // WithWorkflowID sets a custom workflow ID instead of generating one automatically.
 // This is useful for idempotent workflow execution and workflow retrieval.
 func WithWorkflowID(id string) WorkflowOption {
-	return func(p *workflowParams) {
+	return func(p *WorkflowOptions) {
 		p.workflowID = id
 	}
 }
@@ -470,7 +470,7 @@ func WithWorkflowID(id string) WorkflowOption {
 // WithQueue enqueues the workflow to the specified queue instead of executing immediately.
 // Queued workflows will be processed by the queue runner according to the queue's configuration.
 func WithQueue(queueName string) WorkflowOption {
-	return func(p *workflowParams) {
+	return func(p *WorkflowOptions) {
 		p.queueName = queueName
 	}
 }
@@ -478,28 +478,28 @@ func WithQueue(queueName string) WorkflowOption {
 // WithApplicationVersion overrides the DBOS Context application version for this workflow.
 // This affects workflow recovery.
 func WithApplicationVersion(version string) WorkflowOption {
-	return func(p *workflowParams) {
+	return func(p *WorkflowOptions) {
 		p.applicationVersion = version
 	}
 }
 
 // WithDeduplicationID sets a deduplication ID for the workflow.
 func WithDeduplicationID(id string) WorkflowOption {
-	return func(p *workflowParams) {
+	return func(p *WorkflowOptions) {
 		p.deduplicationID = id
 	}
 }
 
 // WithPriority sets the execution priority for the workflow.
 func WithPriority(priority uint) WorkflowOption {
-	return func(p *workflowParams) {
+	return func(p *WorkflowOptions) {
 		p.priority = priority
 	}
 }
 
 // An internal option we use to map the reflection function name to the registration options.
 func withWorkflowName(name string) WorkflowOption {
-	return func(p *workflowParams) {
+	return func(p *WorkflowOptions) {
 		p.workflowName = name
 	}
 }
@@ -583,7 +583,7 @@ func RunAsWorkflow[P any, R any](ctx DBOSContext, fn WorkflowFunc[P, R], input P
 
 func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn workflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 	// Apply options to build params
-	params := workflowParams{
+	params := WorkflowOptions{
 		applicationVersion: c.GetApplicationVersion(),
 	}
 	for _, opt := range opts {
@@ -833,23 +833,23 @@ type StepFunc[R any] func(ctx context.Context) (R, error)
 
 // StepOptions holds the configuration for step execution using functional options pattern.
 type StepOptions struct {
-	MaxRetries    int           // Maximum number of retry attempts (0 = no retries)
-	BackoffFactor float64       // Exponential backoff multiplier between retries (default: 2.0)
-	BaseInterval  time.Duration // Initial delay between retries (default: 100ms)
-	MaxInterval   time.Duration // Maximum delay between retries (default: 5s)
-	StepName      string        // Custom name for the step (defaults to function name)
+	maxRetries    int           // Maximum number of retry attempts (0 = no retries)
+	backoffFactor float64       // Exponential backoff multiplier between retries (default: 2.0)
+	baseInterval  time.Duration // Initial delay between retries (default: 100ms)
+	maxInterval   time.Duration // Maximum delay between retries (default: 5s)
+	stepName      string        // Custom name for the step (defaults to function name)
 }
 
 // setDefaults applies default values to stepOptions
 func (opts *StepOptions) setDefaults() {
-	if opts.BackoffFactor == 0 {
-		opts.BackoffFactor = _DEFAULT_STEP_BACKOFF_FACTOR
+	if opts.backoffFactor == 0 {
+		opts.backoffFactor = _DEFAULT_STEP_BACKOFF_FACTOR
 	}
-	if opts.BaseInterval == 0 {
-		opts.BaseInterval = _DEFAULT_STEP_BASE_INTERVAL
+	if opts.baseInterval == 0 {
+		opts.baseInterval = _DEFAULT_STEP_BASE_INTERVAL
 	}
-	if opts.MaxInterval == 0 {
-		opts.MaxInterval = _DEFAULT_STEP_MAX_INTERVAL
+	if opts.maxInterval == 0 {
+		opts.maxInterval = _DEFAULT_STEP_MAX_INTERVAL
 	}
 }
 
@@ -861,8 +861,8 @@ type StepOption func(*StepOptions)
 // multiple WithStepName calls without overriding the first one.
 func WithStepName(name string) StepOption {
 	return func(opts *StepOptions) {
-		if opts.StepName == "" {
-			opts.StepName = name
+		if opts.stepName == "" {
+			opts.stepName = name
 		}
 	}
 }
@@ -871,7 +871,7 @@ func WithStepName(name string) StepOption {
 // A value of 0 means no retries (default behavior).
 func WithStepMaxRetries(maxRetries int) StepOption {
 	return func(opts *StepOptions) {
-		opts.MaxRetries = maxRetries
+		opts.maxRetries = maxRetries
 	}
 }
 
@@ -880,7 +880,7 @@ func WithStepMaxRetries(maxRetries int) StepOption {
 // Default value is 2.0.
 func WithBackoffFactor(factor float64) StepOption {
 	return func(opts *StepOptions) {
-		opts.BackoffFactor = factor
+		opts.backoffFactor = factor
 	}
 }
 
@@ -888,7 +888,7 @@ func WithBackoffFactor(factor float64) StepOption {
 // Default value is 100ms.
 func WithBaseInterval(interval time.Duration) StepOption {
 	return func(opts *StepOptions) {
-		opts.BaseInterval = interval
+		opts.baseInterval = interval
 	}
 }
 
@@ -896,7 +896,7 @@ func WithBaseInterval(interval time.Duration) StepOption {
 // Default value is 5s.
 func WithMaxInterval(interval time.Duration) StepOption {
 	return func(opts *StepOptions) {
-		opts.MaxInterval = interval
+		opts.maxInterval = interval
 	}
 }
 
@@ -980,12 +980,12 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn stepFunc, opts ...StepOption) 
 	// Get workflow state from context
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return nil, newStepExecutionError("", stepOpts.StepName, "workflow state not found in context: are you running this step within a workflow?")
+		return nil, newStepExecutionError("", stepOpts.stepName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 
 	// This should not happen when called from the package-level RunAsStep
 	if fn == nil {
-		return nil, newStepExecutionError(wfState.workflowID, stepOpts.StepName, "step function cannot be nil")
+		return nil, newStepExecutionError(wfState.workflowID, stepOpts.stepName, "step function cannot be nil")
 	}
 
 	// If within a step, just run the function directly
@@ -1007,10 +1007,10 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn stepFunc, opts ...StepOption) 
 	recordedOutput, err := c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 		workflowID: stepState.workflowID,
 		stepID:     stepState.stepID,
-		stepName:   stepOpts.StepName,
+		stepName:   stepOpts.stepName,
 	})
 	if err != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.StepName, fmt.Sprintf("checking operation execution: %v", err))
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Sprintf("checking operation execution: %v", err))
 	}
 	if recordedOutput != nil {
 		return recordedOutput.output, recordedOutput.err
@@ -1023,23 +1023,23 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn stepFunc, opts ...StepOption) 
 
 	// Retry if MaxRetries > 0 and the first execution failed
 	var joinedErrors error
-	if stepError != nil && stepOpts.MaxRetries > 0 {
+	if stepError != nil && stepOpts.maxRetries > 0 {
 		joinedErrors = errors.Join(joinedErrors, stepError)
 
-		for retry := 1; retry <= stepOpts.MaxRetries; retry++ {
+		for retry := 1; retry <= stepOpts.maxRetries; retry++ {
 			// Calculate delay for exponential backoff
-			delay := stepOpts.BaseInterval
+			delay := stepOpts.baseInterval
 			if retry > 1 {
-				exponentialDelay := float64(stepOpts.BaseInterval) * math.Pow(stepOpts.BackoffFactor, float64(retry-1))
-				delay = time.Duration(math.Min(exponentialDelay, float64(stepOpts.MaxInterval)))
+				exponentialDelay := float64(stepOpts.baseInterval) * math.Pow(stepOpts.backoffFactor, float64(retry-1))
+				delay = time.Duration(math.Min(exponentialDelay, float64(stepOpts.maxInterval)))
 			}
 
-			c.logger.Error("step failed, retrying", "step_name", stepOpts.StepName, "retry", retry, "max_retries", stepOpts.MaxRetries, "delay", delay, "error", stepError)
+			c.logger.Error("step failed, retrying", "step_name", stepOpts.stepName, "retry", retry, "max_retries", stepOpts.maxRetries, "delay", delay, "error", stepError)
 
 			// Wait before retry
 			select {
 			case <-c.Done():
-				return nil, newStepExecutionError(stepState.workflowID, stepOpts.StepName, fmt.Sprintf("context cancelled during retry: %v", c.Err()))
+				return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Sprintf("context cancelled during retry: %v", c.Err()))
 			case <-time.After(delay):
 				// Continue to retry
 			}
@@ -1056,8 +1056,8 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn stepFunc, opts ...StepOption) 
 			joinedErrors = errors.Join(joinedErrors, stepError)
 
 			// If max retries reached, create MaxStepRetriesExceeded error
-			if retry == stepOpts.MaxRetries {
-				stepError = newMaxStepRetriesExceededError(stepState.workflowID, stepOpts.StepName, stepOpts.MaxRetries, joinedErrors)
+			if retry == stepOpts.maxRetries {
+				stepError = newMaxStepRetriesExceededError(stepState.workflowID, stepOpts.stepName, stepOpts.maxRetries, joinedErrors)
 				break
 			}
 		}
@@ -1066,14 +1066,14 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn stepFunc, opts ...StepOption) 
 	// Record the final result
 	dbInput := recordOperationResultDBInput{
 		workflowID: stepState.workflowID,
-		stepName:   stepOpts.StepName,
+		stepName:   stepOpts.stepName,
 		stepID:     stepState.stepID,
 		err:        stepError,
 		output:     stepOutput,
 	}
 	recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
 	if recErr != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.StepName, fmt.Sprintf("recording step outcome: %v", recErr))
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Sprintf("recording step outcome: %v", recErr))
 	}
 
 	return stepOutput, stepError
