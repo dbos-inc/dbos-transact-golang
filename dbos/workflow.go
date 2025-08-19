@@ -1365,42 +1365,89 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (*workflowPolli
 }
 
 type EnqueueOptions struct {
-	WorkflowName       string
-	QueueName          string
-	WorkflowID         string
-	ApplicationVersion string
-	DeduplicationID    string
-	Priority           uint
-	WorkflowTimeout    time.Duration
-	WorkflowInput      any
+	workflowName       string
+	workflowID         string
+	applicationVersion string
+	deduplicationID    string
+	priority           uint
+	workflowTimeout    time.Duration
+	workflowInput      any
 }
 
-func (c *dbosContext) Enqueue(_ DBOSContext, params EnqueueOptions) (WorkflowHandle[any], error) {
-	workflowID := params.WorkflowID
+// EnqueueOption is a functional option for configuring workflow enqueue parameters.
+type EnqueueOption func(*EnqueueOptions)
+
+// WithEnqueueWorkflowID sets a custom workflow ID instead of generating one automatically.
+func WithEnqueueWorkflowID(id string) EnqueueOption {
+	return func(opts *EnqueueOptions) {
+		opts.workflowID = id
+	}
+}
+
+// WithEnqueueApplicationVersion overrides the application version for the enqueued workflow.
+func WithEnqueueApplicationVersion(version string) EnqueueOption {
+	return func(opts *EnqueueOptions) {
+		opts.applicationVersion = version
+	}
+}
+
+// WithEnqueueDeduplicationID sets a deduplication ID for the enqueued workflow.
+func WithEnqueueDeduplicationID(id string) EnqueueOption {
+	return func(opts *EnqueueOptions) {
+		opts.deduplicationID = id
+	}
+}
+
+// WithEnqueuePriority sets the execution priority for the enqueued workflow.
+func WithEnqueuePriority(priority uint) EnqueueOption {
+	return func(opts *EnqueueOptions) {
+		opts.priority = priority
+	}
+}
+
+// WithEnqueueTimeout sets the maximum execution time for the enqueued workflow.
+func WithEnqueueTimeout(timeout time.Duration) EnqueueOption {
+	return func(opts *EnqueueOptions) {
+		opts.workflowTimeout = timeout
+	}
+}
+
+func (c *dbosContext) Enqueue(_ DBOSContext, queueName, workflowName string, input any, opts ...EnqueueOption) (WorkflowHandle[any], error) {
+	// Process options
+	params := &EnqueueOptions{
+		workflowName:       workflowName,
+		applicationVersion: c.GetApplicationVersion(),
+		workflowInput:      input,
+	}
+	for _, opt := range opts {
+		opt(params)
+	}
+
+	workflowID := params.workflowID
 	if workflowID == "" {
 		workflowID = uuid.New().String()
 	}
 
 	var deadline time.Time
-	if params.WorkflowTimeout > 0 {
-		deadline = time.Now().Add(params.WorkflowTimeout)
+	if params.workflowTimeout > 0 {
+		deadline = time.Now().Add(params.workflowTimeout)
 	}
 
-	if params.Priority > uint(math.MaxInt) {
-		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.Priority, math.MaxInt)
+	if params.priority > uint(math.MaxInt) {
+		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.priority, math.MaxInt)
 	}
 	status := WorkflowStatus{
-		Name:               params.WorkflowName,
-		ApplicationVersion: params.ApplicationVersion,
+		Name:               params.workflowName,
+		ApplicationVersion: params.applicationVersion,
 		Status:             WorkflowStatusEnqueued,
 		ID:                 workflowID,
 		CreatedAt:          time.Now(),
 		Deadline:           deadline,
-		Timeout:            params.WorkflowTimeout,
-		Input:              params.WorkflowInput,
-		QueueName:          params.QueueName,
-		DeduplicationID:    params.DeduplicationID,
-		Priority:           int(params.Priority),
+		Timeout:            params.workflowTimeout,
+		Input:              params.workflowInput,
+		QueueName:          queueName,
+		DeduplicationID:    params.deduplicationID,
+		Priority:           int(params.priority),
 	}
 
 	uncancellableCtx := WithoutCancel(c)
@@ -1429,33 +1476,23 @@ func (c *dbosContext) Enqueue(_ DBOSContext, params EnqueueOptions) (WorkflowHan
 	return newWorkflowPollingHandle[any](uncancellableCtx, workflowID), nil
 }
 
-type GenericEnqueueOptions[P any] struct {
-	WorkflowName       string
-	QueueName          string
-	WorkflowID         string
-	ApplicationVersion string
-	DeduplicationID    string
-	Priority           uint
-	WorkflowTimeout    time.Duration
-	WorkflowInput      P
-}
-
 // Enqueue adds a workflow to a named queue for later execution with type safety.
 // The workflow will be persisted with ENQUEUED status until picked up by a DBOS process.
 // This provides asynchronous workflow execution with durability guarantees.
 //
 // Parameters:
 //   - ctx: DBOS context for the operation
-//   - params: Configuration parameters including workflow name, queue name, input, and options
+//   - queueName: Name of the queue to enqueue the workflow to
+//   - workflowName: Name of the registered workflow function to execute
+//   - input: Input parameters to pass to the workflow (type P)
+//   - opts: Optional configuration options
 //
-// The params struct contains:
-//   - WorkflowName: Name of the registered workflow function to execute (required)
-//   - QueueName: Name of the queue to enqueue the workflow to (required)
-//   - WorkflowID: Custom workflow ID (optional, auto-generated if empty)
-//   - ApplicationVersion: Application version override (optional)
-//   - DeduplicationID: Deduplication identifier for idempotent enqueuing (optional)
-//   - WorkflowTimeout: Maximum execution time for the workflow (optional)
-//   - WorkflowInput: Input parameters to pass to the workflow (type P)
+// Available options:
+//   - WithEnqueueWorkflowID: Custom workflow ID (auto-generated if not provided)
+//   - WithEnqueueApplicationVersion: Application version override
+//   - WithEnqueueDeduplicationID: Deduplication identifier for idempotent enqueuing
+//   - WithEnqueuePriority: Execution priority
+//   - WithEnqueueTimeout: Maximum execution time for the workflow
 //
 // Returns a typed workflow handle that can be used to check status and retrieve results.
 // The handle uses polling to check workflow completion since the execution is asynchronous.
@@ -1463,12 +1500,8 @@ type GenericEnqueueOptions[P any] struct {
 // Example usage:
 //
 //	// Enqueue a workflow with string input and int output
-//	handle, err := dbos.Enqueue[string, int](ctx, dbos.GenericEnqueueOptions[string]{
-//	    WorkflowName:    "ProcessDataWorkflow",
-//	    QueueName:       "data-processing",
-//	    WorkflowInput:   "input data",
-//	    WorkflowTimeout: 30 * time.Minute,
-//	})
+//	handle, err := dbos.Enqueue[string, int](ctx, "data-processing", "ProcessDataWorkflow", "input data",
+//	    dbos.WithEnqueueTimeout(30 * time.Minute))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -1488,14 +1521,10 @@ type GenericEnqueueOptions[P any] struct {
 //	}
 //
 //	// Enqueue with deduplication and custom workflow ID
-//	handle, err := dbos.Enqueue[MyInputType, MyOutputType](ctx, dbos.GenericEnqueueOptions[MyInputType]{
-//	    WorkflowName:    "MyWorkflow",
-//	    QueueName:       "my-queue",
-//	    WorkflowID:      "custom-workflow-id",
-//	    DeduplicationID: "unique-operation-id",
-//	    WorkflowInput:   MyInputType{Field: "value"},
-//	})
-func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (WorkflowHandle[R], error) {
+//	handle, err := dbos.Enqueue[MyInputType, MyOutputType](ctx, "my-queue", "MyWorkflow", MyInputType{Field: "value"},
+//	    dbos.WithEnqueueWorkflowID("custom-workflow-id"),
+//	    dbos.WithEnqueueDeduplicationID("unique-operation-id"))
+func Enqueue[P any, R any](ctx DBOSContext, queueName, workflowName string, input P, opts ...EnqueueOption) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
@@ -1506,17 +1535,8 @@ func Enqueue[P any, R any](ctx DBOSContext, params GenericEnqueueOptions[P]) (Wo
 	var typedOutput R
 	gob.Register(typedOutput)
 
-	// Call typed erased enqueue
-	handle, err := ctx.Enqueue(ctx, EnqueueOptions{
-		WorkflowName:       params.WorkflowName,
-		QueueName:          params.QueueName,
-		WorkflowID:         params.WorkflowID,
-		ApplicationVersion: params.ApplicationVersion,
-		DeduplicationID:    params.DeduplicationID,
-		Priority:           params.Priority,
-		WorkflowInput:      params.WorkflowInput,
-		WorkflowTimeout:    params.WorkflowTimeout,
-	})
+	// Call the interface method with the same signature
+	handle, err := ctx.Enqueue(ctx, queueName, workflowName, input, opts...)
 	if err != nil {
 		return nil, err
 	}

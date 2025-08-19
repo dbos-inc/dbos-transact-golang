@@ -68,12 +68,8 @@ func TestEnqueue(t *testing.T) {
 
 	t.Run("EnqueueAndGetResult", func(t *testing.T) {
 		// Client enqueues a task using the new Enqueue method
-		handle, err := Enqueue[wfInput, string](clientCtx, GenericEnqueueOptions[wfInput]{
-			WorkflowName:       "ServerWorkflow",
-			QueueName:          queue.Name,
-			WorkflowInput:      wfInput{Input: "test-input"},
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
 
 		// Verify we got a polling handle
@@ -102,12 +98,8 @@ func TestEnqueue(t *testing.T) {
 		customWorkflowID := "custom-client-workflow-id"
 
 		// Client enqueues a task with a custom workflow ID
-		_, err := Enqueue[wfInput, string](clientCtx, GenericEnqueueOptions[wfInput]{
-			WorkflowName:  "ServerWorkflow",
-			QueueName:     queue.Name,
-			WorkflowID:    customWorkflowID,
-			WorkflowInput: wfInput{Input: "test-input"},
-		})
+		_, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+			WithEnqueueWorkflowID(customWorkflowID))
 		require.NoError(t, err)
 
 		// Verify the workflow ID is what we set
@@ -123,12 +115,8 @@ func TestEnqueue(t *testing.T) {
 	})
 
 	t.Run("EnqueueWithTimeout", func(t *testing.T) {
-		handle, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
-			WorkflowName:    "BlockingWorkflow",
-			QueueName:       queue.Name,
-			WorkflowInput:   "blocking-input",
-			WorkflowTimeout: 500 * time.Millisecond,
-		})
+		handle, err := Enqueue[string, string](clientCtx, queue.Name, "BlockingWorkflow", "blocking-input",
+			WithEnqueueTimeout(500*time.Millisecond))
 		require.NoError(t, err)
 
 		// Should timeout when trying to get result
@@ -154,32 +142,20 @@ func TestEnqueue(t *testing.T) {
 		mu.Unlock()
 
 		// Enqueue workflow without priority (will use default priority of 0)
-		handle1, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
-			WorkflowName:       "PriorityWorkflow",
-			QueueName:          priorityQueue.Name,
-			WorkflowInput:      "abc",
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle1, err := Enqueue[string, string](clientCtx, priorityQueue.Name, "PriorityWorkflow", "abc",
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow without priority")
 
 		// Enqueue with a lower priority (higher number = lower priority)
-		handle2, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
-			WorkflowName:       "PriorityWorkflow",
-			QueueName:          priorityQueue.Name,
-			WorkflowInput:      "def",
-			Priority:           5,
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle2, err := Enqueue[string, string](clientCtx, priorityQueue.Name, "PriorityWorkflow", "def",
+			WithEnqueuePriority(5),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with priority 5")
 
 		// Enqueue with a higher priority (lower number = higher priority)
-		handle3, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
-			WorkflowName:       "PriorityWorkflow",
-			QueueName:          priorityQueue.Name,
-			WorkflowInput:      "ghi",
-			Priority:           1,
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle3, err := Enqueue[string, string](clientCtx, priorityQueue.Name, "PriorityWorkflow", "ghi",
+			WithEnqueuePriority(1),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with priority 1")
 
 		// Get results
@@ -212,25 +188,17 @@ func TestEnqueue(t *testing.T) {
 		wfid2 := "client-dedup-wf2"
 
 		// First workflow with deduplication ID - should succeed
-		handle1, err := Enqueue[wfInput, string](clientCtx, GenericEnqueueOptions[wfInput]{
-			WorkflowName:       "ServerWorkflow",
-			QueueName:          queue.Name,
-			WorkflowID:         wfid1,
-			DeduplicationID:    dedupID,
-			WorkflowInput:      wfInput{Input: "test-input"},
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle1, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+			WithEnqueueWorkflowID(wfid1),
+			WithEnqueueDeduplicationID(dedupID),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue first workflow with deduplication ID")
 
 		// Second workflow with same deduplication ID but different workflow ID - should fail
-		_, err = Enqueue[wfInput, string](clientCtx, GenericEnqueueOptions[wfInput]{
-			WorkflowName:       "ServerWorkflow",
-			QueueName:          queue.Name,
-			WorkflowID:         wfid2,
-			DeduplicationID:    dedupID,
-			WorkflowInput:      wfInput{Input: "test-input"},
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		_, err = Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+			WithEnqueueWorkflowID(wfid2),
+			WithEnqueueDeduplicationID(dedupID),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.Error(t, err, "expected error when enqueueing workflow with same deduplication ID")
 
 		// Check that it's the correct error type and message
@@ -242,22 +210,14 @@ func TestEnqueue(t *testing.T) {
 		assert.Contains(t, err.Error(), expectedMsgPart, "expected error message to contain deduplication information")
 
 		// Third workflow with different deduplication ID - should succeed
-		handle3, err := Enqueue[wfInput, string](clientCtx, GenericEnqueueOptions[wfInput]{
-			WorkflowName:       "ServerWorkflow",
-			QueueName:          queue.Name,
-			DeduplicationID:    "different-dedup-id",
-			WorkflowInput:      wfInput{Input: "test-input"},
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle3, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+			WithEnqueueDeduplicationID("different-dedup-id"),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with different deduplication ID")
 
 		// Fourth workflow without deduplication ID - should succeed
-		handle4, err := Enqueue[wfInput, string](clientCtx, GenericEnqueueOptions[wfInput]{
-			WorkflowName:       "ServerWorkflow",
-			QueueName:          queue.Name,
-			WorkflowInput:      wfInput{Input: "test-input"},
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle4, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow without deduplication ID")
 
 		// Wait for all successful workflows to complete
@@ -274,14 +234,10 @@ func TestEnqueue(t *testing.T) {
 		assert.Equal(t, "processed: test-input", result4)
 
 		// After first workflow completes, we should be able to enqueue with same deduplication ID
-		handle5, err := Enqueue[wfInput, string](clientCtx, GenericEnqueueOptions[wfInput]{
-			WorkflowName:       "ServerWorkflow",
-			QueueName:          queue.Name,
-			WorkflowID:         wfid2,   // Reuse the workflow ID that failed before
-			DeduplicationID:    dedupID, // Same deduplication ID as first workflow
-			WorkflowInput:      wfInput{Input: "test-input"},
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle5, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+			WithEnqueueWorkflowID(wfid2),   // Reuse the workflow ID that failed before
+			WithEnqueueDeduplicationID(dedupID), // Same deduplication ID as first workflow
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with same dedup ID after completion")
 
 		result5, err := handle5.GetResult()
@@ -366,13 +322,9 @@ func TestCancelResume(t *testing.T) {
 		workflowID := "test-cancel-resume-workflow"
 
 		// Start the workflow - it will execute step one and then wait
-		handle, err := Enqueue[int, int](clientCtx, GenericEnqueueOptions[int]{
-			WorkflowName:       "CancelResumeWorkflow",
-			QueueName:          queue.Name,
-			WorkflowID:         workflowID,
-			WorkflowInput:      input,
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle, err := Enqueue[int, int](clientCtx, queue.Name, "CancelResumeWorkflow", input,
+			WithEnqueueWorkflowID(workflowID),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow from client")
 
 		// Wait for workflow to signal it has started and step one completed
@@ -435,14 +387,10 @@ func TestCancelResume(t *testing.T) {
 		workflowTimeout := 2 * time.Second
 
 		// Start the workflow with a 2-second timeout
-		handle, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
-			WorkflowName:       "TimeoutBlockingWorkflow",
-			QueueName:          queue.Name,
-			WorkflowID:         workflowID,
-			WorkflowInput:      "timeout-test",
-			WorkflowTimeout:    workflowTimeout,
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle, err := Enqueue[string, string](clientCtx, queue.Name, "TimeoutBlockingWorkflow", "timeout-test",
+			WithEnqueueWorkflowID(workflowID),
+			WithEnqueueTimeout(workflowTimeout),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue timeout blocking workflow")
 
 		// Wait 500ms (well before the timeout expires)
@@ -615,13 +563,9 @@ func TestForkWorkflow(t *testing.T) {
 		originalWorkflowID := "original-workflow-fork-test"
 
 		// 1. Run the entire workflow first and check counters are 1
-		handle, err := Enqueue[string, string](clientCtx, GenericEnqueueOptions[string]{
-			WorkflowName:       "ParentWorkflow",
-			QueueName:          queue.Name,
-			WorkflowID:         originalWorkflowID,
-			WorkflowInput:      "test",
-			ApplicationVersion: serverCtx.GetApplicationVersion(),
-		})
+		handle, err := Enqueue[string, string](clientCtx, queue.Name, "ParentWorkflow", "test",
+			WithEnqueueWorkflowID(originalWorkflowID),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue original workflow")
 
 		// Wait for the original workflow to complete
@@ -758,13 +702,9 @@ func TestListWorkflows(t *testing.T) {
 			if i < 5 {
 				// First 5 workflows: use prefix "test-batch-" and succeed
 				workflowID = fmt.Sprintf("test-batch-%d", i)
-				handle, err = Enqueue[testInput, string](clientCtx, GenericEnqueueOptions[testInput]{
-					WorkflowName:       "SimpleWorkflow",
-					QueueName:          queue.Name,
-					WorkflowID:         workflowID,
-					WorkflowInput:      testInput{Value: i, ID: fmt.Sprintf("success-%d", i)},
-					ApplicationVersion: serverCtx.GetApplicationVersion(),
-				})
+				handle, err = Enqueue[testInput, string](clientCtx, queue.Name, "SimpleWorkflow", testInput{Value: i, ID: fmt.Sprintf("success-%d", i)},
+					WithEnqueueWorkflowID(workflowID),
+					WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			} else {
 				// Last 5 workflows: use prefix "test-other-" and some will fail
 				workflowID = fmt.Sprintf("test-other-%d", i)
@@ -772,13 +712,9 @@ func TestListWorkflows(t *testing.T) {
 				if i >= 8 {
 					value = -i // These will fail
 				}
-				handle, err = Enqueue[testInput, string](clientCtx, GenericEnqueueOptions[testInput]{
-					WorkflowName:       "SimpleWorkflow",
-					QueueName:          queue.Name,
-					WorkflowID:         workflowID,
-					WorkflowInput:      testInput{Value: value, ID: fmt.Sprintf("test-%d", i)},
-					ApplicationVersion: serverCtx.GetApplicationVersion(),
-				})
+				handle, err = Enqueue[testInput, string](clientCtx, queue.Name, "SimpleWorkflow", testInput{Value: value, ID: fmt.Sprintf("test-%d", i)},
+					WithEnqueueWorkflowID(workflowID),
+					WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			}
 
 			require.NoError(t, err, "failed to enqueue workflow %d", i)

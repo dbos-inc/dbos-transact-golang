@@ -86,12 +86,12 @@ type DBOSContext interface {
 	GetStepID() (int, error)                                                                                      // Get the current step ID (only available within workflows)
 
 	// Workflow management
-	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)   // Get a handle to an existing workflow
-	Enqueue(_ DBOSContext, params EnqueueOptions) (WorkflowHandle[any], error)        // Enqueue a new workflow with parameters
-	CancelWorkflow(_ DBOSContext, workflowID string) error                            // Cancel a workflow by setting its status to CANCELLED
-	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)     // Resume a cancelled workflow
-	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error) // Fork a workflow from a specific step
-	ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, error)              // List workflows based on filtering criteria
+	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                       // Get a handle to an existing workflow
+	Enqueue(_ DBOSContext, queueName, workflowName string, input any, opts ...EnqueueOption) (WorkflowHandle[any], error) // Enqueue a workflow to a named queue
+	CancelWorkflow(_ DBOSContext, workflowID string) error                                                                // Cancel a workflow by setting its status to CANCELLED
+	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                         // Resume a cancelled workflow
+	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)                                     // Fork a workflow from a specific step
+	ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                                                  // List workflows based on filtering criteria
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
