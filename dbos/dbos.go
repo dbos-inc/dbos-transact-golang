@@ -380,7 +380,7 @@ func (c *dbosContext) Launch() error {
 // The method blocks until all workflows complete or the timeout expires. If the timeout is reached
 // while workflows are still running, a warning is logged but the method continues.
 //
-// Cancel is called internally by Shutdown and handles only the core cancellation operations.
+// Cancel is called internally by Shutdown.
 // It is a permanent operation that should be used when the application is shutting down or deactivated.
 func (c *dbosContext) Cancel(timeout time.Duration) {
 	c.logger.Info("Cancelling DBOS context")
@@ -410,13 +410,12 @@ func (c *dbosContext) Cancel(timeout time.Duration) {
 // 1. Calls Cancel to stop workflows and cancel the context
 // 2. Waits for the queue runner to complete processing
 // 3. Stops the workflow scheduler and waits for scheduled jobs to finish
-// 4. Shuts down the system database connection pool
-// 5. Shuts down the admin server (if running)
+// 4. Shuts down the system database connection pool and notification listener
+// 5. Shuts down the admin server
 // 6. Marks the context as not launched
 //
 // Each step respects the provided timeout. If any component doesn't shut down within the timeout,
-// a warning is logged and the shutdown continues to the next component. This ensures that even
-// if one component hangs, the others can still be cleaned up properly.
+// a warning is logged and the shutdown continues to the next component.
 //
 // Shutdown is a permanent operation and should be called when the application is terminating.
 func (c *dbosContext) Shutdown(timeout time.Duration) {
