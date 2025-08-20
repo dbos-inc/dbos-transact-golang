@@ -428,8 +428,9 @@ func (c *dbosContext) Cancel(timeout time.Duration) {
 // Shutdown gracefully shuts down the DBOS runtime by canceling the context, waiting for
 // all workflows to complete, and cleaning up system resources including the database
 // connection pool, queue runner, workflow scheduler, and admin server.
-// This method blocks until all workflows finish and all resources are properly cleaned up.
-// It should be called when the application is shutting down to ensure data consistency.
+// This method blocks until all workflows finish and all resources are properly cleaned up,
+// up to a configurable timeout.
+// Shutdown is a permanent operation and should be called when the application is shutting down.
 func (c *dbosContext) Shutdown(timeout time.Duration) {
 	c.logger.Info("Shutting down DBOS context")
 
