@@ -158,7 +158,7 @@ func newQueueRunner() *queueRunner {
 		jitterMin:             0.95,
 		jitterMax:             1.05,
 		workflowQueueRegistry: make(map[string]WorkflowQueue),
-		completionChan:        make(chan struct{}),
+		completionChan:        make(chan struct{}, 1),
 	}
 }
 

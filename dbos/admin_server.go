@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -27,7 +28,6 @@ const (
 	_WORKFLOW_FORK_PATTERN            = "POST /workflows/{id}/fork"
 
 	_ADMIN_SERVER_READ_HEADER_TIMEOUT = 5 * time.Second
-	_ADMIN_SERVER_SHUTDOWN_TIMEOUT    = 10 * time.Second
 )
 
 // listWorkflowsRequest represents the request structure for listing workflows
@@ -103,6 +103,7 @@ type adminServer struct {
 	logger        *slog.Logger
 	port          int
 	isDeactivated atomic.Int32
+	wg            sync.WaitGroup
 }
 
 // toListWorkflowResponse converts a WorkflowStatus to a map with all time fields in UTC
@@ -226,7 +227,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	mux.HandleFunc(_DEACTIVATE_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		if as.isDeactivated.CompareAndSwap(0, 1) {
 			ctx.logger.Info("Deactivating DBOS executor", "executor_id", ctx.executorID, "app_version", ctx.applicationVersion)
-			// TODO: Stop queue runner, workflow scheduler, etc
+			ctx.Cancel(1 * time.Minute) // Cancel context, queue runner, and workflow scheduler
 		}
 
 		w.Header().Set("Content-Type", "text/plain")
@@ -532,7 +533,9 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 func (as *adminServer) Start() error {
 	as.logger.Info("Starting admin server", "port", as.port)
 
+	as.wg.Add(1)
 	go func() {
+		defer as.wg.Done()
 		if err := as.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			as.logger.Error("Admin server error", "error", err)
 		}
@@ -541,11 +544,10 @@ func (as *adminServer) Start() error {
 	return nil
 }
 
-func (as *adminServer) Shutdown(ctx context.Context) error {
+func (as *adminServer) Shutdown(timeout time.Duration) error {
 	as.logger.Info("Shutting down admin server")
 
-	// Note: consider moving the grace period to DBOSContext.Shutdown()
-	ctx, cancel := context.WithTimeout(ctx, _ADMIN_SERVER_SHUTDOWN_TIMEOUT)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	if err := as.server.Shutdown(ctx); err != nil {
@@ -553,6 +555,19 @@ func (as *adminServer) Shutdown(ctx context.Context) error {
 		return fmt.Errorf("failed to shutdown admin server: %w", err)
 	}
 
-	as.logger.Info("Admin server shutdown complete")
+	// Wait for the server goroutine to return
+	done := make(chan struct{})
+	go func() {
+		as.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		as.logger.Info("Admin server shutdown complete")
+	case <-ctx.Done():
+		as.logger.Warn("Admin server shutdown timed out")
+	}
+
 	return nil
 }
