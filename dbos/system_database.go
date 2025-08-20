@@ -431,17 +431,17 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 					 WHERE workflow_uuid = $2 AND status = $3`
 
 		_, err = input.tx.Exec(ctx, dlqQuery,
-			WorkflowStatusRetriesExceeded,
+			WorkflowStatusMaxRecoveryAttemptsExceeded,
 			input.status.ID,
 			WorkflowStatusPending)
 
 		if err != nil {
-			return nil, fmt.Errorf("failed to update workflow to %s: %w", WorkflowStatusRetriesExceeded, err)
+			return nil, fmt.Errorf("failed to update workflow to %s: %w", WorkflowStatusMaxRecoveryAttemptsExceeded, err)
 		}
 
 		// Commit the transaction before throwing the error
 		if err := input.tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("failed to commit transaction after marking workflow as %s: %w", WorkflowStatusRetriesExceeded, err)
+			return nil, fmt.Errorf("failed to commit transaction after marking workflow as %s: %w", WorkflowStatusMaxRecoveryAttemptsExceeded, err)
 		}
 
 		return nil, newDeadLetterQueueError(input.status.ID, input.maxRetries)

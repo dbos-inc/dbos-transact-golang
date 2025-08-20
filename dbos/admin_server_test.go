@@ -455,7 +455,6 @@ func TestAdminServer(t *testing.T) {
 			"start_time": timeBetween.Format(time.RFC3339Nano),
 			"limit":      10,
 		}
-		fmt.Println("Request body 2:", reqBody2, "timebetween", timeBetween.UnixMilli())
 		req2, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody2)))
 		require.NoError(t, err, "Failed to create request 2")
 		req2.Header.Set("Content-Type", "application/json")
@@ -469,7 +468,6 @@ func TestAdminServer(t *testing.T) {
 		var workflows2 []map[string]any
 		err = json.NewDecoder(resp2.Body).Decode(&workflows2)
 		require.NoError(t, err, "Failed to decode workflows response 2")
-		fmt.Println(workflows2)
 
 		// Should have exactly 1 workflow (the second one)
 		assert.Equal(t, 1, len(workflows2), "Expected exactly 1 workflow with start_time after timeBetween")

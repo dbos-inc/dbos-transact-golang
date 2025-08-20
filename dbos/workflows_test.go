@@ -1216,7 +1216,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// Verify workflow status is MAX_RECOVERY_ATTEMPTS_EXCEEDED
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
-		require.Equal(t, WorkflowStatusRetriesExceeded, status.Status)
+		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
 
 		// Verify that attempting to start a workflow with the same ID throws a DLQ error
 		_, err = RunAsWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
