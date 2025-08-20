@@ -1344,7 +1344,7 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 //	} else {
 //	    log.Printf("Result: %d", result)
 //	}
-func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (*workflowPollingHandle[R], error) {
+func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, errors.New("dbosCtx cannot be nil")
 	}
