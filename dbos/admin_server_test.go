@@ -38,12 +38,7 @@ func TestAdminServer(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		// Verify admin server is not running
-		client := &http.Client{
-			Timeout: 1 * time.Second,
-			Transport: &http.Transport{
-				DisableKeepAlives: true,
-			},
-		}
+		client := &http.Client{Timeout: 1 * time.Second}
 		_, err = client.Get(fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_HEALTHCHECK_PATTERN, "GET /")))
 		require.Error(t, err, "Expected request to fail when admin server is not started")
 
@@ -84,12 +79,7 @@ func TestAdminServer(t *testing.T) {
 		exec := ctx.(*dbosContext)
 		require.NotNil(t, exec.adminServer, "Expected admin server to be created in DBOS instance")
 
-		client := &http.Client{
-			Timeout: 5 * time.Second,
-			Transport: &http.Transport{
-				DisableKeepAlives: true,
-			},
-		}
+		client := &http.Client{Timeout: 5 * time.Second}
 
 		type adminServerTestCase struct {
 			name           string
@@ -270,12 +260,7 @@ func TestAdminServer(t *testing.T) {
 		// Give the server a moment to start
 		time.Sleep(100 * time.Millisecond)
 
-		client := &http.Client{
-			Timeout: 5 * time.Second,
-			Transport: &http.Transport{
-				DisableKeepAlives: true,
-			},
-		}
+		client := &http.Client{Timeout: 5 * time.Second}
 		endpoint := fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /"))
 
 		// Create workflows with different input/output types
@@ -399,12 +384,7 @@ func TestAdminServer(t *testing.T) {
 			}
 		}()
 
-		client := &http.Client{
-			Timeout: 5 * time.Second,
-			Transport: &http.Transport{
-				DisableKeepAlives: true,
-			},
-		}
+		client := &http.Client{Timeout: 5 * time.Second}
 		endpoint := fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /"))
 
 		// Create first workflow
@@ -575,12 +555,7 @@ func TestAdminServer(t *testing.T) {
 			err = ctx.Launch()
 			require.NoError(t, err)
 
-			client := &http.Client{
-				Timeout: 5 * time.Second,
-				Transport: &http.Transport{
-					DisableKeepAlives: true,
-				},
-			}
+			client := &http.Client{Timeout: 5 * time.Second}
 
 			// Ensure cleanup
 			defer func() {
@@ -650,12 +625,7 @@ func TestAdminServer(t *testing.T) {
 			err = ctx.Launch()
 			require.NoError(t, err)
 
-			client := &http.Client{
-				Timeout: 5 * time.Second,
-				Transport: &http.Transport{
-					DisableKeepAlives: true,
-				},
-			}
+			client := &http.Client{Timeout: 5 * time.Second}
 
 			// Ensure cleanup
 			defer func() {
