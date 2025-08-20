@@ -227,7 +227,10 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	mux.HandleFunc(_DEACTIVATE_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		if as.isDeactivated.CompareAndSwap(0, 1) {
 			ctx.logger.Info("Deactivating DBOS executor", "executor_id", ctx.executorID, "app_version", ctx.applicationVersion)
-			ctx.Cancel(1 * time.Minute) // Cancel context, queue runner, and workflow scheduler
+			// Stop the workflow scheduler. Note we don't wait for running jobs to complete
+			if ctx.workflowScheduler != nil {
+				ctx.workflowScheduler.Stop()
+			}
 		}
 
 		w.Header().Set("Content-Type", "text/plain")

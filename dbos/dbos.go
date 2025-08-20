@@ -72,8 +72,8 @@ type DBOSContext interface {
 
 	// Context Lifecycle
 	Launch() error                  // Launch the DBOS runtime including system database, queues, admin server, and workflow recovery
-	Cancel(timeout time.Duration)   // Cancel the context, queue runner, and workflow scheduler, optionally waiting for workflows to complete
-	Shutdown(timeout time.Duration) // Gracefully shutdown the DBOS runtime, including admin server and system database
+	Cancel(timeout time.Duration)   // Cancel the DBOS context and wait for workflows to complete within timeout
+	Shutdown(timeout time.Duration) // Gracefully shutdown all DBOS runtime components with ordered cleanup sequence
 
 	// Workflow operations
 	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                        // Execute a function as a durable step within a workflow
@@ -373,10 +373,15 @@ func (c *dbosContext) Launch() error {
 	return nil
 }
 
-// Cancel cancels the context, waits for workflows to complete, and stops the queue runner and workflow scheduler.
-// This is the core cancellation functionality that signals workflows should stop processing.
-// All workflows and steps contexts will be canceled, which one can check using their context's Done() method.
-// Cancel is a permanent operation and should be called when the application is shutting down or deactivated.
+// Cancel cancels the DBOS context and waits for all running workflows to complete within the specified timeout.
+// This is the core cancellation functionality that signals all workflows and steps to stop processing
+// by canceling their contexts, which can be detected using their context's Done() method.
+//
+// The method blocks until all workflows complete or the timeout expires. If the timeout is reached
+// while workflows are still running, a warning is logged but the method continues.
+//
+// Cancel is called internally by Shutdown and handles only the core cancellation operations.
+// It is a permanent operation that should be used when the application is shutting down or deactivated.
 func (c *dbosContext) Cancel(timeout time.Duration) {
 	c.logger.Info("Cancelling DBOS context")
 
@@ -397,9 +402,31 @@ func (c *dbosContext) Cancel(timeout time.Duration) {
 		// For now just log a warning: eventually we might want Cancel to return an error.
 		c.logger.Warn("Timeout waiting for workflows to complete", "timeout", timeout)
 	}
+}
+
+// Shutdown gracefully shuts down the DBOS runtime by performing a complete, ordered cleanup
+// of all system components. The shutdown sequence includes:
+//
+// 1. Calls Cancel to stop workflows and cancel the context
+// 2. Waits for the queue runner to complete processing
+// 3. Stops the workflow scheduler and waits for scheduled jobs to finish
+// 4. Shuts down the system database connection pool
+// 5. Shuts down the admin server (if running)
+// 6. Marks the context as not launched
+//
+// Each step respects the provided timeout. If any component doesn't shut down within the timeout,
+// a warning is logged and the shutdown continues to the next component. This ensures that even
+// if one component hangs, the others can still be cleaned up properly.
+//
+// Shutdown is a permanent operation and should be called when the application is terminating.
+func (c *dbosContext) Shutdown(timeout time.Duration) {
+	c.logger.Info("Shutting down DBOS context")
+
+	// Signal cancellation to the core DBOS operations and resources
+	c.Cancel(timeout)
 
 	// Wait for queue runner to finish
-	if c.queueRunner != nil {
+	if c.queueRunner != nil && c.launched.Load() {
 		c.logger.Info("Waiting for queue runner to complete")
 		select {
 		case <-c.queueRunner.completionChan:
@@ -411,7 +438,7 @@ func (c *dbosContext) Cancel(timeout time.Duration) {
 	}
 
 	// Stop the workflow scheduler and wait until all scheduled workflows are done
-	if c.workflowScheduler != nil {
+	if c.workflowScheduler != nil && c.launched.Load() {
 		c.logger.Info("Stopping workflow scheduler")
 		ctx := c.workflowScheduler.Stop()
 
@@ -423,21 +450,6 @@ func (c *dbosContext) Cancel(timeout time.Duration) {
 			c.logger.Warn("Timeout waiting for jobs to complete. Moving on", "timeout", timeout)
 		}
 	}
-}
-
-// Shutdown gracefully shuts down the DBOS runtime by canceling the context, waiting for
-// all workflows to complete, and cleaning up system resources including the database
-// connection pool, queue runner, workflow scheduler, and admin server.
-// This method blocks until all workflows finish and all resources are properly cleaned up,
-// up to a configurable timeout.
-// Shutdown is a permanent operation and should be called when the application is shutting down.
-func (c *dbosContext) Shutdown(timeout time.Duration) {
-	c.logger.Info("Shutting down DBOS context")
-
-	// First cancel the core DBOS operations (context, workflows, queue runner, scheduler)
-	if c.launched.Load() {
-		c.Cancel(timeout)
-	}
 
 	// Close the system database
 	if c.systemDB != nil {
@@ -447,7 +459,7 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	}
 
 	// Shutdown the admin server
-	if c.adminServer != nil {
+	if c.adminServer != nil && c.launched.Load() {
 		c.logger.Info("Shutting down admin server")
 		err := c.adminServer.Shutdown(timeout)
 		if err != nil {
