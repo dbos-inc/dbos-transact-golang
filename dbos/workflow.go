@@ -22,12 +22,12 @@ import (
 type WorkflowStatusType string
 
 const (
-	WorkflowStatusPending         WorkflowStatusType = "PENDING"                        // Workflow is running or ready to run
-	WorkflowStatusEnqueued        WorkflowStatusType = "ENQUEUED"                       // Workflow is queued and waiting for execution
-	WorkflowStatusSuccess         WorkflowStatusType = "SUCCESS"                        // Workflow completed successfully
-	WorkflowStatusError           WorkflowStatusType = "ERROR"                          // Workflow completed with an error
-	WorkflowStatusCancelled       WorkflowStatusType = "CANCELLED"                      // Workflow was cancelled (manually or due to timeout)
-	WorkflowStatusRetriesExceeded WorkflowStatusType = "MAX_RECOVERY_ATTEMPTS_EXCEEDED" // Workflow exceeded maximum retry attempts
+	WorkflowStatusPending                     WorkflowStatusType = "PENDING"                        // Workflow is running or ready to run
+	WorkflowStatusEnqueued                    WorkflowStatusType = "ENQUEUED"                       // Workflow is queued and waiting for execution
+	WorkflowStatusSuccess                     WorkflowStatusType = "SUCCESS"                        // Workflow completed successfully
+	WorkflowStatusError                       WorkflowStatusType = "ERROR"                          // Workflow completed with an error
+	WorkflowStatusCancelled                   WorkflowStatusType = "CANCELLED"                      // Workflow was cancelled (manually or due to timeout)
+	WorkflowStatusMaxRecoveryAttemptsExceeded WorkflowStatusType = "MAX_RECOVERY_ATTEMPTS_EXCEEDED" // Workflow exceeded maximum retry attempts
 )
 
 // WorkflowStatus contains comprehensive information about a workflow's current state and execution history.
@@ -317,7 +317,7 @@ const (
 
 // WithMaxRetries sets the maximum number of retry attempts for workflow recovery.
 // If a workflow fails or is interrupted, it will be retried up to this many times.
-// After exceeding max retries, the workflow status becomes RETRIES_EXCEEDED.
+// After exceeding max retries, the workflow status becomes MAX_RECOVERY_ATTEMPTS_EXCEEDED.
 func WithMaxRetries(maxRetries int) WorkflowRegistrationOption {
 	return func(p *WorkflowRegistrationOptions) {
 		p.maxRetries = maxRetries
@@ -1344,7 +1344,7 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 //	} else {
 //	    log.Printf("Result: %d", result)
 //	}
-func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (*workflowPollingHandle[R], error) {
+func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, errors.New("dbosCtx cannot be nil")
 	}

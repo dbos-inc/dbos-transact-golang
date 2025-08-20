@@ -36,12 +36,12 @@ type WorkflowQueue struct {
 	MaxTasksPerIteration int          `json:"maxTasksPerIteration"`        // Max workflows to dequeue per iteration
 }
 
-// queueOption is a functional option for configuring a workflow queue
-type queueOption func(*WorkflowQueue)
+// QueueOption is a functional option for configuring a workflow queue
+type QueueOption func(*WorkflowQueue)
 
 // WithWorkerConcurrency limits the number of workflows this executor can run concurrently from the queue.
 // This provides per-executor concurrency control.
-func WithWorkerConcurrency(concurrency int) queueOption {
+func WithWorkerConcurrency(concurrency int) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.WorkerConcurrency = &concurrency
 	}
@@ -49,7 +49,7 @@ func WithWorkerConcurrency(concurrency int) queueOption {
 
 // WithGlobalConcurrency limits the total number of workflows that can run concurrently from the queue
 // across all executors. This provides global concurrency control.
-func WithGlobalConcurrency(concurrency int) queueOption {
+func WithGlobalConcurrency(concurrency int) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.GlobalConcurrency = &concurrency
 	}
@@ -57,7 +57,7 @@ func WithGlobalConcurrency(concurrency int) queueOption {
 
 // WithPriorityEnabled enables priority-based scheduling for the queue.
 // When enabled, workflows with lower priority numbers are executed first.
-func WithPriorityEnabled(enabled bool) queueOption {
+func WithPriorityEnabled(enabled bool) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.PriorityEnabled = enabled
 	}
@@ -65,7 +65,7 @@ func WithPriorityEnabled(enabled bool) queueOption {
 
 // WithRateLimiter configures rate limiting for the queue to prevent overwhelming external services.
 // The rate limiter enforces a maximum number of workflow starts within a time period.
-func WithRateLimiter(limiter *RateLimiter) queueOption {
+func WithRateLimiter(limiter *RateLimiter) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.RateLimit = limiter
 	}
@@ -73,7 +73,7 @@ func WithRateLimiter(limiter *RateLimiter) queueOption {
 
 // WithMaxTasksPerIteration sets the maximum number of workflows to dequeue in a single iteration.
 // This controls batch sizes for queue processing.
-func WithMaxTasksPerIteration(maxTasks int) queueOption {
+func WithMaxTasksPerIteration(maxTasks int) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.MaxTasksPerIteration = maxTasks
 	}
@@ -96,7 +96,7 @@ func WithMaxTasksPerIteration(maxTasks int) queueOption {
 //
 //	// Enqueue workflows to this queue:
 //	handle, err := dbos.RunAsWorkflow(ctx, SendEmailWorkflow, emailData, dbos.WithQueue("email-queue"))
-func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...queueOption) WorkflowQueue {
+func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) WorkflowQueue {
 	ctx, ok := dbosCtx.(*dbosContext)
 	if !ok {
 		return WorkflowQueue{} // Do nothing if the concrete type is not dbosContext

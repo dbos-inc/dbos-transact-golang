@@ -213,7 +213,154 @@ func TestAdminServer(t *testing.T) {
 		}
 	})
 
+	t.Run("List workflows input/output values", func(t *testing.T) {
+		resetTestDatabase(t, databaseURL)
+		ctx, err := NewDBOSContext(Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-app",
+			AdminServer: true,
+		})
+		require.NoError(t, err)
+
+		// Define a custom struct for testing
+		type TestStruct struct {
+			Name  string `json:"name"`
+			Value int    `json:"value"`
+		}
+
+		// Test workflow with int input/output
+		intWorkflow := func(dbosCtx DBOSContext, input int) (int, error) {
+			return input * 2, nil
+		}
+		RegisterWorkflow(ctx, intWorkflow)
+
+		// Test workflow with empty string input/output
+		emptyStringWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+			return "", nil
+		}
+		RegisterWorkflow(ctx, emptyStringWorkflow)
+
+		// Test workflow with struct input/output
+		structWorkflow := func(dbosCtx DBOSContext, input TestStruct) (TestStruct, error) {
+			return TestStruct{Name: "output-" + input.Name, Value: input.Value * 2}, nil
+		}
+		RegisterWorkflow(ctx, structWorkflow)
+
+		err = ctx.Launch()
+		require.NoError(t, err)
+
+		// Ensure cleanup
+		defer func() {
+			if ctx != nil {
+				ctx.Cancel()
+			}
+		}()
+
+		// Give the server a moment to start
+		time.Sleep(100 * time.Millisecond)
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		endpoint := fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /"))
+
+		// Create workflows with different input/output types
+		// 1. Integer workflow
+		intHandle, err := RunAsWorkflow(ctx, intWorkflow, 42)
+		require.NoError(t, err, "Failed to create int workflow")
+		intResult, err := intHandle.GetResult()
+		require.NoError(t, err, "Failed to get int workflow result")
+		assert.Equal(t, 84, intResult)
+
+		// 2. Empty string workflow
+		emptyStringHandle, err := RunAsWorkflow(ctx, emptyStringWorkflow, "")
+		require.NoError(t, err, "Failed to create empty string workflow")
+		emptyStringResult, err := emptyStringHandle.GetResult()
+		require.NoError(t, err, "Failed to get empty string workflow result")
+		assert.Equal(t, "", emptyStringResult)
+
+		// 3. Struct workflow
+		structInput := TestStruct{Name: "test", Value: 10}
+		structHandle, err := RunAsWorkflow(ctx, structWorkflow, structInput)
+		require.NoError(t, err, "Failed to create struct workflow")
+		structResult, err := structHandle.GetResult()
+		require.NoError(t, err, "Failed to get struct workflow result")
+		assert.Equal(t, TestStruct{Name: "output-test", Value: 20}, structResult)
+
+		// Query workflows with input/output loading enabled
+		// Filter by the workflow IDs we just created to avoid interference from other tests
+		reqBody := map[string]any{
+			"workflow_uuids": []string{
+				intHandle.GetWorkflowID(),
+				emptyStringHandle.GetWorkflowID(),
+				structHandle.GetWorkflowID(),
+			},
+			"load_input":  true,
+			"load_output": true,
+			"limit":       10,
+		}
+		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody)))
+		require.NoError(t, err, "Failed to create request")
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		require.NoError(t, err, "Failed to make request")
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var workflows []map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&workflows)
+		require.NoError(t, err, "Failed to decode workflows response")
+
+		// Should have exactly 3 workflows
+		assert.Equal(t, 3, len(workflows), "Expected exactly 3 workflows")
+
+		// Verify each workflow's input/output marshaling
+		for _, wf := range workflows {
+			wfID := wf["WorkflowUUID"].(string)
+
+			// Check input and output fields exist and are strings (JSON marshaled)
+			if wfID == intHandle.GetWorkflowID() {
+				// Integer workflow: input and output should be marshaled as JSON strings
+				inputStr, ok := wf["Input"].(string)
+				require.True(t, ok, "Int workflow Input should be a string")
+				assert.Equal(t, "42", inputStr, "Int workflow input should be marshaled as '42'")
+
+				outputStr, ok := wf["Output"].(string)
+				require.True(t, ok, "Int workflow Output should be a string")
+				assert.Equal(t, "84", outputStr, "Int workflow output should be marshaled as '84'")
+
+			} else if wfID == emptyStringHandle.GetWorkflowID() {
+				// Empty string workflow: both input and output are empty strings
+				// According to the logic, empty strings should not have Input/Output fields
+				input, hasInput := wf["Input"]
+				require.Equal(t, "", input)
+				require.True(t, hasInput, "Empty string workflow should have Input field")
+
+				output, hasOutput := wf["Output"]
+				require.True(t, hasOutput, "Empty string workflow should have Output field")
+				require.Equal(t, "", output)
+
+			} else if wfID == structHandle.GetWorkflowID() {
+				// Struct workflow: input and output should be marshaled as JSON strings
+				inputStr, ok := wf["Input"].(string)
+				require.True(t, ok, "Struct workflow Input should be a string")
+				var inputStruct TestStruct
+				err = json.Unmarshal([]byte(inputStr), &inputStruct)
+				require.NoError(t, err, "Failed to unmarshal struct workflow input")
+				assert.Equal(t, structInput, inputStruct, "Struct workflow input should match")
+
+				outputStr, ok := wf["Output"].(string)
+				require.True(t, ok, "Struct workflow Output should be a string")
+				var outputStruct TestStruct
+				err = json.Unmarshal([]byte(outputStr), &outputStruct)
+				require.NoError(t, err, "Failed to unmarshal struct workflow output")
+				assert.Equal(t, TestStruct{Name: "output-test", Value: 20}, outputStruct, "Struct workflow output should match")
+			}
+		}
+	})
+
 	t.Run("List endpoints time filtering", func(t *testing.T) {
+		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
@@ -308,7 +455,6 @@ func TestAdminServer(t *testing.T) {
 			"start_time": timeBetween.Format(time.RFC3339Nano),
 			"limit":      10,
 		}
-		fmt.Println("Request body 2:", reqBody2, "timebetween", timeBetween.UnixMilli())
 		req2, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody2)))
 		require.NoError(t, err, "Failed to create request 2")
 		req2.Header.Set("Content-Type", "application/json")
@@ -322,7 +468,6 @@ func TestAdminServer(t *testing.T) {
 		var workflows2 []map[string]any
 		err = json.NewDecoder(resp2.Body).Decode(&workflows2)
 		require.NoError(t, err, "Failed to decode workflows response 2")
-		fmt.Println(workflows2)
 
 		// Should have exactly 1 workflow (the second one)
 		assert.Equal(t, 1, len(workflows2), "Expected exactly 1 workflow with start_time after timeBetween")

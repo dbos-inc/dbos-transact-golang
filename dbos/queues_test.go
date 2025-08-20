@@ -233,13 +233,13 @@ func TestWorkflowQueues(t *testing.T) {
 		for {
 			dlqStatus, err := dlqHandle[0].GetStatus()
 			require.NoError(t, err, "failed to get status of DLQ workflow handle")
-			if dlqStatus.Status != WorkflowStatusRetriesExceeded && retries < 10 {
+			if dlqStatus.Status != WorkflowStatusMaxRecoveryAttemptsExceeded && retries < 10 {
 				time.Sleep(1 * time.Second) // Wait a bit before checking again
 				retries++
 				continue
 			}
 			require.NoError(t, err, "failed to get status of DLQ workflow handle")
-			assert.Equal(t, WorkflowStatusRetriesExceeded, dlqStatus.Status, "expected workflow to be in DLQ after max retries exceeded")
+			assert.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, dlqStatus.Status, "expected workflow to be in DLQ after max retries exceeded")
 			handles = append(handles, dlqHandle[0])
 			break
 		}
