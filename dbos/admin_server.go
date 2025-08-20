@@ -372,7 +372,10 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			}
 		}
 
-		workflows, err := ListWorkflows(ctx, req.toListWorkflowsOptions()...)
+		req.Status = "" // We are not expecting a filter here but clear just in case
+		filters := req.toListWorkflowsOptions()
+		filters = append(filters, WithStatus([]WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending}))
+		workflows, err := ListWorkflows(ctx, filters...)
 		if err != nil {
 			ctx.logger.Error("Failed to list queued workflows", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to list queued workflows: %v", err), http.StatusInternalServerError)
