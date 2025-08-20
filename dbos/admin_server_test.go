@@ -360,6 +360,7 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("List endpoints time filtering", func(t *testing.T) {
+		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
