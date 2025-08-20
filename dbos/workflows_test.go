@@ -2472,7 +2472,6 @@ func TestWorkflowTimeout(t *testing.T) {
 
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
-		fmt.Println(result)
 		// The workflow should return a WorkflowCancelled error from the step
 		require.Error(t, err, "expected error from workflow")
 
