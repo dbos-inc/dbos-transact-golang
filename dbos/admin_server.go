@@ -152,7 +152,7 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 		result["StartedAt"] = nil
 	}
 
-	if ws.Input != nil {
+	if ws.Input != nil && ws.Input != "" {
 		bytes, err := json.Marshal(ws.Input)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal input: %w", err)
@@ -160,7 +160,7 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 		result["Input"] = string(bytes)
 	}
 
-	if ws.Output != nil {
+	if ws.Output != nil && ws.Output != "" {
 		bytes, err := json.Marshal(ws.Output)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal output: %w", err)
