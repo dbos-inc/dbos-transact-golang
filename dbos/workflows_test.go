@@ -1213,7 +1213,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		require.True(t, ok, "expected DBOSError, got %T", err)
 		require.Equal(t, DeadLetterQueueError, dbosErr.Code)
 
-		// Verify workflow status is RETRIES_EXCEEDED
+		// Verify workflow status is MAX_RECOVERY_ATTEMPTS_EXCEEDED
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		require.Equal(t, WorkflowStatusRetriesExceeded, status.Status)

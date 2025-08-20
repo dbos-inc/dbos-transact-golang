@@ -421,11 +421,11 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 	}
 
 	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
-	// When this number becomes equal to `maxRetries + 1`, we mark the workflow as `RETRIES_EXCEEDED`.
+	// When this number becomes equal to `maxRetries + 1`, we mark the workflow as `MAX_RECOVERY_ATTEMPTS_EXCEEDED`.
 	if result.status != WorkflowStatusSuccess && result.status != WorkflowStatusError &&
 		input.maxRetries > 0 && result.attempts > input.maxRetries+1 {
 
-		// Update workflow status to RETRIES_EXCEEDED and clear queue-related fields
+		// Update workflow status to MAX_RECOVERY_ATTEMPTS_EXCEEDED and clear queue-related fields
 		dlqQuery := `UPDATE dbos.workflow_status
 					 SET status = $1, deduplication_id = NULL, started_at_epoch_ms = NULL, queue_name = NULL
 					 WHERE workflow_uuid = $2 AND status = $3`
@@ -436,12 +436,12 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 			WorkflowStatusPending)
 
 		if err != nil {
-			return nil, fmt.Errorf("failed to update workflow to RETRIES_EXCEEDED: %w", err)
+			return nil, fmt.Errorf("failed to update workflow to %s: %w", WorkflowStatusRetriesExceeded, err)
 		}
 
 		// Commit the transaction before throwing the error
 		if err := input.tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("failed to commit transaction after marking workflow as RETRIES_EXCEEDED: %w", err)
+			return nil, fmt.Errorf("failed to commit transaction after marking workflow as %s: %w", WorkflowStatusRetriesExceeded, err)
 		}
 
 		return nil, newDeadLetterQueueError(input.status.ID, input.maxRetries)
