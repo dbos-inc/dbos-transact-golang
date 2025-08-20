@@ -125,7 +125,7 @@ func TestAdminServer(t *testing.T) {
 				endpoint:       fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOW_QUEUES_METADATA_PATTERN, "GET /")),
 				expectedStatus: http.StatusOK,
 				validateResp: func(t *testing.T, resp *http.Response) {
-					var queueMetadata []QueueOptions
+					var queueMetadata []WorkflowQueue
 					err := json.NewDecoder(resp.Body).Decode(&queueMetadata)
 					require.NoError(t, err, "Failed to decode response as QueueMetadata array")
 					assert.NotNil(t, queueMetadata, "Expected non-nil queue metadata array")
