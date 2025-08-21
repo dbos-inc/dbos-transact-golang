@@ -844,6 +844,14 @@ func TestChildWorkflow(t *testing.T) {
 				if !ok {
 					return "", fmt.Errorf("expected child handle to be of type workflowDirectHandle, got %T", childHandle)
 				}
+				// Signal the child workflow is started
+				pollingHandleStartEvent.Set()
+
+				result, err := childHandle.GetResult()
+				if err != nil {
+					return "", fmt.Errorf("failed to get result from child workflow: %w", err)
+				}
+				return result, nil
 			case 2:
 				// Second handle will be a polling handle
 				_, ok := childHandle.(*workflowPollingHandle[string])
@@ -851,16 +859,9 @@ func TestChildWorkflow(t *testing.T) {
 					return "", fmt.Errorf("expected recovered child handle to be of type workflowPollingHandle, got %T", childHandle)
 				}
 			}
-
-			// Signal the child workflow is started
-			pollingHandleStartEvent.Set()
-
-			result, err := childHandle.GetResult()
-			if err != nil {
-				return "", fmt.Errorf("failed to get result from child workflow: %w", err)
-			}
-			return result, nil
+			return "", nil
 		}
+
 		RegisterWorkflow(dbosCtx, pollingHandleParentWf)
 
 		// Execute parent workflow - it will block after starting the child
@@ -948,26 +949,6 @@ func idempotencyWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 		return incrementCounter(ctx, int64(1))
 	})
 	return input, nil
-}
-
-var blockingStepStopEvent *Event
-
-func blockingStep(_ context.Context) (string, error) {
-	blockingStepStopEvent.Wait()
-	return "", nil
-}
-
-var idempotencyWorkflowWithStepEvent *Event
-
-func idempotencyWorkflowWithStep(dbosCtx DBOSContext, input string) (int64, error) {
-	RunAsStep(dbosCtx, func(ctx context.Context) (int64, error) {
-		return incrementCounter(ctx, int64(1))
-	})
-	idempotencyWorkflowWithStepEvent.Set()
-	RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
-		return blockingStep(ctx)
-	})
-	return idempotencyCounter, nil
 }
 
 func TestWorkflowIdempotency(t *testing.T) {
@@ -2940,4 +2921,447 @@ func TestWorkflowAtVersion(t *testing.T) {
 	status, err := retrieved.GetStatus()
 	require.NoError(t, err, "failed to get workflow status")
 	assert.Equal(t, version, status.ApplicationVersion, "expected correct application version")
+}
+
+var cancelAllBeforeBlockEvent = NewEvent()
+
+func cancelAllBeforeBlockingWorkflow(ctx DBOSContext, input string) (string, error) {
+	cancelAllBeforeBlockEvent.Wait()
+	return input, nil
+}
+
+func TestCancelAllBefore(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	RegisterWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow)
+	RegisterWorkflow(dbosCtx, simpleWorkflow)
+
+	// Create a queue for testing enqueued workflows
+	queue := NewWorkflowQueue(dbosCtx, "test-cancel-queue")
+
+	t.Run("CancelAllBefore", func(t *testing.T) {
+		now := time.Now()
+		cutoffTime := now.Add(3 * time.Second)
+
+		// Create workflows that should be cancelled (PENDING/ENQUEUED before cutoff)
+		shouldBeCancelledIDs := make([]string, 0)
+
+		// Create 2 PENDING workflows before cutoff time
+		for i := range 2 {
+			handle, err := RunAsWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow, fmt.Sprintf("pending-before-%d", i))
+			require.NoError(t, err, "failed to start pending workflow %d", i)
+			shouldBeCancelledIDs = append(shouldBeCancelledIDs, handle.GetWorkflowID())
+		}
+
+		// Create 2 ENQUEUED workflows before cutoff time
+		for i := range 2 {
+			handle, err := RunAsWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow, fmt.Sprintf("enqueued-before-%d", i), WithQueue(queue.Name))
+			require.NoError(t, err, "failed to start enqueued workflow %d", i)
+			shouldBeCancelledIDs = append(shouldBeCancelledIDs, handle.GetWorkflowID())
+		}
+
+		// Create workflows that should NOT be cancelled
+
+		// Create 1 SUCCESS workflow before cutoff time (but complete it)
+		successHandle, err := RunAsWorkflow(dbosCtx, simpleWorkflow, "success-before")
+		require.NoError(t, err, "failed to start success workflow")
+		_, err = successHandle.GetResult()
+		require.NoError(t, err, "failed to complete success workflow")
+		shouldNotBeCancelledIDs := []string{successHandle.GetWorkflowID()}
+
+		// Sleep to ensure we pass the cutoff time
+		time.Sleep(4 * time.Second)
+
+		// Create 2 PENDING/ENQUEUED workflows after cutoff time
+		for i := range 2 {
+			handle, err := RunAsWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow, fmt.Sprintf("pending-after-%d", i))
+			require.NoError(t, err, "failed to start pending workflow after cutoff %d", i)
+			shouldNotBeCancelledIDs = append(shouldNotBeCancelledIDs, handle.GetWorkflowID())
+		}
+
+		// Call cancelAllBefore
+		err = dbosCtx.(*dbosContext).systemDB.cancelAllBefore(dbosCtx, cutoffTime)
+		require.NoError(t, err, "failed to call cancelAllBefore")
+
+		// Verify workflows that should be cancelled
+		for _, wfID := range shouldBeCancelledIDs {
+			handle, err := RetrieveWorkflow[string](dbosCtx, wfID)
+			require.NoError(t, err, "failed to retrieve workflow %s", wfID)
+
+			status, err := handle.GetStatus()
+			require.NoError(t, err, "failed to get status for workflow %s", wfID)
+			assert.Equal(t, WorkflowStatusCancelled, status.Status, "workflow %s should be cancelled", wfID)
+		}
+
+		// Verify workflows that should NOT be cancelled
+		for _, wfID := range shouldNotBeCancelledIDs {
+			handle, err := RetrieveWorkflow[string](dbosCtx, wfID)
+			require.NoError(t, err, "failed to retrieve workflow %s", wfID)
+
+			status, err := handle.GetStatus()
+			require.NoError(t, err, "failed to get status for workflow %s", wfID)
+			assert.NotEqual(t, WorkflowStatusCancelled, status.Status, "workflow %s should NOT be cancelled", wfID)
+		}
+
+		// Unblock any remaining workflows
+		cancelAllBeforeBlockEvent.Set()
+
+		// Wait for workflows to complete and verify they were cancelled
+		for _, wfID := range shouldBeCancelledIDs {
+			handle, err := RetrieveWorkflow[string](dbosCtx, wfID)
+			require.NoError(t, err, "failed to retrieve cancelled workflow %s", wfID)
+
+			_, err = handle.GetResult()
+			if err != nil {
+				// Should get a DBOSError with AwaitedWorkflowCancelled code
+				var dbosErr *DBOSError
+				if errors.As(err, &dbosErr) {
+					assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected AwaitedWorkflowCancelled error code for workflow %s, got: %v", wfID, dbosErr.Code)
+				} else {
+					// Fallback: check if error message contains "cancelled"
+					assert.Contains(t, err.Error(), "cancelled", "expected cancellation error for workflow %s", wfID)
+				}
+			}
+		}
+	})
+}
+
+func gcTestStep(_ context.Context, x int) (int, error) {
+	return x, nil
+}
+
+func gcTestWorkflow(dbosCtx DBOSContext, x int) (int, error) {
+	result, err := RunAsStep(dbosCtx, func(ctx context.Context) (int, error) {
+		return gcTestStep(ctx, x)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return result, nil
+}
+
+func gcBlockedWorkflow(dbosCtx DBOSContext, event *Event) (string, error) {
+	event.Wait()
+	workflowID, err := GetWorkflowID(dbosCtx)
+	if err != nil {
+		return "", err
+	}
+	return workflowID, nil
+}
+
+func TestGarbageCollect(t *testing.T) {
+	databaseURL := getDatabaseURL()
+
+	t.Run("GarbageCollectWithOffset", func(t *testing.T) {
+		// Start with clean database for precise workflow counting
+		resetTestDatabase(t, databaseURL)
+		dbosCtx := setupDBOS(t, false, true)
+		gcTestEvent := NewEvent()
+		
+		// Ensure the event is set at the end to unblock any remaining workflows
+		t.Cleanup(func() {
+			gcTestEvent.Set()
+		})
+
+		RegisterWorkflow(dbosCtx, gcTestWorkflow)
+		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
+
+		gcTestEvent.Clear()
+		numWorkflows := 10
+
+		// Start one blocked workflow and 10 normal workflows
+		blockedHandle, err := RunAsWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
+		require.NoError(t, err, "failed to start blocked workflow")
+
+		var completedHandles []WorkflowHandle[int]
+		for i := range numWorkflows {
+			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
+			require.NoError(t, err, "failed to start test workflow %d", i)
+			result, err := handle.GetResult()
+			require.NoError(t, err, "failed to get result from test workflow %d", i)
+			require.Equal(t, i, result, "expected result %d, got %d", i, result)
+			completedHandles = append(completedHandles, handle)
+		}
+
+		// Verify exactly 11 workflows exist before GC (1 blocked + 10 completed)
+		workflows, err := ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows")
+		require.Equal(t, numWorkflows+1, len(workflows), "expected exactly %d workflows before GC", numWorkflows+1)
+
+		// Garbage collect keeping only the 5 newest workflows
+		// The blocked workflow won't be deleted because it's pending
+		threshold := 5
+		err = dbosCtx.(*dbosContext).systemDB.garbageCollectWorkflows(dbosCtx, garbageCollectWorkflowsInput{
+			rowsThreshold: &threshold,
+		})
+		require.NoError(t, err, "failed to garbage collect workflows")
+
+		// Verify workflows after GC - should have 6 workflows:
+		// - 5 newest workflows (by creation time cutoff determined by threshold)
+		// - 1 blocked workflow (preserved because it's pending)
+		workflows, err = ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows after GC")
+		require.Equal(t, 6, len(workflows), "expected exactly 6 workflows after GC (5 from threshold + 1 pending)")
+
+		// Verify blocked workflow still exists (since it's pending)
+		found := false
+		for _, wf := range workflows {
+			if wf.ID == blockedHandle.GetWorkflowID() {
+				found = true
+				require.Equal(t, WorkflowStatusPending, wf.Status, "blocked workflow should still be pending")
+				break
+			}
+		}
+		require.True(t, found, "blocked workflow should still exist after GC")
+
+		// Complete the blocked workflow
+		gcTestEvent.Set()
+		result, err := blockedHandle.GetResult()
+		require.NoError(t, err, "failed to get result from blocked workflow")
+		require.Equal(t, blockedHandle.GetWorkflowID(), result, "expected blocked workflow to return its ID")
+	})
+
+	t.Run("GarbageCollectWithCutoffTime", func(t *testing.T) {
+		// Start with clean database for precise workflow counting
+		resetTestDatabase(t, databaseURL)
+		dbosCtx := setupDBOS(t, false, true)
+		gcTestEvent := NewEvent()
+		
+		// Ensure the event is set at the end to unblock any remaining workflows
+		t.Cleanup(func() {
+			gcTestEvent.Set()
+		})
+
+		RegisterWorkflow(dbosCtx, gcTestWorkflow)
+		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
+
+		gcTestEvent.Clear()
+		numWorkflows := 10
+
+		// Execute first batch of workflows
+		for i := range numWorkflows {
+			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
+			require.NoError(t, err, "failed to start test workflow %d", i)
+			result, err := handle.GetResult()
+			require.NoError(t, err, "failed to get result from test workflow %d", i)
+			require.Equal(t, i, result, "expected result %d, got %d", i, result)
+		}
+
+		// Wait a second to ensure time separation
+		time.Sleep(1 * time.Second)
+		cutoffTime := time.Now()
+
+		// Start blocked workflow after cutoff
+		blockedHandle, err := RunAsWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
+		require.NoError(t, err, "failed to start blocked workflow")
+
+		// Execute second batch of workflows after cutoff
+		for i := numWorkflows; i < numWorkflows*2; i++ {
+			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
+			require.NoError(t, err, "failed to start test workflow %d", i)
+			result, err := handle.GetResult()
+			require.NoError(t, err, "failed to get result from test workflow %d", i)
+			require.Equal(t, i, result, "expected result %d, got %d", i, result)
+		}
+
+		// Verify exactly 21 workflows exist before GC (10 + 1 blocked + 10)
+		workflows, err := ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows")
+		require.Equal(t, 21, len(workflows), "expected exactly 21 workflows before GC (10 old + 1 blocked + 10 new)")
+
+		// Garbage collect workflows completed before cutoff time
+		cutoffTimestamp := cutoffTime.UnixMilli()
+		err = dbosCtx.(*dbosContext).systemDB.garbageCollectWorkflows(dbosCtx, garbageCollectWorkflowsInput{
+			cutoffEpochTimestampMs: &cutoffTimestamp,
+		})
+		require.NoError(t, err, "failed to garbage collect workflows by time")
+
+		// Verify exactly 11 workflows remain after GC (1 blocked + 10 new completed)
+		workflows, err = ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows after time-based GC")
+		require.Equal(t, 11, len(workflows), "expected exactly 11 workflows after time-based GC (1 blocked + 10 new)")
+
+		// Verify blocked workflow still exists
+		found := false
+		for _, wf := range workflows {
+			if wf.ID == blockedHandle.GetWorkflowID() {
+				found = true
+				require.Equal(t, WorkflowStatusPending, wf.Status, "blocked workflow should still be pending")
+				break
+			}
+		}
+		require.True(t, found, "blocked workflow should still exist after time-based GC")
+
+		// Verify all remaining completed workflows were created after cutoff (excluding blocked)
+		completedAfterCutoff := 0
+		for _, wf := range workflows {
+			if wf.ID != blockedHandle.GetWorkflowID() && wf.Status == WorkflowStatusSuccess {
+				require.True(t, wf.CreatedAt.After(cutoffTime), "completed workflow should be from after the cutoff time")
+				completedAfterCutoff++
+			}
+		}
+		require.Equal(t, 10, completedAfterCutoff, "expected exactly 10 completed workflows after cutoff")
+
+		// Complete the blocked workflow
+		gcTestEvent.Set()
+		result, err := blockedHandle.GetResult()
+		require.NoError(t, err, "failed to get result from blocked workflow")
+		require.Equal(t, blockedHandle.GetWorkflowID(), result, "expected blocked workflow to return its ID")
+
+		// Wait a moment to ensure the completed workflow timestamp is after creation
+		time.Sleep(100 * time.Millisecond)
+
+		// Garbage collect all workflows - use a future cutoff to catch everything
+		futureTimestamp := time.Now().Add(1 * time.Hour).UnixMilli()
+		err = dbosCtx.(*dbosContext).systemDB.garbageCollectWorkflows(dbosCtx, garbageCollectWorkflowsInput{
+			cutoffEpochTimestampMs: &futureTimestamp,
+		})
+		require.NoError(t, err, "failed to garbage collect all completed workflows")
+
+		// Verify exactly 0 workflows remain
+		workflows, err = ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows after final GC")
+		require.Equal(t, 0, len(workflows), "expected exactly 0 workflows after final GC")
+	})
+
+	t.Run("GarbageCollectEmptyDatabase", func(t *testing.T) {
+		// Start with clean database for precise workflow counting
+		resetTestDatabase(t, databaseURL)
+		dbosCtx := setupDBOS(t, false, true)
+		
+		RegisterWorkflow(dbosCtx, gcTestWorkflow)
+		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
+
+		// Verify exactly 0 workflows exist initially
+		workflows, err := ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows")
+		require.Equal(t, 0, len(workflows), "expected exactly 0 workflows in empty database")
+
+		// Verify GC runs without errors on a blank table
+		threshold := 1
+		err = dbosCtx.(*dbosContext).systemDB.garbageCollectWorkflows(dbosCtx, garbageCollectWorkflowsInput{
+			rowsThreshold: &threshold,
+		})
+		require.NoError(t, err, "garbage collect should work on empty database")
+
+		// Verify still 0 workflows after row-based GC
+		workflows, err = ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows after row-based GC")
+		require.Equal(t, 0, len(workflows), "expected exactly 0 workflows after row-based GC on empty database")
+
+		currentTimestamp := time.Now().UnixMilli()
+		err = dbosCtx.(*dbosContext).systemDB.garbageCollectWorkflows(dbosCtx, garbageCollectWorkflowsInput{
+			cutoffEpochTimestampMs: &currentTimestamp,
+		})
+		require.NoError(t, err, "time-based garbage collect should work on empty database")
+
+		// Verify still 0 workflows after time-based GC
+		workflows, err = ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows after time-based GC")
+		require.Equal(t, 0, len(workflows), "expected exactly 0 workflows after time-based GC on empty database")
+	})
+
+	t.Run("GarbageCollectOnlyCompletedWorkflows", func(t *testing.T) {
+		// Start with clean database for precise workflow counting
+		resetTestDatabase(t, databaseURL)
+		dbosCtx := setupDBOS(t, false, true)
+		gcTestEvent := NewEvent()
+		
+		// Ensure the event is set at the end to unblock any remaining workflows
+		t.Cleanup(func() {
+			gcTestEvent.Set()
+		})
+
+		RegisterWorkflow(dbosCtx, gcTestWorkflow)
+		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
+
+		gcTestEvent.Clear()
+		numWorkflows := 5
+
+		// Start blocked workflow that will remain pending
+		blockedHandle, err := RunAsWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
+		require.NoError(t, err, "failed to start blocked workflow")
+
+		// Execute normal workflows to completion
+		for i := range numWorkflows {
+			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
+			require.NoError(t, err, "failed to start test workflow %d", i)
+			result, err := handle.GetResult()
+			require.NoError(t, err, "failed to get result from test workflow %d", i)
+			require.Equal(t, i, result, "expected result %d, got %d", i, result)
+		}
+
+		// Verify exactly 6 workflows exist (1 blocked + 5 completed)
+		workflows, err := ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows")
+		require.Equal(t, numWorkflows+1, len(workflows), "expected exactly %d workflows", numWorkflows+1)
+
+		// Count pending vs completed workflows
+		pendingCount := 0
+		completedCount := 0
+		for _, wf := range workflows {
+			switch wf.Status {
+			case WorkflowStatusPending:
+				pendingCount++
+			case WorkflowStatusSuccess:
+				completedCount++
+			}
+		}
+		require.Equal(t, 1, pendingCount, "expected exactly 1 pending workflow")
+		require.Equal(t, numWorkflows, completedCount, "expected exactly %d completed workflows", numWorkflows)
+
+		// GC keeping only the 1 newest workflow
+		// The blocked workflow is the oldest but won't be deleted because it's pending
+		// So we should have 2 workflows: 1 newest completed + 1 pending
+		threshold := 1
+		err = dbosCtx.(*dbosContext).systemDB.garbageCollectWorkflows(dbosCtx, garbageCollectWorkflowsInput{
+			rowsThreshold: &threshold,
+		})
+		require.NoError(t, err, "failed to garbage collect workflows")
+
+		// Verify exactly 2 workflows remain (1 newest + 1 pending)
+		workflows, err = ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows after GC")
+		require.Equal(t, 2, len(workflows), "expected exactly 2 workflows after GC (1 newest + 1 pending)")
+
+		// Verify pending workflow still exists
+		found := false
+		pendingCount = 0
+		completedCount = 0
+		for _, wf := range workflows {
+			if wf.ID == blockedHandle.GetWorkflowID() {
+				found = true
+				require.Equal(t, WorkflowStatusPending, wf.Status, "blocked workflow should still be pending")
+			}
+			if wf.Status == WorkflowStatusPending {
+				pendingCount++
+			} else if wf.Status == WorkflowStatusSuccess {
+				completedCount++
+			}
+		}
+		require.True(t, found, "pending workflow should remain")
+		require.Equal(t, 1, pendingCount, "expected exactly 1 pending workflow after GC")
+		require.Equal(t, 1, completedCount, "expected exactly 1 completed workflow after GC")
+
+		// Complete the blocked workflow and verify GC works
+		gcTestEvent.Set()
+		result, err := blockedHandle.GetResult()
+		require.NoError(t, err, "failed to get result from blocked workflow")
+		require.Equal(t, blockedHandle.GetWorkflowID(), result, "expected blocked workflow to return its ID")
+
+		// Wait a moment to ensure the completed workflow timestamp is after creation
+		time.Sleep(100 * time.Millisecond)
+
+		// Now GC everything using future timestamp
+		futureTimestamp := time.Now().Add(1 * time.Hour).UnixMilli()
+		err = dbosCtx.(*dbosContext).systemDB.garbageCollectWorkflows(dbosCtx, garbageCollectWorkflowsInput{
+			cutoffEpochTimestampMs: &futureTimestamp,
+		})
+		require.NoError(t, err, "failed to garbage collect all workflows")
+
+		// Verify exactly 0 workflows remain
+		workflows, err = ListWorkflows(dbosCtx)
+		require.NoError(t, err, "failed to list workflows after final GC")
+		require.Equal(t, 0, len(workflows), "expected exactly 0 workflows after final GC")
+	})
 }
