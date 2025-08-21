@@ -1,0 +1,359 @@
+package dbos
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+const (
+	_PING_INTERVAL          = 20 * time.Second
+	_PING_TIMEOUT           = 30 * time.Second  // Should be > server's executorPingWait (25s)
+	_INITIAL_RECONNECT_WAIT = 1 * time.Second
+	_MAX_RECONNECT_WAIT     = 30 * time.Second
+	_HANDSHAKE_TIMEOUT      = 10 * time.Second
+)
+
+// ConductorConfig contains configuration for the conductor
+type ConductorConfig struct {
+	url     string
+	apiKey  string
+	appName string
+	logger  *slog.Logger
+}
+
+// Conductor manages the WebSocket connection to the DBOS conductor service
+type Conductor struct {
+	config   ConductorConfig
+	conn     *websocket.Conn
+	wg       sync.WaitGroup
+	stopOnce sync.Once
+	dbosCtx  *dbosContext
+
+	// Connection parameters
+	url           url.URL
+	pingInterval  time.Duration
+	pingTimeout   time.Duration
+	reconnectWait time.Duration
+}
+
+// Launch starts the conductor connection manager goroutine
+func (c *Conductor) Launch() {
+	c.config.logger.Info("Launching conductor", "url", c.url.String())
+	c.wg.Add(1)
+	go c.run()
+}
+
+// NewConductor creates a new conductor instance
+func NewConductor(config ConductorConfig, dbosCtx *dbosContext) (*Conductor, error) {
+	if config.apiKey == "" {
+		return nil, fmt.Errorf("conductor API key is required")
+	}
+	if config.url == "" {
+		return nil, fmt.Errorf("conductor URL is required")
+	}
+
+	// Parse the base conductor URL
+	baseURL, err := url.Parse(config.url)
+	if err != nil {
+		return nil, fmt.Errorf("invalid conductor URL: %w", err)
+	}
+
+	// Build WebSocket URL using net.JoinPath for proper path construction
+	wsURL := url.URL{
+		Scheme: baseURL.Scheme,
+		Host:   baseURL.Host,
+		Path:   baseURL.JoinPath("websocket", config.appName, config.apiKey).Path,
+	}
+
+	// Convert HTTP schemes to WebSocket schemes
+	switch wsURL.Scheme {
+	case "http":
+		wsURL.Scheme = "ws"
+	case "https":
+		wsURL.Scheme = "wss"
+	case "ws", "wss":
+		// Already correct
+	default:
+		return nil, fmt.Errorf("unsupported URL scheme: %s (expected http, https, ws, or wss)", wsURL.Scheme)
+	}
+
+	c := &Conductor{
+		config:        config,
+		dbosCtx:       dbosCtx,
+		url:           wsURL,
+		pingInterval:  _PING_INTERVAL,
+		pingTimeout:   _PING_TIMEOUT,
+		reconnectWait: _INITIAL_RECONNECT_WAIT,
+	}
+
+	config.logger.Info("Conductor created", "url", wsURL.String())
+	return c, nil
+}
+
+// Shutdown gracefully conductor
+func (c *Conductor) Shutdown(timeout time.Duration) {
+	c.stopOnce.Do(func() {
+		c.config.logger.Info("Shutting down conductor")
+
+		done := make(chan struct{})
+		go func() {
+			c.wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			c.config.logger.Info("Conductor shut down")
+		case <-time.After(timeout):
+			c.config.logger.Warn("Timeout waiting for conductor to shut down", "timeout", timeout)
+		}
+	})
+}
+
+// run manages the WebSocket connection lifecycle with reconnection
+func (c *Conductor) run() {
+	defer c.wg.Done()
+
+	for {
+		// Check if the context has been cancelled
+		select {
+		case <-c.dbosCtx.Done():
+			c.config.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
+			if c.conn != nil {
+				c.conn.Close()
+			}
+			return
+		default:
+		}
+
+		// Connect if not connected
+		if c.conn == nil {
+			if err := c.connect(); err != nil {
+				c.config.logger.Warn("Failed to connect to conductor", "error", err)
+				select {
+				case <-c.dbosCtx.Done():
+					c.config.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
+					return
+				case <-time.After(c.reconnectWait):
+					// Exponential backoff up to max wait
+					if c.reconnectWait < _MAX_RECONNECT_WAIT {
+						c.reconnectWait *= 2
+					}
+					continue
+				}
+			}
+
+			// Reset reconnect wait on successful connection
+			c.reconnectWait = _INITIAL_RECONNECT_WAIT
+		}
+
+		// Read message (will timeout based on read deadline set in connect)
+		messageType, message, err := c.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				c.config.logger.Warn("Unexpected WebSocket close", "error", err)
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// This is expected - read deadline timeout, connection is still healthy
+				c.config.logger.Debug("Read deadline reached, connection healthy")
+				continue
+			} else {
+				c.config.logger.Debug("Connection closed", "error", err)
+			}
+			// Close connection to trigger reconnection
+			if c.conn != nil {
+				c.conn.Close()
+				c.conn = nil
+			}
+			continue
+		}
+
+		// Only accept text messages
+		if messageType != websocket.TextMessage {
+			c.config.logger.Warn("Received unexpected message type, forcing reconnection", "type", messageType)
+			if c.conn != nil {
+				c.conn.Close()
+				c.conn = nil
+			}
+			continue
+		}
+
+		if err := c.handleMessage(message); err != nil {
+			c.config.logger.Error("Failed to handle message", "error", err)
+		}
+	}
+}
+
+// connect establishes a WebSocket connection to the conductor
+func (c *Conductor) connect() error {
+	c.config.logger.Debug("Connecting to conductor", "url", c.url.String())
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: _HANDSHAKE_TIMEOUT,
+	}
+
+	conn, _, err := dialer.Dial(c.url.String(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to dial conductor: %w", err)
+	}
+
+	// Set initial read deadline
+	if err := conn.SetReadDeadline(time.Now().Add(c.pingTimeout)); err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to set read deadline: %w", err)
+	}
+
+	// Set pong handler to reset read deadline
+	conn.SetPongHandler(func(appData string) error {
+		c.config.logger.Debug("Received pong from conductor")
+		return conn.SetReadDeadline(time.Now().Add(c.pingTimeout))
+	})
+
+	c.conn = conn
+
+	// Start ping goroutine
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		ticker := time.NewTicker(c.pingInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-c.dbosCtx.Done():
+				c.config.logger.Debug("Ping goroutine stopped, context done")
+				return
+			case <-ticker.C:
+				if err := c.ping(); err != nil {
+					c.config.logger.Warn("Ping failed, closing connection", "error", err)
+					// Close the connection to trigger reconnection in main loop
+					conn.Close()
+					return
+				}
+			}
+		}
+	}()
+
+	c.config.logger.Info("Connected to DBOS conductor")
+	return nil
+}
+
+// ping sends a ping to the conductor
+func (c *Conductor) ping() error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	c.config.logger.Debug("Sending ping to conductor")
+
+	if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+		return fmt.Errorf("failed to send ping: %w", err)
+	}
+
+	return nil
+}
+
+// handleMessage processes an incoming message from the conductor
+func (c *Conductor) handleMessage(data []byte) error {
+	var base BaseMessage
+	if err := json.Unmarshal(data, &base); err != nil {
+		c.config.logger.Error("Failed to parse message", "error", err)
+		return fmt.Errorf("failed to parse base message: %w", err)
+	}
+	c.config.logger.Debug("Received message", "type", base.Type, "request_id", base.RequestID)
+
+	switch base.Type {
+	case ExecutorInfo:
+		return c.handleExecutorInfoRequest(data, base.RequestID)
+	default:
+		c.config.logger.Warn("Unknown message type", "type", base.Type)
+		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
+	}
+}
+
+// handleExecutorInfoRequest handles executor info requests from the conductor
+func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) error {
+	var req ExecutorInfoRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse executor info request", "error", err)
+		return fmt.Errorf("failed to parse executor info request: %w", err)
+	}
+	c.config.logger.Debug("Handling executor info request", "requestd", req)
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		c.config.logger.Error("Failed to get hostname", "error", err)
+		return fmt.Errorf("failed to get hostname: %w", err)
+	}
+
+	response := ExecutorInfoResponse{
+		BaseMessage: BaseMessage{
+			Type:      ExecutorInfo,
+			RequestID: requestID,
+		},
+		ExecutorID:         c.dbosCtx.GetExecutorID(),
+		ApplicationVersion: c.dbosCtx.GetApplicationVersion(),
+		Hostname:           &hostname,
+	}
+
+	return c.sendExecutorInfoResponse(response)
+}
+
+// sendExecutorInfoResponse sends an ExecutorInfoResponse to the conductor
+func (c *Conductor) sendExecutorInfoResponse(response ExecutorInfoResponse) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal executor info response: %w", err)
+	}
+
+	c.config.logger.Debug("Sending executor info response", "data", response)
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.config.logger.Error("Failed to send executor info response", "error", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return nil
+}
+
+// sendErrorResponse sends an error response for unknown message types
+func (c *Conductor) sendErrorResponse(requestID string, msgType MessageType, errorMsg string) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	response := BaseResponse{
+		BaseMessage: BaseMessage{
+			Type:      msgType,
+			RequestID: requestID,
+		},
+		ErrorMessage: &errorMsg,
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		c.config.logger.Error("Failed to marshal error response", "error", err)
+		return fmt.Errorf("failed to marshal error response: %w", err)
+	}
+
+	c.config.logger.Debug("Sending error response", "data", response)
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.config.logger.Error("Failed to send error response", "error", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return nil
+}

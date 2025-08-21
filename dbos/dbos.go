@@ -25,15 +25,18 @@ import (
 
 const (
 	_DEFAULT_ADMIN_SERVER_PORT = 3001
+	_DBOS_DOMAIN               = "cloud.dbos.dev"
 )
 
 // Config holds configuration parameters for initializing a DBOS context.
 // DatabaseURL and AppName are required.
 type Config struct {
-	DatabaseURL string       // PostgreSQL connection string (required)
-	AppName     string       // Application name for identification (required)
-	Logger      *slog.Logger // Custom logger instance (defaults to a new slog logger)
-	AdminServer bool         // Enable Transact admin HTTP server
+	DatabaseURL     string       // PostgreSQL connection string (required)
+	AppName         string       // Application name for identification (required)
+	Logger          *slog.Logger // Custom logger instance (defaults to a new slog logger)
+	AdminServer     bool         // Enable Transact admin HTTP server (disabled by default)
+	ConductorURL    string       // DBOS conductor service URL (optional)
+	ConductorAPIKey string       // DBOS conductor API key (optional)
 }
 
 // processConfig enforces mandatory fields and applies defaults.
@@ -47,10 +50,12 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 
 	dbosConfig := &Config{
-		DatabaseURL: inputConfig.DatabaseURL,
-		AppName:     inputConfig.AppName,
-		Logger:      inputConfig.Logger,
-		AdminServer: inputConfig.AdminServer,
+		DatabaseURL:     inputConfig.DatabaseURL,
+		AppName:         inputConfig.AppName,
+		Logger:          inputConfig.Logger,
+		AdminServer:     inputConfig.AdminServer,
+		ConductorURL:    inputConfig.ConductorURL,
+		ConductorAPIKey: inputConfig.ConductorAPIKey,
 	}
 
 	// Load defaults
@@ -111,6 +116,9 @@ type dbosContext struct {
 
 	// Queue runner
 	queueRunner *queueRunner
+
+	// Conductor client
+	conductor *Conductor
 
 	// Application metadata
 	applicationVersion string
@@ -315,6 +323,30 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	initExecutor.queueRunner = newQueueRunner()
 	NewWorkflowQueue(initExecutor, _DBOS_INTERNAL_QUEUE_NAME)
 
+	// Initialize conductor if API key is provided
+	if config.ConductorAPIKey != "" {
+		if config.ConductorURL == "" {
+			dbosDomain := os.Getenv("DBOS_DOMAIN")
+			if dbosDomain == "" {
+				dbosDomain = _DBOS_DOMAIN
+			}
+			config.ConductorURL = fmt.Sprintf("wss://%s/conductor/v1alpha1", dbosDomain)
+		}
+		conductorConfig := ConductorConfig{
+			url:     config.ConductorURL,
+			apiKey:  config.ConductorAPIKey,
+			appName: config.AppName,
+			logger:  config.Logger,
+		}
+		conductor, err := NewConductor(conductorConfig, initExecutor)
+		if err != nil {
+			initExecutor.logger.Warn("Failed to initialize conductor", "error", err)
+		} else {
+			initExecutor.conductor = conductor
+			initExecutor.logger.Info("Conductor initialized")
+		}
+	}
+
 	return initExecutor, nil
 }
 
@@ -354,6 +386,12 @@ func (c *dbosContext) Launch() error {
 	if c.workflowScheduler != nil {
 		c.workflowScheduler.Start()
 		c.logger.Info("Workflow scheduler started")
+	}
+
+	// Start the conductor if it has been initialized
+	if c.conductor != nil {
+		c.conductor.Launch()
+		c.logger.Info("Conductor started")
 	}
 
 	// Run a round of recovery on the local executor
@@ -431,6 +469,13 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for jobs to complete. Moving on", "timeout", timeout)
 		}
+	}
+
+	// Shutdown the conductor
+	if c.conductor != nil {
+		c.logger.Info("Shutting down conductor")
+		c.conductor.Shutdown(timeout)
+		c.conductor = nil
 	}
 
 	// Shutdown the admin server
