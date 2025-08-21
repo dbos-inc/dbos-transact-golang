@@ -35,6 +35,7 @@ type systemDatabase interface {
 	updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error
 	awaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
 	cancelWorkflow(ctx context.Context, workflowID string) error
+	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	resumeWorkflow(ctx context.Context, workflowID string) error
 	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) error
 
@@ -60,6 +61,9 @@ type systemDatabase interface {
 	// Queues
 	dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error)
 	clearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
+
+	// Garbage collection
+	garbageCollectWorkflows(ctx context.Context, input garbageCollectWorkflowsInput) error
 }
 
 type sysDB struct {
@@ -186,8 +190,22 @@ func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Log
 		return nil, fmt.Errorf("failed to run migrations: %v", err)
 	}
 
-	// Create pgx pool
-	pool, err := pgxpool.New(ctx, databaseURL)
+	// Parse the connection string to get a config
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse database URL: %v", err)
+	}
+	// Set pool configuration
+	config.MaxConns = 20
+	config.MinConns = 0
+	config.MaxConnLifetime = time.Hour
+	config.MaxConnIdleTime = time.Minute * 5
+
+	// Add acquire timeout to prevent indefinite blocking
+	config.ConnConfig.ConnectTimeout = 10 * time.Second
+
+	// Create pool with configuration
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection pool: %v", err)
 	}
@@ -202,11 +220,11 @@ func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Log
 	notificationsMap := &sync.Map{}
 
 	// Create a connection to listen on notifications
-	config, err := pgconn.ParseConfig(databaseURL)
+	notifierConnConfig, err := pgconn.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse database URL: %v", err)
 	}
-	config.OnNotification = func(c *pgconn.PgConn, n *pgconn.Notification) {
+	notifierConnConfig.OnNotification = func(c *pgconn.PgConn, n *pgconn.Notification) {
 		if n.Channel == _DBOS_NOTIFICATIONS_CHANNEL || n.Channel == _DBOS_WORKFLOW_EVENTS_CHANNEL {
 			// Check if an entry exists in the map, indexed by the payload
 			// If yes, broadcast on the condition variable so listeners can wake up
@@ -215,7 +233,7 @@ func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Log
 			}
 		}
 	}
-	notificationListenerConnection, err := pgconn.ConnectConfig(ctx, config)
+	notificationListenerConnection, err := pgconn.ConnectConfig(ctx, notifierConnConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect notification listener to database: %v", err)
 	}
@@ -752,6 +770,92 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+
+	return nil
+}
+
+func (s *sysDB) cancelAllBefore(ctx context.Context, cutoffTime time.Time) error {
+	// List all workflows in PENDING or ENQUEUED state ending at cutoffTime
+	listInput := listWorkflowsDBInput{
+		endTime: cutoffTime,
+		status:  []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued},
+	}
+
+	workflows, err := s.listWorkflows(ctx, listInput)
+	if err != nil {
+		return fmt.Errorf("failed to list workflows for cancellation: %w", err)
+	}
+
+	// Cancel each workflow
+	for _, workflow := range workflows {
+		if err := s.cancelWorkflow(ctx, workflow.ID); err != nil {
+			s.logger.Error("Failed to cancel workflow during cancelAllBefore", "workflowID", workflow.ID, "error", err)
+			// Continue with other workflows even if one fails
+			// If desired we could funnel the errors back the caller (conductor, admin server)
+		}
+	}
+
+	return nil
+}
+
+type garbageCollectWorkflowsInput struct {
+	cutoffEpochTimestampMs *int64
+	rowsThreshold          *int
+}
+
+func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollectWorkflowsInput) error {
+	// Validate input parameters
+	if input.rowsThreshold != nil && *input.rowsThreshold <= 0 {
+		return fmt.Errorf("rowsThreshold must be greater than 0, got %d", *input.rowsThreshold)
+	}
+
+	cutoffTimestamp := input.cutoffEpochTimestampMs
+
+	// If rowsThreshold is provided, get the timestamp of the Nth newest workflow
+	if input.rowsThreshold != nil {
+		query := `SELECT created_at
+				  FROM dbos.workflow_status
+				  ORDER BY created_at DESC
+				  LIMIT 1 OFFSET $1`
+
+		var rowsBasedCutoff int64
+		err := s.pool.QueryRow(ctx, query, *input.rowsThreshold-1).Scan(&rowsBasedCutoff)
+		if err != nil {
+			if err == pgx.ErrNoRows {
+				// Not enough rows to apply threshold, no garbage collection needed
+				return nil
+			}
+			return fmt.Errorf("failed to query cutoff timestamp by rows threshold: %w", err)
+		}
+
+		// Use the more restrictive cutoff (higher timestamp = more recent = less deletion)
+		if cutoffTimestamp == nil || rowsBasedCutoff > *cutoffTimestamp {
+			cutoffTimestamp = &rowsBasedCutoff
+		}
+	}
+
+	// If no cutoff is determined, no garbage collection is needed
+	if cutoffTimestamp == nil {
+		return nil
+	}
+
+	// Delete all workflows older than cutoff that are NOT PENDING or ENQUEUED
+	query := `DELETE FROM dbos.workflow_status
+			  WHERE created_at < $1
+			    AND status NOT IN ($2, $3)`
+
+	commandTag, err := s.pool.Exec(ctx, query,
+		*cutoffTimestamp,
+		WorkflowStatusPending,
+		WorkflowStatusEnqueued)
+
+	if err != nil {
+		return fmt.Errorf("failed to garbage collect workflows: %w", err)
+	}
+
+	s.logger.Info("Garbage collected workflows",
+		"cutoff_timestamp", *cutoffTimestamp,
+		"deleted_count", commandTag.RowsAffected())
 
 	return nil
 }

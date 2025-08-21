@@ -278,7 +278,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	ctx.logger.Debug("Registering admin server endpoint", "pattern", _GLOBAL_TIMEOUT_PATTERN)
 	mux.HandleFunc(_GLOBAL_TIMEOUT_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		var inputs struct {
-			CutoffEpochTimestampMs *int64 `json:"cutoff_epoch_timestamp_ms"`
+			CutoffEpochTimestampMs int64 `json:"cutoff_epoch_timestamp_ms"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&inputs); err != nil {
@@ -286,13 +286,15 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			return
 		}
 
-		// TODO: Implement global timeout
-		// err := globalTimeout(ctx, inputs.CutoffEpochTimestampMs)
-		// if err != nil {
-		//     ctx.logger.Error("Global timeout failed", "error", err)
-		//     http.Error(w, fmt.Sprintf("Global timeout failed: %v", err), http.StatusInternalServerError)
-		//     return
-		// }
+		cutoffTime := time.UnixMilli(inputs.CutoffEpochTimestampMs)
+		ctx.logger.Info("Global timeout request", "cutoff_time", cutoffTime)
+
+		err := ctx.systemDB.cancelAllBefore(ctx, cutoffTime)
+		if err != nil {
+			ctx.logger.Error("Global timeout failed", "error", err)
+			http.Error(w, fmt.Sprintf("Global timeout failed: %v", err), http.StatusInternalServerError)
+			return
+		}
 
 		w.WriteHeader(http.StatusNoContent)
 	})
