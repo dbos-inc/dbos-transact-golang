@@ -3158,36 +3158,42 @@ func TestGarbageCollect(t *testing.T) {
 		gcTestEvent.Clear()
 		numWorkflows := 10
 
-		// Execute first batch of workflows
+		// Start blocked workflow BEFORE cutoff to verify pending workflows are preserved
+		blockedHandle, err := RunAsWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
+		require.NoError(t, err, "failed to start blocked workflow")
+
+		// Execute first batch of workflows (before cutoff)
+		var beforeCutoffHandles []WorkflowHandle[int]
 		for i := range numWorkflows {
 			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
 			require.NoError(t, err, "failed to start test workflow %d", i)
 			result, err := handle.GetResult()
 			require.NoError(t, err, "failed to get result from test workflow %d", i)
 			require.Equal(t, i, result, "expected result %d, got %d", i, result)
+			beforeCutoffHandles = append(beforeCutoffHandles, handle)
 		}
 
-		// Wait a second to ensure time separation
-		time.Sleep(1 * time.Second)
+		// Wait to ensure clear time separation between batches
+		time.Sleep(500 * time.Millisecond)
 		cutoffTime := time.Now()
-
-		// Start blocked workflow after cutoff
-		blockedHandle, err := RunAsWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
-		require.NoError(t, err, "failed to start blocked workflow")
+		// Additional small delay to ensure cutoff is after all first batch workflows
+		time.Sleep(100 * time.Millisecond)
 
 		// Execute second batch of workflows after cutoff
+		var afterCutoffHandles []WorkflowHandle[int]
 		for i := numWorkflows; i < numWorkflows*2; i++ {
 			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
 			require.NoError(t, err, "failed to start test workflow %d", i)
 			result, err := handle.GetResult()
 			require.NoError(t, err, "failed to get result from test workflow %d", i)
 			require.Equal(t, i, result, "expected result %d, got %d", i, result)
+			afterCutoffHandles = append(afterCutoffHandles, handle)
 		}
 
-		// Verify exactly 21 workflows exist before GC (10 + 1 blocked + 10)
+		// Verify exactly 21 workflows exist before GC (1 blocked + 10 old + 10 new)
 		workflows, err := ListWorkflows(dbosCtx)
 		require.NoError(t, err, "failed to list workflows")
-		require.Equal(t, 21, len(workflows), "expected exactly 21 workflows before GC (10 old + 1 blocked + 10 new)")
+		require.Equal(t, 21, len(workflows), "expected exactly 21 workflows before GC (1 blocked + 10 old + 10 new)")
 
 		// Garbage collect workflows completed before cutoff time
 		cutoffTimestamp := cutoffTime.UnixMilli()
@@ -3201,26 +3207,26 @@ func TestGarbageCollect(t *testing.T) {
 		require.NoError(t, err, "failed to list workflows after time-based GC")
 		require.Equal(t, 11, len(workflows), "expected exactly 11 workflows after time-based GC (1 blocked + 10 new)")
 
-		// Verify blocked workflow still exists
-		found := false
+		// Create a map of remaining workflow IDs for easy lookup
+		remainingIDs := make(map[string]bool)
 		for _, wf := range workflows {
-			if wf.ID == blockedHandle.GetWorkflowID() {
-				found = true
-				require.Equal(t, WorkflowStatusPending, wf.Status, "blocked workflow should still be pending")
-				break
-			}
+			remainingIDs[wf.ID] = true
 		}
-		require.True(t, found, "blocked workflow should still exist after time-based GC")
 
-		// Verify all remaining completed workflows were created after cutoff (excluding blocked)
-		completedAfterCutoff := 0
-		for _, wf := range workflows {
-			if wf.ID != blockedHandle.GetWorkflowID() && wf.Status == WorkflowStatusSuccess {
-				require.True(t, wf.CreatedAt.After(cutoffTime), "completed workflow should be from after the cutoff time")
-				completedAfterCutoff++
-			}
+		// Verify blocked workflow still exists (even though it was created before cutoff)
+		require.True(t, remainingIDs[blockedHandle.GetWorkflowID()], "blocked workflow should still exist after GC")
+
+		// Verify that all workflows created before cutoff were deleted (except the blocked one)
+		for _, handle := range beforeCutoffHandles {
+			wfID := handle.GetWorkflowID()
+			require.False(t, remainingIDs[wfID], "workflow created before cutoff (ID: %s) should have been deleted", wfID)
 		}
-		require.Equal(t, 10, completedAfterCutoff, "expected exactly 10 completed workflows after cutoff")
+
+		// Verify that all workflows created after cutoff were preserved
+		for _, handle := range afterCutoffHandles {
+			wfID := handle.GetWorkflowID()
+			require.True(t, remainingIDs[wfID], "workflow created after cutoff (ID: %s) should have been preserved", wfID)
+		}
 
 		// Complete the blocked workflow
 		gcTestEvent.Set()
