@@ -3390,4 +3390,80 @@ func TestGarbageCollect(t *testing.T) {
 		require.NoError(t, err, "failed to list workflows after final GC")
 		require.Equal(t, 0, len(workflows), "expected exactly 0 workflows after final GC")
 	})
+
+	t.Run("ThresholdAndCutoffTimestampInteraction", func(t *testing.T) {
+		// Reset database for clean test environment
+		resetTestDatabase(t, databaseURL)
+		dbosCtx := setupDBOS(t, false, true)
+
+		// Register the test workflow
+		RegisterWorkflow(dbosCtx, gcTestWorkflow)
+
+		// This test verifies that when both threshold and cutoff timestamp are provided,
+		// the more stringent (restrictive) one applies - i.e., the one that keeps more workflows
+
+		// Create 10 workflows with different timestamps
+		numWorkflows := 10
+		handles := make([]WorkflowHandle[int], numWorkflows)
+
+		for i := range numWorkflows {
+			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
+			require.NoError(t, err, "failed to start workflow %d", i)
+			handles[i] = handle
+
+			// Add small delay to ensure distinct timestamps
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		// Wait for all workflows to complete
+		for i, handle := range handles {
+			result, err := handle.GetResult()
+			require.NoError(t, err, "failed to get result from workflow %d", i)
+			require.Equal(t, i, result)
+		}
+
+		// Get timestamps for testing
+		workflows, err := ListWorkflows(dbosCtx, WithSortDesc(true))
+		require.NoError(t, err, "failed to list workflows")
+		require.Equal(t, numWorkflows, len(workflows))
+
+		// Workflows are ordered newest first in ListWorkflows
+		var cutoff1 int64 // Will keep 5 newest when used as cutoff
+		var cutoff2 int64 // Will keep 8 newest when used as cutoff
+
+		cutoff1 = workflows[7].CreatedAt.UnixMilli() // 3rd oldest workflow
+		cutoff2 = workflows[1].CreatedAt.UnixMilli() // 9th oldest workflow
+
+		// Case 1: Threshold is more restrictive (higher/more recent cutoff)
+		// Threshold would keep 6 newest, timestamp would keep 8 newest
+		// Result: threshold wins (higher timestamp), only 6 workflows remain
+		threshold := 6
+		err = dbosCtx.(*dbosContext).systemDB.garbageCollectWorkflows(dbosCtx, garbageCollectWorkflowsInput{
+			rowsThreshold:          &threshold,
+			cutoffEpochTimestampMs: &cutoff1,
+		})
+		require.NoError(t, err, "failed to garbage collect with threshold 6 and 7th newest timestamp")
+
+		workflows, err = ListWorkflows(dbosCtx, WithSortDesc(true))
+		require.NoError(t, err, "failed to list workflows after first GC")
+		require.Equal(t, threshold, len(workflows), "expected 6 workflows when threshold has more recent cutoff than timestamp")
+
+		for i := 0; i < len(workflows)-threshold; i++ {
+			require.Equal(t, workflows[i].ID, handles[i].GetWorkflowID(), "expected workflow %d to remain", i)
+		}
+
+		// Case2: Threshold is less restrictive (lower cutoff)
+		threshold = 3
+		err = dbosCtx.(*dbosContext).systemDB.garbageCollectWorkflows(dbosCtx, garbageCollectWorkflowsInput{
+			rowsThreshold:          &threshold,
+			cutoffEpochTimestampMs: &cutoff2,
+		})
+		require.NoError(t, err, "failed to garbage collect with threshold 3 and 2nd newest timestamp")
+
+		workflows, err = ListWorkflows(dbosCtx, WithSortDesc(true))
+		require.NoError(t, err, "failed to list workflows after second GC")
+		require.Equal(t, 2, len(workflows), "expected 2 workflows after second GC")
+		require.Equal(t, workflows[0].ID, handles[numWorkflows-1].GetWorkflowID(), "expected newest workflow to remain")
+		require.Equal(t, workflows[1].ID, handles[numWorkflows-2].GetWorkflowID(), "expected 2nd newest workflow to remain")
+	})
 }
