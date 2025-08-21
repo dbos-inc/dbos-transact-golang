@@ -9,8 +9,9 @@ import (
 type MessageType string
 
 const (
-	ExecutorInfo         MessageType = "executor_info"
-	ListWorkflowsMessage MessageType = "list_workflows"
+	ExecutorInfo               MessageType = "executor_info"
+	ListWorkflowsMessage       MessageType = "list_workflows"
+	ListQueuedWorkflowsMessage MessageType = "list_queued_workflows"
 )
 
 // BaseMessage represents the common structure of all conductor messages
@@ -48,6 +49,7 @@ type listWorkflowsConductorRequestBody struct {
 	EndTime            *time.Time `json:"end_time,omitempty"`
 	Status             *string    `json:"status,omitempty"`
 	ApplicationVersion *string    `json:"application_version,omitempty"`
+	QueueName          *string    `json:"queue_name,omitempty"`
 	Limit              *int       `json:"limit,omitempty"`
 	Offset             *int       `json:"offset,omitempty"`
 	SortDesc           bool       `json:"sort_desc"`

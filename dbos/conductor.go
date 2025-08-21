@@ -275,6 +275,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 		return c.handleExecutorInfoRequest(data, base.RequestID)
 	case ListWorkflowsMessage:
 		return c.handleListWorkflowsRequest(data, base.RequestID)
+	case ListQueuedWorkflowsMessage:
+		return c.handleListQueuedWorkflowsRequest(data, base.RequestID)
 	default:
 		c.config.logger.Warn("Unknown message type", "type", base.Type)
 		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
@@ -288,7 +290,7 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 		c.config.logger.Error("Failed to parse executor info request", "error", err)
 		return fmt.Errorf("failed to parse executor info request: %w", err)
 	}
-	c.config.logger.Debug("Handling executor info request", "requestd", req)
+	c.config.logger.Debug("Handling executor info request", "request_id", req)
 
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -391,6 +393,98 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	// Prepare response payload
 	formattedWorkflows := make([]listWorkflowsConductorResponseBody, len(workflows))
 	for i, wf := range workflows {
+		formattedWorkflows[i] = formatListWorkflowsResponseBody(wf)
+	}
+
+	response := listWorkflowsConductorResponse{
+		BaseMessage: BaseMessage{
+			Type:      ListWorkflowsMessage,
+			RequestID: requestID,
+		},
+		Output: formattedWorkflows,
+	}
+
+	return c.sendListWorkflowsResponse(response)
+}
+
+// handleListQueuedWorkflowsRequest handles list queued workflows requests from the conductor
+func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID string) error {
+	var req listWorkflowsConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse list queued workflows request", "error", err)
+		return fmt.Errorf("failed to parse list queued workflows request: %w", err)
+	}
+	c.config.logger.Debug("Handling list queued workflows request", "request", req)
+
+	// Build functional options for ListWorkflows
+	var opts []ListWorkflowsOption
+	opts = append(opts, WithLoadInput(req.Body.LoadInput))
+	opts = append(opts, WithLoadOutput(false)) // Don't load output for queued workflows
+	opts = append(opts, WithSortDesc(req.Body.SortDesc))
+
+	// Add status filter for queued workflows
+	queuedStatuses := make([]WorkflowStatusType, 0)
+	if req.Body.Status != nil {
+		// If a specific status is requested, use that status
+		status := WorkflowStatusType(*req.Body.Status)
+		if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
+			c.config.logger.Warn("Received unexpected filtering status for listing queued workflows", "status", status)
+		}
+		queuedStatuses = append(queuedStatuses, status)
+	}
+	if len(queuedStatuses) > 0 {
+		queuedStatuses = []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued}
+	}
+	opts = append(opts, WithStatus(queuedStatuses))
+
+	if req.Body.WorkflowName != nil {
+		opts = append(opts, WithName(*req.Body.WorkflowName))
+	}
+	if req.Body.Limit != nil {
+		opts = append(opts, WithLimit(*req.Body.Limit))
+	}
+	if req.Body.Offset != nil {
+		opts = append(opts, WithOffset(*req.Body.Offset))
+	}
+	if req.Body.StartTime != nil {
+		opts = append(opts, WithStartTime(*req.Body.StartTime))
+	}
+	if req.Body.EndTime != nil {
+		opts = append(opts, WithEndTime(*req.Body.EndTime))
+	}
+	if req.Body.QueueName != nil {
+		opts = append(opts, WithQueueName(*req.Body.QueueName))
+	}
+
+	// List workflows using the package-level function
+	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
+	if err != nil {
+		c.config.logger.Error("Failed to list queued workflows", "error", err)
+		errorMsg := fmt.Sprintf("failed to list queued workflows: %v", err)
+		response := listWorkflowsConductorResponse{
+			BaseMessage: BaseMessage{
+				Type:      ListQueuedWorkflowsMessage,
+				RequestID: requestID,
+			},
+			Output:       []listWorkflowsConductorResponseBody{},
+			ErrorMessage: &errorMsg,
+		}
+		return c.sendListWorkflowsResponse(response)
+	}
+
+	// If no queue name was specified, only include workflows that have a queue name
+	var filteredWorkflows []WorkflowStatus
+	if req.Body.QueueName == nil {
+		for _, wf := range workflows {
+			if wf.QueueName != "" {
+				filteredWorkflows = append(filteredWorkflows, wf)
+			}
+		}
+	}
+
+	// Prepare response payload
+	formattedWorkflows := make([]listWorkflowsConductorResponseBody, len(filteredWorkflows))
+	for i, wf := range filteredWorkflows {
 		formattedWorkflows[i] = formatListWorkflowsResponseBody(wf)
 	}
 
