@@ -16,7 +16,7 @@ import (
 
 const (
 	_PING_INTERVAL          = 20 * time.Second
-	_PING_TIMEOUT           = 30 * time.Second  // Should be > server's executorPingWait (25s)
+	_PING_TIMEOUT           = 30 * time.Second // Should be > server's executorPingWait (25s)
 	_INITIAL_RECONNECT_WAIT = 1 * time.Second
 	_MAX_RECONNECT_WAIT     = 30 * time.Second
 	_HANDSHAKE_TIMEOUT      = 10 * time.Second
@@ -273,6 +273,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 	switch base.Type {
 	case ExecutorInfo:
 		return c.handleExecutorInfoRequest(data, base.RequestID)
+	case ListWorkflowsMessage:
+		return c.handleListWorkflowsRequest(data, base.RequestID)
 	default:
 		c.config.logger.Warn("Unknown message type", "type", base.Type)
 		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
@@ -322,6 +324,102 @@ func (c *Conductor) sendExecutorInfoResponse(response ExecutorInfoResponse) erro
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.config.logger.Error("Failed to send executor info response", "error", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return nil
+}
+
+// handleListWorkflowsRequest handles list workflows requests from the conductor
+func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) error {
+	var req listWorkflowsConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse list workflows request", "error", err)
+		return fmt.Errorf("failed to parse list workflows request: %w", err)
+	}
+	c.config.logger.Debug("Handling list workflows request", "request", req)
+
+	// Build functional options for ListWorkflows
+	var opts []ListWorkflowsOption
+	opts = append(opts, WithLoadInput(req.Body.LoadInput))
+	opts = append(opts, WithLoadOutput(req.Body.LoadOutput))
+	opts = append(opts, WithSortDesc(req.Body.SortDesc))
+	if len(req.Body.WorkflowUUIDs) > 0 {
+		opts = append(opts, WithWorkflowIDs(req.Body.WorkflowUUIDs))
+	}
+	if req.Body.WorkflowName != nil {
+		opts = append(opts, WithName(*req.Body.WorkflowName))
+	}
+	if req.Body.AuthenticatedUser != nil {
+		opts = append(opts, WithUser(*req.Body.AuthenticatedUser))
+	}
+	if req.Body.ApplicationVersion != nil {
+		opts = append(opts, WithAppVersion(*req.Body.ApplicationVersion))
+	}
+	if req.Body.Limit != nil {
+		opts = append(opts, WithLimit(*req.Body.Limit))
+	}
+	if req.Body.Offset != nil {
+		opts = append(opts, WithOffset(*req.Body.Offset))
+	}
+	if req.Body.StartTime != nil {
+		opts = append(opts, WithStartTime(*req.Body.StartTime))
+	}
+	if req.Body.EndTime != nil {
+		opts = append(opts, WithEndTime(*req.Body.EndTime))
+	}
+	if req.Body.Status != nil {
+		opts = append(opts, WithStatus([]WorkflowStatusType{WorkflowStatusType(*req.Body.Status)}))
+	}
+
+	// List workflows using the package-level function
+	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
+	if err != nil {
+		c.config.logger.Error("Failed to list workflows", "error", err)
+		errorMsg := fmt.Sprintf("failed to list workflows: %v", err)
+		response := listWorkflowsConductorResponse{
+			BaseMessage: BaseMessage{
+				Type:      ListWorkflowsMessage,
+				RequestID: requestID,
+			},
+			Output:       []listWorkflowsConductorResponseBody{},
+			ErrorMessage: &errorMsg,
+		}
+		return c.sendListWorkflowsResponse(response)
+	}
+
+	// Prepare response payload
+	formattedWorkflows := make([]listWorkflowsConductorResponseBody, len(workflows))
+	for i, wf := range workflows {
+		formattedWorkflows[i] = formatListWorkflowsResponseBody(wf)
+	}
+
+	response := listWorkflowsConductorResponse{
+		BaseMessage: BaseMessage{
+			Type:      ListWorkflowsMessage,
+			RequestID: requestID,
+		},
+		Output: formattedWorkflows,
+	}
+
+	return c.sendListWorkflowsResponse(response)
+}
+
+// sendListWorkflowsResponse sends a ListWorkflowsResponse to the conductor
+func (c *Conductor) sendListWorkflowsResponse(response listWorkflowsConductorResponse) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal list workflows response: %w", err)
+	}
+
+	c.config.logger.Debug("Sending list workflows response", "workflow_count", len(response.Output))
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.config.logger.Error("Failed to send list workflows response", "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
