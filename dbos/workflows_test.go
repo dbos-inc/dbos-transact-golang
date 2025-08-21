@@ -3057,7 +3057,7 @@ func TestGarbageCollect(t *testing.T) {
 		resetTestDatabase(t, databaseURL)
 		dbosCtx := setupDBOS(t, false, true)
 		gcTestEvent := NewEvent()
-		
+
 		// Ensure the event is set at the end to unblock any remaining workflows
 		t.Cleanup(func() {
 			gcTestEvent.Set()
@@ -3103,16 +3103,36 @@ func TestGarbageCollect(t *testing.T) {
 		require.NoError(t, err, "failed to list workflows after GC")
 		require.Equal(t, 6, len(workflows), "expected exactly 6 workflows after GC (5 from threshold + 1 pending)")
 
+		// Create a map of remaining workflow IDs for easy lookup
+		remainingIDs := make(map[string]bool)
+		for _, wf := range workflows {
+			remainingIDs[wf.ID] = true
+		}
+
 		// Verify blocked workflow still exists (since it's pending)
-		found := false
+		require.True(t, remainingIDs[blockedHandle.GetWorkflowID()], "blocked workflow should still exist after GC")
+
+		// Find status of blocked workflow
 		for _, wf := range workflows {
 			if wf.ID == blockedHandle.GetWorkflowID() {
-				found = true
 				require.Equal(t, WorkflowStatusPending, wf.Status, "blocked workflow should still be pending")
 				break
 			}
 		}
-		require.True(t, found, "blocked workflow should still exist after GC")
+
+		// Verify that the 5 newest completed workflows are preserved
+		// The completedHandles slice is in order of creation (0 is oldest, 9 is newest)
+		// So indices 5-9 (the last 5) should be preserved
+		for i := range numWorkflows {
+			wfID := completedHandles[i].GetWorkflowID()
+			if i < numWorkflows-threshold {
+				// Older workflows (indices 0-4) should be deleted
+				require.False(t, remainingIDs[wfID], "older workflow at index %d (ID: %s) should have been deleted", i, wfID)
+			} else {
+				// Newer workflows (indices 5-9) should be preserved
+				require.True(t, remainingIDs[wfID], "newer workflow at index %d (ID: %s) should have been preserved", i, wfID)
+			}
+		}
 
 		// Complete the blocked workflow
 		gcTestEvent.Set()
@@ -3126,7 +3146,7 @@ func TestGarbageCollect(t *testing.T) {
 		resetTestDatabase(t, databaseURL)
 		dbosCtx := setupDBOS(t, false, true)
 		gcTestEvent := NewEvent()
-		
+
 		// Ensure the event is set at the end to unblock any remaining workflows
 		t.Cleanup(func() {
 			gcTestEvent.Set()
@@ -3228,7 +3248,7 @@ func TestGarbageCollect(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
 		dbosCtx := setupDBOS(t, false, true)
-		
+
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
 		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
 
@@ -3266,7 +3286,7 @@ func TestGarbageCollect(t *testing.T) {
 		resetTestDatabase(t, databaseURL)
 		dbosCtx := setupDBOS(t, false, true)
 		gcTestEvent := NewEvent()
-		
+
 		// Ensure the event is set at the end to unblock any remaining workflows
 		t.Cleanup(func() {
 			gcTestEvent.Set()
