@@ -71,8 +71,8 @@ type DBOSContext interface {
 	context.Context
 
 	// Context Lifecycle
-	Launch() error // Launch the DBOS runtime including system database, queues, admin server, and workflow recovery
-	Cancel()       // Gracefully shutdown the DBOS runtime, waiting for workflows to complete and cleaning up resources
+	Launch() error                  // Launch the DBOS runtime including system database, queues, admin server, and workflow recovery
+	Shutdown(timeout time.Duration) // Gracefully shutdown all DBOS runtime components with ordered cleanup sequence
 
 	// Workflow operations
 	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                        // Execute a function as a durable step within a workflow
@@ -239,7 +239,7 @@ func (c *dbosContext) GetApplicationID() string {
 }
 
 // NewDBOSContext creates a new DBOS context with the provided configuration.
-// The context must be launched with Launch() before use and should be shut down with Cancel().
+// The context must be launched with Launch() before use and should be shut down with Shutdown().
 // This function initializes the DBOS system database, sets up the queue sub-system,
 // and prepares the workflow registry.
 //
@@ -253,7 +253,7 @@ func (c *dbosContext) GetApplicationID() string {
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	defer ctx.Cancel()
+//	defer ctx.Shutdown(30*time.Second)
 //
 //	if err := ctx.Launch(); err != nil {
 //	    log.Fatal(err)
@@ -372,62 +372,86 @@ func (c *dbosContext) Launch() error {
 	return nil
 }
 
-// Cancel gracefully shuts down the DBOS runtime by canceling the context, waiting for
-// all workflows to complete, and cleaning up system resources including the database
-// connection pool, queue runner, workflow scheduler, and admin server.
-// All workflows and steps contexts will be canceled, which one can check using their context's Done() method.
+// Shutdown gracefully shuts down the DBOS runtime by performing a complete, ordered cleanup
+// of all system components. The shutdown sequence includes:
 //
-// This method blocks until all workflows finish and all resources are properly cleaned up.
-// It should be called when the application is shutting down to ensure data consistency.
-func (c *dbosContext) Cancel() {
+// 1. Calls Cancel to stop workflows and cancel the context
+// 2. Waits for the queue runner to complete processing
+// 3. Stops the workflow scheduler and waits for scheduled jobs to finish
+// 4. Shuts down the system database connection pool and notification listener
+// 5. Shuts down the admin server
+// 6. Marks the context as not launched
+//
+// Each step respects the provided timeout. If any component doesn't shut down within the timeout,
+// a warning is logged and the shutdown continues to the next component.
+//
+// Shutdown is a permanent operation and should be called when the application is terminating.
+func (c *dbosContext) Shutdown(timeout time.Duration) {
 	c.logger.Info("Shutting down DBOS context")
 
 	// Cancel the context to signal all resources to stop
-	c.ctxCancelFunc(errors.New("DBOS shutdown initiated"))
+	c.ctxCancelFunc(errors.New("DBOS cancellation initiated"))
 
 	// Wait for all workflows to finish
 	c.logger.Info("Waiting for all workflows to finish")
-	c.workflowsWg.Wait()
-	c.logger.Info("All workflows completed")
+	done := make(chan struct{})
+	go func() {
+		c.workflowsWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		c.logger.Info("All workflows completed")
+	case <-time.After(timeout):
+		// For now just log a warning: eventually we might want Cancel to return an error.
+		c.logger.Warn("Timeout waiting for workflows to complete", "timeout", timeout)
+	}
 
-	// Close the pool and the notification listener if started
+	// Wait for queue runner to finish
+	if c.queueRunner != nil && c.launched.Load() {
+		c.logger.Info("Waiting for queue runner to complete")
+		select {
+		case <-c.queueRunner.completionChan:
+			c.logger.Info("Queue runner completed")
+			c.queueRunner = nil
+		case <-time.After(timeout):
+			c.logger.Warn("Timeout waiting for queue runner to complete", "timeout", timeout)
+		}
+	}
+
+	// Stop the workflow scheduler and wait until all scheduled workflows are done
+	if c.workflowScheduler != nil && c.launched.Load() {
+		c.logger.Info("Stopping workflow scheduler")
+		ctx := c.workflowScheduler.Stop()
+
+		select {
+		case <-ctx.Done():
+			c.logger.Info("All scheduled jobs completed")
+			c.workflowScheduler = nil
+		case <-time.After(timeout):
+			c.logger.Warn("Timeout waiting for jobs to complete. Moving on", "timeout", timeout)
+		}
+	}
+
+	// Shutdown the admin server
+	if c.adminServer != nil && c.launched.Load() {
+		c.logger.Info("Shutting down admin server")
+		err := c.adminServer.Shutdown(timeout)
+		if err != nil {
+			c.logger.Error("Failed to shutdown admin server", "error", err)
+		} else {
+			c.logger.Info("Admin server shutdown complete")
+		}
+		c.adminServer = nil
+	}
+
+	// Close the system database
 	if c.systemDB != nil {
 		c.logger.Info("Shutting down system database")
-		c.systemDB.shutdown(c)
+		c.systemDB.shutdown(c, timeout)
 		c.systemDB = nil
 	}
 
-	if c.launched.Load() {
-		// Wait for queue runner to finish
-		<-c.queueRunner.completionChan
-		c.logger.Info("Queue runner completed")
-
-		if c.workflowScheduler != nil {
-			c.logger.Info("Stopping workflow scheduler")
-			ctx := c.workflowScheduler.Stop()
-			// Wait for all running jobs to complete with 5-second timeout
-			timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-
-			select {
-			case <-ctx.Done():
-				c.logger.Info("All scheduled jobs completed")
-			case <-timeoutCtx.Done():
-				c.logger.Warn("Timeout waiting for jobs to complete. Moving on", "timeout", "5s")
-			}
-		}
-
-		if c.adminServer != nil {
-			c.logger.Info("Shutting down admin server")
-			err := c.adminServer.Shutdown(c)
-			if err != nil {
-				c.logger.Error("Failed to shutdown admin server", "error", err)
-			} else {
-				c.logger.Info("Admin server shutdown complete")
-			}
-			c.adminServer = nil
-		}
-	}
 	c.launched.Store(false)
 }
 

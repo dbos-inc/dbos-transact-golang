@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func TestAdminServer(t *testing.T) {
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Cancel()
+				ctx.Shutdown(1 * time.Minute)
 			}
 		}()
 
@@ -65,7 +66,7 @@ func TestAdminServer(t *testing.T) {
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Cancel()
+				ctx.Shutdown(1 * time.Minute)
 			}
 		}()
 
@@ -252,7 +253,7 @@ func TestAdminServer(t *testing.T) {
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Cancel()
+				ctx.Shutdown(1 * time.Minute)
 			}
 		}()
 
@@ -379,7 +380,7 @@ func TestAdminServer(t *testing.T) {
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Cancel()
+				ctx.Shutdown(1 * time.Minute)
 			}
 		}()
 
@@ -530,8 +531,74 @@ func TestAdminServer(t *testing.T) {
 		}
 		assert.True(t, foundIDs4[workflowID1], "Expected to find first workflow ID in empty body results")
 		assert.True(t, foundIDs4[workflowID2], "Expected to find second workflow ID in empty body results")
+	})
 
-		return // Skip the normal test flow
+	t.Run("TestDeactivate", func(t *testing.T) {
+		t.Run("Deactivate stops workflow scheduler", func(t *testing.T) {
+			resetTestDatabase(t, databaseURL)
+			ctx, err := NewDBOSContext(Config{
+				DatabaseURL: databaseURL,
+				AppName:     "test-app",
+				AdminServer: true,
+			})
+			require.NoError(t, err)
+
+			// Track scheduled workflow executions
+			var executionCount atomic.Int32
+
+			// Register a scheduled workflow that runs every second
+			RegisterWorkflow(ctx, func(dbosCtx DBOSContext, scheduledTime time.Time) (string, error) {
+				executionCount.Add(1)
+				return fmt.Sprintf("executed at %v", scheduledTime), nil
+			}, WithSchedule("* * * * * *")) // Every second
+
+			err = ctx.Launch()
+			require.NoError(t, err)
+
+			client := &http.Client{Timeout: 5 * time.Second}
+
+			// Ensure cleanup
+			defer func() {
+				if ctx != nil {
+					ctx.Shutdown(1 * time.Minute)
+				}
+				if client.Transport != nil {
+					client.Transport.(*http.Transport).CloseIdleConnections()
+				}
+			}()
+
+			// Wait for 2-3 executions to verify scheduler is running
+			require.Eventually(t, func() bool {
+				return executionCount.Load() >= 2
+			}, 3*time.Second, 100*time.Millisecond, "Expected at least 2 scheduled workflow executions")
+
+			// Call deactivate endpoint
+			endpoint := fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_DEACTIVATE_PATTERN, "GET /"))
+			req, err := http.NewRequest("GET", endpoint, nil)
+			require.NoError(t, err, "Failed to create deactivate request")
+
+			resp, err := client.Do(req)
+			require.NoError(t, err, "Failed to call deactivate endpoint")
+			defer resp.Body.Close()
+
+			// Verify endpoint returned 200 OK
+			assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected 200 OK from deactivate endpoint")
+
+			// Verify response body
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err, "Failed to read response body")
+			assert.Equal(t, "deactivated", string(body), "Expected 'deactivated' response body")
+
+			// Record count after deactivate and wait
+			countAfterDeactivate := executionCount.Load()
+			time.Sleep(4 * time.Second) // Wait long enough for multiple executions if scheduler was still running
+
+			// Verify no new executions occurred
+			finalCount := executionCount.Load()
+			assert.Equal(t, countAfterDeactivate, finalCount,
+				"Expected no new scheduled workflows after deactivate (had %d before, %d after)",
+				countAfterDeactivate, finalCount)
+		})
 	})
 
 }

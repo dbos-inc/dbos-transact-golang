@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,7 +23,7 @@ func TestLogger(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			if dbosCtx != nil {
-				dbosCtx.Cancel()
+				dbosCtx.Shutdown(10*time.Second)
 			}
 		})
 
@@ -55,7 +56,7 @@ func TestLogger(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			if dbosCtx != nil {
-				dbosCtx.Cancel()
+				dbosCtx.Shutdown(10*time.Second)
 			}
 		})
 

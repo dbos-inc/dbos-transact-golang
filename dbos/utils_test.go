@@ -70,7 +70,7 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 		fmt.Println("Cleaning up DBOS instance...")
 		dbosCtx.(*dbosContext).logger.Info("Cleaning up DBOS instance...")
 		if dbosCtx != nil {
-			dbosCtx.Cancel()
+			dbosCtx.Shutdown(30 * time.Second) // Wait for workflows to finish and shutdown admin server and system database
 		}
 		dbosCtx = nil
 		if checkLeaks {

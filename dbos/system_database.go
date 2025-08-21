@@ -26,7 +26,7 @@ import (
 type systemDatabase interface {
 	// SysDB management
 	launch(ctx context.Context)
-	shutdown(ctx context.Context)
+	shutdown(ctx context.Context, timeout time.Duration)
 	resetSystemDB(ctx context.Context) error
 
 	// Workflows
@@ -235,7 +235,7 @@ func (s *sysDB) launch(ctx context.Context) {
 	s.launched = true
 }
 
-func (s *sysDB) shutdown(ctx context.Context) {
+func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 	s.logger.Info("DBOS: Closing system database connection pool")
 	if s.pool != nil {
 		s.pool.Close()
@@ -251,7 +251,12 @@ func (s *sysDB) shutdown(ctx context.Context) {
 
 	if s.launched {
 		// Wait for the notification loop to exit
-		<-s.notificationLoopDone
+		s.logger.Info("DBOS: Waiting for notification listener loop to finish")
+		select {
+		case <-s.notificationLoopDone:
+		case <-time.After(timeout):
+			s.logger.Warn("DBOS: Notification listener loop did not finish in time", "timeout", timeout)
+		}
 	}
 
 	s.notificationsMap.Clear()

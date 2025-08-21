@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,7 +22,7 @@ func TestConfigValidationErrorTypes(t *testing.T) {
 		require.NoError(t, err)
 		defer func() {
 			if ctx != nil {
-				ctx.Cancel()
+				ctx.Shutdown(1*time.Minute)
 			}
 		}() // Clean up executor
 

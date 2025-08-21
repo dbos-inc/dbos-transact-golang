@@ -351,7 +351,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		// Launch DBOS context
 		err := freshCtx.Launch()
 		require.NoError(t, err)
-		defer freshCtx.Cancel()
+		defer freshCtx.Shutdown(10 * time.Second)
 
 		// Attempting to register after launch should panic
 		defer func() {
