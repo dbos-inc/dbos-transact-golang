@@ -433,13 +433,6 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 		}
 	}
 
-	// Close the system database
-	if c.systemDB != nil {
-		c.logger.Info("Shutting down system database")
-		c.systemDB.shutdown(c, timeout)
-		c.systemDB = nil
-	}
-
 	// Shutdown the admin server
 	if c.adminServer != nil && c.launched.Load() {
 		c.logger.Info("Shutting down admin server")
@@ -450,6 +443,13 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 			c.logger.Info("Admin server shutdown complete")
 		}
 		c.adminServer = nil
+	}
+
+	// Close the system database
+	if c.systemDB != nil {
+		c.logger.Info("Shutting down system database")
+		c.systemDB.shutdown(c, timeout)
+		c.systemDB = nil
 	}
 
 	c.launched.Store(false)
