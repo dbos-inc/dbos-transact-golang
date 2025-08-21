@@ -798,6 +798,11 @@ func (s *sysDB) cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	return nil
 }
 
+type garbageCollectWorkflowsInput struct {
+	cutoffEpochTimestampMs *int64
+	rowsThreshold          *int
+}
+
 func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollectWorkflowsInput) error {
 	// Validate input parameters
 	if input.rowsThreshold != nil && *input.rowsThreshold <= 0 {
@@ -1969,11 +1974,6 @@ type dequeueWorkflowsInput struct {
 	queue              WorkflowQueue
 	executorID         string
 	applicationVersion string
-}
-
-type garbageCollectWorkflowsInput struct {
-	cutoffEpochTimestampMs *int64
-	rowsThreshold          *int
 }
 
 func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error) {
