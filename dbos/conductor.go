@@ -277,6 +277,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 		return c.handleListWorkflowsRequest(data, base.RequestID)
 	case ListQueuedWorkflowsMessage:
 		return c.handleListQueuedWorkflowsRequest(data, base.RequestID)
+	case ListStepsMessage:
+		return c.handleListStepsRequest(data, base.RequestID)
 	default:
 		c.config.logger.Warn("Unknown message type", "type", base.Type)
 		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
@@ -514,6 +516,77 @@ func (c *Conductor) sendListWorkflowsResponse(response listWorkflowsConductorRes
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.config.logger.Error("Failed to send list workflows response", "error", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return nil
+}
+
+// handleListStepsRequest handles list steps requests from the conductor
+func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error {
+	var req listStepsConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse list steps request", "error", err)
+		return fmt.Errorf("failed to parse list steps request: %w", err)
+	}
+	c.config.logger.Debug("Handling list steps request", "request", req)
+
+	// Get workflow steps using the existing systemDB method
+	steps, err := c.dbosCtx.systemDB.getWorkflowSteps(c.dbosCtx, req.WorkflowID)
+	if err != nil {
+		c.config.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
+		errorMsg := fmt.Sprintf("failed to list workflow steps: %v", err)
+		response := listStepsConductorResponse{
+			BaseMessage: BaseMessage{
+				Type:      ListStepsMessage,
+				RequestID: requestID,
+			},
+			Output:       nil,
+			ErrorMessage: &errorMsg,
+		}
+		return c.sendListStepsResponse(response)
+	}
+
+	// Convert steps to response format
+	var formattedSteps *[]workflowStepsConductorResponseBody
+	if steps != nil {
+		stepsList := make([]workflowStepsConductorResponseBody, len(steps))
+		for i, step := range steps {
+			stepsList[i] = formatWorkflowStepsResponseBody(step)
+		}
+		formattedSteps = &stepsList
+	}
+
+	response := listStepsConductorResponse{
+		BaseMessage: BaseMessage{
+			Type:      ListStepsMessage,
+			RequestID: requestID,
+		},
+		Output: formattedSteps,
+	}
+
+	return c.sendListStepsResponse(response)
+}
+
+// sendListStepsResponse sends a ListStepsResponse to the conductor
+func (c *Conductor) sendListStepsResponse(response listStepsConductorResponse) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal list steps response: %w", err)
+	}
+
+	var stepCount int
+	if response.Output != nil {
+		stepCount = len(*response.Output)
+	}
+	c.config.logger.Debug("Sending list steps response", "step_count", stepCount)
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.config.logger.Error("Failed to send list steps response", "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 

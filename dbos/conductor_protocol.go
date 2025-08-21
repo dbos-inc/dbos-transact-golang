@@ -12,6 +12,7 @@ const (
 	ExecutorInfo               MessageType = "executor_info"
 	ListWorkflowsMessage       MessageType = "list_workflows"
 	ListQueuedWorkflowsMessage MessageType = "list_queued_workflows"
+	ListStepsMessage           MessageType = "list_steps"
 )
 
 // BaseMessage represents the common structure of all conductor messages
@@ -157,6 +158,58 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 	// Copy executor ID
 	if wf.ExecutorID != "" {
 		output.ExecutorID = &wf.ExecutorID
+	}
+
+	return output
+}
+
+// listStepsConductorRequest is sent by the conductor to list workflow steps
+type listStepsConductorRequest struct {
+	BaseMessage
+	WorkflowID string `json:"workflow_id"`
+}
+
+// workflowStepsConductorResponseBody represents a single workflow step in the list response
+type workflowStepsConductorResponseBody struct {
+	FunctionID       int     `json:"function_id"`
+	FunctionName     string  `json:"function_name"`
+	Output           *string `json:"output,omitempty"`
+	Error            *string `json:"error,omitempty"`
+	ChildWorkflowID  *string `json:"child_workflow_id,omitempty"`
+}
+
+// listStepsConductorResponse is sent in response to list steps requests
+type listStepsConductorResponse struct {
+	BaseMessage
+	Output       *[]workflowStepsConductorResponseBody `json:"output,omitempty"`
+	ErrorMessage *string                               `json:"error_message,omitempty"`
+}
+
+// formatWorkflowStepsResponseBody converts stepInfo to workflowStepsConductorResponseBody for the conductor protocol
+func formatWorkflowStepsResponseBody(step stepInfo) workflowStepsConductorResponseBody {
+	output := workflowStepsConductorResponseBody{
+		FunctionID:   step.StepID,
+		FunctionName: step.StepName,
+	}
+
+	// Convert output to JSON string if present
+	if step.Output != nil {
+		outputJSON, err := json.Marshal(step.Output)
+		if err == nil {
+			outputStr := string(outputJSON)
+			output.Output = &outputStr
+		}
+	}
+
+	// Convert error to string if present
+	if step.Error != nil {
+		errorStr := step.Error.Error()
+		output.Error = &errorStr
+	}
+
+	// Set child workflow ID if present
+	if step.ChildWorkflowID != "" {
+		output.ChildWorkflowID = &step.ChildWorkflowID
 	}
 
 	return output
