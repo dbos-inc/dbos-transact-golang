@@ -14,28 +14,29 @@ const (
 	ListQueuedWorkflowsMessage MessageType = "list_queued_workflows"
 	ListStepsMessage           MessageType = "list_steps"
 	GetWorkflowMessage         MessageType = "get_workflow"
+	ForkWorkflowMessage        MessageType = "fork_workflow"
 )
 
-// BaseMessage represents the common structure of all conductor messages
-type BaseMessage struct {
+// baseMessage represents the common structure of all conductor messages
+type baseMessage struct {
 	Type      MessageType `json:"type"`
 	RequestID string      `json:"request_id"`
 }
 
 // BaseResponse extends BaseMessage with optional error handling
 type BaseResponse struct {
-	BaseMessage
+	baseMessage
 	ErrorMessage *string `json:"error_message,omitempty"`
 }
 
 // ExecutorInfoRequest is sent by the conductor to request executor information
 type ExecutorInfoRequest struct {
-	BaseMessage
+	baseMessage
 }
 
 // ExecutorInfoResponse is sent in response to executor info requests
 type ExecutorInfoResponse struct {
-	BaseMessage
+	baseMessage
 	ExecutorID         string  `json:"executor_id"`
 	ApplicationVersion string  `json:"application_version"`
 	Hostname           *string `json:"hostname,omitempty"`
@@ -61,7 +62,7 @@ type listWorkflowsConductorRequestBody struct {
 
 // listWorkflowsConductorRequest is sent by the conductor to list workflows
 type listWorkflowsConductorRequest struct {
-	BaseMessage
+	baseMessage
 	Body listWorkflowsConductorRequestBody `json:"body"`
 }
 
@@ -87,7 +88,7 @@ type listWorkflowsConductorResponseBody struct {
 
 // listWorkflowsConductorResponse is sent in response to list workflows requests
 type listWorkflowsConductorResponse struct {
-	BaseMessage
+	baseMessage
 	Output       []listWorkflowsConductorResponseBody `json:"output"`
 	ErrorMessage *string                              `json:"error_message,omitempty"`
 }
@@ -166,22 +167,22 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 
 // listStepsConductorRequest is sent by the conductor to list workflow steps
 type listStepsConductorRequest struct {
-	BaseMessage
+	baseMessage
 	WorkflowID string `json:"workflow_id"`
 }
 
 // workflowStepsConductorResponseBody represents a single workflow step in the list response
 type workflowStepsConductorResponseBody struct {
-	FunctionID       int     `json:"function_id"`
-	FunctionName     string  `json:"function_name"`
-	Output           *string `json:"output,omitempty"`
-	Error            *string `json:"error,omitempty"`
-	ChildWorkflowID  *string `json:"child_workflow_id,omitempty"`
+	FunctionID      int     `json:"function_id"`
+	FunctionName    string  `json:"function_name"`
+	Output          *string `json:"output,omitempty"`
+	Error           *string `json:"error,omitempty"`
+	ChildWorkflowID *string `json:"child_workflow_id,omitempty"`
 }
 
 // listStepsConductorResponse is sent in response to list steps requests
 type listStepsConductorResponse struct {
-	BaseMessage
+	baseMessage
 	Output       *[]workflowStepsConductorResponseBody `json:"output,omitempty"`
 	ErrorMessage *string                               `json:"error_message,omitempty"`
 }
@@ -218,13 +219,34 @@ func formatWorkflowStepsResponseBody(step stepInfo) workflowStepsConductorRespon
 
 // getWorkflowConductorRequest is sent by the conductor to get a specific workflow
 type getWorkflowConductorRequest struct {
-	BaseMessage
+	baseMessage
 	WorkflowID string `json:"workflow_id"`
 }
 
 // getWorkflowConductorResponse is sent in response to get workflow requests
 type getWorkflowConductorResponse struct {
-	BaseMessage
+	baseMessage
 	Output       *listWorkflowsConductorResponseBody `json:"output,omitempty"`
 	ErrorMessage *string                             `json:"error_message,omitempty"`
+}
+
+// forkWorkflowConductorRequestBody contains the fork workflow parameters
+type forkWorkflowConductorRequestBody struct {
+	WorkflowID         string  `json:"workflow_id"`
+	StartStep          int     `json:"start_step"`
+	ApplicationVersion *string `json:"application_version,omitempty"`
+	NewWorkflowID      *string `json:"new_workflow_id,omitempty"`
+}
+
+// forkWorkflowConductorRequest is sent by the conductor to fork a workflow
+type forkWorkflowConductorRequest struct {
+	baseMessage
+	Body forkWorkflowConductorRequestBody `json:"body"`
+}
+
+// forkWorkflowConductorResponse is sent in response to fork workflow requests
+type forkWorkflowConductorResponse struct {
+	baseMessage
+	NewWorkflowID *string `json:"new_workflow_id,omitempty"`
+	ErrorMessage  *string `json:"error_message,omitempty"`
 }

@@ -263,7 +263,7 @@ func (c *Conductor) ping() error {
 
 // handleMessage processes an incoming message from the conductor
 func (c *Conductor) handleMessage(data []byte) error {
-	var base BaseMessage
+	var base baseMessage
 	if err := json.Unmarshal(data, &base); err != nil {
 		c.config.logger.Error("Failed to parse message", "error", err)
 		return fmt.Errorf("failed to parse base message: %w", err)
@@ -281,6 +281,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 		return c.handleListStepsRequest(data, base.RequestID)
 	case GetWorkflowMessage:
 		return c.handleGetWorkflowRequest(data, base.RequestID)
+	case ForkWorkflowMessage:
+		return c.handleForkWorkflowRequest(data, base.RequestID)
 	default:
 		c.config.logger.Warn("Unknown message type", "type", base.Type)
 		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
@@ -303,7 +305,7 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 	}
 
 	response := ExecutorInfoResponse{
-		BaseMessage: BaseMessage{
+		baseMessage: baseMessage{
 			Type:      ExecutorInfo,
 			RequestID: requestID,
 		},
@@ -383,7 +385,7 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 		c.config.logger.Error("Failed to list workflows", "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflows: %v", err)
 		response := listWorkflowsConductorResponse{
-			BaseMessage: BaseMessage{
+			baseMessage: baseMessage{
 				Type:      ListWorkflowsMessage,
 				RequestID: requestID,
 			},
@@ -400,7 +402,7 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	}
 
 	response := listWorkflowsConductorResponse{
-		BaseMessage: BaseMessage{
+		baseMessage: baseMessage{
 			Type:      ListWorkflowsMessage,
 			RequestID: requestID,
 		},
@@ -464,7 +466,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 		c.config.logger.Error("Failed to list queued workflows", "error", err)
 		errorMsg := fmt.Sprintf("failed to list queued workflows: %v", err)
 		response := listWorkflowsConductorResponse{
-			BaseMessage: BaseMessage{
+			baseMessage: baseMessage{
 				Type:      ListQueuedWorkflowsMessage,
 				RequestID: requestID,
 			},
@@ -491,7 +493,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	}
 
 	response := listWorkflowsConductorResponse{
-		BaseMessage: BaseMessage{
+		baseMessage: baseMessage{
 			Type:      ListWorkflowsMessage,
 			RequestID: requestID,
 		},
@@ -537,7 +539,7 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 		c.config.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflow steps: %v", err)
 		response := listStepsConductorResponse{
-			BaseMessage: BaseMessage{
+			baseMessage: baseMessage{
 				Type:      ListStepsMessage,
 				RequestID: requestID,
 			},
@@ -558,7 +560,7 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 	}
 
 	response := listStepsConductorResponse{
-		BaseMessage: BaseMessage{
+		baseMessage: baseMessage{
 			Type:      ListStepsMessage,
 			RequestID: requestID,
 		},
@@ -608,7 +610,7 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 		c.config.logger.Error("Failed to get workflow", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to get workflow: %v", err)
 		response := getWorkflowConductorResponse{
-			BaseMessage: BaseMessage{
+			baseMessage: baseMessage{
 				Type:      GetWorkflowMessage,
 				RequestID: requestID,
 			},
@@ -626,7 +628,7 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 	}
 
 	response := getWorkflowConductorResponse{
-		BaseMessage: BaseMessage{
+		baseMessage: baseMessage{
 			Type:      GetWorkflowMessage,
 			RequestID: requestID,
 		},
@@ -657,6 +659,77 @@ func (c *Conductor) sendGetWorkflowResponse(response getWorkflowConductorRespons
 	return nil
 }
 
+// handleForkWorkflowRequest handles fork workflow requests from the conductor
+func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) error {
+	var req forkWorkflowConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse fork workflow request", "error", err)
+		return fmt.Errorf("failed to parse fork workflow request: %w", err)
+	}
+	c.config.logger.Debug("Handling fork workflow request", "request", req)
+
+	// Build ForkWorkflowInput from the request
+	input := ForkWorkflowInput{
+		OriginalWorkflowID: req.Body.WorkflowID,
+		StartStep:          uint(req.Body.StartStep),
+	}
+
+	// Set optional fields
+	if req.Body.NewWorkflowID != nil {
+		input.ForkedWorkflowID = *req.Body.NewWorkflowID
+	}
+	if req.Body.ApplicationVersion != nil {
+		input.ApplicationVersion = *req.Body.ApplicationVersion
+	}
+
+	// Execute the fork workflow
+	handle, err := c.dbosCtx.ForkWorkflow(c.dbosCtx, input)
+	var newWorkflowID *string
+	var errorMsg *string
+
+	if err != nil {
+		c.config.logger.Error("Failed to fork workflow", "original_workflow_id", req.Body.WorkflowID, "error", err)
+		errStr := fmt.Sprintf("failed to fork workflow: %v", err)
+		errorMsg = &errStr
+	} else {
+		workflowID := handle.GetWorkflowID()
+		newWorkflowID = &workflowID
+		c.config.logger.Info("Successfully forked workflow", "original_workflow_id", req.Body.WorkflowID, "new_workflow_id", workflowID)
+	}
+
+	response := forkWorkflowConductorResponse{
+		baseMessage: baseMessage{
+			Type:      ForkWorkflowMessage,
+			RequestID: requestID,
+		},
+		NewWorkflowID: newWorkflowID,
+		ErrorMessage:  errorMsg,
+	}
+
+	return c.sendForkWorkflowResponse(response)
+}
+
+// sendForkWorkflowResponse sends a ForkWorkflowResponse to the conductor
+func (c *Conductor) sendForkWorkflowResponse(response forkWorkflowConductorResponse) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal fork workflow response: %w", err)
+	}
+
+	c.config.logger.Debug("Sending fork workflow response", "new_workflow_id", response.NewWorkflowID)
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.config.logger.Error("Failed to send fork workflow response", "error", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return nil
+}
+
 // sendErrorResponse sends an error response for unknown message types
 func (c *Conductor) sendErrorResponse(requestID string, msgType MessageType, errorMsg string) error {
 	if c.conn == nil {
@@ -664,7 +737,7 @@ func (c *Conductor) sendErrorResponse(requestID string, msgType MessageType, err
 	}
 
 	response := BaseResponse{
-		BaseMessage: BaseMessage{
+		baseMessage: baseMessage{
 			Type:      msgType,
 			RequestID: requestID,
 		},
