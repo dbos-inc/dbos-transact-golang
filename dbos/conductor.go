@@ -313,7 +313,7 @@ func (c *Conductor) handleMessage(data []byte) error {
 		return c.handleRetentionRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
-		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
+		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
 	}
 }
 
@@ -881,8 +881,8 @@ func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 	return c.sendResponse(response, "exist pending workflows response")
 }
 
-// sendErrorResponse sends an error response for unknown message types
-func (c *Conductor) sendErrorResponse(requestID string, msgType messageType, errorMsg string) error {
+// handleUnknownMessageType sends an error response for unknown message types
+func (c *Conductor) handleUnknownMessageType(requestID string, msgType messageType, errorMsg string) error {
 	if c.conn == nil {
 		return fmt.Errorf("no connection")
 	}
