@@ -342,7 +342,7 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 		Hostname:           &hostname,
 	}
 
-	return c.sendexecutorInfoResponse(response)
+	return c.sendResponse(response, "executor info response")
 }
 
 // handleRecoveryRequest handles recovery requests from the conductor
@@ -516,26 +516,6 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 	return c.sendResponse(response, "retention response")
 }
 
-// sendexecutorInfoResponse sends an executorInfoResponse to the conductor
-func (c *Conductor) sendexecutorInfoResponse(response executorInfoResponse) error {
-	if c.conn == nil {
-		return fmt.Errorf("no connection")
-	}
-
-	data, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("failed to marshal executor info response: %w", err)
-	}
-
-	c.logger.Debug("Sending executor info response", "data", response)
-
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.logger.Error("Failed to send executor info response", "error", err)
-		return fmt.Errorf("failed to send message: %w", err)
-	}
-
-	return nil
-}
 
 // sendResponse sends a response to the conductor via websocket
 func (c *Conductor) sendResponse(response any, responseType string) error {
@@ -745,7 +725,7 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 			Output:       nil,
 			ErrorMessage: &errorMsg,
 		}
-		return c.sendListStepsResponse(response)
+		return c.sendResponse(response, "list steps response")
 	}
 
 	// Convert steps to response format
@@ -766,33 +746,9 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 		Output: formattedSteps,
 	}
 
-	return c.sendListStepsResponse(response)
+	return c.sendResponse(response, "list steps response")
 }
 
-// sendListStepsResponse sends a ListStepsResponse to the conductor
-func (c *Conductor) sendListStepsResponse(response listStepsConductorResponse) error {
-	if c.conn == nil {
-		return fmt.Errorf("no connection")
-	}
-
-	data, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("failed to marshal list steps response: %w", err)
-	}
-
-	var stepCount int
-	if response.Output != nil {
-		stepCount = len(*response.Output)
-	}
-	c.logger.Debug("Sending list steps response", "step_count", stepCount)
-
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.logger.Error("Failed to send list steps response", "error", err)
-		return fmt.Errorf("failed to send message: %w", err)
-	}
-
-	return nil
-}
 
 // handleGetWorkflowRequest handles get workflow requests from the conductor
 func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) error {
