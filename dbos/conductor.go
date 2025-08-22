@@ -45,13 +45,30 @@ type Conductor struct {
 	pingTimeout   time.Duration
 	reconnectWait time.Duration
 
+	// writeMu protects concurrent writes to the WebSocket connection (pings + handling messages)
+	writeMu sync.Mutex
+
+	// pingCancel cancels the ping goroutine context
+	pingCancel context.CancelFunc
+
 	logger *slog.Logger
 }
 
 // closeConn closes the connection and signals that reconnection is needed
 func (c *Conductor) closeConn() {
+	// Cancel ping goroutine first
+	if c.pingCancel != nil {
+		c.pingCancel()
+		c.pingCancel = nil
+	}
+
 	if c.conn != nil {
-		err := c.conn.Close()
+		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Make sure the write doesn't block
+		err := c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutting down"))
+		if err != nil {
+			c.logger.Warn("Failed to send close message", "error", err)
+		}
+		err = c.conn.Close()
 		if err != nil {
 			c.logger.Warn("Failed to close connection", "error", err)
 		}
@@ -148,13 +165,7 @@ func (c *Conductor) run() {
 		select {
 		case <-c.dbosCtx.Done():
 			c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
-			if c.conn != nil {
-				err := c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutting down"))
-				if err != nil {
-					c.logger.Warn("Failed to send close message", "error", err)
-				}
-				c.closeConn()
-			}
+			c.closeConn()
 			return
 		default:
 		}
@@ -180,13 +191,13 @@ func (c *Conductor) run() {
 			c.needsReconnect.Store(false)
 		}
 
-		// Read message (will timeout based on read deadline set in connect)
+		// This shouldn't happen but check anyway
 		if c.conn == nil {
-			// This shouldn't happen but check anyway
 			c.needsReconnect.Store(true)
 			continue
 		}
 
+		// Read message (will timeout based on read deadline set in connect)
 		messageType, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -246,6 +257,10 @@ func (c *Conductor) connect() error {
 	// Store the connection
 	c.conn = conn
 
+	// Create a cancellable context for the ping goroutine
+	pingCtx, pingCancel := context.WithCancel(c.dbosCtx)
+	c.pingCancel = pingCancel
+
 	// Start ping goroutine
 	c.wg.Add(1)
 	go func() {
@@ -255,8 +270,8 @@ func (c *Conductor) connect() error {
 
 		for {
 			select {
-			case <-c.dbosCtx.Done():
-				c.logger.Debug("Exiting Conductor ping goroutine", "cause", context.Cause(c.dbosCtx))
+			case <-pingCtx.Done():
+				c.logger.Debug("Exiting Conductor ping goroutine", "cause", context.Cause(pingCtx))
 				return
 			case <-ticker.C:
 				if err := c.ping(); err != nil {
@@ -281,9 +296,14 @@ func (c *Conductor) ping() error {
 
 	c.logger.Debug("Sending ping to conductor")
 
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Make sure the write doesn't block
 	if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 		return fmt.Errorf("failed to send ping: %w", err)
 	}
+	c.conn.SetWriteDeadline(time.Time{}) // Clear the write deadline
 
 	return nil
 }
@@ -548,10 +568,15 @@ func (c *Conductor) sendResponse(response any, responseType string) error {
 
 	c.logger.Debug("Sending response", "type", responseType)
 
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Make sure the write doesn't block
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.logger.Error("Failed to send response", "type", responseType, "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
+	c.conn.SetWriteDeadline(time.Time{}) // Clear the write deadline
 
 	return nil
 }
@@ -944,10 +969,15 @@ func (c *Conductor) handleUnknownMessageType(requestID string, msgType messageTy
 
 	c.logger.Debug("Sending error response", "data", response)
 
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Make sure the write doesn't block
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.logger.Error("Failed to send error response", "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
+	c.conn.SetWriteDeadline(time.Time{}) // Clear the write deadline
 
 	return nil
 }
