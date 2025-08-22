@@ -273,6 +273,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 	switch base.Type {
 	case ExecutorInfo:
 		return c.handleExecutorInfoRequest(data, base.RequestID)
+	case RecoveryMessage:
+		return c.handleRecoveryRequest(data, base.RequestID)
 	case CancelWorkflowMessage:
 		return c.handleCancelWorkflowRequest(data, base.RequestID)
 	case ListWorkflowsMessage:
@@ -317,6 +319,41 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 	}
 
 	return c.sendExecutorInfoResponse(response)
+}
+
+// handleRecoveryRequest handles recovery requests from the conductor
+func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
+	var req recoveryConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse recovery request", "error", err)
+		return fmt.Errorf("failed to parse recovery request: %w", err)
+	}
+	c.config.logger.Debug("Handling recovery request", "executor_ids", req.ExecutorIDs, "request_id", requestID)
+
+	// Recover pending workflows using the provided executor IDs
+	success := true
+	var errorMsg *string
+
+	_, err := recoverPendingWorkflows(c.dbosCtx, req.ExecutorIDs)
+	if err != nil {
+		c.config.logger.Error("Failed to recover pending workflows", "executor_ids", req.ExecutorIDs, "error", err)
+		errStr := fmt.Sprintf("failed to recover pending workflows: %v", err)
+		errorMsg = &errStr
+		success = false
+	} else {
+		c.config.logger.Info("Successfully recovered pending workflows", "executor_ids", req.ExecutorIDs)
+	}
+
+	response := recoveryConductorResponse{
+		baseMessage: baseMessage{
+			Type:      RecoveryMessage,
+			RequestID: requestID,
+		},
+		Success:      success,
+		ErrorMessage: errorMsg,
+	}
+
+	return c.sendRecoveryResponse(response)
 }
 
 // handleCancelWorkflowRequest handles cancel workflow requests from the conductor
@@ -368,6 +405,27 @@ func (c *Conductor) sendExecutorInfoResponse(response ExecutorInfoResponse) erro
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.config.logger.Error("Failed to send executor info response", "error", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return nil
+}
+
+// sendRecoveryResponse sends a RecoveryResponse to the conductor
+func (c *Conductor) sendRecoveryResponse(response recoveryConductorResponse) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal recovery response: %w", err)
+	}
+
+	c.config.logger.Debug("Sending recovery response", "success", response.Success, "request_id", response.RequestID)
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.config.logger.Error("Failed to send recovery response", "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 

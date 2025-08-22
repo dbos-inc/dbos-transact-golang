@@ -11,6 +11,7 @@ type MessageType string
 
 const (
 	ExecutorInfo               MessageType = "executor_info"
+	RecoveryMessage            MessageType = "recovery"
 	CancelWorkflowMessage      MessageType = "cancel"
 	ListWorkflowsMessage       MessageType = "list_workflows"
 	ListQueuedWorkflowsMessage MessageType = "list_queued_workflows"
@@ -261,6 +262,19 @@ type cancelWorkflowConductorRequest struct {
 
 // cancelWorkflowConductorResponse is sent in response to cancel workflow requests
 type cancelWorkflowConductorResponse struct {
+	baseMessage
+	Success      bool    `json:"success"`
+	ErrorMessage *string `json:"error_message,omitempty"`
+}
+
+// recoveryConductorRequest is sent by the conductor to request recovery of pending workflows
+type recoveryConductorRequest struct {
+	baseMessage
+	ExecutorIDs []string `json:"executor_ids"`
+}
+
+// recoveryConductorResponse is sent in response to recovery requests
+type recoveryConductorResponse struct {
 	baseMessage
 	Success      bool    `json:"success"`
 	ErrorMessage *string `json:"error_message,omitempty"`
