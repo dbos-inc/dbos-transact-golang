@@ -176,7 +176,6 @@ func (c *Conductor) run() {
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				// This is expected - read deadline timeout, connection is still healthy
 				c.logger.Debug("Read deadline reached, connection healthy")
-				continue
 			} else {
 				c.logger.Debug("Connection closed", "error", err)
 			}
