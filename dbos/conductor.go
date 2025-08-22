@@ -353,7 +353,7 @@ func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 		ErrorMessage: errorMsg,
 	}
 
-	return c.sendRecoveryResponse(response)
+	return c.sendResponse(response, "recovery response")
 }
 
 // handleCancelWorkflowRequest handles cancel workflow requests from the conductor
@@ -387,7 +387,7 @@ func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 		ErrorMessage: errorMsg,
 	}
 
-	return c.sendCancelWorkflowResponse(response)
+	return c.sendResponse(response, "cancel workflow response")
 }
 
 // sendExecutorInfoResponse sends an ExecutorInfoResponse to the conductor
@@ -411,47 +411,27 @@ func (c *Conductor) sendExecutorInfoResponse(response ExecutorInfoResponse) erro
 	return nil
 }
 
-// sendRecoveryResponse sends a RecoveryResponse to the conductor
-func (c *Conductor) sendRecoveryResponse(response recoveryConductorResponse) error {
+// sendResponse sends a response to the conductor via websocket
+func (c *Conductor) sendResponse(response any, responseType string) error {
 	if c.conn == nil {
 		return fmt.Errorf("no connection")
 	}
 
 	data, err := json.Marshal(response)
 	if err != nil {
-		return fmt.Errorf("failed to marshal recovery response: %w", err)
+		return fmt.Errorf("failed to marshal %s: %w", responseType, err)
 	}
 
-	c.config.logger.Debug("Sending recovery response", "success", response.Success, "request_id", response.RequestID)
+	c.config.logger.Debug("Sending response", "type", responseType)
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.config.logger.Error("Failed to send recovery response", "error", err)
+		c.config.logger.Error("Failed to send response", "type", responseType, "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
 	return nil
 }
 
-// sendCancelWorkflowResponse sends a CancelWorkflowResponse to the conductor
-func (c *Conductor) sendCancelWorkflowResponse(response cancelWorkflowConductorResponse) error {
-	if c.conn == nil {
-		return fmt.Errorf("no connection")
-	}
-
-	data, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("failed to marshal cancel workflow response: %w", err)
-	}
-
-	c.config.logger.Debug("Sending cancel workflow response", "success", response.Success, "request_id", response.RequestID)
-
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.config.logger.Error("Failed to send cancel workflow response", "error", err)
-		return fmt.Errorf("failed to send message: %w", err)
-	}
-
-	return nil
-}
 
 // handleListWorkflowsRequest handles list workflows requests from the conductor
 func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) error {
@@ -507,7 +487,7 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 			Output:       []listWorkflowsConductorResponseBody{},
 			ErrorMessage: &errorMsg,
 		}
-		return c.sendListWorkflowsResponse(response)
+		return c.sendResponse(response, "list workflows response")
 	}
 
 	// Prepare response payload
@@ -524,7 +504,7 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 		Output: formattedWorkflows,
 	}
 
-	return c.sendListWorkflowsResponse(response)
+	return c.sendResponse(response, "list workflows response")
 }
 
 // handleListQueuedWorkflowsRequest handles list queued workflows requests from the conductor
@@ -588,7 +568,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 			Output:       []listWorkflowsConductorResponseBody{},
 			ErrorMessage: &errorMsg,
 		}
-		return c.sendListWorkflowsResponse(response)
+		return c.sendResponse(response, "list workflows response")
 	}
 
 	// If no queue name was specified, only include workflows that have a queue name
@@ -615,29 +595,9 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 		Output: formattedWorkflows,
 	}
 
-	return c.sendListWorkflowsResponse(response)
+	return c.sendResponse(response, "list workflows response")
 }
 
-// sendListWorkflowsResponse sends a ListWorkflowsResponse to the conductor
-func (c *Conductor) sendListWorkflowsResponse(response listWorkflowsConductorResponse) error {
-	if c.conn == nil {
-		return fmt.Errorf("no connection")
-	}
-
-	data, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("failed to marshal list workflows response: %w", err)
-	}
-
-	c.config.logger.Debug("Sending list workflows response", "workflow_count", len(response.Output))
-
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.config.logger.Error("Failed to send list workflows response", "error", err)
-		return fmt.Errorf("failed to send message: %w", err)
-	}
-
-	return nil
-}
 
 // handleListStepsRequest handles list steps requests from the conductor
 func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error {
@@ -732,7 +692,7 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 			Output:       nil,
 			ErrorMessage: &errorMsg,
 		}
-		return c.sendGetWorkflowResponse(response)
+		return c.sendResponse(response, "get workflow response")
 	}
 
 	// Format the workflow for response
@@ -750,29 +710,9 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 		Output: formattedWorkflow,
 	}
 
-	return c.sendGetWorkflowResponse(response)
+	return c.sendResponse(response, "get workflow response")
 }
 
-// sendGetWorkflowResponse sends a GetWorkflowResponse to the conductor
-func (c *Conductor) sendGetWorkflowResponse(response getWorkflowConductorResponse) error {
-	if c.conn == nil {
-		return fmt.Errorf("no connection")
-	}
-
-	data, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("failed to marshal get workflow response: %w", err)
-	}
-
-	c.config.logger.Debug("Sending get workflow response", "has_workflow", response.Output != nil)
-
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.config.logger.Error("Failed to send get workflow response", "error", err)
-		return fmt.Errorf("failed to send message: %w", err)
-	}
-
-	return nil
-}
 
 // handleForkWorkflowRequest handles fork workflow requests from the conductor
 func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) error {
@@ -821,29 +761,9 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 		ErrorMessage:  errorMsg,
 	}
 
-	return c.sendForkWorkflowResponse(response)
+	return c.sendResponse(response, "fork workflow response")
 }
 
-// sendForkWorkflowResponse sends a ForkWorkflowResponse to the conductor
-func (c *Conductor) sendForkWorkflowResponse(response forkWorkflowConductorResponse) error {
-	if c.conn == nil {
-		return fmt.Errorf("no connection")
-	}
-
-	data, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("failed to marshal fork workflow response: %w", err)
-	}
-
-	c.config.logger.Debug("Sending fork workflow response", "new_workflow_id", response.NewWorkflowID)
-
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.config.logger.Error("Failed to send fork workflow response", "error", err)
-		return fmt.Errorf("failed to send message: %w", err)
-	}
-
-	return nil
-}
 
 // sendErrorResponse sends an error response for unknown message types
 func (c *Conductor) sendErrorResponse(requestID string, msgType MessageType, errorMsg string) error {
