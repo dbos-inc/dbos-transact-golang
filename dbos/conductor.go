@@ -290,6 +290,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 		return c.handleRecoveryRequest(data, base.RequestID)
 	case CancelWorkflowMessage:
 		return c.handleCancelWorkflowRequest(data, base.RequestID)
+	case ResumeWorkflowMessage:
+		return c.handleResumeWorkflowRequest(data, base.RequestID)
 	case ListWorkflowsMessage:
 		return c.handleListWorkflowsRequest(data, base.RequestID)
 	case ListQueuedWorkflowsMessage:
@@ -302,6 +304,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 		return c.handleForkWorkflowRequest(data, base.RequestID)
 	case ExistPendingWorkflowsMessage:
 		return c.handleExistPendingWorkflowsRequest(data, base.RequestID)
+	case RetentionMessage:
+		return c.handleRetentionRequest(data, base.RequestID)
 	default:
 		c.config.logger.Warn("Unknown message type", "type", base.Type)
 		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
@@ -403,6 +407,108 @@ func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 	}
 
 	return c.sendResponse(response, "cancel workflow response")
+}
+
+// handleResumeWorkflowRequest handles resume workflow requests from the conductor
+func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) error {
+	var req resumeWorkflowConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse resume workflow request", "error", err)
+		return fmt.Errorf("failed to parse resume workflow request: %w", err)
+	}
+	c.config.logger.Debug("Handling resume workflow request", "workflow_id", req.WorkflowID, "request_id", requestID)
+
+	// Resume the workflow using the dbosContext
+	success := true
+	var errorMsg *string
+
+	_, err := c.dbosCtx.ResumeWorkflow(c.dbosCtx, req.WorkflowID)
+	if err != nil {
+		c.config.logger.Error("Failed to resume workflow", "workflow_id", req.WorkflowID, "error", err)
+		errStr := fmt.Sprintf("failed to resume workflow: %v", err)
+		errorMsg = &errStr
+		success = false
+	} else {
+		c.config.logger.Info("Successfully resumed workflow", "workflow_id", req.WorkflowID)
+	}
+
+	response := resumeWorkflowConductorResponse{
+		baseMessage: baseMessage{
+			Type:      ResumeWorkflowMessage,
+			RequestID: requestID,
+		},
+		Success:      success,
+		ErrorMessage: errorMsg,
+	}
+
+	return c.sendResponse(response, "resume workflow response")
+}
+
+// handleRetentionRequest handles retention policy requests from the conductor
+func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error {
+	var req retentionConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse retention request", "error", err)
+		return fmt.Errorf("failed to parse retention request: %w", err)
+	}
+	c.config.logger.Debug("Handling retention request", "request", req, "request_id", requestID)
+
+	success := true
+	var errorMsg *string
+
+	// Handle garbage collection if parameters are provided
+	if req.Body.GCCutoffEpochMs != nil || req.Body.GCRowsThreshold != nil {
+		var cutoffMs *int64
+		if req.Body.GCCutoffEpochMs != nil {
+			ms := int64(*req.Body.GCCutoffEpochMs)
+			cutoffMs = &ms
+		}
+
+		var rowsThreshold *int
+		if req.Body.GCRowsThreshold != nil {
+			rowsThreshold = req.Body.GCRowsThreshold
+		}
+
+		input := garbageCollectWorkflowsInput{
+			cutoffEpochTimestampMs: cutoffMs,
+			rowsThreshold:          rowsThreshold,
+		}
+
+		err := c.dbosCtx.systemDB.garbageCollectWorkflows(c.dbosCtx, input)
+		if err != nil {
+			c.config.logger.Error("Failed to garbage collect workflows", "error", err)
+			errStr := fmt.Sprintf("failed to garbage collect workflows: %v", err)
+			errorMsg = &errStr
+			success = false
+		} else {
+			c.config.logger.Info("Successfully garbage collected workflows", "cutoff_ms", cutoffMs, "rows_threshold", rowsThreshold)
+		}
+	}
+
+	// Handle timeout enforcement if parameter is provided and garbage collection succeeded
+	if success && req.Body.TimeoutCutoffEpochMs != nil {
+		cutoffTime := time.Unix(0, int64(*req.Body.TimeoutCutoffEpochMs)*int64(time.Millisecond))
+		err := c.dbosCtx.systemDB.cancelAllBefore(c.dbosCtx, cutoffTime)
+		if err != nil {
+			c.config.logger.Error("Failed to timeout workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs, "error", err)
+			errStr := fmt.Sprintf("failed to timeout workflows: %v", err)
+			errorMsg = &errStr
+			success = false
+		} else {
+			c.config.logger.Info("Successfully timed out workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs)
+		}
+	}
+
+	response := retentionConductorResponse{
+		baseMessage: baseMessage{
+			Type:      RetentionMessage,
+			RequestID: requestID,
+		},
+		Success:      success,
+		ErrorMessage: errorMsg,
+	}
+
+	return c.sendResponse(response, "retention response")
 }
 
 // sendExecutorInfoResponse sends an ExecutorInfoResponse to the conductor

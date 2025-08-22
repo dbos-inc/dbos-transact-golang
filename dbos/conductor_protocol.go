@@ -10,15 +10,17 @@ import (
 type MessageType string
 
 const (
-	ExecutorInfo                  MessageType = "executor_info"
-	RecoveryMessage               MessageType = "recovery"
-	CancelWorkflowMessage         MessageType = "cancel"
-	ListWorkflowsMessage          MessageType = "list_workflows"
-	ListQueuedWorkflowsMessage    MessageType = "list_queued_workflows"
-	ListStepsMessage              MessageType = "list_steps"
-	GetWorkflowMessage            MessageType = "get_workflow"
-	ForkWorkflowMessage           MessageType = "fork_workflow"
-	ExistPendingWorkflowsMessage  MessageType = "exist_pending_workflows"
+	ExecutorInfo                 MessageType = "executor_info"
+	RecoveryMessage              MessageType = "recovery"
+	CancelWorkflowMessage        MessageType = "cancel"
+	ResumeWorkflowMessage        MessageType = "resume"
+	ListWorkflowsMessage         MessageType = "list_workflows"
+	ListQueuedWorkflowsMessage   MessageType = "list_queued_workflows"
+	ListStepsMessage             MessageType = "list_steps"
+	GetWorkflowMessage           MessageType = "get_workflow"
+	ForkWorkflowMessage          MessageType = "fork_workflow"
+	ExistPendingWorkflowsMessage MessageType = "exist_pending_workflows"
+	RetentionMessage             MessageType = "retention"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -292,5 +294,38 @@ type existPendingWorkflowsConductorRequest struct {
 type existPendingWorkflowsConductorResponse struct {
 	baseMessage
 	Exist        bool    `json:"exist"`
+	ErrorMessage *string `json:"error_message,omitempty"`
+}
+
+// resumeWorkflowConductorRequest is sent by the conductor to resume a workflow
+type resumeWorkflowConductorRequest struct {
+	baseMessage
+	WorkflowID string `json:"workflow_id"`
+}
+
+// resumeWorkflowConductorResponse is sent in response to resume workflow requests
+type resumeWorkflowConductorResponse struct {
+	baseMessage
+	Success      bool    `json:"success"`
+	ErrorMessage *string `json:"error_message,omitempty"`
+}
+
+// retentionConductorRequestBody contains retention policy parameters
+type retentionConductorRequestBody struct {
+	GCCutoffEpochMs      *int `json:"gc_cutoff_epoch_ms,omitempty"`
+	GCRowsThreshold      *int `json:"gc_rows_threshold,omitempty"`
+	TimeoutCutoffEpochMs *int `json:"timeout_cutoff_epoch_ms,omitempty"`
+}
+
+// retentionConductorRequest is sent by the conductor to enforce retention policies
+type retentionConductorRequest struct {
+	baseMessage
+	Body retentionConductorRequestBody `json:"body"`
+}
+
+// retentionConductorResponse is sent in response to retention requests
+type retentionConductorResponse struct {
+	baseMessage
+	Success      bool    `json:"success"`
 	ErrorMessage *string `json:"error_message,omitempty"`
 }

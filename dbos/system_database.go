@@ -860,6 +860,7 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 	return nil
 }
 
+
 func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
