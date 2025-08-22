@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -31,12 +32,12 @@ type ConductorConfig struct {
 
 // Conductor manages the WebSocket connection to the DBOS conductor service
 type Conductor struct {
-	config    ConductorConfig
-	conn      *websocket.Conn
-	closeOnce sync.Once
-	wg        sync.WaitGroup
-	stopOnce  sync.Once
-	dbosCtx   *dbosContext
+	config         ConductorConfig
+	conn           *websocket.Conn
+	needsReconnect atomic.Bool
+	wg             sync.WaitGroup
+	stopOnce       sync.Once
+	dbosCtx        *dbosContext
 
 	// Connection parameters
 	url           url.URL
@@ -47,13 +48,14 @@ type Conductor struct {
 	logger *slog.Logger
 }
 
-// safeClose ensures the connection is closed exactly once per connection instance
-func (c *Conductor) safeClose() {
+// closeConn closes the connection and signals that reconnection is needed
+func (c *Conductor) closeConn() {
 	if c.conn != nil {
-		c.closeOnce.Do(func() {
-			c.conn.Close()
-		})
+		c.conn.Close()
+		c.conn = nil
 	}
+	// Signal that we need to reconnect
+	c.needsReconnect.Store(true)
 }
 
 // Launch starts the conductor connection manager goroutine
@@ -107,6 +109,9 @@ func NewConductor(config ConductorConfig, dbosCtx *dbosContext) (*Conductor, err
 		logger:        dbosCtx.logger,
 	}
 
+	// Start with needsReconnect set to true so we connect on first run
+	c.needsReconnect.Store(true)
+
 	c.logger.Info("Conductor created", "url", wsURL.String())
 	return c, nil
 }
@@ -141,14 +146,15 @@ func (c *Conductor) run() {
 		case <-c.dbosCtx.Done():
 			c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
 			if c.conn != nil {
-				c.safeClose()
+				c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutting down"))
+				c.closeConn()
 			}
 			return
 		default:
 		}
 
-		// Connect if not connected
-		if c.conn == nil {
+		// Connect if reconnection is needed
+		if c.needsReconnect.Load() {
 			if err := c.connect(); err != nil {
 				c.logger.Warn("Failed to connect to conductor", "error", err)
 				select {
@@ -163,12 +169,18 @@ func (c *Conductor) run() {
 					continue
 				}
 			}
-
-			// Reset reconnect wait on successful connection
+			// Reset reconnect wait and clear reconnect flag on successful connection
 			c.reconnectWait = _INITIAL_RECONNECT_WAIT
+			c.needsReconnect.Store(false)
 		}
 
 		// Read message (will timeout based on read deadline set in connect)
+		if c.conn == nil {
+			// This shouldn't happen but check anyway
+			c.needsReconnect.Store(true)
+			continue
+		}
+
 		messageType, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -180,20 +192,14 @@ func (c *Conductor) run() {
 				c.logger.Debug("Connection closed", "error", err)
 			}
 			// Close connection to trigger reconnection
-			if c.conn != nil {
-				c.safeClose()
-				c.conn = nil
-			}
+			c.closeConn()
 			continue
 		}
 
 		// Only accept text messages
 		if messageType != websocket.TextMessage {
 			c.logger.Warn("Received unexpected message type, forcing reconnection", "type", messageType)
-			if c.conn != nil {
-				c.safeClose()
-				c.conn = nil
-			}
+			c.closeConn()
 			continue
 		}
 
@@ -216,9 +222,6 @@ func (c *Conductor) connect() error {
 		return fmt.Errorf("failed to dial conductor: %w", err)
 	}
 
-	// Reset closeOnce for new connection
-	c.closeOnce = sync.Once{}
-
 	// Set initial read deadline
 	if err := conn.SetReadDeadline(time.Now().Add(c.pingTimeout)); err != nil {
 		conn.Close()
@@ -231,6 +234,7 @@ func (c *Conductor) connect() error {
 		return conn.SetReadDeadline(time.Now().Add(c.pingTimeout))
 	})
 
+	// Store the connection
 	c.conn = conn
 
 	// Start ping goroutine
@@ -243,13 +247,13 @@ func (c *Conductor) connect() error {
 		for {
 			select {
 			case <-c.dbosCtx.Done():
-				c.logger.Debug("Ping goroutine stopped, context done")
+				c.logger.Debug("Exiting Conductor ping goroutine", "cause", context.Cause(c.dbosCtx))
 				return
 			case <-ticker.C:
 				if err := c.ping(); err != nil {
-					c.logger.Warn("Ping failed, closing connection", "error", err)
-					// Close the connection to trigger reconnection in main loop
-					c.safeClose()
+					c.logger.Warn("Ping failed, signaling reconnection", "error", err)
+					// Signal that we need to reconnect and exit ping goroutine
+					c.needsReconnect.Store(true)
 					return
 				}
 			}
@@ -286,7 +290,7 @@ func (c *Conductor) handleMessage(data []byte) error {
 
 	switch base.Type {
 	case executorInfo:
-		return c.handleexecutorInfoRequest(data, base.RequestID)
+		return c.handleExecutorInfoRequest(data, base.RequestID)
 	case recoveryMessage:
 		return c.handleRecoveryRequest(data, base.RequestID)
 	case cancelWorkflowMessage:
@@ -313,8 +317,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 	}
 }
 
-// handleexecutorInfoRequest handles executor info requests from the conductor
-func (c *Conductor) handleexecutorInfoRequest(data []byte, requestID string) error {
+// handleExecutorInfoRequest handles executor info requests from the conductor
+func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) error {
 	var req executorInfoRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse executor info request", "error", err)
