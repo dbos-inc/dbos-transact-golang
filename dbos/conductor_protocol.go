@@ -13,6 +13,7 @@ const (
 	ListWorkflowsMessage       MessageType = "list_workflows"
 	ListQueuedWorkflowsMessage MessageType = "list_queued_workflows"
 	ListStepsMessage           MessageType = "list_steps"
+	GetWorkflowMessage         MessageType = "get_workflow"
 )
 
 // BaseMessage represents the common structure of all conductor messages
@@ -213,4 +214,17 @@ func formatWorkflowStepsResponseBody(step stepInfo) workflowStepsConductorRespon
 	}
 
 	return output
+}
+
+// getWorkflowConductorRequest is sent by the conductor to get a specific workflow
+type getWorkflowConductorRequest struct {
+	BaseMessage
+	WorkflowID string `json:"workflow_id"`
+}
+
+// getWorkflowConductorResponse is sent in response to get workflow requests
+type getWorkflowConductorResponse struct {
+	BaseMessage
+	Output       *listWorkflowsConductorResponseBody `json:"output,omitempty"`
+	ErrorMessage *string                             `json:"error_message,omitempty"`
 }

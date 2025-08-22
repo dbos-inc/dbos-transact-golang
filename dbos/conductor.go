@@ -279,6 +279,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 		return c.handleListQueuedWorkflowsRequest(data, base.RequestID)
 	case ListStepsMessage:
 		return c.handleListStepsRequest(data, base.RequestID)
+	case GetWorkflowMessage:
+		return c.handleGetWorkflowRequest(data, base.RequestID)
 	default:
 		c.config.logger.Warn("Unknown message type", "type", base.Type)
 		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
@@ -376,7 +378,6 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 		opts = append(opts, WithStatus([]WorkflowStatusType{WorkflowStatusType(*req.Body.Status)}))
 	}
 
-	// List workflows using the package-level function
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	if err != nil {
 		c.config.logger.Error("Failed to list workflows", "error", err)
@@ -458,7 +459,6 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 		opts = append(opts, WithQueueName(*req.Body.QueueName))
 	}
 
-	// List workflows using the package-level function
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	if err != nil {
 		c.config.logger.Error("Failed to list queued workflows", "error", err)
@@ -587,6 +587,70 @@ func (c *Conductor) sendListStepsResponse(response listStepsConductorResponse) e
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.config.logger.Error("Failed to send list steps response", "error", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return nil
+}
+
+// handleGetWorkflowRequest handles get workflow requests from the conductor
+func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) error {
+	var req getWorkflowConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse get workflow request", "error", err)
+		return fmt.Errorf("failed to parse get workflow request: %w", err)
+	}
+	c.config.logger.Debug("Handling get workflow request", "workflow_id", req.WorkflowID)
+
+	// Get workflow using ListWorkflows with the specific workflow ID filter
+	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, WithWorkflowIDs([]string{req.WorkflowID}))
+	if err != nil {
+		c.config.logger.Error("Failed to get workflow", "workflow_id", req.WorkflowID, "error", err)
+		errorMsg := fmt.Sprintf("failed to get workflow: %v", err)
+		response := getWorkflowConductorResponse{
+			BaseMessage: BaseMessage{
+				Type:      GetWorkflowMessage,
+				RequestID: requestID,
+			},
+			Output:       nil,
+			ErrorMessage: &errorMsg,
+		}
+		return c.sendGetWorkflowResponse(response)
+	}
+
+	// Format the workflow for response
+	var formattedWorkflow *listWorkflowsConductorResponseBody
+	if len(workflows) > 0 {
+		formatted := formatListWorkflowsResponseBody(workflows[0])
+		formattedWorkflow = &formatted
+	}
+
+	response := getWorkflowConductorResponse{
+		BaseMessage: BaseMessage{
+			Type:      GetWorkflowMessage,
+			RequestID: requestID,
+		},
+		Output: formattedWorkflow,
+	}
+
+	return c.sendGetWorkflowResponse(response)
+}
+
+// sendGetWorkflowResponse sends a GetWorkflowResponse to the conductor
+func (c *Conductor) sendGetWorkflowResponse(response getWorkflowConductorResponse) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal get workflow response: %w", err)
+	}
+
+	c.config.logger.Debug("Sending get workflow response", "has_workflow", response.Output != nil)
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.config.logger.Error("Failed to send get workflow response", "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
