@@ -10,14 +10,15 @@ import (
 type MessageType string
 
 const (
-	ExecutorInfo               MessageType = "executor_info"
-	RecoveryMessage            MessageType = "recovery"
-	CancelWorkflowMessage      MessageType = "cancel"
-	ListWorkflowsMessage       MessageType = "list_workflows"
-	ListQueuedWorkflowsMessage MessageType = "list_queued_workflows"
-	ListStepsMessage           MessageType = "list_steps"
-	GetWorkflowMessage         MessageType = "get_workflow"
-	ForkWorkflowMessage        MessageType = "fork_workflow"
+	ExecutorInfo                  MessageType = "executor_info"
+	RecoveryMessage               MessageType = "recovery"
+	CancelWorkflowMessage         MessageType = "cancel"
+	ListWorkflowsMessage          MessageType = "list_workflows"
+	ListQueuedWorkflowsMessage    MessageType = "list_queued_workflows"
+	ListStepsMessage              MessageType = "list_steps"
+	GetWorkflowMessage            MessageType = "get_workflow"
+	ForkWorkflowMessage           MessageType = "fork_workflow"
+	ExistPendingWorkflowsMessage  MessageType = "exist_pending_workflows"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -277,5 +278,19 @@ type recoveryConductorRequest struct {
 type recoveryConductorResponse struct {
 	baseMessage
 	Success      bool    `json:"success"`
+	ErrorMessage *string `json:"error_message,omitempty"`
+}
+
+// existPendingWorkflowsConductorRequest is sent by the conductor to check for pending workflows
+type existPendingWorkflowsConductorRequest struct {
+	baseMessage
+	ExecutorID         string `json:"executor_id"`
+	ApplicationVersion string `json:"application_version"`
+}
+
+// existPendingWorkflowsConductorResponse is sent in response to exist pending workflows requests
+type existPendingWorkflowsConductorResponse struct {
+	baseMessage
+	Exist        bool    `json:"exist"`
 	ErrorMessage *string `json:"error_message,omitempty"`
 }

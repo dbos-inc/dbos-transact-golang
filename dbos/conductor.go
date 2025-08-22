@@ -287,6 +287,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 		return c.handleGetWorkflowRequest(data, base.RequestID)
 	case ForkWorkflowMessage:
 		return c.handleForkWorkflowRequest(data, base.RequestID)
+	case ExistPendingWorkflowsMessage:
+		return c.handleExistPendingWorkflowsRequest(data, base.RequestID)
 	default:
 		c.config.logger.Warn("Unknown message type", "type", base.Type)
 		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
@@ -431,7 +433,6 @@ func (c *Conductor) sendResponse(response any, responseType string) error {
 
 	return nil
 }
-
 
 // handleListWorkflowsRequest handles list workflows requests from the conductor
 func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) error {
@@ -598,7 +599,6 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	return c.sendResponse(response, "list workflows response")
 }
 
-
 // handleListStepsRequest handles list steps requests from the conductor
 func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error {
 	var req listStepsConductorRequest
@@ -713,7 +713,6 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 	return c.sendResponse(response, "get workflow response")
 }
 
-
 // handleForkWorkflowRequest handles fork workflow requests from the conductor
 func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) error {
 	var req forkWorkflowConductorRequest
@@ -764,6 +763,43 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	return c.sendResponse(response, "fork workflow response")
 }
 
+// handleExistPendingWorkflowsRequest handles exist pending workflows requests from the conductor
+func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID string) error {
+	var req existPendingWorkflowsConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse exist pending workflows request", "error", err)
+		return fmt.Errorf("failed to parse exist pending workflows request: %w", err)
+	}
+	c.config.logger.Debug("Handling exist pending workflows request", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion)
+
+	// Use ListWorkflows to check for pending workflows with the specified executor ID and application version
+	// Filter for pending status workflows
+	opts := []ListWorkflowsOption{
+		WithStatus([]WorkflowStatusType{WorkflowStatusPending}),
+		WithLimit(1), // We only need to know if any exist, so limit to 1 for efficiency
+		WithExecutorIDs([]string{req.ExecutorID}),
+		WithAppVersion(req.ApplicationVersion),
+	}
+
+	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
+	var errorMsg *string
+	if err != nil {
+		c.config.logger.Error("Failed to check for pending workflows", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion, "error", err)
+		errStr := fmt.Sprintf("failed to check for pending workflows: %v", err)
+		errorMsg = &errStr
+	}
+
+	response := existPendingWorkflowsConductorResponse{
+		baseMessage: baseMessage{
+			Type:      ExistPendingWorkflowsMessage,
+			RequestID: requestID,
+		},
+		Exist:        len(workflows) > 0,
+		ErrorMessage: errorMsg,
+	}
+
+	return c.sendResponse(response, "exist pending workflows response")
+}
 
 // sendErrorResponse sends an error response for unknown message types
 func (c *Conductor) sendErrorResponse(requestID string, msgType MessageType, errorMsg string) error {
