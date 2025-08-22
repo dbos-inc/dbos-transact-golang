@@ -51,7 +51,10 @@ type Conductor struct {
 // closeConn closes the connection and signals that reconnection is needed
 func (c *Conductor) closeConn() {
 	if c.conn != nil {
-		c.conn.Close()
+		err := c.conn.Close()
+		if err != nil {
+			c.logger.Warn("Failed to close connection", "error", err)
+		}
 		c.conn = nil
 	}
 	// Signal that we need to reconnect
@@ -146,7 +149,10 @@ func (c *Conductor) run() {
 		case <-c.dbosCtx.Done():
 			c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
 			if c.conn != nil {
-				c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutting down"))
+				err := c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutting down"))
+				if err != nil {
+					c.logger.Warn("Failed to send close message", "error", err)
+				}
 				c.closeConn()
 			}
 			return
@@ -224,7 +230,10 @@ func (c *Conductor) connect() error {
 
 	// Set initial read deadline
 	if err := conn.SetReadDeadline(time.Now().Add(c.pingTimeout)); err != nil {
-		conn.Close()
+		cErr := conn.Close()
+		if cErr != nil {
+			c.logger.Warn("Failed to close connection", "error", cErr)
+		}
 		return fmt.Errorf("failed to set read deadline: %w", err)
 	}
 
@@ -827,6 +836,10 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	c.logger.Debug("Handling fork workflow request", "request", req)
 
 	// Build ForkWorkflowInput from the request
+	// Validate StartStep to prevent integer overflow
+	if req.Body.StartStep < 0 {
+		return fmt.Errorf("invalid StartStep: cannot be negative")
+	}
 	input := ForkWorkflowInput{
 		OriginalWorkflowID: req.Body.WorkflowID,
 		StartStep:          uint(req.Body.StartStep),
