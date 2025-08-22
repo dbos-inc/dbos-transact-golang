@@ -42,11 +42,10 @@ type executorInfoRequest struct {
 
 // executorInfoResponse is sent in response to executor info requests
 type executorInfoResponse struct {
-	baseMessage
+	baseResponse
 	ExecutorID         string  `json:"executor_id"`
 	ApplicationVersion string  `json:"application_version"`
 	Hostname           *string `json:"hostname,omitempty"`
-	ErrorMessage       *string `json:"error_message,omitempty"`
 }
 
 // listWorkflowsConductorRequestBody contains filter parameters for listing workflows
@@ -94,9 +93,8 @@ type listWorkflowsConductorResponseBody struct {
 
 // listWorkflowsConductorResponse is sent in response to list workflows requests
 type listWorkflowsConductorResponse struct {
-	baseMessage
-	Output       []listWorkflowsConductorResponseBody `json:"output"`
-	ErrorMessage *string                              `json:"error_message,omitempty"`
+	baseResponse
+	Output []listWorkflowsConductorResponseBody `json:"output"`
 }
 
 // formatListWorkflowsResponseBody converts WorkflowStatus to listWorkflowsConductorResponseBody for the conductor protocol
@@ -188,9 +186,8 @@ type workflowStepsConductorResponseBody struct {
 
 // listStepsConductorResponse is sent in response to list steps requests
 type listStepsConductorResponse struct {
-	baseMessage
-	Output       *[]workflowStepsConductorResponseBody `json:"output,omitempty"`
-	ErrorMessage *string                               `json:"error_message,omitempty"`
+	baseResponse
+	Output *[]workflowStepsConductorResponseBody `json:"output,omitempty"`
 }
 
 // formatWorkflowStepsResponseBody converts stepInfo to workflowStepsConductorResponseBody for the conductor protocol
@@ -231,9 +228,8 @@ type getWorkflowConductorRequest struct {
 
 // getWorkflowConductorResponse is sent in response to get workflow requests
 type getWorkflowConductorResponse struct {
-	baseMessage
-	Output       *listWorkflowsConductorResponseBody `json:"output,omitempty"`
-	ErrorMessage *string                             `json:"error_message,omitempty"`
+	baseResponse
+	Output *listWorkflowsConductorResponseBody `json:"output,omitempty"`
 }
 
 // forkWorkflowConductorRequestBody contains the fork workflow parameters
@@ -252,9 +248,8 @@ type forkWorkflowConductorRequest struct {
 
 // forkWorkflowConductorResponse is sent in response to fork workflow requests
 type forkWorkflowConductorResponse struct {
-	baseMessage
+	baseResponse
 	NewWorkflowID *string `json:"new_workflow_id,omitempty"`
-	ErrorMessage  *string `json:"error_message,omitempty"`
 }
 
 // cancelWorkflowConductorRequest is sent by the conductor to cancel a workflow
@@ -265,9 +260,8 @@ type cancelWorkflowConductorRequest struct {
 
 // cancelWorkflowConductorResponse is sent in response to cancel workflow requests
 type cancelWorkflowConductorResponse struct {
-	baseMessage
-	Success      bool    `json:"success"`
-	ErrorMessage *string `json:"error_message,omitempty"`
+	baseResponse
+	Success bool `json:"success"`
 }
 
 // recoveryConductorRequest is sent by the conductor to request recovery of pending workflows
@@ -278,9 +272,8 @@ type recoveryConductorRequest struct {
 
 // recoveryConductorResponse is sent in response to recovery requests
 type recoveryConductorResponse struct {
-	baseMessage
-	Success      bool    `json:"success"`
-	ErrorMessage *string `json:"error_message,omitempty"`
+	baseResponse
+	Success bool `json:"success"`
 }
 
 // existPendingWorkflowsConductorRequest is sent by the conductor to check for pending workflows
@@ -292,9 +285,8 @@ type existPendingWorkflowsConductorRequest struct {
 
 // existPendingWorkflowsConductorResponse is sent in response to exist pending workflows requests
 type existPendingWorkflowsConductorResponse struct {
-	baseMessage
-	Exist        bool    `json:"exist"`
-	ErrorMessage *string `json:"error_message,omitempty"`
+	baseResponse
+	Exist bool `json:"exist"`
 }
 
 // resumeWorkflowConductorRequest is sent by the conductor to resume a workflow
@@ -305,9 +297,8 @@ type resumeWorkflowConductorRequest struct {
 
 // resumeWorkflowConductorResponse is sent in response to resume workflow requests
 type resumeWorkflowConductorResponse struct {
-	baseMessage
-	Success      bool    `json:"success"`
-	ErrorMessage *string `json:"error_message,omitempty"`
+	baseResponse
+	Success bool `json:"success"`
 }
 
 // retentionConductorRequestBody contains retention policy parameters
@@ -325,7 +316,6 @@ type retentionConductorRequest struct {
 
 // retentionConductorResponse is sent in response to retention requests
 type retentionConductorResponse struct {
-	baseMessage
-	Success      bool    `json:"success"`
-	ErrorMessage *string `json:"error_message,omitempty"`
+	baseResponse
+	Success bool `json:"success"`
 }

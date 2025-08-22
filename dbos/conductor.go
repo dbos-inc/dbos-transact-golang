@@ -333,9 +333,11 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 	}
 
 	response := executorInfoResponse{
-		baseMessage: baseMessage{
-			Type:      executorInfo,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      executorInfo,
+				RequestID: requestID,
+			},
 		},
 		ExecutorID:         c.dbosCtx.GetExecutorID(),
 		ApplicationVersion: c.dbosCtx.GetApplicationVersion(),
@@ -369,12 +371,14 @@ func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 	}
 
 	response := recoveryConductorResponse{
-		baseMessage: baseMessage{
-			Type:      recoveryMessage,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      recoveryMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
 		},
-		Success:      success,
-		ErrorMessage: errorMsg,
+		Success: success,
 	}
 
 	return c.sendResponse(response, "recovery response")
@@ -403,12 +407,14 @@ func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 	}
 
 	response := cancelWorkflowConductorResponse{
-		baseMessage: baseMessage{
-			Type:      cancelWorkflowMessage,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      cancelWorkflowMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
 		},
-		Success:      success,
-		ErrorMessage: errorMsg,
+		Success: success,
 	}
 
 	return c.sendResponse(response, "cancel workflow response")
@@ -438,12 +444,14 @@ func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 	}
 
 	response := resumeWorkflowConductorResponse{
-		baseMessage: baseMessage{
-			Type:      resumeWorkflowMessage,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      resumeWorkflowMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
 		},
-		Success:      success,
-		ErrorMessage: errorMsg,
+		Success: success,
 	}
 
 	return c.sendResponse(response, "resume workflow response")
@@ -505,17 +513,18 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 	}
 
 	response := retentionConductorResponse{
-		baseMessage: baseMessage{
-			Type:      retentionMessage,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      retentionMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
 		},
-		Success:      success,
-		ErrorMessage: errorMsg,
+		Success: success,
 	}
 
 	return c.sendResponse(response, "retention response")
 }
-
 
 // sendResponse sends a response to the conductor via websocket
 func (c *Conductor) sendResponse(response any, responseType string) error {
@@ -585,12 +594,14 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 		c.logger.Error("Failed to list workflows", "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflows: %v", err)
 		response := listWorkflowsConductorResponse{
-			baseMessage: baseMessage{
-				Type:      listWorkflowsMessage,
-				RequestID: requestID,
+			baseResponse: baseResponse{
+				baseMessage: baseMessage{
+					Type:      listWorkflowsMessage,
+					RequestID: requestID,
+				},
+				ErrorMessage: &errorMsg,
 			},
-			Output:       []listWorkflowsConductorResponseBody{},
-			ErrorMessage: &errorMsg,
+			Output: []listWorkflowsConductorResponseBody{},
 		}
 		return c.sendResponse(response, "list workflows response")
 	}
@@ -602,9 +613,11 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	}
 
 	response := listWorkflowsConductorResponse{
-		baseMessage: baseMessage{
-			Type:      listWorkflowsMessage,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      listWorkflowsMessage,
+				RequestID: requestID,
+			},
 		},
 		Output: formattedWorkflows,
 	}
@@ -666,12 +679,14 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 		c.logger.Error("Failed to list queued workflows", "error", err)
 		errorMsg := fmt.Sprintf("failed to list queued workflows: %v", err)
 		response := listWorkflowsConductorResponse{
-			baseMessage: baseMessage{
-				Type:      listQueuedWorkflowsMessage,
-				RequestID: requestID,
+			baseResponse: baseResponse{
+				baseMessage: baseMessage{
+					Type:      listQueuedWorkflowsMessage,
+					RequestID: requestID,
+				},
+				ErrorMessage: &errorMsg,
 			},
-			Output:       []listWorkflowsConductorResponseBody{},
-			ErrorMessage: &errorMsg,
+			Output: []listWorkflowsConductorResponseBody{},
 		}
 		return c.sendResponse(response, "list workflows response")
 	}
@@ -693,9 +708,11 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	}
 
 	response := listWorkflowsConductorResponse{
-		baseMessage: baseMessage{
-			Type:      listWorkflowsMessage,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      listWorkflowsMessage,
+				RequestID: requestID,
+			},
 		},
 		Output: formattedWorkflows,
 	}
@@ -718,12 +735,14 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 		c.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflow steps: %v", err)
 		response := listStepsConductorResponse{
-			baseMessage: baseMessage{
-				Type:      listStepsMessage,
-				RequestID: requestID,
+			baseResponse: baseResponse{
+				baseMessage: baseMessage{
+					Type:      listStepsMessage,
+					RequestID: requestID,
+				},
+				ErrorMessage: &errorMsg,
 			},
-			Output:       nil,
-			ErrorMessage: &errorMsg,
+			Output: nil,
 		}
 		return c.sendResponse(response, "list steps response")
 	}
@@ -739,16 +758,17 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 	}
 
 	response := listStepsConductorResponse{
-		baseMessage: baseMessage{
-			Type:      listStepsMessage,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      listStepsMessage,
+				RequestID: requestID,
+			},
 		},
 		Output: formattedSteps,
 	}
 
 	return c.sendResponse(response, "list steps response")
 }
-
 
 // handleGetWorkflowRequest handles get workflow requests from the conductor
 func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) error {
@@ -765,12 +785,14 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 		c.logger.Error("Failed to get workflow", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to get workflow: %v", err)
 		response := getWorkflowConductorResponse{
-			baseMessage: baseMessage{
-				Type:      getWorkflowMessage,
-				RequestID: requestID,
+			baseResponse: baseResponse{
+				baseMessage: baseMessage{
+					Type:      getWorkflowMessage,
+					RequestID: requestID,
+				},
+				ErrorMessage: &errorMsg,
 			},
-			Output:       nil,
-			ErrorMessage: &errorMsg,
+			Output: nil,
 		}
 		return c.sendResponse(response, "get workflow response")
 	}
@@ -783,9 +805,11 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 	}
 
 	response := getWorkflowConductorResponse{
-		baseMessage: baseMessage{
-			Type:      getWorkflowMessage,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      getWorkflowMessage,
+				RequestID: requestID,
+			},
 		},
 		Output: formattedWorkflow,
 	}
@@ -832,12 +856,14 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	}
 
 	response := forkWorkflowConductorResponse{
-		baseMessage: baseMessage{
-			Type:      forkWorkflowMessage,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      forkWorkflowMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
 		},
 		NewWorkflowID: newWorkflowID,
-		ErrorMessage:  errorMsg,
 	}
 
 	return c.sendResponse(response, "fork workflow response")
@@ -870,12 +896,14 @@ func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 	}
 
 	response := existPendingWorkflowsConductorResponse{
-		baseMessage: baseMessage{
-			Type:      existPendingWorkflowsMessage,
-			RequestID: requestID,
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      existPendingWorkflowsMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
 		},
-		Exist:        len(workflows) > 0,
-		ErrorMessage: errorMsg,
+		Exist: len(workflows) > 0,
 	}
 
 	return c.sendResponse(response, "exist pending workflows response")
