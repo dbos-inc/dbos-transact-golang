@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"encoding/json"
+	"strconv"
 	"time"
 )
 
@@ -139,11 +140,11 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 
 	// Convert timestamps to RFC3339 strings
 	if !wf.CreatedAt.IsZero() {
-		createdStr := wf.CreatedAt.Format(time.RFC3339)
+		createdStr := strconv.FormatInt(wf.CreatedAt.UnixMilli(), 10)
 		output.CreatedAt = &createdStr
 	}
 	if !wf.UpdatedAt.IsZero() {
-		updatedStr := wf.UpdatedAt.Format(time.RFC3339)
+		updatedStr := strconv.FormatInt(wf.UpdatedAt.UnixMilli(), 10)
 		output.UpdatedAt = &updatedStr
 	}
 
