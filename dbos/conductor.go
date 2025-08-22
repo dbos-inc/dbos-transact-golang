@@ -32,17 +32,27 @@ type ConductorConfig struct {
 
 // Conductor manages the WebSocket connection to the DBOS conductor service
 type Conductor struct {
-	config   ConductorConfig
-	conn     *websocket.Conn
-	wg       sync.WaitGroup
-	stopOnce sync.Once
-	dbosCtx  *dbosContext
+	config    ConductorConfig
+	conn      *websocket.Conn
+	closeOnce sync.Once
+	wg        sync.WaitGroup
+	stopOnce  sync.Once
+	dbosCtx   *dbosContext
 
 	// Connection parameters
 	url           url.URL
 	pingInterval  time.Duration
 	pingTimeout   time.Duration
 	reconnectWait time.Duration
+}
+
+// safeClose ensures the connection is closed exactly once per connection instance
+func (c *Conductor) safeClose() {
+	if c.conn != nil {
+		c.closeOnce.Do(func() {
+			c.conn.Close()
+		})
+	}
 }
 
 // Launch starts the conductor connection manager goroutine
@@ -129,7 +139,7 @@ func (c *Conductor) run() {
 		case <-c.dbosCtx.Done():
 			c.config.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
 			if c.conn != nil {
-				c.conn.Close()
+				c.safeClose()
 			}
 			return
 		default:
@@ -170,7 +180,7 @@ func (c *Conductor) run() {
 			}
 			// Close connection to trigger reconnection
 			if c.conn != nil {
-				c.conn.Close()
+				c.safeClose()
 				c.conn = nil
 			}
 			continue
@@ -180,7 +190,7 @@ func (c *Conductor) run() {
 		if messageType != websocket.TextMessage {
 			c.config.logger.Warn("Received unexpected message type, forcing reconnection", "type", messageType)
 			if c.conn != nil {
-				c.conn.Close()
+				c.safeClose()
 				c.conn = nil
 			}
 			continue
@@ -204,6 +214,9 @@ func (c *Conductor) connect() error {
 	if err != nil {
 		return fmt.Errorf("failed to dial conductor: %w", err)
 	}
+
+	// Reset closeOnce for new connection
+	c.closeOnce = sync.Once{}
 
 	// Set initial read deadline
 	if err := conn.SetReadDeadline(time.Now().Add(c.pingTimeout)); err != nil {
@@ -235,7 +248,7 @@ func (c *Conductor) connect() error {
 				if err := c.ping(); err != nil {
 					c.config.logger.Warn("Ping failed, closing connection", "error", err)
 					// Close the connection to trigger reconnection in main loop
-					conn.Close()
+					c.safeClose()
 					return
 				}
 			}
