@@ -273,6 +273,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 	switch base.Type {
 	case ExecutorInfo:
 		return c.handleExecutorInfoRequest(data, base.RequestID)
+	case CancelWorkflowMessage:
+		return c.handleCancelWorkflowRequest(data, base.RequestID)
 	case ListWorkflowsMessage:
 		return c.handleListWorkflowsRequest(data, base.RequestID)
 	case ListQueuedWorkflowsMessage:
@@ -317,6 +319,40 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 	return c.sendExecutorInfoResponse(response)
 }
 
+// handleCancelWorkflowRequest handles cancel workflow requests from the conductor
+func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) error {
+	var req cancelWorkflowConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.config.logger.Error("Failed to parse cancel workflow request", "error", err)
+		return fmt.Errorf("failed to parse cancel workflow request: %w", err)
+	}
+	c.config.logger.Debug("Handling cancel workflow request", "workflow_id", req.WorkflowID, "request_id", requestID)
+
+	// Cancel the workflow using the dbosContext
+	success := true
+	var errorMsg *string
+
+	if err := c.dbosCtx.CancelWorkflow(c.dbosCtx, req.WorkflowID); err != nil {
+		c.config.logger.Error("Failed to cancel workflow", "workflow_id", req.WorkflowID, "error", err)
+		errStr := fmt.Sprintf("failed to cancel workflow: %v", err)
+		errorMsg = &errStr
+		success = false
+	} else {
+		c.config.logger.Info("Successfully cancelled workflow", "workflow_id", req.WorkflowID)
+	}
+
+	response := cancelWorkflowConductorResponse{
+		baseMessage: baseMessage{
+			Type:      CancelWorkflowMessage,
+			RequestID: requestID,
+		},
+		Success:      success,
+		ErrorMessage: errorMsg,
+	}
+
+	return c.sendCancelWorkflowResponse(response)
+}
+
 // sendExecutorInfoResponse sends an ExecutorInfoResponse to the conductor
 func (c *Conductor) sendExecutorInfoResponse(response ExecutorInfoResponse) error {
 	if c.conn == nil {
@@ -332,6 +368,27 @@ func (c *Conductor) sendExecutorInfoResponse(response ExecutorInfoResponse) erro
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.config.logger.Error("Failed to send executor info response", "error", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return nil
+}
+
+// sendCancelWorkflowResponse sends a CancelWorkflowResponse to the conductor
+func (c *Conductor) sendCancelWorkflowResponse(response cancelWorkflowConductorResponse) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal cancel workflow response: %w", err)
+	}
+
+	c.config.logger.Debug("Sending cancel workflow response", "success", response.Success, "request_id", response.RequestID)
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.config.logger.Error("Failed to send cancel workflow response", "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 

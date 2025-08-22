@@ -11,6 +11,7 @@ type MessageType string
 
 const (
 	ExecutorInfo               MessageType = "executor_info"
+	CancelWorkflowMessage      MessageType = "cancel"
 	ListWorkflowsMessage       MessageType = "list_workflows"
 	ListQueuedWorkflowsMessage MessageType = "list_queued_workflows"
 	ListStepsMessage           MessageType = "list_steps"
@@ -250,4 +251,17 @@ type forkWorkflowConductorResponse struct {
 	baseMessage
 	NewWorkflowID *string `json:"new_workflow_id,omitempty"`
 	ErrorMessage  *string `json:"error_message,omitempty"`
+}
+
+// cancelWorkflowConductorRequest is sent by the conductor to cancel a workflow
+type cancelWorkflowConductorRequest struct {
+	baseMessage
+	WorkflowID string `json:"workflow_id"`
+}
+
+// cancelWorkflowConductorResponse is sent in response to cancel workflow requests
+type cancelWorkflowConductorResponse struct {
+	baseMessage
+	Success      bool    `json:"success"`
+	ErrorMessage *string `json:"error_message,omitempty"`
 }
