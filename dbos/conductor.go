@@ -27,7 +27,6 @@ type ConductorConfig struct {
 	url     string
 	apiKey  string
 	appName string
-	logger  *slog.Logger
 }
 
 // Conductor manages the WebSocket connection to the DBOS conductor service
@@ -44,6 +43,8 @@ type Conductor struct {
 	pingInterval  time.Duration
 	pingTimeout   time.Duration
 	reconnectWait time.Duration
+
+	logger *slog.Logger
 }
 
 // safeClose ensures the connection is closed exactly once per connection instance
@@ -57,7 +58,7 @@ func (c *Conductor) safeClose() {
 
 // Launch starts the conductor connection manager goroutine
 func (c *Conductor) Launch() {
-	c.config.logger.Info("Launching conductor", "url", c.url.String())
+	c.logger.Info("Launching conductor", "url", c.url.String())
 	c.wg.Add(1)
 	go c.run()
 }
@@ -103,16 +104,17 @@ func NewConductor(config ConductorConfig, dbosCtx *dbosContext) (*Conductor, err
 		pingInterval:  _PING_INTERVAL,
 		pingTimeout:   _PING_TIMEOUT,
 		reconnectWait: _INITIAL_RECONNECT_WAIT,
+		logger:        dbosCtx.logger,
 	}
 
-	config.logger.Info("Conductor created", "url", wsURL.String())
+	c.logger.Info("Conductor created", "url", wsURL.String())
 	return c, nil
 }
 
 // Shutdown gracefully conductor
 func (c *Conductor) Shutdown(timeout time.Duration) {
 	c.stopOnce.Do(func() {
-		c.config.logger.Info("Shutting down conductor")
+		c.logger.Info("Shutting down conductor")
 
 		done := make(chan struct{})
 		go func() {
@@ -122,9 +124,9 @@ func (c *Conductor) Shutdown(timeout time.Duration) {
 
 		select {
 		case <-done:
-			c.config.logger.Info("Conductor shut down")
+			c.logger.Info("Conductor shut down")
 		case <-time.After(timeout):
-			c.config.logger.Warn("Timeout waiting for conductor to shut down", "timeout", timeout)
+			c.logger.Warn("Timeout waiting for conductor to shut down", "timeout", timeout)
 		}
 	})
 }
@@ -137,7 +139,7 @@ func (c *Conductor) run() {
 		// Check if the context has been cancelled
 		select {
 		case <-c.dbosCtx.Done():
-			c.config.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
+			c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
 			if c.conn != nil {
 				c.safeClose()
 			}
@@ -148,10 +150,10 @@ func (c *Conductor) run() {
 		// Connect if not connected
 		if c.conn == nil {
 			if err := c.connect(); err != nil {
-				c.config.logger.Warn("Failed to connect to conductor", "error", err)
+				c.logger.Warn("Failed to connect to conductor", "error", err)
 				select {
 				case <-c.dbosCtx.Done():
-					c.config.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
+					c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
 					return
 				case <-time.After(c.reconnectWait):
 					// Exponential backoff up to max wait
@@ -170,13 +172,13 @@ func (c *Conductor) run() {
 		messageType, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				c.config.logger.Warn("Unexpected WebSocket close", "error", err)
+				c.logger.Warn("Unexpected WebSocket close", "error", err)
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				// This is expected - read deadline timeout, connection is still healthy
-				c.config.logger.Debug("Read deadline reached, connection healthy")
+				c.logger.Debug("Read deadline reached, connection healthy")
 				continue
 			} else {
-				c.config.logger.Debug("Connection closed", "error", err)
+				c.logger.Debug("Connection closed", "error", err)
 			}
 			// Close connection to trigger reconnection
 			if c.conn != nil {
@@ -188,7 +190,7 @@ func (c *Conductor) run() {
 
 		// Only accept text messages
 		if messageType != websocket.TextMessage {
-			c.config.logger.Warn("Received unexpected message type, forcing reconnection", "type", messageType)
+			c.logger.Warn("Received unexpected message type, forcing reconnection", "type", messageType)
 			if c.conn != nil {
 				c.safeClose()
 				c.conn = nil
@@ -197,14 +199,14 @@ func (c *Conductor) run() {
 		}
 
 		if err := c.handleMessage(message); err != nil {
-			c.config.logger.Error("Failed to handle message", "error", err)
+			c.logger.Error("Failed to handle message", "error", err)
 		}
 	}
 }
 
 // connect establishes a WebSocket connection to the conductor
 func (c *Conductor) connect() error {
-	c.config.logger.Debug("Connecting to conductor", "url", c.url.String())
+	c.logger.Debug("Connecting to conductor", "url", c.url.String())
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: _HANDSHAKE_TIMEOUT,
@@ -226,7 +228,7 @@ func (c *Conductor) connect() error {
 
 	// Set pong handler to reset read deadline
 	conn.SetPongHandler(func(appData string) error {
-		c.config.logger.Debug("Received pong from conductor")
+		c.logger.Debug("Received pong from conductor")
 		return conn.SetReadDeadline(time.Now().Add(c.pingTimeout))
 	})
 
@@ -242,11 +244,11 @@ func (c *Conductor) connect() error {
 		for {
 			select {
 			case <-c.dbosCtx.Done():
-				c.config.logger.Debug("Ping goroutine stopped, context done")
+				c.logger.Debug("Ping goroutine stopped, context done")
 				return
 			case <-ticker.C:
 				if err := c.ping(); err != nil {
-					c.config.logger.Warn("Ping failed, closing connection", "error", err)
+					c.logger.Warn("Ping failed, closing connection", "error", err)
 					// Close the connection to trigger reconnection in main loop
 					c.safeClose()
 					return
@@ -255,7 +257,7 @@ func (c *Conductor) connect() error {
 		}
 	}()
 
-	c.config.logger.Info("Connected to DBOS conductor")
+	c.logger.Info("Connected to DBOS conductor")
 	return nil
 }
 
@@ -265,7 +267,7 @@ func (c *Conductor) ping() error {
 		return fmt.Errorf("no connection")
 	}
 
-	c.config.logger.Debug("Sending ping to conductor")
+	c.logger.Debug("Sending ping to conductor")
 
 	if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 		return fmt.Errorf("failed to send ping: %w", err)
@@ -278,58 +280,58 @@ func (c *Conductor) ping() error {
 func (c *Conductor) handleMessage(data []byte) error {
 	var base baseMessage
 	if err := json.Unmarshal(data, &base); err != nil {
-		c.config.logger.Error("Failed to parse message", "error", err)
+		c.logger.Error("Failed to parse message", "error", err)
 		return fmt.Errorf("failed to parse base message: %w", err)
 	}
-	c.config.logger.Debug("Received message", "type", base.Type, "request_id", base.RequestID)
+	c.logger.Debug("Received message", "type", base.Type, "request_id", base.RequestID)
 
 	switch base.Type {
-	case ExecutorInfo:
-		return c.handleExecutorInfoRequest(data, base.RequestID)
-	case RecoveryMessage:
+	case executorInfo:
+		return c.handleexecutorInfoRequest(data, base.RequestID)
+	case recoveryMessage:
 		return c.handleRecoveryRequest(data, base.RequestID)
-	case CancelWorkflowMessage:
+	case cancelWorkflowMessage:
 		return c.handleCancelWorkflowRequest(data, base.RequestID)
-	case ResumeWorkflowMessage:
+	case resumeWorkflowMessage:
 		return c.handleResumeWorkflowRequest(data, base.RequestID)
-	case ListWorkflowsMessage:
+	case listWorkflowsMessage:
 		return c.handleListWorkflowsRequest(data, base.RequestID)
-	case ListQueuedWorkflowsMessage:
+	case listQueuedWorkflowsMessage:
 		return c.handleListQueuedWorkflowsRequest(data, base.RequestID)
-	case ListStepsMessage:
+	case listStepsMessage:
 		return c.handleListStepsRequest(data, base.RequestID)
-	case GetWorkflowMessage:
+	case getWorkflowMessage:
 		return c.handleGetWorkflowRequest(data, base.RequestID)
-	case ForkWorkflowMessage:
+	case forkWorkflowMessage:
 		return c.handleForkWorkflowRequest(data, base.RequestID)
-	case ExistPendingWorkflowsMessage:
+	case existPendingWorkflowsMessage:
 		return c.handleExistPendingWorkflowsRequest(data, base.RequestID)
-	case RetentionMessage:
+	case retentionMessage:
 		return c.handleRetentionRequest(data, base.RequestID)
 	default:
-		c.config.logger.Warn("Unknown message type", "type", base.Type)
+		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
 	}
 }
 
-// handleExecutorInfoRequest handles executor info requests from the conductor
-func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) error {
-	var req ExecutorInfoRequest
+// handleexecutorInfoRequest handles executor info requests from the conductor
+func (c *Conductor) handleexecutorInfoRequest(data []byte, requestID string) error {
+	var req executorInfoRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse executor info request", "error", err)
+		c.logger.Error("Failed to parse executor info request", "error", err)
 		return fmt.Errorf("failed to parse executor info request: %w", err)
 	}
-	c.config.logger.Debug("Handling executor info request", "request_id", req)
+	c.logger.Debug("Handling executor info request", "request_id", req)
 
 	hostname, err := os.Hostname()
 	if err != nil {
-		c.config.logger.Error("Failed to get hostname", "error", err)
+		c.logger.Error("Failed to get hostname", "error", err)
 		return fmt.Errorf("failed to get hostname: %w", err)
 	}
 
-	response := ExecutorInfoResponse{
+	response := executorInfoResponse{
 		baseMessage: baseMessage{
-			Type:      ExecutorInfo,
+			Type:      executorInfo,
 			RequestID: requestID,
 		},
 		ExecutorID:         c.dbosCtx.GetExecutorID(),
@@ -337,17 +339,17 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 		Hostname:           &hostname,
 	}
 
-	return c.sendExecutorInfoResponse(response)
+	return c.sendexecutorInfoResponse(response)
 }
 
 // handleRecoveryRequest handles recovery requests from the conductor
 func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 	var req recoveryConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse recovery request", "error", err)
+		c.logger.Error("Failed to parse recovery request", "error", err)
 		return fmt.Errorf("failed to parse recovery request: %w", err)
 	}
-	c.config.logger.Debug("Handling recovery request", "executor_ids", req.ExecutorIDs, "request_id", requestID)
+	c.logger.Debug("Handling recovery request", "executor_ids", req.ExecutorIDs, "request_id", requestID)
 
 	// Recover pending workflows using the provided executor IDs
 	success := true
@@ -355,17 +357,17 @@ func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 
 	_, err := recoverPendingWorkflows(c.dbosCtx, req.ExecutorIDs)
 	if err != nil {
-		c.config.logger.Error("Failed to recover pending workflows", "executor_ids", req.ExecutorIDs, "error", err)
+		c.logger.Error("Failed to recover pending workflows", "executor_ids", req.ExecutorIDs, "error", err)
 		errStr := fmt.Sprintf("failed to recover pending workflows: %v", err)
 		errorMsg = &errStr
 		success = false
 	} else {
-		c.config.logger.Info("Successfully recovered pending workflows", "executor_ids", req.ExecutorIDs)
+		c.logger.Info("Successfully recovered pending workflows", "executor_ids", req.ExecutorIDs)
 	}
 
 	response := recoveryConductorResponse{
 		baseMessage: baseMessage{
-			Type:      RecoveryMessage,
+			Type:      recoveryMessage,
 			RequestID: requestID,
 		},
 		Success:      success,
@@ -379,27 +381,27 @@ func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) error {
 	var req cancelWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse cancel workflow request", "error", err)
+		c.logger.Error("Failed to parse cancel workflow request", "error", err)
 		return fmt.Errorf("failed to parse cancel workflow request: %w", err)
 	}
-	c.config.logger.Debug("Handling cancel workflow request", "workflow_id", req.WorkflowID, "request_id", requestID)
+	c.logger.Debug("Handling cancel workflow request", "workflow_id", req.WorkflowID, "request_id", requestID)
 
 	// Cancel the workflow using the dbosContext
 	success := true
 	var errorMsg *string
 
 	if err := c.dbosCtx.CancelWorkflow(c.dbosCtx, req.WorkflowID); err != nil {
-		c.config.logger.Error("Failed to cancel workflow", "workflow_id", req.WorkflowID, "error", err)
+		c.logger.Error("Failed to cancel workflow", "workflow_id", req.WorkflowID, "error", err)
 		errStr := fmt.Sprintf("failed to cancel workflow: %v", err)
 		errorMsg = &errStr
 		success = false
 	} else {
-		c.config.logger.Info("Successfully cancelled workflow", "workflow_id", req.WorkflowID)
+		c.logger.Info("Successfully cancelled workflow", "workflow_id", req.WorkflowID)
 	}
 
 	response := cancelWorkflowConductorResponse{
 		baseMessage: baseMessage{
-			Type:      CancelWorkflowMessage,
+			Type:      cancelWorkflowMessage,
 			RequestID: requestID,
 		},
 		Success:      success,
@@ -413,10 +415,10 @@ func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) error {
 	var req resumeWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse resume workflow request", "error", err)
+		c.logger.Error("Failed to parse resume workflow request", "error", err)
 		return fmt.Errorf("failed to parse resume workflow request: %w", err)
 	}
-	c.config.logger.Debug("Handling resume workflow request", "workflow_id", req.WorkflowID, "request_id", requestID)
+	c.logger.Debug("Handling resume workflow request", "workflow_id", req.WorkflowID, "request_id", requestID)
 
 	// Resume the workflow using the dbosContext
 	success := true
@@ -424,17 +426,17 @@ func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 
 	_, err := c.dbosCtx.ResumeWorkflow(c.dbosCtx, req.WorkflowID)
 	if err != nil {
-		c.config.logger.Error("Failed to resume workflow", "workflow_id", req.WorkflowID, "error", err)
+		c.logger.Error("Failed to resume workflow", "workflow_id", req.WorkflowID, "error", err)
 		errStr := fmt.Sprintf("failed to resume workflow: %v", err)
 		errorMsg = &errStr
 		success = false
 	} else {
-		c.config.logger.Info("Successfully resumed workflow", "workflow_id", req.WorkflowID)
+		c.logger.Info("Successfully resumed workflow", "workflow_id", req.WorkflowID)
 	}
 
 	response := resumeWorkflowConductorResponse{
 		baseMessage: baseMessage{
-			Type:      ResumeWorkflowMessage,
+			Type:      resumeWorkflowMessage,
 			RequestID: requestID,
 		},
 		Success:      success,
@@ -448,10 +450,10 @@ func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error {
 	var req retentionConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse retention request", "error", err)
+		c.logger.Error("Failed to parse retention request", "error", err)
 		return fmt.Errorf("failed to parse retention request: %w", err)
 	}
-	c.config.logger.Debug("Handling retention request", "request", req, "request_id", requestID)
+	c.logger.Debug("Handling retention request", "request", req, "request_id", requestID)
 
 	success := true
 	var errorMsg *string
@@ -476,12 +478,12 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 
 		err := c.dbosCtx.systemDB.garbageCollectWorkflows(c.dbosCtx, input)
 		if err != nil {
-			c.config.logger.Error("Failed to garbage collect workflows", "error", err)
+			c.logger.Error("Failed to garbage collect workflows", "error", err)
 			errStr := fmt.Sprintf("failed to garbage collect workflows: %v", err)
 			errorMsg = &errStr
 			success = false
 		} else {
-			c.config.logger.Info("Successfully garbage collected workflows", "cutoff_ms", cutoffMs, "rows_threshold", rowsThreshold)
+			c.logger.Info("Successfully garbage collected workflows", "cutoff_ms", cutoffMs, "rows_threshold", rowsThreshold)
 		}
 	}
 
@@ -490,18 +492,18 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 		cutoffTime := time.Unix(0, int64(*req.Body.TimeoutCutoffEpochMs)*int64(time.Millisecond))
 		err := c.dbosCtx.systemDB.cancelAllBefore(c.dbosCtx, cutoffTime)
 		if err != nil {
-			c.config.logger.Error("Failed to timeout workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs, "error", err)
+			c.logger.Error("Failed to timeout workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs, "error", err)
 			errStr := fmt.Sprintf("failed to timeout workflows: %v", err)
 			errorMsg = &errStr
 			success = false
 		} else {
-			c.config.logger.Info("Successfully timed out workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs)
+			c.logger.Info("Successfully timed out workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs)
 		}
 	}
 
 	response := retentionConductorResponse{
 		baseMessage: baseMessage{
-			Type:      RetentionMessage,
+			Type:      retentionMessage,
 			RequestID: requestID,
 		},
 		Success:      success,
@@ -511,8 +513,8 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 	return c.sendResponse(response, "retention response")
 }
 
-// sendExecutorInfoResponse sends an ExecutorInfoResponse to the conductor
-func (c *Conductor) sendExecutorInfoResponse(response ExecutorInfoResponse) error {
+// sendexecutorInfoResponse sends an executorInfoResponse to the conductor
+func (c *Conductor) sendexecutorInfoResponse(response executorInfoResponse) error {
 	if c.conn == nil {
 		return fmt.Errorf("no connection")
 	}
@@ -522,10 +524,10 @@ func (c *Conductor) sendExecutorInfoResponse(response ExecutorInfoResponse) erro
 		return fmt.Errorf("failed to marshal executor info response: %w", err)
 	}
 
-	c.config.logger.Debug("Sending executor info response", "data", response)
+	c.logger.Debug("Sending executor info response", "data", response)
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.config.logger.Error("Failed to send executor info response", "error", err)
+		c.logger.Error("Failed to send executor info response", "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
@@ -543,10 +545,10 @@ func (c *Conductor) sendResponse(response any, responseType string) error {
 		return fmt.Errorf("failed to marshal %s: %w", responseType, err)
 	}
 
-	c.config.logger.Debug("Sending response", "type", responseType)
+	c.logger.Debug("Sending response", "type", responseType)
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.config.logger.Error("Failed to send response", "type", responseType, "error", err)
+		c.logger.Error("Failed to send response", "type", responseType, "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
@@ -557,10 +559,10 @@ func (c *Conductor) sendResponse(response any, responseType string) error {
 func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) error {
 	var req listWorkflowsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse list workflows request", "error", err)
+		c.logger.Error("Failed to parse list workflows request", "error", err)
 		return fmt.Errorf("failed to parse list workflows request: %w", err)
 	}
-	c.config.logger.Debug("Handling list workflows request", "request", req)
+	c.logger.Debug("Handling list workflows request", "request", req)
 
 	// Build functional options for ListWorkflows
 	var opts []ListWorkflowsOption
@@ -597,11 +599,11 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	if err != nil {
-		c.config.logger.Error("Failed to list workflows", "error", err)
+		c.logger.Error("Failed to list workflows", "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflows: %v", err)
 		response := listWorkflowsConductorResponse{
 			baseMessage: baseMessage{
-				Type:      ListWorkflowsMessage,
+				Type:      listWorkflowsMessage,
 				RequestID: requestID,
 			},
 			Output:       []listWorkflowsConductorResponseBody{},
@@ -618,7 +620,7 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 
 	response := listWorkflowsConductorResponse{
 		baseMessage: baseMessage{
-			Type:      ListWorkflowsMessage,
+			Type:      listWorkflowsMessage,
 			RequestID: requestID,
 		},
 		Output: formattedWorkflows,
@@ -631,10 +633,10 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID string) error {
 	var req listWorkflowsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse list queued workflows request", "error", err)
+		c.logger.Error("Failed to parse list queued workflows request", "error", err)
 		return fmt.Errorf("failed to parse list queued workflows request: %w", err)
 	}
-	c.config.logger.Debug("Handling list queued workflows request", "request", req)
+	c.logger.Debug("Handling list queued workflows request", "request", req)
 
 	// Build functional options for ListWorkflows
 	var opts []ListWorkflowsOption
@@ -648,7 +650,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 		// If a specific status is requested, use that status
 		status := WorkflowStatusType(*req.Body.Status)
 		if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
-			c.config.logger.Warn("Received unexpected filtering status for listing queued workflows", "status", status)
+			c.logger.Warn("Received unexpected filtering status for listing queued workflows", "status", status)
 		}
 		queuedStatuses = append(queuedStatuses, status)
 	}
@@ -678,11 +680,11 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	if err != nil {
-		c.config.logger.Error("Failed to list queued workflows", "error", err)
+		c.logger.Error("Failed to list queued workflows", "error", err)
 		errorMsg := fmt.Sprintf("failed to list queued workflows: %v", err)
 		response := listWorkflowsConductorResponse{
 			baseMessage: baseMessage{
-				Type:      ListQueuedWorkflowsMessage,
+				Type:      listQueuedWorkflowsMessage,
 				RequestID: requestID,
 			},
 			Output:       []listWorkflowsConductorResponseBody{},
@@ -709,7 +711,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 
 	response := listWorkflowsConductorResponse{
 		baseMessage: baseMessage{
-			Type:      ListWorkflowsMessage,
+			Type:      listWorkflowsMessage,
 			RequestID: requestID,
 		},
 		Output: formattedWorkflows,
@@ -722,19 +724,19 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error {
 	var req listStepsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse list steps request", "error", err)
+		c.logger.Error("Failed to parse list steps request", "error", err)
 		return fmt.Errorf("failed to parse list steps request: %w", err)
 	}
-	c.config.logger.Debug("Handling list steps request", "request", req)
+	c.logger.Debug("Handling list steps request", "request", req)
 
 	// Get workflow steps using the existing systemDB method
 	steps, err := c.dbosCtx.systemDB.getWorkflowSteps(c.dbosCtx, req.WorkflowID)
 	if err != nil {
-		c.config.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
+		c.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflow steps: %v", err)
 		response := listStepsConductorResponse{
 			baseMessage: baseMessage{
-				Type:      ListStepsMessage,
+				Type:      listStepsMessage,
 				RequestID: requestID,
 			},
 			Output:       nil,
@@ -755,7 +757,7 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 
 	response := listStepsConductorResponse{
 		baseMessage: baseMessage{
-			Type:      ListStepsMessage,
+			Type:      listStepsMessage,
 			RequestID: requestID,
 		},
 		Output: formattedSteps,
@@ -779,10 +781,10 @@ func (c *Conductor) sendListStepsResponse(response listStepsConductorResponse) e
 	if response.Output != nil {
 		stepCount = len(*response.Output)
 	}
-	c.config.logger.Debug("Sending list steps response", "step_count", stepCount)
+	c.logger.Debug("Sending list steps response", "step_count", stepCount)
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.config.logger.Error("Failed to send list steps response", "error", err)
+		c.logger.Error("Failed to send list steps response", "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
@@ -793,19 +795,19 @@ func (c *Conductor) sendListStepsResponse(response listStepsConductorResponse) e
 func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) error {
 	var req getWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse get workflow request", "error", err)
+		c.logger.Error("Failed to parse get workflow request", "error", err)
 		return fmt.Errorf("failed to parse get workflow request: %w", err)
 	}
-	c.config.logger.Debug("Handling get workflow request", "workflow_id", req.WorkflowID)
+	c.logger.Debug("Handling get workflow request", "workflow_id", req.WorkflowID)
 
 	// Get workflow using ListWorkflows with the specific workflow ID filter
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, WithWorkflowIDs([]string{req.WorkflowID}))
 	if err != nil {
-		c.config.logger.Error("Failed to get workflow", "workflow_id", req.WorkflowID, "error", err)
+		c.logger.Error("Failed to get workflow", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to get workflow: %v", err)
 		response := getWorkflowConductorResponse{
 			baseMessage: baseMessage{
-				Type:      GetWorkflowMessage,
+				Type:      getWorkflowMessage,
 				RequestID: requestID,
 			},
 			Output:       nil,
@@ -823,7 +825,7 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 
 	response := getWorkflowConductorResponse{
 		baseMessage: baseMessage{
-			Type:      GetWorkflowMessage,
+			Type:      getWorkflowMessage,
 			RequestID: requestID,
 		},
 		Output: formattedWorkflow,
@@ -836,10 +838,10 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) error {
 	var req forkWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse fork workflow request", "error", err)
+		c.logger.Error("Failed to parse fork workflow request", "error", err)
 		return fmt.Errorf("failed to parse fork workflow request: %w", err)
 	}
-	c.config.logger.Debug("Handling fork workflow request", "request", req)
+	c.logger.Debug("Handling fork workflow request", "request", req)
 
 	// Build ForkWorkflowInput from the request
 	input := ForkWorkflowInput{
@@ -861,18 +863,18 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	var errorMsg *string
 
 	if err != nil {
-		c.config.logger.Error("Failed to fork workflow", "original_workflow_id", req.Body.WorkflowID, "error", err)
+		c.logger.Error("Failed to fork workflow", "original_workflow_id", req.Body.WorkflowID, "error", err)
 		errStr := fmt.Sprintf("failed to fork workflow: %v", err)
 		errorMsg = &errStr
 	} else {
 		workflowID := handle.GetWorkflowID()
 		newWorkflowID = &workflowID
-		c.config.logger.Info("Successfully forked workflow", "original_workflow_id", req.Body.WorkflowID, "new_workflow_id", workflowID)
+		c.logger.Info("Successfully forked workflow", "original_workflow_id", req.Body.WorkflowID, "new_workflow_id", workflowID)
 	}
 
 	response := forkWorkflowConductorResponse{
 		baseMessage: baseMessage{
-			Type:      ForkWorkflowMessage,
+			Type:      forkWorkflowMessage,
 			RequestID: requestID,
 		},
 		NewWorkflowID: newWorkflowID,
@@ -886,10 +888,10 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID string) error {
 	var req existPendingWorkflowsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		c.config.logger.Error("Failed to parse exist pending workflows request", "error", err)
+		c.logger.Error("Failed to parse exist pending workflows request", "error", err)
 		return fmt.Errorf("failed to parse exist pending workflows request: %w", err)
 	}
-	c.config.logger.Debug("Handling exist pending workflows request", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion)
+	c.logger.Debug("Handling exist pending workflows request", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion)
 
 	// Use ListWorkflows to check for pending workflows with the specified executor ID and application version
 	// Filter for pending status workflows
@@ -903,14 +905,14 @@ func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	var errorMsg *string
 	if err != nil {
-		c.config.logger.Error("Failed to check for pending workflows", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion, "error", err)
+		c.logger.Error("Failed to check for pending workflows", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion, "error", err)
 		errStr := fmt.Sprintf("failed to check for pending workflows: %v", err)
 		errorMsg = &errStr
 	}
 
 	response := existPendingWorkflowsConductorResponse{
 		baseMessage: baseMessage{
-			Type:      ExistPendingWorkflowsMessage,
+			Type:      existPendingWorkflowsMessage,
 			RequestID: requestID,
 		},
 		Exist:        len(workflows) > 0,
@@ -921,12 +923,12 @@ func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 }
 
 // sendErrorResponse sends an error response for unknown message types
-func (c *Conductor) sendErrorResponse(requestID string, msgType MessageType, errorMsg string) error {
+func (c *Conductor) sendErrorResponse(requestID string, msgType messageType, errorMsg string) error {
 	if c.conn == nil {
 		return fmt.Errorf("no connection")
 	}
 
-	response := BaseResponse{
+	response := baseResponse{
 		baseMessage: baseMessage{
 			Type:      msgType,
 			RequestID: requestID,
@@ -936,14 +938,14 @@ func (c *Conductor) sendErrorResponse(requestID string, msgType MessageType, err
 
 	data, err := json.Marshal(response)
 	if err != nil {
-		c.config.logger.Error("Failed to marshal error response", "error", err)
+		c.logger.Error("Failed to marshal error response", "error", err)
 		return fmt.Errorf("failed to marshal error response: %w", err)
 	}
 
-	c.config.logger.Debug("Sending error response", "data", response)
+	c.logger.Debug("Sending error response", "data", response)
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.config.logger.Error("Failed to send error response", "error", err)
+		c.logger.Error("Failed to send error response", "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 

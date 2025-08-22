@@ -336,7 +336,6 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 			url:     config.ConductorURL,
 			apiKey:  config.ConductorAPIKey,
 			appName: config.AppName,
-			logger:  config.Logger,
 		}
 		conductor, err := NewConductor(conductorConfig, initExecutor)
 		if err != nil {

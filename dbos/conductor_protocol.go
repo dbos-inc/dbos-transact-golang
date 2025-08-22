@@ -6,42 +6,42 @@ import (
 	"time"
 )
 
-// MessageType represents the type of message exchanged with the conductor
-type MessageType string
+// messageType represents the type of message exchanged with the conductor
+type messageType string
 
 const (
-	ExecutorInfo                 MessageType = "executor_info"
-	RecoveryMessage              MessageType = "recovery"
-	CancelWorkflowMessage        MessageType = "cancel"
-	ResumeWorkflowMessage        MessageType = "resume"
-	ListWorkflowsMessage         MessageType = "list_workflows"
-	ListQueuedWorkflowsMessage   MessageType = "list_queued_workflows"
-	ListStepsMessage             MessageType = "list_steps"
-	GetWorkflowMessage           MessageType = "get_workflow"
-	ForkWorkflowMessage          MessageType = "fork_workflow"
-	ExistPendingWorkflowsMessage MessageType = "exist_pending_workflows"
-	RetentionMessage             MessageType = "retention"
+	executorInfo                 messageType = "executor_info"
+	recoveryMessage              messageType = "recovery"
+	cancelWorkflowMessage        messageType = "cancel"
+	resumeWorkflowMessage        messageType = "resume"
+	listWorkflowsMessage         messageType = "list_workflows"
+	listQueuedWorkflowsMessage   messageType = "list_queued_workflows"
+	listStepsMessage             messageType = "list_steps"
+	getWorkflowMessage           messageType = "get_workflow"
+	forkWorkflowMessage          messageType = "fork_workflow"
+	existPendingWorkflowsMessage messageType = "exist_pending_workflows"
+	retentionMessage             messageType = "retention"
 )
 
 // baseMessage represents the common structure of all conductor messages
 type baseMessage struct {
-	Type      MessageType `json:"type"`
+	Type      messageType `json:"type"`
 	RequestID string      `json:"request_id"`
 }
 
-// BaseResponse extends BaseMessage with optional error handling
-type BaseResponse struct {
+// baseResponse extends baseMessage with optional error handling
+type baseResponse struct {
 	baseMessage
 	ErrorMessage *string `json:"error_message,omitempty"`
 }
 
-// ExecutorInfoRequest is sent by the conductor to request executor information
-type ExecutorInfoRequest struct {
+// executorInfoRequest is sent by the conductor to request executor information
+type executorInfoRequest struct {
 	baseMessage
 }
 
-// ExecutorInfoResponse is sent in response to executor info requests
-type ExecutorInfoResponse struct {
+// executorInfoResponse is sent in response to executor info requests
+type executorInfoResponse struct {
 	baseMessage
 	ExecutorID         string  `json:"executor_id"`
 	ApplicationVersion string  `json:"application_version"`
