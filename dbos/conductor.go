@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math"
 	"net"
 	"net/url"
 	"os"
@@ -117,6 +116,10 @@ func NewConductor(config ConductorConfig, dbosCtx *dbosContext) (*Conductor, err
 func (c *Conductor) Shutdown(timeout time.Duration) {
 	c.stopOnce.Do(func() {
 		c.logger.Info("Shutting down conductor")
+
+		if c.pingCancel != nil {
+			c.pingCancel()
+		}
 
 		done := make(chan struct{})
 		go func() {
@@ -876,13 +879,9 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	if req.Body.StartStep < 0 {
 		return fmt.Errorf("invalid StartStep: cannot be negative")
 	}
-	// Additional validation to prevent integer overflow when converting to uint
-	if req.Body.StartStep > math.MaxInt {
-		return fmt.Errorf("invalid StartStep: value too large")
-	}
 	input := ForkWorkflowInput{
 		OriginalWorkflowID: req.Body.WorkflowID,
-		StartStep:          uint(req.Body.StartStep),
+		StartStep:          uint(req.Body.StartStep), // #nosec G115 -- validated above
 	}
 
 	// Set optional fields
