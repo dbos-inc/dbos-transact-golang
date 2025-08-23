@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -141,7 +142,9 @@ func (c *Conductor) closeConn() {
 	}
 
 	if c.conn != nil {
-		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Make sure the write doesn't block
+		if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			c.logger.Warn("Failed to set write deadline", "error", err)
+		}
 		err := c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutting down"))
 		if err != nil {
 			c.logger.Warn("Failed to send close message", "error", err)
@@ -299,11 +302,15 @@ func (c *Conductor) ping() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Make sure the write doesn't block
+	if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		c.logger.Warn("Failed to set write deadline for ping", "error", err)
+	}
 	if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 		return fmt.Errorf("failed to send ping: %w", err)
 	}
-	c.conn.SetWriteDeadline(time.Time{}) // Clear the write deadline
+	if err := c.conn.SetWriteDeadline(time.Time{}); err != nil {
+		c.logger.Warn("Failed to clear write deadline", "error", err)
+	}
 
 	return nil
 }
@@ -571,12 +578,16 @@ func (c *Conductor) sendResponse(response any, responseType string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Make sure the write doesn't block
+	if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		c.logger.Warn("Failed to set write deadline", "type", responseType, "error", err)
+	}
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.logger.Error("Failed to send response", "type", responseType, "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
-	c.conn.SetWriteDeadline(time.Time{}) // Clear the write deadline
+	if err := c.conn.SetWriteDeadline(time.Time{}); err != nil {
+		c.logger.Warn("Failed to clear write deadline", "type", responseType, "error", err)
+	}
 
 	return nil
 }
@@ -972,12 +983,16 @@ func (c *Conductor) handleUnknownMessageType(requestID string, msgType messageTy
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Make sure the write doesn't block
+	if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		c.logger.Warn("Failed to set write deadline for error response", "error", err)
+	}
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.logger.Error("Failed to send error response", "error", err)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
-	c.conn.SetWriteDeadline(time.Time{}) // Clear the write deadline
+	if err := c.conn.SetWriteDeadline(time.Time{}); err != nil {
+		c.logger.Warn("Failed to clear write deadline for error response", "error", err)
+	}
 
 	return nil
 }
