@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )
 
@@ -325,6 +326,10 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 
 	// Initialize conductor if API key is provided
 	if config.ConductorAPIKey != "" {
+		if initExecutor.executorID == "local" {
+			initExecutor.executorID = uuid.NewString()
+		}
+
 		if config.ConductorURL == "" {
 			dbosDomain := os.Getenv("DBOS_DOMAIN")
 			if dbosDomain == "" {
@@ -339,7 +344,7 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 		}
 		conductor, err := NewConductor(conductorConfig, initExecutor)
 		if err != nil {
-			initExecutor.logger.Warn("Failed to initialize conductor", "error", err)
+			return nil, newInitializationError(fmt.Sprintf("failed to initialize conductor: %v", err))
 		} else {
 			initExecutor.conductor = conductor
 			initExecutor.logger.Info("Conductor initialized")
