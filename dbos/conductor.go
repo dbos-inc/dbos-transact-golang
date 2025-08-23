@@ -54,30 +54,6 @@ type Conductor struct {
 	logger *slog.Logger
 }
 
-// closeConn closes the connection and signals that reconnection is needed
-func (c *Conductor) closeConn() {
-	// Cancel ping goroutine first
-	if c.pingCancel != nil {
-		c.pingCancel()
-		c.pingCancel = nil
-	}
-
-	if c.conn != nil {
-		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Make sure the write doesn't block
-		err := c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutting down"))
-		if err != nil {
-			c.logger.Warn("Failed to send close message", "error", err)
-		}
-		err = c.conn.Close()
-		if err != nil {
-			c.logger.Warn("Failed to close connection", "error", err)
-		}
-		c.conn = nil
-	}
-	// Signal that we need to reconnect
-	c.needsReconnect.Store(true)
-}
-
 // Launch starts the conductor connection manager goroutine
 func (c *Conductor) Launch() {
 	c.logger.Info("Launching conductor", "url", c.url.String())
@@ -156,6 +132,30 @@ func (c *Conductor) Shutdown(timeout time.Duration) {
 	})
 }
 
+// closeConn closes the connection and signals that reconnection is needed
+func (c *Conductor) closeConn() {
+	// Cancel ping goroutine first
+	if c.pingCancel != nil {
+		c.pingCancel()
+		c.pingCancel = nil
+	}
+
+	if c.conn != nil {
+		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Make sure the write doesn't block
+		err := c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutting down"))
+		if err != nil {
+			c.logger.Warn("Failed to send close message", "error", err)
+		}
+		err = c.conn.Close()
+		if err != nil {
+			c.logger.Warn("Failed to close connection", "error", err)
+		}
+		c.conn = nil
+	}
+	// Signal that we need to reconnect
+	c.needsReconnect.Store(true)
+}
+
 // run manages the WebSocket connection lifecycle with reconnection
 func (c *Conductor) run() {
 	defer c.wg.Done()
@@ -228,7 +228,7 @@ func (c *Conductor) run() {
 
 // connect establishes a WebSocket connection to the conductor
 func (c *Conductor) connect() error {
-	c.logger.Debug("Connecting to conductor", "url", c.url.String())
+	c.logger.Debug("Connecting to conductor")
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: _HANDSHAKE_TIMEOUT,
