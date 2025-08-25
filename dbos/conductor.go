@@ -206,8 +206,7 @@ func (c *Conductor) run() {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				c.logger.Warn("Unexpected WebSocket close", "error", err)
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// This is expected - read deadline timeout, connection is still healthy
-				c.logger.Debug("Read deadline reached, connection healthy")
+				c.logger.Debug("Read deadline reached", "error", err)
 			} else {
 				c.logger.Debug("Connection closed", "error", err)
 			}
@@ -223,9 +222,11 @@ func (c *Conductor) run() {
 			continue
 		}
 
+		ht := time.Now()
 		if err := c.handleMessage(message); err != nil {
 			c.logger.Error("Failed to handle message", "error", err)
 		}
+		c.logger.Debug("Handled message", "latency_ms", time.Since(ht).Milliseconds())
 	}
 }
 
