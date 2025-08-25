@@ -295,13 +295,11 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	initExecutor.applicationVersion = os.Getenv("DBOS__APPVERSION")
 	if initExecutor.applicationVersion == "" {
 		initExecutor.applicationVersion = computeApplicationVersion()
-		initExecutor.logger.Info("DBOS__APPVERSION not set, using computed hash")
 	}
 
 	initExecutor.executorID = os.Getenv("DBOS__VMID")
 	if initExecutor.executorID == "" {
 		initExecutor.executorID = "local"
-		initExecutor.logger.Info("DBOS__VMID not set, using default", "executor_id", initExecutor.executorID)
 	}
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
