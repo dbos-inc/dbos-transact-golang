@@ -575,7 +575,7 @@ func (c *Conductor) sendResponse(response any, responseType string) error {
 		return fmt.Errorf("failed to marshal %s: %w", responseType, err)
 	}
 
-	c.logger.Debug("Sending response", "type", responseType)
+	c.logger.Debug("Sending response", "type", responseType, "len", len(data))
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()

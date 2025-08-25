@@ -304,12 +304,6 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 
-	initExecutor.logger = initExecutor.logger.With(
-		//"app_version", initExecutor.applicationVersion, // This is really verbose...
-		"executor_id", initExecutor.executorID,
-		//"app_id", initExecutor.applicationID, // This should stay internal
-	)
-
 	// Create the system database
 	systemDB, err := newSystemDatabase(initExecutor, config.DatabaseURL, initExecutor.logger)
 	if err != nil {
