@@ -243,7 +243,7 @@ func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Log
 		notificationListenerConnection: notificationListenerConnection,
 		notificationsMap:               notificationsMap,
 		notificationLoopDone:           make(chan struct{}),
-		logger:                         logger,
+		logger:                         logger.With("service", "system_database"),
 	}, nil
 }
 
@@ -859,7 +859,6 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 
 	return nil
 }
-
 
 func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 	tx, err := s.pool.Begin(ctx)

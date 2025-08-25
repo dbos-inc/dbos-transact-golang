@@ -314,7 +314,7 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	initExecutor.logger.Info("System database initialized")
 
 	// Initialize the queue runner and register DBOS internal queue
-	initExecutor.queueRunner = newQueueRunner()
+	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
 	NewWorkflowQueue(initExecutor, _DBOS_INTERNAL_QUEUE_NAME)
 
 	// Initialize conductor if API key is provided
@@ -414,8 +414,9 @@ func (c *dbosContext) Launch() error {
 // 2. Waits for the queue runner to complete processing
 // 3. Stops the workflow scheduler and waits for scheduled jobs to finish
 // 4. Shuts down the system database connection pool and notification listener
-// 5. Shuts down the admin server
-// 6. Marks the context as not launched
+// 5. Shuts down conductor
+// 6. Shuts down the admin server
+// 7. Marks the context as not launched
 //
 // Each step respects the provided timeout. If any component doesn't shut down within the timeout,
 // a warning is logged and the shutdown continues to the next component.

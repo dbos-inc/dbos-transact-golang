@@ -102,7 +102,7 @@ func NewConductor(config ConductorConfig, dbosCtx *dbosContext) (*Conductor, err
 		pingInterval:  _PING_INTERVAL,
 		pingTimeout:   _PING_TIMEOUT,
 		reconnectWait: _INITIAL_RECONNECT_WAIT,
-		logger:        dbosCtx.logger,
+		logger:        dbosCtx.logger.With("service", "conductor"),
 	}
 
 	// Start with needsReconnect set to true so we connect on first run
@@ -114,8 +114,6 @@ func NewConductor(config ConductorConfig, dbosCtx *dbosContext) (*Conductor, err
 // Shutdown gracefully conductor
 func (c *Conductor) Shutdown(timeout time.Duration) {
 	c.stopOnce.Do(func() {
-		c.logger.Info("Shutting down conductor")
-
 		if c.pingCancel != nil {
 			c.pingCancel()
 		}
