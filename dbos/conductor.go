@@ -108,7 +108,7 @@ func NewConductor(config ConductorConfig, dbosCtx *dbosContext) (*Conductor, err
 	// Start with needsReconnect set to true so we connect on first run
 	c.needsReconnect.Store(true)
 
-	c.logger.Info("Conductor created", "url", wsURL.String())
+	c.logger.Info("Conductor created")
 	return c, nil
 }
 
