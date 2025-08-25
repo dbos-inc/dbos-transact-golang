@@ -449,7 +449,6 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 		select {
 		case <-c.queueRunner.completionChan:
 			c.logger.Info("Queue runner completed")
-			c.queueRunner = nil
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for queue runner to complete", "timeout", timeout)
 		}
@@ -473,7 +472,6 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	if c.conductor != nil {
 		c.logger.Info("Shutting down conductor")
 		c.conductor.Shutdown(timeout)
-		c.conductor = nil
 	}
 
 	// Shutdown the admin server
@@ -485,14 +483,12 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 		} else {
 			c.logger.Info("Admin server shutdown complete")
 		}
-		c.adminServer = nil
 	}
 
 	// Close the system database
 	if c.systemDB != nil {
 		c.logger.Info("Shutting down system database")
 		c.systemDB.shutdown(c, timeout)
-		c.systemDB = nil
 	}
 
 	c.launched.Store(false)
