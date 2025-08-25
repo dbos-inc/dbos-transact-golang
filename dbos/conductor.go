@@ -226,7 +226,7 @@ func (c *Conductor) run() {
 		if err := c.handleMessage(message); err != nil {
 			c.logger.Error("Failed to handle message", "error", err)
 		}
-		c.logger.Debug("Handled message", "message", messageType, "latency_ms", time.Since(ht).Milliseconds())
+		c.logger.Debug("Handled message", "message", messageType, "latency_us", time.Since(ht).Microseconds())
 	}
 }
 
