@@ -335,13 +335,12 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 			apiKey:  config.ConductorAPIKey,
 			appName: config.AppName,
 		}
-		conductor, err := NewConductor(conductorConfig, initExecutor)
+		conductor, err := NewConductor(initExecutor, conductorConfig)
 		if err != nil {
 			return nil, newInitializationError(fmt.Sprintf("failed to initialize conductor: %v", err))
-		} else {
-			initExecutor.conductor = conductor
-			initExecutor.logger.Info("Conductor initialized")
 		}
+		initExecutor.conductor = conductor
+		initExecutor.logger.Info("Conductor initialized")
 	}
 
 	return initExecutor, nil

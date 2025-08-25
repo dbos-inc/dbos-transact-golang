@@ -21,6 +21,7 @@ const (
 	_INITIAL_RECONNECT_WAIT = 1 * time.Second
 	_MAX_RECONNECT_WAIT     = 30 * time.Second
 	_HANDSHAKE_TIMEOUT      = 10 * time.Second
+	_WRITE_DEADLINE         = 5 * time.Second
 )
 
 // ConductorConfig contains configuration for the conductor
@@ -32,12 +33,15 @@ type ConductorConfig struct {
 
 // Conductor manages the WebSocket connection to the DBOS conductor service
 type Conductor struct {
-	config         ConductorConfig
+	dbosCtx *dbosContext
+	logger  *slog.Logger
+
+	// Connection management
 	conn           *websocket.Conn
 	needsReconnect atomic.Bool
 	wg             sync.WaitGroup
 	stopOnce       sync.Once
-	dbosCtx        *dbosContext
+	writeMu        sync.Mutex // writeMu protects concurrent writes to the WebSocket connection (pings + handling messages)
 
 	// Connection parameters
 	url           url.URL
@@ -45,24 +49,18 @@ type Conductor struct {
 	pingTimeout   time.Duration
 	reconnectWait time.Duration
 
-	// writeMu protects concurrent writes to the WebSocket connection (pings + handling messages)
-	writeMu sync.Mutex
-
 	// pingCancel cancels the ping goroutine context
 	pingCancel context.CancelFunc
-
-	logger *slog.Logger
 }
 
-// Launch starts the conductor connection manager goroutine
+// Launch starts the conductor main goroutine
 func (c *Conductor) Launch() {
 	c.logger.Info("Launching conductor")
 	c.wg.Add(1)
 	go c.run()
 }
 
-// NewConductor creates a new conductor instance
-func NewConductor(config ConductorConfig, dbosCtx *dbosContext) (*Conductor, error) {
+func NewConductor(dbosCtx *dbosContext, config ConductorConfig) (*Conductor, error) {
 	if config.apiKey == "" {
 		return nil, fmt.Errorf("conductor API key is required")
 	}
@@ -70,33 +68,18 @@ func NewConductor(config ConductorConfig, dbosCtx *dbosContext) (*Conductor, err
 		return nil, fmt.Errorf("conductor URL is required")
 	}
 
-	// Parse the base conductor URL
 	baseURL, err := url.Parse(config.url)
 	if err != nil {
 		return nil, fmt.Errorf("invalid conductor URL: %w", err)
 	}
 
-	// Build WebSocket URL using net.JoinPath for proper path construction
 	wsURL := url.URL{
 		Scheme: baseURL.Scheme,
 		Host:   baseURL.Host,
 		Path:   baseURL.JoinPath("websocket", config.appName, config.apiKey).Path,
 	}
 
-	// Convert HTTP schemes to WebSocket schemes
-	switch wsURL.Scheme {
-	case "http":
-		wsURL.Scheme = "ws"
-	case "https":
-		wsURL.Scheme = "wss"
-	case "ws", "wss":
-		// Already correct
-	default:
-		return nil, fmt.Errorf("unsupported URL scheme: %s (expected http, https, ws, or wss)", wsURL.Scheme)
-	}
-
 	c := &Conductor{
-		config:        config,
 		dbosCtx:       dbosCtx,
 		url:           wsURL,
 		pingInterval:  _PING_INTERVAL,
@@ -111,7 +94,6 @@ func NewConductor(config ConductorConfig, dbosCtx *dbosContext) (*Conductor, err
 	return c, nil
 }
 
-// Shutdown gracefully conductor
 func (c *Conductor) Shutdown(timeout time.Duration) {
 	c.stopOnce.Do(func() {
 		if c.pingCancel != nil {
@@ -148,7 +130,7 @@ func (c *Conductor) closeConn() {
 	defer c.writeMu.Unlock()
 
 	if c.conn != nil {
-		if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		if err := c.conn.SetWriteDeadline(time.Now().Add(_WRITE_DEADLINE)); err != nil {
 			c.logger.Warn("Failed to set write deadline", "error", err)
 		}
 		err := c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutting down"))
@@ -165,7 +147,6 @@ func (c *Conductor) closeConn() {
 	c.needsReconnect.Store(true)
 }
 
-// run manages the WebSocket connection lifecycle with reconnection
 func (c *Conductor) run() {
 	defer c.wg.Done()
 
@@ -236,7 +217,6 @@ func (c *Conductor) run() {
 	}
 }
 
-// connect establishes a WebSocket connection to the conductor
 func (c *Conductor) connect() error {
 	c.logger.Debug("Connecting to conductor")
 
@@ -298,7 +278,6 @@ func (c *Conductor) connect() error {
 	return nil
 }
 
-// ping sends a ping to the conductor
 func (c *Conductor) ping() error {
 	if c.conn == nil {
 		return fmt.Errorf("no connection")
@@ -309,7 +288,7 @@ func (c *Conductor) ping() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(_WRITE_DEADLINE)); err != nil {
 		c.logger.Warn("Failed to set write deadline for ping", "error", err)
 	}
 	if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
@@ -322,7 +301,6 @@ func (c *Conductor) ping() error {
 	return nil
 }
 
-// handleMessage processes an incoming message from the conductor
 func (c *Conductor) handleMessage(data []byte) error {
 	var base baseMessage
 	if err := json.Unmarshal(data, &base); err != nil {
@@ -360,7 +338,6 @@ func (c *Conductor) handleMessage(data []byte) error {
 	}
 }
 
-// handleExecutorInfoRequest handles executor info requests from the conductor
 func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) error {
 	var req executorInfoRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -390,7 +367,6 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 	return c.sendResponse(response, string(executorInfo))
 }
 
-// handleRecoveryRequest handles recovery requests from the conductor
 func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 	var req recoveryConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -399,7 +375,6 @@ func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 	}
 	c.logger.Debug("Handling recovery request", "executor_ids", req.ExecutorIDs, "request_id", requestID)
 
-	// Recover pending workflows using the provided executor IDs
 	success := true
 	var errorMsg *string
 
@@ -427,7 +402,6 @@ func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 	return c.sendResponse(response, string(recoveryMessage))
 }
 
-// handleCancelWorkflowRequest handles cancel workflow requests from the conductor
 func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) error {
 	var req cancelWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -436,7 +410,6 @@ func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 	}
 	c.logger.Debug("Handling cancel workflow request", "workflow_id", req.WorkflowID, "request_id", requestID)
 
-	// Cancel the workflow using the dbosContext
 	success := true
 	var errorMsg *string
 
@@ -463,7 +436,6 @@ func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 	return c.sendResponse(response, string(cancelWorkflowMessage))
 }
 
-// handleResumeWorkflowRequest handles resume workflow requests from the conductor
 func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) error {
 	var req resumeWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -472,7 +444,6 @@ func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 	}
 	c.logger.Debug("Handling resume workflow request", "workflow_id", req.WorkflowID, "request_id", requestID)
 
-	// Resume the workflow using the dbosContext
 	success := true
 	var errorMsg *string
 
@@ -500,7 +471,6 @@ func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 	return c.sendResponse(response, string(resumeWorkflowMessage))
 }
 
-// handleRetentionRequest handles retention policy requests from the conductor
 func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error {
 	var req retentionConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -543,7 +513,7 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 
 	// Handle timeout enforcement if parameter is provided and garbage collection succeeded
 	if success && req.Body.TimeoutCutoffEpochMs != nil {
-		cutoffTime := time.Unix(0, int64(*req.Body.TimeoutCutoffEpochMs)*int64(time.Millisecond))
+		cutoffTime := time.UnixMilli(int64(*req.Body.TimeoutCutoffEpochMs))
 		err := c.dbosCtx.systemDB.cancelAllBefore(c.dbosCtx, cutoffTime)
 		if err != nil {
 			c.logger.Error("Failed to timeout workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs, "error", err)
@@ -569,7 +539,6 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 	return c.sendResponse(response, string(retentionMessage))
 }
 
-// handleListWorkflowsRequest handles list workflows requests from the conductor
 func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) error {
 	var req listWorkflowsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -578,7 +547,6 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	}
 	c.logger.Debug("Handling list workflows request", "request", req)
 
-	// Build functional options for ListWorkflows
 	var opts []ListWorkflowsOption
 	opts = append(opts, WithLoadInput(req.Body.LoadInput))
 	opts = append(opts, WithLoadOutput(req.Body.LoadOutput))
@@ -628,7 +596,6 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 		return c.sendResponse(response, "list workflows response")
 	}
 
-	// Prepare response payload
 	formattedWorkflows := make([]listWorkflowsConductorResponseBody, len(workflows))
 	for i, wf := range workflows {
 		formattedWorkflows[i] = formatListWorkflowsResponseBody(wf)
@@ -647,7 +614,6 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	return c.sendResponse(response, string(listWorkflowsMessage))
 }
 
-// handleListQueuedWorkflowsRequest handles list queued workflows requests from the conductor
 func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID string) error {
 	var req listWorkflowsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -744,7 +710,6 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	return c.sendResponse(response, string(listQueuedWorkflowsMessage))
 }
 
-// handleListStepsRequest handles list steps requests from the conductor
 func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error {
 	var req listStepsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -794,7 +759,6 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 	return c.sendResponse(response, string(listStepsMessage))
 }
 
-// handleGetWorkflowRequest handles get workflow requests from the conductor
 func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) error {
 	var req getWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -803,7 +767,6 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 	}
 	c.logger.Debug("Handling get workflow request", "workflow_id", req.WorkflowID)
 
-	// Get workflow using ListWorkflows with the specific workflow ID filter
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, WithWorkflowIDs([]string{req.WorkflowID}))
 	if err != nil {
 		c.logger.Error("Failed to get workflow", "workflow_id", req.WorkflowID, "error", err)
@@ -821,7 +784,6 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 		return c.sendResponse(response, "get workflow response")
 	}
 
-	// Format the workflow for response
 	var formattedWorkflow *listWorkflowsConductorResponseBody
 	if len(workflows) > 0 {
 		formatted := formatListWorkflowsResponseBody(workflows[0])
@@ -841,7 +803,6 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 	return c.sendResponse(response, string(getWorkflowMessage))
 }
 
-// handleForkWorkflowRequest handles fork workflow requests from the conductor
 func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) error {
 	var req forkWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -850,7 +811,6 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	}
 	c.logger.Debug("Handling fork workflow request", "request", req)
 
-	// Build ForkWorkflowInput from the request
 	// Validate StartStep to prevent integer overflow
 	if req.Body.StartStep < 0 {
 		return fmt.Errorf("invalid StartStep: cannot be negative")
@@ -897,7 +857,6 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	return c.sendResponse(response, string(forkWorkflowMessage))
 }
 
-// handleExistPendingWorkflowsRequest handles exist pending workflows requests from the conductor
 func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID string) error {
 	var req existPendingWorkflowsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -906,8 +865,6 @@ func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 	}
 	c.logger.Debug("Handling exist pending workflows request", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion)
 
-	// Use ListWorkflows to check for pending workflows with the specified executor ID and application version
-	// Filter for pending status workflows
 	opts := []ListWorkflowsOption{
 		WithStatus([]WorkflowStatusType{WorkflowStatusPending}),
 		WithLimit(1), // We only need to know if any exist, so limit to 1 for efficiency
@@ -937,7 +894,6 @@ func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 	return c.sendResponse(response, string(existPendingWorkflowsMessage))
 }
 
-// handleUnknownMessageType sends an error response for unknown message types
 func (c *Conductor) handleUnknownMessageType(requestID string, msgType messageType, errorMsg string) error {
 	if c.conn == nil {
 		return fmt.Errorf("no connection")
@@ -951,32 +907,9 @@ func (c *Conductor) handleUnknownMessageType(requestID string, msgType messageTy
 		ErrorMessage: &errorMsg,
 	}
 
-	data, err := json.Marshal(response)
-	if err != nil {
-		c.logger.Error("Failed to marshal error response", "error", err)
-		return fmt.Errorf("failed to marshal error response: %w", err)
-	}
-
-	c.logger.Debug("Sending error response", "data", response)
-
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-
-	if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		c.logger.Warn("Failed to set write deadline for error response", "error", err)
-	}
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.logger.Error("Failed to send error response", "error", err)
-		return fmt.Errorf("failed to send message: %w", err)
-	}
-	if err := c.conn.SetWriteDeadline(time.Time{}); err != nil {
-		c.logger.Warn("Failed to clear write deadline for error response", "error", err)
-	}
-
-	return nil
+	return c.sendResponse(response, "unknown message type response")
 }
 
-// sendResponse sends a response to the conductor via websocket
 func (c *Conductor) sendResponse(response any, responseType string) error {
 	if c.conn == nil {
 		return fmt.Errorf("no connection")
@@ -992,7 +925,7 @@ func (c *Conductor) sendResponse(response any, responseType string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(_WRITE_DEADLINE)); err != nil {
 		c.logger.Warn("Failed to set write deadline", "type", responseType, "error", err)
 	}
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
