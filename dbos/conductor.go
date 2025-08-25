@@ -17,7 +17,7 @@ import (
 
 const (
 	_PING_INTERVAL          = 20 * time.Second
-	_PING_TIMEOUT           = 30 * time.Second // Should be > server's executorPingWait (25s)
+	_PING_TIMEOUT           = 30 * time.Second // Should be slightly greater than server's executorPingWait (25s)
 	_INITIAL_RECONNECT_WAIT = 1 * time.Second
 	_MAX_RECONNECT_WAIT     = 30 * time.Second
 	_HANDSHAKE_TIMEOUT      = 10 * time.Second
@@ -118,6 +118,8 @@ func (c *Conductor) Shutdown(timeout time.Duration) {
 			c.pingCancel()
 		}
 
+		c.closeConn()
+
 		done := make(chan struct{})
 		go func() {
 			c.wg.Wait()
@@ -140,6 +142,10 @@ func (c *Conductor) closeConn() {
 		c.pingCancel()
 		c.pingCancel = nil
 	}
+
+	// Acquire write mutex to ensure no concurrent writes during close
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
 	if c.conn != nil {
 		if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
