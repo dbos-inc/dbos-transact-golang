@@ -141,7 +141,7 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 		output.Error = &errorStr
 	}
 
-	// Convert timestamps to RFC3339 strings
+	// Convert timestamps to unix epochs
 	if !wf.CreatedAt.IsZero() {
 		createdStr := strconv.FormatInt(wf.CreatedAt.UnixMilli(), 10)
 		output.CreatedAt = &createdStr
