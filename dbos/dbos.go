@@ -286,6 +286,7 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 
 	// Set global logger
 	initExecutor.logger = config.Logger
+	initExecutor.logger.Info("Initializing DBOS context", "app_name", config.AppName)
 
 	// Register types we serialize with gob
 	var t time.Time
