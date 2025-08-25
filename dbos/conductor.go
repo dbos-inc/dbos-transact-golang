@@ -56,7 +56,7 @@ type Conductor struct {
 
 // Launch starts the conductor connection manager goroutine
 func (c *Conductor) Launch() {
-	c.logger.Info("Launching conductor", "url", c.url.String())
+	c.logger.Info("Launching conductor")
 	c.wg.Add(1)
 	go c.run()
 }
@@ -226,7 +226,7 @@ func (c *Conductor) run() {
 		if err := c.handleMessage(message); err != nil {
 			c.logger.Error("Failed to handle message", "error", err)
 		}
-		c.logger.Debug("Handled message", "latency_ms", time.Since(ht).Milliseconds())
+		c.logger.Debug("Handled message", "message", messageType, "latency_ms", time.Since(ht).Milliseconds())
 	}
 }
 
