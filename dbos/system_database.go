@@ -2174,14 +2174,14 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			input.executorID,
 			time.Now().UnixMilli(),
 			id).Scan(&retWorkflow.name, &inputString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
+		}
 
 		if inputString != nil && len(*inputString) > 0 {
 			retWorkflow.input = *inputString
 		}
 
-		if err != nil {
-			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
-		}
 		retWorkflows = append(retWorkflows, retWorkflow)
 	}
 

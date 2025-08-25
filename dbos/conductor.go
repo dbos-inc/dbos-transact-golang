@@ -387,7 +387,7 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 		Hostname:           &hostname,
 	}
 
-	return c.sendResponse(response, "executor info response")
+	return c.sendResponse(response, string(executorInfo))
 }
 
 // handleRecoveryRequest handles recovery requests from the conductor
@@ -424,7 +424,7 @@ func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 		Success: success,
 	}
 
-	return c.sendResponse(response, "recovery response")
+	return c.sendResponse(response, string(recoveryMessage))
 }
 
 // handleCancelWorkflowRequest handles cancel workflow requests from the conductor
@@ -460,7 +460,7 @@ func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 		Success: success,
 	}
 
-	return c.sendResponse(response, "cancel workflow response")
+	return c.sendResponse(response, string(cancelWorkflowMessage))
 }
 
 // handleResumeWorkflowRequest handles resume workflow requests from the conductor
@@ -497,7 +497,7 @@ func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 		Success: success,
 	}
 
-	return c.sendResponse(response, "resume workflow response")
+	return c.sendResponse(response, string(resumeWorkflowMessage))
 }
 
 // handleRetentionRequest handles retention policy requests from the conductor
@@ -566,37 +566,7 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 		Success: success,
 	}
 
-	return c.sendResponse(response, "retention response")
-}
-
-// sendResponse sends a response to the conductor via websocket
-func (c *Conductor) sendResponse(response any, responseType string) error {
-	if c.conn == nil {
-		return fmt.Errorf("no connection")
-	}
-
-	data, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("failed to marshal %s: %w", responseType, err)
-	}
-
-	c.logger.Debug("Sending response", "type", responseType, "len", len(data))
-
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-
-	if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		c.logger.Warn("Failed to set write deadline", "type", responseType, "error", err)
-	}
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		c.logger.Error("Failed to send response", "type", responseType, "error", err)
-		return fmt.Errorf("failed to send message: %w", err)
-	}
-	if err := c.conn.SetWriteDeadline(time.Time{}); err != nil {
-		c.logger.Warn("Failed to clear write deadline", "type", responseType, "error", err)
-	}
-
-	return nil
+	return c.sendResponse(response, string(retentionMessage))
 }
 
 // handleListWorkflowsRequest handles list workflows requests from the conductor
@@ -674,7 +644,7 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 		Output: formattedWorkflows,
 	}
 
-	return c.sendResponse(response, "list workflows response")
+	return c.sendResponse(response, string(listWorkflowsMessage))
 }
 
 // handleListQueuedWorkflowsRequest handles list queued workflows requests from the conductor
@@ -740,7 +710,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 			},
 			Output: []listWorkflowsConductorResponseBody{},
 		}
-		return c.sendResponse(response, "list workflows response")
+		return c.sendResponse(response, string(listQueuedWorkflowsMessage))
 	}
 
 	// If no queue name was specified, only include workflows that have a queue name
@@ -769,7 +739,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 		Output: formattedWorkflows,
 	}
 
-	return c.sendResponse(response, "list workflows response")
+	return c.sendResponse(response, string(listQueuedWorkflowsMessage))
 }
 
 // handleListStepsRequest handles list steps requests from the conductor
@@ -796,7 +766,7 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 			},
 			Output: nil,
 		}
-		return c.sendResponse(response, "list steps response")
+		return c.sendResponse(response, string(listStepsMessage))
 	}
 
 	// Convert steps to response format
@@ -819,7 +789,7 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 		Output: formattedSteps,
 	}
 
-	return c.sendResponse(response, "list steps response")
+	return c.sendResponse(response, string(listStepsMessage))
 }
 
 // handleGetWorkflowRequest handles get workflow requests from the conductor
@@ -866,7 +836,7 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 		Output: formattedWorkflow,
 	}
 
-	return c.sendResponse(response, "get workflow response")
+	return c.sendResponse(response, string(getWorkflowMessage))
 }
 
 // handleForkWorkflowRequest handles fork workflow requests from the conductor
@@ -922,7 +892,7 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 		NewWorkflowID: newWorkflowID,
 	}
 
-	return c.sendResponse(response, "fork workflow response")
+	return c.sendResponse(response, string(forkWorkflowMessage))
 }
 
 // handleExistPendingWorkflowsRequest handles exist pending workflows requests from the conductor
@@ -962,7 +932,7 @@ func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 		Exist: len(workflows) > 0,
 	}
 
-	return c.sendResponse(response, "exist pending workflows response")
+	return c.sendResponse(response, string(existPendingWorkflowsMessage))
 }
 
 // handleUnknownMessageType sends an error response for unknown message types
@@ -999,6 +969,36 @@ func (c *Conductor) handleUnknownMessageType(requestID string, msgType messageTy
 	}
 	if err := c.conn.SetWriteDeadline(time.Time{}); err != nil {
 		c.logger.Warn("Failed to clear write deadline for error response", "error", err)
+	}
+
+	return nil
+}
+
+// sendResponse sends a response to the conductor via websocket
+func (c *Conductor) sendResponse(response any, responseType string) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection")
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal %s: %w", responseType, err)
+	}
+
+	c.logger.Debug("Sending response", "type", responseType, "len", len(data))
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	if err := c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		c.logger.Warn("Failed to set write deadline", "type", responseType, "error", err)
+	}
+	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.logger.Error("Failed to send response", "type", responseType, "error", err)
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+	if err := c.conn.SetWriteDeadline(time.Time{}); err != nil {
+		c.logger.Warn("Failed to clear write deadline", "type", responseType, "error", err)
 	}
 
 	return nil
