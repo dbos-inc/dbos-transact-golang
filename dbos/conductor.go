@@ -762,7 +762,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	response := listWorkflowsConductorResponse{
 		baseResponse: baseResponse{
 			baseMessage: baseMessage{
-				Type:      listWorkflowsMessage,
+				Type:      listQueuedWorkflowsMessage,
 				RequestID: requestID,
 			},
 		},
