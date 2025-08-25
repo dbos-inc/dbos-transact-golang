@@ -721,6 +721,8 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 				filteredWorkflows = append(filteredWorkflows, wf)
 			}
 		}
+	} else {
+		filteredWorkflows = workflows
 	}
 
 	// Prepare response payload
