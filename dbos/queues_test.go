@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -62,6 +64,29 @@ func TestWorkflowQueues(t *testing.T) {
 
 	// Register workflows with dbosContext
 	RegisterWorkflow(dbosCtx, queueWorkflow)
+
+	// Custom name workflows
+	queueWorkflowCustomName := func(ctx DBOSContext, input string) (string, error) {
+		return input, nil
+	}
+	RegisterWorkflow(dbosCtx, queueWorkflowCustomName, WithWorkflowName("custom-name"))
+
+	queueWorkflowCustomNameEnqueingAnotherCustomNameWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		// Start a child workflow
+		childHandle, err := RunAsWorkflow(ctx, queueWorkflowCustomName, input+"-enqueued", WithQueue(queue.Name))
+		if err != nil {
+			return "", fmt.Errorf("failed to start child workflow: %v", err)
+		}
+
+		// Get result from child workflow
+		childResult, err := childHandle.GetResult()
+		if err != nil {
+			return "", fmt.Errorf("failed to get child result: %v", err)
+		}
+
+		return childResult, nil
+	}
+	RegisterWorkflow(dbosCtx, queueWorkflowCustomNameEnqueingAnotherCustomNameWorkflow, WithWorkflowName("custom-name-enqueuing"))
 
 	// Queue deduplication test workflows
 	var dedupWorkflowEvent *Event
@@ -133,11 +158,49 @@ func TestWorkflowQueues(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, enqueueWorkflowDLQ, WithMaxRetries(dlqMaxRetries))
 
+	// Create a workflow that enqueues another workflow to test step tracking
+	workflowEnqueuesAnother := func(ctx DBOSContext, input string) (string, error) {
+		// Enqueue a child workflow
+		childHandle, err := RunAsWorkflow(ctx, queueWorkflow, input+"-child", WithQueue(queue.Name))
+		if err != nil {
+			return "", fmt.Errorf("failed to enqueue child workflow: %v", err)
+		}
+
+		// Get result from the child workflow
+		childResult, err := childHandle.GetResult()
+		if err != nil {
+			return "", fmt.Errorf("failed to get child result: %v", err)
+		}
+
+		return childResult, nil
+	}
+	RegisterWorkflow(dbosCtx, workflowEnqueuesAnother)
+
 	err := dbosCtx.Launch()
 	require.NoError(t, err)
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
 		handle, err := RunAsWorkflow(dbosCtx, queueWorkflow, "test-input", WithQueue(queue.Name))
+		require.NoError(t, err)
+
+		_, ok := handle.(*workflowPollingHandle[string])
+		require.True(t, ok, "expected handle to be of type workflowPollingHandle, got %T", handle)
+
+		res, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "test-input", res)
+
+		// List steps: the workflow should have 1 step
+		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err)
+		assert.Len(t, steps, 1)
+		assert.Equal(t, 0, steps[0].StepID)
+
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
+	})
+
+	t.Run("EnqueueWorkflowCustomName", func(t *testing.T) {
+		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowCustomName, "test-input", WithQueue(queue.Name))
 		require.NoError(t, err)
 
 		_, ok := handle.(*workflowPollingHandle[string])
@@ -161,10 +224,19 @@ func TestWorkflowQueues(t *testing.T) {
 		expectedResult := "test-input-child"
 		assert.Equal(t, expectedResult, res)
 
+		// List steps: the workflow should have 2 steps (Start the child and GetResult)
+		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err)
+		assert.Len(t, steps, 2)
+		assert.Equal(t, runtime.FuncForPC(reflect.ValueOf(queueWorkflow).Pointer()).Name(), steps[0].StepName)
+		assert.Equal(t, 0, steps[0].StepID)
+		assert.Equal(t, "DBOS.getResult", steps[1].StepName)
+		assert.Equal(t, 1, steps[1].StepID)
+
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
 
-	t.Run("WorkflowEnqueuesAnotherWorkflow", func(t *testing.T) {
+	t.Run("WorkflowEnqueuesAnother", func(t *testing.T) {
 		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowThatEnqueues, "test-input", WithQueue(queue.Name))
 		require.NoError(t, err)
 
@@ -175,7 +247,65 @@ func TestWorkflowQueues(t *testing.T) {
 		expectedResult := "test-input-enqueued"
 		assert.Equal(t, expectedResult, res)
 
+		// List steps: the workflow should have 2 steps (Start the child and GetResult)
+		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err)
+		assert.Len(t, steps, 2)
+		assert.Equal(t, runtime.FuncForPC(reflect.ValueOf(queueWorkflow).Pointer()).Name(), steps[0].StepName)
+		assert.Equal(t, 0, steps[0].StepID)
+		assert.Equal(t, "DBOS.getResult", steps[1].StepName)
+		assert.Equal(t, 1, steps[1].StepID)
+
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
+	})
+
+	t.Run("CustomNameWorkflowEnqueuesAnotherCustomNameWorkflow", func(t *testing.T) {
+		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowCustomNameEnqueingAnotherCustomNameWorkflow, "test-input", WithQueue(queue.Name))
+		require.NoError(t, err)
+
+		res, err := handle.GetResult()
+		require.NoError(t, err)
+
+		// Expected result: enqueued workflow returns "test-input-enqueued"
+		expectedResult := "test-input-enqueued"
+		assert.Equal(t, expectedResult, res)
+
+		// List steps: the workflow should have 2 steps (Start the child and GetResult)
+		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err)
+		assert.Len(t, steps, 2)
+		assert.Equal(t, "custom-name", steps[0].StepName)
+		assert.Equal(t, 0, steps[0].StepID)
+		assert.Equal(t, "DBOS.getResult", steps[1].StepName)
+		assert.Equal(t, 1, steps[1].StepID)
+
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
+	})
+
+	t.Run("EnqueuedWorkflowEnqueuesAnother", func(t *testing.T) {
+		// Run the pre-registered workflow that enqueues another workflow
+		// Enqueue the parent workflow to a queue
+		handle, err := RunAsWorkflow(dbosCtx, workflowEnqueuesAnother, "test-input", WithQueue(queue.Name))
+		require.NoError(t, err)
+
+		res, err := handle.GetResult()
+		require.NoError(t, err)
+
+		// Expected result: child workflow returns "test-input-child"
+		expectedResult := "test-input-child"
+		assert.Equal(t, expectedResult, res)
+
+		// Check that the parent workflow (the one we ran directly) has 2 steps:
+		// one for enqueueing the child and one for calling GetResult
+		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err)
+		assert.Len(t, steps, 2)
+		assert.Equal(t, runtime.FuncForPC(reflect.ValueOf(queueWorkflow).Pointer()).Name(), steps[0].StepName)
+		assert.Equal(t, 0, steps[0].StepID)
+		assert.Equal(t, "DBOS.getResult", steps[1].StepName)
+		assert.Equal(t, 1, steps[1].StepID)
+
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow enqueues another workflow test")
 	})
 
 	t.Run("DynamicRegistration", func(t *testing.T) {
