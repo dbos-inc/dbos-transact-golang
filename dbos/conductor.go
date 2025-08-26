@@ -650,7 +650,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 		}
 		queuedStatuses = append(queuedStatuses, status)
 	}
-	if len(queuedStatuses) > 0 {
+	if len(queuedStatuses) == 0 {
 		queuedStatuses = []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued}
 	}
 	opts = append(opts, WithStatus(queuedStatuses))
