@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -814,6 +815,9 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	// Validate StartStep to prevent integer overflow
 	if req.Body.StartStep < 0 {
 		return fmt.Errorf("invalid StartStep: cannot be negative")
+	}
+	if req.Body.StartStep > math.MaxInt32/2 {
+		return fmt.Errorf("invalid StartStep: cannot be greater than %d", math.MaxInt32/2)
 	}
 	input := ForkWorkflowInput{
 		OriginalWorkflowID: req.Body.WorkflowID,
