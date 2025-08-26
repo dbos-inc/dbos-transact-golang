@@ -291,14 +291,14 @@ func (c *Conductor) connect() error {
 }
 
 func (c *Conductor) ping() error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
 	if c.conn == nil {
 		return fmt.Errorf("no connection")
 	}
 
 	c.logger.Debug("Sending ping to conductor")
-
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 
 	if err := c.conn.SetWriteDeadline(time.Now().Add(_WRITE_DEADLINE)); err != nil {
 		c.logger.Warn("Failed to set write deadline for ping", "error", err)
@@ -926,6 +926,9 @@ func (c *Conductor) handleUnknownMessageType(requestID string, msgType messageTy
 }
 
 func (c *Conductor) sendResponse(response any, responseType string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
 	if c.conn == nil {
 		return fmt.Errorf("no connection")
 	}
@@ -936,9 +939,6 @@ func (c *Conductor) sendResponse(response any, responseType string) error {
 	}
 
 	c.logger.Debug("Sending response", "type", responseType, "len", len(data))
-
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 
 	if err := c.conn.SetWriteDeadline(time.Now().Add(_WRITE_DEADLINE)); err != nil {
 		c.logger.Warn("Failed to set write deadline", "type", responseType, "error", err)
