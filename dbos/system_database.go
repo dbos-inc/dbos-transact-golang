@@ -823,8 +823,10 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 		if err != nil && err != pgx.ErrNoRows {
 			return fmt.Errorf("failed to query cutoff timestamp by rows threshold: %w", err)
 		}
-		// If we found a valid cutoffTimestamp from rows, use it
-		if err != pgx.ErrNoRows && cutoffTimestamp == nil || rowsBasedCutoff > *cutoffTimestamp {
+		// If we don't have a provided cutoffTimestamp and found one in the database
+		// Or if the found cutoffTimestamp is more restrictive (higher timestamp = more recent = less deletion)
+		// Use the cutoff timestamp found in the database
+		if rowsBasedCutoff > 0 && cutoffTimestamp == nil || (cutoffTimestamp != nil && rowsBasedCutoff > *cutoffTimestamp) {
 			cutoffTimestamp = &rowsBasedCutoff
 		}
 	}
