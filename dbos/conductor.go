@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand"
 	"net"
 	"net/url"
 	"os"
@@ -118,6 +119,13 @@ func (c *Conductor) Shutdown(timeout time.Duration) {
 	})
 }
 
+// reconnectWaitWithJitter adds random jitter to the reconnect wait time to prevent thundering herd
+func (c *Conductor) reconnectWaitWithJitter() time.Duration {
+	// Add jitter: random value between 0.5 * wait and 1.5 * wait
+	jitter := 0.5 + rand.Float64() // #nosec G404 -- jitter for backoff doesn't need crypto-secure randomness
+	return time.Duration(float64(c.reconnectWait) * jitter)
+}
+
 // closeConn closes the connection and signals that reconnection is needed
 func (c *Conductor) closeConn() {
 	// Cancel ping goroutine first
@@ -169,10 +177,13 @@ func (c *Conductor) run() {
 				case <-c.dbosCtx.Done():
 					c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
 					return
-				case <-time.After(c.reconnectWait):
-					// Exponential backoff up to max wait
+				case <-time.After(c.reconnectWaitWithJitter()):
+					// Exponential backoff with jitter up to max wait
 					if c.reconnectWait < _MAX_RECONNECT_WAIT {
 						c.reconnectWait *= 2
+						if c.reconnectWait > _MAX_RECONNECT_WAIT {
+							c.reconnectWait = _MAX_RECONNECT_WAIT
+						}
 					}
 					continue
 				}
