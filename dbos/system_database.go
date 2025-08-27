@@ -701,7 +701,7 @@ type updateWorkflowOutcomeDBInput struct {
 func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error {
 	query := `UPDATE dbos.workflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
-			  WHERE workflow_uuid = $5`
+			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 = $7)`
 
 	outputString, err := serialize(input.output)
 	if err != nil {
@@ -714,9 +714,9 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 	}
 
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID)
+		_, err = input.tx.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusError)
 	} else {
-		_, err = s.pool.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID)
+		_, err = s.pool.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusError)
 	}
 
 	if err != nil {
@@ -1646,7 +1646,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	}
 	recordedResult, err := s.checkOperationExecution(ctx, checkInput)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check operation execution: %w", err)
+		return nil, err
 	}
 	if recordedResult != nil {
 		if recordedResult.output != nil {
