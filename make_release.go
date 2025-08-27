@@ -320,10 +320,15 @@ func (rm *ReleaseManager) CreateGitHubRelease(version string) error {
 
 func main() {
 	var (
-		versionFlag  = flag.String("version", "", "Version number (e.g., 1.2.3)")
-		repoPathFlag = flag.String("repo", ".", "Path to git repository")
+		versionFlag    = flag.String("version", "", "Version number (e.g., 1.2.3)")
+		repoPathFlag   = flag.String("repo", ".", "Path to git repository")
+		areYouSureFlag = flag.String("are-you-sure", "", "Confirmation to proceed")
 	)
 	flag.Parse()
+
+	if *areYouSureFlag != "YES!!!" {
+		log.Fatalf("Confirmation not provided. Please use -are-you-sure='YES!!!'")
+	}
 
 	// Initialize release manager
 	rm, err := NewReleaseManager(*repoPathFlag)
