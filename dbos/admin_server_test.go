@@ -592,7 +592,7 @@ func TestAdminServer(t *testing.T) {
 
 			// Verify no new executions occurred
 			finalCount := executionCount.Load()
-			assert.LessOrEqual(t, countAfterDeactivate+1, finalCount,
+			assert.LessOrEqual(t, finalCount, countAfterDeactivate+1,
 				"Expected no new scheduled workflows after deactivate (had %d before, %d after)",
 				countAfterDeactivate, finalCount)
 		})
