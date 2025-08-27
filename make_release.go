@@ -296,11 +296,11 @@ func (rm *ReleaseManager) CreateGitHubRelease(version string) error {
 	ctx := context.Background()
 
 	release := &github.RepositoryRelease{
-		TagName:         github.String(version),
-		TargetCommitish: github.String("main"),
-		Name:            github.String(fmt.Sprintf("Release %s", version)),
-		Body:            github.String(fmt.Sprintf("Release %s", version)),
-		Prerelease:      github.Bool(false),
+		TagName:              github.String(version),
+		TargetCommitish:      github.String("main"),
+		Name:                 github.String(fmt.Sprintf("Release %s", version)),
+		Prerelease:           github.Bool(false),
+		GenerateReleaseNotes: github.Bool(true),
 	}
 
 	_, _, err := rm.client.Repositories.CreateRelease(
