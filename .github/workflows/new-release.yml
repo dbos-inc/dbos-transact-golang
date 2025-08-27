@@ -38,7 +38,7 @@ jobs:
             exit 1
           fi
 
-          FLAGS="-are-you-sure='${{ inputs.are-you-sure }}'"
+          FLAGS="-are-you-sure=${{ inputs.are-you-sure }}"
 
           # Add version flag if provided
           if [ -n "${{ inputs.version }}" ]; then
