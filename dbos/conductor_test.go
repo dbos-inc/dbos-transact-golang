@@ -19,15 +19,23 @@ import (
 	"go.uber.org/goleak"
 )
 
+// writeCommand represents a command to write to the WebSocket connection
+type writeCommand struct {
+	messageType int
+	data        []byte
+	response    chan error // Channel to send back the result
+}
+
 // mockWebSocketServer provides a controllable WebSocket server for testing
 type mockWebSocketServer struct {
 	server      *httptest.Server
 	upgrader    websocket.Upgrader
-	connMu      sync.Mutex
+	connMu      sync.Mutex // Only for connection assignment/reassignment
 	conn        *websocket.Conn
 	closed      atomic.Bool
 	messages    chan []byte
 	pings       chan struct{}
+	writeCmds   chan writeCommand // Channel for write commands
 	stopHandler chan struct{}
 	ignorePings atomic.Bool // When true, don't respond with pongs
 }
@@ -37,6 +45,7 @@ func newMockWebSocketServer() *mockWebSocketServer {
 		upgrader:    websocket.Upgrader{},
 		messages:    make(chan []byte, 100),
 		pings:       make(chan struct{}, 100),
+		writeCmds:   make(chan writeCommand, 10),
 		stopHandler: make(chan struct{}),
 	}
 
@@ -56,6 +65,7 @@ func (m *mockWebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Connection assignment - this is the only place we need mutex
 	m.connMu.Lock()
 	// Close any existing connection
 	if m.conn != nil {
@@ -64,36 +74,86 @@ func (m *mockWebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Req
 	m.conn = conn
 	m.connMu.Unlock()
 
-	// Set up ping handler to capture pings
+	// Ensure the connection gets cleared when this handler exits
+	defer func() {
+		m.connMu.Lock()
+		if m.conn == conn {
+			m.conn = nil
+		}
+		m.connMu.Unlock()
+		conn.Close()
+	}()
+
+	// Handle connection lifecycle - this function owns all I/O on conn
+	fmt.Println("WebSocket connection established")
+	defer fmt.Println("WebSocket connection handler exiting")
+
+	// We need to handle pings manually since we can't use the ping handler
+	// (it would cause concurrent writes with our main loop)
+	pingReceived := make(chan struct{}, 10)
+
+	// Custom ping handler that just signals - no writing
 	conn.SetPingHandler(func(string) error {
+		fmt.Println("received ping")
 		select {
 		case m.pings <- struct{}{}:
 		default:
 		}
-		// Only send pong if not ignoring pings
-		if !m.ignorePings.Load() {
-			return conn.WriteMessage(websocket.PongMessage, nil)
+		select {
+		case pingReceived <- struct{}{}:
+		default:
 		}
 		return nil
 	})
 
-	// Read messages until connection is closed
+	// Start dedicated read goroutine - only reads, never writes
+	readDone := make(chan error, 1)
+	go func() {
+		defer close(readDone)
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				fmt.Printf("WebSocket read error: %v\n", err)
+				readDone <- err
+				return
+			}
+		}
+	}()
+
+	// Main write loop - all writes happen here sequentially
 	for {
 		select {
 		case <-m.stopHandler:
+			fmt.Println("WebSocket connection closed by stop signal")
 			return
-		default:
-		}
 
-		_, message, err := conn.ReadMessage()
-		if err != nil {
-			// Connection closed
+		case err := <-readDone:
+			fmt.Printf("WebSocket connection closed by read error: %v\n", err)
 			return
-		}
 
-		select {
-		case m.messages <- message:
-		default:
+		case writeCmd := <-m.writeCmds:
+			// Handle write command
+			err := conn.WriteMessage(writeCmd.messageType, writeCmd.data)
+			if writeCmd.response != nil {
+				select {
+				case writeCmd.response <- err:
+				default:
+				}
+			}
+			if err != nil {
+				fmt.Printf("WebSocket write error: %v\n", err)
+				return
+			}
+
+		case <-pingReceived:
+			// Handle ping response (send pong)
+			if !m.ignorePings.Load() {
+				err := conn.WriteMessage(websocket.PongMessage, nil)
+				if err != nil {
+					fmt.Printf("WebSocket pong write error: %v\n", err)
+					return
+				}
+			}
 		}
 	}
 }
@@ -111,12 +171,16 @@ func (m *mockWebSocketServer) close() {
 	default:
 	}
 
-	m.connMu.Lock()
-	if m.conn != nil {
-		m.conn.Close()
-		m.conn = nil
-	}
-	m.connMu.Unlock()
+	// Connection will be closed by the handler when it receives stop signal
+	// We just need to clear our reference after a brief delay
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		m.connMu.Lock()
+		if m.conn != nil {
+			m.conn = nil // Just clear reference, handler already closed
+		}
+		m.connMu.Unlock()
+	}()
 }
 
 func (m *mockWebSocketServer) shutdown() {
@@ -127,10 +191,25 @@ func (m *mockWebSocketServer) shutdown() {
 func (m *mockWebSocketServer) restart() {
 	// Reset for new connections
 	m.closed.Store(false)
-	// Drain and recreate stop handler channel
+	// Drain stop handler channel and write command channel
 	select {
 	case <-m.stopHandler:
 	default:
+	}
+	// Drain any pending write commands
+drainLoop:
+	for {
+		select {
+		case cmd := <-m.writeCmds:
+			if cmd.response != nil {
+				select {
+				case cmd.response <- fmt.Errorf("server restarting"):
+				default:
+				}
+			}
+		default:
+			break drainLoop
+		}
 	}
 }
 
@@ -150,47 +229,78 @@ func (m *mockWebSocketServer) waitForConnection(timeout time.Duration) bool {
 
 // sendBinaryMessage sends a binary WebSocket message to the connected client
 func (m *mockWebSocketServer) sendBinaryMessage(data []byte) error {
+	// Check if we have a connection without blocking
 	m.connMu.Lock()
-	defer m.connMu.Unlock()
+	hasConn := m.conn != nil
+	m.connMu.Unlock()
 
-	if m.conn == nil {
+	if !hasConn {
 		return fmt.Errorf("no connection")
 	}
 
-	return m.conn.WriteMessage(websocket.BinaryMessage, data)
-}
-
-// sendTextMessage sends a text WebSocket message to the connected client
-func (m *mockWebSocketServer) sendTextMessage(data string) error {
-	m.connMu.Lock()
-	defer m.connMu.Unlock()
-
-	if m.conn == nil {
-		return fmt.Errorf("no connection")
+	// Send write command via channel
+	response := make(chan error, 1)
+	cmd := writeCommand{
+		messageType: websocket.BinaryMessage,
+		data:        data,
+		response:    response,
 	}
 
-	return m.conn.WriteMessage(websocket.TextMessage, []byte(data))
+	select {
+	case m.writeCmds <- cmd:
+		// Wait for response
+		select {
+		case err := <-response:
+			return err
+		case <-time.After(1 * time.Second):
+			return fmt.Errorf("write timeout")
+		}
+	case <-time.After(1 * time.Second):
+		return fmt.Errorf("write command queue full")
+	}
 }
 
 // sendCloseMessage sends a WebSocket close message with specified code and reason
 func (m *mockWebSocketServer) sendCloseMessage(code int, text string) error {
+	// Check if we have a connection without blocking
 	m.connMu.Lock()
-	defer m.connMu.Unlock()
+	hasConn := m.conn != nil
+	m.connMu.Unlock()
 
-	if m.conn == nil {
+	if !hasConn {
 		return fmt.Errorf("no connection")
 	}
 
-	// Write the close message
+	// Format close message
 	message := websocket.FormatCloseMessage(code, text)
-	err := m.conn.WriteMessage(websocket.CloseMessage, message)
 
-	// After sending close, we should close the connection
-	// This prevents concurrent writes and simulates proper WebSocket close behavior
-	m.conn.Close()
-	m.conn = nil
+	// Send write command via channel
+	response := make(chan error, 1)
+	cmd := writeCommand{
+		messageType: websocket.CloseMessage,
+		data:        message,
+		response:    response,
+	}
 
-	return err
+	select {
+	case m.writeCmds <- cmd:
+		// Wait for response
+		select {
+		case err := <-response:
+			// After sending close, close the connection from our side too
+			m.connMu.Lock()
+			if m.conn != nil {
+				m.conn.Close()
+				m.conn = nil
+			}
+			m.connMu.Unlock()
+			return err
+		case <-time.After(1 * time.Second):
+			return fmt.Errorf("write timeout")
+		}
+	case <-time.After(1 * time.Second):
+		return fmt.Errorf("write command queue full")
+	}
 }
 
 // TestConductorReconnection tests various reconnection scenarios for the conductor
@@ -517,6 +627,10 @@ func TestConductorReconnection(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Logf("Testing %s (code %d)", tc.name, tc.code)
+
+			// Wait for stable connection before testing
+			assert.True(t, mockServer.waitForConnection(5*time.Second), "Should have stable connection before %s", tc.name)
+			time.Sleep(300 * time.Millisecond) // Give time for ping cycle to establish
 
 			// Collect pings before sending close message
 			beforePings := 0
