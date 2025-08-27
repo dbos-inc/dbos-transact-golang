@@ -93,7 +93,7 @@ func main() {
 	defer ctx.Cancel()
 
     // Run a durable workflow and get its result
-	handle, err := dbos.RunAsWorkflow(ctx, workflow, "")
+	handle, err := dbos.RunWorkflow(ctx, workflow, "")
 	if err != nil {
 		panic(err)
 	}
@@ -170,7 +170,7 @@ func main() {
     fmt.Println("Enqueuing workflows")
     handles := make([]dbos.WorkflowHandle[int], 10)
     for i := range 10 {
-        handle, err := dbos.RunAsWorkflow(ctx, task, i, dbos.WithQueue(queue.Name))
+        handle, err := dbos.RunWorkflow(ctx, task, i, dbos.WithQueue(queue.Name))
         if err != nil {
             panic(fmt.Sprintf("failed to enqueue step %d: %v", i, err))
         }
@@ -199,7 +199,7 @@ Acknowledge the event immediately while reliably processing it in the background
 For example:
 
 ```golang
-_, err := dbos.RunAsWorkflow(ctx, task, i, dbos.WithWorkflowID(exactlyOnceEventID))
+_, err := dbos.RunWorkflow(ctx, task, i, dbos.WithWorkflowID(exactlyOnceEventID))
 ```
 </details>
 
@@ -224,7 +224,7 @@ func workflow(ctx dbos.DBOSContext, duration time.Duration) (string, error) {
     return fmt.Sprintf("Workflow slept for %s", duration), nil
 }
 
-handle, err := dbos.RunAsWorkflow(dbosCtx, workflow, time.Second*5)
+handle, err := dbos.RunWorkflow(dbosCtx, workflow, time.Second*5)
 _, err = handle.GetResult()
 ```
 
@@ -251,10 +251,10 @@ func receiveWorkflow(ctx dbos.DBOSContext, topic string) (string, error) {
 }
 
 // Start a receiver in the background
-recvHandle, err := dbos.RunAsWorkflow(dbosCtx, receiveWorkflow, "topic", dbos.WithWorkflowID("receiverID"))
+recvHandle, err := dbos.RunWorkflow(dbosCtx, receiveWorkflow, "topic", dbos.WithWorkflowID("receiverID"))
 
 // Send a message
-sendHandle, err := dbos.RunAsWorkflow(dbosCtx, sendWorkflow, "hola!")
+sendHandle, err := dbos.RunWorkflow(dbosCtx, sendWorkflow, "hola!")
 _, err = sendHandle.GetResult()
 
 // Eventually get the response

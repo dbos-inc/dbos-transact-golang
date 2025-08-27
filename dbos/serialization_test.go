@@ -78,7 +78,7 @@ func TestWorkflowEncoding(t *testing.T) {
 
 	t.Run("BuiltinTypes", func(t *testing.T) {
 		// Test a workflow that uses a built-in type (string)
-		directHandle, err := RunAsWorkflow(executor, encodingWorkflowBuiltinTypes, "test")
+		directHandle, err := RunWorkflow(executor, encodingWorkflowBuiltinTypes, "test")
 		require.NoError(t, err)
 
 		// Test result and error from direct handle
@@ -133,7 +133,7 @@ func TestWorkflowEncoding(t *testing.T) {
 			B: 456,
 		}
 
-		directHandle, err := RunAsWorkflow(executor, encodingWorkflowStruct, input)
+		directHandle, err := RunWorkflow(executor, encodingWorkflowStruct, input)
 		require.NoError(t, err)
 
 		// Test result from direct handle
@@ -227,7 +227,7 @@ func TestSetEventSerialize(t *testing.T) {
 
 	t.Run("SetEventUserDefinedType", func(t *testing.T) {
 		// Start a workflow that sets an event with a user-defined type
-		setHandle, err := RunAsWorkflow(executor, setEventUserDefinedTypeWorkflow, "user-defined-key")
+		setHandle, err := RunWorkflow(executor, setEventUserDefinedTypeWorkflow, "user-defined-key")
 		require.NoError(t, err)
 
 		// Wait for the workflow to complete
@@ -286,11 +286,11 @@ func TestSendSerialize(t *testing.T) {
 
 	t.Run("SendUserDefinedType", func(t *testing.T) {
 		// Start a receiver workflow first
-		recvHandle, err := RunAsWorkflow(executor, recvUserDefinedTypeWorkflow, "recv-input")
+		recvHandle, err := RunWorkflow(executor, recvUserDefinedTypeWorkflow, "recv-input")
 		require.NoError(t, err)
 
 		// Start a sender workflow that sends a message with a user-defined type
-		sendHandle, err := RunAsWorkflow(executor, sendUserDefinedTypeWorkflow, recvHandle.GetWorkflowID())
+		sendHandle, err := RunWorkflow(executor, sendUserDefinedTypeWorkflow, recvHandle.GetWorkflowID())
 		require.NoError(t, err)
 
 		// Wait for the sender workflow to complete

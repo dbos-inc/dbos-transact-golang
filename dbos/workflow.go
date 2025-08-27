@@ -287,7 +287,7 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),
 			withWorkflowName(workflowName),
 		}
-		_, err := ctx.RunAsWorkflow(ctx, fn, scheduledTime, opts...)
+		_, err := ctx.RunWorkflow(ctx, fn, scheduledTime, opts...)
 		if err != nil {
 			c.logger.Error("failed to run scheduled workflow", "fqn", workflowName, "error", err)
 		}
@@ -411,8 +411,8 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	})
 
 	typeErasedWrapper := wrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
-		opts = append(opts, withWorkflowName(fqn)) // Append the name so ctx.RunAsWorkflow can look it up from the registry to apply registration-time options
-		handle, err := ctx.RunAsWorkflow(ctx, typedErasedWorkflow, input, opts...)
+		opts = append(opts, withWorkflowName(fqn)) // Append the name so ctx.RunWorkflow can look it up from the registry to apply registration-time options
+		handle, err := ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -503,7 +503,7 @@ func withWorkflowName(name string) WorkflowOption {
 	}
 }
 
-// RunAsWorkflow executes a workflow function with type safety and durability guarantees.
+// RunWorkflow executes a workflow function with type safety and durability guarantees.
 // The workflow can be executed immediately or enqueued for later execution based on options.
 // Returns a typed handle that can be used to wait for completion and retrieve results.
 //
@@ -512,7 +512,7 @@ func withWorkflowName(name string) WorkflowOption {
 //
 // Example:
 //
-//	handle, err := dbos.RunAsWorkflow(ctx, MyWorkflow, "input string", dbos.WithWorkflowID("my-custom-id"))
+//	handle, err := dbos.RunWorkflow(ctx, MyWorkflow, "input string", dbos.WithWorkflowID("my-custom-id"))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -523,19 +523,19 @@ func withWorkflowName(name string) WorkflowOption {
 //	} else {
 //	    log.Printf("Result: %v", result)
 //	}
-func RunAsWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
+func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("ctx cannot be nil")
 	}
 
-	// Add the fn name to the options so we can communicate it with DBOSContext.RunAsWorkflow
+	// Add the fn name to the options so we can communicate it with DBOSContext.RunWorkflow
 	opts = append(opts, withWorkflowName(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()))
 
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 		return fn(ctx, input.(P))
 	})
 
-	handle, err := ctx.RunAsWorkflow(ctx, typedErasedWorkflow, input, opts...)
+	handle, err := ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -580,7 +580,7 @@ func RunAsWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, op
 	return nil, fmt.Errorf("unexpected workflow handle type: %T", handle)
 }
 
-func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
+func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 	// Apply options to build params
 	params := WorkflowOptions{
 		applicationVersion: c.GetApplicationVersion(),
@@ -637,6 +637,7 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 	uncancellableCtx := WithoutCancel(c)
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
+	// TODO Test that we get this polling handle during recovery of a queue workflow
 	if isChildWorkflow {
 		childWorkflowID, err := c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		if err != nil {

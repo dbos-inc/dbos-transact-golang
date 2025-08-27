@@ -73,7 +73,7 @@ func TestWorkflowQueues(t *testing.T) {
 
 	queueWorkflowCustomNameEnqueingAnotherCustomNameWorkflow := func(ctx DBOSContext, input string) (string, error) {
 		// Start a child workflow
-		childHandle, err := RunAsWorkflow(ctx, queueWorkflowCustomName, input+"-enqueued", WithQueue(queue.Name))
+		childHandle, err := RunWorkflow(ctx, queueWorkflowCustomName, input+"-enqueued", WithQueue(queue.Name))
 		if err != nil {
 			return "", fmt.Errorf("failed to start child workflow: %v", err)
 		}
@@ -100,7 +100,7 @@ func TestWorkflowQueues(t *testing.T) {
 
 	testWorkflow := func(ctx DBOSContext, var1 string) (string, error) {
 		// Make sure the child workflow is not blocked by the same deduplication ID
-		childHandle, err := RunAsWorkflow(ctx, childWorkflow, var1, WithQueue(dedupQueue.Name))
+		childHandle, err := RunWorkflow(ctx, childWorkflow, var1, WithQueue(dedupQueue.Name))
 		if err != nil {
 			return "", fmt.Errorf("failed to enqueue child workflow: %v", err)
 		}
@@ -118,7 +118,7 @@ func TestWorkflowQueues(t *testing.T) {
 	// Create workflow with child that can call the main workflow
 	queueWorkflowWithChild := func(ctx DBOSContext, input string) (string, error) {
 		// Start a child workflow
-		childHandle, err := RunAsWorkflow(ctx, queueWorkflow, input+"-child")
+		childHandle, err := RunWorkflow(ctx, queueWorkflow, input+"-child")
 		if err != nil {
 			return "", fmt.Errorf("failed to start child workflow: %v", err)
 		}
@@ -136,7 +136,7 @@ func TestWorkflowQueues(t *testing.T) {
 	// Create workflow that enqueues another workflow
 	queueWorkflowThatEnqueues := func(ctx DBOSContext, input string) (string, error) {
 		// Enqueue another workflow to the same queue
-		enqueuedHandle, err := RunAsWorkflow(ctx, queueWorkflow, input+"-enqueued", WithQueue(queue.Name))
+		enqueuedHandle, err := RunWorkflow(ctx, queueWorkflow, input+"-enqueued", WithQueue(queue.Name))
 		if err != nil {
 			return "", fmt.Errorf("failed to enqueue workflow: %v", err)
 		}
@@ -161,7 +161,7 @@ func TestWorkflowQueues(t *testing.T) {
 	// Create a workflow that enqueues another workflow to test step tracking
 	workflowEnqueuesAnother := func(ctx DBOSContext, input string) (string, error) {
 		// Enqueue a child workflow
-		childHandle, err := RunAsWorkflow(ctx, queueWorkflow, input+"-child", WithQueue(queue.Name))
+		childHandle, err := RunWorkflow(ctx, queueWorkflow, input+"-child", WithQueue(queue.Name))
 		if err != nil {
 			return "", fmt.Errorf("failed to enqueue child workflow: %v", err)
 		}
@@ -180,7 +180,7 @@ func TestWorkflowQueues(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
-		handle, err := RunAsWorkflow(dbosCtx, queueWorkflow, "test-input", WithQueue(queue.Name))
+		handle, err := RunWorkflow(dbosCtx, queueWorkflow, "test-input", WithQueue(queue.Name))
 		require.NoError(t, err)
 
 		_, ok := handle.(*workflowPollingHandle[string])
@@ -200,7 +200,7 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 
 	t.Run("EnqueueWorkflowCustomName", func(t *testing.T) {
-		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowCustomName, "test-input", WithQueue(queue.Name))
+		handle, err := RunWorkflow(dbosCtx, queueWorkflowCustomName, "test-input", WithQueue(queue.Name))
 		require.NoError(t, err)
 
 		_, ok := handle.(*workflowPollingHandle[string])
@@ -214,7 +214,7 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 
 	t.Run("EnqueuedWorkflowStartsChildWorkflow", func(t *testing.T) {
-		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowWithChild, "test-input", WithQueue(queue.Name))
+		handle, err := RunWorkflow(dbosCtx, queueWorkflowWithChild, "test-input", WithQueue(queue.Name))
 		require.NoError(t, err)
 
 		res, err := handle.GetResult()
@@ -237,7 +237,7 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 
 	t.Run("WorkflowEnqueuesAnother", func(t *testing.T) {
-		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowThatEnqueues, "test-input", WithQueue(queue.Name))
+		handle, err := RunWorkflow(dbosCtx, queueWorkflowThatEnqueues, "test-input", WithQueue(queue.Name))
 		require.NoError(t, err)
 
 		res, err := handle.GetResult()
@@ -260,7 +260,7 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 
 	t.Run("CustomNameWorkflowEnqueuesAnotherCustomNameWorkflow", func(t *testing.T) {
-		handle, err := RunAsWorkflow(dbosCtx, queueWorkflowCustomNameEnqueingAnotherCustomNameWorkflow, "test-input", WithQueue(queue.Name))
+		handle, err := RunWorkflow(dbosCtx, queueWorkflowCustomNameEnqueingAnotherCustomNameWorkflow, "test-input", WithQueue(queue.Name))
 		require.NoError(t, err)
 
 		res, err := handle.GetResult()
@@ -285,7 +285,7 @@ func TestWorkflowQueues(t *testing.T) {
 	t.Run("EnqueuedWorkflowEnqueuesAnother", func(t *testing.T) {
 		// Run the pre-registered workflow that enqueues another workflow
 		// Enqueue the parent workflow to a queue
-		handle, err := RunAsWorkflow(dbosCtx, workflowEnqueuesAnother, "test-input", WithQueue(queue.Name))
+		handle, err := RunWorkflow(dbosCtx, workflowEnqueuesAnother, "test-input", WithQueue(queue.Name))
 		require.NoError(t, err)
 
 		res, err := handle.GetResult()
@@ -321,7 +321,7 @@ func TestWorkflowQueues(t *testing.T) {
 		workflowID := "blocking-workflow-test"
 
 		// Enqueue the workflow for the first time
-		originalHandle, err := RunAsWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
+		originalHandle, err := RunWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
 		require.NoError(t, err)
 
 		// Wait for the workflow to start
@@ -330,7 +330,7 @@ func TestWorkflowQueues(t *testing.T) {
 
 		// Try to enqueue the same workflow more times
 		for i := range dlqMaxRetries * 2 {
-			_, err := RunAsWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
+			_, err := RunWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
 			require.NoError(t, err, "failed to enqueue workflow attempt %d", i+1)
 		}
 
@@ -389,7 +389,7 @@ func TestWorkflowQueues(t *testing.T) {
 		workflowID := "conflicting-workflow-id"
 
 		// Enqueue the same workflow ID on the first queue
-		handle, err := RunAsWorkflow(dbosCtx, queueWorkflow, "test-input-1", WithQueue(conflictQueue1.Name), WithWorkflowID(workflowID))
+		handle, err := RunWorkflow(dbosCtx, queueWorkflow, "test-input-1", WithQueue(conflictQueue1.Name), WithWorkflowID(workflowID))
 		require.NoError(t, err, "failed to enqueue workflow on first queue")
 
 		// Get the result from the first workflow to ensure it completes
@@ -399,7 +399,7 @@ func TestWorkflowQueues(t *testing.T) {
 
 		// Now try to enqueue the same workflow ID on a different queue
 		// This should trigger a ConflictingWorkflowError
-		_, err = RunAsWorkflow(dbosCtx, queueWorkflow, "test-input-2", WithQueue(conflictQueue2.Name), WithWorkflowID(workflowID))
+		_, err = RunWorkflow(dbosCtx, queueWorkflow, "test-input-2", WithQueue(conflictQueue2.Name), WithWorkflowID(workflowID))
 		require.Error(t, err, "expected ConflictingWorkflowError when enqueueing same workflow ID on different queue, but got none")
 
 		// Check that it's the correct error type
@@ -425,24 +425,24 @@ func TestWorkflowQueues(t *testing.T) {
 		// Make sure only one workflow is running at a time
 		wfid := uuid.NewString()
 		dedupID := "my_dedup_id"
-		handle1, err := RunAsWorkflow(dbosCtx, testWorkflow, "abc", WithQueue(dedupQueue.Name), WithWorkflowID(wfid), WithDeduplicationID(dedupID))
+		handle1, err := RunWorkflow(dbosCtx, testWorkflow, "abc", WithQueue(dedupQueue.Name), WithWorkflowID(wfid), WithDeduplicationID(dedupID))
 		require.NoError(t, err, "failed to enqueue first workflow with deduplication ID")
 
 		// Enqueue the same workflow with a different deduplication ID should be fine
-		anotherHandle, err := RunAsWorkflow(dbosCtx, testWorkflow, "ghi", WithQueue(dedupQueue.Name), WithDeduplicationID("my_other_dedup_id"))
+		anotherHandle, err := RunWorkflow(dbosCtx, testWorkflow, "ghi", WithQueue(dedupQueue.Name), WithDeduplicationID("my_other_dedup_id"))
 		require.NoError(t, err, "failed to enqueue workflow with different deduplication ID")
 
 		// Enqueue a workflow without deduplication ID should be fine
-		nodedupHandle1, err := RunAsWorkflow(dbosCtx, testWorkflow, "jkl", WithQueue(dedupQueue.Name))
+		nodedupHandle1, err := RunWorkflow(dbosCtx, testWorkflow, "jkl", WithQueue(dedupQueue.Name))
 		require.NoError(t, err, "failed to enqueue workflow without deduplication ID")
 
 		// Enqueued multiple times without deduplication ID but with different inputs should be fine, but get the result of the first one
-		nodedupHandle2, err := RunAsWorkflow(dbosCtx, testWorkflow, "mno", WithQueue(dedupQueue.Name), WithWorkflowID(wfid))
+		nodedupHandle2, err := RunWorkflow(dbosCtx, testWorkflow, "mno", WithQueue(dedupQueue.Name), WithWorkflowID(wfid))
 		require.NoError(t, err, "failed to enqueue workflow with same workflow ID")
 
 		// Enqueue the same workflow with the same deduplication ID should raise an exception
 		wfid2 := uuid.NewString()
-		_, err = RunAsWorkflow(dbosCtx, testWorkflow, "def", WithQueue(dedupQueue.Name), WithWorkflowID(wfid2), WithDeduplicationID(dedupID))
+		_, err = RunWorkflow(dbosCtx, testWorkflow, "def", WithQueue(dedupQueue.Name), WithWorkflowID(wfid2), WithDeduplicationID(dedupID))
 		require.Error(t, err, "expected error when enqueueing workflow with same deduplication ID")
 
 		// Check that it's the correct error type and message
@@ -472,7 +472,7 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Equal(t, "abc-c-p", resultNodedup2, "expected nodedup2 workflow result to be 'abc-c-p'")
 
 		// Invoke the workflow again with the same deduplication ID now should be fine because it's no longer in the queue
-		handle2, err := RunAsWorkflow(dbosCtx, testWorkflow, "def", WithQueue(dedupQueue.Name), WithWorkflowID(wfid2), WithDeduplicationID(dedupID))
+		handle2, err := RunWorkflow(dbosCtx, testWorkflow, "def", WithQueue(dedupQueue.Name), WithWorkflowID(wfid2), WithDeduplicationID(dedupID))
 		require.NoError(t, err, "failed to enqueue workflow with same dedup ID after completion")
 		result2, err := handle2.GetResult()
 		require.NoError(t, err, "failed to get result from second workflow with same dedup ID")
@@ -501,7 +501,7 @@ func TestQueueRecovery(t *testing.T) {
 	recoveryWorkflowFunc := func(ctx DBOSContext, input string) ([]int, error) {
 		handles := make([]WorkflowHandle[int], 0, 5) // 5 queued steps
 		for i := range 5 {
-			handle, err := RunAsWorkflow(ctx, recoveryStepWorkflowFunc, i, WithQueue(recoveryQueue.Name))
+			handle, err := RunWorkflow(ctx, recoveryStepWorkflowFunc, i, WithQueue(recoveryQueue.Name))
 			if err != nil {
 				return nil, fmt.Errorf("failed to enqueue step %d: %v", i, err)
 			}
@@ -532,7 +532,7 @@ func TestQueueRecovery(t *testing.T) {
 	wfid := uuid.NewString()
 
 	// Start the workflow. Wait for all steps to start. Verify that they started.
-	handle, err := RunAsWorkflow(dbosCtx, recoveryWorkflowFunc, "", WithWorkflowID(wfid))
+	handle, err := RunWorkflow(dbosCtx, recoveryWorkflowFunc, "", WithWorkflowID(wfid))
 	require.NoError(t, err, "failed to start workflow")
 
 	for _, e := range recoveryStepEvents {
@@ -573,7 +573,7 @@ func TestQueueRecovery(t *testing.T) {
 	assert.Equal(t, int64(queuedSteps*2), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to be %d", queuedSteps*2)
 
 	// Rerun the workflow. Because each step is complete, none should start again.
-	rerunHandle, err := RunAsWorkflow(dbosCtx, recoveryWorkflowFunc, "test-input", WithWorkflowID(wfid))
+	rerunHandle, err := RunWorkflow(dbosCtx, recoveryWorkflowFunc, "test-input", WithWorkflowID(wfid))
 	require.NoError(t, err, "failed to rerun workflow")
 	rerunResult, err := rerunHandle.GetResult()
 	require.NoError(t, err, "failed to get result from rerun handle")
@@ -610,10 +610,10 @@ func TestGlobalConcurrency(t *testing.T) {
 	require.NoError(t, err, "failed to launch DBOS instance")
 
 	// Enqueue two workflows
-	handle1, err := RunAsWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow1", WithQueue(globalConcurrencyQueue.Name))
+	handle1, err := RunWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow1", WithQueue(globalConcurrencyQueue.Name))
 	require.NoError(t, err, "failed to enqueue workflow1")
 
-	handle2, err := RunAsWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow2", WithQueue(globalConcurrencyQueue.Name))
+	handle2, err := RunWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow2", WithQueue(globalConcurrencyQueue.Name))
 	require.NoError(t, err, "failed to enqueue workflow2")
 
 	// Wait for the first workflow to start
@@ -711,13 +711,13 @@ func TestWorkerConcurrency(t *testing.T) {
 	require.NoError(t, err, "failed to launch DBOS instance")
 
 	// First enqueue four blocking workflows
-	handle1, err := RunAsWorkflow(dbosCtx1, blockingWfFunc, 0, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-1"))
+	handle1, err := RunWorkflow(dbosCtx1, blockingWfFunc, 0, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-1"))
 	require.NoError(t, err)
-	handle2, err := RunAsWorkflow(dbosCtx1, blockingWfFunc, 1, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-2"))
+	handle2, err := RunWorkflow(dbosCtx1, blockingWfFunc, 1, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-2"))
 	require.NoError(t, err)
-	_, err = RunAsWorkflow(dbosCtx1, blockingWfFunc, 2, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-3"))
+	_, err = RunWorkflow(dbosCtx1, blockingWfFunc, 2, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-3"))
 	require.NoError(t, err)
-	_, err = RunAsWorkflow(dbosCtx1, blockingWfFunc, 3, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-4"))
+	_, err = RunWorkflow(dbosCtx1, blockingWfFunc, 3, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-4"))
 	require.NoError(t, err)
 
 	// The two first workflows should dequeue on both workers
@@ -786,9 +786,9 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	require.NoError(t, err, "failed to launch DBOS instance")
 
 	// Enqueue two workflows on a queue with worker concurrency = 1
-	handle1, err := RunAsWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf1, "workflow1", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
+	handle1, err := RunWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf1, "workflow1", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
 	require.NoError(t, err)
-	handle2, err := RunAsWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf2, "workflow2", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-2"))
+	handle2, err := RunWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf2, "workflow2", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-2"))
 	require.NoError(t, err)
 
 	// Start the first workflow and wait for it to start
@@ -871,7 +871,7 @@ func TestQueueRateLimiter(t *testing.T) {
 	// executed simultaneously, followed by a wait of the period,
 	// followed by the next wave.
 	for i := 0; i < limit*numWaves; i++ {
-		handle, err := RunAsWorkflow(dbosCtx, rateLimiterTestWorkflow, "", WithQueue(rateLimiterQueue.Name))
+		handle, err := RunWorkflow(dbosCtx, rateLimiterTestWorkflow, "", WithQueue(rateLimiterQueue.Name))
 		require.NoError(t, err, "failed to enqueue workflow %d", i)
 		handles = append(handles, handle)
 	}
@@ -946,7 +946,7 @@ func TestQueueTimeouts(t *testing.T) {
 
 	enqueuedWorkflowEnqueuesATimeoutWorkflow := func(ctx DBOSContext, _ string) (string, error) {
 		// This workflow will enqueue a workflow that waits indefinitely until it is cancelled
-		handle, err := RunAsWorkflow(ctx, queuedWaitForCancelWorkflow, "enqueued-wait-for-cancel", WithQueue(timeoutQueue.Name))
+		handle, err := RunWorkflow(ctx, queuedWaitForCancelWorkflow, "enqueued-wait-for-cancel", WithQueue(timeoutQueue.Name))
 		require.NoError(t, err, "failed to start enqueued wait for cancel workflow")
 		// Workflow should get AwaitedWorkflowCancelled DBOSError
 		_, err = handle.GetResult()
@@ -976,7 +976,7 @@ func TestQueueTimeouts(t *testing.T) {
 	enqueuedWorkflowEnqueuesADetachedWorkflow := func(ctx DBOSContext, timeout time.Duration) (string, error) {
 		// This workflow will enqueue a workflow that is not cancelable
 		childCtx := WithoutCancel(ctx)
-		handle, err := RunAsWorkflow(childCtx, detachedWorkflow, timeout*2, WithQueue(timeoutQueue.Name))
+		handle, err := RunWorkflow(childCtx, detachedWorkflow, timeout*2, WithQueue(timeoutQueue.Name))
 		require.NoError(t, err, "failed to start enqueued detached workflow")
 
 		// Wait for the enqueued workflow to complete
@@ -1012,7 +1012,7 @@ func TestQueueTimeouts(t *testing.T) {
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
 
-		handle, err := RunAsWorkflow(cancelCtx, queuedWaitForCancelWorkflow, "enqueue-wait-for-cancel", WithQueue(timeoutQueue.Name))
+		handle, err := RunWorkflow(cancelCtx, queuedWaitForCancelWorkflow, "enqueue-wait-for-cancel", WithQueue(timeoutQueue.Name))
 		require.NoError(t, err, "failed to enqueue wait for cancel workflow")
 
 		// Wait for the workflow to complete and get the result
@@ -1040,7 +1040,7 @@ func TestQueueTimeouts(t *testing.T) {
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
 
-		handle, err := RunAsWorkflow(cancelCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow, "enqueue-timeout-workflow", WithQueue(timeoutQueue.Name))
+		handle, err := RunWorkflow(cancelCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow, "enqueue-timeout-workflow", WithQueue(timeoutQueue.Name))
 		require.NoError(t, err, "failed to start enqueued workflow")
 
 		// Wait for the workflow to complete and get the result
@@ -1069,7 +1069,7 @@ func TestQueueTimeouts(t *testing.T) {
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, timeout)
 		defer cancelFunc() // Ensure we clean up the context
 
-		handle, err := RunAsWorkflow(cancelCtx, enqueuedWorkflowEnqueuesADetachedWorkflow, timeout, WithQueue(timeoutQueue.Name))
+		handle, err := RunWorkflow(cancelCtx, enqueuedWorkflowEnqueuesADetachedWorkflow, timeout, WithQueue(timeoutQueue.Name))
 		require.NoError(t, err, "failed to start enqueued detached workflow")
 
 		// Wait for the workflow to complete and get the result
@@ -1096,7 +1096,7 @@ func TestQueueTimeouts(t *testing.T) {
 		// Test that deadline is only set when workflow is dequeued, not when enqueued
 
 		// Enqueue blocking workflow first
-		blockingHandle, err := RunAsWorkflow(dbosCtx, blockingWorkflow, "blocking", WithQueue(timeoutOnDequeueQueue.Name))
+		blockingHandle, err := RunWorkflow(dbosCtx, blockingWorkflow, "blocking", WithQueue(timeoutOnDequeueQueue.Name))
 		require.NoError(t, err, "failed to enqueue blocking workflow")
 
 		// Set a timeout that would expire if set on enqueue
@@ -1105,7 +1105,7 @@ func TestQueueTimeouts(t *testing.T) {
 		defer cancelFunc()
 
 		// Enqueue second workflow with timeout
-		handle, err := RunAsWorkflow(timeoutCtx, fastWorkflow, "timeout-test", WithQueue(timeoutOnDequeueQueue.Name))
+		handle, err := RunWorkflow(timeoutCtx, fastWorkflow, "timeout-test", WithQueue(timeoutOnDequeueQueue.Name))
 		require.NoError(t, err, "failed to enqueue timeout workflow")
 
 		// Sleep for duration exceeding the timeout
@@ -1155,7 +1155,7 @@ func TestPriorityQueue(t *testing.T) {
 		wfPriorityList = append(wfPriorityList, priority)
 		mu.Unlock()
 
-		childHandle, err := RunAsWorkflow(ctx, childWorkflow, priority, WithQueue(childQueue.Name))
+		childHandle, err := RunWorkflow(ctx, childWorkflow, priority, WithQueue(childQueue.Name))
 		if err != nil {
 			return 0, fmt.Errorf("failed to enqueue child workflow: %v", err)
 		}
@@ -1174,14 +1174,14 @@ func TestPriorityQueue(t *testing.T) {
 	var wfHandles []WorkflowHandle[int]
 
 	// First, enqueue a workflow without priority (default to priority 0)
-	handle, err := RunAsWorkflow(dbosCtx, testWorkflow, 0, WithQueue(priorityQueue.Name))
+	handle, err := RunWorkflow(dbosCtx, testWorkflow, 0, WithQueue(priorityQueue.Name))
 	require.NoError(t, err)
 	wfHandles = append(wfHandles, handle)
 
 	// Then, enqueue workflows with priority 5 to 1
 	reversedPriorityHandles := make([]WorkflowHandle[int], 0, 5)
 	for i := 5; i > 0; i-- {
-		handle, err := RunAsWorkflow(dbosCtx, testWorkflow, i, WithQueue(priorityQueue.Name), WithPriority(uint(i)))
+		handle, err := RunWorkflow(dbosCtx, testWorkflow, i, WithQueue(priorityQueue.Name), WithPriority(uint(i)))
 		require.NoError(t, err)
 		reversedPriorityHandles = append(reversedPriorityHandles, handle)
 	}
@@ -1190,12 +1190,12 @@ func TestPriorityQueue(t *testing.T) {
 	}
 
 	// Finally, enqueue two workflows without priority again (default priority 0)
-	handle6, err := RunAsWorkflow(dbosCtx, testWorkflow, 6, WithQueue(priorityQueue.Name))
+	handle6, err := RunWorkflow(dbosCtx, testWorkflow, 6, WithQueue(priorityQueue.Name))
 	require.NoError(t, err)
 	wfHandles = append(wfHandles, handle6)
 
 	time.Sleep(10 * time.Millisecond) // Avoid collisions in created_at...
-	handle7, err := RunAsWorkflow(dbosCtx, testWorkflow, 7, WithQueue(priorityQueue.Name))
+	handle7, err := RunWorkflow(dbosCtx, testWorkflow, 7, WithQueue(priorityQueue.Name))
 	require.NoError(t, err)
 	wfHandles = append(wfHandles, handle7)
 

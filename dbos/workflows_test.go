@@ -127,7 +127,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "SimpleWorkflow",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunAsWorkflow(dbosCtx, simpleWorkflow, input, opts...)
+				handle, err := RunWorkflow(dbosCtx, simpleWorkflow, input, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -149,7 +149,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "SimpleWorkflowError",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunAsWorkflow(dbosCtx, simpleWorkflowError, input, opts...)
+				handle, err := RunWorkflow(dbosCtx, simpleWorkflowError, input, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -162,7 +162,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "SimpleWorkflowWithStep",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunAsWorkflow(dbosCtx, simpleWorkflowWithStep, input, opts...)
+				handle, err := RunWorkflow(dbosCtx, simpleWorkflowWithStep, input, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -175,7 +175,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "SimpleWorkflowStruct",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunAsWorkflow(dbosCtx, s.simpleWorkflow, input, opts...)
+				handle, err := RunWorkflow(dbosCtx, s.simpleWorkflow, input, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -188,7 +188,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "ValueReceiverWorkflow",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunAsWorkflow(dbosCtx, s.simpleWorkflowValue, input, opts...)
+				handle, err := RunWorkflow(dbosCtx, s.simpleWorkflowValue, input, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -201,7 +201,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "interfaceMethodWorkflow",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunAsWorkflow(dbosCtx, workflowIface.Execute, input, opts...)
+				handle, err := RunWorkflow(dbosCtx, workflowIface.Execute, input, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -214,7 +214,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "GenericWorkflow",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunAsWorkflow(dbosCtx, Identity, 42, opts...)
+				handle, err := RunWorkflow(dbosCtx, Identity, 42, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -227,7 +227,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "ClosureWithCapturedState",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunAsWorkflow(dbosCtx, closureWorkflow, input, opts...)
+				handle, err := RunWorkflow(dbosCtx, closureWorkflow, input, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -240,7 +240,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "AnonymousClosure",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunAsWorkflow(dbosCtx, anonymousWorkflow, input, opts...)
+				handle, err := RunWorkflow(dbosCtx, anonymousWorkflow, input, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -253,7 +253,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "SimpleWorkflowWithStepError",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunAsWorkflow(dbosCtx, simpleWorkflowWithStepError, input, opts...)
+				handle, err := RunWorkflow(dbosCtx, simpleWorkflowWithStepError, input, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -433,7 +433,7 @@ func TestSteps(t *testing.T) {
 	})
 
 	t.Run("StepWithinAStepAreJustFunctions", func(t *testing.T) {
-		handle, err := RunAsWorkflow(dbosCtx, stepWithinAStepWorkflow, "test")
+		handle, err := RunWorkflow(dbosCtx, stepWithinAStepWorkflow, "test")
 		require.NoError(t, err, "failed to run step within a step")
 		result, err := handle.GetResult()
 		require.NoError(t, err, "failed to get result from step within a step")
@@ -450,7 +450,7 @@ func TestSteps(t *testing.T) {
 		stepIdempotencyCounter = 0
 
 		// Execute the workflow
-		handle, err := RunAsWorkflow(dbosCtx, stepRetryWorkflow, "test")
+		handle, err := RunWorkflow(dbosCtx, stepRetryWorkflow, "test")
 		require.NoError(t, err, "failed to start retry workflow")
 
 		_, err = handle.GetResult()
@@ -493,13 +493,13 @@ func TestSteps(t *testing.T) {
 
 	t.Run("checkStepName", func(t *testing.T) {
 		// Run first workflow with custom step name
-		handle1, err := RunAsWorkflow(dbosCtx, testStepWf1, "test-input-1")
+		handle1, err := RunWorkflow(dbosCtx, testStepWf1, "test-input-1")
 		require.NoError(t, err, "failed to run testStepWf1")
 		_, err = handle1.GetResult()
 		require.NoError(t, err, "failed to get result from testStepWf1")
 
 		// Run second workflow with custom step name
-		handle2, err := RunAsWorkflow(dbosCtx, testStepWf2, "test-input-2")
+		handle2, err := RunWorkflow(dbosCtx, testStepWf2, "test-input-2")
 		require.NoError(t, err, "failed to run testStepWf2")
 		_, err = handle2.GetResult()
 		require.NoError(t, err, "failed to get result from testStepWf2")
@@ -546,7 +546,7 @@ func TestSteps(t *testing.T) {
 		RegisterWorkflow(dbosCtx, customNameWorkflow)
 
 		// Execute the workflow
-		handle, err := RunAsWorkflow(dbosCtx, customNameWorkflow, "test-input")
+		handle, err := RunWorkflow(dbosCtx, customNameWorkflow, "test-input")
 		require.NoError(t, err, "failed to run workflow with custom step names")
 
 		result, err := handle.GetResult()
@@ -599,7 +599,7 @@ func TestChildWorkflow(t *testing.T) {
 			return "", fmt.Errorf("failed to get workflow ID: %w", err)
 		}
 
-		childHandle, err := RunAsWorkflow(ctx, childWf, Inheritance{ParentID: workflowID})
+		childHandle, err := RunWorkflow(ctx, childWf, Inheritance{ParentID: workflowID})
 		if err != nil {
 			return "", fmt.Errorf("failed to run child workflow: %w", err)
 		}
@@ -669,7 +669,7 @@ func TestChildWorkflow(t *testing.T) {
 		// 2 steps per loop: spawn child and get result
 		for i := range r {
 			expectedStepID := (2 * i)
-			parentHandle, err := RunAsWorkflow(ctx, parentWf, Inheritance{ParentID: workflowID, Index: expectedStepID})
+			parentHandle, err := RunWorkflow(ctx, parentWf, Inheritance{ParentID: workflowID, Index: expectedStepID})
 			if err != nil {
 				return "", fmt.Errorf("failed to run parent workflow: %w", err)
 			}
@@ -749,7 +749,7 @@ func TestChildWorkflow(t *testing.T) {
 
 	t.Run("ChildWorkflowIDGeneration", func(t *testing.T) {
 		r := 3
-		h, err := RunAsWorkflow(dbosCtx, grandParentWf, r)
+		h, err := RunWorkflow(dbosCtx, grandParentWf, r)
 		require.NoError(t, err, "failed to execute grand parent workflow")
 		_, err = h.GetResult()
 		require.NoError(t, err, "failed to get result from grand parent workflow")
@@ -767,7 +767,7 @@ func TestChildWorkflow(t *testing.T) {
 
 		// Simple parent that starts one child with a custom workflow ID
 		parentWf := func(ctx DBOSContext, input string) (string, error) {
-			childHandle, err := RunAsWorkflow(ctx, simpleChildWf, "test-child-input", WithWorkflowID(customChildID))
+			childHandle, err := RunWorkflow(ctx, simpleChildWf, "test-child-input", WithWorkflowID(customChildID))
 			if err != nil {
 				return "", fmt.Errorf("failed to run child workflow: %w", err)
 			}
@@ -781,7 +781,7 @@ func TestChildWorkflow(t *testing.T) {
 		}
 		RegisterWorkflow(dbosCtx, parentWf)
 
-		parentHandle, err := RunAsWorkflow(dbosCtx, parentWf, "test-input")
+		parentHandle, err := RunWorkflow(dbosCtx, parentWf, "test-input")
 		require.NoError(t, err, "failed to start parent workflow")
 
 		result, err := parentHandle.GetResult()
@@ -823,7 +823,7 @@ func TestChildWorkflow(t *testing.T) {
 			counter++
 
 			// Run child workflow with a known ID
-			childHandle, err := RunAsWorkflow(ctx, pollingHandleChildWf, "child-input", WithWorkflowID(knownChildID))
+			childHandle, err := RunWorkflow(ctx, pollingHandleChildWf, "child-input", WithWorkflowID(knownChildID))
 			if err != nil {
 				return "", fmt.Errorf("failed to run child workflow: %w", err)
 			}
@@ -856,7 +856,7 @@ func TestChildWorkflow(t *testing.T) {
 		RegisterWorkflow(dbosCtx, pollingHandleParentWf)
 
 		// Execute parent workflow - it will block after starting the child
-		parentHandle, err := RunAsWorkflow(dbosCtx, pollingHandleParentWf, "parent-input", WithWorkflowID(knownParentID))
+		parentHandle, err := RunWorkflow(dbosCtx, pollingHandleParentWf, "parent-input", WithWorkflowID(knownParentID))
 		require.NoError(t, err, "failed to start parent workflow")
 
 		// Wait for the workflows to start
@@ -900,7 +900,7 @@ func TestChildWorkflow(t *testing.T) {
 		// Step that tries to spawn a child workflow - this should fail
 		stepThatSpawnsChild := func(ctx context.Context, input string) (string, error) {
 			dbosCtx := ctx.(DBOSContext)
-			_, err := RunAsWorkflow(dbosCtx, childWf, input)
+			_, err := RunWorkflow(dbosCtx, childWf, input)
 			if err != nil {
 				return "", err
 			}
@@ -916,7 +916,7 @@ func TestChildWorkflow(t *testing.T) {
 		RegisterWorkflow(dbosCtx, parentWf)
 
 		// Execute the workflow - should fail when step tries to spawn child workflow
-		handle, err := RunAsWorkflow(dbosCtx, parentWf, "test-input")
+		handle, err := RunWorkflow(dbosCtx, parentWf, "test-input")
 		require.NoError(t, err, "failed to start parent workflow")
 
 		// Expect the workflow to fail
@@ -954,13 +954,13 @@ func TestWorkflowIdempotency(t *testing.T) {
 
 		// Execute the same workflow twice with the same ID
 		// First execution
-		handle1, err := RunAsWorkflow(dbosCtx, idempotencyWorkflow, input, WithWorkflowID(workflowID))
+		handle1, err := RunWorkflow(dbosCtx, idempotencyWorkflow, input, WithWorkflowID(workflowID))
 		require.NoError(t, err, "failed to execute workflow first time")
 		result1, err := handle1.GetResult()
 		require.NoError(t, err, "failed to get result from first execution")
 
 		// Second execution with the same workflow ID
-		handle2, err := RunAsWorkflow(dbosCtx, idempotencyWorkflow, input, WithWorkflowID(workflowID))
+		handle2, err := RunWorkflow(dbosCtx, idempotencyWorkflow, input, WithWorkflowID(workflowID))
 		require.NoError(t, err, "failed to execute workflow second time")
 		result2, err := handle2.GetResult()
 		require.NoError(t, err, "failed to get result from second execution")
@@ -1032,7 +1032,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		// Start all workflows
 		handles := make([]WorkflowHandle[int64], numWorkflows)
 		for i := range numWorkflows {
-			handle, err := RunAsWorkflow(dbosCtx, recoveryWorkflow, i, WithWorkflowID(fmt.Sprintf("recovery-test-%d", i)))
+			handle, err := RunWorkflow(dbosCtx, recoveryWorkflow, i, WithWorkflowID(fmt.Sprintf("recovery-test-%d", i)))
 			require.NoError(t, err, "failed to start workflow %d", i)
 			handles[i] = handle
 		}
@@ -1162,7 +1162,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Start a workflow that blocks forever
 		wfID := uuid.NewString()
-		handle, err := RunAsWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
+		handle, err := RunWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		require.NoError(t, err, "failed to start dead letter queue workflow")
 		deadLetterQueueStartEvent.Wait()
 		deadLetterQueueStartEvent.Clear()
@@ -1191,7 +1191,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
 
 		// Verify that attempting to start a workflow with the same ID throws a DLQ error
-		_, err = RunAsWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
+		_, err = RunWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		require.Error(t, err, "expected dead letter queue error when restarting workflow with same ID but got none")
 
 		dbosErr, ok = err.(*DBOSError)
@@ -1225,7 +1225,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Verify that retries of a completed workflow do not raise the DLQ exception
 		for i := 0; i < maxRecoveryAttempts*2; i++ {
-			_, err = RunAsWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
+			_, err = RunWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 			require.NoError(t, err, "unexpected error when retrying completed workflow")
 		}
 	})
@@ -1237,7 +1237,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// Verify that a workflow with MaxRetries=0 (infinite retries) is retried infinitely
 		wfID := uuid.NewString()
 
-		handle, err := RunAsWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
+		handle, err := RunWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		require.NoError(t, err, "failed to start infinite dead letter queue workflow")
 
 		deadLetterQueueStartEvent.Wait()
@@ -1469,11 +1469,11 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("SendRecvSuccess", func(t *testing.T) {
 		// Start the receive workflow
-		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveWorkflow, "test-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "test-topic")
 		require.NoError(t, err, "failed to start receive workflow")
 
 		// Send a message to the receive workflow
-		handle, err := RunAsWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{
+		handle, err := RunWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "test-topic",
 		})
@@ -1506,11 +1506,11 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("SendRecvCustomStruct", func(t *testing.T) {
 		// Start the receive workflow
-		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveStructWorkflow, "struct-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveStructWorkflow, "struct-topic")
 		require.NoError(t, err, "failed to start receive workflow")
 
 		// Send the struct to the receive workflow
-		sendHandle, err := RunAsWorkflow(dbosCtx, sendStructWorkflow, sendWorkflowInput{
+		sendHandle, err := RunWorkflow(dbosCtx, sendStructWorkflow, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "struct-topic",
 		})
@@ -1546,7 +1546,7 @@ func TestSendRecv(t *testing.T) {
 		destUUID := uuid.NewString()
 
 		// Send to non-existent UUID should fail
-		handle, err := RunAsWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{
+		handle, err := RunWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{
 			DestinationID: destUUID,
 			Topic:         "testtopic",
 		})
@@ -1565,7 +1565,7 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("RecvTimeout", func(t *testing.T) {
 		// Create a receive workflow that tries to receive a message but no send happens
-		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveWorkflow, "timeout-test-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "timeout-test-topic")
 		require.NoError(t, err, "failed to start receive workflow")
 		result, err := receiveHandle.GetResult()
 		require.NoError(t, err, "expected no error on timeout")
@@ -1589,7 +1589,7 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("SendOutsideWorkflow", func(t *testing.T) {
 		// Start a receive workflow to have a valid destination
-		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveWorkflow, "outside-workflow-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "outside-workflow-topic")
 		require.NoError(t, err, "failed to start receive workflow")
 
 		// Send messages from outside a workflow context
@@ -1614,11 +1614,11 @@ func TestSendRecv(t *testing.T) {
 	})
 	t.Run("SendRecvIdempotency", func(t *testing.T) {
 		// Start the receive workflow and wait for it to be ready
-		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveIdempotencyWorkflow, "idempotency-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveIdempotencyWorkflow, "idempotency-topic")
 		require.NoError(t, err, "failed to start receive idempotency workflow")
 
 		// Send the message to the receive workflow
-		sendHandle, err := RunAsWorkflow(dbosCtx, sendIdempotencyWorkflow, sendWorkflowInput{
+		sendHandle, err := RunWorkflow(dbosCtx, sendIdempotencyWorkflow, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "idempotency-topic",
 		})
@@ -1657,11 +1657,11 @@ func TestSendRecv(t *testing.T) {
 
 	t.Run("SendCannotBeCalledWithinStep", func(t *testing.T) {
 		// Start a receive workflow to have a valid destination
-		receiveHandle, err := RunAsWorkflow(dbosCtx, receiveWorkflow, "send-within-step-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "send-within-step-topic")
 		require.NoError(t, err, "failed to start receive workflow")
 
 		// Execute the workflow that tries to call Send within a step
-		handle, err := RunAsWorkflow(dbosCtx, workflowThatCallsSendInStep, sendWorkflowInput{
+		handle, err := RunWorkflow(dbosCtx, workflowThatCallsSendInStep, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "send-within-step-topic",
 		})
@@ -1700,7 +1700,7 @@ func TestSendRecv(t *testing.T) {
 		// Start all receivers - they will signal when ready and wait for coordination
 		for i := range numReceivers {
 			concurrentRecvReadyEvents[i] = NewEvent()
-			receiveHandle, err := RunAsWorkflow(dbosCtx, receiveWorkflowCoordinated, struct {
+			receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflowCoordinated, struct {
 				Topic string
 				i     int
 			}{
@@ -1893,7 +1893,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 		workflowID := uuid.NewString()
 
 		// First, run conflictWorkflowA with a specific workflow ID
-		handle, err := RunAsWorkflow(dbosCtx, conflictWorkflowA, "test-input", WithWorkflowID(workflowID))
+		handle, err := RunWorkflow(dbosCtx, conflictWorkflowA, "test-input", WithWorkflowID(workflowID))
 		require.NoError(t, err, "failed to start first workflow")
 
 		// Get the result to ensure it completes
@@ -1903,7 +1903,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 
 		// Now try to run conflictWorkflowB with the same workflow ID
 		// This should return a ConflictingWorkflowError
-		_, err = RunAsWorkflow(dbosCtx, conflictWorkflowB, "test-input", WithWorkflowID(workflowID))
+		_, err = RunWorkflow(dbosCtx, conflictWorkflowB, "test-input", WithWorkflowID(workflowID))
 		require.Error(t, err, "expected ConflictingWorkflowError when running different workflow with same ID, but got none")
 
 		// Check that it's the correct error type
@@ -1917,7 +1917,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 	})
 
 	t.Run("StepNameConflict", func(t *testing.T) {
-		handle, err := RunAsWorkflow(dbosCtx, workflowWithMultipleSteps, "test-input")
+		handle, err := RunWorkflow(dbosCtx, workflowWithMultipleSteps, "test-input")
 		require.NoError(t, err, "failed to start workflow")
 		result, err := handle.GetResult()
 		require.NoError(t, err, "failed to get result from workflow")
@@ -1962,14 +1962,14 @@ func TestSetGetEvent(t *testing.T) {
 		setSecondEventSignal.Clear()
 
 		// Start the workflow that sets two events
-		setHandle, err := RunAsWorkflow(dbosCtx, setTwoEventsWorkflow, setEventWorkflowInput{
+		setHandle, err := RunWorkflow(dbosCtx, setTwoEventsWorkflow, setEventWorkflowInput{
 			Key:     "test-workflow",
 			Message: "unused",
 		})
 		require.NoError(t, err, "failed to start set two events workflow")
 
 		// Start a workflow to get the first event
-		getFirstEventHandle, err := RunAsWorkflow(dbosCtx, getEventWorkflow, setEventWorkflowInput{
+		getFirstEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, setEventWorkflowInput{
 			Key:     setHandle.GetWorkflowID(), // Target workflow ID
 			Message: "event1",                  // Event key
 		})
@@ -1984,7 +1984,7 @@ func TestSetGetEvent(t *testing.T) {
 		setSecondEventSignal.Set()
 
 		// Start a workflow to get the second event
-		getSecondEventHandle, err := RunAsWorkflow(dbosCtx, getEventWorkflow, setEventWorkflowInput{
+		getSecondEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, setEventWorkflowInput{
 			Key:     setHandle.GetWorkflowID(), // Target workflow ID
 			Message: "event2",                  // Event key
 		})
@@ -2026,7 +2026,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("GetEventFromOutsideWorkflow", func(t *testing.T) {
 		// Start a workflow that sets an event
-		setHandle, err := RunAsWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
+		setHandle, err := RunWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
 			Key:     "test-key",
 			Message: "test-message",
 		})
@@ -2073,7 +2073,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Try to get an event from an existing workflow but with a key that doesn't exist
-		setHandle, err := RunAsWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
+		setHandle, err := RunWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
 			Key:     "test-key",
 			Message: "test-message",
 		})
@@ -2104,7 +2104,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("SetGetEventIdempotency", func(t *testing.T) {
 		// Start the set event workflow
-		setHandle, err := RunAsWorkflow(dbosCtx, setEventIdempotencyWorkflow, setEventWorkflowInput{
+		setHandle, err := RunWorkflow(dbosCtx, setEventIdempotencyWorkflow, setEventWorkflowInput{
 			Key:     "idempotency-key",
 			Message: "idempotency-message",
 		})
@@ -2113,7 +2113,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Start the get event workflow
-		getHandle, err := RunAsWorkflow(dbosCtx, getEventIdempotencyWorkflow, setEventWorkflowInput{
+		getHandle, err := RunWorkflow(dbosCtx, getEventIdempotencyWorkflow, setEventWorkflowInput{
 			Key:     setHandle.GetWorkflowID(),
 			Message: "idempotency-key",
 		})
@@ -2206,7 +2206,7 @@ func TestSetGetEvent(t *testing.T) {
 
 	t.Run("ConcurrentGetEvent", func(t *testing.T) {
 		// Set event
-		setHandle, err := RunAsWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
+		setHandle, err := RunWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
 			Key:     "concurrent-event-key",
 			Message: "concurrent-event-message",
 		})
@@ -2275,7 +2275,7 @@ func TestSleep(t *testing.T) {
 		// Start a workflow that sleeps for 2 seconds then blocks
 		sleepDuration := 2 * time.Second
 
-		handle, err := RunAsWorkflow(dbosCtx, sleepRecoveryWorkflow, sleepDuration)
+		handle, err := RunWorkflow(dbosCtx, sleepRecoveryWorkflow, sleepDuration)
 		require.NoError(t, err, "failed to start sleep recovery workflow")
 
 		sleepStartEvent.Wait()
@@ -2283,7 +2283,7 @@ func TestSleep(t *testing.T) {
 
 		// Run the workflow again and check the return time was less than the durable sleep
 		startTime := time.Now()
-		_, err = RunAsWorkflow(dbosCtx, sleepRecoveryWorkflow, sleepDuration, WithWorkflowID(handle.GetWorkflowID()))
+		_, err = RunWorkflow(dbosCtx, sleepRecoveryWorkflow, sleepDuration, WithWorkflowID(handle.GetWorkflowID()))
 		require.NoError(t, err, "failed to start second sleep recovery workflow")
 
 		sleepStartEvent.Wait()
@@ -2352,7 +2352,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Start a workflow that will wait indefinitely
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
-		handle, err := RunAsWorkflow(cancelCtx, waitForCancelWorkflow, "wait-for-cancel")
+		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflow, "wait-for-cancel")
 		require.NoError(t, err, "failed to start wait for cancel workflow")
 
 		// Wait for the workflow to complete and get the result
@@ -2369,7 +2369,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	t.Run("ManuallyCancelWorkflow", func(t *testing.T) {
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Second)
 		defer cancelFunc() // Ensure we clean up the context
-		handle, err := RunAsWorkflow(cancelCtx, waitForCancelWorkflow, "manual-cancel")
+		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflow, "manual-cancel")
 		require.NoError(t, err, "failed to start manual cancel workflow")
 
 		// Cancel the workflow manually
@@ -2404,7 +2404,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Start a workflow that will run a step that triggers cancellation
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
-		handle, err := RunAsWorkflow(cancelCtx, waitForCancelWorkflowWithStep, "wf-with-step-timeout")
+		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflowWithStep, "wf-with-step-timeout")
 		require.NoError(t, err, "failed to start workflow with step timeout")
 
 		// Wait for the workflow to complete and get the result
@@ -2448,7 +2448,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Start a workflow that waits for cancellation then tries to run a step
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
-		handle, err := RunAsWorkflow(cancelCtx, waitForCancelWorkflowWithStepAfterCancel, "wf-with-step-after-timeout")
+		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflowWithStepAfterCancel, "wf-with-step-after-timeout")
 		require.NoError(t, err, "failed to start workflow with step after timeout")
 
 		// Wait for the workflow to complete and get the result
@@ -2490,7 +2490,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Start a workflow that runs a step with a shorter timeout than the workflow itself
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Second)
 		defer cancelFunc() // Ensure we clean up the context
-		handle, err := RunAsWorkflow(cancelCtx, shorterStepTimeoutWorkflow, "shorter-step-timeout")
+		handle, err := RunWorkflow(cancelCtx, shorterStepTimeoutWorkflow, "shorter-step-timeout")
 		require.NoError(t, err, "failed to start shorter step timeout workflow")
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
@@ -2529,7 +2529,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
 
-		handle, err := RunAsWorkflow(cancelCtx, detachedStepWorkflow, 1*time.Second)
+		handle, err := RunWorkflow(cancelCtx, detachedStepWorkflow, 1*time.Second)
 		require.NoError(t, err, "failed to start detached step workflow")
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
@@ -2543,7 +2543,7 @@ func TestWorkflowTimeout(t *testing.T) {
 
 	waitForCancelParent := func(ctx DBOSContext, _ string) (string, error) {
 		// This workflow will run a child workflow that waits indefinitely until it is cancelled
-		childHandle, err := RunAsWorkflow(ctx, waitForCancelWorkflow, "child-wait-for-cancel")
+		childHandle, err := RunWorkflow(ctx, waitForCancelWorkflow, "child-wait-for-cancel")
 		require.NoError(t, err, "failed to start child workflow")
 
 		// Wait for the child workflow to complete
@@ -2562,7 +2562,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
 
-		handle, err := RunAsWorkflow(cancelCtx, waitForCancelParent, "parent-wait-for-child-cancel")
+		handle, err := RunWorkflow(cancelCtx, waitForCancelParent, "parent-wait-for-child-cancel")
 		require.NoError(t, err, "failed to start parent workflow")
 
 		// Wait for the parent workflow to complete and get the result
@@ -2588,7 +2588,7 @@ func TestWorkflowTimeout(t *testing.T) {
 
 	detachedChildWorkflowParent := func(ctx DBOSContext, timeout time.Duration) (string, error) {
 		childCtx := WithoutCancel(ctx)
-		childHandle, err := RunAsWorkflow(childCtx, detachedChild, timeout*2)
+		childHandle, err := RunWorkflow(childCtx, detachedChild, timeout*2)
 		require.NoError(t, err, "failed to start child workflow")
 
 		// Wait for the child workflow to complete
@@ -2607,7 +2607,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		timeout := 500 * time.Millisecond
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, timeout)
 		defer cancelFunc()
-		handle, err := RunAsWorkflow(cancelCtx, detachedChildWorkflowParent, timeout)
+		handle, err := RunWorkflow(cancelCtx, detachedChildWorkflowParent, timeout)
 		require.NoError(t, err, "failed to start parent workflow with detached child")
 
 		// Wait for the parent workflow to complete and get the result
@@ -2626,7 +2626,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		timeout := 1 * time.Second
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, timeout)
 		defer cancelFunc()
-		handle, err := RunAsWorkflow(cancelCtx, waitForCancelWorkflow, "recover-wait-for-cancel")
+		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflow, "recover-wait-for-cancel")
 		require.NoError(t, err, "failed to start wait for cancel workflow")
 
 		// Recover the pending workflow
@@ -2713,7 +2713,7 @@ func TestConcurrentWorkflows(t *testing.T) {
 		for i := range numGoroutines {
 			go func(input int) {
 				defer wg.Done()
-				handle, err := RunAsWorkflow(dbosCtx, concurrentSimpleWorkflow, input)
+				handle, err := RunWorkflow(dbosCtx, concurrentSimpleWorkflow, input)
 				if err != nil {
 					errors <- fmt.Errorf("failed to start workflow %d: %w", input, err)
 					return
@@ -2764,7 +2764,7 @@ func TestConcurrentWorkflows(t *testing.T) {
 		for i := range numPairs {
 			go func(pairID int) {
 				defer wg.Done()
-				handle, err := RunAsWorkflow(dbosCtx, notificationSetterWorkflow, pairID, WithWorkflowID(fmt.Sprintf("notification-setter-%d", pairID)))
+				handle, err := RunWorkflow(dbosCtx, notificationSetterWorkflow, pairID, WithWorkflowID(fmt.Sprintf("notification-setter-%d", pairID)))
 				if err != nil {
 					errors <- fmt.Errorf("failed to start setter workflow %d: %w", pairID, err)
 					return
@@ -2779,7 +2779,7 @@ func TestConcurrentWorkflows(t *testing.T) {
 
 			go func(pairID int) {
 				defer wg.Done()
-				handle, err := RunAsWorkflow(dbosCtx, notificationWaiterWorkflow, pairID)
+				handle, err := RunWorkflow(dbosCtx, notificationWaiterWorkflow, pairID)
 				if err != nil {
 					errors <- fmt.Errorf("failed to start waiter workflow %d: %w", pairID, err)
 					return
@@ -2839,7 +2839,7 @@ func TestConcurrentWorkflows(t *testing.T) {
 		for i := range numPairs {
 			go func(pairID int) {
 				defer wg.Done()
-				handle, err := RunAsWorkflow(dbosCtx, sendRecvReceiverWorkflow, pairID, WithWorkflowID(fmt.Sprintf("send-recv-receiver-%d", pairID)))
+				handle, err := RunWorkflow(dbosCtx, sendRecvReceiverWorkflow, pairID, WithWorkflowID(fmt.Sprintf("send-recv-receiver-%d", pairID)))
 				if err != nil {
 					errors <- fmt.Errorf("failed to start receiver workflow %d: %w", pairID, err)
 					return
@@ -2859,7 +2859,7 @@ func TestConcurrentWorkflows(t *testing.T) {
 
 			go func(pairID int) {
 				defer wg.Done()
-				handle, err := RunAsWorkflow(dbosCtx, sendRecvSenderWorkflow, pairID)
+				handle, err := RunWorkflow(dbosCtx, sendRecvSenderWorkflow, pairID)
 				if err != nil {
 					errors <- fmt.Errorf("failed to start sender workflow %d: %w", pairID, err)
 					return
@@ -2909,7 +2909,7 @@ func TestWorkflowAtVersion(t *testing.T) {
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
 
 	version := "test-app-version-12345"
-	handle, err := RunAsWorkflow(dbosCtx, simpleWorkflow, "input", WithApplicationVersion(version))
+	handle, err := RunWorkflow(dbosCtx, simpleWorkflow, "input", WithApplicationVersion(version))
 	require.NoError(t, err, "failed to start workflow")
 
 	_, err = handle.GetResult()
@@ -2946,7 +2946,7 @@ func TestWorkflowCancel(t *testing.T) {
 		topic := "cancel-test-topic"
 
 		// Start the blocking workflow
-		handle, err := RunAsWorkflow(dbosCtx, blockingWorkflow, topic)
+		handle, err := RunWorkflow(dbosCtx, blockingWorkflow, topic)
 		require.NoError(t, err, "failed to start blocking workflow")
 
 		// Cancel the workflow using DBOS.CancelWorkflow
@@ -2998,14 +2998,14 @@ func TestCancelAllBefore(t *testing.T) {
 
 		// Create 2 PENDING workflows before cutoff time
 		for i := range 2 {
-			handle, err := RunAsWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow, fmt.Sprintf("pending-before-%d", i))
+			handle, err := RunWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow, fmt.Sprintf("pending-before-%d", i))
 			require.NoError(t, err, "failed to start pending workflow %d", i)
 			shouldBeCancelledIDs = append(shouldBeCancelledIDs, handle.GetWorkflowID())
 		}
 
 		// Create 2 ENQUEUED workflows before cutoff time
 		for i := range 2 {
-			handle, err := RunAsWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow, fmt.Sprintf("enqueued-before-%d", i), WithQueue(queue.Name))
+			handle, err := RunWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow, fmt.Sprintf("enqueued-before-%d", i), WithQueue(queue.Name))
 			require.NoError(t, err, "failed to start enqueued workflow %d", i)
 			shouldBeCancelledIDs = append(shouldBeCancelledIDs, handle.GetWorkflowID())
 		}
@@ -3013,7 +3013,7 @@ func TestCancelAllBefore(t *testing.T) {
 		// Create workflows that should NOT be cancelled
 
 		// Create 1 SUCCESS workflow before cutoff time (but complete it)
-		successHandle, err := RunAsWorkflow(dbosCtx, simpleWorkflow, "success-before")
+		successHandle, err := RunWorkflow(dbosCtx, simpleWorkflow, "success-before")
 		require.NoError(t, err, "failed to start success workflow")
 		_, err = successHandle.GetResult()
 		require.NoError(t, err, "failed to complete success workflow")
@@ -3024,7 +3024,7 @@ func TestCancelAllBefore(t *testing.T) {
 
 		// Create 2 PENDING/ENQUEUED workflows after cutoff time
 		for i := range 2 {
-			handle, err := RunAsWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow, fmt.Sprintf("pending-after-%d", i))
+			handle, err := RunWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow, fmt.Sprintf("pending-after-%d", i))
 			require.NoError(t, err, "failed to start pending workflow after cutoff %d", i)
 			shouldNotBeCancelledIDs = append(shouldNotBeCancelledIDs, handle.GetWorkflowID())
 		}
@@ -3120,12 +3120,12 @@ func TestGarbageCollect(t *testing.T) {
 		numWorkflows := 10
 
 		// Start one blocked workflow and 10 normal workflows
-		blockedHandle, err := RunAsWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
+		blockedHandle, err := RunWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
 		require.NoError(t, err, "failed to start blocked workflow")
 
 		var completedHandles []WorkflowHandle[int]
 		for i := range numWorkflows {
-			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
+			handle, err := RunWorkflow(dbosCtx, gcTestWorkflow, i)
 			require.NoError(t, err, "failed to start test workflow %d", i)
 			result, err := handle.GetResult()
 			require.NoError(t, err, "failed to get result from test workflow %d", i)
@@ -3209,13 +3209,13 @@ func TestGarbageCollect(t *testing.T) {
 		numWorkflows := 10
 
 		// Start blocked workflow BEFORE cutoff to verify pending workflows are preserved
-		blockedHandle, err := RunAsWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
+		blockedHandle, err := RunWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
 		require.NoError(t, err, "failed to start blocked workflow")
 
 		// Execute first batch of workflows (before cutoff)
 		var beforeCutoffHandles []WorkflowHandle[int]
 		for i := range numWorkflows {
-			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
+			handle, err := RunWorkflow(dbosCtx, gcTestWorkflow, i)
 			require.NoError(t, err, "failed to start test workflow %d", i)
 			result, err := handle.GetResult()
 			require.NoError(t, err, "failed to get result from test workflow %d", i)
@@ -3232,7 +3232,7 @@ func TestGarbageCollect(t *testing.T) {
 		// Execute second batch of workflows after cutoff
 		var afterCutoffHandles []WorkflowHandle[int]
 		for i := numWorkflows; i < numWorkflows*2; i++ {
-			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
+			handle, err := RunWorkflow(dbosCtx, gcTestWorkflow, i)
 			require.NoError(t, err, "failed to start test workflow %d", i)
 			result, err := handle.GetResult()
 			require.NoError(t, err, "failed to get result from test workflow %d", i)
@@ -3355,12 +3355,12 @@ func TestGarbageCollect(t *testing.T) {
 		numWorkflows := 5
 
 		// Start blocked workflow that will remain pending
-		blockedHandle, err := RunAsWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
+		blockedHandle, err := RunWorkflow(dbosCtx, gcBlockedWorkflow, gcTestEvent)
 		require.NoError(t, err, "failed to start blocked workflow")
 
 		// Execute normal workflows to completion
 		for i := range numWorkflows {
-			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
+			handle, err := RunWorkflow(dbosCtx, gcTestWorkflow, i)
 			require.NoError(t, err, "failed to start test workflow %d", i)
 			result, err := handle.GetResult()
 			require.NoError(t, err, "failed to get result from test workflow %d", i)
@@ -3457,7 +3457,7 @@ func TestGarbageCollect(t *testing.T) {
 		handles := make([]WorkflowHandle[int], numWorkflows)
 
 		for i := range numWorkflows {
-			handle, err := RunAsWorkflow(dbosCtx, gcTestWorkflow, i)
+			handle, err := RunWorkflow(dbosCtx, gcTestWorkflow, i)
 			require.NoError(t, err, "failed to start workflow %d", i)
 			handles[i] = handle
 

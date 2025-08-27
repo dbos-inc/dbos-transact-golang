@@ -517,7 +517,7 @@ func TestForkWorkflow(t *testing.T) {
 		}
 
 		// Child workflow 1
-		child1Handle, err := RunAsWorkflow(ctx, childWorkflow1, input)
+		child1Handle, err := RunWorkflow(ctx, childWorkflow1, input)
 		if err != nil {
 			return "", err
 		}
@@ -536,7 +536,7 @@ func TestForkWorkflow(t *testing.T) {
 		}
 
 		// Child workflow 2
-		child2Handle, err := RunAsWorkflow(ctx, childWorkflow2, input)
+		child2Handle, err := RunWorkflow(ctx, childWorkflow2, input)
 		if err != nil {
 			return "", err
 		}

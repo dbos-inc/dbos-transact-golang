@@ -81,7 +81,7 @@ func WithMaxTasksPerIteration(maxTasks int) QueueOption {
 }
 
 // NewWorkflowQueue creates a new workflow queue with the specified name and configuration options.
-// The queue must be created before workflows can be enqueued to it using the WithQueue option in RunAsWorkflow.
+// The queue must be created before workflows can be enqueued to it using the WithQueue option in RunWorkflow.
 // Queues provide controlled execution with support for concurrency limits, priority scheduling, and rate limiting.
 //
 // Example:
@@ -96,7 +96,7 @@ func WithMaxTasksPerIteration(maxTasks int) QueueOption {
 //	)
 //
 //	// Enqueue workflows to this queue:
-//	handle, err := dbos.RunAsWorkflow(ctx, SendEmailWorkflow, emailData, dbos.WithQueue("email-queue"))
+//	handle, err := dbos.RunWorkflow(ctx, SendEmailWorkflow, emailData, dbos.WithQueue("email-queue"))
 func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) WorkflowQueue {
 	ctx, ok := dbosCtx.(*dbosContext)
 	if !ok {
