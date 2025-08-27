@@ -262,14 +262,14 @@ func TestAdminServer(t *testing.T) {
 
 		// Create workflows with different input/output types
 		// 1. Integer workflow
-		intHandle, err := RunAsWorkflow(ctx, intWorkflow, 42)
+		intHandle, err := RunWorkflow(ctx, intWorkflow, 42)
 		require.NoError(t, err, "Failed to create int workflow")
 		intResult, err := intHandle.GetResult()
 		require.NoError(t, err, "Failed to get int workflow result")
 		assert.Equal(t, 84, intResult)
 
 		// 2. Empty string workflow
-		emptyStringHandle, err := RunAsWorkflow(ctx, emptyStringWorkflow, "")
+		emptyStringHandle, err := RunWorkflow(ctx, emptyStringWorkflow, "")
 		require.NoError(t, err, "Failed to create empty string workflow")
 		emptyStringResult, err := emptyStringHandle.GetResult()
 		require.NoError(t, err, "Failed to get empty string workflow result")
@@ -277,7 +277,7 @@ func TestAdminServer(t *testing.T) {
 
 		// 3. Struct workflow
 		structInput := TestStruct{Name: "test", Value: 10}
-		structHandle, err := RunAsWorkflow(ctx, structWorkflow, structInput)
+		structHandle, err := RunWorkflow(ctx, structWorkflow, structInput)
 		require.NoError(t, err, "Failed to create struct workflow")
 		structResult, err := structHandle.GetResult()
 		require.NoError(t, err, "Failed to get struct workflow result")
@@ -385,7 +385,7 @@ func TestAdminServer(t *testing.T) {
 		endpoint := fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /"))
 
 		// Create first workflow
-		handle1, err := RunAsWorkflow(ctx, testWorkflow, "workflow1")
+		handle1, err := RunWorkflow(ctx, testWorkflow, "workflow1")
 		require.NoError(t, err, "Failed to create first workflow")
 		workflowID1 := handle1.GetWorkflowID()
 
@@ -399,7 +399,7 @@ func TestAdminServer(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 
 		// Create second workflow
-		handle2, err := RunAsWorkflow(ctx, testWorkflow, "workflow2")
+		handle2, err := RunWorkflow(ctx, testWorkflow, "workflow2")
 		require.NoError(t, err, "Failed to create second workflow")
 		result2, err := handle2.GetResult()
 		require.NoError(t, err, "Failed to get second workflow result")
