@@ -243,7 +243,7 @@ func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Log
 		notificationListenerConnection: notificationListenerConnection,
 		notificationsMap:               notificationsMap,
 		notificationLoopDone:           make(chan struct{}),
-		logger:                         logger,
+		logger:                         logger.With("service", "system_database"),
 	}, nil
 }
 
@@ -820,16 +820,13 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 
 		var rowsBasedCutoff int64
 		err := s.pool.QueryRow(ctx, query, *input.rowsThreshold-1).Scan(&rowsBasedCutoff)
-		if err != nil {
-			if err == pgx.ErrNoRows {
-				// Not enough rows to apply threshold, no garbage collection needed
-				return nil
-			}
+		if err != nil && err != pgx.ErrNoRows {
 			return fmt.Errorf("failed to query cutoff timestamp by rows threshold: %w", err)
 		}
-
-		// Use the more restrictive cutoff (higher timestamp = more recent = less deletion)
-		if cutoffTimestamp == nil || rowsBasedCutoff > *cutoffTimestamp {
+		// If we don't have a provided cutoffTimestamp and found one in the database
+		// Or if the found cutoffTimestamp is more restrictive (higher timestamp = more recent = less deletion)
+		// Use the cutoff timestamp found in the database
+		if rowsBasedCutoff > 0 && cutoffTimestamp == nil || (cutoffTimestamp != nil && rowsBasedCutoff > *cutoffTimestamp) {
 			cutoffTimestamp = &rowsBasedCutoff
 		}
 	}
@@ -2174,14 +2171,14 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			input.executorID,
 			time.Now().UnixMilli(),
 			id).Scan(&retWorkflow.name, &inputString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
+		}
 
 		if inputString != nil && len(*inputString) > 0 {
 			retWorkflow.input = *inputString
 		}
 
-		if err != nil {
-			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
-		}
 		retWorkflows = append(retWorkflows, retWorkflow)
 	}
 

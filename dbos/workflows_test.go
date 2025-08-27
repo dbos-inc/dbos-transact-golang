@@ -1695,7 +1695,7 @@ func TestSendRecv(t *testing.T) {
 		assert.Equal(t, "--", result, "expected receive workflow result to be '--' (timeout)")
 	})
 
-	t.Run("TestSendRecv", func(t *testing.T) {
+	t.Run("TestConcurrentRecvs", func(t *testing.T) {
 		// Test concurrent receivers - only 1 should timeout, others should get errors
 		receiveTopic := "concurrent-recv-topic"
 
@@ -1760,6 +1760,15 @@ func TestSendRecv(t *testing.T) {
 
 		for err := range errors {
 			t.Logf("Receiver error (expected): %v", err)
+			
+			// Check that the error is of the expected type
+			dbosErr, ok := err.(*DBOSError)
+			require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+			require.Equal(t, ConflictingIDError, dbosErr.Code, "expected error code to be ConflictingIDError, got %v", dbosErr.Code)
+			require.Equal(t, "concurrent-recv-wfid", dbosErr.WorkflowID, "expected workflow ID to be 'concurrent-recv-wfid', got %s", dbosErr.WorkflowID)
+			require.True(t, dbosErr.IsBase, "expected error to have IsBase=true")
+			require.Contains(t, dbosErr.Message, "Conflicting workflow ID concurrent-recv-wfid", "expected error message to contain conflicting workflow ID")
+			
 			errorCount++
 		}
 

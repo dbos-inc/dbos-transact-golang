@@ -710,15 +710,6 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 		return nil, err
 	}
 
-	// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
-	if len(params.queueName) > 0 || insertStatusResult.status == WorkflowStatusSuccess || insertStatusResult.status == WorkflowStatusError {
-		// Commit the transaction to update the number of attempts and/or enact the enqueue
-		if err := tx.Commit(uncancellableCtx); err != nil {
-			return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
-		}
-		return newWorkflowPollingHandle[any](uncancellableCtx, workflowStatus.ID), nil
-	}
-
 	// Record child workflow relationship if this is a child workflow
 	if isChildWorkflow {
 		// Get the step ID that was used for generating the child workflow ID
@@ -734,6 +725,15 @@ func (c *dbosContext) RunAsWorkflow(_ DBOSContext, fn WorkflowFunc, input any, o
 			c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("recording child workflow: %v", err))
 		}
+	}
+
+	// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
+	if len(params.queueName) > 0 || insertStatusResult.status == WorkflowStatusSuccess || insertStatusResult.status == WorkflowStatusError {
+		// Commit the transaction to update the number of attempts and/or enact the enqueue
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
+		}
+		return newWorkflowPollingHandle[any](uncancellableCtx, workflowStatus.ID), nil
 	}
 
 	// Channel to receive the outcome from the goroutine
@@ -1728,6 +1728,7 @@ type ListWorkflowsOptions struct {
 	loadInput        bool
 	loadOutput       bool
 	queueName        string
+	executorIDs      []string
 }
 
 // ListWorkflowsOption is a functional option for configuring workflow listing parameters.
@@ -1903,6 +1904,18 @@ func WithQueueName(queueName string) ListWorkflowsOption {
 	}
 }
 
+// WithExecutorIDs filters workflows by the specified executor IDs.
+//
+// Example:
+//
+//	workflows, err := dbos.ListWorkflows(ctx,
+//	    dbos.WithExecutorIDs([]string{"executor-123", "executor-456"}))
+func WithExecutorIDs(executorIDs []string) ListWorkflowsOption {
+	return func(p *ListWorkflowsOptions) {
+		p.executorIDs = executorIDs
+	}
+}
+
 // ListWorkflows retrieves a list of workflows based on the provided filters.
 //
 // The function supports filtering by workflow IDs, status, time ranges, names, application versions,
@@ -1976,6 +1989,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		loadInput:          params.loadInput,
 		loadOutput:         params.loadOutput,
 		queueName:          params.queueName,
+		executorIDs:        params.executorIDs,
 	}
 
 	// Call the context method to list workflows
