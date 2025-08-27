@@ -38,7 +38,7 @@ jobs:
           ${{ runner.os }}-go-
 
     - name: Download dependencies
-      run: go mod tidy
+      run: go mod download
 
     - name: Install security tools
       run: |
