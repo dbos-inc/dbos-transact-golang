@@ -2961,7 +2961,7 @@ func TestWorkflowCancel(t *testing.T) {
 		require.Error(t, err, "expected error from cancelled workflow")
 		assert.Equal(t, "", result, "expected empty result from cancelled workflow")
 
-		// Check that we get a DBOSError with AwaitedWorkflowCancelled code
+		// Check that we get a DBOSError with WorkflowCancelled code
 		var dbosErr *DBOSError
 		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
 		assert.Equal(t, WorkflowCancelled, dbosErr.Code, "expected AwaitedWorkflowCancelled error code, got: %v", dbosErr.Code)
