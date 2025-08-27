@@ -85,8 +85,6 @@ func (m *mockWebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Req
 	}()
 
 	// Handle connection lifecycle - this function owns all I/O on conn
-	fmt.Println("WebSocket connection established")
-	defer fmt.Println("WebSocket connection handler exiting")
 
 	// We need to handle pings manually since we can't use the ping handler
 	// (it would cause concurrent writes with our main loop)
@@ -94,7 +92,6 @@ func (m *mockWebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Req
 
 	// Custom ping handler that just signals - no writing
 	conn.SetPingHandler(func(string) error {
-		fmt.Println("received ping")
 		select {
 		case m.pings <- struct{}{}:
 		default:
@@ -165,22 +162,11 @@ func (m *mockWebSocketServer) getURL() string {
 func (m *mockWebSocketServer) close() {
 	m.closed.Store(true)
 
-	// Signal handler to stop
+	// Signal handler to stop but don't block
 	select {
 	case m.stopHandler <- struct{}{}:
 	default:
 	}
-
-	// Connection will be closed by the handler when it receives stop signal
-	// We just need to clear our reference after a brief delay
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		m.connMu.Lock()
-		if m.conn != nil {
-			m.conn = nil // Just clear reference, handler already closed
-		}
-		m.connMu.Unlock()
-	}()
 }
 
 func (m *mockWebSocketServer) shutdown() {
