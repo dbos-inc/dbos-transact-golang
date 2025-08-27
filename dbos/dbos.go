@@ -32,12 +32,14 @@ const (
 // Config holds configuration parameters for initializing a DBOS context.
 // DatabaseURL and AppName are required.
 type Config struct {
-	DatabaseURL     string       // PostgreSQL connection string (required)
-	AppName         string       // Application name for identification (required)
-	Logger          *slog.Logger // Custom logger instance (defaults to a new slog logger)
-	AdminServer     bool         // Enable Transact admin HTTP server (disabled by default)
-	ConductorURL    string       // DBOS conductor service URL (optional)
-	ConductorAPIKey string       // DBOS conductor API key (optional)
+	DatabaseURL        string       // PostgreSQL connection string (required)
+	AppName            string       // Application name for identification (required)
+	Logger             *slog.Logger // Custom logger instance (defaults to a new slog logger)
+	AdminServer        bool         // Enable Transact admin HTTP server (disabled by default)
+	ConductorURL       string       // DBOS conductor service URL (optional)
+	ConductorAPIKey    string       // DBOS conductor API key (optional)
+	ApplicationVersion string       // Application version (optional, overridden by DBOS__APPVERSION env var)
+	ExecutorID         string       // Executor ID (optional, overridden by DBOS__VMID env var)
 }
 
 // processConfig enforces mandatory fields and applies defaults.
@@ -51,17 +53,35 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 
 	dbosConfig := &Config{
-		DatabaseURL:     inputConfig.DatabaseURL,
-		AppName:         inputConfig.AppName,
-		Logger:          inputConfig.Logger,
-		AdminServer:     inputConfig.AdminServer,
-		ConductorURL:    inputConfig.ConductorURL,
-		ConductorAPIKey: inputConfig.ConductorAPIKey,
+		DatabaseURL:        inputConfig.DatabaseURL,
+		AppName:            inputConfig.AppName,
+		Logger:             inputConfig.Logger,
+		AdminServer:        inputConfig.AdminServer,
+		ConductorURL:       inputConfig.ConductorURL,
+		ConductorAPIKey:    inputConfig.ConductorAPIKey,
+		ApplicationVersion: inputConfig.ApplicationVersion,
+		ExecutorID:         inputConfig.ExecutorID,
 	}
 
 	// Load defaults
 	if dbosConfig.Logger == nil {
 		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+
+	// Override with environment variables if set
+	if envAppVersion := os.Getenv("DBOS__APPVERSION"); envAppVersion != "" {
+		dbosConfig.ApplicationVersion = envAppVersion
+	}
+	if envExecutorID := os.Getenv("DBOS__VMID"); envExecutorID != "" {
+		dbosConfig.ExecutorID = envExecutorID
+	}
+
+	// Apply defaults for empty values
+	if dbosConfig.ApplicationVersion == "" {
+		dbosConfig.ApplicationVersion = computeApplicationVersion()
+	}
+	if dbosConfig.ExecutorID == "" {
+		dbosConfig.ExecutorID = "local"
 	}
 
 	return dbosConfig, nil
@@ -292,16 +312,9 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	var t time.Time
 	gob.Register(t)
 
-	// Initialize global variables with environment variables, providing defaults if not set
-	initExecutor.applicationVersion = os.Getenv("DBOS__APPVERSION")
-	if initExecutor.applicationVersion == "" {
-		initExecutor.applicationVersion = computeApplicationVersion()
-	}
-
-	initExecutor.executorID = os.Getenv("DBOS__VMID")
-	if initExecutor.executorID == "" {
-		initExecutor.executorID = "local"
-	}
+	// Initialize global variables from processed config (already handles env vars and defaults)
+	initExecutor.applicationVersion = config.ApplicationVersion
+	initExecutor.executorID = config.ExecutorID
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 

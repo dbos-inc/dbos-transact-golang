@@ -1,14 +1,5 @@
 package dbos
 
-/**
-Test workflow and steps features
-[x] Wrapping various golang methods in DBOS workflows
-[x] workflow idempotency
-[x] workflow DLQ
-[x] workflow conflicting name
-[x] workflow timeouts & deadlines (including child workflows)
-*/
-
 import (
 	"context"
 	"errors"
@@ -1760,7 +1751,7 @@ func TestSendRecv(t *testing.T) {
 
 		for err := range errors {
 			t.Logf("Receiver error (expected): %v", err)
-			
+
 			// Check that the error is of the expected type
 			dbosErr, ok := err.(*DBOSError)
 			require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
@@ -1768,7 +1759,7 @@ func TestSendRecv(t *testing.T) {
 			require.Equal(t, "concurrent-recv-wfid", dbosErr.WorkflowID, "expected workflow ID to be 'concurrent-recv-wfid', got %s", dbosErr.WorkflowID)
 			require.True(t, dbosErr.IsBase, "expected error to have IsBase=true")
 			require.Contains(t, dbosErr.Message, "Conflicting workflow ID concurrent-recv-wfid", "expected error message to contain conflicting workflow ID")
-			
+
 			errorCount++
 		}
 
@@ -2930,6 +2921,56 @@ func TestWorkflowAtVersion(t *testing.T) {
 	status, err := retrieved.GetStatus()
 	require.NoError(t, err, "failed to get workflow status")
 	assert.Equal(t, version, status.ApplicationVersion, "expected correct application version")
+}
+
+func TestWorkflowCancel(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	blockingEvent := NewEvent()
+
+	// Workflow that waits for an event, then calls Recv(). Returns raw error if Recv fails
+	blockingWorkflow := func(ctx DBOSContext, topic string) (string, error) {
+		// Wait for the event
+		blockingEvent.Wait()
+
+		// Now call Recv() - this should fail if the workflow is cancelled
+		msg, err := Recv[string](ctx, topic, 5*time.Second)
+		if err != nil {
+			return "", err // Return the raw error from Recv
+		}
+		return msg, nil
+	}
+	RegisterWorkflow(dbosCtx, blockingWorkflow)
+
+	t.Run("TestWorkflowCancel", func(t *testing.T) {
+		topic := "cancel-test-topic"
+
+		// Start the blocking workflow
+		handle, err := RunAsWorkflow(dbosCtx, blockingWorkflow, topic)
+		require.NoError(t, err, "failed to start blocking workflow")
+
+		// Cancel the workflow using DBOS.CancelWorkflow
+		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to cancel workflow")
+
+		// Signal the event so the workflow can move on to Recv()
+		blockingEvent.Set()
+
+		// Check the return values of the workflow
+		result, err := handle.GetResult()
+		require.Error(t, err, "expected error from cancelled workflow")
+		assert.Equal(t, "", result, "expected empty result from cancelled workflow")
+
+		// Check that we get a DBOSError with AwaitedWorkflowCancelled code
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
+		assert.Equal(t, WorkflowCancelled, dbosErr.Code, "expected AwaitedWorkflowCancelled error code, got: %v", dbosErr.Code)
+
+		// Ensure the workflow status is of an error type
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+	})
 }
 
 var cancelAllBeforeBlockEvent = NewEvent()
