@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       are-you-sure:
-        description: 'Are you sure you want to cut a release? Only "YES!!!" will be accepted'
+        description: 'Are you sure you want to cut a release?  Only "YES!!!" will be accepted'
         required: true
       version:
         description: 'Version number (leave empty to auto-increment)'
@@ -16,7 +16,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # Required for creating tags and branches
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -30,6 +29,7 @@ jobs:
           go-version: '1.22'
 
       - name: Create release
+        working-directory: releaser
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -45,4 +45,4 @@ jobs:
             FLAGS="$FLAGS -version=${{ inputs.version }}"
           fi
 
-          go run make_release.go -repo=. $FLAGS
+          go run make_release.go -repo=../ $FLAGS
