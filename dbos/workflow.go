@@ -1906,7 +1906,7 @@ func WithQueueName(queueName string) ListWorkflowsOption {
 	}
 }
 
-// WithQueuesOnly filters to only return workflows that are in a queue.
+// WithQueuesOnly filters to only return workflows that are in a queue (queue_name is not NULL).
 //
 // Example:
 //
@@ -1985,11 +1985,6 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	// Apply all provided options
 	for _, opt := range opts {
 		opt(params)
-	}
-
-	// If we are asked to retrieve only queue workflows with no status, only fetch ENQUEUED and PENDING tasks
-	if params.queuesOnly && len(params.status) == 0 {
-		params.status = []WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending}
 	}
 
 	// Convert to system database input structure
