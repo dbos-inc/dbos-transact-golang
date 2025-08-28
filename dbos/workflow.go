@@ -1729,6 +1729,7 @@ type ListWorkflowsOptions struct {
 	loadInput        bool
 	loadOutput       bool
 	queueName        string
+	queuesOnly       bool
 	executorIDs      []string
 }
 
@@ -1905,6 +1906,18 @@ func WithQueueName(queueName string) ListWorkflowsOption {
 	}
 }
 
+// WithQueuesOnly filters to only return workflows that are in a queue.
+//
+// Example:
+//
+//	workflows, err := dbos.ListWorkflows(ctx,
+//	    dbos.WithQueuesOnly())
+func WithQueuesOnly() ListWorkflowsOption {
+	return func(p *ListWorkflowsOptions) {
+		p.queuesOnly = true
+	}
+}
+
 // WithExecutorIDs filters workflows by the specified executor IDs.
 //
 // Example:
@@ -1974,6 +1987,11 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		opt(params)
 	}
 
+	// If we are asked to retrieve only queue workflows with no status, only fetch ENQUEUED and PENDING tasks
+	if params.queuesOnly && len(params.status) == 0 {
+		params.status = []WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending}
+	}
+
 	// Convert to system database input structure
 	dbInput := listWorkflowsDBInput{
 		workflowIDs:        params.workflowIDs,
@@ -1990,6 +2008,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		loadInput:          params.loadInput,
 		loadOutput:         params.loadOutput,
 		queueName:          params.queueName,
+		queuesOnly:         params.queuesOnly,
 		executorIDs:        params.executorIDs,
 	}
 

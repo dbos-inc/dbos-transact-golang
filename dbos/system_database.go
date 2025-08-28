@@ -477,6 +477,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 type listWorkflowsDBInput struct {
 	workflowName       string
 	queueName          string
+	queuesOnly         bool
 	workflowIDPrefix   string
 	workflowIDs        []string
 	authenticatedUser  string
@@ -520,6 +521,9 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 	}
 	if input.queueName != "" {
 		qb.addWhere("queue_name", input.queueName)
+	}
+	if input.queuesOnly {
+		qb.addWhereIsNotNull("queue_name")
 	}
 	if input.workflowIDPrefix != "" {
 		qb.addWhereLike("workflow_uuid", input.workflowIDPrefix+"%")
@@ -2284,6 +2288,10 @@ func (qb *queryBuilder) addWhere(column string, value any) {
 	qb.argCounter++
 	qb.whereClauses = append(qb.whereClauses, fmt.Sprintf("%s=$%d", column, qb.argCounter))
 	qb.args = append(qb.args, value)
+}
+
+func (qb *queryBuilder) addWhereIsNotNull(column string) {
+	qb.whereClauses = append(qb.whereClauses, fmt.Sprintf("%s IS NOT NULL", column))
 }
 
 func (qb *queryBuilder) addWhereLike(column string, value any) {

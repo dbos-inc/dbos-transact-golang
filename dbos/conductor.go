@@ -639,6 +639,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	opts = append(opts, WithLoadInput(req.Body.LoadInput))
 	opts = append(opts, WithLoadOutput(false)) // Don't load output for queued workflows
 	opts = append(opts, WithSortDesc(req.Body.SortDesc))
+	opts = append(opts, WithQueuesOnly()) // Only include workflows that are in queues
 
 	// Add status filter for queued workflows
 	queuedStatuses := make([]WorkflowStatusType, 0)
@@ -691,21 +692,9 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 		return c.sendResponse(response, string(listQueuedWorkflowsMessage))
 	}
 
-	// If no queue name was specified, only include workflows that have a queue name
-	var filteredWorkflows []WorkflowStatus
-	if req.Body.QueueName == nil {
-		for _, wf := range workflows {
-			if wf.QueueName != "" {
-				filteredWorkflows = append(filteredWorkflows, wf)
-			}
-		}
-	} else {
-		filteredWorkflows = workflows
-	}
-
 	// Prepare response payload
-	formattedWorkflows := make([]listWorkflowsConductorResponseBody, len(filteredWorkflows))
-	for i, wf := range filteredWorkflows {
+	formattedWorkflows := make([]listWorkflowsConductorResponseBody, len(workflows))
+	for i, wf := range workflows {
 		formattedWorkflows[i] = formatListWorkflowsResponseBody(wf)
 	}
 
