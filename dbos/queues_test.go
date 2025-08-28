@@ -17,24 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-/**
-This suite tests
-[x] Normal wf with a step
-[x] enqueued workflow starts a child workflow
-[x] workflow enqueues another workflow
-[x] recover queued workflow
-[x] queued workflow DLQ
-[x] global concurrency (one at a time with a single queue and a single worker)
-[x] worker concurrency (2 at a time across two "workers")
-[x] worker concurrency X recovery
-[x] rate limiter
-[x] conflicting workflow on different queues
-[x] queue deduplication
-[x] queue priority
-[x] queued workflow times out
-[] scheduled workflow enqueues another workflow
-*/
-
 func queueWorkflow(ctx DBOSContext, input string) (string, error) {
 	step1, err := RunAsStep(ctx, func(context context.Context) (string, error) {
 		return queueStep(context, input)
@@ -1226,4 +1208,108 @@ func TestPriorityQueue(t *testing.T) {
 		status6.StartedAt, status6.CreatedAt, status7.StartedAt, status7.CreatedAt)
 
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after priority queue test")
+}
+
+func TestListQueuedWorkflows(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	// Simple test workflow that completes immediately
+	testWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		return "completed-" + input, nil
+	}
+
+	// Blocking workflow for testing pending/enqueued workflows
+	startEvent := NewEvent()
+	blockEvent := NewEvent()
+	blockingWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		startEvent.Set()
+		blockEvent.Wait()
+		return "blocked-" + input, nil
+	}
+
+	RegisterWorkflow(dbosCtx, testWorkflow)
+	RegisterWorkflow(dbosCtx, blockingWorkflow)
+
+	// Create queue for testing
+	testQueue1 := NewWorkflowQueue(dbosCtx, "list-test-queue", WithGlobalConcurrency(1))
+	testQueue2 := NewWorkflowQueue(dbosCtx, "list-test-queue2", WithGlobalConcurrency(1))
+
+	err := dbosCtx.Launch()
+	require.NoError(t, err, "failed to launch DBOS")
+
+	t.Run("WithQueuesOnly", func(t *testing.T) {
+		blockEvent.Clear()
+		startEvent.Clear()
+		// Create a non-queued workflow (completed) - this should NOT appear in WithQueuesOnly results
+		nonQueuedHandle, err := RunWorkflow(dbosCtx, testWorkflow, "non-queued-test1")
+		require.NoError(t, err, "failed to start non-queued workflow")
+		_, err = nonQueuedHandle.GetResult()
+		require.NoError(t, err, "failed to complete non-queued workflow")
+
+		// Create queued workflows that will be pending/enqueued
+		queuedHandle1, err := RunWorkflow(dbosCtx, blockingWorkflow, "queued-1-test1", WithQueue(testQueue1.Name))
+		require.NoError(t, err, "failed to start queued workflow 1")
+
+		queuedHandle2, err := RunWorkflow(dbosCtx, blockingWorkflow, "queued-2-test1", WithQueue(testQueue1.Name))
+		require.NoError(t, err, "failed to start queued workflow 2")
+
+		startEvent.Wait()
+
+		// List workflows with WithQueuesOnly - should only return queued workflows
+		queuedWorkflows, err := ListWorkflows(dbosCtx, WithQueuesOnly())
+		require.NoError(t, err, "failed to list queued workflows")
+
+		// Verify all returned workflows are in a queue and have pending/enqueued status
+		require.Equal(t, 2, len(queuedWorkflows), "expected 2 queued workflows to be returned")
+		for _, wf := range queuedWorkflows {
+			require.NotEmpty(t, wf.QueueName, "workflow %s should have a queue name", wf.ID)
+			require.True(t, wf.Status == WorkflowStatusPending || wf.Status == WorkflowStatusEnqueued,
+				"workflow %s status should be PENDING or ENQUEUED, got %s", wf.ID, wf.Status)
+			require.True(t, wf.ID == queuedHandle1.GetWorkflowID() || wf.ID == queuedHandle2.GetWorkflowID())
+		}
+
+		// Unblock the workflows for cleanup
+		blockEvent.Set()
+		_, err = queuedHandle1.GetResult()
+		require.NoError(t, err, "failed to complete queued workflow 1")
+		_, err = queuedHandle2.GetResult()
+		require.NoError(t, err, "failed to complete queued workflow 2")
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "queue entries should be cleaned up")
+	})
+
+	t.Run("WithQueuesOnlyAndStatusFilter", func(t *testing.T) {
+		blockEvent.Clear()
+		startEvent.Clear()
+		// Create queued workflow that will complete with SUCCESS status
+		completedQueuedHandle, err := RunWorkflow(dbosCtx, testWorkflow, "queued-completed", WithQueue(testQueue2.Name))
+		require.NoError(t, err, "failed to start queued workflow for completion")
+
+		// Wait for it to complete
+		_, err = completedQueuedHandle.GetResult()
+		require.NoError(t, err, "failed to complete queued workflow")
+
+		// Create pending queued workflows that will NOT have SUCCESS status
+		pendingHandle1, err := RunWorkflow(dbosCtx, blockingWorkflow, "queued-pending-1", WithQueue(testQueue2.Name))
+		require.NoError(t, err, "failed to start pending queued workflow 1")
+
+		pendingHandle2, err := RunWorkflow(dbosCtx, blockingWorkflow, "queued-pending-2", WithQueue(testQueue2.Name))
+		require.NoError(t, err, "failed to start pending queued workflow 2")
+
+		startEvent.Wait()
+
+		// List queued workflows with SUCCESS status filter
+		successWorkflows, err := ListWorkflows(dbosCtx, WithQueuesOnly(), WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}), WithQueueName(testQueue2.Name))
+		require.NoError(t, err, "failed to list queued workflows with SUCCESS status")
+
+		require.Equal(t, 1, len(successWorkflows), "expected 1 queued workflow with SUCCESS status")
+		require.True(t, successWorkflows[0].ID == completedQueuedHandle.GetWorkflowID(), "our queued workflow should be found in the results")
+
+		// Unblock the pending workflows for cleanup
+		blockEvent.Set()
+		_, err = pendingHandle1.GetResult()
+		require.NoError(t, err, "failed to complete pending workflow 1")
+		_, err = pendingHandle2.GetResult()
+		require.NoError(t, err, "failed to complete pending workflow 2")
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "queue entries should be cleaned up")
+	})
 }
