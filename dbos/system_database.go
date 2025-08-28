@@ -697,11 +697,12 @@ type updateWorkflowOutcomeDBInput struct {
 	tx         pgx.Tx
 }
 
-// Will evolve as we serialize all output and error types
+// updateWorkflowOutcome updates the status, output, and error of a workflow
+// Note that transitions from CANCELLED to SUCCESS or ERROR are forbidden
 func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error {
 	query := `UPDATE dbos.workflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
-			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 = $7)`
+			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 in ($7, $8))`
 
 	outputString, err := serialize(input.output)
 	if err != nil {
@@ -714,9 +715,9 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 	}
 
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusError)
+		_, err = input.tx.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
 	} else {
-		_, err = s.pool.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusError)
+		_, err = s.pool.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
 	}
 
 	if err != nil {
