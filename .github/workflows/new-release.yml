@@ -1,0 +1,48 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      are-you-sure:
+        description: 'Are you sure you want to cut a release? Only "YES!!!" will be accepted'
+        required: true
+      version:
+        description: 'Version number (leave empty to auto-increment)'
+        required: false
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required for creating tags and branches
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # Fetch all history and tags
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${{ inputs.are-you-sure }}" != "YES!!!" ]]; then
+            echo "Error: You must enter 'YES!!!' to confirm."
+            exit 1
+          fi
+
+          FLAGS="-are-you-sure=${{ inputs.are-you-sure }}"
+
+          # Add version flag if provided
+          if [ -n "${{ inputs.version }}" ]; then
+            FLAGS="$FLAGS -version=${{ inputs.version }}"
+          fi
+
+          go run make_release.go -repo=. $FLAGS
