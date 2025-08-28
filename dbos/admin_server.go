@@ -378,25 +378,16 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			}
 		}
 
-		req.Status = "" // We are not expecting a filter here but clear just in case
 		filters := req.toListWorkflowsOptions()
-		filters = append(filters, WithStatus([]WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending}))
+		if len(req.Status) == 0 {
+			filters = append(filters, WithStatus([]WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending}))
+		}
+		filters = append(filters, WithQueuesOnly())
 		workflows, err := ListWorkflows(ctx, filters...)
 		if err != nil {
 			ctx.logger.Error("Failed to list queued workflows", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to list queued workflows: %v", err), http.StatusInternalServerError)
 			return
-		}
-
-		// If not queue was specified, filter out non-queued workflows
-		if req.QueueName == nil {
-			filtered := make([]WorkflowStatus, 0, len(workflows))
-			for _, wf := range workflows {
-				if len(wf.QueueName) > 0 {
-					filtered = append(filtered, wf)
-				}
-			}
-			workflows = filtered
 		}
 
 		// Transform to UNIX timestamps before encoding
