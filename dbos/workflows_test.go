@@ -2942,7 +2942,7 @@ func TestWorkflowCancel(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, blockingWorkflow)
 
-	t.Run("TestWorkflowCancel", func(t *testing.T) {
+	t.Run("TestWorkflowCancelWithRecvError", func(t *testing.T) {
 		topic := "cancel-test-topic"
 
 		// Start the blocking workflow
@@ -2970,6 +2970,58 @@ func TestWorkflowCancel(t *testing.T) {
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+	})
+
+	t.Run("TestWorkflowCancelWithSuccess", func(t *testing.T) {
+		blockingEventNoError := NewEvent()
+
+		// Workflow that waits for an event, then calls Recv(). Does NOT return error when Recv times out
+		blockingWorkflowNoError := func(ctx DBOSContext, topic string) (string, error) {
+			// Wait for the event
+			blockingEventNoError.Wait()
+			Recv[string](ctx, topic, 5*time.Second)
+			// Ignore the error
+			return "", nil
+		}
+		RegisterWorkflow(dbosCtx, blockingWorkflowNoError)
+
+		topic := "cancel-no-error-test-topic"
+
+		// Start the blocking workflow
+		handle, err := RunWorkflow(dbosCtx, blockingWorkflowNoError, topic)
+		require.NoError(t, err, "failed to start blocking workflow")
+
+		// Cancel the workflow using DBOS.CancelWorkflow
+		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to cancel workflow")
+
+		// Signal the event so the workflow can move on to Recv()
+		blockingEventNoError.Set()
+
+		// Check the return values of the workflow
+		// Because this is a direct handle it'll not return an error
+		result, err := handle.GetResult()
+		require.NoError(t, err, "expected no error from direct handle")
+		assert.Equal(t, "", result, "expected empty result from cancelled workflow")
+
+		// Now use a polling handle to get result -- observe the error
+		pollingHandle, err := RetrieveWorkflow[string](dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to retrieve workflow with polling handle")
+
+		result, err = pollingHandle.GetResult()
+		require.Error(t, err, "expected error from cancelled workflow even when workflow returns success")
+		assert.Equal(t, "", result, "expected empty result from cancelled workflow")
+
+		// Check that we still get a DBOSError with AwaitedWorkflowCancelled code
+		// The gate prevents CANCELLED -> SUCCESS transition
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
+		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected AwaitedWorkflowCancelled error code, got: %v", dbosErr.Code)
+
+		// Ensure the workflow status remains CANCELLED
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to remain WorkflowStatusCancelled due to gate")
 	})
 }
 
