@@ -295,15 +295,20 @@ func (rm *ReleaseManager) DeleteRemoteTag(version string) error {
 func (rm *ReleaseManager) CreateGitHubRelease(version string) error {
 	ctx := context.Background()
 
+	v, err := semver.NewVersion(version)
+	if err != nil {
+		return fmt.Errorf("failed to parse version for release: %w", err)
+	}
+
 	release := &github.RepositoryRelease{
 		TagName:              github.String(version),
 		TargetCommitish:      github.String("main"),
 		Name:                 github.String(fmt.Sprintf("Release %s", version)),
-		Prerelease:           github.Bool(false),
+		Prerelease:           github.Bool(v.Prerelease() != ""),
 		GenerateReleaseNotes: github.Bool(true),
 	}
 
-	_, _, err := rm.client.Repositories.CreateRelease(
+	_, _, err = rm.client.Repositories.CreateRelease(
 		ctx,
 		rm.githubOwner,
 		rm.githubRepo,
