@@ -1,0 +1,9 @@
+# DBOS Configuration for {{.ProjectName}}
+name: {{.ProjectName}}
+language: go
+runtimeConfig:
+  start:
+    - go run main.go
+database:
+  migrate:
+    - echo "your migration commands here"
