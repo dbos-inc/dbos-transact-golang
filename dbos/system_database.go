@@ -2079,6 +2079,10 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		}
 	}
 
+	if maxTasks <= 0 {
+		return nil, nil
+	}
+
 	// Build the query to select workflows for dequeueing
 	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
 	// otherwise use NOWAIT to ensure consistent view across processes
