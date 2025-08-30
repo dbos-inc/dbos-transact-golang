@@ -47,7 +47,7 @@ type systemDatabase interface {
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
 	checkOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
-	getWorkflowSteps(ctx context.Context, workflowID string) ([]stepInfo, error)
+	getWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
 
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
@@ -1326,15 +1326,16 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 	return result, nil
 }
 
-type stepInfo struct {
-	StepID          int
-	StepName        string
-	Output          any
-	Error           error
-	ChildWorkflowID string
+// StepInfo contains information about a workflow step execution.
+type StepInfo struct {
+	StepID          int    // The sequential ID of the step within the workflow
+	StepName        string // The name of the step function
+	Output          any    // The output returned by the step (if any)
+	Error           error  // The error returned by the step (if any)
+	ChildWorkflowID string // The ID of a child workflow spawned by this step (if applicable)
 }
 
-func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]stepInfo, error) {
+func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error) {
 	query := `SELECT function_id, function_name, output, error, child_workflow_id
 			  FROM dbos.operation_outputs
 			  WHERE workflow_uuid = $1
@@ -1346,9 +1347,9 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]step
 	}
 	defer rows.Close()
 
-	var steps []stepInfo
+	var steps []StepInfo
 	for rows.Next() {
-		var step stepInfo
+		var step StepInfo
 		var outputString *string
 		var errorString *string
 		var childWorkflowID *string

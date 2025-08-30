@@ -719,8 +719,8 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 	}
 	c.logger.Debug("Handling list steps request", "request", req)
 
-	// Get workflow steps using the existing systemDB method
-	steps, err := c.dbosCtx.systemDB.getWorkflowSteps(c.dbosCtx, req.WorkflowID)
+	// Get workflow steps using the public GetWorkflowSteps method
+	steps, err := GetWorkflowSteps(c.dbosCtx, req.WorkflowID)
 	if err != nil {
 		c.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflow steps: %v", err)
