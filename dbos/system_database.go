@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"math/rand"
 	"net/url"
 	"strings"
 	"sync"
@@ -134,8 +136,11 @@ const (
 	_DBOS_WORKFLOW_EVENTS_CHANNEL = "dbos_workflow_events_channel"
 
 	// Database retry timeouts
-	_DB_CONNECTION_RETRY_DELAY = 500 * time.Millisecond
-	_DB_RETRY_INTERVAL         = 1 * time.Second
+	_DB_CONNECTION_RETRY_BASE_DELAY  = 500 * time.Millisecond
+	_DB_CONNECTION_RETRY_FACTOR      = 2
+	_DB_CONNECTION_RETRY_MAX_RETRIES = 3
+	_DB_CONNECTION_MAX_DELAY         = 10000 * time.Millisecond
+	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
 func runMigrations(databaseURL string) error {
@@ -281,7 +286,7 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 	// Allow pgx health checks to complete
 	// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
 	// These trigger go-leak alerts
-	time.Sleep(_DB_CONNECTION_RETRY_DELAY)
+	time.Sleep(backoffWithJitter(0))
 
 	s.launched = false
 }
@@ -1496,6 +1501,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 		}
 	}
 
+	retryAttempt := 0
 	for {
 		// Block until a notification is received. OnNotification will be called when a notification is received.
 		// WaitForNotification handles context cancellation: https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgconn/pgconn.go#L1050
@@ -1514,9 +1520,9 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			}
 
 			// Other errors - log and retry.
-			// TODO add exponential backoff + jitter
 			s.logger.Error("Error waiting for notification", "error", err)
-			time.Sleep(_DB_CONNECTION_RETRY_DELAY)
+			time.Sleep(backoffWithJitter(retryAttempt))
+			retryAttempt += 1
 			continue
 		}
 	}
@@ -2316,4 +2322,20 @@ func (qb *queryBuilder) addWhereLessEqual(column string, value any) {
 	qb.argCounter++
 	qb.whereClauses = append(qb.whereClauses, fmt.Sprintf("%s <= $%d", column, qb.argCounter))
 	qb.args = append(qb.args, value)
+}
+
+func backoffWithJitter(retryAttempt int) (time.Duration) {
+	// cap backoff to max number of retries, then do a fixed time delay
+	// expected retryAttempt to initially be 0, so >= used
+	if retryAttempt >= _DB_CONNECTION_RETRY_MAX_RETRIES {
+		return _DB_CONNECTION_RETRY_BASE_DELAY
+	}
+	exp := float64(_DB_CONNECTION_RETRY_BASE_DELAY) * math.Pow(_DB_CONNECTION_RETRY_FACTOR, float64(retryAttempt))
+	// cap delay to maximum of _DB_CONNECTION_MAX_DELAY milliseconds
+	if exp > float64(_DB_CONNECTION_MAX_DELAY) {
+		exp = float64(_DB_CONNECTION_MAX_DELAY)
+	}
+
+	jitter := 0.5 + rand.Float64()
+	return time.Duration(exp + jitter)
 }
