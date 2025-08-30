@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand"
 	"net/url"
-	"rand"
 	"strings"
 	"sync"
 	"time"
@@ -136,11 +136,11 @@ const (
 	_DBOS_WORKFLOW_EVENTS_CHANNEL = "dbos_workflow_events_channel"
 
 	// Database retry timeouts
-	_DB_CONNECTION_RETRY_BASE_DELAY = 500 * time.Millisecond
-	_DB_CONNECTION_RETRY_FACTOR = 2
+	_DB_CONNECTION_RETRY_BASE_DELAY  = 500 * time.Millisecond
+	_DB_CONNECTION_RETRY_FACTOR      = 2
 	_DB_CONNECTION_RETRY_MAX_RETRIES = 3
-	_DB_CONNECTION_MAX_DELAY = 10 * time.Second
-	_DB_RETRY_INTERVAL         = 1 * time.Second
+	_DB_CONNECTION_MAX_DELAY         = 10000 * time.Millisecond
+	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
 func runMigrations(databaseURL string) error {
@@ -1520,7 +1520,6 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			}
 
 			// Other errors - log and retry.
-			// TODO add exponential backoff + jitter
 			s.logger.Error("Error waiting for notification", "error", err)
 			time.Sleep(backoffWithJitter(retryAttempt))
 			retryAttempt += 1
@@ -2325,16 +2324,18 @@ func (qb *queryBuilder) addWhereLessEqual(column string, value any) {
 	qb.args = append(qb.args, value)
 }
 
-
-func backoffWithJitter(retryAttempt int) time.Duration, error {
-	exp := float64(base) * math.Pow(_DB_CONNECTION_RETRY_FACTOR, float64(retryAttempt))
-	if retryAttempt > _DB_CONNECTION_RETRY_MAX_RETRIES {
-		return nil, errors.New("Too many retry attempts")
+func backoffWithJitter(retryAttempt int) (time.Duration) {
+	// cap backoff to max number of retries, then do a fixed time delay
+	// expected retryAttempt to initially be 0, so >= used
+	if retryAttempt >= _DB_CONNECTION_RETRY_MAX_RETRIES {
+		return _DB_CONNECTION_RETRY_BASE_DELAY
 	}
-	if exp > float64(_DB_CONNECTION_MAX_DELAY){
+	exp := float64(_DB_CONNECTION_RETRY_BASE_DELAY) * math.Pow(_DB_CONNECTION_RETRY_FACTOR, float64(retryAttempt))
+	// cap delay to maximum of _DB_CONNECTION_MAX_DELAY milliseconds
+	if exp > float64(_DB_CONNECTION_MAX_DELAY) {
 		exp = float64(_DB_CONNECTION_MAX_DELAY)
 	}
-	
-	jitter := 0.3 + rand.Float64()
-	return time.Duration(exp + jitter), nil
+
+	jitter := 0.5 + rand.Float64()
+	return time.Duration(exp + jitter)
 }
