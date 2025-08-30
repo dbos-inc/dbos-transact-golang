@@ -805,14 +805,13 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 7: Test sorting order (ascending - default)
 		ascWorkflows, err := ListWorkflows(clientCtx,
-			WithWorkflowIDPrefix("test-"),
-			WithSortDesc(false))
+			WithWorkflowIDPrefix("test-"))
 		require.NoError(t, err, "failed to list workflows ascending")
 
 		// Test 8: Test sorting order (descending)
 		descWorkflows, err := ListWorkflows(clientCtx,
 			WithWorkflowIDPrefix("test-"),
-			WithSortDesc(true))
+			WithSortDesc())
 		require.NoError(t, err, "failed to list workflows descending")
 
 		// Verify sorting - workflows should be ordered by creation time
