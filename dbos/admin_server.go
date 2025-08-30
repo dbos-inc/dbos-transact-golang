@@ -81,7 +81,7 @@ func (req *listWorkflowsRequest) toListWorkflowsOptions() []ListWorkflowsOption 
 		opts = append(opts, WithOffset(*req.Offset))
 	}
 	if req.SortDesc != nil {
-		opts = append(opts, WithSortDesc(*req.SortDesc))
+		opts = append(opts, WithSortDesc())
 	}
 	if req.WorkflowIDPrefix != nil {
 		opts = append(opts, WithWorkflowIDPrefix(*req.WorkflowIDPrefix))

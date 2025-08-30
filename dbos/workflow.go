@@ -1850,10 +1850,10 @@ func WithOffset(offset int) ListWorkflowsOption {
 // Example:
 //
 //	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithSortDesc(true))
-func WithSortDesc(sortDesc bool) ListWorkflowsOption {
+//	    dbos.WithSortDesc()
+func WithSortDesc() ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
-		p.sortDesc = sortDesc
+		p.sortDesc = true
 	}
 }
 
@@ -1970,7 +1970,7 @@ func WithExecutorIDs(executorIDs []string) ListWorkflowsOption {
 //	    dbos.WithUser("john.doe"),
 //	    dbos.WithOffset(50),
 //	    dbos.WithLimit(25),
-//	    dbos.WithSortDesc(true))
+//	    dbos.WithSortDesc()
 //	if err != nil {
 //	    log.Fatal(err)
 //	}

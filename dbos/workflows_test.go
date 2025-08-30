@@ -3525,7 +3525,7 @@ func TestGarbageCollect(t *testing.T) {
 		}
 
 		// Get timestamps for testing
-		workflows, err := ListWorkflows(dbosCtx, WithSortDesc(true))
+		workflows, err := ListWorkflows(dbosCtx, WithSortDesc())
 		require.NoError(t, err, "failed to list workflows")
 		require.Equal(t, numWorkflows, len(workflows))
 
@@ -3546,7 +3546,7 @@ func TestGarbageCollect(t *testing.T) {
 		})
 		require.NoError(t, err, "failed to garbage collect with threshold 6 and 7th newest timestamp")
 
-		workflows, err = ListWorkflows(dbosCtx, WithSortDesc(true))
+		workflows, err = ListWorkflows(dbosCtx, WithSortDesc())
 		require.NoError(t, err, "failed to list workflows after first GC")
 		require.Equal(t, threshold, len(workflows), "expected 6 workflows when threshold has more recent cutoff than timestamp")
 
@@ -3562,7 +3562,7 @@ func TestGarbageCollect(t *testing.T) {
 		})
 		require.NoError(t, err, "failed to garbage collect with threshold 3 and 2nd newest timestamp")
 
-		workflows, err = ListWorkflows(dbosCtx, WithSortDesc(true))
+		workflows, err = ListWorkflows(dbosCtx, WithSortDesc())
 		require.NoError(t, err, "failed to list workflows after second GC")
 		require.Equal(t, 2, len(workflows), "expected 2 workflows after second GC")
 		require.Equal(t, workflows[0].ID, handles[numWorkflows-1].GetWorkflowID(), "expected newest workflow to remain")
