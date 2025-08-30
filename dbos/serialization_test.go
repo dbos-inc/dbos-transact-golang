@@ -114,7 +114,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		assert.Equal(t, "workflow error: step error", workflow.Error.Error())
 
 		// Test results from GetWorkflowSteps
-		steps, err := executor.(*dbosContext).systemDB.getWorkflowSteps(context.Background(), directHandle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(executor, directHandle.GetWorkflowID())
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
 		step := steps[0]
@@ -175,7 +175,7 @@ func TestWorkflowEncoding(t *testing.T) {
 		assert.Equal(t, "processed by encodingStepStruct", workflowOutput.B)
 
 		// Test results from GetWorkflowSteps
-		steps, err := executor.(*dbosContext).systemDB.getWorkflowSteps(context.Background(), directHandle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(executor, directHandle.GetWorkflowID())
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
 		step := steps[0]

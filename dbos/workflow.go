@@ -2015,7 +2015,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	// Call the context method to list workflows
 	workflows, err := c.systemDB.listWorkflows(c, dbInput)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list workflows: %w", err)
+		return nil, err
 	}
 
 	return workflows, nil
@@ -2061,4 +2061,33 @@ func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStat
 		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.ListWorkflows(ctx, opts...)
+}
+
+func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error) {
+	return c.systemDB.getWorkflowSteps(c, workflowID)
+}
+
+// GetWorkflowSteps retrieves the execution steps of a workflow.
+// Returns a list of step information including step IDs, names, outputs, errors, and child workflow IDs.
+//
+// Parameters:
+//   - ctx: DBOS context for the operation
+//   - workflowID: The unique identifier of the workflow
+//
+// Returns a slice of StepInfo structs containing information about each executed step.
+//
+// Example:
+//
+//	steps, err := dbos.GetWorkflowSteps(ctx, "workflow-id")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	for _, step := range steps {
+//	    log.Printf("Step %d: %s", step.StepID, step.StepName)
+//	}
+func GetWorkflowSteps(ctx DBOSContext, workflowID string) ([]StepInfo, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.GetWorkflowSteps(ctx, workflowID)
 }

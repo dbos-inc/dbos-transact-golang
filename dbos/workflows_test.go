@@ -439,7 +439,7 @@ func TestSteps(t *testing.T) {
 		require.NoError(t, err, "failed to get result from step within a step")
 		assert.Equal(t, "from step", result)
 
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to list steps")
 		require.Len(t, steps, 1, "expected 1 step, got %d", len(steps))
 	})
@@ -476,7 +476,7 @@ func TestSteps(t *testing.T) {
 		}
 
 		// Verify that the failed step was still recorded in the database
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
 
 		require.Len(t, steps, 2, "expected 2 recorded steps")
@@ -505,7 +505,7 @@ func TestSteps(t *testing.T) {
 		require.NoError(t, err, "failed to get result from testStepWf2")
 
 		// Get workflow steps for first workflow and check step name
-		steps1, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle1.GetWorkflowID())
+		steps1, err := GetWorkflowSteps(dbosCtx, handle1.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for testStepWf1")
 		require.Len(t, steps1, 1, "expected 1 step in testStepWf1")
 		s1 := steps1[0]
@@ -513,7 +513,7 @@ func TestSteps(t *testing.T) {
 		assert.Equal(t, expectedStepName1, s1.StepName, "expected step name to match runtime function name")
 
 		// Get workflow steps for second workflow and check step name
-		steps2, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle2.GetWorkflowID())
+		steps2, err := GetWorkflowSteps(dbosCtx, handle2.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for testStepWf2")
 		require.Len(t, steps2, 1, "expected 1 step in testStepWf2")
 		s2 := steps2[0]
@@ -554,7 +554,7 @@ func TestSteps(t *testing.T) {
 		assert.Equal(t, "custom-step-1-result-custom-step-2-result", result)
 
 		// Verify the custom step names were recorded
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
 		require.Len(t, steps, 2, "expected 2 steps")
 
@@ -615,7 +615,7 @@ func TestChildWorkflow(t *testing.T) {
 		}
 
 		// Check the steps from this workflow
-		steps, err := ctx.(*dbosContext).systemDB.getWorkflowSteps(ctx, workflowID)
+		steps, err := GetWorkflowSteps(ctx, workflowID)
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow steps: %w", err)
 		}
@@ -692,7 +692,7 @@ func TestChildWorkflow(t *testing.T) {
 
 		}
 		// Check the steps from this workflow
-		steps, err := ctx.(*dbosContext).systemDB.getWorkflowSteps(ctx, workflowID)
+		steps, err := GetWorkflowSteps(ctx, workflowID)
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow steps: %w", err)
 		}
@@ -789,7 +789,7 @@ func TestChildWorkflow(t *testing.T) {
 		require.Equal(t, "from step", result)
 
 		// Verify the child workflow was recorded as step 0
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, parentHandle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, parentHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
 		require.Len(t, steps, 2, "expected 2 recorded steps, got %d", len(steps))
 
@@ -1044,7 +1044,7 @@ func TestWorkflowRecovery(t *testing.T) {
 
 		// Verify step states before recovery
 		for i := range numWorkflows {
-			steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handles[i].GetWorkflowID())
+			steps, err := GetWorkflowSteps(dbosCtx, handles[i].GetWorkflowID())
 			require.NoError(t, err, "failed to get steps for workflow %d", i)
 			require.Len(t, steps, 1, "expected 1 completed step for workflow %d before recovery", i)
 
@@ -1113,7 +1113,7 @@ func TestWorkflowRecovery(t *testing.T) {
 
 		// Final verification of step states
 		for i := range numWorkflows {
-			steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handles[i].GetWorkflowID())
+			steps, err := GetWorkflowSteps(dbosCtx, handles[i].GetWorkflowID())
 			require.NoError(t, err, "failed to get final steps for workflow %d", i)
 			require.Len(t, steps, 2, "expected 2 steps for workflow %d", i)
 
@@ -1486,7 +1486,7 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, "message1-message2-message3", result)
 
 		// Verify step counting for send workflow (sendWorkflow calls Send 3 times)
-		sendSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		sendSteps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for send workflow")
 		require.Len(t, sendSteps, 3, "expected 3 steps in send workflow (3 Send calls), got %d", len(sendSteps))
 		for i, step := range sendSteps {
@@ -1495,7 +1495,7 @@ func TestSendRecv(t *testing.T) {
 		}
 
 		// Verify step counting for receive workflow (receiveWorkflow calls Recv 3 times)
-		receiveSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
+		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for receive workflow")
 		require.Len(t, receiveSteps, 3, "expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
 		for i, step := range receiveSteps {
@@ -1527,14 +1527,14 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, "test-struct-value", result.Value)
 
 		// Verify step counting for sendStructWorkflow (calls Send 1 time)
-		sendSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, sendHandle.GetWorkflowID())
+		sendSteps, err := GetWorkflowSteps(dbosCtx, sendHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for send struct workflow")
 		require.Len(t, sendSteps, 1, "expected 1 step in send struct workflow (1 Send call), got %d", len(sendSteps))
 		require.Equal(t, 0, sendSteps[0].StepID)
 		require.Equal(t, "DBOS.send", sendSteps[0].StepName)
 
 		// Verify step counting for receiveStructWorkflow (calls Recv 1 time)
-		receiveSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
+		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for receive struct workflow")
 		require.Len(t, receiveSteps, 1, "expected 1 step in receive struct workflow (1 Recv call), got %d", len(receiveSteps))
 		require.Equal(t, 0, receiveSteps[0].StepID)
@@ -1604,7 +1604,7 @@ func TestSendRecv(t *testing.T) {
 		assert.Equal(t, "message1-message2-message3", result, "expected correct result from receive workflow")
 
 		// Verify step counting for receive workflow (calls Recv 3 times)
-		receiveSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
+		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for receive workflow")
 		require.Len(t, receiveSteps, 3, "expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
 		for i, step := range receiveSteps {
@@ -1631,13 +1631,13 @@ func TestSendRecv(t *testing.T) {
 		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.NoError(t, err, "failed to recover pending workflows")
 		require.Len(t, recoveredHandles, 2, "expected 2 recovered handles, got %d", len(recoveredHandles))
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, sendHandle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, sendHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
 		require.Len(t, steps, 1, "expected 1 step in send idempotency workflow, got %d", len(steps))
 		assert.Equal(t, 0, steps[0].StepID, "expected send idempotency step to have StepID 0")
 		assert.Equal(t, "DBOS.send", steps[0].StepName, "expected send idempotency step to have StepName 'DBOS.send'")
 
-		steps, err = dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
+		steps, err = GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get steps for receive idempotency workflow")
 		require.Len(t, steps, 1, "expected 1 step in receive idempotency workflow, got %d", len(steps))
 		assert.Equal(t, 0, steps[0].StepID, "expected receive idempotency step to have StepID 0")
@@ -2001,7 +2001,7 @@ func TestSetGetEvent(t *testing.T) {
 		assert.Equal(t, "two-events-set", result, "expected result to be 'two-events-set'")
 
 		// Verify step counting for setTwoEventsWorkflow (calls SetEvent 2 times)
-		setSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
+		setSteps, err := GetWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for set two events workflow")
 		require.Len(t, setSteps, 2, "expected 2 steps in set two events workflow (2 SetEvent calls), got %d", len(setSteps))
 		for i, step := range setSteps {
@@ -2010,14 +2010,14 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Verify step counting for getFirstEventHandle (calls GetEvent 1 time)
-		getFirstSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, getFirstEventHandle.GetWorkflowID())
+		getFirstSteps, err := GetWorkflowSteps(dbosCtx, getFirstEventHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for get first event workflow")
 		require.Len(t, getFirstSteps, 1, "expected 1 step in get first event workflow (1 GetEvent call), got %d", len(getFirstSteps))
 		assert.Equal(t, 0, getFirstSteps[0].StepID, "expected step to have StepID 0")
 		assert.Equal(t, "DBOS.getEvent", getFirstSteps[0].StepName, "expected step to have StepName 'DBOS.getEvent'")
 
 		// Verify step counting for getSecondEventHandle (calls GetEvent 1 time)
-		getSecondSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, getSecondEventHandle.GetWorkflowID())
+		getSecondSteps, err := GetWorkflowSteps(dbosCtx, getSecondEventHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for get second event workflow")
 		require.Len(t, getSecondSteps, 1, "expected 1 step in get second event workflow (1 GetEvent call), got %d", len(getSecondSteps))
 		assert.Equal(t, 0, getSecondSteps[0].StepID, "expected step to have StepID 0")
@@ -2050,7 +2050,7 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Verify step counting for setEventWorkflow (calls SetEvent 1 time)
-		setSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
+		setSteps, err := GetWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get workflow steps for set event workflow: %v", err)
 		}
@@ -2136,7 +2136,7 @@ func TestSetGetEvent(t *testing.T) {
 		setEventStartIdempotencyEvent.Wait()
 
 		// Verify step counts
-		setSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
+		setSteps, err := GetWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for set event idempotency workflow: %v", err)
 		}
@@ -2148,7 +2148,7 @@ func TestSetGetEvent(t *testing.T) {
 			t.Fatalf("expected set event idempotency step to have StepName 'DBOS.setEvent', got '%s'", setSteps[0].StepName)
 		}
 
-		getSteps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, getHandle.GetWorkflowID())
+		getSteps, err := GetWorkflowSteps(dbosCtx, getHandle.GetWorkflowID())
 		if err != nil {
 			t.Fatalf("failed to get steps for get event idempotency workflow: %v", err)
 		}
@@ -2292,7 +2292,7 @@ func TestSleep(t *testing.T) {
 		assert.Less(t, elapsed, sleepDuration, "expected elapsed time to be less than sleep duration")
 
 		// Verify the sleep step was recorded correctly
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
 
 		require.Len(t, steps, 1, "expected 1 step (the sleep), got %d", len(steps))
