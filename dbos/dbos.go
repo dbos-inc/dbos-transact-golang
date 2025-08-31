@@ -327,7 +327,7 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 		if err == nil {
 			break
 		}
-		initExecutor.logger.Warn("Failed to connect to system DB (attempt %d/%d): %v", attempt, maxRetries, err)
+		initExecutor.logger.Warn("Failed to connect to system DB", "attempt", attempt, "maxRetries", maxRetries, "error", err)
 
 		if attempt < maxRetries {
 			time.Sleep(retryDelay)
