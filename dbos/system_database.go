@@ -2324,7 +2324,7 @@ func (qb *queryBuilder) addWhereLessEqual(column string, value any) {
 	qb.args = append(qb.args, value)
 }
 
-func backoffWithJitter(retryAttempt int) (time.Duration) {
+func backoffWithJitter(retryAttempt int) time.Duration {
 	// cap backoff to max number of retries, then do a fixed time delay
 	// expected retryAttempt to initially be 0, so >= used
 	if retryAttempt >= _DB_CONNECTION_RETRY_MAX_RETRIES {
@@ -2336,6 +2336,7 @@ func backoffWithJitter(retryAttempt int) (time.Duration) {
 		exp = float64(_DB_CONNECTION_MAX_DELAY)
 	}
 
-	jitter := 0.5 + rand.Float64()
-	return time.Duration(exp + jitter)
+	// want randomization between +-25% of exp
+	jitter := 0.75 + rand.Float64()*0.5
+	return time.Duration(exp * jitter)
 }
