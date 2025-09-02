@@ -20,14 +20,14 @@ var startCmd = &cobra.Command{
 func runStart(cmd *cobra.Command, args []string) error {
 	// Check if config is loaded
 	if config == nil {
-		return fmt.Errorf("failed to load config: dbos-config.yaml not found")
+		return fmt.Errorf("no config provided")
 	}
 
 	if len(config.RuntimeConfig.Start) == 0 {
-		return fmt.Errorf("no start commands found in 'dbos-config.yaml'")
+		return fmt.Errorf("no start commands found in config file")
 	}
 
-	logger.Info("Executing start commands from 'dbos-config.yaml'")
+	logger.Info("Executing start commands from config file")
 
 	for _, command := range config.RuntimeConfig.Start {
 		logger.Info("Executing command", "command", command)
@@ -74,14 +74,14 @@ func runStart(cmd *cobra.Command, args []string) error {
 			}
 		case sig := <-sigChan:
 			logger.Info("Received signal, stopping...", "signal", sig)
-			
+
 			// Kill the process group on Unix-like systems
 			if runtime.GOOS != "windows" {
 				syscall.Kill(-process.Process.Pid, syscall.SIGTERM)
 			} else {
 				process.Process.Kill()
 			}
-			
+
 			// Wait a bit for graceful shutdown
 			select {
 			case <-done:
@@ -91,7 +91,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 					syscall.Kill(-process.Process.Pid, syscall.SIGKILL)
 				}
 			}
-			
+
 			os.Exit(0)
 		}
 	}

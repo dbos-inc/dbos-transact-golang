@@ -16,6 +16,7 @@ func maskPassword(dbURL string) string {
 	parsedURL, err := url.Parse(dbURL)
 	if err != nil {
 		// If we can't parse it, return the original (shouldn't happen with valid URLs)
+		logger.Warn("Failed to parse database URL", "error", err)
 		return dbURL
 	}
 
@@ -57,7 +58,7 @@ func getDBURL(_ *cobra.Command) (string, error) {
 		resolvedURL = envURL
 		source = "environment variable"
 	} else {
-		return "", fmt.Errorf("missing database URL: please set it using the --db-url flag, the DBOS_SYSTEM_DATABASE_URL environment variable, or in your dbos-config.yaml file")
+		return "", fmt.Errorf("missing database URL: please set it using the --db-url flag, your dbos-config.yaml file, or the DBOS_SYSTEM_DATABASE_URL environment variable")
 	}
 
 	// Log the database URL in verbose mode with masked password
@@ -71,12 +72,7 @@ func getDBURL(_ *cobra.Command) (string, error) {
 
 // createDBOSContext creates a new DBOS context with the provided database URL
 func createDBOSContext(dbURL string) (dbos.DBOSContext, error) {
-	// TODO consider removing the CLI flag app-name entirely?
 	appName := "dbos-cli"
-	if viper.IsSet("name") {
-		appName = viper.GetString("name")
-	}
-
 	ctx, err := dbos.NewDBOSContext(dbos.Config{
 		DatabaseURL: dbURL,
 		AppName:     appName,
