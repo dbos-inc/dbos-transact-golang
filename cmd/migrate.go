@@ -18,12 +18,10 @@ var migrateCmd = &cobra.Command{
 }
 
 var (
-	systemDatabaseURL string
-	applicationRole   string
+	applicationRole string
 )
 
 func init() {
-	migrateCmd.Flags().StringVarP(&systemDatabaseURL, "sys-db-url", "s", "", "Your DBOS system database URL")
 	migrateCmd.Flags().StringVarP(&applicationRole, "app-role", "r", "", "The role with which you will run your DBOS application")
 }
 
