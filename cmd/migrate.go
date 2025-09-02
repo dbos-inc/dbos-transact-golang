@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -51,8 +52,13 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 		for _, command := range config.Database.Migrate {
 			logger.Info("Executing migration command", "command", command)
 
-			cmd := exec.Command("sh", "-c", command)
-			output, err := cmd.CombinedOutput()
+			var process *exec.Cmd
+			if runtime.GOOS == "windows" {
+				process = exec.Command("cmd", "/C", command)
+			} else {
+				process = exec.Command("sh", "-c", command)
+			}
+			output, err := process.CombinedOutput()
 			if err != nil {
 				return fmt.Errorf("migration command failed: %s\nOutput: %s", err, output)
 			}
