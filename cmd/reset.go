@@ -77,7 +77,10 @@ func runReset(cmd *cobra.Command, args []string) error {
 		WHERE datname = '%s' AND pid <> pg_backend_pid()
 	`, dbName)
 
-	_, _ = db.Exec(terminateQuery) // Ignore errors, database might not exist
+	_, err = db.Exec(terminateQuery) // Ignore errors, database might not exist
+	if err != nil {
+		logger.Warn("Failed to terminate existing connections", "error", err)
+	}
 
 	// Drop the database if it exists
 	dropQuery := fmt.Sprintf("DROP DATABASE IF EXISTS %s", dbName)
