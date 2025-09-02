@@ -36,6 +36,7 @@ type Config struct {
 	AppName            string       // Application name for identification (required)
 	Logger             *slog.Logger // Custom logger instance (defaults to a new slog logger)
 	AdminServer        bool         // Enable Transact admin HTTP server (disabled by default)
+	AdminServerPort    int          // Port for the admin HTTP server (default: 3001)
 	ConductorURL       string       // DBOS conductor service URL (optional)
 	ConductorAPIKey    string       // DBOS conductor API key (optional)
 	ApplicationVersion string       // Application version (optional, overridden by DBOS__APPVERSION env var)
@@ -51,12 +52,16 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	if len(inputConfig.AppName) == 0 {
 		return nil, fmt.Errorf("missing required config field: appName")
 	}
+	if inputConfig.AdminServerPort == 0 {
+	    inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
+	}
 
 	dbosConfig := &Config{
 		DatabaseURL:        inputConfig.DatabaseURL,
 		AppName:            inputConfig.AppName,
 		Logger:             inputConfig.Logger,
 		AdminServer:        inputConfig.AdminServer,
+		AdminServerPort:    inputConfig.AdminServerPort,
 		ConductorURL:       inputConfig.ConductorURL,
 		ConductorAPIKey:    inputConfig.ConductorAPIKey,
 		ApplicationVersion: inputConfig.ApplicationVersion,
@@ -388,13 +393,13 @@ func (c *dbosContext) Launch() error {
 
 	// Start the admin server if configured
 	if c.config.AdminServer {
-		adminServer := newAdminServer(c, _DEFAULT_ADMIN_SERVER_PORT)
+		adminServer := newAdminServer(c, c.config.AdminServerPort)
 		err := adminServer.Start()
 		if err != nil {
 			c.logger.Error("Failed to start admin server", "error", err)
 			return newInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
 		}
-		c.logger.Info("Admin server started", "port", _DEFAULT_ADMIN_SERVER_PORT)
+		c.logger.Info("Admin server started", "port", c.config.AdminServerPort)
 		c.adminServer = adminServer
 	}
 
