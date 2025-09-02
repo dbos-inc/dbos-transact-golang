@@ -140,27 +140,34 @@ const (
 
 func runMigrations(databaseURL string) error {
 	// Change the driver to pgx5
-	databaseURL = "pgx5://" + strings.TrimPrefix(databaseURL, "postgres://")
-
-	// Create migration source from embedded files
-	d, err := iofs.New(migrationFiles, "migrations")
-	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to create migration source: %v", err))
-	}
-
-	// Add custom migration table name to avoid conflicts with user migrations
-	// Parse the URL to properly determine where to add the query parameter
 	parsedURL, err := url.Parse(databaseURL)
 	if err != nil {
 		return newInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
 	}
+	// Handle various PostgreSQL URL schemes
+	switch parsedURL.Scheme {
+	case "postgres", "postgresql":
+		parsedURL.Scheme = "pgx5"
+	case "pgx5":
+		// Already in correct format
+	default:
+		return newInitializationError(fmt.Sprintf("unsupported database URL scheme: %s", parsedURL.Scheme))
+	}
+	databaseURL = parsedURL.String()
 
+	// Add custom migration table name to avoid conflicts with user migrations
 	// Check if query parameters already exist
 	separator := "?"
 	if parsedURL.RawQuery != "" {
 		separator = "&"
 	}
 	databaseURL += separator + "x-migrations-table=" + _DBOS_MIGRATION_TABLE
+
+	// Create migration source from embedded files
+	d, err := iofs.New(migrationFiles, "migrations")
+	if err != nil {
+		return newInitializationError(fmt.Sprintf("failed to create migration source: %v", err))
+	}
 
 	// Create migrator
 	m, err := migrate.NewWithSourceInstance("iofs", d, databaseURL)
