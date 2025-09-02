@@ -30,7 +30,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 	if !skipConfirmation {
 		prompt := "This command resets your DBOS system database, deleting metadata about past workflows and steps. Are you sure you want to proceed?"
 		if !confirmAction(prompt) {
-			fmt.Println("Operation cancelled.")
+			logger.Info("Operation cancelled.")
 			return nil
 		}
 	}
@@ -68,7 +68,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 	defer db.Close()
 
 	// Drop the system database if it exists
-	fmt.Printf("Resetting system database: %s\n", dbName)
+	logger.Info("Resetting system database", "database", dbName)
 
 	// First, terminate all connections to the database
 	terminateQuery := fmt.Sprintf(`
@@ -91,6 +91,6 @@ func runReset(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create system database: %w", err)
 	}
 
-	fmt.Printf("System database %s has been reset successfully.\n", dbName)
+	logger.Info("System database has been reset successfully", "database", dbName)
 	return nil
 }

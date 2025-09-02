@@ -63,7 +63,7 @@ func getDBURL(_ *cobra.Command) (string, error) {
 	// Log the database URL in verbose mode with masked password
 	if verbose {
 		maskedURL := maskPassword(resolvedURL)
-		fmt.Fprintf(os.Stderr, "Using database URL from %s: %s\n", source, maskedURL)
+		logger.Debug("Using database URL", "source", source, "url", maskedURL)
 	}
 
 	return resolvedURL, nil

@@ -147,7 +147,7 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 	}
 
 	if sortDesc, _ := cmd.Flags().GetBool("sort-desc"); sortDesc {
-		opts = append(opts, dbos.WithSortDesc(true))
+		opts = append(opts, dbos.WithSortDesc())
 	}
 
 	if startTime, _ := cmd.Flags().GetString("start-time"); startTime != "" {
@@ -184,7 +184,7 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 
 	// Pretty print for non-JSON output
 	if len(workflows) == 0 {
-		fmt.Println("No workflows found")
+		logger.Info("No workflows found")
 		return nil
 	}
 
@@ -276,7 +276,7 @@ func runWorkflowCancel(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to cancel workflow: %w", err)
 	}
-	fmt.Printf("Successfully cancelled workflow %s\n", workflowID)
+	logger.Info("Successfully cancelled workflow", "id", workflowID)
 	return nil
 }
 
@@ -311,8 +311,7 @@ func runWorkflowResume(cmd *cobra.Command, args []string) error {
 		return outputJSON(status)
 	}
 
-	fmt.Printf("Successfully resumed workflow %s\n", workflowID)
-	fmt.Printf("Current status: %s\n", status.Status)
+	logger.Info("Successfully resumed workflow", "id", workflowID, "status", status.Status)
 	return nil
 }
 

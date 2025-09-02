@@ -64,7 +64,7 @@ func checkDockerInstalled() bool {
 }
 
 func startDockerPostgres() error {
-	fmt.Println("Attempting to create a Docker Postgres container...")
+	logger.Info("Attempting to create a Docker Postgres container...")
 
 	if !checkDockerInstalled() {
 		return fmt.Errorf("Docker not detected locally. Please install Docker to use this feature")
@@ -88,14 +88,14 @@ func startDockerPostgres() error {
 		for _, name := range c.Names {
 			if name == "/"+containerName {
 				if c.State == "running" {
-					fmt.Printf("Container '%s' is already running.\n", containerName)
+					logger.Info("Container is already running", "container", containerName)
 					return nil
 				} else if c.State == "exited" {
 					// Start the existing container
 					if err := cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
 						return fmt.Errorf("failed to start existing container: %w", err)
 					}
-					fmt.Printf("Container '%s' was stopped and has been restarted.\n", containerName)
+					logger.Info("Container was stopped and has been restarted", "container", containerName)
 					return waitForPostgres()
 				}
 			}
@@ -119,7 +119,7 @@ func startDockerPostgres() error {
 	}
 
 	if !imageExists {
-		fmt.Printf("Pulling Docker image %s...\n", imageName)
+		logger.Info("Pulling Docker image", "image", imageName)
 		reader, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to pull image: %w", err)
@@ -167,19 +167,19 @@ func startDockerPostgres() error {
 		return fmt.Errorf("failed to start container: %w", err)
 	}
 
-	fmt.Printf("Created container: %s\n", resp.ID[:12])
+	logger.Info("Created container", "id", resp.ID[:12])
 
 	// Wait for PostgreSQL to be ready
 	if err := waitForPostgres(); err != nil {
 		return err
 	}
 
-	fmt.Printf("Postgres available at postgresql://postgres:%s@localhost:5432\n", password)
+	logger.Info("Postgres available", "url", fmt.Sprintf("postgresql://postgres:%s@localhost:5432", password))
 	return nil
 }
 
 func stopDockerPostgres() error {
-	fmt.Printf("Stopping Docker Postgres container %s...\n", containerName)
+	logger.Info("Stopping Docker Postgres container", "container", containerName)
 
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
@@ -203,22 +203,22 @@ func stopDockerPostgres() error {
 					if err := cli.ContainerStop(ctx, c.ID, container.StopOptions{}); err != nil {
 						return fmt.Errorf("failed to stop container: %w", err)
 					}
-					fmt.Printf("Successfully stopped Docker Postgres container %s.\n", containerName)
+					logger.Info("Successfully stopped Docker Postgres container", "container", containerName)
 					return nil
 				} else {
-					fmt.Printf("Container %s exists but is not running.\n", containerName)
+					logger.Info("Container exists but is not running", "container", containerName)
 					return nil
 				}
 			}
 		}
 	}
 
-	fmt.Printf("Container %s does not exist.\n", containerName)
+	logger.Info("Container does not exist", "container", containerName)
 	return nil
 }
 
 func waitForPostgres() error {
-	fmt.Println("Waiting for Postgres Docker container to start...")
+	logger.Info("Waiting for Postgres Docker container to start...")
 
 	password := os.Getenv("PGPASSWORD")
 	if password == "" {
@@ -230,7 +230,7 @@ func waitForPostgres() error {
 	// Try for up to 30 seconds
 	for i := 0; i < 30; i++ {
 		if i%5 == 0 && i > 0 {
-			fmt.Println("Still waiting for Postgres Docker container to start...")
+			logger.Info("Still waiting for Postgres Docker container to start...")
 		}
 
 		db, err := sql.Open("pgx", connStr)

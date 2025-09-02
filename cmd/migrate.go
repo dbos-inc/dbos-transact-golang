@@ -47,9 +47,9 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 
 	// Run custom migration commands from config if present
 	if config != nil && len(config.Database.Migrate) > 0 {
-		fmt.Println("Executing migration commands from 'dbos-config.yaml'")
+		logger.Info("Executing migration commands from 'dbos-config.yaml'")
 		for _, command := range config.Database.Migrate {
-			fmt.Printf("Executing migration command: %s\n", command)
+			logger.Info("Executing migration command", "command", command)
 
 			cmd := exec.Command("sh", "-c", command)
 			output, err := cmd.CombinedOutput()
@@ -57,17 +57,17 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("migration command failed: %s\nOutput: %s", err, output)
 			}
 			if len(output) > 0 {
-				fmt.Print(string(output))
+				logger.Info("Migration output", "output", string(output))
 			}
 		}
 	}
 
-	fmt.Println("DBOS migrations completed successfully")
+	logger.Info("DBOS migrations completed successfully")
 	return nil
 }
 
 func grantDBOSSchemaPermissions(databaseURL, roleName string) error {
-	fmt.Printf("Granting permissions for DBOS schema to %s\n", roleName)
+	logger.Info("Granting permissions for DBOS schema", "role", roleName)
 
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
@@ -90,7 +90,7 @@ func grantDBOSSchemaPermissions(databaseURL, roleName string) error {
 	}
 
 	for _, query := range queries {
-		fmt.Println(query)
+		logger.Debug("Executing grant query", "query", query)
 		if _, err := db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("failed to execute grant: %w", err)
 		}

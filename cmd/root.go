@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 
@@ -64,10 +63,6 @@ func initConfig() {
 		var cfg Config
 		if err := viper.Unmarshal(&cfg); err == nil {
 			config = &cfg
-			if verbose {
-				fmt.Printf("Successfully loaded config file from: %s\n", viper.ConfigFileUsed())
-				fmt.Println(viper.AllSettings())
-			}
 		}
 	}
 }

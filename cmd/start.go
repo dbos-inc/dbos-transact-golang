@@ -27,10 +27,10 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no start commands found in 'dbos-config.yaml'")
 	}
 
-	fmt.Println("Executing start commands from 'dbos-config.yaml'")
+	logger.Info("Executing start commands from 'dbos-config.yaml'")
 
 	for _, command := range config.RuntimeConfig.Start {
-		fmt.Printf("Executing: %s\n", command)
+		logger.Info("Executing command", "command", command)
 
 		// Create the command
 		var process *exec.Cmd
@@ -73,7 +73,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("command failed: %w", err)
 			}
 		case sig := <-sigChan:
-			fmt.Printf("\nReceived signal %v, stopping...\n", sig)
+			logger.Info("Received signal, stopping...", "signal", sig)
 			
 			// Kill the process group on Unix-like systems
 			if runtime.GOOS != "windows" {

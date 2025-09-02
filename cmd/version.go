@@ -1,9 +1,6 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-
 	"github.com/spf13/cobra"
 )
 
@@ -15,14 +12,9 @@ var versionCmd = &cobra.Command{
 	Short: "Show the version and exit",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if jsonOutput {
-			output := map[string]string{"version": Version}
-			data, err := json.Marshal(output)
-			if err != nil {
-				return err
-			}
-			fmt.Println(string(data))
+			return outputJSON(map[string]string{"version": Version})
 		} else {
-			fmt.Printf("DBOS CLI version: %s\n", Version)
+			logger.Info("DBOS CLI version", "version", Version)
 		}
 		return nil
 	},
