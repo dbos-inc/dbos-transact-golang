@@ -106,15 +106,15 @@ type DBOSContext interface {
 	Shutdown(timeout time.Duration) // Gracefully shutdown all DBOS runtime components with ordered cleanup sequence
 
 	// Workflow operations
-	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                        // Execute a function as a durable step within a workflow
+	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
 	RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
-	Send(_ DBOSContext, destinationID string, message any, topic string) error                                    // Send a message to another workflow
-	Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error)                                         // Receive a message sent to this workflow
-	SetEvent(_ DBOSContext, key string, message any) error                                                        // Set a key-value event for this workflow
-	GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error)              // Get a key-value event from a target workflow
-	Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error)                                           // Durable sleep that survives workflow recovery
-	GetWorkflowID() (string, error)                                                                               // Get the current workflow ID (only available within workflows)
-	GetStepID() (int, error)                                                                                      // Get the current step ID (only available within workflows)
+	Send(_ DBOSContext, destinationID string, message any, topic string) error                                  // Send a message to another workflow
+	Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error)                                       // Receive a message sent to this workflow
+	SetEvent(_ DBOSContext, key string, message any) error                                                      // Set a key-value event for this workflow
+	GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error)            // Get a key-value event from a target workflow
+	Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error)                                         // Durable sleep that survives workflow recovery
+	GetWorkflowID() (string, error)                                                                             // Get the current workflow ID (only available within workflows)
+	GetStepID() (int, error)                                                                                    // Get the current step ID (only available within workflows)
 
 	// Workflow management
 	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                       // Get a handle to an existing workflow
@@ -123,6 +123,7 @@ type DBOSContext interface {
 	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                         // Resume a cancelled workflow
 	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)                                     // Fork a workflow from a specific step
 	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                                   // List workflows based on filtering criteria
+	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)                                                // Get the execution steps of a workflow
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -333,7 +334,6 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 
 	// Initialize the queue runner and register DBOS internal queue
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
-	NewWorkflowQueue(initExecutor, _DBOS_INTERNAL_QUEUE_NAME)
 
 	// Initialize conductor if API key is provided
 	if config.ConductorAPIKey != "" {
@@ -388,6 +388,7 @@ func (c *dbosContext) Launch() error {
 	}
 
 	// Start the queue runner in a goroutine
+	NewWorkflowQueue(c, _DBOS_INTERNAL_QUEUE_NAME)
 	go func() {
 		c.queueRunner.run(c)
 	}()
