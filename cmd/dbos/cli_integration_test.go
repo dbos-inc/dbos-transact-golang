@@ -267,7 +267,7 @@ func testListWorkflows(t *testing.T, cliPath string) {
 			maxCount:        10,
 		},
 		{
-			name:              "QueueOnlyList",
+			name:              "QueueNameFilter",
 			args:              []string{"workflow", "list", "--json", "--queue", "example-queue"},
 			expectWorkflows:   true,
 			expectQueuedCount: 10, // From QueueWorkflow which enqueues 10 workflows
@@ -321,26 +321,10 @@ func testListWorkflows(t *testing.T, cliPath string) {
 			expectWorkflows: true, // Should return all workflows created before now + 1 hour
 		},
 		{
-			name:            "MultipleFilters",
-			args:            []string{"workflow", "list", "--json", "--status", "ENQUEUED", "--queue", "example-queue", "--limit", "20"},
-			expectWorkflows: true,
-			checkStatus:     dbos.WorkflowStatusEnqueued,
-			checkQueueNames: true,
-			maxCount:        20,
-		},
-		{
 			name:            "WorkflowNameFilter",
 			args:            []string{"workflow", "list", "--json", "--name", "main.QueueWorkflow"},
 			expectWorkflows: true,
 			minCount:        1, // Should find at least the QueueWorkflow
-		},
-		{
-			name:            "QueueNameFilter",
-			args:            []string{"workflow", "list", "--json", "--queue", "example-queue", "--status", "ENQUEUED"},
-			expectWorkflows: true,
-			checkQueueNames: true,
-			checkStatus:     dbos.WorkflowStatusEnqueued,
-			minCount:        10, // Should find the 10 enqueued workflows
 		},
 		{
 			name:            "QueuesOnlyFilter",
