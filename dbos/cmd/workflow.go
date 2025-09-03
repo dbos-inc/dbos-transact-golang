@@ -26,13 +26,12 @@ var workflowGetCmd = &cobra.Command{
 	RunE:  runWorkflowGet,
 }
 
-// Steps command is currently not implemented as the method is internal
-// var workflowStepsCmd = &cobra.Command{
-// 	Use:   "steps [workflow-id]",
-// 	Short: "List the steps of a workflow",
-// 	Args:  cobra.ExactArgs(1),
-// 	RunE:  runWorkflowSteps,
-// }
+var workflowStepsCmd = &cobra.Command{
+	Use:   "steps [workflow-id]",
+	Short: "List the steps of a workflow",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runWorkflowSteps,
+}
 
 var workflowCancelCmd = &cobra.Command{
 	Use:   "cancel [workflow-id]",
@@ -59,7 +58,7 @@ func init() {
 	// Add subcommands to workflow
 	workflowCmd.AddCommand(workflowListCmd)
 	workflowCmd.AddCommand(workflowGetCmd)
-	// workflowCmd.AddCommand(workflowStepsCmd) // Not implemented - internal method
+	workflowCmd.AddCommand(workflowStepsCmd)
 	workflowCmd.AddCommand(workflowCancelCmd)
 	workflowCmd.AddCommand(workflowResumeCmd)
 	workflowCmd.AddCommand(workflowForkCmd)
@@ -250,11 +249,60 @@ func runWorkflowGet(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// Steps function is not implemented as the method is internal
-// func runWorkflowSteps(cmd *cobra.Command, args []string) error {
-// 	// Implementation would go here
-// 	return nil
-// }
+func runWorkflowSteps(cmd *cobra.Command, args []string) error {
+	workflowID := args[0]
+
+	// Get database URL
+	dbURL, err := getDBURL(cmd)
+	if err != nil {
+		return err
+	}
+
+	// Create DBOS context
+	ctx, err := createDBOSContext(dbURL)
+	if err != nil {
+		return err
+	}
+
+	// Get workflow steps
+	steps, err := dbos.GetWorkflowSteps(ctx, workflowID)
+	if err != nil {
+		return fmt.Errorf("failed to get workflow steps: %w", err)
+	}
+
+	// Ensure we have a non-nil slice for JSON output
+	if steps == nil {
+		steps = []dbos.StepInfo{}
+	}
+
+	// Output results
+	if jsonOutput {
+		return outputJSON(steps)
+	}
+
+	// Pretty print for non-JSON output
+	if len(steps) == 0 {
+		logger.Info("No steps found for workflow", "id", workflowID)
+		return nil
+	}
+
+	fmt.Printf("Steps for workflow %s:\n\n", workflowID)
+	for _, step := range steps {
+		fmt.Printf("Step %d: %s\n", step.StepID, step.StepName)
+		if step.Output != nil {
+			fmt.Printf("  Output: %v\n", step.Output)
+		}
+		if step.Error != nil {
+			fmt.Printf("  Error: %v\n", step.Error)
+		}
+		if step.ChildWorkflowID != "" {
+			fmt.Printf("  Child Workflow: %s\n", step.ChildWorkflowID)
+		}
+		fmt.Println()
+	}
+
+	return nil
+}
 
 func runWorkflowCancel(cmd *cobra.Command, args []string) error {
 	workflowID := args[0]

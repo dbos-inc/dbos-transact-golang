@@ -53,7 +53,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		return nil, fmt.Errorf("missing required config field: appName")
 	}
 	if inputConfig.AdminServerPort == 0 {
-	    inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
+		inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
 	}
 
 	dbosConfig := &Config{
