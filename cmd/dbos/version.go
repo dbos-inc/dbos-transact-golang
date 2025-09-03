@@ -48,7 +48,14 @@ var versionCmd = &cobra.Command{
 		if jsonOutput {
 			return outputJSON(map[string]string{"version": Version})
 		}
-		logger.Info("DBOS CLI version", "version", Version, "commit", Commit, "built", BuiltAt)
+		l := logger.With("version", Version)
+		if Commit != "" {
+			l = l.With("commit", Commit)
+		}
+		if BuiltAt != "" {
+			l = l.With("built", BuiltAt)
+		}
+		l.Info("DBOS CLI version")
 		return nil
 	},
 }
