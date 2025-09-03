@@ -228,12 +228,21 @@ func testWorkflowCommands(t *testing.T, cliPath string) {
 
 // testListWorkflows tests various workflow listing scenarios
 func testListWorkflows(t *testing.T, cliPath string) {
+	// Create some test workflows first to ensure we have data to filter
+	// The previous test functions have already created workflows that we can query
+
+	// Get the current time for time-based filtering
+	currentTime := time.Now()
+
 	testCases := []struct {
 		name              string
 		args              []string
 		expectWorkflows   bool
 		expectQueuedCount int
 		checkQueueNames   bool
+		maxCount          int
+		minCount          int
+		checkStatus       dbos.WorkflowStatusType
 	}{
 		{
 			name:            "BasicList",
@@ -244,6 +253,18 @@ func testListWorkflows(t *testing.T, cliPath string) {
 			name:            "LimitedList",
 			args:            []string{"workflow", "list", "--json", "--limit", "5"},
 			expectWorkflows: true,
+			maxCount:        5,
+		},
+		{
+			name:     "OffsetPagination",
+			args:     []string{"workflow", "list", "--json", "--limit", "3", "--offset", "1"},
+			maxCount: 3,
+		},
+		{
+			name:            "SortDescending",
+			args:            []string{"workflow", "list", "--json", "--sort-desc", "--limit", "10"},
+			expectWorkflows: true,
+			maxCount:        10,
 		},
 		{
 			name:              "QueueOnlyList",
@@ -251,6 +272,103 @@ func testListWorkflows(t *testing.T, cliPath string) {
 			expectWorkflows:   true,
 			expectQueuedCount: 10, // From QueueWorkflow which enqueues 10 workflows
 			checkQueueNames:   true,
+		},
+		{
+			name:            "StatusFilterSuccess",
+			args:            []string{"workflow", "list", "--json", "--status", "SUCCESS"},
+			expectWorkflows: true,
+			checkStatus:     dbos.WorkflowStatusSuccess,
+		},
+		{
+			name:        "StatusFilterError",
+			args:        []string{"workflow", "list", "--json", "--status", "ERROR"},
+			checkStatus: dbos.WorkflowStatusError,
+		},
+		{
+			name:        "StatusFilterEnqueued",
+			args:        []string{"workflow", "list", "--json", "--status", "ENQUEUED"},
+			checkStatus: dbos.WorkflowStatusEnqueued,
+			minCount:    10, // We expect at least 10 enqueued workflows from QueueWorkflow
+		},
+		{
+			name:        "StatusFilterPending",
+			args:        []string{"workflow", "list", "--json", "--status", "PENDING"},
+			checkStatus: dbos.WorkflowStatusPending,
+		},
+		{
+			name:        "StatusFilterCancelled",
+			args:        []string{"workflow", "list", "--json", "--status", "CANCELLED"},
+			checkStatus: dbos.WorkflowStatusCancelled,
+		},
+		{
+			name:            "TimeRangeFilter",
+			args:            []string{"workflow", "list", "--json", "--start-time", currentTime.Add(-1 * time.Hour).Format(time.RFC3339), "--end-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
+			expectWorkflows: true,
+		},
+		{
+			name:     "CurrentTimeStartFilter",
+			args:     []string{"workflow", "list", "--json", "--start-time", currentTime.Format(time.RFC3339)},
+			maxCount: 0, // Should return no workflows as all were created before currentTime
+		},
+		{
+			name:     "FutureTimeFilter",
+			args:     []string{"workflow", "list", "--json", "--start-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
+			maxCount: 0, // Should return no workflows
+		},
+		{
+			name:            "PastTimeFilter",
+			args:            []string{"workflow", "list", "--json", "--end-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
+			expectWorkflows: true, // Should return all workflows created before now + 1 hour
+		},
+		{
+			name:            "MultipleFilters",
+			args:            []string{"workflow", "list", "--json", "--status", "ENQUEUED", "--queue", "example-queue", "--limit", "20"},
+			expectWorkflows: true,
+			checkStatus:     dbos.WorkflowStatusEnqueued,
+			checkQueueNames: true,
+			maxCount:        20,
+		},
+		{
+			name:            "WorkflowNameFilter",
+			args:            []string{"workflow", "list", "--json", "--name", "main.QueueWorkflow"},
+			expectWorkflows: true,
+			minCount:        1, // Should find at least the QueueWorkflow
+		},
+		{
+			name:            "QueueNameFilter",
+			args:            []string{"workflow", "list", "--json", "--queue", "example-queue", "--status", "ENQUEUED"},
+			expectWorkflows: true,
+			checkQueueNames: true,
+			checkStatus:     dbos.WorkflowStatusEnqueued,
+			minCount:        10, // Should find the 10 enqueued workflows
+		},
+		{
+			name:            "QueuesOnlyFilter",
+			args:            []string{"workflow", "list", "--json", "--queues-only"},
+			expectWorkflows: true,
+			minCount:        10, // Should find at least the enqueued workflows
+		},
+		{
+			name:            "UserFilter",
+			args:            []string{"workflow", "list", "--json", "--user", "test-user"},
+			expectWorkflows: false, // No workflows with test-user in this test
+		},
+		{
+			name:     "LargeLimit",
+			args:     []string{"workflow", "list", "--json", "--limit", "100"},
+			maxCount: 100,
+		},
+		{
+			name:            "CombinedTimeAndStatus",
+			args:            []string{"workflow", "list", "--json", "--status", "SUCCESS", "--start-time", currentTime.Add(-2 * time.Hour).Format(time.RFC3339)},
+			expectWorkflows: true,
+			checkStatus:     dbos.WorkflowStatusSuccess,
+		},
+		{
+			name:            "QueueAndTimeFilter",
+			args:            []string{"workflow", "list", "--json", "--queue", "example-queue", "--end-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
+			expectWorkflows: true,
+			checkQueueNames: true,
 		},
 	}
 
@@ -275,14 +393,24 @@ func testListWorkflows(t *testing.T, cliPath string) {
 				assert.Equal(t, tc.expectQueuedCount, len(workflows), "Should have expected number of queued workflows")
 			}
 
+			if tc.maxCount > 0 {
+				assert.LessOrEqual(t, len(workflows), tc.maxCount, "Should not exceed max count")
+			}
+
+			if tc.minCount > 0 {
+				assert.GreaterOrEqual(t, len(workflows), tc.minCount, "Should have at least min count")
+			}
+
 			if tc.checkQueueNames {
 				for _, wf := range workflows {
 					assert.NotEmpty(t, wf.QueueName, "Queued workflows should have queue name")
 				}
 			}
 
-			if tc.name == "LimitedList" {
-				assert.LessOrEqual(t, len(workflows), 5, "Limited list should respect limit")
+			if tc.checkStatus != "" {
+				for _, wf := range workflows {
+					assert.Equal(t, tc.checkStatus, wf.Status, "All workflows should have status %s", tc.checkStatus)
+				}
 			}
 		})
 	}
