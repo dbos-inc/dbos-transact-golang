@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -1137,6 +1138,7 @@ type stepOptions struct {
 	baseInterval  time.Duration // Initial delay between retries (default: 100ms)
 	maxInterval   time.Duration // Maximum delay between retries (default: 5s)
 	stepName      string        // Custom name for the step (defaults to function name)
+	stepID        int
 }
 
 // setDefaults applies default values to stepOptions
@@ -1195,6 +1197,12 @@ func WithBaseInterval(interval time.Duration) StepOption {
 func WithMaxInterval(interval time.Duration) StepOption {
 	return func(opts *stepOptions) {
 		opts.maxInterval = interval
+	}
+}
+
+func (c *dbosContext) WithNextStepID(stepID int) StepOption {
+	return func(opts *stepOptions) {
+		opts.stepID = stepID
 	}
 }
 
@@ -1316,6 +1324,11 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		isWithinStep: true,
 	}
 
+	// this logic needs to be looked at
+	if stepOpts.stepID >= 0 {
+		stepState.stepID = stepOpts.stepID
+	}
+
 	// Uncancellable context for DBOS operations
 	uncancellableCtx := WithoutCancel(c)
 
@@ -1412,6 +1425,89 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	}
 
 	return stepOutput, stepError
+}
+
+// how can I setup the sdk in a way to test it locally with other files?
+
+// Package level
+// Run step function using Go routines
+// Add odocs
+func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
+	if ctx == nil {
+		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
+	}
+
+	if fn == nil {
+		return *new(R), newStepExecutionError("", "", "step function cannot be nil")
+	}
+
+	// Append WithStepName option to ensure the step name is set. This will not erase a user-provided step name
+	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	opts = append(opts, WithStepName(stepName))
+
+	// create a determistic step ID
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return *new(R), newStepExecutionError("", stepName, "workflow state not found in context: are you running this step within a workflow?")
+	}
+
+	// Get stepID if it has been pre generated
+
+	typeErasedFn := StepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
+
+	// run step inside a Go routine by passing stepID
+	result, err := ctx.Go(ctx, typeErasedFn, 1, opts...)
+
+	// Step function could return a nil result
+	if result == nil {
+		return *new(R), err
+	}
+	// Otherwise type-check and cast the result
+	typedResult, ok := result.(R)
+	if !ok {
+		return *new(R), fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), result)
+	}
+	return typedResult, err
+}
+
+type stepResultChan struct {
+	result any
+	err    error
+}
+
+// Private interface
+// Add docs
+func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, stepID int, opts ...StepOption) (any, error) {
+	var wg sync.WaitGroup
+	stepResult := make(chan stepResultChan, 1)
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		res, err := c.RunAsStep(ctx, fn, c.WithNextStepID(stepID))
+		if err != nil {
+			stepRes := stepResultChan{
+				result: nil,
+				err:    err,
+			}
+			stepResult <- stepRes
+			return
+		}
+
+		stepRes := stepResultChan{
+			result: res,
+			err:    nil,
+		}
+		stepResult <- stepRes
+	}()
+
+	wg.Wait()
+	close(stepResult)
+
+	res := <-stepResult
+
+	return res.result, res.err
 }
 
 /****************************************/
