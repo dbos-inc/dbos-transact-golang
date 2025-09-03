@@ -7,7 +7,7 @@ CREATE SCHEMA IF NOT EXISTS dbos;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Create workflow_status table
-CREATE TABLE dbos.workflow_status (
+CREATE TABLE IF NOT EXISTS dbos.workflow_status (
     workflow_uuid TEXT PRIMARY KEY,
     status TEXT,
     name TEXT,
@@ -34,17 +34,27 @@ CREATE TABLE dbos.workflow_status (
 );
 
 -- Create indexes for workflow_status
-CREATE INDEX workflow_status_created_at_index ON dbos.workflow_status (created_at);
-CREATE INDEX workflow_status_executor_id_index ON dbos.workflow_status (executor_id);
-CREATE INDEX workflow_status_status_index ON dbos.workflow_status (status);
+CREATE INDEX IF NOT EXISTS workflow_status_created_at_index ON dbos.workflow_status (created_at);
+CREATE INDEX IF NOT EXISTS workflow_status_executor_id_index ON dbos.workflow_status (executor_id);
+CREATE INDEX IF NOT EXISTS workflow_status_status_index ON dbos.workflow_status (status);
 
 -- Create unique constraint for queue_name and deduplication_id
-ALTER TABLE dbos.workflow_status 
-ADD CONSTRAINT uq_workflow_status_queue_name_dedup_id 
-UNIQUE (queue_name, deduplication_id);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_name = 'uq_workflow_status_queue_name_dedup_id'
+        AND table_name = 'workflow_status'
+        AND table_schema = 'dbos'
+    ) THEN
+        ALTER TABLE dbos.workflow_status
+        ADD CONSTRAINT uq_workflow_status_queue_name_dedup_id
+        UNIQUE (queue_name, deduplication_id);
+    END IF;
+END $$;
 
 -- Create operation_outputs table
-CREATE TABLE dbos.operation_outputs (
+CREATE TABLE IF NOT EXISTS dbos.operation_outputs (
     workflow_uuid TEXT NOT NULL,
     function_id INTEGER NOT NULL,
     function_name TEXT NOT NULL DEFAULT '',
@@ -56,7 +66,7 @@ CREATE TABLE dbos.operation_outputs (
         ON UPDATE CASCADE ON DELETE CASCADE
 );
 
-CREATE TABLE dbos.notifications (
+CREATE TABLE IF NOT EXISTS dbos.notifications (
     destination_uuid TEXT NOT NULL,
     topic TEXT,
     message TEXT NOT NULL,
@@ -66,7 +76,7 @@ CREATE TABLE dbos.notifications (
         ON UPDATE CASCADE ON DELETE CASCADE
 );
 -- Create index for notifications
-CREATE INDEX idx_workflow_topic ON dbos.notifications (destination_uuid, topic);
+CREATE INDEX IF NOT EXISTS idx_workflow_topic ON dbos.notifications (destination_uuid, topic);
 
 -- Create notification function
 CREATE OR REPLACE FUNCTION dbos.notifications_function() RETURNS TRIGGER AS $$
@@ -79,12 +89,22 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Create notification trigger
-CREATE TRIGGER dbos_notifications_trigger
-AFTER INSERT ON dbos.notifications
-FOR EACH ROW EXECUTE FUNCTION dbos.notifications_function();
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.triggers
+        WHERE trigger_name = 'dbos_notifications_trigger'
+        AND event_object_table = 'notifications'
+        AND event_object_schema = 'dbos'
+    ) THEN
+        CREATE TRIGGER dbos_notifications_trigger
+        AFTER INSERT ON dbos.notifications
+        FOR EACH ROW EXECUTE FUNCTION dbos.notifications_function();
+    END IF;
+END $$;
 
 -- Create workflow_events table
-CREATE TABLE dbos.workflow_events (
+CREATE TABLE IF NOT EXISTS dbos.workflow_events (
     workflow_uuid TEXT NOT NULL,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
@@ -104,6 +124,16 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Create events trigger
-CREATE TRIGGER dbos_workflow_events_trigger
-AFTER INSERT ON dbos.workflow_events
-FOR EACH ROW EXECUTE FUNCTION dbos.workflow_events_function();
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.triggers
+        WHERE trigger_name = 'dbos_workflow_events_trigger'
+        AND event_object_table = 'workflow_events'
+        AND event_object_schema = 'dbos'
+    ) THEN
+        CREATE TRIGGER dbos_workflow_events_trigger
+        AFTER INSERT ON dbos.workflow_events
+        FOR EACH ROW EXECUTE FUNCTION dbos.workflow_events_function();
+    END IF;
+END $$;

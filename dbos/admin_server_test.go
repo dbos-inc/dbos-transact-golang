@@ -36,7 +36,7 @@ func TestAdminServer(t *testing.T) {
 
 		// Verify admin server is not running
 		client := &http.Client{Timeout: 1 * time.Second}
-		_, err = client.Get(fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_HEALTHCHECK_PATTERN, "GET /")))
+		_, err = client.Get(fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_HEALTHCHECK_PATTERN, "GET /")))
 		require.Error(t, err, "Expected request to fail when admin server is not started")
 
 		// Verify the DBOS executor doesn't have an admin server instance
@@ -51,9 +51,10 @@ func TestAdminServer(t *testing.T) {
 		resetTestDatabase(t, databaseURL)
 		// Launch DBOS with admin server once for all endpoint tests
 		ctx, err := NewDBOSContext(Config{
-			DatabaseURL: databaseURL,
-			AppName:     "test-app",
-			AdminServer: true,
+			DatabaseURL:     databaseURL,
+			AppName:         "test-app",
+			AdminServer:     true,
+			AdminServerPort: _DEFAULT_ADMIN_SERVER_PORT,
 		})
 		require.NoError(t, err)
 
@@ -92,13 +93,13 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Health endpoint responds correctly",
 				method:         "GET",
-				endpoint:       fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_HEALTHCHECK_PATTERN, "GET /")),
+				endpoint:       fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_HEALTHCHECK_PATTERN, "GET /")),
 				expectedStatus: http.StatusOK,
 			},
 			{
 				name:           "Recovery endpoint responds correctly with valid JSON",
 				method:         "POST",
-				endpoint:       fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOW_RECOVERY_PATTERN, "POST /")),
+				endpoint:       fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_WORKFLOW_RECOVERY_PATTERN, "POST /")),
 				body:           bytes.NewBuffer(mustMarshal([]string{"executor1", "executor2"})),
 				contentType:    "application/json",
 				expectedStatus: http.StatusOK,
@@ -112,7 +113,7 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Recovery endpoint rejects invalid JSON",
 				method:         "POST",
-				endpoint:       fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOW_RECOVERY_PATTERN, "POST /")),
+				endpoint:       fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_WORKFLOW_RECOVERY_PATTERN, "POST /")),
 				body:           strings.NewReader(`{"invalid": json}`),
 				contentType:    "application/json",
 				expectedStatus: http.StatusBadRequest,
@@ -120,7 +121,7 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Queue metadata endpoint responds correctly",
 				method:         "GET",
-				endpoint:       fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOW_QUEUES_METADATA_PATTERN, "GET /")),
+				endpoint:       fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_WORKFLOW_QUEUES_METADATA_PATTERN, "GET /")),
 				expectedStatus: http.StatusOK,
 				validateResp: func(t *testing.T, resp *http.Response) {
 					var queueMetadata []WorkflowQueue
@@ -146,7 +147,7 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:     "Workflows endpoint accepts all filters without error",
 				method:   "POST",
-				endpoint: fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /")),
+				endpoint: fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /")),
 				body: bytes.NewBuffer(mustMarshal(map[string]any{
 					"workflow_uuids":      []string{"test-id-1", "test-id-2"},
 					"authenticated_user":  "test-user",
@@ -177,7 +178,7 @@ func TestAdminServer(t *testing.T) {
 			{
 				name:           "Get single workflow returns 404 for non-existent workflow",
 				method:         "GET",
-				endpoint:       "http://localhost:3001/workflow/non-existent-workflow-id",
+				endpoint:       fmt.Sprintf("http://localhost:%d/workflow/non-existent-workflow-id", _DEFAULT_ADMIN_SERVER_PORT),
 				expectedStatus: http.StatusNotFound,
 			},
 		}
@@ -214,9 +215,10 @@ func TestAdminServer(t *testing.T) {
 	t.Run("List workflows input/output values", func(t *testing.T) {
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(Config{
-			DatabaseURL: databaseURL,
-			AppName:     "test-app",
-			AdminServer: true,
+			DatabaseURL:     databaseURL,
+			AppName:         "test-app",
+			AdminServer:     true,
+			AdminServerPort: _DEFAULT_ADMIN_SERVER_PORT,
 		})
 		require.NoError(t, err)
 
@@ -258,7 +260,7 @@ func TestAdminServer(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		client := &http.Client{Timeout: 5 * time.Second}
-		endpoint := fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /"))
+		endpoint := fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /"))
 
 		// Create workflows with different input/output types
 		// 1. Integer workflow
@@ -360,9 +362,10 @@ func TestAdminServer(t *testing.T) {
 	t.Run("List endpoints time filtering", func(t *testing.T) {
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(Config{
-			DatabaseURL: databaseURL,
-			AppName:     "test-app",
-			AdminServer: true,
+			DatabaseURL:     databaseURL,
+			AppName:         "test-app",
+			AdminServer:     true,
+			AdminServerPort: _DEFAULT_ADMIN_SERVER_PORT,
 		})
 		require.NoError(t, err)
 
@@ -382,7 +385,7 @@ func TestAdminServer(t *testing.T) {
 		}()
 
 		client := &http.Client{Timeout: 5 * time.Second}
-		endpoint := fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /"))
+		endpoint := fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /"))
 
 		// Create first workflow
 		handle1, err := RunWorkflow(ctx, testWorkflow, "workflow1")
@@ -533,9 +536,10 @@ func TestAdminServer(t *testing.T) {
 	t.Run("ListQueuedWorkflows", func(t *testing.T) {
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(Config{
-			DatabaseURL: databaseURL,
-			AppName:     "test-app",
-			AdminServer: true,
+			DatabaseURL:     databaseURL,
+			AppName:         "test-app",
+			AdminServer:     true,
+			AdminServerPort: _DEFAULT_ADMIN_SERVER_PORT,
 		})
 		require.NoError(t, err)
 
@@ -570,7 +574,7 @@ func TestAdminServer(t *testing.T) {
 		}()
 
 		client := &http.Client{Timeout: 5 * time.Second}
-		endpoint := fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_QUEUED_WORKFLOWS_PATTERN, "POST /"))
+		endpoint := fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_QUEUED_WORKFLOWS_PATTERN, "POST /"))
 
 		/// Create a workflow that will not block the queue
 		h1, err := RunWorkflow(ctx, regularWorkflow, "regular", WithQueue(queue.Name))
@@ -718,9 +722,10 @@ func TestAdminServer(t *testing.T) {
 	t.Run("TestDeactivate", func(t *testing.T) {
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(Config{
-			DatabaseURL: databaseURL,
-			AppName:     "test-app",
-			AdminServer: true,
+			DatabaseURL:     databaseURL,
+			AppName:         "test-app",
+			AdminServer:     true,
+			AdminServerPort: _DEFAULT_ADMIN_SERVER_PORT,
 		})
 		require.NoError(t, err)
 
@@ -754,7 +759,7 @@ func TestAdminServer(t *testing.T) {
 		}, 3*time.Second, 100*time.Millisecond, "Expected at least 2 scheduled workflow executions")
 
 		// Call deactivate endpoint
-		endpoint := fmt.Sprintf("http://localhost:3001/%s", strings.TrimPrefix(_DEACTIVATE_PATTERN, "GET /"))
+		endpoint := fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_DEACTIVATE_PATTERN, "GET /"))
 		req, err := http.NewRequest("GET", endpoint, nil)
 		require.NoError(t, err, "Failed to create deactivate request")
 

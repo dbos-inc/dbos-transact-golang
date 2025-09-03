@@ -49,7 +49,7 @@ type systemDatabase interface {
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
 	checkOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
-	getWorkflowSteps(ctx context.Context, workflowID string) ([]stepInfo, error)
+	getWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
 
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
@@ -145,27 +145,34 @@ const (
 
 func runMigrations(databaseURL string) error {
 	// Change the driver to pgx5
-	databaseURL = "pgx5://" + strings.TrimPrefix(databaseURL, "postgres://")
-
-	// Create migration source from embedded files
-	d, err := iofs.New(migrationFiles, "migrations")
-	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to create migration source: %v", err))
-	}
-
-	// Add custom migration table name to avoid conflicts with user migrations
-	// Parse the URL to properly determine where to add the query parameter
 	parsedURL, err := url.Parse(databaseURL)
 	if err != nil {
 		return newInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
 	}
+	// Handle various PostgreSQL URL schemes
+	switch parsedURL.Scheme {
+	case "postgres", "postgresql":
+		parsedURL.Scheme = "pgx5"
+	case "pgx5":
+		// Already in correct format
+	default:
+		return newInitializationError(fmt.Sprintf("unsupported database URL scheme: %s", parsedURL.Scheme))
+	}
+	databaseURL = parsedURL.String()
 
+	// Add custom migration table name to avoid conflicts with user migrations
 	// Check if query parameters already exist
 	separator := "?"
 	if parsedURL.RawQuery != "" {
 		separator = "&"
 	}
 	databaseURL += separator + "x-migrations-table=" + _DBOS_MIGRATION_TABLE
+
+	// Create migration source from embedded files
+	d, err := iofs.New(migrationFiles, "migrations")
+	if err != nil {
+		return newInitializationError(fmt.Sprintf("failed to create migration source: %v", err))
+	}
 
 	// Create migrator
 	m, err := migrate.NewWithSourceInstance("iofs", d, databaseURL)
@@ -1331,15 +1338,16 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 	return result, nil
 }
 
-type stepInfo struct {
-	StepID          int
-	StepName        string
-	Output          any
-	Error           error
-	ChildWorkflowID string
+// StepInfo contains information about a workflow step execution.
+type StepInfo struct {
+	StepID          int    // The sequential ID of the step within the workflow
+	StepName        string // The name of the step function
+	Output          any    // The output returned by the step (if any)
+	Error           error  // The error returned by the step (if any)
+	ChildWorkflowID string // The ID of a child workflow spawned by this step (if applicable)
 }
 
-func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]stepInfo, error) {
+func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error) {
 	query := `SELECT function_id, function_name, output, error, child_workflow_id
 			  FROM dbos.operation_outputs
 			  WHERE workflow_uuid = $1
@@ -1351,9 +1359,9 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]step
 	}
 	defer rows.Close()
 
-	var steps []stepInfo
+	var steps []StepInfo
 	for rows.Next() {
-		var step stepInfo
+		var step StepInfo
 		var outputString *string
 		var errorString *string
 		var childWorkflowID *string
@@ -2082,6 +2090,10 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 				maxTasks = availableTasks
 			}
 		}
+	}
+
+	if maxTasks <= 0 {
+		return nil, nil
 	}
 
 	// Build the query to select workflows for dequeueing
