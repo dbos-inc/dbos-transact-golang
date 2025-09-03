@@ -37,7 +37,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Enable verbose mode (DEBUG level logging)")
 
 	// Initialize global logger
-	initLogger()
+	logger = initLogger(slog.LevelInfo)
 
 	// Add all subcommands
 	rootCmd.AddCommand(versionCmd)
@@ -67,18 +67,17 @@ func initConfig() {
 	}
 }
 
-func initLogger() {
-	logLevel := slog.LevelError
+func initLogger(logLevel slog.Level) *slog.Logger {
 	if verbose {
 		logLevel = slog.LevelDebug
 	}
 
 	if jsonOutput {
-		logger = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 			Level: logLevel,
 		}))
 	} else {
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 			Level: logLevel,
 		}))
 	}

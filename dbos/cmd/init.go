@@ -79,12 +79,12 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	logger.Info("Created new DBOS application", "path", projectName)
-	logger.Info("To get started:")
-	logger.Info("  cd " + projectName)
-	logger.Info("  go mod tidy")
-	logger.Info("  export DBOS_SYSTEM_DATABASE_URL=<your-database-url>")
-	logger.Info("  go run main.go")
+	fmt.Printf("Created new DBOS application: %s\n", projectName)
+	fmt.Println("To get started:")
+	fmt.Printf("  cd %s\n", projectName)
+	fmt.Println("  go mod tidy")
+	fmt.Println("  export DBOS_SYSTEM_DATABASE_URL=<your-database-url>")
+	fmt.Println("  go run main.go")
 
 	return nil
 }

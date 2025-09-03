@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 
@@ -73,10 +74,11 @@ func getDBURL(_ *cobra.Command) (string, error) {
 // createDBOSContext creates a new DBOS context with the provided database URL
 func createDBOSContext(dbURL string) (dbos.DBOSContext, error) {
 	appName := "dbos-cli"
+
 	ctx, err := dbos.NewDBOSContext(dbos.Config{
 		DatabaseURL: dbURL,
 		AppName:     appName,
-		Logger:      logger,
+		Logger:      initLogger(slog.LevelError),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DBOS context: %w", err)
