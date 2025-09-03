@@ -53,7 +53,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		return nil, fmt.Errorf("missing required config field: appName")
 	}
 	if inputConfig.AdminServerPort == 0 {
-	    inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
+		inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
 	}
 
 	dbosConfig := &Config{
@@ -106,15 +106,16 @@ type DBOSContext interface {
 	Shutdown(timeout time.Duration) // Gracefully shutdown all DBOS runtime components with ordered cleanup sequence
 
 	// Workflow operations
-	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                        // Execute a function as a durable step within a workflow
+	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
+	Go(_ DBOSContext, fn StepFunc, StepID int, opts ...StepOption) (any, error)                                 // Execute a function as a durable step within a Go routine
 	RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
-	Send(_ DBOSContext, destinationID string, message any, topic string) error                                    // Send a message to another workflow
-	Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error)                                         // Receive a message sent to this workflow
-	SetEvent(_ DBOSContext, key string, message any) error                                                        // Set a key-value event for this workflow
-	GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error)              // Get a key-value event from a target workflow
-	Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error)                                           // Durable sleep that survives workflow recovery
-	GetWorkflowID() (string, error)                                                                               // Get the current workflow ID (only available within workflows)
-	GetStepID() (int, error)                                                                                      // Get the current step ID (only available within workflows)
+	Send(_ DBOSContext, destinationID string, message any, topic string) error                                  // Send a message to another workflow
+	Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error)                                       // Receive a message sent to this workflow
+	SetEvent(_ DBOSContext, key string, message any) error                                                      // Set a key-value event for this workflow
+	GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error)            // Get a key-value event from a target workflow
+	Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error)                                         // Durable sleep that survives workflow recovery
+	GetWorkflowID() (string, error)                                                                             // Get the current workflow ID (only available within workflows)
+	GetStepID() (int, error)                                                                                    // Get the current step ID (only available within workflows)
 
 	// Workflow management
 	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                       // Get a handle to an existing workflow
