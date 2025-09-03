@@ -142,7 +142,7 @@ func runMigrations(databaseURL string) error {
 	// Change the driver to pgx5
 	parsedURL, err := url.Parse(databaseURL)
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
+		return fmt.Errorf("failed to parse database URL: %v", err)
 	}
 	// Handle various PostgreSQL URL schemes
 	switch parsedURL.Scheme {
@@ -151,7 +151,7 @@ func runMigrations(databaseURL string) error {
 	case "pgx5":
 		// Already in correct format
 	default:
-		return newInitializationError(fmt.Sprintf("unsupported database URL scheme: %s", parsedURL.Scheme))
+		return fmt.Errorf("unsupported database URL scheme: %s", parsedURL.Scheme)
 	}
 	databaseURL = parsedURL.String()
 
@@ -166,20 +166,20 @@ func runMigrations(databaseURL string) error {
 	// Create migration source from embedded files
 	d, err := iofs.New(migrationFiles, "migrations")
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to create migration source: %v", err))
+		return fmt.Errorf("failed to create migration source: %v", err)
 	}
 
 	// Create migrator
 	m, err := migrate.NewWithSourceInstance("iofs", d, databaseURL)
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to create migrator: %v", err))
+		return fmt.Errorf("failed to create migrator: %v", err)
 	}
 	defer m.Close()
 
 	// Run migrations
 	// FIXME: tolerate errors when the migration is bcz we run an older version of transact
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return newInitializationError(fmt.Sprintf("failed to run migrations: %v", err))
+		return fmt.Errorf("failed to run migrations: %v", err)
 	}
 
 	return nil
