@@ -190,8 +190,8 @@ type listStepsConductorResponse struct {
 	Output *[]workflowStepsConductorResponseBody `json:"output,omitempty"`
 }
 
-// formatWorkflowStepsResponseBody converts stepInfo to workflowStepsConductorResponseBody for the conductor protocol
-func formatWorkflowStepsResponseBody(step stepInfo) workflowStepsConductorResponseBody {
+// formatWorkflowStepsResponseBody converts StepInfo to workflowStepsConductorResponseBody for the conductor protocol
+func formatWorkflowStepsResponseBody(step StepInfo) workflowStepsConductorResponseBody {
 	output := workflowStepsConductorResponseBody{
 		FunctionID:   step.StepID,
 		FunctionName: step.StepName,

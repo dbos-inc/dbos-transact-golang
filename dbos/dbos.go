@@ -123,6 +123,7 @@ type DBOSContext interface {
 	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                         // Resume a cancelled workflow
 	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)                                     // Fork a workflow from a specific step
 	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                                   // List workflows based on filtering criteria
+	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)                                                // Get the execution steps of a workflow
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -349,7 +350,6 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 
 	// Initialize the queue runner and register DBOS internal queue
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
-	NewWorkflowQueue(initExecutor, _DBOS_INTERNAL_QUEUE_NAME)
 
 	// Initialize conductor if API key is provided
 	if config.ConductorAPIKey != "" {
@@ -404,6 +404,7 @@ func (c *dbosContext) Launch() error {
 	}
 
 	// Start the queue runner in a goroutine
+	NewWorkflowQueue(c, _DBOS_INTERNAL_QUEUE_NAME)
 	go func() {
 		c.queueRunner.run(c)
 	}()

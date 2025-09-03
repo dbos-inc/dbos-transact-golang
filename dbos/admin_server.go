@@ -412,7 +412,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	mux.HandleFunc(_WORKFLOW_STEPS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
 
-		steps, err := ctx.systemDB.getWorkflowSteps(ctx, workflowID)
+		steps, err := GetWorkflowSteps(ctx, workflowID)
 		if err != nil {
 			ctx.logger.Error("Failed to list workflow steps", "workflow_id", workflowID, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to list steps: %v", err), http.StatusInternalServerError)
