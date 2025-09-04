@@ -2350,6 +2350,6 @@ func backoffWithJitter(retryAttempt int) time.Duration {
 	}
 
 	// want randomization between +-25% of exp
-	jitter := 0.75 + rand.Float64()*0.5 //nosec G404 -- trivial use of math/rand
+	jitter := 0.75 + rand.Float64()*0.5 // #nosec G404 -- trivial use of math/rand
 	return time.Duration(exp * jitter)
 }
