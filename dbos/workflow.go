@@ -8,7 +8,6 @@ import (
 	"math"
 	"reflect"
 	"runtime"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -1478,36 +1477,18 @@ type stepResultChan struct {
 // Private interface
 // Add docs
 func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, stepID int, opts ...StepOption) (any, error) {
-	var wg sync.WaitGroup
-	stepResult := make(chan stepResultChan, 1)
-
-	wg.Add(1)
-
+	result := make(chan stepResultChan, 1)
 	go func() {
-		defer wg.Done()
 		res, err := c.RunAsStep(ctx, fn, c.WithNextStepID(stepID))
-		if err != nil {
-			stepRes := stepResultChan{
-				result: nil,
-				err:    err,
-			}
-			stepResult <- stepRes
-			return
-		}
-
-		stepRes := stepResultChan{
+		result <- stepResultChan{
 			result: res,
-			err:    nil,
+			err:    err,
 		}
-		stepResult <- stepRes
 	}()
 
-	wg.Wait()
-	close(stepResult)
-
-	res := <-stepResult
-
-	return res.result, res.err
+	resultChan := <-result
+	close(result)
+	return resultChan.result, resultChan.err
 }
 
 /****************************************/
