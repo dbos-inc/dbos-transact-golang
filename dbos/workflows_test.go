@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1269,7 +1270,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 }
 
 var (
-	counter    = 0
+	counter    atomic.Int64
 	counter1Ch = make(chan time.Time, 100)
 )
 
@@ -1278,8 +1279,7 @@ func TestScheduledWorkflows(t *testing.T) {
 
 	RegisterWorkflow(dbosCtx, func(ctx DBOSContext, scheduledTime time.Time) (string, error) {
 		startTime := time.Now()
-		counter++
-		if counter == 10 {
+		if counter.Add(1) == 10 {
 			return "", fmt.Errorf("counter reached 10, stopping workflow")
 		}
 		select {
@@ -1335,8 +1335,8 @@ func TestScheduledWorkflows(t *testing.T) {
 		// Stop the workflowScheduler and check if it stops executing
 		dbosCtx.(*dbosContext).getWorkflowScheduler().Stop()
 		time.Sleep(3 * time.Second) // Wait a bit to ensure no more executions
-		currentCounter := counter   // If more scheduled executions happen, this can also trigger a data race. If the scheduler is correct, there should be no race.
-		require.Less(t, counter, currentCounter+2, "Scheduled workflow continued executing after stopping scheduler")
+		currentCounter := counter.Load()
+		require.Less(t, counter.Load(), currentCounter+2, "Scheduled workflow continued executing after stopping scheduler")
 	})
 }
 
