@@ -18,7 +18,6 @@ var (
 
 	// Global flags
 	dbURL      string
-	jsonOutput bool
 	configFile string
 	verbose    bool
 
@@ -32,7 +31,6 @@ func init() {
 
 	// Global flags available to all commands
 	rootCmd.PersistentFlags().StringVarP(&dbURL, "db-url", "D", "", "Your DBOS system database URL")
-	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output results in JSON format")
 	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "Config file (default is dbos-config.yaml)")
 	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Enable verbose mode (DEBUG level logging)")
 
@@ -71,14 +69,7 @@ func initLogger(logLevel slog.Level) *slog.Logger {
 	if verbose {
 		logLevel = slog.LevelDebug
 	}
-
-	if jsonOutput {
-		return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-			Level: logLevel,
-		}))
-	} else {
-		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-			Level: logLevel,
-		}))
-	}
+	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	}))
 }
