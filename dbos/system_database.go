@@ -118,6 +118,11 @@ func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *
 //go:embed migrations/1_initial_dbos_schema.sql
 var migration1 string
 
+type migrationFile struct {
+	version int64
+	sql     string
+}
+
 // migrations contains all migration files with their version numbers
 var migrations = []migrationFile{
 	{version: 1, sql: migration1},
@@ -217,12 +222,6 @@ func runMigrations(databaseURL string) error {
 
 	return nil
 }
-
-type migrationFile struct {
-	version int64
-	sql     string
-}
-
 
 // New creates a new SystemDatabase instance and runs migrations
 func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Logger) (systemDatabase, error) {
