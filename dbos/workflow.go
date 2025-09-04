@@ -1258,11 +1258,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	return stepOutput, stepError
 }
 
-// how can I setup the sdk in a way to test it locally with other files?
-
-// Package level
-// Run step function using Go routines
-// Add odocs
+// TODO: Add docs --- will add once I get the implementation right
 func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
@@ -1301,13 +1297,13 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
 	return typedResult, err
 }
 
+// TODO: move type above -- keeping it here for in case I need to modify quickly
 type stepResultChan struct {
 	result any
 	err    error
 }
 
-// Private interface
-// Add docs
+// TODO: Add docs --- will add once I get the implementation right
 func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, stepID int, opts ...StepOption) (any, error) {
 	result := make(chan stepResultChan, 1)
 	go func() {
