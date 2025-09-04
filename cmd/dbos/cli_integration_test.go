@@ -70,6 +70,7 @@ func TestCLIWorkflow(t *testing.T) {
 		require.NoError(t, err, "Reset database command failed: %s", string(output))
 
 		assert.Contains(t, string(output), "System database has been reset successfully", "Output should confirm database reset")
+		assert.Contains(t, string(output), "database\":\"dbos", "Output should confirm database reset")
 
 		// log in the database and ensure the dbos schema does not exist anymore
 		db, err := sql.Open("pgx", getDatabaseURL())
