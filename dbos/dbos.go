@@ -110,7 +110,7 @@ type DBOSContext interface {
 
 	// Workflow operations
 	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
-	Go(_ DBOSContext, fn StepFunc, StepID int, opts ...StepOption) (any, error)                                 // Execute a function as a durable step within a Go routine
+	Go(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                             // Execute a function as a durable step within a Go routine
 	RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
 	Send(_ DBOSContext, destinationID string, message any, topic string) error                                  // Send a message to another workflow
 	Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error)                                       // Receive a message sent to this workflow

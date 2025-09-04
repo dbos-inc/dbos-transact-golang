@@ -1285,11 +1285,10 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
 	opts = append(opts, WithNextStepID(stepID))
 
 	// Type-erase the function
-
 	typeErasedFn := StepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
 
 	// run step inside a Go routine by passing stepID
-	result, err := ctx.Go(ctx, typeErasedFn, 1, opts...)
+	result, err := ctx.Go(ctx, typeErasedFn, opts...)
 
 	// Step function could return a nil result
 	if result == nil {
@@ -1310,7 +1309,7 @@ type stepResultChan struct {
 }
 
 // TODO: Add docs --- will add once I get the implementation right
-func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, stepID int, opts ...StepOption) (any, error) {
+func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (any, error) {
 	result := make(chan stepResultChan, 1)
 	go func() {
 		res, err := c.RunAsStep(ctx, fn, opts...)
