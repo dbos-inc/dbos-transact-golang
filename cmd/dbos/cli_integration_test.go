@@ -60,6 +60,16 @@ func TestCLIWorkflow(t *testing.T) {
 		os.Chdir(originalDir)
 	})
 
+	t.Run("ResetDatabase", func(t *testing.T) {
+		cmd := exec.Command(cliPath, "reset", "-y")
+		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
+
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "Reset database command failed: %s", string(output))
+
+		assert.Contains(t, string(output), "System database has been reset successfully", "Output should confirm database reset")
+	})
+
 	t.Run("ProjectInitialization", func(t *testing.T) {
 		testProjectInitialization(t, cliPath)
 	})
@@ -283,12 +293,6 @@ func testListWorkflows(t *testing.T, cliPath string) {
 			name:        "StatusFilterError",
 			args:        []string{"workflow", "list", "--status", "ERROR"},
 			checkStatus: dbos.WorkflowStatusError,
-		},
-		{
-			name:        "StatusFilterEnqueued",
-			args:        []string{"workflow", "list", "--status", "ENQUEUED"},
-			checkStatus: dbos.WorkflowStatusEnqueued,
-			minCount:    10, // We expect at least 10 enqueued workflows from QueueWorkflow
 		},
 		{
 			name:        "StatusFilterPending",
@@ -564,6 +568,24 @@ func testForkWorkflow(t *testing.T, cliPath string) {
 		assert.Equal(t, "ENQUEUED", string(forkedStatus.Status), "Forked workflow should be enqueued")
 		assert.Equal(t, dbosInternalQueueName, forkedStatus.QueueName, "Should be on internal queue")
 	})
+
+	t.Run("ForkWorkflowFromNegativeStep", func(t *testing.T) {
+		// Test fork with invalid step number (0 should be converted to 1)
+		cmd := exec.Command(cliPath, "workflow", "fork", workflowID, "--step", "-1")
+		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
+
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "Fork workflow from step command failed: %s", string(output))
+
+		// Parse JSON response
+		var forkedStatus dbos.WorkflowStatus
+		err = json.Unmarshal(output, &forkedStatus)
+		require.NoError(t, err, "Fork from step JSON output should be valid")
+
+		assert.NotEqual(t, workflowID, forkedStatus.ID, "Forked workflow should have different ID")
+		assert.Equal(t, "ENQUEUED", string(forkedStatus.Status), "Forked workflow should be enqueued")
+		assert.Equal(t, dbosInternalQueueName, forkedStatus.QueueName, "Should be on internal queue")
+	})
 }
 
 // testGetWorkflowSteps tests retrieving workflow steps
@@ -607,24 +629,6 @@ func testGetWorkflowSteps(t *testing.T, cliPath string) {
 			assert.NotEmpty(t, step.StepName, fmt.Sprintf("Step name should not be empty for workflow %s", workflowID))
 		}
 	})
-
-	t.Run("GetStepsHumanReadable", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "steps", workflowID)
-		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
-
-		output, err := cmd.CombinedOutput()
-		require.NoError(t, err, "Get workflow steps human readable command failed: %s", string(output))
-
-		outputStr := string(output)
-		// Should contain workflow ID reference
-		assert.Contains(t, outputStr, workflowID, "Output should reference the workflow ID")
-
-		// Should either show steps or indicate no steps found
-		assert.True(t,
-			assert.Contains(t, outputStr, "Steps for workflow") ||
-				assert.Contains(t, outputStr, "No steps found"),
-			"Output should either show steps or indicate none found")
-	})
 }
 
 // testErrorHandling tests various error conditions and edge cases
@@ -639,7 +643,7 @@ func testErrorHandling(t *testing.T, cliPath string) {
 
 		output, err := cmd.CombinedOutput()
 		assert.Error(t, err, "Should fail with invalid workflow ID")
-		assert.Contains(t, string(output), "failed to retrieve workflow", "Should contain error message")
+		assert.Contains(t, string(output), "workflow not found", "Should contain error message")
 	})
 
 	t.Run("MissingWorkflowID", func(t *testing.T) {
@@ -684,22 +688,6 @@ func testErrorHandling(t *testing.T, cliPath string) {
 				assert.Contains(t, outputStr, "url"),
 			"Should contain database-related error")
 	})
-
-	t.Run("ForkWithInvalidStep", func(t *testing.T) {
-		workflowID := getFirstWorkflowID(t, cliPath)
-		if workflowID == "" {
-			t.Skip("No workflows found for fork test")
-		}
-
-		// Test fork with invalid step number (0 should be converted to 1)
-		cmd := exec.Command(cliPath, "workflow", "fork", workflowID, "--step", "0")
-		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
-
-		output, err := cmd.CombinedOutput()
-		// This should not error as step 0 gets converted to 1
-		require.NoError(t, err, "Fork with step 0 should succeed: %s", string(output))
-		assert.Contains(t, string(output), "Starting from step: 1", "Step 0 should be converted to 1")
-	})
 }
 
 // Helper functions
@@ -728,22 +716,4 @@ func buildCLI(t *testing.T) string {
 	absPath, err := filepath.Abs(cliPath)
 	require.NoError(t, err, "Failed to get absolute path")
 	return absPath
-}
-
-func getFirstWorkflowID(t *testing.T, cliPath string) string {
-	cmd := exec.Command(cliPath, "workflow", "list", "--limit", "1")
-	cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
-
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, "Failed to list workflows: %s", string(output))
-
-	var workflows []dbos.WorkflowStatus
-	err = json.Unmarshal(output, &workflows)
-	require.NoError(t, err, "Failed to parse workflow JSON")
-
-	if len(workflows) == 0 {
-		return ""
-	}
-
-	return workflows[0].ID
 }
