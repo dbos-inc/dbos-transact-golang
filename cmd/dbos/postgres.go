@@ -174,7 +174,7 @@ func startDockerPostgres() error {
 		return err
 	}
 
-	logger.Info("Postgres available", "url", fmt.Sprintf("postgresql://postgres:%s@localhost:5432", password))
+	logger.Info("Postgres available", "url", fmt.Sprintf("postgres://postgres:%s@localhost:5432", password))
 	return nil
 }
 
