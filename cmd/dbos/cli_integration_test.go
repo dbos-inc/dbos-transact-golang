@@ -246,111 +246,111 @@ func testListWorkflows(t *testing.T, cliPath string) {
 	}{
 		{
 			name:            "BasicList",
-			args:            []string{"workflow", "list", "--json"},
+			args:            []string{"workflow", "list"},
 			expectWorkflows: true,
 		},
 		{
 			name:            "LimitedList",
-			args:            []string{"workflow", "list", "--json", "--limit", "5"},
+			args:            []string{"workflow", "list", "--limit", "5"},
 			expectWorkflows: true,
 			maxCount:        5,
 		},
 		{
 			name:     "OffsetPagination",
-			args:     []string{"workflow", "list", "--json", "--limit", "3", "--offset", "1"},
+			args:     []string{"workflow", "list", "--limit", "3", "--offset", "1"},
 			maxCount: 3,
 		},
 		{
 			name:            "SortDescending",
-			args:            []string{"workflow", "list", "--json", "--sort-desc", "--limit", "10"},
+			args:            []string{"workflow", "list", "--sort-desc", "--limit", "10"},
 			expectWorkflows: true,
 			maxCount:        10,
 		},
 		{
 			name:              "QueueNameFilter",
-			args:              []string{"workflow", "list", "--json", "--queue", "example-queue"},
+			args:              []string{"workflow", "list", "--queue", "example-queue"},
 			expectWorkflows:   true,
 			expectQueuedCount: 10, // From QueueWorkflow which enqueues 10 workflows
 			checkQueueNames:   true,
 		},
 		{
 			name:            "StatusFilterSuccess",
-			args:            []string{"workflow", "list", "--json", "--status", "SUCCESS"},
+			args:            []string{"workflow", "list", "--status", "SUCCESS"},
 			expectWorkflows: true,
 			checkStatus:     dbos.WorkflowStatusSuccess,
 		},
 		{
 			name:        "StatusFilterError",
-			args:        []string{"workflow", "list", "--json", "--status", "ERROR"},
+			args:        []string{"workflow", "list", "--status", "ERROR"},
 			checkStatus: dbos.WorkflowStatusError,
 		},
 		{
 			name:        "StatusFilterEnqueued",
-			args:        []string{"workflow", "list", "--json", "--status", "ENQUEUED"},
+			args:        []string{"workflow", "list", "--status", "ENQUEUED"},
 			checkStatus: dbos.WorkflowStatusEnqueued,
 			minCount:    10, // We expect at least 10 enqueued workflows from QueueWorkflow
 		},
 		{
 			name:        "StatusFilterPending",
-			args:        []string{"workflow", "list", "--json", "--status", "PENDING"},
+			args:        []string{"workflow", "list", "--status", "PENDING"},
 			checkStatus: dbos.WorkflowStatusPending,
 		},
 		{
 			name:        "StatusFilterCancelled",
-			args:        []string{"workflow", "list", "--json", "--status", "CANCELLED"},
+			args:        []string{"workflow", "list", "--status", "CANCELLED"},
 			checkStatus: dbos.WorkflowStatusCancelled,
 		},
 		{
 			name:            "TimeRangeFilter",
-			args:            []string{"workflow", "list", "--json", "--start-time", currentTime.Add(-1 * time.Hour).Format(time.RFC3339), "--end-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
+			args:            []string{"workflow", "list", "--start-time", currentTime.Add(-1 * time.Hour).Format(time.RFC3339), "--end-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
 			expectWorkflows: true,
 		},
 		{
 			name:     "CurrentTimeStartFilter",
-			args:     []string{"workflow", "list", "--json", "--start-time", currentTime.Format(time.RFC3339)},
+			args:     []string{"workflow", "list", "--start-time", currentTime.Format(time.RFC3339)},
 			maxCount: 0, // Should return no workflows as all were created before currentTime
 		},
 		{
 			name:     "FutureTimeFilter",
-			args:     []string{"workflow", "list", "--json", "--start-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
+			args:     []string{"workflow", "list", "--start-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
 			maxCount: 0, // Should return no workflows
 		},
 		{
 			name:            "PastTimeFilter",
-			args:            []string{"workflow", "list", "--json", "--end-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
+			args:            []string{"workflow", "list", "--end-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
 			expectWorkflows: true, // Should return all workflows created before now + 1 hour
 		},
 		{
 			name:            "WorkflowNameFilter",
-			args:            []string{"workflow", "list", "--json", "--name", "main.QueueWorkflow"},
+			args:            []string{"workflow", "list", "--name", "main.QueueWorkflow"},
 			expectWorkflows: true,
 			minCount:        1, // Should find at least the QueueWorkflow
 		},
 		{
 			name:            "QueuesOnlyFilter",
-			args:            []string{"workflow", "list", "--json", "--queues-only"},
+			args:            []string{"workflow", "list", "--queues-only"},
 			expectWorkflows: true,
 			minCount:        10, // Should find at least the enqueued workflows
 		},
 		{
 			name:            "UserFilter",
-			args:            []string{"workflow", "list", "--json", "--user", "test-user"},
+			args:            []string{"workflow", "list", "--user", "test-user"},
 			expectWorkflows: false, // No workflows with test-user in this test
 		},
 		{
 			name:     "LargeLimit",
-			args:     []string{"workflow", "list", "--json", "--limit", "100"},
+			args:     []string{"workflow", "list", "--limit", "100"},
 			maxCount: 100,
 		},
 		{
 			name:            "CombinedTimeAndStatus",
-			args:            []string{"workflow", "list", "--json", "--status", "SUCCESS", "--start-time", currentTime.Add(-2 * time.Hour).Format(time.RFC3339)},
+			args:            []string{"workflow", "list", "--status", "SUCCESS", "--start-time", currentTime.Add(-2 * time.Hour).Format(time.RFC3339)},
 			expectWorkflows: true,
 			checkStatus:     dbos.WorkflowStatusSuccess,
 		},
 		{
 			name:            "QueueAndTimeFilter",
-			args:            []string{"workflow", "list", "--json", "--queue", "example-queue", "--end-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
+			args:            []string{"workflow", "list", "--queue", "example-queue", "--end-time", currentTime.Add(1 * time.Hour).Format(time.RFC3339)},
 			expectWorkflows: true,
 			checkQueueNames: true,
 		},
@@ -421,7 +421,7 @@ func testGetWorkflow(t *testing.T, cliPath string) {
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
 	t.Run("GetWorkflowJSON", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "get", workflowID, "--json")
+		cmd := exec.Command(cliPath, "workflow", "get", workflowID)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -436,7 +436,7 @@ func testGetWorkflow(t *testing.T, cliPath string) {
 		assert.NotEmpty(t, status.Name, "Should have workflow name")
 
 		// Redo the test with the db url in flags
-		cmd2 := exec.Command(cliPath, "workflow", "get", workflowID, "--json", "--db-url", getDatabaseURL())
+		cmd2 := exec.Command(cliPath, "workflow", "get", workflowID, "--db-url", getDatabaseURL())
 
 		output2, err2 := cmd2.CombinedOutput()
 		require.NoError(t, err2, "Get workflow JSON command failed: %s", string(output2))
@@ -481,7 +481,7 @@ func testCancelResumeWorkflow(t *testing.T, cliPath string) {
 		assert.Contains(t, string(output), "Successfully cancelled", "Should confirm cancellation")
 
 		// Verify workflow is actually cancelled
-		getCmd := exec.Command(cliPath, "workflow", "get", workflowID, "--json")
+		getCmd := exec.Command(cliPath, "workflow", "get", workflowID)
 		getCmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		getOutput, err := getCmd.CombinedOutput()
@@ -494,7 +494,7 @@ func testCancelResumeWorkflow(t *testing.T, cliPath string) {
 	})
 
 	t.Run("ResumeWorkflow", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "resume", workflowID, "--json")
+		cmd := exec.Command(cliPath, "workflow", "resume", workflowID)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -532,7 +532,7 @@ func testForkWorkflow(t *testing.T, cliPath string) {
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
 	t.Run("ForkWorkflow", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "fork", workflowID, "--json")
+		cmd := exec.Command(cliPath, "workflow", "fork", workflowID)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -549,7 +549,7 @@ func testForkWorkflow(t *testing.T, cliPath string) {
 	})
 
 	t.Run("ForkWorkflowFromStep", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "fork", workflowID, "--step", "2", "--json")
+		cmd := exec.Command(cliPath, "workflow", "fork", workflowID, "--step", "2")
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -587,7 +587,7 @@ func testGetWorkflowSteps(t *testing.T, cliPath string) {
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
 	t.Run("GetStepsJSON", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "steps", workflowID, "--json")
+		cmd := exec.Command(cliPath, "workflow", "steps", workflowID)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -731,7 +731,7 @@ func buildCLI(t *testing.T) string {
 }
 
 func getFirstWorkflowID(t *testing.T, cliPath string) string {
-	cmd := exec.Command(cliPath, "workflow", "list", "--json", "--limit", "1")
+	cmd := exec.Command(cliPath, "workflow", "list", "--limit", "1")
 	cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 	output, err := cmd.CombinedOutput()

@@ -45,17 +45,13 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show the version and exit",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if jsonOutput {
-			return outputJSON(map[string]string{"version": Version})
-		}
-		l := logger.With("version", Version)
+		versionInfo := map[string]string{"version": Version}
 		if Commit != "" {
-			l = l.With("commit", Commit)
+			versionInfo["commit"] = Commit
 		}
 		if BuiltAt != "" {
-			l = l.With("built", BuiltAt)
+			versionInfo["built"] = BuiltAt
 		}
-		l.Info("DBOS CLI version")
-		return nil
+		return outputJSON(versionInfo)
 	},
 }

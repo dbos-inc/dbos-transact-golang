@@ -165,6 +165,9 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 		opts = append(opts, dbos.WithEndTime(t))
 	}
 
+	// Do not retrieve input and output
+	opts = append(opts, dbos.WithLoadInput(false), dbos.WithLoadOutput(false))
+
 	// List workflows
 	workflows, err := ctx.ListWorkflows(ctx, opts...)
 	if err != nil {
@@ -176,29 +179,8 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 		workflows = []dbos.WorkflowStatus{}
 	}
 
-	// Output results
-	if jsonOutput {
-		return outputJSON(workflows)
-	}
-
-	// Pretty print for non-JSON output
-	if len(workflows) == 0 {
-		logger.Info("No workflows found")
-		return nil
-	}
-
-	for _, wf := range workflows {
-		fmt.Printf("ID: %s\n", wf.ID)
-		fmt.Printf("  Name: %s\n", wf.Name)
-		fmt.Printf("  Status: %s\n", wf.Status)
-		fmt.Printf("  Created: %s\n", wf.CreatedAt.Format(time.RFC3339))
-		if wf.QueueName != "" {
-			fmt.Printf("  Queue: %s\n", wf.QueueName)
-		}
-		fmt.Println()
-	}
-
-	return nil
+	// Output results as JSON
+	return outputJSON(workflows)
 }
 
 func runWorkflowGet(cmd *cobra.Command, args []string) error {
@@ -217,36 +199,24 @@ func runWorkflowGet(cmd *cobra.Command, args []string) error {
 	}
 
 	// Retrieve workflow
-	handle, err := ctx.RetrieveWorkflow(ctx, workflowID)
+	workflows, err := ctx.ListWorkflows(
+		ctx,
+		dbos.WithWorkflowIDs([]string{workflowID}),
+		dbos.WithLoadInput(false),
+		dbos.WithLoadOutput(false),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve workflow: %w", err)
 	}
 
-	// Get status
-	status, err := handle.GetStatus()
-	if err != nil {
-		return fmt.Errorf("failed to get workflow status: %w", err)
+	if len(workflows) == 0 {
+		return fmt.Errorf("workflow not found: %s", workflowID)
 	}
 
-	// Output results
-	if jsonOutput {
-		return outputJSON(status)
-	}
+	status := workflows[0]
 
-	// Pretty print
-	fmt.Printf("Workflow ID: %s\n", status.ID)
-	fmt.Printf("Name: %s\n", status.Name)
-	fmt.Printf("Status: %s\n", status.Status)
-	fmt.Printf("Created: %s\n", status.CreatedAt.Format(time.RFC3339))
-	fmt.Printf("Updated: %s\n", status.UpdatedAt.Format(time.RFC3339))
-	if status.QueueName != "" {
-		fmt.Printf("Queue: %s\n", status.QueueName)
-	}
-	if status.Error != nil {
-		fmt.Printf("Error: %v\n", status.Error)
-	}
-
-	return nil
+	// Output results as JSON
+	return outputJSON(status)
 }
 
 func runWorkflowSteps(cmd *cobra.Command, args []string) error {
@@ -275,33 +245,8 @@ func runWorkflowSteps(cmd *cobra.Command, args []string) error {
 		steps = []dbos.StepInfo{}
 	}
 
-	// Output results
-	if jsonOutput {
-		return outputJSON(steps)
-	}
-
-	// Pretty print for non-JSON output
-	if len(steps) == 0 {
-		logger.Info("No steps found for workflow", "id", workflowID)
-		return nil
-	}
-
-	fmt.Printf("Steps for workflow %s:\n\n", workflowID)
-	for _, step := range steps {
-		fmt.Printf("Step %d: %s\n", step.StepID, step.StepName)
-		if step.Output != nil {
-			fmt.Printf("  Output: %v\n", step.Output)
-		}
-		if step.Error != nil {
-			fmt.Printf("  Error: %v\n", step.Error)
-		}
-		if step.ChildWorkflowID != "" {
-			fmt.Printf("  Child Workflow: %s\n", step.ChildWorkflowID)
-		}
-		fmt.Println()
-	}
-
-	return nil
+	// Output results as JSON
+	return outputJSON(steps)
 }
 
 func runWorkflowCancel(cmd *cobra.Command, args []string) error {
@@ -355,12 +300,8 @@ func runWorkflowResume(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get workflow status: %w", err)
 	}
 
-	if jsonOutput {
-		return outputJSON(status)
-	}
-
-	logger.Info("Successfully resumed workflow", "id", workflowID, "status", status.Status)
-	return nil
+	// Output results as JSON
+	return outputJSON(status)
 }
 
 func runWorkflowFork(cmd *cobra.Command, args []string) error {
@@ -399,13 +340,6 @@ func runWorkflowFork(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get forked workflow status: %w", err)
 	}
 
-	if jsonOutput {
-		return outputJSON(status)
-	}
-
-	fmt.Printf("Successfully forked workflow %s\n", workflowID)
-	fmt.Printf("New workflow ID: %s\n", status.ID)
-	fmt.Printf("Starting from step: %d\n", step)
-	fmt.Printf("Status: %s\n", status.Status)
-	return nil
+	// Output results as JSON
+	return outputJSON(status)
 }

@@ -69,21 +69,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 
 	// Drop the system database if it exists
 	logger.Info("Resetting system database", "database", dbName)
-
-	// First, terminate all connections to the database
-	terminateQuery := fmt.Sprintf(`
-		SELECT pg_terminate_backend(pid)
-		FROM pg_stat_activity
-		WHERE datname = '%s' AND pid <> pg_backend_pid()
-	`, dbName)
-
-	_, err = db.Exec(terminateQuery) // Ignore errors, database might not exist
-	if err != nil {
-		logger.Warn("Failed to terminate existing connections", "error", err)
-	}
-
-	// Drop the database if it exists
-	dropQuery := fmt.Sprintf("DROP DATABASE IF EXISTS %s", dbName)
+	dropQuery := fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", dbName)
 	if _, err := db.Exec(dropQuery); err != nil {
 		return fmt.Errorf("failed to drop system database: %w", err)
 	}
