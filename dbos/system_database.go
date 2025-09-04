@@ -2,14 +2,10 @@ package dbos
 
 import (
 	"context"
-	"embed"
+	_ "embed"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -119,8 +115,13 @@ func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *
 	return nil
 }
 
-//go:embed migrations/*.sql
-var migrationFiles embed.FS
+//go:embed migrations/1_initial_dbos_schema.sql
+var migration1 string
+
+// migrations contains all migration files with their version numbers
+var migrations = []migrationFile{
+	{version: 1, sql: migration1},
+}
 
 const (
 	_DBOS_MIGRATION_TABLE = "dbos_migrations"
@@ -178,11 +179,7 @@ func runMigrations(databaseURL string) error {
 		return fmt.Errorf("failed to get current migration version: %v", err)
 	}
 
-	// Read and parse migration files
-	migrations, err := parseMigrationFiles()
-	if err != nil {
-		return fmt.Errorf("failed to parse migration files: %v", err)
-	}
+	// Use the embedded migrations slice
 
 	// Apply migrations starting from the next version
 	for _, migration := range migrations {
@@ -226,49 +223,6 @@ type migrationFile struct {
 	sql     string
 }
 
-func parseMigrationFiles() ([]migrationFile, error) {
-	var migrations []migrationFile
-
-	entries, err := fs.ReadDir(migrationFiles, "migrations")
-	if err != nil {
-		return nil, fmt.Errorf("failed to read migration directory: %v", err)
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
-			continue
-		}
-
-		// Extract version from filename (e.g., "1_initial_dbos_schema.sql" -> 1)
-		parts := strings.SplitN(entry.Name(), "_", 2)
-		if len(parts) < 2 {
-			continue
-		}
-
-		version, err := strconv.ParseInt(parts[0], 10, 64)
-		if err != nil {
-			continue // Skip files with invalid version format
-		}
-
-		// Read migration SQL content
-		content, err := fs.ReadFile(migrationFiles, filepath.Join("migrations", entry.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("failed to read migration file %s: %v", entry.Name(), err)
-		}
-
-		migrations = append(migrations, migrationFile{
-			version: version,
-			sql:     string(content),
-		})
-	}
-
-	// Sort migrations by version
-	sort.Slice(migrations, func(i, j int) bool {
-		return migrations[i].version < migrations[j].version
-	})
-
-	return migrations, nil
-}
 
 // New creates a new SystemDatabase instance and runs migrations
 func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Logger) (systemDatabase, error) {
