@@ -136,10 +136,10 @@ const (
 	_DBOS_WORKFLOW_EVENTS_CHANNEL = "dbos_workflow_events_channel"
 
 	// Database retry timeouts
-	_DB_CONNECTION_RETRY_BASE_DELAY  = 500 * time.Millisecond
+	_DB_CONNECTION_RETRY_BASE_DELAY  = 1 * time.Second
 	_DB_CONNECTION_RETRY_FACTOR      = 2
-	_DB_CONNECTION_RETRY_MAX_RETRIES = 3
-	_DB_CONNECTION_MAX_DELAY         = 10000 * time.Millisecond
+	_DB_CONNECTION_RETRY_MAX_RETRIES = 10
+	_DB_CONNECTION_MAX_DELAY         = 120 * time.Second
 	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
@@ -293,7 +293,7 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 	// Allow pgx health checks to complete
 	// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
 	// These trigger go-leak alerts
-	time.Sleep(backoffWithJitter(0))
+	time.Sleep(500 * time.Second)
 
 	s.launched = false
 }
@@ -1532,6 +1532,10 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			time.Sleep(backoffWithJitter(retryAttempt))
 			retryAttempt += 1
 			continue
+		} else {
+			if retryAttempt > 0 {
+				retryAttempt -= 1
+			}
 		}
 	}
 }
@@ -2337,14 +2341,11 @@ func (qb *queryBuilder) addWhereLessEqual(column string, value any) {
 }
 
 func backoffWithJitter(retryAttempt int) time.Duration {
+	exp := float64(_DB_CONNECTION_RETRY_BASE_DELAY) * math.Pow(_DB_CONNECTION_RETRY_FACTOR, float64(retryAttempt))
 	// cap backoff to max number of retries, then do a fixed time delay
 	// expected retryAttempt to initially be 0, so >= used
-	if retryAttempt >= _DB_CONNECTION_RETRY_MAX_RETRIES {
-		return _DB_CONNECTION_RETRY_BASE_DELAY
-	}
-	exp := float64(_DB_CONNECTION_RETRY_BASE_DELAY) * math.Pow(_DB_CONNECTION_RETRY_FACTOR, float64(retryAttempt))
 	// cap delay to maximum of _DB_CONNECTION_MAX_DELAY milliseconds
-	if exp > float64(_DB_CONNECTION_MAX_DELAY) {
+	if retryAttempt >= _DB_CONNECTION_RETRY_MAX_RETRIES || exp > float64(_DB_CONNECTION_MAX_DELAY) {
 		exp = float64(_DB_CONNECTION_MAX_DELAY)
 	}
 
