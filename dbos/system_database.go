@@ -2,18 +2,14 @@ package dbos
 
 import (
 	"context"
-	"embed"
+	_ "embed"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -119,11 +115,21 @@ func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *
 	return nil
 }
 
-//go:embed migrations/*.sql
-var migrationFiles embed.FS
+//go:embed migrations/1_initial_dbos_schema.sql
+var migration1 string
+
+type migrationFile struct {
+	version int64
+	sql     string
+}
+
+// migrations contains all migration files with their version numbers
+var migrations = []migrationFile{
+	{version: 1, sql: migration1},
+}
 
 const (
-	_DBOS_MIGRATION_TABLE = "dbos_schema_migrations"
+	_DBOS_MIGRATION_TABLE = "dbos_migrations"
 
 	// PostgreSQL error codes
 	_PG_ERROR_UNIQUE_VIOLATION      = "23505"
@@ -139,47 +145,79 @@ const (
 )
 
 func runMigrations(databaseURL string) error {
-	// Change the driver to pgx5
-	parsedURL, err := url.Parse(databaseURL)
+	// Connect to the database
+	pool, err := pgxpool.New(context.Background(), databaseURL)
 	if err != nil {
-		return fmt.Errorf("failed to parse database URL: %v", err)
+		return fmt.Errorf("failed to create connection pool: %v", err)
 	}
-	// Handle various PostgreSQL URL schemes
-	switch parsedURL.Scheme {
-	case "postgres", "postgresql":
-		parsedURL.Scheme = "pgx5"
-	case "pgx5":
-		// Already in correct format
-	default:
-		return fmt.Errorf("unsupported database URL scheme: %s", parsedURL.Scheme)
-	}
-	databaseURL = parsedURL.String()
+	defer pool.Close()
 
-	// Add custom migration table name to avoid conflicts with user migrations
-	// Check if query parameters already exist
-	separator := "?"
-	if parsedURL.RawQuery != "" {
-		separator = "&"
-	}
-	databaseURL += separator + "x-migrations-table=" + _DBOS_MIGRATION_TABLE
-
-	// Create migration source from embedded files
-	d, err := iofs.New(migrationFiles, "migrations")
+	// Begin transaction for atomic migration execution
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to create migration source: %v", err)
+		return fmt.Errorf("failed to begin transaction: %v", err)
 	}
+	defer tx.Rollback(ctx)
 
-	// Create migrator
-	m, err := migrate.NewWithSourceInstance("iofs", d, databaseURL)
+	// Create the DBOS schema if it doesn't exist
+	_, err = tx.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS dbos")
 	if err != nil {
-		return fmt.Errorf("failed to create migrator: %v", err)
+		return fmt.Errorf("failed to create DBOS schema: %v", err)
 	}
-	defer m.Close()
 
-	// Run migrations
-	// FIXME: tolerate errors when the migration is bcz we run an older version of transact
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("failed to run migrations: %v", err)
+	// Create the migrations table if it doesn't exist
+	createTableQuery := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS dbos.%s (
+		version BIGINT NOT NULL PRIMARY KEY
+	)`, _DBOS_MIGRATION_TABLE)
+
+	_, err = tx.Exec(ctx, createTableQuery)
+	if err != nil {
+		return fmt.Errorf("failed to create migrations table: %v", err)
+	}
+
+	// Get current migration version
+	var currentVersion int64 = 0
+	query := fmt.Sprintf("SELECT version FROM dbos.%s LIMIT 1", _DBOS_MIGRATION_TABLE)
+	err = tx.QueryRow(ctx, query).Scan(&currentVersion)
+	if err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("failed to get current migration version: %v", err)
+	}
+
+	// Use the embedded migrations slice
+
+	// Apply migrations starting from the next version
+	for _, migration := range migrations {
+		if migration.version <= currentVersion {
+			continue
+		}
+
+		// Execute the migration SQL
+		_, err = tx.Exec(ctx, migration.sql)
+		if err != nil {
+			return fmt.Errorf("failed to execute migration %d: %v", migration.version, err)
+		}
+
+		// Update the migration version
+		if currentVersion == 0 {
+			// Insert first migration record
+			insertQuery := fmt.Sprintf("INSERT INTO dbos.%s (version) VALUES ($1)", _DBOS_MIGRATION_TABLE)
+			_, err = tx.Exec(ctx, insertQuery, migration.version)
+		} else {
+			// Update existing migration record
+			updateQuery := fmt.Sprintf("UPDATE dbos.%s SET version = $1", _DBOS_MIGRATION_TABLE)
+			_, err = tx.Exec(ctx, updateQuery, migration.version)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to update migration version to %d: %v", migration.version, err)
+		}
+
+		currentVersion = migration.version
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit migration transaction: %v", err)
 	}
 
 	return nil

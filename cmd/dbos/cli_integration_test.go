@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,6 +70,18 @@ func TestCLIWorkflow(t *testing.T) {
 		require.NoError(t, err, "Reset database command failed: %s", string(output))
 
 		assert.Contains(t, string(output), "System database has been reset successfully", "Output should confirm database reset")
+		assert.Contains(t, string(output), "database\":\"dbos", "Output should confirm database reset")
+
+		// log in the database and ensure the dbos schema does not exist anymore
+		db, err := sql.Open("pgx", getDatabaseURL())
+		require.NoError(t, err)
+		defer db.Close()
+
+		var exists bool
+		err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'dbos')").Scan(&exists)
+		require.NoError(t, err)
+
+		assert.False(t, exists, "DBOS schema should not exist")
 	})
 
 	t.Run("ProjectInitialization", func(t *testing.T) {
@@ -145,6 +159,11 @@ func testProjectInitialization(t *testing.T, cliPath string) {
 	modCmd := exec.Command("go", "mod", "tidy")
 	modOutput, err := modCmd.CombinedOutput()
 	require.NoError(t, err, "go mod tidy failed: %s", string(modOutput))
+
+	// TEMPORARY: go get github.com/dbos-inc/dbos-transact-golang/cmd/dbos@dbos-migration
+	tmpCmd := exec.Command("go", "get", "github.com/dbos-inc/dbos-transact-golang/cmd/dbos@dbos-migration")
+	tmpOutput, err := tmpCmd.CombinedOutput()
+	require.NoError(t, err, "Failed to get dbos-migration: %s", string(tmpOutput))
 }
 
 // testApplicationLifecycle starts the application and triggers workflows
