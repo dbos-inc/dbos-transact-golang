@@ -213,10 +213,7 @@ func runWorkflowGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("workflow not found: %s", workflowID)
 	}
 
-	status := workflows[0]
-
-	// Output results as JSON
-	return outputJSON(status)
+	return outputJSON(workflows[0])
 }
 
 func runWorkflowSteps(cmd *cobra.Command, args []string) error {
@@ -267,7 +264,7 @@ func runWorkflowCancel(cmd *cobra.Command, args []string) error {
 	// Cancel workflow
 	err = ctx.CancelWorkflow(ctx, workflowID)
 	if err != nil {
-		return fmt.Errorf("failed to cancel workflow: %w", err)
+		return err
 	}
 	logger.Info("Successfully cancelled workflow", "id", workflowID)
 	return nil
@@ -291,7 +288,7 @@ func runWorkflowResume(cmd *cobra.Command, args []string) error {
 	// Resume workflow
 	handle, err := ctx.ResumeWorkflow(ctx, workflowID)
 	if err != nil {
-		return fmt.Errorf("failed to resume workflow: %w", err)
+		return err
 	}
 
 	// Get status
@@ -331,7 +328,7 @@ func runWorkflowFork(cmd *cobra.Command, args []string) error {
 		StartStep:          uint(step),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to fork workflow: %w", err)
+		return err
 	}
 
 	// Get status of forked workflow
