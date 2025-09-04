@@ -1199,7 +1199,8 @@ func WithMaxInterval(interval time.Duration) StepOption {
 	}
 }
 
-func (c *dbosContext) WithNextStepID(stepID int) StepOption {
+
+func WithNextStepID(stepID int) StepOption {
 	return func(opts *stepOptions) {
 		opts.stepID = stepID
 	}
@@ -1445,8 +1446,10 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
 	if !ok || wfState == nil {
 		return *new(R), newStepExecutionError("", stepName, "workflow state not found in context: are you running this step within a workflow?")
 	}
+	stepID := wfState.NextStepID()
+	opts = append(opts, WithNextStepID(stepID))
 
-	// Get stepID if it has been pre generated
+	// Type-erase the function
 
 	typeErasedFn := StepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
 
@@ -1465,7 +1468,7 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
 	return typedResult, err
 }
 
-// TODO: move type above -- keeping it here for in case I need to modify quickly
+// TODO: move type above -- keeping it here for in case I need to modify it quickly
 type stepResultChan struct {
 	result any
 	err    error
@@ -1475,7 +1478,7 @@ type stepResultChan struct {
 func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, stepID int, opts ...StepOption) (any, error) {
 	result := make(chan stepResultChan, 1)
 	go func() {
-		res, err := c.RunAsStep(ctx, fn, c.WithNextStepID(stepID))
+		res, err := c.RunAsStep(ctx, fn, opts...)
 		result <- stepResultChan{
 			result: res,
 			err:    err,
