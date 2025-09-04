@@ -95,11 +95,18 @@ type baseWorkflowHandle struct {
 }
 
 // GetStatus returns the current status of the workflow from the database
+// If the DBOSContext is running in client mode, do not load input and outputs
 func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
+	loadInput := false
+	loadOutput := false
+	if h.dbosContext.(*dbosContext).launched.Load() {
+		loadInput = false
+		loadOutput = false
+	}
 	workflowStatuses, err := h.dbosContext.(*dbosContext).systemDB.listWorkflows(h.dbosContext, listWorkflowsDBInput{
 		workflowIDs: []string{h.workflowID},
-		loadInput:   true,
-		loadOutput:  true,
+		loadInput:   loadInput,
+		loadOutput:  loadOutput,
 	})
 	if err != nil {
 		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
@@ -1314,10 +1321,16 @@ func GetStepID(ctx DBOSContext) (int, error) {
 }
 
 func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
+	loadInput := false
+	loadOutput := false
+	if c.launched.Load() {
+		loadInput = false
+		loadOutput = false
+	}
 	workflowStatus, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
-		loadInput:   true,
-		loadOutput:  true,
+		loadInput:   loadInput,
+		loadOutput:  loadOutput,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve workflow status: %w", err)
