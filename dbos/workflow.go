@@ -33,27 +33,27 @@ const (
 // WorkflowStatus contains comprehensive information about a workflow's current state and execution history.
 // This struct is returned by workflow status queries and contains both metadata and execution details.
 type WorkflowStatus struct {
-	ID                 string             `json:"workflow_uuid"`       // Unique identifier for the workflow
-	Status             WorkflowStatusType `json:"status"`              // Current execution status
-	Name               string             `json:"name"`                // Function name of the workflow
-	AuthenticatedUser  *string            `json:"authenticated_user"`  // User who initiated the workflow (if applicable)
-	AssumedRole        *string            `json:"assumed_role"`        // Role assumed during execution (if applicable)
-	AuthenticatedRoles *string            `json:"authenticated_roles"` // Roles available to the user (if applicable)
-	Output             any                `json:"output"`              // Workflow output (available after completion)
-	Error              error              `json:"error"`               // Error information (if status is ERROR)
-	ExecutorID         string             `json:"executor_id"`         // ID of the executor running this workflow
-	CreatedAt          time.Time          `json:"created_at"`          // When the workflow was created
-	UpdatedAt          time.Time          `json:"updated_at"`          // When the workflow status was last updated
-	ApplicationVersion string             `json:"application_version"` // Version of the application that created this workflow
-	ApplicationID      string             `json:"application_id"`      // Application identifier
-	Attempts           int                `json:"attempts"`            // Number of execution attempts
-	QueueName          string             `json:"queue_name"`          // Queue name (if workflow was enqueued)
-	Timeout            time.Duration      `json:"timeout"`             // Workflow timeout duration
-	Deadline           time.Time          `json:"deadline"`            // Absolute deadline for workflow completion
-	StartedAt          time.Time          `json:"started_at"`          // When the workflow execution actually started
-	DeduplicationID    string             `json:"deduplication_id"`    // Deduplication identifier (if applicable)
-	Input              any                `json:"input"`               // Input parameters passed to the workflow
-	Priority           int                `json:"priority"`            // Execution priority (lower numbers have higher priority)
+	ID                 string             `json:"workflow_uuid"`                 // Unique identifier for the workflow
+	Status             WorkflowStatusType `json:"status"`                        // Current execution status
+	Name               string             `json:"name"`                          // Function name of the workflow
+	AuthenticatedUser  *string            `json:"authenticated_user,omitempty"`  // User who initiated the workflow (if applicable)
+	AssumedRole        *string            `json:"assumed_role,omitempty"`        // Role assumed during execution (if applicable)
+	AuthenticatedRoles *string            `json:"authenticated_roles,omitempty"` // Roles available to the user (if applicable)
+	Output             any                `json:"output,omitempty"`              // Workflow output (available after completion)
+	Error              error              `json:"error,omitempty"`               // Error information (if status is ERROR)
+	ExecutorID         string             `json:"executor_id"`                   // ID of the executor running this workflow
+	CreatedAt          time.Time          `json:"created_at"`                    // When the workflow was created
+	UpdatedAt          time.Time          `json:"updated_at"`                    // When the workflow status was last updated
+	ApplicationVersion string             `json:"application_version"`           // Version of the application that created this workflow
+	ApplicationID      string             `json:"application_id,omitempty"`      // Application identifier
+	Attempts           int                `json:"attempts"`                      // Number of execution attempts
+	QueueName          string             `json:"queue_name,omitempty"`          // Queue name (if workflow was enqueued)
+	Timeout            time.Duration      `json:"timeout,omitempty"`             // Workflow timeout duration
+	Deadline           time.Time          `json:"deadline"`                      // Absolute deadline for workflow completion
+	StartedAt          time.Time          `json:"started_at"`                    // When the workflow execution actually started
+	DeduplicationID    string             `json:"deduplication_id,omitempty"`    // Deduplication identifier (if applicable)
+	Input              any                `json:"input,omitempty"`               // Input parameters passed to the workflow
+	Priority           int                `json:"priority,omitempty"`            // Execution priority (lower numbers have higher priority)
 }
 
 // workflowState holds the runtime state for a workflow execution
@@ -95,11 +95,18 @@ type baseWorkflowHandle struct {
 }
 
 // GetStatus returns the current status of the workflow from the database
+// If the DBOSContext is running in client mode, do not load input and outputs
 func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
+	loadInput := false
+	loadOutput := false
+	if h.dbosContext.(*dbosContext).launched.Load() {
+		loadInput = false
+		loadOutput = false
+	}
 	workflowStatuses, err := h.dbosContext.(*dbosContext).systemDB.listWorkflows(h.dbosContext, listWorkflowsDBInput{
 		workflowIDs: []string{h.workflowID},
-		loadInput:   true,
-		loadOutput:  true,
+		loadInput:   loadInput,
+		loadOutput:  loadOutput,
 	})
 	if err != nil {
 		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
@@ -1314,10 +1321,16 @@ func GetStepID(ctx DBOSContext) (int, error) {
 }
 
 func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
+	loadInput := false
+	loadOutput := false
+	if c.launched.Load() {
+		loadInput = false
+		loadOutput = false
+	}
 	workflowStatus, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{
 		workflowIDs: []string{workflowID},
-		loadInput:   true,
-		loadOutput:  true,
+		loadInput:   loadInput,
+		loadOutput:  loadOutput,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve workflow status: %w", err)

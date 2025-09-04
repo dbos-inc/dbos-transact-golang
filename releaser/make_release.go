@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -291,8 +293,64 @@ func (rm *ReleaseManager) DeleteRemoteTag(version string) error {
 	return nil
 }
 
-// CreateGitHubRelease creates a GitHub release (optional)
-func (rm *ReleaseManager) CreateGitHubRelease(version string) error {
+// BuildCLIBinaries builds CLI binaries for multiple architectures
+func (rm *ReleaseManager) BuildCLIBinaries(version string) ([]string, error) {
+	// Define target platforms
+	platforms := []struct {
+		GOOS   string
+		GOARCH string
+		name   string
+	}{
+		{"linux", "amd64", "linux-amd64"},
+		{"linux", "arm64", "linux-arm64"},
+		{"darwin", "amd64", "darwin-amd64"},
+		{"darwin", "arm64", "darwin-arm64"},
+		{"windows", "amd64", "windows-amd64"},
+	}
+
+	// Create output directory
+	outputDir := "release-binaries"
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	var binaries []string
+
+	for _, platform := range platforms {
+		outputName := fmt.Sprintf("dbos-%s-%s", version, platform.name)
+		if platform.GOOS == "windows" {
+			outputName += ".exe"
+		}
+		outputPath := filepath.Join(outputDir, outputName)
+
+		fmt.Printf("Building CLI for %s/%s...\n", platform.GOOS, platform.GOARCH)
+
+		cmd := exec.Command("go", "build",
+			"-ldflags", fmt.Sprintf("-X main.Version=%s", version),
+			"-o", outputPath,
+			"./dbos/cmd")
+
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("GOOS=%s", platform.GOOS),
+			fmt.Sprintf("GOARCH=%s", platform.GOARCH),
+			"CGO_ENABLED=0",
+		)
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("failed to build for %s/%s: %w\nOutput: %s",
+				platform.GOOS, platform.GOARCH, err, output)
+		}
+
+		binaries = append(binaries, outputPath)
+		fmt.Printf("✓ Built %s\n", outputName)
+	}
+
+	return binaries, nil
+}
+
+// CreateGitHubRelease creates a GitHub release with CLI binaries
+func (rm *ReleaseManager) CreateGitHubRelease(version string, binaries []string) error {
 	ctx := context.Background()
 
 	v, err := semver.NewVersion(version)
@@ -301,14 +359,14 @@ func (rm *ReleaseManager) CreateGitHubRelease(version string) error {
 	}
 
 	release := &github.RepositoryRelease{
-		TagName:              github.String(version),
-		TargetCommitish:      github.String("main"),
-		Name:                 github.String(fmt.Sprintf("Release %s", version)),
-		Prerelease:           github.Bool(v.Prerelease() != ""),
-		GenerateReleaseNotes: github.Bool(true),
+		TagName:              github.Ptr(version),
+		TargetCommitish:      github.Ptr("main"),
+		Name:                 github.Ptr(fmt.Sprintf("Release %s", version)),
+		Prerelease:           github.Ptr(v.Prerelease() != ""),
+		GenerateReleaseNotes: github.Ptr(true),
 	}
 
-	_, _, err = rm.client.Repositories.CreateRelease(
+	createdRelease, _, err := rm.client.Repositories.CreateRelease(
 		ctx,
 		rm.githubOwner,
 		rm.githubRepo,
@@ -320,6 +378,36 @@ func (rm *ReleaseManager) CreateGitHubRelease(version string) error {
 	}
 
 	fmt.Printf("✓ GitHub release %s created\n", version)
+
+	// Upload CLI binaries as release assets
+	for _, binaryPath := range binaries {
+		file, err := os.Open(binaryPath)
+		if err != nil {
+			fmt.Printf("Warning: failed to open binary %s: %v\n", binaryPath, err)
+			continue
+		}
+		defer file.Close()
+
+		opts := &github.UploadOptions{
+			Name: filepath.Base(binaryPath),
+		}
+
+		_, _, err = rm.client.Repositories.UploadReleaseAsset(
+			ctx,
+			rm.githubOwner,
+			rm.githubRepo,
+			*createdRelease.ID,
+			opts,
+			file,
+		)
+
+		if err != nil {
+			fmt.Printf("Warning: failed to upload %s: %v\n", filepath.Base(binaryPath), err)
+		} else {
+			fmt.Printf("✓ Uploaded %s\n", filepath.Base(binaryPath))
+		}
+	}
+
 	return nil
 }
 
@@ -389,10 +477,38 @@ func main() {
 		log.Fatalf("Failed to create release branch: %v", err)
 	}
 
-	// Optionally create GitHub release
+	// Build CLI binaries for multiple platforms
+	fmt.Printf("\nBuilding CLI binaries...\n")
+	binaries, err := rm.BuildCLIBinaries(version)
+	if err != nil {
+		// Rollback: delete the remote tag
+		if deleteErr := rm.DeleteRemoteTag(version); deleteErr != nil {
+			fmt.Printf("Warning: failed to cleanup remote tag %s: %v\n", version, deleteErr)
+		}
+		// Delete the local tag
+		if deleteErr := rm.repo.DeleteTag(version); deleteErr != nil {
+			fmt.Printf("Warning: failed to cleanup local tag %s: %v\n", version, deleteErr)
+		}
+		log.Fatalf("Failed to build CLI binaries: %v", err)
+	}
+
+	// Create GitHub release with CLI binaries
 	fmt.Printf("\nCreating GitHub release...\n")
-	if err := rm.CreateGitHubRelease(version); err != nil {
+	if err := rm.CreateGitHubRelease(version, binaries); err != nil {
+		// Rollback: delete the remote tag
+		if deleteErr := rm.DeleteRemoteTag(version); deleteErr != nil {
+			fmt.Printf("Warning: failed to cleanup remote tag %s: %v\n", version, deleteErr)
+		}
+		// Delete the local tag
+		if deleteErr := rm.repo.DeleteTag(version); deleteErr != nil {
+			fmt.Printf("Warning: failed to cleanup local tag %s: %v\n", version, deleteErr)
+		}
 		log.Fatalf("Failed to create GitHub release: %v", err)
+	}
+
+	// Clean up binaries directory
+	if err := os.RemoveAll("release-binaries"); err != nil {
+		fmt.Printf("Warning: failed to cleanup release-binaries directory: %v\n", err)
 	}
 
 	fmt.Printf("\n🎉 Release %s completed successfully!\n", version)
