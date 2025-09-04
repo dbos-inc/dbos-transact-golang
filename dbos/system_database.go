@@ -293,7 +293,7 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 	// Allow pgx health checks to complete
 	// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
 	// These trigger go-leak alerts
-	time.Sleep(500 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 
 	s.launched = false
 }
@@ -2350,6 +2350,6 @@ func backoffWithJitter(retryAttempt int) time.Duration {
 	}
 
 	// want randomization between +-25% of exp
-	jitter := 0.75 + rand.Float64()*0.5
+	jitter := 0.75 + rand.Float64()*0.5 //nosec G404 -- trivial use of math/rand
 	return time.Duration(exp * jitter)
 }
