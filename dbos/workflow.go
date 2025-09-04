@@ -833,12 +833,12 @@ type Step[R any] func(ctx context.Context) (R, error)
 
 // StepOptions holds the configuration for step execution using functional options pattern.
 type StepOptions struct {
-	maxRetries    int           // Maximum number of retry attempts (0 = no retries)
-	backoffFactor float64       // Exponential backoff multiplier between retries (default: 2.0)
-	baseInterval  time.Duration // Initial delay between retries (default: 100ms)
-	maxInterval   time.Duration // Maximum delay between retries (default: 5s)
-	stepName      string        // Custom name for the step (defaults to function name)
-	stepID        int
+	maxRetries         int           // Maximum number of retry attempts (0 = no retries)
+	backoffFactor      float64       // Exponential backoff multiplier between retries (default: 2.0)
+	baseInterval       time.Duration // Initial delay between retries (default: 100ms)
+	maxInterval        time.Duration // Maximum delay between retries (default: 5s)
+	stepName           string        // Custom name for the step (defaults to function name)
+	preGeneratedStepID *int          // Pre generated stepID in case we want to run the function in a Go routine
 }
 
 // setDefaults applies default values to stepOptions
@@ -903,7 +903,7 @@ func WithMaxInterval(interval time.Duration) StepOption {
 
 func WithNextStepID(stepID int) StepOption {
 	return func(opts *StepOptions) {
-		opts.stepID = stepID
+		opts.preGeneratedStepID = &stepID
 	}
 }
 
@@ -1000,16 +1000,19 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		return fn(c)
 	}
 
-	// Setup step state
-	stepState := workflowState{
-		workflowID: wfState.workflowID,
-		//	stepID:       wfState.NextStepID(), // crucially, this increments the step ID on the *workflow* state
-		isWithinStep: true,
+	// Get stepID if it has been pre generated
+	var stepID int
+	if stepOpts.preGeneratedStepID != nil {
+		stepID = *stepOpts.preGeneratedStepID
+	} else {
+		stepID = wfState.NextStepID() // crucially, this increments the step ID on the *workflow* state
 	}
 
-	// this logic needs to be looked at
-	if stepOpts.stepID >= 0 {
-		stepState.stepID = stepOpts.stepID
+	// Setup step state
+	stepState := workflowState{
+		workflowID:   wfState.workflowID,
+		stepID:       stepID,
+		isWithinStep: true,
 	}
 
 	// Uncancellable context for DBOS operations
