@@ -159,6 +159,11 @@ func testProjectInitialization(t *testing.T, cliPath string) {
 	modCmd := exec.Command("go", "mod", "tidy")
 	modOutput, err := modCmd.CombinedOutput()
 	require.NoError(t, err, "go mod tidy failed: %s", string(modOutput))
+
+	// TEMPORARY: go get github.com/dbos-inc/dbos-transact-golang/cmd/dbos@dbos-migration
+	tmpCmd := exec.Command("go", "get", "github.com/dbos-inc/dbos-transact-golang/cmd/dbos@dbos-migration")
+	tmpOutput, err := tmpCmd.CombinedOutput()
+	require.NoError(t, err, "Failed to get dbos-migration: %s", string(tmpOutput))
 }
 
 // testApplicationLifecycle starts the application and triggers workflows
