@@ -1371,15 +1371,15 @@ func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 }
 
 func receiveWorkflow(ctx DBOSContext, topic string) (string, error) {
-	msg1, err := Recv[string](ctx, topic, 10*time.Second)
+	msg1, err := Recv[string](ctx, topic, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	msg2, err := Recv[string](ctx, topic, 10*time.Second)
+	msg2, err := Recv[string](ctx, topic, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	msg3, err := Recv[string](ctx, topic, 10*time.Second)
+	msg3, err := Recv[string](ctx, topic, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -1467,10 +1467,14 @@ func TestSendRecv(t *testing.T) {
 	RegisterWorkflow(dbosCtx, receiveIdempotencyWorkflow)
 	RegisterWorkflow(dbosCtx, workflowThatCallsSendInStep)
 
+	dbosCtx.Launch()
+
 	t.Run("SendRecvSuccess", func(t *testing.T) {
 		// Start the receive workflow
 		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "test-topic")
 		require.NoError(t, err, "failed to start receive workflow")
+
+		time.Sleep(500 * time.Millisecond) // Ensure receive workflow is waiting so we don't miss the notification
 
 		// Send a message to the receive workflow
 		handle, err := RunWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{
@@ -1497,10 +1501,14 @@ func TestSendRecv(t *testing.T) {
 		// Verify step counting for receive workflow (receiveWorkflow calls Recv 3 times)
 		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for receive workflow")
-		require.Len(t, receiveSteps, 3, "expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
+		require.Len(t, receiveSteps, 4, "expected 4 steps in receive workflow (3 Recv calls + 1 sleep call during the first recv), got %d", len(receiveSteps))
 		for i, step := range receiveSteps {
 			require.Equal(t, i, step.StepID, "expected step %d to have correct StepID", i)
-			require.Equal(t, "DBOS.recv", step.StepName, "expected step %d to have StepName 'DBOS.recv'", i)
+			if i == 1 {
+				require.Equal(t, "DBOS.sleep", step.StepName, "expected step %d to have StepName 'DBOS.sleep'", i)
+			} else {
+				require.Equal(t, "DBOS.recv", step.StepName, "expected step %d to have StepName 'DBOS.recv'", i)
+			}
 		}
 	})
 
@@ -1533,12 +1541,16 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, 0, sendSteps[0].StepID)
 		require.Equal(t, "DBOS.send", sendSteps[0].StepName)
 
-		// Verify step counting for receiveStructWorkflow (calls Recv 1 time)
+		// Verify step counting for receiveStructWorkflow (calls Recv 1 time, with sleep)
 		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for receive struct workflow")
-		require.Len(t, receiveSteps, 1, "expected 1 step in receive struct workflow (1 Recv call), got %d", len(receiveSteps))
+		require.Len(t, receiveSteps, 2, "expected 2 steps in receive struct workflow (1 Recv call + 1 sleep call), got %d", len(receiveSteps))
+		// First step should be recv
 		require.Equal(t, 0, receiveSteps[0].StepID)
 		require.Equal(t, "DBOS.recv", receiveSteps[0].StepName)
+		// Second step should be sleep
+		require.Equal(t, 1, receiveSteps[1].StepID)
+		require.Equal(t, "DBOS.sleep", receiveSteps[1].StepName)
 	})
 
 	t.Run("SendToNonExistentUUID", func(t *testing.T) {
@@ -1592,6 +1604,8 @@ func TestSendRecv(t *testing.T) {
 		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "outside-workflow-topic")
 		require.NoError(t, err, "failed to start receive workflow")
 
+		time.Sleep(500 * time.Millisecond) // Ensure receive workflow gets to the sleep part
+
 		// Send messages from outside a workflow context
 		for i := range 3 {
 			err = Send(dbosCtx, receiveHandle.GetWorkflowID(), fmt.Sprintf("message%d", i+1), "outside-workflow-topic")
@@ -1603,13 +1617,17 @@ func TestSendRecv(t *testing.T) {
 		require.NoError(t, err, "failed to get result from receive workflow")
 		assert.Equal(t, "message1-message2-message3", result, "expected correct result from receive workflow")
 
-		// Verify step counting for receive workflow (calls Recv 3 times)
+		// Verify step counting for receive workflow (calls Recv 3 times, each with sleep)
 		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for receive workflow")
-		require.Len(t, receiveSteps, 3, "expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
+		require.Len(t, receiveSteps, 4, "expected 4 steps in receive workflow (3 Recv calls + 1 sleep calls), got %d", len(receiveSteps))
 		for i, step := range receiveSteps {
 			require.Equal(t, i, step.StepID, "expected step %d to have correct StepID", i)
-			require.Equal(t, "DBOS.recv", step.StepName, "expected step %d to have StepName 'DBOS.recv'", i)
+			if i == 1 {
+				require.Equal(t, "DBOS.sleep", step.StepName, "expected recv step %d to have StepName 'DBOS.sleep'", i)
+			} else {
+				require.Equal(t, "DBOS.recv", step.StepName, "expected recv step %d to have StepName 'DBOS.recv'", i)
+			}
 		}
 	})
 	t.Run("SendRecvIdempotency", func(t *testing.T) {
@@ -1627,7 +1645,7 @@ func TestSendRecv(t *testing.T) {
 		// Wait for the receive workflow to have received the message
 		receiveIdempotencyStartEvent.Wait()
 
-		// Attempt recovering both workflows. There should be only 2 steps recorded after recovery.
+		// Attempt recovering both workflows. There should be only 1 and 2 steps recorded for send and receive, respectively, after recovery.
 		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.NoError(t, err, "failed to recover pending workflows")
 		require.Len(t, recoveredHandles, 2, "expected 2 recovered handles, got %d", len(recoveredHandles))
@@ -1639,9 +1657,11 @@ func TestSendRecv(t *testing.T) {
 
 		steps, err = GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get steps for receive idempotency workflow")
-		require.Len(t, steps, 1, "expected 1 step in receive idempotency workflow, got %d", len(steps))
+		require.Len(t, steps, 2, "expected 2 steps in receive idempotency workflow (recv + sleep), got %d", len(steps))
 		assert.Equal(t, 0, steps[0].StepID, "expected receive idempotency step to have StepID 0")
 		assert.Equal(t, "DBOS.recv", steps[0].StepName, "expected receive idempotency step to have StepName 'DBOS.recv'")
+		assert.Equal(t, 1, steps[1].StepID, "expected receive idempotency sleep step to have StepID 1")
+		assert.Equal(t, "DBOS.sleep", steps[1].StepName, "expected receive idempotency sleep step to have StepName 'DBOS.sleep'")
 
 		// Unblock the workflows to complete
 		receiveIdempotencyStopEvent.Set()
@@ -1778,6 +1798,7 @@ var (
 	getEventStartIdempotencyEvent = NewEvent()
 	getEventStopIdempotencyEvent  = NewEvent()
 	setSecondEventSignal          = NewEvent()
+	setThirdEventSignal           = NewEvent()
 )
 
 type setEventWorkflowInput struct {
@@ -1793,8 +1814,13 @@ func setEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, err
 	return "event-set", nil
 }
 
-func getEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
-	result, err := GetEvent[string](ctx, input.Key, input.Message, 3*time.Second)
+type getEventWorkflowInput struct {
+	TargetWorkflowID string
+	Key              string
+}
+
+func getEventWorkflow(ctx DBOSContext, input getEventWorkflowInput) (string, error) {
+	result, err := GetEvent[string](ctx, input.TargetWorkflowID, input.Key, 3*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -1803,7 +1829,7 @@ func getEventWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, err
 
 func setTwoEventsWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string, error) {
 	// Set the first event
-	err := SetEvent(ctx, "event1", "first-event-message")
+	err := SetEvent(ctx, "event", "first-event-message")
 	if err != nil {
 		return "", err
 	}
@@ -1812,7 +1838,15 @@ func setTwoEventsWorkflow(ctx DBOSContext, input setEventWorkflowInput) (string,
 	setSecondEventSignal.Wait()
 
 	// Set the second event
-	err = SetEvent(ctx, "event2", "second-event-message")
+	err = SetEvent(ctx, "event", "second-event-message")
+	if err != nil {
+		return "", err
+	}
+
+	setThirdEventSignal.Wait()
+
+	// Set the third event
+	err = SetEvent(ctx, "anotherevent", "third-event-message")
 	if err != nil {
 		return "", err
 	}
@@ -1957,23 +1991,28 @@ func TestSetGetEvent(t *testing.T) {
 	RegisterWorkflow(dbosCtx, setEventIdempotencyWorkflow)
 	RegisterWorkflow(dbosCtx, getEventIdempotencyWorkflow)
 
+	dbosCtx.Launch()
+
 	t.Run("SetGetEventFromWorkflow", func(t *testing.T) {
 		// Clear the signal event before starting
 		setSecondEventSignal.Clear()
 
-		// Start the workflow that sets two events
-		setHandle, err := RunWorkflow(dbosCtx, setTwoEventsWorkflow, setEventWorkflowInput{
-			Key:     "test-workflow",
-			Message: "unused",
-		})
-		require.NoError(t, err, "failed to start set two events workflow")
-
+		setWorkflowID := uuid.NewString()
 		// Start a workflow to get the first event
-		getFirstEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, setEventWorkflowInput{
-			Key:     setHandle.GetWorkflowID(), // Target workflow ID
-			Message: "event1",                  // Event key
+		getFirstEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, getEventWorkflowInput{
+			TargetWorkflowID: setWorkflowID, // Target workflow ID
+			Key:              "event",       // Event key
 		})
 		require.NoError(t, err, "failed to start get first event workflow")
+
+		time.Sleep(500 * time.Millisecond)
+
+		// Start the workflow that sets two events
+		setHandle, err := RunWorkflow(dbosCtx, setTwoEventsWorkflow, setEventWorkflowInput{
+			Key:     setWorkflowID,
+			Message: "unused",
+		}, WithWorkflowID(setWorkflowID))
+		require.NoError(t, err, "failed to start set two events workflow")
 
 		// Verify we can get the first event
 		firstMessage, err := getFirstEventHandle.GetResult()
@@ -1983,10 +2022,12 @@ func TestSetGetEvent(t *testing.T) {
 		// Signal the workflow to set the second event
 		setSecondEventSignal.Set()
 
+		time.Sleep(500 * time.Millisecond)
+
 		// Start a workflow to get the second event
-		getSecondEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, setEventWorkflowInput{
-			Key:     setHandle.GetWorkflowID(), // Target workflow ID
-			Message: "event2",                  // Event key
+		getSecondEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, getEventWorkflowInput{
+			TargetWorkflowID: setWorkflowID, // Target workflow ID
+			Key:              "event",       // Event key
 		})
 		require.NoError(t, err, "failed to start get second event workflow")
 
@@ -1995,15 +2036,30 @@ func TestSetGetEvent(t *testing.T) {
 		require.NoError(t, err, "failed to get result from second event workflow")
 		assert.Equal(t, "second-event-message", secondMessage, "expected second message to be 'second-event-message'")
 
-		// Wait for the workflow to complete
+		// Signal the workflow to set the third event
+		setThirdEventSignal.Set()
+
+		// Start a workflow to get the third event
+		getThirdEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, getEventWorkflowInput{
+			TargetWorkflowID: setWorkflowID,  // Target workflow ID
+			Key:              "anotherevent", // Event key
+		})
+		require.NoError(t, err, "failed to start get third event workflow")
+
+		// Verify we can get the third event
+		thirdMessage, err := getThirdEventHandle.GetResult()
+		require.NoError(t, err, "failed to get result from third event workflow")
+		assert.Equal(t, "third-event-message", thirdMessage, "expected third message to be 'third-event-message'")
+
+		// Wait for the set workflow to complete
 		result, err := setHandle.GetResult()
 		require.NoError(t, err, "failed to get result from set two events workflow")
 		assert.Equal(t, "two-events-set", result, "expected result to be 'two-events-set'")
 
-		// Verify step counting for setTwoEventsWorkflow (calls SetEvent 2 times)
+		// Verify step counting for setTwoEventsWorkflow (calls SetEvent 3 times)
 		setSteps, err := GetWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for set two events workflow")
-		require.Len(t, setSteps, 2, "expected 2 steps in set two events workflow (2 SetEvent calls), got %d", len(setSteps))
+		require.Len(t, setSteps, 3, "expected 3 steps in set two events workflow (3 SetEvent calls), got %d", len(setSteps))
 		for i, step := range setSteps {
 			assert.Equal(t, i, step.StepID, "expected step %d to have StepID %d", i, i)
 			assert.Equal(t, "DBOS.setEvent", step.StepName, "expected step %d to have StepName 'DBOS.setEvent'", i)
@@ -2021,15 +2077,25 @@ func TestSetGetEvent(t *testing.T) {
 		assert.Equal(t, "DBOS.sleep", getFirstSteps[1].StepName, "expected second step to have StepName 'DBOS.sleep'")
 
 		// Verify step counting for the second get event workflow
+		// This one does not sleep because the event was already set
 		getSecondSteps, err := GetWorkflowSteps(dbosCtx, getSecondEventHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for get second event workflow")
-		require.Len(t, getSecondSteps, 2, "expected 2 steps in get second event workflow (getEvent + sleep), got %d", len(getSecondSteps))
+		require.Len(t, getSecondSteps, 1, "expected 1 step in get second event workflow (getEvent only), got %d", len(getSecondSteps))
 		// First step should be the getEvent step with stepID 0
 		assert.Equal(t, 0, getSecondSteps[0].StepID, "expected first step to have StepID 0")
 		assert.Equal(t, "DBOS.getEvent", getSecondSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
+
+		// Verify step counting for the third get event workflow
+		// This one sleeps because the event wasn't set yet
+		getThirdSteps, err := GetWorkflowSteps(dbosCtx, getThirdEventHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for get third event workflow")
+		require.Len(t, getThirdSteps, 2, "expected 2 steps in get third event workflow (getEvent + sleep), got %d", len(getThirdSteps))
+		// First step should be the getEvent step with stepID 0
+		assert.Equal(t, 0, getThirdSteps[0].StepID, "expected first step to have StepID 0")
+		assert.Equal(t, "DBOS.getEvent", getThirdSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
 		// Second step should be the sleep step with stepID 1
-		assert.Equal(t, 1, getSecondSteps[1].StepID, "expected second step to have StepID 1")
-		assert.Equal(t, "DBOS.sleep", getSecondSteps[1].StepName, "expected second step to have StepName 'DBOS.sleep'")
+		assert.Equal(t, 1, getThirdSteps[1].StepID, "expected second step to have StepID")
+		assert.Equal(t, "DBOS.sleep", getThirdSteps[1].StepName, "expected second step to have StepName 'DBOS.sleep'")
 	})
 
 	t.Run("GetEventFromOutsideWorkflow", func(t *testing.T) {
@@ -2119,6 +2185,8 @@ func TestSetGetEvent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to start set event idempotency workflow: %v", err)
 		}
+
+		time.Sleep(500 * time.Millisecond) // Ensure the value is in the database...
 
 		// Start the get event workflow
 		getHandle, err := RunWorkflow(dbosCtx, getEventIdempotencyWorkflow, setEventWorkflowInput{
