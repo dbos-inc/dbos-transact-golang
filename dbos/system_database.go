@@ -54,7 +54,7 @@ type systemDatabase interface {
 	getEvent(ctx context.Context, input getEventInput) (any, error)
 
 	// Timers (special steps)
-	sleep(ctx context.Context, duration time.Duration, stepID int) (time.Duration, error)
+	sleep(ctx context.Context, input sleepInput) (time.Duration, error)
 
 	// Queues
 	dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error)
@@ -1442,7 +1442,13 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 // A wakeup time is computed and recorded in the database
 // If we sleep is re-executed, it will only sleep for the remaining duration until the wakeup time
 // sleep can be called within other special steps (e.g., getEvent, recv) to provide durable sleep
-func (s *sysDB) sleep(ctx context.Context, duration time.Duration, stepID int) (time.Duration, error) {
+type sleepInput struct {
+	duration  time.Duration // Duration to sleep
+	stepID    int           // Optional step ID to use (if < 0, a new step ID will be assigned)
+	skipSleep bool          // If true, the function will not actually sleep (useful for testing)
+}
+
+func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, error) {
 	functionName := "DBOS.sleep"
 
 	// Get workflow state from context
@@ -1455,14 +1461,14 @@ func (s *sysDB) sleep(ctx context.Context, duration time.Duration, stepID int) (
 		return 0, newStepExecutionError(wfState.workflowID, functionName, "cannot call Sleep within a step")
 	}
 
-	if stepID < 0 {
-		stepID = wfState.NextStepID()
+	if input.stepID < 0 {
+		input.stepID = wfState.NextStepID()
 	}
 
 	// Check if operation was already executed
 	checkInput := checkOperationExecutionDBInput{
 		workflowID: wfState.workflowID,
-		stepID:     stepID,
+		stepID:     input.stepID,
 		stepName:   functionName,
 	}
 	recordedResult, err := s.checkOperationExecution(ctx, checkInput)
@@ -1489,14 +1495,14 @@ func (s *sysDB) sleep(ctx context.Context, duration time.Duration, stepID int) (
 		}
 	} else {
 		// First execution: calculate and record the end time
-		s.logger.Debug("Durable sleep", "stepID", stepID, "duration", duration)
+		s.logger.Debug("Durable sleep", "stepID", input.stepID, "duration", input.duration)
 
-		endTime = time.Now().Add(duration)
+		endTime = time.Now().Add(input.duration)
 
 		// Record the operation result with the calculated end time
 		recordInput := recordOperationResultDBInput{
 			workflowID: wfState.workflowID,
-			stepID:     stepID,
+			stepID:     input.stepID,
 			stepName:   functionName,
 			output:     endTime,
 			err:        nil,
@@ -1515,8 +1521,10 @@ func (s *sysDB) sleep(ctx context.Context, duration time.Duration, stepID int) (
 	// Calculate remaining duration until wake up time
 	remainingDuration := max(0, time.Until(endTime))
 
-	// Actually sleep for the remaining duration
-	time.Sleep(remainingDuration)
+	if !input.skipSleep {
+		// Actually sleep for the remaining duration
+		time.Sleep(remainingDuration)
+	}
 
 	return remainingDuration, nil
 }
@@ -1753,10 +1761,19 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 			close(done)
 		}()
 
+		timeout, err := s.sleep(ctx, sleepInput{
+			duration:  input.Timeout,
+			stepID:    wfState.NextStepID(),
+			skipSleep: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to sleep before recv timeout: %w", err)
+		}
+
 		select {
 		case <-done:
 			s.logger.Debug("Received notification on condition variable", "payload", payload)
-		case <-time.After(input.Timeout):
+		case <-time.After(timeout):
 			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
 		}
 	}
@@ -1972,19 +1989,22 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 			close(done)
 		}()
 
-		timeoutChan := time.After(input.Timeout)
+		timeout := input.Timeout
 		if isInWorkflow {
-			go func() {
-				s.sleep(ctx, input.Timeout, wfState.NextStepID())
-				timeoutChan = time.After(0)
-			}()
+			timeout, err = s.sleep(ctx, sleepInput{
+				duration:  input.Timeout,
+				stepID:    wfState.NextStepID(),
+				skipSleep: true,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to sleep before getEvent timeout: %w", err)
+			}
 		}
 
 		select {
 		case <-done:
 			// Received notification
-		case <-timeoutChan:
-			// Timeout reached
+		case <-time.After(timeout):
 			s.logger.Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
 		case <-ctx.Done():
 			return nil, fmt.Errorf("context cancelled while waiting for event: %w", ctx.Err())
