@@ -111,7 +111,7 @@ func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *
 		if err != nil {
 			return newInitializationError(fmt.Sprintf("failed to create database %s: %v", dbName, err))
 		}
-		logger.Info("Database created", "name", dbName)
+		logger.Debug("Database created", "name", dbName)
 	}
 
 	return nil
@@ -304,7 +304,7 @@ func (s *sysDB) launch(ctx context.Context) {
 }
 
 func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
-	s.logger.Info("DBOS: Closing system database connection pool")
+	s.logger.Debug("DBOS: Closing system database connection pool")
 	if s.pool != nil {
 		s.pool.Close()
 	}
@@ -319,7 +319,7 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 
 	if s.launched {
 		// Wait for the notification loop to exit
-		s.logger.Info("DBOS: Waiting for notification listener loop to finish")
+		s.logger.Debug("DBOS: Waiting for notification listener loop to finish")
 		select {
 		case <-s.notificationLoopDone:
 		case <-time.After(timeout):
@@ -1530,7 +1530,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 		s.notificationLoopDone <- struct{}{}
 	}()
 
-	s.logger.Info("DBOS: Starting notification listener loop")
+	s.logger.Debug("DBOS: Starting notification listener loop")
 	mrr := s.notificationListenerConnection.Exec(ctx, fmt.Sprintf("LISTEN %s; LISTEN %s", _DBOS_NOTIFICATIONS_CHANNEL, _DBOS_WORKFLOW_EVENTS_CHANNEL))
 	results, err := mrr.ReadAll()
 	if err != nil {
@@ -1558,7 +1558,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 		if err != nil {
 			// Context cancellation
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				s.logger.Info("Notification listener loop exiting due to context cancellation", "cause", context.Cause(ctx), "error", err)
+				s.logger.Debug("Notification listener loop exiting due to context cancellation", "cause", context.Cause(ctx), "error", err)
 				return
 			}
 

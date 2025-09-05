@@ -330,7 +330,7 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 		return nil, newInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
 	initExecutor.systemDB = systemDB
-	initExecutor.logger.Info("System database initialized")
+	initExecutor.logger.Debug("System database initialized")
 
 	// Initialize the queue runner and register DBOS internal queue
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
@@ -355,7 +355,7 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 			return nil, newInitializationError(fmt.Sprintf("failed to initialize conductor: %v", err))
 		}
 		initExecutor.conductor = conductor
-		initExecutor.logger.Info("Conductor initialized")
+		initExecutor.logger.Debug("Conductor initialized")
 	}
 
 	return initExecutor, nil
@@ -383,7 +383,7 @@ func (c *dbosContext) Launch() error {
 			c.logger.Error("Failed to start admin server", "error", err)
 			return newInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
 		}
-		c.logger.Info("Admin server started", "port", c.config.AdminServerPort)
+		c.logger.Debug("Admin server started", "port", c.config.AdminServerPort)
 		c.adminServer = adminServer
 	}
 
@@ -392,18 +392,18 @@ func (c *dbosContext) Launch() error {
 	go func() {
 		c.queueRunner.run(c)
 	}()
-	c.logger.Info("Queue runner started")
+	c.logger.Debug("Queue runner started")
 
 	// Start the workflow scheduler if it has been initialized
 	if c.workflowScheduler != nil {
 		c.workflowScheduler.Start()
-		c.logger.Info("Workflow scheduler started")
+		c.logger.Debug("Workflow scheduler started")
 	}
 
 	// Start the conductor if it has been initialized
 	if c.conductor != nil {
 		c.conductor.Launch()
-		c.logger.Info("Conductor started")
+		c.logger.Debug("Conductor started")
 	}
 
 	// Run a round of recovery on the local executor
@@ -414,7 +414,7 @@ func (c *dbosContext) Launch() error {
 	if len(recoveryHandles) > 0 {
 		c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
 	} else {
-		c.logger.Info("No pending workflows to recover")
+		c.logger.Debug("No pending workflows to recover")
 	}
 
 	c.logger.Info("DBOS initialized", "app_version", c.applicationVersion, "executor_id", c.executorID)
@@ -438,13 +438,13 @@ func (c *dbosContext) Launch() error {
 //
 // Shutdown is a permanent operation and should be called when the application is terminating.
 func (c *dbosContext) Shutdown(timeout time.Duration) {
-	c.logger.Info("Shutting down DBOS context")
+	c.logger.Debug("Shutting down DBOS context")
 
 	// Cancel the context to signal all resources to stop
 	c.ctxCancelFunc(errors.New("DBOS cancellation initiated"))
 
 	// Wait for all workflows to finish
-	c.logger.Info("Waiting for all workflows to finish")
+	c.logger.Debug("Waiting for all workflows to finish")
 	done := make(chan struct{})
 	go func() {
 		c.workflowsWg.Wait()
@@ -452,7 +452,7 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	}()
 	select {
 	case <-done:
-		c.logger.Info("All workflows completed")
+		c.logger.Debug("All workflows completed")
 	case <-time.After(timeout):
 		// For now just log a warning: eventually we might want Cancel to return an error.
 		c.logger.Warn("Timeout waiting for workflows to complete", "timeout", timeout)
@@ -460,10 +460,10 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 
 	// Wait for queue runner to finish
 	if c.queueRunner != nil && c.launched.Load() {
-		c.logger.Info("Waiting for queue runner to complete")
+		c.logger.Debug("Waiting for queue runner to complete")
 		select {
 		case <-c.queueRunner.completionChan:
-			c.logger.Info("Queue runner completed")
+			c.logger.Debug("Queue runner completed")
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for queue runner to complete", "timeout", timeout)
 		}
@@ -471,12 +471,12 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 
 	// Stop the workflow scheduler and wait until all scheduled workflows are done
 	if c.workflowScheduler != nil && c.launched.Load() {
-		c.logger.Info("Stopping workflow scheduler")
+		c.logger.Debug("Stopping workflow scheduler")
 		ctx := c.workflowScheduler.Stop()
 
 		select {
 		case <-ctx.Done():
-			c.logger.Info("All scheduled jobs completed")
+			c.logger.Debug("All scheduled jobs completed")
 			c.workflowScheduler = nil
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for jobs to complete. Moving on", "timeout", timeout)
@@ -485,24 +485,24 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 
 	// Shutdown the conductor
 	if c.conductor != nil {
-		c.logger.Info("Shutting down conductor")
+		c.logger.Debug("Shutting down conductor")
 		c.conductor.Shutdown(timeout)
 	}
 
 	// Shutdown the admin server
 	if c.adminServer != nil && c.launched.Load() {
-		c.logger.Info("Shutting down admin server")
+		c.logger.Debug("Shutting down admin server")
 		err := c.adminServer.Shutdown(timeout)
 		if err != nil {
 			c.logger.Error("Failed to shutdown admin server", "error", err)
 		} else {
-			c.logger.Info("Admin server shutdown complete")
+			c.logger.Debug("Admin server shutdown complete")
 		}
 	}
 
 	// Close the system database
 	if c.systemDB != nil {
-		c.logger.Info("Shutting down system database")
+		c.logger.Debug("Shutting down system database")
 		c.systemDB.shutdown(c, timeout)
 	}
 

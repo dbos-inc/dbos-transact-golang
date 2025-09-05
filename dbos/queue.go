@@ -264,7 +264,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 		// Sleep with jittered interval, but allow early exit on context cancellation
 		select {
 		case <-ctx.Done():
-			qr.logger.Info("Queue runner stopping due to context cancellation", "cause", context.Cause(ctx))
+			qr.logger.Debug("Queue runner stopping due to context cancellation", "cause", context.Cause(ctx))
 			qr.completionChan <- struct{}{}
 			return
 		case <-time.After(sleepDuration):
