@@ -54,7 +54,7 @@ type systemDatabase interface {
 	getEvent(ctx context.Context, input getEventInput) (any, error)
 
 	// Timers (special steps)
-	sleep(ctx context.Context, duration time.Duration) (time.Duration, error)
+	sleep(ctx context.Context, duration time.Duration, stepID int) (time.Duration, error)
 
 	// Queues
 	dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error)
@@ -1441,7 +1441,8 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 // Sleep is a special type of step that sleeps for a specified duration
 // A wakeup time is computed and recorded in the database
 // If we sleep is re-executed, it will only sleep for the remaining duration until the wakeup time
-func (s *sysDB) sleep(ctx context.Context, duration time.Duration) (time.Duration, error) {
+// sleep can be called within other special steps (e.g., getEvent, recv) to provide durable sleep
+func (s *sysDB) sleep(ctx context.Context, duration time.Duration, stepID int) (time.Duration, error) {
 	functionName := "DBOS.sleep"
 
 	// Get workflow state from context
@@ -1454,7 +1455,9 @@ func (s *sysDB) sleep(ctx context.Context, duration time.Duration) (time.Duratio
 		return 0, newStepExecutionError(wfState.workflowID, functionName, "cannot call Sleep within a step")
 	}
 
-	stepID := wfState.NextStepID()
+	if stepID < 0 {
+		stepID = wfState.NextStepID()
+	}
 
 	// Check if operation was already executed
 	checkInput := checkOperationExecutionDBInput{
@@ -1969,10 +1972,18 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 			close(done)
 		}()
 
+		timeoutChan := time.After(input.Timeout)
+		if isInWorkflow {
+			go func() {
+				s.sleep(ctx, input.Timeout, wfState.NextStepID())
+				timeoutChan = time.After(0)
+			}()
+		}
+
 		select {
 		case <-done:
 			// Received notification
-		case <-time.After(input.Timeout):
+		case <-timeoutChan:
 			// Timeout reached
 			s.logger.Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
 		case <-ctx.Done():

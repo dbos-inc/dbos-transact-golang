@@ -1241,7 +1241,7 @@ func GetEvent[R any](ctx DBOSContext, targetWorkflowID, key string, timeout time
 }
 
 func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error) {
-	return c.systemDB.sleep(c, duration)
+	return c.systemDB.sleep(c, duration, -1)
 }
 
 // Sleep pauses workflow execution for the specified duration.

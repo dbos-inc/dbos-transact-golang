@@ -2009,19 +2009,27 @@ func TestSetGetEvent(t *testing.T) {
 			assert.Equal(t, "DBOS.setEvent", step.StepName, "expected step %d to have StepName 'DBOS.setEvent'", i)
 		}
 
-		// Verify step counting for getFirstEventHandle (calls GetEvent 1 time)
+		// Verify step counting for the first get event workflow
 		getFirstSteps, err := GetWorkflowSteps(dbosCtx, getFirstEventHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for get first event workflow")
-		require.Len(t, getFirstSteps, 1, "expected 1 step in get first event workflow (1 GetEvent call), got %d", len(getFirstSteps))
-		assert.Equal(t, 0, getFirstSteps[0].StepID, "expected step to have StepID 0")
-		assert.Equal(t, "DBOS.getEvent", getFirstSteps[0].StepName, "expected step to have StepName 'DBOS.getEvent'")
+		require.Len(t, getFirstSteps, 2, "expected 2 steps in get first event workflow (getEvent + durable sleep), got %d", len(getFirstSteps))
+		// First step should be the getEvent step with stepID 0
+		assert.Equal(t, 0, getFirstSteps[0].StepID, "expected first step to have StepID 0")
+		assert.Equal(t, "DBOS.getEvent", getFirstSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
+		// Second step should be the sleep step with stepID 1
+		assert.Equal(t, 1, getFirstSteps[1].StepID, "expected second step to have StepID 1")
+		assert.Equal(t, "DBOS.sleep", getFirstSteps[1].StepName, "expected second step to have StepName 'DBOS.sleep'")
 
-		// Verify step counting for getSecondEventHandle (calls GetEvent 1 time)
+		// Verify step counting for the second get event workflow
 		getSecondSteps, err := GetWorkflowSteps(dbosCtx, getSecondEventHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for get second event workflow")
-		require.Len(t, getSecondSteps, 1, "expected 1 step in get second event workflow (1 GetEvent call), got %d", len(getSecondSteps))
-		assert.Equal(t, 0, getSecondSteps[0].StepID, "expected step to have StepID 0")
-		assert.Equal(t, "DBOS.getEvent", getSecondSteps[0].StepName, "expected step to have StepName 'DBOS.getEvent'")
+		require.Len(t, getSecondSteps, 2, "expected 2 steps in get second event workflow (getEvent + durable sleep), got %d", len(getSecondSteps))
+		// First step should be the getEvent step with stepID 0
+		assert.Equal(t, 0, getSecondSteps[0].StepID, "expected first step to have StepID 0")
+		assert.Equal(t, "DBOS.getEvent", getSecondSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
+		// Second step should be the sleep step with stepID 1
+		assert.Equal(t, 1, getSecondSteps[1].StepID, "expected second step to have StepID 1")
+		assert.Equal(t, "DBOS.sleep", getSecondSteps[1].StepName, "expected second step to have StepName 'DBOS.sleep'")
 	})
 
 	t.Run("GetEventFromOutsideWorkflow", func(t *testing.T) {
