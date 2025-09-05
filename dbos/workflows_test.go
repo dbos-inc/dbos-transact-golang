@@ -1790,6 +1790,66 @@ func TestSendRecv(t *testing.T) {
 		// Ensure total results match expected
 		assert.Equal(t, numReceivers, timeoutCount+errorCount, "expected total results to equal number of receivers")
 	})
+
+	t.Run("durableSleep", func(t *testing.T) {
+		// Clear events before starting
+		receiveIdempotencyStartEvent.Clear()
+		receiveIdempotencyStopEvent.Clear()
+
+		// First execution: Start workflow that will timeout after 3 seconds and then block
+		workflowID := uuid.NewString()
+		startTime := time.Now()
+
+		handle1, err := RunWorkflow(dbosCtx, receiveIdempotencyWorkflow, "durable-sleep-topic", WithWorkflowID(workflowID))
+		require.NoError(t, err, "failed to start first receive workflow")
+
+		// Wait for the workflow to signal it has completed the Recv call (which includes the sleep)
+		receiveIdempotencyStartEvent.Wait()
+		receiveIdempotencyStartEvent.Clear()
+
+		// Verify it took at least close to 3 seconds to reach this point (the Recv timeout)
+		elapsed := time.Since(startTime)
+		require.GreaterOrEqual(t, elapsed, 2900*time.Millisecond, "expected workflow to sleep for close to 3 seconds, but elapsed time was %v", elapsed)
+
+		// Now the workflow is blocked on receiveIdempotencyStopEvent.Wait()
+		// Let's recover it to test that the sleep is not repeated
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		require.Len(t, recoveredHandles, 1, "expected 1 recovered handle, got %d", len(recoveredHandles))
+
+		// The recovered workflow should proceed quickly since it already completed the sleep
+		receiveIdempotencyStartEvent.Wait()
+
+		// Verify that the recovery was fast (no additional 3-second sleep)
+		secondElapsed := time.Since(startTime)
+		additionalTime := secondElapsed - elapsed
+		require.Less(t, additionalTime, 500*time.Millisecond, "expected recovery to be fast (additional time less than 500ms), but additional time was %v", additionalTime)
+
+		// Complete the workflow
+		receiveIdempotencyStopEvent.Set()
+
+		// Get results from both handles - they should be the same (empty string due to timeout)
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first workflow")
+		require.Equal(t, "", result1, "expected empty result from first workflow due to timeout")
+
+		result2, err := recoveredHandles[0].GetResult()
+		require.NoError(t, err, "failed to get result from recovered workflow")
+		require.Equal(t, result1, result2, "expected both workflow results to be the same")
+
+		// Verify that there are exactly 2 steps: recv and sleep
+		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 2, "expected 2 steps (recv + sleep), got %d", len(steps))
+
+		// First step should be recv
+		require.Equal(t, 0, steps[0].StepID, "expected first step ID to be 0")
+		require.Equal(t, "DBOS.recv", steps[0].StepName, "expected first step to be recv")
+
+		// Second step should be sleep
+		require.Equal(t, 1, steps[1].StepID, "expected second step ID to be 1")
+		require.Equal(t, "DBOS.sleep", steps[1].StepName, "expected second step to be sleep")
+	})
 }
 
 var (
@@ -2340,6 +2400,7 @@ func TestSetGetEvent(t *testing.T) {
 
 		// Wait for the workflow to signal it has completed the GetEvent call (which includes the sleep)
 		getEventStartIdempotencyEvent.Wait()
+		getEventStartIdempotencyEvent.Clear()
 
 		// Verify it took at least close to 3 seconds to reach this point (the GetEvent timeout)
 		elapsed := time.Since(startTime)
