@@ -2012,7 +2012,7 @@ func TestSetGetEvent(t *testing.T) {
 		// Verify step counting for the first get event workflow
 		getFirstSteps, err := GetWorkflowSteps(dbosCtx, getFirstEventHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for get first event workflow")
-		require.Len(t, getFirstSteps, 2, "expected 2 steps in get first event workflow (getEvent + durable sleep), got %d", len(getFirstSteps))
+		require.Len(t, getFirstSteps, 2, "expected 2 steps in get first event workflow (getEvent + sleep), got %d", len(getFirstSteps))
 		// First step should be the getEvent step with stepID 0
 		assert.Equal(t, 0, getFirstSteps[0].StepID, "expected first step to have StepID 0")
 		assert.Equal(t, "DBOS.getEvent", getFirstSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
@@ -2023,7 +2023,7 @@ func TestSetGetEvent(t *testing.T) {
 		// Verify step counting for the second get event workflow
 		getSecondSteps, err := GetWorkflowSteps(dbosCtx, getSecondEventHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for get second event workflow")
-		require.Len(t, getSecondSteps, 2, "expected 2 steps in get second event workflow (getEvent + durable sleep), got %d", len(getSecondSteps))
+		require.Len(t, getSecondSteps, 2, "expected 2 steps in get second event workflow (getEvent + sleep), got %d", len(getSecondSteps))
 		// First step should be the getEvent step with stepID 0
 		assert.Equal(t, 0, getSecondSteps[0].StepID, "expected first step to have StepID 0")
 		assert.Equal(t, "DBOS.getEvent", getSecondSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
@@ -2253,6 +2253,68 @@ func TestSetGetEvent(t *testing.T) {
 		for err := range errors {
 			require.FailNow(t, "goroutine error: %v", err)
 		}
+	})
+
+	t.Run("durableSleep", func(t *testing.T) {
+		// Clear events before starting
+		getEventStartIdempotencyEvent.Clear()
+		getEventStopIdempotencyEvent.Clear()
+
+		// First execution: Start workflow that will timeout after 3 seconds and then block
+		workflowID := uuid.NewString()
+		startTime := time.Now()
+
+		handle1, err := RunWorkflow(dbosCtx, getEventIdempotencyWorkflow, setEventWorkflowInput{
+			Key:     "non-existent-workflow-id", // This workflow doesn't exist, so GetEvent will timeout
+			Message: "some-event-key",
+		}, WithWorkflowID(workflowID))
+		require.NoError(t, err, "failed to start first get event workflow")
+
+		// Wait for the workflow to signal it has completed the GetEvent call (which includes the sleep)
+		getEventStartIdempotencyEvent.Wait()
+
+		// Verify it took at least close to 3 seconds to reach this point (the GetEvent timeout)
+		elapsed := time.Since(startTime)
+		require.GreaterOrEqual(t, elapsed, 2900*time.Millisecond, "expected workflow to sleep for close to 3 seconds, but elapsed time was %v", elapsed)
+
+		// Now the workflow is blocked on getEventStopIdempotencyEvent.Wait()
+		// Let's recover it to test that the sleep is not repeated
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		require.Len(t, recoveredHandles, 1, "expected 1 recovered handle, got %d", len(recoveredHandles))
+
+		// The recovered workflow should proceed quickly since it already completed the sleep
+		getEventStartIdempotencyEvent.Wait()
+
+		// Verify that the recovery was fast (no additional 3-second sleep)
+		secondElapsed := time.Since(startTime)
+		additionalTime := secondElapsed - elapsed
+		require.Less(t, additionalTime, 500*time.Millisecond, "expected recovery to be fast (additional time less than 500ms), but additional time was %v", additionalTime)
+
+		// Complete the workflow
+		getEventStopIdempotencyEvent.Set()
+
+		// Get results from both handles - they should be the same (empty string due to timeout)
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first workflow")
+		require.Equal(t, "", result1, "expected empty result from first workflow due to timeout")
+
+		result2, err := recoveredHandles[0].GetResult()
+		require.NoError(t, err, "failed to get result from recovered workflow")
+		require.Equal(t, result1, result2, "expected both workflow results to be the same")
+
+		// Verify that there are exactly 2 steps: getEvent and sleep
+		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 2, "expected 2 steps (getEvent + sleep), got %d", len(steps))
+
+		// First step should be getEvent
+		require.Equal(t, 0, steps[0].StepID, "expected first step ID to be 0")
+		require.Equal(t, "DBOS.getEvent", steps[0].StepName, "expected first step to be getEvent")
+
+		// Second step should be sleep
+		require.Equal(t, 1, steps[1].StepID, "expected second step ID to be 1")
+		require.Equal(t, "DBOS.sleep", steps[1].StepName, "expected second step to be sleep")
 	})
 }
 
