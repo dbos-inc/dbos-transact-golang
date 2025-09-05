@@ -1,0 +1,160 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/dbos-inc/dbos-transact-golang/dbos"
+	"github.com/google/uuid"
+)
+
+// Configuration structure
+type Config struct {
+	Name        string `yaml:"name"`
+	Language    string `yaml:"language"`
+	DatabaseURL string `yaml:"database_url"`
+}
+
+// Global variables
+var dbosCtx dbos.DBOSContext
+
+/*****************************/
+/**** WORKFLOWS AND STEPS ****/
+/*****************************/
+
+func ExampleWorkflow(ctx dbos.DBOSContext, _ string) (string, error) {
+	_, err := dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+		return stepOne(stepCtx)
+	})
+	if err != nil {
+		return "", err
+	}
+	return dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+		return stepTwo(stepCtx)
+	})
+}
+
+func stepOne(ctx context.Context) (string, error) {
+	fmt.Println("Step one completed!")
+	return "Step 1 completed", nil
+}
+
+func stepTwo(ctx context.Context) (string, error) {
+	fmt.Println("Step two completed!")
+	return "Step 2 completed - Workflow finished successfully", nil
+}
+
+/*****************************/
+/**** QUEUES *****************/
+/*****************************/
+
+func QueuedStepWorkflow(ctx dbos.DBOSContext, i int) (int, error) {
+	dbos.Sleep(ctx, 5*time.Second)
+	fmt.Printf("Step %d completed!\n", i)
+	return i, nil
+}
+
+func QueueWorkflow(ctx dbos.DBOSContext, _ string) (string, error) {
+	fmt.Println("Enqueueing steps")
+	handles := make([]dbos.WorkflowHandle[int], 10)
+	for i := range 10 {
+		handle, err := dbos.RunWorkflow(ctx, QueuedStepWorkflow, i, dbos.WithQueue("example-queue"))
+		if err != nil {
+			return "", fmt.Errorf("failed to enqueue step %d: %w", i, err)
+		}
+		handles[i] = handle
+	}
+    time.Sleep(10 * time.Second) // give some time for our tests to do wf management
+	return fmt.Sprintf("Successfully enqueued %d steps", len(handles)), nil
+}
+
+/*****************************/
+/**** SCHEDULED WORKFLOWS ****/
+/*****************************/
+
+func ScheduledWorkflow(ctx dbos.DBOSContext, scheduledTime time.Time) (string, error) {
+	fmt.Printf("I am a scheduled workflow scheduled at %v and running at %v\n", scheduledTime, time.Now())
+	return "", nil
+}
+
+func main() {
+	// Create DBOS context
+	var err error
+	dbosCtx, err = dbos.NewDBOSContext(dbos.Config{
+		DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
+		AppName:     "cli-test",
+		AdminServer: true,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// Register workflows
+	dbos.RegisterWorkflow(dbosCtx, ExampleWorkflow)
+	dbos.RegisterWorkflow(dbosCtx, QueueWorkflow)
+	dbos.RegisterWorkflow(dbosCtx, QueuedStepWorkflow)
+	dbos.RegisterWorkflow(dbosCtx, ScheduledWorkflow, dbos.WithSchedule("*/15 * * * * *"))
+
+	// Create queue
+	dbos.NewWorkflowQueue(dbosCtx, "example-queue")
+
+	// Launch DBOS
+	err = dbosCtx.Launch()
+	if err != nil {
+		panic(err)
+	}
+	defer dbosCtx.Shutdown(10 * time.Second)
+
+	// HTTP Handlers
+	http.HandleFunc("/workflow", workflowHandler)
+	http.HandleFunc("/queue", queueHandler)
+	http.HandleFunc("/", healthHandler)
+
+	fmt.Println("Server starting on http://localhost:8080")
+	err = http.ListenAndServe(":8080", nil)
+	if err != nil {
+		fmt.Printf("Error starting server: %s\n", err)
+	}
+}
+
+/*****************************/
+/**** HTTP HANDLERS **********/
+/*****************************/
+
+func workflowHandler(w http.ResponseWriter, r *http.Request) {
+	handle, err := dbos.RunWorkflow(dbosCtx, ExampleWorkflow, "")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error: %s", err), http.StatusInternalServerError)
+		return
+	}
+	res, err := handle.GetResult()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error: %s", err), http.StatusInternalServerError)
+		return
+	}
+	fmt.Fprintf(w, "Workflow result: %s", res)
+}
+
+func queueHandler(w http.ResponseWriter, r *http.Request) {
+	workflowID := uuid.NewString()
+	_, err := dbos.RunWorkflow(dbosCtx, QueueWorkflow, "", dbos.WithWorkflowID(workflowID))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error: %s", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]string{"workflow_id": workflowID}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		fmt.Println("Error encoding response:", err)
+		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+	}
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+    fmt.Fprintf(w, "healthy")
+}

@@ -1,6 +1,7 @@
 package dbos
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -165,5 +166,106 @@ func TestConfig(t *testing.T) {
 			assert.Equal(t, "env-only-v3.0.0", ctx.GetApplicationVersion())
 			assert.Equal(t, "env-only-executor", ctx.GetExecutorID())
 		})
+	})
+
+	t.Run("SystemDBMigration", func(t *testing.T) {
+		t.Setenv("DBOS__APPVERSION", "v1.0.0")
+		t.Setenv("DBOS__APPID", "test-migration")
+		t.Setenv("DBOS__VMID", "test-executor-id")
+
+		ctx, err := NewDBOSContext(Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-migration",
+		})
+		require.NoError(t, err)
+		defer func() {
+			if ctx != nil {
+				ctx.Shutdown(1 * time.Minute)
+			}
+		}()
+
+		require.NotNil(t, ctx)
+
+		// Get the internal systemDB instance to check tables directly
+		dbosCtx, ok := ctx.(*dbosContext)
+		require.True(t, ok, "expected dbosContext")
+		require.NotNil(t, dbosCtx.systemDB)
+
+		sysDB, ok := dbosCtx.systemDB.(*sysDB)
+		require.True(t, ok, "expected sysDB")
+
+		// Verify all expected tables exist and have correct structure
+		dbCtx := context.Background()
+
+		// Test workflow_status table
+		var exists bool
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'workflow_status')").Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "workflow_status table should exist")
+
+		// Test operation_outputs table
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'operation_outputs')").Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "operation_outputs table should exist")
+
+		// Test workflow_events table
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'workflow_events')").Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "workflow_events table should exist")
+
+		// Test notifications table
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'notifications')").Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "notifications table should exist")
+
+		// Test that all tables can be queried (empty results expected)
+		rows, err := sysDB.pool.Query(dbCtx, "SELECT workflow_uuid FROM dbos.workflow_status LIMIT 1")
+		require.NoError(t, err)
+		rows.Close()
+
+		rows, err = sysDB.pool.Query(dbCtx, "SELECT workflow_uuid FROM dbos.operation_outputs LIMIT 1")
+		require.NoError(t, err)
+		rows.Close()
+
+		rows, err = sysDB.pool.Query(dbCtx, "SELECT workflow_uuid FROM dbos.workflow_events LIMIT 1")
+		require.NoError(t, err)
+		rows.Close()
+
+		rows, err = sysDB.pool.Query(dbCtx, "SELECT destination_uuid FROM dbos.notifications LIMIT 1")
+		require.NoError(t, err)
+		rows.Close()
+
+		// Check that the dbos_migrations table exists and has one row with the correct version
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'dbos_migrations')").Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "dbos_migrations table should exist")
+
+		// Verify migration version is 1 (after initial migration)
+		var version int64
+		var count int
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT COUNT(*) FROM dbos.dbos_migrations").Scan(&count)
+		require.NoError(t, err)
+		assert.Equal(t, 1, count, "dbos_migrations table should have exactly one row")
+
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT version FROM dbos.dbos_migrations").Scan(&version)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), version, "migration version should be 1 (after initial migration)")
+
+		// Test manual shutdown and recreate
+		ctx.Shutdown(1 * time.Minute)
+
+		// Recreate context - should have no error since DB is already migrated
+		ctx2, err := NewDBOSContext(Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-migration-recreate",
+		})
+		require.NoError(t, err)
+		defer func() {
+			if ctx2 != nil {
+				ctx2.Shutdown(1 * time.Minute)
+			}
+		}()
+
+		require.NotNil(t, ctx2)
 	})
 }

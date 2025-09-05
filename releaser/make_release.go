@@ -291,7 +291,7 @@ func (rm *ReleaseManager) DeleteRemoteTag(version string) error {
 	return nil
 }
 
-// CreateGitHubRelease creates a GitHub release (optional)
+// CreateGitHubRelease creates a GitHub release with CLI binaries
 func (rm *ReleaseManager) CreateGitHubRelease(version string) error {
 	ctx := context.Background()
 
@@ -301,11 +301,11 @@ func (rm *ReleaseManager) CreateGitHubRelease(version string) error {
 	}
 
 	release := &github.RepositoryRelease{
-		TagName:              github.String(version),
-		TargetCommitish:      github.String("main"),
-		Name:                 github.String(fmt.Sprintf("Release %s", version)),
-		Prerelease:           github.Bool(v.Prerelease() != ""),
-		GenerateReleaseNotes: github.Bool(true),
+		TagName:              github.Ptr(version),
+		TargetCommitish:      github.Ptr("main"),
+		Name:                 github.Ptr(fmt.Sprintf("Release %s", version)),
+		Prerelease:           github.Ptr(v.Prerelease() != ""),
+		GenerateReleaseNotes: github.Ptr(true),
 	}
 
 	_, _, err = rm.client.Repositories.CreateRelease(
@@ -389,10 +389,23 @@ func main() {
 		log.Fatalf("Failed to create release branch: %v", err)
 	}
 
-	// Optionally create GitHub release
+	// Create GitHub release with CLI binaries
 	fmt.Printf("\nCreating GitHub release...\n")
 	if err := rm.CreateGitHubRelease(version); err != nil {
+		// Rollback: delete the remote tag
+		if deleteErr := rm.DeleteRemoteTag(version); deleteErr != nil {
+			fmt.Printf("Warning: failed to cleanup remote tag %s: %v\n", version, deleteErr)
+		}
+		// Delete the local tag
+		if deleteErr := rm.repo.DeleteTag(version); deleteErr != nil {
+			fmt.Printf("Warning: failed to cleanup local tag %s: %v\n", version, deleteErr)
+		}
 		log.Fatalf("Failed to create GitHub release: %v", err)
+	}
+
+	// Clean up binaries directory
+	if err := os.RemoveAll("release-binaries"); err != nil {
+		fmt.Printf("Warning: failed to cleanup release-binaries directory: %v\n", err)
 	}
 
 	fmt.Printf("\n🎉 Release %s completed successfully!\n", version)

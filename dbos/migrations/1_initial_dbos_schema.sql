@@ -1,12 +1,6 @@
--- 001_initial_dbos_schema.up.sql
-
--- Create the dbos schema
-CREATE SCHEMA IF NOT EXISTS dbos;
-
 -- Enable uuid extension for generating UUIDs
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Create workflow_status table
 CREATE TABLE dbos.workflow_status (
     workflow_uuid TEXT PRIMARY KEY,
     status TEXT,
@@ -14,6 +8,7 @@ CREATE TABLE dbos.workflow_status (
     authenticated_user TEXT,
     assumed_role TEXT,
     authenticated_roles TEXT,
+    request TEXT,
     output TEXT,
     error TEXT,
     executor_id TEXT,
@@ -27,23 +22,20 @@ CREATE TABLE dbos.workflow_status (
     queue_name TEXT,
     workflow_timeout_ms BIGINT,
     workflow_deadline_epoch_ms BIGINT,
+    inputs TEXT,
     started_at_epoch_ms BIGINT,
     deduplication_id TEXT,
-    inputs TEXT,
     priority INTEGER NOT NULL DEFAULT 0
 );
 
--- Create indexes for workflow_status
 CREATE INDEX workflow_status_created_at_index ON dbos.workflow_status (created_at);
 CREATE INDEX workflow_status_executor_id_index ON dbos.workflow_status (executor_id);
 CREATE INDEX workflow_status_status_index ON dbos.workflow_status (status);
 
--- Create unique constraint for queue_name and deduplication_id
-ALTER TABLE dbos.workflow_status 
-ADD CONSTRAINT uq_workflow_status_queue_name_dedup_id 
+ALTER TABLE dbos.workflow_status
+ADD CONSTRAINT uq_workflow_status_queue_name_dedup_id
 UNIQUE (queue_name, deduplication_id);
 
--- Create operation_outputs table
 CREATE TABLE dbos.operation_outputs (
     workflow_uuid TEXT NOT NULL,
     function_id INTEGER NOT NULL,
@@ -65,7 +57,6 @@ CREATE TABLE dbos.notifications (
     FOREIGN KEY (destination_uuid) REFERENCES dbos.workflow_status(workflow_uuid) 
         ON UPDATE CASCADE ON DELETE CASCADE
 );
--- Create index for notifications
 CREATE INDEX idx_workflow_topic ON dbos.notifications (destination_uuid, topic);
 
 -- Create notification function
@@ -83,7 +74,6 @@ CREATE TRIGGER dbos_notifications_trigger
 AFTER INSERT ON dbos.notifications
 FOR EACH ROW EXECUTE FUNCTION dbos.notifications_function();
 
--- Create workflow_events table
 CREATE TABLE dbos.workflow_events (
     workflow_uuid TEXT NOT NULL,
     key TEXT NOT NULL,
@@ -107,3 +97,23 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER dbos_workflow_events_trigger
 AFTER INSERT ON dbos.workflow_events
 FOR EACH ROW EXECUTE FUNCTION dbos.workflow_events_function();
+
+CREATE TABLE dbos.streams (
+    workflow_uuid TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    "offset" INTEGER NOT NULL,
+    PRIMARY KEY (workflow_uuid, key, "offset"),
+    FOREIGN KEY (workflow_uuid) REFERENCES dbos.workflow_status(workflow_uuid)
+        ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+CREATE TABLE dbos.event_dispatch_kv (
+    service_name TEXT NOT NULL,
+    workflow_fn_name TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT,
+    update_seq NUMERIC(38,0),
+    update_time NUMERIC(38,15),
+    PRIMARY KEY (service_name, workflow_fn_name, key)
+);

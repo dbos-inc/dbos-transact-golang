@@ -173,7 +173,7 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Equal(t, "test-input", res)
 
 		// List steps: the workflow should have 1 step
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err)
 		assert.Len(t, steps, 1)
 		assert.Equal(t, 0, steps[0].StepID)
@@ -207,7 +207,7 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Equal(t, expectedResult, res)
 
 		// List steps: the workflow should have 2 steps (Start the child and GetResult)
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err)
 		assert.Len(t, steps, 2)
 		assert.Equal(t, runtime.FuncForPC(reflect.ValueOf(queueWorkflow).Pointer()).Name(), steps[0].StepName)
@@ -230,7 +230,7 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Equal(t, expectedResult, res)
 
 		// List steps: the workflow should have 2 steps (Start the child and GetResult)
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err)
 		assert.Len(t, steps, 2)
 		assert.Equal(t, runtime.FuncForPC(reflect.ValueOf(queueWorkflow).Pointer()).Name(), steps[0].StepName)
@@ -253,7 +253,7 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Equal(t, expectedResult, res)
 
 		// List steps: the workflow should have 2 steps (Start the child and GetResult)
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err)
 		assert.Len(t, steps, 2)
 		assert.Equal(t, "custom-name", steps[0].StepName)
@@ -279,7 +279,7 @@ func TestWorkflowQueues(t *testing.T) {
 
 		// Check that the parent workflow (the one we ran directly) has 2 steps:
 		// one for enqueueing the child and one for calling GetResult
-		steps, err := dbosCtx.(*dbosContext).systemDB.getWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err)
 		assert.Len(t, steps, 2)
 		assert.Equal(t, runtime.FuncForPC(reflect.ValueOf(queueWorkflow).Pointer()).Name(), steps[0].StepName)

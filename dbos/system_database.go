@@ -2,18 +2,16 @@ package dbos
 
 import (
 	"context"
-	"embed"
+	_ "embed"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
+	"math"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -47,7 +45,7 @@ type systemDatabase interface {
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
 	checkOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
-	getWorkflowSteps(ctx context.Context, workflowID string) ([]stepInfo, error)
+	getWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
 
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
@@ -119,11 +117,21 @@ func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *
 	return nil
 }
 
-//go:embed migrations/*.sql
-var migrationFiles embed.FS
+//go:embed migrations/1_initial_dbos_schema.sql
+var migration1 string
+
+type migrationFile struct {
+	version int64
+	sql     string
+}
+
+// migrations contains all migration files with their version numbers
+var migrations = []migrationFile{
+	{version: 1, sql: migration1},
+}
 
 const (
-	_DBOS_MIGRATION_TABLE = "dbos_schema_migrations"
+	_DBOS_MIGRATION_TABLE = "dbos_migrations"
 
 	// PostgreSQL error codes
 	_PG_ERROR_UNIQUE_VIOLATION      = "23505"
@@ -134,45 +142,87 @@ const (
 	_DBOS_WORKFLOW_EVENTS_CHANNEL = "dbos_workflow_events_channel"
 
 	// Database retry timeouts
-	_DB_CONNECTION_RETRY_DELAY = 500 * time.Millisecond
-	_DB_RETRY_INTERVAL         = 1 * time.Second
+	_DB_CONNECTION_RETRY_BASE_DELAY  = 1 * time.Second
+	_DB_CONNECTION_RETRY_FACTOR      = 2
+	_DB_CONNECTION_RETRY_MAX_RETRIES = 10
+	_DB_CONNECTION_MAX_DELAY         = 120 * time.Second
+	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
 func runMigrations(databaseURL string) error {
-	// Change the driver to pgx5
-	databaseURL = "pgx5://" + strings.TrimPrefix(databaseURL, "postgres://")
-
-	// Create migration source from embedded files
-	d, err := iofs.New(migrationFiles, "migrations")
+	// Connect to the database
+	pool, err := pgxpool.New(context.Background(), databaseURL)
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to create migration source: %v", err))
+		return fmt.Errorf("failed to create connection pool: %v", err)
 	}
+	defer pool.Close()
 
-	// Add custom migration table name to avoid conflicts with user migrations
-	// Parse the URL to properly determine where to add the query parameter
-	parsedURL, err := url.Parse(databaseURL)
+	// Begin transaction for atomic migration execution
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
+		return fmt.Errorf("failed to begin transaction: %v", err)
 	}
+	defer tx.Rollback(ctx)
 
-	// Check if query parameters already exist
-	separator := "?"
-	if parsedURL.RawQuery != "" {
-		separator = "&"
-	}
-	databaseURL += separator + "x-migrations-table=" + _DBOS_MIGRATION_TABLE
-
-	// Create migrator
-	m, err := migrate.NewWithSourceInstance("iofs", d, databaseURL)
+	// Create the DBOS schema if it doesn't exist
+	_, err = tx.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS dbos")
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to create migrator: %v", err))
+		return fmt.Errorf("failed to create DBOS schema: %v", err)
 	}
-	defer m.Close()
 
-	// Run migrations
-	// FIXME: tolerate errors when the migration is bcz we run an older version of transact
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return newInitializationError(fmt.Sprintf("failed to run migrations: %v", err))
+	// Create the migrations table if it doesn't exist
+	createTableQuery := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS dbos.%s (
+		version BIGINT NOT NULL PRIMARY KEY
+	)`, _DBOS_MIGRATION_TABLE)
+
+	_, err = tx.Exec(ctx, createTableQuery)
+	if err != nil {
+		return fmt.Errorf("failed to create migrations table: %v", err)
+	}
+
+	// Get current migration version
+	var currentVersion int64 = 0
+	query := fmt.Sprintf("SELECT version FROM dbos.%s LIMIT 1", _DBOS_MIGRATION_TABLE)
+	err = tx.QueryRow(ctx, query).Scan(&currentVersion)
+	if err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("failed to get current migration version: %v", err)
+	}
+
+	// Use the embedded migrations slice
+
+	// Apply migrations starting from the next version
+	for _, migration := range migrations {
+		if migration.version <= currentVersion {
+			continue
+		}
+
+		// Execute the migration SQL
+		_, err = tx.Exec(ctx, migration.sql)
+		if err != nil {
+			return fmt.Errorf("failed to execute migration %d: %v", migration.version, err)
+		}
+
+		// Update the migration version
+		if currentVersion == 0 {
+			// Insert first migration record
+			insertQuery := fmt.Sprintf("INSERT INTO dbos.%s (version) VALUES ($1)", _DBOS_MIGRATION_TABLE)
+			_, err = tx.Exec(ctx, insertQuery, migration.version)
+		} else {
+			// Update existing migration record
+			updateQuery := fmt.Sprintf("UPDATE dbos.%s SET version = $1", _DBOS_MIGRATION_TABLE)
+			_, err = tx.Exec(ctx, updateQuery, migration.version)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to update migration version to %d: %v", migration.version, err)
+		}
+
+		currentVersion = migration.version
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit migration transaction: %v", err)
 	}
 
 	return nil
@@ -281,7 +331,7 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 	// Allow pgx health checks to complete
 	// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
 	// These trigger go-leak alerts
-	time.Sleep(_DB_CONNECTION_RETRY_DELAY)
+	time.Sleep(500 * time.Millisecond)
 
 	s.launched = false
 }
@@ -1326,15 +1376,16 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 	return result, nil
 }
 
-type stepInfo struct {
-	StepID          int
-	StepName        string
-	Output          any
-	Error           error
-	ChildWorkflowID string
+// StepInfo contains information about a workflow step execution.
+type StepInfo struct {
+	StepID          int    // The sequential ID of the step within the workflow
+	StepName        string // The name of the step function
+	Output          any    // The output returned by the step (if any)
+	Error           error  // The error returned by the step (if any)
+	ChildWorkflowID string // The ID of a child workflow spawned by this step (if applicable)
 }
 
-func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]stepInfo, error) {
+func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error) {
 	query := `SELECT function_id, function_name, output, error, child_workflow_id
 			  FROM dbos.operation_outputs
 			  WHERE workflow_uuid = $1
@@ -1346,9 +1397,9 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]step
 	}
 	defer rows.Close()
 
-	var steps []stepInfo
+	var steps []StepInfo
 	for rows.Next() {
-		var step stepInfo
+		var step StepInfo
 		var outputString *string
 		var errorString *string
 		var childWorkflowID *string
@@ -1496,6 +1547,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 		}
 	}
 
+	retryAttempt := 0
 	for {
 		// Block until a notification is received. OnNotification will be called when a notification is received.
 		// WaitForNotification handles context cancellation: https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgconn/pgconn.go#L1050
@@ -1514,10 +1566,14 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			}
 
 			// Other errors - log and retry.
-			// TODO add exponential backoff + jitter
 			s.logger.Error("Error waiting for notification", "error", err)
-			time.Sleep(_DB_CONNECTION_RETRY_DELAY)
+			time.Sleep(backoffWithJitter(retryAttempt))
+			retryAttempt += 1
 			continue
+		} else {
+			if retryAttempt > 0 {
+				retryAttempt -= 1
+			}
 		}
 	}
 }
@@ -2078,6 +2134,10 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		}
 	}
 
+	if maxTasks <= 0 {
+		return nil, nil
+	}
+
 	// Build the query to select workflows for dequeueing
 	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
 	// otherwise use NOWAIT to ensure consistent view across processes
@@ -2316,4 +2376,18 @@ func (qb *queryBuilder) addWhereLessEqual(column string, value any) {
 	qb.argCounter++
 	qb.whereClauses = append(qb.whereClauses, fmt.Sprintf("%s <= $%d", column, qb.argCounter))
 	qb.args = append(qb.args, value)
+}
+
+func backoffWithJitter(retryAttempt int) time.Duration {
+	exp := float64(_DB_CONNECTION_RETRY_BASE_DELAY) * math.Pow(_DB_CONNECTION_RETRY_FACTOR, float64(retryAttempt))
+	// cap backoff to max number of retries, then do a fixed time delay
+	// expected retryAttempt to initially be 0, so >= used
+	// cap delay to maximum of _DB_CONNECTION_MAX_DELAY milliseconds
+	if retryAttempt >= _DB_CONNECTION_RETRY_MAX_RETRIES || exp > float64(_DB_CONNECTION_MAX_DELAY) {
+		exp = float64(_DB_CONNECTION_MAX_DELAY)
+	}
+
+	// want randomization between +-25% of exp
+	jitter := 0.75 + rand.Float64()*0.5 // #nosec G404 -- trivial use of math/rand
+	return time.Duration(exp * jitter)
 }
