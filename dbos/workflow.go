@@ -1063,6 +1063,12 @@ func WithNextStepID(stepID int) StepOption {
 	}
 }
 
+// StepOutcome holds the result and error from a step execution
+type stepOutcome[R any] struct {
+	result R
+	err    error
+}
+
 // RunAsStep executes a function as a durable step within a workflow.
 // Steps provide at-least-once execution guarantees and automatic retry capabilities.
 // If a step has already been executed (e.g., during workflow recovery), its recorded
@@ -1263,65 +1269,27 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 }
 
 // TODO: Add docs --- will add once I get the implementation right
-func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
-	if ctx == nil {
-		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
-	}
-
-	if fn == nil {
-		return *new(R), newStepExecutionError("", "", "step function cannot be nil")
-	}
-
-	// Append WithStepName option to ensure the step name is set. This will not erase a user-provided step name
-	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-	opts = append(opts, WithStepName(stepName))
-
+func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan stepOutcome[R], error) {
 	// create a determistic step ID
+	// can we refactor this too?
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return *new(R), newStepExecutionError("", stepName, "workflow state not found in context: are you running this step within a workflow?")
+		return nil, newStepExecutionError("", "", "workflow state not found in context: are you running this step within a workflow?")
 	}
 	stepID := wfState.nextStepID()
 	opts = append(opts, WithNextStepID(stepID))
 
-	// Type-erase the function
-	typeErasedFn := StepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
-
 	// run step inside a Go routine by passing stepID
-	result, err := ctx.Go(ctx, typeErasedFn, opts...)
-
-	// Step function could return a nil result
-	if result == nil {
-		return *new(R), err
-	}
-	// Otherwise type-check and cast the result
-	typedResult, ok := result.(R)
-	if !ok {
-		return *new(R), fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), result)
-	}
-	return typedResult, err
-}
-
-// TODO: move type above -- keeping it here for in case I need to modify it quickly
-type stepResultChan struct {
-	result any
-	err    error
-}
-
-// TODO: Add docs --- will add once I get the implementation right
-func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (any, error) {
-	result := make(chan stepResultChan, 1)
+	result := make(chan stepOutcome[R], 1)
 	go func() {
-		res, err := c.RunAsStep(ctx, fn, opts...)
-		result <- stepResultChan{
+		res, err := RunAsStep(ctx, fn, opts...)
+		result <- stepOutcome[R]{
 			result: res,
 			err:    err,
 		}
 	}()
 
-	resultChan := <-result
-	close(result)
-	return resultChan.result, resultChan.err
+	return result, nil
 }
 
 /****************************************/
