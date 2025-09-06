@@ -47,6 +47,11 @@ func simpleStepError(_ context.Context) (string, error) {
 	return "", fmt.Errorf("step failure")
 }
 
+func stepWithSleep(_ context.Context, duration time.Duration) (string, error) {
+	time.Sleep(duration)
+	return fmt.Sprintf("from step that slept for %s", duration), nil
+}
+
 func simpleWorkflowWithStepError(dbosCtx DBOSContext, input string) (string, error) {
 	return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
 		return simpleStepError(ctx)
@@ -857,6 +862,85 @@ func TestSteps(t *testing.T) {
 		assert.Len(t, storedOutput.Details, 3, "Details array length incorrect")
 		assert.Equal(t, []string{"step1", "step2", "step3"}, storedOutput.Details, "Details array not correctly serialized")
 		assert.False(t, storedOutput.ProcessedAt.IsZero(), "ProcessedAt timestamp should not be zero")
+	})
+}
+
+func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+	t.Run("Go must run steps inside a workflow", func(t *testing.T) {
+		_, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+			return stepWithSleep(ctx, 1*time.Second)
+		})
+		require.Error(t, err, "expected error when running step outside of workflow context, but got none")
+
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, StepExecutionError, dbosErr.Code)
+		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
+		require.Contains(t, err.Error(), expectedMessagePart, "expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+	})
+
+	t.Run("Go must return step error correctly", func(t *testing.T) {
+		goWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+			result, _ := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				return "", fmt.Errorf("step error")
+			})
+
+			resultChan := <-result
+			if resultChan.err != nil {
+				return "", resultChan.err
+			}
+			return resultChan.result, nil
+		}
+
+		RegisterWorkflow(dbosCtx, goWorkflow)
+
+		handle, err := RunWorkflow(dbosCtx, goWorkflow, "test-input")
+		require.NoError(t, err, "failed to run go workflow")
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected error when running step, but got none")
+		require.Equal(t, "step error", err.Error())
+	})
+
+	t.Run("Go must execute 100 steps simultaneously", func(t *testing.T) {
+		// run 100 steps simultaneously
+		const numSteps = 100
+		results := make(chan string, numSteps)
+		errors := make(chan error, numSteps)
+		var resultChans []<-chan stepOutcome[string]
+
+		goWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+			for range numSteps {
+				resultChan, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+					return stepWithSleep(ctx, 20*time.Millisecond)
+				})
+
+				if err != nil {
+					return "", err
+				}
+				resultChans = append(resultChans, resultChan)
+			}
+
+			for _, resultChan := range resultChans {
+				result1 := <-resultChan
+				if result1.err != nil {
+					errors <- result1.err
+				}
+				results <- result1.result
+			}
+			return "", nil
+		}
+		close(results)
+		close(errors)
+
+		RegisterWorkflow(dbosCtx, goWorkflow)
+		handle, err := RunWorkflow(dbosCtx, goWorkflow, "test-input")
+		require.NoError(t, err, "failed to run go workflow")
+		_, err = handle.GetResult()
+		require.NoError(t, err, "failed to get result from go workflow")
+
+		assert.Equal(t, numSteps, len(results), "expected %d results, got %d", numSteps, len(results))
+		assert.Equal(t, 0, len(errors), "expected no errors, got %d", len(errors))
 	})
 }
 
