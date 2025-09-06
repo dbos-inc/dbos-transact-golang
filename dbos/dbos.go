@@ -323,12 +323,28 @@ func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
 	initExecutor.executorID = config.ExecutorID
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
+	maxRetries := 5
+	retryDelay := time.Second * 2
 
-	// Create the system database
-	systemDB, err := newSystemDatabase(initExecutor, config.DatabaseURL, initExecutor.logger)
-	if err != nil {
-		return nil, newInitializationError(fmt.Sprintf("failed to create system database: %v", err))
+	var systemDB systemDatabase
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		systemDB, err = newSystemDatabase(initExecutor, config.DatabaseURL, initExecutor.logger)
+		if err == nil {
+			break
+		}
+		initExecutor.logger.Warn("Failed to connect to system DB", "attempt", attempt, "maxRetries", maxRetries, "error", err)
+
+		if attempt < maxRetries {
+			time.Sleep(retryDelay)
+			retryDelay *= 2 // Exponential backoff
+		}
 	}
+
+	if err != nil {
+		return nil, newInitializationError(fmt.Sprintf("failed to create system database after %d attempts: %v", maxRetries, err))
+	}
+
 	initExecutor.systemDB = systemDB
 	initExecutor.logger.Debug("System database initialized")
 
