@@ -78,6 +78,8 @@ func init() {
 
 	// Fork command flags
 	workflowForkCmd.Flags().IntP("step", "s", 1, "Restart from this step")
+	workflowForkCmd.Flags().StringP("application-version", "a", "", "Application version for the forked workflow")
+	workflowForkCmd.Flags().StringP("forked-workflow-id", "f", "", "Custom workflow ID for the forked workflow")
 }
 
 func runWorkflowList(cmd *cobra.Command, args []string) error {
@@ -322,11 +324,24 @@ func runWorkflowFork(cmd *cobra.Command, args []string) error {
 		step = 1
 	}
 
-	// Fork workflow
-	handle, err := ctx.ForkWorkflow(ctx, dbos.ForkWorkflowInput{
+	// Build ForkWorkflowInput
+	input := dbos.ForkWorkflowInput{
 		OriginalWorkflowID: workflowID,
 		StartStep:          uint(step),
-	})
+	}
+
+	// Get application version flag if provided
+	if appVersion, _ := cmd.Flags().GetString("application-version"); appVersion != "" {
+		input.ApplicationVersion = appVersion
+	}
+
+	// Get forked workflow ID flag if provided
+	if forkedID, _ := cmd.Flags().GetString("forked-workflow-id"); forkedID != "" {
+		input.ForkedWorkflowID = forkedID
+	}
+
+	// Fork workflow
+	handle, err := ctx.ForkWorkflow(ctx, input)
 	if err != nil {
 		return err
 	}
