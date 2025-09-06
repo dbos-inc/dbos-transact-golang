@@ -54,7 +54,7 @@ type systemDatabase interface {
 	getEvent(ctx context.Context, input getEventInput) (any, error)
 
 	// Timers (special steps)
-	sleep(ctx context.Context, duration time.Duration) (time.Duration, error)
+	sleep(ctx context.Context, input sleepInput) (time.Duration, error)
 
 	// Queues
 	dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error)
@@ -111,7 +111,7 @@ func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *
 		if err != nil {
 			return newInitializationError(fmt.Sprintf("failed to create database %s: %v", dbName, err))
 		}
-		logger.Info("Database created", "name", dbName)
+		logger.Debug("Database created", "name", dbName)
 	}
 
 	return nil
@@ -304,7 +304,7 @@ func (s *sysDB) launch(ctx context.Context) {
 }
 
 func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
-	s.logger.Info("DBOS: Closing system database connection pool")
+	s.logger.Debug("DBOS: Closing system database connection pool")
 	if s.pool != nil {
 		s.pool.Close()
 	}
@@ -319,7 +319,7 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 
 	if s.launched {
 		// Wait for the notification loop to exit
-		s.logger.Info("DBOS: Waiting for notification listener loop to finish")
+		s.logger.Debug("DBOS: Waiting for notification listener loop to finish")
 		select {
 		case <-s.notificationLoopDone:
 		case <-time.After(timeout):
@@ -1438,10 +1438,17 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 	return steps, nil
 }
 
+type sleepInput struct {
+	duration  time.Duration // Duration to sleep
+	skipSleep bool          // If true, the function will not actually sleep (useful for testing)
+}
+
 // Sleep is a special type of step that sleeps for a specified duration
 // A wakeup time is computed and recorded in the database
 // If we sleep is re-executed, it will only sleep for the remaining duration until the wakeup time
-func (s *sysDB) sleep(ctx context.Context, duration time.Duration) (time.Duration, error) {
+// sleep can be called within other special steps (e.g., getEvent, recv) to provide durable sleep
+
+func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, error) {
 	functionName := "DBOS.sleep"
 
 	// Get workflow state from context
@@ -1486,9 +1493,9 @@ func (s *sysDB) sleep(ctx context.Context, duration time.Duration) (time.Duratio
 		}
 	} else {
 		// First execution: calculate and record the end time
-		s.logger.Debug("Durable sleep", "stepID", stepID, "duration", duration)
+		s.logger.Debug("Durable sleep", "stepID", stepID, "duration", input.duration)
 
-		endTime = time.Now().Add(duration)
+		endTime = time.Now().Add(input.duration)
 
 		// Record the operation result with the calculated end time
 		recordInput := recordOperationResultDBInput{
@@ -1512,8 +1519,10 @@ func (s *sysDB) sleep(ctx context.Context, duration time.Duration) (time.Duratio
 	// Calculate remaining duration until wake up time
 	remainingDuration := max(0, time.Until(endTime))
 
-	// Actually sleep for the remaining duration
-	time.Sleep(remainingDuration)
+	if !input.skipSleep {
+		// Actually sleep for the remaining duration
+		time.Sleep(remainingDuration)
+	}
 
 	return remainingDuration, nil
 }
@@ -1527,7 +1536,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 		s.notificationLoopDone <- struct{}{}
 	}()
 
-	s.logger.Info("DBOS: Starting notification listener loop")
+	s.logger.Debug("DBOS: Starting notification listener loop")
 	mrr := s.notificationListenerConnection.Exec(ctx, fmt.Sprintf("LISTEN %s; LISTEN %s", _DBOS_NOTIFICATIONS_CHANNEL, _DBOS_WORKFLOW_EVENTS_CHANNEL))
 	results, err := mrr.ReadAll()
 	if err != nil {
@@ -1555,7 +1564,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 		if err != nil {
 			// Context cancellation
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				s.logger.Info("Notification listener loop exiting due to context cancellation", "cause", context.Cause(ctx), "error", err)
+				s.logger.Debug("Notification listener loop exiting due to context cancellation", "cause", context.Cause(ctx), "error", err)
 				return
 			}
 
@@ -1750,10 +1759,18 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 			close(done)
 		}()
 
+		timeout, err := s.sleep(ctx, sleepInput{
+			duration:  input.Timeout,
+			skipSleep: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to sleep before recv timeout: %w", err)
+		}
+
 		select {
 		case <-done:
 			s.logger.Debug("Received notification on condition variable", "payload", payload)
-		case <-time.After(input.Timeout):
+		case <-time.After(timeout):
 			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
 		}
 	}
@@ -1969,11 +1986,21 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 			close(done)
 		}()
 
+		timeout := input.Timeout
+		if isInWorkflow {
+			timeout, err = s.sleep(ctx, sleepInput{
+				duration:  input.Timeout,
+				skipSleep: true,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to sleep before getEvent timeout: %w", err)
+			}
+		}
+
 		select {
 		case <-done:
 			// Received notification
-		case <-time.After(input.Timeout):
-			// Timeout reached
+		case <-time.After(timeout):
 			s.logger.Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
 		case <-ctx.Done():
 			return nil, fmt.Errorf("context cancelled while waiting for event: %w", ctx.Err())

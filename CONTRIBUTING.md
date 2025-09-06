@@ -1,4 +1,4 @@
-# Contributing to DBOS Transact Python
+# Contributing to DBOS Transact Golang
 
 Thank you for considering contributing to DBOS Transact. We welcome contributions from everyone, including bug fixes, feature enhancements, documentation improvements, or any other form of contribution.
 
