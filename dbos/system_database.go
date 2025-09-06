@@ -1440,7 +1440,6 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 
 type sleepInput struct {
 	duration  time.Duration // Duration to sleep
-	stepID    int           // Optional step ID to use (if < 0, a new step ID will be assigned)
 	skipSleep bool          // If true, the function will not actually sleep (useful for testing)
 }
 
@@ -1462,14 +1461,12 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		return 0, newStepExecutionError(wfState.workflowID, functionName, "cannot call Sleep within a step")
 	}
 
-	if input.stepID < 0 {
-		input.stepID = wfState.NextStepID()
-	}
+	stepID := wfState.NextStepID()
 
 	// Check if operation was already executed
 	checkInput := checkOperationExecutionDBInput{
 		workflowID: wfState.workflowID,
-		stepID:     input.stepID,
+		stepID:     stepID,
 		stepName:   functionName,
 	}
 	recordedResult, err := s.checkOperationExecution(ctx, checkInput)
@@ -1496,14 +1493,14 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		}
 	} else {
 		// First execution: calculate and record the end time
-		s.logger.Debug("Durable sleep", "stepID", input.stepID, "duration", input.duration)
+		s.logger.Debug("Durable sleep", "stepID", stepID, "duration", input.duration)
 
 		endTime = time.Now().Add(input.duration)
 
 		// Record the operation result with the calculated end time
 		recordInput := recordOperationResultDBInput{
 			workflowID: wfState.workflowID,
-			stepID:     input.stepID,
+			stepID:     stepID,
 			stepName:   functionName,
 			output:     endTime,
 			err:        nil,
@@ -1764,7 +1761,6 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 
 		timeout, err := s.sleep(ctx, sleepInput{
 			duration:  input.Timeout,
-			stepID:    wfState.NextStepID(),
 			skipSleep: true,
 		})
 		if err != nil {
@@ -1994,7 +1990,6 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		if isInWorkflow {
 			timeout, err = s.sleep(ctx, sleepInput{
 				duration:  input.Timeout,
-				stepID:    wfState.NextStepID(),
 				skipSleep: true,
 			})
 			if err != nil {
