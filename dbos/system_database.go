@@ -1438,15 +1438,16 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 	return steps, nil
 }
 
-// Sleep is a special type of step that sleeps for a specified duration
-// A wakeup time is computed and recorded in the database
-// If we sleep is re-executed, it will only sleep for the remaining duration until the wakeup time
-// sleep can be called within other special steps (e.g., getEvent, recv) to provide durable sleep
 type sleepInput struct {
 	duration  time.Duration // Duration to sleep
 	stepID    int           // Optional step ID to use (if < 0, a new step ID will be assigned)
 	skipSleep bool          // If true, the function will not actually sleep (useful for testing)
 }
+
+// Sleep is a special type of step that sleeps for a specified duration
+// A wakeup time is computed and recorded in the database
+// If we sleep is re-executed, it will only sleep for the remaining duration until the wakeup time
+// sleep can be called within other special steps (e.g., getEvent, recv) to provide durable sleep
 
 func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, error) {
 	functionName := "DBOS.sleep"
