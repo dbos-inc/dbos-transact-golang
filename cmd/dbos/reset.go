@@ -17,12 +17,10 @@ var resetCmd = &cobra.Command{
 
 var (
 	skipConfirmation bool
-	sysDBName        string
 )
 
 func init() {
 	resetCmd.Flags().BoolVarP(&skipConfirmation, "yes", "y", false, "Skip confirmation prompt")
-	resetCmd.Flags().StringVarP(&sysDBName, "sys-db-name", "s", "", "Specify the name of the system database to reset")
 }
 
 func runReset(cmd *cobra.Command, args []string) error {

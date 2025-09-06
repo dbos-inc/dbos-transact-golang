@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
+	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,6 +50,9 @@ func TestCLIWorkflow(t *testing.T) {
 	// Build the CLI once at the beginning
 	cliPath := buildCLI(t)
 	t.Logf("Built CLI at: %s", cliPath)
+	t.Cleanup(func() {
+		os.Remove(cliPath)
+	})
 
 	// Create temporary directory for test
 	tempDir := t.TempDir()
@@ -550,7 +554,9 @@ func testForkWorkflow(t *testing.T, cliPath string) {
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
 	t.Run("ForkWorkflow", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "fork", workflowID)
+		newID := uuid.NewString()
+		targetVersion := "1.0.0"
+		cmd := exec.Command(cliPath, "workflow", "fork", workflowID, "--forked-workflow-id", newID, "--application-version", targetVersion)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -564,6 +570,8 @@ func testForkWorkflow(t *testing.T, cliPath string) {
 		assert.NotEqual(t, workflowID, forkedStatus.ID, "Forked workflow should have different ID")
 		assert.Equal(t, "ENQUEUED", string(forkedStatus.Status), "Forked workflow should be enqueued")
 		assert.Equal(t, dbosInternalQueueName, forkedStatus.QueueName, "Should be on internal queue")
+		assert.Equal(t, newID, forkedStatus.ID, "Forked workflow should have specified ID")
+		assert.Equal(t, targetVersion, forkedStatus.ApplicationVersion, "Forked workflow should have specified application version")
 	})
 
 	t.Run("ForkWorkflowFromStep", func(t *testing.T) {

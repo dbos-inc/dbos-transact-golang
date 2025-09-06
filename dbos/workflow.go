@@ -644,7 +644,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	uncancellableCtx := WithoutCancel(c)
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
-	// TODO Test that we get this polling handle during recovery of a queue workflow
 	if isChildWorkflow {
 		childWorkflowID, err := c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		if err != nil {
