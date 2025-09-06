@@ -839,11 +839,12 @@ type Step[R any] func(ctx context.Context) (R, error)
 
 // StepOptions holds the configuration for step execution using functional options pattern.
 type StepOptions struct {
-	maxRetries    int           // Maximum number of retry attempts (0 = no retries)
-	backoffFactor float64       // Exponential backoff multiplier between retries (default: 2.0)
-	baseInterval  time.Duration // Initial delay between retries (default: 100ms)
-	maxInterval   time.Duration // Maximum delay between retries (default: 5s)
-	stepName      string        // Custom name for the step (defaults to function name)
+	maxRetries         int           // Maximum number of retry attempts (0 = no retries)
+	backoffFactor      float64       // Exponential backoff multiplier between retries (default: 2.0)
+	baseInterval       time.Duration // Initial delay between retries (default: 100ms)
+	maxInterval        time.Duration // Maximum delay between retries (default: 5s)
+	stepName           string        // Custom name for the step (defaults to function name)
+	preGeneratedStepID *int          // Pre generated stepID in case we want to run the function in a Go routine
 }
 
 // setDefaults applies default values to stepOptions
@@ -904,6 +905,18 @@ func WithMaxInterval(interval time.Duration) StepOption {
 	return func(opts *StepOptions) {
 		opts.maxInterval = interval
 	}
+}
+
+func WithNextStepID(stepID int) StepOption {
+	return func(opts *StepOptions) {
+		opts.preGeneratedStepID = &stepID
+	}
+}
+
+// StepOutcome holds the result and error from a step execution
+type stepOutcome[R any] struct {
+	result R
+	err    error
 }
 
 // RunAsStep executes a function as a durable step within a workflow.
@@ -999,10 +1012,18 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		return fn(c)
 	}
 
+	// Get stepID if it has been pre generated
+	var stepID int
+	if stepOpts.preGeneratedStepID != nil {
+		stepID = *stepOpts.preGeneratedStepID
+	} else {
+		stepID = wfState.NextStepID() // crucially, this increments the step ID on the *workflow* state
+	}
+
 	// Setup step state
 	stepState := workflowState{
 		workflowID:   wfState.workflowID,
-		stepID:       wfState.NextStepID(), // crucially, this increments the step ID on the *workflow* state
+		stepID:       stepID,
 		isWithinStep: true,
 	}
 
@@ -1083,6 +1104,30 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	}
 
 	return stepOutput, stepError
+}
+
+// TODO: Add docs --- will add once I get the implementation right
+func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan stepOutcome[R], error) {
+	// create a determistic step ID
+	// can we refactor this too?
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return nil, newStepExecutionError("", "", "workflow state not found in context: are you running this step within a workflow?")
+	}
+	stepID := wfState.NextStepID()
+	opts = append(opts, WithNextStepID(stepID))
+
+	// run step inside a Go routine by passing stepID
+	result := make(chan stepOutcome[R], 1)
+	go func() {
+		res, err := RunAsStep(ctx, fn, opts...)
+		result <- stepOutcome[R]{
+			result: res,
+			err:    err,
+		}
+	}()
+
+	return result, nil
 }
 
 /****************************************/
