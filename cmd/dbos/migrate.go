@@ -33,8 +33,10 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	ctx := context.Background()
+
 	// Create DBOS context which will run migrations automatically for the system DB
-	_, err = createDBOSContext(dbURL)
+	_, err = createDBOSContext(dbURL, ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create DBOS context: %w", err)
 	}
