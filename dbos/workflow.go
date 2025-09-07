@@ -1271,10 +1271,10 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 // TODO: Add docs --- will add once I get the implementation right
 func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan stepOutcome[R], error) {
 	// create a determistic step ID
-	// can we refactor this too?
+	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return nil, newStepExecutionError("", "", "workflow state not found in context: are you running this step within a workflow?")
+		return nil, newStepExecutionError("", stepName, "workflow state not found in context: are you running this step within a workflow?")
 	}
 	stepID := wfState.nextStepID()
 	opts = append(opts, WithNextStepID(stepID))
