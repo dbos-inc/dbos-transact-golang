@@ -760,15 +760,16 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 			}
 			return "", nil
 		}
-		close(results)
-		close(errors)
 
 		RegisterWorkflow(dbosCtx, goWorkflow)
 		handle, err := RunWorkflow(dbosCtx, goWorkflow, "test-input")
 		require.NoError(t, err, "failed to run go workflow")
 		_, err = handle.GetResult()
-		require.NoError(t, err, "failed to get result from go workflow")
+		
+		close(results)
+		close(errors)
 
+		require.NoError(t, err, "failed to get result from go workflow")
 		assert.Equal(t, numSteps, len(results), "expected %d results, got %d", numSteps, len(results))
 		assert.Equal(t, 0, len(errors), "expected no errors, got %d", len(errors))
 	})
