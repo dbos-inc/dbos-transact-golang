@@ -75,7 +75,7 @@ func getDBURL(_ *cobra.Command) (string, error) {
 }
 
 // createDBOSContext creates a new DBOS context with the provided database URL
-func createDBOSContext(dbURL string, userContext context.Context) (dbos.DBOSContext, error) {
+func createDBOSContext(userContext context.Context, dbURL string) (dbos.DBOSContext, error) {
 	appName := "dbos-cli"
 
 	ctx, err := dbos.NewDBOSContext(dbos.Config{
