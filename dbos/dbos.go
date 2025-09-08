@@ -93,6 +93,8 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	return dbosConfig, nil
 }
 
+//go:generate mockery --config=mocks-tests-config.yaml
+
 // DBOSContext represents a DBOS execution context that provides workflow orchestration capabilities.
 // It extends the standard Go context.Context and adds methods for running workflows and steps,
 // inter-workflow communication, and state management.
