@@ -1268,7 +1268,21 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	return stepOutput, stepError
 }
 
-// TODO: Add docs --- will add once I get the implementation right
+// Go runs a step inside a Go routine and returns a channel to receive the result.
+// Go generates a deterministic step ID for the step before running the step in a routine, since routines are not deterministic.
+// The step ID is used to track the steps within the same workflow and use the step ID to perform recovery.
+// The folliwing examples shows how to use Go: 
+//
+//	resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
+//		return "Hello, World!", nil
+//	})
+//
+//	resultChan := <-resultChan // wait for the channel to receive
+//	if resultChan.err != nil {
+//		// Handle error
+//	}
+//  result := resultChan.result
+//
 func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan stepOutcome[R], error) {
 	// create a determistic step ID
 	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
@@ -1279,7 +1293,7 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan stepOutcom
 	stepID := wfState.nextStepID()
 	opts = append(opts, WithNextStepID(stepID))
 
-	// run step inside a Go routine by passing stepID
+	// run step inside a Go routine by passing a stepID 
 	result := make(chan stepOutcome[R], 1)
 	go func() {
 		res, err := RunAsStep(ctx, fn, opts...)
