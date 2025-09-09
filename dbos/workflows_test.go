@@ -1535,10 +1535,10 @@ func TestSendRecv(t *testing.T) {
 		// Verify step counting for receive workflow (receiveWorkflow calls Recv 3 times)
 		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for receive workflow")
-		require.Len(t, receiveSteps, 4, "expected 4 steps in receive workflow (3 Recv calls + 1 sleep call during the first recv), got %d", len(receiveSteps))
+		require.Len(t, receiveSteps, 6, "expected 4 steps in receive workflow (3 Recv calls + 1 sleep call during the first recv), got %d", len(receiveSteps))
 		for i, step := range receiveSteps {
 			require.Equal(t, i, step.StepID, "expected step %d to have correct StepID", i)
-			if i == 1 {
+			if i%2 == 1 {
 				require.Equal(t, "DBOS.sleep", step.StepName, "expected step %d to have StepName 'DBOS.sleep'", i)
 			} else {
 				require.Equal(t, "DBOS.recv", step.StepName, "expected step %d to have StepName 'DBOS.recv'", i)
@@ -1654,10 +1654,10 @@ func TestSendRecv(t *testing.T) {
 		// Verify step counting for receive workflow (calls Recv 3 times, each with sleep)
 		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for receive workflow")
-		require.Len(t, receiveSteps, 4, "expected 4 steps in receive workflow (3 Recv calls + 1 sleep calls), got %d", len(receiveSteps))
+		require.Len(t, receiveSteps, 6, "expected 4 steps in receive workflow (3 Recv calls + 1 sleep calls), got %d", len(receiveSteps))
 		for i, step := range receiveSteps {
 			require.Equal(t, i, step.StepID, "expected step %d to have correct StepID", i)
-			if i == 1 {
+			if i%2 == 1 {
 				require.Equal(t, "DBOS.sleep", step.StepName, "expected recv step %d to have StepName 'DBOS.sleep'", i)
 			} else {
 				require.Equal(t, "DBOS.recv", step.StepName, "expected recv step %d to have StepName 'DBOS.recv'", i)

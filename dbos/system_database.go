@@ -1782,6 +1782,17 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 			s.logger.Warn("Recv() context cancelled", "payload", payload, "cause", context.Cause(ctx))
 			return nil, ctx.Err()
 		}
+	} else {
+		// Do a "zero" sleep to record the sleep step in the workflow history
+		// This is to handle cases were consecutive Recv calls for the same key are made
+		// The key would exist and without this, the step IDs would be: 0 recv, 1 sleep, 2 recv, 4 recv, etc
+		_, err := s.sleep(ctx, sleepInput{
+			duration: 0,
+			stepID:   &sleepStepID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to sleep before recv timeout: %w", err)
+		}
 	}
 
 	// Find the oldest message and delete it atomically
