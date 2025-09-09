@@ -1477,6 +1477,15 @@ type sendRecvType struct {
 	Value string
 }
 
+func recvContextCancelWorkflow(ctx DBOSContext, topic string) (string, error) {
+	// Try to receive with a 5 second timeout, but context will cancel before that
+	msg, err := Recv[string](ctx, topic, 5*time.Second)
+	if err != nil {
+		return "", err
+	}
+	return msg, nil
+}
+
 func TestSendRecv(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 
@@ -1490,6 +1499,7 @@ func TestSendRecv(t *testing.T) {
 	RegisterWorkflow(dbosCtx, receiveIdempotencyWorkflow)
 	RegisterWorkflow(dbosCtx, durableRecvSleepWorkflow)
 	RegisterWorkflow(dbosCtx, workflowThatCallsSendInStep)
+	RegisterWorkflow(dbosCtx, recvContextCancelWorkflow)
 
 	dbosCtx.Launch()
 
@@ -1937,6 +1947,27 @@ func TestSendRecv(t *testing.T) {
 		// Second sleep (step 3)
 		require.Equal(t, 3, steps[3].StepID, "expected fourth step ID to be 3")
 		require.Equal(t, "DBOS.sleep", steps[3].StepName, "expected fourth step to be sleep")
+	})
+
+	t.Run("RecvContextCancellation", func(t *testing.T) {
+		// Create a context with a shorter timeout than the Recv timeout (1s < 5s)
+		timeoutCtx, cancel := WithTimeout(dbosCtx, 1*time.Second)
+		defer cancel()
+
+		// Start the workflow with the timeout context
+		handle, err := RunWorkflow(timeoutCtx, recvContextCancelWorkflow, "context-cancel-topic")
+		require.NoError(t, err, "failed to start recv context cancel workflow")
+
+		// Get the result - should fail with context deadline exceeded
+		result, err := handle.GetResult()
+		require.Error(t, err, "expected error from context cancellation")
+		require.True(t, errors.Is(err, context.DeadlineExceeded), "expected context.DeadlineExceeded error, got: %v", err)
+		require.Equal(t, "", result, "expected empty result when context cancelled")
+
+		// Verify the workflow status is cancelled
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 	})
 }
 
