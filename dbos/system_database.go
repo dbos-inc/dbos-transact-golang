@@ -1778,6 +1778,9 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 			s.logger.Debug("Received notification on condition variable", "payload", payload)
 		case <-time.After(timeout):
 			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
+		case <-ctx.Done():
+			s.logger.Warn("Recv() context cancelled", "payload", payload, "cause", context.Cause(ctx))
+			return nil, ctx.Err()
 		}
 	}
 
