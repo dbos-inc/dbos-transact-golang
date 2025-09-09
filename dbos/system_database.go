@@ -1727,10 +1727,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 		return nil, err
 	}
 	if recordedResult != nil {
-		if recordedResult.output != nil {
-			return recordedResult.output, nil
-		}
-		return nil, fmt.Errorf("no output recorded in the last recv")
+		return recordedResult.output, nil
 	}
 
 	// First check if there's already a receiver for this workflow/topic to avoid unnecessary database load
