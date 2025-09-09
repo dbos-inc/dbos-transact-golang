@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -89,8 +90,10 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	user_ctx := context.Background()
+
 	// Create DBOS context
-	ctx, err := createDBOSContext(dbURL)
+	ctx, err := createDBOSContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
@@ -194,8 +197,10 @@ func runWorkflowGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	user_ctx := context.Background()
+
 	// Create DBOS context
-	ctx, err := createDBOSContext(dbURL)
+	ctx, err := createDBOSContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
@@ -227,8 +232,10 @@ func runWorkflowSteps(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	user_ctx := context.Background()
+
 	// Create DBOS context
-	ctx, err := createDBOSContext(dbURL)
+	ctx, err := createDBOSContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
@@ -257,8 +264,10 @@ func runWorkflowCancel(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	user_ctx := context.Background()
+
 	// Create DBOS context
-	ctx, err := createDBOSContext(dbURL)
+	ctx, err := createDBOSContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
@@ -281,8 +290,10 @@ func runWorkflowResume(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	user_ctx := context.Background()
+
 	// Create DBOS context
-	ctx, err := createDBOSContext(dbURL)
+	ctx, err := createDBOSContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
@@ -312,8 +323,10 @@ func runWorkflowFork(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	user_ctx := context.Background()
+
 	// Create DBOS context
-	ctx, err := createDBOSContext(dbURL)
+	ctx, err := createDBOSContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}

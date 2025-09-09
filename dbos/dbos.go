@@ -32,15 +32,16 @@ const (
 // Config holds configuration parameters for initializing a DBOS context.
 // DatabaseURL and AppName are required.
 type Config struct {
-	DatabaseURL        string       // PostgreSQL connection string (required)
-	AppName            string       // Application name for identification (required)
-	Logger             *slog.Logger // Custom logger instance (defaults to a new slog logger)
-	AdminServer        bool         // Enable Transact admin HTTP server (disabled by default)
-	AdminServerPort    int          // Port for the admin HTTP server (default: 3001)
-	ConductorURL       string       // DBOS conductor service URL (optional)
-	ConductorAPIKey    string       // DBOS conductor API key (optional)
-	ApplicationVersion string       // Application version (optional, overridden by DBOS__APPVERSION env var)
-	ExecutorID         string       // Executor ID (optional, overridden by DBOS__VMID env var)
+	DatabaseURL        string          // PostgreSQL connection string (required)
+	AppName            string          // Application name for identification (required)
+	Logger             *slog.Logger    // Custom logger instance (defaults to a new slog logger)
+	AdminServer        bool            // Enable Transact admin HTTP server (disabled by default)
+	AdminServerPort    int             // Port for the admin HTTP server (default: 3001)
+	ConductorURL       string          // DBOS conductor service URL (optional)
+	ConductorAPIKey    string          // DBOS conductor API key (optional)
+	ApplicationVersion string          // Application version (optional, overridden by DBOS__APPVERSION env var)
+	ExecutorID         string          // Executor ID (optional, overridden by DBOS__VMID env var)
+	Context            context.Context // User Context
 }
 
 // processConfig enforces mandatory fields and applies defaults.
@@ -294,7 +295,13 @@ func (c *dbosContext) GetApplicationID() string {
 //	    log.Fatal(err)
 //	}
 func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
-	ctx, cancelFunc := context.WithCancelCause(context.Background())
+	var baseCtx context.Context
+	if inputConfig.Context != nil {
+		baseCtx = inputConfig.Context
+	} else {
+		baseCtx = context.Background()
+	}
+	ctx, cancelFunc := context.WithCancelCause(baseCtx)
 	initExecutor := &dbosContext{
 		workflowsWg:             &sync.WaitGroup{},
 		ctx:                     ctx,
