@@ -1440,7 +1440,8 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 
 type sleepInput struct {
 	duration  time.Duration // Duration to sleep
-	skipSleep bool          // If true, the function will not actually sleep (useful for testing)
+	skipSleep bool          // If true, the function will not actually sleep and just return the remaining sleep duration
+	stepID    *int          // Optional step ID to use instead of generating a new one (for internal use)
 }
 
 // Sleep is a special type of step that sleeps for a specified duration
@@ -1461,7 +1462,13 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		return 0, newStepExecutionError(wfState.workflowID, functionName, "cannot call Sleep within a step")
 	}
 
-	stepID := wfState.NextStepID()
+	// Determine step ID
+	var stepID int
+	if input.stepID != nil && *input.stepID >= 0 {
+		stepID = *input.stepID
+	} else {
+		stepID = wfState.NextStepID()
+	}
 
 	// Check if operation was already executed
 	checkInput := checkOperationExecutionDBInput{
