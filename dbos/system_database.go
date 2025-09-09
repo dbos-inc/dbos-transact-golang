@@ -1707,6 +1707,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	}
 
 	stepID := wfState.NextStepID()
+	sleepStepID := wfState.NextStepID() // We will use a sleep step to implement the timeout
 	destinationID := wfState.workflowID
 
 	// Set default topic if not provided
@@ -1769,6 +1770,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 		timeout, err := s.sleep(ctx, sleepInput{
 			duration:  input.Timeout,
 			skipSleep: true,
+			stepID:    &sleepStepID,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to sleep before recv timeout: %w", err)
@@ -1930,6 +1932,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	// Get workflow state from context (optional for GetEvent as we can get an event from outside a workflow)
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	var stepID int
+	var sleepStepID int
 	var isInWorkflow bool
 
 	if ok && wfState != nil {
@@ -1938,6 +1941,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 			return nil, newStepExecutionError(wfState.workflowID, functionName, "cannot call GetEvent within a step")
 		}
 		stepID = wfState.NextStepID()
+		sleepStepID = wfState.NextStepID() // We will use a sleep step to implement the timeout
 
 		// Check if operation was already executed (only if in workflow)
 		checkInput := checkOperationExecutionDBInput{
@@ -1998,6 +2002,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 			timeout, err = s.sleep(ctx, sleepInput{
 				duration:  input.Timeout,
 				skipSleep: true,
+				stepID:    &sleepStepID,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("failed to sleep before getEvent timeout: %w", err)
