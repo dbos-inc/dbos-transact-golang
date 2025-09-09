@@ -1817,7 +1817,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 
 	// Deserialize the message
 	var message any
-	if messageString != nil { // nil message should never happen because they'd cause an error on the send() path
+	if messageString != nil { // nil message can happen on the timeout path only
 		message, err = deserialize(messageString)
 		if err != nil {
 			return nil, fmt.Errorf("failed to deserialize message: %w", err)
@@ -1978,7 +1978,6 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 
 	// Check if the event already exists in the database
 	query := `SELECT value FROM dbos.workflow_events WHERE workflow_uuid = $1 AND key = $2`
-	var value any
 	var valueString *string
 
 	row := s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
@@ -1987,7 +1986,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		return nil, fmt.Errorf("failed to query workflow event: %w", err)
 	}
 
-	if err == pgx.ErrNoRows || valueString == nil { // valueString should never be `nil`
+	if err == pgx.ErrNoRows { // valueString should never be `nil`
 		// Wait for notification with timeout using condition variable
 		done := make(chan struct{})
 		go func() {
@@ -2015,22 +2014,20 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		case <-time.After(timeout):
 			s.logger.Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
 		case <-ctx.Done():
-			return nil, fmt.Errorf("context cancelled while waiting for event: %w", ctx.Err())
+			s.logger.Warn("GetEvent() context cancelled", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "cause", context.Cause(ctx))
+			return nil, ctx.Err()
 		}
 
 		// Query the database again after waiting
 		row = s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
 		err = row.Scan(&valueString)
-		if err != nil {
-			if err == pgx.ErrNoRows {
-				value = nil // Event still doesn't exist
-			} else {
-				return nil, fmt.Errorf("failed to query workflow event after wait: %w", err)
-			}
+		if err != nil && err != pgx.ErrNoRows {
+			return nil, fmt.Errorf("failed to query workflow event after wait: %w", err)
 		}
 	}
 
 	// Deserialize the value if it exists
+	var value any
 	if valueString != nil {
 		value, err = deserialize(valueString)
 		if err != nil {
