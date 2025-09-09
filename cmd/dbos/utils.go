@@ -78,7 +78,7 @@ func getDBURL(_ *cobra.Command) (string, error) {
 func createDBOSContext(userContext context.Context, dbURL string) (dbos.DBOSContext, error) {
 	appName := "dbos-cli"
 
-	ctx, err := dbos.NewDBOSContext(dbos.Config{
+	ctx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
 		DatabaseURL: dbURL,
 		AppName:     appName,
 		Logger:      initLogger(slog.LevelError),
