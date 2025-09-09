@@ -1986,7 +1986,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		return nil, fmt.Errorf("failed to query workflow event: %w", err)
 	}
 
-	if err == pgx.ErrNoRows { // valueString should never be `nil`
+	if err == pgx.ErrNoRows {
 		// Wait for notification with timeout using condition variable
 		done := make(chan struct{})
 		go func() {
