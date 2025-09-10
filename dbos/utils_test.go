@@ -58,7 +58,7 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 		resetTestDatabase(t, databaseURL)
 	}
 
-	dbosCtx, err := NewDBOSContext(Config{
+	dbosCtx, err := NewDBOSContext(context.Background(), Config{
 		DatabaseURL: databaseURL,
 		AppName:     "test-app",
 	})

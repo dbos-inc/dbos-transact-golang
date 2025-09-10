@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +23,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+//go:embed cli_test_app.go.test
+var testAppContent []byte
 
 // Test configuration
 const (
@@ -146,12 +150,7 @@ func testProjectInitialization(t *testing.T, cliPath string) {
 	require.NoError(t, err)
 	assert.Contains(t, string(mainGoContent), testProjectName, "main.go should contain project name")
 
-	// Copy the test app to replace the template main.go
-	testAppPath := filepath.Join(filepath.Dir(cliPath), "cli_test_app.go.test")
-	testAppContent, err := os.ReadFile(testAppPath)
-	require.NoError(t, err, "Failed to read test app: %s", testAppPath)
-
-	// Replace the template main.go with our test app
+	// Replace the template main.go with our embedded test app
 	mainGoPath := filepath.Join(projectDir, "main.go")
 	err = os.WriteFile(mainGoPath, testAppContent, 0644)
 	require.NoError(t, err, "Failed to write test app to main.go")

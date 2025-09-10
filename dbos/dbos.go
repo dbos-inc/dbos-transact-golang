@@ -296,17 +296,11 @@ func (c *dbosContext) GetApplicationID() string {
 //	if err := ctx.Launch(); err != nil {
 //	    log.Fatal(err)
 //	}
-func NewDBOSContext(inputConfig Config) (DBOSContext, error) {
-	var baseCtx context.Context
-	if inputConfig.Context != nil {
-		baseCtx = inputConfig.Context
-	} else {
-		baseCtx = context.Background()
-	}
-	ctx, cancelFunc := context.WithCancelCause(baseCtx)
+func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error) {
+	dbosBaseCtx, cancelFunc := context.WithCancelCause(ctx)
 	initExecutor := &dbosContext{
 		workflowsWg:             &sync.WaitGroup{},
-		ctx:                     ctx,
+		ctx:                     dbosBaseCtx,
 		ctxCancelFunc:           cancelFunc,
 		workflowRegistry:        &sync.Map{},
 		workflowCustomNametoFQN: &sync.Map{},
