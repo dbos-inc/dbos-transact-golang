@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ func TestLogger(t *testing.T) {
 	databaseURL := getDatabaseURL()
 
 	t.Run("Default logger", func(t *testing.T) {
-		dbosCtx, err := NewDBOSContext(Config{
+		dbosCtx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 		}) // Create executor with default logger
@@ -46,7 +47,7 @@ func TestLogger(t *testing.T) {
 		// Add some context to the slog logger
 		slogLogger = slogLogger.With("service", "dbos-test", "environment", "test")
 
-		dbosCtx, err := NewDBOSContext(Config{
+		dbosCtx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 			Logger:      slogLogger,

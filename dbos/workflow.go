@@ -216,6 +216,35 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 	return *new(R), err
 }
 
+// Wrapper handle -- useful for handling mocks in RunWorkflow
+type workflowHandleProxy[R any] struct {
+	wrappedHandle WorkflowHandle[any]
+}
+
+func (h *workflowHandleProxy[R]) GetResult() (R, error) {
+	result, err := h.wrappedHandle.GetResult()
+	if err != nil {
+		var zero R
+		return zero, err
+	}
+
+	// Convert from any to R
+	if typed, ok := result.(R); ok {
+		return typed, nil
+	}
+
+	var zero R
+	return zero, fmt.Errorf("cannot convert result of type %T to %T", result, zero)
+}
+
+func (h *workflowHandleProxy[R]) GetStatus() (WorkflowStatus, error) {
+	return h.wrappedHandle.GetStatus()
+}
+
+func (h *workflowHandleProxy[R]) GetWorkflowID() string {
+	return h.wrappedHandle.GetWorkflowID()
+}
+
 /**********************************/
 /******* WORKFLOW REGISTRY *******/
 /**********************************/
@@ -583,8 +612,8 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 		return typedHandle, nil
 	}
 
-	// Should never happen
-	return nil, fmt.Errorf("unexpected workflow handle type: %T", handle)
+	// Usually on a mocked path
+	return &workflowHandleProxy[R]{wrappedHandle: handle}, nil
 }
 
 func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
@@ -644,7 +673,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	uncancellableCtx := WithoutCancel(c)
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
-	// TODO Test that we get this polling handle during recovery of a queue workflow
 	if isChildWorkflow {
 		childWorkflowID, err := c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		if err != nil {
@@ -1300,7 +1328,7 @@ func GetEvent[R any](ctx DBOSContext, targetWorkflowID, key string, timeout time
 }
 
 func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error) {
-	return c.systemDB.sleep(c, duration)
+	return c.systemDB.sleep(c, sleepInput{duration: duration, skipSleep: false})
 }
 
 // Sleep pauses workflow execution for the specified duration.

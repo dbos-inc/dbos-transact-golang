@@ -16,7 +16,7 @@ func TestConfig(t *testing.T) {
 		t.Setenv("DBOS__APPVERSION", "v1.0.0")
 		t.Setenv("DBOS__APPID", "test-app-id")
 		t.Setenv("DBOS__VMID", "test-executor-id")
-		ctx, err := NewDBOSContext(Config{
+		ctx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-initialize",
 		})
@@ -46,7 +46,7 @@ func TestConfig(t *testing.T) {
 			DatabaseURL: databaseURL,
 		}
 
-		_, err := NewDBOSContext(config)
+		_, err := NewDBOSContext(context.Background(), config)
 		require.Error(t, err)
 
 		dbosErr, ok := err.(*DBOSError)
@@ -63,7 +63,7 @@ func TestConfig(t *testing.T) {
 			AppName: "test-app",
 		}
 
-		_, err := NewDBOSContext(config)
+		_, err := NewDBOSContext(context.Background(), config)
 		require.Error(t, err)
 
 		dbosErr, ok := err.(*DBOSError)
@@ -81,7 +81,7 @@ func TestConfig(t *testing.T) {
 			t.Setenv("DBOS__APPVERSION", "")
 			t.Setenv("DBOS__VMID", "")
 
-			ctx, err := NewDBOSContext(Config{
+			ctx, err := NewDBOSContext(context.Background(), Config{
 				DatabaseURL:        databaseURL,
 				AppName:            "test-config-values",
 				ApplicationVersion: "config-v1.2.3",
@@ -102,7 +102,7 @@ func TestConfig(t *testing.T) {
 			t.Setenv("DBOS__APPVERSION", "env-v2.0.0")
 			t.Setenv("DBOS__VMID", "env-executor-456")
 
-			ctx, err := NewDBOSContext(Config{
+			ctx, err := NewDBOSContext(context.Background(), Config{
 				DatabaseURL:        databaseURL,
 				AppName:            "test-env-override",
 				ApplicationVersion: "config-v1.2.3",
@@ -125,7 +125,7 @@ func TestConfig(t *testing.T) {
 			t.Setenv("DBOS__APPVERSION", "")
 			t.Setenv("DBOS__VMID", "")
 
-			ctx, err := NewDBOSContext(Config{
+			ctx, err := NewDBOSContext(context.Background(), Config{
 				DatabaseURL: databaseURL,
 				AppName:     "test-defaults",
 				// ApplicationVersion and ExecutorID left empty
@@ -150,7 +150,7 @@ func TestConfig(t *testing.T) {
 			t.Setenv("DBOS__APPVERSION", "env-only-v3.0.0")
 			t.Setenv("DBOS__VMID", "env-only-executor")
 
-			ctx, err := NewDBOSContext(Config{
+			ctx, err := NewDBOSContext(context.Background(), Config{
 				DatabaseURL: databaseURL,
 				AppName:     "test-env-only",
 				// ApplicationVersion and ExecutorID left empty
@@ -173,7 +173,7 @@ func TestConfig(t *testing.T) {
 		t.Setenv("DBOS__APPID", "test-migration")
 		t.Setenv("DBOS__VMID", "test-executor-id")
 
-		ctx, err := NewDBOSContext(Config{
+		ctx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-migration",
 		})
@@ -255,7 +255,7 @@ func TestConfig(t *testing.T) {
 		ctx.Shutdown(1 * time.Minute)
 
 		// Recreate context - should have no error since DB is already migrated
-		ctx2, err := NewDBOSContext(Config{
+		ctx2, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-migration-recreate",
 		})

@@ -16,10 +16,6 @@ var initCmd = &cobra.Command{
 	RunE:  runInit,
 }
 
-var (
-	configOnly bool
-)
-
 type templateData struct {
 	ProjectName string
 }
