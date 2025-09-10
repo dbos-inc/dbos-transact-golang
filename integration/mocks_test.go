@@ -199,5 +199,6 @@ func TestMocks(t *testing.T) {
 
 	mockCtx.AssertExpectations(t)
 	mockChildHandle.AssertExpectations(t)
-	// mockGenericHandle.AssertExpectations(t)
+	mockGenericHandle.AssertExpectations(t)
+	fmt.Println("TestMocks completed successfully")
 }
