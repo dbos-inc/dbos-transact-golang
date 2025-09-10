@@ -926,9 +926,9 @@ func TestQueueTimeouts(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, queuedWaitForCancelWorkflow)
 
-	enqueuedWorkflowEnqueuesATimeoutWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+	enqueuedWorkflowEnqueuesATimeoutWorkflow := func(ctx DBOSContext, childWorkflowID string) (string, error) {
 		// This workflow will enqueue a workflow that waits indefinitely until it is cancelled
-		handle, err := RunWorkflow(ctx, queuedWaitForCancelWorkflow, "enqueued-wait-for-cancel", WithQueue(timeoutQueue.Name))
+		handle, err := RunWorkflow(ctx, queuedWaitForCancelWorkflow, "enqueued-wait-for-cancel", WithQueue(timeoutQueue.Name), WithWorkflowID(childWorkflowID))
 		require.NoError(t, err, "failed to start enqueued wait for cancel workflow")
 		// Workflow should get AwaitedWorkflowCancelled DBOSError
 		_, err = handle.GetResult()
@@ -936,13 +936,7 @@ func TestQueueTimeouts(t *testing.T) {
 		var dbosErr *DBOSError
 		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
 		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
-
-		// enqueud workflow should have been cancelled
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get status of enqueued workflow")
-		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected enqueued workflow status to be WorkflowStatusCancelled")
-
-		return "should-never-see-this", nil
+		return "", nil
 	}
 	RegisterWorkflow(dbosCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow)
 
@@ -956,19 +950,20 @@ func TestQueueTimeouts(t *testing.T) {
 	}
 
 	enqueuedWorkflowEnqueuesADetachedWorkflow := func(ctx DBOSContext, timeout time.Duration) (string, error) {
+		myId, err := GetWorkflowID(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get workflow ID: %v", err)
+		}
+		childID := fmt.Sprintf("%s-child", myId)
 		// This workflow will enqueue a workflow that is not cancelable
 		childCtx := WithoutCancel(ctx)
-		handle, err := RunWorkflow(childCtx, detachedWorkflow, timeout*2, WithQueue(timeoutQueue.Name))
+		handle, err := RunWorkflow(childCtx, detachedWorkflow, timeout*2, WithQueue(timeoutQueue.Name), WithWorkflowID(childID))
 		require.NoError(t, err, "failed to start enqueued detached workflow")
 
 		// Wait for the enqueued workflow to complete
 		result, err := handle.GetResult()
 		require.NoError(t, err, "failed to get result from enqueued detached workflow")
 		assert.Equal(t, "detached-workflow-completed", result, "expected result to be 'detached-workflow-completed'")
-		// Check the workflow status: should be success
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get enqueued detached workflow status")
-		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected enqueued detached workflow status to be WorkflowStatusSuccess")
 		return result, nil
 	}
 
@@ -1022,7 +1017,8 @@ func TestQueueTimeouts(t *testing.T) {
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
 
-		handle, err := RunWorkflow(cancelCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow, "enqueue-timeout-workflow", WithQueue(timeoutQueue.Name))
+		childWorkflowID := uuid.NewString()
+		handle, err := RunWorkflow(cancelCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow, childWorkflowID, WithQueue(timeoutQueue.Name))
 		require.NoError(t, err, "failed to start enqueued workflow")
 
 		// Wait for the workflow to complete and get the result
@@ -1041,6 +1037,19 @@ func TestQueueTimeouts(t *testing.T) {
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+
+		// Check the child's status: should be cancelled too
+		childHandle, err := RetrieveWorkflow[string](dbosCtx, childWorkflowID)
+		require.NoError(t, err, "failed to retrieve child workflow")
+
+		// Wait for the child workflow status to become cancelled
+		require.Eventually(t, func() bool {
+			status, err := childHandle.GetStatus()
+			if err != nil {
+				return false
+			}
+			return status.Status == WorkflowStatusCancelled
+		}, 5*time.Second, 100*time.Millisecond, "expected enqueued workflow status to be WorkflowStatusCancelled")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow cancellation, but they are not")
 	})
@@ -1070,6 +1079,20 @@ func TestQueueTimeouts(t *testing.T) {
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get enqueued detached workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected enqueued detached workflow status to be WorkflowStatusCancelled")
+
+		// Check the child's status: should be success because it is detached
+		childID := fmt.Sprintf("%s-child", handle.GetWorkflowID())
+		childHandle, err := RetrieveWorkflow[string](dbosCtx, childID)
+		require.NoError(t, err, "failed to retrieve detached workflow")
+
+		// Wait for the child workflow status to become success
+		require.Eventually(t, func() bool {
+			status, err := childHandle.GetStatus()
+			if err != nil {
+				return false
+			}
+			return status.Status == WorkflowStatusSuccess
+		}, 5*time.Second, 100*time.Millisecond, "expected detached workflow status to be WorkflowStatusSuccess")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow cancellation, but they are not")
 	})

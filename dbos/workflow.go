@@ -1674,25 +1674,19 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 		return nil, errors.New("original workflow ID cannot be empty")
 	}
 
-	// Generate new workflow ID if not provided
-	forkedWorkflowID := input.ForkedWorkflowID
-	if forkedWorkflowID == "" {
-		forkedWorkflowID = uuid.New().String()
-	}
-
 	// Create input for system database
 	if input.StartStep > uint(math.MaxInt) {
 		return nil, fmt.Errorf("start step too large: %d", input.StartStep)
 	}
 	dbInput := forkWorkflowDBInput{
 		originalWorkflowID: input.OriginalWorkflowID,
-		forkedWorkflowID:   forkedWorkflowID,
+		forkedWorkflowID:   input.ForkedWorkflowID,
 		startStep:          int(input.StartStep),
 		applicationVersion: input.ApplicationVersion,
 	}
 
 	// Call system database method
-	err := c.systemDB.forkWorkflow(c, dbInput)
+	forkedWorkflowID, err := c.systemDB.forkWorkflow(c, dbInput)
 	if err != nil {
 		return nil, err
 	}
@@ -2016,11 +2010,16 @@ func WithExecutorIDs(executorIDs []string) ListWorkflowsOption {
 //	    log.Fatal(err)
 //	}
 func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
-
 	// Initialize parameters with defaults
+	loadInput := true
+	loadOutput := true
+	if !c.launched.Load() {
+		loadInput = false
+		loadOutput = false
+	}
 	params := &ListWorkflowsOptions{
-		loadInput:  true, // Default to loading input
-		loadOutput: true, // Default to loading output
+		loadInput:  loadInput,
+		loadOutput: loadOutput,
 	}
 
 	// Apply all provided options
