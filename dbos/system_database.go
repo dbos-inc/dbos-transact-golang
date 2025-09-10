@@ -230,7 +230,7 @@ func runMigrations(databaseURL string) error {
 }
 
 // New creates a new SystemDatabase instance and runs migrations
-func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Logger) (systemDatabase, error) {
+func newSystemDatabase(ctx context.Context, databaseURL string, custom_pool *pgxpool.Pool, logger *slog.Logger) (systemDatabase, error) {
 	// Create the database if it doesn't exist
 	if err := createDatabaseIfNotExists(ctx, databaseURL, logger); err != nil {
 		return nil, fmt.Errorf("failed to create database: %v", err)
@@ -241,24 +241,37 @@ func newSystemDatabase(ctx context.Context, databaseURL string, logger *slog.Log
 		return nil, fmt.Errorf("failed to run migrations: %v", err)
 	}
 
-	// Parse the connection string to get a config
-	config, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse database URL: %v", err)
-	}
-	// Set pool configuration
-	config.MaxConns = 20
-	config.MinConns = 0
-	config.MaxConnLifetime = time.Hour
-	config.MaxConnIdleTime = time.Minute * 5
+	// pool
+	var pool *pgxpool.Pool
 
-	// Add acquire timeout to prevent indefinite blocking
-	config.ConnConfig.ConnectTimeout = 10 * time.Second
+	if custom_pool != nil {
 
-	// Create pool with configuration
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create connection pool: %v", err)
+		pool = custom_pool
+
+	} else {
+
+		// Parse the connection string to get a config
+		config, err := pgxpool.ParseConfig(databaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse database URL: %v", err)
+		}
+
+		// Set pool configuration
+		config.MaxConns = 20
+		config.MinConns = 0
+		config.MaxConnLifetime = time.Hour
+		config.MaxConnIdleTime = time.Minute * 5
+
+		// Add acquire timeout to prevent indefinite blocking
+		config.ConnConfig.ConnectTimeout = 10 * time.Second
+
+		// Create pool with configuration
+		new_pool, err := pgxpool.NewWithConfig(ctx, config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create connection pool: %v", err)
+		}
+		pool = new_pool
+
 	}
 
 	// Test the connection
