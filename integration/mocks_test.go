@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/integration/mocks"
+
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
-	"github.com/dbos-inc/dbos-transact-golang/dbos/mocks"
 	"github.com/stretchr/testify/mock"
 )
 
