@@ -82,7 +82,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Run integration tests
-      run: go vet ./... && gotestsum --format github
+      run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
       working-directory: ./integration
       env:
         PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
