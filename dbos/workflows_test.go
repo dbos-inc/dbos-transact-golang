@@ -935,13 +935,21 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		handle, err := RunWorkflow(dbosCtx, goWorkflow, "test-input")
 		require.NoError(t, err, "failed to run go workflow")
 		_, err = handle.GetResult()
-		
+
 		close(results)
 		close(errors)
 
 		require.NoError(t, err, "failed to get result from go workflow")
 		assert.Equal(t, numSteps, len(results), "expected %d results, got %d", numSteps, len(results))
 		assert.Equal(t, 0, len(errors), "expected no errors, got %d", len(errors))
+
+		// Test step IDs are deterministic and in the order of execution
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, numSteps, "expected %d steps, got %d", numSteps, len(steps))
+		for i := 0; i < numSteps; i++ {
+			assert.Equal(t, i, steps[i].StepID, "expected step ID to be %d, got %d", i, steps[i].StepID)
+		}
 	})
 }
 
