@@ -104,8 +104,11 @@ func TestCLIWorkflow(t *testing.T) {
 					fmt.Println(cmd.Stderr)
 					fmt.Println(cmd.Stdout)
 				*/
-				cmd.Process.Signal(os.Interrupt)
-				cmd.Process.Kill()
+				err := cmd.Process.Signal(os.Interrupt)
+				require.NoError(t, err, "Failed to send interrupt signal to application process")
+				time.Sleep(1 * time.Second) // Give it a moment to shut down gracefully
+				err = cmd.Process.Kill()
+				require.NoError(t, err, "Failed to kill application process")
 			}
 		})
 	})
