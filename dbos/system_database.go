@@ -229,8 +229,19 @@ func runMigrations(databaseURL string) error {
 	return nil
 }
 
+type newSystemDatabaseInput struct {
+	databaseURL string
+	custom_pool *pgxpool.Pool
+	logger      *slog.Logger
+}
+
 // New creates a new SystemDatabase instance and runs migrations
-func newSystemDatabase(ctx context.Context, databaseURL string, custom_pool *pgxpool.Pool, logger *slog.Logger) (systemDatabase, error) {
+func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (systemDatabase, error) {
+	// Dereference fields from inputs
+	databaseURL := inputs.databaseURL
+	custom_pool := inputs.custom_pool
+	logger := inputs.logger
+
 	// Create the database if it doesn't exist
 	if err := createDatabaseIfNotExists(ctx, databaseURL, logger); err != nil {
 		return nil, fmt.Errorf("failed to create database: %v", err)

@@ -329,8 +329,14 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 
+	newSystemDatabaseInputs := newSystemDatabaseInput{
+		databaseURL: config.DatabaseURL,
+		custom_pool: nil,
+		logger:      initExecutor.logger,
+	}
+
 	// Create the system database
-	systemDB, err := newSystemDatabase(initExecutor, config.DatabaseURL, nil, initExecutor.logger)
+	systemDB, err := newSystemDatabase(initExecutor, newSystemDatabaseInputs)
 	if err != nil {
 		return nil, newInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
