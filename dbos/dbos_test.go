@@ -1,10 +1,13 @@
 package dbos
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -56,6 +59,55 @@ func TestConfig(t *testing.T) {
 
 		expectedMsg := "Error initializing DBOS Transact: missing required config field: appName"
 		assert.Equal(t, expectedMsg, dbosErr.Message)
+	})
+
+	t.Run("NewSystemDatabaseWithCustomPool", func(t *testing.T) {
+
+		// Logger
+		var buf bytes.Buffer
+		slogLogger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		}))
+
+		slogLogger = slogLogger.With("service", "dbos-test", "environment", "test")
+
+		// Custom Pool
+		poolConfig, _ := pgxpool.ParseConfig(databaseURL)
+
+		poolConfig.MaxConns = 10
+		poolConfig.MinConns = 5
+		poolConfig.MaxConnLifetime = 2 * time.Hour
+		poolConfig.MaxConnIdleTime = time.Minute * 2
+
+		poolConfig.ConnConfig.ConnectTimeout = 10 * time.Second
+
+		pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
+		require.NoError(t, err)
+		defer pool.Close()
+
+		config := Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-custom-pool",
+			Logger:      slogLogger,
+			Pool:        pool,
+		}
+
+		customdbosContext, err := NewDBOSContext(context.Background(), config)
+		require.NoError(t, err)
+		require.NotNil(t, customdbosContext)
+
+		dbosCtx, ok := customdbosContext.(*dbosContext)
+		require.True(t, ok)
+		sysDB, ok := dbosCtx.systemDB.(*sysDB)
+		require.True(t, ok)
+		assert.Same(t, pool, sysDB.pool, "The pool in dbosContext should be the same as the custom pool provided")
+
+		stats := sysDB.pool.Stat()
+		assert.Equal(t, int32(10), stats.MaxConns(), "MaxConns should match custom pool config")
+
+		customdbosContext.Shutdown(1 * time.Minute)
+		err = pool.Ping(context.Background())
+		assert.NoError(t, err, "Custom pool should not be closed by Shutdown and should still be usable")
 	})
 
 	t.Run("FailsWithoutDatabaseURL", func(t *testing.T) {
