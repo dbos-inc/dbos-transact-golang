@@ -1080,12 +1080,11 @@ func TestQueueTimeouts(t *testing.T) {
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected enqueued detached workflow status to be WorkflowStatusCancelled")
 
 		// Check the child's status: should be success because it is detached
-		childID := fmt.Sprintf("%s-child", handle.GetWorkflowID())
-		childHandle, err := RetrieveWorkflow[string](dbosCtx, childID)
-		require.NoError(t, err, "failed to retrieve detached workflow")
-
-		// Wait for the child workflow status to become success
 		require.Eventually(t, func() bool {
+			childID := fmt.Sprintf("%s-child", handle.GetWorkflowID())
+			childHandle, err := RetrieveWorkflow[string](dbosCtx, childID)
+			require.NoError(t, err, "failed to retrieve detached workflow")
+
 			status, err := childHandle.GetStatus()
 			if err != nil {
 				return false
