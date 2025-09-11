@@ -83,7 +83,6 @@ func TestConfig(t *testing.T) {
 
 		pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
 		require.NoError(t, err)
-		defer pool.Close()
 
 		config := Config{
 			DatabaseURL: databaseURL,
