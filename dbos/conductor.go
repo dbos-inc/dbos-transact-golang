@@ -562,7 +562,9 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	var opts []ListWorkflowsOption
 	opts = append(opts, WithLoadInput(req.Body.LoadInput))
 	opts = append(opts, WithLoadOutput(req.Body.LoadOutput))
-	opts = append(opts, WithSortDesc())
+	if req.Body.SortDesc {
+		opts = append(opts, WithSortDesc())
+	}
 	if len(req.Body.WorkflowUUIDs) > 0 {
 		opts = append(opts, WithWorkflowIDs(req.Body.WorkflowUUIDs))
 	}
