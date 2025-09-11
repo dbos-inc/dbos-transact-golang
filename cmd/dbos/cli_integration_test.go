@@ -105,6 +105,8 @@ func TestCLIWorkflow(t *testing.T) {
 					fmt.Println(cmd.Stdout)
 				*/
 				cmd.Process.Kill()
+				// Ensure application is stopped
+				cmd.Wait()
 			}
 		})
 	})
