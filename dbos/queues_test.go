@@ -1038,12 +1038,11 @@ func TestQueueTimeouts(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 
-		// Check the child's status: should be cancelled too
-		childHandle, err := RetrieveWorkflow[string](dbosCtx, childWorkflowID)
-		require.NoError(t, err, "failed to retrieve child workflow")
-
 		// Wait for the child workflow status to become cancelled
 		require.Eventually(t, func() bool {
+			childHandle, err := RetrieveWorkflow[string](dbosCtx, childWorkflowID)
+			require.NoError(t, err, "failed to retrieve child workflow")
+
 			status, err := childHandle.GetStatus()
 			if err != nil {
 				return false
