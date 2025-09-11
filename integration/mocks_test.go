@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/integration/mocks"
+
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
-	"github.com/dbos-inc/dbos-transact-golang/dbos/mocks"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -198,5 +199,6 @@ func TestMocks(t *testing.T) {
 
 	mockCtx.AssertExpectations(t)
 	mockChildHandle.AssertExpectations(t)
-	// mockGenericHandle.AssertExpectations(t)
+	mockGenericHandle.AssertExpectations(t)
+	fmt.Println("TestMocks completed successfully")
 }
