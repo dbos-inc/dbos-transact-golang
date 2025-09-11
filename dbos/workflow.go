@@ -103,11 +103,26 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 		loadInput = false
 		loadOutput = false
 	}
-	workflowStatuses, err := h.dbosContext.(*dbosContext).systemDB.listWorkflows(h.dbosContext, listWorkflowsDBInput{
-		workflowIDs: []string{h.workflowID},
-		loadInput:   loadInput,
-		loadOutput:  loadOutput,
-	})
+	c := h.dbosContext.(*dbosContext)
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	var workflowStatuses []WorkflowStatus
+	var err error
+	if isWithinWorkflow {
+		workflowStatuses, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
+			return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
+				workflowIDs: []string{h.workflowID},
+				loadInput:   loadInput,
+				loadOutput:  loadOutput,
+			})
+		}, WithStepName("DBOS.getStatus"))
+	} else {
+		workflowStatuses, err = c.systemDB.listWorkflows(c, listWorkflowsDBInput{
+			workflowIDs: []string{h.workflowID},
+			loadInput:   loadInput,
+			loadOutput:  loadOutput,
+		})
+	}
 	if err != nil {
 		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
 	}
@@ -1355,11 +1370,26 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 		loadInput = false
 		loadOutput = false
 	}
-	workflowStatus, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{
-		workflowIDs: []string{workflowID},
-		loadInput:   loadInput,
-		loadOutput:  loadOutput,
-	})
+
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	var workflowStatus []WorkflowStatus
+	var err error
+	if isWithinWorkflow {
+		workflowStatus, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
+			return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
+				workflowIDs: []string{workflowID},
+				loadInput:   loadInput,
+				loadOutput:  loadOutput,
+			})
+		}, WithStepName("DBOS.retrieveWorkflow"))
+	} else {
+		workflowStatus, err = c.systemDB.listWorkflows(c, listWorkflowsDBInput{
+			workflowIDs: []string{workflowID},
+			loadInput:   loadInput,
+			loadOutput:  loadOutput,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve workflow status: %w", err)
 	}
@@ -1593,7 +1623,17 @@ func Enqueue[P any, R any](ctx DBOSContext, queueName, workflowName string, inpu
 //
 // Returns an error if the workflow does not exist or if the cancellation operation fails.
 func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
-	return c.systemDB.cancelWorkflow(c, workflowID)
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if isWithinWorkflow {
+		_, err := RunAsStep(c, func(ctx context.Context) (any, error) {
+			err := c.systemDB.cancelWorkflow(ctx, workflowID)
+			return nil, err
+		}, WithStepName("DBOS.cancelWorkflow"))
+		return err
+	} else {
+		return c.systemDB.cancelWorkflow(c, workflowID)
+	}
 }
 
 // CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED.
@@ -1619,7 +1659,17 @@ func CancelWorkflow(ctx DBOSContext, workflowID string) error {
 }
 
 func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
-	err := c.systemDB.resumeWorkflow(c, workflowID)
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	var err error
+	if isWithinWorkflow {
+		_, err = RunAsStep(c, func(ctx context.Context) (any, error) {
+			err := c.systemDB.resumeWorkflow(ctx, workflowID)
+			return nil, err
+		}, WithStepName("DBOS.resumeWorkflow"))
+	} else {
+		err = c.systemDB.resumeWorkflow(c, workflowID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1686,7 +1736,17 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 	}
 
 	// Call system database method
-	forkedWorkflowID, err := c.systemDB.forkWorkflow(c, dbInput)
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	var forkedWorkflowID string
+	var err error
+	if isWithinWorkflow {
+		forkedWorkflowID, err = RunAsStep(c, func(ctx context.Context) (string, error) {
+			return c.systemDB.forkWorkflow(ctx, dbInput)
+		}, WithStepName("DBOS.forkWorkflow"))
+	} else {
+		forkedWorkflowID, err = c.systemDB.forkWorkflow(c, dbInput)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2053,7 +2113,17 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	}
 
 	// Call the context method to list workflows
-	workflows, err := c.systemDB.listWorkflows(c, dbInput)
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	var workflows []WorkflowStatus
+	var err error
+	if isWithinWorkflow {
+		workflows, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
+			return c.systemDB.listWorkflows(ctx, dbInput)
+		}, WithStepName("DBOS.listWorkflows"))
+	} else {
+		workflows, err = c.systemDB.listWorkflows(c, dbInput)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2104,7 +2174,15 @@ func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStat
 }
 
 func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error) {
-	return c.systemDB.getWorkflowSteps(c, workflowID)
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if isWithinWorkflow {
+		return RunAsStep(c, func(ctx context.Context) ([]StepInfo, error) {
+			return c.systemDB.getWorkflowSteps(ctx, workflowID)
+		}, WithStepName("DBOS.getWorkflowSteps"))
+	} else {
+		return c.systemDB.getWorkflowSteps(c, workflowID)
+	}
 }
 
 // GetWorkflowSteps retrieves the execution steps of a workflow.

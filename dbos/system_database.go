@@ -547,45 +547,6 @@ type listWorkflowsDBInput struct {
 
 // ListWorkflows retrieves a list of workflows based on the provided filters
 func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error) {
-	functionName := "DBOS.listWorkflows"
-
-	// Get workflow state from context
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	var stepID int
-	var runAsStep bool
-
-	if ok && wfState != nil && !wfState.isWithinStep {
-		runAsStep = true
-		stepID = wfState.NextStepID()
-
-		// Setup a new child context for the step
-		stepState := workflowState{
-			workflowID:   wfState.workflowID,
-			stepID:       stepID,
-			isWithinStep: true,
-		}
-		ctx = context.WithValue(ctx, workflowStateKey, &stepState)
-
-		// Check if already executed
-		checkInput := checkOperationExecutionDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-		}
-		recordedResult, err := s.checkOperationExecution(ctx, checkInput)
-		if err != nil {
-			return nil, err
-		}
-		if recordedResult != nil {
-			// Return cached result
-			workflowStatuses, ok := recordedResult.output.([]WorkflowStatus)
-			if !ok {
-				return nil, fmt.Errorf("invalid cached result type for ListWorkflows: %T", recordedResult.output)
-			}
-			return workflowStatuses, recordedResult.err
-		}
-	}
-
 	qb := newQueryBuilder()
 
 	// Build the base query with conditional column selection
@@ -780,21 +741,6 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		return nil, fmt.Errorf("error iterating over workflow rows: %w", err)
 	}
 
-	// Record result if in workflow
-	if runAsStep {
-		recordInput := recordOperationResultDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-			output:     workflows,
-			err:        nil,
-		}
-		err = s.recordOperationResult(ctx, recordInput)
-		if err != nil {
-			return nil, fmt.Errorf("failed to record operation result: %w", err)
-		}
-	}
-
 	return workflows, nil
 }
 
@@ -836,41 +782,6 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 }
 
 func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
-	functionName := "DBOS.cancelWorkflow"
-
-	// Get workflow state from context (optional - can be called from outside workflow)
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	var stepID int
-	var runAsStep bool
-
-	if ok && wfState != nil && !wfState.isWithinStep {
-		runAsStep = true
-		stepID = wfState.NextStepID()
-
-		// Setup a new child context for the step
-		stepState := workflowState{
-			workflowID:   wfState.workflowID,
-			stepID:       stepID,
-			isWithinStep: true,
-		}
-		ctx = context.WithValue(ctx, workflowStateKey, &stepState)
-
-		// Check if already executed
-		checkInput := checkOperationExecutionDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-		}
-		recordedResult, err := s.checkOperationExecution(ctx, checkInput)
-		if err != nil {
-			return err
-		}
-		if recordedResult != nil {
-			// Already cancelled, return any error that was recorded
-			return recordedResult.err
-		}
-	}
-
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -899,20 +810,6 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
 		if err := tx.Rollback(ctx); err != nil {
 			return fmt.Errorf("failed to commit transaction: %w", err)
 		}
-		// Record result if in workflow
-		if runAsStep {
-			recordInput := recordOperationResultDBInput{
-				workflowID: wfState.workflowID,
-				stepID:     stepID,
-				stepName:   functionName,
-				output:     nil,
-				err:        nil,
-			}
-			err = s.recordOperationResult(ctx, recordInput)
-			if err != nil {
-				return fmt.Errorf("failed to record operation result: %w", err)
-			}
-		}
 		return nil
 	}
 
@@ -924,22 +821,6 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
 	_, err = tx.Exec(ctx, updateStatusQuery, WorkflowStatusCancelled, time.Now().UnixMilli(), workflowID)
 	if err != nil {
 		return fmt.Errorf("failed to update workflow status to CANCELLED: %w", err)
-	}
-
-	// Record result if in workflow
-	if runAsStep {
-		recordInput := recordOperationResultDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-			output:     nil,
-			err:        nil,
-			tx:         tx,
-		}
-		err = s.recordOperationResult(ctx, recordInput)
-		if err != nil {
-			return fmt.Errorf("failed to record operation result: %w", err)
-		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -969,7 +850,6 @@ func (s *sysDB) cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 			// If desired we could funnel the errors back the caller (conductor, admin server)
 		}
 	}
-
 	return nil
 }
 
@@ -1033,41 +913,6 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 }
 
 func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
-	functionName := "DBOS.resumeWorkflow"
-
-	// Get workflow state from context (optional - can be called from outside workflow)
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	var stepID int
-	var runAsStep bool
-
-	if ok && wfState != nil && !wfState.isWithinStep {
-		runAsStep = true
-		stepID = wfState.NextStepID()
-
-		// Setup a new child context for the step
-		stepState := workflowState{
-			workflowID:   wfState.workflowID,
-			stepID:       stepID,
-			isWithinStep: true,
-		}
-		ctx = context.WithValue(ctx, workflowStateKey, &stepState)
-
-		// Check if already executed
-		checkInput := checkOperationExecutionDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-		}
-		recordedResult, err := s.checkOperationExecution(ctx, checkInput)
-		if err != nil {
-			return err
-		}
-		if recordedResult != nil {
-			// Already resumed, return any error that was recorded
-			return recordedResult.err
-		}
-	}
-
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -1098,21 +943,6 @@ func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 
 	wf := wfs[0]
 	if wf.Status == WorkflowStatusSuccess || wf.Status == WorkflowStatusError {
-		// Record result if in workflow
-		if runAsStep {
-			recordInput := recordOperationResultDBInput{
-				workflowID: wfState.workflowID,
-				stepID:     stepID,
-				stepName:   functionName,
-				output:     nil,
-				err:        nil,
-				tx:         tx,
-			}
-			err = s.recordOperationResult(ctx, recordInput)
-			if err != nil {
-				return fmt.Errorf("failed to record operation result: %w", err)
-			}
-		}
 		return nil // Workflow is complete, do nothing
 	}
 
@@ -1133,22 +963,6 @@ func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 		return fmt.Errorf("failed to update workflow status to ENQUEUED: %w", err)
 	}
 
-	// Record result if in workflow
-	if runAsStep {
-		recordInput := recordOperationResultDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-			output:     nil,
-			err:        nil,
-			tx:         tx,
-		}
-		err = s.recordOperationResult(ctx, recordInput)
-		if err != nil {
-			return fmt.Errorf("failed to record operation result: %w", err)
-		}
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
@@ -1164,48 +978,10 @@ type forkWorkflowDBInput struct {
 }
 
 func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error) {
-	functionName := "DBOS.forkWorkflow"
-
 	// Generate new workflow ID if not provided
 	forkedWorkflowID := input.forkedWorkflowID
 	if forkedWorkflowID == "" {
 		forkedWorkflowID = uuid.New().String()
-	}
-
-	// Get workflow state from context (optional - can be called from outside workflow)
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	var stepID int
-	var runAsStep bool
-
-	if ok && wfState != nil && !wfState.isWithinStep {
-		runAsStep = true
-		stepID = wfState.NextStepID()
-
-		stepState := workflowState{
-			workflowID:   wfState.workflowID,
-			stepID:       stepID,
-			isWithinStep: true,
-		}
-		ctx = context.WithValue(ctx, workflowStateKey, &stepState)
-
-		// Check if already executed
-		checkInput := checkOperationExecutionDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-		}
-		recordedResult, err := s.checkOperationExecution(ctx, checkInput)
-		if err != nil {
-			return "", err
-		}
-		if recordedResult != nil {
-			// Already forked, return any error that was recorded
-			outputString, ok := recordedResult.output.(string)
-			if !ok {
-				return "", fmt.Errorf("unexpected output type in recorded result, expected string")
-			}
-			return outputString, recordedResult.err
-		}
 	}
 
 	// Validate startStep
@@ -1293,22 +1069,6 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		_, err = tx.Exec(ctx, copyOutputsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
 		if err != nil {
 			return "", fmt.Errorf("failed to copy operation outputs: %w", err)
-		}
-	}
-
-	// Record result if in workflow
-	if runAsStep {
-		recordInput := recordOperationResultDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-			output:     forkedWorkflowID,
-			err:        nil,
-			tx:         tx,
-		}
-		err = s.recordOperationResult(ctx, recordInput)
-		if err != nil {
-			return "", fmt.Errorf("failed to record operation result: %w", err)
 		}
 	}
 
@@ -1632,37 +1392,6 @@ type StepInfo struct {
 }
 
 func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error) {
-	functionName := "DBOS.getWorkflowSteps"
-
-	// Get workflow state from context (optional - can be called from outside workflow)
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	var stepID int
-	var runAsStep bool
-
-	if ok && wfState != nil && !wfState.isWithinStep {
-		runAsStep = true
-		stepID = wfState.NextStepID()
-
-		// Check if already executed
-		checkInput := checkOperationExecutionDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-		}
-		recordedResult, err := s.checkOperationExecution(ctx, checkInput)
-		if err != nil {
-			return nil, err
-		}
-		if recordedResult != nil {
-			// Return cached result
-			stepInfos, ok := recordedResult.output.([]StepInfo)
-			if !ok {
-				return nil, fmt.Errorf("unexpected output type in recorded result, expected []StepInfo")
-			}
-			return stepInfos, recordedResult.err
-		}
-	}
-
 	query := `SELECT function_id, function_name, output, error, child_workflow_id
 			  FROM dbos.operation_outputs
 			  WHERE workflow_uuid = $1
@@ -1710,21 +1439,6 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating over step rows: %w", err)
-	}
-
-	// Record result if in workflow
-	if runAsStep {
-		recordInput := recordOperationResultDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-			output:     steps,
-			err:        nil,
-		}
-		err = s.recordOperationResult(ctx, recordInput)
-		if err != nil {
-			return nil, fmt.Errorf("failed to record operation result: %w", err)
-		}
 	}
 
 	return steps, nil
