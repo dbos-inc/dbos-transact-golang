@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -104,9 +105,14 @@ func TestCLIWorkflow(t *testing.T) {
 					fmt.Println(cmd.Stderr)
 					fmt.Println(cmd.Stdout)
 				*/
-				cmd.Process.Kill()
-				// Ensure application is stopped
-				cmd.Wait()
+				// Kill the entire process group
+				pgid, err := syscall.Getpgid(cmd.Process.Pid)
+				if err == nil {
+					syscall.Kill(-pgid, syscall.SIGKILL)
+				} else {
+					cmd.Process.Kill()
+				}
+				_ = cmd.Wait() // Ignore error since we killed it
 			}
 		})
 	})
