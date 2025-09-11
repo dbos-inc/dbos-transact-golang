@@ -104,6 +104,7 @@ func TestCLIWorkflow(t *testing.T) {
 					fmt.Println(cmd.Stderr)
 					fmt.Println(cmd.Stdout)
 				*/
+				cmd.Process.Signal(os.Interrupt)
 				cmd.Process.Kill()
 			}
 		})
