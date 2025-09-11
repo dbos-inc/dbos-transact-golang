@@ -640,8 +640,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	var opts []ListWorkflowsOption
 	opts = append(opts, WithLoadInput(req.Body.LoadInput))
 	opts = append(opts, WithLoadOutput(false)) // Don't load output for queued workflows
-	opts = append(opts, WithSortDesc())
-	opts = append(opts, WithQueuesOnly()) // Only include workflows that are in queues
+	opts = append(opts, WithQueuesOnly())      // Only include workflows that are in queues
 
 	// Add status filter for queued workflows
 	queuedStatuses := make([]WorkflowStatusType, 0)
@@ -658,6 +657,9 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	}
 	opts = append(opts, WithStatus(queuedStatuses))
 
+	if req.Body.SortDesc {
+		opts = append(opts, WithSortDesc())
+	}
 	if req.Body.WorkflowName != nil {
 		opts = append(opts, WithName(*req.Body.WorkflowName))
 	}
