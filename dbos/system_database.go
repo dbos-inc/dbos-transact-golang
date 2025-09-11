@@ -697,7 +697,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var executorID *string
 
 		// Build scan arguments dynamically based on loaded columns
-		scanArgs := []interface{}{
+		scanArgs := []any{
 			&wf.ID, &wf.Status, &wf.Name, &wf.AuthenticatedUser, &wf.AssumedRole,
 			&wf.AuthenticatedRoles, &executorID, &createdAtMs,
 			&updatedAtMs, &applicationVersion, &wf.ApplicationID,
