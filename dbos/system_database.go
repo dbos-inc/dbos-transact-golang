@@ -230,7 +230,7 @@ func runMigrations(databaseURL string) error {
 
 type newSystemDatabaseInput struct {
 	databaseURL string
-	custom_pool *pgxpool.Pool
+	customPool  *pgxpool.Pool
 	logger      *slog.Logger
 }
 
@@ -238,7 +238,7 @@ type newSystemDatabaseInput struct {
 func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (systemDatabase, error) {
 	// Dereference fields from inputs
 	databaseURL := inputs.databaseURL
-	custom_pool := inputs.custom_pool
+	customPool := inputs.customPool
 	logger := inputs.logger
 
 	// Create the database if it doesn't exist
@@ -254,9 +254,9 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	// pool
 	var pool *pgxpool.Pool
 
-	if custom_pool != nil {
+	if customPool != nil {
 
-		pool = custom_pool
+		pool = customPool
 
 	} else {
 
