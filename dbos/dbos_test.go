@@ -72,7 +72,8 @@ func TestConfig(t *testing.T) {
 		slogLogger = slogLogger.With("service", "dbos-test", "environment", "test")
 
 		// Custom Pool
-		poolConfig, _ := pgxpool.ParseConfig(databaseURL)
+		poolConfig, err := pgxpool.ParseConfig(databaseURL)
+		require.NoError(t, err)
 
 		poolConfig.MaxConns = 10
 		poolConfig.MinConns = 5
@@ -85,10 +86,10 @@ func TestConfig(t *testing.T) {
 		require.NoError(t, err)
 
 		config := Config{
-			DatabaseURL: databaseURL,
-			AppName:     "test-custom-pool",
-			Logger:      slogLogger,
-			Pool:        pool,
+			DatabaseURL:  databaseURL,
+			AppName:      "test-custom-pool",
+			Logger:       slogLogger,
+			SystemDBPool: pool,
 		}
 
 		customdbosContext, err := NewDBOSContext(context.Background(), config)
@@ -103,6 +104,13 @@ func TestConfig(t *testing.T) {
 
 		stats := sysDB.pool.Stat()
 		assert.Equal(t, int32(10), stats.MaxConns(), "MaxConns should match custom pool config")
+
+		sysdbConfig := sysDB.pool.Config()
+		assert.Equal(t, int32(10), sysdbConfig.MaxConns)
+		assert.Equal(t, int32(5), sysdbConfig.MinConns)
+		assert.Equal(t, 2*time.Hour, sysdbConfig.MaxConnLifetime)
+		assert.Equal(t, 2*time.Minute, sysdbConfig.MaxConnIdleTime)
+		assert.Equal(t, 10*time.Second, sysdbConfig.ConnConfig.ConnectTimeout)
 
 		customdbosContext.Shutdown(1 * time.Minute)
 		err = pool.Ping(context.Background())

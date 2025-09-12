@@ -43,7 +43,7 @@ type Config struct {
 	ApplicationVersion string          // Application version (optional, overridden by DBOS__APPVERSION env var)
 	ExecutorID         string          // Executor ID (optional, overridden by DBOS__VMID env var)
 	Context            context.Context // User Context
-	Pool               *pgxpool.Pool   // Custom Pool
+	SystemDBPool       *pgxpool.Pool   // Custom System Database Pool
 }
 
 // processConfig enforces mandatory fields and applies defaults.
@@ -69,7 +69,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ConductorAPIKey:    inputConfig.ConductorAPIKey,
 		ApplicationVersion: inputConfig.ApplicationVersion,
 		ExecutorID:         inputConfig.ExecutorID,
-		Pool:               inputConfig.Pool,
+		SystemDBPool:       inputConfig.SystemDBPool,
 	}
 
 	// Load defaults
@@ -334,7 +334,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	newSystemDatabaseInputs := newSystemDatabaseInput{
 		databaseURL: config.DatabaseURL,
-		custom_pool: config.Pool,
+		customPool:  config.SystemDBPool,
 		logger:      initExecutor.logger,
 	}
 
