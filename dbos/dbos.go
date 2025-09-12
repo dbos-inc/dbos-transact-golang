@@ -318,6 +318,10 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	// Register types we serialize with gob
 	var t time.Time
 	gob.Register(t)
+	var ws []WorkflowStatus
+	gob.Register(ws)
+	var si []StepInfo
+	gob.Register(si)
 
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion

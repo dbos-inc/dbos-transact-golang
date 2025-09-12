@@ -2734,18 +2734,6 @@ func TestWorkflowTimeout(t *testing.T) {
 		<-ctx.Done()
 		assert.True(t, errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded),
 			"workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
-		// The status of this workflow should transition to cancelled
-		maxtries := 10
-		for range maxtries {
-			isCancelled, err := checkWfStatus(ctx, WorkflowStatusCancelled)
-			if err != nil {
-				return "", err
-			}
-			if isCancelled {
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
 		return "", ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflow)
@@ -2943,18 +2931,14 @@ func TestWorkflowTimeout(t *testing.T) {
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 	})
 
-	waitForCancelParent := func(ctx DBOSContext, _ string) (string, error) {
+	waitForCancelParent := func(ctx DBOSContext, childWorkflowID string) (string, error) {
 		// This workflow will run a child workflow that waits indefinitely until it is cancelled
-		childHandle, err := RunWorkflow(ctx, waitForCancelWorkflow, "child-wait-for-cancel")
+		childHandle, err := RunWorkflow(ctx, waitForCancelWorkflow, "child-wait-for-cancel", WithWorkflowID(childWorkflowID))
 		require.NoError(t, err, "failed to start child workflow")
 
 		// Wait for the child workflow to complete
 		result, err := childHandle.GetResult()
 		assert.True(t, errors.Is(err, context.DeadlineExceeded), "expected child workflow to be cancelled, got: %v", err)
-		// Check the child workflow status: should be cancelled
-		status, err := childHandle.GetStatus()
-		require.NoError(t, err, "failed to get child workflow status")
-		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected child workflow status to be WorkflowStatusCancelled")
 		return result, ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelParent)
@@ -2964,7 +2948,8 @@ func TestWorkflowTimeout(t *testing.T) {
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
 
-		handle, err := RunWorkflow(cancelCtx, waitForCancelParent, "parent-wait-for-child-cancel")
+		childWorkflowID := "child-wait-for-cancel-" + uuid.NewString()
+		handle, err := RunWorkflow(cancelCtx, waitForCancelParent, childWorkflowID)
 		require.NoError(t, err, "failed to start parent workflow")
 
 		// Wait for the parent workflow to complete and get the result
@@ -2976,6 +2961,13 @@ func TestWorkflowTimeout(t *testing.T) {
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+
+		// Check the child workflow status: should be cancelled
+		childHandle, err := RetrieveWorkflow[string](dbosCtx, childWorkflowID)
+		require.NoError(t, err, "failed to get child workflow handle")
+		status, err = childHandle.GetStatus()
+		require.NoError(t, err, "failed to get child workflow status")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected child workflow status to be WorkflowStatusCancelled")
 	})
 
 	detachedChild := func(ctx DBOSContext, timeout time.Duration) (string, error) {
@@ -2990,16 +2982,15 @@ func TestWorkflowTimeout(t *testing.T) {
 
 	detachedChildWorkflowParent := func(ctx DBOSContext, timeout time.Duration) (string, error) {
 		childCtx := WithoutCancel(ctx)
-		childHandle, err := RunWorkflow(childCtx, detachedChild, timeout*2)
+		myID, err := GetWorkflowID(ctx)
+		require.NoError(t, err, "failed to get parent workflow ID")
+		childWorkflowID := fmt.Sprintf("%s-detached-child", myID)
+		childHandle, err := RunWorkflow(childCtx, detachedChild, timeout*2, WithWorkflowID(childWorkflowID))
 		require.NoError(t, err, "failed to start child workflow")
 
 		// Wait for the child workflow to complete
 		result, err := childHandle.GetResult()
 		require.NoError(t, err, "failed to get result from child workflow")
-		// Check the child workflow status: should be cancelled
-		status, err := childHandle.GetStatus()
-		require.NoError(t, err, "failed to get child workflow status")
-		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected child workflow status to be WorkflowStatusSuccess")
 		// The child spun for timeout*2 so ctx.Err() should be context.DeadlineExceeded
 		return result, ctx.Err()
 	}
@@ -3021,6 +3012,13 @@ func TestWorkflowTimeout(t *testing.T) {
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+
+		// Check the child workflow status: should be cancelled
+		childHandle, err := RetrieveWorkflow[string](dbosCtx, fmt.Sprintf("%s-detached-child", handle.GetWorkflowID()))
+		require.NoError(t, err, "failed to get child workflow handle")
+		status, err = childHandle.GetStatus()
+		require.NoError(t, err, "failed to get child workflow status")
+		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected child workflow status to be WorkflowStatusSuccess")
 	})
 
 	t.Run("RecoverWaitForCancelWorkflow", func(t *testing.T) {
@@ -3969,5 +3967,180 @@ func TestGarbageCollect(t *testing.T) {
 		require.Equal(t, 2, len(workflows), "expected 2 workflows after second GC")
 		require.Equal(t, workflows[0].ID, handles[numWorkflows-1].GetWorkflowID(), "expected newest workflow to remain")
 		require.Equal(t, workflows[1].ID, handles[numWorkflows-2].GetWorkflowID(), "expected 2nd newest workflow to remain")
+	})
+}
+
+// TestSpecialSteps tests that special workflow functions (ListWorkflows, CancelWorkflow,
+// ResumeWorkflow, ForkWorkflow, GetWorkflowSteps) work correctly as durable steps
+func TestSpecialSteps(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	specialStepsEvent := NewEvent()
+	blockingEvent := NewEvent()
+	childEvent := NewEvent()
+
+	// Child workflow that blocks on an event (for cancellation testing)
+	childWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		// Wait for event to be set (will be cancelled before this happens)
+		childEvent.Wait()
+		return fmt.Sprintf("auxiliary-result-%s", input), nil
+	}
+
+	// Main workflow that uses all special steps
+	specialStepsWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		defer specialStepsEvent.Set()
+
+		currentWorkflowID, err := GetWorkflowID(dbosCtx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get current workflow ID: %w", err)
+		}
+
+		// Step 0: Start a child workflow to use in other operations
+		childHandle, err := RunWorkflow(dbosCtx, childWorkflow, "test")
+		if err != nil {
+			return "", fmt.Errorf("failed to start child workflow: %w", err)
+		}
+
+		// Step 1: Use CancelWorkflow on the child workflow (should be cancelled while waiting)
+		err = CancelWorkflow(dbosCtx, childHandle.GetWorkflowID())
+		if err != nil {
+			return "", fmt.Errorf("CancelWorkflow failed: %w", err)
+		}
+
+		// Step 2: Use RetrieveWorkflow (list workflows under the hood)
+		retrievedHandle, err := RetrieveWorkflow[string](dbosCtx, childHandle.GetWorkflowID())
+		if err != nil {
+			return "", fmt.Errorf("RetrieveWorkflow failed: %w", err)
+		}
+		if retrievedHandle.GetWorkflowID() != childHandle.GetWorkflowID() {
+			return "", fmt.Errorf("RetrieveWorkflow returned wrong workflow ID")
+		}
+
+		// Step 3: Check status of cancelled workflow (calls listWorkflows under the hood)
+		status, err := retrievedHandle.GetStatus()
+		if err != nil {
+			return "", fmt.Errorf("failed to get status of retrieved workflow: %w", err)
+		}
+		if status.Status != WorkflowStatusCancelled {
+			return "", fmt.Errorf("expected cancelled workflow status, got %v", status.Status)
+		}
+
+		// Step 4: resume the cancelled workflow
+		resumeHandle, err := ResumeWorkflow[string](dbosCtx, childHandle.GetWorkflowID())
+		if err != nil {
+			fmt.Println("error in ResumeWorkflow:", err)
+			return "", fmt.Errorf("ResumeWorkflow failed: %w", err)
+		}
+		if resumeHandle.GetWorkflowID() != childHandle.GetWorkflowID() {
+			return "", fmt.Errorf("ResumeWorkflow returned wrong workflow ID")
+		}
+
+		// Step 5: Use ForkWorkflow
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: currentWorkflowID,
+			StartStep:          0,
+		})
+		if err != nil {
+			return "", fmt.Errorf("ForkWorkflow failed: %w", err)
+		}
+		if forkHandle.GetWorkflowID() == "" {
+			return "", fmt.Errorf("ForkWorkflow returned empty workflow ID")
+		}
+
+		// Step 6: Use GetWorkflowSteps on current workflow
+		steps, err := GetWorkflowSteps(dbosCtx, currentWorkflowID)
+		if err != nil {
+			return "", fmt.Errorf("GetWorkflowSteps failed: %w", err)
+		}
+		if len(steps) != 6 {
+			t.Logf("Expected 6 steps so far, got %d", len(steps))
+			for step := range steps {
+				t.Logf("Step %d: %s (Error: %v)\n", steps[step].StepID, steps[step].StepName, steps[step].Error)
+			}
+			return "", fmt.Errorf("Expected 6 steps so far, got %d", len(steps))
+		}
+
+		// Step 7: Use ListWorkflows at the end to check expected count
+		workflows, err := ListWorkflows(dbosCtx, WithLimit(100))
+		if err != nil {
+			return "", fmt.Errorf("ListWorkflows failed: %w", err)
+		}
+		// We should have at least 3 workflows: main, child, and forked
+		foundMain := false
+		foundChild := false
+		foundForked := false
+		for _, wf := range workflows {
+			if wf.ID == currentWorkflowID {
+				foundMain = true
+			}
+			if wf.ID == childHandle.GetWorkflowID() {
+				foundChild = true
+			}
+			if wf.ID == forkHandle.GetWorkflowID() {
+				foundForked = true
+			}
+		}
+		if !foundMain || !foundChild || !foundForked {
+			return "", fmt.Errorf("ListWorkflows did not return expected workflows. Found main: %v, child: %v, forked: %v", foundMain, foundChild, foundForked)
+		}
+
+		// Signal that all special steps are complete
+		specialStepsEvent.Set()
+		// Unblock the child
+		childEvent.Set()
+		// Wait for test to unblock
+		blockingEvent.Wait()
+
+		return "success", nil
+	}
+
+	RegisterWorkflow(dbosCtx, childWorkflow, WithWorkflowName("child-workflow"))
+	RegisterWorkflow(dbosCtx, specialStepsWorkflow)
+
+	t.Run("SpecialStepsExecution", func(t *testing.T) {
+		// Start the main workflow
+		workflowID := uuid.NewString()
+		_, err := RunWorkflow(dbosCtx, specialStepsWorkflow, "test-input", WithWorkflowID(workflowID))
+		require.NoError(t, err, "failed to start special steps workflow")
+
+		// Wait for all special steps to complete
+		specialStepsEvent.Wait()
+
+		// Test recovery - recover the pending workflow before unblocking
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+
+		// Find our workflow in the recovered handles
+		var recoveredHandle WorkflowHandle[any]
+		for _, h := range recoveredHandles {
+			if h.GetWorkflowID() == workflowID {
+				recoveredHandle = h
+				break
+			}
+		}
+		require.NotNil(t, recoveredHandle, "workflow should be recovered")
+
+		// Verify that the special steps were recorded properly (and once, idempotently)
+		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
+		require.NoError(t, err, "failed to get workflow steps")
+
+		// We should have at least 8 steps for the special functions
+		require.Equal(t, len(steps), 8, "expected 8 steps")
+		require.Equal(t, "child-workflow", steps[0].StepName, "first step should be child-workflow")
+		require.Equal(t, "DBOS.cancelWorkflow", steps[1].StepName, "second step should be DBOS.cancelWorkflow")
+		require.Equal(t, "DBOS.retrieveWorkflow", steps[2].StepName, "third step should be DBOS.retrieveWorkflow")
+		require.Equal(t, "DBOS.getStatus", steps[3].StepName, "fourth step should be DBOS.getStatus")
+		require.Equal(t, "DBOS.resumeWorkflow", steps[4].StepName, "fifth step should be DBOS.resumeWorkflow")
+		require.Equal(t, "DBOS.forkWorkflow", steps[5].StepName, "sixth step should be DBOS.forkWorkflow")
+		require.Equal(t, "DBOS.getWorkflowSteps", steps[6].StepName, "seventh step should be DBOS.getWorkflowSteps")
+		require.Equal(t, "DBOS.listWorkflows", steps[7].StepName, "eighth step should be DBOS.listWorkflows")
+
+		// Unblock the main workflow
+		blockingEvent.Set()
+
+		// Get final result
+		result, err := recoveredHandle.GetResult()
+		require.NoError(t, err, "workflow should complete successfully")
+		require.Equal(t, "success", result, "workflow should return success")
 	})
 }
