@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	_ "embed"
@@ -14,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -96,17 +96,28 @@ func TestCLIWorkflow(t *testing.T) {
 		testProjectInitialization(t, cliPath)
 	})
 
-	t.Run("ApplicationLifecycle", func(t *testing.T) {
-		cmd := testApplicationLifecycle(t, cliPath)
-		t.Cleanup(func() {
-			if cmd.Process != nil {
-				/*
-					fmt.Println(cmd.Stderr)
-					fmt.Println(cmd.Stdout)
-				*/
-				cmd.Process.Kill()
-			}
-		})
+	// Start a test application using dbos start
+	cmd := exec.CommandContext(context.Background(), cliPath, "start")
+	cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
+	err = cmd.Start()
+	require.NoError(t, err, "Failed to start application")
+	// Wait for server to be ready
+	require.Eventually(t, func() bool {
+		resp, err := http.Get("http://localhost:" + testServerPort)
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 10*time.Second, 500*time.Millisecond, "Server should start within 10 seconds")
+
+	t.Cleanup(func() {
+		fmt.Printf("Cleaning up application process %d\n", cmd.Process.Pid)
+		// fmt.Println(cmd.Stderr)
+		// fmt.Println(cmd.Stdout)
+		err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
+		require.NoError(t, err, "Failed to send interrupt signal to application process")
+		_ = cmd.Wait()
 	})
 
 	t.Run("WorkflowCommands", func(t *testing.T) {
@@ -120,7 +131,6 @@ func TestCLIWorkflow(t *testing.T) {
 
 // testProjectInitialization verifies project initialization
 func testProjectInitialization(t *testing.T, cliPath string) {
-
 	// Initialize project
 	cmd := exec.Command(cliPath, "init", testProjectName)
 	output, err := cmd.CombinedOutput()
@@ -164,71 +174,6 @@ func testProjectInitialization(t *testing.T, cliPath string) {
 	require.NoError(t, err, "go mod tidy failed: %s", string(modOutput))
 }
 
-// testApplicationLifecycle starts the application and triggers workflows
-func testApplicationLifecycle(t *testing.T, cliPath string) *exec.Cmd {
-	// Should already be in project directory from previous test
-
-	// Start the application in background
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, cliPath, "start")
-	cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
-
-	// Capture output for debugging
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Start()
-	require.NoError(t, err, "Failed to start application")
-
-	// Wait for server to be ready
-	require.Eventually(t, func() bool {
-		resp, err := http.Get("http://localhost:" + testServerPort)
-		if err != nil {
-			return false
-		}
-		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}, 10*time.Second, 500*time.Millisecond, "Server should start within 10 seconds")
-
-	// Trigger workflows via HTTP endpoints
-	t.Run("TriggerExampleWorkflow", func(t *testing.T) {
-		resp, err := http.Get("http://localhost:" + testServerPort + "/workflow")
-		require.NoError(t, err, "Failed to trigger workflow")
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-
-		assert.Equal(t, http.StatusOK, resp.StatusCode, "Workflow endpoint should return 200")
-		assert.Contains(t, string(body), "Workflow result", "Should contain workflow result")
-	})
-
-	t.Run("TriggerQueueWorkflow", func(t *testing.T) {
-		resp, err := http.Get("http://localhost:" + testServerPort + "/queue")
-		require.NoError(t, err, "Failed to trigger queue workflow")
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-
-		assert.Equal(t, http.StatusOK, resp.StatusCode, "Queue endpoint should return 200")
-
-		// Parse JSON response to get workflow ID
-		var response map[string]string
-		err = json.Unmarshal(body, &response)
-		require.NoError(t, err, "Should be valid JSON response")
-
-		workflowID, exists := response["workflow_id"]
-		assert.True(t, exists, "Response should contain workflow_id")
-		assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
-	})
-
-	return cmd
-}
-
 // testWorkflowCommands comprehensively tests all workflow CLI commands
 func testWorkflowCommands(t *testing.T, cliPath string) {
 
@@ -256,8 +201,29 @@ func testWorkflowCommands(t *testing.T, cliPath string) {
 // testListWorkflows tests various workflow listing scenarios
 func testListWorkflows(t *testing.T, cliPath string) {
 	// Create some test workflows first to ensure we have data to filter
-	// The previous test functions have already created workflows that we can query
+	resp, err := http.Get("http://localhost:" + testServerPort + "/workflow")
+	require.NoError(t, err, "Failed to trigger workflow")
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "Workflow endpoint should return 200")
+	assert.Contains(t, string(body), "Workflow result", "Should contain workflow result")
 
+	resp, err = http.Get("http://localhost:" + testServerPort + "/queue")
+	require.NoError(t, err, "Failed to trigger queue workflow")
+	defer resp.Body.Close()
+	body, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "Queue endpoint should return 200")
+
+	// Parse JSON response to get workflow ID
+	var response map[string]string
+	err = json.Unmarshal(body, &response)
+	require.NoError(t, err, "Should be valid JSON response")
+
+	workflowID, exists := response["workflow_id"]
+	assert.True(t, exists, "Response should contain workflow_id")
+	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 	// Get the current time for time-based filtering
 	currentTime := time.Now()
 
@@ -724,14 +690,14 @@ func buildCLI(t *testing.T) string {
 	// Build output path in the cmd directory
 	cliPath := filepath.Join(cmdDir, "dbos-cli-test")
 
-	// Check if already built
-	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
-		// Build the CLI from the cmd directory
-		buildCmd := exec.Command("go", "build", "-o", "dbos-cli-test", ".")
-		buildCmd.Dir = cmdDir
-		buildOutput, buildErr := buildCmd.CombinedOutput()
-		require.NoError(t, buildErr, "Failed to build CLI: %s", string(buildOutput))
-	}
+	// Delete any existing binary before building
+	os.Remove(cliPath)
+
+	// Build the CLI from the cmd directory
+	buildCmd := exec.Command("go", "build", "-o", "dbos-cli-test", ".")
+	buildCmd.Dir = cmdDir
+	buildOutput, buildErr := buildCmd.CombinedOutput()
+	require.NoError(t, buildErr, "Failed to build CLI: %s", string(buildOutput))
 
 	// Return absolute path
 	absPath, err := filepath.Abs(cliPath)
