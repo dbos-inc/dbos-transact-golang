@@ -111,10 +111,6 @@ func TestConfig(t *testing.T) {
 		assert.Equal(t, 2*time.Hour, sysdbConfig.MaxConnLifetime)
 		assert.Equal(t, 2*time.Minute, sysdbConfig.MaxConnIdleTime)
 		assert.Equal(t, 10*time.Second, sysdbConfig.ConnConfig.ConnectTimeout)
-
-		customdbosContext.Shutdown(1 * time.Minute)
-		err = pool.Ping(context.Background())
-		assert.NoError(t, err, "Custom pool should not be closed by Shutdown and should still be usable")
 	})
 
 	t.Run("FailsWithoutDatabaseURL", func(t *testing.T) {

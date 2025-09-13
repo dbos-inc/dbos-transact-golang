@@ -277,11 +277,11 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		config.ConnConfig.ConnectTimeout = 10 * time.Second
 
 		// Create pool with configuration
-		new_pool, err := pgxpool.NewWithConfig(ctx, config)
+		newPool, err := pgxpool.NewWithConfig(ctx, config)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create connection pool: %v", err)
 		}
-		pool = new_pool
+		pool = newPool
 
 	}
 
