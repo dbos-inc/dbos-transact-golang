@@ -96,9 +96,12 @@ func TestWorkflowEncoding(t *testing.T) {
 		assert.Equal(t, "workflow error: step error", err.Error())
 
 		// Test results from ListWorkflows
-		workflows, err := ListWorkflows(executor, WithWorkflowIDs(
-			[]string{directHandle.GetWorkflowID()},
-		))
+		workflows, err := ListWorkflows(
+			executor,
+			WithWorkflowIDs([]string{directHandle.GetWorkflowID()}),
+			WithLoadInput(true),
+			WithLoadOutput(true),
+		)
 		require.NoError(t, err)
 		require.Len(t, workflows, 1)
 		workflow := workflows[0]
@@ -155,9 +158,12 @@ func TestWorkflowEncoding(t *testing.T) {
 		assert.Equal(t, "processed by encodingStepStruct", retrievedResult.B)
 
 		// Test results from ListWorkflows
-		workflows, err := ListWorkflows(executor, WithWorkflowIDs(
-			[]string{directHandle.GetWorkflowID()},
-		))
+		workflows, err := ListWorkflows(executor,
+			WithWorkflowIDs([]string{directHandle.GetWorkflowID()}),
+			WithLoadInput(true),
+			WithLoadOutput(true),
+		)
+		require.Len(t, workflows, 1)
 		require.NoError(t, err)
 		workflow := workflows[0]
 		require.NotNil(t, workflow.Input)
