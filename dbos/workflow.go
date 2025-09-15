@@ -342,13 +342,13 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 	c.logger.Info("Registered scheduled workflow", "fqn", workflowName, "cron_schedule", cronSchedule)
 }
 
-type WorkflowRegistrationOptions struct {
+type workflowRegistrationOptions struct {
 	cronSchedule string
 	maxRetries   int
 	name         string
 }
 
-type WorkflowRegistrationOption func(*WorkflowRegistrationOptions)
+type WorkflowRegistrationOption func(*workflowRegistrationOptions)
 
 const (
 	_DEFAULT_MAX_RECOVERY_ATTEMPTS = 100
@@ -363,7 +363,7 @@ const (
 // If a workflow fails or is interrupted, it will be retried up to this many times.
 // After exceeding max retries, the workflow status becomes MAX_RECOVERY_ATTEMPTS_EXCEEDED.
 func WithMaxRetries(maxRetries int) WorkflowRegistrationOption {
-	return func(p *WorkflowRegistrationOptions) {
+	return func(p *workflowRegistrationOptions) {
 		p.maxRetries = maxRetries
 	}
 }
@@ -372,13 +372,13 @@ func WithMaxRetries(maxRetries int) WorkflowRegistrationOption {
 // The schedule string follows standard cron format with second precision.
 // Scheduled workflows automatically receive a time.Time input parameter.
 func WithSchedule(schedule string) WorkflowRegistrationOption {
-	return func(p *WorkflowRegistrationOptions) {
+	return func(p *workflowRegistrationOptions) {
 		p.cronSchedule = schedule
 	}
 }
 
 func WithWorkflowName(name string) WorkflowRegistrationOption {
-	return func(p *WorkflowRegistrationOptions) {
+	return func(p *workflowRegistrationOptions) {
 		p.name = name
 	}
 }
@@ -417,7 +417,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		panic("workflow function cannot be nil")
 	}
 
-	registrationParams := WorkflowRegistrationOptions{
+	registrationParams := workflowRegistrationOptions{
 		maxRetries: _DEFAULT_MAX_RECOVERY_ATTEMPTS,
 	}
 
@@ -489,7 +489,7 @@ type Workflow[P any, R any] func(ctx DBOSContext, input P) (R, error)
 // WorkflowFunc represents a type-erased workflow function used internally.
 type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
 
-type WorkflowOptions struct {
+type workflowOptions struct {
 	workflowName       string
 	workflowID         string
 	queueName          string
@@ -500,11 +500,11 @@ type WorkflowOptions struct {
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
-type WorkflowOption func(*WorkflowOptions)
+type WorkflowOption func(*workflowOptions)
 
 // WithWorkflowID sets a custom workflow ID instead of generating one automatically.
 func WithWorkflowID(id string) WorkflowOption {
-	return func(p *WorkflowOptions) {
+	return func(p *workflowOptions) {
 		p.workflowID = id
 	}
 }
@@ -512,7 +512,7 @@ func WithWorkflowID(id string) WorkflowOption {
 // WithQueue enqueues the workflow to the specified queue instead of executing immediately.
 // Queued workflows will be processed by the queue runner according to the queue's configuration.
 func WithQueue(queueName string) WorkflowOption {
-	return func(p *WorkflowOptions) {
+	return func(p *workflowOptions) {
 		p.queueName = queueName
 	}
 }
@@ -520,28 +520,28 @@ func WithQueue(queueName string) WorkflowOption {
 // WithApplicationVersion overrides the DBOS Context application version for this workflow.
 // This affects workflow recovery.
 func WithApplicationVersion(version string) WorkflowOption {
-	return func(p *WorkflowOptions) {
+	return func(p *workflowOptions) {
 		p.applicationVersion = version
 	}
 }
 
 // WithDeduplicationID sets a deduplication ID for a queue workflow.
 func WithDeduplicationID(id string) WorkflowOption {
-	return func(p *WorkflowOptions) {
+	return func(p *workflowOptions) {
 		p.deduplicationID = id
 	}
 }
 
 // WithPriority sets the execution priority for a queue workflow.
 func WithPriority(priority uint) WorkflowOption {
-	return func(p *WorkflowOptions) {
+	return func(p *workflowOptions) {
 		p.priority = priority
 	}
 }
 
 // An internal option we use to map the reflection function name to the registration options.
 func withWorkflowName(name string) WorkflowOption {
-	return func(p *WorkflowOptions) {
+	return func(p *workflowOptions) {
 		p.workflowName = name
 	}
 }
@@ -625,7 +625,7 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 
 func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 	// Apply options to build params
-	params := WorkflowOptions{
+	params := workflowOptions{
 		applicationVersion: c.GetApplicationVersion(),
 	}
 	for _, opt := range opts {
@@ -873,8 +873,8 @@ type StepFunc func(ctx context.Context) (any, error)
 // Step represents a type-safe step function with a specific output type R.
 type Step[R any] func(ctx context.Context) (R, error)
 
-// StepOptions holds the configuration for step execution using functional options pattern.
-type StepOptions struct {
+// stepOptions holds the configuration for step execution using functional options pattern.
+type stepOptions struct {
 	maxRetries    int           // Maximum number of retry attempts (0 = no retries)
 	backoffFactor float64       // Exponential backoff multiplier between retries (default: 2.0)
 	baseInterval  time.Duration // Initial delay between retries (default: 100ms)
@@ -883,7 +883,7 @@ type StepOptions struct {
 }
 
 // setDefaults applies default values to stepOptions
-func (opts *StepOptions) setDefaults() {
+func (opts *stepOptions) setDefaults() {
 	if opts.backoffFactor == 0 {
 		opts.backoffFactor = _DEFAULT_STEP_BACKOFF_FACTOR
 	}
@@ -896,12 +896,12 @@ func (opts *StepOptions) setDefaults() {
 }
 
 // StepOption is a functional option for configuring step execution parameters.
-type StepOption func(*StepOptions)
+type StepOption func(*stepOptions)
 
 // WithStepName sets a custom name for the step. If the step name has already been set
 // by a previous call to WithStepName, this option will be ignored
 func WithStepName(name string) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		if opts.stepName == "" {
 			opts.stepName = name
 		}
@@ -911,7 +911,7 @@ func WithStepName(name string) StepOption {
 // WithStepMaxRetries sets the maximum number of retry attempts for the step.
 // A value of 0 means no retries (default behavior).
 func WithStepMaxRetries(maxRetries int) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		opts.maxRetries = maxRetries
 	}
 }
@@ -920,7 +920,7 @@ func WithStepMaxRetries(maxRetries int) StepOption {
 // The delay between retries is calculated as: BaseInterval * (BackoffFactor^(retry-1))
 // Default value is 2.0.
 func WithBackoffFactor(factor float64) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		opts.backoffFactor = factor
 	}
 }
@@ -928,7 +928,7 @@ func WithBackoffFactor(factor float64) StepOption {
 // WithBaseInterval sets the initial delay between retries.
 // Default value is 100ms.
 func WithBaseInterval(interval time.Duration) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		opts.baseInterval = interval
 	}
 }
@@ -936,7 +936,7 @@ func WithBaseInterval(interval time.Duration) StepOption {
 // WithMaxInterval sets the maximum delay between retries.
 // Default value is 5s.
 func WithMaxInterval(interval time.Duration) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		opts.maxInterval = interval
 	}
 }
@@ -1012,7 +1012,7 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 
 func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error) {
 	// Process functional options
-	stepOpts := &StepOptions{}
+	stepOpts := &stepOptions{}
 	for _, opt := range opts {
 		opt(stepOpts)
 	}
@@ -1421,7 +1421,7 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle
 	return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID()), nil
 }
 
-type EnqueueOptions struct {
+type enqueueOptions struct {
 	workflowName       string
 	workflowID         string
 	applicationVersion string
@@ -1432,46 +1432,46 @@ type EnqueueOptions struct {
 }
 
 // EnqueueOption is a functional option for configuring workflow enqueue parameters.
-type EnqueueOption func(*EnqueueOptions)
+type EnqueueOption func(*enqueueOptions)
 
 // WithEnqueueWorkflowID sets a custom workflow ID instead of generating one automatically.
 func WithEnqueueWorkflowID(id string) EnqueueOption {
-	return func(opts *EnqueueOptions) {
+	return func(opts *enqueueOptions) {
 		opts.workflowID = id
 	}
 }
 
 // WithEnqueueApplicationVersion overrides the application version for the enqueued workflow.
 func WithEnqueueApplicationVersion(version string) EnqueueOption {
-	return func(opts *EnqueueOptions) {
+	return func(opts *enqueueOptions) {
 		opts.applicationVersion = version
 	}
 }
 
 // WithEnqueueDeduplicationID sets a deduplication ID for the enqueued workflow.
 func WithEnqueueDeduplicationID(id string) EnqueueOption {
-	return func(opts *EnqueueOptions) {
+	return func(opts *enqueueOptions) {
 		opts.deduplicationID = id
 	}
 }
 
 // WithEnqueuePriority sets the execution priority for the enqueued workflow.
 func WithEnqueuePriority(priority uint) EnqueueOption {
-	return func(opts *EnqueueOptions) {
+	return func(opts *enqueueOptions) {
 		opts.priority = priority
 	}
 }
 
 // WithEnqueueTimeout sets the maximum execution time for the enqueued workflow.
 func WithEnqueueTimeout(timeout time.Duration) EnqueueOption {
-	return func(opts *EnqueueOptions) {
+	return func(opts *enqueueOptions) {
 		opts.workflowTimeout = timeout
 	}
 }
 
 func (c *dbosContext) Enqueue(_ DBOSContext, queueName, workflowName string, input any, opts ...EnqueueOption) (WorkflowHandle[any], error) {
 	// Process options
-	params := &EnqueueOptions{
+	params := &enqueueOptions{
 		workflowName:       workflowName,
 		applicationVersion: c.GetApplicationVersion(),
 		workflowInput:      input,
@@ -1784,8 +1784,8 @@ func ForkWorkflow[R any](ctx DBOSContext, input ForkWorkflowInput) (WorkflowHand
 	return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID()), nil
 }
 
-// ListWorkflowsOptions holds configuration parameters for listing workflows
-type ListWorkflowsOptions struct {
+// listWorkflowsOptions holds configuration parameters for listing workflows
+type listWorkflowsOptions struct {
 	workflowIDs      []string
 	status           []WorkflowStatusType
 	startTime        time.Time
@@ -1805,95 +1805,95 @@ type ListWorkflowsOptions struct {
 }
 
 // ListWorkflowsOption is a functional option for configuring workflow listing parameters.
-type ListWorkflowsOption func(*ListWorkflowsOptions)
+type ListWorkflowsOption func(*listWorkflowsOptions)
 
 // WithWorkflowIDs filters workflows by the specified workflow IDs.
 func WithWorkflowIDs(workflowIDs []string) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.workflowIDs = workflowIDs
 	}
 }
 
 // WithStatus filters workflows by the specified list of statuses.
 func WithStatus(status []WorkflowStatusType) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.status = status
 	}
 }
 
 // WithStartTime filters workflows created after the specified time.
 func WithStartTime(startTime time.Time) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.startTime = startTime
 	}
 }
 
 // WithEndTime filters workflows created before the specified time.
 func WithEndTime(endTime time.Time) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.endTime = endTime
 	}
 }
 
 // WithName filters workflows by the specified workflow function name.
 func WithName(name string) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.name = name
 	}
 }
 
 // WithAppVersion filters workflows by the specified application version.
 func WithAppVersion(appVersion string) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.appVersion = appVersion
 	}
 }
 
 // WithUser filters workflows by the specified authenticated user.
 func WithUser(user string) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.user = user
 	}
 }
 
 // WithLimit limits the number of workflows returned.
 func WithLimit(limit int) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.limit = &limit
 	}
 }
 
 // WithOffset sets the offset for pagination.
 func WithOffset(offset int) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.offset = &offset
 	}
 }
 
 // WithSortDesc enables descending sort by creation time (default is ascending).
 func WithSortDesc() ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.sortDesc = true
 	}
 }
 
 // WithWorkflowIDPrefix filters workflows by workflow ID prefix.
 func WithWorkflowIDPrefix(prefix string) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.workflowIDPrefix = prefix
 	}
 }
 
 // WithLoadInput controls whether to load workflow input data (default: true).
 func WithLoadInput(loadInput bool) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.loadInput = loadInput
 	}
 }
 
 // WithLoadOutput controls whether to load workflow output data (default: true).
 func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.loadOutput = loadOutput
 	}
 }
@@ -1901,21 +1901,21 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 // WithQueueName filters workflows by the specified queue name.
 // This is typically used when listing queued workflows.
 func WithQueueName(queueName string) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.queueName = queueName
 	}
 }
 
 // WithQueuesOnly filters to only return workflows that are in a queue.
 func WithQueuesOnly() ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.queuesOnly = true
 	}
 }
 
 // WithExecutorIDs filters workflows by the specified executor IDs.
 func WithExecutorIDs(executorIDs []string) ListWorkflowsOption {
-	return func(p *ListWorkflowsOptions) {
+	return func(p *listWorkflowsOptions) {
 		p.executorIDs = executorIDs
 	}
 }
@@ -1928,7 +1928,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		loadInput = false
 		loadOutput = false
 	}
-	params := &ListWorkflowsOptions{
+	params := &listWorkflowsOptions{
 		loadInput:  loadInput,
 		loadOutput: loadOutput,
 	}
