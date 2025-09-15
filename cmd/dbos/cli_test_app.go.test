@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
@@ -68,7 +70,7 @@ func QueueWorkflow(ctx dbos.DBOSContext, _ string) (string, error) {
 		}
 		handles[i] = handle
 	}
-    time.Sleep(10 * time.Second) // give some time for our tests to do wf management
+	time.Sleep(10 * time.Second) // give some time for our tests to do wf management
 	return fmt.Sprintf("Successfully enqueued %d steps", len(handles)), nil
 }
 
@@ -114,6 +116,16 @@ func main() {
 	http.HandleFunc("/queue", queueHandler)
 	http.HandleFunc("/", healthHandler)
 
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		fmt.Println("Received interrupt signal, shutting down...")
+		os.Exit(0)
+	}()
+
 	fmt.Println("Server starting on http://localhost:8080")
 	err = http.ListenAndServe(":8080", nil)
 	if err != nil {
@@ -156,5 +168,5 @@ func queueHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
-    fmt.Fprintf(w, "healthy")
+	fmt.Fprintf(w, "healthy")
 }

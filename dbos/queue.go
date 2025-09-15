@@ -22,8 +22,8 @@ const (
 // RateLimiter configures rate limiting for workflow queue execution.
 // Rate limits prevent overwhelming external services and provide backpressure.
 type RateLimiter struct {
-	Limit  int     // Maximum number of workflows to start within the period
-	Period float64 // Time period in seconds for the rate limit
+	Limit  int           // Maximum number of workflows to start within the period
+	Period time.Duration // Time period for the rate limit
 }
 
 // WorkflowQueue defines a named queue for workflow execution.
@@ -58,9 +58,9 @@ func WithGlobalConcurrency(concurrency int) QueueOption {
 
 // WithPriorityEnabled enables priority-based scheduling for the queue.
 // When enabled, workflows with lower priority numbers are executed first.
-func WithPriorityEnabled(enabled bool) QueueOption {
+func WithPriorityEnabled() QueueOption {
 	return func(q *WorkflowQueue) {
-		q.PriorityEnabled = enabled
+		q.PriorityEnabled = true
 	}
 }
 
@@ -90,9 +90,9 @@ func WithMaxTasksPerIteration(maxTasks int) QueueOption {
 //	    dbos.WithWorkerConcurrency(5),
 //	    dbos.WithRateLimiter(&dbos.RateLimiter{
 //	        Limit:  100,
-//	        Period: 60.0, // 100 workflows per minute
+//	        Period: 60 * time.Second, // 100 workflows per minute
 //	    }),
-//	    dbos.WithPriorityEnabled(true),
+//	    dbos.WithPriorityEnabled(),
 //	)
 //
 //	// Enqueue workflows to this queue:

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,7 +36,7 @@ type systemDatabase interface {
 	cancelWorkflow(ctx context.Context, workflowID string) error
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	resumeWorkflow(ctx context.Context, workflowID string) error
-	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) error
+	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error)
 
 	// Child workflows
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
@@ -657,7 +658,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var executorID *string
 
 		// Build scan arguments dynamically based on loaded columns
-		scanArgs := []interface{}{
+		scanArgs := []any{
 			&wf.ID, &wf.Status, &wf.Name, &wf.AuthenticatedUser, &wf.AssumedRole,
 			&wf.AuthenticatedRoles, &executorID, &createdAtMs,
 			&updatedAtMs, &applicationVersion, &wf.ApplicationID,
@@ -849,7 +850,6 @@ func (s *sysDB) cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 			// If desired we could funnel the errors back the caller (conductor, admin server)
 		}
 	}
-
 	return nil
 }
 
@@ -977,15 +977,21 @@ type forkWorkflowDBInput struct {
 	applicationVersion string
 }
 
-func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) error {
+func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error) {
+	// Generate new workflow ID if not provided
+	forkedWorkflowID := input.forkedWorkflowID
+	if forkedWorkflowID == "" {
+		forkedWorkflowID = uuid.New().String()
+	}
+
 	// Validate startStep
 	if input.startStep < 0 {
-		return fmt.Errorf("startStep must be >= 0, got %d", input.startStep)
+		return "", fmt.Errorf("startStep must be >= 0, got %d", input.startStep)
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return "", fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -997,10 +1003,10 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) err
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
 	if err != nil {
-		return fmt.Errorf("failed to list workflows: %w", err)
+		return "", fmt.Errorf("failed to list workflows: %w", err)
 	}
 	if len(wfs) == 0 {
-		return newNonExistentWorkflowError(input.originalWorkflowID)
+		return "", newNonExistentWorkflowError(input.originalWorkflowID)
 	}
 
 	originalWorkflow := wfs[0]
@@ -1030,11 +1036,11 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) err
 
 	inputString, err := serialize(originalWorkflow.Input)
 	if err != nil {
-		return fmt.Errorf("failed to serialize input: %w", err)
+		return "", fmt.Errorf("failed to serialize input: %w", err)
 	}
 
 	_, err = tx.Exec(ctx, insertQuery,
-		input.forkedWorkflowID,
+		forkedWorkflowID,
 		WorkflowStatusEnqueued,
 		originalWorkflow.Name,
 		originalWorkflow.AuthenticatedUser,
@@ -1049,7 +1055,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) err
 		0)
 
 	if err != nil {
-		return fmt.Errorf("failed to insert forked workflow status: %w", err)
+		return "", fmt.Errorf("failed to insert forked workflow status: %w", err)
 	}
 
 	// If startStep > 0, copy the original workflow's outputs into the forked workflow
@@ -1060,17 +1066,17 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) err
 			FROM dbos.operation_outputs
 			WHERE workflow_uuid = $2 AND function_id < $3`
 
-		_, err = tx.Exec(ctx, copyOutputsQuery, input.forkedWorkflowID, input.originalWorkflowID, input.startStep)
+		_, err = tx.Exec(ctx, copyOutputsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
 		if err != nil {
-			return fmt.Errorf("failed to copy operation outputs: %w", err)
+			return "", fmt.Errorf("failed to copy operation outputs: %w", err)
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return "", fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	return nil
+	return forkedWorkflowID, nil
 }
 
 func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any, error) {
@@ -1467,7 +1473,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 	if input.stepID != nil && *input.stepID >= 0 {
 		stepID = *input.stepID
 	} else {
-		stepID = wfState.NextStepID()
+		stepID = wfState.nextStepID()
 	}
 
 	// Check if operation was already executed
@@ -1618,7 +1624,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 		if wfState.isWithinStep {
 			return newStepExecutionError(wfState.workflowID, functionName, "cannot call Send within a step")
 		}
-		stepID = wfState.NextStepID()
+		stepID = wfState.nextStepID()
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -1706,8 +1712,8 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 		return nil, newStepExecutionError(wfState.workflowID, functionName, "cannot call Recv within a step")
 	}
 
-	stepID := wfState.NextStepID()
-	sleepStepID := wfState.NextStepID() // We will use a sleep step to implement the timeout
+	stepID := wfState.nextStepID()
+	sleepStepID := wfState.nextStepID() // We will use a sleep step to implement the timeout
 	destinationID := wfState.workflowID
 
 	// Set default topic if not provided
@@ -1862,7 +1868,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 		return newStepExecutionError(wfState.workflowID, functionName, "cannot call SetEvent within a step")
 	}
 
-	stepID := wfState.NextStepID()
+	stepID := wfState.nextStepID()
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1940,8 +1946,8 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		if wfState.isWithinStep {
 			return nil, newStepExecutionError(wfState.workflowID, functionName, "cannot call GetEvent within a step")
 		}
-		stepID = wfState.NextStepID()
-		sleepStepID = wfState.NextStepID() // We will use a sleep step to implement the timeout
+		stepID = wfState.nextStepID()
+		sleepStepID = wfState.nextStepID() // We will use a sleep step to implement the timeout
 
 		// Check if operation was already executed (only if in workflow)
 		checkInput := checkOperationExecutionDBInput{
@@ -2087,10 +2093,8 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	// First check the rate limiter
 	var numRecentQueries int
 	if input.queue.RateLimit != nil {
-		limiterPeriod := time.Duration(input.queue.RateLimit.Period * float64(time.Second))
-
 		// Calculate the cutoff time: current time minus limiter period
-		cutoffTimeMs := time.Now().Add(-limiterPeriod).UnixMilli()
+		cutoffTimeMs := time.Now().Add(-input.queue.RateLimit.Period).UnixMilli()
 
 		// Count workflows that have started in the limiter period
 		limiterQuery := `

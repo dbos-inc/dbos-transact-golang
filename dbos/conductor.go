@@ -26,8 +26,8 @@ const (
 	_WRITE_DEADLINE         = 5 * time.Second
 )
 
-// ConductorConfig contains configuration for the conductor
-type ConductorConfig struct {
+// conductorConfig contains configuration for the conductor
+type conductorConfig struct {
 	url     string
 	apiKey  string
 	appName string
@@ -55,14 +55,14 @@ type Conductor struct {
 	pingCancel context.CancelFunc
 }
 
-// Launch starts the conductor main goroutine
-func (c *Conductor) Launch() {
+// launch starts the conductor main goroutine
+func (c *Conductor) launch() {
 	c.logger.Info("Launching conductor")
 	c.wg.Add(1)
 	go c.run()
 }
 
-func NewConductor(dbosCtx *dbosContext, config ConductorConfig) (*Conductor, error) {
+func newConductor(dbosCtx *dbosContext, config conductorConfig) (*Conductor, error) {
 	if config.apiKey == "" {
 		return nil, fmt.Errorf("conductor API key is required")
 	}
@@ -96,7 +96,7 @@ func NewConductor(dbosCtx *dbosContext, config ConductorConfig) (*Conductor, err
 	return c, nil
 }
 
-func (c *Conductor) Shutdown(timeout time.Duration) {
+func (c *Conductor) shutdown(timeout time.Duration) {
 	c.stopOnce.Do(func() {
 		if c.pingCancel != nil {
 			c.pingCancel()
@@ -562,7 +562,9 @@ func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	var opts []ListWorkflowsOption
 	opts = append(opts, WithLoadInput(req.Body.LoadInput))
 	opts = append(opts, WithLoadOutput(req.Body.LoadOutput))
-	opts = append(opts, WithSortDesc())
+	if req.Body.SortDesc {
+		opts = append(opts, WithSortDesc())
+	}
 	if len(req.Body.WorkflowUUIDs) > 0 {
 		opts = append(opts, WithWorkflowIDs(req.Body.WorkflowUUIDs))
 	}
@@ -638,8 +640,7 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	var opts []ListWorkflowsOption
 	opts = append(opts, WithLoadInput(req.Body.LoadInput))
 	opts = append(opts, WithLoadOutput(false)) // Don't load output for queued workflows
-	opts = append(opts, WithSortDesc())
-	opts = append(opts, WithQueuesOnly()) // Only include workflows that are in queues
+	opts = append(opts, WithQueuesOnly())      // Only include workflows that are in queues
 
 	// Add status filter for queued workflows
 	queuedStatuses := make([]WorkflowStatusType, 0)
@@ -656,6 +657,9 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	}
 	opts = append(opts, WithStatus(queuedStatuses))
 
+	if req.Body.SortDesc {
+		opts = append(opts, WithSortDesc())
+	}
 	if req.Body.WorkflowName != nil {
 		opts = append(opts, WithName(*req.Body.WorkflowName))
 	}

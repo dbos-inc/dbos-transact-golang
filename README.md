@@ -12,9 +12,6 @@
 #### [Documentation](https://docs.dbos.dev/) &nbsp;&nbsp;•&nbsp;&nbsp;  [Examples](https://docs.dbos.dev/examples) &nbsp;&nbsp;•&nbsp;&nbsp; [Github](https://github.com/dbos-inc)
 </div>
 
-#### This Golang version of DBOS Transact is in Alpha!
-For production ready Transacts, check our [Python](https://github.com/dbos-inc/dbos-transact-py) and [TypeScript](https://github.com/dbos-inc/dbos-transact-ts) versions.
-
 ---
 
 ## What is DBOS?
@@ -74,7 +71,7 @@ func stepTwo(ctx context.Context) (string, error) {
 }
 func main() {
     // Initialize a DBOS context
-	ctx, err := dbos.NewDBOSContext(dbos.Config{
+	ctx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
 		DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 		AppName:     "myapp",
 	})
@@ -147,7 +144,7 @@ func task(ctx dbos.DBOSContext, i int) (int, error) {
 
 func main() {
     // Initialize a DBOS context
-    ctx, err := dbos.NewDBOSContext(dbos.Config{
+    ctx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
         DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
         AppName:     "myapp",
     })
