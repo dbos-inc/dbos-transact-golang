@@ -1140,7 +1140,7 @@ func TestPriorityQueue(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 
 	// Create priority-enabled queue with max concurrency of 1
-	priorityQueue := NewWorkflowQueue(dbosCtx, "test_queue_priority", WithGlobalConcurrency(1), WithPriorityEnabled(true))
+	priorityQueue := NewWorkflowQueue(dbosCtx, "test_queue_priority", WithGlobalConcurrency(1), WithPriorityEnabled())
 	childQueue := NewWorkflowQueue(dbosCtx, "test_queue_child")
 
 	workflowEvent := NewEvent()

@@ -21,7 +21,7 @@ func TestEnqueue(t *testing.T) {
 
 	// Create a priority-enabled queue with max concurrency of 1 to ensure ordering
 	// Must be created before Launch()
-	priorityQueue := NewWorkflowQueue(serverCtx, "priority-test-queue", WithGlobalConcurrency(1), WithPriorityEnabled(true))
+	priorityQueue := NewWorkflowQueue(serverCtx, "priority-test-queue", WithGlobalConcurrency(1), WithPriorityEnabled())
 
 	// Track execution order for priority test
 	var executionOrder []string
