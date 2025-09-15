@@ -693,11 +693,6 @@ func buildCLI(t *testing.T) string {
 	// Delete any existing binary before building
 	os.Remove(cliPath)
 
-	// Install Transact from main
-	installCmd := exec.Command("go", "get", "github.com/dbos-inc/dbos-transact-golang/dbos@main")
-	installOutput, installErr := installCmd.CombinedOutput()
-	require.NoError(t, installErr, "Failed to install Transact: %s", string(installOutput))
-
 	// Build the CLI from the cmd directory
 	buildCmd := exec.Command("go", "build", "-o", "dbos-cli-test", ".")
 	buildCmd.Dir = cmdDir
