@@ -58,9 +58,9 @@ func WithGlobalConcurrency(concurrency int) QueueOption {
 
 // WithPriorityEnabled enables priority-based scheduling for the queue.
 // When enabled, workflows with lower priority numbers are executed first.
-func WithPriorityEnabled(enabled bool) QueueOption {
+func WithPriorityEnabled() QueueOption {
 	return func(q *WorkflowQueue) {
-		q.PriorityEnabled = enabled
+		q.PriorityEnabled = true
 	}
 }
 
@@ -92,7 +92,7 @@ func WithMaxTasksPerIteration(maxTasks int) QueueOption {
 //	        Limit:  100,
 //	        Period: 60.0, // 100 workflows per minute
 //	    }),
-//	    dbos.WithPriorityEnabled(true),
+//	    dbos.WithPriorityEnabled(),
 //	)
 //
 //	// Enqueue workflows to this queue:
