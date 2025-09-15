@@ -2093,10 +2093,8 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	// First check the rate limiter
 	var numRecentQueries int
 	if input.queue.RateLimit != nil {
-		limiterPeriod := time.Duration(input.queue.RateLimit.Period * float64(time.Second))
-
 		// Calculate the cutoff time: current time minus limiter period
-		cutoffTimeMs := time.Now().Add(-limiterPeriod).UnixMilli()
+		cutoffTimeMs := time.Now().Add(-input.queue.RateLimit.Period).UnixMilli()
 
 		// Count workflows that have started in the limiter period
 		limiterQuery := `

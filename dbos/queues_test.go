@@ -833,7 +833,7 @@ func rateLimiterTestWorkflow(ctx DBOSContext, _ string) (time.Time, error) {
 func TestQueueRateLimiter(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 
-	rateLimiterQueue := NewWorkflowQueue(dbosCtx, "test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: 1.8}))
+	rateLimiterQueue := NewWorkflowQueue(dbosCtx, "test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: time.Duration(1800 * time.Millisecond)}))
 
 	// Create workflow with dbosContext
 	RegisterWorkflow(dbosCtx, rateLimiterTestWorkflow)
@@ -842,7 +842,7 @@ func TestQueueRateLimiter(t *testing.T) {
 	require.NoError(t, err, "failed to launch DBOS instance")
 
 	limit := 5
-	period := 1.8
+	periodSeconds := 1.8
 	numWaves := 3
 
 	var handles []WorkflowHandle[time.Time]
@@ -889,7 +889,7 @@ func TestQueueRateLimiter(t *testing.T) {
 	// Group workflows into waves based on their start time
 	for _, workflowTime := range sortedTimes {
 		timeSinceBase := workflowTime.Sub(baseTime).Seconds()
-		waveIndex := int(timeSinceBase / period)
+		waveIndex := int(timeSinceBase / periodSeconds)
 		waveMap[waveIndex] = append(waveMap[waveIndex], workflowTime)
 	}
 	// Verify each wave has fewer than the limit
