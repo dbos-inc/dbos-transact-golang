@@ -10,7 +10,7 @@
 //
 //	dbosContext, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
 //	    AppName:     "my-app",
-//	    DatabaseURL: os.Getenv("DATABASE_URL"),
+//	    DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 //	})
 //	defer dbosContext.Shutdown(5 * time.Second)
 //
