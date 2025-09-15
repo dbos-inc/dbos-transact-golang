@@ -694,7 +694,7 @@ func buildCLI(t *testing.T) string {
 	os.Remove(cliPath)
 
 	// Install Transact from main
-	installCmd := exec.Command("go", "get", "github.com/dbos-inc/dbos-transact-golang@main")
+	installCmd := exec.Command("go", "get", "github.com/dbos-inc/dbos-transact-golang/dbos@main")
 	installOutput, installErr := installCmd.CombinedOutput()
 	require.NoError(t, installErr, "Failed to install Transact: %s", string(installOutput))
 
