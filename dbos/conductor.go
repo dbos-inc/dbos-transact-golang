@@ -26,8 +26,8 @@ const (
 	_WRITE_DEADLINE         = 5 * time.Second
 )
 
-// ConductorConfig contains configuration for the conductor
-type ConductorConfig struct {
+// conductorConfig contains configuration for the conductor
+type conductorConfig struct {
 	url     string
 	apiKey  string
 	appName string
@@ -62,7 +62,7 @@ func (c *Conductor) launch() {
 	go c.run()
 }
 
-func newConductor(dbosCtx *dbosContext, config ConductorConfig) (*Conductor, error) {
+func newConductor(dbosCtx *dbosContext, config conductorConfig) (*Conductor, error) {
 	if config.apiKey == "" {
 		return nil, fmt.Errorf("conductor API key is required")
 	}

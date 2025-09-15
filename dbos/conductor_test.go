@@ -299,7 +299,7 @@ func TestConductorReconnection(t *testing.T) {
 		defer mockServer.shutdown()
 
 		// Create conductor config
-		config := ConductorConfig{
+		config := conductorConfig{
 			url:     mockServer.getURL(),
 			apiKey:  "test-key",
 			appName: "test-app",
@@ -389,7 +389,7 @@ func TestConductorReconnection(t *testing.T) {
 		defer mockServer.shutdown()
 
 		// Create conductor config
-		config := ConductorConfig{
+		config := conductorConfig{
 			url:     mockServer.getURL(),
 			apiKey:  "test-key",
 			appName: "test-app",
@@ -477,7 +477,7 @@ func TestConductorReconnection(t *testing.T) {
 		defer mockServer.shutdown()
 
 		// Create conductor config
-		config := ConductorConfig{
+		config := conductorConfig{
 			url:     mockServer.getURL(),
 			apiKey:  "test-key",
 			appName: "test-app",
@@ -570,7 +570,7 @@ func TestConductorReconnection(t *testing.T) {
 		defer mockServer.shutdown()
 
 		// Create conductor config
-		config := ConductorConfig{
+		config := conductorConfig{
 			url:     mockServer.getURL(),
 			apiKey:  "test-key",
 			appName: "test-app",

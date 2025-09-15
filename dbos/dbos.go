@@ -342,7 +342,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 			}
 			config.ConductorURL = fmt.Sprintf("wss://%s/conductor/v1alpha1", dbosDomain)
 		}
-		conductorConfig := ConductorConfig{
+		conductorConfig := conductorConfig{
 			url:     config.ConductorURL,
 			apiKey:  config.ConductorAPIKey,
 			appName: config.AppName,
