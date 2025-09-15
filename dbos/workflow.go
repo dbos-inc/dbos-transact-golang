@@ -477,9 +477,9 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 /******* WORKFLOW FUNCTIONS *******/
 /**********************************/
 
-type DBOSContextKey string
+type dbosContextKey string
 
-const workflowStateKey DBOSContextKey = "workflowState"
+const workflowStateKey dbosContextKey = "workflowState"
 
 // Workflow represents a type-safe workflow function with specific input and output types.
 // P is the input parameter type and R is the return type.
