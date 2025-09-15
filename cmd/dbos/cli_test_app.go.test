@@ -86,7 +86,7 @@ func ScheduledWorkflow(ctx dbos.DBOSContext, scheduledTime time.Time) (string, e
 func main() {
 	// Create DBOS context
 	var err error
-	dbosCtx, err = dbos.NewDBOSContext(context.Background(), dbos.Config{
+	dbosCtx, err = dbos.NewDBOSContext(dbos.Config{
 		DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 		AppName:     "cli-test",
 		AdminServer: true,
