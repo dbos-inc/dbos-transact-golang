@@ -31,7 +31,6 @@ const (
 )
 
 // WorkflowStatus contains comprehensive information about a workflow's current state and execution history.
-// This struct is returned by workflow status queries and contains both metadata and execution details.
 type WorkflowStatus struct {
 	ID                 string             `json:"workflow_uuid"`                 // Unique identifier for the workflow
 	Status             WorkflowStatusType `json:"status"`                        // Current execution status
@@ -51,9 +50,9 @@ type WorkflowStatus struct {
 	Timeout            time.Duration      `json:"timeout,omitempty"`             // Workflow timeout duration
 	Deadline           time.Time          `json:"deadline"`                      // Absolute deadline for workflow completion
 	StartedAt          time.Time          `json:"started_at"`                    // When the workflow execution actually started
-	DeduplicationID    string             `json:"deduplication_id,omitempty"`    // Deduplication identifier (if applicable)
+	DeduplicationID    string             `json:"deduplication_id,omitempty"`    // Queue deduplication identifier
 	Input              any                `json:"input,omitempty"`               // Input parameters passed to the workflow
-	Priority           int                `json:"priority,omitempty"`            // Execution priority (lower numbers have higher priority)
+	Priority           int                `json:"priority,omitempty"`            // Queue execution priority (lower numbers have higher priority)
 }
 
 // workflowState holds the runtime state for a workflow execution
@@ -63,8 +62,8 @@ type workflowState struct {
 	isWithinStep bool
 }
 
-// NextStepID returns the next step ID and increments the counter
-func (ws *workflowState) NextStepID() int {
+// nextStepID returns the next step ID and increments the counter
+func (ws *workflowState) nextStepID() int {
 	ws.stepID++
 	return ws.stepID
 }
@@ -88,7 +87,6 @@ type WorkflowHandle[R any] interface {
 	GetWorkflowID() string              // Get the unique workflow identifier
 }
 
-// baseWorkflowHandle contains common fields and methods for workflow handles
 type baseWorkflowHandle struct {
 	workflowID  string
 	dbosContext DBOSContext
@@ -136,7 +134,6 @@ func (h *baseWorkflowHandle) GetWorkflowID() string {
 	return h.workflowID
 }
 
-// newWorkflowHandle creates a new workflowHandle with the given parameters
 func newWorkflowHandle[R any](ctx DBOSContext, workflowID string, outcomeChan chan workflowOutcome[R]) *workflowHandle[R] {
 	return &workflowHandle[R]{
 		baseWorkflowHandle: baseWorkflowHandle{
@@ -147,7 +144,6 @@ func newWorkflowHandle[R any](ctx DBOSContext, workflowID string, outcomeChan ch
 	}
 }
 
-// newWorkflowPollingHandle creates a new workflowPollingHandle with the given parameters
 func newWorkflowPollingHandle[R any](ctx DBOSContext, workflowID string) *workflowPollingHandle[R] {
 	return &workflowPollingHandle[R]{
 		baseWorkflowHandle: baseWorkflowHandle{
@@ -157,13 +153,11 @@ func newWorkflowPollingHandle[R any](ctx DBOSContext, workflowID string) *workfl
 	}
 }
 
-// workflowHandle is a concrete implementation of WorkflowHandle
 type workflowHandle[R any] struct {
 	baseWorkflowHandle
 	outcomeChan chan workflowOutcome[R]
 }
 
-// GetResult waits for the workflow to complete and returns the result
 func (h *workflowHandle[R]) GetResult() (R, error) {
 	outcome, ok := <-h.outcomeChan // Blocking read
 	if !ok {
@@ -181,7 +175,7 @@ func (h *workflowHandle[R]) GetResult() (R, error) {
 		recordGetResultInput := recordChildGetResultDBInput{
 			parentWorkflowID: workflowState.workflowID,
 			childWorkflowID:  h.workflowID,
-			stepID:           workflowState.NextStepID(),
+			stepID:           workflowState.nextStepID(),
 			output:           encodedOutput,
 			err:              outcome.err,
 		}
@@ -216,7 +210,7 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 			recordGetResultInput := recordChildGetResultDBInput{
 				parentWorkflowID: workflowState.workflowID,
 				childWorkflowID:  h.workflowID,
-				stepID:           workflowState.NextStepID(),
+				stepID:           workflowState.nextStepID(),
 				output:           encodedOutput,
 				err:              err,
 			}
@@ -271,7 +265,6 @@ type workflowRegistryEntry struct {
 	name            string
 }
 
-// Register adds a workflow function to the registry (thread-safe, only once per name)
 func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFunc, maxRetries int, customName string) {
 	// Skip if we don't have a concrete dbosContext
 	c, ok := ctx.(*dbosContext)
@@ -413,7 +406,7 @@ func WithWorkflowName(name string) WorkflowRegistrationOption {
 //	// With options:
 //	dbos.RegisterWorkflow(ctx, MyWorkflow,
 //	    dbos.WithMaxRetries(5),
-//	    dbos.WithSchedule("0 0 * * *")) // daily at midnight
+//	    dbos.WithSchedule("0 0 * * * *")) // daily at midnight
 //		dbos.WithWorkflowName("MyCustomWorkflowName") // Custom name for the workflow
 func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...WorkflowRegistrationOption) {
 	if ctx == nil {
@@ -510,7 +503,6 @@ type WorkflowOptions struct {
 type WorkflowOption func(*WorkflowOptions)
 
 // WithWorkflowID sets a custom workflow ID instead of generating one automatically.
-// This is useful for idempotent workflow execution and workflow retrieval.
 func WithWorkflowID(id string) WorkflowOption {
 	return func(p *WorkflowOptions) {
 		p.workflowID = id
@@ -533,14 +525,14 @@ func WithApplicationVersion(version string) WorkflowOption {
 	}
 }
 
-// WithDeduplicationID sets a deduplication ID for the workflow.
+// WithDeduplicationID sets a deduplication ID for a queue workflow.
 func WithDeduplicationID(id string) WorkflowOption {
 	return func(p *WorkflowOptions) {
 		p.deduplicationID = id
 	}
 }
 
-// WithPriority sets the execution priority for the workflow.
+// WithPriority sets the execution priority for a queue workflow.
 func WithPriority(priority uint) WorkflowOption {
 	return func(p *WorkflowOptions) {
 		p.priority = priority
@@ -568,7 +560,7 @@ func withWorkflowName(name string) WorkflowOption {
 //	    log.Fatal(err)
 //	}
 //
-//	result, err := handle.GetResult() // blocks until completion
+//	result, err := handle.GetResult()
 //	if err != nil {
 //	    log.Printf("Workflow failed: %v", err)
 //	} else {
@@ -667,7 +659,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	if isChildWorkflow {
 		// Advance step ID if we are a child workflow
-		parentWorkflowState.NextStepID()
+		parentWorkflowState.nextStepID()
 	}
 
 	// Generate an ID for the workflow if not provided
@@ -907,8 +899,7 @@ func (opts *StepOptions) setDefaults() {
 type StepOption func(*StepOptions)
 
 // WithStepName sets a custom name for the step. If the step name has already been set
-// by a previous call to WithStepName, this option will be ignored to allow
-// multiple WithStepName calls without overriding the first one.
+// by a previous call to WithStepName, this option will be ignored
 func WithStepName(name string) StepOption {
 	return func(opts *StepOptions) {
 		if opts.stepName == "" {
@@ -989,7 +980,7 @@ func WithMaxInterval(interval time.Duration) StepOption {
 //
 // Note that the function passed to RunAsStep must accept a context.Context as its first parameter
 // and this context *must* be the one specified in the function's signature (not the context passed to RunAsStep).
-// Under the hood, DBOS will augment the step's context and pass it to the function when executing it durably.
+// Under the hood, DBOS uses the provided context to manage durable execution.
 func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
@@ -1046,7 +1037,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	// Setup step state
 	stepState := workflowState{
 		workflowID:   wfState.workflowID,
-		stepID:       wfState.NextStepID(), // crucially, this increments the step ID on the *workflow* state
+		stepID:       wfState.nextStepID(), // crucially, this increments the step ID on the *workflow* state
 		isWithinStep: true,
 	}
 
@@ -1159,7 +1150,6 @@ func Send[P any](ctx DBOSContext, destinationID string, message P, topic string)
 	return ctx.Send(ctx, destinationID, message, topic)
 }
 
-// recvInput defines the parameters for receiving messages sent to this workflow.
 type recvInput struct {
 	Topic   string        // Topic to listen for (empty string receives from default topic)
 	Timeout time.Duration // Maximum time to wait for a message
@@ -1178,7 +1168,6 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 // Messages are consumed in FIFO order and each message is delivered exactly once.
 //
 // Recv can only be called from within a workflow and becomes part of the workflow's durable state.
-// If the workflow is recovered, previously received messages are not re-delivered.
 //
 // Example:
 //
@@ -1234,7 +1223,6 @@ func SetEvent[P any](ctx DBOSContext, key string, message P) error {
 	return ctx.SetEvent(ctx, key, message)
 }
 
-// getEventInput defines the parameters for retrieving an event from a workflow.
 type getEventInput struct {
 	TargetWorkflowID string        // Workflow ID to get the event from
 	Key              string        // Event key to retrieve
@@ -1309,7 +1297,6 @@ func Sleep(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
 /******* WORKFLOW MANAGEMENT *******/
 /***********************************/
 
-// GetWorkflowID retrieves the workflow ID from the context if called within a DBOS workflow
 func (c *dbosContext) GetWorkflowID() (string, error) {
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
@@ -1318,7 +1305,6 @@ func (c *dbosContext) GetWorkflowID() (string, error) {
 	return wfState.workflowID, nil
 }
 
-// GetStepID retrieves the current step ID from the context if called within a DBOS workflow
 func (c *dbosContext) GetStepID() (int, error) {
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
@@ -1334,7 +1320,7 @@ func (c *dbosContext) GetStepID() (int, error) {
 //
 //	workflowID, err := dbos.GetWorkflowID(ctx)
 //	if err != nil {
-//	    log.Printf("Not in a workflow context: %v", err)
+//	    log.Printf("Not within a workflow context")
 //	} else {
 //	    log.Printf("Current workflow ID: %s", workflowID)
 //	}
@@ -1352,7 +1338,7 @@ func GetWorkflowID(ctx DBOSContext) (string, error) {
 //
 //	stepID, err := dbos.GetStepID(ctx)
 //	if err != nil {
-//	    log.Printf("Not in a workflow context: %v", err)
+//	    log.Printf("Not within a workflow context")
 //	} else {
 //	    log.Printf("Current step ID: %d", stepID)
 //	}
@@ -1410,7 +1396,7 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 //	    log.Fatal(err)
 //	}
 //
-//	result, err := handle.GetResult() // blocks until completion
+//	result, err := handle.GetResult()
 //	if err != nil {
 //	    log.Printf("Workflow failed: %v", err)
 //	} else {
@@ -1584,7 +1570,7 @@ func (c *dbosContext) Enqueue(_ DBOSContext, queueName, workflowName string, inp
 //	}
 //
 //	// Wait for completion and get result
-//	result, err := handle.GetResult() // blocks until completion
+//	result, err := handle.GetResult()
 //	if err != nil {
 //	    log.Printf("Workflow failed: %v", err)
 //	} else {
@@ -1615,13 +1601,6 @@ func Enqueue[P any, R any](ctx DBOSContext, queueName, workflowName string, inpu
 	return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID()), nil
 }
 
-// CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED.
-// Once cancelled, the workflow will stop executing. Currently executing steps will not be interrupted.
-//
-// Parameters:
-//   - workflowID: The unique identifier of the workflow to cancel
-//
-// Returns an error if the workflow does not exist or if the cancellation operation fails.
 func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
@@ -1636,8 +1615,8 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	}
 }
 
-// CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED.
-// Once cancelled, the workflow will stop executing. Currently executing steps will not be interrupted.
+// CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED and removing it from the queue.
+// Once cancelled, the workflow will stop executing at the start of the next step. Executing steps will not be interrupted.
 //
 // Parameters:
 //   - ctx: DBOS context for the operation
@@ -1676,11 +1655,13 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	return newWorkflowPollingHandle[any](c, workflowID), nil
 }
 
-// ResumeWorkflow resumes a cancelled workflow by setting its status back to ENQUEUED.
-// The workflow will be picked up by a DBOS queue processor and execution will continue
-// from where it left off. If the workflow is already completed, this is a no-op.
+// ResumeWorkflow resumes a workflow by starting it from its last completed step.
+// You can use this to resume workflows that are cancelled or have exceeded their maximum
+// recovery attempts. You can also use this to start an enqueued workflow immediately,
+// bypassing its queue.
+// If the workflow is already completed, this is a no-op.
 // Returns a handle that can be used to wait for completion and retrieve results.
-// Returns an error if the workflow does not exist or if the cancellation operation fails.
+// Returns an error if the workflow does not exist or if the operation fails.
 //
 // Example:
 //
@@ -1688,7 +1669,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 //	if err != nil {
 //	    log.Printf("Failed to resume workflow: %v", err)
 //	} else {
-//	    result, err := handle.GetResult() // blocks until completion
+//	    result, err := handle.GetResult()
 //	    if err != nil {
 //	        log.Printf("Workflow failed: %v", err)
 //	    } else {
@@ -1712,6 +1693,7 @@ func ResumeWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R
 }
 
 // ForkWorkflowInput holds configuration parameters for forking workflows.
+// OriginalWorkflowID is required. Other fields are optional.
 type ForkWorkflowInput struct {
 	OriginalWorkflowID string // Required: The UUID of the original workflow to fork from
 	ForkedWorkflowID   string // Optional: Custom workflow ID for the forked workflow (auto-generated if empty)
@@ -1762,12 +1744,6 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 // Parameters:
 //   - ctx: DBOS context for the operation
 //   - input: Configuration parameters for the forked workflow
-//
-// The input struct contains:
-//   - OriginalWorkflowID: The UUID of the original workflow to fork from (required)
-//   - ForkedWorkflowID: Custom workflow ID for the forked workflow (optional, auto-generated if empty)
-//   - StartStep: Step to start the forked workflow from (optional, default: 0)
-//   - ApplicationVersion: Application version for the forked workflow (optional, inherits from original if empty)
 //
 // Returns a typed workflow handle for the newly created forked workflow.
 //
@@ -1832,24 +1808,13 @@ type ListWorkflowsOptions struct {
 type ListWorkflowsOption func(*ListWorkflowsOptions)
 
 // WithWorkflowIDs filters workflows by the specified workflow IDs.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithWorkflowIDs([]string{"workflow1", "workflow2"}))
 func WithWorkflowIDs(workflowIDs []string) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.workflowIDs = workflowIDs
 	}
 }
 
-// WithStatus filters workflows by the specified status(es).
-// Can accept a single status or a list of statuses.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess, dbos.WorkflowStatusError}))
+// WithStatus filters workflows by the specified list of statuses.
 func WithStatus(status []WorkflowStatusType) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.status = status
@@ -1857,11 +1822,6 @@ func WithStatus(status []WorkflowStatusType) ListWorkflowsOption {
 }
 
 // WithStartTime filters workflows created after the specified time.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithStartTime(time.Now().Add(-24*time.Hour)))
 func WithStartTime(startTime time.Time) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.startTime = startTime
@@ -1869,11 +1829,6 @@ func WithStartTime(startTime time.Time) ListWorkflowsOption {
 }
 
 // WithEndTime filters workflows created before the specified time.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithEndTime(time.Now()))
 func WithEndTime(endTime time.Time) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.endTime = endTime
@@ -1881,11 +1836,6 @@ func WithEndTime(endTime time.Time) ListWorkflowsOption {
 }
 
 // WithName filters workflows by the specified workflow function name.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithName("MyWorkflowFunction"))
 func WithName(name string) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.name = name
@@ -1893,11 +1843,6 @@ func WithName(name string) ListWorkflowsOption {
 }
 
 // WithAppVersion filters workflows by the specified application version.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithAppVersion("v1.0.0"))
 func WithAppVersion(appVersion string) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.appVersion = appVersion
@@ -1905,11 +1850,6 @@ func WithAppVersion(appVersion string) ListWorkflowsOption {
 }
 
 // WithUser filters workflows by the specified authenticated user.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithUser("john.doe"))
 func WithUser(user string) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.user = user
@@ -1917,11 +1857,6 @@ func WithUser(user string) ListWorkflowsOption {
 }
 
 // WithLimit limits the number of workflows returned.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithLimit(100))
 func WithLimit(limit int) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.limit = &limit
@@ -1929,11 +1864,6 @@ func WithLimit(limit int) ListWorkflowsOption {
 }
 
 // WithOffset sets the offset for pagination.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithOffset(50), dbos.WithLimit(25))
 func WithOffset(offset int) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.offset = &offset
@@ -1941,11 +1871,6 @@ func WithOffset(offset int) ListWorkflowsOption {
 }
 
 // WithSortDesc enables descending sort by creation time (default is ascending).
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithSortDesc()
 func WithSortDesc() ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.sortDesc = true
@@ -1953,11 +1878,6 @@ func WithSortDesc() ListWorkflowsOption {
 }
 
 // WithWorkflowIDPrefix filters workflows by workflow ID prefix.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithWorkflowIDPrefix("batch-"))
 func WithWorkflowIDPrefix(prefix string) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.workflowIDPrefix = prefix
@@ -1965,11 +1885,6 @@ func WithWorkflowIDPrefix(prefix string) ListWorkflowsOption {
 }
 
 // WithLoadInput controls whether to load workflow input data (default: true).
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithLoadInput(false))
 func WithLoadInput(loadInput bool) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.loadInput = loadInput
@@ -1977,11 +1892,6 @@ func WithLoadInput(loadInput bool) ListWorkflowsOption {
 }
 
 // WithLoadOutput controls whether to load workflow output data (default: true).
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithLoadOutput(false))
 func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.loadOutput = loadOutput
@@ -1990,11 +1900,6 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 
 // WithQueueName filters workflows by the specified queue name.
 // This is typically used when listing queued workflows.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithQueueName("data-processing"))
 func WithQueueName(queueName string) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.queueName = queueName
@@ -2002,11 +1907,6 @@ func WithQueueName(queueName string) ListWorkflowsOption {
 }
 
 // WithQueuesOnly filters to only return workflows that are in a queue.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithQueuesOnly())
 func WithQueuesOnly() ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.queuesOnly = true
@@ -2014,61 +1914,12 @@ func WithQueuesOnly() ListWorkflowsOption {
 }
 
 // WithExecutorIDs filters workflows by the specified executor IDs.
-//
-// Example:
-//
-//	workflows, err := dbos.ListWorkflows(ctx,
-//	    dbos.WithExecutorIDs([]string{"executor-123", "executor-456"}))
 func WithExecutorIDs(executorIDs []string) ListWorkflowsOption {
 	return func(p *ListWorkflowsOptions) {
 		p.executorIDs = executorIDs
 	}
 }
 
-// ListWorkflows retrieves a list of workflows based on the provided filters.
-//
-// The function supports filtering by workflow IDs, status, time ranges, names, application versions,
-// authenticated users, workflow ID prefixes, and more. It also supports pagination through
-// limit/offset parameters and sorting control (ascending by default, or descending with WithSortDesc).
-//
-// By default, both input and output data are loaded for each workflow. This can be controlled
-// using WithLoadInput(false) and WithLoadOutput(false) options for better performance when
-// the data is not needed.
-//
-// Parameters:
-//   - opts: Functional options to configure the query filters and parameters
-//
-// Returns a slice of WorkflowStatus structs containing the workflow information.
-//
-// Example usage:
-//
-//	// List all successful workflows from the last 24 hours
-//	workflows, err := ctx.ListWorkflows(
-//	    dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess}),
-//	    dbos.WithStartTime(time.Now().Add(-24*time.Hour)),
-//	    dbos.WithLimit(100))
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//
-//	// List workflows by specific IDs without loading input/output data
-//	workflows, err := ctx.ListWorkflows(
-//	    dbos.WithWorkflowIDs([]string{"workflow1", "workflow2"}),
-//	    dbos.WithLoadInput(false),
-//	    dbos.WithLoadOutput(false))
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//
-//	// List workflows with pagination
-//	workflows, err := ctx.ListWorkflows(
-//	    dbos.WithUser("john.doe"),
-//	    dbos.WithOffset(50),
-//	    dbos.WithLimit(25),
-//	    dbos.WithSortDesc()
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
 func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
 	// Initialize parameters with defaults
 	loadInput := true
@@ -2134,7 +1985,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 // ListWorkflows retrieves a list of workflows based on the provided filters.
 //
 // The function supports filtering by workflow IDs, status, time ranges, names, application versions,
-// authenticated users, workflow ID prefixes, and more. It also supports pagination through
+// workflow ID prefixes, and more. It also supports pagination through
 // limit/offset parameters and sorting control (ascending by default, or descending with WithSortDesc).
 //
 // By default, both input and output data are loaded for each workflow. This can be controlled
@@ -2142,7 +1993,6 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 // the data is not needed.
 //
 // Parameters:
-//   - ctx: DBOS context for the operation
 //   - opts: Functional options to configure the query filters and parameters
 //
 // Returns a slice of WorkflowStatus structs containing the workflow information.
@@ -2150,7 +2000,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 // Example usage:
 //
 //	// List all successful workflows from the last 24 hours
-//	workflows, err := dbos.ListWorkflows(ctx,
+//	workflows, err := dbos.ListWorkflows(
 //	    dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess}),
 //	    dbos.WithStartTime(time.Now().Add(-24*time.Hour)),
 //	    dbos.WithLimit(100))
@@ -2159,10 +2009,20 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 //	}
 //
 //	// List workflows by specific IDs without loading input/output data
-//	workflows, err := dbos.ListWorkflows(ctx,
+//	workflows, err := dbos.ListWorkflows(
 //	    dbos.WithWorkflowIDs([]string{"workflow1", "workflow2"}),
 //	    dbos.WithLoadInput(false),
 //	    dbos.WithLoadOutput(false))
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	// List workflows with pagination
+//	workflows, err := dbos.ListWorkflows(
+//	    dbos.WithUser("john.doe"),
+//	    dbos.WithOffset(50),
+//	    dbos.WithLimit(25),
+//	    dbos.WithSortDesc()
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -2187,6 +2047,7 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 
 // GetWorkflowSteps retrieves the execution steps of a workflow.
 // Returns a list of step information including step IDs, names, outputs, errors, and child workflow IDs.
+// The list is sorted by step ID in ascending order.
 //
 // Parameters:
 //   - ctx: DBOS context for the operation

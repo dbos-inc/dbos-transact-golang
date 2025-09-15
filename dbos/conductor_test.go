@@ -316,7 +316,7 @@ func TestConductorReconnection(t *testing.T) {
 		}
 
 		// Create conductor
-		conductor, err := NewConductor(dbosCtx, config)
+		conductor, err := newConductor(dbosCtx, config)
 		require.NoError(t, err)
 
 		// Speed up intervals for testing
@@ -325,7 +325,7 @@ func TestConductorReconnection(t *testing.T) {
 		conductor.reconnectWait = 100 * time.Millisecond
 
 		// Launch conductor
-		conductor.Launch()
+		conductor.launch()
 
 		// Wait for initial connection
 		assert.True(t, mockServer.waitForConnection(5*time.Second), "Should establish initial connection")
@@ -406,7 +406,7 @@ func TestConductorReconnection(t *testing.T) {
 		}
 
 		// Create conductor
-		conductor, err := NewConductor(dbosCtx, config)
+		conductor, err := newConductor(dbosCtx, config)
 		require.NoError(t, err)
 
 		// Speed up intervals for testing
@@ -415,7 +415,7 @@ func TestConductorReconnection(t *testing.T) {
 		conductor.reconnectWait = 100 * time.Millisecond
 
 		// Launch conductor
-		conductor.Launch()
+		conductor.launch()
 
 		// Wait for initial connection
 		assert.True(t, mockServer.waitForConnection(5*time.Second), "Should establish initial connection")
@@ -494,7 +494,7 @@ func TestConductorReconnection(t *testing.T) {
 		}
 
 		// Create conductor
-		conductor, err := NewConductor(dbosCtx, config)
+		conductor, err := newConductor(dbosCtx, config)
 		require.NoError(t, err)
 
 		// Speed up intervals for testing
@@ -503,7 +503,7 @@ func TestConductorReconnection(t *testing.T) {
 		conductor.reconnectWait = 100 * time.Millisecond
 
 		// Launch conductor
-		conductor.Launch()
+		conductor.launch()
 
 		// Wait for initial connection
 		assert.True(t, mockServer.waitForConnection(5*time.Second), "Should establish initial connection")
@@ -587,7 +587,7 @@ func TestConductorReconnection(t *testing.T) {
 		}
 
 		// Create conductor
-		conductor, err := NewConductor(dbosCtx, config)
+		conductor, err := newConductor(dbosCtx, config)
 		require.NoError(t, err)
 
 		// Speed up intervals for testing
@@ -596,7 +596,7 @@ func TestConductorReconnection(t *testing.T) {
 		conductor.reconnectWait = 100 * time.Millisecond
 
 		// Launch conductor
-		conductor.Launch()
+		conductor.launch()
 
 		// Wait for initial connection
 		assert.True(t, mockServer.waitForConnection(5*time.Second), "Should establish initial connection")

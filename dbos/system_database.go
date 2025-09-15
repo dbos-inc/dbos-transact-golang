@@ -1473,7 +1473,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 	if input.stepID != nil && *input.stepID >= 0 {
 		stepID = *input.stepID
 	} else {
-		stepID = wfState.NextStepID()
+		stepID = wfState.nextStepID()
 	}
 
 	// Check if operation was already executed
@@ -1624,7 +1624,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 		if wfState.isWithinStep {
 			return newStepExecutionError(wfState.workflowID, functionName, "cannot call Send within a step")
 		}
-		stepID = wfState.NextStepID()
+		stepID = wfState.nextStepID()
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -1712,8 +1712,8 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 		return nil, newStepExecutionError(wfState.workflowID, functionName, "cannot call Recv within a step")
 	}
 
-	stepID := wfState.NextStepID()
-	sleepStepID := wfState.NextStepID() // We will use a sleep step to implement the timeout
+	stepID := wfState.nextStepID()
+	sleepStepID := wfState.nextStepID() // We will use a sleep step to implement the timeout
 	destinationID := wfState.workflowID
 
 	// Set default topic if not provided
@@ -1868,7 +1868,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 		return newStepExecutionError(wfState.workflowID, functionName, "cannot call SetEvent within a step")
 	}
 
-	stepID := wfState.NextStepID()
+	stepID := wfState.nextStepID()
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1946,8 +1946,8 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		if wfState.isWithinStep {
 			return nil, newStepExecutionError(wfState.workflowID, functionName, "cannot call GetEvent within a step")
 		}
-		stepID = wfState.NextStepID()
-		sleepStepID = wfState.NextStepID() // We will use a sleep step to implement the timeout
+		stepID = wfState.nextStepID()
+		sleepStepID = wfState.nextStepID() // We will use a sleep step to implement the timeout
 
 		// Check if operation was already executed (only if in workflow)
 		checkInput := checkOperationExecutionDBInput{
