@@ -1,8 +1,3 @@
-// Package dbos provides a Go SDK for building durable applications with DBOS Transact.
-//
-// DBOS Transact enables developers to write resilient distributed applications using workflows
-// and steps backed by PostgreSQL. All application state is automatically persisted, providing
-// exactly-once execution guarantees and automatic recovery from failures.
 package dbos
 
 import (
@@ -46,7 +41,6 @@ type Config struct {
 	SystemDBPool       *pgxpool.Pool   // Custom System Database Pool
 }
 
-// processConfig enforces mandatory fields and applies defaults.
 func processConfig(inputConfig *Config) (*Config, error) {
 	// First check required fields
 	if len(inputConfig.DatabaseURL) == 0 {
@@ -106,8 +100,8 @@ type DBOSContext interface {
 	context.Context
 
 	// Context Lifecycle
-	Launch() error                  // Launch the DBOS runtime including system database, queues, admin server, and workflow recovery
-	Shutdown(timeout time.Duration) // Gracefully shutdown all DBOS runtime components with ordered cleanup sequence
+	Launch() error                  // Launch the DBOS runtime including system database, queues, and perform a workflow recovery for the local executor
+	Shutdown(timeout time.Duration) // Gracefully shutdown all DBOS resources
 
 	// Workflow operations
 	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
@@ -170,7 +164,6 @@ type dbosContext struct {
 	logger *slog.Logger
 }
 
-// Implement contex.Context interface methods
 func (c *dbosContext) Deadline() (deadline time.Time, ok bool) {
 	return c.ctx.Deadline()
 }
@@ -212,7 +205,7 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 }
 
 // WithoutCancel returns a copy of the DBOS context that is not canceled when the parent context is canceled.
-// This is useful for operations that should continue even after a workflow is cancelled.
+// This can be used to detach a child workflow.
 // No-op if the provided context is not a concrete dbos.dbosContext.
 func WithoutCancel(ctx DBOSContext) DBOSContext {
 	if ctx == nil {
@@ -278,9 +271,8 @@ func (c *dbosContext) GetApplicationID() string {
 }
 
 // NewDBOSContext creates a new DBOS context with the provided configuration.
-// The context must be launched with Launch() before use and should be shut down with Shutdown().
-// This function initializes the DBOS system database, sets up the queue sub-system,
-// and prepares the workflow registry.
+// The context must be launched with Launch() for workflow execution and should be shut down with Shutdown().
+// This function initializes the DBOS system database, sets up the queue sub-system, and prepares the workflow registry.
 //
 // Example:
 //
@@ -288,7 +280,7 @@ func (c *dbosContext) GetApplicationID() string {
 //	    DatabaseURL: "postgres://user:pass@localhost:5432/dbname",
 //	    AppName:     "my-app",
 //	}
-//	ctx, err := dbos.NewDBOSContext(config)
+//	ctx, err := dbos.NewDBOSContext(context.Background(), config)
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -359,12 +351,12 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 			}
 			config.ConductorURL = fmt.Sprintf("wss://%s/conductor/v1alpha1", dbosDomain)
 		}
-		conductorConfig := ConductorConfig{
+		conductorConfig := conductorConfig{
 			url:     config.ConductorURL,
 			apiKey:  config.ConductorAPIKey,
 			appName: config.AppName,
 		}
-		conductor, err := NewConductor(initExecutor, conductorConfig)
+		conductor, err := newConductor(initExecutor, conductorConfig)
 		if err != nil {
 			return nil, newInitializationError(fmt.Sprintf("failed to initialize conductor: %v", err))
 		}
@@ -376,9 +368,8 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 }
 
 // Launch initializes and starts the DBOS runtime components including the system database,
-// admin server (if configured), queue runner, workflow scheduler, and performs recovery
-// of any pending workflows on this executor. This method must be called before using the DBOS context
-// for workflow execution and should only be called once.
+// admin server (if enabled), queue runner, workflow scheduler, and performs recovery
+// of any pending workflows on this executor.
 //
 // Returns an error if the context is already launched or if any component fails to start.
 func (c *dbosContext) Launch() error {
@@ -389,7 +380,7 @@ func (c *dbosContext) Launch() error {
 	// Start the system database
 	c.systemDB.launch(c)
 
-	// Start the admin server if configured
+	// Start the admin server if enabled
 	if c.config.AdminServer {
 		adminServer := newAdminServer(c, c.config.AdminServerPort)
 		err := adminServer.Start()
@@ -416,7 +407,7 @@ func (c *dbosContext) Launch() error {
 
 	// Start the conductor if it has been initialized
 	if c.conductor != nil {
-		c.conductor.Launch()
+		c.conductor.launch()
 		c.logger.Debug("Conductor started")
 	}
 
@@ -468,7 +459,6 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	case <-done:
 		c.logger.Debug("All workflows completed")
 	case <-time.After(timeout):
-		// For now just log a warning: eventually we might want Cancel to return an error.
 		c.logger.Warn("Timeout waiting for workflows to complete", "timeout", timeout)
 	}
 
@@ -500,7 +490,7 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	// Shutdown the conductor
 	if c.conductor != nil {
 		c.logger.Debug("Shutting down conductor")
-		c.conductor.Shutdown(timeout)
+		c.conductor.shutdown(timeout)
 	}
 
 	// Shutdown the admin server

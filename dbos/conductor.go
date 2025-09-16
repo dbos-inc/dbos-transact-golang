@@ -26,8 +26,8 @@ const (
 	_WRITE_DEADLINE         = 5 * time.Second
 )
 
-// ConductorConfig contains configuration for the conductor
-type ConductorConfig struct {
+// conductorConfig contains configuration for the conductor
+type conductorConfig struct {
 	url     string
 	apiKey  string
 	appName string
@@ -55,14 +55,14 @@ type Conductor struct {
 	pingCancel context.CancelFunc
 }
 
-// Launch starts the conductor main goroutine
-func (c *Conductor) Launch() {
+// launch starts the conductor main goroutine
+func (c *Conductor) launch() {
 	c.logger.Info("Launching conductor")
 	c.wg.Add(1)
 	go c.run()
 }
 
-func NewConductor(dbosCtx *dbosContext, config ConductorConfig) (*Conductor, error) {
+func newConductor(dbosCtx *dbosContext, config conductorConfig) (*Conductor, error) {
 	if config.apiKey == "" {
 		return nil, fmt.Errorf("conductor API key is required")
 	}
@@ -96,7 +96,7 @@ func NewConductor(dbosCtx *dbosContext, config ConductorConfig) (*Conductor, err
 	return c, nil
 }
 
-func (c *Conductor) Shutdown(timeout time.Duration) {
+func (c *Conductor) shutdown(timeout time.Duration) {
 	c.stopOnce.Do(func() {
 		if c.pingCancel != nil {
 			c.pingCancel()
