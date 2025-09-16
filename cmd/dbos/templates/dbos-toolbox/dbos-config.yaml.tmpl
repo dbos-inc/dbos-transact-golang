@@ -4,6 +4,7 @@ language: go
 runtimeConfig:
   start:
     - go run main.go
+database_url: ${DBOS_SYSTEM_DATABASE_URL}
 database:
   migrate:
     - echo "your migration commands here"

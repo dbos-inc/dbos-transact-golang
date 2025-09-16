@@ -58,6 +58,9 @@ func initConfig() {
 
 	// If a config file is found, read it in and parse it
 	if err := viper.ReadInConfig(); err == nil {
+		// Expand environment variables in all string values
+		expandEnvVarsInConfig()
+
 		var cfg Config
 		if err := viper.Unmarshal(&cfg); err == nil {
 			config = &cfg
@@ -72,4 +75,15 @@ func initLogger(logLevel slog.Level) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: logLevel,
 	}))
+}
+
+// expandEnvVarsInConfig recursively expands environment variables in all string values
+func expandEnvVarsInConfig() {
+	for _, key := range viper.AllKeys() {
+		value := viper.Get(key)
+		if strValue, ok := value.(string); ok {
+			expandedValue := os.ExpandEnv(strValue)
+			viper.Set(key, expandedValue)
+		}
+	}
 }
