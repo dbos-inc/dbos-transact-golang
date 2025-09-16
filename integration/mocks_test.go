@@ -79,11 +79,6 @@ func workflow(ctx dbos.DBOSContext, i int) (int, error) {
 		return 0, err
 	}
 
-	_, err = dbos.Enqueue[int, int](ctx, "test_queue", "test_workflow", 42)
-	if err != nil {
-		return 0, err
-	}
-
 	err = dbos.CancelWorkflow(ctx, workflowID)
 	if err != nil {
 		return 0, err
@@ -180,7 +175,6 @@ func TestMocks(t *testing.T) {
 	mockGenericHandle.On("GetStatus").Return(dbos.WorkflowStatus{}, nil).Maybe()
 
 	mockCtx.On("RetrieveWorkflow", mockCtx, "test-workflow-id").Return(mockGenericHandle, nil)
-	mockCtx.On("Enqueue", mockCtx, "test_queue", "test_workflow", 42).Return(mockGenericHandle, nil)
 	mockCtx.On("CancelWorkflow", mockCtx, "test-workflow-id").Return(nil)
 	mockCtx.On("ResumeWorkflow", mockCtx, "test-workflow-id").Return(mockGenericHandle, nil)
 	mockCtx.On("ForkWorkflow", mockCtx, mock.Anything).Return(mockGenericHandle, nil)

@@ -2746,6 +2746,9 @@ func TestWorkflowTimeout(t *testing.T) {
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflow)
 
 	t.Run("WorkflowTimeout", func(t *testing.T) {
+		// The reason this sequence works is that the timeout is so fast that the workflow AfterFunc
+		// triggers as soon as it is set, likely even before the workflow goroutine is started
+		// So we are almost guaranteed that the workflow will be cancelled before returning, hence GetStatus will show it as cancelled
 		// Start a workflow that will wait indefinitely
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
@@ -2763,22 +2766,46 @@ func TestWorkflowTimeout(t *testing.T) {
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 	})
 
+	wfcStart := NewEvent()
+	wfcStop := NewEvent()
+	waitForCancelWorkflowManual := func(ctx DBOSContext, _ string) (string, error) {
+		// This workflow will wait indefinitely until it is cancelled
+		<-ctx.Done()
+		assert.True(t, errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded),
+			"workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
+		wfcStart.Set()
+		wfcStop.Wait()
+		return "", ctx.Err()
+	}
+	RegisterWorkflow(dbosCtx, waitForCancelWorkflowManual)
+
 	t.Run("ManuallyCancelWorkflow", func(t *testing.T) {
+		// This test requires an event to prevent the workflow for returning before we GetStatus
+		// This is because direct cancellation through the cancel function can happen faster than the timeout context AfterFunc
+		// This is even more likely in contended environments with few CPU resources
+		// When this happens, the workflow will complete first with an error status, and the AfterFunc cancelWorkflow will be a no-op
+		// Thus the workflow status will be "Error" instead of "Cancelled" and the test fail
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Hour)
 		defer cancelFunc() // Ensure we clean up the context
-		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflow, "manual-cancel")
+		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflowManual, "manual-cancel")
 		require.NoError(t, err, "failed to start manual cancel workflow")
 
 		// Cancel the workflow manually
 		cancelFunc()
+		wfcStart.Wait()
+
+		// Check the workflow status: should be cancelled
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			require.NoError(t, err, "failed to get workflow status")
+			return status.Status == WorkflowStatusCancelled
+		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
+
+		wfcStop.Set()
+
 		result, err := handle.GetResult()
 		assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled error, got: %v", err)
 		assert.Equal(t, "", result, "expected result to be an empty string")
-
-		// Check the workflow status: should be cancelled
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get workflow status")
-		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 	})
 
 	waitForCancelStep := func(ctx context.Context) (string, error) {

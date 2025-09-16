@@ -63,12 +63,23 @@ func TestEnqueue(t *testing.T) {
 	err := serverCtx.Launch()
 	require.NoError(t, err)
 
-	// Setup client context - this will enqueue tasks
-	clientCtx := setupDBOS(t, false, false) // Don't drop DB, don't check for leaks
+	// Setup client - this will enqueue tasks
+	databaseURL := getDatabaseURL()
+	config := Config{
+		DatabaseURL: databaseURL,
+		AppName:     "test-app",
+	}
+	client, err := NewClient(context.Background(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
 
 	t.Run("EnqueueAndGetResult", func(t *testing.T) {
 		// Client enqueues a task using the new Enqueue method
-		handle, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
 
@@ -98,12 +109,12 @@ func TestEnqueue(t *testing.T) {
 		customWorkflowID := "custom-client-workflow-id"
 
 		// Client enqueues a task with a custom workflow ID
-		_, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		_, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(customWorkflowID))
 		require.NoError(t, err)
 
 		// Verify the workflow ID is what we set
-		retrieveHandle, err := RetrieveWorkflow[string](clientCtx, customWorkflowID)
+		retrieveHandle, err := client.RetrieveWorkflow(customWorkflowID)
 		require.NoError(t, err)
 
 		result, err := retrieveHandle.GetResult()
@@ -115,7 +126,7 @@ func TestEnqueue(t *testing.T) {
 	})
 
 	t.Run("EnqueueWithTimeout", func(t *testing.T) {
-		handle, err := Enqueue[string, string](clientCtx, queue.Name, "BlockingWorkflow", "blocking-input",
+		handle, err := Enqueue[string, string](client, queue.Name, "BlockingWorkflow", "blocking-input",
 			WithEnqueueTimeout(500*time.Millisecond))
 		require.NoError(t, err)
 
@@ -142,18 +153,18 @@ func TestEnqueue(t *testing.T) {
 		mu.Unlock()
 
 		// Enqueue workflow without priority (will use default priority of 0)
-		handle1, err := Enqueue[string, string](clientCtx, priorityQueue.Name, "PriorityWorkflow", "abc",
+		handle1, err := Enqueue[string, string](client, priorityQueue.Name, "PriorityWorkflow", "abc",
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow without priority")
 
 		// Enqueue with a lower priority (higher number = lower priority)
-		handle2, err := Enqueue[string, string](clientCtx, priorityQueue.Name, "PriorityWorkflow", "def",
+		handle2, err := Enqueue[string, string](client, priorityQueue.Name, "PriorityWorkflow", "def",
 			WithEnqueuePriority(5),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with priority 5")
 
 		// Enqueue with a higher priority (lower number = higher priority)
-		handle3, err := Enqueue[string, string](clientCtx, priorityQueue.Name, "PriorityWorkflow", "ghi",
+		handle3, err := Enqueue[string, string](client, priorityQueue.Name, "PriorityWorkflow", "ghi",
 			WithEnqueuePriority(1),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with priority 1")
@@ -188,14 +199,14 @@ func TestEnqueue(t *testing.T) {
 		wfid2 := "client-dedup-wf2"
 
 		// First workflow with deduplication ID - should succeed
-		handle1, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle1, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfid1),
 			WithEnqueueDeduplicationID(dedupID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue first workflow with deduplication ID")
 
 		// Second workflow with same deduplication ID but different workflow ID - should fail
-		_, err = Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		_, err = Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfid2),
 			WithEnqueueDeduplicationID(dedupID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -210,13 +221,13 @@ func TestEnqueue(t *testing.T) {
 		assert.Contains(t, err.Error(), expectedMsgPart, "expected error message to contain deduplication information")
 
 		// Third workflow with different deduplication ID - should succeed
-		handle3, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle3, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueDeduplicationID("different-dedup-id"),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with different deduplication ID")
 
 		// Fourth workflow without deduplication ID - should succeed
-		handle4, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle4, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow without deduplication ID")
 
@@ -234,7 +245,7 @@ func TestEnqueue(t *testing.T) {
 		assert.Equal(t, "processed: test-input", result4)
 
 		// After first workflow completes, we should be able to enqueue with same deduplication ID
-		handle5, err := Enqueue[wfInput, string](clientCtx, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle5, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfid2),        // Reuse the workflow ID that failed before
 			WithEnqueueDeduplicationID(dedupID), // Same deduplication ID as first workflow
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -312,8 +323,19 @@ func TestCancelResume(t *testing.T) {
 	err := serverCtx.Launch()
 	require.NoError(t, err)
 
-	// Setup client context - this will enqueue tasks
-	clientCtx := setupDBOS(t, false, false) // Don't drop DB, don't check for leaks
+	// Setup client - this will enqueue tasks
+	databaseURL := getDatabaseURL()
+	config := Config{
+		DatabaseURL: databaseURL,
+		AppName:     "test-app",
+	}
+	client, err := NewClient(context.Background(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
 
 	t.Run("CancelAndResume", func(t *testing.T) {
 		// Reset the global counter
@@ -322,7 +344,7 @@ func TestCancelResume(t *testing.T) {
 		workflowID := "test-cancel-resume-workflow"
 
 		// Start the workflow - it will execute step one and then wait
-		handle, err := Enqueue[int, int](clientCtx, queue.Name, "CancelResumeWorkflow", input,
+		handle, err := Enqueue[int, int](client, queue.Name, "CancelResumeWorkflow", input,
 			WithEnqueueWorkflowID(workflowID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow from client")
@@ -334,7 +356,7 @@ func TestCancelResume(t *testing.T) {
 		assert.Equal(t, 1, stepsCompleted, "expected steps completed to be 1")
 
 		// Cancel the workflow
-		err = CancelWorkflow(clientCtx, workflowID)
+		err = client.CancelWorkflow(workflowID)
 		require.NoError(t, err, "failed to cancel workflow")
 
 		// Verify workflow is cancelled
@@ -344,7 +366,7 @@ func TestCancelResume(t *testing.T) {
 		assert.Equal(t, WorkflowStatusCancelled, cancelStatus.Status, "expected workflow status to be CANCELLED")
 
 		// Resume the workflow
-		resumeHandle, err := ResumeWorkflow[int](clientCtx, workflowID)
+		resumeHandle, err := client.ResumeWorkflow(workflowID)
 		require.NoError(t, err, "failed to resume workflow")
 
 		// Wait for workflow completion
@@ -368,7 +390,7 @@ func TestCancelResume(t *testing.T) {
 		assert.Equal(t, _DBOS_INTERNAL_QUEUE_NAME, finalStatus.QueueName, "expected queue name to be %s", _DBOS_INTERNAL_QUEUE_NAME)
 
 		// Resume the workflow again - should not run again
-		resumeAgainHandle, err := ResumeWorkflow[int](clientCtx, workflowID)
+		resumeAgainHandle, err := client.ResumeWorkflow(workflowID)
 		require.NoError(t, err, "failed to resume workflow again")
 
 		resultAgain, err := resumeAgainHandle.GetResult()
@@ -387,7 +409,7 @@ func TestCancelResume(t *testing.T) {
 		workflowTimeout := 2 * time.Second
 
 		// Start the workflow with a 2-second timeout
-		handle, err := Enqueue[string, string](clientCtx, queue.Name, "TimeoutBlockingWorkflow", "timeout-test",
+		handle, err := Enqueue[string, string](client, queue.Name, "TimeoutBlockingWorkflow", "timeout-test",
 			WithEnqueueWorkflowID(workflowID),
 			WithEnqueueTimeout(workflowTimeout),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -397,7 +419,7 @@ func TestCancelResume(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 
 		// Cancel the workflow before timeout expires
-		err = CancelWorkflow(clientCtx, workflowID)
+		err = client.CancelWorkflow(workflowID)
 		require.NoError(t, err, "failed to cancel workflow")
 
 		// Verify workflow is cancelled
@@ -410,7 +432,7 @@ func TestCancelResume(t *testing.T) {
 		originalDeadline := cancelStatus.Deadline
 
 		// Resume the workflow
-		resumeHandle, err := ResumeWorkflow[string](clientCtx, workflowID)
+		resumeHandle, err := client.ResumeWorkflow(workflowID)
 		require.NoError(t, err, "failed to resume workflow")
 		resumeStart := time.Now()
 
@@ -448,7 +470,7 @@ func TestCancelResume(t *testing.T) {
 		nonExistentWorkflowID := "non-existent-workflow-id"
 
 		// Try to cancel a non-existent workflow
-		err := CancelWorkflow(clientCtx, nonExistentWorkflowID)
+		err := client.CancelWorkflow(nonExistentWorkflowID)
 		require.Error(t, err, "expected error when canceling non-existent workflow, but got none")
 
 		// Verify error type and code
@@ -464,7 +486,7 @@ func TestCancelResume(t *testing.T) {
 		nonExistentWorkflowID := "non-existent-resume-workflow-id"
 
 		// Try to resume a non-existent workflow
-		_, err := ResumeWorkflow[int](clientCtx, nonExistentWorkflowID)
+		_, err := client.ResumeWorkflow(nonExistentWorkflowID)
 		require.Error(t, err, "expected error when resuming non-existent workflow, but got none")
 
 		// Verify error type and code
@@ -553,8 +575,19 @@ func TestForkWorkflow(t *testing.T) {
 	err := serverCtx.Launch()
 	require.NoError(t, err)
 
-	// Setup client context
-	clientCtx := setupDBOS(t, false, false)
+	// Setup client
+	databaseURL := getDatabaseURL()
+	config := Config{
+		DatabaseURL: databaseURL,
+		AppName:     "test-app",
+	}
+	client, err := NewClient(context.Background(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
 
 	t.Run("ForkAtAllSteps", func(t *testing.T) {
 		// Reset counters
@@ -563,7 +596,7 @@ func TestForkWorkflow(t *testing.T) {
 		originalWorkflowID := "original-workflow-fork-test"
 
 		// 1. Run the entire workflow first and check counters are 1
-		handle, err := Enqueue[string, string](clientCtx, queue.Name, "ParentWorkflow", "test",
+		handle, err := Enqueue[string, string](client, queue.Name, "ParentWorkflow", "test",
 			WithEnqueueWorkflowID(originalWorkflowID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue original workflow")
@@ -587,7 +620,7 @@ func TestForkWorkflow(t *testing.T) {
 			t.Logf("Forking at step %d", step)
 
 			customForkedWorkflowID := fmt.Sprintf("forked-workflow-step-%d", step)
-			forkedHandle, err := ForkWorkflow[string](clientCtx, ForkWorkflowInput{
+			forkedHandle, err := client.ForkWorkflow(ForkWorkflowInput{
 				OriginalWorkflowID: originalWorkflowID,
 				ForkedWorkflowID:   customForkedWorkflowID,
 				StartStep:          uint(step - 1),
@@ -640,7 +673,7 @@ func TestForkWorkflow(t *testing.T) {
 		nonExistentWorkflowID := "non-existent-workflow-for-fork"
 
 		// Try to fork a non-existent workflow
-		_, err := clientCtx.ForkWorkflow(clientCtx, ForkWorkflowInput{
+		_, err := client.ForkWorkflow(ForkWorkflowInput{
 			OriginalWorkflowID: nonExistentWorkflowID,
 			StartStep:          1,
 		})
@@ -684,8 +717,19 @@ func TestListWorkflows(t *testing.T) {
 	err := serverCtx.Launch()
 	require.NoError(t, err)
 
-	// Setup client context
-	clientCtx := setupDBOS(t, false, false)
+	// Setup client
+	databaseURL := getDatabaseURL()
+	config := Config{
+		DatabaseURL: databaseURL,
+		AppName:     "test-app",
+	}
+	client, err := NewClient(context.Background(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
 
 	t.Run("ListWorkflowsFiltering", func(t *testing.T) {
 		var workflowIDs []string
@@ -702,7 +746,7 @@ func TestListWorkflows(t *testing.T) {
 			if i < 5 {
 				// First 5 workflows: use prefix "test-batch-" and succeed
 				workflowID = fmt.Sprintf("test-batch-%d", i)
-				handle, err = Enqueue[testInput, string](clientCtx, queue.Name, "SimpleWorkflow", testInput{Value: i, ID: fmt.Sprintf("success-%d", i)},
+				handle, err = Enqueue[testInput, string](client, queue.Name, "SimpleWorkflow", testInput{Value: i, ID: fmt.Sprintf("success-%d", i)},
 					WithEnqueueWorkflowID(workflowID),
 					WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			} else {
@@ -712,7 +756,7 @@ func TestListWorkflows(t *testing.T) {
 				if i >= 8 {
 					value = -i // These will fail
 				}
-				handle, err = Enqueue[testInput, string](clientCtx, queue.Name, "SimpleWorkflow", testInput{Value: value, ID: fmt.Sprintf("test-%d", i)},
+				handle, err = Enqueue[testInput, string](client, queue.Name, "SimpleWorkflow", testInput{Value: value, ID: fmt.Sprintf("test-%d", i)},
 					WithEnqueueWorkflowID(workflowID),
 					WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			}
@@ -739,13 +783,13 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 1: List all workflows (no filters)
-		allWorkflows, err := ListWorkflows(clientCtx)
+		allWorkflows, err := client.ListWorkflows()
 		require.NoError(t, err, "failed to list all workflows")
 		assert.GreaterOrEqual(t, len(allWorkflows), 10, "expected at least 10 workflows")
 
 		// Test 2: Filter by workflow IDs
 		expectedIDs := workflowIDs[:3]
-		specificWorkflows, err := ListWorkflows(clientCtx, WithWorkflowIDs(expectedIDs))
+		specificWorkflows, err := client.ListWorkflows(WithWorkflowIDs(expectedIDs))
 		require.NoError(t, err, "failed to list workflows by IDs")
 		assert.Len(t, specificWorkflows, 3, "expected 3 workflows")
 		// Verify returned workflow IDs match expected
@@ -758,7 +802,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 3: Filter by workflow ID prefix
-		batchWorkflows, err := ListWorkflows(clientCtx, WithWorkflowIDPrefix("test-batch-"))
+		batchWorkflows, err := client.ListWorkflows(WithWorkflowIDPrefix("test-batch-"))
 		require.NoError(t, err, "failed to list workflows by prefix")
 		assert.Len(t, batchWorkflows, 5, "expected 5 batch workflows")
 		// Verify all returned workflow IDs have the correct prefix
@@ -767,7 +811,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 4: Filter by status - SUCCESS
-		successWorkflows, err := ListWorkflows(clientCtx,
+		successWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"), // Only our test workflows
 			WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}))
 		require.NoError(t, err, "failed to list successful workflows")
@@ -778,7 +822,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 5: Filter by status - ERROR
-		errorWorkflows, err := ListWorkflows(clientCtx,
+		errorWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithStatus([]WorkflowStatusType{WorkflowStatusError}))
 		require.NoError(t, err, "failed to list error workflows")
@@ -790,26 +834,26 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 6: Filter by time range - first 5 workflows (start to start+500ms)
 		firstHalfTime := testStartTime.Add(500 * time.Millisecond)
-		firstHalfWorkflows, err := ListWorkflows(clientCtx,
+		firstHalfWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithEndTime(firstHalfTime))
 		require.NoError(t, err, "failed to list first half workflows by time range")
 		assert.Len(t, firstHalfWorkflows, 5, "expected 5 workflows in first half time range")
 
 		// Test 6b: Filter by time range - last 5 workflows (start+500ms to end)
-		secondHalfWorkflows, err := ListWorkflows(clientCtx,
+		secondHalfWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithStartTime(firstHalfTime))
 		require.NoError(t, err, "failed to list second half workflows by time range")
 		assert.Len(t, secondHalfWorkflows, 5, "expected 5 workflows in second half time range")
 
 		// Test 7: Test sorting order (ascending - default)
-		ascWorkflows, err := ListWorkflows(clientCtx,
+		ascWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"))
 		require.NoError(t, err, "failed to list workflows ascending")
 
 		// Test 8: Test sorting order (descending)
-		descWorkflows, err := ListWorkflows(clientCtx,
+		descWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithSortDesc())
 		require.NoError(t, err, "failed to list workflows descending")
@@ -831,7 +875,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 9: Test limit and offset
-		limitedWorkflows, err := ListWorkflows(clientCtx,
+		limitedWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithLimit(5))
 		require.NoError(t, err, "failed to list workflows with limit")
@@ -842,7 +886,7 @@ func TestListWorkflows(t *testing.T) {
 			assert.Equal(t, expectedFirstFive[i].ID, wf.ID, "limited workflow at index %d: unexpected ID", i)
 		}
 
-		offsetWorkflows, err := ListWorkflows(clientCtx,
+		offsetWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithOffset(5),
 			WithLimit(3))
@@ -855,7 +899,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 10: Test input/output loading
-		noDataWorkflows, err := ListWorkflows(clientCtx,
+		noDataWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDs(workflowIDs[:2]),
 			WithLoadInput(false),
 			WithLoadOutput(false))
