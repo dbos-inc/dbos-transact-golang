@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -307,7 +308,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	// Set global logger
 	initExecutor.logger = config.Logger
-	initExecutor.logger.Info("Initializing DBOS context", "app_name", config.AppName)
+	initExecutor.logger.Info("Initializing DBOS context", "app_name", config.AppName, "dbos_version", getDBOSVersion())
 
 	// Register types we serialize with gob
 	var t time.Time
@@ -421,7 +422,7 @@ func (c *dbosContext) Launch() error {
 		c.logger.Debug("No pending workflows to recover")
 	}
 
-	c.logger.Info("DBOS initialized", "app_version", c.applicationVersion, "executor_id", c.executorID)
+	c.logger.Info("DBOS launched", "app_version", c.applicationVersion, "executor_id", c.executorID)
 	c.launched.Store(true)
 	return nil
 }
@@ -555,4 +556,20 @@ func computeApplicationVersion() string {
 		return ""
 	}
 	return hash
+}
+
+// getDBOSVersion returns the version of the DBOS module
+func getDBOSVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, dep := range info.Deps {
+			if dep.Path == "github.com/dbos-inc/dbos-transact-golang" {
+				return dep.Version
+			}
+		}
+		// If running as main module, return main module version
+		if info.Main.Path == "github.com/dbos-inc/dbos-transact-golang" {
+			return info.Main.Version
+		}
+	}
+	return "unknown"
 }
