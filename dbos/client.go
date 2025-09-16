@@ -15,33 +15,15 @@ import (
 // It manages the underlying DBOSContext and provides methods for workflow operations
 // without requiring direct management of the context lifecycle.
 type Client interface {
-	// Enqueue enqueues a workflow to a named queue for deferred execution.
-	// The workflow will be executed when the queue runner processes it.
 	Enqueue(queueName, workflowName string, input any, opts ...EnqueueOption) (WorkflowHandle[any], error)
-
-	// ListWorkflows retrieves a list of workflows based on the provided filters.
 	ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, error)
-
-	// Send sends a message to another workflow.
 	Send(destinationID string, message any, topic string) error
-
-	// GetEvent retrieves a key-value event from a target workflow.
 	GetEvent(targetWorkflowID, key string, timeout time.Duration) (any, error)
-
-	// RetrieveWorkflow returns a handle to an existing workflow.
 	RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error)
-
-	// CancelWorkflow cancels a running or enqueued workflow.
 	CancelWorkflow(workflowID string) error
-
-	// ResumeWorkflow resumes a workflow from its last completed step.
 	ResumeWorkflow(workflowID string) (WorkflowHandle[any], error)
-
-	// ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
-
-	// Shutdown gracefully shuts down the client and closes the system database connection.
-	Shutdown(timeout time.Duration)
+	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
 
 type client struct {
@@ -196,7 +178,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 // This provides asynchronous workflow execution with durability guarantees.
 //
 // Parameters:
-//   - ctx: DBOS context for the operation
+//   - c: Client instance for the operation
 //   - queueName: Name of the queue to enqueue the workflow to
 //   - workflowName: Name of the registered workflow function to execute
 //   - input: Input parameters to pass to the workflow (type P)
@@ -215,7 +197,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 // Example usage:
 //
 //	// Enqueue a workflow with string input and int output
-//	handle, err := dbos.Enqueue[string, int](ctx, "data-processing", "ProcessDataWorkflow", "input data",
+//	handle, err := dbos.Enqueue[string, int](client, "data-processing", "ProcessDataWorkflow", "input data",
 //	    dbos.WithEnqueueTimeout(30 * time.Minute))
 //	if err != nil {
 //	    log.Fatal(err)
@@ -236,7 +218,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 //	}
 //
 //	// Enqueue with deduplication and custom workflow ID
-//	handle, err := dbos.Enqueue[MyInputType, MyOutputType](ctx, "my-queue", "MyWorkflow", MyInputType{Field: "value"},
+//	handle, err := dbos.Enqueue[MyInputType, MyOutputType](client, "my-queue", "MyWorkflow", MyInputType{Field: "value"},
 //	    dbos.WithEnqueueWorkflowID("custom-workflow-id"),
 //	    dbos.WithEnqueueDeduplicationID("unique-operation-id"))
 func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, opts ...EnqueueOption) (WorkflowHandle[R], error) {
