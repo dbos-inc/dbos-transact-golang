@@ -97,7 +97,9 @@ func TestConfig(t *testing.T) {
 		require.NotNil(t, customdbosContext)
 
 		dbosCtx, ok := customdbosContext.(*dbosContext)
+		defer dbosCtx.Shutdown(10 * time.Second)
 		require.True(t, ok)
+		
 		sysDB, ok := dbosCtx.systemDB.(*sysDB)
 		require.True(t, ok)
 		assert.Same(t, pool, sysDB.pool, "The pool in dbosContext should be the same as the custom pool provided")
