@@ -31,7 +31,6 @@ var testAppContent []byte
 const (
 	testProjectName = "test-project"
 	testServerPort  = "8080"
-	testTimeout     = 30 * time.Second
 	// From dbos/queue.go
 	dbosInternalQueueName = "_dbos_internal_queue"
 )
