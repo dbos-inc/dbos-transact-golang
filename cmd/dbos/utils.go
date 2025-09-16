@@ -39,8 +39,6 @@ func maskPassword(dbURL string) string {
 		}
 	}
 
-	fmt.Println(parsedURL.String())
-
 	return parsedURL.String()
 }
 
