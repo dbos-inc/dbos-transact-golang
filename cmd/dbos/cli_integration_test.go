@@ -456,7 +456,7 @@ func testGetWorkflow(t *testing.T, cliPath string) {
 		})
 
 		// Test with environment variable D
-		cmd3 := exec.Command(cliPath, "workflow", "get", workflowID, "--verbose")
+		cmd3 := exec.Command(cliPath, "workflow", "get", workflowID)
 		cmd3.Env = append(os.Environ(), "D="+getDatabaseURL())
 
 		output3, err3 := cmd3.CombinedOutput()
