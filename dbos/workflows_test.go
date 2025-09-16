@@ -1974,6 +1974,7 @@ var (
 	getEventStopIdempotencyEvent  = NewEvent()
 	setSecondEventSignal          = NewEvent()
 	setThirdEventSignal           = NewEvent()
+	getEventWorkflowStartedSignal = NewEvent()
 )
 
 type setEventWorkflowInput struct {
@@ -1996,6 +1997,7 @@ type getEventWorkflowInput struct {
 }
 
 func getEventWorkflow(ctx DBOSContext, input getEventWorkflowInput) (string, error) {
+	getEventWorkflowStartedSignal.Set()
 	result, err := GetEvent[string](ctx, input.TargetWorkflowID, input.Key, 3*time.Second)
 	if err != nil {
 		return "", err
@@ -2203,6 +2205,8 @@ func TestSetGetEvent(t *testing.T) {
 			Key:              "event",       // Event key
 		})
 		require.NoError(t, err, "failed to start get first event workflow")
+		getEventWorkflowStartedSignal.Wait()
+		getEventWorkflowStartedSignal.Clear()
 
 		time.Sleep(500 * time.Millisecond)
 
@@ -2229,14 +2233,13 @@ func TestSetGetEvent(t *testing.T) {
 			Key:              "event",       // Event key
 		})
 		require.NoError(t, err, "failed to start get second event workflow")
+		getEventWorkflowStartedSignal.Wait()
+		getEventWorkflowStartedSignal.Clear()
 
 		// Verify we can get the second event
 		secondMessage, err := getSecondEventHandle.GetResult()
 		require.NoError(t, err, "failed to get result from second event workflow")
 		assert.Equal(t, "second-event-message", secondMessage, "expected second message to be 'second-event-message'")
-
-		// Signal the workflow to set the third event
-		setThirdEventSignal.Set()
 
 		// Start a workflow to get the third event
 		getThirdEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, getEventWorkflowInput{
@@ -2244,6 +2247,10 @@ func TestSetGetEvent(t *testing.T) {
 			Key:              "anotherevent", // Event key
 		})
 		require.NoError(t, err, "failed to start get third event workflow")
+		getEventWorkflowStartedSignal.Wait() // So we know we're waiting on GetEvent
+
+		// Signal the workflow to set the third event and wait until it's done
+		setThirdEventSignal.Set()
 
 		// Verify we can get the third event
 		thirdMessage, err := getThirdEventHandle.GetResult()
@@ -2757,7 +2764,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	})
 
 	t.Run("ManuallyCancelWorkflow", func(t *testing.T) {
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Second)
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Hour)
 		defer cancelFunc() // Ensure we clean up the context
 		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflow, "manual-cancel")
 		require.NoError(t, err, "failed to start manual cancel workflow")
