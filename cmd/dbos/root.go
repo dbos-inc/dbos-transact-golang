@@ -34,9 +34,6 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "Config file (default is dbos-config.yaml)")
 	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Enable verbose mode (DEBUG level logging)")
 
-	// Initialize global logger
-	logger = initLogger(slog.LevelInfo)
-
 	// Add all subcommands
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(startCmd)
@@ -48,6 +45,9 @@ func init() {
 }
 
 func initConfig() {
+	// Initialize global logger
+	logger = initLogger(slog.LevelInfo)
+
 	if configFile != "" {
 		viper.SetConfigFile(configFile)
 	} else {
