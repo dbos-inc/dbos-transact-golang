@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -434,6 +435,40 @@ func testGetWorkflow(t *testing.T, cliPath string) {
 		assert.Equal(t, workflowID, status2.ID, "JSON should contain correct workflow ID")
 		assert.NotEmpty(t, status2.Status, "Should have workflow status")
 		assert.NotEmpty(t, status2.Name, "Should have workflow name")
+
+		// Test with config file containing environment variable
+		configPath := "dbos-config.yaml"
+
+		// Read the existing config file
+		originalConfig, err := os.ReadFile(configPath)
+		require.NoError(t, err, "Should be able to read existing config file")
+
+		// Create backup and modify config to use ${D} variable
+		originalConfigStr := string(originalConfig)
+		modifiedConfig := strings.ReplaceAll(originalConfigStr, "${DBOS_SYSTEM_DATABASE_URL}", "${D}")
+
+		err = os.WriteFile(configPath, []byte(modifiedConfig), 0644)
+		require.NoError(t, err, "Should be able to write modified config")
+
+		// Cleanup: restore original config
+		t.Cleanup(func() {
+			os.WriteFile(configPath, originalConfig, 0644)
+		})
+
+		// Test with environment variable D
+		cmd3 := exec.Command(cliPath, "workflow", "get", workflowID, "--verbose")
+		cmd3.Env = append(os.Environ(), "D="+getDatabaseURL())
+
+		output3, err3 := cmd3.CombinedOutput()
+		require.NoError(t, err3, "Get workflow JSON command with config env var failed: %s", string(output3))
+
+		// Verify valid JSON
+		var status3 dbos.WorkflowStatus
+		err = json.Unmarshal(output3, &status3)
+		require.NoError(t, err, "JSON output should be valid")
+		assert.Equal(t, workflowID, status3.ID, "JSON should contain correct workflow ID")
+		assert.NotEmpty(t, status3.Status, "Should have workflow status")
+		assert.NotEmpty(t, status3.Name, "Should have workflow name")
 	})
 }
 
