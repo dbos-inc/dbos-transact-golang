@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/robfig/cron/v3"
 )
 
@@ -37,6 +38,7 @@ type Config struct {
 	ApplicationVersion string          // Application version (optional, overridden by DBOS__APPVERSION env var)
 	ExecutorID         string          // Executor ID (optional, overridden by DBOS__VMID env var)
 	Context            context.Context // User Context
+	SystemDBPool       *pgxpool.Pool   // Custom System Database Pool
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -61,6 +63,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ConductorAPIKey:    inputConfig.ConductorAPIKey,
 		ApplicationVersion: inputConfig.ApplicationVersion,
 		ExecutorID:         inputConfig.ExecutorID,
+		SystemDBPool:       inputConfig.SystemDBPool,
 	}
 
 	// Load defaults
@@ -321,8 +324,14 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 
+	newSystemDatabaseInputs := newSystemDatabaseInput{
+		databaseURL: config.DatabaseURL,
+		customPool:  config.SystemDBPool,
+		logger:      initExecutor.logger,
+	}
+
 	// Create the system database
-	systemDB, err := newSystemDatabase(initExecutor, config.DatabaseURL, initExecutor.logger)
+	systemDB, err := newSystemDatabase(initExecutor, newSystemDatabaseInputs)
 	if err != nil {
 		return nil, newInitializationError(fmt.Sprintf("failed to create system database: %v", err))
 	}
