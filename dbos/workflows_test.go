@@ -2757,7 +2757,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	})
 
 	t.Run("ManuallyCancelWorkflow", func(t *testing.T) {
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Second)
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Hour)
 		defer cancelFunc() // Ensure we clean up the context
 		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflow, "manual-cancel")
 		require.NoError(t, err, "failed to start manual cancel workflow")
