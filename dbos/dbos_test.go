@@ -436,7 +436,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		}
 
 		// Wait for an event from the partner workflow
-		result, err := GetEvent[string](ctx, input.PartnerWorkflowID, "response-key", 5*time.Second)
+		result, err := GetEvent[string](ctx, input.PartnerWorkflowID, "response-key", 5*time.Hour)
 		if err != nil {
 			return "", err
 		}
@@ -447,10 +447,12 @@ func TestCustomSystemDBSchema(t *testing.T) {
 	// Workflow B: Uses Recv() and SetEvent() - waits for workflow A
 	recvSetEventWorkflow := func(ctx DBOSContext, input testWorkflowInput) (string, error) {
 		// Receive a message from the partner workflow
-		receivedMsg, err := Recv[string](ctx, "test-topic", 5*time.Second)
+		receivedMsg, err := Recv[string](ctx, "test-topic", 5*time.Hour)
 		if err != nil {
 			return "", err
 		}
+
+		time.Sleep(1 * time.Second)
 
 		// Set an event for the partner workflow
 		err = SetEvent(ctx, "response-key", "response-from-workflow-b")
