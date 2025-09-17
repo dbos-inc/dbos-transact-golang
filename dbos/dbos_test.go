@@ -3,10 +3,12 @@ package dbos
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,7 +101,7 @@ func TestConfig(t *testing.T) {
 		dbosCtx, ok := customdbosContext.(*dbosContext)
 		defer dbosCtx.Shutdown(10 * time.Second)
 		require.True(t, ok)
-		
+
 		sysDB, ok := dbosCtx.systemDB.(*sysDB)
 		require.True(t, ok)
 		assert.Same(t, pool, sysDB.pool, "The pool in dbosContext should be the same as the custom pool provided")
@@ -324,5 +326,194 @@ func TestConfig(t *testing.T) {
 		}()
 
 		require.NotNil(t, ctx2)
+	})
+}
+
+func TestCustomSystemDBSchema(t *testing.T) {
+	t.Setenv("DBOS__APPVERSION", "v1.0.0")
+	t.Setenv("DBOS__APPID", "test-custom-schema")
+	t.Setenv("DBOS__VMID", "test-executor-id")
+
+	databaseURL := getDatabaseURL()
+	customSchema := "dbos_custom_test"
+
+	ctx, err := NewDBOSContext(context.Background(), Config{
+		DatabaseURL:    databaseURL,
+		AppName:        "test-custom-schema-migration",
+		DatabaseSchema: customSchema,
+	})
+	require.NoError(t, err)
+	defer func() {
+		if ctx != nil {
+			ctx.Shutdown(1 * time.Minute)
+		}
+	}()
+
+	require.NotNil(t, ctx)
+
+	t.Run("CustomSchemaSetup", func(t *testing.T) {
+		// Get the internal systemDB instance to check tables directly
+		dbosCtx, ok := ctx.(*dbosContext)
+		require.True(t, ok, "expected dbosContext")
+		require.NotNil(t, dbosCtx.systemDB)
+
+		sysDB, ok := dbosCtx.systemDB.(*sysDB)
+		require.True(t, ok, "expected sysDB")
+
+		// Verify schema name was set correctly
+		assert.Equal(t, customSchema, sysDB.schema, "schema name should match custom schema")
+
+		// Verify all expected tables exist in the custom schema
+		dbCtx := context.Background()
+
+		// Test workflow_status table in custom schema
+		var exists bool
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'workflow_status')", customSchema).Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "workflow_status table should exist in custom schema")
+
+		// Test operation_outputs table in custom schema
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'operation_outputs')", customSchema).Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "operation_outputs table should exist in custom schema")
+
+		// Test workflow_events table in custom schema
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'workflow_events')", customSchema).Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "workflow_events table should exist in custom schema")
+
+		// Test notifications table in custom schema
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'notifications')", customSchema).Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "notifications table should exist in custom schema")
+
+		// Test that all tables can be queried using custom schema (empty results expected)
+		rows, err := sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.workflow_status LIMIT 1", customSchema))
+		require.NoError(t, err)
+		rows.Close()
+
+		rows, err = sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.operation_outputs LIMIT 1", customSchema))
+		require.NoError(t, err)
+		rows.Close()
+
+		rows, err = sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.workflow_events LIMIT 1", customSchema))
+		require.NoError(t, err)
+		rows.Close()
+
+		rows, err = sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT destination_uuid FROM %s.notifications LIMIT 1", customSchema))
+		require.NoError(t, err)
+		rows.Close()
+
+		// Check that the dbos_migrations table exists in custom schema
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'dbos_migrations')", customSchema).Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "dbos_migrations table should exist in custom schema")
+
+		// Verify migration version is 1 (after initial migration)
+		var version int64
+		var count int
+		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT COUNT(*) FROM %s.dbos_migrations", customSchema)).Scan(&count)
+		require.NoError(t, err)
+		assert.Equal(t, 1, count, "dbos_migrations table should have exactly one row")
+
+		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT version FROM %s.dbos_migrations", customSchema)).Scan(&version)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), version, "migration version should be 1 (after initial migration)")
+	})
+
+	// Test workflows for exercising Send/Recv and SetEvent/GetEvent
+	type testWorkflowInput struct {
+		PartnerWorkflowID string
+		Message           string
+	}
+
+	// Workflow A: Uses Send() and GetEvent() - waits for workflow B
+	sendGetEventWorkflow := func(ctx DBOSContext, input testWorkflowInput) (string, error) {
+		// Send a message to the partner workflow
+		err := Send(ctx, input.PartnerWorkflowID, input.Message, "test-topic")
+		if err != nil {
+			return "", err
+		}
+
+		// Wait for an event from the partner workflow
+		result, err := GetEvent[string](ctx, input.PartnerWorkflowID, "response-key", 5*time.Hour)
+		if err != nil {
+			return "", err
+		}
+
+		return result, nil
+	}
+
+	// Workflow B: Uses Recv() and SetEvent() - waits for workflow A
+	recvSetEventWorkflow := func(ctx DBOSContext, input testWorkflowInput) (string, error) {
+		// Receive a message from the partner workflow
+		receivedMsg, err := Recv[string](ctx, "test-topic", 5*time.Hour)
+		if err != nil {
+			return "", err
+		}
+
+		time.Sleep(1 * time.Second)
+
+		// Set an event for the partner workflow
+		err = SetEvent(ctx, "response-key", "response-from-workflow-b")
+		if err != nil {
+			return "", err
+		}
+
+		return receivedMsg, nil
+	}
+
+	t.Run("CustomSchemaUsage", func(t *testing.T) {
+		// Register the test workflows
+		RegisterWorkflow(ctx, sendGetEventWorkflow)
+		RegisterWorkflow(ctx, recvSetEventWorkflow)
+
+		// Launch the DBOS context
+		ctx.Launch()
+
+		// Test RunWorkflow - start both workflows that will communicate with each other
+		workflowAID := uuid.NewString()
+		workflowBID := uuid.NewString()
+
+		// Start workflow B first (receiver)
+		handleB, err := RunWorkflow(ctx, recvSetEventWorkflow, testWorkflowInput{
+			PartnerWorkflowID: workflowAID,
+			Message:           "test-message-from-b",
+		}, WithWorkflowID(workflowBID))
+		require.NoError(t, err, "failed to start recvSetEventWorkflow")
+
+		// Small delay to ensure workflow B is ready to receive
+		time.Sleep(100 * time.Millisecond)
+
+		// Start workflow A (sender)
+		handleA, err := RunWorkflow(ctx, sendGetEventWorkflow, testWorkflowInput{
+			PartnerWorkflowID: workflowBID,
+			Message:           "test-message-from-a",
+		}, WithWorkflowID(workflowAID))
+		require.NoError(t, err, "failed to start sendGetEventWorkflow")
+
+		// Wait for both workflows to complete
+		resultA, err := handleA.GetResult()
+		require.NoError(t, err, "failed to get result from workflow A")
+		assert.Equal(t, "response-from-workflow-b", resultA, "workflow A should receive response from workflow B")
+
+		resultB, err := handleB.GetResult()
+		require.NoError(t, err, "failed to get result from workflow B")
+		assert.Equal(t, "test-message-from-a", resultB, "workflow B should receive message from workflow A")
+
+		// Test GetWorkflowSteps
+		stepsA, err := GetWorkflowSteps(ctx, workflowAID)
+		require.NoError(t, err, "failed to get workflow A steps")
+		require.Len(t, stepsA, 3, "workflow A should have 3 steps (Send + GetEvent + Sleep)")
+		assert.Equal(t, "DBOS.send", stepsA[0].StepName, "first step should be Send")
+		assert.Equal(t, "DBOS.getEvent", stepsA[1].StepName, "second step should be GetEvent")
+		assert.Equal(t, "DBOS.sleep", stepsA[2].StepName, "third step should be Sleep")
+
+		stepsB, err := GetWorkflowSteps(ctx, workflowBID)
+		require.NoError(t, err, "failed to get workflow B steps")
+		require.Len(t, stepsB, 3, "workflow B should have 3 steps (Recv + Sleep + SetEvent)")
+		assert.Equal(t, "DBOS.recv", stepsB[0].StepName, "first step should be Recv")
+		assert.Equal(t, "DBOS.sleep", stepsB[1].StepName, "second step should be Sleep")
+		assert.Equal(t, "DBOS.setEvent", stepsB[2].StepName, "third step should be SetEvent")
 	})
 }

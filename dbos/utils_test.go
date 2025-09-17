@@ -132,11 +132,11 @@ func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 			return false
 		}
 
-		query := `SELECT COUNT(*)
-				  FROM dbos.workflow_status
+		query := fmt.Sprintf(`SELECT COUNT(*)
+				  FROM %s.workflow_status
 				  WHERE queue_name IS NOT NULL
 					AND queue_name != $1
-					AND status IN ('ENQUEUED', 'PENDING')`
+					AND status IN ('ENQUEUED', 'PENDING')`, pgx.Identifier{exec.systemDB.(*sysDB).schema}.Sanitize())
 
 		var count int
 		err = tx.QueryRow(ctx, query, _DBOS_INTERNAL_QUEUE_NAME).Scan(&count)
