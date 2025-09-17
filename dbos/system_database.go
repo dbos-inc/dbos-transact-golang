@@ -1,7 +1,6 @@
 package dbos
 
 import (
-	"bytes"
 	"context"
 	_ "embed"
 	"errors"
@@ -11,7 +10,6 @@ import (
 	"math/rand"
 	"strings"
 	"sync"
-	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -121,8 +119,8 @@ func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *
 	return nil
 }
 
-//go:embed migrations/1_initial_dbos_schema.sql.tmpl
-var migration1Template string
+//go:embed migrations/1_initial_dbos_schema.sql
+var migration1SQL string
 
 type migrationFile struct {
 	version int64
@@ -149,25 +147,18 @@ const (
 )
 
 func runMigrations(databaseURL string, schema string) error {
-	// Process the migration template with the schema
-	tmpl, err := template.New("migration").Parse(migration1Template)
-	if err != nil {
-		return fmt.Errorf("failed to parse migration template: %v", err)
-	}
+	// Process the migration SQL with fmt.Sprintf (22 schema placeholders)
+	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
+	migrationSQL := fmt.Sprintf(migration1SQL,
+		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
+		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
+		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
+		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
+		sanitizedSchema, sanitizedSchema)
 
-	var migrationSQL bytes.Buffer
-	data := struct {
-		Schema string
-	}{
-		Schema: schema,
-	}
-	if err := tmpl.Execute(&migrationSQL, data); err != nil {
-		return fmt.Errorf("failed to execute migration template: %v", err)
-	}
-
-	// Build migrations list with processed template
+	// Build migrations list with processed SQL
 	migrations := []migrationFile{
-		{version: 1, sql: migrationSQL.String()},
+		{version: 1, sql: migrationSQL},
 	}
 
 	// Connect to the database
