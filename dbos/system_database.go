@@ -243,8 +243,8 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	logger := inputs.logger
 
 	maskedDatabaseURL := maskPassword(databaseURL)
-	fmt.Printf("Database URL for System Database: %s\n", maskedDatabaseURL)
-
+	fmt.Println(maskedDatabaseURL)
+	
 	// Create the database if it doesn't exist
 	if err := createDatabaseIfNotExists(ctx, databaseURL, logger); err != nil {
 		return nil, fmt.Errorf("failed to create database: %v", err)
