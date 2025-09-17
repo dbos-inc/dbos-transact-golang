@@ -690,8 +690,25 @@ func TestForkWorkflow(t *testing.T) {
 }
 
 func TestListWorkflows(t *testing.T) {
-	// Setup server context
-	serverCtx := setupDBOS(t, true, true)
+	// Setup server context with custom schema
+	databaseURL := getDatabaseURL()
+	resetTestDatabase(t, databaseURL)
+
+	customSchema := "dbos_list_test"
+	serverCtx, err := NewDBOSContext(context.Background(), Config{
+		DatabaseURL:    databaseURL,
+		AppName:        "test-list-workflows",
+		DatabaseSchema: customSchema,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, serverCtx)
+
+	// Register cleanup for server context
+	t.Cleanup(func() {
+		if serverCtx != nil {
+			serverCtx.Shutdown(30 * time.Second)
+		}
+	})
 
 	// Create queue for communication
 	queue := NewWorkflowQueue(serverCtx, "list-workflows-queue")
@@ -711,13 +728,13 @@ func TestListWorkflows(t *testing.T) {
 	RegisterWorkflow(serverCtx, simpleWorkflow, WithWorkflowName("SimpleWorkflow"))
 
 	// Launch server
-	err := serverCtx.Launch()
+	err = serverCtx.Launch()
 	require.NoError(t, err)
 
-	// Setup client
-	databaseURL := getDatabaseURL()
+	// Setup client with same custom schema
 	config := ClientConfig{
-		DatabaseURL: databaseURL,
+		DatabaseURL:    databaseURL,
+		DatabaseSchema: customSchema,
 	}
 	client, err := NewClient(context.Background(), config)
 	require.NoError(t, err)
@@ -908,7 +925,6 @@ func TestListWorkflows(t *testing.T) {
 			assert.Nil(t, wf.Output, "expected output to be nil when LoadOutput=false")
 		}
 	})
-
 	// Verify all queue entries are cleaned up
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after list workflows tests")
 }

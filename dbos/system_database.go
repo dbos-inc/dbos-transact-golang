@@ -1,6 +1,7 @@
 package dbos
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"math/rand"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -71,6 +73,7 @@ type sysDB struct {
 	notificationLoopDone           chan struct{}
 	notificationsMap               *sync.Map
 	logger                         *slog.Logger
+	schema                         string
 	launched                       bool
 }
 
@@ -118,17 +121,12 @@ func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *
 	return nil
 }
 
-//go:embed migrations/1_initial_dbos_schema.sql
-var migration1 string
+//go:embed migrations/1_initial_dbos_schema.sql.tmpl
+var migration1Template string
 
 type migrationFile struct {
 	version int64
 	sql     string
-}
-
-// migrations contains all migration files with their version numbers
-var migrations = []migrationFile{
-	{version: 1, sql: migration1},
 }
 
 const (
@@ -150,7 +148,28 @@ const (
 	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
-func runMigrations(databaseURL string) error {
+func runMigrations(databaseURL string, schema string) error {
+	// Process the migration template with the schema
+	tmpl, err := template.New("migration").Parse(migration1Template)
+	if err != nil {
+		return fmt.Errorf("failed to parse migration template: %v", err)
+	}
+
+	var migrationSQL bytes.Buffer
+	data := struct {
+		Schema string
+	}{
+		Schema: schema,
+	}
+	if err := tmpl.Execute(&migrationSQL, data); err != nil {
+		return fmt.Errorf("failed to execute migration template: %v", err)
+	}
+
+	// Build migrations list with processed template
+	migrations := []migrationFile{
+		{version: 1, sql: migrationSQL.String()},
+	}
+
 	// Connect to the database
 	pool, err := pgxpool.New(context.Background(), databaseURL)
 	if err != nil {
@@ -166,16 +185,17 @@ func runMigrations(databaseURL string) error {
 	}
 	defer tx.Rollback(ctx)
 
-	// Create the DBOS schema if it doesn't exist
-	_, err = tx.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS dbos")
+	// Create the schema if it doesn't exist
+	createSchemaQuery := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", pgx.Identifier{schema}.Sanitize())
+	_, err = tx.Exec(ctx, createSchemaQuery)
 	if err != nil {
-		return fmt.Errorf("failed to create DBOS schema: %v", err)
+		return fmt.Errorf("failed to create schema %s: %v", schema, err)
 	}
 
 	// Create the migrations table if it doesn't exist
-	createTableQuery := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS dbos.%s (
+	createTableQuery := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.%s (
 		version BIGINT NOT NULL PRIMARY KEY
-	)`, _DBOS_MIGRATION_TABLE)
+	)`, pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
 
 	_, err = tx.Exec(ctx, createTableQuery)
 	if err != nil {
@@ -184,13 +204,11 @@ func runMigrations(databaseURL string) error {
 
 	// Get current migration version
 	var currentVersion int64 = 0
-	query := fmt.Sprintf("SELECT version FROM dbos.%s LIMIT 1", _DBOS_MIGRATION_TABLE)
+	query := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
 	err = tx.QueryRow(ctx, query).Scan(&currentVersion)
 	if err != nil && err != pgx.ErrNoRows {
 		return fmt.Errorf("failed to get current migration version: %v", err)
 	}
-
-	// Use the embedded migrations slice
 
 	// Apply migrations starting from the next version
 	for _, migration := range migrations {
@@ -207,11 +225,11 @@ func runMigrations(databaseURL string) error {
 		// Update the migration version
 		if currentVersion == 0 {
 			// Insert first migration record
-			insertQuery := fmt.Sprintf("INSERT INTO dbos.%s (version) VALUES ($1)", _DBOS_MIGRATION_TABLE)
+			insertQuery := fmt.Sprintf("INSERT INTO %s.%s (version) VALUES ($1)", pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
 			_, err = tx.Exec(ctx, insertQuery, migration.version)
 		} else {
 			// Update existing migration record
-			updateQuery := fmt.Sprintf("UPDATE dbos.%s SET version = $1", _DBOS_MIGRATION_TABLE)
+			updateQuery := fmt.Sprintf("UPDATE %s.%s SET version = $1", pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
 			_, err = tx.Exec(ctx, updateQuery, migration.version)
 		}
 		if err != nil {
@@ -230,17 +248,24 @@ func runMigrations(databaseURL string) error {
 }
 
 type newSystemDatabaseInput struct {
-	databaseURL string
-	customPool  *pgxpool.Pool
-	logger      *slog.Logger
+	databaseURL    string
+	databaseSchema string
+	customPool     *pgxpool.Pool
+	logger         *slog.Logger
 }
 
 // New creates a new SystemDatabase instance and runs migrations
 func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (systemDatabase, error) {
 	// Dereference fields from inputs
 	databaseURL := inputs.databaseURL
+	databaseSchema := inputs.databaseSchema
 	customPool := inputs.customPool
 	logger := inputs.logger
+
+	// Validate that schema is provided
+	if databaseSchema == "" {
+		return nil, fmt.Errorf("database schema cannot be empty")
+	}
 
 	// Create the database if it doesn't exist
 	if err := createDatabaseIfNotExists(ctx, databaseURL, logger); err != nil {
@@ -248,19 +273,15 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	}
 
 	// Run migrations first
-	if err := runMigrations(databaseURL); err != nil {
+	if err := runMigrations(databaseURL, databaseSchema); err != nil {
 		return nil, fmt.Errorf("failed to run migrations: %v", err)
 	}
 
 	// pool
 	var pool *pgxpool.Pool
-
 	if customPool != nil {
-
 		pool = customPool
-
 	} else {
-
 		// Parse the connection string to get a config
 		config, err := pgxpool.ParseConfig(databaseURL)
 		if err != nil {
@@ -282,7 +303,6 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 			return nil, fmt.Errorf("failed to create connection pool: %v", err)
 		}
 		pool = newPool
-
 	}
 
 	// Test the connection
@@ -319,6 +339,7 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		notificationsMap:               notificationsMap,
 		notificationLoopDone:           make(chan struct{}),
 		logger:                         logger.With("service", "system_database"),
+		schema:                         databaseSchema,
 	}, nil
 }
 
@@ -424,7 +445,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		deduplicationID = &input.status.DeduplicationID
 	}
 
-	query := `INSERT INTO dbos.workflow_status (
+	query := fmt.Sprintf(`INSERT INTO %s.workflow_status (
         workflow_uuid,
         status,
         name,
@@ -455,7 +476,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
                 WHEN EXCLUDED.status = $20 THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
-        RETURNING recovery_attempts, status, name, queue_name, workflow_timeout_ms, workflow_deadline_epoch_ms`
+        RETURNING recovery_attempts, status, name, queue_name, workflow_timeout_ms, workflow_deadline_epoch_ms`, pgx.Identifier{s.schema}.Sanitize())
 
 	var result insertWorkflowResult
 	var timeoutMSResult *int64
@@ -524,9 +545,9 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		input.maxRetries > 0 && result.attempts > input.maxRetries+1 {
 
 		// Update workflow status to MAX_RECOVERY_ATTEMPTS_EXCEEDED and clear queue-related fields
-		dlqQuery := `UPDATE dbos.workflow_status
+		dlqQuery := fmt.Sprintf(`UPDATE %s.workflow_status
 					 SET status = $1, deduplication_id = NULL, started_at_epoch_ms = NULL, queue_name = NULL
-					 WHERE workflow_uuid = $2 AND status = $3`
+					 WHERE workflow_uuid = $2 AND status = $3`, pgx.Identifier{s.schema}.Sanitize())
 
 		_, err = input.tx.Exec(ctx, dlqQuery,
 			WorkflowStatusMaxRecoveryAttemptsExceeded,
@@ -588,7 +609,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		loadColumns = append(loadColumns, "inputs")
 	}
 
-	baseQuery := fmt.Sprintf("SELECT %s FROM dbos.workflow_status", strings.Join(loadColumns, ", "))
+	baseQuery := fmt.Sprintf("SELECT %s FROM %s.workflow_status", strings.Join(loadColumns, ", "), pgx.Identifier{s.schema}.Sanitize())
 
 	// Add filters using query builder
 	if input.workflowName != "" {
@@ -779,9 +800,9 @@ type updateWorkflowOutcomeDBInput struct {
 // updateWorkflowOutcome updates the status, output, and error of a workflow
 // Note that transitions from CANCELLED to SUCCESS or ERROR are forbidden
 func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error {
-	query := `UPDATE dbos.workflow_status
+	query := fmt.Sprintf(`UPDATE %s.workflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
-			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 in ($7, $8))`
+			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 in ($7, $8))`, pgx.Identifier{s.schema}.Sanitize())
 
 	outputString, err := serialize(input.output)
 	if err != nil {
@@ -838,9 +859,9 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
 	}
 
 	// Set the workflow's status to CANCELLED and started_at_epoch_ms to NULL (so it does not block the queue, if any)
-	updateStatusQuery := `UPDATE dbos.workflow_status
+	updateStatusQuery := fmt.Sprintf(`UPDATE %s.workflow_status
 						  SET status = $1, updated_at = $2, started_at_epoch_ms = NULL
-						  WHERE workflow_uuid = $3`
+						  WHERE workflow_uuid = $3`, pgx.Identifier{s.schema}.Sanitize())
 
 	_, err = tx.Exec(ctx, updateStatusQuery, WorkflowStatusCancelled, time.Now().UnixMilli(), workflowID)
 	if err != nil {
@@ -892,10 +913,10 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 
 	// If rowsThreshold is provided, get the timestamp of the Nth newest workflow
 	if input.rowsThreshold != nil {
-		query := `SELECT created_at
-				  FROM dbos.workflow_status
+		query := fmt.Sprintf(`SELECT created_at
+				  FROM %s.workflow_status
 				  ORDER BY created_at DESC
-				  LIMIT 1 OFFSET $1`
+				  LIMIT 1 OFFSET $1`, pgx.Identifier{s.schema}.Sanitize())
 
 		var rowsBasedCutoff int64
 		err := s.pool.QueryRow(ctx, query, *input.rowsThreshold-1).Scan(&rowsBasedCutoff)
@@ -916,9 +937,9 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 	}
 
 	// Delete all workflows older than cutoff that are NOT PENDING or ENQUEUED
-	query := `DELETE FROM dbos.workflow_status
+	query := fmt.Sprintf(`DELETE FROM %s.workflow_status
 			  WHERE created_at < $1
-			    AND status NOT IN ($2, $3)`
+			    AND status NOT IN ($2, $3)`, pgx.Identifier{s.schema}.Sanitize())
 
 	commandTag, err := s.pool.Exec(ctx, query,
 		*cutoffTimestamp,
@@ -971,11 +992,11 @@ func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 	}
 
 	// Set the workflow's status to ENQUEUED and clear its recovery attempts, set new deadline
-	updateStatusQuery := `UPDATE dbos.workflow_status
+	updateStatusQuery := fmt.Sprintf(`UPDATE %s.workflow_status
 						  SET status = $1, queue_name = $2, recovery_attempts = $3, 
 						      workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
 						      started_at_epoch_ms = NULL, updated_at = $4
-						  WHERE workflow_uuid = $5`
+						  WHERE workflow_uuid = $5`, pgx.Identifier{s.schema}.Sanitize())
 
 	_, err = tx.Exec(ctx, updateStatusQuery,
 		WorkflowStatusEnqueued,
@@ -1042,7 +1063,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 	}
 
 	// Create an entry for the forked workflow with the same initial values as the original
-	insertQuery := `INSERT INTO dbos.workflow_status (
+	insertQuery := fmt.Sprintf(`INSERT INTO %s.workflow_status (
 		workflow_uuid,
 		status,
 		name,
@@ -1056,7 +1077,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		created_at,
 		updated_at,
 		recovery_attempts
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, pgx.Identifier{s.schema}.Sanitize())
 
 	inputString, err := serialize(originalWorkflow.Input)
 	if err != nil {
@@ -1084,11 +1105,11 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 
 	// If startStep > 0, copy the original workflow's outputs into the forked workflow
 	if input.startStep > 0 {
-		copyOutputsQuery := `INSERT INTO dbos.operation_outputs
+		copyOutputsQuery := fmt.Sprintf(`INSERT INTO %s.operation_outputs
 			(workflow_uuid, function_id, output, error, function_name, child_workflow_id)
 			SELECT $1, function_id, output, error, function_name, child_workflow_id
-			FROM dbos.operation_outputs
-			WHERE workflow_uuid = $2 AND function_id < $3`
+			FROM %s.operation_outputs
+			WHERE workflow_uuid = $2 AND function_id < $3`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
 
 		_, err = tx.Exec(ctx, copyOutputsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
 		if err != nil {
@@ -1104,7 +1125,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 }
 
 func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any, error) {
-	query := `SELECT status, output, error FROM dbos.workflow_status WHERE workflow_uuid = $1`
+	query := fmt.Sprintf(`SELECT status, output, error FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
 	var status WorkflowStatusType
 	for {
 		select {
@@ -1155,10 +1176,10 @@ type recordOperationResultDBInput struct {
 }
 
 func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
-	query := `INSERT INTO dbos.operation_outputs
+	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
             (workflow_uuid, function_id, output, error, function_name)
             VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT DO NOTHING`
+			ON CONFLICT DO NOTHING`, pgx.Identifier{s.schema}.Sanitize())
 
 	var errorString *string
 	if input.err != nil {
@@ -1224,9 +1245,9 @@ type recordChildWorkflowDBInput struct {
 }
 
 func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error {
-	query := `INSERT INTO dbos.operation_outputs
+	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
             (workflow_uuid, function_id, function_name, child_workflow_id)
-            VALUES ($1, $2, $3, $4)`
+            VALUES ($1, $2, $3, $4)`, pgx.Identifier{s.schema}.Sanitize())
 
 	var commandTag pgconn.CommandTag
 	var err error
@@ -1265,9 +1286,9 @@ func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkfl
 }
 
 func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, functionID int) (*string, error) {
-	query := `SELECT child_workflow_id
-              FROM dbos.operation_outputs
-              WHERE workflow_uuid = $1 AND function_id = $2`
+	query := fmt.Sprintf(`SELECT child_workflow_id
+              FROM %s.operation_outputs
+              WHERE workflow_uuid = $1 AND function_id = $2`, pgx.Identifier{s.schema}.Sanitize())
 
 	var childWorkflowID *string
 	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID)
@@ -1290,10 +1311,10 @@ type recordChildGetResultDBInput struct {
 }
 
 func (s *sysDB) recordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error {
-	query := `INSERT INTO dbos.operation_outputs
+	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
             (workflow_uuid, function_id, function_name, output, error, child_workflow_id)
             VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT DO NOTHING`
+			ON CONFLICT DO NOTHING`, pgx.Identifier{s.schema}.Sanitize())
 
 	var errorString *string
 	if input.err != nil {
@@ -1347,12 +1368,12 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 	}
 
 	// First query: Retrieve the workflow status
-	workflowStatusQuery := `SELECT status FROM dbos.workflow_status WHERE workflow_uuid = $1`
+	workflowStatusQuery := fmt.Sprintf(`SELECT status FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
 
 	// Second query: Retrieve operation outputs if they exist
-	stepOutputQuery := `SELECT output, error, function_name
-							 FROM dbos.operation_outputs
-							 WHERE workflow_uuid = $1 AND function_id = $2`
+	stepOutputQuery := fmt.Sprintf(`SELECT output, error, function_name
+							 FROM %s.operation_outputs
+							 WHERE workflow_uuid = $1 AND function_id = $2`, pgx.Identifier{s.schema}.Sanitize())
 
 	var workflowStatus WorkflowStatusType
 
@@ -1416,10 +1437,10 @@ type StepInfo struct {
 }
 
 func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error) {
-	query := `SELECT function_id, function_name, output, error, child_workflow_id
-			  FROM dbos.operation_outputs
+	query := fmt.Sprintf(`SELECT function_id, function_name, output, error, child_workflow_id
+			  FROM %s.operation_outputs
 			  WHERE workflow_uuid = $1
-			  ORDER BY function_id ASC`
+			  ORDER BY function_id ASC`, pgx.Identifier{s.schema}.Sanitize())
 
 	rows, err := s.pool.Query(ctx, query, workflowID)
 	if err != nil {
@@ -1687,7 +1708,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
 
-	insertQuery := `INSERT INTO dbos.notifications (destination_uuid, topic, message) VALUES ($1, $2, $3)`
+	insertQuery := fmt.Sprintf(`INSERT INTO %s.notifications (destination_uuid, topic, message) VALUES ($1, $2, $3)`, pgx.Identifier{s.schema}.Sanitize())
 	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, messageString)
 	if err != nil {
 		// Check for foreign key violation (destination workflow doesn't exist)
@@ -1777,7 +1798,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	// Now check if there is already a message available in the database.
 	// If not, we'll wait for a notification and timeout
 	var exists bool
-	query := `SELECT EXISTS (SELECT 1 FROM dbos.notifications WHERE destination_uuid = $1 AND topic = $2)`
+	query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.notifications WHERE destination_uuid = $1 AND topic = $2)`, pgx.Identifier{s.schema}.Sanitize())
 	err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("failed to check message: %w", err)
@@ -1820,19 +1841,19 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	query = `
+	query = fmt.Sprintf(`
         WITH oldest_entry AS (
             SELECT destination_uuid, topic, message, created_at_epoch_ms
-            FROM dbos.notifications
+            FROM %s.notifications
             WHERE destination_uuid = $1 AND topic = $2
             ORDER BY created_at_epoch_ms ASC
             LIMIT 1
         )
-        DELETE FROM dbos.notifications
+        DELETE FROM %s.notifications
         WHERE destination_uuid = (SELECT destination_uuid FROM oldest_entry)
           AND topic = (SELECT topic FROM oldest_entry)
           AND created_at_epoch_ms = (SELECT created_at_epoch_ms FROM oldest_entry)
-        RETURNING message`
+        RETURNING message`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
 
 	var messageString *string
 	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString)
@@ -1923,10 +1944,10 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	}
 
 	// Insert or update the event using UPSERT
-	insertQuery := `INSERT INTO dbos.workflow_events (workflow_uuid, key, value)
+	insertQuery := fmt.Sprintf(`INSERT INTO %s.workflow_events (workflow_uuid, key, value)
 					VALUES ($1, $2, $3)
 					ON CONFLICT (workflow_uuid, key)
-					DO UPDATE SET value = EXCLUDED.value`
+					DO UPDATE SET value = EXCLUDED.value`, pgx.Identifier{s.schema}.Sanitize())
 
 	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, messageString)
 	if err != nil {
@@ -2007,7 +2028,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	}()
 
 	// Check if the event already exists in the database
-	query := `SELECT value FROM dbos.workflow_events WHERE workflow_uuid = $1 AND key = $2`
+	query := fmt.Sprintf(`SELECT value FROM %s.workflow_events WHERE workflow_uuid = $1 AND key = $2`, pgx.Identifier{s.schema}.Sanitize())
 	var valueString *string
 
 	row := s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
@@ -2121,12 +2142,12 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		cutoffTimeMs := time.Now().Add(-input.queue.RateLimit.Period).UnixMilli()
 
 		// Count workflows that have started in the limiter period
-		limiterQuery := `
+		limiterQuery := fmt.Sprintf(`
 		SELECT COUNT(*)
-		FROM dbos.workflow_status
+		FROM %s.workflow_status
 		WHERE queue_name = $1
 		  AND status != $2
-		  AND started_at_epoch_ms > $3`
+		  AND started_at_epoch_ms > $3`, pgx.Identifier{s.schema}.Sanitize())
 
 		err := tx.QueryRow(ctx, limiterQuery,
 			input.queue.Name,
@@ -2146,11 +2167,11 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 
 	if input.queue.WorkerConcurrency != nil || input.queue.GlobalConcurrency != nil {
 		// Count pending workflows by executor
-		pendingQuery := `
+		pendingQuery := fmt.Sprintf(`
 			SELECT executor_id, COUNT(*) as task_count
-			FROM dbos.workflow_status
+			FROM %s.workflow_status
 			WHERE queue_name = $1 AND status = $2
-			GROUP BY executor_id`
+			GROUP BY executor_id`, pgx.Identifier{s.schema}.Sanitize())
 
 		rows, err := tx.Query(ctx, pendingQuery, input.queue.Name, WorkflowStatusPending)
 		if err != nil {
@@ -2217,21 +2238,21 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	if input.queue.PriorityEnabled {
 		query = fmt.Sprintf(`
 			SELECT workflow_uuid
-			FROM dbos.workflow_status
+			FROM %s.workflow_status
 			WHERE queue_name = $1
 			  AND status = $2
 			  AND (application_version = $3 OR application_version IS NULL)
 			ORDER BY priority ASC, created_at ASC
-			%s`, lockClause)
+			%s`, pgx.Identifier{s.schema}.Sanitize(), lockClause)
 	} else {
 		query = fmt.Sprintf(`
 			SELECT workflow_uuid
-			FROM dbos.workflow_status
+			FROM %s.workflow_status
 			WHERE queue_name = $1
 			  AND status = $2
 			  AND (application_version = $3 OR application_version IS NULL)
 			ORDER BY created_at ASC
-			%s`, lockClause)
+			%s`, pgx.Identifier{s.schema}.Sanitize(), lockClause)
 	}
 
 	if maxTasks >= 0 {
@@ -2279,8 +2300,8 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		}
 
 		// Update workflow status to PENDING and return name and inputs
-		updateQuery := `
-			UPDATE dbos.workflow_status
+		updateQuery := fmt.Sprintf(`
+			UPDATE %s.workflow_status
 			SET status = $1,
 			    application_version = $2,
 			    executor_id = $3,
@@ -2291,7 +2312,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			        ELSE workflow_deadline_epoch_ms
 			    END
 			WHERE workflow_uuid = $5
-			RETURNING name, inputs`
+			RETURNING name, inputs`, pgx.Identifier{s.schema}.Sanitize())
 
 		var inputString *string
 		err := tx.QueryRow(ctx, updateQuery,
@@ -2322,11 +2343,11 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 }
 
 func (s *sysDB) clearQueueAssignment(ctx context.Context, workflowID string) (bool, error) {
-	query := `UPDATE dbos.workflow_status
+	query := fmt.Sprintf(`UPDATE %s.workflow_status
 			  SET status = $1, started_at_epoch_ms = NULL
 			  WHERE workflow_uuid = $2
 			    AND queue_name IS NOT NULL
-			    AND status = $3`
+			    AND status = $3`, pgx.Identifier{s.schema}.Sanitize())
 
 	commandTag, err := s.pool.Exec(ctx, query,
 		WorkflowStatusEnqueued,

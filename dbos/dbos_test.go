@@ -3,6 +3,7 @@ package dbos
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -99,7 +100,7 @@ func TestConfig(t *testing.T) {
 		dbosCtx, ok := customdbosContext.(*dbosContext)
 		defer dbosCtx.Shutdown(10 * time.Second)
 		require.True(t, ok)
-		
+
 		sysDB, ok := dbosCtx.systemDB.(*sysDB)
 		require.True(t, ok)
 		assert.Same(t, pool, sysDB.pool, "The pool in dbosContext should be the same as the custom pool provided")
@@ -315,6 +316,113 @@ func TestConfig(t *testing.T) {
 		ctx2, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-migration-recreate",
+		})
+		require.NoError(t, err)
+		defer func() {
+			if ctx2 != nil {
+				ctx2.Shutdown(1 * time.Minute)
+			}
+		}()
+
+		require.NotNil(t, ctx2)
+	})
+
+	t.Run("SystemDBMigrationWithCustomSchema", func(t *testing.T) {
+		t.Setenv("DBOS__APPVERSION", "v1.0.0")
+		t.Setenv("DBOS__APPID", "test-custom-schema")
+		t.Setenv("DBOS__VMID", "test-executor-id")
+
+		customSchema := "dbos_custom_test"
+		ctx, err := NewDBOSContext(context.Background(), Config{
+			DatabaseURL:    databaseURL,
+			AppName:        "test-custom-schema-migration",
+			DatabaseSchema: customSchema,
+		})
+		require.NoError(t, err)
+		defer func() {
+			if ctx != nil {
+				ctx.Shutdown(1 * time.Minute)
+			}
+		}()
+
+		require.NotNil(t, ctx)
+
+		// Get the internal systemDB instance to check tables directly
+		dbosCtx, ok := ctx.(*dbosContext)
+		require.True(t, ok, "expected dbosContext")
+		require.NotNil(t, dbosCtx.systemDB)
+
+		sysDB, ok := dbosCtx.systemDB.(*sysDB)
+		require.True(t, ok, "expected sysDB")
+
+		// Verify schema name was set correctly
+		assert.Equal(t, customSchema, sysDB.schema, "schema name should match custom schema")
+
+		// Verify all expected tables exist in the custom schema
+		dbCtx := context.Background()
+
+		// Test workflow_status table in custom schema
+		var exists bool
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'workflow_status')", customSchema).Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "workflow_status table should exist in custom schema")
+
+		// Test operation_outputs table in custom schema
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'operation_outputs')", customSchema).Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "operation_outputs table should exist in custom schema")
+
+		// Test workflow_events table in custom schema
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'workflow_events')", customSchema).Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "workflow_events table should exist in custom schema")
+
+		// Test notifications table in custom schema
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'notifications')", customSchema).Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "notifications table should exist in custom schema")
+
+		// Test that all tables can be queried using custom schema (empty results expected)
+		rows, err := sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.workflow_status LIMIT 1", customSchema))
+		require.NoError(t, err)
+		rows.Close()
+
+		rows, err = sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.operation_outputs LIMIT 1", customSchema))
+		require.NoError(t, err)
+		rows.Close()
+
+		rows, err = sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.workflow_events LIMIT 1", customSchema))
+		require.NoError(t, err)
+		rows.Close()
+
+		rows, err = sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT destination_uuid FROM %s.notifications LIMIT 1", customSchema))
+		require.NoError(t, err)
+		rows.Close()
+
+		// Check that the dbos_migrations table exists in custom schema
+		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'dbos_migrations')", customSchema).Scan(&exists)
+		require.NoError(t, err)
+		assert.True(t, exists, "dbos_migrations table should exist in custom schema")
+
+		// Verify migration version is 1 (after initial migration)
+		var version int64
+		var count int
+		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT COUNT(*) FROM %s.dbos_migrations", customSchema)).Scan(&count)
+		require.NoError(t, err)
+		assert.Equal(t, 1, count, "dbos_migrations table should have exactly one row")
+
+		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT version FROM %s.dbos_migrations", customSchema)).Scan(&version)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), version, "migration version should be 1 (after initial migration)")
+
+		// Test manual shutdown and recreate with same custom schema
+		ctx.Shutdown(1 * time.Minute)
+
+		// Recreate context with same custom schema - should have no error since DB is already migrated
+		ctx2, err := NewDBOSContext(context.Background(), Config{
+			DatabaseURL:    databaseURL,
+			AppName:        "test-custom-schema-recreate",
+			DatabaseSchema: customSchema,
 		})
 		require.NoError(t, err)
 		defer func() {

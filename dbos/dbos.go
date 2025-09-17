@@ -23,6 +23,7 @@ import (
 
 const (
 	_DEFAULT_ADMIN_SERVER_PORT = 3001
+	_DEFAULT_SYSTEM_DB_SCHEMA  = "dbos"
 	_DBOS_DOMAIN               = "cloud.dbos.dev"
 )
 
@@ -31,6 +32,7 @@ const (
 type Config struct {
 	DatabaseURL        string          // PostgreSQL connection string (required)
 	AppName            string          // Application name for identification (required)
+	DatabaseSchema     string          // Database schema name (defaults to "dbos")
 	Logger             *slog.Logger    // Custom logger instance (defaults to a new slog logger)
 	AdminServer        bool            // Enable Transact admin HTTP server (disabled by default)
 	AdminServerPort    int             // Port for the admin HTTP server (default: 3001)
@@ -57,6 +59,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	dbosConfig := &Config{
 		DatabaseURL:        inputConfig.DatabaseURL,
 		AppName:            inputConfig.AppName,
+		DatabaseSchema:     inputConfig.DatabaseSchema,
 		Logger:             inputConfig.Logger,
 		AdminServer:        inputConfig.AdminServer,
 		AdminServerPort:    inputConfig.AdminServerPort,
@@ -70,6 +73,9 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	// Load defaults
 	if dbosConfig.Logger == nil {
 		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	if dbosConfig.DatabaseSchema == "" {
+		dbosConfig.DatabaseSchema = _DEFAULT_SYSTEM_DB_SCHEMA
 	}
 
 	// Override with environment variables if set
@@ -325,9 +331,10 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 
 	newSystemDatabaseInputs := newSystemDatabaseInput{
-		databaseURL: config.DatabaseURL,
-		customPool:  config.SystemDBPool,
-		logger:      initExecutor.logger,
+		databaseURL:    config.DatabaseURL,
+		databaseSchema: config.DatabaseSchema,
+		customPool:     config.SystemDBPool,
+		logger:         initExecutor.logger,
 	}
 
 	// Create the system database

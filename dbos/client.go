@@ -14,9 +14,10 @@ import (
 )
 
 type ClientConfig struct {
-	DatabaseURL  string        // Connection URL for the PostgreSQL database
-	Logger       *slog.Logger  // Optional custom logger
-	SystemDBPool *pgxpool.Pool // Optional existing connection pool for the system database
+	DatabaseURL    string        // Connection URL for the PostgreSQL database
+	DatabaseSchema string        // Database schema name (defaults to "dbos")
+	Logger         *slog.Logger  // Optional custom logger
+	SystemDBPool   *pgxpool.Pool // Optional existing connection pool for the system database
 }
 
 // Client provides a programmatic way to interact with your DBOS application from external code.
@@ -52,10 +53,11 @@ type client struct {
 //	}
 func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 	dbosCtx, err := NewDBOSContext(ctx, Config{
-		DatabaseURL:  config.DatabaseURL,
-		AppName:      "dbos-client",
-		Logger:       config.Logger,
-		SystemDBPool: config.SystemDBPool,
+		DatabaseURL:    config.DatabaseURL,
+		DatabaseSchema: config.DatabaseSchema,
+		AppName:        "dbos-client",
+		Logger:         config.Logger,
+		SystemDBPool:   config.SystemDBPool,
 	})
 	if err != nil {
 		return nil, err
