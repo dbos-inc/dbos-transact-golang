@@ -1,9 +1,6 @@
 -- Enable uuid extension for generating UUIDs
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Create the schema if it doesn't exist
-CREATE SCHEMA IF NOT EXISTS %s;
-
 CREATE TABLE %s.workflow_status (
     workflow_uuid TEXT PRIMARY KEY,
     status TEXT,

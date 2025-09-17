@@ -154,7 +154,7 @@ func runMigrations(databaseURL string, schema string) error {
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
-		sanitizedSchema, sanitizedSchema)
+		sanitizedSchema)
 
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
