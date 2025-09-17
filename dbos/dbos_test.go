@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -326,27 +327,31 @@ func TestConfig(t *testing.T) {
 
 		require.NotNil(t, ctx2)
 	})
+}
 
-	t.Run("SystemDBMigrationWithCustomSchema", func(t *testing.T) {
-		t.Setenv("DBOS__APPVERSION", "v1.0.0")
-		t.Setenv("DBOS__APPID", "test-custom-schema")
-		t.Setenv("DBOS__VMID", "test-executor-id")
+func TestCustomSystemDBSchema(t *testing.T) {
+	t.Setenv("DBOS__APPVERSION", "v1.0.0")
+	t.Setenv("DBOS__APPID", "test-custom-schema")
+	t.Setenv("DBOS__VMID", "test-executor-id")
 
-		customSchema := "dbos_custom_test"
-		ctx, err := NewDBOSContext(context.Background(), Config{
-			DatabaseURL:    databaseURL,
-			AppName:        "test-custom-schema-migration",
-			DatabaseSchema: customSchema,
-		})
-		require.NoError(t, err)
-		defer func() {
-			if ctx != nil {
-				ctx.Shutdown(1 * time.Minute)
-			}
-		}()
+	databaseURL := getDatabaseURL()
+	customSchema := "dbos_custom_test"
 
-		require.NotNil(t, ctx)
+	ctx, err := NewDBOSContext(context.Background(), Config{
+		DatabaseURL:    databaseURL,
+		AppName:        "test-custom-schema-migration",
+		DatabaseSchema: customSchema,
+	})
+	require.NoError(t, err)
+	defer func() {
+		if ctx != nil {
+			ctx.Shutdown(1 * time.Minute)
+		}
+	}()
 
+	require.NotNil(t, ctx)
+
+	t.Run("CustomSchemaSetup", func(t *testing.T) {
 		// Get the internal systemDB instance to check tables directly
 		dbosCtx, ok := ctx.(*dbosContext)
 		require.True(t, ok, "expected dbosContext")
@@ -414,23 +419,99 @@ func TestConfig(t *testing.T) {
 		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT version FROM %s.dbos_migrations", customSchema)).Scan(&version)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), version, "migration version should be 1 (after initial migration)")
+	})
 
-		// Test manual shutdown and recreate with same custom schema
-		ctx.Shutdown(1 * time.Minute)
+	// Test workflows for exercising Send/Recv and SetEvent/GetEvent
+	type testWorkflowInput struct {
+		PartnerWorkflowID string
+		Message           string
+	}
 
-		// Recreate context with same custom schema - should have no error since DB is already migrated
-		ctx2, err := NewDBOSContext(context.Background(), Config{
-			DatabaseURL:    databaseURL,
-			AppName:        "test-custom-schema-recreate",
-			DatabaseSchema: customSchema,
-		})
-		require.NoError(t, err)
-		defer func() {
-			if ctx2 != nil {
-				ctx2.Shutdown(1 * time.Minute)
-			}
-		}()
+	// Workflow A: Uses Send() and GetEvent() - waits for workflow B
+	sendGetEventWorkflow := func(ctx DBOSContext, input testWorkflowInput) (string, error) {
+		// Send a message to the partner workflow
+		err := Send(ctx, input.PartnerWorkflowID, input.Message, "test-topic")
+		if err != nil {
+			return "", err
+		}
 
-		require.NotNil(t, ctx2)
+		// Wait for an event from the partner workflow
+		result, err := GetEvent[string](ctx, input.PartnerWorkflowID, "response-key", 5*time.Second)
+		if err != nil {
+			return "", err
+		}
+
+		return result, nil
+	}
+
+	// Workflow B: Uses Recv() and SetEvent() - waits for workflow A
+	recvSetEventWorkflow := func(ctx DBOSContext, input testWorkflowInput) (string, error) {
+		// Receive a message from the partner workflow
+		receivedMsg, err := Recv[string](ctx, "test-topic", 5*time.Second)
+		if err != nil {
+			return "", err
+		}
+
+		// Set an event for the partner workflow
+		err = SetEvent(ctx, "response-key", "response-from-workflow-b")
+		if err != nil {
+			return "", err
+		}
+
+		return receivedMsg, nil
+	}
+
+	t.Run("CustomSchemaUsage", func(t *testing.T) {
+		// Register the test workflows
+		RegisterWorkflow(ctx, sendGetEventWorkflow)
+		RegisterWorkflow(ctx, recvSetEventWorkflow)
+
+		// Launch the DBOS context
+		ctx.Launch()
+
+		// Test RunWorkflow - start both workflows that will communicate with each other
+		workflowAID := uuid.NewString()
+		workflowBID := uuid.NewString()
+
+		// Start workflow B first (receiver)
+		handleB, err := RunWorkflow(ctx, recvSetEventWorkflow, testWorkflowInput{
+			PartnerWorkflowID: workflowAID,
+			Message:           "test-message-from-b",
+		}, WithWorkflowID(workflowBID))
+		require.NoError(t, err, "failed to start recvSetEventWorkflow")
+
+		// Small delay to ensure workflow B is ready to receive
+		time.Sleep(100 * time.Millisecond)
+
+		// Start workflow A (sender)
+		handleA, err := RunWorkflow(ctx, sendGetEventWorkflow, testWorkflowInput{
+			PartnerWorkflowID: workflowBID,
+			Message:           "test-message-from-a",
+		}, WithWorkflowID(workflowAID))
+		require.NoError(t, err, "failed to start sendGetEventWorkflow")
+
+		// Wait for both workflows to complete
+		resultA, err := handleA.GetResult()
+		require.NoError(t, err, "failed to get result from workflow A")
+		assert.Equal(t, "response-from-workflow-b", resultA, "workflow A should receive response from workflow B")
+
+		resultB, err := handleB.GetResult()
+		require.NoError(t, err, "failed to get result from workflow B")
+		assert.Equal(t, "test-message-from-a", resultB, "workflow B should receive message from workflow A")
+
+		// Test GetWorkflowSteps
+		stepsA, err := GetWorkflowSteps(ctx, workflowAID)
+		require.NoError(t, err, "failed to get workflow A steps")
+		require.Len(t, stepsA, 3, "workflow A should have 3 steps (Send + GetEvent + Sleep)")
+		assert.Equal(t, "DBOS.send", stepsA[0].StepName, "first step should be Send")
+		assert.Equal(t, "DBOS.getEvent", stepsA[1].StepName, "second step should be GetEvent")
+		assert.Equal(t, "DBOS.sleep", stepsA[2].StepName, "third step should be Sleep")
+
+		stepsB, err := GetWorkflowSteps(ctx, workflowBID)
+		require.NoError(t, err, "failed to get workflow B steps")
+		require.Len(t, stepsB, 3, "workflow B should have 3 steps (Recv + Sleep + SetEvent)")
+		assert.Equal(t, "DBOS.recv", stepsB[0].StepName, "first step should be Recv")
+		assert.Equal(t, "DBOS.sleep", stepsB[1].StepName, "second step should be Sleep")
+		assert.Equal(t, "DBOS.setEvent", stepsB[2].StepName, "third step should be SetEvent")
 	})
 }
