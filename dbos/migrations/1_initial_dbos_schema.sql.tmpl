@@ -1,7 +1,10 @@
 -- Enable uuid extension for generating UUIDs
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-CREATE TABLE dbos.workflow_status (
+-- Create the schema if it doesn't exist
+CREATE SCHEMA IF NOT EXISTS {{.Schema}};
+
+CREATE TABLE {{.Schema}}.workflow_status (
     workflow_uuid TEXT PRIMARY KEY,
     status TEXT,
     name TEXT,
@@ -28,15 +31,15 @@ CREATE TABLE dbos.workflow_status (
     priority INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE INDEX workflow_status_created_at_index ON dbos.workflow_status (created_at);
-CREATE INDEX workflow_status_executor_id_index ON dbos.workflow_status (executor_id);
-CREATE INDEX workflow_status_status_index ON dbos.workflow_status (status);
+CREATE INDEX workflow_status_created_at_index ON {{.Schema}}.workflow_status (created_at);
+CREATE INDEX workflow_status_executor_id_index ON {{.Schema}}.workflow_status (executor_id);
+CREATE INDEX workflow_status_status_index ON {{.Schema}}.workflow_status (status);
 
-ALTER TABLE dbos.workflow_status
+ALTER TABLE {{.Schema}}.workflow_status
 ADD CONSTRAINT uq_workflow_status_queue_name_dedup_id
 UNIQUE (queue_name, deduplication_id);
 
-CREATE TABLE dbos.operation_outputs (
+CREATE TABLE {{.Schema}}.operation_outputs (
     workflow_uuid TEXT NOT NULL,
     function_id INTEGER NOT NULL,
     function_name TEXT NOT NULL DEFAULT '',
@@ -44,23 +47,23 @@ CREATE TABLE dbos.operation_outputs (
     error TEXT,
     child_workflow_id TEXT,
     PRIMARY KEY (workflow_uuid, function_id),
-    FOREIGN KEY (workflow_uuid) REFERENCES dbos.workflow_status(workflow_uuid) 
+    FOREIGN KEY (workflow_uuid) REFERENCES {{.Schema}}.workflow_status(workflow_uuid) 
         ON UPDATE CASCADE ON DELETE CASCADE
 );
 
-CREATE TABLE dbos.notifications (
+CREATE TABLE {{.Schema}}.notifications (
     destination_uuid TEXT NOT NULL,
     topic TEXT,
     message TEXT NOT NULL,
     created_at_epoch_ms BIGINT NOT NULL DEFAULT (EXTRACT(epoch FROM now()) * 1000::numeric)::bigint,
     message_uuid TEXT NOT NULL DEFAULT gen_random_uuid(), -- Built-in function
-    FOREIGN KEY (destination_uuid) REFERENCES dbos.workflow_status(workflow_uuid) 
+    FOREIGN KEY (destination_uuid) REFERENCES {{.Schema}}.workflow_status(workflow_uuid) 
         ON UPDATE CASCADE ON DELETE CASCADE
 );
-CREATE INDEX idx_workflow_topic ON dbos.notifications (destination_uuid, topic);
+CREATE INDEX idx_workflow_topic ON {{.Schema}}.notifications (destination_uuid, topic);
 
 -- Create notification function
-CREATE OR REPLACE FUNCTION dbos.notifications_function() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION {{.Schema}}.notifications_function() RETURNS TRIGGER AS $$
 DECLARE
     payload text := NEW.destination_uuid || '::' || NEW.topic;
 BEGIN
@@ -71,20 +74,20 @@ $$ LANGUAGE plpgsql;
 
 -- Create notification trigger
 CREATE TRIGGER dbos_notifications_trigger
-AFTER INSERT ON dbos.notifications
-FOR EACH ROW EXECUTE FUNCTION dbos.notifications_function();
+AFTER INSERT ON {{.Schema}}.notifications
+FOR EACH ROW EXECUTE FUNCTION {{.Schema}}.notifications_function();
 
-CREATE TABLE dbos.workflow_events (
+CREATE TABLE {{.Schema}}.workflow_events (
     workflow_uuid TEXT NOT NULL,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
     PRIMARY KEY (workflow_uuid, key),
-    FOREIGN KEY (workflow_uuid) REFERENCES dbos.workflow_status(workflow_uuid) 
+    FOREIGN KEY (workflow_uuid) REFERENCES {{.Schema}}.workflow_status(workflow_uuid) 
         ON UPDATE CASCADE ON DELETE CASCADE
 );
 
 -- Create events function
-CREATE OR REPLACE FUNCTION dbos.workflow_events_function() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION {{.Schema}}.workflow_events_function() RETURNS TRIGGER AS $$
 DECLARE
     payload text := NEW.workflow_uuid || '::' || NEW.key;
 BEGIN
@@ -95,20 +98,20 @@ $$ LANGUAGE plpgsql;
 
 -- Create events trigger
 CREATE TRIGGER dbos_workflow_events_trigger
-AFTER INSERT ON dbos.workflow_events
-FOR EACH ROW EXECUTE FUNCTION dbos.workflow_events_function();
+AFTER INSERT ON {{.Schema}}.workflow_events
+FOR EACH ROW EXECUTE FUNCTION {{.Schema}}.workflow_events_function();
 
-CREATE TABLE dbos.streams (
+CREATE TABLE {{.Schema}}.streams (
     workflow_uuid TEXT NOT NULL,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
     "offset" INTEGER NOT NULL,
     PRIMARY KEY (workflow_uuid, key, "offset"),
-    FOREIGN KEY (workflow_uuid) REFERENCES dbos.workflow_status(workflow_uuid)
+    FOREIGN KEY (workflow_uuid) REFERENCES {{.Schema}}.workflow_status(workflow_uuid)
         ON UPDATE CASCADE ON DELETE CASCADE
 );
 
-CREATE TABLE dbos.event_dispatch_kv (
+CREATE TABLE {{.Schema}}.event_dispatch_kv (
     service_name TEXT NOT NULL,
     workflow_fn_name TEXT NOT NULL,
     key TEXT NOT NULL,
