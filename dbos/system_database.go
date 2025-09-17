@@ -340,7 +340,6 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 
 	if s.launched {
 		// Wait for the notification loop to exit
-		s.logger.Debug("DBOS: Waiting for notification listener loop to finish")
 		select {
 		case <-s.notificationLoopDone:
 		case <-time.After(timeout):
@@ -1581,17 +1580,26 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			return nil, err
 		}
 		if _, err = tx.Exec(ctx, fmt.Sprintf("LISTEN %s", _DBOS_NOTIFICATIONS_CHANNEL)); err != nil {
-			_ = tx.Rollback(ctx)
+			rErr := tx.Rollback(ctx)
+			if rErr != nil {
+				s.logger.Error("Failed to rollback transaction after LISTEN error", "error", rErr)
+			}
 			pc.Release()
 			return nil, err
 		}
 		if _, err = tx.Exec(ctx, fmt.Sprintf("LISTEN %s", _DBOS_WORKFLOW_EVENTS_CHANNEL)); err != nil {
-			_ = tx.Rollback(ctx)
+			rErr := tx.Rollback(ctx)
+			if rErr != nil {
+				s.logger.Error("Failed to rollback transaction after LISTEN error", "error", rErr)
+			}
 			pc.Release()
 			return nil, err
 		}
 		if err = tx.Commit(ctx); err != nil {
-			_ = tx.Rollback(ctx)
+			rErr := tx.Rollback(ctx)
+			if rErr != nil {
+				s.logger.Error("Failed to rollback transaction after COMMIT error", "error", rErr)
+			}
 			pc.Release()
 			return nil, err
 		}
