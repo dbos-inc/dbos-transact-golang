@@ -5,11 +5,19 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type ClientConfig struct {
+	DatabaseURL  string        // Connection URL for the PostgreSQL database
+	Logger       *slog.Logger  // Optional custom logger
+	SystemDBPool *pgxpool.Pool // Optional existing connection pool for the system database
+}
 
 // Client provides a programmatic way to interact with your DBOS application from external code.
 // It manages the underlying DBOSContext and provides methods for workflow operations
@@ -35,16 +43,20 @@ type client struct {
 //
 // Example:
 //
-//	config := dbos.Config{
+//	config := dbos.ClientConfig{
 //	    DatabaseURL: "postgres://user:pass@localhost:5432/dbname",
-//	    AppName:     "my-app",
 //	}
 //	client, err := dbos.NewClient(context.Background(), config)
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-func NewClient(ctx context.Context, config Config) (Client, error) {
-	dbosCtx, err := NewDBOSContext(ctx, config)
+func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
+	dbosCtx, err := NewDBOSContext(ctx, Config{
+		DatabaseURL:  config.DatabaseURL,
+		AppName:      "dbos-client",
+		Logger:       config.Logger,
+		SystemDBPool: config.SystemDBPool,
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -65,9 +65,8 @@ func TestEnqueue(t *testing.T) {
 
 	// Setup client - this will enqueue tasks
 	databaseURL := getDatabaseURL()
-	config := Config{
+	config := ClientConfig{
 		DatabaseURL: databaseURL,
-		AppName:     "test-app",
 	}
 	client, err := NewClient(context.Background(), config)
 	require.NoError(t, err)
@@ -325,9 +324,8 @@ func TestCancelResume(t *testing.T) {
 
 	// Setup client - this will enqueue tasks
 	databaseURL := getDatabaseURL()
-	config := Config{
+	config := ClientConfig{
 		DatabaseURL: databaseURL,
-		AppName:     "test-app",
 	}
 	client, err := NewClient(context.Background(), config)
 	require.NoError(t, err)
@@ -577,9 +575,8 @@ func TestForkWorkflow(t *testing.T) {
 
 	// Setup client
 	databaseURL := getDatabaseURL()
-	config := Config{
+	config := ClientConfig{
 		DatabaseURL: databaseURL,
-		AppName:     "test-app",
 	}
 	client, err := NewClient(context.Background(), config)
 	require.NoError(t, err)
@@ -719,9 +716,8 @@ func TestListWorkflows(t *testing.T) {
 
 	// Setup client
 	databaseURL := getDatabaseURL()
-	config := Config{
+	config := ClientConfig{
 		DatabaseURL: databaseURL,
-		AppName:     "test-app",
 	}
 	client, err := NewClient(context.Background(), config)
 	require.NoError(t, err)
