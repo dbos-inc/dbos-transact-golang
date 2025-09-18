@@ -290,7 +290,8 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	// Displaying Masked Database URL
 	maskedDatabaseURL, err := maskPassword(pool.Config().ConnString())
 	if err != nil {
-		logger.Warn("Failed to parse database URL", "error", err)
+		logger.Error("Failed to parse database URL", "error", err)
+		return nil, fmt.Errorf("failed to parse database URL: %v", err)
 	}
 	logger.Info("Connecting to system database", "database_url", maskedDatabaseURL, "schema", databaseSchema)
 
