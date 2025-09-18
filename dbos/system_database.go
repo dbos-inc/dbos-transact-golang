@@ -291,9 +291,8 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	maskedDatabaseURL, err := maskPassword(pool.Config().ConnString())
 	if err != nil {
 		logger.Warn("Failed to parse database URL", "error", err)
-	} else {
-		logger.Info("Masked Database URL", "url", maskedDatabaseURL)
 	}
+	logger.Info("Connecting to system database", "database_url", maskedDatabaseURL, "schema", databaseSchema)
 
 	if customPool == nil {
 		// Create the database if it doesn't exist
@@ -2530,7 +2529,7 @@ func maskPassword(dbURL string) (string, error) {
 		_, hasPassword := parsedURL.User.Password()
 		if hasPassword {
 			// Manually construct the URL with masked password to avoid encoding
-			maskedURL := parsedURL.Scheme + "://" + username + ":********@" + parsedURL.Host + parsedURL.Path
+			maskedURL := parsedURL.Scheme + "://" + username + ":***@" + parsedURL.Host + parsedURL.Path
 			if parsedURL.RawQuery != "" {
 				maskedURL += "?" + parsedURL.RawQuery
 			}
