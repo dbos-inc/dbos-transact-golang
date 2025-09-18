@@ -81,15 +81,6 @@ type sysDB struct {
 
 // createDatabaseIfNotExists creates the database if it doesn't exist
 func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
-	// Try to acquire a connection from the pool first
-	poolConn, err := pool.Acquire(ctx)
-	if err == nil {
-		// Pool connection works, database likely exists
-		poolConn.Release()
-		return nil
-	}
-	// Fall through to database creation
-
 	// Get the database name from the pool config
 	poolConfig := pool.Config()
 	dbName := poolConfig.ConnConfig.Database
@@ -269,6 +260,16 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	var pool *pgxpool.Pool
 	if customPool != nil {
 		logger.Info("Using custom database connection pool")
+		// Verify the pool is valid
+		poolConn, err := customPool.Acquire(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate custom pool: %v", err)
+		}
+		err = poolConn.Ping(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate custom pool: %v", err)
+		}
+		poolConn.Release()
 		pool = customPool
 	} else {
 		// Parse the connection string to get a config
@@ -294,21 +295,27 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		pool = newPool
 	}
 
-	// Create the database if it doesn't exist
-	if err := createDatabaseIfNotExists(ctx, pool, logger); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("failed to create database: %v", err)
+	if customPool == nil {
+		// Create the database if it doesn't exist
+		if err := createDatabaseIfNotExists(ctx, pool, logger); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("failed to create database: %v", err)
+		}
 	}
 
 	// Run migrations
 	if err := runMigrations(pool, databaseSchema); err != nil {
-		pool.Close()
+		if customPool == nil {
+			pool.Close()
+		}
 		return nil, fmt.Errorf("failed to run migrations: %v", err)
 	}
 
 	// Test the connection
 	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
+		if customPool == nil {
+			pool.Close()
+		}
 		return nil, fmt.Errorf("failed to ping database: %v", err)
 	}
 
@@ -331,19 +338,28 @@ func (s *sysDB) launch(ctx context.Context) {
 }
 
 func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
-	s.logger.Debug("DBOS: Closing system database connection pool")
-
-	if s.pool != nil {
-		// Will block until every acquired connection is released
-		s.pool.Close()
-	}
+	s.logger.Debug("Closing system database connection pool")
 
 	if s.launched {
 		// Wait for the notification loop to exit
 		select {
 		case <-s.notificationLoopDone:
 		case <-time.After(timeout):
-			s.logger.Warn("DBOS: Notification listener loop did not finish in time", "timeout", timeout)
+			s.logger.Warn("Notification listener loop did not finish in time", "timeout", timeout)
+		}
+	}
+
+	if s.pool != nil {
+		poolClose := make(chan struct{})
+		go func() {
+			// Will block until every acquired connection is released
+			s.pool.Close()
+			close(poolClose)
+		}()
+		select {
+		case <-poolClose:
+		case <-time.After(timeout):
+			s.logger.Warn("System database connection pool did not close in time", "timeout", timeout)
 		}
 	}
 
@@ -1565,6 +1581,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 
 func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 	defer func() {
+		s.logger.Debug("Notification listener loop exiting")
 		s.notificationLoopDone <- struct{}{}
 	}()
 
@@ -1622,8 +1639,9 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 		n, err := poolConn.Conn().WaitForNotification(ctx)
 		if err != nil {
 			// Context cancellation -> graceful exit
-			if ctx.Err() != nil || strings.Contains(err.Error(), "pool closed") {
-				s.logger.Debug("Notification listener exiting (context canceled or pool closed)", "cause", context.Cause(ctx), "error", err)
+			if ctx.Err() != nil {
+				s.logger.Debug("Notification listener exiting (context canceled", "cause", context.Cause(ctx), "error", err)
+				poolConn.Release()
 				return
 			}
 			// If the underlying connection is closed, attempt to re-acquire a new one
