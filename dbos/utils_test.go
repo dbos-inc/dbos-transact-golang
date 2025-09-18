@@ -67,7 +67,6 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 
 	// Register cleanup to run after test completes
 	t.Cleanup(func() {
-		fmt.Println("Cleaning up DBOS instance...")
 		dbosCtx.(*dbosContext).logger.Info("Cleaning up DBOS instance...")
 		if dbosCtx != nil {
 			dbosCtx.Shutdown(30 * time.Second) // Wait for workflows to finish and shutdown admin server and system database
@@ -77,8 +76,9 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 			goleak.VerifyNone(t,
 				// Ignore pgx health checks
 				// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
-				goleak.IgnoreTopFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
-				goleak.IgnoreTopFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
+				goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
+				goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
+				goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck.func1"),
 			)
 		}
 	})
