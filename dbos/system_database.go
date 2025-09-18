@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"math/rand"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -252,6 +253,14 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	databaseSchema := inputs.databaseSchema
 	customPool := inputs.customPool
 	logger := inputs.logger
+
+	// Displaying Masked Database URL
+	maskedDatabaseURL, err := maskPassword(databaseURL)
+	if err != nil {
+		logger.Warn("Failed to parse database URL", "error", err)
+	} else {
+		logger.Info("Masked Database URL", "url", maskedDatabaseURL)
+	}
 
 	// Validate that schema is provided
 	if databaseSchema == "" {
@@ -2466,4 +2475,32 @@ func backoffWithJitter(retryAttempt int) time.Duration {
 	// want randomization between +-25% of exp
 	jitter := 0.75 + rand.Float64()*0.5 // #nosec G404 -- trivial use of math/rand
 	return time.Duration(exp * jitter)
+}
+
+// maskPassword replaces the password in a database URL with asterisks
+func maskPassword(dbURL string) (string, error) {
+	parsedURL, err := url.Parse(dbURL)
+
+	if err != nil {
+		return "", err
+	}
+
+	// Check if there is user info with a password
+	if parsedURL.User != nil {
+		username := parsedURL.User.Username()
+		_, hasPassword := parsedURL.User.Password()
+		if hasPassword {
+			// Manually construct the URL with masked password to avoid encoding
+			maskedURL := parsedURL.Scheme + "://" + username + ":********@" + parsedURL.Host + parsedURL.Path
+			if parsedURL.RawQuery != "" {
+				maskedURL += "?" + parsedURL.RawQuery
+			}
+			if parsedURL.Fragment != "" {
+				maskedURL += "#" + parsedURL.Fragment
+			}
+			return maskedURL, nil
+		}
+	}
+
+	return parsedURL.String(), nil
 }
