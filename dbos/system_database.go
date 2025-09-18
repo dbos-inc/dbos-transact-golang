@@ -342,6 +342,7 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 
 	if s.launched {
 		// Wait for the notification loop to exit
+		// The context should be cancelled prior to calling shutdown
 		select {
 		case <-s.notificationLoopDone:
 		case <-time.After(timeout):
