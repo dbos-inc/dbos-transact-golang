@@ -243,14 +243,6 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	customPool := inputs.customPool
 	logger := inputs.logger
 
-	// Displaying Masked Database URL
-	maskedDatabaseURL, err := maskPassword(databaseURL)
-	if err != nil {
-		logger.Warn("Failed to parse database URL", "error", err)
-	} else {
-		logger.Info("Masked Database URL", "url", maskedDatabaseURL)
-	}
-
 	// Validate that schema is provided
 	if databaseSchema == "" {
 		return nil, fmt.Errorf("database schema cannot be empty")
@@ -293,6 +285,14 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 			return nil, fmt.Errorf("failed to create connection pool: %v", err)
 		}
 		pool = newPool
+	}
+
+	// Displaying Masked Database URL
+	maskedDatabaseURL, err := maskPassword(pool.Config().ConnString())
+	if err != nil {
+		logger.Warn("Failed to parse database URL", "error", err)
+	} else {
+		logger.Info("Masked Database URL", "url", maskedDatabaseURL)
 	}
 
 	if customPool == nil {
@@ -2520,7 +2520,6 @@ func backoffWithJitter(retryAttempt int) time.Duration {
 // maskPassword replaces the password in a database URL with asterisks
 func maskPassword(dbURL string) (string, error) {
 	parsedURL, err := url.Parse(dbURL)
-
 	if err != nil {
 		return "", err
 	}
