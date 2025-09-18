@@ -1,7 +1,6 @@
 package dbos
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -61,60 +60,6 @@ func TestConfig(t *testing.T) {
 
 		expectedMsg := "Error initializing DBOS Transact: missing required config field: appName"
 		assert.Equal(t, expectedMsg, dbosErr.Message)
-	})
-
-	t.Run("NewSystemDatabaseWithCustomPool", func(t *testing.T) {
-
-		// Logger
-		var buf bytes.Buffer
-		slogLogger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		}))
-
-		slogLogger = slogLogger.With("service", "dbos-test", "environment", "test")
-
-		// Custom Pool
-		poolConfig, err := pgxpool.ParseConfig(databaseURL)
-		require.NoError(t, err)
-
-		poolConfig.MaxConns = 10
-		poolConfig.MinConns = 5
-		poolConfig.MaxConnLifetime = 2 * time.Hour
-		poolConfig.MaxConnIdleTime = time.Minute * 2
-
-		poolConfig.ConnConfig.ConnectTimeout = 10 * time.Second
-
-		pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
-		require.NoError(t, err)
-
-		config := Config{
-			DatabaseURL:  databaseURL,
-			AppName:      "test-custom-pool",
-			Logger:       slogLogger,
-			SystemDBPool: pool,
-		}
-
-		customdbosContext, err := NewDBOSContext(context.Background(), config)
-		require.NoError(t, err)
-		require.NotNil(t, customdbosContext)
-
-		dbosCtx, ok := customdbosContext.(*dbosContext)
-		defer dbosCtx.Shutdown(10 * time.Second)
-		require.True(t, ok)
-
-		sysDB, ok := dbosCtx.systemDB.(*sysDB)
-		require.True(t, ok)
-		assert.Same(t, pool, sysDB.pool, "The pool in dbosContext should be the same as the custom pool provided")
-
-		stats := sysDB.pool.Stat()
-		assert.Equal(t, int32(10), stats.MaxConns(), "MaxConns should match custom pool config")
-
-		sysdbConfig := sysDB.pool.Config()
-		assert.Equal(t, int32(10), sysdbConfig.MaxConns)
-		assert.Equal(t, int32(5), sysdbConfig.MinConns)
-		assert.Equal(t, 2*time.Hour, sysdbConfig.MaxConnLifetime)
-		assert.Equal(t, 2*time.Minute, sysdbConfig.MaxConnIdleTime)
-		assert.Equal(t, 10*time.Second, sysdbConfig.ConnConfig.ConnectTimeout)
 	})
 
 	t.Run("FailsWithoutDatabaseURL", func(t *testing.T) {
@@ -515,5 +460,247 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		assert.Equal(t, "DBOS.recv", stepsB[0].StepName, "first step should be Recv")
 		assert.Equal(t, "DBOS.sleep", stepsB[1].StepName, "second step should be Sleep")
 		assert.Equal(t, "DBOS.setEvent", stepsB[2].StepName, "third step should be SetEvent")
+	})
+}
+
+func TestCustomPool(t *testing.T) {
+	// Test workflows for custom pool testing
+	type customPoolWorkflowInput struct {
+		PartnerWorkflowID string
+		Message           string
+	}
+
+	// Workflow A: Uses Send() and GetEvent() - waits for workflow B
+	sendGetEventWorkflowCustom := func(ctx DBOSContext, input customPoolWorkflowInput) (string, error) {
+		// Send a message to the partner workflow
+		err := Send(ctx, input.PartnerWorkflowID, input.Message, "custom-pool-topic")
+		if err != nil {
+			return "", err
+		}
+
+		// Wait for an event from the partner workflow
+		result, err := GetEvent[string](ctx, input.PartnerWorkflowID, "custom-response-key", 5*time.Hour)
+		if err != nil {
+			return "", err
+		}
+
+		return result, nil
+	}
+
+	// Workflow B: Uses Recv() and SetEvent() - waits for workflow A
+	recvSetEventWorkflowCustom := func(ctx DBOSContext, input customPoolWorkflowInput) (string, error) {
+		// Receive a message from the partner workflow
+		receivedMsg, err := Recv[string](ctx, "custom-pool-topic", 5*time.Hour)
+		if err != nil {
+			return "", err
+		}
+
+		time.Sleep(1 * time.Second)
+
+		// Set an event for the partner workflow
+		err = SetEvent(ctx, "custom-response-key", "response-from-custom-pool-workflow")
+		if err != nil {
+			return "", err
+		}
+
+		return receivedMsg, nil
+	}
+
+	t.Run("CustomPool", func(t *testing.T) {
+		// Custom Pool
+		databaseURL := getDatabaseURL()
+		poolConfig, err := pgxpool.ParseConfig(databaseURL)
+		require.NoError(t, err)
+
+		poolConfig.MaxConns = 10
+		poolConfig.MinConns = 5
+		poolConfig.MaxConnLifetime = 2 * time.Hour
+		poolConfig.MaxConnIdleTime = time.Minute * 2
+
+		poolConfig.ConnConfig.ConnectTimeout = 10 * time.Second
+
+		pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
+		require.NoError(t, err)
+
+		config := Config{
+			DatabaseURL:  databaseURL,
+			AppName:      "test-custom-pool",
+			SystemDBPool: pool,
+		}
+
+		customdbosContext, err := NewDBOSContext(context.Background(), config)
+		require.NoError(t, err)
+		require.NotNil(t, customdbosContext)
+
+		dbosCtx, ok := customdbosContext.(*dbosContext)
+		defer dbosCtx.Shutdown(10 * time.Second)
+		require.True(t, ok)
+
+		sysDB, ok := dbosCtx.systemDB.(*sysDB)
+		require.True(t, ok)
+		assert.Same(t, pool, sysDB.pool, "The pool in dbosContext should be the same as the custom pool provided")
+
+		stats := sysDB.pool.Stat()
+		assert.Equal(t, int32(10), stats.MaxConns(), "MaxConns should match custom pool config")
+
+		sysdbConfig := sysDB.pool.Config()
+		assert.Equal(t, int32(10), sysdbConfig.MaxConns)
+		assert.Equal(t, int32(5), sysdbConfig.MinConns)
+		assert.Equal(t, 2*time.Hour, sysdbConfig.MaxConnLifetime)
+		assert.Equal(t, 2*time.Minute, sysdbConfig.MaxConnIdleTime)
+		assert.Equal(t, 10*time.Second, sysdbConfig.ConnConfig.ConnectTimeout)
+
+		// Register the test workflows
+		RegisterWorkflow(customdbosContext, sendGetEventWorkflowCustom)
+		RegisterWorkflow(customdbosContext, recvSetEventWorkflowCustom)
+
+		// Launch the DBOS context
+		err = customdbosContext.Launch()
+		require.NoError(t, err)
+		defer dbosCtx.Shutdown(1 * time.Minute)
+
+		// Test RunWorkflow - start both workflows that will communicate with each other
+		workflowAID := uuid.NewString()
+		workflowBID := uuid.NewString()
+
+		// Start workflow B first (receiver)
+		handleB, err := RunWorkflow(customdbosContext, recvSetEventWorkflowCustom, customPoolWorkflowInput{
+			PartnerWorkflowID: workflowAID,
+			Message:           "custom-pool-message-from-b",
+		}, WithWorkflowID(workflowBID))
+		require.NoError(t, err, "failed to start recvSetEventWorkflowCustom")
+
+		// Small delay to ensure workflow B is ready to receive
+		time.Sleep(100 * time.Millisecond)
+
+		// Start workflow A (sender)
+		handleA, err := RunWorkflow(customdbosContext, sendGetEventWorkflowCustom, customPoolWorkflowInput{
+			PartnerWorkflowID: workflowBID,
+			Message:           "custom-pool-message-from-a",
+		}, WithWorkflowID(workflowAID))
+		require.NoError(t, err, "failed to start sendGetEventWorkflowCustom")
+
+		// Wait for both workflows to complete
+		resultA, err := handleA.GetResult()
+		require.NoError(t, err, "failed to get result from workflow A")
+		assert.Equal(t, "response-from-custom-pool-workflow", resultA, "workflow A should receive response from workflow B")
+
+		resultB, err := handleB.GetResult()
+		require.NoError(t, err, "failed to get result from workflow B")
+		assert.Equal(t, "custom-pool-message-from-a", resultB, "workflow B should receive message from workflow A")
+
+		// Test GetWorkflowSteps
+		stepsA, err := GetWorkflowSteps(customdbosContext, workflowAID)
+		require.NoError(t, err, "failed to get workflow A steps")
+		require.Len(t, stepsA, 3, "workflow A should have 3 steps (Send + GetEvent + Sleep)")
+		assert.Equal(t, "DBOS.send", stepsA[0].StepName, "first step should be Send")
+		assert.Equal(t, "DBOS.getEvent", stepsA[1].StepName, "second step should be GetEvent")
+		assert.Equal(t, "DBOS.sleep", stepsA[2].StepName, "third step should be Sleep")
+
+		stepsB, err := GetWorkflowSteps(customdbosContext, workflowBID)
+		require.NoError(t, err, "failed to get workflow B steps")
+		require.Len(t, stepsB, 3, "workflow B should have 3 steps (Recv + Sleep + SetEvent)")
+		assert.Equal(t, "DBOS.recv", stepsB[0].StepName, "first step should be Recv")
+		assert.Equal(t, "DBOS.sleep", stepsB[1].StepName, "second step should be Sleep")
+		assert.Equal(t, "DBOS.setEvent", stepsB[2].StepName, "third step should be SetEvent")
+	})
+
+	wf := func(ctx DBOSContext, input string) (string, error) {
+		return input, nil
+	}
+
+	t.Run("InvalidDatabaseUrl", func(t *testing.T) {
+		invalidDatabaseURL := "postgres://invalid:invalid@localhost:5432/invaliddb"
+		databaseURL := getDatabaseURL()
+		poolConfig, err := pgxpool.ParseConfig(databaseURL)
+		require.NoError(t, err)
+		pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
+		require.NoError(t, err)
+
+		config := Config{
+			DatabaseURL:  invalidDatabaseURL,
+			AppName:      "test-invalid-db-url",
+			SystemDBPool: pool,
+		}
+		dbosCtx, err := NewDBOSContext(context.Background(), config)
+		require.NoError(t, err)
+
+		RegisterWorkflow(dbosCtx, wf)
+
+		// Launch the DBOS context
+		err = dbosCtx.Launch()
+		require.NoError(t, err)
+		defer dbosCtx.Shutdown(1 * time.Minute)
+
+		// Run a workflow
+		_, err = RunWorkflow(dbosCtx, wf, "test-input")
+		require.NoError(t, err)
+	})
+
+	t.Run("InvalidCustomPool", func(t *testing.T) {
+		databaseURL := getDatabaseURL()
+		poolConfig, err := pgxpool.ParseConfig(databaseURL)
+		require.NoError(t, err)
+		poolConfig.ConnConfig.Host = "invalid-host"
+		pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
+		require.NoError(t, err)
+
+		config := Config{
+			DatabaseURL:  databaseURL,
+			AppName:      "test-invalid-custom-pool",
+			SystemDBPool: pool,
+		}
+		_, err = NewDBOSContext(context.Background(), config)
+		require.Error(t, err)
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected DBOSError, got %T", err)
+		assert.Equal(t, InitializationError, dbosErr.Code)
+		expectedMsg := "Error initializing DBOS Transact: failed to create system database"
+		assert.Contains(t, dbosErr.Message, expectedMsg)
+	})
+
+	t.Run("DirectSystemDatabase", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		databaseURL := getDatabaseURL()
+		logger := slog.Default()
+
+		// Create custom pool
+		poolConfig, err := pgxpool.ParseConfig(databaseURL)
+		require.NoError(t, err)
+		poolConfig.MaxConns = 15
+		poolConfig.MinConns = 3
+		customPool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+		require.NoError(t, err)
+		defer customPool.Close()
+
+		// Create system database with custom pool
+		sysDBInput := newSystemDatabaseInput{
+			databaseURL:    databaseURL,
+			databaseSchema: "dbos_test_custom_direct",
+			customPool:     customPool,
+			logger:         logger,
+		}
+
+		systemDB, err := newSystemDatabase(ctx, sysDBInput)
+		require.NoError(t, err, "failed to create system database with custom pool")
+		require.NotNil(t, systemDB)
+
+		// Launch the system database
+		systemDB.launch(ctx)
+
+		require.Eventually(t, func() bool {
+			conn, err := systemDB.(*sysDB).pool.Acquire(ctx)
+			require.NoError(t, err)
+			defer conn.Release()
+			err = conn.Ping(ctx)
+			require.NoError(t, err)
+			return true
+		}, 5*time.Second, 100*time.Millisecond, "system database should be reachable")
+
+		// Shutdown the system database
+		cancel() // Cancel context
+		shutdownTimeout := 2 * time.Second
+		systemDB.shutdown(ctx, shutdownTimeout)
+		assert.False(t, systemDB.(*sysDB).launched)
 	})
 }

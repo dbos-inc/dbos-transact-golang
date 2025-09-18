@@ -67,13 +67,12 @@ type systemDatabase interface {
 }
 
 type sysDB struct {
-	pool                           *pgxpool.Pool
-	notificationListenerConnection *pgconn.PgConn
-	notificationLoopDone           chan struct{}
-	notificationsMap               *sync.Map
-	logger                         *slog.Logger
-	schema                         string
-	launched                       bool
+	pool                 *pgxpool.Pool
+	notificationLoopDone chan struct{}
+	notificationsMap     *sync.Map
+	logger               *slog.Logger
+	schema               string
+	launched             bool
 }
 
 /*******************************/
@@ -81,21 +80,18 @@ type sysDB struct {
 /*******************************/
 
 // createDatabaseIfNotExists creates the database if it doesn't exist
-func createDatabaseIfNotExists(ctx context.Context, databaseURL string, logger *slog.Logger) error {
-	// Connect to the postgres database
-	parsedURL, err := pgx.ParseConfig(databaseURL)
-	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to parse database URL: %v", err))
-	}
-
-	dbName := parsedURL.Database
+func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+	// Get the database name from the pool config
+	poolConfig := pool.Config()
+	dbName := poolConfig.ConnConfig.Database
 	if dbName == "" {
-		return newInitializationError("database name not found in URL")
+		return newInitializationError("database name not found in pool configuration")
 	}
 
-	serverURL := parsedURL.Copy()
-	serverURL.Database = "postgres"
-	conn, err := pgx.ConnectConfig(ctx, serverURL)
+	// Create a connection to the postgres database to create the target database
+	serverConfig := poolConfig.ConnConfig.Copy()
+	serverConfig.Database = "postgres"
+	conn, err := pgx.ConnectConfig(ctx, serverConfig)
 	if err != nil {
 		return newInitializationError(fmt.Sprintf("failed to connect to PostgreSQL server: %v", err))
 	}
@@ -147,7 +143,7 @@ const (
 	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
-func runMigrations(databaseURL string, schema string) error {
+func runMigrations(pool *pgxpool.Pool, schema string) error {
 	// Process the migration SQL with fmt.Sprintf (22 schema placeholders)
 	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
 	migrationSQL := fmt.Sprintf(migration1SQL,
@@ -161,13 +157,6 @@ func runMigrations(databaseURL string, schema string) error {
 	migrations := []migrationFile{
 		{version: 1, sql: migrationSQL},
 	}
-
-	// Connect to the database
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		return fmt.Errorf("failed to create connection pool: %v", err)
-	}
-	defer pool.Close()
 
 	// Begin transaction for atomic migration execution
 	ctx := context.Background()
@@ -254,32 +243,25 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	customPool := inputs.customPool
 	logger := inputs.logger
 
-	// Displaying Masked Database URL
-	maskedDatabaseURL, err := maskPassword(databaseURL)
-	if err != nil {
-		logger.Warn("Failed to parse database URL", "error", err)
-	} else {
-		logger.Info("Masked Database URL", "url", maskedDatabaseURL)
-	}
-
 	// Validate that schema is provided
 	if databaseSchema == "" {
 		return nil, fmt.Errorf("database schema cannot be empty")
 	}
 
-	// Create the database if it doesn't exist
-	if err := createDatabaseIfNotExists(ctx, databaseURL, logger); err != nil {
-		return nil, fmt.Errorf("failed to create database: %v", err)
-	}
-
-	// Run migrations first
-	if err := runMigrations(databaseURL, databaseSchema); err != nil {
-		return nil, fmt.Errorf("failed to run migrations: %v", err)
-	}
-
-	// pool
+	// Configure a connection pool
 	var pool *pgxpool.Pool
 	if customPool != nil {
+		logger.Info("Using custom database connection pool")
+		// Verify the pool is valid
+		poolConn, err := customPool.Acquire(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate custom pool: %v", err)
+		}
+		err = poolConn.Ping(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate custom pool: %v", err)
+		}
+		poolConn.Release()
 		pool = customPool
 	} else {
 		// Parse the connection string to get a config
@@ -305,41 +287,47 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		pool = newPool
 	}
 
+	// Displaying Masked Database URL
+	maskedDatabaseURL, err := maskPassword(pool.Config().ConnString())
+	if err != nil {
+		logger.Error("Failed to parse database URL", "error", err)
+		return nil, fmt.Errorf("failed to parse database URL: %v", err)
+	}
+	logger.Info("Connecting to system database", "database_url", maskedDatabaseURL, "schema", databaseSchema)
+
+	if customPool == nil {
+		// Create the database if it doesn't exist
+		if err := createDatabaseIfNotExists(ctx, pool, logger); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("failed to create database: %v", err)
+		}
+	}
+
+	// Run migrations
+	if err := runMigrations(pool, databaseSchema); err != nil {
+		if customPool == nil {
+			pool.Close()
+		}
+		return nil, fmt.Errorf("failed to run migrations: %v", err)
+	}
+
 	// Test the connection
 	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
+		if customPool == nil {
+			pool.Close()
+		}
 		return nil, fmt.Errorf("failed to ping database: %v", err)
 	}
 
 	// Create a map of notification payloads to channels
 	notificationsMap := &sync.Map{}
 
-	// Create a connection to listen on notifications
-	notifierConnConfig, err := pgconn.ParseConfig(databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse database URL: %v", err)
-	}
-	notifierConnConfig.OnNotification = func(c *pgconn.PgConn, n *pgconn.Notification) {
-		if n.Channel == _DBOS_NOTIFICATIONS_CHANNEL || n.Channel == _DBOS_WORKFLOW_EVENTS_CHANNEL {
-			// Check if an entry exists in the map, indexed by the payload
-			// If yes, broadcast on the condition variable so listeners can wake up
-			if cond, exists := notificationsMap.Load(n.Payload); exists {
-				cond.(*sync.Cond).Broadcast()
-			}
-		}
-	}
-	notificationListenerConnection, err := pgconn.ConnectConfig(ctx, notifierConnConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect notification listener to database: %v", err)
-	}
-
 	return &sysDB{
-		pool:                           pool,
-		notificationListenerConnection: notificationListenerConnection,
-		notificationsMap:               notificationsMap,
-		notificationLoopDone:           make(chan struct{}),
-		logger:                         logger.With("service", "system_database"),
-		schema:                         databaseSchema,
+		pool:                 pool,
+		notificationsMap:     notificationsMap,
+		notificationLoopDone: make(chan struct{}),
+		logger:               logger.With("service", "system_database"),
+		schema:               databaseSchema,
 	}, nil
 }
 
@@ -350,34 +338,33 @@ func (s *sysDB) launch(ctx context.Context) {
 }
 
 func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
-	s.logger.Debug("DBOS: Closing system database connection pool")
-	if s.pool != nil {
-		s.pool.Close()
-	}
-
-	// Context wasn't cancelled, let's manually close
-	if !errors.Is(ctx.Err(), context.Canceled) {
-		err := s.notificationListenerConnection.Close(ctx)
-		if err != nil {
-			s.logger.Error("Failed to close notification listener connection", "error", err)
-		}
-	}
+	s.logger.Debug("Closing system database connection pool")
 
 	if s.launched {
 		// Wait for the notification loop to exit
-		s.logger.Debug("DBOS: Waiting for notification listener loop to finish")
+		// The context should be cancelled prior to calling shutdown
 		select {
 		case <-s.notificationLoopDone:
 		case <-time.After(timeout):
-			s.logger.Warn("DBOS: Notification listener loop did not finish in time", "timeout", timeout)
+			s.logger.Warn("Notification listener loop did not finish in time", "timeout", timeout)
+		}
+	}
+
+	if s.pool != nil {
+		poolClose := make(chan struct{})
+		go func() {
+			// Will block until every acquired connection is released
+			s.pool.Close()
+			close(poolClose)
+		}()
+		select {
+		case <-poolClose:
+		case <-time.After(timeout):
+			s.logger.Warn("System database connection pool did not close in time", "timeout", timeout)
 		}
 	}
 
 	s.notificationsMap.Clear()
-	// Allow pgx health checks to complete
-	// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
-	// These trigger go-leak alerts
-	time.Sleep(500 * time.Millisecond)
 
 	s.launched = false
 }
@@ -1591,55 +1578,105 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 
 func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 	defer func() {
+		s.logger.Debug("Notification listener loop exiting")
 		s.notificationLoopDone <- struct{}{}
 	}()
 
-	s.logger.Debug("DBOS: Starting notification listener loop")
-	mrr := s.notificationListenerConnection.Exec(ctx, fmt.Sprintf("LISTEN %s; LISTEN %s", _DBOS_NOTIFICATIONS_CHANNEL, _DBOS_WORKFLOW_EVENTS_CHANNEL))
-	results, err := mrr.ReadAll()
-	if err != nil {
-		s.logger.Error("Failed to listen on notification channels", "error", err)
-		return
-	}
-	err = mrr.Close()
-	if err != nil {
-		s.logger.Error("Failed to close connection after setting notification listeners", "error", err)
-		return
+	acquire := func(ctx context.Context) (*pgxpool.Conn, error) {
+		// Acquire a connection from the pool and set up LISTEN on the notifications channels
+		pc, err := s.pool.Acquire(ctx)
+		if err != nil {
+			return nil, err
+		}
+		tx, err := pc.Begin(ctx)
+		if err != nil {
+			pc.Release()
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, fmt.Sprintf("LISTEN %s", _DBOS_NOTIFICATIONS_CHANNEL)); err != nil {
+			rErr := tx.Rollback(ctx)
+			if rErr != nil {
+				s.logger.Error("Failed to rollback transaction after LISTEN error", "error", rErr)
+			}
+			pc.Release()
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, fmt.Sprintf("LISTEN %s", _DBOS_WORKFLOW_EVENTS_CHANNEL)); err != nil {
+			rErr := tx.Rollback(ctx)
+			if rErr != nil {
+				s.logger.Error("Failed to rollback transaction after LISTEN error", "error", rErr)
+			}
+			pc.Release()
+			return nil, err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			rErr := tx.Rollback(ctx)
+			if rErr != nil {
+				s.logger.Error("Failed to rollback transaction after COMMIT error", "error", rErr)
+			}
+			pc.Release()
+			return nil, err
+		}
+		return pc, nil
 	}
 
-	for _, result := range results {
-		if result.Err != nil {
-			s.logger.Error("Error listening on notification channels", "error", result.Err)
-			return
-		}
+	s.logger.Debug("DBOS: Starting notification listener loop")
+
+	poolConn, err := acquire(ctx)
+	if err != nil {
+		s.logger.Error("Failed to acquire listener connection", "error", err)
+		return
 	}
+	defer poolConn.Release()
 
 	retryAttempt := 0
 	for {
 		// Block until a notification is received. OnNotification will be called when a notification is received.
 		// WaitForNotification handles context cancellation: https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgconn/pgconn.go#L1050
-		err := s.notificationListenerConnection.WaitForNotification(ctx)
+		n, err := poolConn.Conn().WaitForNotification(ctx)
 		if err != nil {
-			// Context cancellation
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				s.logger.Debug("Notification listener loop exiting due to context cancellation", "cause", context.Cause(ctx), "error", err)
+			// Context cancellation -> graceful exit
+			if ctx.Err() != nil {
+				s.logger.Debug("Notification listener exiting (context canceled", "cause", context.Cause(ctx), "error", err)
+				poolConn.Release()
 				return
 			}
-
-			// Connection closed (during shutdown) - exit gracefully
-			if s.notificationListenerConnection.IsClosed() {
-				s.logger.Info("Notification listener loop exiting due to connection closure")
-				return
+			// If the underlying connection is closed, attempt to re-acquire a new one
+			if poolConn.Conn().IsClosed() {
+				s.logger.Error("Notification listener connection closed. re-acquiring")
+				poolConn.Release()
+				for {
+					if ctx.Err() != nil {
+						s.logger.Debug("Notification listener exiting (context canceled)", "cause", context.Cause(ctx), "error", err)
+						return
+					}
+					poolConn, err = acquire(ctx)
+					if err == nil {
+						retryAttempt = 0
+						break
+					}
+					s.logger.Error("failed to re-acquire connection for notification listener", "error", err)
+					time.Sleep(backoffWithJitter(retryAttempt))
+					retryAttempt++
+				}
+				continue
 			}
-
-			// Other errors - log and retry.
+			// Other transient errors. Backoff and continue on same conn
 			s.logger.Error("Error waiting for notification", "error", err)
 			time.Sleep(backoffWithJitter(retryAttempt))
-			retryAttempt += 1
+			retryAttempt++
 			continue
-		} else {
-			if retryAttempt > 0 {
-				retryAttempt -= 1
+		}
+
+		// Success: reduce backoff pressure
+		if retryAttempt > 0 {
+			retryAttempt--
+		}
+
+		// Handle notifications
+		if n.Channel == _DBOS_NOTIFICATIONS_CHANNEL || n.Channel == _DBOS_WORKFLOW_EVENTS_CHANNEL {
+			if cond, ok := s.notificationsMap.Load(n.Payload); ok {
+				cond.(*sync.Cond).Broadcast()
 			}
 		}
 	}
@@ -2480,7 +2517,6 @@ func backoffWithJitter(retryAttempt int) time.Duration {
 // maskPassword replaces the password in a database URL with asterisks
 func maskPassword(dbURL string) (string, error) {
 	parsedURL, err := url.Parse(dbURL)
-
 	if err != nil {
 		return "", err
 	}
@@ -2491,7 +2527,7 @@ func maskPassword(dbURL string) (string, error) {
 		_, hasPassword := parsedURL.User.Password()
 		if hasPassword {
 			// Manually construct the URL with masked password to avoid encoding
-			maskedURL := parsedURL.Scheme + "://" + username + ":********@" + parsedURL.Host + parsedURL.Path
+			maskedURL := parsedURL.Scheme + "://" + username + ":***@" + parsedURL.Host + parsedURL.Path
 			if parsedURL.RawQuery != "" {
 				maskedURL += "?" + parsedURL.RawQuery
 			}
