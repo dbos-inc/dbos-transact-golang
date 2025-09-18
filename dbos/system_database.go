@@ -1646,8 +1646,8 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 				s.logger.Error("Notification listener connection closed. re-acquiring")
 				poolConn.Release()
 				for {
-					if ctx.Err() != nil || strings.Contains(err.Error(), "pool closed") {
-						s.logger.Debug("Notification listener exiting (context canceled or pool closed)", "cause", context.Cause(ctx), "error", err)
+					if ctx.Err() != nil {
+						s.logger.Debug("Notification listener exiting (context canceled)", "cause", context.Cause(ctx), "error", err)
 						return
 					}
 					poolConn, err = acquire(ctx)
