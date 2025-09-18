@@ -363,10 +363,6 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 	}
 
 	s.notificationsMap.Clear()
-	// Allow pgx health checks to complete
-	// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
-	// These trigger go-leak alerts
-	time.Sleep(500 * time.Millisecond)
 
 	s.launched = false
 }

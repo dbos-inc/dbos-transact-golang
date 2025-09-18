@@ -74,7 +74,12 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 		}
 		dbosCtx = nil
 		if checkLeaks {
-			goleak.VerifyNone(t)
+			goleak.VerifyNone(t,
+				// Ignore pgx health checks
+				// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
+				goleak.IgnoreTopFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
+				goleak.IgnoreTopFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
+			)
 		}
 	})
 
