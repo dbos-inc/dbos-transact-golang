@@ -506,7 +506,7 @@ func TestCustomPool(t *testing.T) {
 		return receivedMsg, nil
 	}
 
-	t.Run("NewSystemDatabaseWithCustomPool", func(t *testing.T) {
+	t.Run("CustomPool", func(t *testing.T) {
 		// Custom Pool
 		databaseURL := getDatabaseURL()
 		poolConfig, err := pgxpool.ParseConfig(databaseURL)
