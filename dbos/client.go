@@ -14,10 +14,10 @@ import (
 )
 
 type ClientConfig struct {
-	DatabaseURL    string        // Connection URL for the PostgreSQL database
+	DatabaseURL    string        // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
+	SystemDBPool   *pgxpool.Pool // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
 	DatabaseSchema string        // Database schema name (defaults to "dbos")
 	Logger         *slog.Logger  // Optional custom logger
-	SystemDBPool   *pgxpool.Pool // Optional existing connection pool for the system database
 }
 
 // Client provides a programmatic way to interact with your DBOS application from external code.
