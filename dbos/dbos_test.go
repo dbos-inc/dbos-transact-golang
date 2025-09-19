@@ -75,7 +75,7 @@ func TestConfig(t *testing.T) {
 
 		assert.Equal(t, InitializationError, dbosErr.Code)
 
-		expectedMsg := "Error initializing DBOS Transact: missing required config field: databaseURL"
+		expectedMsg := "Error initializing DBOS Transact: either databaseURL or systemDBPool must be provided"
 		assert.Equal(t, expectedMsg, dbosErr.Message)
 	})
 
@@ -523,7 +523,6 @@ func TestCustomPool(t *testing.T) {
 		require.NoError(t, err)
 
 		config := Config{
-			DatabaseURL:  databaseURL,
 			AppName:      "test-custom-pool",
 			SystemDBPool: pool,
 		}
