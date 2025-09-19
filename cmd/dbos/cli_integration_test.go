@@ -58,75 +58,102 @@ func TestCLIWorkflow(t *testing.T) {
 		os.Remove(cliPath)
 	})
 
-	// Create temporary directory for test
-	tempDir := t.TempDir()
-	originalDir, err := os.Getwd()
-	require.NoError(t, err)
+	// Test configurations for schema
+	testConfigs := []struct {
+		name       string
+		schemaName string
+		schemaArgs []string
+	}{
+		{
+			name:       "CustomSchema",
+			schemaName: "test_schema",
+			schemaArgs: []string{"--schema", "test_schema"},
+		},
+		{
+			name:       "DefaultSchema",
+			schemaName: "dbos",
+			schemaArgs: []string{}, // No schema argument, use default
+		},
+	}
 
-	// Change to temp directory for test isolation
-	err = os.Chdir(tempDir)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		os.Chdir(originalDir)
-	})
+	for _, config := range testConfigs {
+		t.Run(config.name, func(t *testing.T) {
+			// Create temporary directory for test
+			tempDir := t.TempDir()
+			originalDir, err := os.Getwd()
+			require.NoError(t, err)
 
-	t.Run("ResetDatabase", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "reset", "-y")
-		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
+			// Change to temp directory for test isolation
+			err = os.Chdir(tempDir)
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				os.Chdir(originalDir)
+			})
 
-		output, err := cmd.CombinedOutput()
-		require.NoError(t, err, "Reset database command failed: %s", string(output))
+			t.Run("ResetDatabase", func(t *testing.T) {
+				args := append([]string{"reset", "-y"}, config.schemaArgs...)
+				cmd := exec.Command(cliPath, args...)
+				cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
-		assert.Contains(t, string(output), "System database has been reset successfully", "Output should confirm database reset")
-		assert.Contains(t, string(output), "database\":\"dbos", "Output should confirm database reset")
+				output, err := cmd.CombinedOutput()
+				require.NoError(t, err, "Reset database command failed: %s", string(output))
 
-		// log in the database and ensure the dbos schema does not exist anymore
-		db, err := sql.Open("pgx", getDatabaseURL())
-		require.NoError(t, err)
-		defer db.Close()
+				assert.Contains(t, string(output), "System database has been reset successfully", "Output should confirm database reset")
+				assert.Contains(t, string(output), "database\":\"dbos", "Output should confirm database reset")
 
-		var exists bool
-		err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'dbos')").Scan(&exists)
-		require.NoError(t, err)
+				// log in the database and ensure the schema does not exist anymore
+				db, err := sql.Open("pgx", getDatabaseURL())
+				require.NoError(t, err)
+				defer db.Close()
 
-		assert.False(t, exists, "DBOS schema should not exist")
-	})
+				var exists bool
+				err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)", config.schemaName).Scan(&exists)
+				require.NoError(t, err)
 
-	t.Run("ProjectInitialization", func(t *testing.T) {
-		testProjectInitialization(t, cliPath)
-	})
+				assert.False(t, exists, fmt.Sprintf("Schema %s should not exist", config.schemaName))
+			})
 
-	// Start a test application using dbos start
-	cmd := exec.CommandContext(context.Background(), cliPath, "start")
-	cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
-	err = cmd.Start()
-	require.NoError(t, err, "Failed to start application")
-	// Wait for server to be ready
-	require.Eventually(t, func() bool {
-		resp, err := http.Get("http://localhost:" + testServerPort)
-		if err != nil {
-			return false
-		}
-		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}, 10*time.Second, 500*time.Millisecond, "Server should start within 10 seconds")
+			t.Run("ProjectInitialization", func(t *testing.T) {
+				testProjectInitialization(t, cliPath)
+			})
 
-	t.Cleanup(func() {
-		fmt.Printf("Cleaning up application process %d\n", cmd.Process.Pid)
-		// fmt.Println(cmd.Stderr)
-		// fmt.Println(cmd.Stdout)
-		err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
-		require.NoError(t, err, "Failed to send interrupt signal to application process")
-		_ = cmd.Wait()
-	})
+			// Start a test application using dbos start
+			startArgs := append([]string{"start"}, config.schemaArgs...)
+			cmd := exec.CommandContext(context.Background(), cliPath, startArgs...)
+			envVars := append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
+			// Pass the schema to the test app if using custom schema
+			if config.schemaName != "dbos" {
+				envVars = append(envVars, "DBOS_SCHEMA="+config.schemaName)
+			}
+			cmd.Env = envVars
+			err = cmd.Start()
+			require.NoError(t, err, "Failed to start application")
+			// Wait for server to be ready
+			require.Eventually(t, func() bool {
+				resp, err := http.Get("http://localhost:" + testServerPort)
+				if err != nil {
+					return false
+				}
+				resp.Body.Close()
+				return resp.StatusCode == http.StatusOK
+			}, 10*time.Second, 500*time.Millisecond, "Server should start within 10 seconds")
 
-	t.Run("WorkflowCommands", func(t *testing.T) {
-		testWorkflowCommands(t, cliPath)
-	})
+			t.Cleanup(func() {
+				fmt.Printf("Cleaning up application process %d\n", cmd.Process.Pid)
+				err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
+				require.NoError(t, err, "Failed to send interrupt signal to application process")
+				_ = cmd.Wait()
+			})
 
-	t.Run("ErrorHandling", func(t *testing.T) {
-		testErrorHandling(t, cliPath)
-	})
+			t.Run("WorkflowCommands", func(t *testing.T) {
+				testWorkflowCommands(t, cliPath, config.schemaArgs)
+			})
+
+			t.Run("ErrorHandling", func(t *testing.T) {
+				testErrorHandling(t, cliPath, config.schemaArgs)
+			})
+		})
+	}
 }
 
 // testProjectInitialization verifies project initialization
@@ -175,31 +202,31 @@ func testProjectInitialization(t *testing.T, cliPath string) {
 }
 
 // testWorkflowCommands comprehensively tests all workflow CLI commands
-func testWorkflowCommands(t *testing.T, cliPath string) {
+func testWorkflowCommands(t *testing.T, cliPath string, schemaArgs []string) {
 
 	t.Run("ListWorkflows", func(t *testing.T) {
-		testListWorkflows(t, cliPath)
+		testListWorkflows(t, cliPath, schemaArgs)
 	})
 
 	t.Run("GetWorkflow", func(t *testing.T) {
-		testGetWorkflow(t, cliPath)
+		testGetWorkflow(t, cliPath, schemaArgs)
 	})
 
 	t.Run("CancelResumeWorkflow", func(t *testing.T) {
-		testCancelResumeWorkflow(t, cliPath)
+		testCancelResumeWorkflow(t, cliPath, schemaArgs)
 	})
 
 	t.Run("ForkWorkflow", func(t *testing.T) {
-		testForkWorkflow(t, cliPath)
+		testForkWorkflow(t, cliPath, schemaArgs)
 	})
 
 	t.Run("GetWorkflowSteps", func(t *testing.T) {
-		testGetWorkflowSteps(t, cliPath)
+		testGetWorkflowSteps(t, cliPath, schemaArgs)
 	})
 }
 
 // testListWorkflows tests various workflow listing scenarios
-func testListWorkflows(t *testing.T, cliPath string) {
+func testListWorkflows(t *testing.T, cliPath string, schemaArgs []string) {
 	// Create some test workflows first to ensure we have data to filter
 	resp, err := http.Get("http://localhost:" + testServerPort + "/workflow")
 	require.NoError(t, err, "Failed to trigger workflow")
@@ -345,7 +372,8 @@ func testListWorkflows(t *testing.T, cliPath string) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(cliPath, tc.args...)
+			args := append(tc.args, schemaArgs...)
+			cmd := exec.Command(cliPath, args...)
 			cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 			output, err := cmd.CombinedOutput()
@@ -388,7 +416,7 @@ func testListWorkflows(t *testing.T, cliPath string) {
 }
 
 // testGetWorkflow tests retrieving individual workflow details
-func testGetWorkflow(t *testing.T, cliPath string) {
+func testGetWorkflow(t *testing.T, cliPath string, schemaArgs []string) {
 	resp, err := http.Get("http://localhost:" + testServerPort + "/queue")
 	require.NoError(t, err, "Failed to trigger queue workflow")
 	defer resp.Body.Close()
@@ -408,7 +436,8 @@ func testGetWorkflow(t *testing.T, cliPath string) {
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
 	t.Run("GetWorkflowJSON", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "get", workflowID)
+		args := append([]string{"workflow", "get", workflowID}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -423,7 +452,8 @@ func testGetWorkflow(t *testing.T, cliPath string) {
 		assert.NotEmpty(t, status.Name, "Should have workflow name")
 
 		// Redo the test with the db url in flags
-		cmd2 := exec.Command(cliPath, "workflow", "get", workflowID, "--db-url", getDatabaseURL())
+		args2 := append([]string{"workflow", "get", workflowID, "--db-url", getDatabaseURL()}, schemaArgs...)
+		cmd2 := exec.Command(cliPath, args2...)
 
 		output2, err2 := cmd2.CombinedOutput()
 		require.NoError(t, err2, "Get workflow JSON command failed: %s", string(output2))
@@ -456,7 +486,8 @@ func testGetWorkflow(t *testing.T, cliPath string) {
 		})
 
 		// Test with environment variable D
-		cmd3 := exec.Command(cliPath, "workflow", "get", workflowID)
+		args3 := append([]string{"workflow", "get", workflowID}, schemaArgs...)
+		cmd3 := exec.Command(cliPath, args3...)
 		cmd3.Env = append(os.Environ(), "D="+getDatabaseURL())
 
 		output3, err3 := cmd3.CombinedOutput()
@@ -473,7 +504,7 @@ func testGetWorkflow(t *testing.T, cliPath string) {
 }
 
 // testCancelResumeWorkflow tests workflow state management
-func testCancelResumeWorkflow(t *testing.T, cliPath string) {
+func testCancelResumeWorkflow(t *testing.T, cliPath string, schemaArgs []string) {
 	resp, err := http.Get("http://localhost:" + testServerPort + "/queue")
 	require.NoError(t, err, "Failed to trigger queue workflow")
 	defer resp.Body.Close()
@@ -493,7 +524,8 @@ func testCancelResumeWorkflow(t *testing.T, cliPath string) {
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
 	t.Run("CancelWorkflow", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "cancel", workflowID)
+		args := append([]string{"workflow", "cancel", workflowID}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -502,7 +534,8 @@ func testCancelResumeWorkflow(t *testing.T, cliPath string) {
 		assert.Contains(t, string(output), "Successfully cancelled", "Should confirm cancellation")
 
 		// Verify workflow is actually cancelled
-		getCmd := exec.Command(cliPath, "workflow", "get", workflowID)
+		getArgs := append([]string{"workflow", "get", workflowID}, schemaArgs...)
+		getCmd := exec.Command(cliPath, getArgs...)
 		getCmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		getOutput, err := getCmd.CombinedOutput()
@@ -515,7 +548,8 @@ func testCancelResumeWorkflow(t *testing.T, cliPath string) {
 	})
 
 	t.Run("ResumeWorkflow", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "resume", workflowID)
+		args := append([]string{"workflow", "resume", workflowID}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -533,7 +567,7 @@ func testCancelResumeWorkflow(t *testing.T, cliPath string) {
 }
 
 // testForkWorkflow tests workflow forking functionality
-func testForkWorkflow(t *testing.T, cliPath string) {
+func testForkWorkflow(t *testing.T, cliPath string, schemaArgs []string) {
 	resp, err := http.Get("http://localhost:" + testServerPort + "/queue")
 	require.NoError(t, err, "Failed to trigger queue workflow")
 	defer resp.Body.Close()
@@ -555,7 +589,8 @@ func testForkWorkflow(t *testing.T, cliPath string) {
 	t.Run("ForkWorkflow", func(t *testing.T) {
 		newID := uuid.NewString()
 		targetVersion := "1.0.0"
-		cmd := exec.Command(cliPath, "workflow", "fork", workflowID, "--forked-workflow-id", newID, "--application-version", targetVersion)
+		args := append([]string{"workflow", "fork", workflowID, "--forked-workflow-id", newID, "--application-version", targetVersion}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -574,7 +609,8 @@ func testForkWorkflow(t *testing.T, cliPath string) {
 	})
 
 	t.Run("ForkWorkflowFromStep", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "fork", workflowID, "--step", "2")
+		args := append([]string{"workflow", "fork", workflowID, "--step", "2"}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -592,7 +628,8 @@ func testForkWorkflow(t *testing.T, cliPath string) {
 
 	t.Run("ForkWorkflowFromNegativeStep", func(t *testing.T) {
 		// Test fork with invalid step number (0 should be converted to 1)
-		cmd := exec.Command(cliPath, "workflow", "fork", workflowID, "--step", "-1")
+		args := append([]string{"workflow", "fork", workflowID, "--step", "-1"}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -610,7 +647,7 @@ func testForkWorkflow(t *testing.T, cliPath string) {
 }
 
 // testGetWorkflowSteps tests retrieving workflow steps
-func testGetWorkflowSteps(t *testing.T, cliPath string) {
+func testGetWorkflowSteps(t *testing.T, cliPath string, schemaArgs []string) {
 	resp, err := http.Get("http://localhost:" + testServerPort + "/queue")
 	require.NoError(t, err, "Failed to trigger queue workflow")
 	defer resp.Body.Close()
@@ -630,7 +667,8 @@ func testGetWorkflowSteps(t *testing.T, cliPath string) {
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
 	t.Run("GetStepsJSON", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "steps", workflowID)
+		args := append([]string{"workflow", "steps", workflowID}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -653,13 +691,13 @@ func testGetWorkflowSteps(t *testing.T, cliPath string) {
 }
 
 // testErrorHandling tests various error conditions and edge cases
-func testErrorHandling(t *testing.T, cliPath string) {
-
+func testErrorHandling(t *testing.T, cliPath string, schemaArgs []string) {
 	t.Run("InvalidWorkflowID", func(t *testing.T) {
 		invalidID := "invalid-workflow-id-12345"
 
 		// Test get with invalid ID
-		cmd := exec.Command(cliPath, "workflow", "get", invalidID)
+		args := append([]string{"workflow", "get", invalidID}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -669,7 +707,8 @@ func testErrorHandling(t *testing.T, cliPath string) {
 
 	t.Run("MissingWorkflowID", func(t *testing.T) {
 		// Test get without workflow ID
-		cmd := exec.Command(cliPath, "workflow", "get")
+		args := append([]string{"workflow", "get"}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -678,7 +717,8 @@ func testErrorHandling(t *testing.T, cliPath string) {
 	})
 
 	t.Run("InvalidStatusFilter", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "list", "--status", "INVALID_STATUS")
+		args := append([]string{"workflow", "list", "--status", "INVALID_STATUS"}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -687,7 +727,8 @@ func testErrorHandling(t *testing.T, cliPath string) {
 	})
 
 	t.Run("InvalidTimeFormat", func(t *testing.T) {
-		cmd := exec.Command(cliPath, "workflow", "list", "--start-time", "invalid-time-format")
+		args := append([]string{"workflow", "list", "--start-time", "invalid-time-format"}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL())
 
 		output, err := cmd.CombinedOutput()
@@ -697,7 +738,8 @@ func testErrorHandling(t *testing.T, cliPath string) {
 
 	t.Run("MissingDatabaseURL", func(t *testing.T) {
 		// Test without system DB url in the flags or env var
-		cmd := exec.Command(cliPath, "workflow", "list")
+		args := append([]string{"workflow", "list"}, schemaArgs...)
+		cmd := exec.Command(cliPath, args...)
 
 		output, err := cmd.CombinedOutput()
 		assert.Error(t, err, "Should fail without database URL")
