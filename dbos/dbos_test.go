@@ -608,7 +608,7 @@ func TestCustomPool(t *testing.T) {
 		return input, nil
 	}
 
-	t.Run("InvalidDatabaseUrl", func(t *testing.T) {
+	t.Run("CustomPoolTakesPrecedence", func(t *testing.T) {
 		invalidDatabaseURL := "postgres://invalid:invalid@localhost:5432/invaliddb"
 		databaseURL := getDatabaseURL()
 		poolConfig, err := pgxpool.ParseConfig(databaseURL)
