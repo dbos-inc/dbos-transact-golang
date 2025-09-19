@@ -880,6 +880,7 @@ type stepOptions struct {
 	baseInterval  time.Duration // Initial delay between retries (default: 100ms)
 	maxInterval   time.Duration // Maximum delay between retries (default: 5s)
 	stepName      string        // Custom name for the step (defaults to function name)
+  preGeneratedStepID *int          // Pre generated stepID in case we want to run the function in a Go routine
 }
 
 // setDefaults applies default values to stepOptions
@@ -939,6 +940,18 @@ func WithMaxInterval(interval time.Duration) StepOption {
 	return func(opts *stepOptions) {
 		opts.maxInterval = interval
 	}
+}
+
+func WithNextStepID(stepID int) StepOption {
+	return func(opts *stepOptions) {
+		opts.preGeneratedStepID = &stepID
+	}
+}
+
+// StepOutcome holds the result and error from a step execution
+type stepOutcome[R any] struct {
+	result R
+	err    error
 }
 
 // RunAsStep executes a function as a durable step within a workflow.
@@ -1034,10 +1047,18 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		return fn(c)
 	}
 
+	// Get stepID if it has been pre generated
+	var stepID int
+	if stepOpts.preGeneratedStepID != nil {
+		stepID = *stepOpts.preGeneratedStepID
+	} else {
+		stepID = wfState.NextStepID() // crucially, this increments the step ID on the *workflow* state
+	}
+
 	// Setup step state
 	stepState := workflowState{
 		workflowID:   wfState.workflowID,
-		stepID:       wfState.nextStepID(), // crucially, this increments the step ID on the *workflow* state
+		stepID:       stepID,
 		isWithinStep: true,
 	}
 
@@ -1118,6 +1139,44 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	}
 
 	return stepOutput, stepError
+}
+
+// Go runs a step inside a Go routine and returns a channel to receive the result.
+// Go generates a deterministic step ID for the step before running the step in a routine, since routines are not deterministic.
+// The step ID is used to track the steps within the same workflow and use the step ID to perform recovery.
+// The folliwing examples shows how to use Go: 
+//
+//	resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
+//		return "Hello, World!", nil
+//	})
+//
+//	resultChan := <-resultChan // wait for the channel to receive
+//	if resultChan.err != nil {
+//		// Handle error
+//	}
+//  result := resultChan.result
+//
+func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan stepOutcome[R], error) {
+	// create a determistic step ID
+	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return nil, newStepExecutionError("", stepName, "workflow state not found in context: are you running this step within a workflow?")
+	}
+	stepID := wfState.NextStepID()
+	opts = append(opts, WithNextStepID(stepID))
+
+	// run step inside a Go routine by passing a stepID 
+	result := make(chan stepOutcome[R], 1)
+	go func() {
+		res, err := RunAsStep(ctx, fn, opts...)
+		result <- stepOutcome[R]{
+			result: res,
+			err:    err,
+		}
+	}()
+
+	return result, nil
 }
 
 /****************************************/
