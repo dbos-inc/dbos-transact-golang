@@ -71,14 +71,13 @@ func getDBURL(_ *cobra.Command) (string, error) {
 }
 
 // createDBOSContext creates a new DBOS context with the provided database URL
-func createDBOSContext(userContext context.Context, dbURL string) (dbos.DBOSContext, error) {
+func createDBOSContext(ctx context.Context, dbURL string) (dbos.DBOSContext, error) {
 	appName := "dbos-cli"
 
 	config := dbos.Config{
 		DatabaseURL: dbURL,
 		AppName:     appName,
 		Logger:      initLogger(slog.LevelError),
-		Context:     userContext,
 	}
 
 	// Use the global schema flag if it's set
@@ -87,11 +86,11 @@ func createDBOSContext(userContext context.Context, dbURL string) (dbos.DBOSCont
 		logger.Debug("Using database schema", "schema", schema)
 	}
 
-	ctx, err := dbos.NewDBOSContext(context.Background(), config)
+	dbosCtx, err := dbos.NewDBOSContext(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DBOS context: %w", err)
 	}
-	return ctx, nil
+	return dbosCtx, nil
 }
 
 // outputJSON outputs data as JSON

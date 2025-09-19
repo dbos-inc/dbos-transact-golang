@@ -62,7 +62,7 @@ func TestConfig(t *testing.T) {
 		assert.Equal(t, expectedMsg, dbosErr.Message)
 	})
 
-	t.Run("FailsWithoutDatabaseURL", func(t *testing.T) {
+	t.Run("FailsWithoutDatabaseURLOrSystemDBPool", func(t *testing.T) {
 		config := Config{
 			AppName: "test-app",
 		}
@@ -75,7 +75,7 @@ func TestConfig(t *testing.T) {
 
 		assert.Equal(t, InitializationError, dbosErr.Code)
 
-		expectedMsg := "Error initializing DBOS Transact: missing required config field: databaseURL"
+		expectedMsg := "Error initializing DBOS Transact: either databaseURL or systemDBPool must be provided"
 		assert.Equal(t, expectedMsg, dbosErr.Message)
 	})
 
@@ -523,7 +523,6 @@ func TestCustomPool(t *testing.T) {
 		require.NoError(t, err)
 
 		config := Config{
-			DatabaseURL:  databaseURL,
 			AppName:      "test-custom-pool",
 			SystemDBPool: pool,
 		}
@@ -609,7 +608,7 @@ func TestCustomPool(t *testing.T) {
 		return input, nil
 	}
 
-	t.Run("InvalidDatabaseUrl", func(t *testing.T) {
+	t.Run("CustomPoolTakesPrecedence", func(t *testing.T) {
 		invalidDatabaseURL := "postgres://invalid:invalid@localhost:5432/invaliddb"
 		databaseURL := getDatabaseURL()
 		poolConfig, err := pgxpool.ParseConfig(databaseURL)

@@ -37,6 +37,19 @@ export DBOS_SYSTEM_DATABASE_URL=postgres://user:pass@localhost/mydb
 dbos migrate
 ```
 
+### Database Schema Configuration
+
+By default, DBOS creates its system tables in the `dbos` schema. You can specify a custom schema name using the `--schema` global flag.
+
+Example:
+```bash
+# Use a custom schema for all DBOS system tables
+dbos migrate --schema myapp_schema
+
+# All workflow commands will use the specified schema
+dbos workflow list --schema myapp_schema
+```
+
 ### Configuration File
 
 The CLI uses a `dbos-config.yaml` file for configuration. By default, it looks for this file in the current directory. You can specify a different config file using the `--config` flag.
@@ -60,6 +73,7 @@ These options are available for all commands:
 
 - `-D, --db-url <url>` - Your DBOS system database URL
 - `--config <file>` - Config file (default: dbos-config.yaml)
+- `--schema <name>` - Database schema name (default: dbos)
 - `--verbose` - Enable verbose mode (DEBUG level logging)
 
 ## Commands
@@ -87,6 +101,8 @@ Create DBOS system tables in your database. This command runs the migration comm
 ```bash
 dbos migrate
 dbos migrate --app-role myapp_role
+dbos migrate --schema custom_schema
+dbos migrate --schema custom_schema --app-role myapp_role
 ```
 
 The migrate commands are defined in `dbos-config.yaml`:
