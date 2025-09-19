@@ -166,11 +166,21 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 	}
 	defer tx.Rollback(ctx)
 
-	// Create the schema if it doesn't exist
-	createSchemaQuery := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", pgx.Identifier{schema}.Sanitize())
-	_, err = tx.Exec(ctx, createSchemaQuery)
+	// Check if the schema exists
+	var schemaExists bool
+	checkSchemaQuery := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = '%s')", schema)
+	err = tx.QueryRow(ctx, checkSchemaQuery).Scan(&schemaExists)
 	if err != nil {
-		return fmt.Errorf("failed to create schema %s: %v", schema, err)
+		return fmt.Errorf("failed to check if schema %s exists: %v", schema, err)
+	}
+
+	// Create the schema if it doesn't exist
+	if !schemaExists {
+		createSchemaQuery := fmt.Sprintf("CREATE SCHEMA %s", pgx.Identifier{schema}.Sanitize())
+		_, err = tx.Exec(ctx, createSchemaQuery)
+		if err != nil {
+			return fmt.Errorf("failed to create schema %s: %v", schema, err)
+		}
 	}
 
 	// Create the migrations table if it doesn't exist
