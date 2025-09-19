@@ -192,10 +192,25 @@ func testProjectInitialization(t *testing.T, cliPath string) {
 	err = os.WriteFile(mainGoPath, testAppContent, 0644)
 	require.NoError(t, err, "Failed to write test app to main.go")
 
-	// Run go mod tidy to prepare for build
+	// Replace the go.mod to use the local dbos directory
 	err = os.Chdir(projectDir)
 	require.NoError(t, err)
 
+	// Get the absolute path to the dbos-transact-golang repository root
+	// We need to find the actual repository location, not the temp test directory
+	_, filename, _, ok := runtime.Caller(0)
+	require.True(t, ok, "Failed to get current file path")
+
+	// Navigate from cmd/dbos/cli_integration_test.go to the repo root
+	repoRoot := filepath.Dir(filepath.Dir(filepath.Dir(filename)))
+
+	// Use go mod edit to replace the dependency with the local path
+	replaceCmd := exec.Command("go", "mod", "edit", "-replace",
+		fmt.Sprintf("github.com/dbos-inc/dbos-transact-golang=%s", repoRoot))
+	replaceOutput, err := replaceCmd.CombinedOutput()
+	require.NoError(t, err, "go mod edit -replace failed: %s", string(replaceOutput))
+
+	// Run go mod tidy to prepare for build
 	modCmd := exec.Command("go", "mod", "tidy")
 	modOutput, err := modCmd.CombinedOutput()
 	require.NoError(t, err, "go mod tidy failed: %s", string(modOutput))
