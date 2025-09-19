@@ -86,11 +86,18 @@ func ScheduledWorkflow(ctx dbos.DBOSContext, scheduledTime time.Time) (string, e
 func main() {
 	// Create DBOS context
 	var err error
-	dbosCtx, err = dbos.NewDBOSContext(context.Background(), dbos.Config{
+	config := dbos.Config{
 		DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 		AppName:     "cli-test",
 		AdminServer: true,
-	})
+	}
+
+	// Use schema from environment variable if set
+	if schema := os.Getenv("DBOS_SCHEMA"); schema != "" {
+		config.DatabaseSchema = schema
+	}
+
+	dbosCtx, err = dbos.NewDBOSContext(context.Background(), config)
 	if err != nil {
 		panic(err)
 	}

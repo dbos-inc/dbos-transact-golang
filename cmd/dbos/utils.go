@@ -64,10 +64,8 @@ func getDBURL(_ *cobra.Command) (string, error) {
 	}
 
 	// Log the database URL in verbose mode with masked password
-	if verbose {
-		maskedURL := maskPassword(resolvedURL)
-		logger.Debug("Using database URL", "source", source, "url", maskedURL)
-	}
+	maskedURL := maskPassword(resolvedURL)
+	logger.Debug("Using database URL", "source", source, "url", maskedURL)
 
 	return resolvedURL, nil
 }
@@ -76,12 +74,20 @@ func getDBURL(_ *cobra.Command) (string, error) {
 func createDBOSContext(userContext context.Context, dbURL string) (dbos.DBOSContext, error) {
 	appName := "dbos-cli"
 
-	ctx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
+	config := dbos.Config{
 		DatabaseURL: dbURL,
 		AppName:     appName,
 		Logger:      initLogger(slog.LevelError),
 		Context:     userContext,
-	})
+	}
+
+	// Use the global schema flag if it's set
+	if schema != "" {
+		config.DatabaseSchema = schema
+		logger.Debug("Using database schema", "schema", schema)
+	}
+
+	ctx, err := dbos.NewDBOSContext(context.Background(), config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DBOS context: %w", err)
 	}
