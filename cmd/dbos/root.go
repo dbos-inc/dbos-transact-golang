@@ -20,6 +20,7 @@ var (
 	dbURL      string
 	configFile string
 	verbose    bool
+	schema     string
 
 	// Global config
 	config *Config
@@ -33,6 +34,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&dbURL, "db-url", "D", "", "Your DBOS system database URL")
 	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "Config file (default is dbos-config.yaml)")
 	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Enable verbose mode (DEBUG level logging)")
+	rootCmd.PersistentFlags().StringVar(&schema, "schema", "", "Database schema name (defaults to \"dbos\")")
 
 	// Add all subcommands
 	rootCmd.AddCommand(versionCmd)

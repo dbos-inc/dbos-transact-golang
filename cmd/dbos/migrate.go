@@ -41,9 +41,15 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create DBOS context: %w", err)
 	}
 
+	// Determine the schema to use (from flag or default)
+	dbSchema := "dbos"
+	if schema != "" {
+		dbSchema = schema
+	}
+
 	// Grant permissions to application role if specified
 	if applicationRole != "" {
-		if err := grantDBOSSchemaPermissions(dbURL, applicationRole); err != nil {
+		if err := grantDBOSSchemaPermissions(dbURL, applicationRole, dbSchema); err != nil {
 			return err
 		}
 	}
@@ -74,8 +80,8 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func grantDBOSSchemaPermissions(databaseURL, roleName string) error {
-	logger.Info("Granting permissions for DBOS schema", "role", roleName)
+func grantDBOSSchemaPermissions(databaseURL, roleName, schemaName string) error {
+	logger.Info("Granting permissions for schema", "role", roleName, "schema", schemaName)
 
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
@@ -86,15 +92,15 @@ func grantDBOSSchemaPermissions(databaseURL, roleName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Grant usage on the dbos schema
+	// Grant usage on the specified schema
 	queries := []string{
-		fmt.Sprintf(`GRANT USAGE ON SCHEMA dbos TO "%s"`, roleName),
-		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA dbos TO "%s"`, roleName),
-		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA dbos TO "%s"`, roleName),
-		fmt.Sprintf(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA dbos TO "%s"`, roleName),
-		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA dbos GRANT ALL ON TABLES TO "%s"`, roleName),
-		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA dbos GRANT ALL ON SEQUENCES TO "%s"`, roleName),
-		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA dbos GRANT EXECUTE ON FUNCTIONS TO "%s"`, roleName),
+		fmt.Sprintf(`GRANT USAGE ON SCHEMA %s TO "%s"`, schemaName, roleName),
+		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA %s TO "%s"`, schemaName, roleName),
+		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %s TO "%s"`, schemaName, roleName),
+		fmt.Sprintf(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %s TO "%s"`, schemaName, roleName),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT ALL ON TABLES TO "%s"`, schemaName, roleName),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT ALL ON SEQUENCES TO "%s"`, schemaName, roleName),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT EXECUTE ON FUNCTIONS TO "%s"`, schemaName, roleName),
 	}
 
 	for _, query := range queries {
