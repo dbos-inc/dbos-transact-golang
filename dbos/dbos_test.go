@@ -62,7 +62,7 @@ func TestConfig(t *testing.T) {
 		assert.Equal(t, expectedMsg, dbosErr.Message)
 	})
 
-	t.Run("FailsWithoutDatabaseURL", func(t *testing.T) {
+	t.Run("FailsWithoutDatabaseURLOrSystemDBPool", func(t *testing.T) {
 		config := Config{
 			AppName: "test-app",
 		}
