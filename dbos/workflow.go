@@ -35,9 +35,9 @@ type WorkflowStatus struct {
 	ID                 string             `json:"workflow_uuid"`                 // Unique identifier for the workflow
 	Status             WorkflowStatusType `json:"status"`                        // Current execution status
 	Name               string             `json:"name"`                          // Function name of the workflow
-	AuthenticatedUser  *string            `json:"authenticated_user,omitempty"`  // User who initiated the workflow (if applicable)
-	AssumedRole        *string            `json:"assumed_role,omitempty"`        // Role assumed during execution (if applicable)
-	AuthenticatedRoles *string            `json:"authenticated_roles,omitempty"` // Roles available to the user (if applicable)
+	AuthenticatedUser  string             `json:"authenticated_user,omitempty"`  // User who initiated the workflow (if applicable)
+	AssumedRole        string             `json:"assumed_role,omitempty"`        // Role assumed during execution (if applicable)
+	AuthenticatedRoles []string           `json:"authenticated_roles,omitempty"` // Roles available to the user (if applicable)
 	Output             any                `json:"output,omitempty"`              // Workflow output (available after completion)
 	Error              error              `json:"error,omitempty"`               // Error information (if status is ERROR)
 	ExecutorID         string             `json:"executor_id"`                   // ID of the executor running this workflow
