@@ -320,3 +320,7 @@ By contrast, Celery/BullMQ are Redis-backed and don't provide workflows, so they
 
 **When to use Celery/BullMQ**: You don't need durability, or you need very high throughput beyond what your Postgres server can support.
 </details>
+
+## ⭐️ Like this project?
+[Star it on GitHub](https://github.com/dbos-inc/dbos-transact-golang)
+[![GitHub Stars](https://img.shields.io/github/stars/dbos-inc/dbos-transact-golang?style=social)](https://github.com/dbos-inc/dbos-transact-golang)
