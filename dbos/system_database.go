@@ -1189,9 +1189,8 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		return fmt.Errorf("failed to serialize output: %w", err)
 	}
 
-	var commandTag pgconn.CommandTag
 	if input.tx != nil {
-		commandTag, err = input.tx.Exec(ctx, query,
+		_, err = input.tx.Exec(ctx, query,
 			input.workflowID,
 			input.stepID,
 			outputString,
@@ -1199,7 +1198,7 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 			input.stepName,
 		)
 	} else {
-		commandTag, err = s.pool.Exec(ctx, query,
+		_, err = s.pool.Exec(ctx, query,
 			input.workflowID,
 			input.stepID,
 			outputString,
@@ -1208,22 +1207,12 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		)
 	}
 
-	/*
-		s.logger.Debug("RecordOperationResult CommandTag", "command_tag", commandTag)
-		s.logger.Debug("RecordOperationResult Rows affected", "rows_affected", commandTag.RowsAffected())
-		s.logger.Debug("RecordOperationResult SQL", "sql", commandTag.String())
-	*/
-
 	if err != nil {
 		s.logger.Error("RecordOperationResult Error occurred", "error", err)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
 			return newWorkflowConflictIDError(input.workflowID)
 		}
 		return err
-	}
-
-	if commandTag.RowsAffected() == 0 {
-		s.logger.Warn("RecordOperationResult No rows were affected by the insert")
 	}
 
 	return nil
@@ -1778,7 +1767,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 
 		err = s.recordOperationResult(ctx, recordInput)
 		if err != nil {
-			return fmt.Errorf("failed to record operation result: %w", err)
+			return err
 		}
 	}
 
@@ -1932,7 +1921,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	}
 	err = s.recordOperationResult(ctx, recordInput)
 	if err != nil {
-		return nil, fmt.Errorf("failed to record operation result: %w", err)
+		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -2013,7 +2002,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 
 	err = s.recordOperationResult(ctx, recordInput)
 	if err != nil {
-		return fmt.Errorf("failed to record operation result: %w", err)
+		return err
 	}
 
 	// Commit transaction
@@ -2145,7 +2134,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 
 		err = s.recordOperationResult(ctx, recordInput)
 		if err != nil {
-			return nil, fmt.Errorf("failed to record operation result: %w", err)
+			return nil, err
 		}
 	}
 
