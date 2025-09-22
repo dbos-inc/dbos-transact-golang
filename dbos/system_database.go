@@ -1767,7 +1767,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 
 		err = s.recordOperationResult(ctx, recordInput)
 		if err != nil {
-			return fmt.Errorf("failed to record operation result: %w", err)
+			return err
 		}
 	}
 
@@ -1921,7 +1921,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	}
 	err = s.recordOperationResult(ctx, recordInput)
 	if err != nil {
-		return nil, fmt.Errorf("failed to record operation result: %w", err)
+		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -2002,7 +2002,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 
 	err = s.recordOperationResult(ctx, recordInput)
 	if err != nil {
-		return fmt.Errorf("failed to record operation result: %w", err)
+		return err
 	}
 
 	// Commit transaction
@@ -2134,7 +2134,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 
 		err = s.recordOperationResult(ctx, recordInput)
 		if err != nil {
-			return nil, fmt.Errorf("failed to record operation result: %w", err)
+			return nil, err
 		}
 	}
 
