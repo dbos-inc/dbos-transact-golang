@@ -826,35 +826,44 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	c.workflowsWg.Add(1)
 	go func() {
 		defer c.workflowsWg.Done()
-		result, err := fn(workflowCtx, input)
-		status := WorkflowStatusSuccess
 
-		// If an error occurred, set the status to error
-		if err != nil {
-			status = WorkflowStatusError
-		}
+		var result any
+		var err error
 
-		// If the afterFunc has started, the workflow was cancelled and the status should be set to cancelled
-		if stopFunc != nil && !stopFunc() {
-			c.logger.Info("Workflow was cancelled. Waiting for cancel function to complete", "workflow_id", workflowID)
-			// Wait for the cancel function to complete
-			// Note this must happen before we write on the outcome channel (and signal the handler's GetResult)
-			<-cancelFuncCompleted
-			// Set the status to cancelled and move on so we still record the outcome in the DB
-			status = WorkflowStatusCancelled
-		}
+		result, err = fn(workflowCtx, input)
 
-		recordErr := c.systemDB.updateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
-			workflowID: workflowID,
-			status:     status,
-			err:        err,
-			output:     result,
-		})
-		if recordErr != nil {
-			c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
-			outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
-			close(outcomeChan)
-			return
+		// Handle DBOS ID conflict errors by waiting workflow result
+		var dbosErr *DBOSError
+		if errors.As(err, &dbosErr) && dbosErr.Code == ConflictingIDError {
+			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
+			result, err = c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID)
+		} else {
+			status := WorkflowStatusSuccess
+
+			// If an error occurred, set the status to error
+			if err != nil {
+				status = WorkflowStatusError
+			}
+
+			// If the afterFunc has started, the workflow was cancelled and the status should be set to cancelled
+			if stopFunc != nil && !stopFunc() {
+				c.logger.Info("Workflow was cancelled. Waiting for cancel function to complete", "workflow_id", workflowID)
+				<-cancelFuncCompleted // Wait for the cancel function to complete
+				status = WorkflowStatusCancelled
+			}
+
+			recordErr := c.systemDB.updateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
+				workflowID: workflowID,
+				status:     status,
+				err:        err,
+				output:     result,
+			})
+			if recordErr != nil {
+				c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
+				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
+				close(outcomeChan)
+				return
+			}
 		}
 		outcomeChan <- workflowOutcome[any]{result: result, err: err}
 		close(outcomeChan)
