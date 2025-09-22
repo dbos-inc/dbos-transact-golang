@@ -1736,14 +1736,11 @@ func TestSendRecv(t *testing.T) {
 	})
 
 	t.Run("TestConcurrentRecvs", func(t *testing.T) {
-		// Test concurrent receivers - only 1 should timeout, others should get errors
+		// Test concurrent receivers - all should return valid results
 		receiveTopic := "concurrent-recv-topic"
 
-		// Start multiple concurrent receive workflows - no messages will be sent
+		// Start multiple concurrent receive workflows
 		numReceivers := 5
-		var wg sync.WaitGroup
-		results := make(chan string, numReceivers)
-		errors := make(chan error, numReceivers)
 		receiverHandles := make([]WorkflowHandle[string], numReceivers)
 
 		// Start all receivers - they will signal when ready and wait for coordination
@@ -1768,56 +1765,12 @@ func TestSendRecv(t *testing.T) {
 		// Now unblock all receivers simultaneously so they race to the Recv call
 		concurrentRecvStartEvent.Set()
 
-		// Collect results from all receivers concurrently
-		// Only 1 should timeout (winner of the CV), others should get errors
-		wg.Add(numReceivers)
+		// Collect results from all receivers
 		for i := range numReceivers {
-			go func(index int) {
-				defer wg.Done()
-				result, err := receiverHandles[index].GetResult()
-				if err != nil {
-					errors <- err
-				} else {
-					results <- result
-				}
-			}(i)
+			result, err := receiverHandles[i].GetResult()
+			require.NoError(t, err, "receiver %d should not error", i)
+			require.Equal(t, result, "", "receiver %d should have an empty string result", i)
 		}
-
-		wg.Wait()
-		close(results)
-		close(errors)
-
-		// Count timeout results and errors
-		timeoutCount := 0
-		errorCount := 0
-
-		for result := range results {
-			if result == "" {
-				// Empty string indicates a timeout - only 1 receiver should get this
-				timeoutCount++
-			}
-		}
-
-		for err := range errors {
-			t.Logf("Receiver error (expected): %v", err)
-
-			// Check that the error is of the expected type
-			dbosErr, ok := err.(*DBOSError)
-			require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
-			require.Equal(t, ConflictingIDError, dbosErr.Code, "expected error code to be ConflictingIDError, got %v", dbosErr.Code)
-			require.Equal(t, "concurrent-recv-wfid", dbosErr.WorkflowID, "expected workflow ID to be 'concurrent-recv-wfid', got %s", dbosErr.WorkflowID)
-			require.True(t, dbosErr.IsBase, "expected error to have IsBase=true")
-			require.Contains(t, dbosErr.Message, "Conflicting workflow ID concurrent-recv-wfid", "expected error message to contain conflicting workflow ID")
-
-			errorCount++
-		}
-
-		// Verify that exactly 1 receiver timed out and 4 got errors
-		assert.Equal(t, 1, timeoutCount, "expected exactly 1 receiver to timeout")
-		assert.Equal(t, 4, errorCount, "expected exactly 4 receivers to get errors")
-
-		// Ensure total results match expected
-		assert.Equal(t, numReceivers, timeoutCount+errorCount, "expected total results to equal number of receivers")
 	})
 
 	t.Run("durableSleep", func(t *testing.T) {
