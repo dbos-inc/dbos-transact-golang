@@ -5,6 +5,7 @@
 [![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/dbos-inc/dbos-transact-golang?sort=semver)](https://github.com/dbos-inc/dbos-transact-golang/releases)
 [![Join Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/jsmC6pXGgX)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/dbos-inc/dbos-transact-golang?style=social)](https://github.com/dbos-inc/dbos-transact-golang)
 
 
 # DBOS Transact: Lightweight Durable Workflow Orchestration with Postgres
@@ -260,38 +261,63 @@ recvResult, err := recvHandle.GetResult()
 
 </details>
 
+## Getting Started
 
-## DBOS workflows
+To get started, follow the [quickstart](https://docs.dbos.dev/quickstart) to install this open-source library and connect it to a Postgres database.
+Then, check out the [programming guide](https://docs.dbos.dev/python/programming-guide) to learn how to build with durable workflows and queues.
 
-A workflow can be any function with the following signature:
-```golang
-type GenericWorkflowFunc[P any, R any] func(ctx context.Context, input P) (R, error)
-```
+## Documentation
 
-To register a workflow call `dbos.RegisterWorkflow(dbosCtx, workflow)` after having initialized a DBOS Context. Workflows can only be registered before DBOS is launched.
+[https://docs.dbos.dev](https://docs.dbos.dev)
 
+## Examples
 
-Workflows can run steps, which can be any function with the following signature:
-```golang
-type GenericStepFunc[R any] func(ctx context.Context) (R, error)
-```
+[https://docs.dbos.dev/examples](https://docs.dbos.dev/examples)
 
-To run a step within a workflow, use `RunAsStep`. Importantly, you must pass to `RunAsStep` the context received in the workflow function (see examples above.)
+## DBOS vs. Other Systems
 
-The input and output of workflows and steps are memoized in your Postgres database for workflow recovery. Under the hood, DBOS uses the [encoding/gob](https://pkg.go.dev/encoding/gob) package for serialization (this means that only exported fields will be memoized and types without exported fields will generate an error.)
+<details><summary><strong>DBOS vs. Temporal</strong></summary>
 
-## Getting started
+####
 
-Install the DBOS Transact package in your program:
+Both DBOS and Temporal provide durable execution, but DBOS is implemented in a lightweight Postgres-backed library whereas Temporal is implemented in an externally orchestrated server.
 
-```shell
-go get github.com/dbos-inc/dbos-transact-golang
-```
+You can add DBOS to your program by installing this open-source library, connecting it to Postgres, and annotating workflows and steps.
+By contrast, to add Temporal to your program, you must rearchitect your program to move your workflows and steps (activities) to a Temporal worker, configure a Temporal server to orchestrate those workflows, and access your workflows only through a Temporal client.
+[This blog post](https://www.dbos.dev/blog/durable-execution-coding-comparison) makes the comparison in more detail.
 
-You can store and export a Postgres connection string in the `DBOS_SYSTEM_DATABASE_URL` environment variable for DBOS to manage your workflows state. By default, DBOS will use `postgres://postgres:${PGPASSWORD}@localhost:5432/dbos?sslmode=disable`.
+**When to use DBOS:** You need to add durable workflows to your applications with minimal rearchitecting, or you are using Postgres.
 
+**When to use Temporal:** You don't want to add Postgres to your stack, or you need a language DBOS doesn't support yet.
 
-## ⭐️ Like this project?
+</details>
 
-[Star it on GitHub](https://github.com/dbos-inc/dbos-transact-golang)
-[![GitHub Stars](https://img.shields.io/github/stars/dbos-inc/dbos-transact-golang?style=social)](https://github.com/dbos-inc/dbos-transact-golang)
+<details><summary><strong>DBOS vs. Airflow</strong></summary>
+
+####
+
+DBOS and Airflow both provide workflow abstractions.
+Airflow is targeted at data science use cases, providing many out-of-the-box connectors but requiring workflows be written as explicit DAGs and externally orchestrating them from an Airflow cluster.
+Airflow is designed for batch operations and does not provide good performance for streaming or real-time use cases.
+DBOS is general-purpose, but is often used for data pipelines, allowing developers to write workflows as code and requiring no infrastructure except Postgres.
+
+**When to use DBOS:** You need the flexibility of writing workflows as code, or you need higher performance than Airflow is capable of (particularly for streaming or real-time use cases).
+
+**When to use Airflow:** You need Airflow's ecosystem of connectors.
+
+</details>
+
+<details><summary><strong>DBOS vs. Celery/BullMQ</strong></summary>
+
+####
+
+DBOS provides a similar queue abstraction to dedicated queueing systems like Celery or BullMQ: you can declare queues, submit tasks to them, and control their flow with concurrency limits, rate limits, timeouts, prioritization, etc.
+However, DBOS queues are **durable and Postgres-backed** and integrate with durable workflows.
+For example, in DBOS you can write a durable workflow that enqueues a thousand tasks and waits for their results.
+DBOS checkpoints the workflow and each of its tasks in Postgres, guaranteeing that even if failures or interruptions occur, the tasks will complete and the workflow will collect their results.
+By contrast, Celery/BullMQ are Redis-backed and don't provide workflows, so they provide fewer guarantees but better performance.
+
+**When to use DBOS:** You need the reliability of enqueueing tasks from durable workflows.
+
+**When to use Celery/BullMQ**: You don't need durability, or you need very high throughput beyond what your Postgres server can support.
+</details>
