@@ -114,9 +114,13 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 		output.WorkflowName = &wf.Name
 	}
 
-	// Copy optional fields
-	output.AuthenticatedUser = &wf.AuthenticatedUser
-	output.AssumedRole = &wf.AssumedRole
+	// Convert identity fields
+	if wf.AuthenticatedUser != "" {
+		output.AuthenticatedUser = &wf.AuthenticatedUser
+	}
+	if wf.AssumedRole != "" {
+		output.AssumedRole = &wf.AssumedRole
+	}
 	// Convert authenticated roles to JSON string if present
 	if len(wf.AuthenticatedRoles) > 0 {
 		rolesJSON, err := json.Marshal(wf.AuthenticatedRoles)
