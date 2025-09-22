@@ -42,64 +42,62 @@ You add durable workflows to your existing Golang program by registering ordinar
 package main
 
 import (
-	"context"
-	"fmt"
-	"os"
+    "context"
+    "fmt"
+    "os"
+    "time"
 
-	"github.com/dbos-inc/dbos-transact-golang/dbos"
+    "github.com/dbos-inc/dbos-transact-golang/dbos"
 )
 
 func workflow(dbosCtx dbos.DBOSContext, _ string) (string, error) {
-	_, err := dbos.RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
-		return stepOne(ctx)
-	})
-	if err != nil {
-		return "", err
-	}
-	return dbos.RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
-		return stepTwo(ctx)
-	})
+    _, err := dbos.RunAsStep(dbosCtx, stepOne)
+    if err != nil {
+        return "", err
+    }
+    return dbos.RunAsStep(dbosCtx, stepTwo)
 }
 
 func stepOne(ctx context.Context) (string, error) {
-	fmt.Println("Step one completed!")
-	return "Step 1 completed", nil
+    fmt.Println("Step one completed!")
+    return "Step 1 completed", nil
 }
 
 func stepTwo(ctx context.Context) (string, error) {
-	fmt.Println("Step two completed!")
-	return "Step 2 completed - Workflow finished successfully", nil
+    fmt.Println("Step two completed!")
+    return "Step 2 completed - Workflow finished successfully", nil
 }
+
 func main() {
     // Initialize a DBOS context
-	ctx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
-		DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
-		AppName:     "myapp",
-	})
-	if err != nil {
-		panic(err)
-	}
+    ctx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
+        DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
+        AppName:     "myapp",
+    })
+    if err != nil {
+        panic(err)
+    }
 
     // Register a workflow
-	dbos.RegisterWorkflow(ctx, workflow)
+    dbos.RegisterWorkflow(ctx, workflow)
 
     // Launch DBOS
-	err = ctx.Launch()
-	if err != nil {
-		panic(err)
-	}
-	defer ctx.Cancel()
+    err = ctx.Launch()
+    if err != nil {
+        panic(err)
+    }
+    defer ctx.Shutdown(2 * time.Second)
 
     // Run a durable workflow and get its result
-	handle, err := dbos.RunWorkflow(ctx, workflow, "")
-	if err != nil {
-		panic(err)
-	}
-	res, err := handle.GetResult()
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("Workflow result:", res)
+    handle, err := dbos.RunWorkflow(ctx, workflow, "")
+    if err != nil {
+        panic(err)
+    }
+    res, err := handle.GetResult()
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println("Workflow result:", res)
 }
 ```
 
@@ -130,6 +128,7 @@ They don't require a separate queueing service or message broker&mdash;just Post
 package main
 
 import (
+    "context"
     "fmt"
     "os"
     "time"
@@ -138,7 +137,7 @@ import (
 )
 
 func task(ctx dbos.DBOSContext, i int) (int, error) {
-    ctx.Sleep(5 * time.Second)
+    dbos.Sleep(ctx, 5*time.Second)
     fmt.Printf("Task %d completed\n", i)
     return i, nil
 }
@@ -162,7 +161,7 @@ func main() {
     if err != nil {
         panic(err)
     }
-    defer ctx.Cancel()
+    defer ctx.Shutdown(2 * time.Second)
 
     // Enqueue tasks and gather results
     fmt.Println("Enqueuing workflows")
@@ -218,7 +217,7 @@ It stores its wakeup time in Postgres so the workflow sleeps through any interru
 
 ```golang
 func workflow(ctx dbos.DBOSContext, duration time.Duration) (string, error) {
-    ctx.Sleep(duration)
+    dbos.Sleep(ctx, duration)
     return fmt.Sprintf("Workflow slept for %s", duration), nil
 }
 
