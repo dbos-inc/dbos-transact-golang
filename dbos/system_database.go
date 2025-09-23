@@ -52,6 +52,7 @@ type systemDatabase interface {
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
 	recv(ctx context.Context, input recvInput) (any, error)
+	selectRecv(ctx context.Context, input selectRecvInput) (selectRecvOutput, error)
 	setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	getEvent(ctx context.Context, input getEventInput) (any, error)
 
@@ -1929,6 +1930,131 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	}
 
 	return message, nil
+}
+
+func (s *sysDB) selectRecv(ctx context.Context, input selectRecvInput) (selectRecvOutput, error) {
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return selectRecvOutput{}, errors.New("selectRecv can only be called within a workflow")
+	}
+
+	destinationID := wfState.workflowID
+	
+	// Try to find an immediately available message
+	if selectedCase, message, found := s.tryReceiveImmediate(ctx, destinationID, input.Cases); found {
+		return selectRecvOutput{
+			SelectedCase: selectedCase,
+			Value:        message,
+			OK:           true,
+		}, nil
+	}
+	
+	// Handle default case with grace period for race conditions
+	if input.HasDefault {
+		return s.handleDefaultCase(ctx, destinationID, input)
+	}
+	
+	// No default case - wait with full timeout on first receive case
+	return s.waitForMessage(ctx, destinationID, input.Cases[0])
+}
+
+// tryReceiveImmediate checks all cases for immediately available messages
+func (s *sysDB) tryReceiveImmediate(ctx context.Context, destinationID string, cases []selectRecvCase) (int, any, bool) {
+	for i, recvCase := range cases {
+		if message, found := s.consumeMessage(ctx, destinationID, recvCase.Topic); found {
+			return i, message, true
+		}
+	}
+	return 0, nil, false
+}
+
+// handleDefaultCase waits briefly for messages before selecting default
+func (s *sysDB) handleDefaultCase(ctx context.Context, destinationID string, input selectRecvInput) (selectRecvOutput, error) {
+	const gracePeriod = 300 * time.Millisecond
+	const pollInterval = 50 * time.Millisecond
+	
+	deadline := time.Now().Add(gracePeriod)
+	
+	for time.Now().Before(deadline) {
+		if selectedCase, message, found := s.tryReceiveImmediate(ctx, destinationID, input.Cases); found {
+			return selectRecvOutput{
+				SelectedCase: selectedCase,
+				Value:        message,
+				OK:           true,
+			}, nil
+		}
+		
+		select {
+		case <-ctx.Done():
+			return selectRecvOutput{}, ctx.Err()
+		case <-time.After(pollInterval):
+			// Continue polling
+		}
+	}
+	
+	// No messages arrived, select default case
+	return selectRecvOutput{
+		SelectedCase: input.DefaultCase,
+		Value:        nil,
+		OK:           false,
+	}, nil
+}
+
+// waitForMessage waits for a message on a specific case with timeout
+func (s *sysDB) waitForMessage(ctx context.Context, destinationID string, recvCase selectRecvCase) (selectRecvOutput, error) {
+	timeout := recvCase.Timeout
+	if !recvCase.HasTimeout {
+		timeout = 30 * time.Second
+	}
+	
+	recvInput := recvInput{
+		Topic:   recvCase.Topic,
+		Timeout: timeout,
+	}
+	
+	message, err := s.recv(ctx, recvInput)
+	if err != nil {
+		return selectRecvOutput{}, err
+	}
+	
+	return selectRecvOutput{
+		SelectedCase: 0,
+		Value:        message,
+		OK:           message != nil,
+	}, nil
+}
+
+// consumeMessage attempts to consume a message from a topic, returning the message and whether one was found
+func (s *sysDB) consumeMessage(ctx context.Context, destinationID, topic string) (any, bool) {
+	query := fmt.Sprintf(`
+		WITH oldest_message AS (
+			SELECT message, created_at_epoch_ms
+			FROM %s.notifications
+			WHERE destination_uuid = $1 AND topic = $2
+			ORDER BY created_at_epoch_ms ASC
+			LIMIT 1
+		)
+		DELETE FROM %s.notifications
+		WHERE destination_uuid = $1 AND topic = $2 
+		  AND created_at_epoch_ms = (SELECT created_at_epoch_ms FROM oldest_message)
+		RETURNING message`, 
+		pgx.Identifier{s.schema}.Sanitize(), 
+		pgx.Identifier{s.schema}.Sanitize())
+
+	var messageString *string
+	err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&messageString)
+	
+	if err != nil || messageString == nil {
+		return nil, false
+	}
+	
+	message, err := deserialize(messageString)
+	if err != nil {
+		s.logger.Warn("Failed to deserialize message", "error", err, "topic", topic)
+		return nil, false
+	}
+	
+	return message, true
 }
 
 type WorkflowSetEventInput struct {

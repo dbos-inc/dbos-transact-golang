@@ -1164,6 +1164,24 @@ type recvInput struct {
 	Timeout time.Duration // Maximum time to wait for a message
 }
 
+type selectRecvCase struct {
+	Topic       string        // Topic to receive from
+	Timeout     time.Duration // Timeout for this case
+	HasTimeout  bool          // Whether timeout is specified
+}
+
+type selectRecvInput struct {
+	Cases       []selectRecvCase // Receive cases to try
+	HasDefault  bool             // Whether there's a default case
+	DefaultCase int              // Index of default case if present
+}
+
+type selectRecvOutput struct {
+	SelectedCase int // Index of the selected case
+	Value        any // Received value (nil for default case or timeout)
+	OK           bool // Whether a value was received
+}
+
 func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error) {
 	input := recvInput{
 		Topic:   topic,
@@ -1300,6 +1318,250 @@ func Sleep(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
 		return 0, errors.New("ctx cannot be nil")
 	}
 	return ctx.Sleep(ctx, duration)
+}
+
+/*********************************/
+/******* DURABLE SELECT *********/
+/*********************************/
+
+// SelectCase represents a single case in a durable select operation.
+// Each case can be a receive operation, send operation, or default case.
+type SelectCase[T any] struct {
+	// For receive operations from DBOS messaging system
+	Topic   string         // Topic to receive from (empty for send/default cases)
+	Timeout *time.Duration // Optional timeout for this specific case (nil for no timeout)
+	
+	// For send operations to DBOS messaging system
+	SendTopic       string // Topic to send to (empty for receive/default cases)  
+	SendDestination string // Destination workflow ID for send (empty for receive/default cases)
+	SendValue       T      // Value to send (zero value for receive/default cases)
+	
+	// Common fields
+	IsDefault bool // True if this is the default case
+	CaseID    int  // Unique identifier for this case (set automatically)
+}
+
+// SelectResult contains the result of a durable select operation.
+type SelectResult[T any] struct {
+	CaseIndex int  // Index of the selected case
+	Value     T    // Received value (zero value for send/default cases)
+	OK        bool // True if receive was successful (false for send/default or closed channel)
+}
+
+type selectInput struct {
+	Cases   []selectCaseData `json:"cases"`
+	Timeout *time.Duration   `json:"timeout,omitempty"`
+}
+
+type selectCaseData struct {
+	CaseID      int    `json:"case_id"`
+	CaseType    string `json:"case_type"`    // "recv", "send", "default"
+	Topic       string `json:"topic,omitempty"` // For messaging cases
+	HasTimeout  bool   `json:"has_timeout"`
+	Timeout     time.Duration `json:"timeout,omitempty"`
+	SendValue   any    `json:"send_value,omitempty"`
+	IsDefault   bool   `json:"is_default"`
+}
+
+type selectOutput struct {
+	SelectedCase int `json:"selected_case"`
+	Value        any `json:"value,omitempty"`
+	OK           bool `json:"ok"`
+}
+
+// Select performs a durable select operation that can survive workflow recovery.
+// It takes multiple SelectCase options and returns the result of the first ready case.
+// The selection is recorded durably, ensuring deterministic replay during recovery.
+//
+// Unlike Go's native select, this function is safe to use in workflows because
+// the selection outcome is recorded and replayed consistently.
+//
+// Example usage:
+//
+//	// Select between receiving from different topics with timeouts
+//	result, err := dbos.Select(ctx, []dbos.SelectCase[string]{
+//	    {Topic: "orders", Timeout: &[]time.Duration{5 * time.Second}[0]},
+//	    {Topic: "cancellations", Timeout: &[]time.Duration{3 * time.Second}[0]},
+//	    {IsDefault: true}, // Default case if no messages available
+//	})
+//	if err != nil {
+//	    return "", err
+//	}
+//	
+//	switch result.CaseIndex {
+//	case 0:
+//	    return fmt.Sprintf("Order received: %s", result.Value), nil
+//	case 1:
+//	    return fmt.Sprintf("Cancellation received: %s", result.Value), nil  
+//	case 2:
+//	    return "No messages available", nil
+//	}
+//
+// Note: This implementation currently supports receiving from topics via the
+// DBOS messaging system. Channel-based operations may be added in future versions.
+func Select[T any](ctx DBOSContext, cases []SelectCase[T], opts ...StepOption) (SelectResult[T], error) {
+	if ctx == nil {
+		return SelectResult[T]{}, errors.New("ctx cannot be nil")
+	}
+	
+	if len(cases) == 0 {
+		return SelectResult[T]{}, errors.New("select requires at least one case")
+	}
+	
+	// Register types for gob encoding
+	var t T
+	gob.Register(t)
+	gob.Register(SelectResult[T]{})
+	gob.Register(selectOutput{})
+	
+	// Validate and prepare cases
+	selectCases, hasDefault, defaultIndex, err := validateAndPrepareCases(cases)
+	if err != nil {
+		return SelectResult[T]{}, err
+	}
+	
+	input := selectInput{Cases: selectCases}
+	
+	// Execute select as a single durable step
+	result, err := RunAsStep(ctx, func(stepCtx context.Context) (selectOutput, error) {
+		return executeSelect(ctx, input, cases, hasDefault, defaultIndex)
+	}, opts...)
+	
+	if err != nil {
+		return SelectResult[T]{}, err
+	}
+
+	// Convert result to typed response
+	var value T
+	if result.Value != nil {
+		var ok bool
+		value, ok = result.Value.(T)
+		if !ok {
+			return SelectResult[T]{}, fmt.Errorf("type assertion failed: expected %T, got %T", value, result.Value)
+		}
+	}
+
+	return SelectResult[T]{
+		CaseIndex: result.SelectedCase,
+		Value:     value,
+		OK:        result.OK,
+	}, nil
+}
+
+// validateAndPrepareCases validates select cases and converts them to internal format
+func validateAndPrepareCases[T any](cases []SelectCase[T]) ([]selectCaseData, bool, int, error) {
+	var hasDefault bool
+	var defaultIndex int
+	selectCases := make([]selectCaseData, len(cases))
+	
+	for i, c := range cases {
+		cases[i].CaseID = i
+		selectCases[i] = selectCaseData{CaseID: c.CaseID}
+		
+		if c.IsDefault {
+			if hasDefault {
+				return nil, false, 0, errors.New("select can only have one default case")
+			}
+			hasDefault = true
+			defaultIndex = i
+			selectCases[i].CaseType = "default"
+		} else if c.Topic != "" {
+			selectCases[i].CaseType = "recv"
+			selectCases[i].Topic = c.Topic
+			if c.Timeout != nil {
+				selectCases[i].HasTimeout = true
+				selectCases[i].Timeout = *c.Timeout
+			}
+		} else if c.SendTopic != "" {
+			selectCases[i].CaseType = "send"
+			selectCases[i].Topic = c.SendTopic
+			selectCases[i].SendValue = c.SendValue
+		} else {
+			return nil, false, 0, fmt.Errorf("invalid case %d: must specify Topic, SendTopic, or IsDefault", i)
+		}
+	}
+	
+	return selectCases, hasDefault, defaultIndex, nil
+}
+
+// executeSelect performs the actual select operation
+func executeSelect[T any](ctx DBOSContext, input selectInput, cases []SelectCase[T], hasDefault bool, defaultIndex int) (selectOutput, error) {
+	dbosCtx, ok := ctx.(*dbosContext)
+	if !ok {
+		return selectOutput{}, errors.New("invalid context type")
+	}
+	
+	// Handle send cases first (they're non-blocking)
+	for i, caseData := range input.Cases {
+		if caseData.CaseType == "send" {
+			if err := trySendCase(dbosCtx, ctx, cases[i], caseData); err == nil {
+				return selectOutput{
+					SelectedCase: i,
+					OK:           true,
+				}, nil
+			}
+			// Send failed, continue to other cases
+		}
+	}
+	
+	// Handle receive cases
+	recvCases := extractReceiveCases(input.Cases)
+	if len(recvCases) > 0 {
+		return handleReceiveCases(dbosCtx, ctx, recvCases, hasDefault, defaultIndex)
+	}
+	
+	// Only default case remains
+	if hasDefault {
+		return selectOutput{
+			SelectedCase: defaultIndex,
+			OK:           false,
+		}, nil
+	}
+	
+	return selectOutput{}, errors.New("no cases were ready and no default case provided")
+}
+
+// trySendCase attempts to send a message for a send case
+func trySendCase[T any](dbosCtx *dbosContext, ctx DBOSContext, selectCase SelectCase[T], caseData selectCaseData) error {
+	if selectCase.SendDestination == "" {
+		return errors.New("send case missing destination")
+	}
+	return dbosCtx.Send(ctx, selectCase.SendDestination, caseData.SendValue, caseData.Topic)
+}
+
+// extractReceiveCases filters out receive cases from all cases
+func extractReceiveCases(cases []selectCaseData) []selectRecvCase {
+	var recvCases []selectRecvCase
+	for _, caseData := range cases {
+		if caseData.CaseType == "recv" {
+			recvCases = append(recvCases, selectRecvCase{
+				Topic:      caseData.Topic,
+				HasTimeout: caseData.HasTimeout,
+				Timeout:    caseData.Timeout,
+			})
+		}
+	}
+	return recvCases
+}
+
+// handleReceiveCases processes receive cases using the system database
+func handleReceiveCases(dbosCtx *dbosContext, ctx DBOSContext, recvCases []selectRecvCase, hasDefault bool, defaultIndex int) (selectOutput, error) {
+	selectInput := selectRecvInput{
+		Cases:       recvCases,
+		HasDefault:  hasDefault,
+		DefaultCase: defaultIndex,
+	}
+	
+	result, err := dbosCtx.systemDB.selectRecv(ctx, selectInput)
+	if err != nil {
+		return selectOutput{}, err
+	}
+	
+	return selectOutput{
+		SelectedCase: result.SelectedCase,
+		Value:        result.Value,
+		OK:           result.OK,
+	}, nil
 }
 
 /***********************************/
