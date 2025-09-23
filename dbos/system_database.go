@@ -5,15 +5,18 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"math/rand"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -127,10 +130,6 @@ type migrationFile struct {
 
 const (
 	_DBOS_MIGRATION_TABLE = "dbos_migrations"
-
-	// PostgreSQL error codes
-	_PG_ERROR_UNIQUE_VIOLATION      = "23505"
-	_PG_ERROR_FOREIGN_KEY_VIOLATION = "23503"
 
 	// Notification channels
 	_DBOS_NOTIFICATIONS_CHANNEL   = "dbos_notifications_channel"
@@ -513,14 +512,14 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 	)
 	if err != nil {
 		// Handle unique constraint violation for the deduplication ID (this should be the only case for a 23505)
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == pgerrcode.UniqueViolation {
 			return nil, newQueueDeduplicatedError(
 				input.status.ID,
 				input.status.QueueName,
 				input.status.DeduplicationID,
 			)
 		}
-		return nil, fmt.Errorf("failed to insert workflow status: %w", err)
+		return nil, err
 	}
 
 	// Convert timeout milliseconds to time.Duration
@@ -534,9 +533,11 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 	}
 
 	if len(input.status.Name) > 0 && result.name != input.status.Name {
+		s.logger.Error("Workflow already exists with a different name", "existing_name", result.name, "provided_name", input.status.Name)
 		return nil, newConflictingWorkflowError(input.status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.name, input.status.Name))
 	}
 	if len(input.status.QueueName) > 0 && result.queueName != nil && input.status.QueueName != *result.queueName {
+		s.logger.Error("Workflow already exists in a different queue", "existing_queue", result.queueName, "provided_queue", input.status.QueueName)
 		return nil, newConflictingWorkflowError(input.status.ID, fmt.Sprintf("Workflow already exists in a different queue: %s, but the provided queue is: %s", *result.queueName, input.status.QueueName))
 	}
 
@@ -556,12 +557,12 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 			WorkflowStatusPending)
 
 		if err != nil {
-			return nil, fmt.Errorf("failed to update workflow to %s: %w", WorkflowStatusMaxRecoveryAttemptsExceeded, err)
+			return nil, err
 		}
 
 		// Commit the transaction before throwing the error
 		if err := input.tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("failed to commit transaction after marking workflow as %s: %w", WorkflowStatusMaxRecoveryAttemptsExceeded, err)
+			return nil, err
 		}
 
 		return nil, newDeadLetterQueueError(input.status.ID, input.maxRetries)
@@ -684,9 +685,8 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 	} else {
 		rows, err = s.pool.Query(ctx, query, qb.args...)
 	}
-
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute ListWorkflows query: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -721,7 +721,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 
 		err := rows.Scan(scanArgs...)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan workflow row: %w", err)
+			return nil, err
 		}
 
 		if queueName != nil && len(*queueName) > 0 {
@@ -784,7 +784,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over workflow rows: %w", err)
+		return nil, err
 	}
 
 	return workflows, nil
@@ -822,7 +822,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to update workflow status: %w", err)
+		return err
 	}
 	return nil
 }
@@ -830,7 +830,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
 	defer tx.Rollback(ctx)
 
@@ -854,7 +854,7 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
 	case WorkflowStatusSuccess, WorkflowStatusError, WorkflowStatusCancelled:
 		// Workflow is already in a terminal state, rollback and return
 		if err := tx.Rollback(ctx); err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
+			return err
 		}
 		return nil
 	}
@@ -866,11 +866,11 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
 
 	_, err = tx.Exec(ctx, updateStatusQuery, WorkflowStatusCancelled, time.Now().UnixMilli(), workflowID)
 	if err != nil {
-		return fmt.Errorf("failed to update workflow status to CANCELLED: %w", err)
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return err
 	}
 
 	return nil
@@ -885,7 +885,7 @@ func (s *sysDB) cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 
 	workflows, err := s.listWorkflows(ctx, listInput)
 	if err != nil {
-		return fmt.Errorf("failed to list workflows for cancellation: %w", err)
+		return err
 	}
 
 	// Cancel each workflow
@@ -922,7 +922,7 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 		var rowsBasedCutoff int64
 		err := s.pool.QueryRow(ctx, query, *input.rowsThreshold-1).Scan(&rowsBasedCutoff)
 		if err != nil && err != pgx.ErrNoRows {
-			return fmt.Errorf("failed to query cutoff timestamp by rows threshold: %w", err)
+			return err
 		}
 		// If we don't have a provided cutoffTimestamp and found one in the database
 		// Or if the found cutoffTimestamp is more restrictive (higher timestamp = more recent = less deletion)
@@ -946,9 +946,8 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 		*cutoffTimestamp,
 		WorkflowStatusPending,
 		WorkflowStatusEnqueued)
-
 	if err != nil {
-		return fmt.Errorf("failed to garbage collect workflows: %w", err)
+		return err
 	}
 
 	s.logger.Info("Garbage collected workflows",
@@ -961,14 +960,14 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
 	defer tx.Rollback(ctx)
 
 	// Execute with snapshot isolation in case of concurrent calls on the same workflow
 	_, err = tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
 	if err != nil {
-		return fmt.Errorf("failed to set transaction isolation level: %w", err)
+		return err
 	}
 
 	// Check the status of the workflow. If it is complete, do nothing.
@@ -1006,11 +1005,11 @@ func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 		time.Now().UnixMilli(),
 		workflowID)
 	if err != nil {
-		return fmt.Errorf("failed to update workflow status to ENQUEUED: %w", err)
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return err
 	}
 
 	return nil
@@ -1037,7 +1036,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to begin transaction: %w", err)
+		return "", err
 	}
 	defer tx.Rollback(ctx)
 
@@ -1049,7 +1048,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
 	if err != nil {
-		return "", fmt.Errorf("failed to list workflows: %w", err)
+		return "", err
 	}
 	if len(wfs) == 0 {
 		return "", newNonExistentWorkflowError(input.originalWorkflowID)
@@ -1101,7 +1100,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		0)
 
 	if err != nil {
-		return "", fmt.Errorf("failed to insert forked workflow status: %w", err)
+		return "", err
 	}
 
 	// If startStep > 0, copy the original workflow's outputs into the forked workflow
@@ -1114,12 +1113,12 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 
 		_, err = tx.Exec(ctx, copyOutputsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
 		if err != nil {
-			return "", fmt.Errorf("failed to copy operation outputs: %w", err)
+			return "", err
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("failed to commit transaction: %w", err)
+		return "", err
 	}
 
 	return forkedWorkflowID, nil
@@ -1144,7 +1143,7 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any
 				time.Sleep(_DB_RETRY_INTERVAL)
 				continue
 			}
-			return nil, fmt.Errorf("failed to query workflow status: %w", err)
+			return nil, err
 		}
 
 		// Deserialize output from TEXT to bytes then from bytes to R using gob
@@ -1213,7 +1212,7 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 
 	if err != nil {
 		s.logger.Error("RecordOperationResult Error occurred", "error", err)
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == pgerrcode.UniqueViolation {
 			return newWorkflowConflictIDError(input.workflowID)
 		}
 		return err
@@ -1260,12 +1259,12 @@ func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkfl
 
 	if err != nil {
 		// Check for unique constraint violation (conflict ID error)
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == pgerrcode.UniqueViolation {
 			return fmt.Errorf(
 				"child workflow %s already registered for parent workflow %s (operation ID: %d)",
 				input.childWorkflowID, input.parentWorkflowID, input.stepID)
 		}
-		return fmt.Errorf("failed to record child workflow: %w", err)
+		return err
 	}
 
 	if commandTag.RowsAffected() == 0 {
@@ -1286,7 +1285,7 @@ func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, funct
 		if err == pgx.ErrNoRows {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to check child workflow: %w", err)
+		return nil, err
 	}
 
 	return childWorkflowID, nil
@@ -1321,7 +1320,7 @@ func (s *sysDB) recordChildGetResult(ctx context.Context, input recordChildGetRe
 		input.childWorkflowID,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to record get result: %w", err)
+		return err
 	}
 	return nil
 }
@@ -1352,7 +1351,7 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 	} else {
 		tx, err = s.pool.Begin(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to begin transaction: %w", err)
+			return nil, err
 		}
 		defer tx.Rollback(ctx) // We don't need to commit this transaction -- it is just useful for having READ COMMITTED across the reads
 	}
@@ -1373,7 +1372,7 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 		if err == pgx.ErrNoRows {
 			return nil, newNonExistentWorkflowError(input.workflowID)
 		}
-		return nil, fmt.Errorf("failed to get workflow status: %w", err)
+		return nil, err
 	}
 
 	// If the workflow is cancelled, raise the exception
@@ -1393,7 +1392,7 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 		if err == pgx.ErrNoRows {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to get operation outputs: %w", err)
+		return nil, err
 	}
 
 	// If the provided and recorded function name are different, throw an exception
@@ -1434,7 +1433,7 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 
 	rows, err := s.pool.Query(ctx, query, workflowID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query workflow steps: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -1447,7 +1446,7 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 
 		err := rows.Scan(&step.StepID, &step.StepName, &outputString, &errorString, &childWorkflowID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan step row: %w", err)
+			return nil, err
 		}
 
 		// Deserialize output if present
@@ -1473,7 +1472,7 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over step rows: %w", err)
+		return nil, err
 	}
 
 	return steps, nil
@@ -1519,7 +1518,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 	}
 	recordedResult, err := s.checkOperationExecution(ctx, checkInput)
 	if err != nil {
-		return 0, fmt.Errorf("failed to check operation execution: %w", err)
+		return 0, err
 	}
 
 	var endTime time.Time
@@ -1559,7 +1558,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 			// Check if this is a ConflictingWorkflowError (operation already recorded by another process)
 			if dbosErr, ok := err.(*DBOSError); ok && dbosErr.Code == ConflictingIDError {
 			} else {
-				return 0, fmt.Errorf("failed to record sleep operation result: %w", err)
+				return 0, err
 			}
 		}
 	}
@@ -1718,7 +1717,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
 	defer tx.Rollback(ctx)
 
@@ -1756,10 +1755,10 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, messageString)
 	if err != nil {
 		// Check for foreign key violation (destination workflow doesn't exist)
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_FOREIGN_KEY_VIOLATION {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == pgerrcode.ForeignKeyViolation {
 			return newNonExistentWorkflowError(input.DestinationID)
 		}
-		return fmt.Errorf("failed to insert notification: %w", err)
+		return err
 	}
 
 	// Record the operation result if this is called within a workflow
@@ -1781,7 +1780,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 
 	// Commit transaction
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return err
 	}
 
 	return nil
@@ -1845,7 +1844,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.notifications WHERE destination_uuid = $1 AND topic = $2)`, pgx.Identifier{s.schema}.Sanitize())
 	err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 	if err != nil {
-		return false, fmt.Errorf("failed to check message: %w", err)
+		return false, err
 	}
 	if !exists {
 		// Wait for notifications using condition variable with timeout pattern
@@ -1882,7 +1881,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	// Find the oldest message and delete it atomically
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
 	query = fmt.Sprintf(`
@@ -1906,7 +1905,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 			// No message found, record nil result
 			messageString = nil
 		} else {
-			return nil, fmt.Errorf("failed to consume message: %w", err)
+			return nil, err
 		}
 	}
 
@@ -1933,7 +1932,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+		return nil, err
 	}
 
 	return message, nil
@@ -1961,7 +1960,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
 	defer tx.Rollback(ctx)
 
@@ -1995,7 +1994,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 
 	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, messageString)
 	if err != nil {
-		return fmt.Errorf("failed to insert/update workflow event: %w", err)
+		return err
 	}
 
 	// Record the operation result
@@ -2015,7 +2014,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 
 	// Commit transaction
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return err
 	}
 
 	return nil
@@ -2078,7 +2077,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	row := s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
 	err := row.Scan(&valueString)
 	if err != nil && err != pgx.ErrNoRows {
-		return nil, fmt.Errorf("failed to query workflow event: %w", err)
+		return nil, err
 	}
 
 	if err == pgx.ErrNoRows {
@@ -2117,7 +2116,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		row = s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
 		err = row.Scan(&valueString)
 		if err != nil && err != pgx.ErrNoRows {
-			return nil, fmt.Errorf("failed to query workflow event after wait: %w", err)
+			return nil, err
 		}
 	}
 
@@ -2169,14 +2168,14 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	// Begin transaction with snapshot isolation
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
 
 	// Set transaction isolation level to repeatable read (similar to snapshot isolation)
 	_, err = tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to set transaction isolation level: %w", err)
+		return nil, err
 	}
 
 	// First check the rate limiter
@@ -2198,7 +2197,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			WorkflowStatusEnqueued,
 			cutoffTimeMs).Scan(&numRecentQueries)
 		if err != nil {
-			return nil, fmt.Errorf("failed to query rate limiter: %w", err)
+			return nil, err
 		}
 
 		if numRecentQueries >= input.queue.RateLimit.Limit {
@@ -2219,7 +2218,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 
 		rows, err := tx.Query(ctx, pendingQuery, input.queue.Name, WorkflowStatusPending)
 		if err != nil {
-			return nil, fmt.Errorf("failed to query pending workflows: %w", err)
+			return nil, err
 		}
 		defer rows.Close()
 
@@ -2228,7 +2227,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			var executorIDRow string
 			var taskCount int
 			if err := rows.Scan(&executorIDRow, &taskCount); err != nil {
-				return nil, fmt.Errorf("failed to scan pending workflow row: %w", err)
+				return nil, err
 			}
 			pendingWorkflowsDict[executorIDRow] = taskCount
 		}
@@ -2306,7 +2305,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	// Execute the query to get workflow IDs
 	rows, err := tx.Query(ctx, query, input.queue.Name, WorkflowStatusEnqueued, input.applicationVersion)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query enqueued workflows: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -2321,7 +2320,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		}
 		var workflowID string
 		if err := rows.Scan(&workflowID); err != nil {
-			return nil, fmt.Errorf("failed to scan workflow ID: %w", err)
+			return nil, err
 		}
 		dequeuedIDs = append(dequeuedIDs, workflowID)
 	}
@@ -2366,7 +2365,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			time.Now().UnixMilli(),
 			id).Scan(&retWorkflow.name, &inputString)
 		if err != nil {
-			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
+			return nil, err
 		}
 
 		if inputString != nil && len(*inputString) > 0 {
@@ -2379,7 +2378,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	// Commit only if workflows were dequeued. Avoids WAL bloat and XID advancement.
 	if len(retWorkflows) > 0 {
 		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("failed to commit transaction: %w", err)
+			return nil, err
 		}
 	}
 
@@ -2399,7 +2398,7 @@ func (s *sysDB) clearQueueAssignment(ctx context.Context, workflowID string) (bo
 		WorkflowStatusPending)
 
 	if err != nil {
-		return false, fmt.Errorf("failed to clear queue assignment for workflow %s: %w", workflowID, err)
+		return false, err
 	}
 
 	// If no rows were affected, the workflow is not anymore in the queue or was already completed
