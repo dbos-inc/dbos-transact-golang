@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/robfig/cron/v3"
 )
 
@@ -681,7 +682,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
+		childWorkflowID, err := retryWithResult(uncancellableCtx, func() (*string, error) {
+			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
+		}, withRetrierLogger(c.logger))
 		if err != nil {
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("checking child workflow: %v", err))
 		}
@@ -735,11 +738,15 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	}
 
 	// Init status and record child workflow relationship in a single transaction
-	tx, err := c.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
+	tx, err := retryWithResult(uncancellableCtx, func() (pgx.Tx, error) {
+		return c.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
+	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to begin transaction: %v", err))
 	}
-	defer tx.Rollback(uncancellableCtx) // Rollback if not committed
+	defer retry(uncancellableCtx, func() error {
+		return tx.Rollback(uncancellableCtx) // Rollback if not committed
+	}, withRetrierLogger(c.logger))
 
 	// Insert workflow status with transaction
 	insertInput := insertWorkflowStatusDBInput{
@@ -747,7 +754,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		maxRetries: params.maxRetries,
 		tx:         tx,
 	}
-	insertStatusResult, err := c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
+	insertStatusResult, err := retryWithResult(uncancellableCtx, func() (*insertWorkflowResult, error) {
+		return c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
+	}, withRetrierLogger(c.logger))
 	if err != nil {
 		c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
 		return nil, err
@@ -763,7 +772,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			stepID:           parentWorkflowState.stepID,
 			tx:               tx,
 		}
-		err = c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
+		err = retry(uncancellableCtx, func() error {
+			return c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
+		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("recording child workflow: %v", err))
@@ -773,7 +784,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
 	if len(params.queueName) > 0 || insertStatusResult.status == WorkflowStatusSuccess || insertStatusResult.status == WorkflowStatusError {
 		// Commit the transaction to update the number of attempts and/or enact the enqueue
-		if err := tx.Commit(uncancellableCtx); err != nil {
+		if err := retry(uncancellableCtx, func() error {
+			return tx.Commit(uncancellableCtx)
+		}, withRetrierLogger(c.logger)); err != nil {
 			return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
 		}
 		return newWorkflowPollingHandle[any](uncancellableCtx, workflowStatus.ID), nil
@@ -808,7 +821,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
 		dbosCancelFunction := func() {
 			c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
-			err = c.systemDB.cancelWorkflow(uncancellableCtx, workflowID)
+			err = retry(uncancellableCtx, func() error {
+				return c.systemDB.cancelWorkflow(uncancellableCtx, workflowID)
+			}, withRetrierLogger(c.logger))
 			if err != nil {
 				c.logger.Error("Failed to cancel workflow", "error", err)
 			}
@@ -818,7 +833,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	}
 
 	// Commit the transaction. This must happen before we start the goroutine to ensure the workflow is found by steps in the database
-	if err := tx.Commit(uncancellableCtx); err != nil {
+	if err := retry(uncancellableCtx, func() error {
+		return tx.Commit(uncancellableCtx)
+	}, withRetrierLogger(c.logger)); err != nil {
 		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
 	}
 
@@ -836,7 +853,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		var dbosErr *DBOSError
 		if errors.As(err, &dbosErr) && dbosErr.Code == ConflictingIDError {
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
-			result, err = c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID)
+			result, err = retryWithResult(uncancellableCtx, func() (any, error) {
+				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID)
+			}, withRetrierLogger(c.logger))
 		} else {
 			status := WorkflowStatusSuccess
 
@@ -852,12 +871,14 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				status = WorkflowStatusCancelled
 			}
 
-			recordErr := c.systemDB.updateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
-				workflowID: workflowID,
-				status:     status,
-				err:        err,
-				output:     result,
-			})
+			recordErr := retry(uncancellableCtx, func() error {
+				return c.systemDB.updateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
+					workflowID: workflowID,
+					status:     status,
+					err:        err,
+					output:     result,
+				})
+			}, withRetrierLogger(c.logger))
 			if recordErr != nil {
 				c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
 				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
@@ -1054,11 +1075,13 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	uncancellableCtx := WithoutCancel(c)
 
 	// Check the step is cancelled, has already completed, or is called with a different name
-	recordedOutput, err := c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
-		workflowID: stepState.workflowID,
-		stepID:     stepState.stepID,
-		stepName:   stepOpts.stepName,
-	})
+	recordedOutput, err := retryWithResult(uncancellableCtx, func() (*recordedResult, error) {
+		return c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
+			workflowID: stepState.workflowID,
+			stepID:     stepState.stepID,
+			stepName:   stepOpts.stepName,
+		})
+	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Sprintf("checking operation execution: %v", err))
 	}
@@ -1121,7 +1144,9 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		err:        stepError,
 		output:     stepOutput,
 	}
-	recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+	recErr := retry(uncancellableCtx, func() error {
+		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+	}, withRetrierLogger(c.logger))
 	if recErr != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Sprintf("recording step outcome: %v", recErr))
 	}
