@@ -2546,3 +2546,229 @@ func maskPassword(dbURL string) (string, error) {
 
 	return parsedURL.String(), nil
 }
+
+/*******************************/
+/******* RETRIER ********/
+/*******************************/
+
+func isRetryablePGError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// PostgreSQL codes indicating connection/admin shutdown etc.
+	var pgerr *pgconn.PgError
+	if errors.As(err, &pgerr) {
+		switch pgerr.Code {
+		case pgerrcode.ConnectionException,
+			pgerrcode.ConnectionDoesNotExist,
+			pgerrcode.ConnectionFailure,
+			pgerrcode.SQLClientUnableToEstablishSQLConnection,
+			pgerrcode.SQLServerRejectedEstablishmentOfSQLConnection,
+			pgerrcode.AdminShutdown,
+			pgerrcode.CrashShutdown,
+			pgerrcode.CannotConnectNow:
+			return true
+		}
+	}
+
+	// pgx aggregate for connect attempts:
+	var cerr *pgconn.ConnectError
+	if errors.As(err, &cerr) {
+		return true
+	}
+
+	// Match most "connection closed" cases
+	if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "conn closed") {
+		return true
+	}
+
+	/*
+		// Common low-level causes during startup handshake:
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return true
+		}
+	*/
+
+	/*
+		// Syscalls frequently seen from dial/handshake:
+		switch {
+		case errors.Is(err, syscall.ECONNREFUSED),
+			errors.Is(err, syscall.ECONNRESET),
+			errors.Is(err, syscall.EHOSTDOWN),
+			errors.Is(err, syscall.EHOSTUNREACH),
+			errors.Is(err, syscall.ENETDOWN),
+			errors.Is(err, syscall.ENETUNREACH):
+			return true
+		}
+	*/
+
+	// Net-level errors
+	var nerr net.Error
+	return errors.As(err, &nerr)
+}
+
+// retryConfig holds the configuration for a retry operation
+type retryConfig struct {
+	maxRetries     int // -1 for infinite retries
+	baseDelay      time.Duration
+	maxDelay       time.Duration
+	backoffFactor  float64
+	jitterMin      float64
+	jitterMax      float64
+	retryCondition func(error) bool
+	logger         *slog.Logger
+}
+
+// retryOption is a functional option for configuring retry behavior
+type retryOption func(*retryConfig)
+
+// withRetrierMaxRetries sets the maximum number of retry attempts (-1 for infinite)
+func withRetrierMaxRetries(maxRetries int) retryOption {
+	return func(c *retryConfig) {
+		c.maxRetries = maxRetries
+	}
+}
+
+// withRetrierBaseDelay sets the initial delay between retry attempts
+func withRetrierBaseDelay(delay time.Duration) retryOption {
+	return func(c *retryConfig) {
+		c.baseDelay = delay
+	}
+}
+
+// withRetrierMaxDelay sets the maximum delay between retry attempts
+func withRetrierMaxDelay(delay time.Duration) retryOption {
+	return func(c *retryConfig) {
+		c.maxDelay = delay
+	}
+}
+
+// withRetrierBackoffFactor sets the exponential backoff factor
+func withRetrierBackoffFactor(factor float64) retryOption {
+	return func(c *retryConfig) {
+		c.backoffFactor = factor
+	}
+}
+
+// withRetrierJitter sets the jitter range for retry delays (e.g., 0.95 to 1.05 for ±5% jitter)
+func withRetrierJitter(min, max float64) retryOption {
+	return func(c *retryConfig) {
+		c.jitterMin = min
+		c.jitterMax = max
+	}
+}
+
+// withRetrierCondition sets the function that determines if an error is retryable
+func withRetrierCondition(condition func(error) bool) retryOption {
+	return func(c *retryConfig) {
+		c.retryCondition = condition
+	}
+}
+
+// withRetrierLogger sets the logger for the retrier
+func withRetrierLogger(logger *slog.Logger) retryOption {
+	return func(c *retryConfig) {
+		c.logger = logger
+	}
+}
+
+// retry executes a function with retry logic using functional options
+func retry(ctx context.Context, fn func() error, options ...retryOption) error {
+	// Start with default configuration
+	config := &retryConfig{
+		maxRetries:     -1,
+		baseDelay:      100 * time.Millisecond,
+		maxDelay:       30 * time.Second,
+		backoffFactor:  2.0,
+		jitterMin:      0.95,
+		jitterMax:      1.05,
+		retryCondition: isRetryablePGError,
+	}
+
+	// Apply options
+	for _, opt := range options {
+		opt(config)
+	}
+
+	var lastErr error
+	delay := config.baseDelay
+	attempt := 0
+
+	for {
+		// Check context before attempting
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		lastErr = fn()
+
+		// Success and rollback case
+		if lastErr == nil || strings.Contains(lastErr.Error(), "tx is closed") {
+			return nil
+		}
+
+		// Check if error is retryable
+		if !config.retryCondition(lastErr) {
+			config.logger.Error("Non-retryable error encountered", "error", lastErr)
+			return lastErr
+		}
+
+		// Check if we should continue retrying
+		// If maxRetries is -1, retry indefinitely
+		if config.maxRetries >= 0 && attempt >= config.maxRetries {
+			return lastErr
+		}
+
+		// Log retry attempt if logger is provided
+		if config.logger != nil {
+			config.logger.Info("Retrying operation",
+				"attempt", attempt+1,
+				"max_retries", config.maxRetries,
+				"delay", delay,
+				"error", lastErr)
+		}
+
+		// Apply jitter to the delay
+		jitterRange := config.jitterMax - config.jitterMin
+		jitterFactor := config.jitterMin + rand.Float64()*jitterRange // #nosec G404 -- trivial use of math/rand
+		jitteredDelay := time.Duration(float64(delay) * jitterFactor)
+
+		// Wait before retrying with context cancellation support
+		select {
+		case <-time.After(jitteredDelay):
+		case <-ctx.Done():
+			config.logger.Error("Operation cancelled", "error", ctx.Err())
+			return ctx.Err()
+		}
+
+		// Calculate next delay with exponential backoff
+		delay = min(time.Duration(float64(delay)*config.backoffFactor), config.maxDelay)
+
+		attempt++
+	}
+}
+
+// retryWithResult executes a function that returns a value with retry logic
+// It uses the non-generic retry function under the hood
+func retryWithResult[T any](ctx context.Context, fn func() (T, error), options ...retryOption) (T, error) {
+	var result T
+	var capturedErr error
+
+	// Wrap the generic function to work with the non-generic retry
+	wrappedFn := func() error {
+		var err error
+		result, err = fn()
+		capturedErr = err
+		return err
+	}
+
+	// Use the non-generic retry function
+	err := retry(ctx, wrappedFn, options...)
+
+	// Return the last result and error
+	if err != nil {
+		return result, capturedErr
+	}
+	return result, nil
+}
