@@ -1649,7 +1649,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			}
 			// If the underlying connection is closed, attempt to re-acquire a new one
 			if poolConn.Conn().IsClosed() {
-				s.logger.Error("Notification listener connection closed. re-acquiring")
+				s.logger.Debug("Notification listener connection closed. re-acquiring")
 				poolConn.Release()
 				for {
 					if ctx.Err() != nil {
@@ -1661,7 +1661,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 						retryAttempt = 0
 						break
 					}
-					s.logger.Error("failed to re-acquire connection for notification listener", "error", err)
+					s.logger.Debug("failed to re-acquire connection for notification listener", "error", err)
 					time.Sleep(backoffWithJitter(retryAttempt))
 					retryAttempt++
 				}
@@ -2587,26 +2587,6 @@ func isRetryablePGError(err error) bool {
 		return true
 	}
 
-	/*
-		// Common low-level causes during startup handshake:
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return true
-		}
-	*/
-
-	/*
-		// Syscalls frequently seen from dial/handshake:
-		switch {
-		case errors.Is(err, syscall.ECONNREFUSED),
-			errors.Is(err, syscall.ECONNRESET),
-			errors.Is(err, syscall.EHOSTDOWN),
-			errors.Is(err, syscall.EHOSTUNREACH),
-			errors.Is(err, syscall.ENETDOWN),
-			errors.Is(err, syscall.ENETUNREACH):
-			return true
-		}
-	*/
-
 	// Net-level errors
 	var nerr net.Error
 	return errors.As(err, &nerr)
@@ -2714,7 +2694,7 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 
 		// Check if error is retryable
 		if !config.retryCondition(lastErr) {
-			config.logger.Error("Non-retryable error encountered", "error", lastErr)
+			config.logger.Debug("Non-retryable error encountered", "error", lastErr)
 			return lastErr
 		}
 
@@ -2726,7 +2706,7 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 
 		// Log retry attempt if logger is provided
 		if config.logger != nil {
-			config.logger.Info("Retrying operation",
+			config.logger.Debug("Retrying operation",
 				"attempt", attempt+1,
 				"max_retries", config.maxRetries,
 				"delay", delay,
