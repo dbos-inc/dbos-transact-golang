@@ -242,11 +242,11 @@ func TestChaosRecv(t *testing.T) {
 	dbosCtx := setupDBOS(t)
 
 	// Start chaos monkey
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var wg sync.WaitGroup
 	PostgresChaosMonkey(t, ctx, &wg)
-	defer wg.Wait()
 
 	topic := "test_topic"
 
@@ -294,11 +294,11 @@ func TestChaosEvents(t *testing.T) {
 	dbosCtx := setupDBOS(t)
 
 	// Start chaos monkey
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var wg sync.WaitGroup
 	PostgresChaosMonkey(t, ctx, &wg)
-	defer wg.Wait()
 
 	key := "test_key"
 
@@ -343,11 +343,11 @@ func TestChaosQueues(t *testing.T) {
 	dbosCtx := setupDBOS(t)
 
 	// Start chaos monkey
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var wg sync.WaitGroup
 	PostgresChaosMonkey(t, ctx, &wg)
-	defer wg.Wait()
 
 	queue := dbos.NewWorkflowQueue(dbosCtx, "test_queue")
 
