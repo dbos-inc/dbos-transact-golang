@@ -490,13 +490,16 @@ type Workflow[P any, R any] func(ctx DBOSContext, input P) (R, error)
 type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
 
 type workflowOptions struct {
-	workflowName       string
-	workflowID         string
-	queueName          string
-	applicationVersion string
-	maxRetries         int
-	deduplicationID    string
-	priority           uint
+	workflowName        string
+	workflowID          string
+	queueName           string
+	applicationVersion  string
+	maxRetries          int
+	deduplicationID     string
+	priority            uint
+	authenticated_user  string
+	assumed_role        string
+	authenticated_roles []string
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
@@ -732,6 +735,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		QueueName:          params.queueName,
 		DeduplicationID:    params.deduplicationID,
 		Priority:           int(params.priority),
+		AuthenticatedUser:  params.authenticated_user,
+		AssumedRole:        params.assumed_role,
+		AuthenticatedRoles: params.authenticated_roles,
 	}
 
 	// Init status and record child workflow relationship in a single transaction
