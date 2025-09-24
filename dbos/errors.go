@@ -28,7 +28,6 @@ const (
 type DBOSError struct {
 	Message string        // Human-readable error message
 	Code    DBOSErrorCode // Error type code for programmatic handling
-	IsBase  bool          // Internal errors that shouldn't be caught by user code
 
 	// Optional context fields - only set when relevant to the error
 	WorkflowID      string // Associated workflow identifier
@@ -40,12 +39,20 @@ type DBOSError struct {
 	ExpectedName    string // Expected function name (for determinism errors)
 	RecordedName    string // Actually recorded function name (for determinism errors)
 	MaxRetries      int    // Maximum retry limit (for retry-related errors)
+
+	wrappedErr error // Underlying error being wrapped (for error unwrapping)
 }
 
 // Error returns a formatted error message including the error code.
 // This implements the standard Go error interface.
 func (e *DBOSError) Error() string {
 	return fmt.Sprintf("DBOS Error %d: %s", int(e.Code), e.Message)
+}
+
+// Unwrap returns the underlying error, if any.
+// This enables Go's error unwrapping functionality with errors.Is and errors.As.
+func (e *DBOSError) Unwrap() error {
+	return e.wrappedErr
 }
 
 func newConflictingWorkflowError(workflowID, message string) *DBOSError {
@@ -105,7 +112,6 @@ func newWorkflowCancelledError(workflowID string) *DBOSError {
 	return &DBOSError{
 		Message: fmt.Sprintf("Workflow %s was cancelled", workflowID),
 		Code:    WorkflowCancelled,
-		IsBase:  true,
 	}
 }
 
@@ -114,7 +120,6 @@ func newWorkflowConflictIDError(workflowID string) *DBOSError {
 		Message:    fmt.Sprintf("Conflicting workflow ID %s", workflowID),
 		Code:       ConflictingIDError,
 		WorkflowID: workflowID,
-		IsBase:     true,
 	}
 }
 
@@ -123,7 +128,6 @@ func newWorkflowUnexpectedResultType(workflowID, expectedType, actualType string
 		Message:    fmt.Sprintf("Workflow %s returned unexpected result type: expected %s, got %s", workflowID, expectedType, actualType),
 		Code:       WorkflowUnexpectedTypeError,
 		WorkflowID: workflowID,
-		IsBase:     true,
 	}
 }
 
@@ -131,16 +135,15 @@ func newWorkflowUnexpectedInputType(workflowName, expectedType, actualType strin
 	return &DBOSError{
 		Message: fmt.Sprintf("Workflow %s received unexpected input type: expected %s, got %s", workflowName, expectedType, actualType),
 		Code:    WorkflowUnexpectedTypeError,
-		IsBase:  true,
 	}
 }
 
-func newWorkflowExecutionError(workflowID, message string) *DBOSError {
+func newWorkflowExecutionError(workflowID string, err error) *DBOSError {
 	return &DBOSError{
-		Message:    fmt.Sprintf("Workflow %s execution error: %s", workflowID, message),
+		Message:    fmt.Sprintf("Workflow %s execution error: %s", workflowID, err.Error()),
 		Code:       WorkflowExecutionError,
 		WorkflowID: workflowID,
-		IsBase:     true,
+		wrappedErr: err,
 	}
 }
 
@@ -150,7 +153,6 @@ func newStepExecutionError(workflowID, stepName, message string) *DBOSError {
 		Code:       StepExecutionError,
 		WorkflowID: workflowID,
 		StepName:   stepName,
-		IsBase:     true,
 	}
 }
 
@@ -160,7 +162,6 @@ func newDeadLetterQueueError(workflowID string, maxRetries int) *DBOSError {
 		Code:       DeadLetterQueueError,
 		WorkflowID: workflowID,
 		MaxRetries: maxRetries,
-		IsBase:     true,
 	}
 }
 
@@ -171,7 +172,7 @@ func newMaxStepRetriesExceededError(workflowID, stepName string, maxRetries int,
 		WorkflowID: workflowID,
 		StepName:   stepName,
 		MaxRetries: maxRetries,
-		IsBase:     true,
+		wrappedErr: err,
 	}
 }
 

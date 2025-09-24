@@ -175,7 +175,7 @@ func (h *workflowHandle[R]) GetResult() (R, error) {
 	if isWithinWorkflow {
 		encodedOutput, encErr := serialize(outcome.result)
 		if encErr != nil {
-			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Sprintf("serializing child workflow result: %v", encErr))
+			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 		}
 		recordGetResultInput := recordChildGetResultDBInput{
 			parentWorkflowID: workflowState.workflowID,
@@ -189,7 +189,7 @@ func (h *workflowHandle[R]) GetResult() (R, error) {
 		}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 		if recordResultErr != nil {
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
-			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Sprintf("recording child workflow result: %v", recordResultErr))
+			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("recording child workflow result: %w", recordResultErr))
 		}
 	}
 	return outcome.result, outcome.err
@@ -214,7 +214,7 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 		if isWithinWorkflow {
 			encodedOutput, encErr := serialize(typedResult)
 			if encErr != nil {
-				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Sprintf("serializing child workflow result: %v", encErr))
+				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 			}
 			recordGetResultInput := recordChildGetResultDBInput{
 				parentWorkflowID: workflowState.workflowID,
@@ -228,7 +228,7 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 			}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 			if recordResultErr != nil {
 				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
-				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Sprintf("recording child workflow result: %v", recordResultErr))
+				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("recording child workflow result: %w", recordResultErr))
 			}
 		}
 		return typedResult, err
@@ -699,7 +699,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		}, withRetrierLogger(c.logger))
 		if err != nil {
-			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("checking child workflow: %v", err))
+			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("checking child workflow: %w", err))
 		}
 		if childWorkflowID != nil {
 			return newWorkflowPollingHandle[any](uncancellableCtx, *childWorkflowID), nil
@@ -755,7 +755,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		return c.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
 	}, withRetrierLogger(c.logger))
 	if err != nil {
-		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to begin transaction: %v", err))
+		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
 	}
 	defer retry(uncancellableCtx, func() error {
 		return tx.Rollback(uncancellableCtx) // Rollback if not committed
@@ -790,17 +790,15 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
-			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Sprintf("recording child workflow: %v", err))
+			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
 		}
 	}
 
 	// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
 	if len(params.queueName) > 0 || insertStatusResult.status == WorkflowStatusSuccess || insertStatusResult.status == WorkflowStatusError {
 		// Commit the transaction to update the number of attempts and/or enact the enqueue
-		if err := retry(uncancellableCtx, func() error {
-			return tx.Commit(uncancellableCtx)
-		}, withRetrierLogger(c.logger)); err != nil {
-			return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
 		}
 		return newWorkflowPollingHandle[any](uncancellableCtx, workflowStatus.ID), nil
 	}
@@ -846,10 +844,8 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	}
 
 	// Commit the transaction. This must happen before we start the goroutine to ensure the workflow is found by steps in the database
-	if err := retry(uncancellableCtx, func() error {
-		return tx.Commit(uncancellableCtx)
-	}, withRetrierLogger(c.logger)); err != nil {
-		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to commit transaction: %v", err))
+	if err := tx.Commit(uncancellableCtx); err != nil {
+		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
 	}
 
 	// Run the function in a goroutine
