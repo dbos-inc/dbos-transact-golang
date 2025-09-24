@@ -2699,7 +2699,9 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 
 		// Check if error is retryable
 		if !config.retryCondition(lastErr) {
-			config.logger.Debug("Non-retryable error encountered", "error", lastErr)
+			if config.logger != nil {
+				config.logger.Debug("Non-retryable error encountered", "error", lastErr)
+			}
 			return lastErr
 		}
 
@@ -2727,7 +2729,9 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 		select {
 		case <-time.After(jitteredDelay):
 		case <-ctx.Done():
-			config.logger.Error("Operation cancelled", "error", ctx.Err())
+			if config.logger != nil {
+				config.logger.Debug("Retry operation cancelled", "error", ctx.Err())
+			}
 			return ctx.Err()
 		}
 
