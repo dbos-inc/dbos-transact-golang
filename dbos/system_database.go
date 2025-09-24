@@ -1681,11 +1681,15 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 		switch n.Channel {
 		case _DBOS_NOTIFICATIONS_CHANNEL:
 			if cond, ok := s.workflowNotificationsMap.Load(n.Payload); ok {
+				cond.(*sync.Cond).L.Lock()
 				cond.(*sync.Cond).Broadcast()
+				cond.(*sync.Cond).L.Unlock()
 			}
 		case _DBOS_WORKFLOW_EVENTS_CHANNEL:
 			if cond, ok := s.workflowEventsMap.Load(n.Payload); ok {
+				cond.(*sync.Cond).L.Lock()
 				cond.(*sync.Cond).Broadcast()
+				cond.(*sync.Cond).L.Unlock()
 			}
 		}
 	}
@@ -1830,8 +1834,10 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	// First check if there's already a receiver for this workflow/topic to avoid unnecessary database load
 	payload := fmt.Sprintf("%s::%s", destinationID, topic)
 	cond := sync.NewCond(&sync.Mutex{})
+	cond.L.Lock()
 	_, loaded := s.workflowNotificationsMap.LoadOrStore(payload, cond)
 	if loaded {
+		cond.L.Unlock()
 		s.logger.Error("Receive already called for workflow", "destination_id", destinationID)
 		return nil, newWorkflowConflictIDError(destinationID)
 	}
@@ -1847,6 +1853,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.notifications WHERE destination_uuid = $1 AND topic = $2)`, pgx.Identifier{s.schema}.Sanitize())
 	err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 	if err != nil {
+		cond.L.Unlock()
 		return false, fmt.Errorf("failed to check message: %w", err)
 	}
 	if !exists {
@@ -1855,7 +1862,6 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 
 		done := make(chan struct{})
 		go func() {
-			cond.L.Lock()
 			defer cond.L.Unlock()
 			cond.Wait()
 			close(done)
@@ -1879,6 +1885,8 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 			s.logger.Warn("Recv() context cancelled", "payload", payload, "cause", context.Cause(ctx))
 			return nil, ctx.Err()
 		}
+	} else {
+		cond.L.Unlock()
 	}
 
 	// Find the oldest message and delete it atomically
