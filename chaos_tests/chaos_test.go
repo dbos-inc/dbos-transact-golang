@@ -234,7 +234,6 @@ func TestChaosWorkflow(t *testing.T) {
 		require.NoError(t, err, "failed to get result for workflow %d", i)
 		assert.Equal(t, i+3, result, "unexpected result for workflow %d", i)
 	}
-	fmt.Println("SUCCESSS")
 }
 
 // Test send/recv functionality
