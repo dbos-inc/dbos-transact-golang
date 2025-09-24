@@ -2560,9 +2560,12 @@ func isRetryablePGError(err error) bool {
 		return false
 	}
 
-	// Special case for tx is closed, which can happen when rollbacking an already committed transaction, and vice versa.
-	if strings.Contains(err.Error(), "tx is closed") {
-		return false
+	// If tx is closed (because failure happened between pgx trying to commit/rollback and setting tx.closed)
+	// pgx will always return pgx.ErrTxClosed again.
+	// This is only retryable if the caller retries with a new transaction object.
+	// Otherwise, retrying with the same closed transaction will always fail.
+	if errors.Is(err, pgx.ErrTxClosed) {
+		return true
 	}
 
 	// PostgreSQL codes indicating connection/admin shutdown etc.

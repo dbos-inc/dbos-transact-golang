@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/robfig/cron/v3"
 )
 
@@ -342,7 +341,9 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),
 			withWorkflowName(workflowName),
 		}
-		_, err := ctx.RunWorkflow(ctx, fn, scheduledTime, opts...)
+		_, err := retryWithResult(ctx, func() (WorkflowHandle[any], error) {
+			return ctx.RunWorkflow(ctx, fn, scheduledTime, opts...)
+		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to run scheduled workflow", "fqn", workflowName, "error", err)
 		}
@@ -470,7 +471,9 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 
 	typeErasedWrapper := wrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 		opts = append(opts, withWorkflowName(fqn)) // Append the name so ctx.RunWorkflow can look it up from the registry to apply registration-time options
-		handle, err := ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
+		handle, err := retryWithResult(ctx, func() (WorkflowHandle[any], error) {
+			return ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
+		}, withRetrierLogger(ctx.(*dbosContext).logger))
 		if err != nil {
 			return nil, err
 		}
@@ -592,7 +595,10 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 		return fn(ctx, input.(P))
 	})
 
-	handle, err := ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
+	// Wrap the RunWorkflow call with retryWithResult for database operation retries
+	handle, err := retryWithResult(ctx, func() (WorkflowHandle[any], error) {
+		return ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
+	}, withRetrierLogger(ctx.(*dbosContext).logger))
 	if err != nil {
 		return nil, err
 	}
@@ -695,9 +701,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := retryWithResult(uncancellableCtx, func() (*string, error) {
-			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
-		}, withRetrierLogger(c.logger))
+		childWorkflowID, err := c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		if err != nil {
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("checking child workflow: %w", err))
 		}
@@ -751,15 +755,11 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	}
 
 	// Init status and record child workflow relationship in a single transaction
-	tx, err := retryWithResult(uncancellableCtx, func() (pgx.Tx, error) {
-		return c.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
-	}, withRetrierLogger(c.logger))
+	tx, err := c.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
 	if err != nil {
 		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
 	}
-	defer retry(uncancellableCtx, func() error {
-		return tx.Rollback(uncancellableCtx) // Rollback if not committed
-	}, withRetrierLogger(c.logger))
+	defer tx.Rollback(uncancellableCtx) // Rollback if not committed
 
 	// Insert workflow status with transaction
 	insertInput := insertWorkflowStatusDBInput{
@@ -767,9 +767,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		maxRetries: params.maxRetries,
 		tx:         tx,
 	}
-	insertStatusResult, err := retryWithResult(uncancellableCtx, func() (*insertWorkflowResult, error) {
-		return c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
-	}, withRetrierLogger(c.logger))
+	insertStatusResult, err := c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
 	if err != nil {
 		c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
 		return nil, err
@@ -785,9 +783,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			stepID:           parentWorkflowState.stepID,
 			tx:               tx,
 		}
-		err = retry(uncancellableCtx, func() error {
-			return c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
-		}, withRetrierLogger(c.logger))
+		err = c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
 		if err != nil {
 			c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
