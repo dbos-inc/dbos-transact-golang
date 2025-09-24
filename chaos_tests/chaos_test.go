@@ -138,7 +138,7 @@ func setupDBOS(t *testing.T) dbos.DBOSContext {
 
 	databaseURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL")
 	if databaseURL == "" {
-		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
+		password := os.Getenv("PGPASSWORD")
 		if password == "" {
 			password = "dbos"
 		}
