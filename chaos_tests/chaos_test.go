@@ -146,7 +146,7 @@ func setupDBOS(t *testing.T) dbos.DBOSContext {
 	}
 
 	// Clean up the test database
-	parsedURL, err := pgx.ParseConfig(databaseURL)
+	parsedURL, err := pgx.ParseConfig(url.QueryEscape(databaseURL))
 	require.NoError(t, err)
 
 	dbName := parsedURL.Database
