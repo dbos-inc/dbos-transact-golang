@@ -2555,7 +2555,7 @@ func maskPassword(dbURL string) (string, error) {
 /******* RETRIER ********/
 /*******************************/
 
-func isRetryablePGError(err error) bool {
+func isRetryablePGError(err error, logger *slog.Logger) bool {
 	if err == nil {
 		return false
 	}
@@ -2565,6 +2565,9 @@ func isRetryablePGError(err error) bool {
 	// This is only retryable if the caller retries with a new transaction object.
 	// Otherwise, retrying with the same closed transaction will always fail.
 	if errors.Is(err, pgx.ErrTxClosed) {
+		if logger != nil {
+			logger.Warn("Transaction is closed, retrying requires a new transaction object", "error", err)
+		}
 		return true
 	}
 
@@ -2608,7 +2611,7 @@ type retryConfig struct {
 	backoffFactor  float64
 	jitterMin      float64
 	jitterMax      float64
-	retryCondition func(error) bool
+	retryCondition func(error, *slog.Logger) bool
 	logger         *slog.Logger
 }
 
@@ -2652,7 +2655,7 @@ func withRetrierJitter(min, max float64) retryOption {
 }
 
 // withRetrierCondition sets the function that determines if an error is retryable
-func withRetrierCondition(condition func(error) bool) retryOption {
+func withRetrierCondition(condition func(error, *slog.Logger) bool) retryOption {
 	return func(c *retryConfig) {
 		c.retryCondition = condition
 	}
@@ -2701,7 +2704,7 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 		}
 
 		// Check if error is retryable
-		if !config.retryCondition(lastErr) {
+		if !config.retryCondition(lastErr, config.logger) {
 			if config.logger != nil {
 				config.logger.Debug("Non-retryable error encountered", "error", lastErr)
 			}
