@@ -37,7 +37,7 @@ jobs:
       run: go install gotest.tools/gotestsum@latest
 
     - name: Run chaos tests
-      run: go vet ./... && gotestsum --format github-action -- -v -race -count=1 -timeout=30m ./...
+      run: go vet ./... && gotestsum --format github-action -- -v -race -count=1 ./...
       working-directory: ./chaos_tests
       env:
         PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
