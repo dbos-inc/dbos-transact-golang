@@ -60,6 +60,14 @@ func TestMain(m *testing.M) {
 	}
 	testCLIPath = absPath
 
+	// Start postgres
+	startPostgresCmd := exec.Command(cliPath, "postgres", "start")
+	startOutput, startErr := startPostgresCmd.CombinedOutput()
+	if startErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start postgres: %s\n", string(startOutput))
+		os.Exit(1)
+	}
+
 	// Run tests
 	code := m.Run()
 
