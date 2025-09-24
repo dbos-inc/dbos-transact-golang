@@ -68,7 +68,6 @@ jobs:
       env:
         PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        DBOS_SYSTEM_DATABASE_URL: "postgres://postgres:a!b@c$d()e*_,/:;=?@ff[]22@localhost:5432/dbos?sslmode=disable"
 
         name: Run Chaos Tests
 

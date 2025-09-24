@@ -138,7 +138,7 @@ func setupDBOS(t *testing.T) dbos.DBOSContext {
 
 	databaseURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL")
 	if databaseURL == "" {
-		password := os.Getenv("PGPASSWORD")
+		password := url.QueryEscape(os.Getenv("PGPASSWORD"))
 		if password == "" {
 			password = "dbos"
 		}
@@ -146,7 +146,7 @@ func setupDBOS(t *testing.T) dbos.DBOSContext {
 	}
 
 	// Clean up the test database
-	parsedURL, err := pgx.ParseConfig(url.QueryEscape(databaseURL))
+	parsedURL, err := pgx.ParseConfig(databaseURL)
 	require.NoError(t, err)
 
 	dbName := parsedURL.Database
