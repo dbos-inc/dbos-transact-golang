@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"time"
 
@@ -174,7 +175,7 @@ func startDockerPostgres() error {
 		return err
 	}
 
-	logger.Info("Postgres available", "url", fmt.Sprintf("postgres://postgres:%s@localhost:5432", password))
+	logger.Info("Postgres available", "url", fmt.Sprintf("postgres://postgres:%s@localhost:5432", url.QueryEscape(password)))
 	return nil
 }
 
@@ -225,7 +226,7 @@ func waitForPostgres() error {
 		password = "dbos"
 	}
 
-	connStr := fmt.Sprintf("postgres://postgres:%s@localhost:5432/postgres?connect_timeout=2&sslmode=disable", password)
+	connStr := fmt.Sprintf("postgres://postgres:%s@localhost:5432/postgres?connect_timeout=2&sslmode=disable", url.QueryEscape(password))
 
 	// Try for up to 30 seconds
 	for i := 0; i < 30; i++ {
