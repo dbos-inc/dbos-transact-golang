@@ -2560,6 +2560,11 @@ func isRetryablePGError(err error) bool {
 		return false
 	}
 
+	// Special case for tx is closed, which can happen when rollbacking an already committed transaction, and vice versa.
+	if strings.Contains(err.Error(), "tx is closed") {
+		return false
+	}
+
 	// PostgreSQL codes indicating connection/admin shutdown etc.
 	var pgerr *pgconn.PgError
 	if errors.As(err, &pgerr) {
@@ -2688,7 +2693,7 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 		lastErr = fn()
 
 		// Success and rollback case
-		if lastErr == nil || strings.Contains(lastErr.Error(), "tx is closed") {
+		if lastErr == nil {
 			return nil
 		}
 
