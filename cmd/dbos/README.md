@@ -6,7 +6,7 @@ The DBOS CLI is a command-line interface for managing DBOS workflows.
 
 ### From Source
 ```bash
-go install github.com/dbos-inc/dbos-transact-golang/cmd/dbos
+go install github.com/dbos-inc/dbos-transact-golang/cmd/dbos@latest
 ```
 
 ### Build Locally
