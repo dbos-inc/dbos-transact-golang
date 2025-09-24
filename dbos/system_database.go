@@ -1215,7 +1215,6 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 	}
 
 	if err != nil {
-		s.logger.Error("RecordOperationResult Error occurred", "error", err)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
 			return newWorkflowConflictIDError(input.workflowID)
 		}
