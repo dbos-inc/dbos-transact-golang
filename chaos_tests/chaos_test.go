@@ -113,11 +113,11 @@ func PostgresChaosMonkey(t *testing.T, ctx context.Context, wg *sync.WaitGroup) 
 			downTime := time.Duration(rand.Float64()*2) * time.Second
 
 			// Stop PostgreSQL
-			t.Logf("🐒 Chaos Monkey: Stopping PostgreSQL")
 			require.Eventually(t, func() bool {
 				stopPostgres(t, cliPath)
 				return true
 			}, 5*time.Second, 100*time.Millisecond)
+			t.Logf("🐒 Chaos Monkey: Stopped PostgreSQL")
 
 			// Sleep for random down time
 			select {
@@ -127,6 +127,7 @@ func PostgresChaosMonkey(t *testing.T, ctx context.Context, wg *sync.WaitGroup) 
 					startPostgres(t, cliPath)
 					return true
 				}, 5*time.Second, 100*time.Millisecond)
+				t.Logf("🐒 Chaos Monkey: Starting PostgreSQL")
 			case <-ctx.Done():
 				// Ensure PostgreSQL is started before exiting
 				require.Eventually(t, func() bool {
