@@ -179,7 +179,7 @@ func setupDBOS(t *testing.T) dbos.DBOSContext {
 	dbosCtx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
 		DatabaseURL: databaseURL,
 		AppName:     "chaos-test",
-		Logger:      slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Logger:      slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, dbosCtx)
