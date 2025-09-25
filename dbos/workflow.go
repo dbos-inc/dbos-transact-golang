@@ -5,7 +5,6 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"reflect"
 	"runtime"
@@ -342,9 +341,7 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),
 			withWorkflowName(workflowName),
 		}
-		_, err := retryWithResult(ctx, func() (WorkflowHandle[any], error) {
-			return ctx.RunWorkflow(ctx, fn, scheduledTime, opts...)
-		}, withRetrierLogger(c.logger))
+		_, err := ctx.RunWorkflow(ctx, fn, scheduledTime, opts...)
 		if err != nil {
 			c.logger.Error("failed to run scheduled workflow", "fqn", workflowName, "error", err)
 		}
@@ -457,9 +454,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 
 	typeErasedWrapper := wrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 		opts = append(opts, withWorkflowName(fqn)) // Append the name so ctx.RunWorkflow can look it up from the registry to apply registration-time options
-		handle, err := retryWithResult(ctx, func() (WorkflowHandle[any], error) {
-			return ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
-		}, withRetrierLogger(ctx.(*dbosContext).logger))
+		handle, err := ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -581,14 +576,7 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 		return fn(ctx, input.(P))
 	})
 
-	// Wrap the RunWorkflow call with retryWithResult for database operation retries
-	var logger *slog.Logger
-	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		logger = dbosCtx.logger
-	}
-	handle, err := retryWithResult(ctx, func() (WorkflowHandle[any], error) {
-		return ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
-	}, withRetrierLogger(logger))
+	handle, err := ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -744,94 +732,103 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		Priority:           int(params.priority),
 	}
 
-	// Init status and record child workflow relationship in a single transaction
-	tx, err := c.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
-	if err != nil {
-		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
-	}
-	defer tx.Rollback(uncancellableCtx) // Rollback if not committed
-
-	// Insert workflow status with transaction
-	insertInput := insertWorkflowStatusDBInput{
-		status:     workflowStatus,
-		maxRetries: params.maxRetries,
-		tx:         tx,
-	}
-	insertStatusResult, err := c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
-	if err != nil {
-		c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
-		return nil, err
-	}
-
-	// Record child workflow relationship if this is a child workflow
-	if isChildWorkflow {
-		// Get the step ID that was used for generating the child workflow ID
-		childInput := recordChildWorkflowDBInput{
-			parentWorkflowID: parentWorkflowState.workflowID,
-			childWorkflowID:  workflowID,
-			stepName:         params.workflowName,
-			stepID:           parentWorkflowState.stepID,
-			tx:               tx,
-		}
-		err = c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
-		if err != nil {
-			c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
-			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
-		}
-	}
-
-	// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
-	if len(params.queueName) > 0 || insertStatusResult.status == WorkflowStatusSuccess || insertStatusResult.status == WorkflowStatusError {
-		// Commit the transaction to update the number of attempts and/or enact the enqueue
-		if err := tx.Commit(uncancellableCtx); err != nil {
-			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
-		}
-		return newWorkflowPollingHandle[any](uncancellableCtx, workflowStatus.ID), nil
-	}
-
-	// Channel to receive the outcome from the goroutine
-	// The buffer size of 1 allows the goroutine to send the outcome without blocking
-	// In addition it allows the channel to be garbage collected
-	outcomeChan := make(chan workflowOutcome[any], 1)
-
-	// Create workflow state to track step execution
-	wfState := &workflowState{
-		workflowID: workflowID,
-		stepID:     -1, // Steps are O-indexed
-	}
-
-	workflowCtx := WithValue(c, workflowStateKey, wfState)
-
-	// If the workflow has a timeout but no deadline, compute the deadline from the timeout.
-	// Else use the durable deadline.
-	durableDeadline := time.Time{}
-	if insertStatusResult.timeout > 0 && insertStatusResult.workflowDeadline.IsZero() {
-		durableDeadline = time.Now().Add(insertStatusResult.timeout)
-	} else if !insertStatusResult.workflowDeadline.IsZero() {
-		durableDeadline = insertStatusResult.workflowDeadline
-	}
-
 	var stopFunc func() bool
 	cancelFuncCompleted := make(chan struct{})
-	if !durableDeadline.IsZero() {
-		workflowCtx, _ = WithTimeout(workflowCtx, time.Until(durableDeadline))
-		// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
-		dbosCancelFunction := func() {
-			c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
-			err = retry(uncancellableCtx, func() error {
-				return c.systemDB.cancelWorkflow(uncancellableCtx, workflowID)
-			}, withRetrierLogger(c.logger))
-			if err != nil {
-				c.logger.Error("Failed to cancel workflow", "error", err)
-			}
-			close(cancelFuncCompleted)
-		}
-		stopFunc = context.AfterFunc(workflowCtx, dbosCancelFunction)
-	}
+	var workflowCtx DBOSContext
+	outcomeChan := make(chan workflowOutcome[any], 1)
+	var earlyReturnPollingHandle *workflowPollingHandle[any]
 
-	// Commit the transaction. This must happen before we start the goroutine to ensure the workflow is found by steps in the database
-	if err := tx.Commit(uncancellableCtx); err != nil {
-		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
+	// Init status and record child workflow relationship in a single transaction
+	err := retry(c, func() error {
+		tx, err := c.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
+		if err != nil {
+			return newWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		defer tx.Rollback(uncancellableCtx) // Rollback if not committed
+
+		// Insert workflow status with transaction
+		insertInput := insertWorkflowStatusDBInput{
+			status:     workflowStatus,
+			maxRetries: params.maxRetries,
+			tx:         tx,
+		}
+		insertStatusResult, err := c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
+		if err != nil {
+			c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
+			return err
+		}
+
+		// Record child workflow relationship if this is a child workflow
+		if isChildWorkflow {
+			// Get the step ID that was used for generating the child workflow ID
+			childInput := recordChildWorkflowDBInput{
+				parentWorkflowID: parentWorkflowState.workflowID,
+				childWorkflowID:  workflowID,
+				stepName:         params.workflowName,
+				stepID:           parentWorkflowState.stepID,
+				tx:               tx,
+			}
+			err = c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
+			if err != nil {
+				c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
+				return newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
+			}
+		}
+
+		// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
+		if len(params.queueName) > 0 || insertStatusResult.status == WorkflowStatusSuccess || insertStatusResult.status == WorkflowStatusError {
+			// Commit the transaction to update the number of attempts and/or enact the enqueue
+			if err := tx.Commit(uncancellableCtx); err != nil {
+				return newWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
+			}
+			earlyReturnPollingHandle = newWorkflowPollingHandle[any](uncancellableCtx, workflowStatus.ID)
+			return nil
+		}
+
+		// Create workflow state to track step execution
+		wfState := &workflowState{
+			workflowID: workflowID,
+			stepID:     -1, // Steps are O-indexed
+		}
+
+		workflowCtx = WithValue(c, workflowStateKey, wfState)
+
+		// If the workflow has a timeout but no deadline, compute the deadline from the timeout.
+		// Else use the durable deadline.
+		durableDeadline := time.Time{}
+		if insertStatusResult.timeout > 0 && insertStatusResult.workflowDeadline.IsZero() {
+			durableDeadline = time.Now().Add(insertStatusResult.timeout)
+		} else if !insertStatusResult.workflowDeadline.IsZero() {
+			durableDeadline = insertStatusResult.workflowDeadline
+		}
+
+		if !durableDeadline.IsZero() {
+			workflowCtx, _ = WithTimeout(workflowCtx, time.Until(durableDeadline))
+			// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
+			dbosCancelFunction := func() {
+				c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
+				err = retry(uncancellableCtx, func() error {
+					return c.systemDB.cancelWorkflow(uncancellableCtx, workflowID)
+				}, withRetrierLogger(c.logger))
+				if err != nil {
+					c.logger.Error("Failed to cancel workflow", "error", err)
+				}
+				close(cancelFuncCompleted)
+			}
+			stopFunc = context.AfterFunc(workflowCtx, dbosCancelFunction)
+		}
+
+		// Commit the transaction. This must happen before we start the goroutine to ensure the workflow is found by steps in the database
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return newWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
+		}
+		return nil
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, err
+	}
+	if earlyReturnPollingHandle != nil {
+		return earlyReturnPollingHandle, nil
 	}
 
 	// Run the function in a goroutine
