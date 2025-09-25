@@ -449,21 +449,6 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 		typedInput, ok := input.(P)
 		if !ok {
-			wfID, err := ctx.GetWorkflowID()
-			if err != nil {
-				return nil, fmt.Errorf("failed to get workflow ID: %w", err)
-			}
-			noCancelCtx := WithoutCancel(ctx)
-			err = retry(noCancelCtx, func() error {
-				return ctx.(*dbosContext).systemDB.updateWorkflowOutcome(noCancelCtx, updateWorkflowOutcomeDBInput{
-					workflowID: wfID,
-					status:     WorkflowStatusError,
-					err:        newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input)),
-				})
-			}, withRetrierLogger(ctx.(*dbosContext).logger))
-			if err != nil {
-				return nil, fmt.Errorf("failed to record unexpected input type error: %w", err)
-			}
 			return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
 		}
 		return fn(ctx, typedInput)
