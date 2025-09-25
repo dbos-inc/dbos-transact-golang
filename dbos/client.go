@@ -162,28 +162,32 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 	}
 
 	uncancellableCtx := WithoutCancel(dbosCtx)
+	err := retry(dbosCtx, func() error {
+		tx, err := dbosCtx.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
+		if err != nil {
+			return newWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		defer tx.Rollback(uncancellableCtx) // Rollback if not committed
 
-	tx, err := dbosCtx.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
-	if err != nil {
-		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
-	}
-	defer tx.Rollback(uncancellableCtx) // Rollback if not committed
+		// Insert workflow status with transaction
+		insertInput := insertWorkflowStatusDBInput{
+			status: status,
+			tx:     tx,
+		}
+		_, err = dbosCtx.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
+		if err != nil {
+			dbosCtx.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
+			return err
+		}
 
-	// Insert workflow status with transaction
-	insertInput := insertWorkflowStatusDBInput{
-		status: status,
-		tx:     tx,
-	}
-	_, err = dbosCtx.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		return nil
+	}, withRetrierLogger(dbosCtx.logger))
 	if err != nil {
-		dbosCtx.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
 		return nil, err
 	}
-
-	if err := tx.Commit(uncancellableCtx); err != nil {
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
 	return newWorkflowPollingHandle[any](uncancellableCtx, workflowID), nil
 }
 
