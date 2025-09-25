@@ -1857,9 +1857,6 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 		return false, fmt.Errorf("failed to check message: %w", err)
 	}
 	if !exists {
-		// Wait for notifications using condition variable with timeout pattern
-		s.logger.Debug("Waiting for notification on condition variable", "payload", payload)
-
 		done := make(chan struct{})
 		go func() {
 			defer cond.L.Unlock()
@@ -1878,7 +1875,6 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 
 		select {
 		case <-done:
-			s.logger.Debug("Received notification on condition variable", "payload", payload)
 		case <-time.After(timeout):
 			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
 		case <-ctx.Done():
