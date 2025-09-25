@@ -2078,9 +2078,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	defer func() {
 		cond.Broadcast()
 		// Clean up the condition variable after we're done, if we created it
-		if !loaded {
-			s.workflowEventsMap.Delete(payload)
-		}
+		s.workflowEventsMap.Delete(payload)
 	}()
 
 	// Check if the event already exists in the database
@@ -2090,11 +2088,13 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	row := s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
 	err := row.Scan(&valueString)
 	if err != nil && err != pgx.ErrNoRows {
-		cond.L.Unlock()
+		if !loaded {
+			cond.L.Unlock()
+		}
 		return nil, fmt.Errorf("failed to query workflow event: %w", err)
 	}
 
-	if err == pgx.ErrNoRows {
+	if err == pgx.ErrNoRows { // this implies isLaunched is True
 		// Wait for notification with timeout using condition variable
 		done := make(chan struct{})
 		go func() {
@@ -2129,11 +2129,8 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		row = s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
 		err = row.Scan(&valueString)
 		if err != nil && err != pgx.ErrNoRows {
-			cond.L.Unlock()
 			return nil, fmt.Errorf("failed to query workflow event after wait: %w", err)
 		}
-	} else {
-		cond.L.Unlock()
 	}
 
 	// Deserialize the value if it exists
