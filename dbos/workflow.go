@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"reflect"
 	"runtime"
@@ -581,9 +582,13 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 	})
 
 	// Wrap the RunWorkflow call with retryWithResult for database operation retries
+	var logger *slog.Logger
+	if dbosCtx, ok := ctx.(*dbosContext); ok {
+		logger = dbosCtx.logger
+	}
 	handle, err := retryWithResult(ctx, func() (WorkflowHandle[any], error) {
 		return ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
-	}, withRetrierLogger(ctx.(*dbosContext).logger))
+	}, withRetrierLogger(logger))
 	if err != nil {
 		return nil, err
 	}
