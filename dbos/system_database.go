@@ -1543,8 +1543,6 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		}
 	} else {
 		// First execution: calculate and record the end time
-		s.logger.Debug("Durable sleep", "stepID", stepID, "duration", input.duration)
-
 		endTime = time.Now().Add(input.duration)
 
 		// Record the operation result with the calculated end time
