@@ -732,11 +732,8 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		Priority:           int(params.priority),
 	}
 
-	var stopFunc func() bool
-	cancelFuncCompleted := make(chan struct{})
-	var workflowCtx DBOSContext
-	outcomeChan := make(chan workflowOutcome[any], 1)
 	var earlyReturnPollingHandle *workflowPollingHandle[any]
+	var insertStatusResult *insertWorkflowResult
 
 	// Init status and record child workflow relationship in a single transaction
 	err := retry(c, func() error {
@@ -752,7 +749,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			maxRetries: params.maxRetries,
 			tx:         tx,
 		}
-		insertStatusResult, err := c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
+		insertStatusResult, err = c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
 			c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
 			return err
@@ -785,43 +782,11 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			return nil
 		}
 
-		// Create workflow state to track step execution
-		wfState := &workflowState{
-			workflowID: workflowID,
-			stepID:     -1, // Steps are O-indexed
-		}
-
-		workflowCtx = WithValue(c, workflowStateKey, wfState)
-
-		// If the workflow has a timeout but no deadline, compute the deadline from the timeout.
-		// Else use the durable deadline.
-		durableDeadline := time.Time{}
-		if insertStatusResult.timeout > 0 && insertStatusResult.workflowDeadline.IsZero() {
-			durableDeadline = time.Now().Add(insertStatusResult.timeout)
-		} else if !insertStatusResult.workflowDeadline.IsZero() {
-			durableDeadline = insertStatusResult.workflowDeadline
-		}
-
-		if !durableDeadline.IsZero() {
-			workflowCtx, _ = WithTimeout(workflowCtx, time.Until(durableDeadline))
-			// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
-			dbosCancelFunction := func() {
-				c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
-				err = retry(c, func() error {
-					return c.systemDB.cancelWorkflow(uncancellableCtx, workflowID)
-				}, withRetrierLogger(c.logger))
-				if err != nil {
-					c.logger.Error("Failed to cancel workflow", "error", err)
-				}
-				close(cancelFuncCompleted)
-			}
-			stopFunc = context.AfterFunc(workflowCtx, dbosCancelFunction)
-		}
-
 		// Commit the transaction. This must happen before we start the goroutine to ensure the workflow is found by steps in the database
 		if err := tx.Commit(uncancellableCtx); err != nil {
 			return newWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
 		}
+
 		return nil
 	}, withRetrierLogger(c.logger))
 	if err != nil {
@@ -829,6 +794,43 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	}
 	if earlyReturnPollingHandle != nil {
 		return earlyReturnPollingHandle, nil
+	}
+
+	outcomeChan := make(chan workflowOutcome[any], 1)
+
+	// Create workflow state to track step execution
+	wfState := &workflowState{
+		workflowID: workflowID,
+		stepID:     -1, // Steps are O-indexed
+	}
+
+	workflowCtx := WithValue(c, workflowStateKey, wfState)
+
+	// If the workflow has a timeout but no deadline, compute the deadline from the timeout.
+	// Else use the durable deadline.
+	durableDeadline := time.Time{}
+	if insertStatusResult.timeout > 0 && insertStatusResult.workflowDeadline.IsZero() {
+		durableDeadline = time.Now().Add(insertStatusResult.timeout)
+	} else if !insertStatusResult.workflowDeadline.IsZero() {
+		durableDeadline = insertStatusResult.workflowDeadline
+	}
+
+	var stopFunc func() bool
+	cancelFuncCompleted := make(chan struct{})
+	if !durableDeadline.IsZero() {
+		workflowCtx, _ = WithTimeout(workflowCtx, time.Until(durableDeadline))
+		// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
+		dbosCancelFunction := func() {
+			c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
+			err = retry(c, func() error {
+				return c.systemDB.cancelWorkflow(uncancellableCtx, workflowID)
+			}, withRetrierLogger(c.logger))
+			if err != nil {
+				c.logger.Error("Failed to cancel workflow", "error", err)
+			}
+			close(cancelFuncCompleted)
+		}
+		stopFunc = context.AfterFunc(workflowCtx, dbosCancelFunction)
 	}
 
 	// Run the function in a goroutine
