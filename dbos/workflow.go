@@ -550,7 +550,7 @@ func withWorkflowName(name string) WorkflowOption {
 }
 
 // Sets the authenticated user for the workflow
-func WithAutheticatedUser(user string) WorkflowOption {
+func WithAuthenticatedUser(user string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.authenticated_user = user
 	}

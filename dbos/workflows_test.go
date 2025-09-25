@@ -4133,12 +4133,13 @@ func TestSpecialSteps(t *testing.T) {
 }
 func TestWorkflowIdentity(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
+	RegisterWorkflow(dbosCtx, simpleWorkflow)
 	handle, err := RunWorkflow(
 		dbosCtx,
 		simpleWorkflow,
 		"test",
 		WithWorkflowID("my-workflow-id"),
-		WithAutheticatedUser("user123"),
+		WithAuthenticatedUser("user123"),
 		WithAssumedRole("admin"),
 		WithAuthenticatedRoles([]string{"reader", "writer"}))
 	require.NoError(t, err, "failed to start workflow")
