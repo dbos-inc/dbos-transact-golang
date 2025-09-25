@@ -245,7 +245,7 @@ func TestChaosWorkflow(t *testing.T) {
 	numWorkflows := 10000
 	for i := range numWorkflows {
 		if i%100 == 0 {
-			t.Logf("Starting workflow %d/%d", i, numWorkflows)
+			t.Logf("Starting workflow %d/%d", i+1, numWorkflows)
 		}
 		handle, err := dbos.RunWorkflow(dbosCtx, workflow, i)
 		require.NoError(t, err, "failed to start workflow %d", i)
@@ -289,7 +289,7 @@ func TestChaosRecv(t *testing.T) {
 	numWorkflows := 10000
 	for i := range numWorkflows {
 		if i%100 == 0 {
-			t.Logf("Starting workflow %d/%d", i, numWorkflows)
+			t.Logf("Starting workflow %d/%d", i+1, numWorkflows)
 		}
 		handle, err := dbos.RunWorkflow(dbosCtx, recvWorkflow, "")
 		require.NoError(t, err, "failed to start workflow %d", i)
@@ -344,7 +344,7 @@ func TestChaosEvents(t *testing.T) {
 	numWorkflows := 5000
 	for i := range numWorkflows {
 		if i%100 == 0 {
-			t.Logf("Starting workflow %d/%d", i, numWorkflows)
+			t.Logf("Starting workflow %d/%d", i+1, numWorkflows)
 		}
 		wfID := uuid.NewString()
 
@@ -435,7 +435,7 @@ func TestChaosQueues(t *testing.T) {
 	numWorkflows := 30
 	for i := range numWorkflows {
 		if i%10 == 0 {
-			t.Logf("Starting workflow %d/%d", i, numWorkflows)
+			t.Logf("Starting workflow %d/%d", i+1, numWorkflows)
 		}
 		// Enqueue the main workflow
 		handle, err := dbos.RunWorkflow(dbosCtx, workflow, i, dbos.WithQueue(queue.Name))
