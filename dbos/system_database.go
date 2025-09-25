@@ -2066,8 +2066,10 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	// Create notification payload and condition variable
 	payload := fmt.Sprintf("%s::%s", input.TargetWorkflowID, input.Key)
 	cond := sync.NewCond(&sync.Mutex{})
+	cond.L.Lock()
 	existingCond, loaded := s.workflowEventsMap.LoadOrStore(payload, cond)
 	if loaded {
+		cond.L.Unlock()
 		// Reuse the existing condition variable
 		cond = existingCond.(*sync.Cond)
 	}
@@ -2088,6 +2090,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	row := s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
 	err := row.Scan(&valueString)
 	if err != nil && err != pgx.ErrNoRows {
+		cond.L.Unlock()
 		return nil, fmt.Errorf("failed to query workflow event: %w", err)
 	}
 
@@ -2095,7 +2098,6 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		// Wait for notification with timeout using condition variable
 		done := make(chan struct{})
 		go func() {
-			cond.L.Lock()
 			defer cond.L.Unlock()
 			cond.Wait()
 			close(done)
@@ -2127,8 +2129,11 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		row = s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
 		err = row.Scan(&valueString)
 		if err != nil && err != pgx.ErrNoRows {
+			cond.L.Unlock()
 			return nil, fmt.Errorf("failed to query workflow event after wait: %w", err)
 		}
+	} else {
+		cond.L.Unlock()
 	}
 
 	// Deserialize the value if it exists
