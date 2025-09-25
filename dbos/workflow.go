@@ -549,6 +549,27 @@ func withWorkflowName(name string) WorkflowOption {
 	}
 }
 
+// Sets the authenticated user for the workflow
+func WithAutheticatedUser(user string) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.authenticated_user = user
+	}
+}
+
+// Sets the assumed role for the workflow
+func WithAssumedRole(role string) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.assumed_role = role
+	}
+}
+
+// Sets the authenticated role for the workflow
+func WithAuthenticatedRoles(roles []string) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.authenticated_roles = roles
+	}
+}
+
 // RunWorkflow executes a workflow function with type safety and durability guarantees.
 // The workflow can be executed immediately or enqueued for later execution based on options.
 // Returns a typed handle that can be used to wait for completion and retrieve results.
