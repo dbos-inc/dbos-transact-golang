@@ -807,7 +807,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
 			dbosCancelFunction := func() {
 				c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
-				err = retry(uncancellableCtx, func() error {
+				err = retry(c, func() error {
 					return c.systemDB.cancelWorkflow(uncancellableCtx, workflowID)
 				}, withRetrierLogger(c.logger))
 				if err != nil {
@@ -845,7 +845,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		var dbosErr *DBOSError
 		if errors.As(err, &dbosErr) && dbosErr.Code == ConflictingIDError {
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
-			result, err = retryWithResult(uncancellableCtx, func() (any, error) {
+			result, err = retryWithResult(c, func() (any, error) {
 				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID)
 			}, withRetrierLogger(c.logger))
 		} else {
@@ -863,7 +863,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				status = WorkflowStatusCancelled
 			}
 
-			recordErr := retry(uncancellableCtx, func() error {
+			recordErr := retry(c, func() error {
 				return c.systemDB.updateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
 					workflowID: workflowID,
 					status:     status,
@@ -1067,7 +1067,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	uncancellableCtx := WithoutCancel(c)
 
 	// Check the step is cancelled, has already completed, or is called with a different name
-	recordedOutput, err := retryWithResult(uncancellableCtx, func() (*recordedResult, error) {
+	recordedOutput, err := retryWithResult(c, func() (*recordedResult, error) {
 		return c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 			workflowID: stepState.workflowID,
 			stepID:     stepState.stepID,
@@ -1136,7 +1136,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		err:        stepError,
 		output:     stepOutput,
 	}
-	recErr := retry(uncancellableCtx, func() error {
+	recErr := retry(c, func() error {
 		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
 	}, withRetrierLogger(c.logger))
 	if recErr != nil {
