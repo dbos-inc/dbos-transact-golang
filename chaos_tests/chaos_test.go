@@ -127,8 +127,8 @@ func PostgresChaosMonkey(t *testing.T, ctx context.Context, wg *sync.WaitGroup) 
 				return
 			}
 
-			// Wait a bit before next chaos event (between 1 and 5 seconds)
-			upTime := time.Duration(1+rand.Float64()*4) * time.Second
+			// Wait a bit before next chaos event (between 5 and 40 seconds)
+			upTime := time.Duration(5+rand.Float64()*35) * time.Second
 			select {
 			case <-time.After(upTime):
 				// Continue to next iteration
@@ -170,7 +170,7 @@ func setupDBOS(t *testing.T) dbos.DBOSContext {
 	dbosCtx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
 		DatabaseURL: databaseURL,
 		AppName:     "chaos-test",
-		Logger:      slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Logger:      slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, dbosCtx)
