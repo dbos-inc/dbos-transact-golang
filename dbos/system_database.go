@@ -2698,11 +2698,6 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 	attempt := 0
 
 	for {
-		// Check context before attempting
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
 		lastErr = fn()
 
 		// Success and rollback case
