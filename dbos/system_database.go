@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -489,7 +490,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		input.status.QueueName,
 		input.status.AuthenticatedUser,
 		input.status.AssumedRole,
-		input.status.AuthenticatedRoles,
+		pgtype.Array[string]{Elements: input.status.AuthenticatedRoles},
 		input.status.ExecutorID,
 		applicationVersion,
 		input.status.ApplicationID,
