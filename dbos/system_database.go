@@ -2071,7 +2071,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	// Defer broadcast to ensure any waiting goroutines eventually unlock
 	defer func() {
 		cond.Broadcast()
-		// Clean up the condition variable after we're done, if we created it
+		// Clean up the condition variable after we're done (Delete is a no-op if the key doesn't exist)
 		s.workflowEventsMap.Delete(payload)
 	}()
 
