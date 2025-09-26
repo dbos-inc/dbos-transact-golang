@@ -206,6 +206,11 @@ func TestChaosWorkflow(t *testing.T) {
 	defer cancel()
 	PostgresChaosMonkey(t, ctx, &wg)
 
+	// Define scheduled workflow that runs every second
+	scheduledWorkflow := func(ctx dbos.DBOSContext, scheduledTime time.Time) (struct{}, error) {
+		return struct{}{}, nil
+	}
+
 	// Define step functions
 	stepOne := func(_ context.Context, x int) (int, error) {
 		return x + 1, nil
@@ -236,8 +241,10 @@ func TestChaosWorkflow(t *testing.T) {
 		return x, nil
 	}
 
-	// Register the workflow
+	// Register the workflows
 	dbos.RegisterWorkflow(dbosCtx, workflow)
+	// Register scheduled workflow to run every second for chaos testing
+	dbos.RegisterWorkflow(dbosCtx, scheduledWorkflow, dbos.WithSchedule("* * * * * *"), dbos.WithWorkflowName("ScheduledChaosTest"))
 
 	err := dbosCtx.Launch()
 	require.NoError(t, err)
@@ -255,6 +262,25 @@ func TestChaosWorkflow(t *testing.T) {
 		require.NoError(t, err, "failed to get result for workflow %d", i)
 		assert.Equal(t, i+3, result, "unexpected result for workflow %d", i)
 	}
+
+	// Validate scheduled workflow executions using ListWorkflows
+	scheduledWorkflows, err := dbos.ListWorkflows(dbosCtx,
+		dbos.WithName("ScheduledChaosTest"),
+		dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess}),
+		dbos.WithSortDesc(),
+		dbos.WithLimit(1),
+		dbos.WithLoadInput(false),
+		dbos.WithLoadOutput(false),
+	)
+	require.NoError(t, err, "failed to list scheduled workflows")
+
+	assert.Equal(t, len(scheduledWorkflows), 1, "Expected exactly one scheduled workflow execution")
+
+	// Check the last execution was within 10 seconds -- reasonable for a 1 second schedule and 2 seconds postgres downtime
+	latestWorkflow := scheduledWorkflows[0] // Sorted descending
+	timeSinceLastExecution := time.Since(latestWorkflow.CreatedAt)
+	assert.Less(t, timeSinceLastExecution, 10*time.Second,
+		"Last scheduled execution was %v ago, expected less than 60 seconds", timeSinceLastExecution)
 }
 
 // Test send/recv functionality
