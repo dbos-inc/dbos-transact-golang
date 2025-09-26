@@ -3,6 +3,8 @@ package dbos
 import (
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 )
 
 var backoffWithJitterTestcases = []struct {
@@ -38,6 +40,7 @@ var backoffWithJitterTestcases = []struct {
 }
 
 func TestBackoffWithJitter(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	for _, testcase := range backoffWithJitterTestcases {
 		t.Run(testcase.name, func(t *testing.T) {
 			got := backoffWithJitter(testcase.retryAttempt)

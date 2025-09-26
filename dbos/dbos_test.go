@@ -11,9 +11,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 func TestConfig(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck.func1"),
+	)
 	databaseURL := getDatabaseURL()
 
 	t.Run("CreatesDBOSContext", func(t *testing.T) {
@@ -275,6 +281,11 @@ func TestConfig(t *testing.T) {
 }
 
 func TestCustomSystemDBSchema(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck.func1"),
+	)
 	t.Setenv("DBOS__APPVERSION", "v1.0.0")
 	t.Setenv("DBOS__APPID", "test-custom-schema")
 	t.Setenv("DBOS__VMID", "test-executor-id")
@@ -464,6 +475,11 @@ func TestCustomSystemDBSchema(t *testing.T) {
 }
 
 func TestCustomPool(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck.func1"),
+	)
 	// Test workflows for custom pool testing
 	type customPoolWorkflowInput struct {
 		PartnerWorkflowID string
