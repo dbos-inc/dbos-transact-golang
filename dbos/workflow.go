@@ -1408,13 +1408,11 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 			})
 		}, WithStepName("DBOS.retrieveWorkflow"))
 	} else {
-		workflowStatus, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
-			return c.systemDB.listWorkflows(c, listWorkflowsDBInput{
-				workflowIDs: []string{workflowID},
-				loadInput:   loadInput,
-				loadOutput:  loadOutput,
-			})
-		}, withRetrierLogger(c.logger))
+		workflowStatus, err = c.systemDB.listWorkflows(c, listWorkflowsDBInput{
+			workflowIDs: []string{workflowID},
+			loadInput:   loadInput,
+			loadOutput:  loadOutput,
+		})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve workflow status: %w", err)
@@ -1471,9 +1469,7 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 		}, WithStepName("DBOS.cancelWorkflow"))
 		return err
 	} else {
-		return retry(c, func() error {
-			return c.systemDB.cancelWorkflow(c, workflowID)
-		}, withRetrierLogger(c.logger))
+		return c.systemDB.cancelWorkflow(c, workflowID)
 	}
 }
 
@@ -1509,9 +1505,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 			return nil, err
 		}, WithStepName("DBOS.resumeWorkflow"))
 	} else {
-		err = retry(c, func() error {
-			return c.systemDB.resumeWorkflow(c, workflowID)
-		}, withRetrierLogger(c.logger))
+		err = c.systemDB.resumeWorkflow(c, workflowID)
 	}
 	if err != nil {
 		return nil, err
@@ -1591,9 +1585,7 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 			return c.systemDB.forkWorkflow(ctx, dbInput)
 		}, WithStepName("DBOS.forkWorkflow"))
 	} else {
-		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
-			return c.systemDB.forkWorkflow(c, dbInput)
-		}, withRetrierLogger(c.logger))
+		forkedWorkflowID, err = c.systemDB.forkWorkflow(c, dbInput)
 	}
 	if err != nil {
 		return nil, err
@@ -1832,22 +1824,13 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	// Call the context method to list workflows
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
-	var workflows []WorkflowStatus
-	var err error
 	if isWithinWorkflow {
-		workflows, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
+		return RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
 			return c.systemDB.listWorkflows(ctx, dbInput)
 		}, WithStepName("DBOS.listWorkflows"))
 	} else {
-		workflows, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
-			return c.systemDB.listWorkflows(c, dbInput)
-		}, withRetrierLogger(c.logger))
+		return c.systemDB.listWorkflows(c, dbInput)
 	}
-	if err != nil {
-		return nil, err
-	}
-
-	return workflows, nil
 }
 
 // ListWorkflows retrieves a list of workflows based on the provided filters.
@@ -1909,9 +1892,7 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 			return c.systemDB.getWorkflowSteps(ctx, workflowID)
 		}, WithStepName("DBOS.getWorkflowSteps"))
 	} else {
-		return retryWithResult(c, func() ([]StepInfo, error) {
-			return c.systemDB.getWorkflowSteps(c, workflowID)
-		}, withRetrierLogger(c.logger))
+		return c.systemDB.getWorkflowSteps(c, workflowID)
 	}
 }
 

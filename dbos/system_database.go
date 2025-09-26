@@ -2621,49 +2621,6 @@ type retryConfig struct {
 // retryOption is a functional option for configuring retry behavior
 type retryOption func(*retryConfig)
 
-// withRetrierMaxRetries sets the maximum number of retry attempts (-1 for infinite)
-func withRetrierMaxRetries(maxRetries int) retryOption {
-	return func(c *retryConfig) {
-		c.maxRetries = maxRetries
-	}
-}
-
-// withRetrierBaseDelay sets the initial delay between retry attempts
-func withRetrierBaseDelay(delay time.Duration) retryOption {
-	return func(c *retryConfig) {
-		c.baseDelay = delay
-	}
-}
-
-// withRetrierMaxDelay sets the maximum delay between retry attempts
-func withRetrierMaxDelay(delay time.Duration) retryOption {
-	return func(c *retryConfig) {
-		c.maxDelay = delay
-	}
-}
-
-// withRetrierBackoffFactor sets the exponential backoff factor
-func withRetrierBackoffFactor(factor float64) retryOption {
-	return func(c *retryConfig) {
-		c.backoffFactor = factor
-	}
-}
-
-// withRetrierJitter sets the jitter range for retry delays (e.g., 0.95 to 1.05 for ±5% jitter)
-func withRetrierJitter(min, max float64) retryOption {
-	return func(c *retryConfig) {
-		c.jitterMin = min
-		c.jitterMax = max
-	}
-}
-
-// withRetrierCondition sets the function that determines if an error is retryable
-func withRetrierCondition(condition func(error, *slog.Logger) bool) retryOption {
-	return func(c *retryConfig) {
-		c.retryCondition = condition
-	}
-}
-
 // withRetrierLogger sets the logger for the retrier
 func withRetrierLogger(logger *slog.Logger) retryOption {
 	return func(c *retryConfig) {
