@@ -284,7 +284,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DoubleRegistrationWithoutName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
+		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
 
 		// First registration should work
 		RegisterWorkflow(freshCtx, simpleWorkflow)
@@ -302,7 +302,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DoubleRegistrationWithCustomName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
+		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
 
 		// First registration with custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("custom-workflow"))
@@ -320,7 +320,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DifferentWorkflowsSameCustomName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
+		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
 
 		// First registration with custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("same-name"))
@@ -338,7 +338,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("RegisterAfterLaunchPanics", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, false) // Don't check for leaks and don't reset DB
+		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
 
 		// Launch DBOS context
 		err := freshCtx.Launch()

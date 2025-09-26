@@ -23,6 +23,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 //go:embed cli_test_app.go.test
@@ -51,6 +52,11 @@ func getDatabaseURL() string {
 
 // TestCLIWorkflow provides comprehensive integration testing of the DBOS CLI
 func TestCLIWorkflow(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck.func1"),
+	)
 	// Build the CLI once at the beginning
 	cliPath := buildCLI(t)
 	t.Logf("Built CLI at: %s", cliPath)
