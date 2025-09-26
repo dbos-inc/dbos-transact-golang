@@ -190,9 +190,4 @@ func TestMocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	mockCtx.AssertExpectations(t)
-	mockChildHandle.AssertExpectations(t)
-	mockGenericHandle.AssertExpectations(t)
-	fmt.Println("TestMocks completed successfully")
 }

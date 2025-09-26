@@ -165,7 +165,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 
 	tx, err := dbosCtx.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
 	if err != nil {
-		return nil, newWorkflowExecutionError(workflowID, fmt.Sprintf("failed to begin transaction: %v", err))
+		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %v", err))
 	}
 	defer tx.Rollback(uncancellableCtx) // Rollback if not committed
 
