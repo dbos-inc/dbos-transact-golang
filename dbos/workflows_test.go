@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"reflect"
 	"runtime"
 	"sync"
@@ -4146,6 +4147,7 @@ func TestWorkflowIdentity(t *testing.T) {
 
 	// Retrieve the workflow's status.
 	status, err := handle.GetStatus()
+	log.Print(status)
 	require.NoError(t, err)
 
 	t.Run("CheckAuthenticatedUser", func(t *testing.T) {

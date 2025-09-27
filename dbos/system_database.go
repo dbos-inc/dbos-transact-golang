@@ -488,7 +488,11 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 	var workflowDeadlineEpochMS *int64
 
 	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
-	authenticatedRoles, _ := json.Marshal(input.status.AuthenticatedRoles)
+	authenticatedRoles, err := json.Marshal(input.status.AuthenticatedRoles)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal the authenticated roles: %w", err)
+	}
 
 	err = input.tx.QueryRow(ctx, query,
 		input.status.ID,
@@ -1101,7 +1105,11 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 	}
 
 	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
-	authenticatedRoles, _ := json.Marshal(originalWorkflow.AuthenticatedRoles)
+	authenticatedRoles, err := json.Marshal(originalWorkflow.AuthenticatedRoles)
+
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal the authenticated roles: %w", err)
+	}
 
 	_, err = tx.Exec(ctx, insertQuery,
 		forkedWorkflowID,
