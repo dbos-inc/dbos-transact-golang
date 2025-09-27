@@ -3,6 +3,7 @@ package dbos
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -485,6 +486,14 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 	var result insertWorkflowResult
 	var timeoutMSResult *int64
 	var workflowDeadlineEpochMS *int64
+
+	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
+	authenticatedRoles, err := json.Marshal(input.status.AuthenticatedRoles)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal the authenticated roles: %w", err)
+	}
+
 	err = input.tx.QueryRow(ctx, query,
 		input.status.ID,
 		input.status.Status,
@@ -492,7 +501,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		input.status.QueueName,
 		input.status.AuthenticatedUser,
 		input.status.AssumedRole,
-		input.status.AuthenticatedRoles,
+		authenticatedRoles,
 		input.status.ExecutorID,
 		applicationVersion,
 		input.status.ApplicationID,
@@ -705,11 +714,12 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var deduplicationID *string
 		var applicationVersion *string
 		var executorID *string
+		var authenticatedRoles *string
 
 		// Build scan arguments dynamically based on loaded columns
 		scanArgs := []any{
 			&wf.ID, &wf.Status, &wf.Name, &wf.AuthenticatedUser, &wf.AssumedRole,
-			&wf.AuthenticatedRoles, &executorID, &createdAtMs,
+			&authenticatedRoles, &executorID, &createdAtMs,
 			&updatedAtMs, &applicationVersion, &wf.ApplicationID,
 			&wf.Attempts, &queueName, &timeoutMs,
 			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority,
@@ -725,6 +735,12 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		err := rows.Scan(scanArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan workflow row: %w", err)
+		}
+
+		if authenticatedRoles != nil && *authenticatedRoles != "" {
+			if err := json.Unmarshal([]byte(*authenticatedRoles), &wf.AuthenticatedRoles); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal authenticated_roles: %w", err)
+			}
 		}
 
 		if queueName != nil && len(*queueName) > 0 {
@@ -1088,13 +1104,20 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		return "", fmt.Errorf("failed to serialize input: %w", err)
 	}
 
+	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
+	authenticatedRoles, err := json.Marshal(originalWorkflow.AuthenticatedRoles)
+
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal the authenticated roles: %w", err)
+	}
+
 	_, err = tx.Exec(ctx, insertQuery,
 		forkedWorkflowID,
 		WorkflowStatusEnqueued,
 		originalWorkflow.Name,
 		originalWorkflow.AuthenticatedUser,
 		originalWorkflow.AssumedRole,
-		originalWorkflow.AuthenticatedRoles,
+		authenticatedRoles,
 		&appVersion,
 		originalWorkflow.ApplicationID,
 		_DBOS_INTERNAL_QUEUE_NAME,
