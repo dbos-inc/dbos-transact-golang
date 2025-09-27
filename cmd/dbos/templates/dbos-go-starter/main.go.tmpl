@@ -80,7 +80,7 @@ func main() {
 	var err error
 	dbosCtx, err = dbos.NewDBOSContext(context.Background(), dbos.Config{
 		DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
-		AppName:     "dbos-toolbox",
+		AppName: "{{.ProjectName}}",
 		AdminServer: true,
 	})
 	if err != nil {
