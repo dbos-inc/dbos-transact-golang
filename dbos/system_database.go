@@ -6,15 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"math/rand"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -1227,7 +1230,6 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 	}
 
 	if err != nil {
-		s.logger.Error("RecordOperationResult Error occurred", "error", err)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
 			return newWorkflowConflictIDError(input.workflowID)
 		}
@@ -1556,8 +1558,6 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		}
 	} else {
 		// First execution: calculate and record the end time
-		s.logger.Debug("Durable sleep", "stepID", stepID, "duration", input.duration)
-
 		endTime = time.Now().Add(input.duration)
 
 		// Record the operation result with the calculated end time
@@ -1661,7 +1661,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			}
 			// If the underlying connection is closed, attempt to re-acquire a new one
 			if poolConn.Conn().IsClosed() {
-				s.logger.Error("Notification listener connection closed. re-acquiring")
+				s.logger.Debug("Notification listener connection closed. re-acquiring")
 				poolConn.Release()
 				for {
 					if ctx.Err() != nil {
@@ -1673,7 +1673,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 						retryAttempt = 0
 						break
 					}
-					s.logger.Error("failed to re-acquire connection for notification listener", "error", err)
+					s.logger.Debug("failed to re-acquire connection for notification listener", "error", err)
 					time.Sleep(backoffWithJitter(retryAttempt))
 					retryAttempt++
 				}
@@ -1694,11 +1694,15 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 		switch n.Channel {
 		case _DBOS_NOTIFICATIONS_CHANNEL:
 			if cond, ok := s.workflowNotificationsMap.Load(n.Payload); ok {
+				cond.(*sync.Cond).L.Lock()
 				cond.(*sync.Cond).Broadcast()
+				cond.(*sync.Cond).L.Unlock()
 			}
 		case _DBOS_WORKFLOW_EVENTS_CHANNEL:
 			if cond, ok := s.workflowEventsMap.Load(n.Payload); ok {
+				cond.(*sync.Cond).L.Lock()
 				cond.(*sync.Cond).Broadcast()
+				cond.(*sync.Cond).L.Unlock()
 			}
 		}
 	}
@@ -1843,8 +1847,10 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	// First check if there's already a receiver for this workflow/topic to avoid unnecessary database load
 	payload := fmt.Sprintf("%s::%s", destinationID, topic)
 	cond := sync.NewCond(&sync.Mutex{})
+	cond.L.Lock()
 	_, loaded := s.workflowNotificationsMap.LoadOrStore(payload, cond)
 	if loaded {
+		cond.L.Unlock()
 		s.logger.Error("Receive already called for workflow", "destination_id", destinationID)
 		return nil, newWorkflowConflictIDError(destinationID)
 	}
@@ -1860,15 +1866,12 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.notifications WHERE destination_uuid = $1 AND topic = $2)`, pgx.Identifier{s.schema}.Sanitize())
 	err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 	if err != nil {
+		cond.L.Unlock()
 		return false, fmt.Errorf("failed to check message: %w", err)
 	}
 	if !exists {
-		// Wait for notifications using condition variable with timeout pattern
-		s.logger.Debug("Waiting for notification on condition variable", "payload", payload)
-
 		done := make(chan struct{})
 		go func() {
-			cond.L.Lock()
 			defer cond.L.Unlock()
 			cond.Wait()
 			close(done)
@@ -1885,13 +1888,14 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 
 		select {
 		case <-done:
-			s.logger.Debug("Received notification on condition variable", "payload", payload)
 		case <-time.After(timeout):
 			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
 		case <-ctx.Done():
 			s.logger.Warn("Recv() context cancelled", "payload", payload, "cause", context.Cause(ctx))
 			return nil, ctx.Err()
 		}
+	} else {
+		cond.L.Unlock()
 	}
 
 	// Find the oldest message and delete it atomically
@@ -2071,8 +2075,10 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	// Create notification payload and condition variable
 	payload := fmt.Sprintf("%s::%s", input.TargetWorkflowID, input.Key)
 	cond := sync.NewCond(&sync.Mutex{})
+	cond.L.Lock()
 	existingCond, loaded := s.workflowEventsMap.LoadOrStore(payload, cond)
 	if loaded {
+		cond.L.Unlock()
 		// Reuse the existing condition variable
 		cond = existingCond.(*sync.Cond)
 	}
@@ -2080,10 +2086,8 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	// Defer broadcast to ensure any waiting goroutines eventually unlock
 	defer func() {
 		cond.Broadcast()
-		// Clean up the condition variable after we're done, if we created it
-		if !loaded {
-			s.workflowEventsMap.Delete(payload)
-		}
+		// Clean up the condition variable after we're done (Delete is a no-op if the key doesn't exist)
+		s.workflowEventsMap.Delete(payload)
 	}()
 
 	// Check if the event already exists in the database
@@ -2093,14 +2097,16 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	row := s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
 	err := row.Scan(&valueString)
 	if err != nil && err != pgx.ErrNoRows {
+		if !loaded {
+			cond.L.Unlock()
+		}
 		return nil, fmt.Errorf("failed to query workflow event: %w", err)
 	}
 
-	if err == pgx.ErrNoRows {
+	if err == pgx.ErrNoRows { // this implies isLaunched is True
 		// Wait for notification with timeout using condition variable
 		done := make(chan struct{})
 		go func() {
-			cond.L.Lock()
 			defer cond.L.Unlock()
 			cond.Wait()
 			close(done)
@@ -2561,4 +2567,177 @@ func maskPassword(dbURL string) (string, error) {
 	}
 
 	return parsedURL.String(), nil
+}
+
+/*******************************/
+/******* RETRIER ********/
+/*******************************/
+
+func isRetryablePGError(err error, logger *slog.Logger) bool {
+	if err == nil {
+		return false
+	}
+
+	// If tx is closed (because failure happened between pgx trying to commit/rollback and setting tx.closed)
+	// pgx will always return pgx.ErrTxClosed again.
+	// This is only retryable if the caller retries with a new transaction object.
+	// Otherwise, retrying with the same closed transaction will always fail.
+	if errors.Is(err, pgx.ErrTxClosed) {
+		if logger != nil {
+			logger.Warn("Transaction is closed, retrying requires a new transaction object", "error", err)
+		}
+		return true
+	}
+
+	// PostgreSQL codes indicating connection/admin shutdown etc.
+	var pgerr *pgconn.PgError
+	if errors.As(err, &pgerr) {
+		switch pgerr.Code {
+		case pgerrcode.ConnectionException,
+			pgerrcode.ConnectionDoesNotExist,
+			pgerrcode.ConnectionFailure,
+			pgerrcode.SQLClientUnableToEstablishSQLConnection,
+			pgerrcode.SQLServerRejectedEstablishmentOfSQLConnection,
+			pgerrcode.AdminShutdown,
+			pgerrcode.CrashShutdown,
+			pgerrcode.CannotConnectNow:
+			return true
+		}
+	}
+
+	// pgx aggregate for connect attempts:
+	var cerr *pgconn.ConnectError
+	if errors.As(err, &cerr) {
+		return true
+	}
+
+	// Match most "connection closed" cases
+	if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "conn closed") {
+		return true
+	}
+
+	// Net-level errors
+	var nerr net.Error
+	return errors.As(err, &nerr)
+}
+
+// retryConfig holds the configuration for a retry operation
+type retryConfig struct {
+	maxRetries     int // -1 for infinite retries
+	baseDelay      time.Duration
+	maxDelay       time.Duration
+	backoffFactor  float64
+	jitterMin      float64
+	jitterMax      float64
+	retryCondition func(error, *slog.Logger) bool
+	logger         *slog.Logger
+}
+
+// retryOption is a functional option for configuring retry behavior
+type retryOption func(*retryConfig)
+
+// withRetrierLogger sets the logger for the retrier
+func withRetrierLogger(logger *slog.Logger) retryOption {
+	return func(c *retryConfig) {
+		c.logger = logger
+	}
+}
+
+// retry executes a function with retry logic using functional options
+func retry(ctx context.Context, fn func() error, options ...retryOption) error {
+	// Start with default configuration
+	config := &retryConfig{
+		maxRetries:     -1,
+		baseDelay:      100 * time.Millisecond,
+		maxDelay:       30 * time.Second,
+		backoffFactor:  2.0,
+		jitterMin:      0.95,
+		jitterMax:      1.05,
+		retryCondition: isRetryablePGError,
+	}
+
+	// Apply options
+	for _, opt := range options {
+		opt(config)
+	}
+
+	var lastErr error
+	delay := config.baseDelay
+	attempt := 0
+
+	for {
+		lastErr = fn()
+
+		// Success and rollback case
+		if lastErr == nil {
+			return nil
+		}
+
+		// Check if error is retryable
+		if !config.retryCondition(lastErr, config.logger) {
+			if config.logger != nil {
+				config.logger.Debug("Non-retryable error encountered", "error", lastErr)
+			}
+			return lastErr
+		}
+
+		// Check if we should continue retrying
+		// If maxRetries is -1, retry indefinitely
+		if config.maxRetries >= 0 && attempt >= config.maxRetries {
+			return lastErr
+		}
+
+		// Log retry attempt if logger is provided
+		if config.logger != nil {
+			config.logger.Debug("Retrying operation",
+				"attempt", attempt+1,
+				"max_retries", config.maxRetries,
+				"delay", delay,
+				"error", lastErr)
+		}
+
+		// Apply jitter to the delay
+		jitterRange := config.jitterMax - config.jitterMin
+		jitterFactor := config.jitterMin + rand.Float64()*jitterRange // #nosec G404 -- trivial use of math/rand
+		jitteredDelay := time.Duration(float64(delay) * jitterFactor)
+
+		// Wait before retrying with context cancellation support
+		select {
+		case <-time.After(jitteredDelay):
+		case <-ctx.Done():
+			if config.logger != nil {
+				config.logger.Debug("Retry operation cancelled", "error", ctx.Err())
+			}
+			return ctx.Err()
+		}
+
+		// Calculate next delay with exponential backoff
+		delay = min(time.Duration(float64(delay)*config.backoffFactor), config.maxDelay)
+
+		attempt++
+	}
+}
+
+// retryWithResult executes a function that returns a value with retry logic
+// It uses the non-generic retry function under the hood
+func retryWithResult[T any](ctx context.Context, fn func() (T, error), options ...retryOption) (T, error) {
+	var result T
+	var capturedErr error
+
+	// Wrap the generic function to work with the non-generic retry
+	wrappedFn := func() error {
+		var err error
+		result, err = fn()
+		capturedErr = err
+		return err
+	}
+
+	// Use the non-generic retry function
+	err := retry(ctx, wrappedFn, options...)
+
+	// Return the last result and error
+	if err != nil {
+		return result, capturedErr
+	}
+	return result, nil
 }

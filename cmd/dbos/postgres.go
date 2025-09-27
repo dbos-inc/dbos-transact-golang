@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -17,9 +19,10 @@ import (
 )
 
 const (
-	containerName = "dbos-db"
-	imageName     = "pgvector/pgvector:pg16"
-	pgData        = "/var/lib/postgresql/data"
+	containerName        = "dbos-db"
+	imageName            = "pgvector/pgvector:pg16"
+	pgData               = "/var/lib/postgresql/data"
+	hostPgDataVolumeName = "pgdata"
 )
 
 var postgresCmd = &cobra.Command{
@@ -146,6 +149,10 @@ func startDockerPostgres() error {
 		},
 	}
 
+	_, err = cli.VolumeCreate(ctx, volume.CreateOptions{Name: hostPgDataVolumeName})
+	if err != nil {
+		return fmt.Errorf("failed to create volume %s for Postgres: %w", hostPgDataVolumeName, err)
+	}
 	hostConfig := &container.HostConfig{
 		PortBindings: nat.PortMap{
 			"5432/tcp": []nat.PortBinding{
@@ -156,6 +163,9 @@ func startDockerPostgres() error {
 			},
 		},
 		AutoRemove: true,
+		Binds: []string{
+			fmt.Sprintf("%s:%s", hostPgDataVolumeName, pgData),
+		},
 	}
 
 	resp, err := cli.ContainerCreate(ctx, config, hostConfig, nil, nil, containerName)
@@ -174,7 +184,7 @@ func startDockerPostgres() error {
 		return err
 	}
 
-	logger.Info("Postgres available", "url", fmt.Sprintf("postgres://postgres:%s@localhost:5432", password))
+	logger.Info("Postgres available", "url", fmt.Sprintf("postgres://postgres:%s@localhost:5432", url.QueryEscape(password)))
 	return nil
 }
 
@@ -225,7 +235,7 @@ func waitForPostgres() error {
 		password = "dbos"
 	}
 
-	connStr := fmt.Sprintf("postgres://postgres:%s@localhost:5432/postgres?connect_timeout=2&sslmode=disable", password)
+	connStr := fmt.Sprintf("postgres://postgres:%s@localhost:5432/postgres?connect_timeout=2&sslmode=disable", url.QueryEscape(password))
 
 	// Try for up to 30 seconds
 	for i := 0; i < 30; i++ {

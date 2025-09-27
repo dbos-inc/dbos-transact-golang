@@ -10,6 +10,7 @@ import (
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
 	"github.com/stretchr/testify/mock"
+	"go.uber.org/goleak"
 )
 
 func step(ctx context.Context) (int, error) {
@@ -142,6 +143,7 @@ func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
 }
 
 func TestMocks(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	mockCtx := mocks.NewMockDBOSContext(t)
 
 	// Context lifecycle
@@ -190,9 +192,4 @@ func TestMocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	mockCtx.AssertExpectations(t)
-	mockChildHandle.AssertExpectations(t)
-	mockGenericHandle.AssertExpectations(t)
-	fmt.Println("TestMocks completed successfully")
 }
