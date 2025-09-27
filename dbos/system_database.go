@@ -732,15 +732,15 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			scanArgs = append(scanArgs, &inputString)
 		}
 
+		err := rows.Scan(scanArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan workflow row: %w", err)
+		}
+
 		if authenticatedRoles != nil && *authenticatedRoles != "" {
 			if err := json.Unmarshal([]byte(*authenticatedRoles), &wf.AuthenticatedRoles); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal authenticated_roles: %w", err)
 			}
-		}
-
-		err := rows.Scan(scanArgs...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan workflow row: %w", err)
 		}
 
 		if queueName != nil && len(*queueName) > 0 {
