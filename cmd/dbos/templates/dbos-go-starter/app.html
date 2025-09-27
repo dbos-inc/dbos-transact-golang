@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Welcome to DBOS!</title>
+    <link
+      rel="icon"
+      href="https://dbos-blog-posts.s3.us-west-1.amazonaws.com/live-demo/favicon.ico"
+      type="image/x-icon"
+    />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      .code-block {
+        background: #f6f8fa;
+        padding: 0.75em 0.25em 0.75em 0.75em;
+        font-size: 14px;
+        line-height: 1.5;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      .step-highlight {
+        background-color: #fff3b4;
+      }
+      .function-block {
+        display: block;
+        padding-left: 1em;
+      }
+      .code-line {
+        display: block;
+        white-space: pre;
+      }
+      .keyword {
+        color: #e03444;
+      }
+      .decorator {
+        color: #953800;
+      }
+      .function {
+        color: #8957e5;
+      }
+      .string {
+        color: #0550ae;
+      }
+      .comment {
+        color: #6e7781;
+      }
+      .punctuation {
+        color: #24292f;
+      }
+
+      .status-text {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        transition: all 0.2s;
+      }
+
+      .status-text .step {
+        display: block;
+        padding: 0.375rem 0.75rem;
+        border-left: 3px solid transparent;
+        transition: all 0.2s;
+      }
+
+      .status-text .step.pending {
+        color: #6b7280;
+        border-left-color: #e5e7eb;
+      }
+
+      .status-text .step.active {
+        color: #2563eb;
+        border-left-color: #3b82f6;
+        background-color: #eff6ff;
+      }
+
+      .status-text .step.recover {
+        color: #dc2626;
+        border-left-color: #ef4444;
+        background-color: #fef2f2;
+      }
+
+      .status-text .step.complete {
+        color: #059669;
+        border-left-color: #10b981;
+      }
+
+      @keyframes typing {
+        0% {
+          content: "";
+        }
+        25% {
+          content: ".";
+        }
+        50% {
+          content: "..";
+        }
+        75% {
+          content: "...";
+        }
+        100% {
+          content: "";
+        }
+      }
+
+      .status-text .step.active::after {
+        content: "";
+        animation: typing 2s infinite;
+      }
+
+      .status-text .step.recover::after {
+        content: "";
+        animation: typing 2s infinite;
+      }
+    </style>
+  </head>
+  <body class="font-sans text-gray-800 p-6">
+    <!-- Regular width container for header content -->
+    <div class="max-w-3xl mx-auto">
+      <h1 class="text-xl font-semibold mb-4">Welcome to DBOS!</h1>
+      <div
+        id="reconnecting"
+        class="hidden mb-4 bg-yellow-100 p-2 rounded-md text-center flex items-center justify-center gap-2"
+      >
+        <svg
+          class="animate-spin h-5 w-5 text-yellow-700"
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+        >
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path
+            class="opacity-75"
+            fill="currentColor"
+            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+          ></path>
+        </svg>
+        <span class="text-yellow-700">Reconnecting...</span>
+      </div>
+      <p class="mb-4">DBOS helps you build applications that are <strong>resilient to any failure</strong>.</p>
+
+      <p class="mb-4">
+        Simply add DBOS to your existing Go program by registering ordinary functions as workflows and steps. These <b>durably execute</b> your program, persisting its state to a Postgres database. If your
+        program is ever interrupted or crashes, DBOS uses this saved state to recover it from the last completed step.
+      </p>
+      <p class="mb-4">
+        Try it: Launch a durable workflow, then crash the application. When your application restarts, your workflow will always recover from the last
+        completed step!
+      </p>
+    </div>
+
+    <!-- Compact container for the side-by-side section -->
+    <div class="max-w-3xl mx-auto mb-8">
+      <div class="flex gap-16 items-center justify-center">
+        <!-- Code section -->
+        <div class="w-[500px]">
+          <div class="rounded-lg shadow-lg overflow-hidden">
+            <pre class="code-block"><div class="step-1"><span class="code-line"><span class="keyword">func</span> <span class="function">stepOne</span><span class="punctuation">(</span>ctx context.Context<span class="punctuation">)</span> <span class="punctuation">(</span>string<span class="punctuation">,</span> error<span class="punctuation">)</span> <span class="punctuation">{</span></span><span class="code-line function-block">  time.<span class="function">Sleep</span><span class="punctuation">(</span>5 <span class="punctuation">*</span> time.Second<span class="punctuation">)</span></span><span class="code-line function-block">  fmt.<span class="function">Println</span><span class="punctuation">(</span><span class="string">"Step one completed!"</span><span class="punctuation">)</span></span><span class="code-line function-block">  <span class="keyword">return</span> <span class="string">"Step 1 completed"</span><span class="punctuation">,</span> <span class="keyword">nil</span></span><span class="code-line"><span class="punctuation">}</span></span></div><div> </div><div class="step-2"><span class="code-line"><span class="keyword">func</span> <span class="function">stepTwo</span><span class="punctuation">(</span>ctx context.Context<span class="punctuation">)</span> <span class="punctuation">(</span>string<span class="punctuation">,</span> error<span class="punctuation">)</span> <span class="punctuation">{</span></span><span class="code-line function-block">  time.<span class="function">Sleep</span><span class="punctuation">(</span>5 <span class="punctuation">*</span> time.Second<span class="punctuation">)</span></span><span class="code-line function-block">  fmt.<span class="function">Println</span><span class="punctuation">(</span><span class="string">"Step two completed!"</span><span class="punctuation">)</span></span><span class="code-line function-block">  <span class="keyword">return</span> <span class="string">"Step 2 completed"</span><span class="punctuation">,</span> <span class="keyword">nil</span></span><span class="code-line"><span class="punctuation">}</span></span></div><div> </div><div class="step-3"><span class="code-line"><span class="keyword">func</span> <span class="function">stepThree</span><span class="punctuation">(</span>ctx context.Context<span class="punctuation">)</span> <span class="punctuation">(</span>string<span class="punctuation">,</span> error<span class="punctuation">)</span> <span class="punctuation">{</span></span><span class="code-line function-block">  time.<span class="function">Sleep</span><span class="punctuation">(</span>5 <span class="punctuation">*</span> time.Second<span class="punctuation">)</span></span><span class="code-line function-block">  fmt.<span class="function">Println</span><span class="punctuation">(</span><span class="string">"Step three completed!"</span><span class="punctuation">)</span></span><span class="code-line function-block">  <span class="keyword">return</span> <span class="string">"Step 3 completed"</span><span class="punctuation">,</span> <span class="keyword">nil</span></span><span class="code-line"><span class="punctuation">}</span></span></div><div> </div><span class="code-line"><span class="keyword">func</span> <span class="function">ExampleWorkflow</span><span class="punctuation">(</span>ctx dbos.DBOSContext<span class="punctuation">)</span> <span class="punctuation">{</span></span><span class="code-line function-block workflow-step-1">  dbos.<span class="function">RunAsStep</span><span class="punctuation">(</span>ctx<span class="punctuation">,</span></span><span class="code-line function-block">    <span class="keyword">func</span><span class="punctuation">(</span>stepCtx context.Context<span class="punctuation">)</span> <span class="punctuation">(</span>string<span class="punctuation">,</span> error<span class="punctuation">)</span> <span class="punctuation">{</span></span><span class="code-line function-block">      <span class="keyword">return</span> <span class="function">stepOne</span><span class="punctuation">(</span>stepCtx<span class="punctuation">)</span></span><span class="code-line function-block">    <span class="punctuation">})</span></span><span class="code-line function-block workflow-step-2">  dbos.<span class="function">RunAsStep</span><span class="punctuation">(</span>ctx<span class="punctuation">,</span></span><span class="code-line function-block">    <span class="keyword">func</span><span class="punctuation">(</span>stepCtx context.Context<span class="punctuation">)</span> <span class="punctuation">(</span>string<span class="punctuation">,</span> error<span class="punctuation">)</span> <span class="punctuation">{</span></span><span class="code-line function-block">      <span class="keyword">return</span> <span class="function">stepTwo</span><span class="punctuation">(</span>stepCtx<span class="punctuation">)</span></span><span class="code-line function-block">    <span class="punctuation">})</span></span><span class="code-line function-block workflow-step-3">  dbos.<span class="function">RunAsStep</span><span class="punctuation">(</span>ctx<span class="punctuation">,</span></span><span class="code-line function-block">    <span class="keyword">func</span><span class="punctuation">(</span>stepCtx context.Context<span class="punctuation">)</span> <span class="punctuation">(</span>string<span class="punctuation">,</span> error<span class="punctuation">)</span> <span class="punctuation">{</span></span><span class="code-line function-block">      <span class="keyword">return</span> <span class="function">stepThree</span><span class="punctuation">(</span>stepCtx<span class="punctuation">)</span></span><span class="code-line function-block">    <span class="punctuation">})</span></span><span class="code-line"><span class="punctuation">}</span></span></pre>
+          </div>
+        </div>
+
+        <!-- Controls section -->
+        <div class="w-1/3 flex flex-col justify-center items-start">
+          <div class="flex flex-col gap-4 mb-4">
+            <button
+              onclick="startBackgroundJob()"
+              class="inline-block bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded shadow transition duration-150 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+            >
+              Launch a durable workflow
+            </button>
+            <button
+              onclick="crashApp()"
+              id="crash-button"
+              disabled
+              class="inline-block bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-6 rounded shadow transition duration-150 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:hover:bg-red-600"
+            >
+              Crash the application
+            </button>
+          </div>
+          <div
+            id="status"
+            class="text-gray-600 bg-white rounded-lg shadow-sm border border-gray-100 p-2 mt-4 w-full status-text"
+          >
+            <div class="step" id="step-1">▶</div>
+            <div class="step" id="step-2">▶</div>
+            <div class="step" id="step-3">▶</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Regular width container for remaining content -->
+    <div class="max-w-3xl mx-auto">
+      <p class="mb-4">
+        To see it's really working, check your app's logs. When you crash your app, its process is forcibly exited.
+        When the process restarts, it recovers any active workflows from their last completed step
+        <code class="bg-gray-100 px-2 py-1 rounded-md font-mono text-sm text-gray-700">(Recovered pending workflows...)</code>,
+        then runs the recovered workflows <code
+          class="bg-gray-100 px-2 py-1 rounded-md font-mono text-sm text-gray-700"
+          >(Step completed...)</code
+        >.
+      </p>
+      <p class="mb-4">
+        Check out the
+        <a href="https://docs.dbos.dev/golang/programming-guide" target="_blank" class="text-blue-600 hover:underline"
+          >programming guide</a
+        >
+        to learn how to build with DBOS!
+      </p>
+    </div>
+
+    <script>
+      function generateRandomString() {
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        return Array.from(crypto.getRandomValues(new Uint8Array(6)))
+          .map((x) => chars[x % chars.length])
+          .join("");
+      }
+
+      let currentId = null;
+
+      // Check URL for existing ID on page load
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlId = urlParams.get("id");
+      if (urlId && urlId.length > 0) {
+        currentId = urlId;
+        enableCrashButton();
+      }
+
+      checkProgress();
+      setInterval(checkProgress, 1667);
+
+      function showReconnecting() {
+        document.getElementById("reconnecting").classList.remove("hidden");
+      }
+
+      function hideReconnecting() {
+        document.getElementById("reconnecting").classList.add("hidden");
+      }
+
+      async function crashApp() {
+        // Make the HTTP request with a 100ms timeout and ignore errors
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 100);
+
+          await fetch("/crash", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeoutId);
+        } catch (error) {}
+
+        await checkProgress();
+      }
+
+      function enableCrashButton() {
+        document.getElementById("crash-button").disabled = false;
+      }
+
+      async function startBackgroundJob() {
+        const randomString = generateRandomString();
+        const urlParams = new URLSearchParams(window.location.search);
+        urlParams.set("id", randomString);
+        window.history.replaceState({}, "", `${window.location.pathname}?${urlParams.toString()}`);
+
+        currentId = randomString;
+        await fetch(`/workflow/${currentId}`, { method: "GET" });
+        await checkProgress();
+        enableCrashButton();
+      }
+
+      function updateStatusBox(step, error = false) {
+        document.querySelectorAll(".status-text .step").forEach((stepEl, index) => {
+          const stepNum = index + 1;
+
+          if (stepNum < step) {
+            stepEl.className = "step complete";
+            stepEl.textContent = `✓ Completed step ${stepNum}`;
+          } else if (stepNum === step && error) {
+            stepEl.className = "step recover";
+            stepEl.textContent = `■ Disconnected`;
+          } else if (stepNum === step) {
+            stepEl.className = "step active";
+            stepEl.textContent = `▶ Executing step ${stepNum}`;
+          } else {
+            stepEl.className = "step pending";
+            stepEl.textContent = `▶`;
+          }
+        });
+      }
+
+      let lastStep = 0;
+
+      async function checkProgress() {
+        if (!currentId) {
+          return;
+        }
+
+        try {
+          const response = await fetch(`/last_step/${currentId}`);
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          const step = Number(await response.text()) + 1;
+
+          // Remove all highlights from code
+          document.querySelectorAll(".step-highlight").forEach((el) => {
+            el.classList.remove("step-highlight");
+          });
+
+          // Update status text
+          updateStatusBox(step);
+          lastStep = step;
+
+          if (step <= 3) {
+            // Keep original code highlighting
+            const stepBlock = document.querySelector(`.step-${step}`);
+            if (stepBlock) {
+              stepBlock.classList.add("step-highlight");
+            }
+            const workflowLine = document.querySelector(`.workflow-step-${step}`);
+            if (workflowLine) {
+              workflowLine.classList.add("step-highlight");
+            }
+          } else {
+            document.querySelectorAll(".status-text .step").forEach((step) => {
+              step.className = "step complete";
+            });
+            currentId = null;
+          }
+          hideReconnecting();
+        } catch (error) {
+          console.error("Error checking progress:", error);
+          showReconnecting();
+          updateStatusBox(lastStep, true);
+        }
+      }
+    </script>
+  </body>
+</html>

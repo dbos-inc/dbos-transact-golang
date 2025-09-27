@@ -25,7 +25,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		projectName = args[0]
 	} else {
-		projectName = "dbos-toolbox"
+		projectName = "dbos-go-starter"
 	}
 
 	// Check if directory already exists
@@ -45,9 +45,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Process and write each template file
 	templates := map[string]string{
-		"templates/dbos-toolbox/go.mod.tmpl":           "go.mod",
-		"templates/dbos-toolbox/main.go.tmpl":          "main.go",
-		"templates/dbos-toolbox/dbos-config.yaml.tmpl": "dbos-config.yaml",
+		"templates/dbos-go-starter/go.mod.tmpl":           "go.mod",
+		"templates/dbos-go-starter/main.go.tmpl":          "main.go",
+		"templates/dbos-go-starter/dbos-config.yaml.tmpl": "dbos-config.yaml",
+		"templates/dbos-go-starter/app.html":              "html/app.html",
 	}
 
 	for tmplPath, outputFile := range templates {
@@ -70,6 +71,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 		// Write output file
 		outputPath := filepath.Join(projectName, outputFile)
+		if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+			return fmt.Errorf("failed to create directory for %s: %w", outputFile, err)
+		}
 		if err := os.WriteFile(outputPath, buf.Bytes(), 0644); err != nil {
 			return fmt.Errorf("failed to write %s: %w", outputFile, err)
 		}
@@ -79,7 +83,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	fmt.Println("To get started:")
 	fmt.Printf("  cd %s\n", projectName)
 	fmt.Println("  go mod tidy")
-	fmt.Println("  export DBOS_SYSTEM_DATABASE_URL=<your-database-url>")
+	fmt.Println("  export DBOS_SYSTEM_DATABASE_URL=\"postgres://<user>:<password>@<host>:<port>/<db>\"")
 	fmt.Println("  go run main.go")
 
 	return nil
