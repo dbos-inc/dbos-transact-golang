@@ -316,26 +316,18 @@ type ScheduledWorkflowInfo struct {
 func (c *dbosContext) listScheduledWorkflows() []ScheduledWorkflowInfo {
 	var scheduledWorkflows []ScheduledWorkflowInfo
 
-	// Get all registered workflows first
-	registeredWorkflows := c.listRegisteredWorkflows()
-
-	// Create a map of FQN to workflow info for quick lookup
-	workflowMap := make(map[string]RegisteredWorkflowInfo)
-	for _, workflow := range registeredWorkflows {
-		workflowMap[workflow.FQN] = workflow
-	}
-
-	// Check which ones are scheduled by examining the scheduled workflow registry
 	c.scheduledWorkflowRegistry.Range(func(key, value interface{}) bool {
 		workflowFQN := key.(string)
 		cronSchedule := value.(string)
 
-		// Find the corresponding workflow info
-		if workflow, exists := workflowMap[workflowFQN]; exists {
+		// Get the workflow info directly from the main registry
+		if workflowEntryAny, exists := c.workflowRegistry.Load(workflowFQN); exists {
+			workflowEntry := workflowEntryAny.(workflowRegistryEntry)
+
 			scheduledWorkflows = append(scheduledWorkflows, ScheduledWorkflowInfo{
-				FQN:          workflow.FQN,
-				CustomName:   workflow.CustomName,
-				MaxRetries:   workflow.MaxRetries,
+				FQN:          workflowFQN,
+				CustomName:   workflowEntry.name,
+				MaxRetries:   workflowEntry.maxRetries,
 				CronSchedule: cronSchedule,
 			})
 		}
