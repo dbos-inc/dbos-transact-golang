@@ -127,6 +127,8 @@ type DBOSContext interface {
 	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)   // Fork a workflow from a specific step
 	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) // List workflows based on filtering criteria
 	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)              // Get the execution steps of a workflow
+	ListRegisteredWorkflows(_ DBOSContext) ([]RegisteredWorkflowInfo, error)            // List all registered workflows with their registration parameters
+	ListScheduledWorkflows(_ DBOSContext) ([]ScheduledWorkflowInfo, error)              // List all registered scheduled workflows with their registration parameters
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -159,8 +161,9 @@ type dbosContext struct {
 	workflowsWg *sync.WaitGroup
 
 	// Workflow registry - read-mostly sync.Map since registration happens only before launch
-	workflowRegistry        *sync.Map // map[string]workflowRegistryEntry
-	workflowCustomNametoFQN *sync.Map // Maps fully qualified workflow names to custom names. Usefor when client enqueues a workflow by name because registry is indexed by FQN.
+	workflowRegistry          *sync.Map // map[string]workflowRegistryEntry
+	workflowCustomNametoFQN   *sync.Map // Maps fully qualified workflow names to custom names. Usefor when client enqueues a workflow by name because registry is indexed by FQN.
+	scheduledWorkflowRegistry *sync.Map // map[string]string - Maps workflow FQN to cron schedule string
 
 	// Workflow scheduler
 	workflowScheduler *cron.Cron
@@ -275,6 +278,83 @@ func (c *dbosContext) GetApplicationID() string {
 	return c.applicationID
 }
 
+// RegisteredWorkflowInfo contains information about a registered workflow
+type RegisteredWorkflowInfo struct {
+	FQN        string // Fully qualified name of the workflow function
+	CustomName string // Custom name if provided during registration
+	MaxRetries int    // Maximum retry attempts for workflow recovery
+}
+
+// listRegisteredWorkflows returns information about all registered workflows
+func (c *dbosContext) listRegisteredWorkflows() []RegisteredWorkflowInfo {
+	var workflows []RegisteredWorkflowInfo
+
+	c.workflowRegistry.Range(func(key, value interface{}) bool {
+		fqn := key.(string)
+		entry := value.(workflowRegistryEntry)
+
+		workflows = append(workflows, RegisteredWorkflowInfo{
+			FQN:        fqn,
+			CustomName: entry.name,
+			MaxRetries: entry.maxRetries,
+		})
+		return true
+	})
+
+	return workflows
+}
+
+// ScheduledWorkflowInfo contains information about a registered scheduled workflow
+type ScheduledWorkflowInfo struct {
+	FQN          string // Fully qualified name of the workflow function
+	CustomName   string // Custom name if provided during registration
+	MaxRetries   int    // Maximum retry attempts for workflow recovery
+	CronSchedule string // Cron schedule string
+}
+
+// listScheduledWorkflows returns information about all registered scheduled workflows
+func (c *dbosContext) listScheduledWorkflows() []ScheduledWorkflowInfo {
+	var scheduledWorkflows []ScheduledWorkflowInfo
+
+	// Get all registered workflows first
+	registeredWorkflows := c.listRegisteredWorkflows()
+
+	// Create a map of FQN to workflow info for quick lookup
+	workflowMap := make(map[string]RegisteredWorkflowInfo)
+	for _, workflow := range registeredWorkflows {
+		workflowMap[workflow.FQN] = workflow
+	}
+
+	// Check which ones are scheduled by examining the scheduled workflow registry
+	c.scheduledWorkflowRegistry.Range(func(key, value interface{}) bool {
+		workflowFQN := key.(string)
+		cronSchedule := value.(string)
+
+		// Find the corresponding workflow info
+		if workflow, exists := workflowMap[workflowFQN]; exists {
+			scheduledWorkflows = append(scheduledWorkflows, ScheduledWorkflowInfo{
+				FQN:          workflow.FQN,
+				CustomName:   workflow.CustomName,
+				MaxRetries:   workflow.MaxRetries,
+				CronSchedule: cronSchedule,
+			})
+		}
+		return true
+	})
+
+	return scheduledWorkflows
+}
+
+// ListRegisteredWorkflows returns information about all registered workflows with their registration parameters.
+func (c *dbosContext) ListRegisteredWorkflows(_ DBOSContext) ([]RegisteredWorkflowInfo, error) {
+	return c.listRegisteredWorkflows(), nil
+}
+
+// ListScheduledWorkflows returns information about all registered scheduled workflows with their registration parameters.
+func (c *dbosContext) ListScheduledWorkflows(_ DBOSContext) ([]ScheduledWorkflowInfo, error) {
+	return c.listScheduledWorkflows(), nil
+}
+
 // NewDBOSContext creates a new DBOS context with the provided configuration.
 // The context must be launched with Launch() for workflow execution and should be shut down with Shutdown().
 // This function initializes the DBOS system database, sets up the queue sub-system, and prepares the workflow registry.
@@ -297,11 +377,12 @@ func (c *dbosContext) GetApplicationID() string {
 func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error) {
 	dbosBaseCtx, cancelFunc := context.WithCancelCause(ctx)
 	initExecutor := &dbosContext{
-		workflowsWg:             &sync.WaitGroup{},
-		ctx:                     dbosBaseCtx,
-		ctxCancelFunc:           cancelFunc,
-		workflowRegistry:        &sync.Map{},
-		workflowCustomNametoFQN: &sync.Map{},
+		workflowsWg:               &sync.WaitGroup{},
+		ctx:                       dbosBaseCtx,
+		ctxCancelFunc:             cancelFunc,
+		workflowRegistry:          &sync.Map{},
+		workflowCustomNametoFQN:   &sync.Map{},
+		scheduledWorkflowRegistry: &sync.Map{},
 	}
 
 	// Load and process the configuration

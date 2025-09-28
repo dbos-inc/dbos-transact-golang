@@ -321,6 +321,9 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 		panic("Cannot register scheduled workflow after DBOS has launched")
 	}
 
+	// Store the schedule information in the scheduled workflow registry
+	c.scheduledWorkflowRegistry.Store(workflowName, cronSchedule)
+
 	c.getWorkflowScheduler().Start()
 	var entryID cron.EntryID
 	entryID, err := c.getWorkflowScheduler().AddFunc(cronSchedule, func() {
@@ -1920,4 +1923,44 @@ func GetWorkflowSteps(ctx DBOSContext, workflowID string) ([]StepInfo, error) {
 		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.GetWorkflowSteps(ctx, workflowID)
+}
+
+// ListRegisteredWorkflows returns information about all registered workflows with their registration parameters.
+// This includes the fully qualified name, custom name (if provided), and maximum retry attempts.
+//
+// Example:
+//
+//	workflows, err := dbos.ListRegisteredWorkflows(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	for _, workflow := range workflows {
+//	    log.Printf("Workflow: %s (Custom: %s, MaxRetries: %d)",
+//	        workflow.FQN, workflow.CustomName, workflow.MaxRetries)
+//	}
+func ListRegisteredWorkflows(ctx DBOSContext) ([]RegisteredWorkflowInfo, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.ListRegisteredWorkflows(ctx)
+}
+
+// ListScheduledWorkflows returns information about all registered scheduled workflows with their registration parameters.
+// This includes the fully qualified name, custom name (if provided), maximum retry attempts, and cron schedule.
+//
+// Example:
+//
+//	scheduledWorkflows, err := dbos.ListScheduledWorkflows(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	for _, workflow := range scheduledWorkflows {
+//	    log.Printf("Scheduled Workflow: %s (Schedule: %s, MaxRetries: %d)",
+//	        workflow.FQN, workflow.CronSchedule, workflow.MaxRetries)
+//	}
+func ListScheduledWorkflows(ctx DBOSContext) ([]ScheduledWorkflowInfo, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.ListScheduledWorkflows(ctx)
 }
