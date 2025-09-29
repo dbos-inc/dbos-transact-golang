@@ -65,26 +65,26 @@ func TestCLIWorkflow(t *testing.T) {
 	testConfigs := []struct {
 		name       string
 		schemaName string
-		schemaArgs []string
 		dbRole     string
+		args       []string
 	}{
 		{
 			name:       "CustomSchema",
 			schemaName: "test_schema",
-			schemaArgs: []string{"--schema", "test_schema"},
 			dbRole:     "postgres",
+			args:       []string{"--schema", "test_schema"},
 		},
 		{
 			name:       "DefaultSchema",
 			schemaName: "dbos",
-			schemaArgs: []string{}, // No schema argument, use default
 			dbRole:     "postgres",
+			args:       []string{},
 		},
 		{
 			name:       "FunnySchema",
 			schemaName: "F8nny_sCHem@-n@m3",
-			schemaArgs: []string{"--schema", "F8nny_sCHem@-n@m3"},
 			dbRole:     "notpostgres",
+			args:       []string{"--schema", "F8nny_sCHem@-n@m3"},
 		},
 	}
 
@@ -103,7 +103,7 @@ func TestCLIWorkflow(t *testing.T) {
 			})
 
 			t.Run("ResetDatabase", func(t *testing.T) {
-				args := append([]string{"reset", "-y"}, config.schemaArgs...)
+				args := append([]string{"reset", "-y"}, config.args...)
 				cmd := exec.Command(cliPath, args...)
 				cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL("postgres"))
 
@@ -144,11 +144,14 @@ func TestCLIWorkflow(t *testing.T) {
 			})
 
 			t.Run("MigrateCommand", func(t *testing.T) {
-				testMigrateCommand(t, cliPath, config.schemaArgs, config.dbRole)
+				testMigrateCommand(t, cliPath, config.args, config.dbRole)
 			})
 
 			// Start a test application using dbos start
-			startArgs := append([]string{"start"}, config.schemaArgs...)
+			startArgs := append([]string{"start"}, config.args...)
+			if config.dbRole != "postgres" {
+				startArgs = append(startArgs, "--app-role", config.dbRole)
+			}
 			cmd := exec.CommandContext(context.Background(), cliPath, startArgs...)
 			envVars := append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(config.dbRole))
 			// Pass the schema to the test app if using custom schema
@@ -176,11 +179,11 @@ func TestCLIWorkflow(t *testing.T) {
 			})
 
 			t.Run("WorkflowCommands", func(t *testing.T) {
-				testWorkflowCommands(t, cliPath, config.schemaArgs, config.dbRole)
+				testWorkflowCommands(t, cliPath, config.args, config.dbRole)
 			})
 
 			t.Run("ErrorHandling", func(t *testing.T) {
-				testErrorHandling(t, cliPath, config.schemaArgs, config.dbRole)
+				testErrorHandling(t, cliPath, config.args, config.dbRole)
 			})
 		})
 	}
@@ -246,7 +249,7 @@ func testProjectInitialization(t *testing.T, cliPath string) {
 	require.NoError(t, err, "go mod tidy failed: %s", string(modOutput))
 }
 
-func testMigrateCommand(t *testing.T, cliPath string, schemaArgs []string, dbRole string) {
+func testMigrateCommand(t *testing.T, cliPath string, baseArgs []string, dbRole string) {
 	// If the role is set, create it in Postgres first
 	if dbRole != "postgres" {
 		db, err := sql.Open("pgx", getDatabaseURL("postgres"))
@@ -261,7 +264,7 @@ func testMigrateCommand(t *testing.T, cliPath string, schemaArgs []string, dbRol
 		require.NoError(t, err)
 	}
 
-	args := append([]string{"--verbose", "migrate"}, schemaArgs...)
+	args := append([]string{"--verbose", "migrate"}, baseArgs...)
 	if dbRole != "postgres" {
 		args = append(args, "--app-role", dbRole)
 	}
@@ -273,31 +276,31 @@ func testMigrateCommand(t *testing.T, cliPath string, schemaArgs []string, dbRol
 }
 
 // testWorkflowCommands comprehensively tests all workflow CLI commands
-func testWorkflowCommands(t *testing.T, cliPath string, schemaArgs []string, dbRole string) {
+func testWorkflowCommands(t *testing.T, cliPath string, baseArgs []string, dbRole string) {
 
 	t.Run("ListWorkflows", func(t *testing.T) {
-		testListWorkflows(t, cliPath, schemaArgs, dbRole)
+		testListWorkflows(t, cliPath, baseArgs, dbRole)
 	})
 
 	t.Run("GetWorkflow", func(t *testing.T) {
-		testGetWorkflow(t, cliPath, schemaArgs, dbRole)
+		testGetWorkflow(t, cliPath, baseArgs, dbRole)
 	})
 
 	t.Run("CancelResumeWorkflow", func(t *testing.T) {
-		testCancelResumeWorkflow(t, cliPath, schemaArgs, dbRole)
+		testCancelResumeWorkflow(t, cliPath, baseArgs, dbRole)
 	})
 
 	t.Run("ForkWorkflow", func(t *testing.T) {
-		testForkWorkflow(t, cliPath, schemaArgs, dbRole)
+		testForkWorkflow(t, cliPath, baseArgs, dbRole)
 	})
 
 	t.Run("GetWorkflowSteps", func(t *testing.T) {
-		testGetWorkflowSteps(t, cliPath, schemaArgs, dbRole)
+		testGetWorkflowSteps(t, cliPath, baseArgs, dbRole)
 	})
 }
 
 // testListWorkflows tests various workflow listing scenarios
-func testListWorkflows(t *testing.T, cliPath string, schemaArgs []string, dbRole string) {
+func testListWorkflows(t *testing.T, cliPath string, baseArgs []string, dbRole string) {
 	// Create some test workflows first to ensure we have data to filter
 	resp, err := http.Get("http://localhost:" + testServerPort + "/workflow")
 	require.NoError(t, err, "Failed to trigger workflow")
@@ -443,7 +446,10 @@ func testListWorkflows(t *testing.T, cliPath string, schemaArgs []string, dbRole
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			args := append(tc.args, schemaArgs...)
+			args := append(tc.args, baseArgs...)
+			if dbRole != "postgres" {
+				args = append(args, "--app-role", dbRole)
+			}
 			cmd := exec.Command(cliPath, args...)
 			cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -487,7 +493,7 @@ func testListWorkflows(t *testing.T, cliPath string, schemaArgs []string, dbRole
 }
 
 // testGetWorkflow tests retrieving individual workflow details
-func testGetWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole string) {
+func testGetWorkflow(t *testing.T, cliPath string, baseArgs []string, dbRole string) {
 	resp, err := http.Get("http://localhost:" + testServerPort + "/queue")
 	require.NoError(t, err, "Failed to trigger queue workflow")
 	defer resp.Body.Close()
@@ -507,7 +513,10 @@ func testGetWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole s
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
 	t.Run("GetWorkflowJSON", func(t *testing.T) {
-		args := append([]string{"workflow", "get", workflowID}, schemaArgs...)
+		args := append([]string{"workflow", "get", workflowID}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -523,7 +532,10 @@ func testGetWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole s
 		assert.NotEmpty(t, status.Name, "Should have workflow name")
 
 		// Redo the test with the db url in flags
-		args2 := append([]string{"workflow", "get", workflowID, "--db-url", getDatabaseURL(dbRole)}, schemaArgs...)
+		args2 := append([]string{"workflow", "get", workflowID, "--db-url", getDatabaseURL(dbRole)}, baseArgs...)
+		if dbRole != "postgres" {
+			args2 = append(args2, "--app-role", dbRole)
+		}
 		cmd2 := exec.Command(cliPath, args2...)
 
 		output2, err2 := cmd2.CombinedOutput()
@@ -557,7 +569,10 @@ func testGetWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole s
 		})
 
 		// Test with environment variable D
-		args3 := append([]string{"workflow", "get", workflowID}, schemaArgs...)
+		args3 := append([]string{"workflow", "get", workflowID}, baseArgs...)
+		if dbRole != "postgres" {
+			args3 = append(args3, "--app-role", dbRole)
+		}
 		cmd3 := exec.Command(cliPath, args3...)
 		cmd3.Env = append(os.Environ(), "D="+getDatabaseURL(dbRole))
 
@@ -575,7 +590,7 @@ func testGetWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole s
 }
 
 // testCancelResumeWorkflow tests workflow state management
-func testCancelResumeWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole string) {
+func testCancelResumeWorkflow(t *testing.T, cliPath string, baseArgs []string, dbRole string) {
 	resp, err := http.Get("http://localhost:" + testServerPort + "/queue")
 	require.NoError(t, err, "Failed to trigger queue workflow")
 	defer resp.Body.Close()
@@ -595,7 +610,10 @@ func testCancelResumeWorkflow(t *testing.T, cliPath string, schemaArgs []string,
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
 	t.Run("CancelWorkflow", func(t *testing.T) {
-		args := append([]string{"workflow", "cancel", workflowID}, schemaArgs...)
+		args := append([]string{"workflow", "cancel", workflowID}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -605,7 +623,10 @@ func testCancelResumeWorkflow(t *testing.T, cliPath string, schemaArgs []string,
 		assert.Contains(t, string(output), "Successfully cancelled", "Should confirm cancellation")
 
 		// Verify workflow is actually cancelled
-		getArgs := append([]string{"workflow", "get", workflowID}, schemaArgs...)
+		getArgs := append([]string{"workflow", "get", workflowID}, baseArgs...)
+		if dbRole != "postgres" {
+			getArgs = append(getArgs, "--app-role", dbRole)
+		}
 		getCmd := exec.Command(cliPath, getArgs...)
 		getCmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -619,7 +640,10 @@ func testCancelResumeWorkflow(t *testing.T, cliPath string, schemaArgs []string,
 	})
 
 	t.Run("ResumeWorkflow", func(t *testing.T) {
-		args := append([]string{"workflow", "resume", workflowID}, schemaArgs...)
+		args := append([]string{"workflow", "resume", workflowID}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -638,7 +662,7 @@ func testCancelResumeWorkflow(t *testing.T, cliPath string, schemaArgs []string,
 }
 
 // testForkWorkflow tests workflow forking functionality
-func testForkWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole string) {
+func testForkWorkflow(t *testing.T, cliPath string, baseArgs []string, dbRole string) {
 	resp, err := http.Get("http://localhost:" + testServerPort + "/queue")
 	require.NoError(t, err, "Failed to trigger queue workflow")
 	defer resp.Body.Close()
@@ -660,7 +684,10 @@ func testForkWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole 
 	t.Run("ForkWorkflow", func(t *testing.T) {
 		newID := uuid.NewString()
 		targetVersion := "1.0.0"
-		args := append([]string{"workflow", "fork", workflowID, "--forked-workflow-id", newID, "--application-version", targetVersion}, schemaArgs...)
+		args := append([]string{"workflow", "fork", workflowID, "--forked-workflow-id", newID, "--application-version", targetVersion}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -680,7 +707,10 @@ func testForkWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole 
 	})
 
 	t.Run("ForkWorkflowFromStep", func(t *testing.T) {
-		args := append([]string{"workflow", "fork", workflowID, "--step", "2"}, schemaArgs...)
+		args := append([]string{"workflow", "fork", workflowID, "--step", "2"}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -699,7 +729,10 @@ func testForkWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole 
 
 	t.Run("ForkWorkflowFromNegativeStep", func(t *testing.T) {
 		// Test fork with invalid step number (0 should be converted to 1)
-		args := append([]string{"workflow", "fork", workflowID, "--step", "-1"}, schemaArgs...)
+		args := append([]string{"workflow", "fork", workflowID, "--step", "-1"}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -718,7 +751,7 @@ func testForkWorkflow(t *testing.T, cliPath string, schemaArgs []string, dbRole 
 }
 
 // testGetWorkflowSteps tests retrieving workflow steps
-func testGetWorkflowSteps(t *testing.T, cliPath string, schemaArgs []string, dbRole string) {
+func testGetWorkflowSteps(t *testing.T, cliPath string, baseArgs []string, dbRole string) {
 	resp, err := http.Get("http://localhost:" + testServerPort + "/queue")
 	require.NoError(t, err, "Failed to trigger queue workflow")
 	defer resp.Body.Close()
@@ -738,7 +771,10 @@ func testGetWorkflowSteps(t *testing.T, cliPath string, schemaArgs []string, dbR
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
 	t.Run("GetStepsJSON", func(t *testing.T) {
-		args := append([]string{"workflow", "steps", workflowID}, schemaArgs...)
+		args := append([]string{"workflow", "steps", workflowID}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -762,12 +798,15 @@ func testGetWorkflowSteps(t *testing.T, cliPath string, schemaArgs []string, dbR
 }
 
 // testErrorHandling tests various error conditions and edge cases
-func testErrorHandling(t *testing.T, cliPath string, schemaArgs []string, dbRole string) {
+func testErrorHandling(t *testing.T, cliPath string, baseArgs []string, dbRole string) {
 	t.Run("InvalidWorkflowID", func(t *testing.T) {
 		invalidID := "invalid-workflow-id-12345"
 
 		// Test get with invalid ID
-		args := append([]string{"workflow", "get", invalidID}, schemaArgs...)
+		args := append([]string{"workflow", "get", invalidID}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -778,7 +817,10 @@ func testErrorHandling(t *testing.T, cliPath string, schemaArgs []string, dbRole
 
 	t.Run("MissingWorkflowID", func(t *testing.T) {
 		// Test get without workflow ID
-		args := append([]string{"workflow", "get"}, schemaArgs...)
+		args := append([]string{"workflow", "get"}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -788,7 +830,10 @@ func testErrorHandling(t *testing.T, cliPath string, schemaArgs []string, dbRole
 	})
 
 	t.Run("InvalidStatusFilter", func(t *testing.T) {
-		args := append([]string{"workflow", "list", "--status", "INVALID_STATUS"}, schemaArgs...)
+		args := append([]string{"workflow", "list", "--status", "INVALID_STATUS"}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -798,7 +843,10 @@ func testErrorHandling(t *testing.T, cliPath string, schemaArgs []string, dbRole
 	})
 
 	t.Run("InvalidTimeFormat", func(t *testing.T) {
-		args := append([]string{"workflow", "list", "--start-time", "invalid-time-format"}, schemaArgs...)
+		args := append([]string{"workflow", "list", "--start-time", "invalid-time-format"}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
 
@@ -809,7 +857,10 @@ func testErrorHandling(t *testing.T, cliPath string, schemaArgs []string, dbRole
 
 	t.Run("MissingDatabaseURL", func(t *testing.T) {
 		// Test without system DB url in the flags or env var
-		args := append([]string{"workflow", "list"}, schemaArgs...)
+		args := append([]string{"workflow", "list"}, baseArgs...)
+		if dbRole != "postgres" {
+			args = append(args, "--app-role", dbRole)
+		}
 		cmd := exec.Command(cliPath, args...)
 
 		output, err := cmd.CombinedOutput()
