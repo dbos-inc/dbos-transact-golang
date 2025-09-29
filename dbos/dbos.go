@@ -579,3 +579,40 @@ func getDBOSVersion() string {
 	}
 	return "unknown"
 }
+
+// Launch launches the DBOS runtime using the provided DBOSContext.
+// This is a package-level wrapper for the DBOSContext.Launch() method.
+//
+// Example:
+//
+//	ctx, err := dbos.NewDBOSContext(context.Background(), config)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	if err := dbos.Launch(ctx); err != nil {
+//	    log.Fatal(err)
+//	}
+func Launch(ctx DBOSContext) error {
+	if ctx == nil {
+		return fmt.Errorf("ctx cannot be nil")
+	}
+	return ctx.Launch()
+}
+
+// Shutdown gracefully shuts down the DBOS runtime using the provided DBOSContext and timeout.
+// This is a package-level wrapper for the DBOSContext.Shutdown() method.
+//
+// Example:
+//
+//	ctx, err := dbos.NewDBOSContext(context.Background(), config)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer dbos.Shutdown(ctx, 30*time.Second)
+func Shutdown(ctx DBOSContext, timeout time.Duration) {
+	if ctx == nil {
+		return
+	}
+	ctx.Shutdown(timeout)
+}
