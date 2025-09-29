@@ -670,7 +670,7 @@ func TestCustomPool(t *testing.T) {
 		dbosErr, ok := err.(*DBOSError)
 		require.True(t, ok, "expected DBOSError, got %T", err)
 		assert.Equal(t, InitializationError, dbosErr.Code)
-		expectedMsg := "Error initializing DBOS Transact: failed to create system database"
+		expectedMsg := "Error initializing DBOS Transact: failed to validate custom pool"
 		assert.Contains(t, dbosErr.Message, expectedMsg)
 	})
 
