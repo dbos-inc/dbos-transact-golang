@@ -60,7 +60,7 @@ func TestEnqueue(t *testing.T) {
 	RegisterWorkflow(serverCtx, priorityWorkflow, WithWorkflowName("PriorityWorkflow"))
 
 	// Launch the server context to start processing tasks
-	err := serverCtx.Launch()
+	err := Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client - this will enqueue tasks
@@ -319,7 +319,7 @@ func TestCancelResume(t *testing.T) {
 	RegisterWorkflow(serverCtx, timeoutBlockingWorkflow, WithWorkflowName("TimeoutBlockingWorkflow"))
 
 	// Launch the server context to start processing tasks
-	err := serverCtx.Launch()
+	err := Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client - this will enqueue tasks
@@ -570,7 +570,7 @@ func TestForkWorkflow(t *testing.T) {
 	RegisterWorkflow(serverCtx, parentWorkflow, WithWorkflowName("ParentWorkflow"))
 
 	// Launch the server context to start processing tasks
-	err := serverCtx.Launch()
+	err := Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client
@@ -706,7 +706,7 @@ func TestListWorkflows(t *testing.T) {
 	// Register cleanup for server context
 	t.Cleanup(func() {
 		if serverCtx != nil {
-			serverCtx.Shutdown(30 * time.Second)
+			Shutdown(serverCtx, 30*time.Second)
 		}
 	})
 
@@ -728,7 +728,7 @@ func TestListWorkflows(t *testing.T) {
 	RegisterWorkflow(serverCtx, simpleWorkflow, WithWorkflowName("SimpleWorkflow"))
 
 	// Launch server
-	err = serverCtx.Launch()
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client with same custom schema

@@ -341,9 +341,9 @@ func TestWorkflowsRegistration(t *testing.T) {
 		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
 
 		// Launch DBOS context
-		err := freshCtx.Launch()
+		err := Launch(freshCtx)
 		require.NoError(t, err)
-		defer freshCtx.Shutdown(10 * time.Second)
+		defer Shutdown(freshCtx, 10*time.Second)
 
 		// Attempting to register after launch should panic
 		defer func() {
@@ -1289,7 +1289,7 @@ func TestScheduledWorkflows(t *testing.T) {
 		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", scheduledTime, startTime), nil
 	}, WithSchedule("* * * * * *")) // Every second
 
-	err := dbosCtx.Launch()
+	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
 
 	// Helper function to collect execution times
@@ -1501,7 +1501,7 @@ func TestSendRecv(t *testing.T) {
 	RegisterWorkflow(dbosCtx, workflowThatCallsSendInStep)
 	RegisterWorkflow(dbosCtx, recvContextCancelWorkflow)
 
-	dbosCtx.Launch()
+	Launch(dbosCtx)
 
 	t.Run("SendRecvSuccess", func(t *testing.T) {
 		// Start the receive workflow
@@ -2145,7 +2145,7 @@ func TestSetGetEvent(t *testing.T) {
 	RegisterWorkflow(dbosCtx, getEventIdempotencyWorkflow)
 	RegisterWorkflow(dbosCtx, durableGetEventSleepWorkflow)
 
-	dbosCtx.Launch()
+	Launch(dbosCtx)
 
 	t.Run("SetGetEventFromWorkflow", func(t *testing.T) {
 		// Clear the signal event before starting

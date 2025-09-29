@@ -33,7 +33,7 @@ func TestConfig(t *testing.T) {
 		require.NoError(t, err)
 		defer func() {
 			if ctx != nil {
-				ctx.Shutdown(1 * time.Minute)
+				Shutdown(ctx, 1*time.Minute)
 			}
 		}() // Clean up executor
 
@@ -100,7 +100,7 @@ func TestConfig(t *testing.T) {
 			require.NoError(t, err)
 			defer func() {
 				if ctx != nil {
-					ctx.Shutdown(1 * time.Minute)
+					Shutdown(ctx, 1*time.Minute)
 				}
 			}()
 
@@ -121,7 +121,7 @@ func TestConfig(t *testing.T) {
 			require.NoError(t, err)
 			defer func() {
 				if ctx != nil {
-					ctx.Shutdown(1 * time.Minute)
+					Shutdown(ctx, 1*time.Minute)
 				}
 			}()
 
@@ -143,7 +143,7 @@ func TestConfig(t *testing.T) {
 			require.NoError(t, err)
 			defer func() {
 				if ctx != nil {
-					ctx.Shutdown(1 * time.Minute)
+					Shutdown(ctx, 1*time.Minute)
 				}
 			}()
 
@@ -168,7 +168,7 @@ func TestConfig(t *testing.T) {
 			require.NoError(t, err)
 			defer func() {
 				if ctx != nil {
-					ctx.Shutdown(1 * time.Minute)
+					Shutdown(ctx, 1*time.Minute)
 				}
 			}()
 
@@ -190,7 +190,7 @@ func TestConfig(t *testing.T) {
 		require.NoError(t, err)
 		defer func() {
 			if ctx != nil {
-				ctx.Shutdown(1 * time.Minute)
+				Shutdown(ctx, 1*time.Minute)
 			}
 		}()
 
@@ -262,7 +262,7 @@ func TestConfig(t *testing.T) {
 		assert.Equal(t, int64(1), version, "migration version should be 1 (after initial migration)")
 
 		// Test manual shutdown and recreate
-		ctx.Shutdown(1 * time.Minute)
+		Shutdown(ctx, 1*time.Minute)
 
 		// Recreate context - should have no error since DB is already migrated
 		ctx2, err := NewDBOSContext(context.Background(), Config{
@@ -272,7 +272,7 @@ func TestConfig(t *testing.T) {
 		require.NoError(t, err)
 		defer func() {
 			if ctx2 != nil {
-				ctx2.Shutdown(1 * time.Minute)
+				Shutdown(ctx2, 1*time.Minute)
 			}
 		}()
 
@@ -301,7 +301,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 	require.NoError(t, err)
 	defer func() {
 		if ctx != nil {
-			ctx.Shutdown(1 * time.Minute)
+			Shutdown(ctx, 1*time.Minute)
 		}
 	}()
 
@@ -425,7 +425,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		RegisterWorkflow(ctx, recvSetEventWorkflow)
 
 		// Launch the DBOS context
-		ctx.Launch()
+		Launch(ctx)
 
 		// Test RunWorkflow - start both workflows that will communicate with each other
 		workflowAID := uuid.NewString()
@@ -548,7 +548,7 @@ func TestCustomPool(t *testing.T) {
 		require.NotNil(t, customdbosContext)
 
 		dbosCtx, ok := customdbosContext.(*dbosContext)
-		defer dbosCtx.Shutdown(10 * time.Second)
+		defer Shutdown(dbosCtx, 10*time.Second)
 		require.True(t, ok)
 
 		sysDB, ok := dbosCtx.systemDB.(*sysDB)
@@ -570,9 +570,9 @@ func TestCustomPool(t *testing.T) {
 		RegisterWorkflow(customdbosContext, recvSetEventWorkflowCustom)
 
 		// Launch the DBOS context
-		err = customdbosContext.Launch()
+		err = Launch(customdbosContext)
 		require.NoError(t, err)
-		defer dbosCtx.Shutdown(1 * time.Minute)
+		defer Shutdown(dbosCtx, 1*time.Minute)
 
 		// Test RunWorkflow - start both workflows that will communicate with each other
 		workflowAID := uuid.NewString()
@@ -643,9 +643,9 @@ func TestCustomPool(t *testing.T) {
 		RegisterWorkflow(dbosCtx, wf)
 
 		// Launch the DBOS context
-		err = dbosCtx.Launch()
+		err = Launch(dbosCtx)
 		require.NoError(t, err)
-		defer dbosCtx.Shutdown(1 * time.Minute)
+		defer Shutdown(dbosCtx, 1*time.Minute)
 
 		// Run a workflow
 		_, err = RunWorkflow(dbosCtx, wf, "test-input")
