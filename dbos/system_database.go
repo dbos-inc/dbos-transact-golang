@@ -90,7 +90,7 @@ func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *
 	poolConfig := pool.Config()
 	dbName := poolConfig.ConnConfig.Database
 	if dbName == "" {
-		return newInitializationError("database name not found in pool configuration")
+		return errors.New("database name not found in pool configuration")
 	}
 
 	// Create a connection to the postgres database to create the target database
@@ -98,7 +98,7 @@ func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *
 	serverConfig.Database = "postgres"
 	conn, err := pgx.ConnectConfig(ctx, serverConfig)
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to connect to PostgreSQL server: %v", err))
+		return fmt.Errorf("failed to connect to PostgreSQL server: %v", err)
 	}
 	defer conn.Close(ctx)
 
@@ -107,13 +107,13 @@ func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *
 	err = conn.QueryRow(ctx,
 		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName).Scan(&exists)
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to check if database exists: %v", err))
+		return fmt.Errorf("failed to check if database exists: %v", err)
 	}
 	if !exists {
 		createSQL := fmt.Sprintf("CREATE DATABASE %s", pgx.Identifier{dbName}.Sanitize())
 		_, err = conn.Exec(ctx, createSQL)
 		if err != nil {
-			return newInitializationError(fmt.Sprintf("failed to create database %s: %v", dbName, err))
+			return fmt.Errorf("failed to create database %s: %v", dbName, err)
 		}
 		logger.Debug("Database created", "name", dbName)
 	}
