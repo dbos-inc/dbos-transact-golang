@@ -26,11 +26,11 @@ func TestLogger(t *testing.T) {
 			AppName:     "test-app",
 		}) // Create executor with default logger
 		require.NoError(t, err)
-		err = dbosCtx.Launch()
+		err = Launch(dbosCtx)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			if dbosCtx != nil {
-				dbosCtx.Shutdown(10 * time.Second)
+				Shutdown(dbosCtx, 10*time.Second)
 			}
 		})
 
@@ -59,11 +59,11 @@ func TestLogger(t *testing.T) {
 			Logger:      slogLogger,
 		})
 		require.NoError(t, err)
-		err = dbosCtx.Launch()
+		err = Launch(dbosCtx)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			if dbosCtx != nil {
-				dbosCtx.Shutdown(10 * time.Second)
+				Shutdown(dbosCtx, 10*time.Second)
 			}
 		})
 

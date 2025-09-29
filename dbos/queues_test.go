@@ -158,7 +158,7 @@ func TestWorkflowQueues(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, workflowEnqueuesAnother)
 
-	err := dbosCtx.Launch()
+	err := Launch(dbosCtx)
 	require.NoError(t, err)
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
@@ -502,7 +502,7 @@ func TestQueueRecovery(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, recoveryWorkflowFunc)
 
-	err := dbosCtx.Launch()
+	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
 	queuedSteps := 5
@@ -588,7 +588,7 @@ func TestGlobalConcurrency(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, globalConcurrencyWorkflowFunc)
 
-	err := dbosCtx.Launch()
+	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
 	// Enqueue two workflows
@@ -686,10 +686,10 @@ func TestWorkerConcurrency(t *testing.T) {
 	RegisterWorkflow(dbosCtx1, blockingWfFunc)
 	RegisterWorkflow(dbosCtx2, blockingWfFunc)
 
-	err := dbosCtx1.Launch()
+	err := Launch(dbosCtx1)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
-	err = dbosCtx2.Launch()
+	err = Launch(dbosCtx2)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
 	// First enqueue four blocking workflows
@@ -764,7 +764,7 @@ func TestWorkerConcurrencyXRecovery(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf2)
 
-	err := dbosCtx.Launch()
+	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
 	// Enqueue two workflows on a queue with worker concurrency = 1
@@ -838,7 +838,7 @@ func TestQueueRateLimiter(t *testing.T) {
 	// Create workflow with dbosContext
 	RegisterWorkflow(dbosCtx, rateLimiterTestWorkflow)
 
-	err := dbosCtx.Launch()
+	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
 	limit := 5
@@ -982,7 +982,7 @@ func TestQueueTimeouts(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, fastWorkflow)
 
-	dbosCtx.Launch()
+	Launch(dbosCtx)
 
 	t.Run("EnqueueWorkflowTimeout", func(t *testing.T) {
 		// Start a workflow that will wait indefinitely
@@ -1171,7 +1171,7 @@ func TestPriorityQueue(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, testWorkflow)
 
-	err := dbosCtx.Launch()
+	err := Launch(dbosCtx)
 	require.NoError(t, err)
 
 	var wfHandles []WorkflowHandle[int]
@@ -1255,7 +1255,7 @@ func TestListQueuedWorkflows(t *testing.T) {
 	testQueue1 := NewWorkflowQueue(dbosCtx, "list-test-queue", WithGlobalConcurrency(1))
 	testQueue2 := NewWorkflowQueue(dbosCtx, "list-test-queue2", WithGlobalConcurrency(1))
 
-	err := dbosCtx.Launch()
+	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
 
 	t.Run("WithQueuesOnly", func(t *testing.T) {
