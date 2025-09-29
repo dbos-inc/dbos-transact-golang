@@ -4131,3 +4131,32 @@ func TestSpecialSteps(t *testing.T) {
 		require.Equal(t, "success", result, "workflow should return success")
 	})
 }
+func TestWorkflowIdentity(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+	RegisterWorkflow(dbosCtx, simpleWorkflow)
+	handle, err := RunWorkflow(
+		dbosCtx,
+		simpleWorkflow,
+		"test",
+		WithWorkflowID("my-workflow-id"),
+		WithAuthenticatedUser("user123"),
+		WithAssumedRole("admin"),
+		WithAuthenticatedRoles([]string{"reader", "writer"}))
+	require.NoError(t, err, "failed to start workflow")
+
+	// Retrieve the workflow's status.
+	status, err := handle.GetStatus()
+	require.NoError(t, err)
+
+	t.Run("CheckAuthenticatedUser", func(t *testing.T) {
+		assert.Equal(t, "user123", status.AuthenticatedUser)
+	})
+
+	t.Run("CheckAssumedRole", func(t *testing.T) {
+		assert.Equal(t, "admin", status.AssumedRole)
+	})
+
+	t.Run("CheckAuthenticatedRoles", func(t *testing.T) {
+		assert.Equal(t, []string{"reader", "writer"}, status.AuthenticatedRoles)
+	})
+}

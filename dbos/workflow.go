@@ -488,13 +488,16 @@ type Workflow[P any, R any] func(ctx DBOSContext, input P) (R, error)
 type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
 
 type workflowOptions struct {
-	workflowName       string
-	workflowID         string
-	queueName          string
-	applicationVersion string
-	maxRetries         int
-	deduplicationID    string
-	priority           uint
+	workflowName        string
+	workflowID          string
+	queueName           string
+	applicationVersion  string
+	maxRetries          int
+	deduplicationID     string
+	priority            uint
+	authenticated_user  string
+	assumed_role        string
+	authenticated_roles []string
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
@@ -541,6 +544,27 @@ func WithPriority(priority uint) WorkflowOption {
 func withWorkflowName(name string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.workflowName = name
+	}
+}
+
+// Sets the authenticated user for the workflow
+func WithAuthenticatedUser(user string) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.authenticated_user = user
+	}
+}
+
+// Sets the assumed role for the workflow
+func WithAssumedRole(role string) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.assumed_role = role
+	}
+}
+
+// Sets the authenticated role for the workflow
+func WithAuthenticatedRoles(roles []string) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.authenticated_roles = roles
 	}
 }
 
@@ -730,6 +754,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		QueueName:          params.queueName,
 		DeduplicationID:    params.deduplicationID,
 		Priority:           int(params.priority),
+		AuthenticatedUser:  params.authenticated_user,
+		AssumedRole:        params.assumed_role,
+		AuthenticatedRoles: params.authenticated_roles,
 	}
 
 	var earlyReturnPollingHandle *workflowPollingHandle[any]
