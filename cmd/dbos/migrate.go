@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/spf13/cobra"
 )
@@ -38,7 +39,7 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 	// Create DBOS context which will run migrations automatically for the system DB
 	_, err = createDBOSContext(ctx, dbURL)
 	if err != nil {
-		return fmt.Errorf("failed to create DBOS context: %w", err)
+		return err
 	}
 
 	// Determine the schema to use (from flag or default)
@@ -93,14 +94,17 @@ func grantDBOSSchemaPermissions(databaseURL, roleName, schemaName string) error 
 	defer cancel()
 
 	// Grant usage on the specified schema
+	schemaSQL := pgx.Identifier{schemaName}.Sanitize()
+	roleSQL := pgx.Identifier{roleName}.Sanitize()
+
 	queries := []string{
-		fmt.Sprintf(`GRANT USAGE ON SCHEMA %s TO "%s"`, schemaName, roleName),
-		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA %s TO "%s"`, schemaName, roleName),
-		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %s TO "%s"`, schemaName, roleName),
-		fmt.Sprintf(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %s TO "%s"`, schemaName, roleName),
-		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT ALL ON TABLES TO "%s"`, schemaName, roleName),
-		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT ALL ON SEQUENCES TO "%s"`, schemaName, roleName),
-		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT EXECUTE ON FUNCTIONS TO "%s"`, schemaName, roleName),
+		fmt.Sprintf(`GRANT USAGE ON SCHEMA %s TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA %s TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %s TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %s TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT ALL ON TABLES TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT ALL ON SEQUENCES TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT EXECUTE ON FUNCTIONS TO %s`, schemaSQL, roleSQL),
 	}
 
 	for _, query := range queries {

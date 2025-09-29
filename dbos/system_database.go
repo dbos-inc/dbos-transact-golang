@@ -90,7 +90,7 @@ func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *
 	poolConfig := pool.Config()
 	dbName := poolConfig.ConnConfig.Database
 	if dbName == "" {
-		return newInitializationError("database name not found in pool configuration")
+		return errors.New("database name not found in pool configuration")
 	}
 
 	// Create a connection to the postgres database to create the target database
@@ -98,7 +98,7 @@ func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *
 	serverConfig.Database = "postgres"
 	conn, err := pgx.ConnectConfig(ctx, serverConfig)
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to connect to PostgreSQL server: %v", err))
+		return fmt.Errorf("failed to connect to PostgreSQL server: %v", err)
 	}
 	defer conn.Close(ctx)
 
@@ -107,13 +107,13 @@ func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *
 	err = conn.QueryRow(ctx,
 		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName).Scan(&exists)
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to check if database exists: %v", err))
+		return fmt.Errorf("failed to check if database exists: %v", err)
 	}
 	if !exists {
 		createSQL := fmt.Sprintf("CREATE DATABASE %s", pgx.Identifier{dbName}.Sanitize())
 		_, err = conn.Exec(ctx, createSQL)
 		if err != nil {
-			return newInitializationError(fmt.Sprintf("failed to create database %s: %v", dbName, err))
+			return fmt.Errorf("failed to create database %s: %v", dbName, err)
 		}
 		logger.Debug("Database created", "name", dbName)
 	}
@@ -173,8 +173,8 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 
 	// Check if the schema exists
 	var schemaExists bool
-	checkSchemaQuery := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = '%s')", schema)
-	err = tx.QueryRow(ctx, checkSchemaQuery).Scan(&schemaExists)
+	checkSchemaQuery := `SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`
+	err = tx.QueryRow(ctx, checkSchemaQuery, schema).Scan(&schemaExists)
 	if err != nil {
 		return fmt.Errorf("failed to check if schema %s exists: %v", schema, err)
 	}
@@ -189,13 +189,19 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 	}
 
 	// Create the migrations table if it doesn't exist
-	createTableQuery := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.%s (
-		version BIGINT NOT NULL PRIMARY KEY
-	)`, pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
+	checkMigrationTableExistsQuery := `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`
 
-	_, err = tx.Exec(ctx, createTableQuery)
+	var migrationTableExists bool
+	err = tx.QueryRow(ctx, checkMigrationTableExistsQuery, schema, _DBOS_MIGRATION_TABLE).Scan(&migrationTableExists)
 	if err != nil {
-		return fmt.Errorf("failed to create migrations table: %v", err)
+		return fmt.Errorf("failed to check if migration table exists: %v", err)
+	}
+	if !migrationTableExists {
+		createTableQuery := fmt.Sprintf(`CREATE TABLE %s.%s (version BIGINT NOT NULL PRIMARY KEY)`, pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
+		_, err = tx.Exec(ctx, createTableQuery)
+		if err != nil {
+			return fmt.Errorf("failed to create migrations table: %v", err)
+		}
 	}
 
 	// Get current migration version
@@ -2462,7 +2468,7 @@ func (s *sysDB) resetSystemDB(ctx context.Context) error {
 	// Connect to the postgres database
 	conn, err := pgx.ConnectConfig(ctx, postgresConfig)
 	if err != nil {
-		return fmt.Errorf("failed to connect to PostgreSQL server: %w", err)
+		return err
 	}
 	defer conn.Close(ctx)
 
