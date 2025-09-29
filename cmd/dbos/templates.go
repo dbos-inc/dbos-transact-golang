@@ -4,5 +4,5 @@ import (
 	"embed"
 )
 
-//go:embed templates/dbos-toolbox/*
+//go:embed templates/dbos-go-starter/*
 var templateFS embed.FS
