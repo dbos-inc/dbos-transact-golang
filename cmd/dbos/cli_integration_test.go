@@ -271,7 +271,7 @@ func testMigrateCommand(t *testing.T, cliPath string, baseArgs []string, dbRole 
 		if password == "" {
 			password = "dbos"
 		}
-		query := fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", pgx.Identifier{dbRole}.Sanitize(), url.QueryEscape(password))
+		query := fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", pgx.Identifier{dbRole}.Sanitize(), password)
 		_, err = db.Exec(query)
 		require.NoError(t, err)
 	}
