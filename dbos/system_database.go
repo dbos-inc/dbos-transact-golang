@@ -173,8 +173,8 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 
 	// Check if the schema exists
 	var schemaExists bool
-	checkSchemaQuery := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = '%s')", schema)
-	err = tx.QueryRow(ctx, checkSchemaQuery).Scan(&schemaExists)
+	checkSchemaQuery := `SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`
+	err = tx.QueryRow(ctx, checkSchemaQuery, schema).Scan(&schemaExists)
 	if err != nil {
 		return fmt.Errorf("failed to check if schema %s exists: %v", schema, err)
 	}
@@ -189,13 +189,19 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 	}
 
 	// Create the migrations table if it doesn't exist
-	createTableQuery := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.%s (
-		version BIGINT NOT NULL PRIMARY KEY
-	)`, pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
+	checkMigrationTableExistsQuery := `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`
 
-	_, err = tx.Exec(ctx, createTableQuery)
+	var migrationTableExists bool
+	err = tx.QueryRow(ctx, checkMigrationTableExistsQuery, schema, _DBOS_MIGRATION_TABLE).Scan(&migrationTableExists)
 	if err != nil {
-		return fmt.Errorf("failed to create migrations table: %v", err)
+		return fmt.Errorf("failed to check if migration table exists: %v", err)
+	}
+	if !migrationTableExists {
+		createTableQuery := fmt.Sprintf(`CREATE TABLE %s.%s (version BIGINT NOT NULL PRIMARY KEY)`, pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
+		_, err = tx.Exec(ctx, createTableQuery)
+		if err != nil {
+			return fmt.Errorf("failed to create migrations table: %v", err)
+		}
 	}
 
 	// Get current migration version
