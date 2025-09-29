@@ -45,7 +45,14 @@ func getDatabaseURL(dbRole string) string {
 	if password == "" {
 		password = "dbos"
 	}
-	return fmt.Sprintf("postgres://%s:%s@localhost:5432/dbos?sslmode=disable", dbRole, url.QueryEscape(password))
+	dsn := &url.URL{
+		Scheme:   "postgres",
+		Host:     "localhost:5432",
+		Path:     "/dbos",
+		RawQuery: "sslmode=disable",
+	}
+	dsn.User = url.UserPassword(dbRole, password)
+	return dsn.String()
 }
 
 // TestCLIWorkflow provides comprehensive integration testing of the DBOS CLI
@@ -84,7 +91,7 @@ func TestCLIWorkflow(t *testing.T) {
 		{
 			name:       "FunnySchema",
 			schemaName: "F8nny_sCHem@-n@m3",
-			dbRole:     "notpostgres",
+			dbRole:     "User Name-123@acme.com#$%&!",
 			args:       []string{"--schema", "F8nny_sCHem@-n@m3"},
 		},
 	}
