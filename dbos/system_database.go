@@ -2468,7 +2468,7 @@ func (s *sysDB) resetSystemDB(ctx context.Context) error {
 	// Connect to the postgres database
 	conn, err := pgx.ConnectConfig(ctx, postgresConfig)
 	if err != nil {
-		return fmt.Errorf("failed to connect to PostgreSQL server: %w", err)
+		return err
 	}
 	defer conn.Close(ctx)
 
