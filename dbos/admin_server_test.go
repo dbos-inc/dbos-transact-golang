@@ -32,12 +32,12 @@ func TestAdminServer(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		err = ctx.Launch()
+		err = Launch(ctx)
 		require.NoError(t, err)
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Shutdown(1 * time.Minute)
+				Shutdown(ctx, 1*time.Minute)
 			}
 		}()
 
@@ -65,13 +65,13 @@ func TestAdminServer(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		err = ctx.Launch()
+		err = Launch(ctx)
 		require.NoError(t, err)
 
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Shutdown(1 * time.Minute)
+				Shutdown(ctx, 1*time.Minute)
 			}
 		}()
 
@@ -253,13 +253,13 @@ func TestAdminServer(t *testing.T) {
 		}
 		RegisterWorkflow(ctx, structWorkflow)
 
-		err = ctx.Launch()
+		err = Launch(ctx)
 		require.NoError(t, err)
 
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Shutdown(1 * time.Minute)
+				Shutdown(ctx, 1*time.Minute)
 			}
 		}()
 
@@ -381,13 +381,13 @@ func TestAdminServer(t *testing.T) {
 		}
 		RegisterWorkflow(ctx, testWorkflow)
 
-		err = ctx.Launch()
+		err = Launch(ctx)
 		require.NoError(t, err)
 
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Shutdown(1 * time.Minute)
+				Shutdown(ctx, 1*time.Minute)
 			}
 		}()
 
@@ -569,14 +569,14 @@ func TestAdminServer(t *testing.T) {
 		}
 		RegisterWorkflow(ctx, regularWorkflow)
 
-		err = ctx.Launch()
+		err = Launch(ctx)
 		require.NoError(t, err)
 
 		// Ensure cleanup
 		defer func() {
 			close(blockingChan) // Unblock any blocked workflows
 			if ctx != nil {
-				ctx.Shutdown(1 * time.Minute)
+				Shutdown(ctx, 1*time.Minute)
 			}
 		}()
 
@@ -745,7 +745,7 @@ func TestAdminServer(t *testing.T) {
 			return fmt.Sprintf("executed at %v", scheduledTime), nil
 		}, WithSchedule("* * * * * *")) // Every second
 
-		err = ctx.Launch()
+		err = Launch(ctx)
 		require.NoError(t, err)
 
 		client := &http.Client{Timeout: 5 * time.Second}
@@ -753,7 +753,7 @@ func TestAdminServer(t *testing.T) {
 		// Ensure cleanup
 		defer func() {
 			if ctx != nil {
-				ctx.Shutdown(1 * time.Minute)
+				Shutdown(ctx, 1*time.Minute)
 			}
 			if client.Transport != nil {
 				client.Transport.(*http.Transport).CloseIdleConnections()

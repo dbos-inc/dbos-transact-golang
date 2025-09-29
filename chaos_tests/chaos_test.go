@@ -188,7 +188,7 @@ func setupDBOS(t *testing.T) dbos.DBOSContext {
 	// Register cleanup to run after test completes
 	t.Cleanup(func() {
 		if dbosCtx != nil {
-			dbosCtx.Shutdown(30 * time.Second)
+			dbos.Shutdown(dbosCtx, 30*time.Second)
 		}
 	})
 
@@ -246,7 +246,7 @@ func TestChaosWorkflow(t *testing.T) {
 	// Register scheduled workflow to run every second for chaos testing
 	dbos.RegisterWorkflow(dbosCtx, scheduledWorkflow, dbos.WithSchedule("* * * * * *"), dbos.WithWorkflowName("ScheduledChaosTest"))
 
-	err := dbosCtx.Launch()
+	err := dbos.Launch(dbosCtx)
 	require.NoError(t, err)
 
 	// Run multiple workflows
@@ -309,7 +309,7 @@ func TestChaosRecv(t *testing.T) {
 	// Register the workflow
 	dbos.RegisterWorkflow(dbosCtx, recvWorkflow)
 
-	err := dbosCtx.Launch()
+	err := dbos.Launch(dbosCtx)
 	require.NoError(t, err)
 
 	// Run multiple workflows with send/recv
@@ -364,7 +364,7 @@ func TestChaosEvents(t *testing.T) {
 	// Register the workflow
 	dbos.RegisterWorkflow(dbosCtx, eventWorkflow)
 
-	err := dbosCtx.Launch()
+	err := dbos.Launch(dbosCtx)
 	require.NoError(t, err)
 
 	// Run multiple workflows with events
@@ -455,7 +455,7 @@ func TestChaosQueues(t *testing.T) {
 	dbos.RegisterWorkflow(dbosCtx, stepTwo)
 	dbos.RegisterWorkflow(dbosCtx, workflow)
 
-	err := dbosCtx.Launch()
+	err := dbos.Launch(dbosCtx)
 	require.NoError(t, err)
 
 	// Run multiple workflows

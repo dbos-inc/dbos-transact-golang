@@ -126,11 +126,11 @@ func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
 
 	dbos.RegisterWorkflow(dbosCtx, workflow)
 
-	err := dbosCtx.Launch()
+	err := dbos.Launch(dbosCtx)
 	if err != nil {
 		return err
 	}
-	defer dbosCtx.Shutdown(1 * time.Second)
+	defer dbos.Shutdown(dbosCtx, 1*time.Second)
 
 	res, err := workflow(dbosCtx, 2)
 	if err != nil {
