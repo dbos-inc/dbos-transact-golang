@@ -17,6 +17,13 @@ import (
 	"go.uber.org/goleak"
 )
 
+// TestStepResult is a custom struct for testing step outputs
+type TestStepResult struct {
+	Message string `json:"message"`
+	Count   int    `json:"count"`
+	Success bool   `json:"success"`
+}
+
 func TestAdminServer(t *testing.T) {
 	defer goleak.VerifyNone(t,
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
@@ -724,6 +731,168 @@ func TestAdminServer(t *testing.T) {
 		queueName, ok := pendingWorkflows[0]["QueueName"].(string)
 		require.True(t, ok, "QueueName should be a string")
 		assert.Equal(t, queue.Name, queueName, "Expected queue name to be 'test-queue'")
+	})
+
+	t.Run("WorkflowSteps", func(t *testing.T) {
+		resetTestDatabase(t, databaseURL)
+		ctx, err := NewDBOSContext(context.Background(), Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-app",
+			AdminServer: true,
+		})
+		require.NoError(t, err)
+
+		// Test workflow with multiple steps - simpler version that won't fail on serialization
+		testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+			// Step 1: Return a string
+			stepResult1, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+				return "step1-output", nil
+			}, WithStepName("stringStep"))
+			if err != nil {
+				return "", err
+			}
+
+			// Step 2: Return a user-defined struct
+			stepResult2, err := RunAsStep(dbosCtx, func(ctx context.Context) (TestStepResult, error) {
+				return TestStepResult{
+					Message: "structured data",
+					Count:   100,
+					Success: true,
+				}, nil
+			}, WithStepName("structStep"))
+			if err != nil {
+				return "", err
+			}
+
+			// Step 3: Return an error - but we don't abort on error to test error marshaling
+			_, _ = RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+				return "", fmt.Errorf("deliberate error for testing")
+			}, WithStepName("errorStep"))
+
+			// Step 4: Return empty string (to test empty value handling)
+			stepResult4, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+				return "", nil
+			}, WithStepName("emptyStep"))
+			if err != nil {
+				return "", err
+			}
+
+			// Combine results
+			return fmt.Sprintf("workflow complete: %s, struct(%s,%d,%v), %s", stepResult1, stepResult2.Message, stepResult2.Count, stepResult2.Success, stepResult4), nil
+		}
+
+		RegisterWorkflow(ctx, testWorkflow)
+
+		err = Launch(ctx)
+		require.NoError(t, err)
+
+		// Ensure cleanup
+		defer func() {
+			if ctx != nil {
+				Shutdown(ctx, 1*time.Minute)
+			}
+		}()
+
+		// Give the server a moment to start
+		time.Sleep(100 * time.Millisecond)
+
+		client := &http.Client{Timeout: 5 * time.Second}
+
+		// Create and run the workflow
+		handle, err := RunWorkflow(ctx, testWorkflow, "test-input")
+		require.NoError(t, err, "Failed to create workflow")
+
+		// Wait for workflow to complete
+		result, err := handle.GetResult()
+		require.NoError(t, err, "Workflow should complete successfully")
+		t.Logf("Workflow result: %s", result)
+
+		// Call the workflow steps endpoint
+		workflowID := handle.GetWorkflowID()
+		endpoint := fmt.Sprintf("http://localhost:%d/workflows/%s/steps", _DEFAULT_ADMIN_SERVER_PORT, workflowID)
+		req, err := http.NewRequest("GET", endpoint, nil)
+		require.NoError(t, err, "Failed to create request")
+
+		resp, err := client.Do(req)
+		require.NoError(t, err, "Failed to make request")
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected 200 OK from steps endpoint")
+
+		// Decode the response
+		var steps []map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&steps)
+		require.NoError(t, err, "Failed to decode steps response")
+
+		// Should have 4 steps
+		assert.Equal(t, 4, len(steps), "Expected exactly 4 steps")
+
+		// Verify each step's output/error is properly marshaled
+		for i, step := range steps {
+			functionName, ok := step["function_name"].(string)
+			require.True(t, ok, "function_name should be a string for step %d", i)
+
+			t.Logf("Step %d (%s): output=%v, error=%v", i, functionName, step["output"], step["error"])
+
+			switch functionName {
+			case "stringStep":
+				// String output should be marshaled as JSON string
+				outputStr, ok := step["output"].(string)
+				require.True(t, ok, "String step output should be a JSON string")
+
+				var unmarshaledOutput string
+				err = json.Unmarshal([]byte(outputStr), &unmarshaledOutput)
+				require.NoError(t, err, "Failed to unmarshal string step output")
+				assert.Equal(t, "step1-output", unmarshaledOutput, "String step output should match")
+
+				assert.Nil(t, step["error"], "String step should have no error")
+
+			case "structStep":
+				// Struct output should be marshaled as JSON string
+				outputStr, ok := step["output"].(string)
+				require.True(t, ok, "Struct step output should be a JSON string")
+
+				var unmarshaledOutput TestStepResult
+				err = json.Unmarshal([]byte(outputStr), &unmarshaledOutput)
+				require.NoError(t, err, "Failed to unmarshal struct step output")
+				assert.Equal(t, TestStepResult{
+					Message: "structured data",
+					Count:   100,
+					Success: true,
+				}, unmarshaledOutput, "Struct step output should match")
+
+				assert.Nil(t, step["error"], "Struct step should have no error")
+
+			case "errorStep":
+				// Error step should have error marshaled as JSON string
+				errorStr, ok := step["error"].(string)
+				require.True(t, ok, "Error step error should be a JSON string")
+
+				var unmarshaledError string
+				err = json.Unmarshal([]byte(errorStr), &unmarshaledError)
+				require.NoError(t, err, "Failed to unmarshal error step error")
+				assert.Contains(t, unmarshaledError, "deliberate error for testing", "Error message should be preserved")
+
+			case "emptyStep":
+				// Empty string might be returned as nil or as an empty JSON string
+				output := step["output"]
+				if output == nil {
+					// Empty string was not included in response (which is fine)
+					t.Logf("Empty step output was nil (not included)")
+				} else {
+					// If it was included, it should be marshaled as JSON string `""`
+					outputStr, ok := output.(string)
+					require.True(t, ok, "If present, empty step output should be a JSON string")
+
+					var unmarshaledOutput string
+					err = json.Unmarshal([]byte(outputStr), &unmarshaledOutput)
+					require.NoError(t, err, "Failed to unmarshal empty step output")
+					assert.Equal(t, "", unmarshaledOutput, "Empty step output should be empty string")
+				}
+
+				assert.Nil(t, step["error"], "Empty step should have no error")
+			}
+		}
 	})
 
 	t.Run("TestDeactivate", func(t *testing.T) {
