@@ -221,7 +221,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 					qr.logger.Error("workflow function not found in registry", "workflow_name", workflow.name)
 					continue
 				}
-				registeredWorkflow, ok := registeredWorkflowAny.(workflowRegistryEntry)
+				registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
 				if !ok {
 					qr.logger.Error("invalid workflow registry entry type", "workflow_name", workflow.name)
 					continue
@@ -243,7 +243,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 					}
 				}
 
-				_, err := registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
+				_, err := registeredWorkflow.WrappedFunction(ctx, input, WithWorkflowID(workflow.id))
 				if err != nil {
 					qr.logger.Error("Error running queued workflow", "error", err)
 				}

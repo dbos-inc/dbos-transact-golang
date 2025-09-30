@@ -269,10 +269,12 @@ func (h *workflowHandleProxy[R]) GetWorkflowID() string {
 /**********************************/
 type wrappedWorkflowFunc func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
 
-type workflowRegistryEntry struct {
-	wrappedFunction wrappedWorkflowFunc
-	maxRetries      int
-	name            string
+type WorkflowRegistryEntry struct {
+	WrappedFunction wrappedWorkflowFunc
+	MaxRetries      int
+	Name            string
+	FQN             string // Fully qualified name of the workflow function
+	CronSchedule    string // Empty string for non-scheduled workflows
 }
 
 func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFunc, maxRetries int, customName string) {
@@ -287,10 +289,12 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFun
 	}
 
 	// Check if workflow already exists and store atomically using LoadOrStore
-	entry := workflowRegistryEntry{
-		wrappedFunction: fn,
-		maxRetries:      maxRetries,
-		name:            customName,
+	entry := WorkflowRegistryEntry{
+		WrappedFunction: fn,
+		FQN:             workflowFQN,
+		MaxRetries:      maxRetries,
+		Name:            customName,
+		CronSchedule:    "",
 	}
 
 	if _, exists := c.workflowRegistry.LoadOrStore(workflowFQN, entry); exists {
@@ -321,8 +325,15 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 		panic("Cannot register scheduled workflow after DBOS has launched")
 	}
 
-	// Store the schedule information in the scheduled workflow registry
-	c.scheduledWorkflowRegistry.Store(workflowName, cronSchedule)
+	// Update the existing workflow entry with the cron schedule
+	registryEntryAny, exists := c.workflowRegistry.Load(workflowName)
+	if !exists {
+		panic(fmt.Sprintf("workflow %s must be registered before scheduling", workflowName))
+	}
+
+	registryEntry := registryEntryAny.(WorkflowRegistryEntry)
+	registryEntry.CronSchedule = cronSchedule
+	c.workflowRegistry.Store(workflowName, registryEntry)
 
 	c.getWorkflowScheduler().Start()
 	var entryID cron.EntryID
@@ -662,15 +673,15 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	if !exists {
 		return nil, newNonExistentWorkflowError(params.workflowName)
 	}
-	registeredWorkflow, ok := registeredWorkflowAny.(workflowRegistryEntry)
+	registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
 	if !ok {
 		return nil, fmt.Errorf("invalid workflow registry entry type for workflow %s", params.workflowName)
 	}
-	if registeredWorkflow.maxRetries > 0 {
-		params.maxRetries = registeredWorkflow.maxRetries
+	if registeredWorkflow.MaxRetries > 0 {
+		params.maxRetries = registeredWorkflow.MaxRetries
 	}
-	if len(registeredWorkflow.name) > 0 {
-		params.workflowName = registeredWorkflow.name
+	if len(registeredWorkflow.Name) > 0 {
+		params.workflowName = registeredWorkflow.Name
 	}
 
 	// Check if we are within a workflow (and thus a child workflow)
@@ -1952,42 +1963,48 @@ func GetWorkflowSteps(ctx DBOSContext, workflowID string) ([]StepInfo, error) {
 	return ctx.GetWorkflowSteps(ctx, workflowID)
 }
 
-// ListRegisteredWorkflows returns information about all registered workflows with their registration parameters.
-// This includes the fully qualified name, custom name (if provided), and maximum retry attempts.
+// listRegisteredWorkflowsOptions holds configuration parameters for listing registered workflows
+type listRegisteredWorkflowsOptions struct {
+	scheduledOnly bool
+}
+
+// ListRegisteredWorkflowsOption is a functional option for configuring registered workflow listing parameters.
+type ListRegisteredWorkflowsOption func(*listRegisteredWorkflowsOptions)
+
+// WithScheduledOnly filters to only return scheduled workflows (those with a cron schedule).
+func WithScheduledOnly() ListRegisteredWorkflowsOption {
+	return func(p *listRegisteredWorkflowsOptions) {
+		p.scheduledOnly = true
+	}
+}
+
+// ListRegisteredWorkflows returns information about workflows registered with DBOS.
+// Each WorkflowRegistryEntry contains:
+// - WrappedFunction: The underlying workflow implementation
+// - MaxRetries: Maximum number of retry attempts for workflow recovery
+// - Name: Custom name if provided during registration, otherwise empty
+// - FQN: Fully qualified name of the workflow function (always present)
+// - CronSchedule: Empty string for non-scheduled workflows
+//
+// The function supports filtering using functional options:
+// - WithScheduledOnly(): Return only scheduled workflows
 //
 // Example:
 //
+//	// List all registered workflows
 //	workflows, err := dbos.ListRegisteredWorkflows(ctx)
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	for _, workflow := range workflows {
-//	    log.Printf("Workflow: %s (Custom: %s, MaxRetries: %d)",
-//	        workflow.FQN, workflow.CustomName, workflow.MaxRetries)
-//	}
-func ListRegisteredWorkflows(ctx DBOSContext) ([]RegisteredWorkflowInfo, error) {
-	if ctx == nil {
-		return nil, errors.New("ctx cannot be nil")
-	}
-	return ctx.ListRegisteredWorkflows(ctx)
-}
-
-// ListScheduledWorkflows returns information about all registered scheduled workflows with their registration parameters.
-// This includes the fully qualified name, custom name (if provided), maximum retry attempts, and cron schedule.
 //
-// Example:
-//
-//	scheduledWorkflows, err := dbos.ListScheduledWorkflows(ctx)
+//	// List only scheduled workflows
+//	scheduled, err := dbos.ListRegisteredWorkflows(ctx, dbos.WithScheduledOnly())
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	for _, workflow := range scheduledWorkflows {
-//	    log.Printf("Scheduled Workflow: %s (Schedule: %s, MaxRetries: %d)",
-//	        workflow.FQN, workflow.CronSchedule, workflow.MaxRetries)
-//	}
-func ListScheduledWorkflows(ctx DBOSContext) ([]ScheduledWorkflowInfo, error) {
+func ListRegisteredWorkflows(ctx DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
-	return ctx.ListScheduledWorkflows(ctx)
+	return ctx.ListRegisteredWorkflows(ctx, opts...)
 }
