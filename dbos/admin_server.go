@@ -433,13 +433,37 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		// Transform to snake_case format with function_id and function_name
 		formattedSteps := make([]map[string]any, len(steps))
 		for i, step := range steps {
-			formattedSteps[i] = map[string]any{
+			formattedStep := map[string]any{
 				"function_id":       step.StepID,
 				"function_name":     step.StepName,
-				"output":            step.Output,
-				"error":             step.Error,
 				"child_workflow_id": step.ChildWorkflowID,
 			}
+
+			// Marshal Output as JSON string if present
+			if step.Output != nil && step.Output != "" {
+				bytes, err := json.Marshal(step.Output)
+				if err != nil {
+					ctx.logger.Error("Failed to marshal step output", "error", err)
+					http.Error(w, fmt.Sprintf("Failed to format step output: %v", err), http.StatusInternalServerError)
+					return
+				}
+				formattedStep["output"] = string(bytes)
+			}
+
+			// Marshal Error as JSON string if present
+			if step.Error != nil {
+				// Convert error to string first, then marshal as JSON
+				errStr := step.Error.Error()
+				bytes, err := json.Marshal(errStr)
+				if err != nil {
+					ctx.logger.Error("Failed to marshal step error", "error", err)
+					http.Error(w, fmt.Sprintf("Failed to format step error: %v", err), http.StatusInternalServerError)
+					return
+				}
+				formattedStep["error"] = string(bytes)
+			}
+
+			formattedSteps[i] = formattedStep
 		}
 
 		w.Header().Set("Content-Type", "application/json")
