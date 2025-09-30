@@ -117,7 +117,6 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 		"AssumedRole":        ws.AssumedRole,
 		"AuthenticatedRoles": ws.AuthenticatedRoles,
 		"Output":             ws.Output,
-		"Error":              ws.Error,
 		"ExecutorID":         ws.ExecutorID,
 		"ApplicationVersion": ws.ApplicationVersion,
 		"ApplicationID":      ws.ApplicationID,
@@ -167,6 +166,18 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 			return nil, fmt.Errorf("failed to marshal output: %w", err)
 		}
 		result["Output"] = string(bytes)
+	}
+
+	if ws.Error != nil {
+		// Convert error to string first, then marshal as JSON
+		errStr := ws.Error.Error()
+		bytes, err := json.Marshal(errStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal error: %w", err)
+		}
+		result["Error"] = string(bytes)
+	} else {
+		result["Error"] = ""
 	}
 
 	return result, nil
