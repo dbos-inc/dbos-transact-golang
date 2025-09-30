@@ -4145,6 +4145,9 @@ func TestRegisteredWorkflowListing(t *testing.T) {
 	RegisterWorkflow(dbosCtx, simpleWorkflowWithStep, WithWorkflowName("CustomStepWorkflow"))
 	RegisterWorkflow(dbosCtx, simpleWorkflowWithSchedule, WithWorkflowName("ScheduledWorkflow"), WithSchedule("0 0 * * * *"))
 
+	err := Launch(dbosCtx)
+	require.NoError(t, err, "failed to launch DBOS")
+
 	t.Run("ListRegisteredWorkflows", func(t *testing.T) {
 		workflows, err := ListRegisteredWorkflows(dbosCtx)
 		require.NoError(t, err, "ListRegisteredWorkflows should not return an error")
