@@ -322,8 +322,6 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	gob.Register(ws)
 	var si []StepInfo
 	gob.Register(si)
-	var bh baseWorkflowHandle
-	gob.Register(bh)
 	var h workflowHandle[any]
 	gob.Register(h)
 	var ph workflowPollingHandle[any]

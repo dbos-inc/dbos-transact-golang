@@ -719,3 +719,38 @@ func TestCustomPool(t *testing.T) {
 		assert.False(t, systemDB.(*sysDB).launched)
 	})
 }
+
+func TestWorkflowHandlerRegistration(t *testing.T) {
+	databaseURL := getDatabaseURL()
+	ctx, err := NewDBOSContext(context.Background(), Config{
+		DatabaseURL: databaseURL,
+		AppName:     "test-initialize",
+	})
+	require.NoError(t, err)
+	defer func() {
+		if ctx != nil {
+			Shutdown(ctx, 1*time.Minute)
+		}
+	}() // Clean up executor
+
+	require.NotNil(t, ctx)
+
+	wf := func(ctx DBOSContext, input string) (string, error) {
+		return input, nil
+	}
+
+	RegisterWorkflow(ctx, wf)
+
+	// Launch a workflow
+	err = Launch(ctx)
+	require.NoError(t, err)
+	defer Shutdown(ctx, 1*time.Minute)
+
+	// Run a workflow
+	handle, err := RunWorkflow(ctx, wf, "test-input")
+	require.NoError(t, err)
+
+	result, err := handle.GetResult()
+	require.NoError(t, err, "failed to get result from workflow")
+	assert.Equal(t, "test-input", result)
+}
