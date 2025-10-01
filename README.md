@@ -82,11 +82,11 @@ func main() {
     dbos.RegisterWorkflow(ctx, workflow)
 
     // Launch DBOS
-    err = ctx.Launch()
+    err = dbos.Launch(ctx)
     if err != nil {
         panic(err)
     }
-    defer ctx.Shutdown(2 * time.Second)
+    defer dbos.Shutdown(ctx, 2 * time.Second)
 
     // Run a durable workflow and get its result
     handle, err := dbos.RunWorkflow(ctx, workflow, "")
@@ -157,11 +157,11 @@ func main() {
     queue := dbos.NewWorkflowQueue(ctx, "queue")
 
     // Launch DBOS
-    err = ctx.Launch()
+    err = dbos.Launch(ctx)
     if err != nil {
         panic(err)
     }
-    defer ctx.Shutdown(2 * time.Second)
+    defer dbos.Shutdown(ctx, 2 * time.Second)
 
     // Enqueue tasks and gather results
     fmt.Println("Enqueuing workflows")
