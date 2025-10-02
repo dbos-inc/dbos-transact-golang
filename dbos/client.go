@@ -31,6 +31,7 @@ type Client interface {
 	CancelWorkflow(workflowID string) error
 	ResumeWorkflow(workflowID string) (WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
+	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
 
@@ -293,6 +294,11 @@ func (c *client) ResumeWorkflow(workflowID string) (WorkflowHandle[any], error) 
 // ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.
 func (c *client) ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error) {
 	return c.dbosCtx.ForkWorkflow(c.dbosCtx, input)
+}
+
+// GetWorkflowSteps retrieves the execution steps of a workflow.
+func (c *client) GetWorkflowSteps(workflowID string) ([]StepInfo, error) {
+	return c.dbosCtx.GetWorkflowSteps(c.dbosCtx, workflowID)
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.

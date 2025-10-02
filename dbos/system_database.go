@@ -51,7 +51,7 @@ type systemDatabase interface {
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
 	checkOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
-	getWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error)
+	getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]StepInfo, error)
 
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
@@ -1457,13 +1457,18 @@ type StepInfo struct {
 	ChildWorkflowID string // The ID of a child workflow spawned by this step (if applicable)
 }
 
-func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]StepInfo, error) {
+type getWorkflowStepsInput struct {
+	workflowID string
+	loadOutput bool
+}
+
+func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]StepInfo, error) {
 	query := fmt.Sprintf(`SELECT function_id, function_name, output, error, child_workflow_id
 			  FROM %s.operation_outputs
 			  WHERE workflow_uuid = $1
 			  ORDER BY function_id ASC`, pgx.Identifier{s.schema}.Sanitize())
 
-	rows, err := s.pool.Query(ctx, query, workflowID)
+	rows, err := s.pool.Query(ctx, query, input.workflowID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query workflow steps: %w", err)
 	}
@@ -1481,8 +1486,8 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, workflowID string) ([]Step
 			return nil, fmt.Errorf("failed to scan step row: %w", err)
 		}
 
-		// Deserialize output if present
-		if outputString != nil {
+		// Deserialize output if present and loadOutput is true
+		if input.loadOutput && outputString != nil {
 			output, err := deserialize(outputString)
 			if err != nil {
 				return nil, fmt.Errorf("failed to deserialize output: %w", err)

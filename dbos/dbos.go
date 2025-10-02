@@ -194,7 +194,8 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 	}
 	// Will do nothing if the concrete type is not dbosContext
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		return &dbosContext{
+		launched := dbosCtx.launched.Load()
+		childCtx := &dbosContext{
 			ctx:                     context.WithValue(dbosCtx.ctx, key, val), // Spawn a new child context with the value set
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
@@ -205,6 +206,8 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
 		}
+		childCtx.launched.Store(launched)
+		return childCtx
 	}
 	return nil
 }
@@ -217,7 +220,10 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 		return nil
 	}
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		return &dbosContext{
+		launched := dbosCtx.launched.Load()
+		// Create a new context that is not canceled when the parent is canceled
+		// but retains all other values
+		childCtx := &dbosContext{
 			ctx:                     context.WithoutCancel(dbosCtx.ctx),
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
@@ -228,6 +234,8 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
 		}
+		childCtx.launched.Store(launched)
+		return childCtx
 	}
 	return nil
 }
@@ -240,8 +248,9 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 		return nil, func() {}
 	}
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
+		launched := dbosCtx.launched.Load()
 		newCtx, cancelFunc := context.WithTimeoutCause(dbosCtx.ctx, timeout, errors.New("DBOS context timeout"))
-		return &dbosContext{
+		childCtx := &dbosContext{
 			ctx:                     newCtx,
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
@@ -251,7 +260,9 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
-		}, cancelFunc
+		}
+		childCtx.launched.Store(launched)
+		return childCtx, cancelFunc
 	}
 	return nil, func() {}
 }

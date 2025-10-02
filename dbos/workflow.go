@@ -1956,14 +1956,25 @@ func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStat
 }
 
 func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error) {
+	var loadOutput bool
+	if c.launched.Load() {
+		loadOutput = true
+	} else {
+		loadOutput = false
+	}
+	getWorkflowStepsInput := getWorkflowStepsInput{
+		workflowID: workflowID,
+		loadOutput: loadOutput,
+	}
+
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		return RunAsStep(c, func(ctx context.Context) ([]StepInfo, error) {
-			return c.systemDB.getWorkflowSteps(ctx, workflowID)
+			return c.systemDB.getWorkflowSteps(ctx, getWorkflowStepsInput)
 		}, WithStepName("DBOS.getWorkflowSteps"))
 	} else {
-		return c.systemDB.getWorkflowSteps(c, workflowID)
+		return c.systemDB.getWorkflowSteps(c, getWorkflowStepsInput)
 	}
 }
 

@@ -11,15 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-/** Test serialization and deserialization
-[x] Built in types
-[x] User defined types (structs)
-[x] Workflow inputs/outputs
-[x] Step inputs/outputs
-[x] Direct handlers, polling handler, list workflows results, get step infos
-[x] Set/get event with user defined types
-*/
-
 // Builtin types
 func encodingStepBuiltinTypes(_ context.Context, input int) (int, error) {
 	return input, errors.New("step error")
@@ -75,6 +66,9 @@ func TestWorkflowEncoding(t *testing.T) {
 	// Register workflows with executor
 	RegisterWorkflow(executor, encodingWorkflowBuiltinTypes)
 	RegisterWorkflow(executor, encodingWorkflowStruct)
+
+	err := Launch(executor)
+	require.NoError(t, err)
 
 	t.Run("BuiltinTypes", func(t *testing.T) {
 		// Test a workflow that uses a built-in type (string)
