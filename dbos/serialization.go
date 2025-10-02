@@ -49,20 +49,15 @@ func deserialize(data *string) (any, error) {
 func safeGobRegister(value any, logger *slog.Logger) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Only catch specific duplicate registration errors
 			if errStr, ok := r.(string); ok {
 				// Check if this is one of the two specific duplicate registration errors we want to ignore
-				// These patterns come from gob's RegisterName function
 				// See https://cs.opensource.google/go/go/+/refs/tags/go1.25.1:src/encoding/gob/type.go;l=832
 				if strings.Contains(errStr, "gob: registering duplicate types for") ||
 					strings.Contains(errStr, "gob: registering duplicate names for") {
-					// Log at debug level since these specific conflicts are expected and harmless
 					if logger != nil {
-						logger.Debug("gob registration conflict",
-							"type", fmt.Sprintf("%T", value),
-							"error", r)
+						logger.Debug("gob registration conflict", "type", fmt.Sprintf("%T", value), "error", r)
 					}
-					return // Recover from this specific panic
+					return
 				}
 			}
 			// Re-panic for any other errors
