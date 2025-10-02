@@ -1982,7 +1982,6 @@ func WithScheduledOnly() ListRegisteredWorkflowsOption {
 
 // ListRegisteredWorkflows returns information about workflows registered with DBOS.
 // Each WorkflowRegistryEntry contains:
-// - WrappedFunction: The underlying workflow implementation
 // - MaxRetries: Maximum number of retry attempts for workflow recovery
 // - Name: Custom name if provided during registration, otherwise empty
 // - FQN: Fully qualified name of the workflow function (always present)
