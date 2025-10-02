@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"reflect"
 	"runtime"
@@ -436,10 +437,14 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	fqn := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 
 	// Registry the input/output types for gob encoding
+	var logger slog.Logger
+	if c, ok := ctx.(*dbosContext); ok {
+		logger = *c.logger
+	}
 	var p P
 	var r R
-	safeGobRegister(p, ctx.(*dbosContext).logger)
-	safeGobRegister(r, ctx.(*dbosContext).logger)
+	safeGobRegister(p, &logger)
+	safeGobRegister(r, &logger)
 
 	// Register a type-erased version of the durable workflow for recovery
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
@@ -1040,8 +1045,12 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 	}
 
 	// Register the output type for gob encoding
+	var logger slog.Logger
+	if c, ok := ctx.(*dbosContext); ok {
+		logger = *c.logger
+	}
 	var r R
-	safeGobRegister(r, ctx.(*dbosContext).logger)
+	safeGobRegister(r, &logger)
 
 	// Append WithStepName option to ensure the step name is set. This will not erase a user-provided step name
 	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
@@ -1204,8 +1213,12 @@ func Send[P any](ctx DBOSContext, destinationID string, message P, topic string)
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
+	var logger slog.Logger
+	if c, ok := ctx.(*dbosContext); ok {
+		logger = *c.logger
+	}
 	var typedMessage P
-	safeGobRegister(typedMessage, ctx.(*dbosContext).logger)
+	safeGobRegister(typedMessage, &logger)
 	return ctx.Send(ctx, destinationID, message, topic)
 }
 
@@ -1281,8 +1294,12 @@ func SetEvent[P any](ctx DBOSContext, key string, message P) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
+	var logger slog.Logger
+	if c, ok := ctx.(*dbosContext); ok {
+		logger = *c.logger
+	}
 	var typedMessage P
-	safeGobRegister(typedMessage, ctx.(*dbosContext).logger)
+	safeGobRegister(typedMessage, &logger)
 	return ctx.SetEvent(ctx, key, message)
 }
 
@@ -1475,8 +1492,12 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle
 	}
 
 	// Register the output for gob encoding
+	var logger slog.Logger
+	if c, ok := ctx.(*dbosContext); ok {
+		logger = *c.logger
+	}
 	var r R
-	safeGobRegister(r, ctx.(*dbosContext).logger)
+	safeGobRegister(r, &logger)
 
 	// Call the interface method
 	handle, err := ctx.RetrieveWorkflow(ctx, workflowID)
@@ -1569,8 +1590,12 @@ func ResumeWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R
 	}
 
 	// Register the output for gob encoding
+	var logger slog.Logger
+	if c, ok := ctx.(*dbosContext); ok {
+		logger = *c.logger
+	}
 	var r R
-	safeGobRegister(r, ctx.(*dbosContext).logger)
+	safeGobRegister(r, &logger)
 
 	_, err := ctx.ResumeWorkflow(ctx, workflowID)
 	if err != nil {
@@ -1661,8 +1686,12 @@ func ForkWorkflow[R any](ctx DBOSContext, input ForkWorkflowInput) (WorkflowHand
 	}
 
 	// Register the output for gob encoding
+	var logger slog.Logger
+	if c, ok := ctx.(*dbosContext); ok {
+		logger = *c.logger
+	}
 	var r R
-	safeGobRegister(r, ctx.(*dbosContext).logger)
+	safeGobRegister(r, &logger)
 
 	handle, err := ctx.ForkWorkflow(ctx, input)
 	if err != nil {
