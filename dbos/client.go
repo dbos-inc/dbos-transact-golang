@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -242,9 +241,9 @@ func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, op
 
 	// Register the input and outputs for gob encoding
 	var typedInput P
-	gob.Register(typedInput)
+	safeGobRegister(typedInput, nil)
 	var typedOutput R
-	gob.Register(typedOutput)
+	safeGobRegister(typedOutput, nil)
 
 	// Call the interface method with the same signature
 	handle, err := c.Enqueue(queueName, workflowName, input, opts...)

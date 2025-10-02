@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"math"
@@ -439,8 +438,8 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	// Registry the input/output types for gob encoding
 	var p P
 	var r R
-	gob.Register(p)
-	gob.Register(r)
+	safeGobRegister(p, ctx.(*dbosContext).logger)
+	safeGobRegister(r, ctx.(*dbosContext).logger)
 
 	// Register a type-erased version of the durable workflow for recovery
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
@@ -1042,7 +1041,7 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 
 	// Register the output type for gob encoding
 	var r R
-	gob.Register(r)
+	safeGobRegister(r, ctx.(*dbosContext).logger)
 
 	// Append WithStepName option to ensure the step name is set. This will not erase a user-provided step name
 	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
@@ -1206,7 +1205,7 @@ func Send[P any](ctx DBOSContext, destinationID string, message P, topic string)
 		return errors.New("ctx cannot be nil")
 	}
 	var typedMessage P
-	gob.Register(typedMessage)
+	safeGobRegister(typedMessage, ctx.(*dbosContext).logger)
 	return ctx.Send(ctx, destinationID, message, topic)
 }
 
@@ -1283,7 +1282,7 @@ func SetEvent[P any](ctx DBOSContext, key string, message P) error {
 		return errors.New("ctx cannot be nil")
 	}
 	var typedMessage P
-	gob.Register(typedMessage)
+	safeGobRegister(typedMessage, ctx.(*dbosContext).logger)
 	return ctx.SetEvent(ctx, key, message)
 }
 
@@ -1477,7 +1476,7 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle
 
 	// Register the output for gob encoding
 	var r R
-	gob.Register(r)
+	safeGobRegister(r, ctx.(*dbosContext).logger)
 
 	// Call the interface method
 	handle, err := ctx.RetrieveWorkflow(ctx, workflowID)
@@ -1571,7 +1570,7 @@ func ResumeWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R
 
 	// Register the output for gob encoding
 	var r R
-	gob.Register(r)
+	safeGobRegister(r, ctx.(*dbosContext).logger)
 
 	_, err := ctx.ResumeWorkflow(ctx, workflowID)
 	if err != nil {
@@ -1663,7 +1662,7 @@ func ForkWorkflow[R any](ctx DBOSContext, input ForkWorkflowInput) (WorkflowHand
 
 	// Register the output for gob encoding
 	var r R
-	gob.Register(r)
+	safeGobRegister(r, ctx.(*dbosContext).logger)
 
 	handle, err := ctx.ForkWorkflow(ctx, input)
 	if err != nil {
