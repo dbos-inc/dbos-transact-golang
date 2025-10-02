@@ -839,14 +839,11 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		return earlyReturnPollingHandle, nil
 	}
 
-	outcomeChan := make(chan workflowOutcome[any], 1)
-
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID: workflowID,
 		stepID:     -1, // Steps are O-indexed
 	}
-
 	workflowCtx := WithValue(c, workflowStateKey, wfState)
 
 	// If the workflow has a timeout but no deadline, compute the deadline from the timeout.
@@ -863,7 +860,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	if !durableDeadline.IsZero() {
 		workflowCtx, _ = WithTimeout(workflowCtx, time.Until(durableDeadline))
 		// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
-		dbosCancelFunction := func() {
+		workflowCancelFunction := func() {
 			c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
 			err = retry(c, func() error {
 				return c.systemDB.cancelWorkflow(uncancellableCtx, workflowID)
@@ -873,10 +870,11 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			}
 			close(cancelFuncCompleted)
 		}
-		stopFunc = context.AfterFunc(workflowCtx, dbosCancelFunction)
+		stopFunc = context.AfterFunc(workflowCtx, workflowCancelFunction)
 	}
 
 	// Run the function in a goroutine
+	outcomeChan := make(chan workflowOutcome[any], 1)
 	c.workflowsWg.Add(1)
 	go func() {
 		defer c.workflowsWg.Done()

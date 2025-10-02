@@ -9,7 +9,6 @@ import (
 	"os"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
-	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
@@ -43,7 +42,7 @@ func maskPassword(dbURL string) string {
 }
 
 // getDBURL resolves the database URL from flag, config, or environment variable
-func getDBURL(_ *cobra.Command) (string, error) {
+func getDBURL() (string, error) {
 	var resolvedURL string
 	var source string
 

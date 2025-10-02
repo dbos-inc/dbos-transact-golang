@@ -85,7 +85,7 @@ func init() {
 
 func runWorkflowList(cmd *cobra.Command, args []string) error {
 	// Get database URL
-	dbURL, err := getDBURL(cmd)
+	dbURL, err := getDBURL()
 	if err != nil {
 		return err
 	}
@@ -192,7 +192,7 @@ func runWorkflowGet(cmd *cobra.Command, args []string) error {
 	workflowID := args[0]
 
 	// Get database URL
-	dbURL, err := getDBURL(cmd)
+	dbURL, err := getDBURL()
 	if err != nil {
 		return err
 	}
@@ -227,7 +227,7 @@ func runWorkflowSteps(cmd *cobra.Command, args []string) error {
 	workflowID := args[0]
 
 	// Get database URL
-	dbURL, err := getDBURL(cmd)
+	dbURL, err := getDBURL()
 	if err != nil {
 		return err
 	}
@@ -259,7 +259,7 @@ func runWorkflowCancel(cmd *cobra.Command, args []string) error {
 	workflowID := args[0]
 
 	// Get database URL
-	dbURL, err := getDBURL(cmd)
+	dbURL, err := getDBURL()
 	if err != nil {
 		return err
 	}
@@ -285,7 +285,7 @@ func runWorkflowResume(cmd *cobra.Command, args []string) error {
 	workflowID := args[0]
 
 	// Get database URL
-	dbURL, err := getDBURL(cmd)
+	dbURL, err := getDBURL()
 	if err != nil {
 		return err
 	}
@@ -318,7 +318,7 @@ func runWorkflowFork(cmd *cobra.Command, args []string) error {
 	workflowID := args[0]
 
 	// Get database URL
-	dbURL, err := getDBURL(cmd)
+	dbURL, err := getDBURL()
 	if err != nil {
 		return err
 	}

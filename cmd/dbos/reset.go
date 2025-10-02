@@ -34,7 +34,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get database URL
-	dbURL, err := getDBURL(cmd)
+	dbURL, err := getDBURL()
 	if err != nil {
 		return err
 	}
