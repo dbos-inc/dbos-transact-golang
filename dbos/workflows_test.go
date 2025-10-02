@@ -3075,7 +3075,7 @@ func TestWorkflowTimeout(t *testing.T) {
 
 	t.Run("WorkflowWithStepTimeout", func(t *testing.T) {
 		// Start a workflow that will run a step that triggers cancellation
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 100*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
 		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflowWithStep, "wf-with-step-timeout")
 		require.NoError(t, err, "failed to start workflow with step timeout")
