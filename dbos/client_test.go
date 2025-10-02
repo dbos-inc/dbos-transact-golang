@@ -928,3 +928,69 @@ func TestListWorkflows(t *testing.T) {
 	// Verify all queue entries are cleaned up
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after list workflows tests")
 }
+
+func TestGetWorkflowSteps(t *testing.T) {
+	// Setup server context
+	serverCtx := setupDBOS(t, true, true)
+
+	// Create queue for communication
+	queue := NewWorkflowQueue(serverCtx, "get-workflow-steps-queue")
+
+	// Workflow with one step
+	stepFunction := func(ctx context.Context) (string, error) {
+		return "abc", nil
+	}
+
+	testWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		result, err := RunAsStep(ctx, stepFunction, WithStepName("TestStep"))
+		if err != nil {
+			return "", err
+		}
+		return result, nil
+	}
+	RegisterWorkflow(serverCtx, testWorkflow, WithWorkflowName("TestWorkflow"))
+
+	// Launch server
+	err := Launch(serverCtx)
+	require.NoError(t, err)
+
+	// Setup client
+	databaseURL := getDatabaseURL()
+	config := ClientConfig{
+		DatabaseURL: databaseURL,
+	}
+	client, err := NewClient(context.Background(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
+
+	// Enqueue and run the workflow
+	workflowID := "test-get-workflow-steps"
+	handle, err := Enqueue[string, string](client, queue.Name, "TestWorkflow", "test-input", WithEnqueueWorkflowID(workflowID))
+	require.NoError(t, err)
+
+	// Wait for workflow to complete
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "abc", result)
+
+	// Test GetWorkflowSteps with loadOutput = true
+	stepsWithOutput, err := client.GetWorkflowSteps(workflowID)
+	require.NoError(t, err)
+	require.Len(t, stepsWithOutput, 1, "expected exactly 1 step")
+
+	step := stepsWithOutput[0]
+	assert.Equal(t, 0, step.StepID, "expected step ID to be 0")
+	assert.Equal(t, "TestStep", step.StepName, "expected step name to be set")
+	assert.Nil(t, step.Error, "expected no error in step")
+	assert.Equal(t, "", step.ChildWorkflowID, "expected no child workflow ID")
+
+	// Verify the output wasn't loaded
+	require.Nil(t, step.Output, "expected output not to be loaded")
+
+	// Verify all queue entries are cleaned up
+	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after get workflow steps test")
+}

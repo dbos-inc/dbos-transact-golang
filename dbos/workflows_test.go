@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -45,6 +46,10 @@ func simpleWorkflowWithStepError(dbosCtx DBOSContext, input string) (string, err
 	return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
 		return simpleStepError(ctx)
 	})
+}
+
+func simpleWorkflowWithSchedule(dbosCtx DBOSContext, scheduledTime time.Time) (time.Time, error) {
+	return scheduledTime, nil
 }
 
 // idempotencyWorkflow increments a global counter and returns the input
@@ -353,6 +358,177 @@ func TestWorkflowsRegistration(t *testing.T) {
 		}()
 		RegisterWorkflow(freshCtx, simpleWorkflow)
 	})
+
+	t.Run("SafeGobRegister", func(t *testing.T) {
+		// Create a fresh DBOS context for this test
+		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+
+		// Test 1: Basic type vs pointer conflicts
+		type TestType struct {
+			Value string
+		}
+
+		// Register workflows that use the same type to trigger potential gob conflicts
+		// The safeGobRegister calls within RegisterWorkflow should handle the conflicts
+		workflow1 := func(ctx DBOSContext, input TestType) (TestType, error) {
+			return input, nil
+		}
+		workflow2 := func(ctx DBOSContext, input *TestType) (*TestType, error) {
+			return input, nil
+		}
+
+		// Both registrations should succeed despite using conflicting types (T and *T)
+		RegisterWorkflow(freshCtx, workflow1)
+		RegisterWorkflow(freshCtx, workflow2)
+
+		// Test 2: Multiple workflows with the same types (duplicate registrations)
+		workflow3 := func(ctx DBOSContext, input TestType) (TestType, error) {
+			return TestType{Value: input.Value + "-modified"}, nil
+		}
+		workflow4 := func(ctx DBOSContext, input TestType) (TestType, error) {
+			return TestType{Value: input.Value + "-another"}, nil
+		}
+
+		// These should succeed even though TestType is already registered
+		RegisterWorkflow(freshCtx, workflow3)
+		RegisterWorkflow(freshCtx, workflow4)
+
+		// Test 3: Nested structs
+		type InnerType struct {
+			ID int
+		}
+		type OuterType struct {
+			Inner InnerType
+			Name  string
+		}
+
+		workflow5 := func(ctx DBOSContext, input OuterType) (OuterType, error) {
+			return input, nil
+		}
+		workflow6 := func(ctx DBOSContext, input *OuterType) (*OuterType, error) {
+			return input, nil
+		}
+
+		RegisterWorkflow(freshCtx, workflow5)
+		RegisterWorkflow(freshCtx, workflow6)
+
+		// Test 4: Slice and map types
+		workflow7 := func(ctx DBOSContext, input []TestType) ([]TestType, error) {
+			return input, nil
+		}
+		workflow8 := func(ctx DBOSContext, input []*TestType) ([]*TestType, error) {
+			return input, nil
+		}
+		workflow9 := func(ctx DBOSContext, input map[string]TestType) (map[string]TestType, error) {
+			return input, nil
+		}
+		workflow10 := func(ctx DBOSContext, input map[string]*TestType) (map[string]*TestType, error) {
+			return input, nil
+		}
+
+		RegisterWorkflow(freshCtx, workflow7)
+		RegisterWorkflow(freshCtx, workflow8)
+		RegisterWorkflow(freshCtx, workflow9)
+		RegisterWorkflow(freshCtx, workflow10)
+
+		// Launch and verify the system still works
+		err := Launch(freshCtx)
+		require.NoError(t, err, "failed to launch DBOS after gob conflict handling")
+		defer Shutdown(freshCtx, 10*time.Second)
+
+		// Test all registered workflows to ensure they work correctly
+
+		// Run workflow1 with value type
+		testValue := TestType{Value: "test"}
+		handle1, err := RunWorkflow(freshCtx, workflow1, testValue)
+		require.NoError(t, err, "failed to run workflow1")
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from workflow1")
+		assert.Equal(t, testValue, result1, "unexpected result from workflow1")
+
+		// Run workflow2 with pointer type
+		testPointer := &TestType{Value: "pointer"}
+		handle2, err := RunWorkflow(freshCtx, workflow2, testPointer)
+		require.NoError(t, err, "failed to run workflow2")
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result from workflow2")
+		assert.Equal(t, testPointer, result2, "unexpected result from workflow2")
+
+		// Run workflow3 with modified output
+		handle3, err := RunWorkflow(freshCtx, workflow3, testValue)
+		require.NoError(t, err, "failed to run workflow3")
+		result3, err := handle3.GetResult()
+		require.NoError(t, err, "failed to get result from workflow3")
+		assert.Equal(t, TestType{Value: "test-modified"}, result3, "unexpected result from workflow3")
+
+		// Run workflow5 with nested struct
+		testOuter := OuterType{Inner: InnerType{ID: 42}, Name: "test"}
+		handle5, err := RunWorkflow(freshCtx, workflow5, testOuter)
+		require.NoError(t, err, "failed to run workflow5")
+		result5, err := handle5.GetResult()
+		require.NoError(t, err, "failed to get result from workflow5")
+		assert.Equal(t, testOuter, result5, "unexpected result from workflow5")
+
+		// Run workflow6 with nested struct pointer
+		testOuterPtr := &OuterType{Inner: InnerType{ID: 43}, Name: "test-ptr"}
+		handle6, err := RunWorkflow(freshCtx, workflow6, testOuterPtr)
+		require.NoError(t, err, "failed to run workflow6")
+		result6, err := handle6.GetResult()
+		require.NoError(t, err, "failed to get result from workflow6")
+		assert.Equal(t, testOuterPtr, result6, "unexpected result from workflow6")
+
+		// Run workflow7 with slice type
+		testSlice := []TestType{{Value: "a"}, {Value: "b"}}
+		handle7, err := RunWorkflow(freshCtx, workflow7, testSlice)
+		require.NoError(t, err, "failed to run workflow7")
+		result7, err := handle7.GetResult()
+		require.NoError(t, err, "failed to get result from workflow7")
+		assert.Equal(t, testSlice, result7, "unexpected result from workflow7")
+
+		// Run workflow8 with pointer slice type
+		testPtrSlice := []*TestType{{Value: "a"}, {Value: "b"}}
+		handle8, err := RunWorkflow(freshCtx, workflow8, testPtrSlice)
+		require.NoError(t, err, "failed to run workflow8")
+		result8, err := handle8.GetResult()
+		require.NoError(t, err, "failed to get result from workflow8")
+		assert.Equal(t, testPtrSlice, result8, "unexpected result from workflow8")
+
+		// Run workflow9 with map type
+		testMap := map[string]TestType{"key1": {Value: "value1"}}
+		handle9, err := RunWorkflow(freshCtx, workflow9, testMap)
+		require.NoError(t, err, "failed to run workflow9")
+		result9, err := handle9.GetResult()
+		require.NoError(t, err, "failed to get result from workflow9")
+		assert.Equal(t, testMap, result9, "unexpected result from workflow9")
+
+		// Run workflow10 with pointer map type
+		testPtrMap := map[string]*TestType{"key1": {Value: "value1"}}
+		handle10, err := RunWorkflow(freshCtx, workflow10, testPtrMap)
+		require.NoError(t, err, "failed to run workflow10")
+		result10, err := handle10.GetResult()
+		require.NoError(t, err, "failed to get result from workflow10")
+		assert.Equal(t, testPtrMap, result10, "unexpected result from workflow10")
+
+		t.Run("validPanic", func(t *testing.T) {
+			// Verify that non-duplicate registration panics are still propagated
+			workflow11 := func(ctx DBOSContext, input any) (any, error) {
+				return input, nil
+			}
+
+			// This should panic during registration because interface{} creates a nil value
+			// which gob.Register cannot handle
+			defer func() {
+				r := recover()
+				require.NotNil(t, r, "expected panic from interface{} registration but got none")
+				// Verify it's not a duplicate registration error (which would be caught)
+				if errStr, ok := r.(string); ok {
+					assert.False(t, strings.Contains(errStr, "gob: registering duplicate"),
+						"panic should not be a duplicate registration error, got: %v", r)
+				}
+			}()
+			RegisterWorkflow(freshCtx, workflow11) // This should panic
+		})
+	})
 }
 
 func stepWithinAStep(ctx context.Context) (string, error) {
@@ -414,6 +590,105 @@ func TestSteps(t *testing.T) {
 	RegisterWorkflow(dbosCtx, stepRetryWorkflow)
 	RegisterWorkflow(dbosCtx, testStepWf1)
 	RegisterWorkflow(dbosCtx, testStepWf2)
+	// Create a workflow that uses custom step names
+	customNameWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		// Run a step with a custom name
+		result1, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+			return "custom-step-1-result", nil
+		}, WithStepName("MyCustomStep1"))
+		if err != nil {
+			return "", err
+		}
+
+		// Run another step with a different custom name
+		result2, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+			return "custom-step-2-result", nil
+		}, WithStepName("MyCustomStep2"))
+		if err != nil {
+			return "", err
+		}
+
+		return result1 + "-" + result2, nil
+	}
+
+	RegisterWorkflow(dbosCtx, customNameWorkflow)
+
+	// Define user-defined types for testing serialization
+	type StepInput struct {
+		Name      string            `json:"name"`
+		Count     int               `json:"count"`
+		Active    bool              `json:"active"`
+		Metadata  map[string]string `json:"metadata"`
+		CreatedAt time.Time         `json:"created_at"`
+	}
+
+	type StepOutput struct {
+		ProcessedName string    `json:"processed_name"`
+		TotalCount    int       `json:"total_count"`
+		Success       bool      `json:"success"`
+		ProcessedAt   time.Time `json:"processed_at"`
+		Details       []string  `json:"details"`
+	}
+
+	// Create a step function that accepts StepInput and returns StepOutput
+	processUserObjectStep := func(_ context.Context, input StepInput) (StepOutput, error) {
+		// Process the input and create output
+		output := StepOutput{
+			ProcessedName: fmt.Sprintf("Processed_%s", input.Name),
+			TotalCount:    input.Count * 2,
+			Success:       input.Active,
+			ProcessedAt:   time.Now(),
+			Details:       []string{"step1", "step2", "step3"},
+		}
+
+		// Verify input was correctly deserialized
+		if input.Metadata == nil {
+			return StepOutput{}, fmt.Errorf("metadata map was not properly deserialized")
+		}
+
+		return output, nil
+	}
+
+	// Create a workflow that uses the step with user-defined objects
+	userObjectWorkflow := func(dbosCtx DBOSContext, workflowInput string) (string, error) {
+		// Create input for the step
+		stepInput := StepInput{
+			Name:   workflowInput,
+			Count:  42,
+			Active: true,
+			Metadata: map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+			},
+			CreatedAt: time.Now(),
+		}
+
+		// Run the step with user-defined input and output
+		output, err := RunAsStep(dbosCtx, func(ctx context.Context) (StepOutput, error) {
+			return processUserObjectStep(ctx, stepInput)
+		})
+		if err != nil {
+			return "", fmt.Errorf("step failed: %w", err)
+		}
+
+		// Verify the output was correctly returned
+		if output.ProcessedName == "" {
+			return "", fmt.Errorf("output ProcessedName is empty")
+		}
+		if output.TotalCount != 84 {
+			return "", fmt.Errorf("expected TotalCount to be 84, got %d", output.TotalCount)
+		}
+		if len(output.Details) != 3 {
+			return "", fmt.Errorf("expected 3 details, got %d", len(output.Details))
+		}
+
+		return "", nil
+	}
+	// Register the workflow
+	RegisterWorkflow(dbosCtx, userObjectWorkflow)
+
+	err := Launch(dbosCtx)
+	require.NoError(t, err, "failed to launch DBOS")
 
 	t.Run("StepsMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run a step outside of a workflow context
@@ -523,28 +798,6 @@ func TestSteps(t *testing.T) {
 	})
 
 	t.Run("customStepNames", func(t *testing.T) {
-		// Create a workflow that uses custom step names
-		customNameWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-			// Run a step with a custom name
-			result1, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
-				return "custom-step-1-result", nil
-			}, WithStepName("MyCustomStep1"))
-			if err != nil {
-				return "", err
-			}
-
-			// Run another step with a different custom name
-			result2, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
-				return "custom-step-2-result", nil
-			}, WithStepName("MyCustomStep2"))
-			if err != nil {
-				return "", err
-			}
-
-			return result1 + "-" + result2, nil
-		}
-
-		RegisterWorkflow(dbosCtx, customNameWorkflow)
 
 		// Execute the workflow
 		handle, err := RunWorkflow(dbosCtx, customNameWorkflow, "test-input")
@@ -569,80 +822,6 @@ func TestSteps(t *testing.T) {
 	})
 
 	t.Run("stepsOutputEncoding", func(t *testing.T) {
-		// Define user-defined types for testing serialization
-		type StepInput struct {
-			Name      string            `json:"name"`
-			Count     int               `json:"count"`
-			Active    bool              `json:"active"`
-			Metadata  map[string]string `json:"metadata"`
-			CreatedAt time.Time         `json:"created_at"`
-		}
-
-		type StepOutput struct {
-			ProcessedName string    `json:"processed_name"`
-			TotalCount    int       `json:"total_count"`
-			Success       bool      `json:"success"`
-			ProcessedAt   time.Time `json:"processed_at"`
-			Details       []string  `json:"details"`
-		}
-
-		// Create a step function that accepts StepInput and returns StepOutput
-		processUserObjectStep := func(_ context.Context, input StepInput) (StepOutput, error) {
-			// Process the input and create output
-			output := StepOutput{
-				ProcessedName: fmt.Sprintf("Processed_%s", input.Name),
-				TotalCount:    input.Count * 2,
-				Success:       input.Active,
-				ProcessedAt:   time.Now(),
-				Details:       []string{"step1", "step2", "step3"},
-			}
-
-			// Verify input was correctly deserialized
-			if input.Metadata == nil {
-				return StepOutput{}, fmt.Errorf("metadata map was not properly deserialized")
-			}
-
-			return output, nil
-		}
-
-		// Create a workflow that uses the step with user-defined objects
-		userObjectWorkflow := func(dbosCtx DBOSContext, workflowInput string) (string, error) {
-			// Create input for the step
-			stepInput := StepInput{
-				Name:   workflowInput,
-				Count:  42,
-				Active: true,
-				Metadata: map[string]string{
-					"key1": "value1",
-					"key2": "value2",
-				},
-				CreatedAt: time.Now(),
-			}
-
-			// Run the step with user-defined input and output
-			output, err := RunAsStep(dbosCtx, func(ctx context.Context) (StepOutput, error) {
-				return processUserObjectStep(ctx, stepInput)
-			})
-			if err != nil {
-				return "", fmt.Errorf("step failed: %w", err)
-			}
-
-			// Verify the output was correctly returned
-			if output.ProcessedName == "" {
-				return "", fmt.Errorf("output ProcessedName is empty")
-			}
-			if output.TotalCount != 84 {
-				return "", fmt.Errorf("expected TotalCount to be 84, got %d", output.TotalCount)
-			}
-			if len(output.Details) != 3 {
-				return "", fmt.Errorf("expected 3 details, got %d", len(output.Details))
-			}
-
-			return "", nil
-		}
-
-		// Register the workflow
-		RegisterWorkflow(dbosCtx, userObjectWorkflow)
 
 		// Execute the workflow
 		handle, err := RunWorkflow(dbosCtx, userObjectWorkflow, "TestObject")
@@ -685,8 +864,8 @@ func TestChildWorkflow(t *testing.T) {
 	}
 
 	// Create child workflows with executor
-	childWf := func(dbosCtx DBOSContext, input Inheritance) (string, error) {
-		workflowID, err := GetWorkflowID(dbosCtx)
+	childWf := func(ctx DBOSContext, input Inheritance) (string, error) {
+		workflowID, err := GetWorkflowID(ctx)
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %w", err)
 		}
@@ -695,7 +874,7 @@ func TestChildWorkflow(t *testing.T) {
 			return "", fmt.Errorf("expected childWf workflow ID to be %s, got %s", expectedCurrentID, workflowID)
 		}
 		// Steps of a child workflow start with an incremented step ID, because the first step ID is allocated to the child workflow
-		return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+		return RunAsStep(ctx, func(ctx context.Context) (string, error) {
 			return simpleStep(ctx)
 		})
 	}
@@ -855,7 +1034,104 @@ func TestChildWorkflow(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, grandParentWf)
 
+	// Register workflows needed for ChildWorkflowWithCustomID test
+	simpleChildWf := func(dbosCtx DBOSContext, input string) (string, error) {
+		return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+			return simpleStep(ctx)
+		})
+	}
+	RegisterWorkflow(dbosCtx, simpleChildWf)
+
+	// Register workflows needed for RecoveredChildWorkflowPollingHandle test
+	var pollingHandleCompleteEvent *Event
+	pollingHandleChildWf := func(dbosCtx DBOSContext, input string) (string, error) {
+		// Wait if event is set
+		if pollingHandleCompleteEvent != nil {
+			pollingHandleCompleteEvent.Wait()
+		}
+		return input + "-result", nil
+	}
+	RegisterWorkflow(dbosCtx, pollingHandleChildWf)
+
+	var pollingCounter int
+	var pollingHandleStartEvent *Event
+	pollingHandleParentWf := func(ctx DBOSContext, input string) (string, error) {
+		pollingCounter++
+
+		// Run child workflow with a known ID
+		childHandle, err := RunWorkflow(ctx, pollingHandleChildWf, "child-input", WithWorkflowID("known-child-workflow-id"))
+		if err != nil {
+			return "", fmt.Errorf("failed to run child workflow: %w", err)
+		}
+
+		switch pollingCounter {
+		case 1:
+			// First handle will be a direct handle
+			_, ok := childHandle.(*workflowHandle[string])
+			if !ok {
+				return "", fmt.Errorf("expected child handle to be of type workflowDirectHandle, got %T", childHandle)
+			}
+			// Signal the child workflow is started
+			if pollingHandleStartEvent != nil {
+				pollingHandleStartEvent.Set()
+			}
+
+			result, err := childHandle.GetResult()
+			if err != nil {
+				return "", fmt.Errorf("failed to get result from child workflow: %w", err)
+			}
+			return result, nil
+		case 2:
+			// Second handle will be a polling handle
+			_, ok := childHandle.(*workflowPollingHandle[string])
+			if !ok {
+				return "", fmt.Errorf("expected recovered child handle to be of type workflowPollingHandle, got %T", childHandle)
+			}
+		}
+		return "", nil
+	}
+	RegisterWorkflow(dbosCtx, pollingHandleParentWf)
+
+	// Register workflows needed for ChildWorkflowCannotBeSpawnedFromStep test
+	childWfForStepTest := func(dbosCtx DBOSContext, input string) (string, error) {
+		return "child-result", nil
+	}
+	RegisterWorkflow(dbosCtx, childWfForStepTest)
+
+	parentWfForStepTest := func(ctx DBOSContext, input string) (string, error) {
+		return RunAsStep(ctx, func(context context.Context) (string, error) {
+			dbosCtx := context.(DBOSContext)
+			_, err := RunWorkflow(dbosCtx, childWfForStepTest, input)
+			if err != nil {
+				return "", err
+			}
+			return "should-not-reach", nil
+		})
+	}
+	RegisterWorkflow(dbosCtx, parentWfForStepTest)
+	// Simple parent that starts one child with a custom workflow ID
+	simpleParentWf := func(ctx DBOSContext, customChildID string) (string, error) {
+		childHandle, err := RunWorkflow(ctx, simpleChildWf, "test-child-input", WithWorkflowID(customChildID))
+		if err != nil {
+			return "", fmt.Errorf("failed to run child workflow: %w", err)
+		}
+
+		result, err := childHandle.GetResult()
+		if err != nil {
+			return "", fmt.Errorf("failed to get result from child workflow: %w", err)
+		}
+
+		return result, nil
+	}
+
+	RegisterWorkflow(dbosCtx, simpleParentWf)
+
+	// Launch the context once for all subtests
+	err := Launch(dbosCtx)
+	require.NoError(t, err, "failed to launch DBOS")
+
 	t.Run("ChildWorkflowIDGeneration", func(t *testing.T) {
+
 		r := 3
 		h, err := RunWorkflow(dbosCtx, grandParentWf, r)
 		require.NoError(t, err, "failed to execute grand parent workflow")
@@ -866,30 +1142,7 @@ func TestChildWorkflow(t *testing.T) {
 	t.Run("ChildWorkflowWithCustomID", func(t *testing.T) {
 		customChildID := uuid.NewString()
 
-		simpleChildWf := func(dbosCtx DBOSContext, input string) (string, error) {
-			return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
-				return simpleStep(ctx)
-			})
-		}
-		RegisterWorkflow(dbosCtx, simpleChildWf)
-
-		// Simple parent that starts one child with a custom workflow ID
-		parentWf := func(ctx DBOSContext, input string) (string, error) {
-			childHandle, err := RunWorkflow(ctx, simpleChildWf, "test-child-input", WithWorkflowID(customChildID))
-			if err != nil {
-				return "", fmt.Errorf("failed to run child workflow: %w", err)
-			}
-
-			result, err := childHandle.GetResult()
-			if err != nil {
-				return "", fmt.Errorf("failed to get result from child workflow: %w", err)
-			}
-
-			return result, nil
-		}
-		RegisterWorkflow(dbosCtx, parentWf)
-
-		parentHandle, err := RunWorkflow(dbosCtx, parentWf, "test-input")
+		parentHandle, err := RunWorkflow(dbosCtx, simpleParentWf, customChildID)
 		require.NoError(t, err, "failed to start parent workflow")
 
 		result, err := parentHandle.GetResult()
@@ -913,55 +1166,12 @@ func TestChildWorkflow(t *testing.T) {
 	})
 
 	t.Run("RecoveredChildWorkflowPollingHandle", func(t *testing.T) {
-		pollingHandleStartEvent := NewEvent()
-		pollingHandleCompleteEvent := NewEvent()
+		// Reset counter and set up events for this test
+		pollingCounter = 0
+		pollingHandleStartEvent = NewEvent()
+		pollingHandleCompleteEvent = NewEvent()
 		knownChildID := "known-child-workflow-id"
 		knownParentID := "known-parent-workflow-id"
-		counter := 0
-
-		// Simple child workflow that returns a result
-		pollingHandleChildWf := func(dbosCtx DBOSContext, input string) (string, error) {
-			// Wait
-			pollingHandleCompleteEvent.Wait()
-			return input + "-result", nil
-		}
-		RegisterWorkflow(dbosCtx, pollingHandleChildWf)
-
-		pollingHandleParentWf := func(ctx DBOSContext, input string) (string, error) {
-			counter++
-
-			// Run child workflow with a known ID
-			childHandle, err := RunWorkflow(ctx, pollingHandleChildWf, "child-input", WithWorkflowID(knownChildID))
-			if err != nil {
-				return "", fmt.Errorf("failed to run child workflow: %w", err)
-			}
-
-			switch counter {
-			case 1:
-				// First handle will be a direct handle
-				_, ok := childHandle.(*workflowHandle[string])
-				if !ok {
-					return "", fmt.Errorf("expected child handle to be of type workflowDirectHandle, got %T", childHandle)
-				}
-				// Signal the child workflow is started
-				pollingHandleStartEvent.Set()
-
-				result, err := childHandle.GetResult()
-				if err != nil {
-					return "", fmt.Errorf("failed to get result from child workflow: %w", err)
-				}
-				return result, nil
-			case 2:
-				// Second handle will be a polling handle
-				_, ok := childHandle.(*workflowPollingHandle[string])
-				if !ok {
-					return "", fmt.Errorf("expected recovered child handle to be of type workflowPollingHandle, got %T", childHandle)
-				}
-			}
-			return "", nil
-		}
-
-		RegisterWorkflow(dbosCtx, pollingHandleParentWf)
 
 		// Execute parent workflow - it will block after starting the child
 		parentHandle, err := RunWorkflow(dbosCtx, pollingHandleParentWf, "parent-input", WithWorkflowID(knownParentID))
@@ -999,32 +1209,8 @@ func TestChildWorkflow(t *testing.T) {
 	})
 
 	t.Run("ChildWorkflowCannotBeSpawnedFromStep", func(t *testing.T) {
-		// Child workflow for testing
-		childWf := func(dbosCtx DBOSContext, input string) (string, error) {
-			return "child-result", nil
-		}
-		RegisterWorkflow(dbosCtx, childWf)
-
-		// Step that tries to spawn a child workflow - this should fail
-		stepThatSpawnsChild := func(ctx context.Context, input string) (string, error) {
-			dbosCtx := ctx.(DBOSContext)
-			_, err := RunWorkflow(dbosCtx, childWf, input)
-			if err != nil {
-				return "", err
-			}
-			return "should-not-reach", nil
-		}
-
-		// Workflow that calls the step
-		parentWf := func(ctx DBOSContext, input string) (string, error) {
-			return RunAsStep(ctx, func(context context.Context) (string, error) {
-				return stepThatSpawnsChild(context, input)
-			})
-		}
-		RegisterWorkflow(dbosCtx, parentWf)
-
 		// Execute the workflow - should fail when step tries to spawn child workflow
-		handle, err := RunWorkflow(dbosCtx, parentWf, "test-input")
+		handle, err := RunWorkflow(dbosCtx, parentWfForStepTest, "test-input")
 		require.NoError(t, err, "failed to start parent workflow")
 
 		// Expect the workflow to fail
@@ -1122,6 +1308,9 @@ func TestWorkflowRecovery(t *testing.T) {
 	}
 
 	RegisterWorkflow(dbosCtx, recoveryWorkflow)
+
+	err := Launch(dbosCtx)
+	require.NoError(t, err, "failed to launch DBOS")
 
 	t.Run("WorkflowRecovery", func(t *testing.T) {
 		const numWorkflows = 5
@@ -2886,7 +3075,7 @@ func TestWorkflowTimeout(t *testing.T) {
 
 	t.Run("WorkflowWithStepTimeout", func(t *testing.T) {
 		// Start a workflow that will run a step that triggers cancellation
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 100*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
 		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflowWithStep, "wf-with-step-timeout")
 		require.NoError(t, err, "failed to start workflow with step timeout")
@@ -4238,6 +4427,73 @@ func TestSpecialSteps(t *testing.T) {
 		require.Equal(t, "success", result, "workflow should return success")
 	})
 }
+
+func TestRegisteredWorkflowListing(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	// Register some regular workflows
+	RegisterWorkflow(dbosCtx, simpleWorkflow)
+	RegisterWorkflow(dbosCtx, simpleWorkflowError, WithMaxRetries(5))
+	RegisterWorkflow(dbosCtx, simpleWorkflowWithStep, WithWorkflowName("CustomStepWorkflow"))
+	RegisterWorkflow(dbosCtx, simpleWorkflowWithSchedule, WithWorkflowName("ScheduledWorkflow"), WithSchedule("0 0 * * * *"))
+
+	err := Launch(dbosCtx)
+	require.NoError(t, err, "failed to launch DBOS")
+
+	t.Run("ListRegisteredWorkflows", func(t *testing.T) {
+		workflows, err := ListRegisteredWorkflows(dbosCtx)
+		require.NoError(t, err, "ListRegisteredWorkflows should not return an error")
+
+		// Should have 4 workflows (3 regular + 1 scheduled)
+		require.GreaterOrEqual(t, len(workflows), 4, "Should have 4 registered workflows")
+
+		// Create a map for easier lookup
+		workflowMap := make(map[string]WorkflowRegistryEntry)
+		for _, wf := range workflows {
+			workflowMap[wf.FQN] = wf
+		}
+
+		// Check that simpleWorkflow is registered
+		simpleWorkflowFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflow).Pointer()).Name()
+		simpleWf, exists := workflowMap[simpleWorkflowFQN]
+		require.True(t, exists, "simpleWorkflow should be registered")
+		require.Equal(t, _DEFAULT_MAX_RECOVERY_ATTEMPTS, simpleWf.MaxRetries, "simpleWorkflow should have default max retries")
+		require.Empty(t, simpleWf.CronSchedule, "simpleWorkflow should not have cron schedule")
+
+		// Check that simpleWorkflowError is registered with custom max retries
+		simpleWorkflowErrorFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflowError).Pointer()).Name()
+		errorWf, exists := workflowMap[simpleWorkflowErrorFQN]
+		require.True(t, exists, "simpleWorkflowError should be registered")
+		require.Equal(t, 5, errorWf.MaxRetries, "simpleWorkflowError should have custom max retries")
+		require.Empty(t, errorWf.CronSchedule, "simpleWorkflowError should not have cron schedule")
+
+		// Check that custom named workflow is registered
+		customStepWorkflowFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflowWithStep).Pointer()).Name()
+		customWf, exists := workflowMap[customStepWorkflowFQN]
+		require.True(t, exists, "CustomStepWorkflow should be found")
+		require.Equal(t, "CustomStepWorkflow", customWf.Name, "CustomStepWorkflow should have the correct name")
+		require.Empty(t, customWf.CronSchedule, "CustomStepWorkflow should not have cron schedule")
+
+		// Check that scheduled workflow is registered
+		scheduledWorkflowFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflowWithSchedule).Pointer()).Name()
+		scheduledWf, exists := workflowMap[scheduledWorkflowFQN]
+		require.True(t, exists, "ScheduledWorkflow should be found")
+		require.Equal(t, "ScheduledWorkflow", scheduledWf.Name, "ScheduledWorkflow should have the correct name")
+		require.Equal(t, "0 0 * * * *", scheduledWf.CronSchedule, "ScheduledWorkflow should have the correct cron schedule")
+	})
+
+	t.Run("ListRegisteredWorkflowsWithScheduledOnly", func(t *testing.T) {
+		scheduledWorkflows, err := ListRegisteredWorkflows(dbosCtx, WithScheduledOnly())
+		require.NoError(t, err, "ListRegisteredWorkflows with WithScheduledOnly should not return an error")
+		require.Equal(t, 1, len(scheduledWorkflows), "Should have exactly 1 scheduled workflow")
+
+		entry := scheduledWorkflows[0]
+		scheduledWorkflowFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflowWithSchedule).Pointer()).Name()
+		require.Equal(t, scheduledWorkflowFQN, entry.FQN, "ScheduledWorkflow should have the correct FQN")
+		require.Equal(t, "0 0 * * * *", entry.CronSchedule, "ScheduledWorkflow should have the correct cron schedule")
+	})
+}
+
 func TestWorkflowIdentity(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 	RegisterWorkflow(dbosCtx, simpleWorkflow)

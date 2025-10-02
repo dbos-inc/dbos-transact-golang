@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,6 +31,7 @@ type Client interface {
 	CancelWorkflow(workflowID string) error
 	ResumeWorkflow(workflowID string) (WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
+	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
 
@@ -241,10 +241,16 @@ func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, op
 	}
 
 	// Register the input and outputs for gob encoding
+	var logger *slog.Logger
+	if cl, ok := c.(*client); ok {
+		if ctx, ok := cl.dbosCtx.(*dbosContext); ok {
+			logger = ctx.logger
+		}
+	}
 	var typedInput P
-	gob.Register(typedInput)
+	safeGobRegister(typedInput, logger)
 	var typedOutput R
-	gob.Register(typedOutput)
+	safeGobRegister(typedOutput, logger)
 
 	// Call the interface method with the same signature
 	handle, err := c.Enqueue(queueName, workflowName, input, opts...)
@@ -288,6 +294,11 @@ func (c *client) ResumeWorkflow(workflowID string) (WorkflowHandle[any], error) 
 // ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.
 func (c *client) ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error) {
 	return c.dbosCtx.ForkWorkflow(c.dbosCtx, input)
+}
+
+// GetWorkflowSteps retrieves the execution steps of a workflow.
+func (c *client) GetWorkflowSteps(workflowID string) ([]StepInfo, error) {
+	return c.dbosCtx.GetWorkflowSteps(c.dbosCtx, workflowID)
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.

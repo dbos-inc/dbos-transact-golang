@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/gob"
 	"fmt"
+	"log/slog"
+	"strings"
 )
 
 func serialize(data any) (string, error) {
@@ -38,4 +40,29 @@ func deserialize(data *string) (any, error) {
 	}
 
 	return result, nil
+}
+
+// safeGobRegister attempts to register a type with gob, recovering only from
+// panics caused by duplicate type/name registrations (e.g., registering both T and *T).
+// These specific conflicts don't affect encoding/decoding correctness, so they're safe to ignore.
+// Other panics (like register `any`) are real errors and will propagate.
+func safeGobRegister(value any, logger *slog.Logger) {
+	defer func() {
+		if r := recover(); r != nil {
+			if errStr, ok := r.(string); ok {
+				// Check if this is one of the two specific duplicate registration errors we want to ignore
+				// See https://cs.opensource.google/go/go/+/refs/tags/go1.25.1:src/encoding/gob/type.go;l=832
+				if strings.Contains(errStr, "gob: registering duplicate types for") ||
+					strings.Contains(errStr, "gob: registering duplicate names for") {
+					if logger != nil {
+						logger.Debug("gob registration conflict", "type", fmt.Sprintf("%T", value), "error", r)
+					}
+					return
+				}
+			}
+			// Re-panic for any other errors
+			panic(r)
+		}
+	}()
+	gob.Register(value)
 }

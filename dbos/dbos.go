@@ -3,7 +3,6 @@ package dbos
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/gob"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -121,12 +120,13 @@ type DBOSContext interface {
 	GetStepID() (int, error)                                                                                    // Get the current step ID (only available within workflows)
 
 	// Workflow management
-	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)     // Get a handle to an existing workflow
-	CancelWorkflow(_ DBOSContext, workflowID string) error                              // Cancel a workflow by setting its status to CANCELLED
-	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)       // Resume a cancelled workflow
-	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)   // Fork a workflow from a specific step
-	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) // List workflows based on filtering criteria
-	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)              // Get the execution steps of a workflow
+	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                // Get a handle to an existing workflow
+	CancelWorkflow(_ DBOSContext, workflowID string) error                                                         // Cancel a workflow by setting its status to CANCELLED
+	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                  // Resume a cancelled workflow
+	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)                              // Fork a workflow from a specific step
+	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                            // List workflows based on filtering criteria
+	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)                                         // Get the execution steps of a workflow
+	ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) // List registered workflows with filtering options
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -159,7 +159,7 @@ type dbosContext struct {
 	workflowsWg *sync.WaitGroup
 
 	// Workflow registry - read-mostly sync.Map since registration happens only before launch
-	workflowRegistry        *sync.Map // map[string]workflowRegistryEntry
+	workflowRegistry        *sync.Map // map[string]WorkflowRegistryEntry
 	workflowCustomNametoFQN *sync.Map // Maps fully qualified workflow names to custom names. Usefor when client enqueues a workflow by name because registry is indexed by FQN.
 
 	// Workflow scheduler
@@ -194,7 +194,8 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 	}
 	// Will do nothing if the concrete type is not dbosContext
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		return &dbosContext{
+		launched := dbosCtx.launched.Load()
+		childCtx := &dbosContext{
 			ctx:                     context.WithValue(dbosCtx.ctx, key, val), // Spawn a new child context with the value set
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
@@ -205,6 +206,8 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
 		}
+		childCtx.launched.Store(launched)
+		return childCtx
 	}
 	return nil
 }
@@ -217,7 +220,10 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 		return nil
 	}
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		return &dbosContext{
+		launched := dbosCtx.launched.Load()
+		// Create a new context that is not canceled when the parent is canceled
+		// but retains all other values
+		childCtx := &dbosContext{
 			ctx:                     context.WithoutCancel(dbosCtx.ctx),
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
@@ -228,6 +234,8 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
 		}
+		childCtx.launched.Store(launched)
+		return childCtx
 	}
 	return nil
 }
@@ -240,8 +248,9 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 		return nil, func() {}
 	}
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
+		launched := dbosCtx.launched.Load()
 		newCtx, cancelFunc := context.WithTimeoutCause(dbosCtx.ctx, timeout, errors.New("DBOS context timeout"))
-		return &dbosContext{
+		childCtx := &dbosContext{
 			ctx:                     newCtx,
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
@@ -251,7 +260,9 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
-		}, cancelFunc
+		}
+		childCtx.launched.Store(launched)
+		return childCtx, cancelFunc
 	}
 	return nil, func() {}
 }
@@ -273,6 +284,34 @@ func (c *dbosContext) GetExecutorID() string {
 
 func (c *dbosContext) GetApplicationID() string {
 	return c.applicationID
+}
+
+// ListRegisteredWorkflows returns information about registered workflows with their registration parameters.
+// Supports filtering using functional options.
+func (c *dbosContext) ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) {
+	// Initialize parameters with defaults
+	params := &listRegisteredWorkflowsOptions{}
+
+	// Apply all provided options
+	for _, opt := range opts {
+		opt(params)
+	}
+
+	// Get all registered workflows and apply filters
+	var filteredWorkflows []WorkflowRegistryEntry
+	c.workflowRegistry.Range(func(key, value interface{}) bool {
+		workflow := value.(WorkflowRegistryEntry)
+
+		// Filter by scheduled only
+		if params.scheduledOnly && workflow.CronSchedule == "" {
+			return true
+		}
+
+		filteredWorkflows = append(filteredWorkflows, workflow)
+		return true
+	})
+
+	return filteredWorkflows, nil
 }
 
 // NewDBOSContext creates a new DBOS context with the provided configuration.
@@ -317,15 +356,14 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	// Register types we serialize with gob
 	var t time.Time
-	gob.Register(t)
+	safeGobRegister(t, initExecutor.logger)
 	var ws []WorkflowStatus
-	gob.Register(ws)
+	safeGobRegister(ws, initExecutor.logger)
 	var si []StepInfo
-	gob.Register(si)
 	var h workflowHandle[any]
-	gob.Register(h)
+	safeGobRegister(h, initExecutor.logger)
 	var ph workflowPollingHandle[any]
-	gob.Register(ph)
+	safeGobRegister(ph, initExecutor.logger)
 
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion
