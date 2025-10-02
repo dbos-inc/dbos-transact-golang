@@ -321,7 +321,6 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 		panic("Cannot register scheduled workflow after DBOS has launched")
 	}
 
-	c.getWorkflowScheduler().Start()
 	var entryID cron.EntryID
 	entryID, err := c.getWorkflowScheduler().AddFunc(cronSchedule, func() {
 		// Execute the workflow on the cron schedule once DBOS is launched
