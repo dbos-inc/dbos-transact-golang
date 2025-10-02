@@ -269,10 +269,12 @@ func (h *workflowHandleProxy[R]) GetWorkflowID() string {
 /**********************************/
 type wrappedWorkflowFunc func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
 
-type workflowRegistryEntry struct {
+type WorkflowRegistryEntry struct {
 	wrappedFunction wrappedWorkflowFunc
-	maxRetries      int
-	name            string
+	MaxRetries      int
+	Name            string
+	FQN             string // Fully qualified name of the workflow function
+	CronSchedule    string // Empty string for non-scheduled workflows
 }
 
 func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFunc, maxRetries int, customName string) {
@@ -287,10 +289,12 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFun
 	}
 
 	// Check if workflow already exists and store atomically using LoadOrStore
-	entry := workflowRegistryEntry{
+	entry := WorkflowRegistryEntry{
 		wrappedFunction: fn,
-		maxRetries:      maxRetries,
-		name:            customName,
+		FQN:             workflowFQN,
+		MaxRetries:      maxRetries,
+		Name:            customName,
+		CronSchedule:    "",
 	}
 
 	if _, exists := c.workflowRegistry.LoadOrStore(workflowFQN, entry); exists {
@@ -320,6 +324,15 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 	if c.launched.Load() {
 		panic("Cannot register scheduled workflow after DBOS has launched")
 	}
+
+	// Update the existing workflow entry with the cron schedule
+	registryEntryAny, exists := c.workflowRegistry.Load(workflowName)
+	if !exists {
+		panic(fmt.Sprintf("workflow %s must be registered before scheduling", workflowName))
+	}
+	registryEntry := registryEntryAny.(WorkflowRegistryEntry)
+	registryEntry.CronSchedule = cronSchedule
+	c.workflowRegistry.Store(workflowName, registryEntry)
 
 	var entryID cron.EntryID
 	entryID, err := c.getWorkflowScheduler().AddFunc(cronSchedule, func() {
@@ -658,15 +671,15 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	if !exists {
 		return nil, newNonExistentWorkflowError(params.workflowName)
 	}
-	registeredWorkflow, ok := registeredWorkflowAny.(workflowRegistryEntry)
+	registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
 	if !ok {
 		return nil, fmt.Errorf("invalid workflow registry entry type for workflow %s", params.workflowName)
 	}
-	if registeredWorkflow.maxRetries > 0 {
-		params.maxRetries = registeredWorkflow.maxRetries
+	if registeredWorkflow.MaxRetries > 0 {
+		params.maxRetries = registeredWorkflow.MaxRetries
 	}
-	if len(registeredWorkflow.name) > 0 {
-		params.workflowName = registeredWorkflow.name
+	if len(registeredWorkflow.Name) > 0 {
+		params.workflowName = registeredWorkflow.Name
 	}
 
 	// Check if we are within a workflow (and thus a child workflow)
@@ -1950,4 +1963,49 @@ func GetWorkflowSteps(ctx DBOSContext, workflowID string) ([]StepInfo, error) {
 		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.GetWorkflowSteps(ctx, workflowID)
+}
+
+// listRegisteredWorkflowsOptions holds configuration parameters for listing registered workflows
+type listRegisteredWorkflowsOptions struct {
+	scheduledOnly bool
+}
+
+// ListRegisteredWorkflowsOption is a functional option for configuring registered workflow listing parameters.
+type ListRegisteredWorkflowsOption func(*listRegisteredWorkflowsOptions)
+
+// WithScheduledOnly filters to only return scheduled workflows (those with a cron schedule).
+func WithScheduledOnly() ListRegisteredWorkflowsOption {
+	return func(p *listRegisteredWorkflowsOptions) {
+		p.scheduledOnly = true
+	}
+}
+
+// ListRegisteredWorkflows returns information about workflows registered with DBOS.
+// Each WorkflowRegistryEntry contains:
+// - MaxRetries: Maximum number of retry attempts for workflow recovery
+// - Name: Custom name if provided during registration, otherwise empty
+// - FQN: Fully qualified name of the workflow function (always present)
+// - CronSchedule: Empty string for non-scheduled workflows
+//
+// The function supports filtering using functional options:
+// - WithScheduledOnly(): Return only scheduled workflows
+//
+// Example:
+//
+//	// List all registered workflows
+//	workflows, err := dbos.ListRegisteredWorkflows(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	// List only scheduled workflows
+//	scheduled, err := dbos.ListRegisteredWorkflows(ctx, dbos.WithScheduledOnly())
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+func ListRegisteredWorkflows(ctx DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.ListRegisteredWorkflows(ctx, opts...)
 }

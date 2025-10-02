@@ -47,6 +47,10 @@ func simpleWorkflowWithStepError(dbosCtx DBOSContext, input string) (string, err
 	})
 }
 
+func simpleWorkflowWithSchedule(dbosCtx DBOSContext, scheduledTime time.Time) (time.Time, error) {
+	return scheduledTime, nil
+}
+
 // idempotencyWorkflow increments a global counter and returns the input
 func incrementCounter(_ context.Context, value int64) (int64, error) {
 	idempotencyCounter += value
@@ -4238,6 +4242,73 @@ func TestSpecialSteps(t *testing.T) {
 		require.Equal(t, "success", result, "workflow should return success")
 	})
 }
+
+func TestRegisteredWorkflowListing(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	// Register some regular workflows
+	RegisterWorkflow(dbosCtx, simpleWorkflow)
+	RegisterWorkflow(dbosCtx, simpleWorkflowError, WithMaxRetries(5))
+	RegisterWorkflow(dbosCtx, simpleWorkflowWithStep, WithWorkflowName("CustomStepWorkflow"))
+	RegisterWorkflow(dbosCtx, simpleWorkflowWithSchedule, WithWorkflowName("ScheduledWorkflow"), WithSchedule("0 0 * * * *"))
+
+	err := Launch(dbosCtx)
+	require.NoError(t, err, "failed to launch DBOS")
+
+	t.Run("ListRegisteredWorkflows", func(t *testing.T) {
+		workflows, err := ListRegisteredWorkflows(dbosCtx)
+		require.NoError(t, err, "ListRegisteredWorkflows should not return an error")
+
+		// Should have 4 workflows (3 regular + 1 scheduled)
+		require.GreaterOrEqual(t, len(workflows), 4, "Should have 4 registered workflows")
+
+		// Create a map for easier lookup
+		workflowMap := make(map[string]WorkflowRegistryEntry)
+		for _, wf := range workflows {
+			workflowMap[wf.FQN] = wf
+		}
+
+		// Check that simpleWorkflow is registered
+		simpleWorkflowFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflow).Pointer()).Name()
+		simpleWf, exists := workflowMap[simpleWorkflowFQN]
+		require.True(t, exists, "simpleWorkflow should be registered")
+		require.Equal(t, _DEFAULT_MAX_RECOVERY_ATTEMPTS, simpleWf.MaxRetries, "simpleWorkflow should have default max retries")
+		require.Empty(t, simpleWf.CronSchedule, "simpleWorkflow should not have cron schedule")
+
+		// Check that simpleWorkflowError is registered with custom max retries
+		simpleWorkflowErrorFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflowError).Pointer()).Name()
+		errorWf, exists := workflowMap[simpleWorkflowErrorFQN]
+		require.True(t, exists, "simpleWorkflowError should be registered")
+		require.Equal(t, 5, errorWf.MaxRetries, "simpleWorkflowError should have custom max retries")
+		require.Empty(t, errorWf.CronSchedule, "simpleWorkflowError should not have cron schedule")
+
+		// Check that custom named workflow is registered
+		customStepWorkflowFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflowWithStep).Pointer()).Name()
+		customWf, exists := workflowMap[customStepWorkflowFQN]
+		require.True(t, exists, "CustomStepWorkflow should be found")
+		require.Equal(t, "CustomStepWorkflow", customWf.Name, "CustomStepWorkflow should have the correct name")
+		require.Empty(t, customWf.CronSchedule, "CustomStepWorkflow should not have cron schedule")
+
+		// Check that scheduled workflow is registered
+		scheduledWorkflowFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflowWithSchedule).Pointer()).Name()
+		scheduledWf, exists := workflowMap[scheduledWorkflowFQN]
+		require.True(t, exists, "ScheduledWorkflow should be found")
+		require.Equal(t, "ScheduledWorkflow", scheduledWf.Name, "ScheduledWorkflow should have the correct name")
+		require.Equal(t, "0 0 * * * *", scheduledWf.CronSchedule, "ScheduledWorkflow should have the correct cron schedule")
+	})
+
+	t.Run("ListRegisteredWorkflowsWithScheduledOnly", func(t *testing.T) {
+		scheduledWorkflows, err := ListRegisteredWorkflows(dbosCtx, WithScheduledOnly())
+		require.NoError(t, err, "ListRegisteredWorkflows with WithScheduledOnly should not return an error")
+		require.Equal(t, 1, len(scheduledWorkflows), "Should have exactly 1 scheduled workflow")
+
+		entry := scheduledWorkflows[0]
+		scheduledWorkflowFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflowWithSchedule).Pointer()).Name()
+		require.Equal(t, scheduledWorkflowFQN, entry.FQN, "ScheduledWorkflow should have the correct FQN")
+		require.Equal(t, "0 0 * * * *", entry.CronSchedule, "ScheduledWorkflow should have the correct cron schedule")
+	})
+}
+
 func TestWorkflowIdentity(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
