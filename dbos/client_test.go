@@ -942,7 +942,7 @@ func TestGetWorkflowSteps(t *testing.T) {
 	}
 
 	testWorkflow := func(ctx DBOSContext, input string) (string, error) {
-		result, err := RunAsStep(ctx, stepFunction)
+		result, err := RunAsStep(ctx, stepFunction, WithStepName("TestStep"))
 		if err != nil {
 			return "", err
 		}
@@ -984,7 +984,7 @@ func TestGetWorkflowSteps(t *testing.T) {
 
 	step := stepsWithOutput[0]
 	assert.Equal(t, 0, step.StepID, "expected step ID to be 0")
-	assert.NotEmpty(t, step.StepName, "expected step name to be set")
+	assert.Equal(t, "TestStep", step.StepName, "expected step name to be set")
 	assert.Nil(t, step.Error, "expected no error in step")
 	assert.Equal(t, "", step.ChildWorkflowID, "expected no child workflow ID")
 
