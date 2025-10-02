@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -356,6 +357,177 @@ func TestWorkflowsRegistration(t *testing.T) {
 			}
 		}()
 		RegisterWorkflow(freshCtx, simpleWorkflow)
+	})
+
+	t.Run("SafeGobRegister", func(t *testing.T) {
+		// Create a fresh DBOS context for this test
+		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+
+		// Test 1: Basic type vs pointer conflicts
+		type TestType struct {
+			Value string
+		}
+
+		// Register workflows that use the same type to trigger potential gob conflicts
+		// The safeGobRegister calls within RegisterWorkflow should handle the conflicts
+		workflow1 := func(ctx DBOSContext, input TestType) (TestType, error) {
+			return input, nil
+		}
+		workflow2 := func(ctx DBOSContext, input *TestType) (*TestType, error) {
+			return input, nil
+		}
+
+		// Both registrations should succeed despite using conflicting types (T and *T)
+		RegisterWorkflow(freshCtx, workflow1)
+		RegisterWorkflow(freshCtx, workflow2)
+
+		// Test 2: Multiple workflows with the same types (duplicate registrations)
+		workflow3 := func(ctx DBOSContext, input TestType) (TestType, error) {
+			return TestType{Value: input.Value + "-modified"}, nil
+		}
+		workflow4 := func(ctx DBOSContext, input TestType) (TestType, error) {
+			return TestType{Value: input.Value + "-another"}, nil
+		}
+
+		// These should succeed even though TestType is already registered
+		RegisterWorkflow(freshCtx, workflow3)
+		RegisterWorkflow(freshCtx, workflow4)
+
+		// Test 3: Nested structs
+		type InnerType struct {
+			ID int
+		}
+		type OuterType struct {
+			Inner InnerType
+			Name  string
+		}
+
+		workflow5 := func(ctx DBOSContext, input OuterType) (OuterType, error) {
+			return input, nil
+		}
+		workflow6 := func(ctx DBOSContext, input *OuterType) (*OuterType, error) {
+			return input, nil
+		}
+
+		RegisterWorkflow(freshCtx, workflow5)
+		RegisterWorkflow(freshCtx, workflow6)
+
+		// Test 4: Slice and map types
+		workflow7 := func(ctx DBOSContext, input []TestType) ([]TestType, error) {
+			return input, nil
+		}
+		workflow8 := func(ctx DBOSContext, input []*TestType) ([]*TestType, error) {
+			return input, nil
+		}
+		workflow9 := func(ctx DBOSContext, input map[string]TestType) (map[string]TestType, error) {
+			return input, nil
+		}
+		workflow10 := func(ctx DBOSContext, input map[string]*TestType) (map[string]*TestType, error) {
+			return input, nil
+		}
+
+		RegisterWorkflow(freshCtx, workflow7)
+		RegisterWorkflow(freshCtx, workflow8)
+		RegisterWorkflow(freshCtx, workflow9)
+		RegisterWorkflow(freshCtx, workflow10)
+
+		// Launch and verify the system still works
+		err := Launch(freshCtx)
+		require.NoError(t, err, "failed to launch DBOS after gob conflict handling")
+		defer Shutdown(freshCtx, 10*time.Second)
+
+		// Test all registered workflows to ensure they work correctly
+
+		// Run workflow1 with value type
+		testValue := TestType{Value: "test"}
+		handle1, err := RunWorkflow(freshCtx, workflow1, testValue)
+		require.NoError(t, err, "failed to run workflow1")
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from workflow1")
+		assert.Equal(t, testValue, result1, "unexpected result from workflow1")
+
+		// Run workflow2 with pointer type
+		testPointer := &TestType{Value: "pointer"}
+		handle2, err := RunWorkflow(freshCtx, workflow2, testPointer)
+		require.NoError(t, err, "failed to run workflow2")
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result from workflow2")
+		assert.Equal(t, testPointer, result2, "unexpected result from workflow2")
+
+		// Run workflow3 with modified output
+		handle3, err := RunWorkflow(freshCtx, workflow3, testValue)
+		require.NoError(t, err, "failed to run workflow3")
+		result3, err := handle3.GetResult()
+		require.NoError(t, err, "failed to get result from workflow3")
+		assert.Equal(t, TestType{Value: "test-modified"}, result3, "unexpected result from workflow3")
+
+		// Run workflow5 with nested struct
+		testOuter := OuterType{Inner: InnerType{ID: 42}, Name: "test"}
+		handle5, err := RunWorkflow(freshCtx, workflow5, testOuter)
+		require.NoError(t, err, "failed to run workflow5")
+		result5, err := handle5.GetResult()
+		require.NoError(t, err, "failed to get result from workflow5")
+		assert.Equal(t, testOuter, result5, "unexpected result from workflow5")
+
+		// Run workflow6 with nested struct pointer
+		testOuterPtr := &OuterType{Inner: InnerType{ID: 43}, Name: "test-ptr"}
+		handle6, err := RunWorkflow(freshCtx, workflow6, testOuterPtr)
+		require.NoError(t, err, "failed to run workflow6")
+		result6, err := handle6.GetResult()
+		require.NoError(t, err, "failed to get result from workflow6")
+		assert.Equal(t, testOuterPtr, result6, "unexpected result from workflow6")
+
+		// Run workflow7 with slice type
+		testSlice := []TestType{{Value: "a"}, {Value: "b"}}
+		handle7, err := RunWorkflow(freshCtx, workflow7, testSlice)
+		require.NoError(t, err, "failed to run workflow7")
+		result7, err := handle7.GetResult()
+		require.NoError(t, err, "failed to get result from workflow7")
+		assert.Equal(t, testSlice, result7, "unexpected result from workflow7")
+
+		// Run workflow8 with pointer slice type
+		testPtrSlice := []*TestType{{Value: "a"}, {Value: "b"}}
+		handle8, err := RunWorkflow(freshCtx, workflow8, testPtrSlice)
+		require.NoError(t, err, "failed to run workflow8")
+		result8, err := handle8.GetResult()
+		require.NoError(t, err, "failed to get result from workflow8")
+		assert.Equal(t, testPtrSlice, result8, "unexpected result from workflow8")
+
+		// Run workflow9 with map type
+		testMap := map[string]TestType{"key1": {Value: "value1"}}
+		handle9, err := RunWorkflow(freshCtx, workflow9, testMap)
+		require.NoError(t, err, "failed to run workflow9")
+		result9, err := handle9.GetResult()
+		require.NoError(t, err, "failed to get result from workflow9")
+		assert.Equal(t, testMap, result9, "unexpected result from workflow9")
+
+		// Run workflow10 with pointer map type
+		testPtrMap := map[string]*TestType{"key1": {Value: "value1"}}
+		handle10, err := RunWorkflow(freshCtx, workflow10, testPtrMap)
+		require.NoError(t, err, "failed to run workflow10")
+		result10, err := handle10.GetResult()
+		require.NoError(t, err, "failed to get result from workflow10")
+		assert.Equal(t, testPtrMap, result10, "unexpected result from workflow10")
+
+		t.Run("validPanic", func(t *testing.T) {
+			// Verify that non-duplicate registration panics are still propagated
+			workflow11 := func(ctx DBOSContext, input any) (any, error) {
+				return input, nil
+			}
+
+			// This should panic during registration because interface{} creates a nil value
+			// which gob.Register cannot handle
+			defer func() {
+				r := recover()
+				require.NotNil(t, r, "expected panic from interface{} registration but got none")
+				// Verify it's not a duplicate registration error (which would be caught)
+				if errStr, ok := r.(string); ok {
+					assert.False(t, strings.Contains(errStr, "gob: registering duplicate"),
+						"panic should not be a duplicate registration error, got: %v", r)
+				}
+			}()
+			RegisterWorkflow(freshCtx, workflow11) // This should panic
+		})
 	})
 }
 

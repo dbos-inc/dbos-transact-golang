@@ -3,7 +3,6 @@ package dbos
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/gob"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -346,11 +345,11 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	// Register types we serialize with gob
 	var t time.Time
-	gob.Register(t)
+	safeGobRegister(t, initExecutor.logger)
 	var ws []WorkflowStatus
-	gob.Register(ws)
+	safeGobRegister(ws, initExecutor.logger)
 	var si []StepInfo
-	gob.Register(si)
+	safeGobRegister(si, initExecutor.logger)
 
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion
