@@ -270,7 +270,7 @@ func (h *workflowHandleProxy[R]) GetWorkflowID() string {
 type wrappedWorkflowFunc func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
 
 type WorkflowRegistryEntry struct {
-	WrappedFunction wrappedWorkflowFunc
+	wrappedFunction wrappedWorkflowFunc
 	MaxRetries      int
 	Name            string
 	FQN             string // Fully qualified name of the workflow function
@@ -290,7 +290,7 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFun
 
 	// Check if workflow already exists and store atomically using LoadOrStore
 	entry := WorkflowRegistryEntry{
-		WrappedFunction: fn,
+		wrappedFunction: fn,
 		FQN:             workflowFQN,
 		MaxRetries:      maxRetries,
 		Name:            customName,

@@ -243,7 +243,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 					}
 				}
 
-				_, err := registeredWorkflow.WrappedFunction(ctx, input, WithWorkflowID(workflow.id))
+				_, err := registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
 				if err != nil {
 					qr.logger.Error("Error running queued workflow", "error", err)
 				}
