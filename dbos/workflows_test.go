@@ -507,8 +507,6 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 		t.Run("validPanic", func(t *testing.T) {
 			// Verify that non-duplicate registration panics are still propagated
-			// interface{} types cause gob.Register to panic because they can't register a nil interface
-			// This should NOT be caught by safeGobRegister since it's not a duplicate registration error
 			workflow11 := func(ctx DBOSContext, input any) (any, error) {
 				return input, nil
 			}
