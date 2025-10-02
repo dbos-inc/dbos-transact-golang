@@ -12,13 +12,13 @@
 //	    AppName:     "my-app",
 //	    DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 //	})
-//	defer dbosContext.Shutdown(5 * time.Second)
+//	defer dbos.Shutdown(dbosContext, 5 * time.Second)
 //
 //	// Register workflows before launching
 //	dbos.RegisterWorkflow(dbosContext, myWorkflow)
 //
 //	// Launch the context to start processing
-//	err = dbosContext.Launch()
+//	err = dbos.Launch(dbosContext)
 //
 // # Workflows
 //

@@ -330,12 +330,10 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 	if !exists {
 		panic(fmt.Sprintf("workflow %s must be registered before scheduling", workflowName))
 	}
-
 	registryEntry := registryEntryAny.(WorkflowRegistryEntry)
 	registryEntry.CronSchedule = cronSchedule
 	c.workflowRegistry.Store(workflowName, registryEntry)
 
-	c.getWorkflowScheduler().Start()
 	var entryID cron.EntryID
 	entryID, err := c.getWorkflowScheduler().AddFunc(cronSchedule, func() {
 		// Execute the workflow on the cron schedule once DBOS is launched
@@ -1055,6 +1053,10 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 		return *new(R), newStepExecutionError("", "", "step function cannot be nil")
 	}
 
+	// Register the output type for gob encoding
+	var r R
+	gob.Register(r)
+
 	// Append WithStepName option to ensure the step name is set. This will not erase a user-provided step name
 	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	opts = append(opts, WithStepName(stepName))
@@ -1504,9 +1506,9 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		_, err := RunAsStep(c, func(ctx context.Context) (any, error) {
+		_, err := RunAsStep(c, func(ctx context.Context) (string, error) {
 			err := c.systemDB.cancelWorkflow(ctx, workflowID)
-			return nil, err
+			return "", err
 		}, WithStepName("DBOS.cancelWorkflow"))
 		return err
 	} else {
@@ -1541,9 +1543,9 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	isWithinWorkflow := ok && workflowState != nil
 	var err error
 	if isWithinWorkflow {
-		_, err = RunAsStep(c, func(ctx context.Context) (any, error) {
+		_, err = RunAsStep(c, func(ctx context.Context) (string, error) {
 			err := c.systemDB.resumeWorkflow(ctx, workflowID)
-			return nil, err
+			return "", err
 		}, WithStepName("DBOS.resumeWorkflow"))
 	} else {
 		err = c.systemDB.resumeWorkflow(c, workflowID)

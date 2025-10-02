@@ -571,6 +571,113 @@ func TestSteps(t *testing.T) {
 		assert.Equal(t, "MyCustomStep2", steps[1].StepName, "expected second step to have custom name")
 		assert.Equal(t, 1, steps[1].StepID)
 	})
+
+	t.Run("stepsOutputEncoding", func(t *testing.T) {
+		// Define user-defined types for testing serialization
+		type StepInput struct {
+			Name      string            `json:"name"`
+			Count     int               `json:"count"`
+			Active    bool              `json:"active"`
+			Metadata  map[string]string `json:"metadata"`
+			CreatedAt time.Time         `json:"created_at"`
+		}
+
+		type StepOutput struct {
+			ProcessedName string    `json:"processed_name"`
+			TotalCount    int       `json:"total_count"`
+			Success       bool      `json:"success"`
+			ProcessedAt   time.Time `json:"processed_at"`
+			Details       []string  `json:"details"`
+		}
+
+		// Create a step function that accepts StepInput and returns StepOutput
+		processUserObjectStep := func(_ context.Context, input StepInput) (StepOutput, error) {
+			// Process the input and create output
+			output := StepOutput{
+				ProcessedName: fmt.Sprintf("Processed_%s", input.Name),
+				TotalCount:    input.Count * 2,
+				Success:       input.Active,
+				ProcessedAt:   time.Now(),
+				Details:       []string{"step1", "step2", "step3"},
+			}
+
+			// Verify input was correctly deserialized
+			if input.Metadata == nil {
+				return StepOutput{}, fmt.Errorf("metadata map was not properly deserialized")
+			}
+
+			return output, nil
+		}
+
+		// Create a workflow that uses the step with user-defined objects
+		userObjectWorkflow := func(dbosCtx DBOSContext, workflowInput string) (string, error) {
+			// Create input for the step
+			stepInput := StepInput{
+				Name:   workflowInput,
+				Count:  42,
+				Active: true,
+				Metadata: map[string]string{
+					"key1": "value1",
+					"key2": "value2",
+				},
+				CreatedAt: time.Now(),
+			}
+
+			// Run the step with user-defined input and output
+			output, err := RunAsStep(dbosCtx, func(ctx context.Context) (StepOutput, error) {
+				return processUserObjectStep(ctx, stepInput)
+			})
+			if err != nil {
+				return "", fmt.Errorf("step failed: %w", err)
+			}
+
+			// Verify the output was correctly returned
+			if output.ProcessedName == "" {
+				return "", fmt.Errorf("output ProcessedName is empty")
+			}
+			if output.TotalCount != 84 {
+				return "", fmt.Errorf("expected TotalCount to be 84, got %d", output.TotalCount)
+			}
+			if len(output.Details) != 3 {
+				return "", fmt.Errorf("expected 3 details, got %d", len(output.Details))
+			}
+
+			return "", nil
+		}
+
+		// Register the workflow
+		RegisterWorkflow(dbosCtx, userObjectWorkflow)
+
+		// Execute the workflow
+		handle, err := RunWorkflow(dbosCtx, userObjectWorkflow, "TestObject")
+		require.NoError(t, err, "failed to run workflow with user-defined objects")
+
+		// Get the result
+		_, err = handle.GetResult()
+		require.NoError(t, err, "failed to get result from workflow")
+
+		// Verify the step was recorded
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 1, "expected 1 step")
+
+		// Verify step output was properly serialized and stored
+		step := steps[0]
+		require.NotNil(t, step.Output, "step output should not be nil")
+		assert.Nil(t, step.Error)
+
+		// Deserialize the output from the database to verify proper encoding
+		storedOutput, ok := step.Output.(StepOutput)
+		require.True(t, ok, "failed to cast step output to StepOutput")
+
+		// Verify all fields were correctly serialized and deserialized
+		assert.Equal(t, "Processed_TestObject", storedOutput.ProcessedName, "ProcessedName not correctly serialized")
+		assert.Equal(t, 84, storedOutput.TotalCount, "TotalCount not correctly serialized")
+		assert.True(t, storedOutput.Success, "Success flag not correctly serialized")
+		assert.Len(t, storedOutput.Details, 3, "Details array length incorrect")
+		assert.Equal(t, []string{"step1", "step2", "step3"}, storedOutput.Details, "Details array not correctly serialized")
+		assert.False(t, storedOutput.ProcessedAt.IsZero(), "ProcessedAt timestamp should not be zero")
+	})
 }
 
 func TestChildWorkflow(t *testing.T) {
