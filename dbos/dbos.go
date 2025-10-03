@@ -361,6 +361,10 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	safeGobRegister(ws, initExecutor.logger)
 	var si []StepInfo
 	safeGobRegister(si, initExecutor.logger)
+	var h workflowHandle[any]
+	safeGobRegister(h, initExecutor.logger)
+	var ph workflowPollingHandle[any]
+	safeGobRegister(ph, initExecutor.logger)
 
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion
