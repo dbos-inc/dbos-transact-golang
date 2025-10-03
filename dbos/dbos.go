@@ -360,6 +360,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	var ws []WorkflowStatus
 	safeGobRegister(ws, initExecutor.logger)
 	var si []StepInfo
+	safeGobRegister(si, initExecutor.logger)
 	var h workflowHandle[any]
 	safeGobRegister(h, initExecutor.logger)
 	var ph workflowPollingHandle[any]

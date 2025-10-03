@@ -735,10 +735,20 @@ func TestWorkflowHandlerRegistration(t *testing.T) {
 
 	require.NotNil(t, ctx)
 
-	wf := func(ctx DBOSContext, input string) (string, error) {
-		return input, nil
+	childWf := func(ctx DBOSContext, input string) (string, error) {
+		return "child-" + input, nil
 	}
 
+	wf := func(ctx DBOSContext, input string) (WorkflowHandle[string], error) {
+		childHandle, err := RunWorkflow(ctx, childWf, input)
+		if err != nil {
+			var emptyHandle WorkflowHandle[string]
+			return emptyHandle, err
+		}
+		return childHandle, nil
+	}
+
+	RegisterWorkflow(ctx, childWf)
 	RegisterWorkflow(ctx, wf)
 
 	// Launch a workflow
@@ -746,11 +756,17 @@ func TestWorkflowHandlerRegistration(t *testing.T) {
 	require.NoError(t, err)
 	defer Shutdown(ctx, 1*time.Minute)
 
-	// Run a workflow
-	handle, err := RunWorkflow(ctx, wf, "test-input")
+	parentHandle, err := RunWorkflow(ctx, wf, "test-input")
 	require.NoError(t, err)
 
-	result, err := handle.GetResult()
-	require.NoError(t, err, "failed to get result from workflow")
-	assert.Equal(t, "test-input", result)
+	// The result of the parent workflow should itself be a workflow handle
+	childHandle, err := parentHandle.GetResult()
+	require.NoError(t, err, "failed to get child handle from parent workflow")
+
+	// Now we can use the child handle to get the final result
+	result, err := childHandle.GetResult()
+	require.NoError(t, err, "failed to get result from child workflow")
+
+	// Assert final child workflow result
+	assert.Equal(t, "child-test-input", result)
 }
