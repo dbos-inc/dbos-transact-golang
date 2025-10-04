@@ -82,14 +82,30 @@ type workflowOutcome[R any] struct {
 // The type parameter R represents the expected return type of the workflow.
 // Handles can be used to wait for workflow completion, check status, and retrieve results.
 type WorkflowHandle[R any] interface {
-	GetResult() (R, error)              // Wait for workflow completion and return the result
-	GetStatus() (WorkflowStatus, error) // Get current workflow status without waiting
-	GetWorkflowID() string              // Get the unique workflow identifier
+	GetResult(opts ...GetResultOption) (R, error) // Wait for workflow completion and return the result
+	GetStatus() (WorkflowStatus, error)           // Get current workflow status without waiting
+	GetWorkflowID() string                        // Get the unique workflow identifier
 }
 
 type baseWorkflowHandle struct {
 	workflowID  string
 	dbosContext DBOSContext
+}
+
+// GetResultOption is a functional option for configuring GetResult behavior.
+type GetResultOption func(*getResultOptions)
+
+// getResultOptions holds the configuration for GetResult execution.
+type getResultOptions struct {
+	timeout time.Duration
+}
+
+// WithHandleTimeout sets a timeout for the GetResult operation.
+// If the timeout is reached before the workflow completes, GetResult will return a timeout error.
+func WithHandleTimeout(timeout time.Duration) GetResultOption {
+	return func(opts *getResultOptions) {
+		opts.timeout = timeout
+	}
 }
 
 // GetStatus returns the current status of the workflow from the database
@@ -162,12 +178,33 @@ type workflowHandle[R any] struct {
 	outcomeChan chan workflowOutcome[R]
 }
 
-func (h *workflowHandle[R]) GetResult() (R, error) {
-	outcome, ok := <-h.outcomeChan // Blocking read
-	if !ok {
-		// Return an error if the channel was closed. In normal operations this would happen if GetResul() is called twice on a handler. The first call should get the buffered result, the second call find zero values (channel is empty and closed).
-		return *new(R), errors.New("workflow result channel is already closed. Did you call GetResult() twice on the same workflow handle?")
+func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
+	options := &getResultOptions{}
+	for _, opt := range opts {
+		opt(options)
 	}
+
+	var timeoutChan <-chan time.Time
+	if options.timeout > 0 {
+		timeoutChan = time.After(options.timeout)
+	}
+
+	select {
+	case outcome, ok := <-h.outcomeChan:
+		if !ok {
+			// Return error if channel closed (happens when GetResult() called twice)
+			return *new(R), errors.New("workflow result channel is already closed. Did you call GetResult() twice on the same workflow handle?")
+		}
+		return h.processOutcome(outcome)
+	case <-h.dbosContext.Done():
+		return *new(R), h.dbosContext.Err()
+	case <-timeoutChan:
+		return *new(R), fmt.Errorf("workflow result timeout after %v", options.timeout)
+	}
+}
+
+// processOutcome handles the common logic for processing workflow outcomes
+func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error) {
 	// If we are calling GetResult inside a workflow, record the result as a step result
 	workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
@@ -198,9 +235,22 @@ type workflowPollingHandle[R any] struct {
 	baseWorkflowHandle
 }
 
-func (h *workflowPollingHandle[R]) GetResult() (R, error) {
-	result, err := retryWithResult(h.dbosContext, func() (any, error) {
-		return h.dbosContext.(*dbosContext).systemDB.awaitWorkflowResult(h.dbosContext, h.workflowID)
+func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
+	options := &getResultOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	// Use timeout if specified, otherwise use DBOS context directly
+	ctx := h.dbosContext
+	var cancel context.CancelFunc
+	if options.timeout > 0 {
+		ctx, cancel = WithTimeout(h.dbosContext, options.timeout)
+		defer cancel()
+	}
+
+	result, err := retryWithResult(ctx, func() (any, error) {
+		return h.dbosContext.(*dbosContext).systemDB.awaitWorkflowResult(ctx, h.workflowID)
 	}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 	if result != nil {
 		typedResult, ok := result.(R)
@@ -240,8 +290,8 @@ type workflowHandleProxy[R any] struct {
 	wrappedHandle WorkflowHandle[any]
 }
 
-func (h *workflowHandleProxy[R]) GetResult() (R, error) {
-	result, err := h.wrappedHandle.GetResult()
+func (h *workflowHandleProxy[R]) GetResult(opts ...GetResultOption) (R, error) {
+	result, err := h.wrappedHandle.GetResult(opts...)
 	if err != nil {
 		var zero R
 		return zero, err
