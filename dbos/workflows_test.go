@@ -34,6 +34,11 @@ func simpleWorkflowWithStep(dbosCtx DBOSContext, input string) (string, error) {
 	})
 }
 
+func slowWorkflow(dbosCtx DBOSContext, sleepTime time.Duration) (string, error) {
+	time.Sleep(sleepTime)
+	return "done", nil
+}
+
 func simpleStep(_ context.Context) (string, error) {
 	return "from step", nil
 }
@@ -4526,11 +4531,11 @@ func TestWorkflowIdentity(t *testing.T) {
 
 func TestWorkflowHandleTimeout(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
-	RegisterWorkflow(dbosCtx, simpleWorkflow)
+	RegisterWorkflow(dbosCtx, slowWorkflow)
 
 	t.Run("WorkflowHandleTimeout", func(t *testing.T) {
 		// Test timeout on workflowHandle (channel-based)
-		handle, err := RunWorkflow(dbosCtx, simpleWorkflow, "test")
+		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 5*time.Second)
 		require.NoError(t, err, "failed to start workflow")
 
 		// Test with a very short timeout - should timeout
@@ -4545,23 +4550,23 @@ func TestWorkflowHandleTimeout(t *testing.T) {
 
 	t.Run("WorkflowHandleNoTimeout", func(t *testing.T) {
 		// Test without timeout - should work normally
-		handle, err := RunWorkflow(dbosCtx, simpleWorkflow, "test")
+		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 1*time.Millisecond)
 		require.NoError(t, err, "failed to start workflow")
 
 		result, err := handle.GetResult()
 		require.NoError(t, err, "GetResult without timeout should succeed")
-		assert.Equal(t, "test", result)
+		assert.Equal(t, "done", result)
 	})
 
 	t.Run("WorkflowHandleGetResultAfterChannelClose", func(t *testing.T) {
 		// Test getting result after the outcome channel would be closed
-		handle, err := RunWorkflow(dbosCtx, simpleWorkflow, "test")
+		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 1*time.Millisecond)
 		require.NoError(t, err, "failed to start workflow")
 
 		// Get result first time - this will close the outcome channel
 		result1, err := handle.GetResult()
 		require.NoError(t, err, "first GetResult should succeed")
-		assert.Equal(t, "test", result1)
+		assert.Equal(t, "done", result1)
 
 		// Sleep briefly to ensure channel is closed
 		time.Sleep(10 * time.Millisecond)
@@ -4575,11 +4580,11 @@ func TestWorkflowHandleTimeout(t *testing.T) {
 
 func TestWorkflowPollingHandleTimeout(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
-	RegisterWorkflow(dbosCtx, simpleWorkflow)
+	RegisterWorkflow(dbosCtx, slowWorkflow)
 
 	t.Run("WorkflowPollingHandleTimeout", func(t *testing.T) {
 		// Test timeout on workflowPollingHandle (database polling)
-		handle, err := RunWorkflow(dbosCtx, simpleWorkflow, "test")
+		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 5*time.Second)
 		require.NoError(t, err, "failed to start workflow")
 
 		// Test with a very short timeout - should timeout
@@ -4594,11 +4599,11 @@ func TestWorkflowPollingHandleTimeout(t *testing.T) {
 
 	t.Run("WorkflowPollingHandleNoTimeout", func(t *testing.T) {
 		// Test without timeout - should work normally
-		handle, err := RunWorkflow(dbosCtx, simpleWorkflow, "test")
+		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 1*time.Millisecond)
 		require.NoError(t, err, "failed to start workflow")
 
 		result, err := handle.GetResult()
 		require.NoError(t, err, "GetResult without timeout should succeed")
-		assert.Equal(t, "test", result)
+		assert.Equal(t, "done", result)
 	})
 }
