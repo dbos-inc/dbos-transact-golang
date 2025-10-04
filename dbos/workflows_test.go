@@ -38,12 +38,6 @@ func simpleStep(_ context.Context) (string, error) {
 	return "from step", nil
 }
 
-func slowWorkflow(dbosCtx DBOSContext, input string) (string, error) {
-	// Simulate a slow workflow that takes time to complete
-	time.Sleep(500 * time.Millisecond)
-	return input, nil
-}
-
 func simpleStepError(_ context.Context) (string, error) {
 	return "", fmt.Errorf("step failure")
 }
