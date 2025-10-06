@@ -6,20 +6,39 @@ import (
 	"encoding/gob"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 )
 
-func serialize(data any) (string, error) {
-	var inputBytes []byte
-	if data != nil {
-		var buf bytes.Buffer
-		enc := gob.NewEncoder(&buf)
-		if err := enc.Encode(&data); err != nil {
-			return "", fmt.Errorf("failed to encode data: %w", err)
-		}
-		inputBytes = buf.Bytes()
+func isNilValue(data any) bool {
+	if data == nil {
+		return true
 	}
-	return base64.StdEncoding.EncodeToString(inputBytes), nil
+	v := reflect.ValueOf(data)
+	// Check if the value is invalid (zero Value from reflect)
+	if !v.IsValid() {
+		return true
+	}
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface:
+		return v.IsNil()
+	}
+	return false
+}
+
+func serialize(data any) (string, error) {
+	// Handle nil and nil-able type cases (pointer, slice, map, chan, func, interface)
+	if isNilValue(data) {
+		fmt.Println("Serializing nil or nil-able type as empty string:", data, "type:", reflect.TypeOf(data))
+		return "", nil
+	}
+
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(&data); err != nil {
+		return "", fmt.Errorf("failed to encode data: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
 func deserialize(data *string) (any, error) {
@@ -47,6 +66,14 @@ func deserialize(data *string) (any, error) {
 // These specific conflicts don't affect encoding/decoding correctness, so they're safe to ignore.
 // Other panics (like register `any`) are real errors and will propagate.
 func safeGobRegister(value any, logger *slog.Logger) {
+	if isNilValue(value) {
+		// Don't attempt to register nil values, as gob.Register(nil) panics
+		if logger != nil {
+			logger.Debug("Skipping gob registration for nil value", "type", fmt.Sprintf("%T", value))
+		}
+		return
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			if errStr, ok := r.(string); ok {
