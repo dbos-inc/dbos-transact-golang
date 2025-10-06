@@ -1228,8 +1228,7 @@ func Send[P any](ctx DBOSContext, destinationID string, message P, topic string)
 	if c, ok := ctx.(*dbosContext); ok {
 		logger = c.logger
 	}
-	var typedMessage P
-	safeGobRegister(typedMessage, logger)
+	safeGobRegister(message, logger)
 	return ctx.Send(ctx, destinationID, message, topic)
 }
 
@@ -1309,8 +1308,7 @@ func SetEvent[P any](ctx DBOSContext, key string, message P) error {
 	if c, ok := ctx.(*dbosContext); ok {
 		logger = c.logger
 	}
-	var typedMessage P
-	safeGobRegister(typedMessage, logger)
+	safeGobRegister(message, logger)
 	return ctx.SetEvent(ctx, key, message)
 }
 
