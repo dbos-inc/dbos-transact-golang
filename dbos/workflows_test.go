@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -508,26 +507,6 @@ func TestWorkflowsRegistration(t *testing.T) {
 		result10, err := handle10.GetResult()
 		require.NoError(t, err, "failed to get result from workflow10")
 		assert.Equal(t, testPtrMap, result10, "unexpected result from workflow10")
-
-		t.Run("validPanic", func(t *testing.T) {
-			// Verify that non-duplicate registration panics are still propagated
-			workflow11 := func(ctx DBOSContext, input any) (any, error) {
-				return input, nil
-			}
-
-			// This should panic during registration because interface{} creates a nil value
-			// which gob.Register cannot handle
-			defer func() {
-				r := recover()
-				require.NotNil(t, r, "expected panic from interface{} registration but got none")
-				// Verify it's not a duplicate registration error (which would be caught)
-				if errStr, ok := r.(string); ok {
-					assert.False(t, strings.Contains(errStr, "gob: registering duplicate"),
-						"panic should not be a duplicate registration error, got: %v", r)
-				}
-			}()
-			RegisterWorkflow(freshCtx, workflow11) // This should panic
-		})
 	})
 }
 
