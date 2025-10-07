@@ -171,7 +171,7 @@ func (h *workflowHandle[R]) GetResult() (R, error) {
 	workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		encodedOutput, encErr := serialize(outcome.result)
+		encodedOutput, encErr := serialize(outcome.result, h.dbosContext.(*dbosContext).logger)
 		if encErr != nil {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 		}
@@ -210,7 +210,7 @@ func (h *workflowPollingHandle[R]) GetResult() (R, error) {
 		workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 		isWithinWorkflow := ok && workflowState != nil
 		if isWithinWorkflow {
-			encodedOutput, encErr := serialize(typedResult)
+			encodedOutput, encErr := serialize(typedResult, h.dbosContext.(*dbosContext).logger)
 			if encErr != nil {
 				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 			}

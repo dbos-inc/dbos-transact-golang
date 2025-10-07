@@ -26,14 +26,14 @@ func isNilValue(data any) bool {
 	return false
 }
 
-func serialize(data any) (string, error) {
+func serialize(data any, logger *slog.Logger) (string, error) {
 	// Handle nil and nil-able type cases (pointer, slice, map, chan, func, interface)
 	if isNilValue(data) {
 		return base64.StdEncoding.EncodeToString([]byte{}), nil
 	}
 
 	// Lazy registration of the type for gob encoding
-	safeGobRegister(data, nil)
+	safeGobRegister(data, logger)
 
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)

@@ -440,7 +440,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		timeoutMs = &millis
 	}
 
-	inputString, err := serialize(input.status.Input)
+	inputString, err := serialize(input.status.Input, s.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize input: %w", err)
 	}
@@ -830,7 +830,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
 			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 in ($7, $8))`, pgx.Identifier{s.schema}.Sanitize())
 
-	outputString, err := serialize(input.output)
+	outputString, err := serialize(input.output, s.logger)
 	if err != nil {
 		return fmt.Errorf("failed to serialize output: %w", err)
 	}
@@ -1105,7 +1105,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		recovery_attempts
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, pgx.Identifier{s.schema}.Sanitize())
 
-	inputString, err := serialize(originalWorkflow.Input)
+	inputString, err := serialize(originalWorkflow.Input, s.logger)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize input: %w", err)
 	}
@@ -1220,7 +1220,7 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		errorString = &e
 	}
 
-	outputString, err := serialize(input.output)
+	outputString, err := serialize(input.output, s.logger)
 	if err != nil {
 		return fmt.Errorf("failed to serialize output: %w", err)
 	}
@@ -1785,7 +1785,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	}
 
 	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := serialize(input.Message)
+	messageString, err := serialize(input.Message, s.logger)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
@@ -2020,7 +2020,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	}
 
 	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := serialize(input.Message)
+	messageString, err := serialize(input.Message, s.logger)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
