@@ -29,7 +29,7 @@ func isNilValue(data any) bool {
 func serialize(data any) (string, error) {
 	// Handle nil and nil-able type cases (pointer, slice, map, chan, func, interface)
 	if isNilValue(data) {
-		return "", nil
+		return base64.StdEncoding.EncodeToString([]byte{}), nil
 	}
 
 	// Lazy registration of the type for gob encoding
