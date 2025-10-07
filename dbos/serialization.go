@@ -29,7 +29,6 @@ func isNilValue(data any) bool {
 func serialize(data any) (string, error) {
 	// Handle nil and nil-able type cases (pointer, slice, map, chan, func, interface)
 	if isNilValue(data) {
-		fmt.Println("Serializing nil or nil-able type as empty string:", data, "type:", reflect.TypeOf(data))
 		return "", nil
 	}
 
