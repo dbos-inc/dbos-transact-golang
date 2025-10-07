@@ -33,6 +33,9 @@ func serialize(data any) (string, error) {
 		return "", nil
 	}
 
+	// Lazy registration of the type for gob encoding
+	safeGobRegister(data, nil)
+
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
 	if err := enc.Encode(&data); err != nil {
@@ -66,14 +69,6 @@ func deserialize(data *string) (any, error) {
 // These specific conflicts don't affect encoding/decoding correctness, so they're safe to ignore.
 // Other panics (like register `any`) are real errors and will propagate.
 func safeGobRegister(value any, logger *slog.Logger) {
-	if isNilValue(value) {
-		// Don't attempt to register nil values, as gob.Register(nil) panics
-		if logger != nil {
-			logger.Debug("Skipping gob registration for nil value", "type", fmt.Sprintf("%T", value))
-		}
-		return
-	}
-
 	defer func() {
 		if r := recover(); r != nil {
 			if errStr, ok := r.(string); ok {

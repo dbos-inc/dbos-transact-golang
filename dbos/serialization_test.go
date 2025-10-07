@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"strings"
@@ -304,11 +303,8 @@ func TestWorkflowEncoding(t *testing.T) {
 		}
 	})
 
-	t.Run("ManualInterfaceRegistration", func(t *testing.T) {
-		// Manually register the concrete type for interface testing
-		gob.Register(ConcreteResponse{})
-
-		// Test a workflow that returns an interface with manually registered concrete type
+	t.Run("LazyInterfaceRegistration", func(t *testing.T) {
+		// Test a workflow that returns an interface with lazily registered concrete type
 		directHandle, err := RunWorkflow(executor, encodingWorkflowInterface, "test-interface")
 		require.NoError(t, err)
 
