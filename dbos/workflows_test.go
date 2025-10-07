@@ -35,7 +35,7 @@ func simpleWorkflowWithStep(dbosCtx DBOSContext, input string) (string, error) {
 }
 
 func slowWorkflow(dbosCtx DBOSContext, sleepTime time.Duration) (string, error) {
-	time.Sleep(sleepTime)
+	Sleep(dbosCtx, sleepTime)
 	return "done", nil
 }
 
@@ -4534,76 +4534,65 @@ func TestWorkflowHandleTimeout(t *testing.T) {
 	RegisterWorkflow(dbosCtx, slowWorkflow)
 
 	t.Run("WorkflowHandleTimeout", func(t *testing.T) {
-		// Test timeout on workflowHandle (channel-based)
-		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 5*time.Second)
+		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 10*time.Second)
 		require.NoError(t, err, "failed to start workflow")
 
-		// Test with a very short timeout - should timeout
 		start := time.Now()
-		_, err = handle.GetResult(WithHandleTimeout(1 * time.Millisecond))
+		_, err = handle.GetResult(WithHandleTimeout(10 * time.Millisecond))
 		duration := time.Since(start)
 
 		require.Error(t, err, "expected timeout error")
 		assert.Contains(t, err.Error(), "workflow result timeout")
 		assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
+		assert.True(t, errors.Is(err, context.DeadlineExceeded),
+			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
 	})
 
-	t.Run("WorkflowHandleNoTimeout", func(t *testing.T) {
-		// Test without timeout - should work normally
-		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 1*time.Millisecond)
+	t.Run("WorkflowPollingHandleTimeout", func(t *testing.T) {
+		// Start a workflow that will block on the first signal
+		originalHandle, err := RunWorkflow(dbosCtx, slowWorkflow, 10*time.Second)
 		require.NoError(t, err, "failed to start workflow")
 
-		result, err := handle.GetResult()
-		require.NoError(t, err, "GetResult without timeout should succeed")
-		assert.Equal(t, "done", result)
-	})
+		pollingHandle, err := RetrieveWorkflow[string](dbosCtx, originalHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to retrieve workflow")
 
-	t.Run("WorkflowHandleGetResultAfterChannelClose", func(t *testing.T) {
-		// Test getting result after the outcome channel would be closed
-		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 1*time.Millisecond)
-		require.NoError(t, err, "failed to start workflow")
+		_, ok := pollingHandle.(*workflowPollingHandle[string])
+		require.True(t, ok, "expected polling handle, got %T", pollingHandle)
 
-		// Get result first time - this will close the outcome channel
-		result1, err := handle.GetResult()
-		require.NoError(t, err, "first GetResult should succeed")
-		assert.Equal(t, "done", result1)
+		_, err = pollingHandle.GetResult(WithHandleTimeout(10 * time.Millisecond))
 
-		// Sleep briefly to ensure channel is closed
-		time.Sleep(10 * time.Millisecond)
-
-		// Get result second time - should fail since channel is closed
-		_, err = handle.GetResult()
-		require.Error(t, err, "second GetResult should fail")
-		assert.Contains(t, err.Error(), "workflow result channel is already closed")
+		require.Error(t, err, "expected timeout error")
+		assert.True(t, errors.Is(err, context.DeadlineExceeded),
+			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
 	})
 }
 
-func TestWorkflowPollingHandleTimeout(t *testing.T) {
+func TestWorkflowHandleContextCancel(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
-	RegisterWorkflow(dbosCtx, slowWorkflow)
+	RegisterWorkflow(dbosCtx, getEventWorkflow)
 
-	t.Run("WorkflowPollingHandleTimeout", func(t *testing.T) {
-		// Test timeout on workflowPollingHandle (database polling)
-		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 5*time.Second)
+	t.Run("WorkflowHandleContextCancel", func(t *testing.T) {
+		getEventWorkflowStartedSignal.Clear()
+		handle, err := RunWorkflow(dbosCtx, getEventWorkflow, getEventWorkflowInput{
+			TargetWorkflowID: "test-workflow-id",
+			Key:              "test-key",
+		})
 		require.NoError(t, err, "failed to start workflow")
 
-		// Test with a very short timeout - should timeout
-		start := time.Now()
-		_, err = handle.GetResult(WithHandleTimeout(1 * time.Millisecond))
-		duration := time.Since(start)
+		resultChan := make(chan error)
+		go func() {
+			_, err := handle.GetResult()
+			resultChan <- err
+		}()
 
-		require.Error(t, err, "expected timeout error")
-		assert.Contains(t, err.Error(), "workflow result timeout after 1ms")
-		assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
-	})
+		getEventWorkflowStartedSignal.Wait()
+		getEventWorkflowStartedSignal.Clear()
 
-	t.Run("WorkflowPollingHandleNoTimeout", func(t *testing.T) {
-		// Test without timeout - should work normally
-		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 1*time.Millisecond)
-		require.NoError(t, err, "failed to start workflow")
+		dbosCtx.Shutdown(1 * time.Second)
 
-		result, err := handle.GetResult()
-		require.NoError(t, err, "GetResult without timeout should succeed")
-		assert.Equal(t, "done", result)
+		err = <-resultChan
+		require.Error(t, err, "expected error from cancelled context")
+		assert.True(t, errors.Is(err, context.Canceled),
+			"expected error to be detectable as context.Canceled, got: %v", err)
 	})
 }

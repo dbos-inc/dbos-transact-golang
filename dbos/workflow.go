@@ -197,9 +197,9 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 		}
 		return h.processOutcome(outcome)
 	case <-h.dbosContext.Done():
-		return *new(R), h.dbosContext.Err()
+		return *new(R), context.Cause(h.dbosContext)
 	case <-timeoutChan:
-		return *new(R), fmt.Errorf("workflow result timeout after %v", options.timeout)
+		return *new(R), fmt.Errorf("workflow result timeout after %v: %w", options.timeout, context.DeadlineExceeded)
 	}
 }
 
