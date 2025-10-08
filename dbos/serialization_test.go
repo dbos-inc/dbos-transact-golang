@@ -68,7 +68,7 @@ func TestSerialize(t *testing.T) {
 	})
 
 	t.Run("StructTypes", func(t *testing.T) {
-		type TestStruct struct {
+		type TestingStruct struct {
 			A string
 			B int
 		}
@@ -77,8 +77,8 @@ func TestSerialize(t *testing.T) {
 			name  string
 			value any
 		}{
-			{"struct", TestStruct{A: "test", B: 42}},
-			{"pointer to struct", &TestStruct{A: "test", B: 42}},
+			{"struct", TestingStruct{A: "test", B: 42}},
+			{"pointer to struct", &TestingStruct{A: "test", B: 42}},
 		}
 
 		for _, tt := range tests {
