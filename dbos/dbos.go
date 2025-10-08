@@ -354,14 +354,6 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.logger = config.Logger
 	initExecutor.logger.Info("Initializing DBOS context", "app_name", config.AppName, "dbos_version", getDBOSVersion())
 
-	// Register types we serialize with gob
-	var t time.Time
-	safeGobRegister(t, initExecutor.logger)
-	var ws []WorkflowStatus
-	safeGobRegister(ws, initExecutor.logger)
-	var si []StepInfo
-	safeGobRegister(si, initExecutor.logger)
-
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion
 	initExecutor.executorID = config.ExecutorID
