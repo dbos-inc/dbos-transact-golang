@@ -2,8 +2,10 @@ package dbos
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,294 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// ============================================================================
+// Unit Tests for Serialization Functions
+// ============================================================================
+
+func TestSerialize(t *testing.T) {
+	logger := slog.Default()
+
+	t.Run("NilValues", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			value any
+		}{
+			{"nil", nil},
+			{"nil pointer", (*int)(nil)},
+			{"nil slice", ([]int)(nil)},
+			{"nil map", (map[string]int)(nil)},
+			{"nil interface", (interface{})(nil)},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result, err := serialize(tt.value, logger)
+				require.NoError(t, err)
+				// Nil values should serialize to base64-encoded empty bytes
+				expected := base64.StdEncoding.EncodeToString([]byte{})
+				assert.Equal(t, expected, result)
+			})
+		}
+	})
+
+	t.Run("BuiltinTypes", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			value any
+		}{
+			{"int", 42},
+			{"string", "test"},
+			{"bool", true},
+			{"float64", 3.14},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result, err := serialize(tt.value, logger)
+				require.NoError(t, err)
+				assert.NotEmpty(t, result)
+				// Should be valid base64
+				_, decodeErr := base64.StdEncoding.DecodeString(result)
+				assert.NoError(t, decodeErr)
+			})
+		}
+	})
+
+	t.Run("StructTypes", func(t *testing.T) {
+		type TestStruct struct {
+			A string
+			B int
+		}
+
+		tests := []struct {
+			name  string
+			value any
+		}{
+			{"struct", TestStruct{A: "test", B: 42}},
+			{"pointer to struct", &TestStruct{A: "test", B: 42}},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result, err := serialize(tt.value, logger)
+				require.NoError(t, err)
+				assert.NotEmpty(t, result)
+				// Should be valid base64
+				_, decodeErr := base64.StdEncoding.DecodeString(result)
+				assert.NoError(t, decodeErr)
+			})
+		}
+	})
+
+	t.Run("CollectionTypes", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			value any
+		}{
+			{"slice", []int{1, 2, 3}},
+			{"map", map[string]int{"a": 1, "b": 2}},
+			{"empty slice", []int{}},
+			{"empty map", map[string]int{}},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result, err := serialize(tt.value, logger)
+				require.NoError(t, err)
+				assert.NotEmpty(t, result)
+				// Should be valid base64
+				_, decodeErr := base64.StdEncoding.DecodeString(result)
+				assert.NoError(t, decodeErr)
+			})
+		}
+	})
+}
+
+func TestDeserialize(t *testing.T) {
+	t.Run("NilOrEmptyString", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			input *string
+		}{
+			{"nil pointer", nil},
+			{"empty string", stringPtr("")},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result, err := deserialize(tt.input)
+				require.NoError(t, err)
+				assert.Nil(t, result)
+			})
+		}
+	})
+
+	t.Run("InvalidBase64", func(t *testing.T) {
+		invalidBase64 := "not-valid-base64!!!"
+		result, err := deserialize(&invalidBase64)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to decode data")
+		assert.Nil(t, result)
+	})
+
+	t.Run("ValidBase64ButInvalidGob", func(t *testing.T) {
+		// Valid base64 but not a valid gob encoding
+		invalidGob := base64.StdEncoding.EncodeToString([]byte{1, 2, 3, 4, 5})
+		result, err := deserialize(&invalidGob)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to decode data")
+		assert.Nil(t, result)
+	})
+}
+
+func TestSerializeDeserializeRoundTrip(t *testing.T) {
+	logger := slog.Default()
+
+	type ComplexStruct struct {
+		Name   string
+		Value  int
+		Nested struct {
+			Data []string
+		}
+	}
+
+	tests := []struct {
+		name     string
+		value    any
+		expected any // expected value after round trip (gob may not preserve pointer vs value)
+	}{
+		{"int", 42, 42},
+		{"string", "test string", "test string"},
+		{"bool", true, true},
+		{"float", 3.14159, 3.14159},
+		{"slice", []int{1, 2, 3, 4, 5}, []int{1, 2, 3, 4, 5}},
+		{"map", map[string]int{"a": 1, "b": 2, "c": 3}, map[string]int{"a": 1, "b": 2, "c": 3}},
+		{"struct", ComplexStruct{
+			Name:  "test",
+			Value: 42,
+			Nested: struct {
+				Data []string
+			}{
+				Data: []string{"a", "b", "c"},
+			},
+		}, ComplexStruct{
+			Name:  "test",
+			Value: 42,
+			Nested: struct {
+				Data []string
+			}{
+				Data: []string{"a", "b", "c"},
+			},
+		}},
+		// Note: gob doesn't preserve pointer vs value semantics, so a pointer becomes a value after round trip
+		{"pointer to struct", &ComplexStruct{Name: "ptr-test", Value: 99}, ComplexStruct{Name: "ptr-test", Value: 99}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Serialize
+			serialized, err := serialize(tt.value, logger)
+			require.NoError(t, err)
+			assert.NotEmpty(t, serialized)
+
+			// Deserialize
+			deserialized, err := deserialize(&serialized)
+			require.NoError(t, err)
+
+			// Verify round trip
+			assert.Equal(t, tt.expected, deserialized)
+		})
+	}
+}
+
+func TestIsNilValue(t *testing.T) {
+	t.Run("NilValues", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			value any
+		}{
+			{"nil", nil},
+			{"nil pointer", (*int)(nil)},
+			{"nil slice", ([]int)(nil)},
+			{"nil map", (map[string]int)(nil)},
+			{"nil interface", (interface{})(nil)},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				assert.True(t, isNilValue(tt.value))
+			})
+		}
+	})
+
+	t.Run("NonNilValues", func(t *testing.T) {
+		val := 42
+		tests := []struct {
+			name  string
+			value any
+		}{
+			{"int", 42},
+			{"string", "test"},
+			{"bool", true},
+			{"non-nil pointer", &val},
+			{"empty slice", []int{}},
+			{"empty map", map[string]int{}},
+			{"struct", struct{ A int }{A: 1}},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				assert.False(t, isNilValue(tt.value))
+			})
+		}
+	})
+}
+
+func TestSafeGobRegister(t *testing.T) {
+	logger := slog.Default()
+
+	t.Run("DuplicateTypeRegistration", func(t *testing.T) {
+		type TestType1 struct {
+			Value string
+		}
+
+		// First registration should succeed
+		assert.NotPanics(t, func() {
+			safeGobRegister(TestType1{}, logger)
+		})
+
+		// Duplicate registration should not panic (handled by safeGobRegister)
+		assert.NotPanics(t, func() {
+			safeGobRegister(TestType1{}, logger)
+		})
+	})
+
+	t.Run("TypeAndPointerConflict", func(t *testing.T) {
+		type TestType2 struct {
+			Value string
+		}
+
+		// Register value type
+		assert.NotPanics(t, func() {
+			safeGobRegister(TestType2{}, logger)
+		})
+
+		// Register pointer type (should handle the conflict gracefully)
+		assert.NotPanics(t, func() {
+			safeGobRegister(&TestType2{}, logger)
+		})
+	})
+}
+
+// Helper function
+func stringPtr(s string) *string {
+	return &s
+}
+
+// ============================================================================
+// Integration Tests for Workflow Serialization
+// ============================================================================
 
 // Builtin types
 func encodingStepBuiltinTypes(_ context.Context, input int) (int, error) {
@@ -128,7 +418,7 @@ func encodingStepInterface(_ context.Context, input string) (ResponseInterface, 
 	}, nil
 }
 
-func TestWorkflowEncoding(t *testing.T) {
+func TestWorkflowSerializationIntegration(t *testing.T) {
 	executor := setupDBOS(t, true, true)
 
 	// Register workflows with executor
@@ -480,5 +770,150 @@ func TestSendSerialize(t *testing.T) {
 		// Verify tags
 		expectedTags := []string{"test", "user-defined", "serialization", "send"}
 		assert.Equal(t, expectedTags, receivedData.Details.Tags)
+	})
+}
+
+func TestGobRegistrationWithConflictingTypes(t *testing.T) {
+	// Create a fresh DBOS context for this test
+	executor := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+
+	// Test type definitions
+	type TestType struct {
+		Value string
+	}
+
+	type InnerType struct {
+		ID int
+	}
+	type OuterType struct {
+		Inner InnerType
+		Name  string
+	}
+
+	// Test workflows with various type combinations
+	workflow1 := func(ctx DBOSContext, input TestType) (TestType, error) {
+		return input, nil
+	}
+	workflow2 := func(ctx DBOSContext, input *TestType) (*TestType, error) {
+		return input, nil
+	}
+	workflow3 := func(ctx DBOSContext, input TestType) (TestType, error) {
+		return TestType{Value: input.Value + "-modified"}, nil
+	}
+	workflow5 := func(ctx DBOSContext, input OuterType) (OuterType, error) {
+		return input, nil
+	}
+	workflow6 := func(ctx DBOSContext, input *OuterType) (*OuterType, error) {
+		return input, nil
+	}
+	workflow7 := func(ctx DBOSContext, input []TestType) ([]TestType, error) {
+		return input, nil
+	}
+	workflow8 := func(ctx DBOSContext, input []*TestType) ([]*TestType, error) {
+		return input, nil
+	}
+	workflow9 := func(ctx DBOSContext, input map[string]TestType) (map[string]TestType, error) {
+		return input, nil
+	}
+	workflow10 := func(ctx DBOSContext, input map[string]*TestType) (map[string]*TestType, error) {
+		return input, nil
+	}
+
+	// Register all workflows - this will trigger gob registration conflicts that should be handled gracefully
+	RegisterWorkflow(executor, workflow1)
+	RegisterWorkflow(executor, workflow2)
+	RegisterWorkflow(executor, workflow3)
+	RegisterWorkflow(executor, workflow5)
+	RegisterWorkflow(executor, workflow6)
+	RegisterWorkflow(executor, workflow7)
+	RegisterWorkflow(executor, workflow8)
+	RegisterWorkflow(executor, workflow9)
+	RegisterWorkflow(executor, workflow10)
+
+	// Launch and verify the system works
+	err := Launch(executor)
+	require.NoError(t, err, "failed to launch DBOS after gob conflict handling")
+	defer Shutdown(executor, 10*time.Second)
+
+	// Test workflows with value type and pointer type
+	t.Run("ValueType", func(t *testing.T) {
+		testValue := TestType{Value: "test"}
+		handle, err := RunWorkflow(executor, workflow1, testValue)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, testValue, result)
+	})
+
+	t.Run("PointerType", func(t *testing.T) {
+		testPointer := &TestType{Value: "pointer"}
+		handle, err := RunWorkflow(executor, workflow2, testPointer)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, testPointer, result)
+	})
+
+	t.Run("ModifiedOutput", func(t *testing.T) {
+		testValue := TestType{Value: "test"}
+		handle, err := RunWorkflow(executor, workflow3, testValue)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, TestType{Value: "test-modified"}, result)
+	})
+
+	t.Run("NestedStruct", func(t *testing.T) {
+		testOuter := OuterType{Inner: InnerType{ID: 42}, Name: "test"}
+		handle, err := RunWorkflow(executor, workflow5, testOuter)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, testOuter, result)
+	})
+
+	t.Run("NestedStructPointer", func(t *testing.T) {
+		testOuterPtr := &OuterType{Inner: InnerType{ID: 43}, Name: "test-ptr"}
+		handle, err := RunWorkflow(executor, workflow6, testOuterPtr)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, testOuterPtr, result)
+	})
+
+	t.Run("SliceType", func(t *testing.T) {
+		testSlice := []TestType{{Value: "a"}, {Value: "b"}}
+		handle, err := RunWorkflow(executor, workflow7, testSlice)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, testSlice, result)
+	})
+
+	t.Run("PointerSliceType", func(t *testing.T) {
+		testPtrSlice := []*TestType{{Value: "a"}, {Value: "b"}}
+		handle, err := RunWorkflow(executor, workflow8, testPtrSlice)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, testPtrSlice, result)
+	})
+
+	t.Run("MapType", func(t *testing.T) {
+		testMap := map[string]TestType{"key1": {Value: "value1"}}
+		handle, err := RunWorkflow(executor, workflow9, testMap)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, testMap, result)
+	})
+
+	t.Run("PointerMapType", func(t *testing.T) {
+		testPtrMap := map[string]*TestType{"key1": {Value: "value1"}}
+		handle, err := RunWorkflow(executor, workflow10, testPtrMap)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, testPtrMap, result)
 	})
 }
