@@ -1207,7 +1207,8 @@ func WithNextStepID(stepID int) StepOption {
 }
 
 // StepOutcome holds the result and error from a step execution
-type stepOutcome[R any] struct {
+// This struct is returned as part of a channel from the Go function when running the step inside a Go routine
+type StepOutcome[R any] struct {
 	result R
 	err    error
 }
@@ -1439,19 +1440,56 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 // Go runs a step inside a Go routine and returns a channel to receive the result.
 // Go generates a deterministic step ID for the step before running the step in a routine, since routines are not deterministic.
 // The step ID is used to track the steps within the same workflow and use the step ID to perform recovery.
-// The folliwing examples shows how to use Go: 
+// The folliwing examples shows how to use Go:
 //
-//	resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
-//		return "Hello, World!", nil
-//	})
+//		resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
+//			return "Hello, World!", nil
+//		})
 //
-//	resultChan := <-resultChan // wait for the channel to receive
-//	if resultChan.err != nil {
-//		// Handle error
-//	}
-//  result := resultChan.result
-//
-func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan stepOutcome[R], error) {
+//		resultChan := <-resultChan // wait for the channel to receive
+//		if resultChan.err != nil {
+//			// Handle error
+//		}
+//	 result := resultChan.result
+func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcome[R], error) {
+	if ctx == nil {
+		// is this the correct return here?
+		return *new(chan StepOutcome[R]), newStepExecutionError("", "", "ctx cannot be nil")
+	}
+
+	if fn == nil {
+		return *new(chan StepOutcome[R]), newStepExecutionError("", "", "step function cannot be nil")
+	}
+
+	// Append WithStepName option to ensure the step name is set. This will not erase a user-provided step name
+	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	opts = append(opts, WithStepName(stepName))
+
+	// Type-erase the function
+	typeErasedFn := StepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
+
+	result, err := ctx.Go(ctx, typeErasedFn, opts...)
+	// Step function could return a nil result
+	if result == nil {
+		return *new(chan StepOutcome[R]), err
+	}
+
+	// Otherwise type-check and cast the result
+	outcome := <-result
+	typedResult, ok := outcome.result.(R)
+	if !ok {
+		return *new(chan StepOutcome[R]), fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), result)
+	}
+	outcomeChan := make(chan StepOutcome[R], 1)
+	defer close(outcomeChan)
+	outcomeChan <- StepOutcome[R]{
+		result: typedResult,
+		err:    outcome.err,
+	}
+	return outcomeChan, nil
+}
+
+func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (chan StepOutcome[any], error) {
 	// create a determistic step ID
 	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
@@ -1461,11 +1499,11 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan stepOutcom
 	stepID := wfState.nextStepID()
 	opts = append(opts, WithNextStepID(stepID))
 
-	// run step inside a Go routine by passing a stepID 
-	result := make(chan stepOutcome[R], 1)
+	// run step inside a Go routine by passing a stepID
+	result := make(chan StepOutcome[any], 1)
 	go func() {
-		res, err := RunAsStep(ctx, fn, opts...)
-		result <- stepOutcome[R]{
+		res, err := ctx.RunAsStep(ctx, fn, opts...)
+		result <- StepOutcome[any]{
 			result: res,
 			err:    err,
 		}

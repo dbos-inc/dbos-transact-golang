@@ -737,7 +737,7 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		const numSteps = 100
 		results := make(chan string, numSteps)
 		errors := make(chan error, numSteps)
-		var resultChans []<-chan stepOutcome[string]
+		var resultChans []<-chan StepOutcome[string]
 
 		goWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 			for range numSteps {
