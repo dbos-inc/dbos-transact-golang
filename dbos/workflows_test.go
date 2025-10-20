@@ -786,7 +786,6 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		handle, err := RunWorkflow(dbosCtx, goWorkflow, "test-input")
 		require.NoError(t, err, "failed to run go workflow")
 		_, err = handle.GetResult()
-
 		close(results)
 		close(errors)
 		require.NoError(t, err, "failed to get result from go workflow")

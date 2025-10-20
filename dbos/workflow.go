@@ -1520,8 +1520,6 @@ func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (chan
 		}
 	}()
 
-	// TODO: do I need to close the channel here?
-
 	return result, nil
 }
 
