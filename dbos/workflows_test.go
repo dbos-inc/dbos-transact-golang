@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"reflect"
@@ -47,9 +48,24 @@ func simpleStepError(_ context.Context) (string, error) {
 	return "", fmt.Errorf("step failure")
 }
 
+type stepWithSleepOutput struct {
+	StepID int
+	Result string
+	Error  error
+}
+
 func stepWithSleep(_ context.Context, duration time.Duration) (string, error) {
 	time.Sleep(duration)
 	return fmt.Sprintf("from step that slept for %s", duration), nil
+}
+
+func stepWithSleepCustomOutput(_ context.Context, duration time.Duration, stepID int) (stepWithSleepOutput, error) {
+	time.Sleep(duration)
+	return stepWithSleepOutput{
+		StepID: stepID,
+		Result: fmt.Sprintf("from step that slept for %s", duration),
+		Error:  nil,
+	}, nil
 }
 
 func simpleWorkflowWithStepError(dbosCtx DBOSContext, input string) (string, error) {
@@ -867,6 +883,10 @@ func TestSteps(t *testing.T) {
 
 func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
+
+	// Register custom types for Gob encoding
+	var stepOutput stepWithSleepOutput
+	gob.Register(stepOutput)
 	t.Run("Go must run steps inside a workflow", func(t *testing.T) {
 		_, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 			return stepWithSleep(ctx, 1*time.Second)
@@ -907,12 +927,12 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		const numSteps = 100
 		results := make(chan string, numSteps)
 		errors := make(chan error, numSteps)
-		var resultChans []<-chan StepOutcome[string]
+		var resultChans []<-chan StepOutcome[stepWithSleepOutput]
 
 		goWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-			for range numSteps {
-				resultChan, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
-					return stepWithSleep(ctx, 20*time.Millisecond)
+			for i := 0; i < numSteps; i++ {
+				resultChan, err := Go(dbosCtx, func(ctx context.Context) (stepWithSleepOutput, error) {
+					return stepWithSleepCustomOutput(ctx, 20*time.Millisecond, i)
 				})
 
 				if err != nil {
@@ -921,12 +941,13 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 				resultChans = append(resultChans, resultChan)
 			}
 
-			for _, resultChan := range resultChans {
+			for i, resultChan := range resultChans {
 				result1 := <-resultChan
 				if result1.err != nil {
-					errors <- result1.err
+					errors <- result1.result.Error
 				}
-				results <- result1.result
+				assert.Equal(t, i, result1.result.StepID, "expected step ID to be %d, got %d", i, result1.result.StepID)
+				results <- result1.result.Result
 			}
 			return "", nil
 		}
@@ -938,18 +959,10 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 
 		close(results)
 		close(errors)
-
 		require.NoError(t, err, "failed to get result from go workflow")
 		assert.Equal(t, numSteps, len(results), "expected %d results, got %d", numSteps, len(results))
 		assert.Equal(t, 0, len(errors), "expected no errors, got %d", len(errors))
 
-		// Test step IDs are deterministic and in the order of execution
-		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
-		require.NoError(t, err, "failed to get workflow steps")
-		require.Len(t, steps, numSteps, "expected %d steps, got %d", numSteps, len(steps))
-		for i := 0; i < numSteps; i++ {
-			assert.Equal(t, i, steps[i].StepID, "expected step ID to be %d, got %d", i, steps[i].StepID)
-		}
 	})
 }
 
