@@ -1474,18 +1474,29 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcom
 		return *new(chan StepOutcome[R]), err
 	}
 
-	// Otherwise type-check and cast the result
+	outcomeChan := make(chan StepOutcome[R], 1)
+	defer close(outcomeChan)
+
 	outcome := <-result
+
+	if outcome.err != nil {
+		outcomeChan <- StepOutcome[R]{
+			result: *new(R),
+			err:    outcome.err,
+		}
+		return outcomeChan, nil
+	}
+
+	// Otherwise type-check and cast the result
 	typedResult, ok := outcome.result.(R)
 	if !ok {
 		return *new(chan StepOutcome[R]), fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), result)
 	}
-	outcomeChan := make(chan StepOutcome[R], 1)
-	defer close(outcomeChan)
 	outcomeChan <- StepOutcome[R]{
 		result: typedResult,
-		err:    outcome.err,
+		err:    nil,
 	}
+
 	return outcomeChan, nil
 }
 
@@ -1508,6 +1519,8 @@ func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (chan
 			err:    err,
 		}
 	}()
+
+	// TODO: do I need to close the channel here?
 
 	return result, nil
 }
