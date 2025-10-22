@@ -7,7 +7,6 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -81,21 +80,6 @@ func runStart(cmd *cobra.Command, args []string) error {
 				syscall.Kill(-process.Process.Pid, syscall.SIGTERM)
 			} else {
 				process.Process.Kill()
-			}
-
-			// Wait a bit for graceful shutdown
-			select {
-			case <-done:
-			case <-sigChan:
-				// Force kill if we get another signal
-				if runtime.GOOS != "windows" {
-					syscall.Kill(-process.Process.Pid, syscall.SIGKILL)
-				}
-			case <-time.After(10 * time.Second):
-				// Force kill after timeout
-				if runtime.GOOS != "windows" {
-					syscall.Kill(-process.Process.Pid, syscall.SIGKILL)
-				}
 			}
 
 			os.Exit(0)
