@@ -1130,8 +1130,8 @@ type StepFunc func(ctx context.Context) (any, error)
 // Step represents a type-safe step function with a specific output type R.
 type Step[R any] func(ctx context.Context) (R, error)
 
-// StepOptions holds the configuration for step execution using functional options pattern.
-type StepOptions struct {
+// stepOptions holds the configuration for step execution using functional options pattern.
+type stepOptions struct {
 	maxRetries         int           // Maximum number of retry attempts (0 = no retries)
 	backoffFactor      float64       // Exponential backoff multiplier between retries (default: 2.0)
 	baseInterval       time.Duration // Initial delay between retries (default: 100ms)
@@ -1141,7 +1141,7 @@ type StepOptions struct {
 }
 
 // setDefaults applies default values to stepOptions
-func (opts *StepOptions) setDefaults() {
+func (opts *stepOptions) setDefaults() {
 	if opts.backoffFactor == 0 {
 		opts.backoffFactor = _DEFAULT_STEP_BACKOFF_FACTOR
 	}
@@ -1154,12 +1154,12 @@ func (opts *StepOptions) setDefaults() {
 }
 
 // StepOption is a functional option for configuring step execution parameters.
-type StepOption func(*StepOptions)
+type StepOption func(*stepOptions)
 
 // WithStepName sets a custom name for the step. If the step name has already been set
 // by a previous call to WithStepName, this option will be ignored
 func WithStepName(name string) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		if opts.stepName == "" {
 			opts.stepName = name
 		}
@@ -1169,7 +1169,7 @@ func WithStepName(name string) StepOption {
 // WithStepMaxRetries sets the maximum number of retry attempts for the step.
 // A value of 0 means no retries (default behavior).
 func WithStepMaxRetries(maxRetries int) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		opts.maxRetries = maxRetries
 	}
 }
@@ -1178,7 +1178,7 @@ func WithStepMaxRetries(maxRetries int) StepOption {
 // The delay between retries is calculated as: BaseInterval * (BackoffFactor^(retry-1))
 // Default value is 2.0.
 func WithBackoffFactor(factor float64) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		opts.backoffFactor = factor
 	}
 }
@@ -1186,7 +1186,7 @@ func WithBackoffFactor(factor float64) StepOption {
 // WithBaseInterval sets the initial delay between retries.
 // Default value is 100ms.
 func WithBaseInterval(interval time.Duration) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		opts.baseInterval = interval
 	}
 }
@@ -1194,14 +1194,14 @@ func WithBaseInterval(interval time.Duration) StepOption {
 // WithMaxInterval sets the maximum delay between retries.
 // Default value is 5s.
 func WithMaxInterval(interval time.Duration) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		opts.maxInterval = interval
 	}
 }
 
 
 func WithNextStepID(stepID int) StepOption {
-	return func(opts *StepOptions) {
+	return func(opts *stepOptions) {
 		opts.preGeneratedStepID = &stepID
 	}
 }
@@ -1302,7 +1302,7 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 
 func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error) {
 	// Process functional options
-	stepOpts := &StepOptions{}
+	stepOpts := &stepOptions{}
 	for _, opt := range opts {
 		opt(stepOpts)
 	}
