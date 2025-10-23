@@ -48,24 +48,9 @@ func simpleStepError(_ context.Context) (string, error) {
 	return "", fmt.Errorf("step failure")
 }
 
-type stepWithSleepOutput struct {
-	StepID int
-	Result string
-	Error  error
-}
-
 func stepWithSleep(_ context.Context, duration time.Duration) (string, error) {
 	time.Sleep(duration)
 	return fmt.Sprintf("from step that slept for %s", duration), nil
-}
-
-func stepWithSleepCustomOutput(_ context.Context, duration time.Duration, stepID int) (stepWithSleepOutput, error) {
-	time.Sleep(duration)
-	return stepWithSleepOutput{
-		StepID: stepID,
-		Result: fmt.Sprintf("from step that slept for %s", duration),
-		Error:  nil,
-	}, nil
 }
 
 func simpleWorkflowWithStepError(dbosCtx DBOSContext, input string) (string, error) {
@@ -881,7 +866,37 @@ func TestSteps(t *testing.T) {
 	})
 }
 
+type stepWithSleepOutput struct {
+	StepID int
+	Result string
+	Error  error
+}
+
+var (
+	stepDeterminismStartEvent *Event
+	stepDeterminismEvent      *Event
+)
+
+func stepWithSleepCustomOutput(_ context.Context, duration time.Duration, stepID int) (stepWithSleepOutput, error) {
+	time.Sleep(duration)
+	return stepWithSleepOutput{
+		StepID: stepID,
+		Result: fmt.Sprintf("from step that slept for %s", duration),
+		Error:  nil,
+	}, nil
+}
+
+// blocks indefinitely
+func stepThatBlocks(_ context.Context) (string, error) {
+	stepDeterminismStartEvent.Set()
+	fmt.Println("stepThatBlocks: started to block")
+	stepDeterminismEvent.Wait()
+	fmt.Println("stepThatBlocks: unblocked")
+	return "from step that blocked", nil
+}
+
 func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
+
 	dbosCtx := setupDBOS(t, true, true)
 
 	// Register custom types for Gob encoding
@@ -922,7 +937,7 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		require.Equal(t, "step error", err.Error())
 	})
 
-	t.Run("Go must execute 100 steps simultaneously", func(t *testing.T) {
+	t.Run("Go must execute 100 steps simultaneously then return the stepIDs in the correct sequence", func(t *testing.T) {
 		// run 100 steps simultaneously
 		const numSteps = 100
 		results := make(chan string, numSteps)
@@ -930,7 +945,7 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		var resultChans []<-chan StepOutcome[stepWithSleepOutput]
 
 		goWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-			for i := 0; i < numSteps; i++ {
+			for i := range numSteps {
 				resultChan, err := Go(dbosCtx, func(ctx context.Context) (stepWithSleepOutput, error) {
 					return stepWithSleepCustomOutput(ctx, 20*time.Millisecond, i)
 				})
@@ -961,7 +976,80 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		require.NoError(t, err, "failed to get result from go workflow")
 		assert.Equal(t, numSteps, len(results), "expected %d results, got %d", numSteps, len(results))
 		assert.Equal(t, 0, len(errors), "expected no errors, got %d", len(errors))
+	})
 
+	t.Run("Go executes the same workflow twice, whilst blocking the first workflow, to test for deterministic execution when using Go routines", func(t *testing.T) {
+
+		stepDeterminismStartEvent = NewEvent()
+		stepDeterminismEvent = NewEvent()
+
+		goWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+			_, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				return stepWithSleep(ctx, 1*time.Second)
+			})
+
+			if err != nil {
+				return "", err
+			}
+
+			_, err = Go(dbosCtx, func(ctx context.Context) (string, error) {
+				return stepWithSleep(ctx, 1*time.Second)
+			})
+
+			if err != nil {
+				return "", err
+			}
+
+			_, err = Go(dbosCtx, func(ctx context.Context) (string, error) {
+				return stepWithSleep(ctx, 1*time.Second)
+			})
+
+			if err != nil {
+				return "", err
+			}
+
+			_, err = Go(dbosCtx, func(ctx context.Context) (string, error) {
+				return stepThatBlocks(ctx)
+			})
+
+			if err != nil {
+				return "", err
+			}
+
+			return "WORKFLOW EXECUTED DETERMINISTICALLY", nil
+		}
+
+		// Run the first workflow
+		RegisterWorkflow(dbosCtx, goWorkflow)
+		handle, err := RunWorkflow(dbosCtx, goWorkflow, "test-input")
+		require.NoError(t, err, "failed to run go workflow")
+		
+		// Wait for the first workflow to reach the blocking step
+		stepDeterminismStartEvent.Wait()
+		stepDeterminismStartEvent.Clear()
+
+		// Run the second workflow
+		handle2, err := RunWorkflow(dbosCtx, goWorkflow, "test-input", WithWorkflowID(handle.GetWorkflowID()))
+		
+		// If it throws an error, it's because of steps not being deterministically executed when using Go routines in the first workflow
+		require.NoError(t, err, "failed to run go workflow")
+		
+		// Complete the blocked workflow
+		stepDeterminismEvent.Set()
+
+		_, err = handle2.GetResult()
+		require.NoError(t, err, "failed to get result from go workflow")
+
+		// Verify workflow status is SUCCESS
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusSuccess, status.Status, "expected workflow status to be WorkflowStatusSuccess")
+		
+
+		// Verify workflow result is "WORKFLOW EXECUTED DETERMINISTICALLY"
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from go workflow")
+		require.Equal(t, "WORKFLOW EXECUTED DETERMINISTICALLY", result, "expected result to be 'WORKFLOW EXECUTED DETERMINISTICALLY'")
 	})
 }
 
