@@ -1453,7 +1453,6 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 //	 result := resultChan.result
 func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcome[R], error) {
 	if ctx == nil {
-		// is this the correct return here?
 		return *new(chan StepOutcome[R]), newStepExecutionError("", "", "ctx cannot be nil")
 	}
 
