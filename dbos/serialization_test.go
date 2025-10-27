@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -11,304 +10,288 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Builtin types
-func encodingStepBuiltinTypes(_ context.Context, input int) (int, error) {
-	return input, errors.New("step error")
+// Test data structures for DBOS integration testing
+type TestData struct {
+	Message string
+	Value   int
+	Active  bool
 }
 
-func encodingWorkflowBuiltinTypes(ctx DBOSContext, input string) (string, error) {
-	stepResult, err := RunAsStep(ctx, func(context context.Context) (int, error) {
-		return encodingStepBuiltinTypes(context, 123)
-	})
-	return fmt.Sprintf("%d", stepResult), fmt.Errorf("workflow error: %v", err)
+type TestWorkflowData struct {
+	ID       string
+	Message  string
+	Value    int
+	Active   bool
+	Data     TestData
+	Created  time.Time
+	Metadata map[string]string
 }
 
-// Struct types
-type StepOutputStruct struct {
-	A StepInputStruct
-	B string
+// Test workflows and steps
+func serializerTestStep(_ context.Context, input TestWorkflowData) (TestWorkflowData, error) {
+	return input, nil
 }
 
-type StepInputStruct struct {
-	A SimpleStruct
-	B string
-}
-
-type WorkflowInputStruct struct {
-	A SimpleStruct
-	B int
-}
-
-type SimpleStruct struct {
-	A string
-	B int
-}
-
-func encodingWorkflowStruct(ctx DBOSContext, input WorkflowInputStruct) (StepOutputStruct, error) {
-	return RunAsStep(ctx, func(context context.Context) (StepOutputStruct, error) {
-		return encodingStepStruct(context, StepInputStruct{
-			A: input.A,
-			B: fmt.Sprintf("%d", input.B),
-		})
+func serializerTestWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
+	return RunAsStep(ctx, func(context context.Context) (TestWorkflowData, error) {
+		return serializerTestStep(context, input)
 	})
 }
 
-func encodingStepStruct(_ context.Context, input StepInputStruct) (StepOutputStruct, error) {
-	return StepOutputStruct{
-		A: input,
-		B: "processed by encodingStepStruct",
-	}, nil
+func serializerNilValueWorkflow(ctx DBOSContext, input any) (any, error) {
+	return RunAsStep(ctx, func(context context.Context) (any, error) {
+		return input, nil
+	})
 }
 
-func TestWorkflowEncoding(t *testing.T) {
-	executor := setupDBOS(t, true, true)
+func serializerErrorStep(_ context.Context, _ TestWorkflowData) (TestWorkflowData, error) {
+	return TestWorkflowData{}, fmt.Errorf("step error")
+}
 
-	// Register workflows with executor
-	RegisterWorkflow(executor, encodingWorkflowBuiltinTypes)
-	RegisterWorkflow(executor, encodingWorkflowStruct)
-
-	err := Launch(executor)
-	require.NoError(t, err)
-
-	t.Run("BuiltinTypes", func(t *testing.T) {
-		// Test a workflow that uses a built-in type (string)
-		directHandle, err := RunWorkflow(executor, encodingWorkflowBuiltinTypes, "test")
-		require.NoError(t, err)
-
-		// Test result and error from direct handle
-		directHandleResult, err := directHandle.GetResult()
-		assert.Equal(t, "123", directHandleResult)
-		require.Error(t, err)
-		assert.Equal(t, "workflow error: step error", err.Error())
-
-		// Test result from polling handle
-		retrieveHandler, err := RetrieveWorkflow[string](executor.(*dbosContext), directHandle.GetWorkflowID())
-		require.NoError(t, err)
-		retrievedResult, err := retrieveHandler.GetResult()
-		assert.Equal(t, "123", retrievedResult)
-		require.Error(t, err)
-		assert.Equal(t, "workflow error: step error", err.Error())
-
-		// Test results from ListWorkflows
-		workflows, err := ListWorkflows(
-			executor,
-			WithWorkflowIDs([]string{directHandle.GetWorkflowID()}),
-			WithLoadInput(true),
-			WithLoadOutput(true),
-		)
-		require.NoError(t, err)
-		require.Len(t, workflows, 1)
-		workflow := workflows[0]
-		require.NotNil(t, workflow.Input)
-		workflowInput, ok := workflow.Input.(string)
-		require.True(t, ok, "expected workflow input to be of type string, got %T", workflow.Input)
-		assert.Equal(t, "test", workflowInput)
-		require.NotNil(t, workflow.Output)
-		workflowOutput, ok := workflow.Output.(string)
-		require.True(t, ok, "expected workflow output to be of type string, got %T", workflow.Output)
-		assert.Equal(t, "123", workflowOutput)
-		require.NotNil(t, workflow.Error)
-		assert.Equal(t, "workflow error: step error", workflow.Error.Error())
-
-		// Test results from GetWorkflowSteps
-		steps, err := GetWorkflowSteps(executor, directHandle.GetWorkflowID())
-		require.NoError(t, err)
-		require.Len(t, steps, 1)
-		step := steps[0]
-		require.NotNil(t, step.Output)
-		stepOutput, ok := step.Output.(int)
-		require.True(t, ok, "expected step output to be of type int, got %T", step.Output)
-		assert.Equal(t, 123, stepOutput)
-		require.NotNil(t, step.Error)
-		assert.Equal(t, "step error", step.Error.Error())
+func serializerErrorWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
+	return RunAsStep(ctx, func(context context.Context) (TestWorkflowData, error) {
+		return serializerErrorStep(context, input)
 	})
+}
 
-	t.Run("StructType", func(t *testing.T) {
-		// Test a workflow that calls a step with struct types to verify serialization/deserialization
-		input := WorkflowInputStruct{
-			A: SimpleStruct{A: "test", B: 123},
-			B: 456,
+// Test that DBOS uses the configured serializer
+func TestSerializerConfiguration(t *testing.T) {
+	// Test JSON serializer configuration
+	t.Run("JSONSerializer", func(t *testing.T) {
+		config := Config{
+			DatabaseURL: getDatabaseURL(),
+			AppName:     "test-app",
+			Serializer:  NewJSONSerializer(),
 		}
 
-		directHandle, err := RunWorkflow(executor, encodingWorkflowStruct, input)
-		require.NoError(t, err)
+		executor, err := NewDBOSContext(context.Background(), config)
+		require.NoError(t, err, "Failed to create DBOS context with JSON serializer")
 
-		// Test result from direct handle
-		directResult, err := directHandle.GetResult()
-		require.NoError(t, err)
-		assert.Equal(t, input.A.A, directResult.A.A.A)
-		assert.Equal(t, input.A.B, directResult.A.A.B)
-		assert.Equal(t, fmt.Sprintf("%d", input.B), directResult.A.B)
-		assert.Equal(t, "processed by encodingStepStruct", directResult.B)
+		// Verify the serializer is set in the context
+		if dbosCtx, ok := executor.(*dbosContext); ok {
+			assert.NotNil(t, dbosCtx.serializer, "JSON serializer should be configured")
+			assert.IsType(t, &JSONSerializer{}, dbosCtx.serializer, "Should be JSONSerializer type")
+		}
+	})
 
-		// Test result from polling handle
-		retrieveHandler, err := RetrieveWorkflow[StepOutputStruct](executor.(*dbosContext), directHandle.GetWorkflowID())
-		require.NoError(t, err)
-		retrievedResult, err := retrieveHandler.GetResult()
-		require.NoError(t, err)
-		assert.Equal(t, input.A.A, retrievedResult.A.A.A)
-		assert.Equal(t, input.A.B, retrievedResult.A.A.B)
-		assert.Equal(t, fmt.Sprintf("%d", input.B), retrievedResult.A.B)
-		assert.Equal(t, "processed by encodingStepStruct", retrievedResult.B)
+	// Test Gob serializer configuration
+	t.Run("GobSerializer", func(t *testing.T) {
+		config := Config{
+			DatabaseURL: getDatabaseURL(),
+			AppName:     "test-app",
+			Serializer:  NewGobSerializer(),
+		}
 
-		// Test results from ListWorkflows
-		workflows, err := ListWorkflows(executor,
-			WithWorkflowIDs([]string{directHandle.GetWorkflowID()}),
-			WithLoadInput(true),
-			WithLoadOutput(true),
-		)
-		require.Len(t, workflows, 1)
-		require.NoError(t, err)
-		workflow := workflows[0]
-		require.NotNil(t, workflow.Input)
-		workflowInput, ok := workflow.Input.(WorkflowInputStruct)
-		require.True(t, ok, "expected workflow input to be of type WorkflowInputStruct, got %T", workflow.Input)
-		assert.Equal(t, input.A.A, workflowInput.A.A)
-		assert.Equal(t, input.A.B, workflowInput.A.B)
-		assert.Equal(t, input.B, workflowInput.B)
+		executor, err := NewDBOSContext(context.Background(), config)
+		require.NoError(t, err, "Failed to create DBOS context with Gob serializer")
 
-		workflowOutput, ok := workflow.Output.(StepOutputStruct)
-		require.True(t, ok, "expected workflow output to be of type StepOutputStruct, got %T", workflow.Output)
-		assert.Equal(t, input.A.A, workflowOutput.A.A.A)
-		assert.Equal(t, input.A.B, workflowOutput.A.A.B)
-		assert.Equal(t, fmt.Sprintf("%d", input.B), workflowOutput.A.B)
-		assert.Equal(t, "processed by encodingStepStruct", workflowOutput.B)
+		// Verify the serializer is set in the context
+		if dbosCtx, ok := executor.(*dbosContext); ok {
+			assert.NotNil(t, dbosCtx.serializer, "Gob serializer should be configured")
+			assert.IsType(t, &GobSerializer{}, dbosCtx.serializer, "Should be GobSerializer type")
+		}
+	})
 
-		// Test results from GetWorkflowSteps
-		steps, err := GetWorkflowSteps(executor, directHandle.GetWorkflowID())
-		require.NoError(t, err)
-		require.Len(t, steps, 1)
-		step := steps[0]
-		require.NotNil(t, step.Output)
-		stepOutput, ok := step.Output.(StepOutputStruct)
-		require.True(t, ok, "expected step output to be of type StepOutputStruct, got %T", step.Output)
-		assert.Equal(t, input.A.A, stepOutput.A.A.A)
-		assert.Equal(t, input.A.B, stepOutput.A.A.B)
-		assert.Equal(t, fmt.Sprintf("%d", input.B), stepOutput.A.B)
-		assert.Equal(t, "processed by encodingStepStruct", stepOutput.B)
-		assert.Nil(t, step.Error)
+	// Test default serializer (should be JSON)
+	t.Run("DefaultSerializer", func(t *testing.T) {
+		config := Config{
+			DatabaseURL: getDatabaseURL(),
+			AppName:     "test-app",
+			// No serializer specified - should default to JSON
+		}
+
+		executor, err := NewDBOSContext(context.Background(), config)
+		require.NoError(t, err, "Failed to create DBOS context with default serializer")
+
+		// Verify the default serializer is JSON
+		if dbosCtx, ok := executor.(*dbosContext); ok {
+			assert.NotNil(t, dbosCtx.serializer, "Default serializer should be configured")
+			assert.IsType(t, &JSONSerializer{}, dbosCtx.serializer, "Default should be JSONSerializer")
+		}
 	})
 }
 
-type UserDefinedEventData struct {
-	ID      int    `json:"id"`
-	Name    string `json:"name"`
-	Details struct {
-		Description string   `json:"description"`
-		Tags        []string `json:"tags"`
-	} `json:"details"`
-}
-
-func setEventUserDefinedTypeWorkflow(ctx DBOSContext, input string) (string, error) {
-	eventData := UserDefinedEventData{
-		ID:   42,
-		Name: "test-event",
-		Details: struct {
-			Description string   `json:"description"`
-			Tags        []string `json:"tags"`
-		}{
-			Description: "This is a test event with user-defined data",
-			Tags:        []string{"test", "user-defined", "serialization"},
-		},
+// Test that workflows use the configured serializer for input/output
+func TestSerializer(t *testing.T) {
+	serializers := map[string]func() Serializer{
+		"JSON": func() Serializer { return NewJSONSerializer() },
+		"Gob":  func() Serializer { return NewGobSerializer() },
 	}
 
-	err := SetEvent(ctx, input, eventData)
-	if err != nil {
-		return "", err
+	for serializerName, serializerFactory := range serializers {
+		t.Run(serializerName, func(t *testing.T) {
+			executor := setupDBOS(t, true, true, serializerFactory())
+
+			// Register workflows
+			RegisterWorkflow(executor, serializerTestWorkflow)
+			RegisterWorkflow(executor, serializerNilValueWorkflow)
+			RegisterWorkflow(executor, serializerErrorWorkflow)
+
+			err := Launch(executor)
+			require.NoError(t, err)
+			defer Shutdown(executor, 10*time.Second)
+
+			// Test workflow with comprehensive data structure
+			t.Run("ComprehensiveValues", func(t *testing.T) {
+				input := TestWorkflowData{
+					ID:       "test-id",
+					Message:  "test message",
+					Value:    42,
+					Active:   true,
+					Data:     TestData{Message: "embedded", Value: 123, Active: false},
+					Created:  time.Now(),
+					Metadata: map[string]string{"key": "value"},
+				}
+
+				handle, err := RunWorkflow(executor, serializerTestWorkflow, input)
+				require.NoError(t, err, "Workflow execution failed")
+
+				// Wait for completion
+				_, err = handle.GetResult()
+				require.NoError(t, err, "Failed to get workflow result")
+
+				// 1. Test with handle.GetResult()
+				t.Run("HandleGetResult", func(t *testing.T) {
+					result, err := handle.GetResult()
+					require.NoError(t, err, "Failed to get workflow result")
+					assert.Equal(t, input, result, "Workflow result should match input")
+				})
+
+				// 2. Test with ListWorkflows
+				t.Run("ListWorkflows", func(t *testing.T) {
+					workflows, err := ListWorkflows(executor,
+						WithWorkflowIDs([]string{handle.GetWorkflowID()}),
+						WithLoadInput(true),
+						WithLoadOutput(true),
+					)
+					require.NoError(t, err, "Failed to list workflows")
+					require.Len(t, workflows, 1, "Expected 1 workflow")
+
+					workflow := workflows[0]
+					require.NotNil(t, workflow.Input, "Workflow input should not be nil")
+					require.NotNil(t, workflow.Output, "Workflow output should not be nil")
+					assert.Equal(t, input, workflow.Input, "Workflow input from ListWorkflows should match original")
+					assert.Equal(t, input, workflow.Output, "Workflow output from ListWorkflows should match original")
+				})
+
+				// 3. Test with GetWorkflowSteps
+				t.Run("GetWorkflowSteps", func(t *testing.T) {
+					steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
+					require.NoError(t, err, "Failed to get workflow steps")
+					require.Len(t, steps, 1, "Expected 1 step")
+
+					step := steps[0]
+					require.NotNil(t, step.Output, "Step output should not be nil")
+					assert.Equal(t, input, step.Output, "Step output should match original")
+					assert.Nil(t, step.Error, "Step should not have error")
+				})
+			})
+
+			// Test nil values
+			t.Run("NilValues", func(t *testing.T) {
+				handle, err := RunWorkflow(executor, serializerNilValueWorkflow, nil)
+				require.NoError(t, err, "Nil workflow execution failed")
+
+				// Wait for completion
+				_, err = handle.GetResult()
+				require.NoError(t, err, "Failed to get nil workflow result")
+
+				// 1. Test with handle.GetResult()
+				t.Run("HandleGetResult", func(t *testing.T) {
+					result, err := handle.GetResult()
+					require.NoError(t, err, "Failed to get workflow result")
+					assert.Nil(t, result, "Nil result should be preserved")
+				})
+
+				// 2. Test with ListWorkflows
+				t.Run("ListWorkflows", func(t *testing.T) {
+					workflows, err := ListWorkflows(executor,
+						WithWorkflowIDs([]string{handle.GetWorkflowID()}),
+						WithLoadInput(true),
+						WithLoadOutput(true),
+					)
+					require.NoError(t, err, "Failed to list workflows")
+					require.Len(t, workflows, 1, "Expected 1 workflow")
+
+					workflow := workflows[0]
+					assert.Nil(t, workflow.Input, "Workflow input from ListWorkflows should be nil")
+					assert.Nil(t, workflow.Output, "Workflow output from ListWorkflows should be nil")
+				})
+
+				// 3. Test with GetWorkflowSteps
+				t.Run("GetWorkflowSteps", func(t *testing.T) {
+					steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
+					require.NoError(t, err, "Failed to get workflow steps")
+					require.Len(t, steps, 1, "Expected 1 step")
+
+					step := steps[0]
+					assert.Nil(t, step.Output, "Step output should be nil")
+					assert.Nil(t, step.Error, "Step should not have error")
+				})
+
+				// 4. Test database storage (nil values stored as empty strings)
+				t.Run("DatabaseStorage", func(t *testing.T) {
+					dbosCtx, ok := executor.(*dbosContext)
+					require.True(t, ok, "expected dbosContext")
+					sysDB, ok := dbosCtx.systemDB.(*sysDB)
+					require.True(t, ok, "expected sysDB")
+
+					var inputs string
+					var output string
+					err := sysDB.pool.QueryRow(context.Background(),
+						fmt.Sprintf("SELECT inputs, output FROM %s.workflow_status WHERE workflow_uuid = $1", sysDB.schema),
+						handle.GetWorkflowID()).Scan(&inputs, &output)
+					require.NoError(t, err, "Failed to query workflow_status")
+					assert.Equal(t, "", inputs, "Nil inputs should be stored as empty string in database")
+					assert.Equal(t, "", output, "Nil output should be stored as empty string in database")
+				})
+			})
+
+			// Test error values
+			t.Run("ErrorValues", func(t *testing.T) {
+				input := TestWorkflowData{
+					ID:       "error-test-id",
+					Message:  "error test",
+					Value:    123,
+					Active:   true,
+					Data:     TestData{Message: "error data", Value: 456, Active: false},
+					Created:  time.Now(),
+					Metadata: map[string]string{"type": "error"},
+				}
+
+				handle, err := RunWorkflow(executor, serializerErrorWorkflow, input)
+				require.NoError(t, err, "Error workflow execution failed")
+
+				// Wait for completion (will error)
+				_, err = handle.GetResult()
+				require.Error(t, err, "Should get step error")
+
+				// 1. Test with handle.GetResult()
+				t.Run("HandleGetResult", func(t *testing.T) {
+					_, err := handle.GetResult()
+					require.Error(t, err, "Should get step error")
+					assert.Contains(t, err.Error(), "step error", "Error message should be preserved")
+				})
+
+				// 2. Test with GetWorkflowSteps
+				t.Run("GetWorkflowSteps", func(t *testing.T) {
+					steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
+					require.NoError(t, err, "Failed to get workflow steps")
+					require.Len(t, steps, 1, "Expected 1 step")
+
+					step := steps[0]
+					require.NotNil(t, step.Error, "Step should have error")
+					assert.Contains(t, step.Error.Error(), "step error", "Step error should be preserved")
+				})
+			})
+
+		})
 	}
-	return "user-defined-event-set", nil
 }
 
-func TestSetEventSerialize(t *testing.T) {
-	executor := setupDBOS(t, true, true)
-
-	// Register workflow with executor
-	RegisterWorkflow(executor, setEventUserDefinedTypeWorkflow)
-
-	t.Run("SetEventUserDefinedType", func(t *testing.T) {
-		// Start a workflow that sets an event with a user-defined type
-		setHandle, err := RunWorkflow(executor, setEventUserDefinedTypeWorkflow, "user-defined-key")
-		require.NoError(t, err)
-
-		// Wait for the workflow to complete
-		result, err := setHandle.GetResult()
-		require.NoError(t, err)
-		assert.Equal(t, "user-defined-event-set", result)
-
-		// Retrieve the event to verify it was properly serialized and can be deserialized
-		retrievedEvent, err := GetEvent[UserDefinedEventData](executor, setHandle.GetWorkflowID(), "user-defined-key", 3*time.Second)
-		require.NoError(t, err)
-
-		// Verify the retrieved data matches what we set
-		assert.Equal(t, 42, retrievedEvent.ID)
-		assert.Equal(t, "test-event", retrievedEvent.Name)
-		assert.Equal(t, "This is a test event with user-defined data", retrievedEvent.Details.Description)
-		require.Len(t, retrievedEvent.Details.Tags, 3)
-		expectedTags := []string{"test", "user-defined", "serialization"}
-		assert.Equal(t, expectedTags, retrievedEvent.Details.Tags)
-	})
-}
-
-func sendUserDefinedTypeWorkflow(ctx DBOSContext, destinationID string) (string, error) {
-	// Create an instance of our user-defined type inside the workflow
-	sendData := UserDefinedEventData{
-		ID:   42,
-		Name: "test-send-message",
-		Details: struct {
-			Description string   `json:"description"`
-			Tags        []string `json:"tags"`
-		}{
-			Description: "This is a test send message with user-defined data",
-			Tags:        []string{"test", "user-defined", "serialization", "send"},
-		},
-	}
-
-	// Send should automatically register this type with gob
-	err := Send(ctx, destinationID, sendData, "user-defined-topic")
-	if err != nil {
-		return "", err
-	}
-	return "user-defined-message-sent", nil
-}
-
-func recvUserDefinedTypeWorkflow(ctx DBOSContext, input string) (UserDefinedEventData, error) {
-	// Receive the user-defined type message
-	result, err := Recv[UserDefinedEventData](ctx, "user-defined-topic", 3*time.Second)
-	return result, err
-}
-
-func TestSendSerialize(t *testing.T) {
-	executor := setupDBOS(t, true, true)
-
-	// Register workflows with executor
-	RegisterWorkflow(executor, sendUserDefinedTypeWorkflow)
-	RegisterWorkflow(executor, recvUserDefinedTypeWorkflow)
-
-	t.Run("SendUserDefinedType", func(t *testing.T) {
-		// Start a receiver workflow first
-		recvHandle, err := RunWorkflow(executor, recvUserDefinedTypeWorkflow, "recv-input")
-		require.NoError(t, err)
-
-		// Start a sender workflow that sends a message with a user-defined type
-		sendHandle, err := RunWorkflow(executor, sendUserDefinedTypeWorkflow, recvHandle.GetWorkflowID())
-		require.NoError(t, err)
-
-		// Wait for the sender workflow to complete
-		sendResult, err := sendHandle.GetResult()
-		require.NoError(t, err)
-		assert.Equal(t, "user-defined-message-sent", sendResult)
-
-		// Wait for the receiver workflow to complete and get the message
-		receivedData, err := recvHandle.GetResult()
-		require.NoError(t, err)
-
-		// Verify the received data matches what we sent
-		assert.Equal(t, 42, receivedData.ID)
-		assert.Equal(t, "test-send-message", receivedData.Name)
-		assert.Equal(t, "This is a test send message with user-defined data", receivedData.Details.Description)
-
-		// Verify tags
-		expectedTags := []string{"test", "user-defined", "serialization", "send"}
-		assert.Equal(t, expectedTags, receivedData.Details.Tags)
-	})
+// Test serializer interface compliance
+func TestSerializerInterface(t *testing.T) {
+	// Test that both serializers implement the Serializer interface
+	var _ Serializer = (*GobSerializer)(nil)
+	var _ Serializer = (*JSONSerializer)(nil)
 }

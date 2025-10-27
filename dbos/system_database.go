@@ -78,6 +78,7 @@ type sysDB struct {
 	logger                   *slog.Logger
 	schema                   string
 	launched                 bool
+	serializer               Serializer
 }
 
 /*******************************/
@@ -254,6 +255,7 @@ type newSystemDatabaseInput struct {
 	databaseSchema string
 	customPool     *pgxpool.Pool
 	logger         *slog.Logger
+	serializer     Serializer
 }
 
 // New creates a new SystemDatabase instance and runs migrations
@@ -351,6 +353,7 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		notificationLoopDone:     make(chan struct{}),
 		logger:                   logger.With("service", "system_database"),
 		schema:                   databaseSchema,
+		serializer:               inputs.serializer,
 	}, nil
 }
 
@@ -440,7 +443,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		timeoutMs = &millis
 	}
 
-	inputString, err := serialize(input.status.Input)
+	inputString, err := s.serializer.Encode(input.status.Input)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize input: %w", err)
 	}
@@ -791,7 +794,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 				wf.Error = errors.New(*errorStr)
 			}
 
-			wf.Output, err = deserialize(outputString)
+			wf.Output, err = s.serializer.Decode(outputString)
 			if err != nil {
 				return nil, fmt.Errorf("failed to deserialize output: %w", err)
 			}
@@ -799,7 +802,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 
 		// Handle input only if loadInput is true
 		if input.loadInput {
-			wf.Input, err = deserialize(inputString)
+			wf.Input, err = s.serializer.Decode(inputString)
 			if err != nil {
 				return nil, fmt.Errorf("failed to deserialize input: %w", err)
 			}
@@ -830,7 +833,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
 			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 in ($7, $8))`, pgx.Identifier{s.schema}.Sanitize())
 
-	outputString, err := serialize(input.output)
+	outputString, err := s.serializer.Encode(input.output)
 	if err != nil {
 		return fmt.Errorf("failed to serialize output: %w", err)
 	}
@@ -1105,7 +1108,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		recovery_attempts
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, pgx.Identifier{s.schema}.Sanitize())
 
-	inputString, err := serialize(originalWorkflow.Input)
+	inputString, err := s.serializer.Encode(originalWorkflow.Input)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize input: %w", err)
 	}
@@ -1180,7 +1183,7 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any
 		}
 
 		// Deserialize output from TEXT to bytes then from bytes to R using gob
-		output, err := deserialize(outputString)
+		output, err := s.serializer.Decode(outputString)
 		if err != nil {
 			return nil, fmt.Errorf("failed to deserialize output: %w", err)
 		}
@@ -1219,7 +1222,7 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		errorString = &e
 	}
 
-	outputString, err := serialize(input.output)
+	outputString, err := s.serializer.Encode(input.output)
 	if err != nil {
 		return fmt.Errorf("failed to serialize output: %w", err)
 	}
@@ -1431,7 +1434,7 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 		return nil, newUnexpectedStepError(input.workflowID, input.stepID, input.stepName, recordedFunctionName)
 	}
 
-	output, err := deserialize(outputString)
+	output, err := s.serializer.Decode(outputString)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deserialize output: %w", err)
 	}
@@ -1487,7 +1490,7 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 
 		// Deserialize output if present and loadOutput is true
 		if input.loadOutput && outputString != nil {
-			output, err := deserialize(outputString)
+			output, err := s.serializer.Decode(outputString)
 			if err != nil {
 				return nil, fmt.Errorf("failed to deserialize output: %w", err)
 			}
@@ -1784,7 +1787,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	}
 
 	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := serialize(input.Message)
+	messageString, err := s.serializer.Encode(input.Message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
@@ -1950,7 +1953,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	// Deserialize the message
 	var message any
 	if messageString != nil { // nil message can happen on the timeout path only
-		message, err = deserialize(messageString)
+		message, err = s.serializer.Decode(messageString)
 		if err != nil {
 			return nil, fmt.Errorf("failed to deserialize message: %w", err)
 		}
@@ -2019,7 +2022,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	}
 
 	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := serialize(input.Message)
+	messageString, err := s.serializer.Encode(input.Message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
@@ -2163,7 +2166,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	// Deserialize the value if it exists
 	var value any
 	if valueString != nil {
-		value, err = deserialize(valueString)
+		value, err = s.serializer.Decode(valueString)
 		if err != nil {
 			return nil, fmt.Errorf("failed to deserialize event value: %w", err)
 		}

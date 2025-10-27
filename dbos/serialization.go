@@ -4,14 +4,37 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 )
 
-func serialize(data any) (string, error) {
+// Serializer defines the interface for pluggable serializers.
+// Encode and Decode are called during database storage and retrieval respectively.
+type Serializer interface {
+	// Encode serializes data to a string for database storage
+	Encode(data any) (string, error)
+	// Decode deserializes data from a string
+	Decode(data *string) (any, error)
+}
+
+// GobSerializer implements Serializer using encoding/gob
+type GobSerializer struct{}
+
+func NewGobSerializer() *GobSerializer {
+	return &GobSerializer{}
+}
+
+// Encode serializes data using gob and encodes it to a base64 string
+// Performs "lazy" registration of the type with gob
+func (g *GobSerializer) Encode(data any) (string, error) {
 	var inputBytes []byte
-	if data != nil {
+	if !isNilValue(data) {
+		// Register the type with gob for proper serialization
+		safeGobRegister(data, nil)
+
 		var buf bytes.Buffer
 		enc := gob.NewEncoder(&buf)
 		if err := enc.Encode(&data); err != nil {
@@ -22,7 +45,8 @@ func serialize(data any) (string, error) {
 	return base64.StdEncoding.EncodeToString(inputBytes), nil
 }
 
-func deserialize(data *string) (any, error) {
+// Decode deserializes data from a base64 string using gob
+func (g *GobSerializer) Decode(data *string) (any, error) {
 	if data == nil || *data == "" {
 		return nil, nil
 	}
@@ -40,6 +64,73 @@ func deserialize(data *string) (any, error) {
 	}
 
 	return result, nil
+}
+
+// JSONSerializer implements Serializer using encoding/json
+type JSONSerializer struct{}
+
+func NewJSONSerializer() *JSONSerializer {
+	return &JSONSerializer{}
+}
+
+func (j *JSONSerializer) Encode(data any) (string, error) {
+	var inputBytes []byte
+	if !isNilValue(data) {
+		jsonBytes, err := json.Marshal(data)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal data to JSON: %w", err)
+		}
+		inputBytes = jsonBytes
+	}
+	return base64.StdEncoding.EncodeToString(inputBytes), nil
+}
+
+func (j *JSONSerializer) Decode(data *string) (any, error) {
+	if data == nil || *data == "" {
+		return nil, nil
+	}
+
+	dataBytes, err := base64.StdEncoding.DecodeString(*data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode data: %w", err)
+	}
+
+	var result any
+	if err := json.Unmarshal(dataBytes, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal JSON data: %w", err)
+	}
+
+	return result, nil
+}
+
+// serialize serializes data using the serializer from the DBOSContext
+// this is only use in workflow handles
+func serialize(ctx DBOSContext, data any) (string, error) {
+	dbosCtx, ok := ctx.(*dbosContext)
+	if !ok {
+		return "", fmt.Errorf("invalid DBOSContext: expected *dbosContext")
+	}
+	if dbosCtx.serializer == nil {
+		return "", fmt.Errorf("no serializer configured in DBOSContext")
+	}
+	return dbosCtx.serializer.Encode(data)
+}
+
+// Handle cases where the provided data interface wraps a nil value (e.g., var p *int; data := any(p). data != nil but the underlying value is nil)
+func isNilValue(data any) bool {
+	if data == nil {
+		return true
+	}
+	v := reflect.ValueOf(data)
+	// Check if the value is invalid (zero Value from reflect)
+	if !v.IsValid() {
+		return true
+	}
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface:
+		return v.IsNil()
+	}
+	return false
 }
 
 // safeGobRegister attempts to register a type with gob, recovering only from

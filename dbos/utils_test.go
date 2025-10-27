@@ -50,7 +50,7 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 }
 
 /* Test database setup */
-func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
+func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool, serializer Serializer) DBOSContext {
 	t.Helper()
 
 	databaseURL := getDatabaseURL()
@@ -61,6 +61,7 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 	dbosCtx, err := NewDBOSContext(context.Background(), Config{
 		DatabaseURL: databaseURL,
 		AppName:     "test-app",
+		Serializer:  serializer,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, dbosCtx)

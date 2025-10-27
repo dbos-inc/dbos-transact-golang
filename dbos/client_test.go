@@ -14,7 +14,7 @@ import (
 
 func TestEnqueue(t *testing.T) {
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, true, true, nil)
 
 	// Create queue for communication between client and server
 	queue := NewWorkflowQueue(serverCtx, "client-enqueue-queue")
@@ -265,7 +265,7 @@ func TestCancelResume(t *testing.T) {
 	var stepsCompleted int
 
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, true, true, nil)
 
 	// Create queue for communication between client and server
 	queue := NewWorkflowQueue(serverCtx, "cancel-resume-queue")
@@ -507,7 +507,7 @@ func TestForkWorkflow(t *testing.T) {
 	)
 
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, true, true, nil)
 
 	// Create queue for communication between client and server
 	queue := NewWorkflowQueue(serverCtx, "fork-workflow-queue")
@@ -931,7 +931,7 @@ func TestListWorkflows(t *testing.T) {
 
 func TestGetWorkflowSteps(t *testing.T) {
 	// Setup server context
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, true, true, nil)
 
 	// Create queue for communication
 	queue := NewWorkflowQueue(serverCtx, "get-workflow-steps-queue")

@@ -32,7 +32,7 @@ func queueStep(_ context.Context, input string) (string, error) {
 }
 
 func TestWorkflowQueues(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	queue := NewWorkflowQueue(dbosCtx, "test-queue")
 	dlqEnqueueQueue := NewWorkflowQueue(dbosCtx, "test-successive-enqueue-queue")
@@ -465,7 +465,7 @@ func TestWorkflowQueues(t *testing.T) {
 }
 
 func TestQueueRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	recoveryQueue := NewWorkflowQueue(dbosCtx, "recovery-queue")
 	var recoveryStepCounter int64
@@ -568,7 +568,7 @@ func TestQueueRecovery(t *testing.T) {
 
 // Note: we could update this test to have the same logic than TestWorkerConcurrency
 func TestGlobalConcurrency(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	globalConcurrencyQueue := NewWorkflowQueue(dbosCtx, "test-global-concurrency-queue", WithGlobalConcurrency(1))
 	workflowEvent1 := NewEvent()
@@ -627,9 +627,9 @@ func TestGlobalConcurrency(t *testing.T) {
 func TestWorkerConcurrency(t *testing.T) {
 	// Create two contexts that will represent 2 DBOS executors
 	os.Setenv("DBOS__VMID", "worker1")
-	dbosCtx1 := setupDBOS(t, true, true)
+	dbosCtx1 := setupDBOS(t, true, true, nil)
 	os.Setenv("DBOS__VMID", "worker2")
-	dbosCtx2 := setupDBOS(t, false, false) // Don't check for leaks because t.Cancel is called in LIFO order. Also don't reset the DB here.
+	dbosCtx2 := setupDBOS(t, false, false, nil) // Don't check for leaks because t.Cancel is called in LIFO order. Also don't reset the DB here.
 	os.Unsetenv("DBOS__VMID")
 
 	assert.Equal(t, "worker1", dbosCtx1.GetExecutorID(), "expected first executor ID to be 'worker1'")
@@ -742,7 +742,7 @@ func TestWorkerConcurrency(t *testing.T) {
 }
 
 func TestWorkerConcurrencyXRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	workerConcurrencyRecoveryQueue := NewWorkflowQueue(dbosCtx, "test-worker-concurrency-recovery-queue", WithWorkerConcurrency(1))
 	workerConcurrencyRecoveryStartEvent1 := NewEvent()
@@ -831,7 +831,7 @@ func rateLimiterTestWorkflow(ctx DBOSContext, _ string) (time.Time, error) {
 }
 
 func TestQueueRateLimiter(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	rateLimiterQueue := NewWorkflowQueue(dbosCtx, "test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: time.Duration(1800 * time.Millisecond)}))
 
@@ -914,7 +914,7 @@ func TestQueueRateLimiter(t *testing.T) {
 }
 
 func TestQueueTimeouts(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	timeoutQueue := NewWorkflowQueue(dbosCtx, "timeout-queue")
 
@@ -1137,7 +1137,7 @@ func TestQueueTimeouts(t *testing.T) {
 }
 
 func TestPriorityQueue(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	// Create priority-enabled queue with max concurrency of 1
 	priorityQueue := NewWorkflowQueue(dbosCtx, "test_queue_priority", WithGlobalConcurrency(1), WithPriorityEnabled())
@@ -1232,7 +1232,7 @@ func TestPriorityQueue(t *testing.T) {
 }
 
 func TestListQueuedWorkflows(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	// Simple test workflow that completes immediately
 	testWorkflow := func(ctx DBOSContext, input string) (string, error) {

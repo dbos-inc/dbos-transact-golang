@@ -95,7 +95,7 @@ func Identity[T any](dbosCtx DBOSContext, in T) (T, error) {
 }
 
 func TestWorkflowsRegistration(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	// Setup workflows with executor
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -294,7 +294,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DoubleRegistrationWithoutName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, false, true, nil) // Don't reset DB but do check for leaks
 
 		// First registration should work
 		RegisterWorkflow(freshCtx, simpleWorkflow)
@@ -312,7 +312,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DoubleRegistrationWithCustomName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, false, true, nil) // Don't reset DB but do check for leaks
 
 		// First registration with custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("custom-workflow"))
@@ -330,7 +330,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DifferentWorkflowsSameCustomName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, false, true, nil) // Don't reset DB but do check for leaks
 
 		// First registration with custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("same-name"))
@@ -348,7 +348,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("RegisterAfterLaunchPanics", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, false, true, nil) // Don't reset DB but do check for leaks
 
 		// Launch DBOS context
 		err := Launch(freshCtx)
@@ -366,7 +366,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("SafeGobRegister", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, false, true, nil) // Don't reset DB but do check for leaks
 
 		// Test 1: Basic type vs pointer conflicts
 		type TestType struct {
@@ -588,7 +588,7 @@ func testStepWf2(dbosCtx DBOSContext, input string) (string, error) {
 }
 
 func TestSteps(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	// Create workflows with executor
 	RegisterWorkflow(dbosCtx, stepWithinAStepWorkflow)
@@ -861,7 +861,7 @@ func TestSteps(t *testing.T) {
 }
 
 func TestChildWorkflow(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	type Inheritance struct {
 		ParentID string
@@ -1242,7 +1242,7 @@ func idempotencyWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 }
 
 func TestWorkflowIdempotency(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 	RegisterWorkflow(dbosCtx, idempotencyWorkflow)
 
 	t.Run("WorkflowExecutedOnlyOnce", func(t *testing.T) {
@@ -1279,7 +1279,7 @@ func TestWorkflowIdempotency(t *testing.T) {
 }
 
 func TestWorkflowRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	var (
 		recoveryCounters []int64
@@ -1466,7 +1466,7 @@ func infiniteDeadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error)
 	return 0, nil
 }
 func TestWorkflowDeadLetterQueue(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 	RegisterWorkflow(dbosCtx, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
 	RegisterWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
 
@@ -1589,7 +1589,7 @@ var (
 )
 
 func TestScheduledWorkflows(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	RegisterWorkflow(dbosCtx, func(ctx DBOSContext, scheduledTime time.Time) (string, error) {
 		startTime := time.Now()
@@ -1801,7 +1801,7 @@ func recvContextCancelWorkflow(ctx DBOSContext, topic string) (string, error) {
 }
 
 func TestSendRecv(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	// Register all send/recv workflows with executor
 	RegisterWorkflow(dbosCtx, sendWorkflow)
@@ -2383,7 +2383,7 @@ func workflowWithMultipleSteps(dbosCtx DBOSContext, input string) (string, error
 }
 
 func TestWorkflowExecutionMismatch(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	// Register workflows for testing
 	RegisterWorkflow(dbosCtx, conflictWorkflowA)
@@ -2449,7 +2449,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 }
 
 func TestSetGetEvent(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	// Register all set/get event workflows with executor
 	RegisterWorkflow(dbosCtx, setEventWorkflow)
@@ -2941,7 +2941,7 @@ func sleepRecoveryWorkflow(dbosCtx DBOSContext, duration time.Duration) (time.Du
 }
 
 func TestSleep(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 	RegisterWorkflow(dbosCtx, sleepRecoveryWorkflow)
 
 	t.Run("SleepDurableRecovery", func(t *testing.T) {
@@ -3001,7 +3001,7 @@ func TestSleep(t *testing.T) {
 }
 
 func TestWorkflowTimeout(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	waitForCancelWorkflow := func(ctx DBOSContext, _ string) (string, error) {
 		// This workflow will wait indefinitely until it is cancelled
@@ -3397,7 +3397,7 @@ func concurrentSimpleWorkflow(dbosCtx DBOSContext, input int) (int, error) {
 }
 
 func TestConcurrentWorkflows(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 	RegisterWorkflow(dbosCtx, concurrentSimpleWorkflow)
 	RegisterWorkflow(dbosCtx, notificationWaiterWorkflow)
 	RegisterWorkflow(dbosCtx, notificationSetterWorkflow)
@@ -3605,7 +3605,7 @@ func TestConcurrentWorkflows(t *testing.T) {
 }
 
 func TestWorkflowAtVersion(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
 
@@ -3625,7 +3625,7 @@ func TestWorkflowAtVersion(t *testing.T) {
 }
 
 func TestWorkflowCancel(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	blockingEvent := NewEvent()
 
@@ -3734,7 +3734,7 @@ func cancelAllBeforeBlockingWorkflow(ctx DBOSContext, input string) (string, err
 }
 
 func TestCancelAllBefore(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	RegisterWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow)
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -3858,7 +3858,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectWithOffset", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, false, true, nil)
 		gcTestEvent := NewEvent()
 
 		// Ensure the event is set at the end to unblock any remaining workflows
@@ -3947,7 +3947,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectWithCutoffTime", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, false, true, nil)
 		gcTestEvent := NewEvent()
 
 		// Ensure the event is set at the end to unblock any remaining workflows
@@ -4056,7 +4056,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectEmptyDatabase", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, false, true, nil)
 
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
 		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
@@ -4093,7 +4093,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectOnlyCompletedWorkflows", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, false, true, nil)
 		gcTestEvent := NewEvent()
 
 		// Ensure the event is set at the end to unblock any remaining workflows
@@ -4198,7 +4198,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("ThresholdAndCutoffTimestampInteraction", func(t *testing.T) {
 		// Reset database for clean test environment
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, false, true, nil)
 
 		// Register the test workflow
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
@@ -4275,7 +4275,7 @@ func TestGarbageCollect(t *testing.T) {
 // TestSpecialSteps tests that special workflow functions (ListWorkflows, CancelWorkflow,
 // ResumeWorkflow, ForkWorkflow, GetWorkflowSteps) work correctly as durable steps
 func TestSpecialSteps(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	specialStepsEvent := NewEvent()
 	blockingEvent := NewEvent()
@@ -4448,7 +4448,7 @@ func TestSpecialSteps(t *testing.T) {
 }
 
 func TestRegisteredWorkflowListing(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 
 	// Register some regular workflows
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -4514,7 +4514,7 @@ func TestRegisteredWorkflowListing(t *testing.T) {
 }
 
 func TestWorkflowIdentity(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
 	handle, err := RunWorkflow(
 		dbosCtx,
