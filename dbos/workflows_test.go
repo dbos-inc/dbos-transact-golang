@@ -4544,7 +4544,7 @@ func TestWorkflowIdentity(t *testing.T) {
 }
 
 func TestWorkflowHandleTimeout(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 	RegisterWorkflow(dbosCtx, slowWorkflow)
 
 	t.Run("WorkflowHandleTimeout", func(t *testing.T) {
@@ -4582,7 +4582,7 @@ func TestWorkflowHandleTimeout(t *testing.T) {
 }
 
 func TestWorkflowHandleContextCancel(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, true, true, nil)
 	RegisterWorkflow(dbosCtx, getEventWorkflow)
 
 	t.Run("WorkflowHandleContextCancel", func(t *testing.T) {
