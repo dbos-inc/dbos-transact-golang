@@ -55,6 +55,16 @@ func (e *DBOSError) Unwrap() error {
 	return e.wrappedErr
 }
 
+// Implements https://pkg.go.dev/errors#Is
+func (e *DBOSError) Is(target error) bool {
+	t, ok := target.(*DBOSError)
+	if !ok {
+		return false
+	}
+	// Match if codes are equal (and target code is set)
+	return t.Code != 0 && e.Code == t.Code
+}
+
 func newConflictingWorkflowError(workflowID, message string) *DBOSError {
 	msg := fmt.Sprintf("Conflicting workflow invocation with the same ID (%s)", workflowID)
 	if message != "" {
@@ -147,12 +157,13 @@ func newWorkflowExecutionError(workflowID string, err error) *DBOSError {
 	}
 }
 
-func newStepExecutionError(workflowID, stepName, message string) *DBOSError {
+func newStepExecutionError(workflowID, stepName string, err error) *DBOSError {
 	return &DBOSError{
-		Message:    fmt.Sprintf("Step %s in workflow %s execution error: %s", stepName, workflowID, message),
+		Message:    fmt.Sprintf("Step %s in workflow %s execution error: %v", stepName, workflowID, err),
 		Code:       StepExecutionError,
 		WorkflowID: workflowID,
 		StepName:   stepName,
+		wrappedErr: err,
 	}
 }
 
