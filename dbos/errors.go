@@ -55,6 +55,7 @@ func (e *DBOSError) Unwrap() error {
 	return e.wrappedErr
 }
 
+// Implements https://pkg.go.dev/errors#Is
 func (e *DBOSError) Is(target error) bool {
 	t, ok := target.(*DBOSError)
 	if !ok {
