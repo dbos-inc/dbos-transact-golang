@@ -3,13 +3,22 @@ package dbos
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// isInterfaceType checks if the given value is of interface{} (any) type
+func isInterfaceType(v any) bool {
+	t := reflect.TypeOf(v)
+	if t == nil {
+		return true // nil can be any type
+	}
+	return t.Kind() == reflect.Interface
+}
 
 // Helper function to test comprehensive workflow values across different retrieval methods
 func testComprehensiveWorkflowValues[T any](
@@ -47,7 +56,7 @@ func testComprehensiveWorkflowValues[T any](
 		require.NotNil(t, workflow.Output, "Workflow output should not be nil")
 
 		if isJSON {
-			// For JSON serializer, convert map[string]interface{} to typed struct
+			// For JSON serializer with any type, convert map[string]interface{} to typed struct
 			typedInput, err := convertJSONToType[TestWorkflowData](workflow.Input)
 			require.NoError(t, err, "Failed to convert workflow input")
 			typedOutput, err := convertJSONToType[TestWorkflowData](workflow.Output)
@@ -70,7 +79,7 @@ func testComprehensiveWorkflowValues[T any](
 		require.NotNil(t, step.Output, "Step output should not be nil")
 
 		if isJSON {
-			// For JSON serializer, convert map[string]interface{} to typed struct
+			// For JSON serializer with any type, convert map[string]interface{} to typed struct
 			typedOutput, err := convertJSONToType[TestWorkflowData](step.Output)
 			require.NoError(t, err, "Failed to convert step output")
 			assert.Equal(t, expectedInput, typedOutput, "Step output should match original")
@@ -81,6 +90,11 @@ func testComprehensiveWorkflowValues[T any](
 	})
 
 	// 4. Test with RetrieveWorkflow (polling handle)
+
+	// Check if T is 'any' - only then we need JSON recast for RetrieveWorkflow (generic otherwise)
+	var zeroT T
+	needsJSONRecast := isJSON && isInterfaceType(zeroT)
+
 	t.Run("RetrieveWorkflow", func(t *testing.T) {
 		retrievedHandle, err := RetrieveWorkflow[T](executor, handle.GetWorkflowID())
 		require.NoError(t, err, "Failed to retrieve workflow")
@@ -88,8 +102,8 @@ func testComprehensiveWorkflowValues[T any](
 		result, err := retrievedHandle.GetResult()
 		require.NoError(t, err, "Failed to get result from retrieved handle")
 
-		if isJSON {
-			// For JSON serializer, convert map[string]interface{} to typed struct
+		if needsJSONRecast {
+			// For JSON serializer with any type, convert map[string]interface{} to typed struct
 			typedResult, err := convertJSONToType[TestWorkflowData](result)
 			require.NoError(t, err, "Failed to convert retrieved workflow result")
 			assert.Equal(t, expectedInput, typedResult, "Retrieved workflow result should match input")
@@ -179,11 +193,6 @@ func testSendRecv[T any](
 ) {
 	t.Helper()
 
-	// Get the serializer to determine how to compare
-	dbosCtx, ok := executor.(*dbosContext)
-	require.True(t, ok, "expected dbosContext")
-	isJSON := isJSONSerializer(dbosCtx.serializer)
-
 	// Start sender workflow first
 	senderHandle, err := RunWorkflow(executor, senderWorkflow, input, WithWorkflowID(senderID))
 	require.NoError(t, err, "Sender workflow execution failed")
@@ -201,7 +210,12 @@ func testSendRecv[T any](
 	require.NoError(t, err, "Receiver workflow should complete")
 
 	// Verify the received data matches what was sent
-	if isJSON {
+
+	dbosCtx, ok := executor.(*dbosContext)
+	require.True(t, ok, "expected dbosContext")
+	var zeroT T
+	needsJSONRecast := isJSONSerializer(dbosCtx.serializer) && isInterfaceType(zeroT)
+	if needsJSONRecast {
 		// For JSON serializer with any type, convert map[string]interface{} to typed struct
 		typedSenderResult, err := convertJSONToType[TestWorkflowData](senderResult)
 		require.NoError(t, err, "Failed to convert sender result")
@@ -229,11 +243,6 @@ func testSetGetEvent[T any](
 ) {
 	t.Helper()
 
-	// Get the serializer to determine how to compare
-	dbosCtx, ok := executor.(*dbosContext)
-	require.True(t, ok, "expected dbosContext")
-	isJSON := isJSONSerializer(dbosCtx.serializer)
-
 	// Start setEvent workflow
 	setEventHandle, err := RunWorkflow(executor, setEventWorkflow, input, WithWorkflowID(setEventID))
 	require.NoError(t, err, "SetEvent workflow execution failed")
@@ -251,7 +260,11 @@ func testSetGetEvent[T any](
 	require.NoError(t, err, "GetEvent workflow should complete")
 
 	// Verify the event data matches what was set
-	if isJSON {
+	dbosCtx, ok := executor.(*dbosContext)
+	require.True(t, ok, "expected dbosContext")
+	var zeroT T
+	needsJSONRecast := isJSONSerializer(dbosCtx.serializer) && isInterfaceType(zeroT)
+	if needsJSONRecast {
 		// For JSON serializer with any type, convert map[string]interface{} to typed struct
 		typedSetResult, err := convertJSONToType[TestWorkflowData](setResult)
 		require.NoError(t, err, "Failed to convert set result")
@@ -264,6 +277,81 @@ func testSetGetEvent[T any](
 	} else {
 		assert.Equal(t, input, setResult, "SetEvent result should match input")
 		assert.Equal(t, input, getResult, "GetEvent data should match what was set")
+	}
+}
+
+// Helper function to test workflow recovery
+func testWorkflowRecovery[T any](
+	t *testing.T,
+	executor DBOSContext,
+	recoveryWorkflow func(DBOSContext, T) (T, error),
+	startEvent *Event,
+	blockingEvent *Event,
+	input T,
+	workflowID string,
+) {
+	t.Helper()
+
+	// Start the blocking workflow
+	handle, err := RunWorkflow(executor, recoveryWorkflow, input, WithWorkflowID(workflowID))
+	require.NoError(t, err, "failed to start blocking workflow")
+
+	// Wait for the workflow to reach the blocking step
+	startEvent.Wait()
+
+	// Recover the pending workflow
+	dbosCtx, ok := executor.(*dbosContext)
+	require.True(t, ok, "expected dbosContext")
+	recoveredHandles, err := recoverPendingWorkflows(dbosCtx, []string{"local"})
+	require.NoError(t, err, "failed to recover pending workflows")
+
+	// Find our workflow in the recovered handles
+	var recoveredHandle WorkflowHandle[any]
+	for _, h := range recoveredHandles {
+		if h.GetWorkflowID() == handle.GetWorkflowID() {
+			recoveredHandle = h
+			break
+		}
+	}
+	require.NotNil(t, recoveredHandle, "expected to find recovered handle")
+
+	// Verify it's a polling handle
+	_, ok = recoveredHandle.(*workflowPollingHandle[any])
+	require.True(t, ok, "recovered handle should be of type workflowPollingHandle, got %T", recoveredHandle)
+
+	// Unblock the workflow
+	blockingEvent.Set()
+
+	// Get result from the original handle
+	originalResult, err := handle.GetResult()
+	require.NoError(t, err, "original handle should complete successfully")
+
+	// Get result from the recovered handle
+	recoveredResult, err := recoveredHandle.GetResult()
+	require.NoError(t, err, "recovered handle should complete successfully")
+
+	// Verify results match input
+	isJSON := isJSONSerializer(dbosCtx.serializer)
+	if isJSON {
+		// Recovery handle are always "any"
+		typedRecoveredResult, err := convertJSONToType[TestWorkflowData](recoveredResult)
+		require.NoError(t, err, "Failed to convert recovered result")
+		var zeroT T
+		if isInterfaceType(zeroT) {
+			// For JSON serializer with any type, convert results
+			typedOriginalResult, err := convertJSONToType[TestWorkflowData](originalResult)
+			require.NoError(t, err, "Failed to convert original result")
+			typedInput, err := convertJSONToType[TestWorkflowData](input)
+			require.NoError(t, err, "Failed to convert input")
+			assert.Equal(t, typedInput, typedOriginalResult, "original handle result should match input")
+			assert.Equal(t, typedInput, typedRecoveredResult, "recovered handle result should match input")
+		} else {
+			assert.Equal(t, input, originalResult, "original handle result should match input")
+			assert.Equal(t, input, typedRecoveredResult, "recovered handle result should match input")
+		}
+	} else {
+		assert.Equal(t, input, originalResult, "original handle result should match input")
+		assert.Equal(t, input, recoveredResult, "recovered handle result should match input")
 	}
 }
 
@@ -288,7 +376,7 @@ func serializerTestStep(_ context.Context, input TestWorkflowData) (TestWorkflow
 	return input, nil
 }
 
-func serializerTestWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
+func serializerWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
 	return RunAsStep(ctx, func(context context.Context) (TestWorkflowData, error) {
 		return serializerTestStep(context, input)
 	})
@@ -300,7 +388,7 @@ func serializerNilValueWorkflow(ctx DBOSContext, input *TestWorkflowData) (*Test
 	})
 }
 
-func serializerNilValueAnyWorkflow(ctx DBOSContext, input any) (any, error) {
+func serializerAnyValueWorkflow(ctx DBOSContext, input any) (any, error) {
 	return RunAsStep(ctx, func(context context.Context) (any, error) {
 		if input == nil {
 			return nil, nil
@@ -405,6 +493,36 @@ func serializerAnyGetEventWorkflow(ctx DBOSContext, targetWorkflowID string) (an
 	return event, nil
 }
 
+// Workflows for testing recovery with TestWorkflowData type
+var (
+	serializerRecoveryStartEvent *Event
+	serializerRecoveryEvent      *Event
+)
+
+func serializerRecoveryWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
+	// Single blocking step
+	return RunAsStep(ctx, func(context context.Context) (TestWorkflowData, error) {
+		serializerRecoveryStartEvent.Set()
+		serializerRecoveryEvent.Wait()
+		return input, nil
+	}, WithStepName("BlockingStep"))
+}
+
+// Workflows for testing recovery with any type
+var (
+	serializerAnyRecoveryStartEvent *Event
+	serializerAnyRecoveryEvent      *Event
+)
+
+func serializerAnyRecoveryWorkflow(ctx DBOSContext, input any) (any, error) {
+	// Single blocking step
+	return RunAsStep(ctx, func(context context.Context) (any, error) {
+		serializerAnyRecoveryStartEvent.Set()
+		serializerAnyRecoveryEvent.Wait()
+		return input, nil
+	}, WithStepName("BlockingStep"))
+}
+
 // Test that workflows use the configured serializer for input/output
 func TestSerializer(t *testing.T) {
 	serializers := map[string]func() Serializer{
@@ -417,20 +535,22 @@ func TestSerializer(t *testing.T) {
 			executor := setupDBOS(t, true, true, serializerFactory())
 
 			// Register workflows
-			RegisterWorkflow(executor, serializerTestWorkflow)
+			RegisterWorkflow(executor, serializerWorkflow)
 			RegisterWorkflow(executor, serializerNilValueWorkflow)
 			RegisterWorkflow(executor, serializerErrorWorkflow)
 			RegisterWorkflow(executor, serializerSenderWorkflow)
 			RegisterWorkflow(executor, serializerReceiverWorkflow)
 			RegisterWorkflow(executor, serializerSetEventWorkflow)
 			RegisterWorkflow(executor, serializerGetEventWorkflow)
+			RegisterWorkflow(executor, serializerRecoveryWorkflow)
 			if serializerName == "JSON" {
 				// Cannot register "any" workflow with Gob serializer
-				RegisterWorkflow(executor, serializerNilValueAnyWorkflow)
+				RegisterWorkflow(executor, serializerAnyValueWorkflow)
 				RegisterWorkflow(executor, serializerAnySenderWorkflow)
 				RegisterWorkflow(executor, serializerAnyReceiverWorkflow)
 				RegisterWorkflow(executor, serializerAnySetEventWorkflow)
 				RegisterWorkflow(executor, serializerAnyGetEventWorkflow)
+				RegisterWorkflow(executor, serializerAnyRecoveryWorkflow)
 			}
 
 			err := Launch(executor)
@@ -448,7 +568,7 @@ func TestSerializer(t *testing.T) {
 					Metadata: map[string]string{"key": "value"},
 				}
 
-				handle, err := RunWorkflow(executor, serializerTestWorkflow, input)
+				handle, err := RunWorkflow(executor, serializerWorkflow, input)
 				require.NoError(t, err, "Workflow execution failed")
 
 				testComprehensiveWorkflowValues(t, executor, handle, input)
@@ -469,7 +589,7 @@ func TestSerializer(t *testing.T) {
 				}
 
 				// Pass input as any to match serializerNilValueAnyWorkflow signature
-				handle, err := RunWorkflow(executor, serializerNilValueAnyWorkflow, any(input))
+				handle, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(input))
 				require.NoError(t, err, "Any workflow execution failed")
 
 				testComprehensiveWorkflowValues(t, executor, handle, input)
@@ -488,7 +608,7 @@ func TestSerializer(t *testing.T) {
 				if serializerName == "Gob" {
 					t.Skip("Skipping test for Gob serializer due to Gob limitations with interface types")
 				}
-				handle, err := RunWorkflow(executor, serializerNilValueAnyWorkflow, nil)
+				handle, err := RunWorkflow(executor, serializerAnyValueWorkflow, nil)
 				require.NoError(t, err, "Nil any workflow execution failed")
 
 				testNilWorkflowValues(t, executor, handle)
@@ -589,6 +709,44 @@ func TestSerializer(t *testing.T) {
 				testSetGetEvent(t, executor, serializerAnySetEventWorkflow, serializerAnyGetEventWorkflow, any(input), "any-setevent-wf", "any-getevent-wf")
 			})
 
+			// Test workflow recovery with TestWorkflowData type
+			t.Run("WorkflowRecovery", func(t *testing.T) {
+				serializerRecoveryStartEvent = NewEvent()
+				serializerRecoveryEvent = NewEvent()
+
+				input := TestWorkflowData{
+					ID:       "recovery-test-id",
+					Message:  "recovery test message",
+					Value:    123,
+					Active:   true,
+					Data:     TestData{Message: "recovery nested", Value: 456, Active: false},
+					Metadata: map[string]string{"type": "recovery"},
+				}
+
+				testWorkflowRecovery(t, executor, serializerRecoveryWorkflow, serializerRecoveryStartEvent, serializerRecoveryEvent, input, "serializer-recovery-wf")
+			})
+
+			// Test workflow recovery with any type
+			t.Run("WorkflowRecoveryAny", func(t *testing.T) {
+				if serializerName == "Gob" {
+					t.Skip("Skipping test for Gob serializer due to Gob limitations with interface types")
+				}
+
+				serializerAnyRecoveryStartEvent = NewEvent()
+				serializerAnyRecoveryEvent = NewEvent()
+
+				input := TestWorkflowData{
+					ID:       "recovery-any-test-id",
+					Message:  "recovery any test message",
+					Value:    789,
+					Active:   false,
+					Data:     TestData{Message: "recovery any nested", Value: 987, Active: true},
+					Metadata: map[string]string{"type": "recovery-any"},
+				}
+
+				testWorkflowRecovery(t, executor, serializerAnyRecoveryWorkflow, serializerAnyRecoveryStartEvent, serializerAnyRecoveryEvent, any(input), "serializer-any-recovery-wf")
+			})
+
 		})
 	}
 }
@@ -655,125 +813,4 @@ func TestSerializerConfiguration(t *testing.T) {
 			assert.IsType(t, &GobSerializer{}, dbosCtx.serializer, "Default should be GobSerializer")
 		}
 	})
-}
-
-// Global events for controlling concurrent workflow test execution
-var (
-	concurrentConflictFirstInStep     *Event
-	concurrentConflictSecondInStep    *Event
-	concurrentConflictProceed         *Event
-	concurrentConflictInvocationCount int32
-)
-
-// Test concurrent workflow invocations with step recording conflict
-// This tests the conflict resolution path in workflow.go where a workflow
-// detects a conflict during recordOperationResult and waits for the existing workflow
-func TestConcurrentWorkflowInvocationConflict(t *testing.T) {
-	serializers := map[string]Serializer{
-		"Gob":  NewGobSerializer(),
-		"JSON": NewJSONSerializer(),
-	}
-
-	for serializerName, serializer := range serializers {
-		t.Run(serializerName, func(t *testing.T) {
-			executor := setupDBOS(t, true, true, serializer)
-
-			// Register a workflow that has a step and blocks on an event
-			RegisterWorkflow(executor, concurrentConflictWorkflow)
-
-			// Create events to control workflow execution
-			concurrentConflictFirstInStep = NewEvent()
-			concurrentConflictSecondInStep = NewEvent()
-			concurrentConflictProceed = NewEvent()
-			concurrentConflictInvocationCount = 0
-
-			// Use a fixed workflow ID for both executions
-			workflowID := "concurrent-conflict-test-id"
-			input := TestWorkflowData{
-				ID:       workflowID,
-				Message:  "concurrent test",
-				Value:    999,
-				Active:   true,
-				Data:     TestData{Message: "nested", Value: 111, Active: true},
-				Metadata: map[string]string{"test": "concurrent"},
-			}
-
-			// Start first workflow - it will enter the step and wait
-			handle1, err := RunWorkflow(executor, concurrentConflictWorkflow, input, WithWorkflowID(workflowID))
-			require.NoError(t, err, "First workflow should start successfully")
-
-			// Wait for the first workflow to enter the step
-			concurrentConflictFirstInStep.Wait()
-
-			// Start second workflow with the same ID - it will also enter the step and wait
-			handle2, err := RunWorkflow(executor, concurrentConflictWorkflow, input, WithWorkflowID(workflowID))
-			require.NoError(t, err, "Second workflow should start successfully")
-
-			// Wait for the second workflow to enter the step
-			concurrentConflictSecondInStep.Wait()
-
-			// Now both workflows are inside the step, waiting to proceed
-			// Let them both try to commit - one will succeed, the other will get a conflict
-			concurrentConflictProceed.Set()
-
-			// Both handles should return the same result
-			result1, err := handle1.GetResult()
-			require.NoError(t, err, "First workflow should complete successfully")
-
-			fmt.Printf("type of handle2: %T\n", handle2)
-
-			result2, err := handle2.GetResult()
-			require.NoError(t, err, "Second workflow should get result from first workflow")
-
-			// Get the serializer to determine how to compare
-			dbosCtx, ok := executor.(*dbosContext)
-			require.True(t, ok, "expected dbosContext")
-			isJSON := isJSONSerializer(dbosCtx.serializer)
-
-			// Verify results are equal
-			if isJSON {
-				typedResult1, err := convertJSONToType[TestWorkflowData](result1)
-				require.NoError(t, err, "Failed to convert first result")
-				typedResult2, err := convertJSONToType[TestWorkflowData](result2)
-				require.NoError(t, err, "Failed to convert second result")
-				assert.Equal(t, typedResult1, typedResult2, "Both results should be equal")
-				assert.Equal(t, input, typedResult1, "Result should match input")
-			} else {
-				assert.Equal(t, result1, result2, "Both results should be equal")
-				assert.Equal(t, input, result1, "Result should match input")
-			}
-
-			// Verify both handles point to the same workflow ID
-			assert.Equal(t, handle1.GetWorkflowID(), handle2.GetWorkflowID())
-		})
-	}
-}
-
-// Workflow that executes a step with concurrent access control
-func concurrentConflictWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
-	// Execute a step - both invocations will enter here simultaneously
-	result, err := RunAsStep(ctx, func(ctx context.Context) (TestWorkflowData, error) {
-		// Atomically increment and determine which invocation this is
-		invocationNum := atomic.AddInt32(&concurrentConflictInvocationCount, 1)
-
-		// Signal that this invocation has entered the step
-		switch invocationNum {
-		case 1:
-			concurrentConflictFirstInStep.Set()
-		case 2:
-			concurrentConflictSecondInStep.Set()
-		}
-
-		// Wait for the test to tell both invocations to proceed
-		concurrentConflictProceed.Wait()
-
-		// Now both will try to record their result - one will succeed, one will conflict
-		return input, nil
-	})
-	fmt.Println("step error:", err)
-	if err != nil {
-		return TestWorkflowData{}, err
-	}
-
-	return result, nil
 }

@@ -544,9 +544,23 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 
 	// Register a type-erased version of the durable workflow for recovery
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
-		typedInput, ok := input.(P)
-		if !ok {
-			return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
+		workflowID, err := GetWorkflowID(ctx)
+		if err != nil {
+			return *new(R), newWorkflowExecutionError("", fmt.Errorf("getting workflow ID: %w", err))
+		}
+		var typedInput P
+		if isJSONSerializer(ctx.(*dbosContext).serializer) {
+			var err error
+			typedInput, err = convertJSONToType[P](input)
+			if err != nil {
+				return *new(R), newWorkflowExecutionError(workflowID, err)
+			}
+		} else {
+			var ok bool
+			typedInput, ok = input.(P)
+			if !ok {
+				return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", typedInput), fmt.Sprintf("%T", input))
+			}
 		}
 		return fn(ctx, typedInput)
 	})
@@ -1174,9 +1188,23 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 		return *new(R), err
 	}
 	// Otherwise type-check and cast the result
-	typedResult, ok := result.(R)
-	if !ok {
-		return *new(R), fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), result)
+	// If we use the JSON serializer, we need to do a recast here: on the recovery path, the result could be pulled from the database
+	// FIXME: could we do this only on the recovery path? But how to detect?
+	var typedResult R
+	if isJSONSerializer(serializer) {
+		var err error
+		typedResult, err = convertJSONToType[R](result)
+		if err != nil {
+			workflowID, _ := ctx.GetWorkflowID() // Must be within a workflow so we can ignore the error
+			return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("converting step result to expected type: %w", err))
+		}
+	} else {
+		var ok bool
+		typedResult, ok = result.(R)
+		if !ok {
+			workflowID, _ := ctx.GetWorkflowID() // Must be within a workflow so we can ignore the error
+			return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", result))
+		}
 	}
 	return typedResult, err
 }
