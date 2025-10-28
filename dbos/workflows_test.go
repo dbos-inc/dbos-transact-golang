@@ -34,6 +34,11 @@ func simpleWorkflowWithStep(dbosCtx DBOSContext, input string) (string, error) {
 	})
 }
 
+func slowWorkflow(dbosCtx DBOSContext, sleepTime time.Duration) (string, error) {
+	Sleep(dbosCtx, sleepTime)
+	return "done", nil
+}
+
 func simpleStep(_ context.Context) (string, error) {
 	return "from step", nil
 }
@@ -4521,5 +4526,73 @@ func TestWorkflowIdentity(t *testing.T) {
 
 	t.Run("CheckAuthenticatedRoles", func(t *testing.T) {
 		assert.Equal(t, []string{"reader", "writer"}, status.AuthenticatedRoles)
+	})
+}
+
+func TestWorkflowHandleTimeout(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+	RegisterWorkflow(dbosCtx, slowWorkflow)
+
+	t.Run("WorkflowHandleTimeout", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 10*time.Second)
+		require.NoError(t, err, "failed to start workflow")
+
+		start := time.Now()
+		_, err = handle.GetResult(WithHandleTimeout(10 * time.Millisecond))
+		duration := time.Since(start)
+
+		require.Error(t, err, "expected timeout error")
+		assert.Contains(t, err.Error(), "workflow result timeout")
+		assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
+		assert.True(t, errors.Is(err, context.DeadlineExceeded),
+			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
+	})
+
+	t.Run("WorkflowPollingHandleTimeout", func(t *testing.T) {
+		// Start a workflow that will block on the first signal
+		originalHandle, err := RunWorkflow(dbosCtx, slowWorkflow, 10*time.Second)
+		require.NoError(t, err, "failed to start workflow")
+
+		pollingHandle, err := RetrieveWorkflow[string](dbosCtx, originalHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to retrieve workflow")
+
+		_, ok := pollingHandle.(*workflowPollingHandle[string])
+		require.True(t, ok, "expected polling handle, got %T", pollingHandle)
+
+		_, err = pollingHandle.GetResult(WithHandleTimeout(10 * time.Millisecond))
+
+		require.Error(t, err, "expected timeout error")
+		assert.True(t, errors.Is(err, context.DeadlineExceeded),
+			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
+	})
+}
+
+func TestWorkflowHandleContextCancel(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+	RegisterWorkflow(dbosCtx, getEventWorkflow)
+
+	t.Run("WorkflowHandleContextCancel", func(t *testing.T) {
+		getEventWorkflowStartedSignal.Clear()
+		handle, err := RunWorkflow(dbosCtx, getEventWorkflow, getEventWorkflowInput{
+			TargetWorkflowID: "test-workflow-id",
+			Key:              "test-key",
+		})
+		require.NoError(t, err, "failed to start workflow")
+
+		resultChan := make(chan error)
+		go func() {
+			_, err := handle.GetResult()
+			resultChan <- err
+		}()
+
+		getEventWorkflowStartedSignal.Wait()
+		getEventWorkflowStartedSignal.Clear()
+
+		dbosCtx.Shutdown(1 * time.Second)
+
+		err = <-resultChan
+		require.Error(t, err, "expected error from cancelled context")
+		assert.True(t, errors.Is(err, context.Canceled),
+			"expected error to be detectable as context.Canceled, got: %v", err)
 	})
 }
