@@ -534,6 +534,9 @@ func TestSerializer(t *testing.T) {
 		t.Run(serializerName, func(t *testing.T) {
 			executor := setupDBOS(t, true, true, serializerFactory())
 
+			// Create a test queue for queued workflow tests
+			testQueue := NewWorkflowQueue(executor, "serializer-test-queue")
+
 			// Register workflows
 			RegisterWorkflow(executor, serializerWorkflow)
 			RegisterWorkflow(executor, serializerNilValueWorkflow)
@@ -745,6 +748,56 @@ func TestSerializer(t *testing.T) {
 				}
 
 				testWorkflowRecovery(t, executor, serializerAnyRecoveryWorkflow, serializerAnyRecoveryStartEvent, serializerAnyRecoveryEvent, any(input), "serializer-any-recovery-wf")
+			})
+
+			// Test queued workflow with TestWorkflowData type
+			t.Run("QueuedWorkflow", func(t *testing.T) {
+				input := TestWorkflowData{
+					ID:       "queued-test-id",
+					Message:  "queued test message",
+					Value:    456,
+					Active:   false,
+					Data:     TestData{Message: "queued nested", Value: 789, Active: true},
+					Metadata: map[string]string{"type": "queued"},
+				}
+
+				// Start workflow with queue option
+				handle, err := RunWorkflow(executor, serializerWorkflow, input, WithWorkflowID("serializer-queued-wf"), WithQueue(testQueue.Name))
+				require.NoError(t, err, "failed to start queued workflow")
+
+				// Get result from the handle
+				result, err := handle.GetResult()
+				require.NoError(t, err, "queued workflow should complete successfully")
+				assert.Equal(t, input, result, "queued workflow result should match input")
+			})
+
+			// Test queued workflow with any type
+			t.Run("QueuedWorkflowAny", func(t *testing.T) {
+				if serializerName == "Gob" {
+					t.Skip("Skipping test for Gob serializer due to Gob limitations with interface types")
+				}
+
+				input := TestWorkflowData{
+					ID:       "queued-any-test-id",
+					Message:  "queued any test message",
+					Value:    321,
+					Active:   true,
+					Data:     TestData{Message: "queued any nested", Value: 654, Active: false},
+					Metadata: map[string]string{"type": "queued-any"},
+				}
+
+				// Start workflow with queue option
+				handle, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(input), WithWorkflowID("serializer-queued-any-wf"), WithQueue(testQueue.Name))
+				require.NoError(t, err, "failed to start queued workflow")
+
+				// Get result from the handle
+				result, err := handle.GetResult()
+				require.NoError(t, err, "queued workflow should complete successfully")
+
+				// Convert the result from any type
+				typedResult, err := convertJSONToType[TestWorkflowData](result)
+				require.NoError(t, err, "Failed to convert result")
+				assert.Equal(t, input, typedResult, "queued workflow result should match input")
 			})
 
 		})

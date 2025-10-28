@@ -990,7 +990,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 		// Handle DBOS ID conflict errors by waiting workflow result
 		needsConversion := false
-		fmt.Println(err)
 		if errors.Is(err, &DBOSError{Code: ConflictingIDError}) {
 			fmt.Println("Detected workflow ID conflict error, awaiting existing workflow result")
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)

@@ -1,10 +1,7 @@
 package dbos
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/gob"
 	"log/slog"
 	"math"
 	"math/rand"
@@ -227,23 +224,13 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 					continue
 				}
 
-				// Deserialize input
-				var input any
-				if len(workflow.input) > 0 {
-					inputBytes, err := base64.StdEncoding.DecodeString(workflow.input)
-					if err != nil {
-						qr.logger.Error("failed to decode input for workflow", "workflow_id", workflow.id, "error", err)
-						continue
-					}
-					buf := bytes.NewBuffer(inputBytes)
-					dec := gob.NewDecoder(buf)
-					if err := dec.Decode(&input); err != nil {
-						qr.logger.Error("failed to decode input for workflow", "workflow_id", workflow.id, "error", err)
-						continue
-					}
+				input, err := ctx.serializer.Decode(&workflow.input)
+				if err != nil {
+					qr.logger.Error("Failed to decode workflow input", "workflow_id", workflow.id, "error", err)
+					continue
 				}
 
-				_, err := registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
+				_, err = registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
 				if err != nil {
 					qr.logger.Error("Error running queued workflow", "error", err)
 				}
