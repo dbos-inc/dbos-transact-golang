@@ -742,7 +742,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// Prevent spawning child workflows from within a step
 	if isChildWorkflow && parentWorkflowState.isWithinStep {
-		return nil, newStepExecutionError(parentWorkflowState.workflowID, params.workflowName, "cannot spawn child workflow from within a step")
+		return nil, newStepExecutionError(parentWorkflowState.workflowID, params.workflowName, fmt.Errorf("cannot spawn child workflow from within a step"))
 	}
 
 	if isChildWorkflow {
@@ -935,8 +935,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		result, err = fn(workflowCtx, input)
 
 		// Handle DBOS ID conflict errors by waiting workflow result
-		var dbosErr *DBOSError
-		if errors.As(err, &dbosErr) && dbosErr.Code == ConflictingIDError {
+		if errors.Is(err, &DBOSError{Code: ConflictingIDError}) {
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
 			result, err = retryWithResult(c, func() (any, error) {
 				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID)
@@ -1098,11 +1097,11 @@ func WithMaxInterval(interval time.Duration) StepOption {
 // Under the hood, DBOS uses the provided context to manage durable execution.
 func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
-		return *new(R), newStepExecutionError("", "", "ctx cannot be nil")
+		return *new(R), newStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
 	}
 
 	if fn == nil {
-		return *new(R), newStepExecutionError("", "", "step function cannot be nil")
+		return *new(R), newStepExecutionError("", "", fmt.Errorf("step function cannot be nil"))
 	}
 
 	// Register the output type for gob encoding
@@ -1144,12 +1143,12 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	// Get workflow state from context
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return nil, newStepExecutionError("", stepOpts.stepName, "workflow state not found in context: are you running this step within a workflow?")
+		return nil, newStepExecutionError("", stepOpts.stepName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
 	}
 
 	// This should not happen when called from the package-level RunAsStep
 	if fn == nil {
-		return nil, newStepExecutionError(wfState.workflowID, stepOpts.stepName, "step function cannot be nil")
+		return nil, newStepExecutionError(wfState.workflowID, stepOpts.stepName, fmt.Errorf("step function cannot be nil"))
 	}
 
 	// If within a step, just run the function directly
@@ -1176,7 +1175,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		})
 	}, withRetrierLogger(c.logger))
 	if err != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Sprintf("checking operation execution: %v", err))
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
 	}
 	if recordedOutput != nil {
 		return recordedOutput.output, recordedOutput.err
@@ -1205,7 +1204,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 			// Wait before retry
 			select {
 			case <-c.Done():
-				return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Sprintf("context cancelled during retry: %v", c.Err()))
+				return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("context cancelled during retry: %w", c.Err()))
 			case <-time.After(delay):
 				// Continue to retry
 			}
@@ -1241,7 +1240,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
 	}, withRetrierLogger(c.logger))
 	if recErr != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Sprintf("recording step outcome: %v", recErr))
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
 	}
 
 	return stepOutput, stepError

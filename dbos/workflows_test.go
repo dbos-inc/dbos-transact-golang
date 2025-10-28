@@ -4149,9 +4149,10 @@ func TestGarbageCollect(t *testing.T) {
 				found = true
 				require.Equal(t, WorkflowStatusPending, wf.Status, "blocked workflow should still be pending")
 			}
-			if wf.Status == WorkflowStatusPending {
+			switch wf.Status {
+			case WorkflowStatusPending:
 				pendingCount++
-			} else if wf.Status == WorkflowStatusSuccess {
+			case WorkflowStatusSuccess:
 				completedCount++
 			}
 		}

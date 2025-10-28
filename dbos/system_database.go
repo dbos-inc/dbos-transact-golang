@@ -1211,8 +1211,7 @@ type recordOperationResultDBInput struct {
 func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
 	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
             (workflow_uuid, function_id, output, error, function_name)
-            VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT DO NOTHING`, pgx.Identifier{s.schema}.Sanitize())
+            VALUES ($1, $2, $3, $4, $5)`, pgx.Identifier{s.schema}.Sanitize())
 
 	var errorString *string
 	if input.err != nil {
@@ -1532,11 +1531,11 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 	// Get workflow state from context
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return 0, newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
+		return 0, newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
 	}
 
 	if wfState.isWithinStep {
-		return 0, newStepExecutionError(wfState.workflowID, functionName, "cannot call Sleep within a step")
+		return 0, newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call Sleep within a step"))
 	}
 
 	// Determine step ID
@@ -1749,7 +1748,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	if ok && wfState != nil {
 		isInWorkflow = true
 		if wfState.isWithinStep {
-			return newStepExecutionError(wfState.workflowID, functionName, "cannot call Send within a step")
+			return newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call Send within a step"))
 		}
 		stepID = wfState.nextStepID()
 	}
@@ -1832,11 +1831,11 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	// Get workflow state from context
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return nil, newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
+		return nil, newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
 	}
 
 	if wfState.isWithinStep {
-		return nil, newStepExecutionError(wfState.workflowID, functionName, "cannot call Recv within a step")
+		return nil, newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call Recv within a step"))
 	}
 
 	stepID := wfState.nextStepID()
@@ -1988,11 +1987,11 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	// Get workflow state from context
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return newStepExecutionError("", functionName, "workflow state not found in context: are you running this step within a workflow?")
+		return newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
 	}
 
 	if wfState.isWithinStep {
-		return newStepExecutionError(wfState.workflowID, functionName, "cannot call SetEvent within a step")
+		return newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call SetEvent within a step"))
 	}
 
 	stepID := wfState.nextStepID()
@@ -2071,7 +2070,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 	if ok && wfState != nil {
 		isInWorkflow = true
 		if wfState.isWithinStep {
-			return nil, newStepExecutionError(wfState.workflowID, functionName, "cannot call GetEvent within a step")
+			return nil, newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call GetEvent within a step"))
 		}
 		stepID = wfState.nextStepID()
 		sleepStepID = wfState.nextStepID() // We will use a sleep step to implement the timeout
