@@ -1,9 +1,5 @@
 package dbos
 
-import (
-	"strings"
-)
-
 func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
@@ -18,13 +14,6 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 	}
 
 	for _, workflow := range pendingWorkflows {
-		if inputStr, ok := workflow.Input.(string); ok {
-			if strings.Contains(inputStr, "Failed to decode") {
-				ctx.logger.Warn("Skipping workflow recovery due to input decoding failure", "workflow_id", workflow.ID, "name", workflow.Name)
-				continue
-			}
-		}
-
 		if workflow.QueueName != "" {
 			cleared, err := ctx.systemDB.clearQueueAssignment(ctx, workflow.ID)
 			if err != nil {

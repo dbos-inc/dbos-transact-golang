@@ -33,6 +33,7 @@ func (g *GobSerializer) Encode(data any) (string, error) {
 	var inputBytes []byte
 	if !isNilValue(data) {
 		// Register the type with gob for proper serialization
+		// This is useful when dealing with interface types that didn't have a concrete value at workflow registration time
 		safeGobRegister(data, nil)
 
 		var buf bytes.Buffer
@@ -114,6 +115,42 @@ func serialize(ctx DBOSContext, data any) (string, error) {
 		return "", fmt.Errorf("no serializer configured in DBOSContext")
 	}
 	return dbosCtx.serializer.Encode(data)
+}
+
+// isJSONSerializer checks if the given serializer is a JSONSerializer
+func isJSONSerializer(s Serializer) bool {
+	_, ok := s.(*JSONSerializer)
+	return ok
+}
+
+// isGobSerializer checks if the given serializer is a GobSerializer
+func isGobSerializer(s Serializer) bool {
+	_, ok := s.(*GobSerializer)
+	return ok
+}
+
+// convertJSONToType converts a JSON-decoded value (map[string]interface{}) to type T
+// via marshal/unmarshal round-trip.
+//
+// This is needed because JSON deserialization loses type information when decoding
+// into `any` - it converts structs to map[string]interface{}, numbers to float64, etc.
+// By re-marshaling and unmarshaling into a typed target, we (mostly) restore the original structure.
+func convertJSONToType[T any](value any) (T, error) {
+	if value == nil {
+		return *new(T), nil
+	}
+
+	jsonBytes, err := json.Marshal(value)
+	if err != nil {
+		return *new(T), fmt.Errorf("marshaling for type conversion: %w", err)
+	}
+
+	var typedResult T
+	if err := json.Unmarshal(jsonBytes, &typedResult); err != nil {
+		return *new(T), fmt.Errorf("unmarshaling for type conversion: %w", err)
+	}
+
+	return typedResult, nil
 }
 
 // Handle cases where the provided data interface wraps a nil value (e.g., var p *int; data := any(p). data != nil but the underlying value is nil)

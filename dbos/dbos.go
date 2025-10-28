@@ -78,7 +78,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		dbosConfig.DatabaseSchema = _DEFAULT_SYSTEM_DB_SCHEMA
 	}
 	if dbosConfig.Serializer == nil {
-		dbosConfig.Serializer = NewJSONSerializer()
+		dbosConfig.Serializer = NewGobSerializer()
 	}
 
 	// Override with environment variables if set
@@ -213,6 +213,7 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
+			serializer:              dbosCtx.serializer,
 		}
 		childCtx.launched.Store(launched)
 		return childCtx
@@ -241,6 +242,7 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
+			serializer:              dbosCtx.serializer,
 		}
 		childCtx.launched.Store(launched)
 		return childCtx
@@ -268,6 +270,7 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
+			serializer:              dbosCtx.serializer,
 		}
 		childCtx.launched.Store(launched)
 		return childCtx, cancelFunc
@@ -362,18 +365,20 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.logger = config.Logger
 	initExecutor.logger.Info("Initializing DBOS context", "app_name", config.AppName, "dbos_version", getDBOSVersion())
 
-	// Register types we serialize with gob
-	var t time.Time
-	safeGobRegister(t, initExecutor.logger)
-	var ws []WorkflowStatus
-	safeGobRegister(ws, initExecutor.logger)
-	var si []StepInfo
-	safeGobRegister(si, initExecutor.logger)
-
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion
 	initExecutor.executorID = config.ExecutorID
 	initExecutor.serializer = config.Serializer
+
+	// Register types we serialize with gob (only if using GobSerializer)
+	if isGobSerializer(initExecutor.serializer) {
+		var t time.Time
+		safeGobRegister(t, initExecutor.logger)
+		var ws []WorkflowStatus
+		safeGobRegister(ws, initExecutor.logger)
+		var si []StepInfo
+		safeGobRegister(si, initExecutor.logger)
+	}
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 

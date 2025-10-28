@@ -1182,7 +1182,6 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any
 			return nil, fmt.Errorf("failed to query workflow status: %w", err)
 		}
 
-		// Deserialize output from TEXT to bytes then from bytes to R using gob
 		output, err := s.serializer.Decode(outputString)
 		if err != nil {
 			return nil, fmt.Errorf("failed to deserialize output: %w", err)
@@ -1247,6 +1246,7 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
+			fmt.Println("Conflict error while recording operation result")
 			return newWorkflowConflictIDError(input.workflowID)
 		}
 		return err
