@@ -145,6 +145,31 @@ func convertJSONToType[T any](value any) (T, error) {
 		return *new(T), fmt.Errorf("marshaling for type conversion: %w", err)
 	}
 
+	fmt.Println("convertJSONToType:", string(jsonBytes))
+
+	// Check if T is an interface type
+	var zero T
+	typeOfT := reflect.TypeOf(&zero).Elem()
+
+	if typeOfT.Kind() == reflect.Interface {
+		// T is interface - need to get concrete type from value
+		concreteType := reflect.TypeOf(value)
+		if concreteType.Kind() == reflect.Pointer {
+			concreteType = concreteType.Elem()
+		}
+
+		// Create new instance of concrete type
+		newInstance := reflect.New(concreteType)
+
+		// Unmarshal into the concrete type
+		if err := json.Unmarshal(jsonBytes, newInstance.Interface()); err != nil {
+			return *new(T), fmt.Errorf("unmarshaling for type conversion: %w", err)
+		}
+
+		// Convert to interface type T
+		return newInstance.Elem().Interface().(T), nil
+	}
+
 	var typedResult T
 	if err := json.Unmarshal(jsonBytes, &typedResult); err != nil {
 		return *new(T), fmt.Errorf("unmarshaling for type conversion: %w", err)
