@@ -1,9 +1,5 @@
 package dbos
 
-import (
-	"strings"
-)
-
 func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
@@ -18,10 +14,20 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 	}
 
 	for _, workflow := range pendingWorkflows {
-		if inputStr, ok := workflow.Input.(string); ok {
-			if strings.Contains(inputStr, "Failed to decode") {
-				ctx.logger.Warn("Skipping workflow recovery due to input decoding failure", "workflow_id", workflow.ID, "name", workflow.Name)
+		// Deserialize the workflow input
+		var decodedInput any
+		if workflow.Input != nil {
+			inputStr, ok := workflow.Input.(string)
+			if !ok {
+				ctx.logger.Warn("Skipping workflow recovery: input is not an encoded string", "workflow_id", workflow.ID, "name", workflow.Name, "input_type", workflow.Input)
 				continue
+			}
+			if inputStr != "" {
+				decodedInput, err = deserialize(&inputStr)
+				if err != nil {
+					ctx.logger.Warn("Skipping workflow recovery due to input decoding failure", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
+					continue
+				}
 			}
 		}
 
@@ -59,7 +65,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 			WithWorkflowID(workflow.ID),
 		}
 		// Create a workflow context from the executor context
-		handle, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, opts...)
+		handle, err := registeredWorkflow.wrappedFunction(ctx, decodedInput, opts...)
 		if err != nil {
 			return nil, err
 		}
