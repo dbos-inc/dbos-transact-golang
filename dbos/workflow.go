@@ -1228,11 +1228,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		// Deserialize the recorded output
 		var decodedOutput any
 		if recordedOutput.output != nil {
-			encodedStr, ok := recordedOutput.output.(string)
-			if !ok {
-				return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("recorded output must be encoded string, got %T", recordedOutput.output))
-			}
-			decodedOutput, err = deserialize(&encodedStr)
+			decodedOutput, err = deserialize(recordedOutput.output)
 			if err != nil {
 				return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to deserialize recorded output: %w", err))
 			}
@@ -1363,22 +1359,14 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 		Topic:   topic,
 		Timeout: timeout,
 	}
-	encodedMsg, err := retryWithResult(c, func() (any, error) {
+	encodedMsg, err := retryWithResult(c, func() (*string, error) {
 		return c.systemDB.recv(c, input)
 	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
 	}
 
-	// Deserialize the received message
-	if encodedMsg != nil {
-		encodedStr, ok := encodedMsg.(string)
-		if !ok {
-			return nil, fmt.Errorf("received message must be encoded string, got %T", encodedMsg)
-		}
-		return deserialize(&encodedStr)
-	}
-	return nil, nil
+	return deserialize(encodedMsg)
 }
 
 // Recv receives a message sent to this workflow with type safety.
@@ -2062,22 +2050,26 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	if params.loadInput || params.loadOutput {
 		for i := range workflows {
 			if params.loadInput && workflows[i].Input != nil {
-				encodedStr, ok := workflows[i].Input.(string)
-				if ok && encodedStr != "" {
-					workflows[i].Input, err = deserialize(&encodedStr)
-					if err != nil {
-						return nil, fmt.Errorf("failed to deserialize workflow input for %s: %w", workflows[i].ID, err)
-					}
+				encodedInput, ok := workflows[i].Input.(*string)
+				if !ok {
+					return nil, fmt.Errorf("workflow input must be encoded string, got %T", workflows[i].Input)
 				}
+				decodedInput, err := deserialize(encodedInput)
+				if err != nil {
+					return nil, fmt.Errorf("failed to deserialize workflow input for %s: %w", workflows[i].ID, err)
+				}
+				workflows[i].Input = decodedInput
 			}
 			if params.loadOutput && workflows[i].Output != nil {
-				encodedStr, ok := workflows[i].Output.(string)
-				if ok && encodedStr != "" {
-					workflows[i].Output, err = deserialize(&encodedStr)
-					if err != nil {
-						return nil, fmt.Errorf("failed to deserialize workflow output for %s: %w", workflows[i].ID, err)
-					}
+				encodedOutput, ok := workflows[i].Output.(*string)
+				if !ok {
+					return nil, fmt.Errorf("workflow output must be encoded string, got %T", workflows[i].Output)
 				}
+				decodedOutput, err := deserialize(encodedOutput)
+				if err != nil {
+					return nil, fmt.Errorf("failed to deserialize workflow output for %s: %w", workflows[i].ID, err)
+				}
+				workflows[i].Output = decodedOutput
 			}
 		}
 	}
@@ -2163,18 +2155,18 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 		return nil, err
 	}
 
-	// Deserialize Output fields if they were loaded
+	// Deserialize outputs if asked to
 	if loadOutput {
 		for i := range steps {
-			if steps[i].Output != nil {
-				encodedStr, ok := steps[i].Output.(string)
-				if ok && encodedStr != "" {
-					steps[i].Output, err = deserialize(&encodedStr)
-					if err != nil {
-						return nil, fmt.Errorf("failed to deserialize step output for step %d: %w", steps[i].StepID, err)
-					}
-				}
+			encodedOutput, ok := steps[i].Output.(*string)
+			if !ok {
+				return nil, fmt.Errorf("step output must be encoded string, got %T", steps[i].Output)
 			}
+			decodedOutput, err := deserialize(encodedOutput)
+			if err != nil {
+				return nil, fmt.Errorf("failed to deserialize step output for step %d: %w", steps[i].StepID, err)
+			}
+			steps[i].Output = decodedOutput
 		}
 	}
 

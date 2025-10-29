@@ -9,21 +9,33 @@ import (
 	"strings"
 )
 
-func serialize(data any) (string, error) {
-	var inputBytes []byte
-	if data != nil {
-		var buf bytes.Buffer
-		enc := gob.NewEncoder(&buf)
-		if err := enc.Encode(&data); err != nil {
-			return "", fmt.Errorf("failed to encode data: %w", err)
-		}
-		inputBytes = buf.Bytes()
+func serialize(data any) (*string, error) {
+	// Handle nil values specially - return nil pointer which will be stored as NULL in DB
+	if data == nil {
+		return nil, nil
 	}
-	return base64.StdEncoding.EncodeToString(inputBytes), nil
+
+	// Handle empty string specially - return pointer to empty string which will be stored as "" in DB
+	if str, ok := data.(string); ok && str == "" {
+		return &str, nil
+	}
+
+	// Register the type with gob to avoid interface{} issues
+	safeGobRegister(data, nil)
+
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(data); err != nil {
+		return nil, fmt.Errorf("failed to encode data: %w", err)
+	}
+	inputBytes := buf.Bytes()
+
+	encoded := base64.StdEncoding.EncodeToString(inputBytes)
+	return &encoded, nil
 }
 
 func deserialize(data *string) (any, error) {
-	if data == nil || *data == "" {
+	if data == nil {
 		return nil, nil
 	}
 
