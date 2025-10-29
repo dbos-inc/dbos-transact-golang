@@ -1195,7 +1195,7 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 		typedResult, err = convertJSONToType[R](result)
 		if err != nil {
 			workflowID, _ := ctx.GetWorkflowID() // Must be within a workflow so we can ignore the error
-			return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("converting step result to expected type: %w", err))
+			return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("converting step result to expected type %T: %w", *new(R), err))
 		}
 	} else {
 		var ok bool
@@ -1355,9 +1355,8 @@ func Send[P any](ctx DBOSContext, destinationID string, message P, topic string)
 		logger = c.logger
 		serializer = c.serializer
 	}
-	var typedMessage P
 	if isGobSerializer(serializer) {
-		safeGobRegister(typedMessage, logger)
+		safeGobRegister(message, logger)
 	}
 	return ctx.Send(ctx, destinationID, message, topic)
 }
@@ -1455,9 +1454,8 @@ func SetEvent[P any](ctx DBOSContext, key string, message P) error {
 		logger = c.logger
 		serializer = c.serializer
 	}
-	var typedMessage P
 	if isGobSerializer(serializer) {
-		safeGobRegister(typedMessage, logger)
+		safeGobRegister(message, logger)
 	}
 	return ctx.SetEvent(ctx, key, message)
 }
@@ -1505,9 +1503,13 @@ func GetEvent[R any](ctx DBOSContext, targetWorkflowID, key string, timeout time
 		return *new(R), nil
 	}
 
-	// JSON serializer loses type information - convert back to expected type
+	var serializer Serializer
+	if dbosCtx, ok := ctx.(*dbosContext); ok {
+		serializer = dbosCtx.serializer
+	}
 	var typedValue R
-	if dbosCtx, ok := ctx.(*dbosContext); ok && isJSONSerializer(dbosCtx.serializer) {
+	// JSON serializer loses type information - convert back to expected type
+	if isJSONSerializer(serializer) {
 		typedValue, err = convertJSONToType[R](value)
 		if err != nil {
 			return *new(R), fmt.Errorf("converting event value to type %T: %w", *new(R), err)

@@ -371,6 +371,26 @@ type TestWorkflowData struct {
 	Metadata map[string]string
 }
 
+// Interface for testing interface-typed workflows
+type DataProvider interface {
+	GetMessage() string
+	GetValue() int
+}
+
+// Concrete implementation of DataProvider
+type ConcreteDataProvider struct {
+	Message string
+	Value   int
+}
+
+func (c ConcreteDataProvider) GetMessage() string {
+	return c.Message
+}
+
+func (c ConcreteDataProvider) GetValue() int {
+	return c.Value
+}
+
 // Test workflows and steps
 func serializerTestStep(_ context.Context, input TestWorkflowData) (TestWorkflowData, error) {
 	return input, nil
@@ -393,6 +413,12 @@ func serializerAnyValueWorkflow(ctx DBOSContext, input any) (any, error) {
 		if input == nil {
 			return nil, nil
 		}
+		return input, nil
+	})
+}
+
+func serializerInterfaceValueWorkflow(ctx DBOSContext, input DataProvider) (DataProvider, error) {
+	return RunAsStep(ctx, func(context context.Context) (DataProvider, error) {
 		return input, nil
 	})
 }
@@ -546,6 +572,7 @@ func TestSerializer(t *testing.T) {
 			RegisterWorkflow(executor, serializerSetEventWorkflow)
 			RegisterWorkflow(executor, serializerGetEventWorkflow)
 			RegisterWorkflow(executor, serializerRecoveryWorkflow)
+			RegisterWorkflow(executor, serializerInterfaceValueWorkflow)
 			if serializerName == "JSON" {
 				// Cannot register "any" workflow with Gob serializer
 				RegisterWorkflow(executor, serializerAnyValueWorkflow)
@@ -596,6 +623,68 @@ func TestSerializer(t *testing.T) {
 				require.NoError(t, err, "Any workflow execution failed")
 
 				testComprehensiveWorkflowValues(t, executor, handle, input)
+			})
+
+			// Test workflow with interface type
+			t.Run("ComprehensiveInterfaceValues", func(t *testing.T) {
+				input := ConcreteDataProvider{
+					Message: "interface test message",
+					Value:   123,
+				}
+
+				handle, err := RunWorkflow(executor, serializerInterfaceValueWorkflow, DataProvider(input))
+				require.NoError(t, err, "Interface workflow execution failed")
+
+				// Get the result
+				result, err := handle.GetResult()
+				require.NoError(t, err, "Failed to get workflow result")
+
+				// For interface types, we need to check the concrete type
+				concreteResult, ok := result.(ConcreteDataProvider)
+				require.True(t, ok, "Result should be ConcreteDataProvider type")
+				assert.Equal(t, input.Message, concreteResult.Message, "Message should match")
+				assert.Equal(t, input.Value, concreteResult.Value, "Value should match")
+
+				// Test with ListWorkflows
+				workflows, err := ListWorkflows(executor,
+					WithWorkflowIDs([]string{handle.GetWorkflowID()}),
+					WithLoadInput(true),
+					WithLoadOutput(true),
+				)
+				require.NoError(t, err, "Failed to list workflows")
+				require.Len(t, workflows, 1, "Expected 1 workflow")
+
+				workflow := workflows[0]
+				require.NotNil(t, workflow.Input, "Workflow input should not be nil")
+				require.NotNil(t, workflow.Output, "Workflow output should not be nil")
+
+				// For Gob serializer, the concrete type is preserved
+				// For JSON serializer, we get a map that needs conversion
+				dbosCtx, ok := executor.(*dbosContext)
+				require.True(t, ok, "expected dbosContext")
+				isJSON := isJSONSerializer(dbosCtx.serializer)
+
+				if isJSON {
+					// JSON serializer returns map[string]any
+					inputMap, ok := workflow.Input.(map[string]any)
+					require.True(t, ok, "Input should be map[string]any for JSON")
+					assert.Equal(t, input.Message, inputMap["Message"], "Message should match in input")
+					assert.Equal(t, float64(input.Value), inputMap["Value"], "Value should match in input")
+
+					outputMap, ok := workflow.Output.(map[string]any)
+					require.True(t, ok, "Output should be map[string]any for JSON")
+					assert.Equal(t, input.Message, outputMap["Message"], "Message should match in output")
+					assert.Equal(t, float64(input.Value), outputMap["Value"], "Value should match in output")
+				} else {
+					// Gob serializer preserves the concrete type
+					inputConcrete, ok := workflow.Input.(ConcreteDataProvider)
+					require.True(t, ok, "Input should be ConcreteDataProvider for Gob")
+					assert.Equal(t, input, inputConcrete, "Input should match")
+
+					outputConcrete, ok := workflow.Output.(ConcreteDataProvider)
+					require.True(t, ok, "Output should be ConcreteDataProvider for Gob")
+					assert.Equal(t, input, outputConcrete, "Output should match")
+				}
 			})
 
 			// Test nil values with pointer type workflow
