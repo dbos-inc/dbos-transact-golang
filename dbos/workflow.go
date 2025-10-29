@@ -253,16 +253,17 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		return h.dbosContext.(*dbosContext).systemDB.awaitWorkflowResult(ctx, h.workflowID)
 	}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 
-	// Deserialize the result
+	// Deserialize the result (but preserve any error from awaitWorkflowResult)
 	var result any
 	if encodedResult != nil {
 		encodedStr, ok := encodedResult.(string)
 		if !ok {
 			return *new(R), newWorkflowUnexpectedResultType(h.workflowID, "string (encoded)", fmt.Sprintf("%T", encodedResult))
 		}
-		result, err = deserialize(&encodedStr)
-		if err != nil {
-			return *new(R), fmt.Errorf("failed to deserialize workflow result: %w", err)
+		var deserErr error
+		result, deserErr = deserialize(&encodedStr)
+		if deserErr != nil {
+			return *new(R), fmt.Errorf("failed to deserialize workflow result: %w", deserErr)
 		}
 	}
 
