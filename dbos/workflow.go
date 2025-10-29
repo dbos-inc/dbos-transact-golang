@@ -959,9 +959,25 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		// Handle DBOS ID conflict errors by waiting workflow result
 		if errors.Is(err, &DBOSError{Code: ConflictingIDError}) {
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
-			result, err = retryWithResult(c, func() (any, error) {
+			var encodedResult any
+			encodedResult, err = retryWithResult(c, func() (any, error) {
 				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID)
 			}, withRetrierLogger(c.logger))
+			var deserErr error
+			encodedResultString, ok := encodedResult.(string)
+			if !ok {
+				c.logger.Error("Unexpected result type when awaiting workflow result after ID conflict", "workflow_id", workflowID, "type", fmt.Sprintf("%T", encodedResult))
+				outcomeChan <- workflowOutcome[any]{result: nil, err: fmt.Errorf("unexpected result type when awaiting workflow result after ID conflict: expected string, got %T", encodedResult)}
+				close(outcomeChan)
+				return
+			}
+			result, deserErr = deserialize(&encodedResultString)
+			if deserErr != nil {
+				c.logger.Error("Failed to deserialize workflow result after ID conflict", "workflow_id", workflowID, "error", deserErr)
+				outcomeChan <- workflowOutcome[any]{result: nil, err: fmt.Errorf("failed to deserialize workflow result after ID conflict: %w", deserErr)}
+				close(outcomeChan)
+				return
+			}
 		} else {
 			status := WorkflowStatusSuccess
 
