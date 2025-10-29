@@ -440,9 +440,10 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		timeoutMs = &millis
 	}
 
-	inputString, err := serialize(input.status.Input)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize input: %w", err)
+	// Input should already be serialized by caller
+	inputString, ok := input.status.Input.(string)
+	if !ok && input.status.Input != nil {
+		return nil, fmt.Errorf("workflow input must be a pre-encoded string, got %T", input.status.Input)
 	}
 
 	// Our DB works with NULL values
@@ -791,18 +792,15 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 				wf.Error = errors.New(*errorStr)
 			}
 
-			wf.Output, err = deserialize(outputString)
-			if err != nil {
-				return nil, fmt.Errorf("failed to deserialize output: %w", err)
+			// Return output as encoded string (stored as any)
+			if outputString != nil {
+				wf.Output = *outputString
 			}
 		}
 
-		// Handle input only if loadInput is true
-		if input.loadInput {
-			wf.Input, err = deserialize(inputString)
-			if err != nil {
-				return nil, fmt.Errorf("failed to deserialize input: %w", err)
-			}
+		// Return input as encoded string (stored as any)
+		if input.loadInput && inputString != nil {
+			wf.Input = *inputString
 		}
 
 		workflows = append(workflows, wf)
@@ -830,9 +828,10 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
 			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 in ($7, $8))`, pgx.Identifier{s.schema}.Sanitize())
 
-	outputString, err := serialize(input.output)
-	if err != nil {
-		return fmt.Errorf("failed to serialize output: %w", err)
+	// Output should already be serialized by caller
+	outputString, ok := input.output.(string)
+	if !ok && input.output != nil {
+		return fmt.Errorf("workflow output must be a pre-encoded string, got %T", input.output)
 	}
 
 	var errorStr string
@@ -840,6 +839,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 		errorStr = input.err.Error()
 	}
 
+	var err error
 	if input.tx != nil {
 		_, err = input.tx.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
 	} else {
@@ -1105,9 +1105,10 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		recovery_attempts
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, pgx.Identifier{s.schema}.Sanitize())
 
-	inputString, err := serialize(originalWorkflow.Input)
-	if err != nil {
-		return "", fmt.Errorf("failed to serialize input: %w", err)
+	// Input should already be serialized in originalWorkflow.Input
+	inputString, ok := originalWorkflow.Input.(string)
+	if !ok && originalWorkflow.Input != nil {
+		return "", fmt.Errorf("workflow input must be a pre-encoded string, got %T", originalWorkflow.Input)
 	}
 
 	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
@@ -1179,10 +1180,10 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any
 			return nil, fmt.Errorf("failed to query workflow status: %w", err)
 		}
 
-		// Deserialize output from TEXT to bytes then from bytes to R using gob
-		output, err := deserialize(outputString)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize output: %w", err)
+		// Return output as encoded string
+		var output any
+		if outputString != nil {
+			output = *outputString
 		}
 
 		switch status {
@@ -1219,11 +1220,13 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		errorString = &e
 	}
 
-	outputString, err := serialize(input.output)
-	if err != nil {
-		return fmt.Errorf("failed to serialize output: %w", err)
+	// Output should already be serialized by caller
+	outputString, ok := input.output.(string)
+	if !ok && input.output != nil {
+		return fmt.Errorf("step output must be a pre-encoded string, got %T", input.output)
 	}
 
+	var err error
 	if input.tx != nil {
 		_, err = input.tx.Exec(ctx, query,
 			input.workflowID,
@@ -1431,9 +1434,10 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 		return nil, newUnexpectedStepError(input.workflowID, input.stepID, input.stepName, recordedFunctionName)
 	}
 
-	output, err := deserialize(outputString)
-	if err != nil {
-		return nil, fmt.Errorf("failed to deserialize output: %w", err)
+	// Return output as encoded string
+	var output any
+	if outputString != nil {
+		output = *outputString
 	}
 
 	var recordedError error
@@ -1485,13 +1489,9 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 			return nil, fmt.Errorf("failed to scan step row: %w", err)
 		}
 
-		// Deserialize output if present and loadOutput is true
+		// Return output as encoded string if loadOutput is true
 		if input.loadOutput && outputString != nil {
-			output, err := deserialize(outputString)
-			if err != nil {
-				return nil, fmt.Errorf("failed to deserialize output: %w", err)
-			}
-			step.Output = output
+			step.Output = *outputString
 		}
 
 		// Convert error string to error if present
@@ -1564,10 +1564,20 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 			return 0, fmt.Errorf("no recorded end time for recorded sleep operation")
 		}
 
-		// The output should be a time.Time representing the end time
-		endTimeInterface, ok := recordedResult.output.(time.Time)
+		// Deserialize the recorded end time
+		encodedStr, ok := recordedResult.output.(string)
 		if !ok {
-			return 0, fmt.Errorf("recorded output is not a time.Time: %T", recordedResult.output)
+			return 0, fmt.Errorf("recorded output must be encoded string, got %T", recordedResult.output)
+		}
+		decodedOutput, err := deserialize(&encodedStr)
+		if err != nil {
+			return 0, fmt.Errorf("failed to deserialize sleep end time: %w", err)
+		}
+
+		// The output should be a time.Time representing the end time
+		endTimeInterface, ok := decodedOutput.(time.Time)
+		if !ok {
+			return 0, fmt.Errorf("decoded output is not a time.Time: %T", decodedOutput)
 		}
 		endTime = endTimeInterface
 
@@ -1578,12 +1588,18 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		// First execution: calculate and record the end time
 		endTime = time.Now().Add(input.duration)
 
+		// Serialize the end time before recording
+		encodedEndTime, serErr := serialize(endTime)
+		if serErr != nil {
+			return 0, fmt.Errorf("failed to serialize sleep end time: %w", serErr)
+		}
+
 		// Record the operation result with the calculated end time
 		recordInput := recordOperationResultDBInput{
 			workflowID: wfState.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
-			output:     endTime,
+			output:     encodedEndTime,
 			err:        nil,
 		}
 
@@ -1783,10 +1799,10 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 		topic = input.Topic
 	}
 
-	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := serialize(input.Message)
-	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
+	// Message should already be serialized by caller
+	messageString, ok := input.Message.(string)
+	if !ok && input.Message != nil {
+		return fmt.Errorf("message must be a pre-encoded string, got %T", input.Message)
 	}
 
 	insertQuery := fmt.Sprintf(`INSERT INTO %s.notifications (destination_uuid, topic, message) VALUES ($1, $2, $3)`, pgx.Identifier{s.schema}.Sanitize())
@@ -1947,16 +1963,13 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 		}
 	}
 
-	// Deserialize the message
+	// Return message as encoded string
 	var message any
-	if messageString != nil { // nil message can happen on the timeout path only
-		message, err = deserialize(messageString)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize message: %w", err)
-		}
+	if messageString != nil {
+		message = *messageString
 	}
 
-	// Record the operation result
+	// Record the operation result (with encoded message string)
 	recordInput := recordOperationResultDBInput{
 		workflowID: destinationID,
 		stepID:     stepID,
@@ -2018,10 +2031,10 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 		return nil
 	}
 
-	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := serialize(input.Message)
-	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
+	// Message should already be serialized by caller
+	messageString, ok := input.Message.(string)
+	if !ok && input.Message != nil {
+		return fmt.Errorf("event value must be a pre-encoded string, got %T", input.Message)
 	}
 
 	// Insert or update the event using UPSERT
@@ -2160,16 +2173,13 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		}
 	}
 
-	// Deserialize the value if it exists
+	// Return value as encoded string
 	var value any
 	if valueString != nil {
-		value, err = deserialize(valueString)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize event value: %w", err)
-		}
+		value = *valueString
 	}
 
-	// Record the operation result if this is called within a workflow
+	// Record the operation result if this is called within a workflow (with encoded value string)
 	if isInWorkflow {
 		recordInput := recordOperationResultDBInput{
 			workflowID: wfState.workflowID,
