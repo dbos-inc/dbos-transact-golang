@@ -256,12 +256,12 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	// Deserialize the result (but preserve any error from awaitWorkflowResult)
 	var result any
 	if encodedResult != nil {
-		encodedStr, ok := encodedResult.(string)
+		encodedStr, ok := encodedResult.(*string)
 		if !ok {
 			return *new(R), newWorkflowUnexpectedResultType(h.workflowID, "string (encoded)", fmt.Sprintf("%T", encodedResult))
 		}
 		var deserErr error
-		result, deserErr = deserialize(&encodedStr)
+		result, deserErr = deserialize(encodedStr)
 		if deserErr != nil {
 			return *new(R), fmt.Errorf("failed to deserialize workflow result: %w", deserErr)
 		}
@@ -964,14 +964,15 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID)
 			}, withRetrierLogger(c.logger))
 			var deserErr error
-			encodedResultString, ok := encodedResult.(string)
+			encodedResultString, ok := encodedResult.(*string)
 			if !ok {
 				c.logger.Error("Unexpected result type when awaiting workflow result after ID conflict", "workflow_id", workflowID, "type", fmt.Sprintf("%T", encodedResult))
 				outcomeChan <- workflowOutcome[any]{result: nil, err: fmt.Errorf("unexpected result type when awaiting workflow result after ID conflict: expected string, got %T", encodedResult)}
 				close(outcomeChan)
 				return
 			}
-			result, deserErr = deserialize(&encodedResultString)
+			fmt.Println("Encoded result string:", *encodedResultString)
+			result, deserErr = deserialize(encodedResultString)
 			if deserErr != nil {
 				c.logger.Error("Failed to deserialize workflow result after ID conflict", "workflow_id", workflowID, "error", deserErr)
 				outcomeChan <- workflowOutcome[any]{result: nil, err: fmt.Errorf("failed to deserialize workflow result after ID conflict: %w", deserErr)}

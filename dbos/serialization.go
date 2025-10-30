@@ -36,6 +36,10 @@ func deserialize(data *string) (any, error) {
 		return nil, nil
 	}
 
+	if *data == "" {
+		return "", nil
+	}
+
 	dataBytes, err := base64.StdEncoding.DecodeString(*data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode data: %w", err)

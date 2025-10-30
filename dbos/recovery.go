@@ -17,17 +17,15 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 		// Deserialize the workflow input
 		var decodedInput any
 		if workflow.Input != nil {
-			inputStr, ok := workflow.Input.(string)
+			inputString, ok := workflow.Input.(*string)
 			if !ok {
-				ctx.logger.Warn("Skipping workflow recovery: input is not an encoded string", "workflow_id", workflow.ID, "name", workflow.Name, "input_type", workflow.Input)
+				ctx.logger.Warn("Skipping workflow recovery due to invalid input type", "workflow_id", workflow.ID, "name", workflow.Name, "input_type", workflow.Input)
 				continue
 			}
-			if inputStr != "" {
-				decodedInput, err = deserialize(&inputStr)
-				if err != nil {
-					ctx.logger.Warn("Skipping workflow recovery due to input decoding failure", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
-					continue
-				}
+			decodedInput, err = deserialize(inputString)
+			if err != nil {
+				ctx.logger.Warn("Skipping workflow recovery due to input decoding failure", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
+				continue
 			}
 		}
 

@@ -37,7 +37,7 @@ type systemDatabase interface {
 	insertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error)
 	listWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error)
 	updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error
-	awaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
+	awaitWorkflowResult(ctx context.Context, workflowID string) (*string, error)
 	cancelWorkflow(ctx context.Context, workflowID string) error
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	resumeWorkflow(ctx context.Context, workflowID string) error
@@ -1138,7 +1138,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 	return forkedWorkflowID, nil
 }
 
-func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any, error) {
+func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (*string, error) {
 	query := fmt.Sprintf(`SELECT status, output, error FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
 	var status WorkflowStatusType
 	for {
@@ -1160,20 +1160,14 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any
 			return nil, fmt.Errorf("failed to query workflow status: %w", err)
 		}
 
-		// Return output as encoded string
-		var output any
-		if outputString != nil {
-			output = *outputString
-		}
-
 		switch status {
 		case WorkflowStatusSuccess, WorkflowStatusError:
 			if errorStr == nil || len(*errorStr) == 0 {
-				return output, nil
+				return outputString, nil
 			}
-			return output, errors.New(*errorStr)
+			return outputString, errors.New(*errorStr)
 		case WorkflowStatusCancelled:
-			return output, newAwaitedWorkflowCancelledError(workflowID)
+			return outputString, newAwaitedWorkflowCancelledError(workflowID)
 		default:
 			time.Sleep(_DB_RETRY_INTERVAL)
 		}
