@@ -1,0 +1,68 @@
+Likely future problems:
+- With* @ interface method
+- WithValue private?
+
+- ? special steps as RunAsStep ?
+- refact process wf outcome from handlers
+- handlers use of cancellable context when recording getresult as step
+
+Doc updates:
+- launch/shutdown pkg methods
+- list registry methods
+
+
+- Test cancellation of dboscontext that has been passed through a workflow to package methods, like Recv (e.g., test cancelling the recv)
+- Do we correctly test the error wrapping in retry exceeded?
+- Do we test sending/receiving, set/get events values that are not just strings?
+- Probably no need _PG_ERROR_UNIQUE_VIOLATION and _PG_ERROR_FOREIGN_KEY_VIOLATION => we can use pgx constants for that
+- Default pgxpool config
+    * See https://github.com/jackc/pgx/blob/a2fca037434a0a7096b095d4ed87cdffb03b626e/pgxpool/pool.go#L18
+    * MaxConnLifetime = the default one currently
+- loadOutput / loadInput filter should be done *before* we do the SQL, tbh
+- Why is authenticated_roles stored as "null" in the database?
+
+v1:
+- DBOSContext -> Context
+- dbos.Shutdown -> WithGraceTime
+- default encoder becomes JSON
+
+
+
+user provided data sources:
+
+This feature is about allowing users to bring on their own datasources (likely, custom pgxpools) and enable exactly-once semantic for workflow steps.
+
+A user-provided datasource can be used by the user to interact with their database while having durable execution managed transactionally by DBOS^
+
+
+
+Docs:
+- Workflows signatures & encoding
+
+
+
+
+Gob registration problems
+---
+
+Most problems are with recovery and/or with interface in workflow/steps signatures.
+- interface types require "lazy" registration, i.e., on a concrete value. Gob-registering a raw interface type will panic (it is nil), so we must do it once we have a concrete value available
+- however, during recovery, a workflow might be trying to access a value that we've not had a chance to see.
+
+A few examples:
+- a workflow accepts an interface value which can only be registered once a concrete value is available (which is done _after_ the code tries to load the checkpointed value from the DB)
+- an app has two workflow: one which sends and one which receives, and we recover the receiving one, then the message type will not have been recorded
+- Recovered workflow calls RetrieveWorkflow on a workflow that accepts an interface and has not run yet in the process
+
+We could alleviate the first point by forbiding (or require users to explicitly register for) workflows signatures with interfaces, but that doesn't solve all cases.
+The only "true" bullet-proof solution is to have the user always register for gob encoding the types they'll use in their workflows.
+
+
+JSON registration problems
+---
+While JSON doesn't require registration of an a
+-- Can we relegate the entire decode responsibility to the typed layer of the code? packge functions
+
+
+
+

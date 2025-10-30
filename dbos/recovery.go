@@ -14,6 +14,21 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 	}
 
 	for _, workflow := range pendingWorkflows {
+		// Deserialize the workflow input
+		var decodedInput any
+		if workflow.Input != nil {
+			inputString, ok := workflow.Input.(*string)
+			if !ok {
+				ctx.logger.Warn("Skipping workflow recovery due to invalid input type", "workflow_id", workflow.ID, "name", workflow.Name, "input_type", workflow.Input)
+				continue
+			}
+			decodedInput, err = ctx.serializer.Decode(inputString)
+			if err != nil {
+				ctx.logger.Warn("Skipping workflow recovery due to input decoding failure", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
+				continue
+			}
+		}
+
 		if workflow.QueueName != "" {
 			cleared, err := ctx.systemDB.clearQueueAssignment(ctx, workflow.ID)
 			if err != nil {
@@ -48,7 +63,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 			WithWorkflowID(workflow.ID),
 		}
 		// Create a workflow context from the executor context
-		handle, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, opts...)
+		handle, err := registeredWorkflow.wrappedFunction(ctx, decodedInput, opts...)
 		if err != nil {
 			return nil, err
 		}

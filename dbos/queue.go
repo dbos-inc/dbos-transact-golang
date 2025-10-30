@@ -224,7 +224,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 					continue
 				}
 
-				input, err := ctx.serializer.Decode(&workflow.input)
+				input, err := ctx.serializer.Decode(workflow.input)
 				if err != nil {
 					qr.logger.Error("Failed to decode workflow input", "workflow_id", workflow.id, "error", err)
 					continue

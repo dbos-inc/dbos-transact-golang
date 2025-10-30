@@ -147,6 +147,14 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 	if params.priority > uint(math.MaxInt) {
 		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.priority, math.MaxInt)
 	}
+
+	// Serialize input before storing in workflow status
+	encodedInputStr, err := serialize(dbosCtx, params.workflowInput)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize workflow input: %w", err)
+	}
+	encodedInput := &encodedInputStr
+
 	status := WorkflowStatus{
 		Name:               params.workflowName,
 		ApplicationVersion: params.applicationVersion,
@@ -155,7 +163,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		CreatedAt:          time.Now(),
 		Deadline:           deadline,
 		Timeout:            params.workflowTimeout,
-		Input:              params.workflowInput,
+		Input:              encodedInput,
 		QueueName:          queueName,
 		DeduplicationID:    params.deduplicationID,
 		Priority:           int(params.priority),

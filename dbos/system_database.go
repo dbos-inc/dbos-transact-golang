@@ -37,7 +37,7 @@ type systemDatabase interface {
 	insertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error)
 	listWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error)
 	updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error
-	awaitWorkflowResult(ctx context.Context, workflowID string) (any, error)
+	awaitWorkflowResult(ctx context.Context, workflowID string) (*string, error)
 	cancelWorkflow(ctx context.Context, workflowID string) error
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	resumeWorkflow(ctx context.Context, workflowID string) error
@@ -55,7 +55,7 @@ type systemDatabase interface {
 
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
-	recv(ctx context.Context, input recvInput) (any, error)
+	recv(ctx context.Context, input recvInput) (*string, error)
 	setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	getEvent(ctx context.Context, input getEventInput) (any, error)
 
@@ -443,9 +443,14 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		timeoutMs = &millis
 	}
 
-	inputString, err := s.serializer.Encode(input.status.Input)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize input: %w", err)
+	// Input is already encoded as *string from the typed layer
+	var inputString *string
+	if input.status.Input != nil {
+		encodedInput, ok := input.status.Input.(*string)
+		if !ok {
+			return nil, fmt.Errorf("workflow input must be encoded *string, got %T", input.status.Input)
+		}
+		inputString = encodedInput
 	}
 
 	// Our DB works with NULL values
@@ -519,7 +524,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		updatedAt.UnixMilli(),
 		timeoutMs,
 		deadline,
-		inputString,
+		inputString, // encoded input (already *string)
 		deduplicationID,
 		input.status.Priority,
 		WorkflowStatusEnqueued,
@@ -794,18 +799,13 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 				wf.Error = errors.New(*errorStr)
 			}
 
-			wf.Output, err = s.serializer.Decode(outputString)
-			if err != nil {
-				return nil, fmt.Errorf("failed to deserialize output: %w", err)
-			}
+			// Return output as encoded *string
+			wf.Output = outputString
 		}
 
-		// Handle input only if loadInput is true
+		// Return input as encoded *string
 		if input.loadInput {
-			wf.Input, err = s.serializer.Decode(inputString)
-			if err != nil {
-				return nil, fmt.Errorf("failed to deserialize input: %w", err)
-			}
+			wf.Input = inputString
 		}
 
 		workflows = append(workflows, wf)
@@ -821,7 +821,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 type updateWorkflowOutcomeDBInput struct {
 	workflowID string
 	status     WorkflowStatusType
-	output     any
+	output     *string
 	err        error
 	tx         pgx.Tx
 }
@@ -833,20 +833,17 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
 			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 in ($7, $8))`, pgx.Identifier{s.schema}.Sanitize())
 
-	outputString, err := s.serializer.Encode(input.output)
-	if err != nil {
-		return fmt.Errorf("failed to serialize output: %w", err)
-	}
-
 	var errorStr string
 	if input.err != nil {
 		errorStr = input.err.Error()
 	}
 
+	// input.output is already a *string from the database layer
+	var err error
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
+		_, err = input.tx.Exec(ctx, query, input.status, input.output, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
 	} else {
-		_, err = s.pool.Exec(ctx, query, input.status, outputString, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
+		_, err = s.pool.Exec(ctx, query, input.status, input.output, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
 	}
 
 	if err != nil {
@@ -1108,11 +1105,6 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		recovery_attempts
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, pgx.Identifier{s.schema}.Sanitize())
 
-	inputString, err := s.serializer.Encode(originalWorkflow.Input)
-	if err != nil {
-		return "", fmt.Errorf("failed to serialize input: %w", err)
-	}
-
 	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
 	authenticatedRoles, err := json.Marshal(originalWorkflow.AuthenticatedRoles)
 
@@ -1130,7 +1122,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		&appVersion,
 		originalWorkflow.ApplicationID,
 		_DBOS_INTERNAL_QUEUE_NAME,
-		inputString,
+		originalWorkflow.Input, // Input is already encoded *string from listWorkflows
 		time.Now().UnixMilli(),
 		time.Now().UnixMilli(),
 		0)
@@ -1160,7 +1152,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 	return forkedWorkflowID, nil
 }
 
-func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any, error) {
+func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (*string, error) {
 	query := fmt.Sprintf(`SELECT status, output, error FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
 	var status WorkflowStatusType
 	for {
@@ -1182,19 +1174,14 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (any
 			return nil, fmt.Errorf("failed to query workflow status: %w", err)
 		}
 
-		output, err := s.serializer.Decode(outputString)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize output: %w", err)
-		}
-
 		switch status {
 		case WorkflowStatusSuccess, WorkflowStatusError:
 			if errorStr == nil || len(*errorStr) == 0 {
-				return output, nil
+				return outputString, nil
 			}
-			return output, errors.New(*errorStr)
+			return outputString, errors.New(*errorStr)
 		case WorkflowStatusCancelled:
-			return output, newAwaitedWorkflowCancelledError(workflowID)
+			return outputString, newAwaitedWorkflowCancelledError(workflowID)
 		default:
 			time.Sleep(_DB_RETRY_INTERVAL)
 		}
@@ -1205,7 +1192,7 @@ type recordOperationResultDBInput struct {
 	workflowID string
 	stepID     int
 	stepName   string
-	output     any
+	output     *string
 	err        error
 	tx         pgx.Tx
 }
@@ -1221,16 +1208,13 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		errorString = &e
 	}
 
-	outputString, err := s.serializer.Encode(input.output)
-	if err != nil {
-		return fmt.Errorf("failed to serialize output: %w", err)
-	}
-
+	// input.output is already a *string from the database layer
+	var err error
 	if input.tx != nil {
 		_, err = input.tx.Exec(ctx, query,
 			input.workflowID,
 			input.stepID,
-			outputString,
+			input.output,
 			errorString,
 			input.stepName,
 		)
@@ -1238,7 +1222,7 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		_, err = s.pool.Exec(ctx, query,
 			input.workflowID,
 			input.stepID,
-			outputString,
+			input.output,
 			errorString,
 			input.stepName,
 		)
@@ -1328,7 +1312,7 @@ type recordChildGetResultDBInput struct {
 	parentWorkflowID string
 	childWorkflowID  string
 	stepID           int
-	output           string
+	output           *string
 	err              error
 }
 
@@ -1363,7 +1347,7 @@ func (s *sysDB) recordChildGetResult(ctx context.Context, input recordChildGetRe
 /*******************************/
 
 type recordedResult struct {
-	output any
+	output *string
 	err    error
 }
 
@@ -1433,17 +1417,12 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 		return nil, newUnexpectedStepError(input.workflowID, input.stepID, input.stepName, recordedFunctionName)
 	}
 
-	output, err := s.serializer.Decode(outputString)
-	if err != nil {
-		return nil, fmt.Errorf("failed to deserialize output: %w", err)
-	}
-
 	var recordedError error
 	if errorStr != nil && *errorStr != "" {
 		recordedError = errors.New(*errorStr)
 	}
 	result := &recordedResult{
-		output: output,
+		output: outputString,
 		err:    recordedError,
 	}
 	return result, nil
@@ -1487,13 +1466,9 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 			return nil, fmt.Errorf("failed to scan step row: %w", err)
 		}
 
-		// Deserialize output if present and loadOutput is true
-		if input.loadOutput && outputString != nil {
-			output, err := s.serializer.Decode(outputString)
-			if err != nil {
-				return nil, fmt.Errorf("failed to deserialize output: %w", err)
-			}
-			step.Output = output
+		// Return output as encoded string if loadOutput is true
+		if input.loadOutput {
+			step.Output = outputString
 		}
 
 		// Convert error string to error if present
@@ -1566,11 +1541,27 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 			return 0, fmt.Errorf("no recorded end time for recorded sleep operation")
 		}
 
-		// The output should be a time.Time representing the end time
-		// Because checkOperationExecution decoded it in an `any` type, we need to encode/decode it into a time.Time
-		endTime, err = convertJSONToType[time.Time](recordedResult.output)
+		// Deserialize the recorded end time
+		decodedOutput, err := s.serializer.Decode(recordedResult.output)
 		if err != nil {
-			return 0, fmt.Errorf("failed to convert recorded output to time.Time: %w", err)
+			return 0, fmt.Errorf("failed to deserialize sleep end time: %w", err)
+		}
+
+		// The output should be a time.Time representing the end time
+		// Because checkOperationExecution returns encoded string, we need to decode it into a time.Time
+		endTimeInterface, ok := decodedOutput.(time.Time)
+		if !ok {
+			// JSON serializer loses type information - convert using convertJSONToType
+			if isJSONSerializer(s.serializer) {
+				endTime, err = convertJSONToType[time.Time](decodedOutput)
+				if err != nil {
+					return 0, fmt.Errorf("failed to convert recorded output to time.Time: %w", err)
+				}
+			} else {
+				return 0, fmt.Errorf("decoded output is not a time.Time: %T", decodedOutput)
+			}
+		} else {
+			endTime = endTimeInterface
 		}
 
 		if recordedResult.err != nil { // This should never happen
@@ -1580,12 +1571,19 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		// First execution: calculate and record the end time
 		endTime = time.Now().Add(input.duration)
 
+		// Serialize the end time before recording
+		encodedEndTimeStr, serErr := s.serializer.Encode(endTime)
+		if serErr != nil {
+			return 0, fmt.Errorf("failed to serialize sleep end time: %w", serErr)
+		}
+		encodedEndTime := &encodedEndTimeStr
+
 		// Record the operation result with the calculated end time
 		recordInput := recordOperationResultDBInput{
 			workflowID: wfState.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
-			output:     endTime,
+			output:     encodedEndTime,
 			err:        nil,
 		}
 
@@ -1732,7 +1730,7 @@ const _DBOS_NULL_TOPIC = "__null__topic__"
 
 type WorkflowSendInput struct {
 	DestinationID string
-	Message       any
+	Message       *string
 	Topic         string
 }
 
@@ -1785,14 +1783,9 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 		topic = input.Topic
 	}
 
-	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := s.serializer.Encode(input.Message)
-	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
-	}
-
+	// input.Message is already encoded *string from the typed layer
 	insertQuery := fmt.Sprintf(`INSERT INTO %s.notifications (destination_uuid, topic, message) VALUES ($1, $2, $3)`, pgx.Identifier{s.schema}.Sanitize())
-	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, messageString)
+	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
 	if err != nil {
 		// Check for foreign key violation (destination workflow doesn't exist)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_FOREIGN_KEY_VIOLATION {
@@ -1827,7 +1820,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 }
 
 // Recv is a special type of step that receives a message destined for a given workflow
-func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
+func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 	functionName := "DBOS.recv"
 
 	// Get workflow state from context
@@ -1887,7 +1880,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 	if err != nil {
 		cond.L.Unlock()
-		return false, fmt.Errorf("failed to check message: %w", err)
+		return nil, fmt.Errorf("failed to check message: %w", err)
 	}
 	if !exists {
 		done := make(chan struct{})
@@ -1941,29 +1934,17 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 	var messageString *string
 	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			// No message found, record nil result
-			messageString = nil
-		} else {
+		if err != pgx.ErrNoRows {
 			return nil, fmt.Errorf("failed to consume message: %w", err)
 		}
 	}
 
-	// Deserialize the message
-	var message any
-	if messageString != nil { // nil message can happen on the timeout path only
-		message, err = s.serializer.Decode(messageString)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize message: %w", err)
-		}
-	}
-
-	// Record the operation result
+	// Record the operation result (with encoded message string)
 	recordInput := recordOperationResultDBInput{
 		workflowID: destinationID,
 		stepID:     stepID,
 		stepName:   functionName,
-		output:     message,
+		output:     messageString,
 		tx:         tx,
 	}
 	err = s.recordOperationResult(ctx, recordInput)
@@ -1975,12 +1956,13 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (any, error) {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	return message, nil
+	// Return the message string pointer
+	return messageString, nil
 }
 
 type WorkflowSetEventInput struct {
 	Key     string
-	Message any
+	Message *string
 }
 
 func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error {
@@ -2020,19 +2002,14 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 		return nil
 	}
 
-	// Serialize the message. It must have been registered with encoding/gob by the user if not a basic type.
-	messageString, err := s.serializer.Encode(input.Message)
-	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
-	}
-
+	// input.Message is already encoded *string from the typed layer
 	// Insert or update the event using UPSERT
 	insertQuery := fmt.Sprintf(`INSERT INTO %s.workflow_events (workflow_uuid, key, value)
 					VALUES ($1, $2, $3)
 					ON CONFLICT (workflow_uuid, key)
 					DO UPDATE SET value = EXCLUDED.value`, pgx.Identifier{s.schema}.Sanitize())
 
-	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, messageString)
+	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Message)
 	if err != nil {
 		return fmt.Errorf("failed to insert/update workflow event: %w", err)
 	}
@@ -2162,22 +2139,13 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		}
 	}
 
-	// Deserialize the value if it exists
-	var value any
-	if valueString != nil {
-		value, err = s.serializer.Decode(valueString)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize event value: %w", err)
-		}
-	}
-
 	// Record the operation result if this is called within a workflow
 	if isInWorkflow {
 		recordInput := recordOperationResultDBInput{
 			workflowID: wfState.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
-			output:     value,
+			output:     valueString,
 			err:        nil,
 		}
 
@@ -2187,7 +2155,8 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 		}
 	}
 
-	return value, nil
+	// Return the value string pointer
+	return valueString, nil
 }
 
 /*******************************/
@@ -2197,7 +2166,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 type dequeuedWorkflow struct {
 	id    string
 	name  string
-	input string
+	input *string
 }
 
 type dequeueWorkflowsInput struct {
@@ -2399,19 +2368,14 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			WHERE workflow_uuid = $5
 			RETURNING name, inputs`, pgx.Identifier{s.schema}.Sanitize())
 
-		var inputString *string
 		err := tx.QueryRow(ctx, updateQuery,
 			WorkflowStatusPending,
 			input.applicationVersion,
 			input.executorID,
 			time.Now().UnixMilli(),
-			id).Scan(&retWorkflow.name, &inputString)
+			id).Scan(&retWorkflow.name, &retWorkflow.input)
 		if err != nil {
 			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
-		}
-
-		if inputString != nil && len(*inputString) > 0 {
-			retWorkflow.input = *inputString
 		}
 
 		retWorkflows = append(retWorkflows, retWorkflow)
