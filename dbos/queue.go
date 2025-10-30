@@ -224,7 +224,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 					continue
 				}
 
-				// Deserialize input using the centralized deserialize function
+				// Deserialize input
 				var input any
 				input, err = deserialize(workflow.input)
 				if err != nil {
