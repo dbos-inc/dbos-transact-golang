@@ -54,7 +54,7 @@ func (j *JSONSerializer) Decode(data *string) (any, error) {
 }
 
 // serialize serializes data using the serializer from the DBOSContext
-// this is only use in workflow handles
+// convenience helper to also check the context & serializer
 func serialize(ctx DBOSContext, data any) (string, error) {
 	dbosCtx, ok := ctx.(*dbosContext)
 	if !ok {
