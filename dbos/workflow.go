@@ -73,9 +73,9 @@ func (ws *workflowState) nextStepID() int {
 
 // workflowOutcome holds the result and error from workflow execution
 type workflowOutcome[R any] struct {
-	result              R
-	err                 error
-	needsJSONConversion bool // true if result came from awaitWorkflowResult and needs JSON type conversion
+	result        R
+	err           error
+	needsDecoding bool // true if result came from awaitWorkflowResult (ID conflict path) and needs JSON type conversion
 }
 
 // WorkflowHandle provides methods to interact with a running or completed workflow.
@@ -205,22 +205,8 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 
 // processOutcome handles the common logic for processing workflow outcomes
 func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error) {
-	var typedResult R
-	// Convert result to expected type R if needed (only when needsJSONConversion flag is set)
-	// This is necessary when the workflow detected a conflict and retrieved the result via awaitWorkflowResult
-	if outcome.needsJSONConversion && isJSONSerializer(h.dbosContext.(*dbosContext).serializer) {
-		// JSON serializer loses type information - convert from map[string]interface{} to R
-		var convertErr error
-		typedResult, convertErr = convertJSONToType[R](outcome.result)
-		if convertErr != nil {
-			return *new(R), newWorkflowExecutionError(h.workflowID, fmt.Errorf("converting workflow result from JSON: %w", convertErr))
-		}
-	} else {
-		// Normal path - result already has the correct type
-		typedResult = outcome.result
-	}
+	typedResult := outcome.result
 	// If we are calling GetResult inside a workflow, record the result as a step result
-	// TODO: refactor this logic (used in both workflowHandle and workflowPollingHandle)
 	workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
@@ -726,15 +712,34 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 
 			resultErr := outcome.err
 			var typedResult R
+
 			// Handle nil results - nil cannot be type-asserted to any interface
 			if outcome.result == nil {
 				typedResult = *new(R)
-			} else if typedRes, ok := outcome.result.(R); ok {
-				typedResult = typedRes
-			} else { // This should never happen
-				typedResult = *new(R)
-				typeErr := newWorkflowUnexpectedResultType(handle.workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", outcome.result))
-				resultErr = errors.Join(resultErr, typeErr)
+			} else {
+				// Convert result to expected type R
+				// Only convert if result came from awaitWorkflowResult (ID conflict path) and we're using JSON serializer
+				dbosCtx, ok := handle.dbosContext.(*dbosContext)
+				if !ok {
+					typedResult = *new(R)
+					resultErr = errors.Join(resultErr, fmt.Errorf("invalid DBOSContext type"))
+				} else if outcome.needsDecoding && isJSONSerializer(dbosCtx.serializer) {
+					// Result came from awaitWorkflowResult and JSON serializer loses type information
+					var convertErr error
+					typedResult, convertErr = convertJSONToType[R](outcome.result)
+					if convertErr != nil {
+						typedResult = *new(R)
+						resultErr = errors.Join(resultErr, newWorkflowExecutionError(handle.workflowID, fmt.Errorf("converting workflow result from JSON: %w", convertErr)))
+					}
+				} else if typedRes, ok := outcome.result.(R); ok {
+					// Normal path - result already has the correct type
+					typedResult = typedRes
+				} else {
+					// Type assertion failed
+					typedResult = *new(R)
+					typeErr := newWorkflowUnexpectedResultType(handle.workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", outcome.result))
+					resultErr = errors.Join(resultErr, typeErr)
+				}
 			}
 
 			typedOutcomeChan <- workflowOutcome[R]{
@@ -976,14 +981,16 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		result, err = fn(workflowCtx, input)
 
 		// Handle DBOS ID conflict errors by waiting workflow result
-		needsConversion := false // Notify the handle.GetResult() that we need to decode the result.
 		if errors.Is(err, &DBOSError{Code: ConflictingIDError}) {
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
 			result, err = retryWithResult(c, func() (any, error) {
 				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID)
 			}, withRetrierLogger(c.logger))
-			// Mark that this result may need JSON type conversion in GetResult()
-			needsConversion = true
+			// Result from awaitWorkflowResult is JSON-decoded and needs type conversion.
+			// This conversion happens in RunWorkflow[P,R] when converting from workflowHandle[any] to workflowHandle[R].
+			outcomeChan <- workflowOutcome[any]{result: result, err: err, needsDecoding: true}
+			close(outcomeChan)
+			return
 		} else {
 			status := WorkflowStatusSuccess
 
@@ -1009,12 +1016,12 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			}, withRetrierLogger(c.logger))
 			if recordErr != nil {
 				c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
-				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr, needsJSONConversion: false}
+				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr, needsDecoding: false}
 				close(outcomeChan)
 				return
 			}
 		}
-		outcomeChan <- workflowOutcome[any]{result: result, err: err, needsJSONConversion: needsConversion}
+		outcomeChan <- workflowOutcome[any]{result: result, err: err, needsDecoding: false}
 		close(outcomeChan)
 	}()
 
