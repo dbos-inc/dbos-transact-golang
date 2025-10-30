@@ -142,13 +142,13 @@ func testSendRecv[T any](
 ) {
 	t.Helper()
 
-	// Start sender workflow first
-	senderHandle, err := RunWorkflow(executor, senderWorkflow, input, WithWorkflowID(senderID))
-	require.NoError(t, err, "Sender workflow execution failed")
-
-	// Start receiver workflow (it will wait for the message)
+	// Start receiver workflow first (it will wait for the message)
 	receiverHandle, err := RunWorkflow(executor, receiverWorkflow, input, WithWorkflowID(senderID+"-receiver"))
 	require.NoError(t, err, "Receiver workflow execution failed")
+
+	// Start sender workflow (it will send the message)
+	senderHandle, err := RunWorkflow(executor, senderWorkflow, input, WithWorkflowID(senderID))
+	require.NoError(t, err, "Sender workflow execution failed")
 
 	// Get sender result
 	senderResult, err := senderHandle.GetResult()
@@ -308,18 +308,30 @@ func testWorkflowRecovery[T any](
 func runScalarsTests(t *testing.T, executor DBOSContext) {
 	t.Run("Scalars", func(t *testing.T) {
 		// Test int as representative scalar type - tests our encode/decode logic, not JSON itself
-		h, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(int(42)))
+		// Test with any-typed workflow
+		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(int(42)))
 		require.NoError(t, err)
-		testRoundTrip[int, any](t, executor, h, 42)
+		testRoundTrip[int, any](t, executor, h1, 42)
+
+		// Test with typed workflow
+		h2, err := RunWorkflow(executor, serializerIntWorkflow, 42)
+		require.NoError(t, err)
+		testRoundTrip[int, int](t, executor, h2, 42)
 	})
 }
 
 func runPointerTests(t *testing.T, executor DBOSContext) {
 	t.Run("Pointers", func(t *testing.T) {
 		v := 123
+		// Test with any-typed workflow
 		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(&v))
 		require.NoError(t, err)
 		testRoundTrip[*int, any](t, executor, h1, &v)
+
+		// Test with typed workflow
+		h2, err := RunWorkflow(executor, serializerIntPtrWorkflow, &v)
+		require.NoError(t, err)
+		testRoundTrip[*int, *int](t, executor, h2, &v)
 	})
 }
 
@@ -327,15 +339,27 @@ func runSlicesAndArraysTests(t *testing.T, executor DBOSContext) {
 	t.Run("SlicesAndArrays", func(t *testing.T) {
 		// Non-empty slice - tests collection round-trip
 		s1 := []int{1, 2, 3}
+		// Test with any-typed workflow
 		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(s1))
 		require.NoError(t, err)
 		testRoundTrip[[]int, any](t, executor, h1, s1)
 
+		// Test with typed workflow
+		h2, err := RunWorkflow(executor, serializerIntSliceWorkflow, s1)
+		require.NoError(t, err)
+		testRoundTrip[[]int, []int](t, executor, h2, s1)
+
 		// Nil slice - tests nil handling
 		var s2 []int
-		h2, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(s2))
+		// Test with any-typed workflow
+		h3, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(s2))
 		require.NoError(t, err)
-		testRoundTrip[[]int, any](t, executor, h2, s2)
+		testRoundTrip[[]int, any](t, executor, h3, s2)
+
+		// Test with typed workflow
+		h4, err := RunWorkflow(executor, serializerIntSliceWorkflow, s2)
+		require.NoError(t, err)
+		testRoundTrip[[]int, []int](t, executor, h4, s2)
 	})
 }
 
@@ -343,73 +367,135 @@ func runMapsTests(t *testing.T, executor DBOSContext) {
 	t.Run("Maps", func(t *testing.T) {
 		// Non-empty map - tests map round-trip
 		m1 := map[string]int{"x": 1, "y": 2}
+		// Test with any-typed workflow
 		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(m1))
 		require.NoError(t, err)
 		testRoundTrip[map[string]int, any](t, executor, h1, m1)
 
+		// Test with typed workflow
+		h2, err := RunWorkflow(executor, serializerStringIntMapWorkflow, m1)
+		require.NoError(t, err)
+		testRoundTrip[map[string]int, map[string]int](t, executor, h2, m1)
+
 		// Nil map - tests nil handling
 		var m2 map[string]int
-		h2, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(m2))
+		// Test with any-typed workflow
+		h3, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(m2))
 		require.NoError(t, err)
-		testRoundTrip[map[string]int, any](t, executor, h2, m2)
+		testRoundTrip[map[string]int, any](t, executor, h3, m2)
+
+		// Test with typed workflow
+		h4, err := RunWorkflow(executor, serializerStringIntMapWorkflow, m2)
+		require.NoError(t, err)
+		testRoundTrip[map[string]int, map[string]int](t, executor, h4, m2)
 	})
 }
 
 func runInterfaceFieldsTests(t *testing.T, executor DBOSContext) {
 	t.Run("InterfaceFieldsStruct", func(t *testing.T) {
-		inp := WithInterfaces{A: map[string]any{"k": "v"}, P: map[string]any{"Message": "m", "Value": float64(5)}}
-		h, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(inp))
+		inp := WithInterfaces{A: map[string]any{"k": "v"}}
+		// Test with any-typed workflow
+		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(inp))
 		require.NoError(t, err)
-		testRoundTrip[WithInterfaces, any](t, executor, h, inp)
+		testRoundTrip[WithInterfaces, any](t, executor, h1, inp)
+
+		// Test with typed workflow
+		h2, err := RunWorkflow(executor, serializerWithInterfacesWorkflow, inp)
+		require.NoError(t, err)
+		testRoundTrip[WithInterfaces, WithInterfaces](t, executor, h2, inp)
 	})
 }
 
 func runCustomTypesTests(t *testing.T, executor DBOSContext) {
 	t.Run("CustomTypes", func(t *testing.T) {
 		mi := MyInt(7)
+		// Test with any-typed workflow
 		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(mi))
 		require.NoError(t, err)
 		testRoundTrip[MyInt, any](t, executor, h1, mi)
+		// Test with typed workflow
+		h2, err := RunWorkflow(executor, serializerMyIntWorkflow, mi)
+		require.NoError(t, err)
+		testRoundTrip[MyInt, MyInt](t, executor, h2, mi)
 
 		ms := MyString("zeta")
-		h2, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(ms))
+		// Test with any-typed workflow
+		h3, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(ms))
 		require.NoError(t, err)
-		testRoundTrip[MyString, any](t, executor, h2, ms)
+		testRoundTrip[MyString, any](t, executor, h3, ms)
+		// Test with typed workflow
+		h4, err := RunWorkflow(executor, serializerMyStringWorkflow, ms)
+		require.NoError(t, err)
+		testRoundTrip[MyString, MyString](t, executor, h4, ms)
 
 		msl := []MyString{"a", "b"}
-		h3, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(msl))
+		// Test with any-typed workflow
+		h5, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(msl))
 		require.NoError(t, err)
-		testRoundTrip[[]MyString, any](t, executor, h3, msl)
+		testRoundTrip[[]MyString, any](t, executor, h5, msl)
+		// Test with typed workflow
+		h6, err := RunWorkflow(executor, serializerMyStringSliceWorkflow, msl)
+		require.NoError(t, err)
+		testRoundTrip[[]MyString, []MyString](t, executor, h6, msl)
 
 		mm := map[string]MyInt{"k": 9}
-		h4, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(mm))
+		// Test with any-typed workflow
+		h7, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(mm))
 		require.NoError(t, err)
-		testRoundTrip[map[string]MyInt, any](t, executor, h4, mm)
+		testRoundTrip[map[string]MyInt, any](t, executor, h7, mm)
+		// Test with typed workflow
+		h8, err := RunWorkflow(executor, serializerStringMyIntMapWorkflow, mm)
+		require.NoError(t, err)
+		testRoundTrip[map[string]MyInt, map[string]MyInt](t, executor, h8, mm)
 	})
 }
 
 func runCustomMarshalerTests(t *testing.T, executor DBOSContext) {
 	t.Run("CustomMarshaler", func(t *testing.T) {
 		tw := TwiceInt(11)
-		h, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(tw))
+		// Test with any-typed workflow
+		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(tw))
 		require.NoError(t, err)
-		testRoundTrip[TwiceInt, any](t, executor, h, tw)
+		testRoundTrip[TwiceInt, any](t, executor, h1, tw)
+
+		// Test with typed workflow
+		h2, err := RunWorkflow(executor, serializerTwiceIntWorkflow, tw)
+		require.NoError(t, err)
+		testRoundTrip[TwiceInt, TwiceInt](t, executor, h2, tw)
 	})
 }
 
 func runJSONEdgeTests(t *testing.T, executor DBOSContext) {
 	t.Run("JSONEdgeCases", func(t *testing.T) {
+		// Empty string
+		// Test with any-typed workflow
 		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(""))
 		require.NoError(t, err)
 		testRoundTrip[string, any](t, executor, h1, "")
-
-		h2, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(0))
+		// Test with typed workflow
+		h2, err := RunWorkflow(executor, serializerStringWorkflow, "")
 		require.NoError(t, err)
-		testRoundTrip[int, any](t, executor, h2, 0)
+		testRoundTrip[string, string](t, executor, h2, "")
 
-		h3, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(false))
+		// Zero int
+		// Test with any-typed workflow
+		h3, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(0))
 		require.NoError(t, err)
-		testRoundTrip[bool, any](t, executor, h3, false)
+		testRoundTrip[int, any](t, executor, h3, 0)
+		// Test with typed workflow
+		h4, err := RunWorkflow(executor, serializerIntWorkflow, 0)
+		require.NoError(t, err)
+		testRoundTrip[int, int](t, executor, h4, 0)
+
+		// False bool
+		// Test with any-typed workflow
+		h5, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(false))
+		require.NoError(t, err)
+		testRoundTrip[bool, any](t, executor, h5, false)
+		// Test with typed workflow
+		h6, err := RunWorkflow(executor, serializerBoolWorkflow, false)
+		require.NoError(t, err)
+		testRoundTrip[bool, bool](t, executor, h6, false)
 	})
 }
 
@@ -437,7 +523,6 @@ func (t *TwiceInt) UnmarshalJSON(b []byte) error {
 // Struct with interface fields
 type WithInterfaces struct {
 	A any
-	P any
 }
 
 // Test data structures for DBOS integration testing
@@ -500,6 +585,192 @@ func serializerAnyValueWorkflow(ctx DBOSContext, input any) (any, error) {
 		}
 		return input, nil
 	})
+}
+
+// Typed workflow functions for testing concrete signatures
+func serializerIntWorkflow(ctx DBOSContext, input int) (int, error) {
+	return RunAsStep(ctx, func(context context.Context) (int, error) {
+		return input, nil
+	})
+}
+
+func serializerIntPtrWorkflow(ctx DBOSContext, input *int) (*int, error) {
+	return RunAsStep(ctx, func(context context.Context) (*int, error) {
+		return input, nil
+	})
+}
+
+func serializerIntSliceWorkflow(ctx DBOSContext, input []int) ([]int, error) {
+	return RunAsStep(ctx, func(context context.Context) ([]int, error) {
+		return input, nil
+	})
+}
+
+func serializerStringIntMapWorkflow(ctx DBOSContext, input map[string]int) (map[string]int, error) {
+	return RunAsStep(ctx, func(context context.Context) (map[string]int, error) {
+		return input, nil
+	})
+}
+
+func serializerWithInterfacesWorkflow(ctx DBOSContext, input WithInterfaces) (WithInterfaces, error) {
+	return RunAsStep(ctx, func(context context.Context) (WithInterfaces, error) {
+		return input, nil
+	})
+}
+
+func serializerMyIntWorkflow(ctx DBOSContext, input MyInt) (MyInt, error) {
+	return RunAsStep(ctx, func(context context.Context) (MyInt, error) {
+		return input, nil
+	})
+}
+
+func serializerMyStringWorkflow(ctx DBOSContext, input MyString) (MyString, error) {
+	return RunAsStep(ctx, func(context context.Context) (MyString, error) {
+		return input, nil
+	})
+}
+
+func serializerMyStringSliceWorkflow(ctx DBOSContext, input []MyString) ([]MyString, error) {
+	return RunAsStep(ctx, func(context context.Context) ([]MyString, error) {
+		return input, nil
+	})
+}
+
+func serializerStringMyIntMapWorkflow(ctx DBOSContext, input map[string]MyInt) (map[string]MyInt, error) {
+	return RunAsStep(ctx, func(context context.Context) (map[string]MyInt, error) {
+		return input, nil
+	})
+}
+
+func serializerTwiceIntWorkflow(ctx DBOSContext, input TwiceInt) (TwiceInt, error) {
+	return RunAsStep(ctx, func(context context.Context) (TwiceInt, error) {
+		return input, nil
+	})
+}
+
+func serializerStringWorkflow(ctx DBOSContext, input string) (string, error) {
+	return RunAsStep(ctx, func(context context.Context) (string, error) {
+		return input, nil
+	})
+}
+
+func serializerBoolWorkflow(ctx DBOSContext, input bool) (bool, error) {
+	return RunAsStep(ctx, func(context context.Context) (bool, error) {
+		return input, nil
+	})
+}
+
+// Typed Send/Recv workflows for various types
+func serializerIntSenderWorkflow(ctx DBOSContext, input int) (int, error) {
+	receiverWorkflowID, err := GetWorkflowID(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get workflow ID: %w", err)
+	}
+	destID := receiverWorkflowID + "-receiver"
+	err = Send(ctx, destID, input, "test-topic")
+	if err != nil {
+		return 0, fmt.Errorf("send failed: %w", err)
+	}
+	return input, nil
+}
+
+func serializerIntReceiverWorkflow(ctx DBOSContext, _ int) (int, error) {
+	received, err := Recv[int](ctx, "test-topic", 10*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("recv failed: %w", err)
+	}
+	return received, nil
+}
+
+func serializerIntPtrSenderWorkflow(ctx DBOSContext, input *int) (*int, error) {
+	receiverWorkflowID, err := GetWorkflowID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get workflow ID: %w", err)
+	}
+	destID := receiverWorkflowID + "-receiver"
+	err = Send(ctx, destID, input, "test-topic")
+	if err != nil {
+		return nil, fmt.Errorf("send failed: %w", err)
+	}
+	return input, nil
+}
+
+func serializerIntPtrReceiverWorkflow(ctx DBOSContext, _ *int) (*int, error) {
+	received, err := Recv[*int](ctx, "test-topic", 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("recv failed: %w", err)
+	}
+	return received, nil
+}
+
+func serializerMyIntSenderWorkflow(ctx DBOSContext, input MyInt) (MyInt, error) {
+	receiverWorkflowID, err := GetWorkflowID(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get workflow ID: %w", err)
+	}
+	destID := receiverWorkflowID + "-receiver"
+	err = Send(ctx, destID, input, "test-topic")
+	if err != nil {
+		return 0, fmt.Errorf("send failed: %w", err)
+	}
+	return input, nil
+}
+
+func serializerMyIntReceiverWorkflow(ctx DBOSContext, _ MyInt) (MyInt, error) {
+	received, err := Recv[MyInt](ctx, "test-topic", 10*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("recv failed: %w", err)
+	}
+	return received, nil
+}
+
+// Typed SetEvent/GetEvent workflows for various types
+func serializerIntSetEventWorkflow(ctx DBOSContext, input int) (int, error) {
+	err := SetEvent(ctx, "test-key", input)
+	if err != nil {
+		return 0, fmt.Errorf("set event failed: %w", err)
+	}
+	return input, nil
+}
+
+func serializerIntGetEventWorkflow(ctx DBOSContext, targetWorkflowID string) (int, error) {
+	event, err := GetEvent[int](ctx, targetWorkflowID, "test-key", 10*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("get event failed: %w", err)
+	}
+	return event, nil
+}
+
+func serializerIntPtrSetEventWorkflow(ctx DBOSContext, input *int) (*int, error) {
+	err := SetEvent(ctx, "test-key", input)
+	if err != nil {
+		return nil, fmt.Errorf("set event failed: %w", err)
+	}
+	return input, nil
+}
+
+func serializerIntPtrGetEventWorkflow(ctx DBOSContext, targetWorkflowID string) (*int, error) {
+	event, err := GetEvent[*int](ctx, targetWorkflowID, "test-key", 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("get event failed: %w", err)
+	}
+	return event, nil
+}
+
+func serializerMyIntSetEventWorkflow(ctx DBOSContext, input MyInt) (MyInt, error) {
+	err := SetEvent(ctx, "test-key", input)
+	if err != nil {
+		return 0, fmt.Errorf("set event failed: %w", err)
+	}
+	return input, nil
+}
+
+func serializerMyIntGetEventWorkflow(ctx DBOSContext, targetWorkflowID string) (MyInt, error) {
+	event, err := GetEvent[MyInt](ctx, targetWorkflowID, "test-key", 10*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("get event failed: %w", err)
+	}
+	return event, nil
 }
 
 func serializerInterfaceValueWorkflow(ctx DBOSContext, input DataProvider) (DataProvider, error) {
@@ -664,6 +935,33 @@ func TestSerializer(t *testing.T) {
 			RegisterWorkflow(executor, serializerAnySetEventWorkflow)
 			RegisterWorkflow(executor, serializerAnyGetEventWorkflow)
 			RegisterWorkflow(executor, serializerAnyRecoveryWorkflow)
+			// Register typed workflows for concrete signatures
+			RegisterWorkflow(executor, serializerIntWorkflow)
+			RegisterWorkflow(executor, serializerIntPtrWorkflow)
+			RegisterWorkflow(executor, serializerIntSliceWorkflow)
+			RegisterWorkflow(executor, serializerStringIntMapWorkflow)
+			RegisterWorkflow(executor, serializerWithInterfacesWorkflow)
+			RegisterWorkflow(executor, serializerMyIntWorkflow)
+			RegisterWorkflow(executor, serializerMyStringWorkflow)
+			RegisterWorkflow(executor, serializerMyStringSliceWorkflow)
+			RegisterWorkflow(executor, serializerStringMyIntMapWorkflow)
+			RegisterWorkflow(executor, serializerTwiceIntWorkflow)
+			RegisterWorkflow(executor, serializerStringWorkflow)
+			RegisterWorkflow(executor, serializerBoolWorkflow)
+			// Register typed Send/Recv workflows
+			RegisterWorkflow(executor, serializerIntSenderWorkflow)
+			RegisterWorkflow(executor, serializerIntReceiverWorkflow)
+			RegisterWorkflow(executor, serializerIntPtrSenderWorkflow)
+			RegisterWorkflow(executor, serializerIntPtrReceiverWorkflow)
+			RegisterWorkflow(executor, serializerMyIntSenderWorkflow)
+			RegisterWorkflow(executor, serializerMyIntReceiverWorkflow)
+			// Register typed SetEvent/GetEvent workflows
+			RegisterWorkflow(executor, serializerIntSetEventWorkflow)
+			RegisterWorkflow(executor, serializerIntGetEventWorkflow)
+			RegisterWorkflow(executor, serializerIntPtrSetEventWorkflow)
+			RegisterWorkflow(executor, serializerIntPtrGetEventWorkflow)
+			RegisterWorkflow(executor, serializerMyIntSetEventWorkflow)
+			RegisterWorkflow(executor, serializerMyIntGetEventWorkflow)
 
 			err := Launch(executor)
 			require.NoError(t, err)
@@ -870,6 +1168,38 @@ func TestSerializer(t *testing.T) {
 				}
 
 				testSetGetEvent(t, executor, serializerAnySetEventWorkflow, serializerAnyGetEventWorkflow, any(input), "any-setevent-wf", "any-getevent-wf")
+			})
+
+			// Test typed Send/Recv and SetEvent/GetEvent with various types
+			t.Run("TypedSendRecvAndSetGetEvent", func(t *testing.T) {
+				// Test int (scalar type)
+				t.Run("Int", func(t *testing.T) {
+					input := 42
+					testSendRecv(t, executor, serializerIntSenderWorkflow, serializerIntReceiverWorkflow, input, "typed-int-sender-wf")
+					testSetGetEvent(t, executor, serializerIntSetEventWorkflow, serializerIntGetEventWorkflow, input, "typed-int-setevent-wf", "typed-int-getevent-wf")
+				})
+
+				// Test MyInt (user defined type)
+				t.Run("MyInt", func(t *testing.T) {
+					input := MyInt(73)
+					testSendRecv(t, executor, serializerMyIntSenderWorkflow, serializerMyIntReceiverWorkflow, input, "typed-myint-sender-wf")
+					testSetGetEvent(t, executor, serializerMyIntSetEventWorkflow, serializerMyIntGetEventWorkflow, input, "typed-myint-setevent-wf", "typed-myint-getevent-wf")
+				})
+
+				// Test *int (pointer type, set)
+				t.Run("IntPtrSet", func(t *testing.T) {
+					v := 99
+					input := &v
+					testSendRecv(t, executor, serializerIntPtrSenderWorkflow, serializerIntPtrReceiverWorkflow, input, "typed-intptr-set-sender-wf")
+					testSetGetEvent(t, executor, serializerIntPtrSetEventWorkflow, serializerIntPtrGetEventWorkflow, input, "typed-intptr-set-setevent-wf", "typed-intptr-set-getevent-wf")
+				})
+
+				// Test *int (pointer type, nil)
+				t.Run("IntPtrNil", func(t *testing.T) {
+					var input *int = nil
+					testSendRecv(t, executor, serializerIntPtrSenderWorkflow, serializerIntPtrReceiverWorkflow, input, "typed-intptr-nil-sender-wf")
+					testSetGetEvent(t, executor, serializerIntPtrSetEventWorkflow, serializerIntPtrGetEventWorkflow, input, "typed-intptr-nil-setevent-wf", "typed-intptr-nil-getevent-wf")
+				})
 			})
 
 			// Test workflow recovery with TestWorkflowData type
