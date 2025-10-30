@@ -1568,11 +1568,11 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		}
 
 		// The output should be a time.Time representing the end time
-		endTimeInterface, ok := recordedResult.output.(time.Time)
-		if !ok {
-			return 0, fmt.Errorf("recorded output is not a time.Time: %T", recordedResult.output)
+		// Because checkOperationExecution decoded it in an `any` type, we need to encode/decode it into a time.Time
+		endTime, err = convertJSONToType[time.Time](recordedResult.output)
+		if err != nil {
+			return 0, fmt.Errorf("failed to convert recorded output to time.Time: %w", err)
 		}
-		endTime = endTimeInterface
 
 		if recordedResult.err != nil { // This should never happen
 			return 0, recordedResult.err
