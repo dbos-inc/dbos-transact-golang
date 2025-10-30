@@ -521,6 +521,9 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		if err != nil {
 			return *new(R), newWorkflowExecutionError("", fmt.Errorf("getting workflow ID: %w", err))
 		}
+		// In async execution (e.g., recoverPendingWorkflows and queue runner), we don't know the input type
+		// Here we can capture it and add the casting to the logic
+		// Note that the input might come from the database.
 		var typedInput P
 		if isJSONSerializer(ctx.(*dbosContext).serializer) {
 			var err error

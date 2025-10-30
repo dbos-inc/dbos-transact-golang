@@ -77,7 +77,7 @@ func isJSONSerializer(s Serializer) bool {
 // This is needed because JSON deserialization loses type information when decoding
 // into `any` - it converts structs to map[string]interface{}, numbers to float64, etc.
 // By re-marshaling and unmarshaling into a typed target, we (mostly) restore the original structure.
-// We should be able to get ride of this when we lift encoding/decoding outside of the system database.
+// We should be able to get rid of this when we lift encoding/decoding outside of the system database.
 func convertJSONToType[T any](value any) (T, error) {
 	if value == nil {
 		return *new(T), nil
