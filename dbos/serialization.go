@@ -20,9 +20,6 @@ func serialize(data any) (*string, error) {
 		return &str, nil
 	}
 
-	// Register the type with gob to avoid interface{} issues
-	safeGobRegister(data, nil)
-
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
 	if err := enc.Encode(data); err != nil {
