@@ -1246,7 +1246,6 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
-			fmt.Println("Conflict error while recording operation result")
 			return newWorkflowConflictIDError(input.workflowID)
 		}
 		return err

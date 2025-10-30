@@ -307,7 +307,7 @@ func testWorkflowRecovery[T any](
 // Readability helpers: group related subtests behind concise functions
 func runScalarsTests(t *testing.T, executor DBOSContext) {
 	t.Run("Scalars", func(t *testing.T) {
-		// Test int as representative scalar type - tests our encode/decode logic, not JSON itself
+		// Test int as representative scalar type
 		// Test with any-typed workflow
 		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(int(42)))
 		require.NoError(t, err)
@@ -499,7 +499,6 @@ func runJSONEdgeTests(t *testing.T, executor DBOSContext) {
 	})
 }
 
-// Types for additional coverage
 type MyInt int
 type MyString string
 
