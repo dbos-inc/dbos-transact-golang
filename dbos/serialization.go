@@ -22,7 +22,7 @@ func serialize(data any) (*string, error) {
 
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
-	if err := enc.Encode(data); err != nil {
+	if err := enc.Encode(&data); err != nil {
 		return nil, fmt.Errorf("failed to encode data: %w", err)
 	}
 	inputBytes := buf.Bytes()

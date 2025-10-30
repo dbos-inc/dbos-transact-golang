@@ -2138,7 +2138,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) 
 type dequeuedWorkflow struct {
 	id    string
 	name  string
-	input string
+	input *string
 }
 
 type dequeueWorkflowsInput struct {
@@ -2340,19 +2340,14 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			WHERE workflow_uuid = $5
 			RETURNING name, inputs`, pgx.Identifier{s.schema}.Sanitize())
 
-		var inputString *string
 		err := tx.QueryRow(ctx, updateQuery,
 			WorkflowStatusPending,
 			input.applicationVersion,
 			input.executorID,
 			time.Now().UnixMilli(),
-			id).Scan(&retWorkflow.name, &inputString)
+			id).Scan(&retWorkflow.name, &retWorkflow.input)
 		if err != nil {
 			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
-		}
-
-		if inputString != nil && len(*inputString) > 0 {
-			retWorkflow.input = *inputString
 		}
 
 		retWorkflows = append(retWorkflows, retWorkflow)

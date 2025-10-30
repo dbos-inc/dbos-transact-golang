@@ -1463,11 +1463,11 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 
 	// Deserialize the event value
 	if encodedValue != nil {
-		encodedStr, ok := encodedValue.(string)
+		encodedStr, ok := encodedValue.(*string)
 		if !ok {
 			return nil, fmt.Errorf("event value must be encoded string, got %T", encodedValue)
 		}
-		return deserialize(&encodedStr)
+		return deserialize(encodedStr)
 	}
 	return nil, nil
 }

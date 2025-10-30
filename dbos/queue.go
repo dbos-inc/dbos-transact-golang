@@ -226,12 +226,10 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 
 				// Deserialize input using the centralized deserialize function
 				var input any
-				if len(workflow.input) > 0 {
-					input, err = deserialize(&workflow.input)
-					if err != nil {
-						qr.logger.Error("failed to deserialize input for workflow", "workflow_id", workflow.id, "error", err)
-						continue
-					}
+				input, err = deserialize(workflow.input)
+				if err != nil {
+					qr.logger.Error("failed to deserialize input for workflow", "workflow_id", workflow.id, "error", err)
+					continue
 				}
 
 				_, err := registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
