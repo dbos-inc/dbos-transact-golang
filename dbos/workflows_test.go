@@ -827,7 +827,6 @@ func TestSteps(t *testing.T) {
 	})
 
 	t.Run("stepsOutputEncoding", func(t *testing.T) {
-
 		// Execute the workflow
 		handle, err := RunWorkflow(dbosCtx, userObjectWorkflow, "TestObject")
 		require.NoError(t, err, "failed to run workflow with user-defined objects")
@@ -846,17 +845,20 @@ func TestSteps(t *testing.T) {
 		require.NotNil(t, step.Output, "step output should not be nil")
 		assert.Nil(t, step.Error)
 
+		fmt.Println("step.Output", step.Output)
+
 		// Deserialize the output from the database to verify proper encoding
-		storedOutput, ok := step.Output.(StepOutput)
-		require.True(t, ok, "failed to cast step output to StepOutput")
+		// Need to recast to JSON because step.Output is an any type
+		storedOutput, err := convertJSONToType[StepOutput](step.Output)
+		require.NoError(t, err)
 
 		// Verify all fields were correctly serialized and deserialized
-		assert.Equal(t, "Processed_TestObject", storedOutput.ProcessedName, "ProcessedName not correctly serialized")
-		assert.Equal(t, 84, storedOutput.TotalCount, "TotalCount not correctly serialized")
-		assert.True(t, storedOutput.Success, "Success flag not correctly serialized")
-		assert.Len(t, storedOutput.Details, 3, "Details array length incorrect")
-		assert.Equal(t, []string{"step1", "step2", "step3"}, storedOutput.Details, "Details array not correctly serialized")
-		assert.False(t, storedOutput.ProcessedAt.IsZero(), "ProcessedAt timestamp should not be zero")
+		assert.Equal(t, "Processed_TestObject", storedOutput.ProcessedName)
+		assert.Equal(t, 84, storedOutput.TotalCount)
+		assert.True(t, storedOutput.Success)
+		assert.Len(t, storedOutput.Details, 3)
+		assert.Equal(t, []string{"step1", "step2", "step3"}, storedOutput.Details)
+		assert.False(t, storedOutput.ProcessedAt.IsZero())
 	})
 }
 
@@ -1412,8 +1414,8 @@ func TestWorkflowRecovery(t *testing.T) {
 			result, err := recoveredHandle.GetResult()
 			require.NoError(t, err, "failed to get result from recovered workflow %d", i)
 
-			// Result should be the counter value (1)
-			require.Equal(t, int64(1), result, "workflow %d result should be 1", i)
+			// Result should be the counter value (1). Will be float64 because JSON serialized it into an any type.
+			require.Equal(t, float64(1), result, "workflow %d result should be 1", i)
 		}
 
 		// Final verification of step states
@@ -1578,7 +1580,8 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		for i, h := range handles {
 			result, err := h.GetResult()
 			require.NoError(t, err, "failed to get result from handle %d", i)
-			require.Equal(t, 0, result)
+			// Will be float64 because JSON serialized it into an any type.
+			require.Equal(t, float64(0), result)
 		}
 	})
 }
