@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
@@ -11,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// isInterfaceType checks if the given value is of interface{} (any) type
 func isInterfaceType(v any) bool {
 	t := reflect.TypeOf(v)
 	if t == nil {
@@ -20,165 +20,114 @@ func isInterfaceType(v any) bool {
 	return t.Kind() == reflect.Interface
 }
 
-// Helper function to test comprehensive workflow values across different retrieval methods
-func testComprehensiveWorkflowValues[T any](
+// Unified helper: test round-trip across all read paths for both typed and any workflows.
+// Handles JSON recast automatically when needed (when handle is WorkflowHandle[any] and JSON serializer).
+// Also handles nil values when expected is nil.
+func testRoundTrip[T any, H any](
 	t *testing.T,
 	executor DBOSContext,
-	handle WorkflowHandle[T],
-	expectedInput TestWorkflowData,
+	handle WorkflowHandle[H],
+	expected T,
 ) {
 	t.Helper()
 
-	// Get the serializer to determine how to compare
 	dbosCtx, ok := executor.(*dbosContext)
 	require.True(t, ok, "expected dbosContext")
 	isJSON := isJSONSerializer(dbosCtx.serializer)
 
-	// 1. Test with handle.GetResult()
+	var zeroH H
+	isAnyHandle := isInterfaceType(zeroH)
+	needsJSONRecast := isJSON && isAnyHandle
+
+	// Check if expected is nil (for pointer types, slice, map, interface, etc.)
+	isNilExpected := false
+	expectedVal := reflect.ValueOf(expected)
+	if !expectedVal.IsValid() {
+		isNilExpected = true
+	} else {
+		switch expectedVal.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface, reflect.Chan, reflect.Func:
+			isNilExpected = expectedVal.IsNil()
+		}
+	}
+
 	t.Run("HandleGetResult", func(t *testing.T) {
-		result, err := handle.GetResult()
-		require.NoError(t, err, "Failed to get workflow result")
-		assert.Equal(t, expectedInput, result, "Workflow result should match input")
-	})
-
-	// 2. Test with ListWorkflows
-	t.Run("ListWorkflows", func(t *testing.T) {
-		workflows, err := ListWorkflows(executor,
-			WithWorkflowIDs([]string{handle.GetWorkflowID()}),
-			WithLoadInput(true),
-			WithLoadOutput(true),
-		)
-		require.NoError(t, err, "Failed to list workflows")
-		require.Len(t, workflows, 1, "Expected 1 workflow")
-
-		workflow := workflows[0]
-		require.NotNil(t, workflow.Input, "Workflow input should not be nil")
-		require.NotNil(t, workflow.Output, "Workflow output should not be nil")
-
-		if isJSON {
-			// For JSON serializer with any type, convert map[string]interface{} to typed struct
-			typedInput, err := convertJSONToType[TestWorkflowData](workflow.Input)
-			require.NoError(t, err, "Failed to convert workflow input")
-			typedOutput, err := convertJSONToType[TestWorkflowData](workflow.Output)
-			require.NoError(t, err, "Failed to convert workflow output")
-			assert.Equal(t, expectedInput, typedInput, "Workflow input from ListWorkflows should match original")
-			assert.Equal(t, expectedInput, typedOutput, "Workflow output from ListWorkflows should match original")
+		gotAny, err := handle.GetResult()
+		require.NoError(t, err)
+		if isNilExpected {
+			assert.Nil(t, gotAny, "Nil result should be preserved")
+		} else if needsJSONRecast {
+			got, err := convertJSONToType[T](gotAny)
+			require.NoError(t, err)
+			assert.Equal(t, expected, got)
 		} else {
-			assert.Equal(t, expectedInput, workflow.Input, "Workflow input from ListWorkflows should match original")
-			assert.Equal(t, expectedInput, workflow.Output, "Workflow output from ListWorkflows should match original")
+			assert.Equal(t, expected, gotAny)
 		}
 	})
 
-	// 3. Test with GetWorkflowSteps
+	// ListWorkflows returns typeless input and output values. Needs recast by the caller if serializer is JSON.
+	t.Run("ListWorkflows", func(t *testing.T) {
+		wfs, err := ListWorkflows(executor,
+			WithWorkflowIDs([]string{handle.GetWorkflowID()}),
+			WithLoadInput(true), WithLoadOutput(true))
+		require.NoError(t, err)
+		require.Len(t, wfs, 1)
+		wf := wfs[0]
+		if isNilExpected {
+			assert.Nil(t, wf.Input, "Workflow input should be nil")
+			assert.Nil(t, wf.Output, "Workflow output should be nil")
+		} else {
+			require.NotNil(t, wf.Input)
+			require.NotNil(t, wf.Output)
+			if isJSON {
+				inVal, err := convertJSONToType[T](wf.Input)
+				require.NoError(t, err)
+				outVal, err := convertJSONToType[T](wf.Output)
+				require.NoError(t, err)
+				assert.Equal(t, expected, inVal)
+				assert.Equal(t, expected, outVal)
+			} else {
+				assert.Equal(t, expected, wf.Input)
+				assert.Equal(t, expected, wf.Output)
+			}
+		}
+	})
+
+	// GetWorkflowSteps returns typeless output values. Needs recast by the caller if serializer is JSON.
 	t.Run("GetWorkflowSteps", func(t *testing.T) {
 		steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
-		require.NoError(t, err, "Failed to get workflow steps")
-		require.Len(t, steps, 1, "Expected 1 step")
-
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
 		step := steps[0]
-		require.NotNil(t, step.Output, "Step output should not be nil")
-
-		if isJSON {
-			// For JSON serializer with any type, convert map[string]interface{} to typed struct
-			typedOutput, err := convertJSONToType[TestWorkflowData](step.Output)
-			require.NoError(t, err, "Failed to convert step output")
-			assert.Equal(t, expectedInput, typedOutput, "Step output should match original")
+		if isNilExpected {
+			assert.Nil(t, step.Output, "Step output should be nil")
 		} else {
-			assert.Equal(t, expectedInput, step.Output, "Step output should match original")
+			require.NotNil(t, step.Output)
+			if isJSON {
+				outVal, err := convertJSONToType[T](step.Output)
+				require.NoError(t, err)
+				assert.Equal(t, expected, outVal)
+			} else {
+				assert.Equal(t, expected, step.Output)
+			}
 		}
-		assert.Nil(t, step.Error, "Step should not have error")
+		assert.Nil(t, step.Error)
 	})
-
-	// 4. Test with RetrieveWorkflow (polling handle)
-
-	// Check if T is 'any' - only then we need JSON recast for RetrieveWorkflow (generic otherwise)
-	var zeroT T
-	needsJSONRecast := isJSON && isInterfaceType(zeroT)
 
 	t.Run("RetrieveWorkflow", func(t *testing.T) {
-		retrievedHandle, err := RetrieveWorkflow[T](executor, handle.GetWorkflowID())
-		require.NoError(t, err, "Failed to retrieve workflow")
-
-		result, err := retrievedHandle.GetResult()
-		require.NoError(t, err, "Failed to get result from retrieved handle")
-
-		if needsJSONRecast {
-			// For JSON serializer with any type, convert map[string]interface{} to typed struct
-			typedResult, err := convertJSONToType[TestWorkflowData](result)
-			require.NoError(t, err, "Failed to convert retrieved workflow result")
-			assert.Equal(t, expectedInput, typedResult, "Retrieved workflow result should match input")
+		h2, err := RetrieveWorkflow[H](executor, handle.GetWorkflowID())
+		require.NoError(t, err)
+		gotAny, err := h2.GetResult()
+		require.NoError(t, err)
+		if isNilExpected {
+			assert.Nil(t, gotAny, "Retrieved workflow result should be nil")
+		} else if needsJSONRecast {
+			got, err := convertJSONToType[T](gotAny)
+			require.NoError(t, err)
+			assert.Equal(t, expected, got)
 		} else {
-			assert.Equal(t, expectedInput, result, "Retrieved workflow result should match input")
+			assert.Equal(t, expected, gotAny)
 		}
-	})
-}
-
-// Helper function to test nil workflow values across different retrieval methods
-func testNilWorkflowValues[T any](
-	t *testing.T,
-	executor DBOSContext,
-	handle WorkflowHandle[T],
-) {
-	t.Helper()
-
-	// 1. Test with handle.GetResult()
-	t.Run("HandleGetResult", func(t *testing.T) {
-		result, err := handle.GetResult()
-		require.NoError(t, err, "Failed to get workflow result")
-		assert.Nil(t, result, "Nil result should be preserved")
-	})
-
-	// 2. Test with ListWorkflows
-	t.Run("ListWorkflows", func(t *testing.T) {
-		workflows, err := ListWorkflows(executor,
-			WithWorkflowIDs([]string{handle.GetWorkflowID()}),
-			WithLoadInput(true),
-			WithLoadOutput(true),
-		)
-		require.NoError(t, err, "Failed to list workflows")
-		require.Len(t, workflows, 1, "Expected 1 workflow")
-
-		workflow := workflows[0]
-		assert.Nil(t, workflow.Input, "Workflow input from ListWorkflows should be nil")
-		assert.Nil(t, workflow.Output, "Workflow output from ListWorkflows should be nil")
-	})
-
-	// 3. Test with GetWorkflowSteps
-	t.Run("GetWorkflowSteps", func(t *testing.T) {
-		steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
-		require.NoError(t, err, "Failed to get workflow steps")
-		require.Len(t, steps, 1, "Expected 1 step")
-
-		step := steps[0]
-		assert.Nil(t, step.Output, "Step output should be nil")
-		assert.Nil(t, step.Error, "Step should not have error")
-	})
-
-	// 4. Test with RetrieveWorkflow (polling handle)
-	t.Run("RetrieveWorkflow", func(t *testing.T) {
-		retrievedHandle, err := RetrieveWorkflow[T](executor, handle.GetWorkflowID())
-		require.NoError(t, err, "Failed to retrieve workflow")
-
-		result, err := retrievedHandle.GetResult()
-		require.NoError(t, err, "Failed to get result from retrieved handle")
-		assert.Nil(t, result, "Retrieved workflow result should be nil")
-	})
-
-	// 5. Test database storage (nil values stored as empty strings)
-	t.Run("DatabaseStorage", func(t *testing.T) {
-		dbosCtx, ok := executor.(*dbosContext)
-		require.True(t, ok, "expected dbosContext")
-		sysDB, ok := dbosCtx.systemDB.(*sysDB)
-		require.True(t, ok, "expected sysDB")
-
-		var inputs string
-		var output string
-		err := sysDB.pool.QueryRow(context.Background(),
-			fmt.Sprintf("SELECT inputs, output FROM %s.workflow_status WHERE workflow_uuid = $1", sysDB.schema),
-			handle.GetWorkflowID()).Scan(&inputs, &output)
-		require.NoError(t, err, "Failed to query workflow_status")
-		assert.Equal(t, "", inputs, "Nil inputs should be stored as empty string in database")
-		assert.Equal(t, "", output, "Nil output should be stored as empty string in database")
 	})
 }
 
@@ -186,8 +135,8 @@ func testNilWorkflowValues[T any](
 func testSendRecv[T any](
 	t *testing.T,
 	executor DBOSContext,
-	senderWorkflow func(DBOSContext, T) (T, error),
-	receiverWorkflow func(DBOSContext, T) (T, error),
+	senderWorkflow Workflow[T, T],
+	receiverWorkflow Workflow[T, T],
 	input T,
 	senderID string,
 ) {
@@ -235,8 +184,8 @@ func testSendRecv[T any](
 func testSetGetEvent[T any](
 	t *testing.T,
 	executor DBOSContext,
-	setEventWorkflow func(DBOSContext, T) (T, error),
-	getEventWorkflow func(DBOSContext, string) (T, error),
+	setEventWorkflow Workflow[T, T],
+	getEventWorkflow Workflow[string, T],
 	input T,
 	setEventID string,
 	getEventID string,
@@ -353,6 +302,142 @@ func testWorkflowRecovery[T any](
 		assert.Equal(t, input, originalResult, "original handle result should match input")
 		assert.Equal(t, input, recoveredResult, "recovered handle result should match input")
 	}
+}
+
+// Readability helpers: group related subtests behind concise functions
+func runScalarsTests(t *testing.T, executor DBOSContext) {
+	t.Run("Scalars", func(t *testing.T) {
+		// Test int as representative scalar type - tests our encode/decode logic, not JSON itself
+		h, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(int(42)))
+		require.NoError(t, err)
+		testRoundTrip[int, any](t, executor, h, 42)
+	})
+}
+
+func runPointerTests(t *testing.T, executor DBOSContext) {
+	t.Run("Pointers", func(t *testing.T) {
+		v := 123
+		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(&v))
+		require.NoError(t, err)
+		testRoundTrip[*int, any](t, executor, h1, &v)
+	})
+}
+
+func runSlicesAndArraysTests(t *testing.T, executor DBOSContext) {
+	t.Run("SlicesAndArrays", func(t *testing.T) {
+		// Non-empty slice - tests collection round-trip
+		s1 := []int{1, 2, 3}
+		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(s1))
+		require.NoError(t, err)
+		testRoundTrip[[]int, any](t, executor, h1, s1)
+
+		// Nil slice - tests nil handling
+		var s2 []int
+		h2, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(s2))
+		require.NoError(t, err)
+		testRoundTrip[[]int, any](t, executor, h2, s2)
+	})
+}
+
+func runMapsTests(t *testing.T, executor DBOSContext) {
+	t.Run("Maps", func(t *testing.T) {
+		// Non-empty map - tests map round-trip
+		m1 := map[string]int{"x": 1, "y": 2}
+		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(m1))
+		require.NoError(t, err)
+		testRoundTrip[map[string]int, any](t, executor, h1, m1)
+
+		// Nil map - tests nil handling
+		var m2 map[string]int
+		h2, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(m2))
+		require.NoError(t, err)
+		testRoundTrip[map[string]int, any](t, executor, h2, m2)
+	})
+}
+
+func runInterfaceFieldsTests(t *testing.T, executor DBOSContext) {
+	t.Run("InterfaceFieldsStruct", func(t *testing.T) {
+		inp := WithInterfaces{A: map[string]any{"k": "v"}, P: map[string]any{"Message": "m", "Value": float64(5)}}
+		h, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(inp))
+		require.NoError(t, err)
+		testRoundTrip[WithInterfaces, any](t, executor, h, inp)
+	})
+}
+
+func runCustomTypesTests(t *testing.T, executor DBOSContext) {
+	t.Run("CustomTypes", func(t *testing.T) {
+		mi := MyInt(7)
+		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(mi))
+		require.NoError(t, err)
+		testRoundTrip[MyInt, any](t, executor, h1, mi)
+
+		ms := MyString("zeta")
+		h2, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(ms))
+		require.NoError(t, err)
+		testRoundTrip[MyString, any](t, executor, h2, ms)
+
+		msl := []MyString{"a", "b"}
+		h3, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(msl))
+		require.NoError(t, err)
+		testRoundTrip[[]MyString, any](t, executor, h3, msl)
+
+		mm := map[string]MyInt{"k": 9}
+		h4, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(mm))
+		require.NoError(t, err)
+		testRoundTrip[map[string]MyInt, any](t, executor, h4, mm)
+	})
+}
+
+func runCustomMarshalerTests(t *testing.T, executor DBOSContext) {
+	t.Run("CustomMarshaler", func(t *testing.T) {
+		tw := TwiceInt(11)
+		h, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(tw))
+		require.NoError(t, err)
+		testRoundTrip[TwiceInt, any](t, executor, h, tw)
+	})
+}
+
+func runJSONEdgeTests(t *testing.T, executor DBOSContext) {
+	t.Run("JSONEdgeCases", func(t *testing.T) {
+		h1, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(""))
+		require.NoError(t, err)
+		testRoundTrip[string, any](t, executor, h1, "")
+
+		h2, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(0))
+		require.NoError(t, err)
+		testRoundTrip[int, any](t, executor, h2, 0)
+
+		h3, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(false))
+		require.NoError(t, err)
+		testRoundTrip[bool, any](t, executor, h3, false)
+	})
+}
+
+// Types for additional coverage
+type MyInt int
+type MyString string
+
+// Custom marshaler that doubles on marshal and halves on unmarshal
+type TwiceInt int
+
+func (t TwiceInt) MarshalJSON() ([]byte, error) {
+	v := int(t) * 2
+	return json.Marshal(v)
+}
+
+func (t *TwiceInt) UnmarshalJSON(b []byte) error {
+	var v int
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*t = TwiceInt(v / 2)
+	return nil
+}
+
+// Struct with interface fields
+type WithInterfaces struct {
+	A any
+	P any
 }
 
 // Test data structures for DBOS integration testing
@@ -598,7 +683,7 @@ func TestSerializer(t *testing.T) {
 				handle, err := RunWorkflow(executor, serializerWorkflow, input)
 				require.NoError(t, err, "Workflow execution failed")
 
-				testComprehensiveWorkflowValues(t, executor, handle, input)
+				testRoundTrip[TestWorkflowData, TestWorkflowData](t, executor, handle, input)
 			})
 
 			// Test workflow with any type and comprehensive data structure
@@ -616,7 +701,8 @@ func TestSerializer(t *testing.T) {
 				handle, err := RunWorkflow(executor, serializerAnyValueWorkflow, any(input))
 				require.NoError(t, err, "Any workflow execution failed")
 
-				testComprehensiveWorkflowValues(t, executor, handle, input)
+				// For any-typed workflow we keep using any-specific helper elsewhere
+				testRoundTrip[TestWorkflowData, any](t, executor, handle, input)
 			})
 
 			// Test workflow with interface type
@@ -686,7 +772,7 @@ func TestSerializer(t *testing.T) {
 				handle, err := RunWorkflow(executor, serializerNilValueWorkflow, (*TestWorkflowData)(nil))
 				require.NoError(t, err, "Nil pointer workflow execution failed")
 
-				testNilWorkflowValues(t, executor, handle)
+				testRoundTrip[*TestWorkflowData, *TestWorkflowData](t, executor, handle, (*TestWorkflowData)(nil))
 			})
 
 			// Test nil values with any type workflow
@@ -694,7 +780,7 @@ func TestSerializer(t *testing.T) {
 				handle, err := RunWorkflow(executor, serializerAnyValueWorkflow, nil)
 				require.NoError(t, err, "Nil any workflow execution failed")
 
-				testNilWorkflowValues(t, executor, handle)
+				testRoundTrip[any, any](t, executor, handle, nil)
 			})
 
 			// Test error values
@@ -867,6 +953,30 @@ func TestSerializer(t *testing.T) {
 				require.NoError(t, err, "Failed to convert result")
 				assert.Equal(t, input, typedResult, "queued workflow result should match input")
 			})
+
+			// Additional coverage: Scalars
+			runScalarsTests(t, executor)
+
+			// Pointer variants (non-nil)
+			runPointerTests(t, executor)
+
+			// Slices and arrays, including nil vs empty and nested
+			runSlicesAndArraysTests(t, executor)
+
+			// Maps, including non-string keys
+			runMapsTests(t, executor)
+
+			// Struct with interface fields
+			runInterfaceFieldsTests(t, executor)
+
+			// Custom defined types
+			runCustomTypesTests(t, executor)
+
+			// Custom marshaler/unmarshaler
+			runCustomMarshalerTests(t, executor)
+
+			// JSON edge cases
+			runJSONEdgeTests(t, executor)
 
 		})
 	}
