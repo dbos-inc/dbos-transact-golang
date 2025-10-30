@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"reflect"
 	"runtime"
@@ -528,19 +527,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 
 	fqn := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 
-	// Registry the input/output types for gob encoding
-	var logger *slog.Logger
-	var serializer Serializer
-	if c, ok := ctx.(*dbosContext); ok {
-		logger = c.logger
-		serializer = c.serializer
-	}
 	var p P
-	var r R
-	if isGobSerializer(serializer) {
-		safeGobRegister(p, logger)
-		safeGobRegister(r, logger)
-	}
 
 	// Register a type-erased version of the durable workflow for recovery
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
@@ -1162,16 +1149,10 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 		return *new(R), newStepExecutionError("", "", fmt.Errorf("step function cannot be nil"))
 	}
 
-	// Register the output type for gob encoding
-	var logger *slog.Logger
+	// No gob registration required
 	var serializer Serializer
 	if c, ok := ctx.(*dbosContext); ok {
-		logger = c.logger
 		serializer = c.serializer
-	}
-	var r R
-	if isGobSerializer(serializer) {
-		safeGobRegister(r, logger)
 	}
 
 	// Append WithStepName option to ensure the step name is set. This will not erase a user-provided step name
@@ -1349,15 +1330,6 @@ func Send[P any](ctx DBOSContext, destinationID string, message P, topic string)
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	var logger *slog.Logger
-	var serializer Serializer
-	if c, ok := ctx.(*dbosContext); ok {
-		logger = c.logger
-		serializer = c.serializer
-	}
-	if isGobSerializer(serializer) {
-		safeGobRegister(message, logger)
-	}
 	return ctx.Send(ctx, destinationID, message, topic)
 }
 
@@ -1448,15 +1420,7 @@ func SetEvent[P any](ctx DBOSContext, key string, message P) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	var logger *slog.Logger
-	var serializer Serializer
-	if c, ok := ctx.(*dbosContext); ok {
-		logger = c.logger
-		serializer = c.serializer
-	}
-	if isGobSerializer(serializer) {
-		safeGobRegister(message, logger)
-	}
+	// No gob registration required
 	return ctx.SetEvent(ctx, key, message)
 }
 
@@ -1662,18 +1626,6 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle
 		return nil, errors.New("dbosCtx cannot be nil")
 	}
 
-	// Register the output for gob encoding
-	var logger *slog.Logger
-	var serializer Serializer
-	if c, ok := ctx.(*dbosContext); ok {
-		logger = c.logger
-		serializer = c.serializer
-	}
-	var r R
-	if isGobSerializer(serializer) {
-		safeGobRegister(r, logger)
-	}
-
 	// Call the interface method
 	handle, err := ctx.RetrieveWorkflow(ctx, workflowID)
 	if err != nil {
@@ -1764,18 +1716,6 @@ func ResumeWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R
 		return nil, errors.New("ctx cannot be nil")
 	}
 
-	// Register the output for gob encoding
-	var logger *slog.Logger
-	var serializer Serializer
-	if c, ok := ctx.(*dbosContext); ok {
-		logger = c.logger
-		serializer = c.serializer
-	}
-	var r R
-	if isGobSerializer(serializer) {
-		safeGobRegister(r, logger)
-	}
-
 	_, err := ctx.ResumeWorkflow(ctx, workflowID)
 	if err != nil {
 		return nil, err
@@ -1862,18 +1802,6 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 func ForkWorkflow[R any](ctx DBOSContext, input ForkWorkflowInput) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
-	}
-
-	// Register the output for gob encoding
-	var logger *slog.Logger
-	var serializer Serializer
-	if c, ok := ctx.(*dbosContext); ok {
-		logger = c.logger
-		serializer = c.serializer
-	}
-	var r R
-	if isGobSerializer(serializer) {
-		safeGobRegister(r, logger)
 	}
 
 	handle, err := ctx.ForkWorkflow(ctx, input)

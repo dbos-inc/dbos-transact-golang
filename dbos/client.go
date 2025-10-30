@@ -239,22 +239,7 @@ func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, op
 	if c == nil {
 		return nil, errors.New("client cannot be nil")
 	}
-
-	// Register the input and outputs for gob encoding
-	var logger *slog.Logger
-	var serializer Serializer
-	if cl, ok := c.(*client); ok {
-		if ctx, ok := cl.dbosCtx.(*dbosContext); ok {
-			logger = ctx.logger
-			serializer = ctx.serializer
-		}
-	}
-	var typedInput P
-	var typedOutput R
-	if isGobSerializer(serializer) {
-		safeGobRegister(typedInput, logger)
-		safeGobRegister(typedOutput, logger)
-	}
+    
 
 	// Call the interface method with the same signature
 	handle, err := c.Enqueue(queueName, workflowName, input, opts...)

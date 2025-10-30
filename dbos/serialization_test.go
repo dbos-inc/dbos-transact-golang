@@ -553,7 +553,6 @@ func serializerAnyRecoveryWorkflow(ctx DBOSContext, input any) (any, error) {
 func TestSerializer(t *testing.T) {
 	serializers := map[string]func() Serializer{
 		"JSON": func() Serializer { return NewJSONSerializer() },
-		"Gob":  func() Serializer { return NewGobSerializer() },
 	}
 
 	for serializerName, serializerFactory := range serializers {
@@ -573,15 +572,13 @@ func TestSerializer(t *testing.T) {
 			RegisterWorkflow(executor, serializerGetEventWorkflow)
 			RegisterWorkflow(executor, serializerRecoveryWorkflow)
 			RegisterWorkflow(executor, serializerInterfaceValueWorkflow)
-			if serializerName == "JSON" {
-				// Cannot register "any" workflow with Gob serializer
-				RegisterWorkflow(executor, serializerAnyValueWorkflow)
-				RegisterWorkflow(executor, serializerAnySenderWorkflow)
-				RegisterWorkflow(executor, serializerAnyReceiverWorkflow)
-				RegisterWorkflow(executor, serializerAnySetEventWorkflow)
-				RegisterWorkflow(executor, serializerAnyGetEventWorkflow)
-				RegisterWorkflow(executor, serializerAnyRecoveryWorkflow)
-			}
+			// Register any-type workflows (JSON-only runtime)
+			RegisterWorkflow(executor, serializerAnyValueWorkflow)
+			RegisterWorkflow(executor, serializerAnySenderWorkflow)
+			RegisterWorkflow(executor, serializerAnyReceiverWorkflow)
+			RegisterWorkflow(executor, serializerAnySetEventWorkflow)
+			RegisterWorkflow(executor, serializerAnyGetEventWorkflow)
+			RegisterWorkflow(executor, serializerAnyRecoveryWorkflow)
 
 			err := Launch(executor)
 			require.NoError(t, err)
@@ -606,9 +603,6 @@ func TestSerializer(t *testing.T) {
 
 			// Test workflow with any type and comprehensive data structure
 			t.Run("ComprehensiveAnyValues", func(t *testing.T) {
-				if serializerName == "Gob" {
-					t.Skip("Skipping test for Gob serializer due to Gob limitations with interface types")
-				}
 				input := TestWorkflowData{
 					ID:       "any-test-id",
 					Message:  "any test message",
@@ -697,9 +691,6 @@ func TestSerializer(t *testing.T) {
 
 			// Test nil values with any type workflow
 			t.Run("NilValuesAny", func(t *testing.T) {
-				if serializerName == "Gob" {
-					t.Skip("Skipping test for Gob serializer due to Gob limitations with interface types")
-				}
 				handle, err := RunWorkflow(executor, serializerAnyValueWorkflow, nil)
 				require.NoError(t, err, "Nil any workflow execution failed")
 
@@ -769,9 +760,6 @@ func TestSerializer(t *testing.T) {
 
 			// Test Send/Recv with any type
 			t.Run("SendRecvAny", func(t *testing.T) {
-				if serializerName == "Gob" {
-					t.Skip("Skipping test for Gob serializer due to Gob limitations with interface types")
-				}
 				input := TestWorkflowData{
 					ID:       "sendrecv-any-test-id",
 					Message:  "any test message",
@@ -786,9 +774,6 @@ func TestSerializer(t *testing.T) {
 
 			// Test SetEvent/GetEvent with any type
 			t.Run("SetGetEventAny", func(t *testing.T) {
-				if serializerName == "Gob" {
-					t.Skip("Skipping test for Gob serializer due to Gob limitations with interface types")
-				}
 				input := TestWorkflowData{
 					ID:       "event-any-test-id",
 					Message:  "any event message",
@@ -820,9 +805,6 @@ func TestSerializer(t *testing.T) {
 
 			// Test workflow recovery with any type
 			t.Run("WorkflowRecoveryAny", func(t *testing.T) {
-				if serializerName == "Gob" {
-					t.Skip("Skipping test for Gob serializer due to Gob limitations with interface types")
-				}
 
 				serializerAnyRecoveryStartEvent = NewEvent()
 				serializerAnyRecoveryEvent = NewEvent()
@@ -862,9 +844,6 @@ func TestSerializer(t *testing.T) {
 
 			// Test queued workflow with any type
 			t.Run("QueuedWorkflowAny", func(t *testing.T) {
-				if serializerName == "Gob" {
-					t.Skip("Skipping test for Gob serializer due to Gob limitations with interface types")
-				}
 
 				input := TestWorkflowData{
 					ID:       "queued-any-test-id",
@@ -896,7 +875,6 @@ func TestSerializer(t *testing.T) {
 // Test serializer interface compliance
 func TestSerializerInterface(t *testing.T) {
 	// Test that both serializers implement the Serializer interface
-	var _ Serializer = (*GobSerializer)(nil)
 	var _ Serializer = (*JSONSerializer)(nil)
 }
 
@@ -920,25 +898,9 @@ func TestSerializerConfiguration(t *testing.T) {
 		}
 	})
 
-	// Test Gob serializer configuration
-	t.Run("GobSerializer", func(t *testing.T) {
-		config := Config{
-			DatabaseURL: getDatabaseURL(),
-			AppName:     "test-app",
-			Serializer:  NewGobSerializer(),
-		}
+	// Removed Gob serializer configuration test
 
-		executor, err := NewDBOSContext(context.Background(), config)
-		require.NoError(t, err, "Failed to create DBOS context with Gob serializer")
-
-		// Verify the serializer is set in the context
-		if dbosCtx, ok := executor.(*dbosContext); ok {
-			assert.NotNil(t, dbosCtx.serializer, "Gob serializer should be configured")
-			assert.IsType(t, &GobSerializer{}, dbosCtx.serializer, "Should be GobSerializer type")
-		}
-	})
-
-	// Test default serializer (should be Gob)
+	// Test default serializer (should be JSON)
 	t.Run("DefaultSerializer", func(t *testing.T) {
 		config := Config{
 			DatabaseURL: getDatabaseURL(),
@@ -952,7 +914,7 @@ func TestSerializerConfiguration(t *testing.T) {
 		// Verify the default serializer is Gob
 		if dbosCtx, ok := executor.(*dbosContext); ok {
 			assert.NotNil(t, dbosCtx.serializer, "Default serializer should be configured")
-			assert.IsType(t, &GobSerializer{}, dbosCtx.serializer, "Default should be GobSerializer")
+			assert.IsType(t, &JSONSerializer{}, dbosCtx.serializer, "Default should be JSONSerializer")
 		}
 	})
 }

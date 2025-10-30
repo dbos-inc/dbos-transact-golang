@@ -78,7 +78,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		dbosConfig.DatabaseSchema = _DEFAULT_SYSTEM_DB_SCHEMA
 	}
 	if dbosConfig.Serializer == nil {
-		dbosConfig.Serializer = NewGobSerializer()
+		dbosConfig.Serializer = NewJSONSerializer()
 	}
 
 	// Override with environment variables if set
@@ -370,15 +370,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.executorID = config.ExecutorID
 	initExecutor.serializer = config.Serializer
 
-	// Register types we serialize with gob (only if using GobSerializer)
-	if isGobSerializer(initExecutor.serializer) {
-		var t time.Time
-		safeGobRegister(t, initExecutor.logger)
-		var ws []WorkflowStatus
-		safeGobRegister(ws, initExecutor.logger)
-		var si []StepInfo
-		safeGobRegister(si, initExecutor.logger)
-	}
+
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 

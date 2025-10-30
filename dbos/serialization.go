@@ -1,14 +1,10 @@
 package dbos
 
 import (
-	"bytes"
 	"encoding/base64"
-	"encoding/gob"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"reflect"
-	"strings"
 )
 
 // Serializer defines the interface for pluggable serializers.
@@ -18,53 +14,6 @@ type Serializer interface {
 	Encode(data any) (string, error)
 	// Decode deserializes data from a string
 	Decode(data *string) (any, error)
-}
-
-// GobSerializer implements Serializer using encoding/gob
-type GobSerializer struct{}
-
-func NewGobSerializer() *GobSerializer {
-	return &GobSerializer{}
-}
-
-// Encode serializes data using gob and encodes it to a base64 string
-// Performs "lazy" registration of the type with gob
-func (g *GobSerializer) Encode(data any) (string, error) {
-	var inputBytes []byte
-	if !isNilValue(data) {
-		// Register the type with gob for proper serialization
-		// This is useful when dealing with interface types that didn't have a concrete value at workflow registration time
-		safeGobRegister(data, nil)
-
-		var buf bytes.Buffer
-		enc := gob.NewEncoder(&buf)
-		if err := enc.Encode(&data); err != nil {
-			return "", fmt.Errorf("failed to encode data: %w", err)
-		}
-		inputBytes = buf.Bytes()
-	}
-	return base64.StdEncoding.EncodeToString(inputBytes), nil
-}
-
-// Decode deserializes data from a base64 string using gob
-func (g *GobSerializer) Decode(data *string) (any, error) {
-	if data == nil || *data == "" {
-		return nil, nil
-	}
-
-	dataBytes, err := base64.StdEncoding.DecodeString(*data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode data: %w", err)
-	}
-
-	var result any
-	buf := bytes.NewBuffer(dataBytes)
-	dec := gob.NewDecoder(buf)
-	if err := dec.Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode data: %w", err)
-	}
-
-	return result, nil
 }
 
 // JSONSerializer implements Serializer using encoding/json
@@ -123,12 +72,6 @@ func isJSONSerializer(s Serializer) bool {
 	return ok
 }
 
-// isGobSerializer checks if the given serializer is a GobSerializer
-func isGobSerializer(s Serializer) bool {
-	_, ok := s.(*GobSerializer)
-	return ok
-}
-
 // convertJSONToType converts a JSON-decoded value (map[string]interface{}) to type T
 // via marshal/unmarshal round-trip.
 //
@@ -144,8 +87,6 @@ func convertJSONToType[T any](value any) (T, error) {
 	if err != nil {
 		return *new(T), fmt.Errorf("marshaling for type conversion: %w", err)
 	}
-
-	fmt.Println("convertJSONToType:", string(jsonBytes))
 
 	// Check if T is an interface type
 	var zero T
@@ -193,29 +134,4 @@ func isNilValue(data any) bool {
 		return v.IsNil()
 	}
 	return false
-}
-
-// safeGobRegister attempts to register a type with gob, recovering only from
-// panics caused by duplicate type/name registrations (e.g., registering both T and *T).
-// These specific conflicts don't affect encoding/decoding correctness, so they're safe to ignore.
-// Other panics (like register `any`) are real errors and will propagate.
-func safeGobRegister(value any, logger *slog.Logger) {
-	defer func() {
-		if r := recover(); r != nil {
-			if errStr, ok := r.(string); ok {
-				// Check if this is one of the two specific duplicate registration errors we want to ignore
-				// See https://cs.opensource.google/go/go/+/refs/tags/go1.25.1:src/encoding/gob/type.go;l=832
-				if strings.Contains(errStr, "gob: registering duplicate types for") ||
-					strings.Contains(errStr, "gob: registering duplicate names for") {
-					if logger != nil {
-						logger.Debug("gob registration conflict", "type", fmt.Sprintf("%T", value), "error", r)
-					}
-					return
-				}
-			}
-			// Re-panic for any other errors
-			panic(r)
-		}
-	}()
-	gob.Register(value)
 }
