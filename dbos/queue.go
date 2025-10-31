@@ -224,13 +224,8 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 					continue
 				}
 
-				input, err := ctx.serializer.Decode(workflow.input)
-				if err != nil {
-					qr.logger.Error("Failed to decode workflow input", "workflow_id", workflow.id, "error", err)
-					continue
-				}
-
-				_, err = registeredWorkflow.wrappedFunction(ctx, input, WithWorkflowID(workflow.id))
+				// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
+				_, err = registeredWorkflow.wrappedFunction(ctx, workflow.input, WithWorkflowID(workflow.id))
 				if err != nil {
 					qr.logger.Error("Error running queued workflow", "error", err)
 				}

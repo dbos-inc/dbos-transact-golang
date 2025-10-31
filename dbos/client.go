@@ -149,7 +149,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 	}
 
 	// Serialize input before storing in workflow status
-	encodedInputStr, err := serialize(dbosCtx, params.workflowInput)
+	encodedInputStr, err := serialize(dbosCtx.serializer, params.workflowInput)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize workflow input: %w", err)
 	}
@@ -247,7 +247,6 @@ func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, op
 	if c == nil {
 		return nil, errors.New("client cannot be nil")
 	}
-    
 
 	// Call the interface method with the same signature
 	handle, err := c.Enqueue(queueName, workflowName, input, opts...)

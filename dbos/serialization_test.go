@@ -1042,18 +1042,15 @@ func TestSerializer(t *testing.T) {
 				isJSON := isJSONSerializer(dbosCtx.serializer)
 
 				if isJSON {
-					// JSON serializer returns map[string]any
-					inputMap, ok := workflow.Input.(map[string]any)
-					require.True(t, ok, "Input should be map[string]any for JSON")
-					assert.Equal(t, input.Message, inputMap["Message"], "Message should match in input")
-					assert.Equal(t, float64(input.Value), inputMap["Value"], "Value should match in input")
+					// JSON serializer returns map[string]any. We need to convert it to a _concrete_ type
+					inputConcrete, err := convertJSONToType[ConcreteDataProvider](workflow.Input)
+					require.NoError(t, err, "Failed to convert workflow input to ConcreteDataProvider")
+					assert.Equal(t, input, inputConcrete, "Workflow input should match input")
 
-					outputMap, ok := workflow.Output.(map[string]any)
-					require.True(t, ok, "Output should be map[string]any for JSON")
-					assert.Equal(t, input.Message, outputMap["Message"], "Message should match in output")
-					assert.Equal(t, float64(input.Value), outputMap["Value"], "Value should match in output")
+					outputConcrete, err := convertJSONToType[ConcreteDataProvider](workflow.Output)
+					require.NoError(t, err, "Failed to convert workflow output to ConcreteDataProvider")
+					assert.Equal(t, input, outputConcrete, "Workflow output should match input")
 				} else {
-					// Gob serializer preserves the concrete type
 					inputConcrete, ok := workflow.Input.(ConcreteDataProvider)
 					require.True(t, ok, "Input should be ConcreteDataProvider for Gob")
 					assert.Equal(t, input, inputConcrete, "Input should match")
@@ -1062,6 +1059,46 @@ func TestSerializer(t *testing.T) {
 					require.True(t, ok, "Output should be ConcreteDataProvider for Gob")
 					assert.Equal(t, input, outputConcrete, "Output should match")
 				}
+
+				// Test GetWorkflowSteps for interface types
+				t.Run("GetWorkflowSteps", func(t *testing.T) {
+					steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
+					require.NoError(t, err, "Failed to get workflow steps")
+					require.Len(t, steps, 1, "Expected 1 step")
+
+					step := steps[0]
+					require.NotNil(t, step.Output, "Step output should not be nil")
+					assert.Nil(t, step.Error, "Step should not have error")
+
+					if isJSON {
+						// JSON serializer returns map[string]any, convert to ConcreteDataProvider
+						outputConcrete, err := convertJSONToType[ConcreteDataProvider](step.Output)
+						require.NoError(t, err, "Failed to convert step output to ConcreteDataProvider")
+						assert.Equal(t, input, outputConcrete, "Step output should match input")
+					} else {
+						outputConcrete, ok := step.Output.(ConcreteDataProvider)
+						require.True(t, ok, "Output should be ConcreteDataProvider for Gob")
+						assert.Equal(t, input, outputConcrete, "Step output should match input")
+					}
+				})
+
+				// Test RetrieveWorkflow for interface types
+				// TODO: not supported for interface types w/o storing the type information in the DB
+				/*
+					t.Run("RetrieveWorkflow", func(t *testing.T) {
+						h2, err := RetrieveWorkflow[DataProvider](executor, handle.GetWorkflowID())
+						require.NoError(t, err, "Failed to retrieve workflow")
+
+						retrievedResult, err := h2.GetResult()
+						require.NoError(t, err, "Failed to get retrieved workflow result")
+
+						// For interface types, we need to check the concrete type
+						concreteRetrievedResult, ok := retrievedResult.(ConcreteDataProvider)
+						require.True(t, ok, "Retrieved result should be ConcreteDataProvider type")
+						assert.Equal(t, input.Message, concreteRetrievedResult.Message, "Message should match")
+						assert.Equal(t, input.Value, concreteRetrievedResult.Value, "Value should match")
+					})
+				*/
 			})
 
 			// Test nil values with pointer type workflow

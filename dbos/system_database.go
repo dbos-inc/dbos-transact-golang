@@ -1541,27 +1541,11 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 			return 0, fmt.Errorf("no recorded end time for recorded sleep operation")
 		}
 
-		// Deserialize the recorded end time
-		decodedOutput, err := s.serializer.Decode(recordedResult.output)
+		// Decode the recorded end time directly into time.Time
+		// recordedResult.output is an encoded *string
+		endTime, err = deserialize[time.Time](s.serializer, recordedResult.output)
 		if err != nil {
-			return 0, fmt.Errorf("failed to deserialize sleep end time: %w", err)
-		}
-
-		// The output should be a time.Time representing the end time
-		// Because checkOperationExecution returns encoded string, we need to decode it into a time.Time
-		endTimeInterface, ok := decodedOutput.(time.Time)
-		if !ok {
-			// JSON serializer loses type information - convert using convertJSONToType
-			if isJSONSerializer(s.serializer) {
-				endTime, err = convertJSONToType[time.Time](decodedOutput)
-				if err != nil {
-					return 0, fmt.Errorf("failed to convert recorded output to time.Time: %w", err)
-				}
-			} else {
-				return 0, fmt.Errorf("decoded output is not a time.Time: %T", decodedOutput)
-			}
-		} else {
-			endTime = endTimeInterface
+			return 0, fmt.Errorf("failed to decode sleep end time: %w", err)
 		}
 
 		if recordedResult.err != nil { // This should never happen

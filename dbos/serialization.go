@@ -23,6 +23,11 @@ func NewJSONSerializer() *JSONSerializer {
 	return &JSONSerializer{}
 }
 
+func isJSONSerializer(s Serializer) bool {
+	_, ok := s.(*JSONSerializer)
+	return ok
+}
+
 func (j *JSONSerializer) Encode(data any) (string, error) {
 	var inputBytes []byte
 	if !isNilValue(data) {
@@ -53,69 +58,53 @@ func (j *JSONSerializer) Decode(data *string) (any, error) {
 	return result, nil
 }
 
-// serialize serializes data using the serializer from the DBOSContext
-// convenience helper to also check the context & serializer
-func serialize(ctx DBOSContext, data any) (string, error) {
-	dbosCtx, ok := ctx.(*dbosContext)
-	if !ok {
-		return "", fmt.Errorf("invalid DBOSContext: expected *dbosContext")
+// serialize serializes data using the provided serializer
+func serialize[T any](serializer Serializer, data T) (string, error) {
+	if serializer == nil {
+		return "", fmt.Errorf("serializer cannot be nil")
 	}
-	if dbosCtx.serializer == nil {
-		return "", fmt.Errorf("no serializer configured in DBOSContext")
-	}
-	return dbosCtx.serializer.Encode(data)
+	return serializer.Encode(data)
 }
 
-func isJSONSerializer(s Serializer) bool {
-	_, ok := s.(*JSONSerializer)
-	return ok
-}
-
-// convertJSONToType converts a JSON-decoded value (map[string]interface{}) to type T
-// via marshal/unmarshal round-trip.
-//
-// This is needed because JSON deserialization loses type information when decoding
-// into `any` - it converts structs to map[string]interface{}, numbers to float64, etc.
-// By re-marshaling and unmarshaling into a typed target, we (mostly) restore the original structure.
-// We should be able to get rid of this when we lift encoding/decoding outside of the system database.
-func convertJSONToType[T any](value any) (T, error) {
-	if value == nil {
-		return *new(T), nil
+// deserialize decodes an encoded string directly into a typed variable.
+// For JSON serializer, this decodes directly into the target type, preserving type information.
+// For other serializers, it decodes into any and then type-asserts.
+// (we don't want generic Serializer interface because it would require 1 serializer per type)
+func deserialize[T any](serializer Serializer, encoded *string) (T, error) {
+	if serializer == nil {
+		return *new(T), fmt.Errorf("serializer cannot be nil")
 	}
 
-	jsonBytes, err := json.Marshal(value)
-	if err != nil {
-		return *new(T), fmt.Errorf("marshaling for type conversion: %w", err)
-	}
-
-	// Check if T is an interface type
 	var zero T
-	typeOfT := reflect.TypeOf(&zero).Elem()
-
-	if typeOfT.Kind() == reflect.Interface {
-		// T is interface - need to get concrete type from value
-		concreteType := reflect.TypeOf(value)
-		if concreteType.Kind() == reflect.Pointer {
-			concreteType = concreteType.Elem()
-		}
-
-		// Create new instance of concrete type
-		newInstance := reflect.New(concreteType)
-
-		// Unmarshal into the concrete type
-		if err := json.Unmarshal(jsonBytes, newInstance.Interface()); err != nil {
-			return *new(T), fmt.Errorf("unmarshaling for type conversion: %w", err)
-		}
-
-		// Convert to interface type T
-		return newInstance.Elem().Interface().(T), nil
+	if encoded == nil || *encoded == "" {
+		return zero, nil
 	}
 
-	var typedResult T
-	if err := json.Unmarshal(jsonBytes, &typedResult); err != nil {
-		return *new(T), fmt.Errorf("unmarshaling for type conversion: %w", err)
+	if isJSONSerializer(serializer) {
+		// For JSON serializer, decode directly into the target type to preserve type information
+		// We cannot just use the serializer's Decode method and recast -- the type inormation would be lost
+		dataBytes, err := base64.StdEncoding.DecodeString(*encoded)
+		if err != nil {
+			return zero, fmt.Errorf("failed to decode base64 data: %w", err)
+		}
+
+		// We could check and error explicitly if T is an interface type.
+
+		if err := json.Unmarshal(dataBytes, &zero); err != nil {
+			return zero, fmt.Errorf("failed to unmarshal JSON data: %w", err)
+		}
+		return zero, nil
 	}
 
+	// For other serializers, just call the decoder and type-assert
+	decoded, err := serializer.Decode(encoded)
+	if err != nil {
+		return zero, err
+	}
+	typedResult, ok := decoded.(T)
+	if !ok {
+		return zero, fmt.Errorf("cannot convert decoded value of type %T to %T", decoded, zero)
+	}
 	return typedResult, nil
 }
 
