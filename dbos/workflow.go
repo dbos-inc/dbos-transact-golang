@@ -75,7 +75,7 @@ func (ws *workflowState) nextStepID() int {
 type workflowOutcome[R any] struct {
 	result        R
 	err           error
-	needsDecoding bool // true if result came from awaitWorkflowResult (ID conflict path) and needs JSON type conversion
+	needsDecoding bool // true if result came from awaitWorkflowResult (ID conflict path) and needs decoding
 }
 
 // WorkflowHandle provides methods to interact with a running or completed workflow.
@@ -211,22 +211,21 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		dbosCtx, ok := h.dbosContext.(*dbosContext)
-		if !ok {
+		if !ok { // Should never happen
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("invalid DBOSContext: expected *dbosContext"))
 		}
 		if dbosCtx.serializer == nil {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("no serializer configured in DBOSContext"))
 		}
-		encodedOutputStr, encErr := dbosCtx.serializer.Encode(typedResult)
+		encodedOutput, encErr := dbosCtx.serializer.Encode(typedResult)
 		if encErr != nil {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 		}
-		encodedOutput := &encodedOutputStr
 		recordGetResultInput := recordChildGetResultDBInput{
 			parentWorkflowID: workflowState.workflowID,
 			childWorkflowID:  h.workflowID,
 			stepID:           workflowState.nextStepID(),
-			output:           encodedOutput,
+			output:           &encodedOutput,
 			err:              outcome.err,
 		}
 		recordResultErr := retry(h.dbosContext, func() error {
@@ -279,23 +278,15 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 		isWithinWorkflow := ok && workflowState != nil
 		if isWithinWorkflow {
-			dbosCtx, ok := h.dbosContext.(*dbosContext)
-			if !ok {
-				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("invalid DBOSContext: expected *dbosContext"))
+			encodedResultStr, ok := encodedResult.(*string)
+			if !ok { // Should never happen
+				return *new(R), newWorkflowUnexpectedResultType(h.workflowID, "string (encoded)", fmt.Sprintf("%T", encodedResult))
 			}
-			if dbosCtx.serializer == nil {
-				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("no serializer configured in DBOSContext"))
-			}
-			encodedOutputStr, encErr := dbosCtx.serializer.Encode(typedResult)
-			if encErr != nil {
-				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
-			}
-			encodedOutput := &encodedOutputStr
 			recordGetResultInput := recordChildGetResultDBInput{
 				parentWorkflowID: workflowState.workflowID,
 				childWorkflowID:  h.workflowID,
 				stepID:           workflowState.nextStepID(),
-				output:           encodedOutput,
+				output:           encodedResultStr,
 				err:              err,
 			}
 			recordResultErr := retry(h.dbosContext, func() error {
@@ -722,7 +713,7 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 			var typedResult R
 
 			// Handle nil results - nil cannot be type-asserted to any interface
-			if isNilValue(outcome.result) {
+			if outcome.result == nil {
 				typedOutcomeChan <- workflowOutcome[R]{
 					result: typedResult,
 					err:    resultErr,
@@ -732,10 +723,9 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 
 			// Get serializer from context
 			dbosCtx, ok := handle.dbosContext.(*dbosContext)
-			if !ok {
-				resultErr = errors.Join(resultErr, fmt.Errorf("invalid DBOSContext type"))
+			if !ok { // Likely a mocked path
 				typedOutcomeChan <- workflowOutcome[R]{
-					result: typedResult,
+					result: outcome.result.(R),
 					err:    resultErr,
 				}
 				return
@@ -1201,7 +1191,6 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 		return *new(R), newStepExecutionError("", "", fmt.Errorf("step function cannot be nil"))
 	}
 
-	// No gob registration required
 	var serializer Serializer
 	if c, ok := ctx.(*dbosContext); ok {
 		serializer = c.serializer
@@ -1289,10 +1278,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	}
 	if recordedOutput != nil {
 		// Return the encoded output - decoding will happen in RunAsStep[R] when we know the target type
-		if recordedOutput.output != nil {
-			return recordedOutput.output, recordedOutput.err
-		}
-		return nil, recordedOutput.err
+		return recordedOutput.output, recordedOutput.err
 	}
 
 	// Spawn a child DBOSContext with the step state
@@ -1372,16 +1358,15 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 
 func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string) error {
 	// Serialize the message before sending
-	encodedMessageStr, err := c.serializer.Encode(message)
+	encodedMessage, err := c.serializer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
-	encodedMessage := &encodedMessageStr
 
 	return retry(c, func() error {
 		return c.systemDB.send(c, WorkflowSendInput{
 			DestinationID: destinationID,
-			Message:       encodedMessage,
+			Message:       &encodedMessage,
 			Topic:         topic,
 		})
 	}, withRetrierLogger(c.logger))
@@ -1413,18 +1398,9 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 		Topic:   topic,
 		Timeout: timeout,
 	}
-	encodedMsg, err := retryWithResult(c, func() (*string, error) {
+	return retryWithResult(c, func() (*string, error) {
 		return c.systemDB.recv(c, input)
 	}, withRetrierLogger(c.logger))
-	if err != nil {
-		return nil, err
-	}
-
-	if encodedMsg == nil {
-		return nil, nil
-	}
-	// Return encoded string - decoding will happen in Recv[T] when we know the target type
-	return encodedMsg, nil
 }
 
 // Recv receives a message sent to this workflow with type safety.
@@ -1483,16 +1459,15 @@ func Recv[T any](ctx DBOSContext, topic string, timeout time.Duration) (T, error
 
 func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
 	// Serialize the event value before storing
-	encodedMessageStr, err := c.serializer.Encode(message)
+	encodedMessage, err := c.serializer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize event value: %w", err)
 	}
-	encodedMessage := &encodedMessageStr
 
 	return retry(c, func() error {
 		return c.systemDB.setEvent(c, WorkflowSetEventInput{
 			Key:     key,
-			Message: encodedMessage,
+			Message: &encodedMessage,
 		})
 	}, withRetrierLogger(c.logger))
 }
@@ -1511,7 +1486,6 @@ func SetEvent[P any](ctx DBOSContext, key string, message P) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	// No gob registration required
 	return ctx.SetEvent(ctx, key, message)
 }
 
@@ -1527,15 +1501,9 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 		Key:              key,
 		Timeout:          timeout,
 	}
-	encodedValue, err := retryWithResult(c, func() (any, error) {
+	return retryWithResult(c, func() (any, error) {
 		return c.systemDB.getEvent(c, input)
 	}, withRetrierLogger(c.logger))
-	if err != nil {
-		return nil, err
-	}
-
-	// Return encoded string - decoding will happen in GetEvent[T] when we know the target type
-	return encodedValue, nil
 }
 
 // GetEvent retrieves a key-value event from a target workflow with type safety.

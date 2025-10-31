@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"reflect"
 )
 
 // Serializer defines the interface for pluggable serializers.
@@ -30,13 +29,11 @@ func isJSONSerializer(s Serializer) bool {
 
 func (j *JSONSerializer) Encode(data any) (string, error) {
 	var inputBytes []byte
-	if !isNilValue(data) {
-		jsonBytes, err := json.Marshal(data)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal data to JSON: %w", err)
-		}
-		inputBytes = jsonBytes
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal data to JSON: %w", err)
 	}
+	inputBytes = jsonBytes
 	return base64.StdEncoding.EncodeToString(inputBytes), nil
 }
 
@@ -98,21 +95,4 @@ func deserialize[T any](serializer Serializer, encoded *string) (T, error) {
 		return zero, fmt.Errorf("cannot convert decoded value of type %T to %T", decoded, zero)
 	}
 	return typedResult, nil
-}
-
-// Handle cases where the provided data interface wraps a nil value (e.g., var p *int; data := any(p). data != nil but the underlying value is nil)
-func isNilValue(data any) bool {
-	if data == nil {
-		return true
-	}
-	v := reflect.ValueOf(data)
-	// Check if the value is invalid (zero Value from reflect)
-	if !v.IsValid() {
-		return true
-	}
-	switch v.Kind() {
-	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface:
-		return v.IsNil()
-	}
-	return false
 }

@@ -443,16 +443,6 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		timeoutMs = &millis
 	}
 
-	// Input is already encoded as *string from the typed layer
-	var inputString *string
-	if input.status.Input != nil {
-		encodedInput, ok := input.status.Input.(*string)
-		if !ok {
-			return nil, fmt.Errorf("workflow input must be encoded *string, got %T", input.status.Input)
-		}
-		inputString = encodedInput
-	}
-
 	// Our DB works with NULL values
 	var applicationVersion *string
 	if len(input.status.ApplicationVersion) > 0 {
@@ -524,7 +514,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		updatedAt.UnixMilli(),
 		timeoutMs,
 		deadline,
-		inputString, // encoded input (already *string)
+		input.status.Input, // encoded input (already *string)
 		deduplicationID,
 		input.status.Priority,
 		WorkflowStatusEnqueued,
@@ -1122,7 +1112,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		&appVersion,
 		originalWorkflow.ApplicationID,
 		_DBOS_INTERNAL_QUEUE_NAME,
-		originalWorkflow.Input, // Input is already encoded *string from listWorkflows
+		originalWorkflow.Input, // encoded
 		time.Now().UnixMilli(),
 		time.Now().UnixMilli(),
 		0)
@@ -1208,7 +1198,6 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		errorString = &e
 	}
 
-	// input.output is already a *string from the database layer
 	var err error
 	if input.tx != nil {
 		_, err = input.tx.Exec(ctx, query,
@@ -1767,7 +1756,6 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 		topic = input.Topic
 	}
 
-	// input.Message is already encoded *string from the typed layer
 	insertQuery := fmt.Sprintf(`INSERT INTO %s.notifications (destination_uuid, topic, message) VALUES ($1, $2, $3)`, pgx.Identifier{s.schema}.Sanitize())
 	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
 	if err != nil {

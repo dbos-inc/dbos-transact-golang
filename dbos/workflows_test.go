@@ -1110,10 +1110,11 @@ func TestWorkflowRecovery(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true, nil)
 
 	var (
-		recoveryCounters []int64
-		recoveryEvents   []*Event
-		blockingEvents   []*Event
-		secondStepErrors []error
+		recoveryCounters   []int64
+		recoveryEvents     []*Event
+		blockingEvents     []*Event
+		secondStepErrors   []error
+		secondStepErrorsMu sync.Mutex
 	)
 
 	recoveryWorkflow := func(dbosCtx DBOSContext, index int) (int64, error) {
@@ -1135,7 +1136,9 @@ func TestWorkflowRecovery(t *testing.T) {
 			return fmt.Sprintf("completed-%d", index), nil
 		}, WithStepName(fmt.Sprintf("BlockingStep-%d", index)))
 		if err != nil {
+			secondStepErrorsMu.Lock()
 			secondStepErrors = append(secondStepErrors, err)
+			secondStepErrorsMu.Unlock()
 			return 0, err
 		}
 
@@ -1259,8 +1262,12 @@ func TestWorkflowRecovery(t *testing.T) {
 
 		// At least 5 of the 2nd steps should have errored due to execution race
 		// Check they are DBOSErrors with StepExecutionError wrapping a ConflictingIDError
-		require.GreaterOrEqual(t, len(secondStepErrors), 5, "expected at least 5 errors from second steps due to recovery race, got %d", len(secondStepErrors))
-		for _, err := range secondStepErrors {
+		secondStepErrorsMu.Lock()
+		errorsCopy := make([]error, len(secondStepErrors))
+		copy(errorsCopy, secondStepErrors)
+		secondStepErrorsMu.Unlock()
+		require.GreaterOrEqual(t, len(errorsCopy), 5, "expected at least 5 errors from second steps due to recovery race, got %d", len(errorsCopy))
+		for _, err := range errorsCopy {
 			dbosErr, ok := err.(*DBOSError)
 			require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
 			require.Equal(t, StepExecutionError, dbosErr.Code, "expected error code to be StepExecutionError, got %v", dbosErr.Code)
