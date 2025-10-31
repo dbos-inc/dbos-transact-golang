@@ -58,14 +58,6 @@ func (j *JSONSerializer) Decode(data *string) (any, error) {
 	return result, nil
 }
 
-// serialize serializes data using the provided serializer
-func serialize[T any](serializer Serializer, data T) (string, error) {
-	if serializer == nil {
-		return "", fmt.Errorf("serializer cannot be nil")
-	}
-	return serializer.Encode(data)
-}
-
 // deserialize decodes an encoded string directly into a typed variable.
 // For JSON serializer, this decodes directly into the target type, preserving type information.
 // For other serializers, it decodes into any and then type-asserts.

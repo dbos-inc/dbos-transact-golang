@@ -149,7 +149,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 	}
 
 	// Serialize input before storing in workflow status
-	encodedInputStr, err := serialize(dbosCtx.serializer, params.workflowInput)
+	encodedInputStr, err := dbosCtx.serializer.Encode(params.workflowInput)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize workflow input: %w", err)
 	}

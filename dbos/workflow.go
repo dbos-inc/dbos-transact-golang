@@ -217,7 +217,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error
 		if dbosCtx.serializer == nil {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("no serializer configured in DBOSContext"))
 		}
-		encodedOutputStr, encErr := serialize(dbosCtx.serializer, typedResult)
+		encodedOutputStr, encErr := dbosCtx.serializer.Encode(typedResult)
 		if encErr != nil {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 		}
@@ -286,7 +286,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 			if dbosCtx.serializer == nil {
 				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("no serializer configured in DBOSContext"))
 			}
-			encodedOutputStr, encErr := serialize(dbosCtx.serializer, typedResult)
+			encodedOutputStr, encErr := dbosCtx.serializer.Encode(typedResult)
 			if encErr != nil {
 				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 			}
@@ -876,7 +876,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	}
 
 	// Serialize input before storing in workflow status
-	encodedInputStr, serErr := serialize(c.serializer, input)
+	encodedInputStr, serErr := c.serializer.Encode(input)
 	if serErr != nil {
 		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize workflow input: %w", serErr))
 	}
@@ -1044,7 +1044,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			}
 
 			// Serialize the output before recording
-			encodedOutput, serErr := serialize(c.serializer, result)
+			encodedOutput, serErr := c.serializer.Encode(result)
 			if serErr != nil {
 				c.logger.Error("Failed to serialize workflow output", "workflow_id", workflowID, "error", serErr)
 				outcomeChan <- workflowOutcome[any]{result: nil, err: fmt.Errorf("failed to serialize output: %w", serErr)}
@@ -1343,7 +1343,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	}
 
 	// Serialize step output before recording
-	encodedStepOutput, serErr := serialize(c.serializer, stepOutput)
+	encodedStepOutput, serErr := c.serializer.Encode(stepOutput)
 	if serErr != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
 	}
@@ -1372,7 +1372,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 
 func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string) error {
 	// Serialize the message before sending
-	encodedMessageStr, err := serialize(c.serializer, message)
+	encodedMessageStr, err := c.serializer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
@@ -1483,7 +1483,7 @@ func Recv[T any](ctx DBOSContext, topic string, timeout time.Duration) (T, error
 
 func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
 	// Serialize the event value before storing
-	encodedMessageStr, err := serialize(c.serializer, message)
+	encodedMessageStr, err := c.serializer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize event value: %w", err)
 	}
