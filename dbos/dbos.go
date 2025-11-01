@@ -193,6 +193,16 @@ func (c *dbosContext) Value(key any) any {
 	return c.ctx.Value(key)
 }
 
+// getSerializer extracts the serializer from a DBOSContext.
+// Returns the serializer if the context is a *dbosContext with a configured serializer,
+// or nil if the context is not a *dbosContext (for testing/mocking scenarios).
+func getSerializer(ctx DBOSContext) Serializer {
+	if dbosCtx, ok := ctx.(*dbosContext); ok {
+		return dbosCtx.serializer
+	}
+	return nil
+}
+
 // WithValue returns a copy of the DBOS context with the given key-value pair.
 // This is similar to context.WithValue but maintains DBOS context capabilities.
 // No-op if the provided context is not a concrete dbos.dbosContext.
@@ -369,8 +379,6 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.applicationVersion = config.ApplicationVersion
 	initExecutor.executorID = config.ExecutorID
 	initExecutor.serializer = config.Serializer
-
-
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 

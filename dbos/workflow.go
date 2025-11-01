@@ -269,7 +269,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 			return *new(R), newWorkflowUnexpectedResultType(h.workflowID, "string (encoded)", fmt.Sprintf("%T", encodedResult))
 		}
 		var deserErr error
-		typedResult, deserErr = deserialize[R](h.dbosContext.(*dbosContext).serializer, encodedStr)
+		typedResult, deserErr = deserialize[R](getSerializer(h.dbosContext), encodedStr)
 		if deserErr != nil {
 			return *new(R), fmt.Errorf("failed to deserialize workflow result: %w", deserErr)
 		}
@@ -530,7 +530,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 			return *new(R), newWorkflowUnexpectedInputType(fqn, "*string (encoded)", fmt.Sprintf("%T", input))
 		}
 		// Decode directly into the target type
-		typedInput, err := deserialize[P](ctx.(*dbosContext).serializer, encodedInput)
+		typedInput, err := deserialize[P](getSerializer(ctx), encodedInput)
 		if err != nil {
 			return *new(R), newWorkflowExecutionError(workflowID, err)
 		}
@@ -1191,10 +1191,7 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 		return *new(R), newStepExecutionError("", "", fmt.Errorf("step function cannot be nil"))
 	}
 
-	var serializer Serializer
-	if c, ok := ctx.(*dbosContext); ok {
-		serializer = c.serializer
-	}
+	serializer := getSerializer(ctx)
 
 	// Append WithStepName option to ensure the step name is set. This will not erase a user-provided step name
 	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
@@ -1427,27 +1424,27 @@ func Recv[T any](ctx DBOSContext, topic string, timeout time.Duration) (T, error
 		return *new(T), nil
 	}
 
-	// Decode the message directly into the target type
-	// msg is an encoded *string from Recv
-	encodedMsg, ok := msg.(*string)
-	if !ok {
-		return *new(T), newWorkflowUnexpectedResultType("", "string (encoded)", fmt.Sprintf("%T", msg))
-	}
-
 	var typedMessage T
-	var serializer Serializer
-	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		serializer = dbosCtx.serializer
+	serializer := getSerializer(ctx)
+	if serializer != nil {
+		encodedMsg, ok := msg.(*string)
+		if !ok {
+			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+			return *new(T), newWorkflowUnexpectedResultType(workflowID, "string (encoded)", fmt.Sprintf("%T", msg))
+		}
 		var decodeErr error
 		typedMessage, decodeErr = deserialize[T](serializer, encodedMsg)
 		if decodeErr != nil {
 			return *new(T), fmt.Errorf("decoding received message to type %T: %w", *new(T), decodeErr)
 		}
+		return typedMessage, nil
 	} else {
+		// Fallback for testing/mocking scenarios where serializer is nil
 		var ok bool
 		typedMessage, ok = msg.(T)
 		if !ok {
-			return *new(T), newWorkflowUnexpectedResultType("", fmt.Sprintf("%T", new(T)), fmt.Sprintf("%T", msg))
+			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+			return *new(T), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(T)), fmt.Sprintf("%T", msg))
 		}
 	}
 	return typedMessage, nil
@@ -1528,17 +1525,15 @@ func GetEvent[T any](ctx DBOSContext, targetWorkflowID, key string, timeout time
 		return *new(T), nil
 	}
 
-	// Decode the event value directly into the target type
-	// value is an encoded *string from GetEvent
-	encodedValue, ok := value.(*string)
-	if !ok {
-		return *new(T), newWorkflowUnexpectedResultType("", "string (encoded)", fmt.Sprintf("%T", value))
-	}
-
 	var typedValue T
-	var serializer Serializer
-	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		serializer = dbosCtx.serializer
+	serializer := getSerializer(ctx)
+	if serializer != nil {
+		encodedValue, ok := value.(*string)
+		if !ok {
+			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+			return *new(T), newWorkflowUnexpectedResultType(workflowID, "string (encoded)", fmt.Sprintf("%T", value))
+		}
+
 		typedValue, decodeErr := deserialize[T](serializer, encodedValue)
 		if decodeErr != nil {
 			return *new(T), fmt.Errorf("decoding event value to type %T: %w", *new(T), decodeErr)
@@ -1548,7 +1543,8 @@ func GetEvent[T any](ctx DBOSContext, targetWorkflowID, key string, timeout time
 		var ok bool
 		typedValue, ok = value.(T)
 		if !ok {
-			return *new(T), newWorkflowUnexpectedResultType("", fmt.Sprintf("%T", new(T)), fmt.Sprintf("%T", value))
+			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+			return *new(T), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(T)), fmt.Sprintf("%T", value))
 		}
 	}
 	return typedValue, nil
