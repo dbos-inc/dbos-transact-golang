@@ -615,118 +615,74 @@ var (
 	serializerBoolWorkflow           = makeTestWorkflow[bool]()
 )
 
+// makeSenderWorkflow creates a generic sender workflow that sends a message to a receiver workflow.
+func makeSenderWorkflow[T any]() Workflow[T, T] {
+	return func(ctx DBOSContext, input T) (T, error) {
+		receiverWorkflowID, err := GetWorkflowID(ctx)
+		if err != nil {
+			return *new(T), fmt.Errorf("failed to get workflow ID: %w", err)
+		}
+		destID := receiverWorkflowID + "-receiver"
+		err = Send(ctx, destID, input, "test-topic")
+		if err != nil {
+			return *new(T), fmt.Errorf("send failed: %w", err)
+		}
+		return input, nil
+	}
+}
+
+// makeReceiverWorkflow creates a generic receiver workflow that receives a message.
+func makeReceiverWorkflow[T any]() Workflow[T, T] {
+	return func(ctx DBOSContext, _ T) (T, error) {
+		received, err := Recv[T](ctx, "test-topic", 10*time.Second)
+		if err != nil {
+			return *new(T), fmt.Errorf("recv failed: %w", err)
+		}
+		return received, nil
+	}
+}
+
+// makeSetEventWorkflow creates a generic workflow that sets an event.
+func makeSetEventWorkflow[T any]() Workflow[T, T] {
+	return func(ctx DBOSContext, input T) (T, error) {
+		err := SetEvent(ctx, "test-key", input)
+		if err != nil {
+			return *new(T), fmt.Errorf("set event failed: %w", err)
+		}
+		return input, nil
+	}
+}
+
+// makeGetEventWorkflow creates a generic workflow that gets an event.
+func makeGetEventWorkflow[T any]() Workflow[string, T] {
+	return func(ctx DBOSContext, targetWorkflowID string) (T, error) {
+		event, err := GetEvent[T](ctx, targetWorkflowID, "test-key", 10*time.Second)
+		if err != nil {
+			return *new(T), fmt.Errorf("get event failed: %w", err)
+		}
+		return event, nil
+	}
+}
+
 // Typed Send/Recv workflows for various types
-func serializerIntSenderWorkflow(ctx DBOSContext, input int) (int, error) {
-	receiverWorkflowID, err := GetWorkflowID(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get workflow ID: %w", err)
-	}
-	destID := receiverWorkflowID + "-receiver"
-	err = Send(ctx, destID, input, "test-topic")
-	if err != nil {
-		return 0, fmt.Errorf("send failed: %w", err)
-	}
-	return input, nil
-}
-
-func serializerIntReceiverWorkflow(ctx DBOSContext, _ int) (int, error) {
-	received, err := Recv[int](ctx, "test-topic", 10*time.Second)
-	if err != nil {
-		return 0, fmt.Errorf("recv failed: %w", err)
-	}
-	return received, nil
-}
-
-func serializerIntPtrSenderWorkflow(ctx DBOSContext, input *int) (*int, error) {
-	receiverWorkflowID, err := GetWorkflowID(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get workflow ID: %w", err)
-	}
-	destID := receiverWorkflowID + "-receiver"
-	err = Send(ctx, destID, input, "test-topic")
-	if err != nil {
-		return nil, fmt.Errorf("send failed: %w", err)
-	}
-	return input, nil
-}
-
-func serializerIntPtrReceiverWorkflow(ctx DBOSContext, _ *int) (*int, error) {
-	received, err := Recv[*int](ctx, "test-topic", 10*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("recv failed: %w", err)
-	}
-	return received, nil
-}
-
-func serializerMyIntSenderWorkflow(ctx DBOSContext, input MyInt) (MyInt, error) {
-	receiverWorkflowID, err := GetWorkflowID(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get workflow ID: %w", err)
-	}
-	destID := receiverWorkflowID + "-receiver"
-	err = Send(ctx, destID, input, "test-topic")
-	if err != nil {
-		return 0, fmt.Errorf("send failed: %w", err)
-	}
-	return input, nil
-}
-
-func serializerMyIntReceiverWorkflow(ctx DBOSContext, _ MyInt) (MyInt, error) {
-	received, err := Recv[MyInt](ctx, "test-topic", 10*time.Second)
-	if err != nil {
-		return 0, fmt.Errorf("recv failed: %w", err)
-	}
-	return received, nil
-}
+var (
+	serializerIntSenderWorkflow      = makeSenderWorkflow[int]()
+	serializerIntReceiverWorkflow    = makeReceiverWorkflow[int]()
+	serializerIntPtrSenderWorkflow   = makeSenderWorkflow[*int]()
+	serializerIntPtrReceiverWorkflow = makeReceiverWorkflow[*int]()
+	serializerMyIntSenderWorkflow    = makeSenderWorkflow[MyInt]()
+	serializerMyIntReceiverWorkflow  = makeReceiverWorkflow[MyInt]()
+)
 
 // Typed SetEvent/GetEvent workflows for various types
-func serializerIntSetEventWorkflow(ctx DBOSContext, input int) (int, error) {
-	err := SetEvent(ctx, "test-key", input)
-	if err != nil {
-		return 0, fmt.Errorf("set event failed: %w", err)
-	}
-	return input, nil
-}
-
-func serializerIntGetEventWorkflow(ctx DBOSContext, targetWorkflowID string) (int, error) {
-	event, err := GetEvent[int](ctx, targetWorkflowID, "test-key", 10*time.Second)
-	if err != nil {
-		return 0, fmt.Errorf("get event failed: %w", err)
-	}
-	return event, nil
-}
-
-func serializerIntPtrSetEventWorkflow(ctx DBOSContext, input *int) (*int, error) {
-	err := SetEvent(ctx, "test-key", input)
-	if err != nil {
-		return nil, fmt.Errorf("set event failed: %w", err)
-	}
-	return input, nil
-}
-
-func serializerIntPtrGetEventWorkflow(ctx DBOSContext, targetWorkflowID string) (*int, error) {
-	event, err := GetEvent[*int](ctx, targetWorkflowID, "test-key", 10*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("get event failed: %w", err)
-	}
-	return event, nil
-}
-
-func serializerMyIntSetEventWorkflow(ctx DBOSContext, input MyInt) (MyInt, error) {
-	err := SetEvent(ctx, "test-key", input)
-	if err != nil {
-		return 0, fmt.Errorf("set event failed: %w", err)
-	}
-	return input, nil
-}
-
-func serializerMyIntGetEventWorkflow(ctx DBOSContext, targetWorkflowID string) (MyInt, error) {
-	event, err := GetEvent[MyInt](ctx, targetWorkflowID, "test-key", 10*time.Second)
-	if err != nil {
-		return 0, fmt.Errorf("get event failed: %w", err)
-	}
-	return event, nil
-}
+var (
+	serializerIntSetEventWorkflow    = makeSetEventWorkflow[int]()
+	serializerIntGetEventWorkflow    = makeGetEventWorkflow[int]()
+	serializerIntPtrSetEventWorkflow = makeSetEventWorkflow[*int]()
+	serializerIntPtrGetEventWorkflow = makeGetEventWorkflow[*int]()
+	serializerMyIntSetEventWorkflow  = makeSetEventWorkflow[MyInt]()
+	serializerMyIntGetEventWorkflow  = makeGetEventWorkflow[MyInt]()
+)
 
 func serializerInterfaceValueWorkflow(ctx DBOSContext, input DataProvider) (DataProvider, error) {
 	return RunAsStep(ctx, func(context context.Context) (DataProvider, error) {
