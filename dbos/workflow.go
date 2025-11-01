@@ -1208,25 +1208,21 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 	if result == nil {
 		return *new(R), err
 	}
-	// Decode the result directly into the target type
-	// result can be either an encoded *string (from recorded output) or already decoded any (from step execution)
 	var typedResult R
-	if encodedOutput, ok := result.(*string); ok {
-		// Result is encoded, decode directly into target type
+	// When the step is executed, the result is already decoded and should be directly convertible
+	if typedRes, ok := result.(R); ok {
+		typedResult = typedRes
+	} else if encodedOutput, ok := result.(*string); ok {
+		// If not it should be an encoded *string
 		var decodeErr error
 		typedResult, decodeErr = deserialize[R](serializer, encodedOutput)
 		if decodeErr != nil {
-			workflowID, _ := ctx.GetWorkflowID() // Must be within a workflow so we can ignore the error
+			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
 			return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("decoding step result to expected type %T: %w", *new(R), decodeErr))
 		}
 	} else {
-		// Result is already decoded, type-assert
-		var ok bool
-		typedResult, ok = result.(R)
-		if !ok {
-			workflowID, _ := ctx.GetWorkflowID() // Must be within a workflow so we can ignore the error
-			return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", result))
-		}
+		workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+		return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", result))
 	}
 	return typedResult, err
 }
