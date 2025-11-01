@@ -71,7 +71,7 @@ func deserialize[T any](serializer Serializer, encoded *string) (T, error) {
 
 	if isJSONSerializer(serializer) {
 		// For JSON serializer, decode directly into the target type to preserve type information
-		// We cannot just use the serializer's Decode method and recast -- the type inormation would be lost
+		// We cannot just use the serializer's Decode method and recast -- the type information would be lost
 		dataBytes, err := base64.StdEncoding.DecodeString(*encoded)
 		if err != nil {
 			return zero, fmt.Errorf("failed to decode base64 data: %w", err)
