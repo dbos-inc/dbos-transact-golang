@@ -589,78 +589,31 @@ func serializerAnyValueWorkflow(ctx DBOSContext, input any) (any, error) {
 	})
 }
 
+// makeTestWorkflow creates a generic workflow that simply returns the input.
+func makeTestWorkflow[T any]() Workflow[T, T] {
+	return func(ctx DBOSContext, input T) (T, error) {
+		return RunAsStep(ctx, func(context context.Context) (T, error) {
+			return input, nil
+		})
+	}
+}
+
 // Typed workflow functions for testing concrete signatures
-func serializerIntWorkflow(ctx DBOSContext, input int) (int, error) {
-	return RunAsStep(ctx, func(context context.Context) (int, error) {
-		return input, nil
-	})
-}
-
-func serializerIntPtrWorkflow(ctx DBOSContext, input *int) (*int, error) {
-	return RunAsStep(ctx, func(context context.Context) (*int, error) {
-		return input, nil
-	})
-}
-
-func serializerIntSliceWorkflow(ctx DBOSContext, input []int) ([]int, error) {
-	return RunAsStep(ctx, func(context context.Context) ([]int, error) {
-		return input, nil
-	})
-}
-
-func serializerStringIntMapWorkflow(ctx DBOSContext, input map[string]int) (map[string]int, error) {
-	return RunAsStep(ctx, func(context context.Context) (map[string]int, error) {
-		return input, nil
-	})
-}
-
-func serializerWithInterfacesWorkflow(ctx DBOSContext, input WithInterfaces) (WithInterfaces, error) {
-	return RunAsStep(ctx, func(context context.Context) (WithInterfaces, error) {
-		return input, nil
-	})
-}
-
-func serializerMyIntWorkflow(ctx DBOSContext, input MyInt) (MyInt, error) {
-	return RunAsStep(ctx, func(context context.Context) (MyInt, error) {
-		return input, nil
-	})
-}
-
-func serializerMyStringWorkflow(ctx DBOSContext, input MyString) (MyString, error) {
-	return RunAsStep(ctx, func(context context.Context) (MyString, error) {
-		return input, nil
-	})
-}
-
-func serializerMyStringSliceWorkflow(ctx DBOSContext, input []MyString) ([]MyString, error) {
-	return RunAsStep(ctx, func(context context.Context) ([]MyString, error) {
-		return input, nil
-	})
-}
-
-func serializerStringMyIntMapWorkflow(ctx DBOSContext, input map[string]MyInt) (map[string]MyInt, error) {
-	return RunAsStep(ctx, func(context context.Context) (map[string]MyInt, error) {
-		return input, nil
-	})
-}
-
-func serializerTwiceIntWorkflow(ctx DBOSContext, input TwiceInt) (TwiceInt, error) {
-	return RunAsStep(ctx, func(context context.Context) (TwiceInt, error) {
-		return input, nil
-	})
-}
-
-func serializerStringWorkflow(ctx DBOSContext, input string) (string, error) {
-	return RunAsStep(ctx, func(context context.Context) (string, error) {
-		return input, nil
-	})
-}
-
-func serializerBoolWorkflow(ctx DBOSContext, input bool) (bool, error) {
-	return RunAsStep(ctx, func(context context.Context) (bool, error) {
-		return input, nil
-	})
-}
+// These are now generated using makeTestWorkflow to reduce boilerplate
+var (
+	serializerIntWorkflow            = makeTestWorkflow[int]()
+	serializerIntPtrWorkflow         = makeTestWorkflow[*int]()
+	serializerIntSliceWorkflow       = makeTestWorkflow[[]int]()
+	serializerStringIntMapWorkflow   = makeTestWorkflow[map[string]int]()
+	serializerWithInterfacesWorkflow = makeTestWorkflow[WithInterfaces]()
+	serializerMyIntWorkflow          = makeTestWorkflow[MyInt]()
+	serializerMyStringWorkflow       = makeTestWorkflow[MyString]()
+	serializerMyStringSliceWorkflow  = makeTestWorkflow[[]MyString]()
+	serializerStringMyIntMapWorkflow = makeTestWorkflow[map[string]MyInt]()
+	serializerTwiceIntWorkflow       = makeTestWorkflow[TwiceInt]()
+	serializerStringWorkflow         = makeTestWorkflow[string]()
+	serializerBoolWorkflow           = makeTestWorkflow[bool]()
+)
 
 // Typed Send/Recv workflows for various types
 func serializerIntSenderWorkflow(ctx DBOSContext, input int) (int, error) {
