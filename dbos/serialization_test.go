@@ -20,6 +20,32 @@ func isInterfaceType(v any) bool {
 	return t.Kind() == reflect.Interface
 }
 
+// isTestNilValue checks if a value is nil (for pointer types, slice, map, interface, etc.)
+func isTestNilValue(v any) bool {
+	val := reflect.ValueOf(v)
+	if !val.IsValid() {
+		return true
+	}
+	switch val.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface, reflect.Chan, reflect.Func:
+		return val.IsNil()
+	}
+	return false
+}
+
+// needsJSONRecast checks if JSON recast is needed for the given types and executor.
+// JSON recast is needed when using JSON serializer with an any-typed handle.
+func needsJSONRecast[T any, H any](executor DBOSContext) bool {
+	dbosCtx, ok := executor.(*dbosContext)
+	if !ok {
+		return false
+	}
+	isJSON := isJSONSerializer(dbosCtx.serializer)
+	var zeroH H
+	isAnyHandle := isInterfaceType(zeroH)
+	return isJSON && isAnyHandle
+}
+
 // Unified helper: test round-trip across all read paths for both typed and any workflows.
 // Handles JSON recast automatically when needed (when handle is WorkflowHandle[any] and JSON serializer).
 // Also handles nil values when expected is nil.
@@ -34,29 +60,15 @@ func testRoundTrip[T any, H any](
 	dbosCtx, ok := executor.(*dbosContext)
 	require.True(t, ok, "expected dbosContext")
 	isJSON := isJSONSerializer(dbosCtx.serializer)
-
-	var zeroH H
-	isAnyHandle := isInterfaceType(zeroH)
-	needsJSONRecast := isJSON && isAnyHandle
-
-	// Check if expected is nil (for pointer types, slice, map, interface, etc.)
-	isNilExpected := false
-	expectedVal := reflect.ValueOf(expected)
-	if !expectedVal.IsValid() {
-		isNilExpected = true
-	} else {
-		switch expectedVal.Kind() {
-		case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface, reflect.Chan, reflect.Func:
-			isNilExpected = expectedVal.IsNil()
-		}
-	}
+	needsRecast := needsJSONRecast[T, H](executor)
+	isNilExpected := isTestNilValue(expected)
 
 	t.Run("HandleGetResult", func(t *testing.T) {
 		gotAny, err := handle.GetResult()
 		require.NoError(t, err)
 		if isNilExpected {
 			assert.Nil(t, gotAny, "Nil result should be preserved")
-		} else if needsJSONRecast {
+		} else if needsRecast {
 			got, err := convertJSONToType[T](gotAny)
 			require.NoError(t, err)
 			assert.Equal(t, expected, got)
@@ -121,7 +133,7 @@ func testRoundTrip[T any, H any](
 		require.NoError(t, err)
 		if isNilExpected {
 			assert.Nil(t, gotAny, "Retrieved workflow result should be nil")
-		} else if needsJSONRecast {
+		} else if needsRecast {
 			got, err := convertJSONToType[T](gotAny)
 			require.NoError(t, err)
 			assert.Equal(t, expected, got)
@@ -159,12 +171,7 @@ func testSendRecv[T any](
 	require.NoError(t, err, "Receiver workflow should complete")
 
 	// Verify the received data matches what was sent
-
-	dbosCtx, ok := executor.(*dbosContext)
-	require.True(t, ok, "expected dbosContext")
-	var zeroT T
-	needsJSONRecast := isJSONSerializer(dbosCtx.serializer) && isInterfaceType(zeroT)
-	if needsJSONRecast {
+	if needsJSONRecast[T, T](executor) {
 		// For JSON serializer with any type, convert map[string]interface{} to typed struct
 		typedSenderResult, err := convertJSONToType[TestWorkflowData](senderResult)
 		require.NoError(t, err, "Failed to convert sender result")
@@ -209,11 +216,7 @@ func testSetGetEvent[T any](
 	require.NoError(t, err, "GetEvent workflow should complete")
 
 	// Verify the event data matches what was set
-	dbosCtx, ok := executor.(*dbosContext)
-	require.True(t, ok, "expected dbosContext")
-	var zeroT T
-	needsJSONRecast := isJSONSerializer(dbosCtx.serializer) && isInterfaceType(zeroT)
-	if needsJSONRecast {
+	if needsJSONRecast[T, T](executor) {
 		// For JSON serializer with any type, convert map[string]interface{} to typed struct
 		typedSetResult, err := convertJSONToType[TestWorkflowData](setResult)
 		require.NoError(t, err, "Failed to convert set result")
@@ -281,13 +284,13 @@ func testWorkflowRecovery[T any](
 
 	// Verify results match input
 	isJSON := isJSONSerializer(dbosCtx.serializer)
+	needsRecast := needsJSONRecast[T, T](executor)
 	if isJSON {
-		// Recovery handle are always "any"
+		// Recovery handles are always "any", so always convert recovered result
 		typedRecoveredResult, err := convertJSONToType[TestWorkflowData](recoveredResult)
 		require.NoError(t, err, "Failed to convert recovered result")
-		var zeroT T
-		if isInterfaceType(zeroT) {
-			// For JSON serializer with any type, convert results
+		if needsRecast {
+			// For JSON serializer with any type, convert original result too
 			typedOriginalResult, err := convertJSONToType[TestWorkflowData](originalResult)
 			require.NoError(t, err, "Failed to convert original result")
 			typedInput, err := convertJSONToType[TestWorkflowData](input)
