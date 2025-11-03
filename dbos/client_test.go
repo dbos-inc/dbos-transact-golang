@@ -372,8 +372,8 @@ func TestCancelResume(t *testing.T) {
 		result, err := resumeHandle.GetResult()
 		require.NoError(t, err, "failed to get result from resumed workflow")
 
-		// Verify the result. Need to recast to int because JSON serialized it
-		assert.Equal(t, input, int(result.(float64)), "expected result to match input")
+		// Verify the result
+		assert.Equal(t, input, result, "expected result to match input")
 
 		// Verify both steps completed
 		assert.Equal(t, 2, stepsCompleted, "expected steps completed to be 2")
@@ -394,8 +394,7 @@ func TestCancelResume(t *testing.T) {
 		resultAgain, err := resumeAgainHandle.GetResult()
 		require.NoError(t, err, "failed to get result from second resume")
 
-		// Need to recast to int because JSON serialized it to float64
-		assert.Equal(t, input, int(resultAgain.(float64)), "expected second resume result to match input")
+		assert.Equal(t, input, resultAgain, "expected second resume result to match input")
 
 		// Verify steps didn't run again
 		assert.Equal(t, 2, stepsCompleted, "expected steps completed to remain 2 after second resume")
