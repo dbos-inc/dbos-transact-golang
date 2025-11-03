@@ -1126,9 +1126,6 @@ func TestSerializer(t *testing.T) {
 						assert.Equal(t, input, outputConcrete, "Step output should match input")
 					}
 				})
-
-				// Test RetrieveWorkflow for interface types
-				// TODO: not supported for interface types w/o storing the type information in the DB
 			})
 
 			// Test nil values with pointer type workflow
