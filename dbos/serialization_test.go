@@ -414,7 +414,7 @@ func serializerWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowDa
 	})
 }
 
-func serializerNilValueWorkflow(ctx DBOSContext, input *TestWorkflowData) (*TestWorkflowData, error) {
+func serializerPointerValueWorkflow(ctx DBOSContext, input *TestWorkflowData) (*TestWorkflowData, error) {
 	return RunAsStep(ctx, func(context context.Context) (*TestWorkflowData, error) {
 		return input, nil
 	})
@@ -640,7 +640,7 @@ func TestSerializer(t *testing.T) {
 
 		// Register workflows
 		RegisterWorkflow(executor, serializerWorkflow)
-		RegisterWorkflow(executor, serializerNilValueWorkflow)
+		RegisterWorkflow(executor, serializerPointerValueWorkflow)
 		RegisterWorkflow(executor, serializerErrorWorkflow)
 		RegisterWorkflow(executor, serializerSenderWorkflow)
 		RegisterWorkflow(executor, serializerReceiverWorkflow)
@@ -698,7 +698,7 @@ func TestSerializer(t *testing.T) {
 
 		// Test nil values with pointer type workflow
 		t.Run("NilValuesPointer", func(t *testing.T) {
-			handle, err := RunWorkflow(executor, serializerNilValueWorkflow, (*TestWorkflowData)(nil))
+			handle, err := RunWorkflow(executor, serializerPointerValueWorkflow, (*TestWorkflowData)(nil))
 			require.NoError(t, err, "Nil pointer workflow execution failed")
 
 			testRoundTrip[*TestWorkflowData, *TestWorkflowData](t, executor, handle, (*TestWorkflowData)(nil))
