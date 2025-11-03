@@ -166,7 +166,7 @@ type dbosContext struct {
 	workflowScheduler *cron.Cron
 
 	// Serializer for encoding/decoding workflow data
-	serializer Serializer
+	serializer serializer
 
 	// logger
 	logger *slog.Logger
@@ -191,7 +191,7 @@ func (c *dbosContext) Value(key any) any {
 // getSerializer extracts the serializer from a DBOSContext.
 // Returns the serializer if the context is a *dbosContext with a configured serializer,
 // or nil if the context is not a *dbosContext (for testing/mocking scenarios).
-func getSerializer(ctx DBOSContext) Serializer {
+func getSerializer(ctx DBOSContext) serializer {
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
 		return dbosCtx.serializer
 	}

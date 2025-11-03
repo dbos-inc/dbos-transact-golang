@@ -9,16 +9,16 @@ import (
 	"strings"
 )
 
-// Serializer defines the interface for pluggable serializers.
+// serializer defines the interface for pluggable serializers.
 // Encode and Decode are called during database storage and retrieval respectively.
-type Serializer interface {
+type serializer interface {
 	// Encode serializes data to a string for database storage
 	Encode(data any) (string, error)
 	// Decode deserializes data from a string
 	Decode(data *string) (any, error)
 }
 
-func isGobSerializer(s Serializer) bool {
+func isGobSerializer(s serializer) bool {
 	_, ok := s.(*GobSerializer)
 	return ok
 }
@@ -57,7 +57,7 @@ func init() {
 	safeGobRegister(gobValue{})
 }
 
-// GobSerializer implements Serializer using encoding/gob
+// GobSerializer implements serializer using encoding/gob
 type GobSerializer struct{}
 
 func NewGobSerializer() *GobSerializer {
@@ -108,7 +108,7 @@ func (g *GobSerializer) Decode(data *string) (any, error) {
 }
 
 // deserialize decodes an encoded string directly into a typed variable.
-func deserialize[T any](serializer Serializer, encoded *string) (T, error) {
+func deserialize[T any](serializer serializer, encoded *string) (T, error) {
 	var zero T
 
 	if serializer == nil {
