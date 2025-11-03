@@ -230,12 +230,54 @@ func runScalarsTests(t *testing.T, executor DBOSContext) {
 	})
 }
 
+// testRoundTrip doesn't work super well for pointer types and ListWorkflows/GetWorkflowSteps
 func runPointerTests(t *testing.T, executor DBOSContext) {
 	t.Run("Pointers", func(t *testing.T) {
 		v := 123
-		h2, err := RunWorkflow(executor, serializerIntPtrWorkflow, &v)
+		expected := &v
+		h2, err := RunWorkflow(executor, serializerIntPtrWorkflow, expected)
 		require.NoError(t, err)
-		testRoundTrip[*int, *int](t, executor, h2, &v)
+
+		t.Run("HandleGetResult", func(t *testing.T) {
+			gotAny, err := h2.GetResult()
+			require.NoError(t, err)
+			assert.Equal(t, expected, gotAny)
+		})
+
+		t.Run("RetrieveWorkflow", func(t *testing.T) {
+			h3, err := RetrieveWorkflow[*int](executor, h2.GetWorkflowID())
+			require.NoError(t, err)
+			gotAny, err := h3.GetResult()
+			require.NoError(t, err)
+			assert.Equal(t, expected, gotAny)
+		})
+
+		// For ListWorkflows and GetWorkflowSteps, the decoded value will be the underlying type,
+		// not the pointer, because they use serializer.Decode() without pointer reconstruction
+		t.Run("ListWorkflows", func(t *testing.T) {
+			wfs, err := ListWorkflows(executor,
+				WithWorkflowIDs([]string{h2.GetWorkflowID()}),
+				WithLoadInput(true), WithLoadOutput(true))
+			require.NoError(t, err)
+			require.Len(t, wfs, 1)
+			wf := wfs[0]
+			require.NotNil(t, wf.Input)
+			require.NotNil(t, wf.Output)
+			// Decoded value should be the underlying type (int), not the pointer
+			assert.Equal(t, v, wf.Input, "Input should be dereferenced value")
+			assert.Equal(t, v, wf.Output, "Output should be dereferenced value")
+		})
+
+		t.Run("GetWorkflowSteps", func(t *testing.T) {
+			steps, err := GetWorkflowSteps(executor, h2.GetWorkflowID())
+			require.NoError(t, err)
+			require.Len(t, steps, 1)
+			step := steps[0]
+			require.NotNil(t, step.Output)
+			// Decoded value should be the underlying type (int), not the pointer
+			assert.Equal(t, v, step.Output, "Step output should be dereferenced value")
+			assert.Nil(t, step.Error)
+		})
 	})
 }
 
