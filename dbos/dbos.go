@@ -40,7 +40,6 @@ type Config struct {
 	ConductorAPIKey    string        // DBOS conductor API key (optional)
 	ApplicationVersion string        // Application version (optional, overridden by DBOS__APPVERSION env var)
 	ExecutorID         string        // Executor ID (optional, overridden by DBOS__VMID env var)
-	Serializer         Serializer    // Custom serializer for encoding/decoding workflow data (defaults to JSON)
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -67,7 +66,6 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ApplicationVersion: inputConfig.ApplicationVersion,
 		ExecutorID:         inputConfig.ExecutorID,
 		SystemDBPool:       inputConfig.SystemDBPool,
-		Serializer:         inputConfig.Serializer,
 	}
 
 	// Load defaults
@@ -76,9 +74,6 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 	if dbosConfig.DatabaseSchema == "" {
 		dbosConfig.DatabaseSchema = _DEFAULT_SYSTEM_DB_SCHEMA
-	}
-	if dbosConfig.Serializer == nil {
-		dbosConfig.Serializer = NewJSONSerializer()
 	}
 
 	// Override with environment variables if set
@@ -378,7 +373,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion
 	initExecutor.executorID = config.ExecutorID
-	initExecutor.serializer = config.Serializer
+	initExecutor.serializer = NewGobSerializer()
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 
@@ -387,7 +382,6 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 		databaseSchema: config.DatabaseSchema,
 		customPool:     config.SystemDBPool,
 		logger:         initExecutor.logger,
-		serializer:     config.Serializer,
 	}
 
 	// Create the system database

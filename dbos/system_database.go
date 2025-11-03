@@ -78,7 +78,6 @@ type sysDB struct {
 	logger                   *slog.Logger
 	schema                   string
 	launched                 bool
-	serializer               Serializer
 }
 
 /*******************************/
@@ -255,7 +254,6 @@ type newSystemDatabaseInput struct {
 	databaseSchema string
 	customPool     *pgxpool.Pool
 	logger         *slog.Logger
-	serializer     Serializer
 }
 
 // New creates a new SystemDatabase instance and runs migrations
@@ -353,7 +351,6 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		notificationLoopDone:     make(chan struct{}),
 		logger:                   logger.With("service", "system_database"),
 		schema:                   databaseSchema,
-		serializer:               inputs.serializer,
 	}, nil
 }
 
@@ -1532,7 +1529,10 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 
 		// Decode the recorded end time directly into time.Time
 		// recordedResult.output is an encoded *string
-		endTime, err = deserialize[time.Time](s.serializer, recordedResult.output)
+		// Get serializer from DBOSContext (ctx is always DBOSContext in system database)
+		dbosCtx := ctx.(DBOSContext)
+		serializer := getSerializer(dbosCtx)
+		endTime, err = deserialize[time.Time](serializer, recordedResult.output)
 		if err != nil {
 			return 0, fmt.Errorf("failed to decode sleep end time: %w", err)
 		}
@@ -1545,7 +1545,10 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		endTime = time.Now().Add(input.duration)
 
 		// Serialize the end time before recording
-		encodedEndTimeStr, serErr := s.serializer.Encode(endTime)
+		// Get serializer from DBOSContext (ctx is always DBOSContext in system database)
+		dbosCtx := ctx.(DBOSContext)
+		serializer := getSerializer(dbosCtx)
+		encodedEndTimeStr, serErr := serializer.Encode(endTime)
 		if serErr != nil {
 			return 0, fmt.Errorf("failed to serialize sleep end time: %w", serErr)
 		}
