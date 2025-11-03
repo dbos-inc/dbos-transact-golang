@@ -674,17 +674,16 @@ func TestSteps(t *testing.T) {
 		assert.Nil(t, step.Error)
 
 		// Deserialize the output from the database to verify proper encoding
-		// Need to recast to JSON because step.Output is an any type
-		storedOutput, err := convertJSONToType[StepOutput](step.Output)
-		require.NoError(t, err)
+		storedOutput, ok := step.Output.(StepOutput)
+		require.True(t, ok, "failed to cast step output to StepOutput")
 
 		// Verify all fields were correctly serialized and deserialized
-		assert.Equal(t, "Processed_TestObject", storedOutput.ProcessedName)
-		assert.Equal(t, 84, storedOutput.TotalCount)
-		assert.True(t, storedOutput.Success)
-		assert.Len(t, storedOutput.Details, 3)
-		assert.Equal(t, []string{"step1", "step2", "step3"}, storedOutput.Details)
-		assert.False(t, storedOutput.ProcessedAt.IsZero())
+		assert.Equal(t, "Processed_TestObject", storedOutput.ProcessedName, "ProcessedName not correctly serialized")
+		assert.Equal(t, 84, storedOutput.TotalCount, "TotalCount not correctly serialized")
+		assert.True(t, storedOutput.Success, "Success flag not correctly serialized")
+		assert.Len(t, storedOutput.Details, 3, "Details array length incorrect")
+		assert.Equal(t, []string{"step1", "step2", "step3"}, storedOutput.Details, "Details array not correctly serialized")
+		assert.False(t, storedOutput.ProcessedAt.IsZero(), "ProcessedAt timestamp should not be zero")
 	})
 }
 
@@ -1413,8 +1412,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		for i, h := range handles {
 			result, err := h.GetResult()
 			require.NoError(t, err, "failed to get result from handle %d", i)
-			// Will be float64 because JSON serialized it into an any type.
-			require.Equal(t, float64(0), result)
+			require.Equal(t, 0, result)
 		}
 	})
 }
