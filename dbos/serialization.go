@@ -109,7 +109,7 @@ func (g *gobSerializer) Decode(data *string) (any, error) {
 
 // deserialize decodes an encoded string directly into a typed variable.
 func deserialize[T any](serializer serializer, encoded *string) (T, error) {
-	var zero T
+	zero := *new(T)
 
 	if serializer == nil {
 		return zero, fmt.Errorf("serializer cannot be nil")
@@ -119,19 +119,19 @@ func deserialize[T any](serializer serializer, encoded *string) (T, error) {
 		return zero, nil
 	}
 
+	// Get the type of T once at the beginning of the function
+	tType := reflect.TypeOf(zero)
+	if tType == nil {
+		// zero is nil, T is likely a pointer type or interface
+		// Get the type from a pointer to zero
+		tType = reflect.TypeOf(&zero).Elem()
+	}
+
 	// For gobSerializer, register type T before decoding
 	// This is required on the recovery path, where the process might not have been doing the encode/registering.
 	if isGobSerializer(serializer) {
 		// Check if T is an interface type - if so, skip registration
 		// We do no support interface types in workflows/steps
-		tType := reflect.TypeOf(zero)
-		if tType == nil {
-			// zero is nil, T is likely a pointer type or interface
-			// Get the type from a new instance
-			var tVal T
-			tType = reflect.TypeOf(&tVal).Elem()
-		}
-
 		// Only register if T is a concrete type (not an interface)
 		if tType != nil && tType.Kind() != reflect.Interface {
 			safeGobRegister(zero)
@@ -146,13 +146,6 @@ func deserialize[T any](serializer serializer, encoded *string) (T, error) {
 
 	// Handle pointer types: if T is a pointer type and decoded value matches the element type,
 	// convert the value to a pointer
-	// Get the type of T by reflecting on zero (or creating a new value if zero is nil)
-	tType := reflect.TypeOf(zero)
-	if tType == nil {
-		// zero is nil, T is likely a pointer type - get type from a new value
-		var tVal T
-		tType = reflect.TypeOf(&tVal).Elem()
-	}
 
 	if tType != nil && tType.Kind() == reflect.Pointer {
 		// T is a pointer type
@@ -187,7 +180,7 @@ func deserialize[T any](serializer serializer, encoded *string) (T, error) {
 	return typedResult, nil
 }
 
-// isNilValue checks if a value is nil (for pointer types, slice, map, interface, etc.)
+// isNilValue checks if a value is nil (for pointer types, slice, map, etc.)
 func isNilValue(v any) bool {
 	val := reflect.ValueOf(v)
 	if !val.IsValid() {
