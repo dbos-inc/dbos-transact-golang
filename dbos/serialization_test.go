@@ -1129,21 +1129,6 @@ func TestSerializer(t *testing.T) {
 
 				// Test RetrieveWorkflow for interface types
 				// TODO: not supported for interface types w/o storing the type information in the DB
-				/*
-					t.Run("RetrieveWorkflow", func(t *testing.T) {
-						h2, err := RetrieveWorkflow[DataProvider](executor, handle.GetWorkflowID())
-						require.NoError(t, err, "Failed to retrieve workflow")
-
-						retrievedResult, err := h2.GetResult()
-						require.NoError(t, err, "Failed to get retrieved workflow result")
-
-						// For interface types, we need to check the concrete type
-						concreteRetrievedResult, ok := retrievedResult.(ConcreteDataProvider)
-						require.True(t, ok, "Retrieved result should be ConcreteDataProvider type")
-						assert.Equal(t, input.Message, concreteRetrievedResult.Message, "Message should match")
-						assert.Equal(t, input.Value, concreteRetrievedResult.Value, "Value should match")
-					})
-				*/
 			})
 
 			// Test nil values with pointer type workflow

@@ -115,6 +115,7 @@ func deserialize[T any](serializer Serializer, encoded *string) (T, error) {
 			return elemValue.Interface().(T), nil
 		}
 		// If decoded is already a pointer of the correct type, try direct assertion
+		// this is unlikely with Gob because Gob serializes pointers as values, so it should hit the previous case instead
 		if decodedType != nil && decodedType == tType {
 			typedResult, ok := decoded.(T)
 			if ok {
