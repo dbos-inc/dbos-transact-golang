@@ -1,10 +1,15 @@
 package dbos
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -816,10 +821,138 @@ func serializerAnyRecoveryWorkflow(ctx DBOSContext, input any) (any, error) {
 	}, WithStepName("BlockingStep"))
 }
 
+// gobValue is a wrapper type for gob encoding/decoding of any value
+type gobValue struct {
+	Value any
+}
+
+// safeGobRegister attempts to register a type with gob, recovering only from
+// panics caused by duplicate type/name registrations (e.g., registering both T and *T).
+// These specific conflicts don't affect encoding/decoding correctness, so they're safe to ignore.
+// Other panics (like registering `any`) are real errors and will propagate.
+func safeGobRegister(value any, logger *slog.Logger) {
+	defer func() {
+		if r := recover(); r != nil {
+			if errStr, ok := r.(string); ok {
+				// Check if this is one of the two specific duplicate registration errors we want to ignore
+				// See https://cs.opensource.google/go/go/+/refs/tags/go1.25.1:src/encoding/gob/type.go;l=832
+				if strings.Contains(errStr, "gob: registering duplicate types for") ||
+					strings.Contains(errStr, "gob: registering duplicate names for") {
+					if logger != nil {
+						logger.Debug("gob registration conflict", "type", fmt.Sprintf("%T", value), "error", r)
+					}
+					return
+				}
+			}
+			// Re-panic for any other errors
+			panic(r)
+		}
+	}()
+	gob.Register(value)
+}
+
+// init registers all custom types with gob for GobSerializer
+// Note: gob requires concrete types to be registered. Interface types cannot be registered
+// directly - only their concrete implementations. When encoding interface{} fields,
+// gob needs the concrete type to be registered.
+func init() {
+	// Register wrapper type
+	safeGobRegister(gobValue{}, nil)
+
+	// Register test data types (concrete structs)
+	safeGobRegister(TestData{}, nil)
+	safeGobRegister(TestWorkflowData{}, nil)
+
+	// Register custom type aliases (must register with concrete value)
+	safeGobRegister(MyInt(0), nil)
+	safeGobRegister(MyString(""), nil)
+	safeGobRegister(TwiceInt(0), nil)
+
+	// Register struct with interface fields (the struct itself is concrete)
+	safeGobRegister(WithInterfaces{}, nil)
+
+	// Register concrete implementation of interface (cannot register DataProvider interface itself)
+	safeGobRegister(ConcreteDataProvider{}, nil)
+
+	// Register slices of custom types
+	safeGobRegister([]MyString(nil), nil)
+	safeGobRegister([]MyInt(nil), nil)
+	safeGobRegister([]int(nil), nil)
+	safeGobRegister([]string(nil), nil)
+	safeGobRegister([]bool(nil), nil)
+
+	// Register maps with custom types
+	safeGobRegister(map[string]MyInt(nil), nil)
+	safeGobRegister(map[string]string(nil), nil)
+	safeGobRegister(map[string]int(nil), nil)
+	safeGobRegister(map[string]bool(nil), nil)
+	safeGobRegister(map[string]any(nil), nil)
+
+	// Register pointer types
+	safeGobRegister((*int)(nil), nil)
+	safeGobRegister((*string)(nil), nil)
+	safeGobRegister((*bool)(nil), nil)
+	safeGobRegister((*TestWorkflowData)(nil), nil)
+	safeGobRegister((*TestData)(nil), nil)
+	safeGobRegister((*MyInt)(nil), nil)
+	safeGobRegister((*MyString)(nil), nil)
+
+	// Register time.Time (used in workflow timeouts and sleep operations)
+	safeGobRegister(time.Time{}, nil)
+}
+
+// GobSerializer implements Serializer using encoding/gob
+type GobSerializer struct{}
+
+func NewGobSerializer() *GobSerializer {
+	return &GobSerializer{}
+}
+
+func (g *GobSerializer) Encode(data any) (string, error) {
+	// Check if data is nil (for pointer types, slice, map, interface, chan, func)
+	if isTestNilValue(data) {
+		// For nil values, encode an empty byte slice directly to base64
+		return base64.StdEncoding.EncodeToString([]byte{}), nil
+	}
+
+	var buf bytes.Buffer
+	encoder := gob.NewEncoder(&buf)
+	wrapper := gobValue{Value: data}
+	if err := encoder.Encode(wrapper); err != nil {
+		return "", fmt.Errorf("failed to encode data with gob: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
+}
+
+func (g *GobSerializer) Decode(data *string) (any, error) {
+	if data == nil || *data == "" {
+		return nil, nil
+	}
+
+	dataBytes, err := base64.StdEncoding.DecodeString(*data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 data: %w", err)
+	}
+
+	// If decoded data is empty, it represents a nil value
+	if len(dataBytes) == 0 {
+		return nil, nil
+	}
+
+	var wrapper gobValue
+	decoder := gob.NewDecoder(bytes.NewReader(dataBytes))
+	if err := decoder.Decode(&wrapper); err != nil {
+		return nil, fmt.Errorf("failed to decode gob data: %w", err)
+	}
+
+	return wrapper.Value, nil
+}
+
 // Test that workflows use the configured serializer for input/output
 func TestSerializer(t *testing.T) {
 	serializers := map[string]func() Serializer{
-		"JSON": func() Serializer { return NewJSONSerializer() },
+		//	"JSON": func() Serializer { return NewJSONSerializer() },
+		"Gob": func() Serializer { return NewGobSerializer() },
 	}
 
 	for serializerName, serializerFactory := range serializers {

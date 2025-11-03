@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"reflect"
 )
 
 // Serializer defines the interface for pluggable serializers.
@@ -90,6 +91,43 @@ func deserialize[T any](serializer Serializer, encoded *string) (T, error) {
 	if err != nil {
 		return zero, err
 	}
+
+	// Handle pointer types: if T is a pointer type and decoded value matches the element type,
+	// convert the value to a pointer
+	// Get the type of T by reflecting on zero (or creating a new value if zero is nil)
+	tType := reflect.TypeOf(zero)
+	if tType == nil {
+		// zero is nil, T is likely a pointer type - get type from a new value
+		var tVal T
+		tType = reflect.TypeOf(&tVal).Elem()
+	}
+
+	if tType != nil && tType.Kind() == reflect.Pointer {
+		// T is a pointer type
+		elemType := tType.Elem()
+		decodedType := reflect.TypeOf(decoded)
+
+		// Check if decoded value matches the element type (not the pointer type)
+		if decodedType != nil && decodedType == elemType {
+			// Create a new pointer to the decoded value
+			elemValue := reflect.New(elemType)
+			elemValue.Elem().Set(reflect.ValueOf(decoded))
+			return elemValue.Interface().(T), nil
+		}
+		// If decoded is already a pointer of the correct type, try direct assertion
+		if decodedType != nil && decodedType == tType {
+			typedResult, ok := decoded.(T)
+			if ok {
+				return typedResult, nil
+			}
+		}
+		// If decoded is nil and T is a pointer type, return nil pointer
+		if decoded == nil {
+			return zero, nil
+		}
+	}
+
+	// Try direct type assertion
 	typedResult, ok := decoded.(T)
 	if !ok {
 		return zero, fmt.Errorf("cannot convert decoded value of type %T to %T", decoded, zero)
