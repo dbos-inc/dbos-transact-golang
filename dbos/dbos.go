@@ -373,7 +373,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion
 	initExecutor.executorID = config.ExecutorID
-	initExecutor.serializer = NewGobSerializer()
+	initExecutor.serializer = newGobSerializer()
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 

@@ -19,7 +19,7 @@ type serializer interface {
 }
 
 func isGobSerializer(s serializer) bool {
-	_, ok := s.(*GobSerializer)
+	_, ok := s.(*gobSerializer)
 	return ok
 }
 
@@ -51,20 +51,20 @@ func safeGobRegister(value any) {
 	gob.Register(value)
 }
 
-// init registers the gobValue wrapper type with gob for GobSerializer
+// init registers the gobValue wrapper type with gob for gobSerializer
 func init() {
 	// Register wrapper type - this is required for gob encoding/decoding to work
 	safeGobRegister(gobValue{})
 }
 
-// GobSerializer implements serializer using encoding/gob
-type GobSerializer struct{}
+// gobSerializer implements serializer using encoding/gob
+type gobSerializer struct{}
 
-func NewGobSerializer() *GobSerializer {
-	return &GobSerializer{}
+func newGobSerializer() *gobSerializer {
+	return &gobSerializer{}
 }
 
-func (g *GobSerializer) Encode(data any) (string, error) {
+func (g *gobSerializer) Encode(data any) (string, error) {
 	// Check if data is nil (for pointer types, slice, map, interface, chan, func)
 	if isNilValue(data) {
 		// For nil values, encode an empty byte slice directly to base64
@@ -83,7 +83,7 @@ func (g *GobSerializer) Encode(data any) (string, error) {
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
-func (g *GobSerializer) Decode(data *string) (any, error) {
+func (g *gobSerializer) Decode(data *string) (any, error) {
 	if data == nil || *data == "" {
 		return nil, nil
 	}
@@ -119,7 +119,7 @@ func deserialize[T any](serializer serializer, encoded *string) (T, error) {
 		return zero, nil
 	}
 
-	// For GobSerializer, register type T before decoding
+	// For gobSerializer, register type T before decoding
 	// This is required on the recovery path, where the process might not have been doing the encode/registering.
 	if isGobSerializer(serializer) {
 		// Check if T is an interface type - if so, skip registration

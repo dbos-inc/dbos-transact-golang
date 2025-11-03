@@ -583,7 +583,7 @@ func serializerRecoveryWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWo
 	}, WithStepName("BlockingStep"))
 }
 
-// init registers all custom types with gob for GobSerializer
+// init registers all custom types with gob for gobSerializer
 // Note: gob requires concrete types to be registered. Interface types cannot be registered
 // directly - only their concrete implementations. When encoding interface{} fields,
 // gob needs the concrete type to be registered.
