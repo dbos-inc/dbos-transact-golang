@@ -24,6 +24,7 @@ func isGobSerializer(s Serializer) bool {
 }
 
 // gobValue is a wrapper type for gob encoding/decoding of any value
+// Useful when we need to encode/decode a nil pointer or an empty string
 type gobValue struct {
 	Value any
 }

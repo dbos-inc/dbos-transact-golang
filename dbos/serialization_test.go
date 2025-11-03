@@ -228,6 +228,13 @@ func runScalarsTests(t *testing.T, executor DBOSContext) {
 		require.NoError(t, err)
 		testRoundTrip[int, int](t, executor, h2, 42)
 	})
+
+	t.Run("EmptyString", func(t *testing.T) {
+		emptyStr := ""
+		h3, err := RunWorkflow(executor, serializerStringWorkflow, emptyStr)
+		require.NoError(t, err)
+		testRoundTrip[string, string](t, executor, h3, emptyStr)
+	})
 }
 
 // testRoundTrip doesn't work super well for pointer types and ListWorkflows/GetWorkflowSteps
