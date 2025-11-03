@@ -540,9 +540,8 @@ func TestQueueRecovery(t *testing.T) {
 			// Root workflow case
 			result, err := h.GetResult()
 			require.NoError(t, err, "failed to get result from recovered root workflow handle")
-			// Need to re-marshal to []int because JSON serialized it to []interface{}
-			castedResult, err := convertJSONToType[[]int](result)
-			require.NoError(t, err, "failed to convert result to []int")
+			castedResult, ok := result.([]int)
+			require.True(t, ok, "expected result to be of type []int for root workflow, got %T", result)
 			expectedResult := []int{0, 1, 2, 3, 4}
 			assert.Equal(t, expectedResult, castedResult, "expected result %v, got %v", expectedResult, castedResult)
 		}
