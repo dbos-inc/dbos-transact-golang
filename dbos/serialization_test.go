@@ -222,6 +222,7 @@ func testSetGetEvent[T any](
 
 type MyInt int
 type MyString string
+type IntSliceSlice [][]int
 
 // Test data structures for DBOS integration testing
 type TestData struct {
@@ -302,6 +303,11 @@ var (
 	recoveryMyStringWorkflow       = makeRecoveryWorkflow[MyString]()
 	recoveryMyStringSliceWorkflow  = makeRecoveryWorkflow[[]MyString]()
 	recoveryStringMyIntMapWorkflow = makeRecoveryWorkflow[map[string]MyInt]()
+	// Additional types: empty struct, nested collections, slices of pointers
+	recoveryEmptyStructWorkflow   = makeRecoveryWorkflow[struct{}]()
+	recoveryIntSliceSliceWorkflow = makeRecoveryWorkflow[IntSliceSlice]()
+	recoveryNestedMapWorkflow     = makeRecoveryWorkflow[map[string]map[string]int]()
+	recoveryIntPtrSliceWorkflow   = makeRecoveryWorkflow[[]*int]()
 )
 
 // makeSenderWorkflow creates a generic sender workflow that sends a message to a receiver workflow.
@@ -578,6 +584,11 @@ func TestSerializer(t *testing.T) {
 		RegisterWorkflow(executor, recoveryMyStringWorkflow)
 		RegisterWorkflow(executor, recoveryMyStringSliceWorkflow)
 		RegisterWorkflow(executor, recoveryStringMyIntMapWorkflow)
+		// Register additional recovery workflows
+		RegisterWorkflow(executor, recoveryEmptyStructWorkflow)
+		RegisterWorkflow(executor, recoveryIntSliceSliceWorkflow)
+		RegisterWorkflow(executor, recoveryNestedMapWorkflow)
+		RegisterWorkflow(executor, recoveryIntPtrSliceWorkflow)
 		// Register typed Send/Recv workflows
 		RegisterWorkflow(executor, serializerIntSenderWorkflow)
 		RegisterWorkflow(executor, serializerIntReceiverWorkflow)
@@ -874,6 +885,44 @@ func TestSerializer(t *testing.T) {
 			t.Run("StringMyIntMap", func(t *testing.T) {
 				input := map[string]MyInt{"k": 9}
 				testAllSerializationPaths(t, executor, recoveryStringMyIntMapWorkflow, input, "recovery-string-myint-map-wf")
+			})
+		})
+
+		// Empty struct
+		t.Run("EmptyStruct", func(t *testing.T) {
+			input := struct{}{}
+			testAllSerializationPaths(t, executor, recoveryEmptyStructWorkflow, input, "recovery-empty-struct-wf")
+		})
+
+		// Nested collections
+		t.Run("NestedCollections", func(t *testing.T) {
+			t.Run("SliceOfSlices", func(t *testing.T) {
+				input := IntSliceSlice{{1, 2}, {3, 4, 5}}
+				testAllSerializationPaths(t, executor, recoveryIntSliceSliceWorkflow, input, "recovery-int-slice-slice-wf")
+			})
+
+			t.Run("NestedMap", func(t *testing.T) {
+				input := map[string]map[string]int{
+					"outer1": {"inner1": 1, "inner2": 2},
+					"outer2": {"inner3": 3},
+				}
+				testAllSerializationPaths(t, executor, recoveryNestedMapWorkflow, input, "recovery-nested-map-wf")
+			})
+		})
+
+		// Slices of pointers
+		t.Run("SliceOfPointers", func(t *testing.T) {
+			t.Run("NonNil", func(t *testing.T) {
+				v1 := 10
+				v2 := 20
+				v3 := 30
+				input := []*int{&v1, &v2, &v3}
+				testAllSerializationPaths(t, executor, recoveryIntPtrSliceWorkflow, input, "recovery-int-ptr-slice-wf")
+			})
+
+			t.Run("NilSlice", func(t *testing.T) {
+				var input []*int = nil
+				testAllSerializationPaths(t, executor, recoveryIntPtrSliceWorkflow, input, "recovery-int-ptr-slice-nil-wf")
 			})
 		})
 

@@ -963,7 +963,6 @@ func TestChildWorkflow(t *testing.T) {
 	require.NoError(t, err, "failed to launch DBOS")
 
 	t.Run("ChildWorkflowIDGeneration", func(t *testing.T) {
-
 		r := 3
 		h, err := RunWorkflow(dbosCtx, grandParentWf, r)
 		require.NoError(t, err, "failed to execute grand parent workflow")

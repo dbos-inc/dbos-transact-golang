@@ -68,7 +68,7 @@ func (g *gobSerializer[T]) Encode(data T) (string, error) {
 	encoder := gob.NewEncoder(&buf)
 	wrapper := gobValue{Value: data}
 	if err := encoder.Encode(wrapper); err != nil {
-		return "", fmt.Errorf("failed to encode data with gob: %w", err)
+		return "", fmt.Errorf("failed to encode data: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
