@@ -165,9 +165,6 @@ type dbosContext struct {
 	// Workflow scheduler
 	workflowScheduler *cron.Cron
 
-	// Serializer for encoding/decoding workflow data
-	serializer serializer
-
 	// logger
 	logger *slog.Logger
 }
@@ -188,15 +185,6 @@ func (c *dbosContext) Value(key any) any {
 	return c.ctx.Value(key)
 }
 
-// getSerializer extracts the serializer from a DBOSContext.
-// Returns the serializer if the context is a *dbosContext with a configured serializer,
-// or nil if the context is not a *dbosContext (for testing/mocking scenarios).
-func getSerializer(ctx DBOSContext) serializer {
-	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		return dbosCtx.serializer
-	}
-	return nil
-}
 
 // WithValue returns a copy of the DBOS context with the given key-value pair.
 // This is similar to context.WithValue but maintains DBOS context capabilities.
@@ -218,7 +206,6 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
-			serializer:              dbosCtx.serializer,
 		}
 		childCtx.launched.Store(launched)
 		return childCtx
@@ -247,7 +234,6 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
-			serializer:              dbosCtx.serializer,
 		}
 		childCtx.launched.Store(launched)
 		return childCtx
@@ -275,7 +261,6 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
-			serializer:              dbosCtx.serializer,
 		}
 		childCtx.launched.Store(launched)
 		return childCtx, cancelFunc
@@ -373,7 +358,6 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion
 	initExecutor.executorID = config.ExecutorID
-	initExecutor.serializer = newGobSerializer()
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 

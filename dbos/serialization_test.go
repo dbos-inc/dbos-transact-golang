@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -576,6 +577,21 @@ func serializerRecoveryWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWo
 	}, WithStepName("BlockingStep"))
 }
 
+// TestDataProcessor is an interface for testing workflows with interface signatures
+type TestDataProcessor interface {
+	Process(data string) string
+}
+
+// TestStringProcessor is a concrete implementation of TestDataProcessor
+type TestStringProcessor struct {
+	Prefix string
+}
+
+// Process implements the TestDataProcessor interface
+func (p *TestStringProcessor) Process(data string) string {
+	return p.Prefix + data
+}
+
 // Test that workflows use the configured serializer for input/output
 func TestSerializer(t *testing.T) {
 	t.Run("Gob", func(t *testing.T) {
@@ -619,6 +635,17 @@ func TestSerializer(t *testing.T) {
 		RegisterWorkflow(executor, serializerIntPtrGetEventWorkflow)
 		RegisterWorkflow(executor, serializerMyIntSetEventWorkflow)
 		RegisterWorkflow(executor, serializerMyIntGetEventWorkflow)
+
+		// Register workflow with interface signature for manual gob registration test
+		interfaceWorkflow := func(ctx DBOSContext, input TestDataProcessor) (TestDataProcessor, error) {
+			return RunAsStep(ctx, func(context context.Context) (TestDataProcessor, error) {
+				return input, nil
+			})
+		}
+		RegisterWorkflow(executor, interfaceWorkflow)
+
+		// Manually register the concrete implementation with gob before launching DBOS
+		gob.Register(&TestStringProcessor{})
 
 		err := Launch(executor)
 		require.NoError(t, err)
@@ -837,6 +864,65 @@ func TestSerializer(t *testing.T) {
 
 		// Custom marshaler/unmarshaler
 		runCustomMarshalerTests(t, executor)
+
+		// Test workflow with interface signature and manual gob registration
+		t.Run("InterfaceWithManualGobRegistration", func(t *testing.T) {
+			// Create an instance of the concrete implementation
+			processor := &TestStringProcessor{Prefix: "Processed: "}
+
+			// Run the workflow with explicit type parameters
+			handle, err := RunWorkflow[TestDataProcessor, TestDataProcessor](executor, interfaceWorkflow, processor)
+			require.NoError(t, err, "Workflow execution failed")
+
+			// Helper function to verify TestStringProcessor
+			verifyProcessor := func(t *testing.T, actual any, name string) {
+				t.Helper()
+				require.NotNil(t, actual, "%s should not be nil", name)
+				processor, ok := actual.(*TestStringProcessor)
+				require.True(t, ok, "%s should be *TestStringProcessor, got %T", name, actual)
+				assert.Equal(t, "Processed: ", processor.Prefix, "%s Prefix should match", name)
+				// Verify the interface method works
+				processed := processor.Process("test")
+				assert.Equal(t, "Processed: test", processed, "%s Process method should work", name)
+			}
+
+			t.Run("HandleGetResult", func(t *testing.T) {
+				result, err := handle.GetResult()
+				require.NoError(t, err, "Failed to get workflow result")
+				verifyProcessor(t, result, "Result")
+			})
+
+			t.Run("ListWorkflows", func(t *testing.T) {
+				wfs, err := ListWorkflows(executor,
+					WithWorkflowIDs([]string{handle.GetWorkflowID()}),
+					WithLoadInput(true), WithLoadOutput(true))
+				require.NoError(t, err)
+				require.Len(t, wfs, 1)
+				wf := wfs[0]
+				require.NotNil(t, wf.Input, "Workflow input should not be nil")
+				require.NotNil(t, wf.Output, "Workflow output should not be nil")
+				verifyProcessor(t, wf.Input, "Workflow input")
+				verifyProcessor(t, wf.Output, "Workflow output")
+			})
+
+			t.Run("GetWorkflowSteps", func(t *testing.T) {
+				steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
+				require.NoError(t, err)
+				require.Len(t, steps, 1)
+				step := steps[0]
+				require.NotNil(t, step.Output, "Step output should not be nil")
+				verifyProcessor(t, step.Output, "Step output")
+				assert.Nil(t, step.Error)
+			})
+
+			t.Run("RetrieveWorkflow", func(t *testing.T) {
+				h2, err := RetrieveWorkflow[TestDataProcessor](executor, handle.GetWorkflowID())
+				require.NoError(t, err)
+				result, err := h2.GetResult()
+				require.NoError(t, err, "Failed to get retrieved workflow result")
+				verifyProcessor(t, result, "Retrieved workflow result")
+			})
+		})
 
 	})
 }

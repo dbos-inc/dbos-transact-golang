@@ -1529,10 +1529,8 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 
 		// Decode the recorded end time directly into time.Time
 		// recordedResult.output is an encoded *string
-		// Get serializer from DBOSContext (ctx is always DBOSContext in system database)
-		dbosCtx := ctx.(DBOSContext)
-		serializer := getSerializer(dbosCtx)
-		endTime, err = deserialize[time.Time](serializer, recordedResult.output)
+		serializer := newGobSerializer[time.Time]()
+		endTime, err = serializer.Decode(recordedResult.output)
 		if err != nil {
 			return 0, fmt.Errorf("failed to decode sleep end time: %w", err)
 		}
@@ -1545,9 +1543,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		endTime = time.Now().Add(input.duration)
 
 		// Serialize the end time before recording
-		// Get serializer from DBOSContext (ctx is always DBOSContext in system database)
-		dbosCtx := ctx.(DBOSContext)
-		serializer := getSerializer(dbosCtx)
+		serializer := newGobSerializer[time.Time]()
 		encodedEndTimeStr, serErr := serializer.Encode(endTime)
 		if serErr != nil {
 			return 0, fmt.Errorf("failed to serialize sleep end time: %w", serErr)
@@ -1706,7 +1702,7 @@ const _DBOS_NULL_TOPIC = "__null__topic__"
 
 type WorkflowSendInput struct {
 	DestinationID string
-	Message       *string
+	Message       any
 	Topic         string
 }
 
@@ -1727,6 +1723,10 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 			return newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call Send within a step"))
 		}
 		stepID = wfState.nextStepID()
+	}
+
+	if _, ok := input.Message.(*string); !ok {
+		return fmt.Errorf("message must be a pointer to a string")
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -1937,7 +1937,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 
 type WorkflowSetEventInput struct {
 	Key     string
-	Message *string
+	Message any
 }
 
 func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error {
@@ -1947,6 +1947,10 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
+	}
+
+	if _, ok := input.Message.(*string); !ok {
+		return fmt.Errorf("message must be a pointer to a string")
 	}
 
 	if wfState.isWithinStep {
