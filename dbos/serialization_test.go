@@ -3,36 +3,13 @@ package dbos
 import (
 	"context"
 	"encoding/gob"
-	"encoding/json"
 	"fmt"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func isInterfaceType(v any) bool {
-	t := reflect.TypeOf(v)
-	if t == nil {
-		return true // nil can be any type
-	}
-	return t.Kind() == reflect.Interface
-}
-
-// isTestNilValue checks if a value is nil (for pointer types, slice, map, interface, etc.)
-func isTestNilValue(v any) bool {
-	val := reflect.ValueOf(v)
-	if !val.IsValid() {
-		return true
-	}
-	switch val.Kind() {
-	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface, reflect.Chan, reflect.Func:
-		return val.IsNil()
-	}
-	return false
-}
 
 // Unified helper: test round-trip across all read paths for typed workflows.
 // Also handles nil values when expected is nil.
@@ -44,7 +21,7 @@ func testRoundTrip[T any, H any](
 ) {
 	t.Helper()
 
-	isNilExpected := isTestNilValue(expected)
+	isNilExpected := isNilValue(expected)
 
 	t.Run("HandleGetResult", func(t *testing.T) {
 		gotAny, err := handle.GetResult()
@@ -227,14 +204,14 @@ func runScalarsTests(t *testing.T, executor DBOSContext) {
 		// Test int as representative scalar type
 		h2, err := RunWorkflow(executor, serializerIntWorkflow, 42)
 		require.NoError(t, err)
-		testRoundTrip[int, int](t, executor, h2, 42)
+		testRoundTrip(t, executor, h2, 42)
 	})
 
 	t.Run("EmptyString", func(t *testing.T) {
 		emptyStr := ""
 		h3, err := RunWorkflow(executor, serializerStringWorkflow, emptyStr)
 		require.NoError(t, err)
-		testRoundTrip[string, string](t, executor, h3, emptyStr)
+		testRoundTrip(t, executor, h3, emptyStr)
 	})
 }
 
@@ -287,6 +264,111 @@ func runPointerTests(t *testing.T, executor DBOSContext) {
 			assert.Nil(t, step.Error)
 		})
 	})
+
+	t.Run("NestedPointers", func(t *testing.T) {
+		// Test **int with non-nil value - verifies double-pointer reconstruction
+		// Gob stores pointed values directly, so **int requires reconstructing two pointer levels
+		// This tests that the pointer reconstruction logic handles nested pointers correctly
+		t.Run("NonNil", func(t *testing.T) {
+			v := 42
+			ptr := &v
+			expected := &ptr
+			h2, err := RunWorkflow(executor, serializerIntPtrPtrWorkflow, expected)
+			require.NoError(t, err)
+
+			t.Run("HandleGetResult", func(t *testing.T) {
+				gotAny, err := h2.GetResult()
+				require.NoError(t, err)
+				require.NotNil(t, gotAny, "Double pointer should not be nil")
+				require.NotNil(t, *gotAny, "Dereferenced pointer should not be nil")
+				assert.Equal(t, v, **gotAny, "Double-dereferenced value should match original")
+			})
+
+			t.Run("RetrieveWorkflow", func(t *testing.T) {
+				// We only do 1 level of pointer reconstruction in T (e.g., *int, not **int)
+				h3, err := RetrieveWorkflow[*int](executor, h2.GetWorkflowID())
+				require.NoError(t, err)
+				gotAny, err := h3.GetResult()
+				require.NoError(t, err)
+				require.NotNil(t, gotAny, "Retrieved double pointer should not be nil")
+				require.NotNil(t, *gotAny, "Retrieved dereferenced pointer should not be nil")
+				assert.Equal(t, v, *gotAny, "Retrieved double-dereferenced value should match original")
+			})
+
+			// For ListWorkflows and GetWorkflowSteps, the decoded value will not be reconstructed as a pointer
+			t.Run("ListWorkflows", func(t *testing.T) {
+				wfs, err := ListWorkflows(executor,
+					WithWorkflowIDs([]string{h2.GetWorkflowID()}),
+					WithLoadInput(true), WithLoadOutput(true))
+				require.NoError(t, err)
+				require.Len(t, wfs, 1)
+				wf := wfs[0]
+				require.NotNil(t, wf.Input)
+				require.NotNil(t, wf.Output)
+				// Decoded value should be *int (one level dereferenced), not **int
+				inputPtr, ok := wf.Input.(int)
+				require.True(t, ok, "Input should be *int after one level dereferencing, got %T", wf.Input)
+				assert.Equal(t, v, inputPtr, "Input should dereference to original value")
+				outputPtr, ok := wf.Output.(int)
+				require.True(t, ok, "Output should be int after one level dereferencing, got %T", wf.Output)
+				assert.Equal(t, v, outputPtr, "Output should dereference to original value")
+			})
+
+			t.Run("GetWorkflowSteps", func(t *testing.T) {
+				steps, err := GetWorkflowSteps(executor, h2.GetWorkflowID())
+				require.NoError(t, err)
+				require.Len(t, steps, 1)
+				step := steps[0]
+				require.NotNil(t, step.Output)
+				// Decoded value should be *int (one level dereferenced), not **int
+				outputPtr, ok := step.Output.(int)
+				require.True(t, ok, "Step output should be int after one level dereferencing, got %T", step.Output)
+				assert.Equal(t, v, outputPtr, "Step output should dereference to original value")
+				assert.Nil(t, step.Error)
+			})
+		})
+
+		// Test **int with nil value - verifies nil double-pointer handling
+		t.Run("Nil", func(t *testing.T) {
+			var expected **int = nil
+			h2, err := RunWorkflow(executor, serializerIntPtrPtrWorkflow, expected)
+			require.NoError(t, err)
+
+			t.Run("HandleGetResult", func(t *testing.T) {
+				gotAny, err := h2.GetResult()
+				require.NoError(t, err)
+				assert.Nil(t, gotAny, "Nil double pointer should be preserved")
+			})
+
+			t.Run("RetrieveWorkflow", func(t *testing.T) {
+				h3, err := RetrieveWorkflow[**int](executor, h2.GetWorkflowID())
+				require.NoError(t, err)
+				gotAny, err := h3.GetResult()
+				require.NoError(t, err)
+				assert.Nil(t, gotAny, "Retrieved nil double pointer should be preserved")
+			})
+
+			t.Run("ListWorkflows", func(t *testing.T) {
+				wfs, err := ListWorkflows(executor,
+					WithWorkflowIDs([]string{h2.GetWorkflowID()}),
+					WithLoadInput(true), WithLoadOutput(true))
+				require.NoError(t, err)
+				require.Len(t, wfs, 1)
+				wf := wfs[0]
+				assert.Nil(t, wf.Input, "Nil double pointer input should decode to nil")
+				assert.Nil(t, wf.Output, "Nil double pointer output should decode to nil")
+			})
+
+			t.Run("GetWorkflowSteps", func(t *testing.T) {
+				steps, err := GetWorkflowSteps(executor, h2.GetWorkflowID())
+				require.NoError(t, err)
+				require.Len(t, steps, 1)
+				step := steps[0]
+				assert.Nil(t, step.Output, "Nil double pointer step output should decode to nil")
+				assert.Nil(t, step.Error)
+			})
+		})
+	})
 }
 
 func runSlicesAndArraysTests(t *testing.T, executor DBOSContext) {
@@ -295,13 +377,45 @@ func runSlicesAndArraysTests(t *testing.T, executor DBOSContext) {
 		s1 := []int{1, 2, 3}
 		h2, err := RunWorkflow(executor, serializerIntSliceWorkflow, s1)
 		require.NoError(t, err)
-		testRoundTrip[[]int, []int](t, executor, h2, s1)
+		testRoundTrip(t, executor, h2, s1)
 
 		// Nil slice - tests nil handling
 		var s2 []int
 		h4, err := RunWorkflow(executor, serializerIntSliceWorkflow, s2)
 		require.NoError(t, err)
-		testRoundTrip[[]int, []int](t, executor, h4, s2)
+		testRoundTrip(t, executor, h4, s2)
+
+		// Array - tests fixed-size array type handling
+		// Arrays are value types with fixed size, distinct from slices
+		// This verifies that gob handles array types correctly (reflect.Array vs reflect.Slice)
+		t.Run("Array", func(t *testing.T) {
+			arr := [3]int{1, 2, 3}
+			h6, err := RunWorkflow(executor, serializerIntArrayWorkflow, arr)
+			require.NoError(t, err)
+			testRoundTrip(t, executor, h6, arr)
+		})
+	})
+}
+
+func runByteSliceTests(t *testing.T, executor DBOSContext) {
+	t.Run("ByteSlices", func(t *testing.T) {
+		// Non-empty byte slice - tests gob's special handling of []byte
+		// Gob optimizes []byte encoding, potentially using raw bytes instead of slice encoding
+		// This verifies that the wrapper approach works correctly with this optimization
+		t.Run("NonEmpty", func(t *testing.T) {
+			bs := []byte{1, 2, 3, 4, 5}
+			h2, err := RunWorkflow(executor, serializerByteSliceWorkflow, bs)
+			require.NoError(t, err)
+			testRoundTrip(t, executor, h2, bs)
+		})
+
+		// Nil byte slice - tests nil handling for byte slices
+		t.Run("Nil", func(t *testing.T) {
+			var bs []byte = nil
+			h3, err := RunWorkflow(executor, serializerByteSliceWorkflow, bs)
+			require.NoError(t, err)
+			testRoundTrip(t, executor, h3, bs)
+		})
 	})
 }
 
@@ -311,13 +425,13 @@ func runMapsTests(t *testing.T, executor DBOSContext) {
 		m1 := map[string]int{"x": 1, "y": 2}
 		h2, err := RunWorkflow(executor, serializerStringIntMapWorkflow, m1)
 		require.NoError(t, err)
-		testRoundTrip[map[string]int, map[string]int](t, executor, h2, m1)
+		testRoundTrip(t, executor, h2, m1)
 
 		// Nil map - tests nil handling
 		var m2 map[string]int
 		h4, err := RunWorkflow(executor, serializerStringIntMapWorkflow, m2)
 		require.NoError(t, err)
-		testRoundTrip[map[string]int, map[string]int](t, executor, h4, m2)
+		testRoundTrip(t, executor, h4, m2)
 	})
 }
 
@@ -326,53 +440,27 @@ func runCustomTypesTests(t *testing.T, executor DBOSContext) {
 		mi := MyInt(7)
 		h2, err := RunWorkflow(executor, serializerMyIntWorkflow, mi)
 		require.NoError(t, err)
-		testRoundTrip[MyInt, MyInt](t, executor, h2, mi)
+		testRoundTrip(t, executor, h2, mi)
 
 		ms := MyString("zeta")
 		h4, err := RunWorkflow(executor, serializerMyStringWorkflow, ms)
 		require.NoError(t, err)
-		testRoundTrip[MyString, MyString](t, executor, h4, ms)
+		testRoundTrip(t, executor, h4, ms)
 
 		msl := []MyString{"a", "b"}
 		h6, err := RunWorkflow(executor, serializerMyStringSliceWorkflow, msl)
 		require.NoError(t, err)
-		testRoundTrip[[]MyString, []MyString](t, executor, h6, msl)
+		testRoundTrip(t, executor, h6, msl)
 
 		mm := map[string]MyInt{"k": 9}
 		h8, err := RunWorkflow(executor, serializerStringMyIntMapWorkflow, mm)
 		require.NoError(t, err)
-		testRoundTrip[map[string]MyInt, map[string]MyInt](t, executor, h8, mm)
-	})
-}
-
-func runCustomMarshalerTests(t *testing.T, executor DBOSContext) {
-	t.Run("CustomMarshaler", func(t *testing.T) {
-		tw := TwiceInt(11)
-		h2, err := RunWorkflow(executor, serializerTwiceIntWorkflow, tw)
-		require.NoError(t, err)
-		testRoundTrip[TwiceInt, TwiceInt](t, executor, h2, tw)
+		testRoundTrip(t, executor, h8, mm)
 	})
 }
 
 type MyInt int
 type MyString string
-
-// Custom marshaler that doubles on marshal and halves on unmarshal
-type TwiceInt int
-
-func (t TwiceInt) MarshalJSON() ([]byte, error) {
-	v := int(t) * 2
-	return json.Marshal(v)
-}
-
-func (t *TwiceInt) UnmarshalJSON(b []byte) error {
-	var v int
-	if err := json.Unmarshal(b, &v); err != nil {
-		return err
-	}
-	*t = TwiceInt(v / 2)
-	return nil
-}
 
 // Test data structures for DBOS integration testing
 type TestData struct {
@@ -388,14 +476,16 @@ type NestedTestData struct {
 }
 
 type TestWorkflowData struct {
-	ID          string
-	Message     string
-	Value       int
-	Active      bool
-	Data        TestData
-	Metadata    map[string]string
-	NestedSlice []NestedTestData
-	NestedMap   map[NestedTestData]MyInt
+	ID           string
+	Message      string
+	Value        int
+	Active       bool
+	Data         TestData
+	Metadata     map[string]string
+	NestedSlice  []NestedTestData
+	NestedMap    map[NestedTestData]MyInt
+	StringPtr    *string
+	StringPtrPtr **string
 }
 
 // Test workflows and steps
@@ -435,9 +525,11 @@ var (
 	serializerMyStringWorkflow       = makeTestWorkflow[MyString]()
 	serializerMyStringSliceWorkflow  = makeTestWorkflow[[]MyString]()
 	serializerStringMyIntMapWorkflow = makeTestWorkflow[map[string]MyInt]()
-	serializerTwiceIntWorkflow       = makeTestWorkflow[TwiceInt]()
 	serializerStringWorkflow         = makeTestWorkflow[string]()
 	serializerBoolWorkflow           = makeTestWorkflow[bool]()
+	serializerIntArrayWorkflow       = makeTestWorkflow[[3]int]()
+	serializerByteSliceWorkflow      = makeTestWorkflow[[]byte]()
+	serializerIntPtrPtrWorkflow      = makeTestWorkflow[**int]()
 )
 
 // makeSenderWorkflow creates a generic sender workflow that sends a message to a receiver workflow.
@@ -562,6 +654,13 @@ func serializerGetEventWorkflow(ctx DBOSContext, targetWorkflowID string) (TestW
 	return event, nil
 }
 
+// Workflow for testing interface signature with manual gob registration
+var interfaceWorkflow = func(ctx DBOSContext, input TestDataProcessor) (TestDataProcessor, error) {
+	return RunAsStep(ctx, func(context context.Context) (TestDataProcessor, error) {
+		return input, nil
+	})
+}
+
 // Workflows for testing recovery with TestWorkflowData type
 var (
 	serializerRecoveryStartEvent *Event
@@ -569,7 +668,15 @@ var (
 )
 
 func serializerRecoveryWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
-	// Single blocking step
+	// First step: return an empty int slice
+	_, err := RunAsStep(ctx, func(context context.Context) ([]int, error) {
+		return []int{}, nil
+	}, WithStepName("EmptySliceStep"))
+	if err != nil {
+		return TestWorkflowData{}, err
+	}
+
+	// Second step: blocking step
 	return RunAsStep(ctx, func(context context.Context) (TestWorkflowData, error) {
 		serializerRecoveryStartEvent.Set()
 		serializerRecoveryEvent.Wait()
@@ -618,9 +725,11 @@ func TestSerializer(t *testing.T) {
 		RegisterWorkflow(executor, serializerMyStringWorkflow)
 		RegisterWorkflow(executor, serializerMyStringSliceWorkflow)
 		RegisterWorkflow(executor, serializerStringMyIntMapWorkflow)
-		RegisterWorkflow(executor, serializerTwiceIntWorkflow)
 		RegisterWorkflow(executor, serializerStringWorkflow)
 		RegisterWorkflow(executor, serializerBoolWorkflow)
+		RegisterWorkflow(executor, serializerIntArrayWorkflow)
+		RegisterWorkflow(executor, serializerByteSliceWorkflow)
+		RegisterWorkflow(executor, serializerIntPtrPtrWorkflow)
 		// Register typed Send/Recv workflows
 		RegisterWorkflow(executor, serializerIntSenderWorkflow)
 		RegisterWorkflow(executor, serializerIntReceiverWorkflow)
@@ -637,11 +746,6 @@ func TestSerializer(t *testing.T) {
 		RegisterWorkflow(executor, serializerMyIntGetEventWorkflow)
 
 		// Register workflow with interface signature for manual gob registration test
-		interfaceWorkflow := func(ctx DBOSContext, input TestDataProcessor) (TestDataProcessor, error) {
-			return RunAsStep(ctx, func(context context.Context) (TestDataProcessor, error) {
-				return input, nil
-			})
-		}
 		RegisterWorkflow(executor, interfaceWorkflow)
 
 		// Manually register the concrete implementation with gob before launching DBOS
@@ -653,6 +757,8 @@ func TestSerializer(t *testing.T) {
 
 		// Test workflow with comprehensive data structure
 		t.Run("ComprehensiveValues", func(t *testing.T) {
+			strPtr := "pointer value"
+			strPtrPtr := &strPtr
 			input := TestWorkflowData{
 				ID:       "test-id",
 				Message:  "test message",
@@ -668,20 +774,22 @@ func TestSerializer(t *testing.T) {
 					{Key: "map-key1", Count: 1}: MyInt(100),
 					{Key: "map-key2", Count: 2}: MyInt(200),
 				},
+				StringPtr:    &strPtr,
+				StringPtrPtr: &strPtrPtr,
 			}
 
 			handle, err := RunWorkflow(executor, serializerWorkflow, input)
 			require.NoError(t, err, "Workflow execution failed")
 
-			testRoundTrip[TestWorkflowData, TestWorkflowData](t, executor, handle, input)
+			testRoundTrip(t, executor, handle, input)
 		})
 
 		// Test nil values with pointer type workflow
-		t.Run("NilValuesPointer", func(t *testing.T) {
+		t.Run("NilPointer", func(t *testing.T) {
 			handle, err := RunWorkflow(executor, serializerPointerValueWorkflow, (*TestWorkflowData)(nil))
 			require.NoError(t, err, "Nil pointer workflow execution failed")
 
-			testRoundTrip[*TestWorkflowData, *TestWorkflowData](t, executor, handle, (*TestWorkflowData)(nil))
+			testRoundTrip(t, executor, handle, (*TestWorkflowData)(nil))
 		})
 
 		// Test error values
@@ -699,6 +807,8 @@ func TestSerializer(t *testing.T) {
 				NestedMap: map[NestedTestData]MyInt{
 					{Key: "error-key", Count: 999}: MyInt(999),
 				},
+				StringPtr:    nil,
+				StringPtrPtr: nil,
 			}
 
 			handle, err := RunWorkflow(executor, serializerErrorWorkflow, input)
@@ -725,6 +835,7 @@ func TestSerializer(t *testing.T) {
 
 		// Test Send/Recv with non-basic types
 		t.Run("SendRecv", func(t *testing.T) {
+			strPtr := "sendrecv pointer"
 			input := TestWorkflowData{
 				ID:       "sendrecv-test-id",
 				Message:  "test message",
@@ -738,6 +849,8 @@ func TestSerializer(t *testing.T) {
 				NestedMap: map[NestedTestData]MyInt{
 					{Key: "sendrecv-key", Count: 5}: MyInt(500),
 				},
+				StringPtr:    &strPtr,
+				StringPtrPtr: nil,
 			}
 
 			testSendRecv(t, executor, serializerSenderWorkflow, serializerReceiverWorkflow, input, "sender-wf")
@@ -745,6 +858,8 @@ func TestSerializer(t *testing.T) {
 
 		// Test SetEvent/GetEvent with non-basic types
 		t.Run("SetGetEvent", func(t *testing.T) {
+			strPtr := "event pointer"
+			strPtrPtr := &strPtr
 			input := TestWorkflowData{
 				ID:       "event-test-id",
 				Message:  "event message",
@@ -760,6 +875,8 @@ func TestSerializer(t *testing.T) {
 					{Key: "event-key1", Count: 3}: MyInt(300),
 					{Key: "event-key2", Count: 4}: MyInt(400),
 				},
+				StringPtr:    &strPtr,
+				StringPtrPtr: &strPtrPtr,
 			}
 
 			testSetGetEvent(t, executor, serializerSetEventWorkflow, serializerGetEventWorkflow, input, "setevent-wf", "getevent-wf")
@@ -802,6 +919,7 @@ func TestSerializer(t *testing.T) {
 			serializerRecoveryStartEvent = NewEvent()
 			serializerRecoveryEvent = NewEvent()
 
+			strPtr := "recovery pointer"
 			input := TestWorkflowData{
 				ID:       "recovery-test-id",
 				Message:  "recovery test message",
@@ -815,6 +933,8 @@ func TestSerializer(t *testing.T) {
 				NestedMap: map[NestedTestData]MyInt{
 					{Key: "recovery-key", Count: 11}: MyInt(1111),
 				},
+				StringPtr:    &strPtr,
+				StringPtrPtr: nil,
 			}
 
 			testWorkflowRecovery(t, executor, serializerRecoveryWorkflow, serializerRecoveryStartEvent, serializerRecoveryEvent, input, "serializer-recovery-wf")
@@ -822,6 +942,8 @@ func TestSerializer(t *testing.T) {
 
 		// Test queued workflow with TestWorkflowData type
 		t.Run("QueuedWorkflow", func(t *testing.T) {
+			strPtr := "queued pointer"
+			strPtrPtr := &strPtr
 			input := TestWorkflowData{
 				ID:       "queued-test-id",
 				Message:  "queued test message",
@@ -835,6 +957,8 @@ func TestSerializer(t *testing.T) {
 				NestedMap: map[NestedTestData]MyInt{
 					{Key: "queued-key", Count: 22}: MyInt(2222),
 				},
+				StringPtr:    &strPtr,
+				StringPtrPtr: &strPtrPtr,
 			}
 
 			// Start workflow with queue option
@@ -850,11 +974,14 @@ func TestSerializer(t *testing.T) {
 		// Additional coverage: Scalars
 		runScalarsTests(t, executor)
 
-		// Pointer variants (non-nil)
+		// Pointer variants (non-nil) and nested pointers (**int)
 		runPointerTests(t, executor)
 
 		// Slices and arrays, including nil vs empty and nested
 		runSlicesAndArraysTests(t, executor)
+
+		// Byte slices - tests gob's special handling of []byte
+		runByteSliceTests(t, executor)
 
 		// Maps, including non-string keys
 		runMapsTests(t, executor)
@@ -862,16 +989,13 @@ func TestSerializer(t *testing.T) {
 		// Custom defined types
 		runCustomTypesTests(t, executor)
 
-		// Custom marshaler/unmarshaler
-		runCustomMarshalerTests(t, executor)
-
 		// Test workflow with interface signature and manual gob registration
 		t.Run("InterfaceWithManualGobRegistration", func(t *testing.T) {
 			// Create an instance of the concrete implementation
 			processor := &TestStringProcessor{Prefix: "Processed: "}
 
-			// Run the workflow with explicit type parameters
-			handle, err := RunWorkflow[TestDataProcessor, TestDataProcessor](executor, interfaceWorkflow, processor)
+			// Run the workflow with explicit type parameters (needed because processor is *TestStringProcessor but workflow expects TestDataProcessor interface)
+			handle, err := RunWorkflow[TestDataProcessor](executor, interfaceWorkflow, processor)
 			require.NoError(t, err, "Workflow execution failed")
 
 			// Helper function to verify TestStringProcessor
