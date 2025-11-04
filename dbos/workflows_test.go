@@ -1242,8 +1242,8 @@ func TestWorkflowRecovery(t *testing.T) {
 			result, err := recoveredHandle.GetResult()
 			require.NoError(t, err, "failed to get result from recovered workflow %d", i)
 
-			// Result should be the counter value (1). Will be float64 because JSON serialized it into an any type.
-			require.Equal(t, float64(1), result, "workflow %d result should be 1", i)
+			// Result should be the counter value (1)
+			require.Equal(t, int64(1), result, "workflow %d result should be 1", i)
 		}
 
 		// Final verification of step states
