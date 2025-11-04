@@ -1238,8 +1238,8 @@ type recordChildWorkflowDBInput struct {
 
 func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error {
 	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, function_name, child_workflow_id)
-            VALUES ($1, $2, $3, $4)`, pgx.Identifier{s.schema}.Sanitize())
+            (workflow_uuid, function_id, function_name, child_workflow_id, output)
+            VALUES ($1, $2, $3, $4, '')`, pgx.Identifier{s.schema}.Sanitize())
 
 	var commandTag pgconn.CommandTag
 	var err error
