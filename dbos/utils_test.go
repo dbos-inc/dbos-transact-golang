@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -180,23 +179,4 @@ func checkWfStatus(ctx DBOSContext, expectedStatus WorkflowStatusType) (bool, er
 		return true, nil
 	}
 	return false, nil
-}
-
-// Re-encode the value as JSON and then unmarshal into the target type
-func convertJSONToType[T any](value any) (T, error) {
-	if value == nil {
-		return *new(T), nil
-	}
-
-	jsonBytes, err := json.Marshal(value)
-	if err != nil {
-		return *new(T), fmt.Errorf("marshaling for type conversion: %w", err)
-	}
-
-	var typedResult T
-	if err := json.Unmarshal(jsonBytes, &typedResult); err != nil {
-		return *new(T), fmt.Errorf("unmarshaling for type conversion: %w", err)
-	}
-
-	return typedResult, nil
 }
