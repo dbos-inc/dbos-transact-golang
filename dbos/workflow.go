@@ -205,7 +205,7 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 
 // processOutcome handles the common logic for processing workflow outcomes
 func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error) {
-	typedResult := outcome.result
+	decodedResult := outcome.result
 	// If we are calling GetResult inside a workflow, record the result as a step result
 	workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
@@ -214,7 +214,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("invalid DBOSContext: expected *dbosContext"))
 		}
 		serializer := newGobSerializer[R]()
-		encodedOutput, encErr := serializer.Encode(typedResult)
+		encodedOutput, encErr := serializer.Encode(decodedResult)
 		if encErr != nil {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 		}
@@ -233,7 +233,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("recording child workflow result: %w", recordResultErr))
 		}
 	}
-	return typedResult, outcome.err
+	return decodedResult, outcome.err
 }
 
 type workflowPollingHandle[R any] struct {
@@ -262,7 +262,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	var typedResult R
 	if encodedResult != nil {
 		encodedStr, ok := encodedResult.(*string)
-		if !ok {
+		if !ok { // Should never happen
 			return *new(R), newWorkflowUnexpectedResultType(h.workflowID, "string (encoded)", fmt.Sprintf("%T", encodedResult))
 		}
 		serializer := newGobSerializer[R]()
@@ -517,7 +517,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	var p P
 
 	// Register a type-erased version of the durable workflow for recovery and queue runner
-	// Input will always be encoded as *string, so we decode it into the target type (captured by this wrapped closure)
+	// Input will always come from the database and encoded as *string, so we decode it into the target type (captured by this wrapped closure)
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 		workflowID, err := GetWorkflowID(ctx)
 		if err != nil {
@@ -681,10 +681,6 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 	opts = append(opts, withWorkflowName(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()))
 
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
-		if input == nil {
-			var zero P
-			return fn(ctx, zero)
-		}
 		return fn(ctx, input.(P))
 	})
 
@@ -1006,13 +1002,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			encodedResult, err = retryWithResult(c, func() (any, error) {
 				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID)
 			}, withRetrierLogger(c.logger))
-			encodedResult, ok := encodedResult.(*string)
-			if !ok {
-				c.logger.Error("Unexpected result type when awaiting workflow result after ID conflict", "workflow_id", workflowID, "type", fmt.Sprintf("%T", encodedResult))
-				outcomeChan <- workflowOutcome[any]{result: nil, err: fmt.Errorf("unexpected result type when awaiting workflow result after ID conflict: expected *string, got %T", encodedResult)}
-				close(outcomeChan)
-				return
-			}
 			// Keep the encoded result - decoding will happen in RunWorkflow[P,R] when we know the target type
 			outcomeChan <- workflowOutcome[any]{result: encodedResult, err: err, needsDecoding: true}
 			close(outcomeChan)
@@ -1052,12 +1041,12 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			}, withRetrierLogger(c.logger))
 			if recordErr != nil {
 				c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
-				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr, needsDecoding: false}
+				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
 				close(outcomeChan)
 				return
 			}
 		}
-		outcomeChan <- workflowOutcome[any]{result: result, err: err, needsDecoding: false}
+		outcomeChan <- workflowOutcome[any]{result: result, err: err}
 		close(outcomeChan)
 	}()
 

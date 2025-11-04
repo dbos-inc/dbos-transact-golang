@@ -57,7 +57,7 @@ type systemDatabase interface {
 	send(ctx context.Context, input WorkflowSendInput) error
 	recv(ctx context.Context, input recvInput) (*string, error)
 	setEvent(ctx context.Context, input WorkflowSetEventInput) error
-	getEvent(ctx context.Context, input getEventInput) (any, error)
+	getEvent(ctx context.Context, input getEventInput) (*string, error)
 
 	// Timers (special steps)
 	sleep(ctx context.Context, input sleepInput) (time.Duration, error)
@@ -2016,7 +2016,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	return nil
 }
 
-func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (any, error) {
+func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, error) {
 	functionName := "DBOS.getEvent"
 
 	// Get workflow state from context (optional for GetEvent as we can get an event from outside a workflow)

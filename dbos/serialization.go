@@ -55,7 +55,6 @@ func newGobSerializer[T any]() serializer[T] {
 }
 
 func (g *gobSerializer[T]) Encode(data T) (string, error) {
-	// Check if data is nil (for pointer types, slice, map, interface, chan, func)
 	if isNilValue(data) {
 		// For nil values, encode an empty byte slice directly to base64
 		return base64.StdEncoding.EncodeToString([]byte{}), nil
@@ -100,8 +99,7 @@ func (g *gobSerializer[T]) Decode(data *string) (T, error) {
 
 	// Register type T before decoding
 	// This is required on the recovery path, where the process might not have been doing the encode/registering.
-	// Note wee do not support interface types in workflows/steps
-	// This will panic if T is an non-registered interface type
+	// This will panic if T is an non-registered interface type (which is not supported)
 	if tType != nil && tType.Kind() != reflect.Interface {
 		safeGobRegister(zero)
 	}
