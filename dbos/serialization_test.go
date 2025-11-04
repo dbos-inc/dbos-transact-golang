@@ -591,57 +591,6 @@ func serializerRecoveryWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWo
 	}, WithStepName("BlockingStep"))
 }
 
-// init registers all custom types with gob for gobSerializer
-// Note: gob requires concrete types to be registered. Interface types cannot be registered
-// directly - only their concrete implementations. When encoding interface{} fields,
-// gob needs the concrete type to be registered.
-func init() {
-	// Register wrapper type
-	safeGobRegister(gobValue{})
-
-	// Register test data types (concrete structs)
-	safeGobRegister(TestData{})
-	safeGobRegister(NestedTestData{})
-	safeGobRegister(TestWorkflowData{})
-
-	// Register custom type aliases (must register with concrete value)
-	safeGobRegister(MyInt(0))
-	safeGobRegister(MyString(""))
-	safeGobRegister(TwiceInt(0))
-
-	// Register struct with interface fields (the struct itself is concrete)
-	safeGobRegister(WithInterfaces{})
-
-	// Register slices of custom types
-	safeGobRegister([]MyString(nil))
-	safeGobRegister([]MyInt(nil))
-	safeGobRegister([]int(nil))
-	safeGobRegister([]string(nil))
-	safeGobRegister([]bool(nil))
-	safeGobRegister([]NestedTestData(nil))
-
-	// Register maps with custom types
-	safeGobRegister(map[string]MyInt(nil))
-	safeGobRegister(map[string]string(nil))
-	safeGobRegister(map[string]int(nil))
-	safeGobRegister(map[string]bool(nil))
-	safeGobRegister(map[string]any(nil))
-	safeGobRegister(map[NestedTestData]MyInt(nil))
-
-	// Register pointer types
-	safeGobRegister((*int)(nil))
-	safeGobRegister((*string)(nil))
-	safeGobRegister((*bool)(nil))
-	safeGobRegister((*TestWorkflowData)(nil))
-	safeGobRegister((*TestData)(nil))
-	safeGobRegister((*NestedTestData)(nil))
-	safeGobRegister((*MyInt)(nil))
-	safeGobRegister((*MyString)(nil))
-
-	// Register time.Time (used in workflow timeouts and sleep operations)
-	safeGobRegister(time.Time{})
-}
-
 // Test that workflows use the configured serializer for input/output
 func TestSerializer(t *testing.T) {
 	t.Run("Gob", func(t *testing.T) {
