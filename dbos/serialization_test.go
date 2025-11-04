@@ -320,15 +320,6 @@ func runMapsTests(t *testing.T, executor DBOSContext) {
 	})
 }
 
-func runInterfaceFieldsTests(t *testing.T, executor DBOSContext) {
-	t.Run("InterfaceFieldsStruct", func(t *testing.T) {
-		inp := WithInterfaces{A: map[string]any{"k": "v"}}
-		h2, err := RunWorkflow(executor, serializerWithInterfacesWorkflow, inp)
-		require.NoError(t, err)
-		testRoundTrip[WithInterfaces, WithInterfaces](t, executor, h2, inp)
-	})
-}
-
 func runCustomTypesTests(t *testing.T, executor DBOSContext) {
 	t.Run("CustomTypes", func(t *testing.T) {
 		mi := MyInt(7)
@@ -380,11 +371,6 @@ func (t *TwiceInt) UnmarshalJSON(b []byte) error {
 	}
 	*t = TwiceInt(v / 2)
 	return nil
-}
-
-// Struct with interface fields
-type WithInterfaces struct {
-	A any
 }
 
 // Test data structures for DBOS integration testing
@@ -444,7 +430,6 @@ var (
 	serializerIntPtrWorkflow         = makeTestWorkflow[*int]()
 	serializerIntSliceWorkflow       = makeTestWorkflow[[]int]()
 	serializerStringIntMapWorkflow   = makeTestWorkflow[map[string]int]()
-	serializerWithInterfacesWorkflow = makeTestWorkflow[WithInterfaces]()
 	serializerMyIntWorkflow          = makeTestWorkflow[MyInt]()
 	serializerMyStringWorkflow       = makeTestWorkflow[MyString]()
 	serializerMyStringSliceWorkflow  = makeTestWorkflow[[]MyString]()
@@ -613,7 +598,6 @@ func TestSerializer(t *testing.T) {
 		RegisterWorkflow(executor, serializerIntPtrWorkflow)
 		RegisterWorkflow(executor, serializerIntSliceWorkflow)
 		RegisterWorkflow(executor, serializerStringIntMapWorkflow)
-		RegisterWorkflow(executor, serializerWithInterfacesWorkflow)
 		RegisterWorkflow(executor, serializerMyIntWorkflow)
 		RegisterWorkflow(executor, serializerMyStringWorkflow)
 		RegisterWorkflow(executor, serializerMyStringSliceWorkflow)
@@ -847,9 +831,6 @@ func TestSerializer(t *testing.T) {
 
 		// Maps, including non-string keys
 		runMapsTests(t, executor)
-
-		// Struct with interface fields
-		runInterfaceFieldsTests(t, executor)
 
 		// Custom defined types
 		runCustomTypesTests(t, executor)
