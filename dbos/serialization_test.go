@@ -394,13 +394,21 @@ type TestData struct {
 	Active  bool
 }
 
+// NestedTestData is a nested struct type for testing slices and maps of structs
+type NestedTestData struct {
+	Key   string
+	Count int
+}
+
 type TestWorkflowData struct {
-	ID       string
-	Message  string
-	Value    int
-	Active   bool
-	Data     TestData
-	Metadata map[string]string
+	ID          string
+	Message     string
+	Value       int
+	Active      bool
+	Data        TestData
+	Metadata    map[string]string
+	NestedSlice []NestedTestData
+	NestedMap   map[NestedTestData]MyInt
 }
 
 // Test workflows and steps
@@ -593,6 +601,7 @@ func init() {
 
 	// Register test data types (concrete structs)
 	safeGobRegister(TestData{})
+	safeGobRegister(NestedTestData{})
 	safeGobRegister(TestWorkflowData{})
 
 	// Register custom type aliases (must register with concrete value)
@@ -609,6 +618,7 @@ func init() {
 	safeGobRegister([]int(nil))
 	safeGobRegister([]string(nil))
 	safeGobRegister([]bool(nil))
+	safeGobRegister([]NestedTestData(nil))
 
 	// Register maps with custom types
 	safeGobRegister(map[string]MyInt(nil))
@@ -616,6 +626,7 @@ func init() {
 	safeGobRegister(map[string]int(nil))
 	safeGobRegister(map[string]bool(nil))
 	safeGobRegister(map[string]any(nil))
+	safeGobRegister(map[NestedTestData]MyInt(nil))
 
 	// Register pointer types
 	safeGobRegister((*int)(nil))
@@ -623,6 +634,7 @@ func init() {
 	safeGobRegister((*bool)(nil))
 	safeGobRegister((*TestWorkflowData)(nil))
 	safeGobRegister((*TestData)(nil))
+	safeGobRegister((*NestedTestData)(nil))
 	safeGobRegister((*MyInt)(nil))
 	safeGobRegister((*MyString)(nil))
 
@@ -688,6 +700,14 @@ func TestSerializer(t *testing.T) {
 				Active:   true,
 				Data:     TestData{Message: "embedded", Value: 123, Active: false},
 				Metadata: map[string]string{"key": "value"},
+				NestedSlice: []NestedTestData{
+					{Key: "nested1", Count: 10},
+					{Key: "nested2", Count: 20},
+				},
+				NestedMap: map[NestedTestData]MyInt{
+					{Key: "map-key1", Count: 1}: MyInt(100),
+					{Key: "map-key2", Count: 2}: MyInt(200),
+				},
 			}
 
 			handle, err := RunWorkflow(executor, serializerWorkflow, input)
@@ -713,6 +733,12 @@ func TestSerializer(t *testing.T) {
 				Active:   true,
 				Data:     TestData{Message: "error data", Value: 456, Active: false},
 				Metadata: map[string]string{"type": "error"},
+				NestedSlice: []NestedTestData{
+					{Key: "error-nested", Count: 99},
+				},
+				NestedMap: map[NestedTestData]MyInt{
+					{Key: "error-key", Count: 999}: MyInt(999),
+				},
 			}
 
 			handle, err := RunWorkflow(executor, serializerErrorWorkflow, input)
@@ -746,6 +772,12 @@ func TestSerializer(t *testing.T) {
 				Active:   true,
 				Data:     TestData{Message: "nested", Value: 200, Active: true},
 				Metadata: map[string]string{"comm": "sendrecv"},
+				NestedSlice: []NestedTestData{
+					{Key: "sendrecv-nested", Count: 50},
+				},
+				NestedMap: map[NestedTestData]MyInt{
+					{Key: "sendrecv-key", Count: 5}: MyInt(500),
+				},
 			}
 
 			testSendRecv(t, executor, serializerSenderWorkflow, serializerReceiverWorkflow, input, "sender-wf")
@@ -760,6 +792,14 @@ func TestSerializer(t *testing.T) {
 				Active:   false,
 				Data:     TestData{Message: "event nested", Value: 333, Active: true},
 				Metadata: map[string]string{"type": "event"},
+				NestedSlice: []NestedTestData{
+					{Key: "event-nested1", Count: 30},
+					{Key: "event-nested2", Count: 40},
+				},
+				NestedMap: map[NestedTestData]MyInt{
+					{Key: "event-key1", Count: 3}: MyInt(300),
+					{Key: "event-key2", Count: 4}: MyInt(400),
+				},
 			}
 
 			testSetGetEvent(t, executor, serializerSetEventWorkflow, serializerGetEventWorkflow, input, "setevent-wf", "getevent-wf")
@@ -809,6 +849,12 @@ func TestSerializer(t *testing.T) {
 				Active:   true,
 				Data:     TestData{Message: "recovery nested", Value: 456, Active: false},
 				Metadata: map[string]string{"type": "recovery"},
+				NestedSlice: []NestedTestData{
+					{Key: "recovery-nested", Count: 111},
+				},
+				NestedMap: map[NestedTestData]MyInt{
+					{Key: "recovery-key", Count: 11}: MyInt(1111),
+				},
 			}
 
 			testWorkflowRecovery(t, executor, serializerRecoveryWorkflow, serializerRecoveryStartEvent, serializerRecoveryEvent, input, "serializer-recovery-wf")
@@ -823,6 +869,12 @@ func TestSerializer(t *testing.T) {
 				Active:   false,
 				Data:     TestData{Message: "queued nested", Value: 789, Active: true},
 				Metadata: map[string]string{"type": "queued"},
+				NestedSlice: []NestedTestData{
+					{Key: "queued-nested", Count: 222},
+				},
+				NestedMap: map[NestedTestData]MyInt{
+					{Key: "queued-key", Count: 22}: MyInt(2222),
+				},
 			}
 
 			// Start workflow with queue option
