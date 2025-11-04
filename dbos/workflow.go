@@ -1350,10 +1350,16 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 /****************************************/
 
 func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string) error {
+	// Serialize the message before sending
+	serializer := newGobSerializer[any]()
+	encodedMessage, err := serializer.Encode(message)
+	if err != nil {
+		return fmt.Errorf("failed to serialize message: %w", err)
+	}
 	return retry(c, func() error {
 		return c.systemDB.send(c, WorkflowSendInput{
 			DestinationID: destinationID,
-			Message:       message,
+			Message:       &encodedMessage,
 			Topic:         topic,
 		})
 	}, withRetrierLogger(c.logger))
@@ -1372,13 +1378,7 @@ func Send[P any](ctx DBOSContext, destinationID string, message P, topic string)
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	// Serialize the message before sending
-	serializer := newGobSerializer[P]()
-	encodedMessage, err := serializer.Encode(message)
-	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
-	}
-	return ctx.Send(ctx, destinationID, &encodedMessage, topic)
+	return ctx.Send(ctx, destinationID, message, topic)
 }
 
 type recvInput struct {
@@ -1410,52 +1410,59 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 //	    return err
 //	}
 //	log.Printf("Received: %s", message)
-func Recv[T any](ctx DBOSContext, topic string, timeout time.Duration) (T, error) {
+func Recv[R any](ctx DBOSContext, topic string, timeout time.Duration) (R, error) {
 	if ctx == nil {
-		return *new(T), errors.New("ctx cannot be nil")
+		return *new(R), errors.New("ctx cannot be nil")
 	}
 	msg, err := ctx.Recv(ctx, topic, timeout)
 	if err != nil {
-		return *new(T), err
+		return *new(R), err
 	}
 
 	// Handle nil message
 	if msg == nil {
-		return *new(T), nil
+		return *new(R), nil
 	}
 
-	var typedMessage T
+	var typedMessage R
 	// Check if we're in a real DBOS context (not a mock)
 	if _, ok := ctx.(*dbosContext); ok {
 		encodedMsg, ok := msg.(*string)
 		if !ok {
 			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-			return *new(T), newWorkflowUnexpectedResultType(workflowID, "string (encoded)", fmt.Sprintf("%T", msg))
+			return *new(R), newWorkflowUnexpectedResultType(workflowID, "string (encoded)", fmt.Sprintf("%T", msg))
 		}
-		serializer := newGobSerializer[T]()
+		serializer := newGobSerializer[R]()
 		var decodeErr error
 		typedMessage, decodeErr = serializer.Decode(encodedMsg)
 		if decodeErr != nil {
-			return *new(T), fmt.Errorf("decoding received message to type %T: %w", *new(T), decodeErr)
+			return *new(R), fmt.Errorf("decoding received message to type %T: %w", *new(R), decodeErr)
 		}
 		return typedMessage, nil
 	} else {
 		// Fallback for testing/mocking scenarios where serializer is nil
 		var ok bool
-		typedMessage, ok = msg.(T)
+		typedMessage, ok = msg.(R)
 		if !ok {
 			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-			return *new(T), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(T)), fmt.Sprintf("%T", msg))
+			return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", msg))
 		}
 	}
 	return typedMessage, nil
 }
 
 func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
+	// Serialize the event value before storing
+	serializer := newGobSerializer[any]()
+	encodedMessage, err := serializer.Encode(message)
+	if err != nil {
+		return fmt.Errorf("failed to serialize event value: %w", err)
+	}
+
 	return retry(c, func() error {
 		return c.systemDB.setEvent(c, WorkflowSetEventInput{
 			Key:     key,
-			Message: message,
+			Message: &encodedMessage,
 		})
 	}, withRetrierLogger(c.logger))
 }
@@ -1474,14 +1481,7 @@ func SetEvent[P any](ctx DBOSContext, key string, message P) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	// Serialize the event value before storing
-	serializer := newGobSerializer[P]()
-	encodedMessage, err := serializer.Encode(message)
-	if err != nil {
-		return fmt.Errorf("failed to serialize event value: %w", err)
-	}
-
-	return ctx.SetEvent(ctx, key, &encodedMessage)
+	return ctx.SetEvent(ctx, key, message)
 }
 
 type getEventInput struct {
@@ -1515,40 +1515,40 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 //	    return err
 //	}
 //	log.Printf("Status: %s", status)
-func GetEvent[T any](ctx DBOSContext, targetWorkflowID, key string, timeout time.Duration) (T, error) {
+func GetEvent[R any](ctx DBOSContext, targetWorkflowID, key string, timeout time.Duration) (R, error) {
 	if ctx == nil {
-		return *new(T), errors.New("ctx cannot be nil")
+		return *new(R), errors.New("ctx cannot be nil")
 	}
 	value, err := ctx.GetEvent(ctx, targetWorkflowID, key, timeout)
 	if err != nil {
-		return *new(T), err
+		return *new(R), err
 	}
 	if value == nil {
-		return *new(T), nil
+		return *new(R), nil
 	}
 
-	var typedValue T
+	var typedValue R
 	// Check if we're in a real DBOS context (not a mock)
 	if _, ok := ctx.(*dbosContext); ok {
 		encodedValue, ok := value.(*string)
 		if !ok {
 			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-			return *new(T), newWorkflowUnexpectedResultType(workflowID, "string (encoded)", fmt.Sprintf("%T", value))
+			return *new(R), newWorkflowUnexpectedResultType(workflowID, "string (encoded)", fmt.Sprintf("%T", value))
 		}
 
-		serializer := newGobSerializer[T]()
+		serializer := newGobSerializer[R]()
 		var decodeErr error
 		typedValue, decodeErr = serializer.Decode(encodedValue)
 		if decodeErr != nil {
-			return *new(T), fmt.Errorf("decoding event value to type %T: %w", *new(T), decodeErr)
+			return *new(R), fmt.Errorf("decoding event value to type %T: %w", *new(R), decodeErr)
 		}
 		return typedValue, nil
 	} else {
 		var ok bool
-		typedValue, ok = value.(T)
+		typedValue, ok = value.(R)
 		if !ok {
 			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-			return *new(T), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(T)), fmt.Sprintf("%T", value))
+			return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", value))
 		}
 	}
 	return typedValue, nil
