@@ -1260,11 +1260,14 @@ func TestWorkflowRecovery(t *testing.T) {
 
 		// At least 5 of the 2nd steps should have errored due to execution race
 		// Check they are DBOSErrors with StepExecutionError wrapping a ConflictingIDError
-		secondStepErrorsMu.Lock()
-		errorsCopy := make([]error, len(secondStepErrors))
-		copy(errorsCopy, secondStepErrors)
-		secondStepErrorsMu.Unlock()
-		require.GreaterOrEqual(t, len(errorsCopy), 5, "expected at least 5 errors from second steps due to recovery race, got %d", len(errorsCopy))
+		var errorsCopy []error
+		require.Eventually(t, func() bool {
+			secondStepErrorsMu.Lock()
+			errorsCopy := make([]error, len(secondStepErrors))
+			copy(errorsCopy, secondStepErrors)
+			secondStepErrorsMu.Unlock()
+			return len(errorsCopy) >= 5
+		}, 10*time.Second, 100*time.Millisecond)
 		for _, err := range errorsCopy {
 			dbosErr, ok := err.(*DBOSError)
 			require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
