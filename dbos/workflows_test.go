@@ -1491,6 +1491,7 @@ var (
 	sendIdempotencyEvent         = NewEvent()
 	receiveIdempotencyStartEvent = NewEvent()
 	receiveIdempotencyStopEvent  = NewEvent()
+	sendRecvSyncEvent            = NewEvent() // Event to synchronize send/recv in tests
 	numConcurrentRecvWfs         = 5
 	concurrentRecvReadyEvents    = make([]*Event, numConcurrentRecvWfs)
 	concurrentRecvStartEvent     = NewEvent()
@@ -1518,6 +1519,9 @@ func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 }
 
 func receiveWorkflow(ctx DBOSContext, topic string) (string, error) {
+	// Wait for the test to signal it's ready
+	sendRecvSyncEvent.Wait()
+
 	msg1, err := Recv[string](ctx, topic, 2*time.Second)
 	if err != nil {
 		return "", err
@@ -1651,27 +1655,34 @@ func TestSendRecv(t *testing.T) {
 	Launch(dbosCtx)
 
 	t.Run("SendRecvSuccess", func(t *testing.T) {
-		// Start the receive workflow
+		// Clear the sync event before starting
+		sendRecvSyncEvent.Clear()
+
+		// Start the receive workflow - it will wait for sendRecvSyncEvent before calling Recv
 		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "test-topic")
 		require.NoError(t, err, "failed to start receive workflow")
 
-		time.Sleep(500 * time.Millisecond) // Ensure receive workflow is waiting so we don't miss the notification
-
-		// Send a message to the receive workflow
-		handle, err := RunWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{
+		// Send messages to the receive workflow
+		sendHandle, err := RunWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{
 			DestinationID: receiveHandle.GetWorkflowID(),
 			Topic:         "test-topic",
 		})
 		require.NoError(t, err, "failed to send message")
-		_, err = handle.GetResult()
+
+		// Wait for send workflow to complete
+		_, err = sendHandle.GetResult()
 		require.NoError(t, err, "failed to get result from send workflow")
 
+		// Now that the send workflow has completed, signal the receive workflow to proceed
+		sendRecvSyncEvent.Set()
+
+		// Wait for receive workflow to complete
 		result, err := receiveHandle.GetResult()
 		require.NoError(t, err, "failed to get result from receive workflow")
 		require.Equal(t, "message1-message2-message3", result)
 
 		// Verify step counting for send workflow (sendWorkflow calls Send 3 times)
-		sendSteps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		sendSteps, err := GetWorkflowSteps(dbosCtx, sendHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for send workflow")
 		require.Len(t, sendSteps, 3, "expected 3 steps in send workflow (3 Send calls), got %d", len(sendSteps))
 		for i, step := range sendSteps {
@@ -1682,12 +1693,10 @@ func TestSendRecv(t *testing.T) {
 		// Verify step counting for receive workflow (receiveWorkflow calls Recv 3 times)
 		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps for receive workflow")
-		require.Len(t, receiveSteps, 4, "expected 4 steps in receive workflow (3 Recv calls + 1 sleep call during the first recv), got %d", len(receiveSteps))
-		// Steps 0, 2 and 4 are recv
+		require.Len(t, receiveSteps, 3, "expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
 		require.Equal(t, "DBOS.recv", receiveSteps[0].StepName, "expected step 0 to have StepName 'DBOS.recv'")
-		require.Equal(t, "DBOS.sleep", receiveSteps[1].StepName, "expected step 1 to have StepName 'DBOS.sleep'")
+		require.Equal(t, "DBOS.recv", receiveSteps[1].StepName, "expected step 1 to have StepName 'DBOS.recv'")
 		require.Equal(t, "DBOS.recv", receiveSteps[2].StepName, "expected step 2 to have StepName 'DBOS.recv'")
-		require.Equal(t, "DBOS.recv", receiveSteps[3].StepName, "expected step 3 to have StepName 'DBOS.recv'")
 	})
 
 	t.Run("SendRecvCustomStruct", func(t *testing.T) {
@@ -1754,12 +1763,25 @@ func TestSendRecv(t *testing.T) {
 	})
 
 	t.Run("RecvTimeout", func(t *testing.T) {
+		// Set the event so the receive workflow can proceed immediately
+		sendRecvSyncEvent.Set()
+
 		// Create a receive workflow that tries to receive a message but no send happens
 		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "timeout-test-topic")
 		require.NoError(t, err, "failed to start receive workflow")
 		result, err := receiveHandle.GetResult()
 		require.NoError(t, err, "expected no error on timeout")
 		assert.Equal(t, "--", result, "expected -- result on timeout")
+		// Check that six steps were recorded: recv, sleep, recv, sleep, recv, sleep
+		steps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 6, "expected 6 steps in receive workflow, got %d", len(steps))
+		require.Equal(t, "DBOS.recv", steps[0].StepName, "expected step 0 to have StepName 'DBOS.recv'")
+		require.Equal(t, "DBOS.sleep", steps[1].StepName, "expected step 1 to have StepName 'DBOS.sleep'")
+		require.Equal(t, "DBOS.recv", steps[2].StepName, "expected step 2 to have StepName 'DBOS.recv'")
+		require.Equal(t, "DBOS.sleep", steps[3].StepName, "expected step 3 to have StepName 'DBOS.sleep'")
+		require.Equal(t, "DBOS.recv", steps[4].StepName, "expected step 4 to have StepName 'DBOS.recv'")
+		require.Equal(t, "DBOS.sleep", steps[5].StepName, "expected step 5 to have StepName 'DBOS.sleep'")
 	})
 
 	t.Run("RecvMustRunInsideWorkflows", func(t *testing.T) {
@@ -1778,6 +1800,9 @@ func TestSendRecv(t *testing.T) {
 	})
 
 	t.Run("SendOutsideWorkflow", func(t *testing.T) {
+		// Set the event so the receive workflow can proceed immediately
+		sendRecvSyncEvent.Set()
+
 		// Start a receive workflow to have a valid destination
 		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "outside-workflow-topic")
 		require.NoError(t, err, "failed to start receive workflow")
@@ -1852,6 +1877,9 @@ func TestSendRecv(t *testing.T) {
 	})
 
 	t.Run("SendCannotBeCalledWithinStep", func(t *testing.T) {
+		// Set the event so the receive workflow can proceed immediately
+		sendRecvSyncEvent.Set()
+
 		// Start a receive workflow to have a valid destination
 		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "send-within-step-topic")
 		require.NoError(t, err, "failed to start receive workflow")
