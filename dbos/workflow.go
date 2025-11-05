@@ -2144,6 +2144,14 @@ func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStat
 	return ctx.ListWorkflows(ctx, opts...)
 }
 
+type StepInfo struct {
+	StepID          int    // The sequential ID of the step within the workflow
+	StepName        string // The name of the step function
+	Output          any    // The output returned by the step (if any)
+	Error           error  // The error returned by the step (if any)
+	ChildWorkflowID string // The ID of a child workflow spawned by this step (if applicable)
+}
+
 func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error) {
 	var loadOutput bool
 	if c.launched.Load() {
@@ -2156,12 +2164,12 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 		loadOutput: loadOutput,
 	}
 
-	var steps []StepInfo
+	var steps []stepInfo
 	var err error
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		steps, err = RunAsStep(c, func(ctx context.Context) ([]StepInfo, error) {
+		steps, err = RunAsStep(c, func(ctx context.Context) ([]stepInfo, error) {
 			return c.systemDB.getWorkflowSteps(ctx, getWorkflowStepsInput)
 		}, WithStepName("DBOS.getWorkflowSteps"))
 	} else {
@@ -2170,24 +2178,31 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 	if err != nil {
 		return nil, err
 	}
+	stepInfos := make([]StepInfo, len(steps))
+	for i, step := range steps {
+		stepInfos[i] = StepInfo{
+			StepID:          step.StepID,
+			StepName:        step.StepName,
+			Output:          step.Output,
+			Error:           step.Error,
+			ChildWorkflowID: step.ChildWorkflowID,
+		}
+	}
 
 	// Deserialize outputs if asked to
 	if loadOutput {
 		serializer := newGobSerializer[any]()
 		for i := range steps {
-			encodedOutput, ok := steps[i].Output.(*string)
-			if !ok {
-				return nil, fmt.Errorf("step output must be encoded string, got %T", steps[i].Output)
-			}
+			encodedOutput := steps[i].Output
 			decodedOutput, err := serializer.Decode(encodedOutput)
 			if err != nil {
 				return nil, fmt.Errorf("failed to deserialize step output for step %d: %w", steps[i].StepID, err)
 			}
-			steps[i].Output = decodedOutput
+			stepInfos[i].Output = decodedOutput
 		}
 	}
 
-	return steps, nil
+	return stepInfos, nil
 }
 
 // GetWorkflowSteps retrieves the execution steps of a workflow.

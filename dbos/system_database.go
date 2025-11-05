@@ -51,7 +51,7 @@ type systemDatabase interface {
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
 	checkOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
-	getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]StepInfo, error)
+	getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]stepInfo, error)
 
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
@@ -1238,8 +1238,8 @@ type recordChildWorkflowDBInput struct {
 
 func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error {
 	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, function_name, child_workflow_id, output)
-            VALUES ($1, $2, $3, $4, '')`, pgx.Identifier{s.schema}.Sanitize())
+            (workflow_uuid, function_id, function_name, child_workflow_id)
+            VALUES ($1, $2, $3, $4)`, pgx.Identifier{s.schema}.Sanitize())
 
 	var commandTag pgconn.CommandTag
 	var err error
@@ -1415,12 +1415,12 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 }
 
 // StepInfo contains information about a workflow step execution.
-type StepInfo struct {
-	StepID          int    // The sequential ID of the step within the workflow
-	StepName        string // The name of the step function
-	Output          any    // The output returned by the step (if any)
-	Error           error  // The error returned by the step (if any)
-	ChildWorkflowID string // The ID of a child workflow spawned by this step (if applicable)
+type stepInfo struct {
+	StepID          int     // The sequential ID of the step within the workflow
+	StepName        string  // The name of the step function
+	Output          *string // The output returned by the step (if any)
+	Error           error   // The error returned by the step (if any)
+	ChildWorkflowID string  // The ID of a child workflow spawned by this step (if applicable)
 }
 
 type getWorkflowStepsInput struct {
@@ -1428,7 +1428,7 @@ type getWorkflowStepsInput struct {
 	loadOutput bool
 }
 
-func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]StepInfo, error) {
+func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]stepInfo, error) {
 	query := fmt.Sprintf(`SELECT function_id, function_name, output, error, child_workflow_id
 			  FROM %s.operation_outputs
 			  WHERE workflow_uuid = $1
@@ -1440,9 +1440,9 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 	}
 	defer rows.Close()
 
-	var steps []StepInfo
+	var steps []stepInfo
 	for rows.Next() {
-		var step StepInfo
+		var step stepInfo
 		var outputString *string
 		var errorString *string
 		var childWorkflowID *string
