@@ -157,3 +157,26 @@ func isNilValue(v any) bool {
 	}
 	return false
 }
+
+// IsNestedPointer checks if a type is a nested pointer (e.g., **int, ***int).
+// It returns false for non-pointer types and single-level pointers (*int).
+// It returns true for nested pointers with depth > 1.
+func IsNestedPointer(t reflect.Type) bool {
+	if t == nil {
+		return false
+	}
+
+	depth := 0
+	currentType := t
+
+	// Count pointer indirection levels, break early if depth > 1
+	for currentType != nil && currentType.Kind() == reflect.Pointer {
+		depth++
+		if depth > 1 {
+			return true
+		}
+		currentType = currentType.Elem()
+	}
+
+	return false
+}

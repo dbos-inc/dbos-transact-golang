@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"encoding/gob"
 	"fmt"
 	"reflect"
 	"testing"
@@ -611,8 +610,64 @@ func TestSerializer(t *testing.T) {
 		recoveryPtrWorkflow := makeRecoveryWorkflow[*TestWorkflowData]()
 		RegisterWorkflow(executor, recoveryPtrWorkflow)
 
-		// Manually register the concrete implementation with gob before launching DBOS
-		gob.Register(&TestStringProcessor{})
+		// Define workflows for RunAsStep nested pointer validation tests
+		nestedPtrStepWorkflow := func(ctx DBOSContext, input int) (int, error) {
+			_, err := RunAsStep(ctx, func(context context.Context) (**int, error) {
+				return nil, nil
+			})
+			if err != nil {
+				return 0, err
+			}
+			return input, nil
+		}
+
+		tripleNestedPtrStepWorkflow := func(ctx DBOSContext, input int) (int, error) {
+			_, err := RunAsStep(ctx, func(context context.Context) (***int, error) {
+				return nil, nil
+			})
+			if err != nil {
+				return 0, err
+			}
+			return input, nil
+		}
+
+		// Register workflows for RunAsStep nested pointer validation
+		RegisterWorkflow(executor, nestedPtrStepWorkflow)
+		RegisterWorkflow(executor, tripleNestedPtrStepWorkflow)
+
+		// Test nested pointer validation - these tests only check registration, not execution
+		// so they can run before Launch using the main executor
+		t.Run("NestedPointerValidation_Registration", func(t *testing.T) {
+			// Test RegisterWorkflow with nested pointer input type
+			t.Run("RegisterWorkflowWithNestedPointerInput", func(t *testing.T) {
+				nestedPtrInputWorkflow := func(ctx DBOSContext, input **int) (int, error) {
+					return 0, nil
+				}
+				require.Panics(t, func() {
+					RegisterWorkflow(executor, nestedPtrInputWorkflow)
+				}, "RegisterWorkflow should panic when input type is a nested pointer")
+			})
+
+			// Test RegisterWorkflow with nested pointer return type
+			t.Run("RegisterWorkflowWithNestedPointerReturn", func(t *testing.T) {
+				nestedPtrReturnWorkflow := func(ctx DBOSContext, input int) (**int, error) {
+					return nil, nil
+				}
+				require.Panics(t, func() {
+					RegisterWorkflow(executor, nestedPtrReturnWorkflow)
+				}, "RegisterWorkflow should panic when return type is a nested pointer")
+			})
+
+			// Test RegisterWorkflow with triple nested pointer
+			t.Run("RegisterWorkflowWithTripleNestedPointer", func(t *testing.T) {
+				tripleNestedWorkflow := func(ctx DBOSContext, input ***int) (int, error) {
+					return 0, nil
+				}
+				require.Panics(t, func() {
+					RegisterWorkflow(executor, tripleNestedWorkflow)
+				}, "RegisterWorkflow should panic when input type is a triple nested pointer")
+			})
+		})
 
 		err := Launch(executor)
 		require.NoError(t, err)
@@ -982,6 +1037,29 @@ func TestSerializer(t *testing.T) {
 				result, err := h2.GetResult()
 				require.NoError(t, err, "Failed to get retrieved workflow result")
 				verifyProcessor(t, result, "Retrieved workflow result")
+			})
+		})
+
+		// Test nested pointer validation with RunAsStep
+		t.Run("NestedPointerValidation_RunAsStep", func(t *testing.T) {
+			// Test RunAsStep with nested pointer return type
+			t.Run("RunAsStepWithNestedPointerReturn", func(t *testing.T) {
+				handle, err := RunWorkflow(executor, nestedPtrStepWorkflow, 42)
+				require.NoError(t, err, "Workflow should start successfully")
+
+				_, err = handle.GetResult()
+				require.Error(t, err, "Step execution should fail with nested pointer return type")
+				assert.Contains(t, err.Error(), "nested pointer types are not supported", "Error should mention nested pointer types")
+			})
+
+			// Test RunAsStep with triple nested pointer return type
+			t.Run("RunAsStepWithTripleNestedPointerReturn", func(t *testing.T) {
+				handle, err := RunWorkflow(executor, tripleNestedPtrStepWorkflow, 42)
+				require.NoError(t, err, "Workflow should start successfully")
+
+				_, err = handle.GetResult()
+				require.Error(t, err, "Step execution should fail with triple nested pointer return type")
+				assert.Contains(t, err.Error(), "nested pointer types are not supported", "Error should mention nested pointer types")
 			})
 		})
 

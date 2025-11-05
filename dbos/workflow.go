@@ -504,6 +504,28 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		panic("workflow function cannot be nil")
 	}
 
+	// Check for nested pointer types
+	var p P
+	var r R
+	pType := reflect.TypeOf(p)
+	rType := reflect.TypeOf(r)
+
+	if IsNestedPointer(pType) {
+		// Log error if we have a concrete dbosContext
+		if c, ok := ctx.(*dbosContext); ok {
+			c.logger.Error("nested pointer types are not supported", "workflow_input_type", pType)
+		}
+		panic(fmt.Sprintf("nested pointer types are not supported: workflow input type %v is a nested pointer", pType))
+	}
+
+	if IsNestedPointer(rType) {
+		// Log error if we have a concrete dbosContext
+		if c, ok := ctx.(*dbosContext); ok {
+			c.logger.Error("nested pointer types are not supported", "workflow_return_type", rType)
+		}
+		panic(fmt.Sprintf("nested pointer types are not supported: workflow return type %v is a nested pointer", rType))
+	}
+
 	registrationParams := workflowRegistrationOptions{
 		maxRetries: _DEFAULT_MAX_RECOVERY_ATTEMPTS,
 	}
@@ -513,8 +535,6 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	}
 
 	fqn := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-
-	var p P
 
 	// Register a type-erased version of the durable workflow for recovery and queue runner
 	// Input will always come from the database and encoded as *string, so we decode it into the target type (captured by this wrapped closure)
@@ -1178,6 +1198,18 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 
 	if fn == nil {
 		return *new(R), newStepExecutionError("", "", fmt.Errorf("step function cannot be nil"))
+	}
+
+	// Check for nested pointer types
+	var r R
+	rType := reflect.TypeOf(r)
+	if IsNestedPointer(rType) {
+		workflowID, _ := GetWorkflowID(ctx) // Best effort to get workflow ID for error context
+		// Log error if we have a concrete dbosContext
+		if c, ok := ctx.(*dbosContext); ok {
+			c.logger.Error("nested pointer types are not supported", "step_return_type", rType, "workflow_id", workflowID)
+		}
+		return *new(R), newStepExecutionError(workflowID, "", fmt.Errorf("nested pointer types are not supported: step return type %v is a nested pointer", rType))
 	}
 
 	// Append WithStepName option to ensure the step name is set. This will not erase a user-provided step name
