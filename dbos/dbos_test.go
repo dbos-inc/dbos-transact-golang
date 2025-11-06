@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,6 +279,99 @@ func TestConfig(t *testing.T) {
 
 		require.NotNil(t, ctx2)
 	})
+
+	t.Run("KeyValueFormatConnectionString", func(t *testing.T) {
+		t.Setenv("DBOS__APPVERSION", "v1.0.0")
+		t.Setenv("DBOS__APPID", "test-keyvalue-format")
+		t.Setenv("DBOS__VMID", "test-executor-id")
+
+		// Get base connection parameters
+		originalURL := databaseURL
+		parsedURL, err := pgxpool.ParseConfig(originalURL)
+		require.NoError(t, err)
+
+		user := parsedURL.ConnConfig.User
+		database := parsedURL.ConnConfig.Database
+		host := parsedURL.ConnConfig.Host
+		port := parsedURL.ConnConfig.Port
+
+		// Use a unique test password that won't match other connection parameters
+		testPassword := "TEST_PASSWORD_UNIQUE_12345!@#$%"
+
+		// Test password masking with various spacing formats
+		maskingTestCases := []struct {
+			name    string
+			connStr string
+		}{
+			{"NoSpaces", fmt.Sprintf("user=%s password=%s database=%s host=%s", user, testPassword, database, host)},
+			{"SpaceBeforeEquals", fmt.Sprintf("user=%s password =%s database=%s host=%s", user, testPassword, database, host)},
+			{"SpaceAfterEquals", fmt.Sprintf("user=%s password= %s database=%s host=%s", user, testPassword, database, host)},
+			{"SpacesBothSides", fmt.Sprintf("user=%s password = %s database=%s host=%s", user, testPassword, database, host)},
+			{"UppercaseKey", fmt.Sprintf("user=%s PASSWORD=%s database=%s host=%s", user, testPassword, database, host)},
+			{"MixedCaseKey", fmt.Sprintf("user=%s Password=%s database=%s host=%s", user, testPassword, database, host)},
+		}
+
+		// Add port and sslmode if needed
+		portSSL := ""
+		if port != 0 {
+			portSSL += fmt.Sprintf(" port=%d", port)
+		}
+		if strings.Contains(originalURL, "sslmode=disable") {
+			portSSL += " sslmode=disable"
+		}
+		for i := range maskingTestCases {
+			maskingTestCases[i].connStr += portSSL
+		}
+
+		for _, tc := range maskingTestCases {
+			t.Run("Masking_"+tc.name, func(t *testing.T) {
+				masked, err := maskPassword(tc.connStr)
+				require.NoError(t, err)
+				assert.Contains(t, masked, "***", "password should be masked")
+				passwordPattern := fmt.Sprintf("password=%s", testPassword)
+				assert.NotContains(t, strings.ToLower(masked), strings.ToLower(passwordPattern), "password should not appear in plaintext")
+			})
+		}
+
+		// Integration test: verify DBOS context works with key-value format
+		t.Run("DBOSContextCreation", func(t *testing.T) {
+			// Use the actual password from config for integration test
+			actualPassword := parsedURL.ConnConfig.Password
+			keyValueConnStr := fmt.Sprintf("user=%s password=%s database=%s host=%s%s", user, actualPassword, database, host, portSSL)
+
+			ctx, err := NewDBOSContext(context.Background(), Config{
+				DatabaseURL: keyValueConnStr,
+				AppName:     "test-keyvalue-format",
+			})
+			require.NoError(t, err)
+			defer func() {
+				if ctx != nil {
+					Shutdown(ctx, 1*time.Minute)
+				}
+			}()
+
+			require.NotNil(t, ctx)
+
+			// Verify system DB is functional
+			dbosCtx, ok := ctx.(*dbosContext)
+			require.True(t, ok)
+			sysDB, ok := dbosCtx.systemDB.(*sysDB)
+			require.True(t, ok)
+
+			var exists bool
+			err = sysDB.pool.QueryRow(context.Background(), "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'workflow_status')").Scan(&exists)
+			require.NoError(t, err)
+			assert.True(t, exists)
+
+			// Verify masking works
+			poolConnStr := sysDB.pool.Config().ConnString()
+			maskedConnStr, err := maskPassword(poolConnStr)
+			require.NoError(t, err)
+			assert.Contains(t, maskedConnStr, "password=***")
+			assert.NotContains(t, maskedConnStr, fmt.Sprintf("password=%s", actualPassword))
+		})
+	})
+
 }
 
 func TestCustomSystemDBSchema(t *testing.T) {
