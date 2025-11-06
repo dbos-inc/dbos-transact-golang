@@ -1,11 +1,11 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
-	"net/url"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 )
 
@@ -39,42 +39,43 @@ func runReset(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Parse the URL to get database name
-	parsedURL, err := url.Parse(dbURL)
+	ctx := context.Background()
+
+	// Parse the connection string using pgxpool.ParseConfig which handles both URL and key-value formats
+	config, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
-		return fmt.Errorf("invalid database URL: %w", err)
+		return fmt.Errorf("failed to parse database URL: %w", err)
 	}
 
-	// Extract database name from path
-	dbName := parsedURL.Path
-	if len(dbName) > 0 && dbName[0] == '/' {
-		dbName = dbName[1:] // Remove leading slash
-	}
-
+	// Get the database name from the config
+	dbName := config.ConnConfig.Database
 	if dbName == "" {
-		return fmt.Errorf("database name is required in URL")
+		return fmt.Errorf("database name not found in connection string")
 	}
 
-	// Connect to postgres database to drop and recreate the system database
-	parsedURL.Path = "/postgres"
-	postgresURL := parsedURL.String()
+	// Create a connection configuration pointing to the postgres database
+	postgresConfig := config.ConnConfig.Copy()
+	postgresConfig.Database = "postgres"
 
-	db, err := sql.Open("pgx", postgresURL)
+	// Connect to the postgres database
+	conn, err := pgx.ConnectConfig(ctx, postgresConfig)
 	if err != nil {
-		return fmt.Errorf("failed to connect to postgres database: %w", err)
+		return fmt.Errorf("failed to connect to PostgreSQL server: %w", err)
 	}
-	defer db.Close()
+	defer conn.Close(ctx)
 
 	// Drop the system database if it exists
 	logger.Info("Resetting system database", "database", dbName)
-	dropQuery := fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", dbName)
-	if _, err := db.Exec(dropQuery); err != nil {
+	dropSQL := fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", pgx.Identifier{dbName}.Sanitize())
+	_, err = conn.Exec(ctx, dropSQL)
+	if err != nil {
 		return fmt.Errorf("failed to drop system database: %w", err)
 	}
 
 	// Create the database
-	createQuery := fmt.Sprintf("CREATE DATABASE %s", dbName)
-	if _, err := db.Exec(createQuery); err != nil {
+	createSQL := fmt.Sprintf("CREATE DATABASE %s", pgx.Identifier{dbName}.Sanitize())
+	_, err = conn.Exec(ctx, createSQL)
+	if err != nil {
 		return fmt.Errorf("failed to create system database: %w", err)
 	}
 
