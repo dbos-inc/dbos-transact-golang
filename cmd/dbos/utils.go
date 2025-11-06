@@ -103,7 +103,7 @@ func getDBURL() (string, error) {
 	// Log the database URL in verbose mode with masked password
 	maskedURL, err := maskPassword(resolvedURL)
 	if err != nil {
-		logger.Warn("Failed to mask database URL", "error", err)
+		logger.Debug("Failed to mask database URL", "error", err)
 		maskedURL = resolvedURL
 	}
 	logger.Debug("Using database URL", "source", source, "url", maskedURL)

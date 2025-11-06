@@ -55,6 +55,16 @@ func getDatabaseURL(dbRole string) string {
 	return dsn.String()
 }
 
+// getDatabaseURLKeyValue returns the same connection string in libpq key-value format
+// This is useful for testing that commands handle both URL and key-value formats
+func getDatabaseURLKeyValue(dbRole string) string {
+	password := os.Getenv("PGPASSWORD")
+	if password == "" {
+		password = "dbos"
+	}
+	return fmt.Sprintf("user='%s' password='%s' database=dbos host=localhost port=5432 sslmode=disable", dbRole, password)
+}
+
 // TestCLIWorkflow provides comprehensive integration testing of the DBOS CLI
 func TestCLIWorkflow(t *testing.T) {
 	defer goleak.VerifyNone(t,
@@ -145,6 +155,27 @@ func TestCLIWorkflow(t *testing.T) {
 					require.NoError(t, err)
 					assert.False(t, exists, fmt.Sprintf("Role %s should not exist", config.dbRole))
 				}
+			})
+
+			t.Run("ResetDatabaseWithKeyValueFormat", func(t *testing.T) {
+				// Test reset command with key-value format connection string
+				args := append([]string{"reset", "-y", "--db-url", getDatabaseURLKeyValue("postgres")}, config.args...)
+				cmd := exec.Command(cliPath, args...)
+
+				output, err := cmd.CombinedOutput()
+				require.NoError(t, err, "Reset database command with key-value format failed: %s", string(output))
+
+				assert.Contains(t, string(output), "System database has been reset successfully", "Output should confirm database reset")
+
+				// Verify the database was reset by checking schema doesn't exist
+				db, err := sql.Open("pgx", getDatabaseURL("postgres"))
+				require.NoError(t, err)
+				defer db.Close()
+
+				var exists bool
+				err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)", config.schemaName).Scan(&exists)
+				require.NoError(t, err)
+				assert.False(t, exists, fmt.Sprintf("Schema %s should not exist after reset", config.schemaName))
 			})
 
 			t.Run("ProjectInitialization", func(t *testing.T) {
@@ -507,6 +538,22 @@ func testListWorkflows(t *testing.T, cliPath string, baseArgs []string, dbRole s
 			}
 		})
 	}
+
+	// Test list command with key-value format connection string
+	t.Run("ListWithKeyValueFormat", func(t *testing.T) {
+		args := append([]string{"workflow", "list", "--db-url", getDatabaseURLKeyValue(dbRole)}, baseArgs...)
+		fmt.Println(args)
+		cmd := exec.Command(cliPath, args...)
+
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "List command with key-value format failed: %s", string(output))
+
+		// Parse JSON output
+		var workflows []dbos.WorkflowStatus
+		err = json.Unmarshal(output, &workflows)
+		require.NoError(t, err, "JSON output should be valid")
+		assert.Greater(t, len(workflows), 0, "Should have workflows when using key-value format")
+	})
 }
 
 // testGetWorkflow tests retrieving individual workflow details
@@ -559,6 +606,21 @@ func testGetWorkflow(t *testing.T, cliPath string, baseArgs []string, dbRole str
 		assert.Equal(t, workflowID, status2.ID, "JSON should contain correct workflow ID")
 		assert.NotEmpty(t, status2.Status, "Should have workflow status")
 		assert.NotEmpty(t, status2.Name, "Should have workflow name")
+
+		// Test with key-value format connection string (libpq format)
+		argsKeyValue := append([]string{"workflow", "get", workflowID, "--db-url", getDatabaseURLKeyValue(dbRole)}, baseArgs...)
+		cmdKeyValue := exec.Command(cliPath, argsKeyValue...)
+
+		outputKeyValue, errKeyValue := cmdKeyValue.CombinedOutput()
+		require.NoError(t, errKeyValue, "Get workflow JSON command with key-value format failed: %s", string(outputKeyValue))
+
+		// Verify valid JSON
+		var statusKeyValue dbos.WorkflowStatus
+		err = json.Unmarshal(outputKeyValue, &statusKeyValue)
+		require.NoError(t, err, "JSON output should be valid")
+		assert.Equal(t, workflowID, statusKeyValue.ID, "JSON should contain correct workflow ID")
+		assert.NotEmpty(t, statusKeyValue.Status, "Should have workflow status")
+		assert.NotEmpty(t, statusKeyValue.Name, "Should have workflow name")
 
 		// Test with config file containing environment variable
 		configPath := "dbos-config.yaml"

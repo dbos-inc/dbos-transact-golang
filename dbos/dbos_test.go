@@ -337,7 +337,7 @@ func TestConfig(t *testing.T) {
 		t.Run("DBOSContextCreation", func(t *testing.T) {
 			// Use the actual password from config for integration test
 			actualPassword := parsedURL.ConnConfig.Password
-			keyValueConnStr := fmt.Sprintf("user=%s password=%s database=%s host=%s%s", user, actualPassword, database, host, portSSL)
+			keyValueConnStr := fmt.Sprintf("user='%s' password='%s' database=%s host=%s%s", user, actualPassword, database, host, portSSL)
 
 			ctx, err := NewDBOSContext(context.Background(), Config{
 				DatabaseURL: keyValueConnStr,
