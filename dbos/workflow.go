@@ -213,7 +213,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error
 		if _, ok := h.dbosContext.(*dbosContext); !ok {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("invalid DBOSContext: expected *dbosContext"))
 		}
-		serializer := newGobSerializer[R]()
+		serializer := newJSONSerializer[R]()
 		encodedOutput, encErr := serializer.Encode(decodedResult)
 		if encErr != nil {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
@@ -265,7 +265,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		if !ok { // Should never happen
 			return *new(R), newWorkflowUnexpectedResultType(h.workflowID, "string (encoded)", fmt.Sprintf("%T", encodedResult))
 		}
-		serializer := newGobSerializer[R]()
+		serializer := newJSONSerializer[R]()
 		var deserErr error
 		typedResult, deserErr = serializer.Decode(encodedStr)
 		if deserErr != nil {
@@ -548,7 +548,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 			return *new(R), newWorkflowUnexpectedInputType(fqn, "*string (encoded)", fmt.Sprintf("%T", input))
 		}
 		// Decode directly into the target type
-		serializer := newGobSerializer[P]()
+		serializer := newJSONSerializer[P]()
 		typedInput, err := serializer.Decode(encodedInput)
 		if err != nil {
 			return *new(R), newWorkflowExecutionError(workflowID, err)
@@ -753,7 +753,7 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 					resultErr = errors.Join(resultErr, newWorkflowUnexpectedResultType(handle.workflowID, "string (encoded)", fmt.Sprintf("%T", outcome.result)))
 				} else {
 					// Result is encoded, decode directly into target type
-					serializer := newGobSerializer[R]()
+					serializer := newJSONSerializer[R]()
 					var decodeErr error
 					typedResult, decodeErr = serializer.Decode(encodedResult)
 					if decodeErr != nil {
@@ -881,7 +881,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	}
 
 	// Serialize input before storing in workflow status
-	serializer := newGobSerializer[any]()
+	serializer := newJSONSerializer[any]()
 	encodedInput, serErr := serializer.Encode(input)
 	if serErr != nil {
 		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize workflow input: %w", serErr))
@@ -1042,7 +1042,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			}
 
 			// Serialize the output before recording
-			serializer := newGobSerializer[any]()
+			serializer := newJSONSerializer[any]()
 			encodedOutput, serErr := serializer.Encode(result)
 			if serErr != nil {
 				c.logger.Error("Failed to serialize workflow output", "workflow_id", workflowID, "error", serErr)
@@ -1230,7 +1230,7 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 		typedResult = typedRes
 	} else if encodedOutput, ok := result.(*string); ok {
 		// If not it should be an encoded *string
-		serializer := newGobSerializer[R]()
+		serializer := newJSONSerializer[R]()
 		var decodeErr error
 		typedResult, decodeErr = serializer.Decode(encodedOutput)
 		if decodeErr != nil {
@@ -1342,7 +1342,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	}
 
 	// Serialize step output before recording
-	serializer := newGobSerializer[any]()
+	serializer := newJSONSerializer[any]()
 	encodedStepOutput, serErr := serializer.Encode(stepOutput)
 	if serErr != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
@@ -1372,7 +1372,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 
 func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string) error {
 	// Serialize the message before sending
-	serializer := newGobSerializer[any]()
+	serializer := newJSONSerializer[any]()
 	encodedMessage, err := serializer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
@@ -1453,7 +1453,7 @@ func Recv[R any](ctx DBOSContext, topic string, timeout time.Duration) (R, error
 			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
 			return *new(R), newWorkflowUnexpectedResultType(workflowID, "string (encoded)", fmt.Sprintf("%T", msg))
 		}
-		serializer := newGobSerializer[R]()
+		serializer := newJSONSerializer[R]()
 		var decodeErr error
 		typedMessage, decodeErr = serializer.Decode(encodedMsg)
 		if decodeErr != nil {
@@ -1474,7 +1474,7 @@ func Recv[R any](ctx DBOSContext, topic string, timeout time.Duration) (R, error
 
 func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
 	// Serialize the event value before storing
-	serializer := newGobSerializer[any]()
+	serializer := newJSONSerializer[any]()
 	encodedMessage, err := serializer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize event value: %w", err)
@@ -1557,7 +1557,7 @@ func GetEvent[R any](ctx DBOSContext, targetWorkflowID, key string, timeout time
 			return *new(R), newWorkflowUnexpectedResultType(workflowID, "string (encoded)", fmt.Sprintf("%T", value))
 		}
 
-		serializer := newGobSerializer[R]()
+		serializer := newJSONSerializer[R]()
 		var decodeErr error
 		typedValue, decodeErr = serializer.Decode(encodedValue)
 		if decodeErr != nil {
@@ -2095,7 +2095,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 
 	// Deserialize Input and Output fields if they were loaded
 	if params.loadInput || params.loadOutput {
-		serializer := newGobSerializer[any]()
+		serializer := newJSONSerializer[any]()
 		for i := range workflows {
 			if params.loadInput && workflows[i].Input != nil {
 				encodedInput, ok := workflows[i].Input.(*string)
@@ -2223,7 +2223,7 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 
 	// Deserialize outputs if asked to
 	if loadOutput {
-		serializer := newGobSerializer[any]()
+		serializer := newJSONSerializer[any]()
 		for i := range steps {
 			encodedOutput := steps[i].Output
 			decodedOutput, err := serializer.Decode(encodedOutput)

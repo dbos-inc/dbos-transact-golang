@@ -242,7 +242,7 @@ func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, op
 	}
 
 	// Serialize input
-	serializer := newGobSerializer[P]()
+	serializer := newJSONSerializer[P]()
 	encodedInput, err := serializer.Encode(input)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize workflow input: %w", err)

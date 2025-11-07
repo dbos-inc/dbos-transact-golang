@@ -2,14 +2,33 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// decodeAnyToType converts an any value (which is map[string]interface{} after JSON decode)
+// back to the expected type T by re-encoding to JSON and decoding into T.
+func decodeAnyToType[T any](value any) (T, error) {
+	var result T
+	if value == nil {
+		return result, nil
+	}
+	// Re-encode the any value to JSON
+	jsonBytes, err := json.Marshal(value)
+	if err != nil {
+		return result, fmt.Errorf("failed to marshal any value: %w", err)
+	}
+	// Decode JSON into the expected type T
+	if err := json.Unmarshal(jsonBytes, &result); err != nil {
+		return result, fmt.Errorf("failed to unmarshal into type T: %w", err)
+	}
+	return result, nil
+}
 
 // testAllSerializationPaths tests workflow recovery and verifies all read paths.
 // This is the unified test function that exercises:
@@ -99,20 +118,11 @@ func testAllSerializationPaths[T any](
 				assert.Nil(t, lastStep.Output, "Step output should be nil")
 			} else {
 				require.NotNil(t, lastStep.Output)
-				// GetWorkflowSteps decodes pointer types as their underlying value (not as pointers)
-				// So if T is a pointer type, we need to compare against the dereferenced value
-				zero := *new(T)
-				tType := reflect.TypeOf(zero)
-				isPointerType := tType != nil && tType.Kind() == reflect.Pointer
-
-				if isPointerType {
-					// GetWorkflowSteps returns the underlying value, not the pointer
-					// So we compare against the dereferenced expectedOutput
-					expectedValue := reflect.ValueOf(expectedOutput).Elem().Interface()
-					assert.Equal(t, expectedValue, lastStep.Output, "Step output should match dereferenced expected output")
-				} else {
-					assert.Equal(t, expectedOutput, lastStep.Output, "Step output should match expected output")
-				}
+				// GetWorkflowSteps returns any (map[string]interface{} after JSON decode)
+				// We need to re-encode to JSON and decode into type T
+				decodedOutput, err := decodeAnyToType[T](lastStep.Output)
+				require.NoError(t, err, "Failed to decode step output to type T")
+				assert.Equal(t, expectedOutput, decodedOutput, "Step output should match expected output")
 			}
 			assert.Nil(t, lastStep.Error)
 		}
@@ -133,23 +143,116 @@ func testAllSerializationPaths[T any](
 			require.NotNil(t, wf.Input)
 			require.NotNil(t, wf.Output)
 
-			// ListWorkflows decodes pointer types as their underlying value (not as pointers)
-			// So if T is a pointer type, we need to compare against the dereferenced value
-			zero := *new(T)
-			tType := reflect.TypeOf(zero)
-			isPointerType := tType != nil && tType.Kind() == reflect.Pointer
+			// ListWorkflows returns any (map[string]interface{} after JSON decode)
+			// We need to re-encode to JSON and decode into type T
+			decodedInput, err := decodeAnyToType[T](wf.Input)
+			require.NoError(t, err, "Failed to decode workflow input to type T")
+			decodedOutput, err := decodeAnyToType[T](wf.Output)
+			require.NoError(t, err, "Failed to decode workflow output to type T")
+			assert.Equal(t, input, decodedInput, "Workflow input should match input")
+			assert.Equal(t, expectedOutput, decodedOutput, "Workflow output should match expected output")
+		}
+	})
+}
 
-			if isPointerType {
-				// ListWorkflows returns the underlying value, not the pointer
-				// So we compare against the dereferenced values
-				expectedInputValue := reflect.ValueOf(input).Elem().Interface()
-				expectedOutputValue := reflect.ValueOf(expectedOutput).Elem().Interface()
-				assert.Equal(t, expectedInputValue, wf.Input, "Workflow input should match dereferenced input")
-				assert.Equal(t, expectedOutputValue, wf.Output, "Workflow output should match dereferenced expected output")
+// testInterfaceSerializationPaths tests interface workflows with special handling for decoding to concrete types.
+// It's similar to testAllSerializationPaths but handles the fact that interface types need to be decoded
+// to their concrete implementation type (*TestStringProcessor) rather than the interface type.
+func testInterfaceSerializationPaths[T any, Concrete any](
+	t *testing.T,
+	executor DBOSContext,
+	workflow Workflow[T, T],
+	input T,
+	workflowID string,
+	verifyFunc func(t *testing.T, actual any, name string),
+) {
+	t.Helper()
+
+	isNilExpected := isNilValue(input)
+
+	// Start the workflow
+	handle, err := RunWorkflow(executor, workflow, input, WithWorkflowID(workflowID))
+	require.NoError(t, err, "Workflow execution failed")
+
+	// Test read paths after completion
+	t.Run("HandleGetResult", func(t *testing.T) {
+		result, err := handle.GetResult()
+		require.NoError(t, err, "Failed to get workflow result")
+		verifyFunc(t, result, "Result")
+	})
+
+	t.Run("RetrieveWorkflow", func(t *testing.T) {
+		// JSON can't unmarshal into interface types directly, so we use the concrete type
+		h2, err := RetrieveWorkflow[Concrete](executor, handle.GetWorkflowID())
+		require.NoError(t, err)
+		result, err := h2.GetResult()
+		require.NoError(t, err, "Failed to get retrieved workflow result")
+		verifyFunc(t, result, "Retrieved workflow result")
+	})
+
+	// Check the last step output (the workflow result)
+	t.Run("GetWorkflowSteps", func(t *testing.T) {
+		steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(steps), 1, "Should have at least one step")
+		if len(steps) > 0 {
+			lastStep := steps[len(steps)-1]
+			if isNilExpected {
+				// For nil pointers, JSON may return nil or an empty map
+				if lastStep.Output != nil {
+					decodedOutput, err := decodeAnyToType[Concrete](lastStep.Output)
+					require.NoError(t, err, "Failed to decode step output to concrete type")
+					verifyFunc(t, decodedOutput, "Step output")
+				} else {
+					verifyFunc(t, lastStep.Output, "Step output")
+				}
 			} else {
-				assert.Equal(t, input, wf.Input)
-				assert.Equal(t, expectedOutput, wf.Output)
+				require.NotNil(t, lastStep.Output)
+				// GetWorkflowSteps returns any (map[string]interface{} after JSON decode)
+				// We need to re-encode to JSON and decode into concrete type
+				decodedOutput, err := decodeAnyToType[Concrete](lastStep.Output)
+				require.NoError(t, err, "Failed to decode step output to concrete type")
+				verifyFunc(t, decodedOutput, "Step output")
 			}
+			assert.Nil(t, lastStep.Error)
+		}
+	})
+
+	// Verify final state via ListWorkflows
+	t.Run("ListWorkflows", func(t *testing.T) {
+		wfs, err := ListWorkflows(executor,
+			WithWorkflowIDs([]string{handle.GetWorkflowID()}),
+			WithLoadInput(true), WithLoadOutput(true))
+		require.NoError(t, err)
+		require.Len(t, wfs, 1)
+		wf := wfs[0]
+		if isNilExpected {
+			// For nil pointers, JSON may return nil or an empty map
+			if wf.Input != nil {
+				decodedInput, err := decodeAnyToType[Concrete](wf.Input)
+				require.NoError(t, err, "Failed to decode workflow input to concrete type")
+				verifyFunc(t, decodedInput, "Workflow input")
+			} else {
+				verifyFunc(t, wf.Input, "Workflow input")
+			}
+			if wf.Output != nil {
+				decodedOutput, err := decodeAnyToType[Concrete](wf.Output)
+				require.NoError(t, err, "Failed to decode workflow output to concrete type")
+				verifyFunc(t, decodedOutput, "Workflow output")
+			} else {
+				verifyFunc(t, wf.Output, "Workflow output")
+			}
+		} else {
+			require.NotNil(t, wf.Input)
+			require.NotNil(t, wf.Output)
+			// ListWorkflows returns any (map[string]interface{} after JSON decode)
+			// We need to re-encode to JSON and decode into concrete type
+			decodedInput, err := decodeAnyToType[Concrete](wf.Input)
+			require.NoError(t, err, "Failed to decode workflow input to concrete type")
+			decodedOutput, err := decodeAnyToType[Concrete](wf.Output)
+			require.NoError(t, err, "Failed to decode workflow output to concrete type")
+			verifyFunc(t, decodedInput, "Workflow input")
+			verifyFunc(t, decodedOutput, "Workflow output")
 		}
 	})
 }
@@ -244,7 +347,7 @@ type TestWorkflowData struct {
 	Data         TestData
 	Metadata     map[string]string
 	NestedSlice  []NestedTestData
-	NestedMap    map[NestedTestData]MyInt
+	NestedMap    map[string]MyInt
 	StringPtr    *string
 	StringPtrPtr **string
 }
@@ -431,12 +534,11 @@ func serializerGetEventWorkflow(ctx DBOSContext, targetWorkflowID string) (TestW
 	return event, nil
 }
 
-// Workflow for testing interface signature with manual gob registration
-var interfaceWorkflow = func(ctx DBOSContext, input TestDataProcessor) (TestDataProcessor, error) {
-	return RunAsStep(ctx, func(context context.Context) (TestDataProcessor, error) {
-		return input, nil
-	})
-}
+// Workflow factories for interface and any types
+var (
+	interfaceWorkflow = makeTestWorkflow[TestDataProcessor]()
+	anyWorkflow       = makeTestWorkflow[any]()
+)
 
 // recoveryEventRegistry stores events for recovery workflows by workflow ID
 var recoveryEventRegistry = make(map[string]struct {
@@ -543,7 +645,7 @@ func (p *TestStringProcessor) Process(data string) string {
 // slices, arrays, byte slices, maps, and custom types. It also tests Send/Recv and
 // SetEvent/GetEvent communication patterns.
 func TestSerializer(t *testing.T) {
-	t.Run("Gob", func(t *testing.T) {
+	t.Run("JSON", func(t *testing.T) {
 		executor := setupDBOS(t, true, true)
 
 		// Create a test queue for queued workflow tests
@@ -605,6 +707,8 @@ func TestSerializer(t *testing.T) {
 
 		// Register workflow with interface signature for manual gob registration test
 		RegisterWorkflow(executor, interfaceWorkflow)
+		// Register workflow with any signature for type information loss test
+		RegisterWorkflow(executor, anyWorkflow)
 
 		// Register recovery workflow for *TestWorkflowData (used in NilPointer test)
 		recoveryPtrWorkflow := makeRecoveryWorkflow[*TestWorkflowData]()
@@ -688,9 +792,9 @@ func TestSerializer(t *testing.T) {
 					{Key: "nested1", Count: 10},
 					{Key: "nested2", Count: 20},
 				},
-				NestedMap: map[NestedTestData]MyInt{
-					{Key: "map-key1", Count: 1}: MyInt(100),
-					{Key: "map-key2", Count: 2}: MyInt(200),
+				NestedMap: map[string]MyInt{
+					"map-key1": MyInt(100),
+					"map-key2": MyInt(200),
 				},
 				StringPtr:    &strPtr,
 				StringPtrPtr: &strPtrPtr,
@@ -716,8 +820,8 @@ func TestSerializer(t *testing.T) {
 				NestedSlice: []NestedTestData{
 					{Key: "error-nested", Count: 99},
 				},
-				NestedMap: map[NestedTestData]MyInt{
-					{Key: "error-key", Count: 999}: MyInt(999),
+				NestedMap: map[string]MyInt{
+					"error-key": MyInt(999),
 				},
 				StringPtr:    nil,
 				StringPtrPtr: nil,
@@ -759,8 +863,8 @@ func TestSerializer(t *testing.T) {
 				NestedSlice: []NestedTestData{
 					{Key: "sendrecv-nested", Count: 50},
 				},
-				NestedMap: map[NestedTestData]MyInt{
-					{Key: "sendrecv-key", Count: 5}: MyInt(500),
+				NestedMap: map[string]MyInt{
+					"sendrecv-key": MyInt(500),
 				},
 				StringPtr:    &strPtr,
 				StringPtrPtr: &strPtrPtr,
@@ -784,9 +888,9 @@ func TestSerializer(t *testing.T) {
 					{Key: "event-nested1", Count: 30},
 					{Key: "event-nested2", Count: 40},
 				},
-				NestedMap: map[NestedTestData]MyInt{
-					{Key: "event-key1", Count: 3}: MyInt(300),
-					{Key: "event-key2", Count: 4}: MyInt(400),
+				NestedMap: map[string]MyInt{
+					"event-key1": MyInt(300),
+					"event-key2": MyInt(400),
 				},
 				StringPtr:    &strPtr,
 				StringPtrPtr: &strPtrPtr,
@@ -841,8 +945,8 @@ func TestSerializer(t *testing.T) {
 				NestedSlice: []NestedTestData{
 					{Key: "queued-nested", Count: 222},
 				},
-				NestedMap: map[NestedTestData]MyInt{
-					{Key: "queued-key", Count: 22}: MyInt(2222),
+				NestedMap: map[string]MyInt{
+					"queued-key": MyInt(2222),
 				},
 				StringPtr:    &strPtr,
 				StringPtrPtr: &strPtrPtr,
@@ -981,14 +1085,10 @@ func TestSerializer(t *testing.T) {
 			})
 		})
 
-		// Test workflow with interface signature and manual gob registration
-		t.Run("InterfaceWithManualGobRegistration", func(t *testing.T) {
+		// Test workflow with interface signature
+		t.Run("Interface", func(t *testing.T) {
 			// Create an instance of the concrete implementation
 			processor := &TestStringProcessor{Prefix: "Processed: "}
-
-			// Run the workflow with explicit type parameters (needed because processor is *TestStringProcessor but workflow expects TestDataProcessor interface)
-			handle, err := RunWorkflow[TestDataProcessor](executor, interfaceWorkflow, processor)
-			require.NoError(t, err, "Workflow execution failed")
 
 			// Helper function to verify TestStringProcessor
 			verifyProcessor := func(t *testing.T, actual any, name string) {
@@ -1002,10 +1102,49 @@ func TestSerializer(t *testing.T) {
 				assert.Equal(t, "Processed: test", processed, "%s Process method should work", name)
 			}
 
+			testInterfaceSerializationPaths[TestDataProcessor, *TestStringProcessor](
+				t, executor, interfaceWorkflow, processor, "interface-wf", verifyProcessor)
+		})
+
+		// Test workflow with interface signature and nil pointer
+		t.Run("InterfaceNil", func(t *testing.T) {
+			// Create a nil pointer to the concrete implementation
+			var processor *TestStringProcessor = nil
+
+			// Helper function to verify nil pointer
+			verifyNil := func(t *testing.T, actual any, name string) {
+				t.Helper()
+				assert.Nil(t, actual, "%s should be nil", name)
+			}
+
+			testInterfaceSerializationPaths[TestDataProcessor, *TestStringProcessor](
+				t, executor, interfaceWorkflow, processor, "interface-nil-wf", verifyNil)
+		})
+
+		// Test workflow with any signature and nil pointer - demonstrates type information loss
+		t.Run("InterfaceAny", func(t *testing.T) {
+			// Create a nil pointer to the concrete implementation
+			var processor *TestStringProcessor = nil
+
+			// Helper function to verify type information loss
+			verifyTypeCast := func(t *testing.T, actual any, name string) {
+				t.Helper()
+				// When decoding into any, we get untyped nil, not (*TestStringProcessor)(nil)
+				// This demonstrates that type information is lost
+				assert.Nil(t, actual, "%s should be nil (untyped)", name)
+				// Type assertion fails because type information was lost - we can't recover the original type
+				_, ok := actual.(*TestStringProcessor)
+				assert.True(t, ok, "%s type assertion to *TestStringProcessor should succeed", name)
+			}
+
+			// Start the workflow with any type - this loses type information
+			handle, err := RunWorkflow[any](executor, anyWorkflow, processor, WithWorkflowID("interface-any-wf"))
+			require.NoError(t, err, "Workflow execution failed")
+
 			t.Run("HandleGetResult", func(t *testing.T) {
 				result, err := handle.GetResult()
 				require.NoError(t, err, "Failed to get workflow result")
-				verifyProcessor(t, result, "Result")
+				verifyTypeCast(t, result, "Result")
 			})
 
 			t.Run("ListWorkflows", func(t *testing.T) {
@@ -1015,10 +1154,20 @@ func TestSerializer(t *testing.T) {
 				require.NoError(t, err)
 				require.Len(t, wfs, 1)
 				wf := wfs[0]
-				require.NotNil(t, wf.Input, "Workflow input should not be nil")
-				require.NotNil(t, wf.Output, "Workflow output should not be nil")
-				verifyProcessor(t, wf.Input, "Workflow input")
-				verifyProcessor(t, wf.Output, "Workflow output")
+				// Input and output are decoded as any, so they're either nil or map[string]interface{}
+				if wf.Input != nil {
+					// If it's not nil, it's a map[string]interface{} from JSON decode
+					_, isMap := wf.Input.(map[string]interface{})
+					assert.True(t, isMap, "Input should be map[string]interface{} when decoded as any")
+				} else {
+					assert.Nil(t, wf.Input, "Input should be nil (untyped)")
+				}
+				if wf.Output != nil {
+					_, isMap := wf.Output.(map[string]interface{})
+					assert.True(t, isMap, "Output should be map[string]interface{} when decoded as any")
+				} else {
+					assert.Nil(t, wf.Output, "Output should be nil (untyped)")
+				}
 			})
 
 			t.Run("GetWorkflowSteps", func(t *testing.T) {
@@ -1026,17 +1175,23 @@ func TestSerializer(t *testing.T) {
 				require.NoError(t, err)
 				require.Len(t, steps, 1)
 				step := steps[0]
-				require.NotNil(t, step.Output, "Step output should not be nil")
-				verifyProcessor(t, step.Output, "Step output")
+				// Step output is decoded as any
+				if step.Output != nil {
+					_, isMap := step.Output.(map[string]interface{})
+					assert.True(t, isMap, "Step output should be map[string]interface{} when decoded as any")
+				} else {
+					assert.Nil(t, step.Output, "Step output should be nil (untyped)")
+				}
 				assert.Nil(t, step.Error)
 			})
 
 			t.Run("RetrieveWorkflow", func(t *testing.T) {
-				h2, err := RetrieveWorkflow[TestDataProcessor](executor, handle.GetWorkflowID())
+				// When retrieving with any, we need to cast to the concrete type
+				h2, err := RetrieveWorkflow[*TestStringProcessor](executor, handle.GetWorkflowID())
 				require.NoError(t, err)
 				result, err := h2.GetResult()
 				require.NoError(t, err, "Failed to get retrieved workflow result")
-				verifyProcessor(t, result, "Retrieved workflow result")
+				verifyTypeCast(t, result, "Retrieved workflow result")
 			})
 		})
 
@@ -1062,6 +1217,5 @@ func TestSerializer(t *testing.T) {
 				assert.Contains(t, err.Error(), "nested pointer types are not supported", "Error should mention nested pointer types")
 			})
 		})
-
 	})
 }

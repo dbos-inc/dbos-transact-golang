@@ -1529,7 +1529,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 
 		// Decode the recorded end time directly into time.Time
 		// recordedResult.output is an encoded *string
-		serializer := newGobSerializer[time.Time]()
+		serializer := newJSONSerializer[time.Time]()
 		endTime, err = serializer.Decode(recordedResult.output)
 		if err != nil {
 			return 0, fmt.Errorf("failed to decode sleep end time: %w", err)
@@ -1543,7 +1543,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		endTime = time.Now().Add(input.duration)
 
 		// Serialize the end time before recording
-		serializer := newGobSerializer[time.Time]()
+		serializer := newJSONSerializer[time.Time]()
 		encodedEndTimeStr, serErr := serializer.Encode(endTime)
 		if serErr != nil {
 			return 0, fmt.Errorf("failed to serialize sleep end time: %w", serErr)
