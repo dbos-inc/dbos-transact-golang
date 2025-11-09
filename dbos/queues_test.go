@@ -538,10 +538,11 @@ func TestQueueRecovery(t *testing.T) {
 	for _, h := range recoveryHandles {
 		if h.GetWorkflowID() == wfid {
 			// Root workflow case
-			result, err := h.GetResult()
+			resultAny, err := h.GetResult()
 			require.NoError(t, err, "failed to get result from recovered root workflow handle")
-			castedResult, ok := result.([]int)
-			require.True(t, ok, "expected result to be of type []int for root workflow, got %T", result)
+			// Decode the result from any (which may be []interface{} after JSON decode) to []int
+			castedResult, err := decodeAnyToType[[]int](resultAny)
+			require.NoError(t, err, "failed to decode result to []int")
 			expectedResult := []int{0, 1, 2, 3, 4}
 			assert.Equal(t, expectedResult, castedResult, "expected result %v, got %v", expectedResult, castedResult)
 		}

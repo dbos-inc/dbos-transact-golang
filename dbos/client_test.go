@@ -369,8 +369,12 @@ func TestCancelResume(t *testing.T) {
 
 		// Wait for workflow completion
 		proceedSignal.Set() // Allow the workflow to proceed to step two
-		result, err := resumeHandle.GetResult()
+		resultAny, err := resumeHandle.GetResult()
 		require.NoError(t, err, "failed to get result from resumed workflow")
+
+		// Decode the result from any (which may be float64 after JSON decode) to int
+		result, err := decodeAnyToType[int](resultAny)
+		require.NoError(t, err, "failed to decode result to int")
 
 		// Verify the result
 		assert.Equal(t, input, result, "expected result to match input")
@@ -391,8 +395,12 @@ func TestCancelResume(t *testing.T) {
 		resumeAgainHandle, err := client.ResumeWorkflow(workflowID)
 		require.NoError(t, err, "failed to resume workflow again")
 
-		resultAgain, err := resumeAgainHandle.GetResult()
+		resultAgainAny, err := resumeAgainHandle.GetResult()
 		require.NoError(t, err, "failed to get result from second resume")
+
+		// Decode the result from any (which may be float64 after JSON decode) to int
+		resultAgain, err := decodeAnyToType[int](resultAgainAny)
+		require.NoError(t, err, "failed to decode second result to int")
 
 		assert.Equal(t, input, resultAgain, "expected second resume result to match input")
 

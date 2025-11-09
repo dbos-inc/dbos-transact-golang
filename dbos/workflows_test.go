@@ -674,8 +674,9 @@ func TestSteps(t *testing.T) {
 		assert.Nil(t, step.Error)
 
 		// Deserialize the output from the database to verify proper encoding
-		storedOutput, ok := step.Output.(StepOutput)
-		require.True(t, ok, "failed to cast step output to StepOutput")
+		// Use decodeAnyToType to handle JSON encode/decode round-trip
+		storedOutput, err := decodeAnyToType[StepOutput](step.Output)
+		require.NoError(t, err, "failed to decode step output to StepOutput")
 
 		// Verify all fields were correctly serialized and deserialized
 		assert.Equal(t, "Processed_TestObject", storedOutput.ProcessedName, "ProcessedName not correctly serialized")
@@ -1241,8 +1242,8 @@ func TestWorkflowRecovery(t *testing.T) {
 			result, err := recoveredHandle.GetResult()
 			require.NoError(t, err, "failed to get result from recovered workflow %d", i)
 
-			// Result should be the counter value (1)
-			require.Equal(t, int64(1), result, "workflow %d result should be 1", i)
+			// Result should be the counter value (1) as float64
+			require.Equal(t, float64(1), result, "workflow %d result should be 1", i)
 		}
 
 		// Final verification of step states
@@ -1412,8 +1413,11 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Wait for all handles to complete
 		for i, h := range handles {
-			result, err := h.GetResult()
+			resultAny, err := h.GetResult()
 			require.NoError(t, err, "failed to get result from handle %d", i)
+			// Decode the result from any (which may be float64 after JSON decode) to int
+			result, err := decodeAnyToType[int](resultAny)
+			require.NoError(t, err, "failed to decode result to int")
 			require.Equal(t, 0, result)
 		}
 	})
