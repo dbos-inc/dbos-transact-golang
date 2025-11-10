@@ -26,7 +26,7 @@ func testAllSerializationPaths[T any](
 ) {
 	t.Helper()
 
-	isNilExpected := isNilValue(input)
+	isNilExpected := isNilOrZeroValue(input)
 
 	// Setup events for recovery
 	startEvent := NewEvent()

@@ -19,7 +19,7 @@ func newJSONSerializer[T any]() serializer[T] {
 }
 
 func (j *jsonSerializer[T]) Encode(data T) (string, error) {
-	if isNilValue(data) {
+	if isNilOrZeroValue(data) {
 		// For nil values, encode an empty byte slice directly to base64
 		return base64.StdEncoding.EncodeToString([]byte{}), nil
 	}
@@ -57,8 +57,8 @@ func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
 	return result, nil
 }
 
-// isNilValue checks if a value is nil (for pointer types, slice, map, etc.)
-func isNilValue(v any) bool {
+// isNilOrZeroValue checks if a value is nil (for pointer types, slice, map, etc.) or a zero value.
+func isNilOrZeroValue(v any) bool {
 	val := reflect.ValueOf(v)
 	if !val.IsValid() {
 		return true
@@ -67,7 +67,8 @@ func isNilValue(v any) bool {
 	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
 		return val.IsNil()
 	}
-	return false
+	// For other types, check if it's the zero value
+	return val.IsZero()
 }
 
 // IsNestedPointer checks if a type is a nested pointer (e.g., **int, ***int).

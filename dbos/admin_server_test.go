@@ -874,22 +874,9 @@ func TestAdminServer(t *testing.T) {
 				assert.Contains(t, unmarshaledError, "deliberate error for testing", "Error message should be preserved")
 
 			case "emptyStep":
-				// Empty string might be returned as nil or as an empty JSON string
+				// Empty string is returned as an empty JSON string
 				output := step["output"]
-				if output == nil {
-					// Empty string was not included in response (which is fine)
-					t.Logf("Empty step output was nil (not included)")
-				} else {
-					// If it was included, it should be marshaled as JSON string `""`
-					outputStr, ok := output.(string)
-					require.True(t, ok, "If present, empty step output should be a JSON string")
-
-					var unmarshaledOutput string
-					err = json.Unmarshal([]byte(outputStr), &unmarshaledOutput)
-					require.NoError(t, err, "Failed to unmarshal empty step output")
-					assert.Equal(t, "", unmarshaledOutput, "Empty step output should be empty string")
-				}
-
+				require.Equal(t, "", output, "Empty step output should be an empty string")
 				assert.Nil(t, step["error"], "Empty step should have no error")
 			}
 		}

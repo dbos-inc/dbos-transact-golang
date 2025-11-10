@@ -2070,6 +2070,9 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 				if !ok {
 					return nil, fmt.Errorf("workflow input must be encoded string, got %T", workflows[i].Input)
 				}
+				if encodedInput == nil {
+					continue
+				}
 				decodedBytes, err := base64.StdEncoding.DecodeString(*encodedInput)
 				if err != nil {
 					return nil, fmt.Errorf("failed to decode base64 workflow input for %s: %w", workflows[i].ID, err)
@@ -2079,7 +2082,10 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 			if params.loadOutput && workflows[i].Output != nil {
 				encodedOutput, ok := workflows[i].Output.(*string)
 				if !ok {
-					return nil, fmt.Errorf("workflow output must be encoded string, got %T", workflows[i].Output)
+					return nil, fmt.Errorf("workflow output must be encoded *string, got %T", workflows[i].Output)
+				}
+				if encodedOutput == nil {
+					continue
 				}
 				decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
 				if err != nil {
