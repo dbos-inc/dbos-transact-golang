@@ -548,7 +548,7 @@ func TestSerializer(t *testing.T) {
 	})
 
 	t.Run("Int", func(t *testing.T) {
-		testAllSerializationPaths(t, executor, recoveryIntWorkflow, 42, "recovery-int-wf")
+		testAllSerializationPaths(t, executor, recoveryIntWorkflow, 0, "recovery-int-wf")
 	})
 
 	t.Run("EmptyString", func(t *testing.T) {

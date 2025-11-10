@@ -26,12 +26,6 @@ func (j *jsonSerializer[T]) Encode(data T) (*string, error) {
 	}
 
 	// Check if the value is a zero value (but not nil)
-	if isZeroValue(data) {
-		// For zero values, encode an empty byte slice directly to base64
-		emptyStr := base64.StdEncoding.EncodeToString([]byte{})
-		return &emptyStr, nil
-	}
-
 	jsonBytes, err := json.Marshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode data: %w", err)
@@ -48,10 +42,6 @@ func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
 
 	// If *data is an empty string, return zero value
 	var result T
-	if *data == "" {
-		return result, nil
-	}
-
 	dataBytes, err := base64.StdEncoding.DecodeString(*data)
 	if err != nil {
 		return result, fmt.Errorf("failed to decode base64 data: %w", err)
@@ -75,21 +65,6 @@ func isNilValue(v any) bool {
 		return val.IsNil()
 	}
 	return false
-}
-
-// isZeroValue checks if a value is a zero value (but not nil).
-func isZeroValue(v any) bool {
-	val := reflect.ValueOf(v)
-	if !val.IsValid() {
-		return false
-	}
-	// For pointer-like types, if it's not nil, it's not a zero value
-	switch val.Kind() {
-	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func, reflect.Interface:
-		return false
-	}
-	// For other types, check if it's the zero value
-	return val.IsZero()
 }
 
 // getNilOrZeroValue returns nil for pointer types, or zero value for non-pointer types.

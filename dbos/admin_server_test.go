@@ -347,12 +347,12 @@ func TestAdminServer(t *testing.T) {
 				// Empty string workflow: both input and output are empty strings
 				// According to the logic, empty strings should not have Input/Output fields
 				input, hasInput := wf["Input"]
-				require.Equal(t, "", input)
+				require.Equal(t, "\"\"", input)
 				require.True(t, hasInput, "Empty string workflow should have Input field")
 
 				output, hasOutput := wf["Output"]
 				require.True(t, hasOutput, "Empty string workflow should have Output field")
-				require.Equal(t, "", output)
+				require.Equal(t, "\"\"", output)
 
 			} else if wfID == structHandle.GetWorkflowID() {
 				// Struct workflow: input and output should be marshaled as JSON strings
@@ -876,7 +876,7 @@ func TestAdminServer(t *testing.T) {
 			case "emptyStep":
 				// Empty string is returned as an empty JSON string
 				output := step["output"]
-				require.Equal(t, "", output, "Empty step output should be an empty string")
+				require.Equal(t, "\"\"", output, "Empty step output should be an empty string")
 				assert.Nil(t, step["error"], "Empty step should have no error")
 			}
 		}

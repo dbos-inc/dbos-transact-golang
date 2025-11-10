@@ -3223,8 +3223,7 @@ func TestWorkflowTimeout(t *testing.T) {
 
 		// Wait for the workflow to complete and check the result. Should we AwaitedWorkflowCancelled
 		result, err := recoveredHandle.GetResult()
-		// Recovery handles are of type any, so when the handle decoded the result into any, it returned a zero value of any, which is nil, not an empty string.
-		assert.Nil(t, result, "expected result to be nil")
+		assert.Equal(t, "", result, "expected result to be an empty string")
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
 		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
