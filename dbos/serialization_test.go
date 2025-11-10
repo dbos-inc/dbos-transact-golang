@@ -35,6 +35,7 @@ func decodeAnyToType[T any](value any) (T, error) {
 // 1. Workflow recovery: starts a workflow, blocks it, recovers it, then verifies completion
 // 2. All read paths: HandleGetResult, GetWorkflowSteps, ListWorkflows, RetrieveWorkflow
 // This ensures recovery paths exercise all encoding/decoding scenarios that normal workflows do.
+// If input is nil, the test expects the output to be nil too.
 func testAllSerializationPaths[T any](
 	t *testing.T,
 	executor DBOSContext,
@@ -86,24 +87,24 @@ func testAllSerializationPaths[T any](
 
 	// Test read paths after completion
 	t.Run("HandleGetResult", func(t *testing.T) {
-		gotAny, err := handle.GetResult()
+		output, err := handle.GetResult()
 		require.NoError(t, err)
 		if isNilExpected {
-			assert.Nil(t, gotAny, "Nil result should be preserved")
+			assert.Nil(t, output, "Nil result should be preserved")
 		} else {
-			assert.Equal(t, expectedOutput, gotAny)
+			assert.Equal(t, expectedOutput, output)
 		}
 	})
 
 	t.Run("RetrieveWorkflow", func(t *testing.T) {
 		h2, err := RetrieveWorkflow[T](executor, handle.GetWorkflowID())
 		require.NoError(t, err)
-		gotAny, err := h2.GetResult()
+		output, err := h2.GetResult()
 		require.NoError(t, err)
 		if isNilExpected {
-			assert.Nil(t, gotAny, "Retrieved workflow result should be nil")
+			assert.Nil(t, output, "Retrieved workflow result should be nil")
 		} else {
-			assert.Equal(t, expectedOutput, gotAny, "Retrieved workflow result should match expected output")
+			assert.Equal(t, expectedOutput, output, "Retrieved workflow result should match expected output")
 		}
 	})
 
@@ -151,108 +152,6 @@ func testAllSerializationPaths[T any](
 			require.NoError(t, err, "Failed to decode workflow output to type T")
 			assert.Equal(t, input, decodedInput, "Workflow input should match input")
 			assert.Equal(t, expectedOutput, decodedOutput, "Workflow output should match expected output")
-		}
-	})
-}
-
-// testInterfaceSerializationPaths tests interface workflows with special handling for decoding to concrete types.
-// It's similar to testAllSerializationPaths but handles the fact that interface types need to be decoded
-// to their concrete implementation type (*TestStringProcessor) rather than the interface type.
-func testInterfaceSerializationPaths[T any, Concrete any](
-	t *testing.T,
-	executor DBOSContext,
-	workflow Workflow[T, T],
-	input T,
-	workflowID string,
-	verifyFunc func(t *testing.T, actual any, name string),
-) {
-	t.Helper()
-
-	isNilExpected := isNilValue(input)
-
-	// Start the workflow
-	handle, err := RunWorkflow(executor, workflow, input, WithWorkflowID(workflowID))
-	require.NoError(t, err, "Workflow execution failed")
-
-	// Test read paths after completion
-	t.Run("HandleGetResult", func(t *testing.T) {
-		result, err := handle.GetResult()
-		require.NoError(t, err, "Failed to get workflow result")
-		verifyFunc(t, result, "Result")
-	})
-
-	t.Run("RetrieveWorkflow", func(t *testing.T) {
-		// JSON can't unmarshal into interface types directly, so we use the concrete type
-		h2, err := RetrieveWorkflow[Concrete](executor, handle.GetWorkflowID())
-		require.NoError(t, err)
-		result, err := h2.GetResult()
-		require.NoError(t, err, "Failed to get retrieved workflow result")
-		verifyFunc(t, result, "Retrieved workflow result")
-	})
-
-	// Check the last step output (the workflow result)
-	t.Run("GetWorkflowSteps", func(t *testing.T) {
-		steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
-		require.NoError(t, err)
-		require.GreaterOrEqual(t, len(steps), 1, "Should have at least one step")
-		if len(steps) > 0 {
-			lastStep := steps[len(steps)-1]
-			if isNilExpected {
-				// For nil pointers, JSON may return nil or an empty map
-				if lastStep.Output != nil {
-					decodedOutput, err := decodeAnyToType[Concrete](lastStep.Output)
-					require.NoError(t, err, "Failed to decode step output to concrete type")
-					verifyFunc(t, decodedOutput, "Step output")
-				} else {
-					verifyFunc(t, lastStep.Output, "Step output")
-				}
-			} else {
-				require.NotNil(t, lastStep.Output)
-				// GetWorkflowSteps returns any (map[string]interface{} after JSON decode)
-				// We need to re-encode to JSON and decode into concrete type
-				decodedOutput, err := decodeAnyToType[Concrete](lastStep.Output)
-				require.NoError(t, err, "Failed to decode step output to concrete type")
-				verifyFunc(t, decodedOutput, "Step output")
-			}
-			assert.Nil(t, lastStep.Error)
-		}
-	})
-
-	// Verify final state via ListWorkflows
-	t.Run("ListWorkflows", func(t *testing.T) {
-		wfs, err := ListWorkflows(executor,
-			WithWorkflowIDs([]string{handle.GetWorkflowID()}),
-			WithLoadInput(true), WithLoadOutput(true))
-		require.NoError(t, err)
-		require.Len(t, wfs, 1)
-		wf := wfs[0]
-		if isNilExpected {
-			// For nil pointers, JSON may return nil or an empty map
-			if wf.Input != nil {
-				decodedInput, err := decodeAnyToType[Concrete](wf.Input)
-				require.NoError(t, err, "Failed to decode workflow input to concrete type")
-				verifyFunc(t, decodedInput, "Workflow input")
-			} else {
-				verifyFunc(t, wf.Input, "Workflow input")
-			}
-			if wf.Output != nil {
-				decodedOutput, err := decodeAnyToType[Concrete](wf.Output)
-				require.NoError(t, err, "Failed to decode workflow output to concrete type")
-				verifyFunc(t, decodedOutput, "Workflow output")
-			} else {
-				verifyFunc(t, wf.Output, "Workflow output")
-			}
-		} else {
-			require.NotNil(t, wf.Input)
-			require.NotNil(t, wf.Output)
-			// ListWorkflows returns any (map[string]interface{} after JSON decode)
-			// We need to re-encode to JSON and decode into concrete type
-			decodedInput, err := decodeAnyToType[Concrete](wf.Input)
-			require.NoError(t, err, "Failed to decode workflow input to concrete type")
-			decodedOutput, err := decodeAnyToType[Concrete](wf.Output)
-			require.NoError(t, err, "Failed to decode workflow output to concrete type")
-			verifyFunc(t, decodedInput, "Workflow input")
-			verifyFunc(t, decodedOutput, "Workflow output")
 		}
 	})
 }
@@ -326,14 +225,12 @@ type MyInt int
 type MyString string
 type IntSliceSlice [][]int
 
-// Test data structures for DBOS integration testing
 type TestData struct {
 	Message string
 	Value   int
 	Active  bool
 }
 
-// NestedTestData is a nested struct type for testing slices and maps of structs
 type NestedTestData struct {
 	Key   string
 	Count int
@@ -352,51 +249,15 @@ type TestWorkflowData struct {
 	StringPtrPtr **string
 }
 
-// Test workflows and steps
-func serializerTestStep(_ context.Context, input TestWorkflowData) (TestWorkflowData, error) {
-	return input, nil
-}
-
-func serializerWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
-	return RunAsStep(ctx, func(context context.Context) (TestWorkflowData, error) {
-		return serializerTestStep(context, input)
-	})
-}
-
-func serializerPointerValueWorkflow(ctx DBOSContext, input *TestWorkflowData) (*TestWorkflowData, error) {
-	return RunAsStep(ctx, func(context context.Context) (*TestWorkflowData, error) {
-		return input, nil
-	})
-}
-
-// makeTestWorkflow creates a generic workflow that simply returns the input.
-func makeTestWorkflow[T any]() Workflow[T, T] {
-	return func(ctx DBOSContext, input T) (T, error) {
-		return RunAsStep(ctx, func(context context.Context) (T, error) {
-			return input, nil
-		})
-	}
-}
-
 // Typed workflow functions for testing concrete signatures
-// These are now generated using makeTestWorkflow to reduce boilerplate
 var (
-	serializerIntWorkflow            = makeTestWorkflow[int]()
-	serializerIntPtrWorkflow         = makeTestWorkflow[*int]()
-	serializerIntSliceWorkflow       = makeTestWorkflow[[]int]()
-	serializerStringIntMapWorkflow   = makeTestWorkflow[map[string]int]()
-	serializerMyIntWorkflow          = makeTestWorkflow[MyInt]()
-	serializerMyStringWorkflow       = makeTestWorkflow[MyString]()
-	serializerMyStringSliceWorkflow  = makeTestWorkflow[[]MyString]()
-	serializerStringMyIntMapWorkflow = makeTestWorkflow[map[string]MyInt]()
-	serializerStringWorkflow         = makeTestWorkflow[string]()
-	serializerBoolWorkflow           = makeTestWorkflow[bool]()
-	serializerIntArrayWorkflow       = makeTestWorkflow[[3]int]()
-	serializerByteSliceWorkflow      = makeTestWorkflow[[]byte]()
-	// Recovery workflows for all types - these test encoding/decoding through recovery paths
+	serializerWorkflow             = makeTestWorkflow[TestWorkflowData]()
+	recoveryStructPtrWorkflow      = makeRecoveryWorkflow[*TestWorkflowData]()
+	serializerStructWorkflow       = makeRecoveryWorkflow[TestWorkflowData]()
 	recoveryIntWorkflow            = makeRecoveryWorkflow[int]()
 	recoveryStringWorkflow         = makeRecoveryWorkflow[string]()
 	recoveryIntPtrWorkflow         = makeRecoveryWorkflow[*int]()
+	recoveryNestedIntPtrWorkflow   = makeRecoveryWorkflow[**int]()
 	recoveryIntSliceWorkflow       = makeRecoveryWorkflow[[]int]()
 	recoveryIntArrayWorkflow       = makeRecoveryWorkflow[[3]int]()
 	recoveryByteSliceWorkflow      = makeRecoveryWorkflow[[]byte]()
@@ -411,6 +272,30 @@ var (
 	recoveryNestedMapWorkflow     = makeRecoveryWorkflow[map[string]map[string]int]()
 	recoveryIntPtrSliceWorkflow   = makeRecoveryWorkflow[[]*int]()
 	recoveryAnyWorkflow           = makeRecoveryWorkflow[any]()
+)
+
+// Typed Send/Recv workflows for various types
+var (
+	serializerSenderWorkflow         = makeSenderWorkflow[TestWorkflowData]()
+	serializerReceiverWorkflow       = makeReceiverWorkflow[TestWorkflowData]()
+	serializerIntSenderWorkflow      = makeSenderWorkflow[int]()
+	serializerIntReceiverWorkflow    = makeReceiverWorkflow[int]()
+	serializerIntPtrSenderWorkflow   = makeSenderWorkflow[*int]()
+	serializerIntPtrReceiverWorkflow = makeReceiverWorkflow[*int]()
+	serializerMyIntSenderWorkflow    = makeSenderWorkflow[MyInt]()
+	serializerMyIntReceiverWorkflow  = makeReceiverWorkflow[MyInt]()
+)
+
+// Typed SetEvent/GetEvent workflows for various types
+var (
+	serializerSetEventWorkflow       = makeSetEventWorkflow[TestWorkflowData]()
+	serializerGetEventWorkflow       = makeGetEventWorkflow[TestWorkflowData]()
+	serializerIntSetEventWorkflow    = makeSetEventWorkflow[int]()
+	serializerIntGetEventWorkflow    = makeGetEventWorkflow[int]()
+	serializerIntPtrSetEventWorkflow = makeSetEventWorkflow[*int]()
+	serializerIntPtrGetEventWorkflow = makeGetEventWorkflow[*int]()
+	serializerMyIntSetEventWorkflow  = makeSetEventWorkflow[MyInt]()
+	serializerMyIntGetEventWorkflow  = makeGetEventWorkflow[MyInt]()
 )
 
 // makeSenderWorkflow creates a generic sender workflow that sends a message to a receiver workflow.
@@ -462,25 +347,14 @@ func makeGetEventWorkflow[T any]() Workflow[string, T] {
 	}
 }
 
-// Typed Send/Recv workflows for various types
-var (
-	serializerIntSenderWorkflow      = makeSenderWorkflow[int]()
-	serializerIntReceiverWorkflow    = makeReceiverWorkflow[int]()
-	serializerIntPtrSenderWorkflow   = makeSenderWorkflow[*int]()
-	serializerIntPtrReceiverWorkflow = makeReceiverWorkflow[*int]()
-	serializerMyIntSenderWorkflow    = makeSenderWorkflow[MyInt]()
-	serializerMyIntReceiverWorkflow  = makeReceiverWorkflow[MyInt]()
-)
-
-// Typed SetEvent/GetEvent workflows for various types
-var (
-	serializerIntSetEventWorkflow    = makeSetEventWorkflow[int]()
-	serializerIntGetEventWorkflow    = makeGetEventWorkflow[int]()
-	serializerIntPtrSetEventWorkflow = makeSetEventWorkflow[*int]()
-	serializerIntPtrGetEventWorkflow = makeGetEventWorkflow[*int]()
-	serializerMyIntSetEventWorkflow  = makeSetEventWorkflow[MyInt]()
-	serializerMyIntGetEventWorkflow  = makeGetEventWorkflow[MyInt]()
-)
+// makeTestWorkflow creates a generic workflow that simply returns the input.
+func makeTestWorkflow[T any]() Workflow[T, T] {
+	return func(ctx DBOSContext, input T) (T, error) {
+		return RunAsStep(ctx, func(context context.Context) (T, error) {
+			return input, nil
+		})
+	}
+}
 
 func serializerErrorStep(_ context.Context, _ TestWorkflowData) (TestWorkflowData, error) {
 	return TestWorkflowData{}, fmt.Errorf("step error")
@@ -491,55 +365,6 @@ func serializerErrorWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkf
 		return serializerErrorStep(context, input)
 	})
 }
-
-// Workflows for testing Send/Recv with non-basic types
-func serializerSenderWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
-	receiverWorkflowID, err := GetWorkflowID(ctx)
-	if err != nil {
-		return TestWorkflowData{}, fmt.Errorf("failed to get workflow ID: %w", err)
-	}
-	// Add a suffix to create receiver workflow ID
-	destID := receiverWorkflowID + "-receiver"
-
-	err = Send(ctx, destID, input, "test-topic")
-	if err != nil {
-		return TestWorkflowData{}, fmt.Errorf("send failed: %w", err)
-	}
-	return input, nil
-}
-
-func serializerReceiverWorkflow(ctx DBOSContext, _ TestWorkflowData) (TestWorkflowData, error) {
-	// Receive a message with the expected type
-	received, err := Recv[TestWorkflowData](ctx, "test-topic", 10*time.Second)
-	if err != nil {
-		return TestWorkflowData{}, fmt.Errorf("recv failed: %w", err)
-	}
-	return received, nil
-}
-
-// Workflows for testing SetEvent/GetEvent with non-basic types
-func serializerSetEventWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
-	err := SetEvent(ctx, "test-key", input)
-	if err != nil {
-		return TestWorkflowData{}, fmt.Errorf("set event failed: %w", err)
-	}
-	return input, nil
-}
-
-func serializerGetEventWorkflow(ctx DBOSContext, targetWorkflowID string) (TestWorkflowData, error) {
-	// Get the event with the expected type
-	event, err := GetEvent[TestWorkflowData](ctx, targetWorkflowID, "test-key", 10*time.Second)
-	if err != nil {
-		return TestWorkflowData{}, fmt.Errorf("get event failed: %w", err)
-	}
-	return event, nil
-}
-
-// Workflow factories for interface and any types
-var (
-	interfaceWorkflow = makeTestWorkflow[TestDataProcessor]()
-	anyWorkflow       = makeTestWorkflow[any]()
-)
 
 // recoveryEventRegistry stores events for recovery workflows by workflow ID
 var recoveryEventRegistry = make(map[string]struct {
@@ -583,35 +408,6 @@ func makeRecoveryWorkflow[T any]() Workflow[T, T] {
 	}
 }
 
-// serializerRecoveryWorkflow is a recovery workflow for TestWorkflowData type.
-// It uses the recoveryEventRegistry to look up events by workflow ID.
-func serializerRecoveryWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
-	// First step: return the input (tests encoding/decoding of TestWorkflowData)
-	firstStepOutput, err := RunAsStep(ctx, func(context context.Context) (TestWorkflowData, error) {
-		return input, nil
-	}, WithStepName("FirstStep"))
-	if err != nil {
-		return TestWorkflowData{}, err
-	}
-
-	// Second step: blocking step that uses the first step's output
-	// This tests that the first step's output is correctly decoded
-	return RunAsStep(ctx, func(context context.Context) (TestWorkflowData, error) {
-		workflowID, err := GetWorkflowID(ctx)
-		if err != nil {
-			return TestWorkflowData{}, fmt.Errorf("failed to get workflow ID: %w", err)
-		}
-		events, ok := recoveryEventRegistry[workflowID]
-		if !ok {
-			return TestWorkflowData{}, fmt.Errorf("no events registered for workflow ID: %s", workflowID)
-		}
-		events.startEvent.Set()
-		events.blockingEvent.Wait()
-		// Return the first step's output - this verifies correct decoding
-		return firstStepOutput, nil
-	}, WithStepName("BlockingStep"))
-}
-
 // TestDataProcessor is an interface for testing workflows with interface signatures
 type TestDataProcessor interface {
 	Process(data string) string
@@ -642,507 +438,391 @@ func (p *TestStringProcessor) Process(data string) string {
 // - Verifies all read paths: HandleGetResult, ListWorkflows, GetWorkflowSteps, RetrieveWorkflow
 // - Ensures that both original and recovered handles produce correct results
 //
-// The suite covers: scalars, pointers (single level only, nested pointers not supported),
+// The suite covers: scalars, pointers, nested pointers
 // slices, arrays, byte slices, maps, and custom types. It also tests Send/Recv and
 // SetEvent/GetEvent communication patterns.
 func TestSerializer(t *testing.T) {
-	t.Run("JSON", func(t *testing.T) {
-		executor := setupDBOS(t, true, true)
+	executor := setupDBOS(t, true, true)
 
-		// Create a test queue for queued workflow tests
-		testQueue := NewWorkflowQueue(executor, "serializer-test-queue")
+	// Create a test queue for queued workflow tests
+	testQueue := NewWorkflowQueue(executor, "serializer-test-queue")
 
-		// Register workflows
-		RegisterWorkflow(executor, serializerWorkflow)
-		RegisterWorkflow(executor, serializerPointerValueWorkflow)
-		RegisterWorkflow(executor, serializerErrorWorkflow)
-		RegisterWorkflow(executor, serializerSenderWorkflow)
-		RegisterWorkflow(executor, serializerReceiverWorkflow)
-		RegisterWorkflow(executor, serializerSetEventWorkflow)
-		RegisterWorkflow(executor, serializerGetEventWorkflow)
-		RegisterWorkflow(executor, serializerRecoveryWorkflow)
-		// Register typed workflows for concrete signatures
-		RegisterWorkflow(executor, serializerIntWorkflow)
-		RegisterWorkflow(executor, serializerIntPtrWorkflow)
-		RegisterWorkflow(executor, serializerIntSliceWorkflow)
-		RegisterWorkflow(executor, serializerStringIntMapWorkflow)
-		RegisterWorkflow(executor, serializerMyIntWorkflow)
-		RegisterWorkflow(executor, serializerMyStringWorkflow)
-		RegisterWorkflow(executor, serializerMyStringSliceWorkflow)
-		RegisterWorkflow(executor, serializerStringMyIntMapWorkflow)
-		RegisterWorkflow(executor, serializerStringWorkflow)
-		RegisterWorkflow(executor, serializerBoolWorkflow)
-		RegisterWorkflow(executor, serializerIntArrayWorkflow)
-		RegisterWorkflow(executor, serializerByteSliceWorkflow)
-		// Register recovery workflows for all types
-		RegisterWorkflow(executor, recoveryIntWorkflow)
-		RegisterWorkflow(executor, recoveryStringWorkflow)
-		RegisterWorkflow(executor, recoveryIntPtrWorkflow)
-		RegisterWorkflow(executor, recoveryIntSliceWorkflow)
-		RegisterWorkflow(executor, recoveryIntArrayWorkflow)
-		RegisterWorkflow(executor, recoveryByteSliceWorkflow)
-		RegisterWorkflow(executor, recoveryStringIntMapWorkflow)
-		RegisterWorkflow(executor, recoveryMyIntWorkflow)
-		RegisterWorkflow(executor, recoveryMyStringWorkflow)
-		RegisterWorkflow(executor, recoveryMyStringSliceWorkflow)
-		RegisterWorkflow(executor, recoveryStringMyIntMapWorkflow)
-		// Register additional recovery workflows
-		RegisterWorkflow(executor, recoveryEmptyStructWorkflow)
-		RegisterWorkflow(executor, recoveryIntSliceSliceWorkflow)
-		RegisterWorkflow(executor, recoveryNestedMapWorkflow)
-		RegisterWorkflow(executor, recoveryIntPtrSliceWorkflow)
-		RegisterWorkflow(executor, recoveryAnyWorkflow)
-		// Register typed Send/Recv workflows
-		RegisterWorkflow(executor, serializerIntSenderWorkflow)
-		RegisterWorkflow(executor, serializerIntReceiverWorkflow)
-		RegisterWorkflow(executor, serializerIntPtrSenderWorkflow)
-		RegisterWorkflow(executor, serializerIntPtrReceiverWorkflow)
-		RegisterWorkflow(executor, serializerMyIntSenderWorkflow)
-		RegisterWorkflow(executor, serializerMyIntReceiverWorkflow)
-		// Register typed SetEvent/GetEvent workflows
-		RegisterWorkflow(executor, serializerIntSetEventWorkflow)
-		RegisterWorkflow(executor, serializerIntGetEventWorkflow)
-		RegisterWorkflow(executor, serializerIntPtrSetEventWorkflow)
-		RegisterWorkflow(executor, serializerIntPtrGetEventWorkflow)
-		RegisterWorkflow(executor, serializerMyIntSetEventWorkflow)
-		RegisterWorkflow(executor, serializerMyIntGetEventWorkflow)
+	// Register workflows
+	RegisterWorkflow(executor, serializerWorkflow)
+	RegisterWorkflow(executor, recoveryStructPtrWorkflow)
+	RegisterWorkflow(executor, serializerErrorWorkflow)
+	RegisterWorkflow(executor, serializerSenderWorkflow)
+	RegisterWorkflow(executor, serializerReceiverWorkflow)
+	RegisterWorkflow(executor, serializerSetEventWorkflow)
+	RegisterWorkflow(executor, serializerGetEventWorkflow)
+	RegisterWorkflow(executor, serializerStructWorkflow)
 
-		// Register workflow with interface signature for manual gob registration test
-		RegisterWorkflow(executor, interfaceWorkflow)
-		// Register workflow with any signature for type information loss test
-		RegisterWorkflow(executor, anyWorkflow)
+	// Register recovery workflows for all types
+	RegisterWorkflow(executor, recoveryIntWorkflow)
+	RegisterWorkflow(executor, recoveryStringWorkflow)
+	RegisterWorkflow(executor, recoveryIntPtrWorkflow)
+	RegisterWorkflow(executor, recoveryNestedIntPtrWorkflow)
+	RegisterWorkflow(executor, recoveryIntSliceWorkflow)
+	RegisterWorkflow(executor, recoveryIntArrayWorkflow)
+	RegisterWorkflow(executor, recoveryByteSliceWorkflow)
+	RegisterWorkflow(executor, recoveryStringIntMapWorkflow)
+	RegisterWorkflow(executor, recoveryMyIntWorkflow)
+	RegisterWorkflow(executor, recoveryMyStringWorkflow)
+	RegisterWorkflow(executor, recoveryMyStringSliceWorkflow)
+	RegisterWorkflow(executor, recoveryStringMyIntMapWorkflow)
+	// Register additional recovery workflows
+	RegisterWorkflow(executor, recoveryEmptyStructWorkflow)
+	RegisterWorkflow(executor, recoveryIntSliceSliceWorkflow)
+	RegisterWorkflow(executor, recoveryNestedMapWorkflow)
+	RegisterWorkflow(executor, recoveryIntPtrSliceWorkflow)
+	RegisterWorkflow(executor, recoveryAnyWorkflow)
+	// Register typed Send/Recv workflows
+	RegisterWorkflow(executor, serializerIntSenderWorkflow)
+	RegisterWorkflow(executor, serializerIntReceiverWorkflow)
+	RegisterWorkflow(executor, serializerIntPtrSenderWorkflow)
+	RegisterWorkflow(executor, serializerIntPtrReceiverWorkflow)
+	RegisterWorkflow(executor, serializerMyIntSenderWorkflow)
+	RegisterWorkflow(executor, serializerMyIntReceiverWorkflow)
+	// Register typed SetEvent/GetEvent workflows
+	RegisterWorkflow(executor, serializerIntSetEventWorkflow)
+	RegisterWorkflow(executor, serializerIntGetEventWorkflow)
+	RegisterWorkflow(executor, serializerIntPtrSetEventWorkflow)
+	RegisterWorkflow(executor, serializerIntPtrGetEventWorkflow)
+	RegisterWorkflow(executor, serializerMyIntSetEventWorkflow)
+	RegisterWorkflow(executor, serializerMyIntGetEventWorkflow)
 
-		// Register recovery workflow for *TestWorkflowData (used in NilPointer test)
-		recoveryPtrWorkflow := makeRecoveryWorkflow[*TestWorkflowData]()
-		RegisterWorkflow(executor, recoveryPtrWorkflow)
+	err := Launch(executor)
+	require.NoError(t, err)
+	defer Shutdown(executor, 10*time.Second)
 
-		err := Launch(executor)
-		require.NoError(t, err)
-		defer Shutdown(executor, 10*time.Second)
+	// Test workflow with comprehensive data structure
+	t.Run("StructValues", func(t *testing.T) {
+		strPtr := "pointer value"
+		strPtrPtr := &strPtr
+		input := TestWorkflowData{
+			ID:       "test-id",
+			Message:  "test message",
+			Value:    42,
+			Active:   true,
+			Data:     TestData{Message: "embedded", Value: 123, Active: false},
+			Metadata: map[string]string{"key": "value"},
+			NestedSlice: []NestedTestData{
+				{Key: "nested1", Count: 10},
+				{Key: "nested2", Count: 20},
+			},
+			NestedMap: map[string]MyInt{
+				"map-key1": MyInt(100),
+				"map-key2": MyInt(200),
+			},
+			StringPtr:    &strPtr,
+			StringPtrPtr: &strPtrPtr,
+		}
 
-		// Test workflow with comprehensive data structure
-		t.Run("ComprehensiveValues", func(t *testing.T) {
-			strPtr := "pointer value"
-			strPtrPtr := &strPtr
-			input := TestWorkflowData{
-				ID:       "test-id",
-				Message:  "test message",
-				Value:    42,
-				Active:   true,
-				Data:     TestData{Message: "embedded", Value: 123, Active: false},
-				Metadata: map[string]string{"key": "value"},
-				NestedSlice: []NestedTestData{
-					{Key: "nested1", Count: 10},
-					{Key: "nested2", Count: 20},
-				},
-				NestedMap: map[string]MyInt{
-					"map-key1": MyInt(100),
-					"map-key2": MyInt(200),
-				},
-				StringPtr:    &strPtr,
-				StringPtrPtr: &strPtrPtr,
+		testAllSerializationPaths(t, executor, serializerStructWorkflow, input, "struct-values-wf")
+	})
+
+	// Test nil values with pointer type workflow
+	t.Run("NilStructPointer", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, recoveryStructPtrWorkflow, (*TestWorkflowData)(nil), "nil-pointer-wf")
+	})
+
+	t.Run("Int", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, recoveryIntWorkflow, 42, "recovery-int-wf")
+	})
+
+	t.Run("EmptyString", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, recoveryStringWorkflow, "", "recovery-empty-string-wf")
+	})
+
+	// Pointer variants (single level only, nested pointers not supported)
+	t.Run("Pointers", func(t *testing.T) {
+		t.Run("NonNil", func(t *testing.T) {
+			v := 123
+			input := &v
+			testAllSerializationPaths(t, executor, recoveryIntPtrWorkflow, input, "recovery-int-ptr-wf")
+
+		})
+
+		t.Run("Nil", func(t *testing.T) {
+			var input *int = nil
+			testAllSerializationPaths(t, executor, recoveryIntPtrWorkflow, input, "recovery-int-ptr-nil-wf")
+		})
+	})
+
+	t.Run("NestedPointers", func(t *testing.T) {
+		t.Run("NonNil", func(t *testing.T) {
+			v := 123
+			ptr := &v
+			ptrPtr := &ptr
+			testAllSerializationPaths(t, executor, recoveryNestedIntPtrWorkflow, ptrPtr, "recovery-nested-int-ptr-wf")
+
+		})
+
+		t.Run("Nil", func(t *testing.T) {
+			var ptrPtr **int = nil
+			testAllSerializationPaths(t, executor, recoveryNestedIntPtrWorkflow, ptrPtr, "recovery-nested-int-ptr-nil-wf")
+		})
+	})
+
+	t.Run("SlicesAndArrays", func(t *testing.T) {
+		t.Run("NonEmptySlice", func(t *testing.T) {
+			input := []int{1, 2, 3}
+			testAllSerializationPaths(t, executor, recoveryIntSliceWorkflow, input, "recovery-int-slice-wf")
+		})
+
+		t.Run("NilSlice", func(t *testing.T) {
+			var input []int = nil
+			testAllSerializationPaths(t, executor, recoveryIntSliceWorkflow, input, "recovery-int-slice-nil-wf")
+		})
+
+		t.Run("Array", func(t *testing.T) {
+			input := [3]int{1, 2, 3}
+			testAllSerializationPaths(t, executor, recoveryIntArrayWorkflow, input, "recovery-int-array-wf")
+		})
+	})
+
+	t.Run("ByteSlices", func(t *testing.T) {
+		t.Run("NonEmpty", func(t *testing.T) {
+			input := []byte{1, 2, 3, 4, 5}
+			testAllSerializationPaths(t, executor, recoveryByteSliceWorkflow, input, "recovery-byte-slice-wf")
+		})
+
+		t.Run("Nil", func(t *testing.T) {
+			var input []byte = nil
+			testAllSerializationPaths(t, executor, recoveryByteSliceWorkflow, input, "recovery-byte-slice-nil-wf")
+		})
+	})
+
+	t.Run("Maps", func(t *testing.T) {
+		t.Run("NonEmptyMap", func(t *testing.T) {
+			input := map[string]int{"x": 1, "y": 2}
+			testAllSerializationPaths(t, executor, recoveryStringIntMapWorkflow, input, "recovery-string-int-map-wf")
+		})
+
+		t.Run("NilMap", func(t *testing.T) {
+			var input map[string]int = nil
+			testAllSerializationPaths(t, executor, recoveryStringIntMapWorkflow, input, "recovery-string-int-map-nil-wf")
+		})
+	})
+
+	t.Run("CustomTypes", func(t *testing.T) {
+		t.Run("MyInt", func(t *testing.T) {
+			input := MyInt(7)
+			testAllSerializationPaths(t, executor, recoveryMyIntWorkflow, input, "recovery-myint-wf")
+		})
+
+		t.Run("MyString", func(t *testing.T) {
+			input := MyString("zeta")
+			testAllSerializationPaths(t, executor, recoveryMyStringWorkflow, input, "recovery-mystring-wf")
+		})
+
+		t.Run("MyStringSlice", func(t *testing.T) {
+			input := []MyString{"a", "b"}
+			testAllSerializationPaths(t, executor, recoveryMyStringSliceWorkflow, input, "recovery-mystring-slice-wf")
+		})
+
+		t.Run("StringMyIntMap", func(t *testing.T) {
+			input := map[string]MyInt{"k": 9}
+			testAllSerializationPaths(t, executor, recoveryStringMyIntMapWorkflow, input, "recovery-string-myint-map-wf")
+		})
+	})
+
+	// Empty struct
+	t.Run("EmptyStruct", func(t *testing.T) {
+		input := struct{}{}
+		testAllSerializationPaths(t, executor, recoveryEmptyStructWorkflow, input, "recovery-empty-struct-wf")
+	})
+
+	// Nested collections
+	t.Run("NestedCollections", func(t *testing.T) {
+		t.Run("SliceOfSlices", func(t *testing.T) {
+			input := IntSliceSlice{{1, 2}, {3, 4, 5}}
+			testAllSerializationPaths(t, executor, recoveryIntSliceSliceWorkflow, input, "recovery-int-slice-slice-wf")
+		})
+
+		t.Run("NestedMap", func(t *testing.T) {
+			input := map[string]map[string]int{
+				"outer1": {"inner1": 1, "inner2": 2},
+				"outer2": {"inner3": 3},
 			}
+			testAllSerializationPaths(t, executor, recoveryNestedMapWorkflow, input, "recovery-nested-map-wf")
+		})
+	})
 
-			testAllSerializationPaths(t, executor, serializerRecoveryWorkflow, input, "comprehensive-values-wf")
+	// Slices of pointers
+	t.Run("SliceOfPointers", func(t *testing.T) {
+		t.Run("NonNil", func(t *testing.T) {
+			v1 := 10
+			v2 := 20
+			v3 := 30
+			input := []*int{&v1, &v2, &v3}
+			testAllSerializationPaths(t, executor, recoveryIntPtrSliceWorkflow, input, "recovery-int-ptr-slice-wf")
 		})
 
-		// Test nil values with pointer type workflow
-		t.Run("NilPointer", func(t *testing.T) {
-			testAllSerializationPaths(t, executor, recoveryPtrWorkflow, (*TestWorkflowData)(nil), "nil-pointer-wf")
+		t.Run("NilSlice", func(t *testing.T) {
+			var input []*int = nil
+			testAllSerializationPaths(t, executor, recoveryIntPtrSliceWorkflow, input, "recovery-int-ptr-slice-nil-wf")
+		})
+	})
+
+	// Test workflow with any signature using testAllSerializationPaths
+	t.Run("Any", func(t *testing.T) {
+		// Test with a string value (avoids JSON number type conversion issues)
+		input := any("test-value")
+		testAllSerializationPaths(t, executor, recoveryAnyWorkflow, input, "recovery-any-string-wf")
+	})
+
+	// Test error values
+	t.Run("ErrorValues", func(t *testing.T) {
+		input := TestWorkflowData{
+			ID:       "error-test-id",
+			Message:  "error test",
+			Value:    123,
+			Active:   true,
+			Data:     TestData{Message: "error data", Value: 456, Active: false},
+			Metadata: map[string]string{"type": "error"},
+			NestedSlice: []NestedTestData{
+				{Key: "error-nested", Count: 99},
+			},
+			NestedMap: map[string]MyInt{
+				"error-key": MyInt(999),
+			},
+			StringPtr:    nil,
+			StringPtrPtr: nil,
+		}
+
+		handle, err := RunWorkflow(executor, serializerErrorWorkflow, input)
+		require.NoError(t, err, "Error workflow execution failed")
+
+		// 1. Test with handle.GetResult()
+		t.Run("HandleGetResult", func(t *testing.T) {
+			_, err := handle.GetResult()
+			require.Error(t, err, "Should get step error")
+			assert.Contains(t, err.Error(), "step error", "Error message should be preserved")
 		})
 
-		// Test error values
-		t.Run("ErrorValues", func(t *testing.T) {
-			input := TestWorkflowData{
-				ID:       "error-test-id",
-				Message:  "error test",
-				Value:    123,
-				Active:   true,
-				Data:     TestData{Message: "error data", Value: 456, Active: false},
-				Metadata: map[string]string{"type": "error"},
-				NestedSlice: []NestedTestData{
-					{Key: "error-nested", Count: 99},
-				},
-				NestedMap: map[string]MyInt{
-					"error-key": MyInt(999),
-				},
-				StringPtr:    nil,
-				StringPtrPtr: nil,
-			}
+		// 2. Test with GetWorkflowSteps
+		t.Run("GetWorkflowSteps", func(t *testing.T) {
+			steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
+			require.NoError(t, err, "Failed to get workflow steps")
+			require.Len(t, steps, 1, "Expected 1 step")
 
-			handle, err := RunWorkflow(executor, serializerErrorWorkflow, input)
-			require.NoError(t, err, "Error workflow execution failed")
+			step := steps[0]
+			require.NotNil(t, step.Error, "Step should have error")
+			assert.Contains(t, step.Error.Error(), "step error", "Step error should be preserved")
+		})
+	})
 
-			// 1. Test with handle.GetResult()
-			t.Run("HandleGetResult", func(t *testing.T) {
-				_, err := handle.GetResult()
-				require.Error(t, err, "Should get step error")
-				assert.Contains(t, err.Error(), "step error", "Error message should be preserved")
-			})
+	// Test Send/Recv with non-basic types
+	t.Run("SendRecv", func(t *testing.T) {
+		strPtr := "sendrecv pointer"
+		strPtrPtr := &strPtr
+		input := TestWorkflowData{
+			ID:       "sendrecv-test-id",
+			Message:  "test message",
+			Value:    99,
+			Active:   true,
+			Data:     TestData{Message: "nested", Value: 200, Active: true},
+			Metadata: map[string]string{"comm": "sendrecv"},
+			NestedSlice: []NestedTestData{
+				{Key: "sendrecv-nested", Count: 50},
+			},
+			NestedMap: map[string]MyInt{
+				"sendrecv-key": MyInt(500),
+			},
+			StringPtr:    &strPtr,
+			StringPtrPtr: &strPtrPtr,
+		}
 
-			// 2. Test with GetWorkflowSteps
-			t.Run("GetWorkflowSteps", func(t *testing.T) {
-				steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
-				require.NoError(t, err, "Failed to get workflow steps")
-				require.Len(t, steps, 1, "Expected 1 step")
+		testSendRecv(t, executor, serializerSenderWorkflow, serializerReceiverWorkflow, input, "sender-wf")
+	})
 
-				step := steps[0]
-				require.NotNil(t, step.Error, "Step should have error")
-				assert.Contains(t, step.Error.Error(), "step error", "Step error should be preserved")
-			})
+	// Test SetEvent/GetEvent with non-basic types
+	t.Run("SetGetEvent", func(t *testing.T) {
+		strPtr := "event pointer"
+		strPtrPtr := &strPtr
+		input := TestWorkflowData{
+			ID:       "event-test-id",
+			Message:  "event message",
+			Value:    77,
+			Active:   false,
+			Data:     TestData{Message: "event nested", Value: 333, Active: true},
+			Metadata: map[string]string{"type": "event"},
+			NestedSlice: []NestedTestData{
+				{Key: "event-nested1", Count: 30},
+				{Key: "event-nested2", Count: 40},
+			},
+			NestedMap: map[string]MyInt{
+				"event-key1": MyInt(300),
+				"event-key2": MyInt(400),
+			},
+			StringPtr:    &strPtr,
+			StringPtrPtr: &strPtrPtr,
+		}
+
+		testSetGetEvent(t, executor, serializerSetEventWorkflow, serializerGetEventWorkflow, input, "setevent-wf", "getevent-wf")
+	})
+
+	// Test typed Send/Recv and SetEvent/GetEvent with various types
+	t.Run("TypedSendRecvAndSetGetEvent", func(t *testing.T) {
+		// Test int (scalar type)
+		t.Run("Int", func(t *testing.T) {
+			input := 42
+			testSendRecv(t, executor, serializerIntSenderWorkflow, serializerIntReceiverWorkflow, input, "typed-int-sender-wf")
+			testSetGetEvent(t, executor, serializerIntSetEventWorkflow, serializerIntGetEventWorkflow, input, "typed-int-setevent-wf", "typed-int-getevent-wf")
 		})
 
-		// Test Send/Recv with non-basic types
-		t.Run("SendRecv", func(t *testing.T) {
-			strPtr := "sendrecv pointer"
-			strPtrPtr := &strPtr
-			input := TestWorkflowData{
-				ID:       "sendrecv-test-id",
-				Message:  "test message",
-				Value:    99,
-				Active:   true,
-				Data:     TestData{Message: "nested", Value: 200, Active: true},
-				Metadata: map[string]string{"comm": "sendrecv"},
-				NestedSlice: []NestedTestData{
-					{Key: "sendrecv-nested", Count: 50},
-				},
-				NestedMap: map[string]MyInt{
-					"sendrecv-key": MyInt(500),
-				},
-				StringPtr:    &strPtr,
-				StringPtrPtr: &strPtrPtr,
-			}
-
-			testSendRecv(t, executor, serializerSenderWorkflow, serializerReceiverWorkflow, input, "sender-wf")
+		// Test MyInt (user defined type)
+		t.Run("MyInt", func(t *testing.T) {
+			input := MyInt(73)
+			testSendRecv(t, executor, serializerMyIntSenderWorkflow, serializerMyIntReceiverWorkflow, input, "typed-myint-sender-wf")
+			testSetGetEvent(t, executor, serializerMyIntSetEventWorkflow, serializerMyIntGetEventWorkflow, input, "typed-myint-setevent-wf", "typed-myint-getevent-wf")
 		})
 
-		// Test SetEvent/GetEvent with non-basic types
-		t.Run("SetGetEvent", func(t *testing.T) {
-			strPtr := "event pointer"
-			strPtrPtr := &strPtr
-			input := TestWorkflowData{
-				ID:       "event-test-id",
-				Message:  "event message",
-				Value:    77,
-				Active:   false,
-				Data:     TestData{Message: "event nested", Value: 333, Active: true},
-				Metadata: map[string]string{"type": "event"},
-				NestedSlice: []NestedTestData{
-					{Key: "event-nested1", Count: 30},
-					{Key: "event-nested2", Count: 40},
-				},
-				NestedMap: map[string]MyInt{
-					"event-key1": MyInt(300),
-					"event-key2": MyInt(400),
-				},
-				StringPtr:    &strPtr,
-				StringPtrPtr: &strPtrPtr,
-			}
-
-			testSetGetEvent(t, executor, serializerSetEventWorkflow, serializerGetEventWorkflow, input, "setevent-wf", "getevent-wf")
+		// Test *int (pointer type, set)
+		t.Run("IntPtrSet", func(t *testing.T) {
+			v := 99
+			input := &v
+			testSendRecv(t, executor, serializerIntPtrSenderWorkflow, serializerIntPtrReceiverWorkflow, input, "typed-intptr-set-sender-wf")
+			testSetGetEvent(t, executor, serializerIntPtrSetEventWorkflow, serializerIntPtrGetEventWorkflow, input, "typed-intptr-set-setevent-wf", "typed-intptr-set-getevent-wf")
 		})
 
-		// Test typed Send/Recv and SetEvent/GetEvent with various types
-		t.Run("TypedSendRecvAndSetGetEvent", func(t *testing.T) {
-			// Test int (scalar type)
-			t.Run("Int", func(t *testing.T) {
-				input := 42
-				testSendRecv(t, executor, serializerIntSenderWorkflow, serializerIntReceiverWorkflow, input, "typed-int-sender-wf")
-				testSetGetEvent(t, executor, serializerIntSetEventWorkflow, serializerIntGetEventWorkflow, input, "typed-int-setevent-wf", "typed-int-getevent-wf")
-			})
-
-			// Test MyInt (user defined type)
-			t.Run("MyInt", func(t *testing.T) {
-				input := MyInt(73)
-				testSendRecv(t, executor, serializerMyIntSenderWorkflow, serializerMyIntReceiverWorkflow, input, "typed-myint-sender-wf")
-				testSetGetEvent(t, executor, serializerMyIntSetEventWorkflow, serializerMyIntGetEventWorkflow, input, "typed-myint-setevent-wf", "typed-myint-getevent-wf")
-			})
-
-			// Test *int (pointer type, set)
-			t.Run("IntPtrSet", func(t *testing.T) {
-				v := 99
-				input := &v
-				testSendRecv(t, executor, serializerIntPtrSenderWorkflow, serializerIntPtrReceiverWorkflow, input, "typed-intptr-set-sender-wf")
-				testSetGetEvent(t, executor, serializerIntPtrSetEventWorkflow, serializerIntPtrGetEventWorkflow, input, "typed-intptr-set-setevent-wf", "typed-intptr-set-getevent-wf")
-			})
-
-			// Test *int (pointer type, nil)
-			t.Run("IntPtrNil", func(t *testing.T) {
-				var input *int = nil
-				testSendRecv(t, executor, serializerIntPtrSenderWorkflow, serializerIntPtrReceiverWorkflow, input, "typed-intptr-nil-sender-wf")
-				testSetGetEvent(t, executor, serializerIntPtrSetEventWorkflow, serializerIntPtrGetEventWorkflow, input, "typed-intptr-nil-setevent-wf", "typed-intptr-nil-getevent-wf")
-			})
+		// Test *int (pointer type, nil)
+		t.Run("IntPtrNil", func(t *testing.T) {
+			var input *int = nil
+			testSendRecv(t, executor, serializerIntPtrSenderWorkflow, serializerIntPtrReceiverWorkflow, input, "typed-intptr-nil-sender-wf")
+			testSetGetEvent(t, executor, serializerIntPtrSetEventWorkflow, serializerIntPtrGetEventWorkflow, input, "typed-intptr-nil-setevent-wf", "typed-intptr-nil-getevent-wf")
 		})
+	})
 
-		// Test queued workflow with TestWorkflowData type
-		t.Run("QueuedWorkflow", func(t *testing.T) {
-			strPtr := "queued pointer"
-			strPtrPtr := &strPtr
-			input := TestWorkflowData{
-				ID:       "queued-test-id",
-				Message:  "queued test message",
-				Value:    456,
-				Active:   false,
-				Data:     TestData{Message: "queued nested", Value: 789, Active: true},
-				Metadata: map[string]string{"type": "queued"},
-				NestedSlice: []NestedTestData{
-					{Key: "queued-nested", Count: 222},
-				},
-				NestedMap: map[string]MyInt{
-					"queued-key": MyInt(2222),
-				},
-				StringPtr:    &strPtr,
-				StringPtrPtr: &strPtrPtr,
-			}
+	// Test queued workflow with TestWorkflowData type
+	t.Run("QueuedWorkflow", func(t *testing.T) {
+		strPtr := "queued pointer"
+		strPtrPtr := &strPtr
+		input := TestWorkflowData{
+			ID:       "queued-test-id",
+			Message:  "queued test message",
+			Value:    456,
+			Active:   false,
+			Data:     TestData{Message: "queued nested", Value: 789, Active: true},
+			Metadata: map[string]string{"type": "queued"},
+			NestedSlice: []NestedTestData{
+				{Key: "queued-nested", Count: 222},
+			},
+			NestedMap: map[string]MyInt{
+				"queued-key": MyInt(2222),
+			},
+			StringPtr:    &strPtr,
+			StringPtrPtr: &strPtrPtr,
+		}
 
-			// Start workflow with queue option
-			handle, err := RunWorkflow(executor, serializerWorkflow, input, WithWorkflowID("serializer-queued-wf"), WithQueue(testQueue.Name))
-			require.NoError(t, err, "failed to start queued workflow")
+		// Start workflow with queue option
+		handle, err := RunWorkflow(executor, serializerWorkflow, input, WithWorkflowID("serializer-queued-wf"), WithQueue(testQueue.Name))
+		require.NoError(t, err, "failed to start queued workflow")
 
-			// Get result from the handle
-			result, err := handle.GetResult()
-			require.NoError(t, err, "queued workflow should complete successfully")
-			assert.Equal(t, input, result, "queued workflow result should match input")
-		})
-
-		t.Run("Scalars", func(t *testing.T) {
-			testAllSerializationPaths(t, executor, recoveryIntWorkflow, 42, "recovery-int-wf")
-		})
-
-		t.Run("EmptyString", func(t *testing.T) {
-			testAllSerializationPaths(t, executor, recoveryStringWorkflow, "", "recovery-empty-string-wf")
-		})
-
-		// Pointer variants (single level only, nested pointers not supported)
-		t.Run("Pointers", func(t *testing.T) {
-			t.Run("NonNil", func(t *testing.T) {
-				v := 123
-				input := &v
-				testAllSerializationPaths(t, executor, recoveryIntPtrWorkflow, input, "recovery-int-ptr-wf")
-			})
-
-			t.Run("Nil", func(t *testing.T) {
-				var input *int = nil
-				testAllSerializationPaths(t, executor, recoveryIntPtrWorkflow, input, "recovery-int-ptr-nil-wf")
-			})
-		})
-
-		t.Run("SlicesAndArrays", func(t *testing.T) {
-			t.Run("NonEmptySlice", func(t *testing.T) {
-				input := []int{1, 2, 3}
-				testAllSerializationPaths(t, executor, recoveryIntSliceWorkflow, input, "recovery-int-slice-wf")
-			})
-
-			t.Run("NilSlice", func(t *testing.T) {
-				var input []int = nil
-				testAllSerializationPaths(t, executor, recoveryIntSliceWorkflow, input, "recovery-int-slice-nil-wf")
-			})
-
-			t.Run("Array", func(t *testing.T) {
-				input := [3]int{1, 2, 3}
-				testAllSerializationPaths(t, executor, recoveryIntArrayWorkflow, input, "recovery-int-array-wf")
-			})
-		})
-
-		t.Run("ByteSlices", func(t *testing.T) {
-			t.Run("NonEmpty", func(t *testing.T) {
-				input := []byte{1, 2, 3, 4, 5}
-				testAllSerializationPaths(t, executor, recoveryByteSliceWorkflow, input, "recovery-byte-slice-wf")
-			})
-
-			t.Run("Nil", func(t *testing.T) {
-				var input []byte = nil
-				testAllSerializationPaths(t, executor, recoveryByteSliceWorkflow, input, "recovery-byte-slice-nil-wf")
-			})
-		})
-
-		t.Run("Maps", func(t *testing.T) {
-			t.Run("NonEmptyMap", func(t *testing.T) {
-				input := map[string]int{"x": 1, "y": 2}
-				testAllSerializationPaths(t, executor, recoveryStringIntMapWorkflow, input, "recovery-string-int-map-wf")
-			})
-
-			t.Run("NilMap", func(t *testing.T) {
-				var input map[string]int = nil
-				testAllSerializationPaths(t, executor, recoveryStringIntMapWorkflow, input, "recovery-string-int-map-nil-wf")
-			})
-		})
-
-		t.Run("CustomTypes", func(t *testing.T) {
-			t.Run("MyInt", func(t *testing.T) {
-				input := MyInt(7)
-				testAllSerializationPaths(t, executor, recoveryMyIntWorkflow, input, "recovery-myint-wf")
-			})
-
-			t.Run("MyString", func(t *testing.T) {
-				input := MyString("zeta")
-				testAllSerializationPaths(t, executor, recoveryMyStringWorkflow, input, "recovery-mystring-wf")
-			})
-
-			t.Run("MyStringSlice", func(t *testing.T) {
-				input := []MyString{"a", "b"}
-				testAllSerializationPaths(t, executor, recoveryMyStringSliceWorkflow, input, "recovery-mystring-slice-wf")
-			})
-
-			t.Run("StringMyIntMap", func(t *testing.T) {
-				input := map[string]MyInt{"k": 9}
-				testAllSerializationPaths(t, executor, recoveryStringMyIntMapWorkflow, input, "recovery-string-myint-map-wf")
-			})
-		})
-
-		// Empty struct
-		t.Run("EmptyStruct", func(t *testing.T) {
-			input := struct{}{}
-			testAllSerializationPaths(t, executor, recoveryEmptyStructWorkflow, input, "recovery-empty-struct-wf")
-		})
-
-		// Nested collections
-		t.Run("NestedCollections", func(t *testing.T) {
-			t.Run("SliceOfSlices", func(t *testing.T) {
-				input := IntSliceSlice{{1, 2}, {3, 4, 5}}
-				testAllSerializationPaths(t, executor, recoveryIntSliceSliceWorkflow, input, "recovery-int-slice-slice-wf")
-			})
-
-			t.Run("NestedMap", func(t *testing.T) {
-				input := map[string]map[string]int{
-					"outer1": {"inner1": 1, "inner2": 2},
-					"outer2": {"inner3": 3},
-				}
-				testAllSerializationPaths(t, executor, recoveryNestedMapWorkflow, input, "recovery-nested-map-wf")
-			})
-		})
-
-		// Slices of pointers
-		t.Run("SliceOfPointers", func(t *testing.T) {
-			t.Run("NonNil", func(t *testing.T) {
-				v1 := 10
-				v2 := 20
-				v3 := 30
-				input := []*int{&v1, &v2, &v3}
-				testAllSerializationPaths(t, executor, recoveryIntPtrSliceWorkflow, input, "recovery-int-ptr-slice-wf")
-			})
-
-			t.Run("NilSlice", func(t *testing.T) {
-				var input []*int = nil
-				testAllSerializationPaths(t, executor, recoveryIntPtrSliceWorkflow, input, "recovery-int-ptr-slice-nil-wf")
-			})
-		})
-
-		// Test workflow with interface signature
-		t.Run("Interface", func(t *testing.T) {
-			// Create an instance of the concrete implementation
-			processor := &TestStringProcessor{Prefix: "Processed: "}
-
-			// Helper function to verify TestStringProcessor
-			verifyProcessor := func(t *testing.T, actual any, name string) {
-				t.Helper()
-				require.NotNil(t, actual, "%s should not be nil", name)
-				processor, ok := actual.(*TestStringProcessor)
-				require.True(t, ok, "%s should be *TestStringProcessor, got %T", name, actual)
-				assert.Equal(t, "Processed: ", processor.Prefix, "%s Prefix should match", name)
-				// Verify the interface method works
-				processed := processor.Process("test")
-				assert.Equal(t, "Processed: test", processed, "%s Process method should work", name)
-			}
-
-			testInterfaceSerializationPaths[TestDataProcessor, *TestStringProcessor](
-				t, executor, interfaceWorkflow, processor, "interface-wf", verifyProcessor)
-		})
-
-		// Test workflow with interface signature and nil pointer
-		t.Run("InterfaceNil", func(t *testing.T) {
-			// Create a nil pointer to the concrete implementation
-			var processor *TestStringProcessor = nil
-
-			// Helper function to verify nil pointer
-			verifyNil := func(t *testing.T, actual any, name string) {
-				t.Helper()
-				assert.Nil(t, actual, "%s should be nil", name)
-			}
-
-			testInterfaceSerializationPaths[TestDataProcessor, *TestStringProcessor](
-				t, executor, interfaceWorkflow, processor, "interface-nil-wf", verifyNil)
-		})
-
-		// Test workflow with any signature and nil pointer - demonstrates type information loss
-		t.Run("InterfaceAny", func(t *testing.T) {
-			// Create a nil pointer to the concrete implementation
-			var processor *TestStringProcessor = nil
-
-			// Helper function to verify type information loss
-			verifyTypeCast := func(t *testing.T, actual any, name string) {
-				t.Helper()
-				// When decoding into any, we get untyped nil, not (*TestStringProcessor)(nil)
-				// This demonstrates that type information is lost
-				assert.Nil(t, actual, "%s should be nil (untyped)", name)
-				// Type assertion fails because type information was lost - we can't recover the original type
-				_, ok := actual.(*TestStringProcessor)
-				assert.True(t, ok, "%s type assertion to *TestStringProcessor should succeed", name)
-			}
-
-			// Start the workflow with any type - this loses type information
-			handle, err := RunWorkflow[any](executor, anyWorkflow, processor, WithWorkflowID("interface-any-wf"))
-			require.NoError(t, err, "Workflow execution failed")
-
-			t.Run("HandleGetResult", func(t *testing.T) {
-				result, err := handle.GetResult()
-				require.NoError(t, err, "Failed to get workflow result")
-				verifyTypeCast(t, result, "Result")
-			})
-
-			t.Run("ListWorkflows", func(t *testing.T) {
-				wfs, err := ListWorkflows(executor,
-					WithWorkflowIDs([]string{handle.GetWorkflowID()}),
-					WithLoadInput(true), WithLoadOutput(true))
-				require.NoError(t, err)
-				require.Len(t, wfs, 1)
-				wf := wfs[0]
-				// Input and output are decoded as any, so they're either nil or map[string]interface{}
-				if wf.Input != nil {
-					// If it's not nil, it's a map[string]interface{} from JSON decode
-					_, isMap := wf.Input.(map[string]interface{})
-					assert.True(t, isMap, "Input should be map[string]interface{} when decoded as any")
-				} else {
-					assert.Nil(t, wf.Input, "Input should be nil (untyped)")
-				}
-				if wf.Output != nil {
-					_, isMap := wf.Output.(map[string]interface{})
-					assert.True(t, isMap, "Output should be map[string]interface{} when decoded as any")
-				} else {
-					assert.Nil(t, wf.Output, "Output should be nil (untyped)")
-				}
-			})
-
-			t.Run("GetWorkflowSteps", func(t *testing.T) {
-				steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
-				require.NoError(t, err)
-				require.Len(t, steps, 1)
-				step := steps[0]
-				// Step output is decoded as any
-				if step.Output != nil {
-					_, isMap := step.Output.(map[string]interface{})
-					assert.True(t, isMap, "Step output should be map[string]interface{} when decoded as any")
-				} else {
-					assert.Nil(t, step.Output, "Step output should be nil (untyped)")
-				}
-				assert.Nil(t, step.Error)
-			})
-
-			t.Run("RetrieveWorkflow", func(t *testing.T) {
-				// When retrieving with any, we need to cast to the concrete type
-				h2, err := RetrieveWorkflow[*TestStringProcessor](executor, handle.GetWorkflowID())
-				require.NoError(t, err)
-				result, err := h2.GetResult()
-				require.NoError(t, err, "Failed to get retrieved workflow result")
-				verifyTypeCast(t, result, "Retrieved workflow result")
-			})
-		})
-
-		// Test workflow with any signature using testAllSerializationPaths
-		t.Run("Any", func(t *testing.T) {
-			// Test with a string value (avoids JSON number type conversion issues)
-			input := any("test-value")
-			testAllSerializationPaths(t, executor, recoveryAnyWorkflow, input, "recovery-any-string-wf")
-		})
+		// Get result from the handle
+		result, err := handle.GetResult()
+		require.NoError(t, err, "queued workflow should complete successfully")
+		assert.Equal(t, input, result, "queued workflow result should match input")
 	})
 }
