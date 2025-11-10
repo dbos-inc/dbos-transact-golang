@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -674,8 +675,9 @@ func TestSteps(t *testing.T) {
 		assert.Nil(t, step.Error)
 
 		// Deserialize the output from the database to verify proper encoding
-		// Use decodeAnyToType to handle JSON encode/decode round-trip
-		storedOutput, err := decodeAnyToType[StepOutput](step.Output)
+		// Use json.Unmarshal to handle JSON encode/decode round-trip
+		var storedOutput StepOutput
+		err = json.Unmarshal([]byte(step.Output.(string)), &storedOutput)
 		require.NoError(t, err, "failed to decode step output to StepOutput")
 
 		// Verify all fields were correctly serialized and deserialized
@@ -1416,7 +1418,8 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			resultAny, err := h.GetResult()
 			require.NoError(t, err, "failed to get result from handle %d", i)
 			// Decode the result from any (which may be float64 after JSON decode) to int
-			result, err := decodeAnyToType[int](resultAny)
+			var result int
+			err = json.Unmarshal([]byte(resultAny.(string)), &result)
 			require.NoError(t, err, "failed to decode result to int")
 			require.Equal(t, 0, result)
 		}

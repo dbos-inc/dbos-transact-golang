@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -541,7 +542,8 @@ func TestQueueRecovery(t *testing.T) {
 			resultAny, err := h.GetResult()
 			require.NoError(t, err, "failed to get result from recovered root workflow handle")
 			// Decode the result from any (which may be []interface{} after JSON decode) to []int
-			castedResult, err := decodeAnyToType[[]int](resultAny)
+			var castedResult []int
+			err = json.Unmarshal([]byte(resultAny.(string)), &castedResult)
 			require.NoError(t, err, "failed to decode result to []int")
 			expectedResult := []int{0, 1, 2, 3, 4}
 			assert.Equal(t, expectedResult, castedResult, "expected result %v, got %v", expectedResult, castedResult)

@@ -11,25 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// decodeAnyToType converts an any value (which is map[string]interface{} after JSON decode)
-// back to the expected type T by re-encoding to JSON and decoding into T.
-func decodeAnyToType[T any](value any) (T, error) {
-	var result T
-	if value == nil {
-		return result, nil
-	}
-	// Re-encode the any value to JSON
-	jsonBytes, err := json.Marshal(value)
-	if err != nil {
-		return result, fmt.Errorf("failed to marshal any value: %w", err)
-	}
-	// Decode JSON into the expected type T
-	if err := json.Unmarshal(jsonBytes, &result); err != nil {
-		return result, fmt.Errorf("failed to unmarshal into type T: %w", err)
-	}
-	return result, nil
-}
-
 // testAllSerializationPaths tests workflow recovery and verifies all read paths.
 // This is the unified test function that exercises:
 // 1. Workflow recovery: starts a workflow, blocks it, recovers it, then verifies completion
@@ -116,13 +97,17 @@ func testAllSerializationPaths[T any](
 		if len(steps) > 0 {
 			lastStep := steps[len(steps)-1]
 			if isNilExpected {
-				assert.Nil(t, lastStep.Output, "Step output should be nil")
+				// Should be an empty string
+				assert.Equal(t, "", lastStep.Output, "Step output should be an empty string")
 			} else {
 				require.NotNil(t, lastStep.Output)
-				// GetWorkflowSteps returns any (map[string]interface{} after JSON decode)
-				// We need to re-encode to JSON and decode into type T
-				decodedOutput, err := decodeAnyToType[T](lastStep.Output)
-				require.NoError(t, err, "Failed to decode step output to type T")
+				// GetWorkflowSteps returns a string (base64-decoded JSON)
+				// Unmarshal the JSON string into type T
+				strValue, ok := lastStep.Output.(string)
+				require.True(t, ok, "Step output should be a string")
+				var decodedOutput T
+				err := json.Unmarshal([]byte(strValue), &decodedOutput)
+				require.NoError(t, err, "Failed to unmarshal step output to type T")
 				assert.Equal(t, expectedOutput, decodedOutput, "Step output should match expected output")
 			}
 			assert.Nil(t, lastStep.Error)
@@ -138,18 +123,28 @@ func testAllSerializationPaths[T any](
 		require.Len(t, wfs, 1)
 		wf := wfs[0]
 		if isNilExpected {
-			assert.Nil(t, wf.Input, "Workflow input should be nil")
-			assert.Nil(t, wf.Output, "Workflow output should be nil")
+			// Should be an empty string
+			assert.Equal(t, "", wf.Input, "Workflow input should be an empty string")
+			assert.Equal(t, "", wf.Output, "Workflow output should be an empty string")
 		} else {
 			require.NotNil(t, wf.Input)
 			require.NotNil(t, wf.Output)
 
-			// ListWorkflows returns any (map[string]interface{} after JSON decode)
-			// We need to re-encode to JSON and decode into type T
-			decodedInput, err := decodeAnyToType[T](wf.Input)
-			require.NoError(t, err, "Failed to decode workflow input to type T")
-			decodedOutput, err := decodeAnyToType[T](wf.Output)
-			require.NoError(t, err, "Failed to decode workflow output to type T")
+			// ListWorkflows returns strings (base64-decoded JSON)
+			// Unmarshal the JSON strings into type T
+			inputStr, ok := wf.Input.(string)
+			require.True(t, ok, "Workflow input should be a string")
+			outputStr, ok := wf.Output.(string)
+			require.True(t, ok, "Workflow output should be a string")
+
+			var decodedInput T
+			err := json.Unmarshal([]byte(inputStr), &decodedInput)
+			require.NoError(t, err, "Failed to unmarshal workflow input to type T")
+
+			var decodedOutput T
+			err = json.Unmarshal([]byte(outputStr), &decodedOutput)
+			require.NoError(t, err, "Failed to unmarshal workflow output to type T")
+
 			assert.Equal(t, input, decodedInput, "Workflow input should match input")
 			assert.Equal(t, expectedOutput, decodedOutput, "Workflow output should match expected output")
 		}

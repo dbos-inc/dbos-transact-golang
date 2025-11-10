@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -2063,29 +2064,28 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 
 	// Deserialize Input and Output fields if they were loaded
 	if params.loadInput || params.loadOutput {
-		serializer := newJSONSerializer[any]()
 		for i := range workflows {
 			if params.loadInput && workflows[i].Input != nil {
 				encodedInput, ok := workflows[i].Input.(*string)
 				if !ok {
 					return nil, fmt.Errorf("workflow input must be encoded string, got %T", workflows[i].Input)
 				}
-				decodedInput, err := serializer.Decode(encodedInput)
+				decodedBytes, err := base64.StdEncoding.DecodeString(*encodedInput)
 				if err != nil {
-					return nil, fmt.Errorf("failed to deserialize workflow input for %s: %w", workflows[i].ID, err)
+					return nil, fmt.Errorf("failed to decode base64 workflow input for %s: %w", workflows[i].ID, err)
 				}
-				workflows[i].Input = decodedInput
+				workflows[i].Input = string(decodedBytes)
 			}
 			if params.loadOutput && workflows[i].Output != nil {
 				encodedOutput, ok := workflows[i].Output.(*string)
 				if !ok {
 					return nil, fmt.Errorf("workflow output must be encoded string, got %T", workflows[i].Output)
 				}
-				decodedOutput, err := serializer.Decode(encodedOutput)
+				decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
 				if err != nil {
-					return nil, fmt.Errorf("failed to deserialize workflow output for %s: %w", workflows[i].ID, err)
+					return nil, fmt.Errorf("failed to decode base64 workflow output for %s: %w", workflows[i].ID, err)
 				}
-				workflows[i].Output = decodedOutput
+				workflows[i].Output = string(decodedBytes)
 			}
 		}
 	}
@@ -2191,14 +2191,16 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 
 	// Deserialize outputs if asked to
 	if loadOutput {
-		serializer := newJSONSerializer[any]()
 		for i := range steps {
 			encodedOutput := steps[i].Output
-			decodedOutput, err := serializer.Decode(encodedOutput)
-			if err != nil {
-				return nil, fmt.Errorf("failed to deserialize step output for step %d: %w", steps[i].StepID, err)
+			if encodedOutput == nil {
+				continue
 			}
-			stepInfos[i].Output = decodedOutput
+			decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode base64 step output for step %d: %w", steps[i].StepID, err)
+			}
+			stepInfos[i].Output = string(decodedBytes)
 		}
 	}
 

@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -373,7 +374,8 @@ func TestCancelResume(t *testing.T) {
 		require.NoError(t, err, "failed to get result from resumed workflow")
 
 		// Decode the result from any (which may be float64 after JSON decode) to int
-		result, err := decodeAnyToType[int](resultAny)
+		var result int
+		err = json.Unmarshal([]byte(resultAny.(string)), &result)
 		require.NoError(t, err, "failed to decode result to int")
 
 		// Verify the result
@@ -399,7 +401,8 @@ func TestCancelResume(t *testing.T) {
 		require.NoError(t, err, "failed to get result from second resume")
 
 		// Decode the result from any (which may be float64 after JSON decode) to int
-		resultAgain, err := decodeAnyToType[int](resultAgainAny)
+		var resultAgain int
+		err = json.Unmarshal([]byte(resultAgainAny.(string)), &resultAgain)
 		require.NoError(t, err, "failed to decode second result to int")
 
 		assert.Equal(t, input, resultAgain, "expected second resume result to match input")
