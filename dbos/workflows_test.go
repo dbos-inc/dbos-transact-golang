@@ -768,7 +768,12 @@ func TestChildWorkflow(t *testing.T) {
 		if steps[1].StepName != "DBOS.getResult" {
 			return "", fmt.Errorf("expected second step name to be getResult, got %s", steps[1].StepName)
 		}
-		if steps[1].Output != "from step" {
+		var stepOutput string
+		err = json.Unmarshal([]byte(steps[1].Output.(string)), &stepOutput)
+		if err != nil {
+			return "", fmt.Errorf("failed to unmarshal step output: %w", err)
+		}
+		if stepOutput != "from step" {
 			return "", fmt.Errorf("expected second step output to be 'from step', got %s", steps[1].Output)
 		}
 		if steps[1].Error != nil {
@@ -847,7 +852,12 @@ func TestChildWorkflow(t *testing.T) {
 			if childWfStep.Output != nil {
 				return "", fmt.Errorf("expected child wf step output to be nil, got %s", childWfStep.Output)
 			}
-			if getResultStep.Output != "from step" {
+			var stepOutput string
+			err = json.Unmarshal([]byte(getResultStep.Output.(string)), &stepOutput)
+			if err != nil {
+				return "", fmt.Errorf("failed to unmarshal step output: %w", err)
+			}
+			if stepOutput != "from step" {
 				return "", fmt.Errorf("expected get result step output to be 'from step', got %s", getResultStep.Output)
 			}
 
