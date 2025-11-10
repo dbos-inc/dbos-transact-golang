@@ -41,14 +41,13 @@ func (j *jsonSerializer[T]) Encode(data T) (*string, error) {
 }
 
 func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
-	var result T
-
 	// If data is a nil pointer, return nil (for pointer types) or zero value (for non-pointer types)
 	if data == nil {
 		return getNilOrZeroValue[T](), nil
 	}
 
 	// If *data is an empty string, return zero value
+	var result T
 	if *data == "" {
 		return result, nil
 	}
@@ -58,13 +57,6 @@ func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
 		return result, fmt.Errorf("failed to decode base64 data: %w", err)
 	}
 
-	// If decoded data is empty, it represents a zero value
-	if len(dataBytes) == 0 {
-		return result, nil
-	}
-
-	// JSON unmarshal can handle both pointer and non-pointer types
-	// For pointer types, it will allocate if needed
 	if err := json.Unmarshal(dataBytes, &result); err != nil {
 		return result, fmt.Errorf("failed to decode json data: %w", err)
 	}

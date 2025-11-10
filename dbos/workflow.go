@@ -277,15 +277,11 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 		isWithinWorkflow := ok && workflowState != nil
 		if isWithinWorkflow {
-			encodedResultStr, ok := encodedResult.(*string)
-			if !ok { // Should never happen
-				return *new(R), newWorkflowUnexpectedResultType(h.workflowID, "string (encoded)", fmt.Sprintf("%T", encodedResult))
-			}
 			recordGetResultInput := recordChildGetResultDBInput{
 				parentWorkflowID: workflowState.workflowID,
 				childWorkflowID:  h.workflowID,
 				stepID:           workflowState.nextStepID(),
-				output:           encodedResultStr,
+				output:           encodedStr,
 				err:              err,
 			}
 			recordResultErr := retry(h.dbosContext, func() error {
