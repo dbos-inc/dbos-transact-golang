@@ -2189,7 +2189,6 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 		stepInfos[i] = StepInfo{
 			StepID:          step.StepID,
 			StepName:        step.StepName,
-			Output:          step.Output,
 			Error:           step.Error,
 			ChildWorkflowID: step.ChildWorkflowID,
 		}
