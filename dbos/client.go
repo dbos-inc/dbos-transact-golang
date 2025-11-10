@@ -249,7 +249,7 @@ func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, op
 	}
 
 	// Call the interface method with the same signature
-	handle, err := c.Enqueue(queueName, workflowName, &encodedInput, opts...)
+	handle, err := c.Enqueue(queueName, workflowName, encodedInput, opts...)
 	if err != nil {
 		return nil, err
 	}

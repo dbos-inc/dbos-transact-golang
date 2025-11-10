@@ -1544,11 +1544,10 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 
 		// Serialize the end time before recording
 		serializer := newJSONSerializer[time.Time]()
-		encodedEndTimeStr, serErr := serializer.Encode(endTime)
+		encodedEndTime, serErr := serializer.Encode(endTime)
 		if serErr != nil {
 			return 0, fmt.Errorf("failed to serialize sleep end time: %w", serErr)
 		}
-		encodedEndTime := &encodedEndTimeStr
 
 		// Record the operation result with the calculated end time
 		recordInput := recordOperationResultDBInput{

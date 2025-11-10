@@ -8,7 +8,7 @@ import (
 )
 
 type serializer[T any] interface {
-	Encode(data T) (string, error)
+	Encode(data T) (*string, error)
 	Decode(data *string) (T, error)
 }
 
@@ -18,23 +18,38 @@ func newJSONSerializer[T any]() serializer[T] {
 	return &jsonSerializer[T]{}
 }
 
-func (j *jsonSerializer[T]) Encode(data T) (string, error) {
-	if isNilOrZeroValue(data) {
-		// For nil values, encode an empty byte slice directly to base64
-		return base64.StdEncoding.EncodeToString([]byte{}), nil
+func (j *jsonSerializer[T]) Encode(data T) (*string, error) {
+	// Check if the value is nil (for pointer types, slice, map, etc.)
+	if isNilValue(data) {
+		// For nil values, return nil pointer
+		return nil, nil
+	}
+
+	// Check if the value is a zero value (but not nil)
+	if isZeroValue(data) {
+		// For zero values, encode an empty byte slice directly to base64
+		emptyStr := base64.StdEncoding.EncodeToString([]byte{})
+		return &emptyStr, nil
 	}
 
 	jsonBytes, err := json.Marshal(data)
 	if err != nil {
-		return "", fmt.Errorf("failed to encode data: %w", err)
+		return nil, fmt.Errorf("failed to encode data: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(jsonBytes), nil
+	encodedStr := base64.StdEncoding.EncodeToString(jsonBytes)
+	return &encodedStr, nil
 }
 
 func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
 	var result T
 
-	if data == nil || *data == "" {
+	// If data is a nil pointer, return nil (for pointer types) or zero value (for non-pointer types)
+	if data == nil {
+		return getNilOrZeroValue[T](), nil
+	}
+
+	// If *data is an empty string, return zero value
+	if *data == "" {
 		return result, nil
 	}
 
@@ -43,7 +58,7 @@ func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
 		return result, fmt.Errorf("failed to decode base64 data: %w", err)
 	}
 
-	// If decoded data is empty, it represents a nil value
+	// If decoded data is empty, it represents a zero value
 	if len(dataBytes) == 0 {
 		return result, nil
 	}
@@ -57,39 +72,45 @@ func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
 	return result, nil
 }
 
-// isNilOrZeroValue checks if a value is nil (for pointer types, slice, map, etc.) or a zero value.
-func isNilOrZeroValue(v any) bool {
+// isNilValue checks if a value is nil (for pointer types, slice, map, etc.).
+func isNilValue(v any) bool {
 	val := reflect.ValueOf(v)
 	if !val.IsValid() {
 		return true
 	}
 	switch val.Kind() {
-	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func, reflect.Interface:
 		return val.IsNil()
+	}
+	return false
+}
+
+// isZeroValue checks if a value is a zero value (but not nil).
+func isZeroValue(v any) bool {
+	val := reflect.ValueOf(v)
+	if !val.IsValid() {
+		return false
+	}
+	// For pointer-like types, if it's not nil, it's not a zero value
+	switch val.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func, reflect.Interface:
+		return false
 	}
 	// For other types, check if it's the zero value
 	return val.IsZero()
 }
 
-// IsNestedPointer checks if a type is a nested pointer (e.g., **int, ***int).
-// It returns false for non-pointer types and single-level pointers (*int).
-// It returns true for nested pointers with depth > 1.
-func IsNestedPointer(t reflect.Type) bool {
-	if t == nil {
-		return false
+// getNilOrZeroValue returns nil for pointer types, or zero value for non-pointer types.
+func getNilOrZeroValue[T any]() T {
+	var result T
+	resultType := reflect.TypeOf(result)
+	if resultType == nil {
+		return result
 	}
-
-	depth := 0
-	currentType := t
-
-	// Count pointer indirection levels, break early if depth > 1
-	for currentType != nil && currentType.Kind() == reflect.Pointer {
-		depth++
-		if depth > 1 {
-			return true
-		}
-		currentType = currentType.Elem()
+	// If T is a pointer type, return nil
+	if resultType.Kind() == reflect.Pointer {
+		return reflect.Zero(resultType).Interface().(T)
 	}
-
-	return false
+	// Otherwise return zero value
+	return result
 }

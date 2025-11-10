@@ -223,7 +223,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error
 			parentWorkflowID: workflowState.workflowID,
 			childWorkflowID:  h.workflowID,
 			stepID:           workflowState.nextStepID(),
-			output:           &encodedOutput,
+			output:           encodedOutput,
 			err:              outcome.err,
 		}
 		recordResultErr := retry(h.dbosContext, func() error {
@@ -877,7 +877,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		CreatedAt:          time.Now(),
 		Deadline:           deadline,
 		Timeout:            timeout,
-		Input:              &encodedInput,
+		Input:              encodedInput,
 		ApplicationID:      c.GetApplicationID(),
 		QueueName:          params.queueName,
 		DeduplicationID:    params.deduplicationID,
@@ -1037,7 +1037,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 					workflowID: workflowID,
 					status:     status,
 					err:        err,
-					output:     &encodedOutput,
+					output:     encodedOutput,
 				})
 			}, withRetrierLogger(c.logger))
 			if recordErr != nil {
@@ -1323,7 +1323,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		stepName:   stepOpts.stepName,
 		stepID:     stepState.stepID,
 		err:        stepError,
-		output:     &encodedStepOutput,
+		output:     encodedStepOutput,
 	}
 	recErr := retry(c, func() error {
 		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
@@ -1349,7 +1349,7 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 	return retry(c, func() error {
 		return c.systemDB.send(c, WorkflowSendInput{
 			DestinationID: destinationID,
-			Message:       &encodedMessage,
+			Message:       encodedMessage,
 			Topic:         topic,
 		})
 	}, withRetrierLogger(c.logger))
@@ -1452,7 +1452,7 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
 	return retry(c, func() error {
 		return c.systemDB.setEvent(c, WorkflowSetEventInput{
 			Key:     key,
-			Message: &encodedMessage,
+			Message: encodedMessage,
 		})
 	}, withRetrierLogger(c.logger))
 }

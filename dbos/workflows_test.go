@@ -1418,8 +1418,11 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			resultAny, err := h.GetResult()
 			require.NoError(t, err, "failed to get result from handle %d", i)
 			// Decode the result from any (which may be float64 after JSON decode) to int
+			// Marshal to JSON then unmarshal into the expected type
+			jsonBytes, err := json.Marshal(resultAny)
+			require.NoError(t, err, "failed to marshal result to JSON")
 			var result int
-			err = json.Unmarshal([]byte(resultAny.(string)), &result)
+			err = json.Unmarshal(jsonBytes, &result)
 			require.NoError(t, err, "failed to decode result to int")
 			require.Equal(t, 0, result)
 		}
@@ -3210,7 +3213,8 @@ func TestWorkflowTimeout(t *testing.T) {
 
 		// Wait for the workflow to complete and check the result. Should we AwaitedWorkflowCancelled
 		result, err := recoveredHandle.GetResult()
-		assert.Equal(t, "", result, "expected result to be an empty string")
+		// Recovery handles are of type any, so when the handle decoded the result into any, it returned a zero value of any, which is nil, not an empty string.
+		assert.Nil(t, result, "expected result to be nil")
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
 		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)

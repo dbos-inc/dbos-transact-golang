@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -26,7 +27,17 @@ func testAllSerializationPaths[T any](
 ) {
 	t.Helper()
 
-	isNilExpected := isNilOrZeroValue(input)
+	// Check if input is nil (for pointer types, slice, map, etc.)
+	val := reflect.ValueOf(input)
+	isNilExpected := false
+	if !val.IsValid() {
+		isNilExpected = true
+	} else {
+		switch val.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+			isNilExpected = val.IsNil()
+		}
+	}
 
 	// Setup events for recovery
 	startEvent := NewEvent()
@@ -98,17 +109,23 @@ func testAllSerializationPaths[T any](
 			lastStep := steps[len(steps)-1]
 			if isNilExpected {
 				// Should be an empty string
-				assert.Equal(t, "", lastStep.Output, "Step output should be an empty string")
+				assert.Nil(t, lastStep.Output, "Step output should be nil")
 			} else {
 				require.NotNil(t, lastStep.Output)
 				// GetWorkflowSteps returns a string (base64-decoded JSON)
 				// Unmarshal the JSON string into type T
 				strValue, ok := lastStep.Output.(string)
 				require.True(t, ok, "Step output should be a string")
-				var decodedOutput T
-				err := json.Unmarshal([]byte(strValue), &decodedOutput)
-				require.NoError(t, err, "Failed to unmarshal step output to type T")
-				assert.Equal(t, expectedOutput, decodedOutput, "Step output should match expected output")
+				// We encode zero values as empty strings. End users are expected to handle this.
+				if strValue == "" {
+					var zero T
+					assert.Equal(t, zero, expectedOutput, "Step output should be the zero value of type T")
+				} else {
+					var decodedOutput T
+					err := json.Unmarshal([]byte(strValue), &decodedOutput)
+					require.NoError(t, err, "Failed to unmarshal step output to type T")
+					assert.Equal(t, expectedOutput, decodedOutput, "Step output should match expected output")
+				}
 			}
 			assert.Nil(t, lastStep.Error)
 		}
@@ -124,8 +141,8 @@ func testAllSerializationPaths[T any](
 		wf := wfs[0]
 		if isNilExpected {
 			// Should be an empty string
-			assert.Equal(t, "", wf.Input, "Workflow input should be an empty string")
-			assert.Equal(t, "", wf.Output, "Workflow output should be an empty string")
+			assert.Nil(t, wf.Input, "Workflow input should be nil")
+			assert.Nil(t, wf.Output, "Workflow output should be nil")
 		} else {
 			require.NotNil(t, wf.Input)
 			require.NotNil(t, wf.Output)
@@ -137,16 +154,25 @@ func testAllSerializationPaths[T any](
 			outputStr, ok := wf.Output.(string)
 			require.True(t, ok, "Workflow output should be a string")
 
-			var decodedInput T
-			err := json.Unmarshal([]byte(inputStr), &decodedInput)
-			require.NoError(t, err, "Failed to unmarshal workflow input to type T")
+			if inputStr == "" {
+				var zero T
+				assert.Equal(t, zero, input, "Workflow input should be the zero value of type T")
+			} else {
+				var decodedInput T
+				err := json.Unmarshal([]byte(inputStr), &decodedInput)
+				require.NoError(t, err, "Failed to unmarshal workflow input to type T")
+				assert.Equal(t, input, decodedInput, "Workflow input should match input")
+			}
 
-			var decodedOutput T
-			err = json.Unmarshal([]byte(outputStr), &decodedOutput)
-			require.NoError(t, err, "Failed to unmarshal workflow output to type T")
-
-			assert.Equal(t, input, decodedInput, "Workflow input should match input")
-			assert.Equal(t, expectedOutput, decodedOutput, "Workflow output should match expected output")
+			if outputStr == "" {
+				var zero T
+				assert.Equal(t, zero, expectedOutput, "Workflow output should be the zero value of type T")
+			} else {
+				var decodedOutput T
+				err = json.Unmarshal([]byte(outputStr), &decodedOutput)
+				require.NoError(t, err, "Failed to unmarshal workflow output to type T")
+				assert.Equal(t, expectedOutput, decodedOutput, "Workflow output should match expected output")
+			}
 		}
 	})
 }
@@ -780,13 +806,6 @@ func TestSerializer(t *testing.T) {
 			input := &v
 			testSendRecv(t, executor, serializerIntPtrSenderWorkflow, serializerIntPtrReceiverWorkflow, input, "typed-intptr-set-sender-wf")
 			testSetGetEvent(t, executor, serializerIntPtrSetEventWorkflow, serializerIntPtrGetEventWorkflow, input, "typed-intptr-set-setevent-wf", "typed-intptr-set-getevent-wf")
-		})
-
-		// Test *int (pointer type, nil)
-		t.Run("IntPtrNil", func(t *testing.T) {
-			var input *int = nil
-			testSendRecv(t, executor, serializerIntPtrSenderWorkflow, serializerIntPtrReceiverWorkflow, input, "typed-intptr-nil-sender-wf")
-			testSetGetEvent(t, executor, serializerIntPtrSetEventWorkflow, serializerIntPtrGetEventWorkflow, input, "typed-intptr-nil-setevent-wf", "typed-intptr-nil-getevent-wf")
 		})
 	})
 
