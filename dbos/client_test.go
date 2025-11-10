@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -373,13 +372,8 @@ func TestCancelResume(t *testing.T) {
 		resultAny, err := resumeHandle.GetResult()
 		require.NoError(t, err, "failed to get result from resumed workflow")
 
-		// Decode the result from any (which may be float64 after JSON decode) to int
-		var result int
-		err = json.Unmarshal([]byte(resultAny.(string)), &result)
-		require.NoError(t, err, "failed to decode result to int")
-
-		// Verify the result
-		assert.Equal(t, input, result, "expected result to match input")
+		// Will be a float64 from json decode
+		require.Equal(t, input, int(resultAny.(float64)), "expected result to match input")
 
 		// Verify both steps completed
 		assert.Equal(t, 2, stepsCompleted, "expected steps completed to be 2")
@@ -400,12 +394,8 @@ func TestCancelResume(t *testing.T) {
 		resultAgainAny, err := resumeAgainHandle.GetResult()
 		require.NoError(t, err, "failed to get result from second resume")
 
-		// Decode the result from any (which may be float64 after JSON decode) to int
-		var resultAgain int
-		err = json.Unmarshal([]byte(resultAgainAny.(string)), &resultAgain)
-		require.NoError(t, err, "failed to decode second result to int")
-
-		assert.Equal(t, input, resultAgain, "expected second resume result to match input")
+		// Will be a float64 from json decode
+		require.Equal(t, input, int(resultAgainAny.(float64)), "expected result to match input")
 
 		// Verify steps didn't run again
 		assert.Equal(t, 2, stepsCompleted, "expected steps completed to remain 2 after second resume")
