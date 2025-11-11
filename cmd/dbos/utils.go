@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"strings"
+	"regexp"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
 	"github.com/spf13/viper"
@@ -46,37 +46,10 @@ func maskPassword(dbURL string) (string, error) {
 // Format: "user=foo password=bar database=db host=localhost"
 // Supports all spacing variations: password=value, password =value, password= value, password = value
 func maskPasswordInKeyValueFormat(connStr string) string {
-	// Find "password" key (case insensitive)
-	lowerStr := strings.ToLower(connStr)
-	passwordKey := "password"
-	passwordIdx := strings.Index(lowerStr, passwordKey)
-	if passwordIdx == -1 {
-		return connStr // No password found
-	}
-
-	// Find the = sign after "password" (skip optional spaces before =)
-	afterKey := passwordIdx + len(passwordKey)
-	for afterKey < len(connStr) && connStr[afterKey] == ' ' {
-		afterKey++
-	}
-	if afterKey >= len(connStr) || connStr[afterKey] != '=' {
-		return connStr // No = sign found
-	}
-
-	// Find the start of the password value (skip = and optional spaces after =)
-	valueStart := afterKey + 1
-	for valueStart < len(connStr) && connStr[valueStart] == ' ' {
-		valueStart++
-	}
-
-	// Find the end of the password value (next space or end of string)
-	valueEnd := valueStart
-	for valueEnd < len(connStr) && connStr[valueEnd] != ' ' {
-		valueEnd++
-	}
-
-	// Replace password value with ***
-	return connStr[:valueStart] + "***" + connStr[valueEnd:]
+	// Match password=value (case insensitive, handles spaces around =)
+	// Pattern matches: password (case insensitive), optional spaces, =, optional spaces, then value until next space or end
+	re := regexp.MustCompile(`(?i)password\s*=\s*[^\s]+`)
+	return re.ReplaceAllString(connStr, "password=***")
 }
 
 // getDBURL resolves the database URL from flag, config, or environment variable
