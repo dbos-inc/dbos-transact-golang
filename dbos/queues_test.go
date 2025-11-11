@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -538,10 +539,16 @@ func TestQueueRecovery(t *testing.T) {
 	for _, h := range recoveryHandles {
 		if h.GetWorkflowID() == wfid {
 			// Root workflow case
-			result, err := h.GetResult()
+			resultAny, err := h.GetResult()
 			require.NoError(t, err, "failed to get result from recovered root workflow handle")
-			castedResult, ok := result.([]int)
-			require.True(t, ok, "expected result to be of type []int for root workflow, got %T", result)
+			// re-encode and decode the result from []interface{} to []int
+			encodedResult, ok := resultAny.([]any)
+			require.True(t, ok, "expected result to be a []any")
+			jsonBytes, err := json.Marshal(encodedResult)
+			require.NoError(t, err, "failed to marshal result to JSON")
+			var castedResult []int
+			err = json.Unmarshal(jsonBytes, &castedResult)
+			require.NoError(t, err, "failed to decode result to []int")
 			expectedResult := []int{0, 1, 2, 3, 4}
 			assert.Equal(t, expectedResult, castedResult, "expected result %v, got %v", expectedResult, castedResult)
 		}

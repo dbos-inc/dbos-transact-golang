@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -674,8 +675,10 @@ func TestSteps(t *testing.T) {
 		assert.Nil(t, step.Error)
 
 		// Deserialize the output from the database to verify proper encoding
-		storedOutput, ok := step.Output.(StepOutput)
-		require.True(t, ok, "failed to cast step output to StepOutput")
+		// Use json.Unmarshal to handle JSON encode/decode round-trip
+		var storedOutput StepOutput
+		err = json.Unmarshal([]byte(step.Output.(string)), &storedOutput)
+		require.NoError(t, err, "failed to decode step output to StepOutput")
 
 		// Verify all fields were correctly serialized and deserialized
 		assert.Equal(t, "Processed_TestObject", storedOutput.ProcessedName, "ProcessedName not correctly serialized")
@@ -765,7 +768,12 @@ func TestChildWorkflow(t *testing.T) {
 		if steps[1].StepName != "DBOS.getResult" {
 			return "", fmt.Errorf("expected second step name to be getResult, got %s", steps[1].StepName)
 		}
-		if steps[1].Output != "from step" {
+		var stepOutput string
+		err = json.Unmarshal([]byte(steps[1].Output.(string)), &stepOutput)
+		if err != nil {
+			return "", fmt.Errorf("failed to unmarshal step output: %w", err)
+		}
+		if stepOutput != "from step" {
 			return "", fmt.Errorf("expected second step output to be 'from step', got %s", steps[1].Output)
 		}
 		if steps[1].Error != nil {
@@ -844,7 +852,12 @@ func TestChildWorkflow(t *testing.T) {
 			if childWfStep.Output != nil {
 				return "", fmt.Errorf("expected child wf step output to be nil, got %s", childWfStep.Output)
 			}
-			if getResultStep.Output != "from step" {
+			var stepOutput string
+			err = json.Unmarshal([]byte(getResultStep.Output.(string)), &stepOutput)
+			if err != nil {
+				return "", fmt.Errorf("failed to unmarshal step output: %w", err)
+			}
+			if stepOutput != "from step" {
 				return "", fmt.Errorf("expected get result step output to be 'from step', got %s", getResultStep.Output)
 			}
 
@@ -1241,8 +1254,8 @@ func TestWorkflowRecovery(t *testing.T) {
 			result, err := recoveredHandle.GetResult()
 			require.NoError(t, err, "failed to get result from recovered workflow %d", i)
 
-			// Result should be the counter value (1)
-			require.Equal(t, int64(1), result, "workflow %d result should be 1", i)
+			// Result should be the counter value (1) as float64
+			require.Equal(t, float64(1), result, "workflow %d result should be 1", i)
 		}
 
 		// Final verification of step states
@@ -1412,8 +1425,15 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		// Wait for all handles to complete
 		for i, h := range handles {
-			result, err := h.GetResult()
+			resultAny, err := h.GetResult()
 			require.NoError(t, err, "failed to get result from handle %d", i)
+			// Decode the result from any (which may be float64 after JSON decode) to int
+			// Marshal to JSON then unmarshal into the expected type
+			jsonBytes, err := json.Marshal(resultAny)
+			require.NoError(t, err, "failed to marshal result to JSON")
+			var result int
+			err = json.Unmarshal(jsonBytes, &result)
+			require.NoError(t, err, "failed to decode result to int")
 			require.Equal(t, 0, result)
 		}
 	})

@@ -242,14 +242,14 @@ func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, op
 	}
 
 	// Serialize input
-	serializer := newGobSerializer[P]()
+	serializer := newJSONSerializer[P]()
 	encodedInput, err := serializer.Encode(input)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize workflow input: %w", err)
 	}
 
 	// Call the interface method with the same signature
-	handle, err := c.Enqueue(queueName, workflowName, &encodedInput, opts...)
+	handle, err := c.Enqueue(queueName, workflowName, encodedInput, opts...)
 	if err != nil {
 		return nil, err
 	}
