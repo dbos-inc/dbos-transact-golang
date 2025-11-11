@@ -79,6 +79,10 @@ type workflowOutcome[R any] struct {
 	needsDecoding bool // true if result came from awaitWorkflowResult (ID conflict path) and needs decoding
 }
 
+type stepCheckpointedOutcome struct {
+	value any // The encoded value (should be a *string)
+}
+
 // WorkflowHandle provides methods to interact with a running or completed workflow.
 // The type parameter R represents the expected return type of the workflow.
 // Handles can be used to wait for workflow completion, check status, and retrieve results.
@@ -1190,18 +1194,24 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 		return *new(R), err
 	}
 	var typedResult R
-	// When the step is executed, the result is already decoded and should be directly convertible
-	if typedRes, ok := result.(R); ok {
-		typedResult = typedRes
-	} else if encodedOutput, ok := result.(*string); ok {
-		// If not it should be an encoded *string
+	// First check if this is a checkpointed outcome (encoded value from database)
+	if checkpointed, ok := result.(stepCheckpointedOutcome); ok {
+		// This came from the database and needs decoding
+		encodedOutput, ok := checkpointed.value.(*string)
+		if !ok {
+			workflowID, _ := GetWorkflowID(ctx)
+			return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("checkpointed outcome value is not *string, got %T", checkpointed.value))
+		}
 		serializer := newJSONSerializer[R]()
 		var decodeErr error
 		typedResult, decodeErr = serializer.Decode(encodedOutput)
 		if decodeErr != nil {
-			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+			workflowID, _ := GetWorkflowID(ctx)
 			return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("decoding step result to expected type %T: %w", *new(R), decodeErr))
 		}
+	} else if typedRes, ok := result.(R); ok {
+		// When the step is executed, the result is already decoded and should be directly convertible
+		typedResult = typedRes
 	} else {
 		workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
 		return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", result))
@@ -1255,8 +1265,9 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
 	}
 	if recordedOutput != nil {
-		// Return the encoded output - decoding will happen in RunAsStep[R] when we know the target type
-		return recordedOutput.output, recordedOutput.err
+		// Return the encoded output wrapped in stepCheckpointedOutcome
+		// This allows RunAsStep[R] to distinguish encoded values from direct values
+		return stepCheckpointedOutcome{value: recordedOutput.output}, recordedOutput.err
 	}
 
 	// Spawn a child DBOSContext with the step state
