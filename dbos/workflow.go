@@ -227,7 +227,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error
 			parentWorkflowID: workflowState.workflowID,
 			childWorkflowID:  h.workflowID,
 			stepID:           workflowState.nextStepID(),
-			output:           &encodedOutput,
+			output:           encodedOutput,
 			err:              outcome.err,
 		}
 		recordResultErr := retry(h.dbosContext, func() error {
