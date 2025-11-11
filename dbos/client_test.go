@@ -369,11 +369,11 @@ func TestCancelResume(t *testing.T) {
 
 		// Wait for workflow completion
 		proceedSignal.Set() // Allow the workflow to proceed to step two
-		result, err := resumeHandle.GetResult()
+		resultAny, err := resumeHandle.GetResult()
 		require.NoError(t, err, "failed to get result from resumed workflow")
 
-		// Verify the result
-		assert.Equal(t, input, result, "expected result to match input")
+		// Will be a float64 from json decode
+		require.Equal(t, input, int(resultAny.(float64)), "expected result to match input")
 
 		// Verify both steps completed
 		assert.Equal(t, 2, stepsCompleted, "expected steps completed to be 2")
@@ -391,10 +391,11 @@ func TestCancelResume(t *testing.T) {
 		resumeAgainHandle, err := client.ResumeWorkflow(workflowID)
 		require.NoError(t, err, "failed to resume workflow again")
 
-		resultAgain, err := resumeAgainHandle.GetResult()
+		resultAgainAny, err := resumeAgainHandle.GetResult()
 		require.NoError(t, err, "failed to get result from second resume")
 
-		assert.Equal(t, input, resultAgain, "expected second resume result to match input")
+		// Will be a float64 from json decode
+		require.Equal(t, input, int(resultAgainAny.(float64)), "expected result to match input")
 
 		// Verify steps didn't run again
 		assert.Equal(t, 2, stepsCompleted, "expected steps completed to remain 2 after second resume")

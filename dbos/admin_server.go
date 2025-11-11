@@ -152,20 +152,23 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 		result["StartedAt"] = nil
 	}
 
-	if ws.Input != nil && ws.Input != "" {
-		bytes, err := json.Marshal(ws.Input)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal input: %w", err)
+	if ws.Input != nil {
+		// If there is a value, it should be a JSON string
+		jsonInput, ok := ws.Input.(string)
+		if ok {
+			result["Input"] = jsonInput
+		} else {
+			result["Input"] = ""
 		}
-		result["Input"] = string(bytes)
 	}
 
-	if ws.Output != nil && ws.Output != "" {
-		bytes, err := json.Marshal(ws.Output)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal output: %w", err)
+	if ws.Output != nil {
+		jsonOutput, ok := ws.Output.(string)
+		if ok {
+			result["Output"] = jsonOutput
+		} else {
+			result["Output"] = ""
 		}
-		result["Output"] = string(bytes)
 	}
 
 	if ws.Error != nil {
@@ -439,15 +442,16 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 				"child_workflow_id": step.ChildWorkflowID,
 			}
 
-			// Marshal Output as JSON string if present
-			if step.Output != nil && step.Output != "" {
-				bytes, err := json.Marshal(step.Output)
-				if err != nil {
-					ctx.logger.Error("Failed to marshal step output", "error", err)
-					http.Error(w, fmt.Sprintf("Failed to format step output: %v", err), http.StatusInternalServerError)
-					return
+			if step.Output != nil {
+				// If there is a value, it should be a JSON string
+				jsonOutput, ok := step.Output.(string)
+				if ok {
+					formattedStep["output"] = jsonOutput
+				} else {
+					formattedStep["output"] = ""
 				}
-				formattedStep["output"] = string(bytes)
+			} else {
+				formattedStep["output"] = ""
 			}
 
 			// Marshal Error as JSON string if present

@@ -147,6 +147,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 	if params.priority > uint(math.MaxInt) {
 		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.priority, math.MaxInt)
 	}
+
 	status := WorkflowStatus{
 		Name:               params.workflowName,
 		ApplicationVersion: params.applicationVersion,
@@ -155,7 +156,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		CreatedAt:          time.Now(),
 		Deadline:           deadline,
 		Timeout:            params.workflowTimeout,
-		Input:              params.workflowInput,
+		Input:              input,
 		QueueName:          queueName,
 		DeduplicationID:    params.deduplicationID,
 		Priority:           int(params.priority),
@@ -240,20 +241,15 @@ func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, op
 		return nil, errors.New("client cannot be nil")
 	}
 
-	// Register the input and outputs for gob encoding
-	var logger *slog.Logger
-	if cl, ok := c.(*client); ok {
-		if ctx, ok := cl.dbosCtx.(*dbosContext); ok {
-			logger = ctx.logger
-		}
+	// Serialize input
+	serializer := newJSONSerializer[P]()
+	encodedInput, err := serializer.Encode(input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize workflow input: %w", err)
 	}
-	var typedInput P
-	safeGobRegister(typedInput, logger)
-	var typedOutput R
-	safeGobRegister(typedOutput, logger)
 
 	// Call the interface method with the same signature
-	handle, err := c.Enqueue(queueName, workflowName, input, opts...)
+	handle, err := c.Enqueue(queueName, workflowName, encodedInput, opts...)
 	if err != nil {
 		return nil, err
 	}

@@ -185,6 +185,7 @@ func (c *dbosContext) Value(key any) any {
 	return c.ctx.Value(key)
 }
 
+
 // WithValue returns a copy of the DBOS context with the given key-value pair.
 // This is similar to context.WithValue but maintains DBOS context capabilities.
 // No-op if the provided context is not a concrete dbos.dbosContext.
@@ -353,14 +354,6 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	// Set global logger
 	initExecutor.logger = config.Logger
 	initExecutor.logger.Info("Initializing DBOS context", "app_name", config.AppName, "dbos_version", getDBOSVersion())
-
-	// Register types we serialize with gob
-	var t time.Time
-	safeGobRegister(t, initExecutor.logger)
-	var ws []WorkflowStatus
-	safeGobRegister(ws, initExecutor.logger)
-	var si []StepInfo
-	safeGobRegister(si, initExecutor.logger)
 
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion

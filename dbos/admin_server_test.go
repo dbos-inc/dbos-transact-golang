@@ -347,12 +347,12 @@ func TestAdminServer(t *testing.T) {
 				// Empty string workflow: both input and output are empty strings
 				// According to the logic, empty strings should not have Input/Output fields
 				input, hasInput := wf["Input"]
-				require.Equal(t, "", input)
+				require.Equal(t, "\"\"", input)
 				require.True(t, hasInput, "Empty string workflow should have Input field")
 
 				output, hasOutput := wf["Output"]
 				require.True(t, hasOutput, "Empty string workflow should have Output field")
-				require.Equal(t, "", output)
+				require.Equal(t, "\"\"", output)
 
 			} else if wfID == structHandle.GetWorkflowID() {
 				// Struct workflow: input and output should be marshaled as JSON strings
@@ -874,22 +874,9 @@ func TestAdminServer(t *testing.T) {
 				assert.Contains(t, unmarshaledError, "deliberate error for testing", "Error message should be preserved")
 
 			case "emptyStep":
-				// Empty string might be returned as nil or as an empty JSON string
+				// Empty string is returned as an empty JSON string
 				output := step["output"]
-				if output == nil {
-					// Empty string was not included in response (which is fine)
-					t.Logf("Empty step output was nil (not included)")
-				} else {
-					// If it was included, it should be marshaled as JSON string `""`
-					outputStr, ok := output.(string)
-					require.True(t, ok, "If present, empty step output should be a JSON string")
-
-					var unmarshaledOutput string
-					err = json.Unmarshal([]byte(outputStr), &unmarshaledOutput)
-					require.NoError(t, err, "Failed to unmarshal empty step output")
-					assert.Equal(t, "", unmarshaledOutput, "Empty step output should be empty string")
-				}
-
+				require.Equal(t, "\"\"", output, "Empty step output should be an empty string")
 				assert.Nil(t, step["error"], "Empty step should have no error")
 			}
 		}
