@@ -7,6 +7,11 @@ import (
 	"reflect"
 )
 
+const (
+	// nilMarker is a special marker string used to represent nil values in the database.
+	nilMarker = "__DBOS_NIL"
+)
+
 type serializer[T any] interface {
 	Encode(data T) (*string, error)
 	Decode(data *string) (T, error)
@@ -21,8 +26,9 @@ func newJSONSerializer[T any]() serializer[T] {
 func (j *jsonSerializer[T]) Encode(data T) (*string, error) {
 	// Check if the value is nil (for pointer types, slice, map, etc.)
 	if isNilValue(data) {
-		// For nil values, return nil pointer
-		return nil, nil
+		// For nil values, return the special marker so it can be stored in the database
+		marker := string(nilMarker)
+		return &marker, nil
 	}
 
 	// Check if the value is a zero value (but not nil)
@@ -36,7 +42,7 @@ func (j *jsonSerializer[T]) Encode(data T) (*string, error) {
 
 func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
 	// If data is a nil pointer, return nil (for pointer types) or zero value (for non-pointer types)
-	if data == nil {
+	if data == nil || *data == nilMarker {
 		return getNilOrZeroValue[T](), nil
 	}
 
