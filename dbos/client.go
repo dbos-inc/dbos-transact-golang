@@ -263,6 +263,14 @@ func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, op
 		return nil, errors.New("client cannot be nil")
 	}
 
+	if len(queueName) == 0 {
+		return nil, fmt.Errorf("queue name is required")
+	}
+
+	if len(workflowName) == 0 {
+		return nil, fmt.Errorf("workflow name is required")
+	}
+
 	// Serialize input
 	serializer := newJSONSerializer[P]()
 	encodedInput, err := serializer.Encode(input)
