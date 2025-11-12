@@ -87,6 +87,9 @@ type listWorkflowsConductorResponseBody struct {
 	CreatedAt          *string `json:"CreatedAt,omitempty"`
 	UpdatedAt          *string `json:"UpdatedAt,omitempty"`
 	QueueName          *string `json:"QueueName,omitempty"`
+	QueuePartitionKey  *string `json:"QueuePartitionKey,omitempty"`
+	DeduplicationID    *string `json:"DeduplicationID,omitempty"`
+	Priority           *int    `json:"Priority,omitempty"`
 	ApplicationVersion *string `json:"ApplicationVersion,omitempty"`
 	ExecutorID         *string `json:"ExecutorID,omitempty"`
 }
@@ -165,6 +168,21 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 	// Copy queue name
 	if wf.QueueName != "" {
 		output.QueueName = &wf.QueueName
+	}
+
+	// Copy queue partition key
+	if wf.QueuePartitionKey != "" {
+		output.QueuePartitionKey = &wf.QueuePartitionKey
+	}
+
+	// Copy deduplication ID
+	if wf.DeduplicationID != "" {
+		output.DeduplicationID = &wf.DeduplicationID
+	}
+
+	// Copy priority
+	if wf.Priority != 0 {
+		output.Priority = &wf.Priority
 	}
 
 	// Copy application version
