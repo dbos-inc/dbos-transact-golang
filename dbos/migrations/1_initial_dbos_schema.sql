@@ -31,6 +31,7 @@ CREATE TABLE %s.workflow_status (
 CREATE INDEX workflow_status_created_at_index ON %s.workflow_status (created_at);
 CREATE INDEX workflow_status_executor_id_index ON %s.workflow_status (executor_id);
 CREATE INDEX workflow_status_status_index ON %s.workflow_status (status);
+CREATE INDEX idx_workflow_status_queue_status_started ON %s.workflow_status (queue_name, status, started_at_epoch_ms);
 
 ALTER TABLE %s.workflow_status
 ADD CONSTRAINT uq_workflow_status_queue_name_dedup_id
