@@ -32,6 +32,7 @@ type WorkflowQueue struct {
 	PriorityEnabled      bool         `json:"priorityEnabled,omitempty"`   // Enable priority-based scheduling
 	RateLimit            *RateLimiter `json:"rateLimit,omitempty"`         // Rate limiting configuration
 	MaxTasksPerIteration int          `json:"maxTasksPerIteration"`        // Max workflows to dequeue per iteration
+	PartitionQueue       bool         `json:"partitionQueue,omitempty"`    // Enable partitioned queue mode
 }
 
 // QueueOption is a functional option for configuring a workflow queue
@@ -74,6 +75,16 @@ func WithRateLimiter(limiter *RateLimiter) QueueOption {
 func WithMaxTasksPerIteration(maxTasks int) QueueOption {
 	return func(q *WorkflowQueue) {
 		q.MaxTasksPerIteration = maxTasks
+	}
+}
+
+// WithPartitionQueue enables partitioned queue mode.
+// When enabled, workflows can be enqueued with a partition key, and each partition
+// has its own concurrency limits. This allows distributing work across dynamically
+// created queue partitions.
+func WithPartitionQueue() QueueOption {
+	return func(q *WorkflowQueue) {
+		q.PartitionQueue = true
 	}
 }
 
@@ -171,6 +182,15 @@ func (qr *queueRunner) listQueues() []WorkflowQueue {
 	return queues
 }
 
+// getQueue returns the queue with the given name from the registry.
+// Returns a pointer to the queue if found, or nil if the queue does not exist.
+func (qr *queueRunner) getQueue(queueName string) *WorkflowQueue {
+	if queue, exists := qr.workflowQueueRegistry[queueName]; exists {
+		return &queue
+	}
+	return nil
+}
+
 func (qr *queueRunner) run(ctx *dbosContext) {
 	pollingInterval := qr.baseInterval
 
@@ -178,31 +198,33 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 		hasBackoffError := false
 
 		// Iterate through all queues in the registry
-		for queueName, queue := range qr.workflowQueueRegistry {
-			// Call DequeueWorkflows for each queue
-			dequeuedWorkflows, err := retryWithResult(ctx, func() ([]dequeuedWorkflow, error) {
-				return ctx.systemDB.dequeueWorkflows(ctx, dequeueWorkflowsInput{
-					queue:              queue,
-					executorID:         ctx.executorID,
-					applicationVersion: ctx.applicationVersion,
-				})
-			}, withRetrierLogger(qr.logger))
-			if err != nil {
-				if pgErr, ok := err.(*pgconn.PgError); ok {
-					switch pgErr.Code {
-					case pgerrcode.SerializationFailure:
-						hasBackoffError = true
-					case pgerrcode.LockNotAvailable:
-						hasBackoffError = true
-					}
-				} else {
-					qr.logger.Error("Error dequeuing workflows from queue", "queue_name", queueName, "error", err)
+		for _, queue := range qr.workflowQueueRegistry {
+			// Build list of partition keys to dequeue from
+			// Default to empty string for non-partitioned queues
+			partitionKeys := []string{""}
+			if queue.PartitionQueue {
+				partitions, err := retryWithResult(ctx, func() ([]string, error) {
+					return ctx.systemDB.getQueuePartitions(ctx, queue.Name)
+				}, withRetrierLogger(qr.logger))
+				if err != nil {
+					qr.logger.Error("Error getting queue partitions", "queue_name", queue.Name, "error", err)
+					continue
 				}
-				continue
+				partitionKeys = partitions
+			}
+
+			// Dequeue from each partition (or once for non-partitioned queues)
+			var dequeuedWorkflows []dequeuedWorkflow
+			for _, partitionKey := range partitionKeys {
+				workflows, shouldContinue := qr.dequeueWorkflows(ctx, queue, partitionKey, &hasBackoffError)
+				if shouldContinue {
+					continue
+				}
+				dequeuedWorkflows = append(dequeuedWorkflows, workflows...)
 			}
 
 			if len(dequeuedWorkflows) > 0 {
-				qr.logger.Debug("Dequeued workflows from queue", "queue_name", queueName, "workflows", dequeuedWorkflows)
+				qr.logger.Debug("Dequeued workflows from queue", "queue_name", queue.Name, "workflows", len(dequeuedWorkflows))
 			}
 			for _, workflow := range dequeuedWorkflows {
 				// Find the workflow in the registry
@@ -225,7 +247,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 				}
 
 				// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
-				_, err = registeredWorkflow.wrappedFunction(ctx, workflow.input, WithWorkflowID(workflow.id))
+				_, err := registeredWorkflow.wrappedFunction(ctx, workflow.input, WithWorkflowID(workflow.id))
 				if err != nil {
 					qr.logger.Error("Error running queued workflow", "error", err)
 				}
@@ -255,4 +277,33 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 			// Continue to next iteration
 		}
 	}
+}
+
+// dequeueWorkflows dequeues workflows from a specific partition and handles errors.
+// Returns the dequeued workflows and a boolean indicating whether to continue to the next iteration.
+func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue WorkflowQueue, partitionKey string, hasBackoffError *bool) ([]dequeuedWorkflow, bool) {
+	dequeuedWorkflows, err := retryWithResult(ctx, func() ([]dequeuedWorkflow, error) {
+		return ctx.systemDB.dequeueWorkflows(ctx, dequeueWorkflowsInput{
+			queue:              queue,
+			executorID:         ctx.executorID,
+			applicationVersion: ctx.applicationVersion,
+			queuePartitionKey:  partitionKey,
+		})
+	}, withRetrierLogger(qr.logger))
+
+	if err != nil {
+		if pgErr, ok := err.(*pgconn.PgError); ok {
+			switch pgErr.Code {
+			case pgerrcode.SerializationFailure:
+				*hasBackoffError = true
+			case pgerrcode.LockNotAvailable:
+				*hasBackoffError = true
+			}
+		} else {
+			qr.logger.Error("Error dequeuing workflows from queue", "queue_name", queue.Name, "partition_key", partitionKey, "error", err)
+		}
+		return nil, true // Indicate to continue to next iteration
+	}
+
+	return dequeuedWorkflows, false // Success, don't continue
 }
