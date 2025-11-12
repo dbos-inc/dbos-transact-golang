@@ -124,6 +124,8 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 		"QueueName":          ws.QueueName,
 		"Timeout":            ws.Timeout,
 		"DeduplicationID":    ws.DeduplicationID,
+		"Priority":           ws.Priority,
+		"QueuePartitionKey":  ws.QueuePartitionKey,
 		"Input":              ws.Input,
 	}
 
