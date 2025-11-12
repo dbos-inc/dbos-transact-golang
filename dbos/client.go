@@ -106,6 +106,15 @@ func WithEnqueueTimeout(timeout time.Duration) EnqueueOption {
 	}
 }
 
+// WithEnqueueQueuePartitionKey sets the queue partition key for partitioned queues.
+// When a queue is partitioned, workflows with the same partition key are processed
+// with separate concurrency limits per partition.
+func WithEnqueueQueuePartitionKey(partitionKey string) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.queuePartitionKey = partitionKey
+	}
+}
+
 type enqueueOptions struct {
 	workflowName       string
 	workflowID         string
@@ -114,6 +123,7 @@ type enqueueOptions struct {
 	priority           uint
 	workflowTimeout    time.Duration
 	workflowInput      any
+	queuePartitionKey  string
 }
 
 // EnqueueWorkflow enqueues a workflow to a named queue for deferred execution.
@@ -132,6 +142,16 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 	}
 	for _, opt := range opts {
 		opt(params)
+	}
+
+	// Validate partition key is not provided without queue name
+	if len(params.queuePartitionKey) > 0 && len(queueName) == 0 {
+		return nil, newWorkflowExecutionError("", fmt.Errorf("partition key provided but queue name is missing"))
+	}
+
+	// Validate partition key and deduplication ID are not both provided (they are incompatible)
+	if len(params.queuePartitionKey) > 0 && len(params.deduplicationID) > 0 {
+		return nil, newWorkflowExecutionError("", fmt.Errorf("partition key and deduplication ID cannot be used together"))
 	}
 
 	workflowID := params.workflowID
@@ -160,6 +180,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		QueueName:          queueName,
 		DeduplicationID:    params.deduplicationID,
 		Priority:           int(params.priority),
+		QueuePartitionKey:  params.queuePartitionKey,
 	}
 
 	uncancellableCtx := WithoutCancel(dbosCtx)
@@ -205,6 +226,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 //   - WithEnqueueDeduplicationID: Deduplication identifier for idempotent enqueuing
 //   - WithEnqueuePriority: Execution priority
 //   - WithEnqueueTimeout: Maximum execution time for the workflow
+//   - WithEnqueueQueuePartitionKey: Queue partition key for partitioned queues
 //
 // Returns a typed workflow handle that can be used to check status and retrieve results.
 // The handle uses polling to check workflow completion since the execution is asynchronous.
