@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -2507,28 +2508,40 @@ func backoffWithJitter(retryAttempt int) time.Duration {
 // maskPassword replaces the password in a database URL with asterisks
 func maskPassword(dbURL string) (string, error) {
 	parsedURL, err := url.Parse(dbURL)
-	if err != nil {
-		return "", err
-	}
+	if err == nil && parsedURL.Scheme != "" {
 
-	// Check if there is user info with a password
-	if parsedURL.User != nil {
-		username := parsedURL.User.Username()
-		_, hasPassword := parsedURL.User.Password()
-		if hasPassword {
-			// Manually construct the URL with masked password to avoid encoding
-			maskedURL := parsedURL.Scheme + "://" + username + ":***@" + parsedURL.Host + parsedURL.Path
-			if parsedURL.RawQuery != "" {
-				maskedURL += "?" + parsedURL.RawQuery
+		// Check if there is user info with a password
+		if parsedURL.User != nil {
+			username := parsedURL.User.Username()
+			_, hasPassword := parsedURL.User.Password()
+			if hasPassword {
+				// Manually construct the URL with masked password to avoid encoding
+				maskedURL := parsedURL.Scheme + "://" + username + ":***@" + parsedURL.Host + parsedURL.Path
+				if parsedURL.RawQuery != "" {
+					maskedURL += "?" + parsedURL.RawQuery
+				}
+				if parsedURL.Fragment != "" {
+					maskedURL += "#" + parsedURL.Fragment
+				}
+				return maskedURL, nil
 			}
-			if parsedURL.Fragment != "" {
-				maskedURL += "#" + parsedURL.Fragment
-			}
-			return maskedURL, nil
 		}
+
+		return parsedURL.String(), nil
 	}
 
-	return parsedURL.String(), nil
+	// If URL parsing failed or no scheme, try key-value format (libpq connection string)
+	return maskPasswordInKeyValueFormat(dbURL), nil
+}
+
+// maskPasswordInKeyValueFormat masks password in libpq-style key-value connection strings
+// Format: "user=foo password=bar database=db host=localhost"
+// Supports all spacing variations: password=value, password =value, password= value, password = value
+func maskPasswordInKeyValueFormat(connStr string) string {
+	// Match password=value (case insensitive, handles spaces around =)
+	// Pattern matches: password (case insensitive), optional spaces, =, optional spaces, then value until next space or end
+	re := regexp.MustCompile(`(?i)password\s*=\s*[^\s]+`)
+	return re.ReplaceAllString(connStr, "password=***")
 }
 
 /*******************************/
