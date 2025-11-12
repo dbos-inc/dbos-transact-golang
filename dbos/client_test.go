@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEnqueue(t *testing.T) {
+func TestClientEnqueue(t *testing.T) {
 	// Setup server context - this will process tasks
 	serverCtx := setupDBOS(t, true, true)
 
@@ -22,6 +22,10 @@ func TestEnqueue(t *testing.T) {
 	// Create a priority-enabled queue with max concurrency of 1 to ensure ordering
 	// Must be created before Launch()
 	priorityQueue := NewWorkflowQueue(serverCtx, "priority-test-queue", WithGlobalConcurrency(1), WithPriorityEnabled())
+
+	// Create a partitioned queue for partition key test
+	// Must be created before Launch()
+	partitionedQueue := NewWorkflowQueue(serverCtx, "client-partitioned-queue", WithPartitionQueue())
 
 	// Track execution order for priority test
 	var executionOrder []string
@@ -58,6 +62,12 @@ func TestEnqueue(t *testing.T) {
 		return input, nil
 	}
 	RegisterWorkflow(serverCtx, priorityWorkflow, WithWorkflowName("PriorityWorkflow"))
+
+	// Simple workflow for partitioned queue test
+	partitionedWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		return "partitioned: " + input, nil
+	}
+	RegisterWorkflow(serverCtx, partitionedWorkflow, WithWorkflowName("PartitionedWorkflow"))
 
 	// Launch the server context to start processing tasks
 	err := Launch(serverCtx)
@@ -255,6 +265,77 @@ func TestEnqueue(t *testing.T) {
 		assert.Equal(t, "processed: test-input", result5)
 
 		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after deduplication test")
+	})
+
+	t.Run("EnqueueToPartitionedQueue", func(t *testing.T) {
+		// Enqueue a workflow to a partitioned queue with a partition key
+		handle, err := Enqueue[string, string](client, partitionedQueue.Name, "PartitionedWorkflow", "test-input",
+			WithEnqueueQueuePartitionKey("partition-1"),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err, "failed to enqueue workflow to partitioned queue")
+
+		// Verify we got a polling handle
+		_, ok := handle.(*workflowPollingHandle[string])
+		require.True(t, ok, "expected handle to be of type workflowPollingHandle, got %T", handle)
+
+		// Get the result
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from partitioned queue workflow")
+
+		expectedResult := "partitioned: test-input"
+		assert.Equal(t, expectedResult, result, "expected result to match")
+
+		// Verify the workflow status
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+
+		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected workflow status to be SUCCESS")
+		assert.Equal(t, "PartitionedWorkflow", status.Name, "expected workflow name to match")
+		assert.Equal(t, partitionedQueue.Name, status.QueueName, "expected queue name to match")
+
+		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after partitioned queue test")
+	})
+
+	t.Run("EnqueueWithPartitionKeyWithoutQueue", func(t *testing.T) {
+		// Attempt to enqueue with a partition key but no queue name
+		_, err := Enqueue[string, string](client, "", "PartitionedWorkflow", "test-input",
+			WithEnqueueQueuePartitionKey("partition-1"))
+		require.Error(t, err, "expected error when enqueueing with partition key but no queue name")
+
+		// Verify the error message contains the expected text
+		assert.Contains(t, err.Error(), "queue name is required", "expected error message to contain 'queue name is required'")
+	})
+
+	t.Run("EnqueueWithPartitionKeyAndDeduplicationID", func(t *testing.T) {
+		// Attempt to enqueue with both partition key and deduplication ID
+		// This should return an error
+		_, err := Enqueue[string, string](client, partitionedQueue.Name, "PartitionedWorkflow", "test-input",
+			WithEnqueueQueuePartitionKey("partition-1"),
+			WithEnqueueDeduplicationID("dedup-id"))
+		require.Error(t, err, "expected error when enqueueing with both partition key and deduplication ID")
+
+		// Verify the error message contains the expected text
+		assert.Contains(t, err.Error(), "partition key and deduplication ID cannot be used together", "expected error message to contain validation message")
+	})
+
+	t.Run("EnqueueWithEmptyQueueName", func(t *testing.T) {
+		// Attempt to enqueue with empty queue name
+		// This should return an error
+		_, err := Enqueue[wfInput, string](client, "", "ServerWorkflow", wfInput{Input: "test-input"})
+		require.Error(t, err, "expected error when enqueueing with empty queue name")
+
+		// Verify the error message contains the expected text
+		assert.Contains(t, err.Error(), "queue name is required", "expected error message to contain 'queue name is required'")
+	})
+
+	t.Run("EnqueueWithEmptyWorkflowName", func(t *testing.T) {
+		// Attempt to enqueue with empty workflow name
+		// This should return an error
+		_, err := Enqueue[wfInput, string](client, queue.Name, "", wfInput{Input: "test-input"})
+		require.Error(t, err, "expected error when enqueueing with empty workflow name")
+
+		// Verify the error message contains the expected text
+		assert.Contains(t, err.Error(), "workflow name is required", "expected error message to contain 'workflow name is required'")
 	})
 
 	// Verify all queue entries are cleaned up

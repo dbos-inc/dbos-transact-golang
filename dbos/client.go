@@ -146,12 +146,12 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 
 	// Validate partition key is not provided without queue name
 	if len(params.queuePartitionKey) > 0 && len(queueName) == 0 {
-		return nil, newWorkflowExecutionError("", fmt.Errorf("partition key provided but queue name is missing"))
+		return nil, fmt.Errorf("partition key provided but queue name is missing")
 	}
 
 	// Validate partition key and deduplication ID are not both provided (they are incompatible)
 	if len(params.queuePartitionKey) > 0 && len(params.deduplicationID) > 0 {
-		return nil, newWorkflowExecutionError("", fmt.Errorf("partition key and deduplication ID cannot be used together"))
+		return nil, fmt.Errorf("partition key and deduplication ID cannot be used together")
 	}
 
 	workflowID := params.workflowID
