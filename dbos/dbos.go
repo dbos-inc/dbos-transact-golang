@@ -205,6 +205,7 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
+			queueRunner:             dbosCtx.queueRunner,
 		}
 		childCtx.launched.Store(launched)
 		return childCtx
@@ -233,6 +234,7 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
+			queueRunner:             dbosCtx.queueRunner,
 		}
 		childCtx.launched.Store(launched)
 		return childCtx
@@ -260,6 +262,7 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
+			queueRunner:             dbosCtx.queueRunner,
 		}
 		childCtx.launched.Store(launched)
 		return childCtx, cancelFunc
