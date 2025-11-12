@@ -159,6 +159,12 @@ func TestWorkflowQueues(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, workflowEnqueuesAnother)
 
+	// Simple workflow for NonExistingQueue test
+	simpleWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		return input, nil
+	}
+	RegisterWorkflow(dbosCtx, simpleWorkflow)
+
 	err := Launch(dbosCtx)
 	require.NoError(t, err)
 
@@ -462,6 +468,26 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Equal(t, "def-c-p", result2, "expected second workflow result to be 'def-c-p'")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after deduplication test")
+	})
+
+	t.Run("NonExistingQueue", func(t *testing.T) {
+		// Attempt to enqueue to a non-existing queue
+		// This should return an error
+		_, err := RunWorkflow(dbosCtx, simpleWorkflow, "test-input", WithQueue("non-existing-queue"))
+		require.Error(t, err, "expected error when enqueueing to non-existing queue")
+
+		// Check that it's the correct error type
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
+
+		// Verify the error is wrapped by newWorkflowExecutionError with WorkflowExecutionError code
+		assert.True(t, errors.Is(err, &DBOSError{Code: WorkflowExecutionError}), "expected error to be WorkflowExecutionError")
+
+		// Verify the unwrapped error contains the validation message
+		unwrappedErr := errors.Unwrap(dbosErr)
+		require.NotNil(t, unwrappedErr, "expected error to have an unwrapped error")
+		expectedMsgPart := "does not exist"
+		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
 	})
 }
 
@@ -1339,5 +1365,183 @@ func TestListQueuedWorkflows(t *testing.T) {
 		_, err = pendingHandle2.GetResult()
 		require.NoError(t, err, "failed to complete pending workflow 2")
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "queue entries should be cleaned up")
+	})
+}
+
+func TestPartitionedQueues(t *testing.T) {
+	t.Run("PartitionKeyWithoutQueue", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, true, true)
+
+		// Register a simple workflow
+		simpleWorkflow := func(ctx DBOSContext, input string) (string, error) {
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, simpleWorkflow)
+
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Attempt to enqueue with a partition key but no queue name
+		// This should return an error
+		_, err = RunWorkflow(dbosCtx, simpleWorkflow, "test-input", WithQueuePartitionKey("partition-1"))
+		require.Error(t, err, "expected error when enqueueing with partition key but no queue name")
+
+		// Check that it's the correct error type
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
+
+		// Verify the error is wrapped by newWorkflowExecutionError with WorkflowExecutionError code
+		assert.True(t, errors.Is(err, &DBOSError{Code: WorkflowExecutionError}), "expected error to be WorkflowExecutionError")
+
+		// Verify the unwrapped error contains the validation message
+		unwrappedErr := errors.Unwrap(dbosErr)
+		require.NotNil(t, unwrappedErr, "expected error to have an unwrapped error")
+		expectedMsgPart := "partition key provided but queue name is missing"
+		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
+	})
+
+	t.Run("PartitionKeyOnNonPartitionedQueue", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, true, true)
+
+		// Create a non-partitioned queue
+		nonPartitionedQueue := NewWorkflowQueue(dbosCtx, "non-partitioned-queue")
+
+		// Register a simple workflow
+		simpleWorkflow := func(ctx DBOSContext, input string) (string, error) {
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, simpleWorkflow)
+
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Attempt to enqueue with a partition key on a non-partitioned queue
+		// This should return an error
+		_, err = RunWorkflow(dbosCtx, simpleWorkflow, "test-input", WithQueue(nonPartitionedQueue.Name), WithQueuePartitionKey("partition-1"))
+		require.Error(t, err, "expected error when enqueueing with partition key on non-partitioned queue")
+
+		// Check that it's the correct error type
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
+
+		// Verify the error is wrapped by newWorkflowExecutionError with WorkflowExecutionError code
+		assert.True(t, errors.Is(err, &DBOSError{Code: WorkflowExecutionError}), "expected error to be WorkflowExecutionError")
+
+		// Verify the unwrapped error contains the validation message
+		unwrappedErr := errors.Unwrap(dbosErr)
+		require.NotNil(t, unwrappedErr, "expected error to have an unwrapped error")
+		expectedMsgPart := "is not a partitioned queue, but a partition key was provided"
+		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
+	})
+
+	t.Run("PartitionKeyWithDeduplicationID", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, true, true)
+
+		// Create a partitioned queue
+		partitionedQueue := NewWorkflowQueue(dbosCtx, "partitioned-queue-test", WithPartitionQueue())
+
+		// Register a simple workflow
+		simpleWorkflow := func(ctx DBOSContext, input string) (string, error) {
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, simpleWorkflow)
+
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Attempt to enqueue with both partition key and deduplication ID
+		// This should return an error
+		_, err = RunWorkflow(dbosCtx, simpleWorkflow, "test-input", WithQueue(partitionedQueue.Name), WithQueuePartitionKey("partition-1"), WithDeduplicationID("dedup-id"))
+		require.Error(t, err, "expected error when enqueueing with both partition key and deduplication ID")
+
+		// Check that it's the correct error type
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
+
+		// Verify the error is wrapped by newWorkflowExecutionError with WorkflowExecutionError code
+		assert.True(t, errors.Is(err, &DBOSError{Code: WorkflowExecutionError}), "expected error to be WorkflowExecutionError")
+
+		// Verify the unwrapped error contains the validation message
+		unwrappedErr := errors.Unwrap(dbosErr)
+		require.NotNil(t, unwrappedErr, "expected error to have an unwrapped error")
+		expectedMsgPart := "partition key and deduplication ID cannot be used together"
+		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
+	})
+
+	t.Run("Dequeue", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, true, true)
+
+		// Create a partitioned queue with concurrency limit of 1 per partition
+		partitionedQueue := NewWorkflowQueue(dbosCtx, "partitioned-queue", WithPartitionQueue(), WithGlobalConcurrency(1))
+
+		// Create events for blocking workflow on partition 1
+		partition1StartEvent := NewEvent()
+		partition1BlockEvent := NewEvent()
+
+		// Create blocking workflow for partition 1
+		blockingWorkflowP1 := func(ctx DBOSContext, input string) (string, error) {
+			partition1StartEvent.Set()
+			partition1BlockEvent.Wait()
+			return "p1-" + input, nil
+		}
+
+		// Create non-blocking workflow (used for both partitions)
+		nonBlockingWorkflow := func(ctx DBOSContext, input string) (string, error) {
+			return input, nil
+		}
+
+		RegisterWorkflow(dbosCtx, blockingWorkflowP1)
+		RegisterWorkflow(dbosCtx, nonBlockingWorkflow)
+
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Enqueue a blocking workflow on partition 1
+		handleP1Blocked, err := RunWorkflow(dbosCtx, blockingWorkflowP1, "blocked", WithQueue(partitionedQueue.Name), WithQueuePartitionKey("partition-1"))
+		require.NoError(t, err, "failed to enqueue blocking workflow on partition 1")
+
+		// Wait for the blocking workflow on partition 1 to start
+		partition1StartEvent.Wait()
+
+		// Enqueue a non-blocking workflow on partition 1 - this should be blocked behind the blocking one
+		handleP1Normal, err := RunWorkflow(dbosCtx, nonBlockingWorkflow, "p1-normal", WithQueue(partitionedQueue.Name), WithQueuePartitionKey("partition-1"))
+		require.NoError(t, err, "failed to enqueue normal workflow on partition 1")
+
+		// Verify the normal workflow is blocked (ENQUEUED status) behind the blocking one
+		statusP1Normal, err := handleP1Normal.GetStatus()
+		require.NoError(t, err, "failed to get status of normal workflow on partition 1")
+		assert.Equal(t, WorkflowStatusEnqueued, statusP1Normal.Status, "expected normal workflow on partition 1 to be ENQUEUED behind the blocking one")
+
+		// Enqueue multiple non-blocking workflows on partition 2 - these should all complete
+		// even though partition 1 is blocked, demonstrating partition independence
+		numP2Workflows := 3
+		handlesP2 := make([]WorkflowHandle[string], numP2Workflows)
+		for i := range numP2Workflows {
+			handle, err := RunWorkflow(dbosCtx, nonBlockingWorkflow, fmt.Sprintf("p2-workflow-%d", i), WithQueue(partitionedQueue.Name), WithQueuePartitionKey("partition-2"))
+			require.NoError(t, err, "failed to enqueue workflow %d on partition 2", i)
+			handlesP2[i] = handle
+		}
+
+		// Wait for all partition 2 workflows to complete
+		for i, handle := range handlesP2 {
+			result, err := handle.GetResult()
+			require.NoError(t, err, "failed to get result from partition 2 workflow %d", i)
+			expectedResult := fmt.Sprintf("p2-workflow-%d", i)
+			assert.Equal(t, expectedResult, result, "expected result from partition 2 workflow %d", i)
+		}
+
+		// Verify partition 1 blocking workflow is still pending
+		statusP1Blocked, err := handleP1Blocked.GetStatus()
+		require.NoError(t, err, "failed to get status of blocking workflow on partition 1")
+		assert.Equal(t, WorkflowStatusPending, statusP1Blocked.Status, "expected blocking workflow on partition 1 to still be pending")
+
+		// Verify the normal workflow on partition 1 is still enqueued
+		statusP1Normal, err = handleP1Normal.GetStatus()
+		require.NoError(t, err, "failed to get status of normal workflow on partition 1")
+		assert.Equal(t, WorkflowStatusEnqueued, statusP1Normal.Status, "expected normal workflow on partition 1 to still be ENQUEUED")
+
+		// Now unblock partition 1 blocking workflow
+		partition1BlockEvent.Set()
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after partitioned queue test")
 	})
 }
