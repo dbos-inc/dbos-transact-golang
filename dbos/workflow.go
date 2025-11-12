@@ -2077,28 +2077,30 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 				if !ok {
 					return nil, fmt.Errorf("workflow input must be encoded string, got %T", workflows[i].Input)
 				}
-				if encodedInput == nil {
-					continue
+				if encodedInput == nil || *encodedInput == nilMarker {
+					workflows[i].Input = nil
+				} else {
+					decodedBytes, err := base64.StdEncoding.DecodeString(*encodedInput)
+					if err != nil {
+						return nil, fmt.Errorf("failed to decode base64 workflow input for %s: %w", workflows[i].ID, err)
+					}
+					workflows[i].Input = string(decodedBytes)
 				}
-				decodedBytes, err := base64.StdEncoding.DecodeString(*encodedInput)
-				if err != nil {
-					return nil, fmt.Errorf("failed to decode base64 workflow input for %s: %w", workflows[i].ID, err)
-				}
-				workflows[i].Input = string(decodedBytes)
 			}
 			if params.loadOutput && workflows[i].Output != nil {
 				encodedOutput, ok := workflows[i].Output.(*string)
 				if !ok {
 					return nil, fmt.Errorf("workflow output must be encoded *string, got %T", workflows[i].Output)
 				}
-				if encodedOutput == nil {
-					continue
+				if encodedOutput == nil || *encodedOutput == nilMarker {
+					workflows[i].Output = nil
+				} else {
+					decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
+					if err != nil {
+						return nil, fmt.Errorf("failed to decode base64 workflow output for %s: %w", workflows[i].ID, err)
+					}
+					workflows[i].Output = string(decodedBytes)
 				}
-				decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
-				if err != nil {
-					return nil, fmt.Errorf("failed to decode base64 workflow output for %s: %w", workflows[i].ID, err)
-				}
-				workflows[i].Output = string(decodedBytes)
 			}
 		}
 	}
@@ -2205,7 +2207,8 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 	if loadOutput {
 		for i := range steps {
 			encodedOutput := steps[i].Output
-			if encodedOutput == nil {
+			if encodedOutput == nil || *encodedOutput == nilMarker {
+				stepInfos[i].Output = nil
 				continue
 			}
 			decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)

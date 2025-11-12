@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -141,8 +142,8 @@ func testAllSerializationPaths[T any](
 		wf := wfs[0]
 		if isNilExpected {
 			// Should be an empty string
-			assert.Nil(t, wf.Input, "Workflow input should be nil")
-			assert.Nil(t, wf.Output, "Workflow output should be nil")
+			require.Nil(t, wf.Input, "Workflow input should be nil")
+			require.Nil(t, wf.Output, "Workflow output should be nil")
 		} else {
 			require.NotNil(t, wf.Input)
 			require.NotNil(t, wf.Output)
@@ -175,6 +176,40 @@ func testAllSerializationPaths[T any](
 			}
 		}
 	})
+
+	// If nil is expected, verify the nil marker is stored in the database
+	if isNilExpected {
+		t.Run("DatabaseNilMarker", func(t *testing.T) {
+			// Get the database pool to query directly
+			dbosCtx, ok := executor.(*dbosContext)
+			require.True(t, ok, "expected dbosContext")
+			sysDB, ok := dbosCtx.systemDB.(*sysDB)
+			require.True(t, ok, "expected sysDB")
+
+			// Query the database directly to check for the marker
+			ctx := context.Background()
+			query := fmt.Sprintf(`SELECT inputs, output FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{sysDB.schema}.Sanitize())
+
+			var inputString, outputString *string
+			err := sysDB.pool.QueryRow(ctx, query, workflowID).Scan(&inputString, &outputString)
+			require.NoError(t, err, "failed to query workflow status")
+
+			// Both input and output should be the nil marker
+			require.NotNil(t, inputString, "input should not be NULL in database")
+			assert.Equal(t, nilMarker, *inputString, "input should be the nil marker")
+
+			require.NotNil(t, outputString, "output should not be NULL in database")
+			assert.Equal(t, nilMarker, *outputString, "output should be the nil marker")
+
+			// Also check the step output in operation_outputs
+			stepQuery := fmt.Sprintf(`SELECT output FROM %s.operation_outputs WHERE workflow_uuid = $1 ORDER BY function_id LIMIT 1`, pgx.Identifier{sysDB.schema}.Sanitize())
+			var stepOutputString *string
+			err = sysDB.pool.QueryRow(ctx, stepQuery, workflowID).Scan(&stepOutputString)
+			require.NoError(t, err, "failed to query step output")
+			require.NotNil(t, stepOutputString, "step output should not be NULL in database")
+			assert.Equal(t, nilMarker, *stepOutputString, "step output should be the nil marker")
+		})
+	}
 }
 
 // Helper function to test Send/Recv communication

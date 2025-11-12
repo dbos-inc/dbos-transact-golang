@@ -185,7 +185,6 @@ func (c *dbosContext) Value(key any) any {
 	return c.ctx.Value(key)
 }
 
-
 // WithValue returns a copy of the DBOS context with the given key-value pair.
 // This is similar to context.WithValue but maintains DBOS context capabilities.
 // No-op if the provided context is not a concrete dbos.dbosContext.
@@ -300,7 +299,7 @@ func (c *dbosContext) ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegiste
 
 	// Get all registered workflows and apply filters
 	var filteredWorkflows []WorkflowRegistryEntry
-	c.workflowRegistry.Range(func(key, value interface{}) bool {
+	c.workflowRegistry.Range(func(key, value any) bool {
 		workflow := value.(WorkflowRegistryEntry)
 
 		// Filter by scheduled only
