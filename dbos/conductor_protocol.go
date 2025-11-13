@@ -137,18 +137,16 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 		}
 	}
 
-	// Convert input/output to JSON strings if present
+	// input/output are already JSON strings
 	if wf.Input != nil {
-		inputJSON, err := json.Marshal(wf.Input)
-		if err == nil {
-			inputStr := string(inputJSON)
+		inputStr, ok := wf.Input.(string)
+		if ok {
 			output.Input = &inputStr
 		}
 	}
 	if wf.Output != nil {
-		outputJSON, err := json.Marshal(wf.Output)
-		if err == nil {
-			outputStr := string(outputJSON)
+		outputStr, ok := wf.Output.(string)
+		if ok {
 			output.Output = &outputStr
 		}
 	}
@@ -249,11 +247,10 @@ func formatWorkflowStepsResponseBody(step StepInfo) workflowStepsConductorRespon
 		FunctionName: step.StepName,
 	}
 
-	// Convert output to JSON string if present
+	// output is already a JSON string
 	if step.Output != nil {
-		outputJSON, err := json.Marshal(step.Output)
-		if err == nil {
-			outputStr := string(outputJSON)
+		outputStr, ok := step.Output.(string)
+		if ok {
 			output.Output = &outputStr
 		}
 	}
