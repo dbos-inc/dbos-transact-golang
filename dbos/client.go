@@ -144,9 +144,12 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		opt(params)
 	}
 
-	// Validate partition key is not provided without queue name
-	if len(params.queuePartitionKey) > 0 && len(queueName) == 0 {
-		return nil, fmt.Errorf("partition key provided but queue name is missing")
+	if len(queueName) == 0 {
+		return nil, fmt.Errorf("queue name is required")
+	}
+
+	if len(workflowName) == 0 {
+		return nil, fmt.Errorf("workflow name is required")
 	}
 
 	// Validate partition key and deduplication ID are not both provided (they are incompatible)
@@ -261,14 +264,6 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, opts ...EnqueueOption) (WorkflowHandle[R], error) {
 	if c == nil {
 		return nil, errors.New("client cannot be nil")
-	}
-
-	if len(queueName) == 0 {
-		return nil, fmt.Errorf("queue name is required")
-	}
-
-	if len(workflowName) == 0 {
-		return nil, fmt.Errorf("workflow name is required")
 	}
 
 	// Serialize input

@@ -1434,6 +1434,40 @@ func TestPartitionedQueues(t *testing.T) {
 		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
 	})
 
+	t.Run("PartitionedQueueWithoutPartitionKey", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, true, true)
+
+		// Create a partitioned queue
+		partitionedQueue := NewWorkflowQueue(dbosCtx, "partitioned-queue-required", WithPartitionQueue())
+
+		// Register a simple workflow
+		simpleWorkflow := func(ctx DBOSContext, input string) (string, error) {
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, simpleWorkflow)
+
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Attempt to enqueue to a partitioned queue without a partition key
+		// This should return an error
+		_, err = RunWorkflow(dbosCtx, simpleWorkflow, "test-input", WithQueue(partitionedQueue.Name))
+		require.Error(t, err, "expected error when enqueueing to partitioned queue without partition key")
+
+		// Check that it's the correct error type
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
+
+		// Verify the error is wrapped by newWorkflowExecutionError with WorkflowExecutionError code
+		assert.True(t, errors.Is(err, &DBOSError{Code: WorkflowExecutionError}), "expected error to be WorkflowExecutionError")
+
+		// Verify the unwrapped error contains the validation message
+		unwrappedErr := errors.Unwrap(dbosErr)
+		require.NotNil(t, unwrappedErr, "expected error to have an unwrapped error")
+		expectedMsgPart := "has partitions enabled, but no partition key was provided"
+		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
+	})
+
 	t.Run("PartitionKeyWithDeduplicationID", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, true, true)
 

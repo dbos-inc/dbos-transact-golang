@@ -817,11 +817,13 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		if queue == nil {
 			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s does not exist", params.queueName))
 		}
-		// Validate queue partition key if provided
-		if len(params.queuePartitionKey) > 0 {
-			if !queue.PartitionQueue {
-				return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.queueName))
-			}
+		// If queue has partitions enabled, partition key must be provided
+		if queue.PartitionQueue && len(params.queuePartitionKey) == 0 {
+			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.queueName))
+		}
+		// If partition key is provided, queue must have partitions enabled
+		if len(params.queuePartitionKey) > 0 && !queue.PartitionQueue {
+			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.queueName))
 		}
 	}
 
