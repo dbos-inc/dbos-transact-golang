@@ -129,6 +129,9 @@ var migration1SQL string
 //go:embed migrations/2_add_queue_partition_key.sql
 var migration2SQL string
 
+//go:embed migrations/3_add_workflow_status_index.sql
+var migration3SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -165,10 +168,13 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 
 	migration2SQLProcessed := fmt.Sprintf(migration2SQL, sanitizedSchema)
 
+	migration3SQLProcessed := fmt.Sprintf(migration3SQL, sanitizedSchema)
+
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
 		{version: 1, sql: migration1SQLProcessed},
 		{version: 2, sql: migration2SQLProcessed},
+		{version: 3, sql: migration3SQLProcessed},
 	}
 
 	// Begin transaction for atomic migration execution
