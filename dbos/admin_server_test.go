@@ -885,6 +885,12 @@ func TestAdminServer(t *testing.T) {
 			functionName, ok := step["function_name"].(string)
 			require.True(t, ok, "function_name should be a string for step %d", i)
 
+			// Verify timestamps are present
+			_, hasStartedAt := step["started_at_epoch_ms"]
+			assert.True(t, hasStartedAt, "Step %d should have started_at_epoch_ms field", i)
+			_, hasCompletedAt := step["completed_at_epoch_ms"]
+			assert.True(t, hasCompletedAt, "Step %d should have completed_at_epoch_ms field", i)
+
 			t.Logf("Step %d (%s): output=%v, error=%v", i, functionName, step["output"], step["error"])
 
 			switch functionName {

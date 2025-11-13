@@ -143,9 +143,9 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 	}
 
 	if !ws.Deadline.IsZero() {
-		result["Deadline"] = ws.Deadline.UTC().UnixMilli()
+		result["WorkflowDeadlineEpochMS"] = ws.Deadline.UTC().UnixMilli()
 	} else {
-		result["Deadline"] = nil
+		result["WorkflowDeadlineEpochMS"] = nil
 	}
 
 	if !ws.StartedAt.IsZero() {
@@ -442,6 +442,14 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 				"function_id":       step.StepID,
 				"function_name":     step.StepName,
 				"child_workflow_id": step.ChildWorkflowID,
+			}
+
+			// Add timestamps if present
+			if !step.StartedAt.IsZero() {
+				formattedStep["started_at_epoch_ms"] = step.StartedAt.UnixMilli()
+			}
+			if !step.CompletedAt.IsZero() {
+				formattedStep["completed_at_epoch_ms"] = step.CompletedAt.UnixMilli()
 			}
 
 			if step.Output != nil {

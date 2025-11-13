@@ -1711,6 +1711,10 @@ func TestSendRecv(t *testing.T) {
 		for i, step := range sendSteps {
 			require.Equal(t, i, step.StepID, "expected step %d to have correct StepID", i)
 			require.Equal(t, "DBOS.send", step.StepName, "expected step %d to have StepName 'DBOS.send'", i)
+			require.False(t, step.StartedAt.IsZero(), "expected step %d to have StartedAt set", i)
+			require.False(t, step.CompletedAt.IsZero(), "expected step %d to have CompletedAt set", i)
+			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
+				"expected step %d CompletedAt to be after or equal to StartedAt", i)
 		}
 
 		// Verify step counting for receive workflow (receiveWorkflow calls Recv 3 times)
@@ -1720,6 +1724,12 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, "DBOS.recv", receiveSteps[0].StepName, "expected step 0 to have StepName 'DBOS.recv'")
 		require.Equal(t, "DBOS.recv", receiveSteps[1].StepName, "expected step 1 to have StepName 'DBOS.recv'")
 		require.Equal(t, "DBOS.recv", receiveSteps[2].StepName, "expected step 2 to have StepName 'DBOS.recv'")
+		for i, step := range receiveSteps {
+			require.False(t, step.StartedAt.IsZero(), "expected recv step %d to have StartedAt set", i)
+			require.False(t, step.CompletedAt.IsZero(), "expected recv step %d to have CompletedAt set", i)
+			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
+				"expected recv step %d CompletedAt to be after or equal to StartedAt", i)
+		}
 	})
 
 	t.Run("SendRecvCustomStruct", func(t *testing.T) {
@@ -1750,6 +1760,10 @@ func TestSendRecv(t *testing.T) {
 		require.Len(t, sendSteps, 1, "expected 1 step in send struct workflow (1 Send call), got %d", len(sendSteps))
 		require.Equal(t, 0, sendSteps[0].StepID)
 		require.Equal(t, "DBOS.send", sendSteps[0].StepName)
+		require.False(t, sendSteps[0].StartedAt.IsZero(), "expected send step to have StartedAt set")
+		require.False(t, sendSteps[0].CompletedAt.IsZero(), "expected send step to have CompletedAt set")
+		require.True(t, sendSteps[0].CompletedAt.After(sendSteps[0].StartedAt) || sendSteps[0].CompletedAt.Equal(sendSteps[0].StartedAt),
+			"expected send step CompletedAt to be after or equal to StartedAt")
 
 		// Verify step counting for receiveStructWorkflow (calls Recv 1 time, with sleep)
 		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
@@ -1758,9 +1772,17 @@ func TestSendRecv(t *testing.T) {
 		// First step should be recv
 		require.Equal(t, 0, receiveSteps[0].StepID)
 		require.Equal(t, "DBOS.recv", receiveSteps[0].StepName)
+		require.False(t, receiveSteps[0].StartedAt.IsZero(), "expected recv step to have StartedAt set")
+		require.False(t, receiveSteps[0].CompletedAt.IsZero(), "expected recv step to have CompletedAt set")
+		require.True(t, receiveSteps[0].CompletedAt.After(receiveSteps[0].StartedAt) || receiveSteps[0].CompletedAt.Equal(receiveSteps[0].StartedAt),
+			"expected recv step CompletedAt to be after or equal to StartedAt")
 		// Second step should be sleep
 		require.Equal(t, 1, receiveSteps[1].StepID)
 		require.Equal(t, "DBOS.sleep", receiveSteps[1].StepName)
+		require.False(t, receiveSteps[1].StartedAt.IsZero(), "expected sleep step to have StartedAt set")
+		require.False(t, receiveSteps[1].CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
+		require.True(t, receiveSteps[1].CompletedAt.After(receiveSteps[1].StartedAt) || receiveSteps[1].CompletedAt.Equal(receiveSteps[1].StartedAt),
+			"expected sleep step CompletedAt to be after or equal to StartedAt")
 	})
 
 	t.Run("SendToNonExistentUUID", func(t *testing.T) {
@@ -1805,6 +1827,12 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, "DBOS.sleep", steps[3].StepName, "expected step 3 to have StepName 'DBOS.sleep'")
 		require.Equal(t, "DBOS.recv", steps[4].StepName, "expected step 4 to have StepName 'DBOS.recv'")
 		require.Equal(t, "DBOS.sleep", steps[5].StepName, "expected step 5 to have StepName 'DBOS.sleep'")
+		for i, step := range steps {
+			require.False(t, step.StartedAt.IsZero(), "expected step %d to have StartedAt set", i)
+			require.False(t, step.CompletedAt.IsZero(), "expected step %d to have CompletedAt set", i)
+			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
+				"expected step %d CompletedAt to be after or equal to StartedAt", i)
+		}
 	})
 
 	t.Run("RecvMustRunInsideWorkflows", func(t *testing.T) {
@@ -1852,6 +1880,12 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, "DBOS.sleep", receiveSteps[1].StepName, "expected step 1 to have StepName 'DBOS.sleep'")
 		require.Equal(t, "DBOS.recv", receiveSteps[2].StepName, "expected step 2 to have StepName 'DBOS.recv'")
 		require.Equal(t, "DBOS.recv", receiveSteps[3].StepName, "expected step 3 to have StepName 'DBOS.recv'")
+		for i, step := range receiveSteps {
+			require.False(t, step.StartedAt.IsZero(), "expected step %d to have StartedAt set", i)
+			require.False(t, step.CompletedAt.IsZero(), "expected step %d to have CompletedAt set", i)
+			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
+				"expected step %d CompletedAt to be after or equal to StartedAt", i)
+		}
 
 	})
 	t.Run("SendRecvIdempotency", func(t *testing.T) {
@@ -1878,6 +1912,10 @@ func TestSendRecv(t *testing.T) {
 		require.Len(t, steps, 1, "expected 1 step in send idempotency workflow, got %d", len(steps))
 		assert.Equal(t, 0, steps[0].StepID, "expected send idempotency step to have StepID 0")
 		assert.Equal(t, "DBOS.send", steps[0].StepName, "expected send idempotency step to have StepName 'DBOS.send'")
+		require.False(t, steps[0].StartedAt.IsZero(), "expected send step to have StartedAt set")
+		require.False(t, steps[0].CompletedAt.IsZero(), "expected send step to have CompletedAt set")
+		require.True(t, steps[0].CompletedAt.After(steps[0].StartedAt) || steps[0].CompletedAt.Equal(steps[0].StartedAt),
+			"expected send step CompletedAt to be after or equal to StartedAt")
 
 		steps, err = GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get steps for receive idempotency workflow")
@@ -1886,6 +1924,12 @@ func TestSendRecv(t *testing.T) {
 		assert.Equal(t, "DBOS.recv", steps[0].StepName, "expected receive idempotency step to have StepName 'DBOS.recv'")
 		assert.Equal(t, 1, steps[1].StepID, "expected receive idempotency sleep step to have StepID 1")
 		assert.Equal(t, "DBOS.sleep", steps[1].StepName, "expected receive idempotency sleep step to have StepName 'DBOS.sleep'")
+		for i, step := range steps {
+			require.False(t, step.StartedAt.IsZero(), "expected step %d to have StartedAt set", i)
+			require.False(t, step.CompletedAt.IsZero(), "expected step %d to have CompletedAt set", i)
+			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
+				"expected step %d CompletedAt to be after or equal to StartedAt", i)
+		}
 
 		// Unblock the workflows to complete
 		receiveIdempotencyStopEvent.Set()
@@ -2001,19 +2045,35 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, 0, steps[0].StepID, "expected first step ID to be 0")
 		require.Equal(t, "DBOS.recv", steps[0].StepName, "expected first step to be recv")
 		require.Nil(t, steps[0].Output, "expected first recv step output to be nil (timeout)")
+		require.False(t, steps[0].StartedAt.IsZero(), "expected recv step to have StartedAt set")
+		require.False(t, steps[0].CompletedAt.IsZero(), "expected recv step to have CompletedAt set")
+		require.True(t, steps[0].CompletedAt.After(steps[0].StartedAt) || steps[0].CompletedAt.Equal(steps[0].StartedAt),
+			"expected recv step CompletedAt to be after or equal to StartedAt")
 
 		// First sleep (step 1)
 		require.Equal(t, 1, steps[1].StepID, "expected second step ID to be 1")
 		require.Equal(t, "DBOS.sleep", steps[1].StepName, "expected second step to be sleep")
+		require.False(t, steps[1].StartedAt.IsZero(), "expected sleep step to have StartedAt set")
+		require.False(t, steps[1].CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
+		require.True(t, steps[1].CompletedAt.After(steps[1].StartedAt) || steps[1].CompletedAt.Equal(steps[1].StartedAt),
+			"expected sleep step CompletedAt to be after or equal to StartedAt")
 
 		// Second recv (step 2) - should have nil output due to timeout
 		require.Equal(t, 2, steps[2].StepID, "expected third step ID to be 2")
 		require.Equal(t, "DBOS.recv", steps[2].StepName, "expected third step to be recv")
 		require.Nil(t, steps[2].Output, "expected second recv step output to be nil (timeout)")
+		require.False(t, steps[2].StartedAt.IsZero(), "expected recv step to have StartedAt set")
+		require.False(t, steps[2].CompletedAt.IsZero(), "expected recv step to have CompletedAt set")
+		require.True(t, steps[2].CompletedAt.After(steps[2].StartedAt) || steps[2].CompletedAt.Equal(steps[2].StartedAt),
+			"expected recv step CompletedAt to be after or equal to StartedAt")
 
 		// Second sleep (step 3)
 		require.Equal(t, 3, steps[3].StepID, "expected fourth step ID to be 3")
 		require.Equal(t, "DBOS.sleep", steps[3].StepName, "expected fourth step to be sleep")
+		require.False(t, steps[3].StartedAt.IsZero(), "expected sleep step to have StartedAt set")
+		require.False(t, steps[3].CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
+		require.True(t, steps[3].CompletedAt.After(steps[3].StartedAt) || steps[3].CompletedAt.Equal(steps[3].StartedAt),
+			"expected sleep step CompletedAt to be after or equal to StartedAt")
 
 		// Now the workflow is blocked on receiveIdempotencyStopEvent.Wait()
 		// Let's recover it to test that the sleep is not repeated
@@ -2420,6 +2480,10 @@ func TestSetGetEvent(t *testing.T) {
 		for i, step := range setSteps {
 			assert.Equal(t, i, step.StepID, "expected step %d to have StepID %d", i, i)
 			assert.Equal(t, "DBOS.setEvent", step.StepName, "expected step %d to have StepName 'DBOS.setEvent'", i)
+			require.False(t, step.StartedAt.IsZero(), "expected setEvent step %d to have StartedAt set", i)
+			require.False(t, step.CompletedAt.IsZero(), "expected setEvent step %d to have CompletedAt set", i)
+			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
+				"expected setEvent step %d CompletedAt to be after or equal to StartedAt", i)
 		}
 
 		// Verify step counting for the first get event workflow
@@ -2429,9 +2493,17 @@ func TestSetGetEvent(t *testing.T) {
 		// First step should be the getEvent step with stepID 0
 		assert.Equal(t, 0, getFirstSteps[0].StepID, "expected first step to have StepID 0")
 		assert.Equal(t, "DBOS.getEvent", getFirstSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
+		require.False(t, getFirstSteps[0].StartedAt.IsZero(), "expected getEvent step to have StartedAt set")
+		require.False(t, getFirstSteps[0].CompletedAt.IsZero(), "expected getEvent step to have CompletedAt set")
+		require.True(t, getFirstSteps[0].CompletedAt.After(getFirstSteps[0].StartedAt) || getFirstSteps[0].CompletedAt.Equal(getFirstSteps[0].StartedAt),
+			"expected getEvent step CompletedAt to be after or equal to StartedAt")
 		// Second step should be the sleep step with stepID 1
 		assert.Equal(t, 1, getFirstSteps[1].StepID, "expected second step to have StepID 1")
 		assert.Equal(t, "DBOS.sleep", getFirstSteps[1].StepName, "expected second step to have StepName 'DBOS.sleep'")
+		require.False(t, getFirstSteps[1].StartedAt.IsZero(), "expected sleep step to have StartedAt set")
+		require.False(t, getFirstSteps[1].CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
+		require.True(t, getFirstSteps[1].CompletedAt.After(getFirstSteps[1].StartedAt) || getFirstSteps[1].CompletedAt.Equal(getFirstSteps[1].StartedAt),
+			"expected sleep step CompletedAt to be after or equal to StartedAt")
 
 		// Verify step counting for the second get event workflow
 		// This one does not sleep because the event was already set
@@ -2441,6 +2513,10 @@ func TestSetGetEvent(t *testing.T) {
 		// First step should be the getEvent step with stepID 0
 		assert.Equal(t, 0, getSecondSteps[0].StepID, "expected first step to have StepID 0")
 		assert.Equal(t, "DBOS.getEvent", getSecondSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
+		require.False(t, getSecondSteps[0].StartedAt.IsZero(), "expected getEvent step to have StartedAt set")
+		require.False(t, getSecondSteps[0].CompletedAt.IsZero(), "expected getEvent step to have CompletedAt set")
+		require.True(t, getSecondSteps[0].CompletedAt.After(getSecondSteps[0].StartedAt) || getSecondSteps[0].CompletedAt.Equal(getSecondSteps[0].StartedAt),
+			"expected getEvent step CompletedAt to be after or equal to StartedAt")
 
 		// Verify step counting for the third get event workflow
 		// This one sleeps because the event wasn't set yet
@@ -2450,9 +2526,17 @@ func TestSetGetEvent(t *testing.T) {
 		// First step should be the getEvent step with stepID 0
 		assert.Equal(t, 0, getThirdSteps[0].StepID, "expected first step to have StepID 0")
 		assert.Equal(t, "DBOS.getEvent", getThirdSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
+		require.False(t, getThirdSteps[0].StartedAt.IsZero(), "expected getEvent step to have StartedAt set")
+		require.False(t, getThirdSteps[0].CompletedAt.IsZero(), "expected getEvent step to have CompletedAt set")
+		require.True(t, getThirdSteps[0].CompletedAt.After(getThirdSteps[0].StartedAt) || getThirdSteps[0].CompletedAt.Equal(getThirdSteps[0].StartedAt),
+			"expected getEvent step CompletedAt to be after or equal to StartedAt")
 		// Second step should be the sleep step with stepID 1
 		assert.Equal(t, 1, getThirdSteps[1].StepID, "expected second step to have StepID")
 		assert.Equal(t, "DBOS.sleep", getThirdSteps[1].StepName, "expected second step to have StepName 'DBOS.sleep'")
+		require.False(t, getThirdSteps[1].StartedAt.IsZero(), "expected sleep step to have StartedAt set")
+		require.False(t, getThirdSteps[1].CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
+		require.True(t, getThirdSteps[1].CompletedAt.After(getThirdSteps[1].StartedAt) || getThirdSteps[1].CompletedAt.Equal(getThirdSteps[1].StartedAt),
+			"expected sleep step CompletedAt to be after or equal to StartedAt")
 	})
 
 	t.Run("GetEventFromOutsideWorkflow", func(t *testing.T) {
@@ -2492,6 +2576,10 @@ func TestSetGetEvent(t *testing.T) {
 		if setSteps[0].StepName != "DBOS.setEvent" {
 			t.Fatalf("expected step to have StepName 'DBOS.setEvent', got '%s'", setSteps[0].StepName)
 		}
+		require.False(t, setSteps[0].StartedAt.IsZero(), "expected setEvent step to have StartedAt set")
+		require.False(t, setSteps[0].CompletedAt.IsZero(), "expected setEvent step to have CompletedAt set")
+		require.True(t, setSteps[0].CompletedAt.After(setSteps[0].StartedAt) || setSteps[0].CompletedAt.Equal(setSteps[0].StartedAt),
+			"expected setEvent step CompletedAt to be after or equal to StartedAt")
 	})
 
 	t.Run("GetEventTimeout", func(t *testing.T) {
@@ -2580,6 +2668,10 @@ func TestSetGetEvent(t *testing.T) {
 		if setSteps[0].StepName != "DBOS.setEvent" {
 			t.Fatalf("expected set event idempotency step to have StepName 'DBOS.setEvent', got '%s'", setSteps[0].StepName)
 		}
+		require.False(t, setSteps[0].StartedAt.IsZero(), "expected setEvent step to have StartedAt set")
+		require.False(t, setSteps[0].CompletedAt.IsZero(), "expected setEvent step to have CompletedAt set")
+		require.True(t, setSteps[0].CompletedAt.After(setSteps[0].StartedAt) || setSteps[0].CompletedAt.Equal(setSteps[0].StartedAt),
+			"expected setEvent step CompletedAt to be after or equal to StartedAt")
 
 		getSteps, err := GetWorkflowSteps(dbosCtx, getHandle.GetWorkflowID())
 		if err != nil {
@@ -2592,6 +2684,10 @@ func TestSetGetEvent(t *testing.T) {
 		if getSteps[0].StepName != "DBOS.getEvent" {
 			t.Fatalf("expected get event idempotency step to have StepName 'DBOS.getEvent', got '%s'", getSteps[0].StepName)
 		}
+		require.False(t, getSteps[0].StartedAt.IsZero(), "expected getEvent step to have StartedAt set")
+		require.False(t, getSteps[0].CompletedAt.IsZero(), "expected getEvent step to have CompletedAt set")
+		require.True(t, getSteps[0].CompletedAt.After(getSteps[0].StartedAt) || getSteps[0].CompletedAt.Equal(getSteps[0].StartedAt),
+			"expected getEvent step CompletedAt to be after or equal to StartedAt")
 
 		// Complete the workflows
 		setEvenStopIdempotencyEvent.Set()
@@ -2710,19 +2806,35 @@ func TestSetGetEvent(t *testing.T) {
 		require.Equal(t, 0, steps[0].StepID, "expected first step ID to be 0")
 		require.Equal(t, "DBOS.getEvent", steps[0].StepName, "expected first step to be getEvent")
 		require.Nil(t, steps[0].Output, "expected first getEvent step output to be empty string (timeout)")
+		require.False(t, steps[0].StartedAt.IsZero(), "expected getEvent step to have StartedAt set")
+		require.False(t, steps[0].CompletedAt.IsZero(), "expected getEvent step to have CompletedAt set")
+		require.True(t, steps[0].CompletedAt.After(steps[0].StartedAt) || steps[0].CompletedAt.Equal(steps[0].StartedAt),
+			"expected getEvent step CompletedAt to be after or equal to StartedAt")
 
 		// First sleep (step 1)
 		require.Equal(t, 1, steps[1].StepID, "expected second step ID to be 1")
 		require.Equal(t, "DBOS.sleep", steps[1].StepName, "expected second step to be sleep")
+		require.False(t, steps[1].StartedAt.IsZero(), "expected sleep step to have StartedAt set")
+		require.False(t, steps[1].CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
+		require.True(t, steps[1].CompletedAt.After(steps[1].StartedAt) || steps[1].CompletedAt.Equal(steps[1].StartedAt),
+			"expected sleep step CompletedAt to be after or equal to StartedAt")
 
 		// Second getEvent (step 2) - should have empty string output due to timeout
 		require.Equal(t, 2, steps[2].StepID, "expected third step ID to be 2")
 		require.Equal(t, "DBOS.getEvent", steps[2].StepName, "expected third step to be getEvent")
 		require.Nil(t, steps[2].Output, "expected second getEvent step output to be empty string (timeout)")
+		require.False(t, steps[2].StartedAt.IsZero(), "expected getEvent step to have StartedAt set")
+		require.False(t, steps[2].CompletedAt.IsZero(), "expected getEvent step to have CompletedAt set")
+		require.True(t, steps[2].CompletedAt.After(steps[2].StartedAt) || steps[2].CompletedAt.Equal(steps[2].StartedAt),
+			"expected getEvent step CompletedAt to be after or equal to StartedAt")
 
 		// Second sleep (step 3)
 		require.Equal(t, 3, steps[3].StepID, "expected fourth step ID to be 3")
 		require.Equal(t, "DBOS.sleep", steps[3].StepName, "expected fourth step to be sleep")
+		require.False(t, steps[3].StartedAt.IsZero(), "expected sleep step to have StartedAt set")
+		require.False(t, steps[3].CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
+		require.True(t, steps[3].CompletedAt.After(steps[3].StartedAt) || steps[3].CompletedAt.Equal(steps[3].StartedAt),
+			"expected sleep step CompletedAt to be after or equal to StartedAt")
 
 		// Now the workflow is blocked on getEventStopIdempotencyEvent.Wait()
 		// Let's recover it to test that the sleep is not repeated
@@ -2861,6 +2973,10 @@ func TestSleep(t *testing.T) {
 		assert.Equal(t, 0, step.StepID, "expected step to have StepID 0")
 		assert.Equal(t, "DBOS.sleep", step.StepName, "expected step name to be 'DBOS.sleep'")
 		assert.Nil(t, step.Error, "expected step to have no error")
+		require.False(t, step.StartedAt.IsZero(), "expected sleep step to have StartedAt set")
+		require.False(t, step.CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
+		require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
+			"expected sleep step CompletedAt to be after or equal to StartedAt")
 
 		sleepStopEvent.Set()
 

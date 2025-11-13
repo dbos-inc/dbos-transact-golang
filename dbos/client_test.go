@@ -709,6 +709,11 @@ func TestForkWorkflow(t *testing.T) {
 			forkedWorkflowID := forkedHandle.GetWorkflowID()
 			assert.Equal(t, customForkedWorkflowID, forkedWorkflowID, "expected forked workflow ID to match")
 
+			// Verify forked_from is set
+			forkedStatus, err := forkedHandle.GetStatus()
+			require.NoError(t, err, "failed to get forked workflow status")
+			assert.Equal(t, originalWorkflowID, forkedStatus.ForkedFrom, "expected forked_from to be set to original workflow ID")
+
 			forkedResult, err := forkedHandle.GetResult()
 			require.NoError(t, err, "failed to get result from forked workflow at step %d", step)
 
@@ -881,6 +886,17 @@ func TestListWorkflows(t *testing.T) {
 		allWorkflows, err := client.ListWorkflows()
 		require.NoError(t, err, "failed to list all workflows")
 		assert.GreaterOrEqual(t, len(allWorkflows), 10, "expected at least 10 workflows")
+
+		for _, wf := range allWorkflows {
+			// These fields should exist (may be zero/empty for some workflows)
+			// Timeout and Deadline are time.Duration and time.Time, so they're always present
+			_ = wf.Timeout
+			_ = wf.Deadline
+			_ = wf.DeduplicationID
+			_ = wf.Priority
+			_ = wf.QueuePartitionKey
+			_ = wf.ForkedFrom
+		}
 
 		// Test 2: Filter by workflow IDs
 		expectedIDs := workflowIDs[:3]
@@ -1069,6 +1085,11 @@ func TestGetWorkflowSteps(t *testing.T) {
 	assert.Equal(t, "TestStep", step.StepName, "expected step name to be set")
 	assert.Nil(t, step.Error, "expected no error in step")
 	assert.Equal(t, "", step.ChildWorkflowID, "expected no child workflow ID")
+
+	// Verify timestamps are present
+	assert.False(t, step.StartedAt.IsZero(), "expected step to have StartedAt timestamp")
+	assert.False(t, step.CompletedAt.IsZero(), "expected step to have CompletedAt timestamp")
+	assert.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt), "expected CompletedAt to be after or equal to StartedAt")
 
 	// Verify the output wasn't loaded
 	require.Nil(t, step.Output, "expected output not to be loaded")

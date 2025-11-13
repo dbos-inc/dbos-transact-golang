@@ -54,6 +54,7 @@ type WorkflowStatus struct {
 	Input              any                `json:"input,omitempty"`               // Input parameters passed to the workflow
 	Priority           int                `json:"priority,omitempty"`            // Queue execution priority (lower numbers have higher priority)
 	QueuePartitionKey  string             `json:"queue_partition_key,omitempty"` // Queue partition key for partitioned queues
+	ForkedFrom         string             `json:"forked_from,omitempty"`         // ID of the original workflow if this is a fork
 }
 
 // workflowState holds the runtime state for a workflow execution
@@ -190,6 +191,8 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 		opt(options)
 	}
 
+	startTime := time.Now()
+
 	var timeoutChan <-chan time.Time
 	if options.timeout > 0 {
 		timeoutChan = time.After(options.timeout)
@@ -201,7 +204,8 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 			// Return error if channel closed (happens when GetResult() called twice)
 			return *new(R), errors.New("workflow result channel is already closed. Did you call GetResult() twice on the same workflow handle?")
 		}
-		return h.processOutcome(outcome)
+		completedTime := time.Now()
+		return h.processOutcome(outcome, startTime, completedTime)
 	case <-h.dbosContext.Done():
 		return *new(R), context.Cause(h.dbosContext)
 	case <-timeoutChan:
@@ -210,7 +214,7 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 }
 
 // processOutcome handles the common logic for processing workflow outcomes
-func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error) {
+func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime, completedTime time.Time) (R, error) {
 	decodedResult := outcome.result
 	// If we are calling GetResult inside a workflow, record the result as a step result
 	workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
@@ -230,6 +234,8 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R]) (R, error
 			stepID:           workflowState.nextStepID(),
 			output:           encodedOutput,
 			err:              outcome.err,
+			startedAt:        startTime,
+			completedAt:      completedTime,
 		}
 		recordResultErr := retry(h.dbosContext, func() error {
 			return h.dbosContext.(*dbosContext).systemDB.recordChildGetResult(h.dbosContext, recordGetResultInput)
@@ -252,6 +258,8 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		opt(options)
 	}
 
+	startTime := time.Now()
+
 	// Use timeout if specified, otherwise use DBOS context directly
 	ctx := h.dbosContext
 	var cancel context.CancelFunc
@@ -263,6 +271,8 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	encodedResult, err := retryWithResult(ctx, func() (any, error) {
 		return h.dbosContext.(*dbosContext).systemDB.awaitWorkflowResult(ctx, h.workflowID)
 	}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
+
+	completedTime := time.Now()
 
 	// Deserialize the result directly into the target type
 	var typedResult R
@@ -288,6 +298,8 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 				stepID:           workflowState.nextStepID(),
 				output:           encodedStr,
 				err:              err,
+				startedAt:        startTime,
+				completedAt:      completedTime,
 			}
 			recordResultErr := retry(h.dbosContext, func() error {
 				return h.dbosContext.(*dbosContext).systemDB.recordChildGetResult(h.dbosContext, recordGetResultInput)
@@ -1311,6 +1323,9 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	// Spawn a child DBOSContext with the step state
 	stepCtx := WithValue(c, workflowStateKey, &stepState)
 
+	// Record start time before executing the step
+	stepStartTime := time.Now()
+
 	stepOutput, stepError := fn(stepCtx)
 
 	// Retry if MaxRetries > 0 and the first execution failed
@@ -1363,12 +1378,15 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	}
 
 	// Record the final result
+	stepCompletedTime := time.Now()
 	dbInput := recordOperationResultDBInput{
-		workflowID: stepState.workflowID,
-		stepName:   stepOpts.stepName,
-		stepID:     stepState.stepID,
-		err:        stepError,
-		output:     encodedStepOutput,
+		workflowID:  stepState.workflowID,
+		stepName:    stepOpts.stepName,
+		stepID:      stepState.stepID,
+		err:         stepError,
+		startedAt:   stepStartTime,
+		completedAt: stepCompletedTime,
+		output:      encodedStepOutput,
 	}
 	recErr := retry(c, func() error {
 		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
@@ -1930,6 +1948,7 @@ type listWorkflowsOptions struct {
 	queueName        string
 	queuesOnly       bool
 	executorIDs      []string
+	forkedFrom       string
 }
 
 // ListWorkflowsOption is a functional option for configuring workflow listing parameters.
@@ -2048,6 +2067,13 @@ func WithExecutorIDs(executorIDs []string) ListWorkflowsOption {
 	}
 }
 
+// WithForkedFrom filters workflows by the specified forked_from workflow ID.
+func WithForkedFrom(forkedFrom string) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.forkedFrom = forkedFrom
+	}
+}
+
 func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
 	// Initialize parameters with defaults
 	loadInput := true
@@ -2089,6 +2115,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		queueName:          params.queueName,
 		queuesOnly:         params.queuesOnly,
 		executorIDs:        params.executorIDs,
+		forkedFrom:         params.forkedFrom,
 	}
 
 	// Call the context method to list workflows
@@ -2198,11 +2225,13 @@ func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStat
 }
 
 type StepInfo struct {
-	StepID          int    // The sequential ID of the step within the workflow
-	StepName        string // The name of the step function
-	Output          any    // The output returned by the step (if any)
-	Error           error  // The error returned by the step (if any)
-	ChildWorkflowID string // The ID of a child workflow spawned by this step (if applicable)
+	StepID          int       // The sequential ID of the step within the workflow
+	StepName        string    // The name of the step function
+	Output          any       // The output returned by the step (if any)
+	Error           error     // The error returned by the step (if any)
+	ChildWorkflowID string    // The ID of a child workflow spawned by this step (if applicable)
+	StartedAt       time.Time // When the step execution started
+	CompletedAt     time.Time // When the step execution completed
 }
 
 func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error) {
@@ -2238,6 +2267,8 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 			StepName:        step.StepName,
 			Error:           step.Error,
 			ChildWorkflowID: step.ChildWorkflowID,
+			StartedAt:       step.StartedAt,
+			CompletedAt:     step.CompletedAt,
 		}
 	}
 
