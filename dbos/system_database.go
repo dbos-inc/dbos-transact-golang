@@ -66,6 +66,7 @@ type systemDatabase interface {
 	// Queues
 	dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error)
 	clearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
+	getQueuePartitions(ctx context.Context, queueName string) ([]string, error)
 
 	// Garbage collection
 	garbageCollectWorkflows(ctx context.Context, input garbageCollectWorkflowsInput) error
@@ -125,6 +126,9 @@ func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *
 //go:embed migrations/1_initial_dbos_schema.sql
 var migration1SQL string
 
+//go:embed migrations/2_add_queue_partition_key.sql
+var migration2SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -150,18 +154,21 @@ const (
 )
 
 func runMigrations(pool *pgxpool.Pool, schema string) error {
-	// Process the migration SQL with fmt.Sprintf (22 schema placeholders)
+	// Process the migration SQL with fmt.Sprintf
 	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
-	migrationSQL := fmt.Sprintf(migration1SQL,
+	migration1SQLProcessed := fmt.Sprintf(migration1SQL,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema)
 
+	migration2SQLProcessed := fmt.Sprintf(migration2SQL, sanitizedSchema)
+
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
-		{version: 1, sql: migrationSQL},
+		{version: 1, sql: migration1SQLProcessed},
+		{version: 2, sql: migration2SQLProcessed},
 	}
 
 	// Begin transaction for atomic migration execution
@@ -452,6 +459,11 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		deduplicationID = &input.status.DeduplicationID
 	}
 
+	var queuePartitionKey *string
+	if len(input.status.QueuePartitionKey) > 0 {
+		queuePartitionKey = &input.status.QueuePartitionKey
+	}
+
 	query := fmt.Sprintf(`INSERT INTO %s.workflow_status (
         workflow_uuid,
         status,
@@ -470,17 +482,18 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
         workflow_deadline_epoch_ms,
         inputs,
         deduplication_id,
-        priority
-    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        priority,
+        queue_partition_key
+    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
 			recovery_attempts = CASE
-                WHEN EXCLUDED.status != $19 THEN workflow_status.recovery_attempts + 1
+                WHEN EXCLUDED.status != $20 THEN workflow_status.recovery_attempts + 1
                 ELSE workflow_status.recovery_attempts
             END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status = $20 THEN workflow_status.executor_id
+                WHEN EXCLUDED.status = $21 THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
         RETURNING recovery_attempts, status, name, queue_name, workflow_timeout_ms, workflow_deadline_epoch_ms`, pgx.Identifier{s.schema}.Sanitize())
@@ -515,6 +528,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		input.status.Input, // encoded input (already *string)
 		deduplicationID,
 		input.status.Priority,
+		queuePartitionKey,
 		WorkflowStatusEnqueued,
 		WorkflowStatusEnqueued,
 	).Scan(
@@ -614,7 +628,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		"workflow_uuid", "status", "name", "authenticated_user", "assumed_role", "authenticated_roles",
 		"executor_id", "created_at", "updated_at", "application_version", "application_id",
 		"recovery_attempts", "queue_name", "workflow_timeout_ms", "workflow_deadline_epoch_ms", "started_at_epoch_ms",
-		"deduplication_id", "priority",
+		"deduplication_id", "priority", "queue_partition_key",
 	}
 
 	if input.loadOutput {
@@ -717,6 +731,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var applicationVersion *string
 		var executorID *string
 		var authenticatedRoles *string
+		var queuePartitionKey *string
 
 		// Build scan arguments dynamically based on loaded columns
 		scanArgs := []any{
@@ -724,7 +739,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			&authenticatedRoles, &executorID, &createdAtMs,
 			&updatedAtMs, &applicationVersion, &wf.ApplicationID,
 			&wf.Attempts, &queueName, &timeoutMs,
-			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority,
+			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey,
 		}
 
 		if input.loadOutput {
@@ -759,6 +774,10 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 
 		if deduplicationID != nil && len(*deduplicationID) > 0 {
 			wf.DeduplicationID = *deduplicationID
+		}
+
+		if queuePartitionKey != nil && len(*queuePartitionKey) > 0 {
+			wf.QueuePartitionKey = *queuePartitionKey
 		}
 
 		// Convert milliseconds to time.Time
@@ -2152,6 +2171,7 @@ type dequeueWorkflowsInput struct {
 	queue              WorkflowQueue
 	executorID         string
 	applicationVersion string
+	queuePartitionKey  string
 }
 
 func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error) {
@@ -2182,10 +2202,13 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		  AND status != $2
 		  AND started_at_epoch_ms > $3`, pgx.Identifier{s.schema}.Sanitize())
 
-		err := tx.QueryRow(ctx, limiterQuery,
-			input.queue.Name,
-			WorkflowStatusEnqueued,
-			cutoffTimeMs).Scan(&numRecentQueries)
+		limiterArgs := []any{input.queue.Name, WorkflowStatusEnqueued, cutoffTimeMs}
+		if len(input.queuePartitionKey) > 0 {
+			limiterQuery += ` AND queue_partition_key = $4`
+			limiterArgs = append(limiterArgs, input.queuePartitionKey)
+		}
+
+		err := tx.QueryRow(ctx, limiterQuery, limiterArgs...).Scan(&numRecentQueries)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query rate limiter: %w", err)
 		}
@@ -2203,10 +2226,16 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		pendingQuery := fmt.Sprintf(`
 			SELECT executor_id, COUNT(*) as task_count
 			FROM %s.workflow_status
-			WHERE queue_name = $1 AND status = $2
-			GROUP BY executor_id`, pgx.Identifier{s.schema}.Sanitize())
+			WHERE queue_name = $1 AND status = $2`, pgx.Identifier{s.schema}.Sanitize())
 
-		rows, err := tx.Query(ctx, pendingQuery, input.queue.Name, WorkflowStatusPending)
+		pendingArgs := []any{input.queue.Name, WorkflowStatusPending}
+		if len(input.queuePartitionKey) > 0 {
+			pendingQuery += ` AND queue_partition_key = $3`
+			pendingArgs = append(pendingArgs, input.queuePartitionKey)
+		}
+		pendingQuery += ` GROUP BY executor_id`
+
+		rows, err := tx.Query(ctx, pendingQuery, pendingArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query pending workflows: %w", err)
 		}
@@ -2257,6 +2286,27 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	}
 
 	// Build the query to select workflows for dequeueing
+	var query string
+	queryArgs := []any{input.queue.Name, WorkflowStatusEnqueued, input.applicationVersion}
+	query = fmt.Sprintf(`
+			SELECT workflow_uuid
+			FROM %s.workflow_status
+			WHERE queue_name = $1
+			  AND status = $2
+			  AND (application_version = $3 OR application_version IS NULL)`, pgx.Identifier{s.schema}.Sanitize())
+
+	// Add partition key filter if provided
+	if len(input.queuePartitionKey) > 0 {
+		query += ` AND queue_partition_key = $4`
+		queryArgs = append(queryArgs, input.queuePartitionKey)
+	}
+
+	if input.queue.PriorityEnabled {
+		query += ` ORDER BY priority ASC, created_at ASC`
+	} else {
+		query += ` ORDER BY created_at ASC`
+	}
+
 	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
 	// otherwise use NOWAIT to ensure consistent view across processes
 	skipLocks := input.queue.GlobalConcurrency == nil
@@ -2266,34 +2316,14 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	} else {
 		lockClause = "FOR UPDATE NOWAIT"
 	}
-
-	var query string
-	if input.queue.PriorityEnabled {
-		query = fmt.Sprintf(`
-			SELECT workflow_uuid
-			FROM %s.workflow_status
-			WHERE queue_name = $1
-			  AND status = $2
-			  AND (application_version = $3 OR application_version IS NULL)
-			ORDER BY priority ASC, created_at ASC
-			%s`, pgx.Identifier{s.schema}.Sanitize(), lockClause)
-	} else {
-		query = fmt.Sprintf(`
-			SELECT workflow_uuid
-			FROM %s.workflow_status
-			WHERE queue_name = $1
-			  AND status = $2
-			  AND (application_version = $3 OR application_version IS NULL)
-			ORDER BY created_at ASC
-			%s`, pgx.Identifier{s.schema}.Sanitize(), lockClause)
-	}
+	query += fmt.Sprintf(" %s", lockClause)
 
 	if maxTasks >= 0 {
 		query += fmt.Sprintf(" LIMIT %d", int(maxTasks))
 	}
 
 	// Execute the query to get workflow IDs
-	rows, err := tx.Query(ctx, query, input.queue.Name, WorkflowStatusEnqueued, input.applicationVersion)
+	rows, err := tx.Query(ctx, query, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query enqueued workflows: %w", err)
 	}
@@ -2388,6 +2418,33 @@ func (s *sysDB) clearQueueAssignment(ctx context.Context, workflowID string) (bo
 
 	// If no rows were affected, the workflow is not anymore in the queue or was already completed
 	return commandTag.RowsAffected() > 0, nil
+}
+
+// getQueuePartitions returns all unique partition keys for enqueued workflows in a queue.
+func (s *sysDB) getQueuePartitions(ctx context.Context, queueName string) ([]string, error) {
+	query := fmt.Sprintf(`
+		SELECT DISTINCT queue_partition_key
+		FROM %s.workflow_status
+		WHERE queue_name = $1
+		  AND status = $2
+		  AND queue_partition_key IS NOT NULL`, pgx.Identifier{s.schema}.Sanitize())
+
+	rows, err := s.pool.Query(ctx, query, queueName, WorkflowStatusEnqueued)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query queue partitions: %w", err)
+	}
+	defer rows.Close()
+
+	var partitions []string
+	for rows.Next() {
+		var partitionKey string
+		if err := rows.Scan(&partitionKey); err != nil {
+			return nil, fmt.Errorf("failed to scan partition key: %w", err)
+		}
+		partitions = append(partitions, partitionKey)
+	}
+
+	return partitions, nil
 }
 
 /*******************************/

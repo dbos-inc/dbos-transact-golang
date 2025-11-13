@@ -53,6 +53,7 @@ type WorkflowStatus struct {
 	DeduplicationID    string             `json:"deduplication_id,omitempty"`    // Queue deduplication identifier
 	Input              any                `json:"input,omitempty"`               // Input parameters passed to the workflow
 	Priority           int                `json:"priority,omitempty"`            // Queue execution priority (lower numbers have higher priority)
+	QueuePartitionKey  string             `json:"queue_partition_key,omitempty"` // Queue partition key for partitioned queues
 }
 
 // workflowState holds the runtime state for a workflow execution
@@ -583,6 +584,7 @@ type workflowOptions struct {
 	authenticated_user  string
 	assumed_role        string
 	authenticated_roles []string
+	queuePartitionKey   string
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
@@ -622,6 +624,15 @@ func WithDeduplicationID(id string) WorkflowOption {
 func WithPriority(priority uint) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.priority = priority
+	}
+}
+
+// WithQueuePartitionKey sets the queue partition key for partitioned queues.
+// When a queue is partitioned, workflows with the same partition key are processed
+// with separate concurrency limits per partition.
+func WithQueuePartitionKey(partitionKey string) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.queuePartitionKey = partitionKey
 	}
 }
 
@@ -790,6 +801,32 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		params.workflowName = registeredWorkflow.Name
 	}
 
+	// Validate partition key is not provided without queue name
+	if len(params.queuePartitionKey) > 0 && len(params.queueName) == 0 {
+		return nil, newWorkflowExecutionError("", fmt.Errorf("partition key provided but queue name is missing"))
+	}
+
+	// Validate partition key and deduplication ID are not both provided (they are incompatible)
+	if len(params.queuePartitionKey) > 0 && len(params.deduplicationID) > 0 {
+		return nil, newWorkflowExecutionError("", fmt.Errorf("partition key and deduplication ID cannot be used together"))
+	}
+
+	// Validate queue exists if provided
+	if len(params.queueName) > 0 {
+		queue := c.queueRunner.getQueue(params.queueName)
+		if queue == nil {
+			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s does not exist", params.queueName))
+		}
+		// If queue has partitions enabled, partition key must be provided
+		if queue.PartitionQueue && len(params.queuePartitionKey) == 0 {
+			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.queueName))
+		}
+		// If partition key is provided, queue must have partitions enabled
+		if len(params.queuePartitionKey) > 0 && !queue.PartitionQueue {
+			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.queueName))
+		}
+	}
+
 	// Check if we are within a workflow (and thus a child workflow)
 	parentWorkflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
@@ -885,6 +922,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		AuthenticatedUser:  params.authenticated_user,
 		AssumedRole:        params.assumed_role,
 		AuthenticatedRoles: params.authenticated_roles,
+		QueuePartitionKey:  params.queuePartitionKey,
 	}
 
 	var earlyReturnPollingHandle *workflowPollingHandle[any]

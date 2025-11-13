@@ -560,6 +560,12 @@ func TestAdminServer(t *testing.T) {
 		// Create a workflow queue with limited concurrency to keep workflows enqueued
 		queue := NewWorkflowQueue(ctx, "test-queue", WithGlobalConcurrency(1))
 
+		// Create a partitioned queue for partition key test
+		partitionedQueue := NewWorkflowQueue(ctx, "partitioned-test-queue", WithPartitionQueue(), WithGlobalConcurrency(1))
+
+		// Create a priority-enabled queue for priority and deduplication tests
+		priorityQueue := NewWorkflowQueue(ctx, "priority-test-queue", WithPriorityEnabled(), WithGlobalConcurrency(1))
+
 		// Define a blocking workflow that will hold up the queue
 		startEvent := NewEvent()
 		blockingChan := make(chan struct{})
@@ -610,6 +616,22 @@ func TestAdminServer(t *testing.T) {
 			enqueuedHandles = append(enqueuedHandles, handle)
 		}
 
+		// Create workflow with partition key
+		partitionHandle, err := RunWorkflow(ctx, blockingWorkflow, "partition-test", WithQueue(partitionedQueue.Name), WithQueuePartitionKey("partition-1"))
+		require.NoError(t, err, "Failed to create workflow with partition key")
+		enqueuedHandles = append(enqueuedHandles, partitionHandle)
+
+		// Create workflow with deduplication ID
+		dedupID := "test-dedup-id"
+		dedupHandle, err := RunWorkflow(ctx, blockingWorkflow, "dedup-test", WithQueue(priorityQueue.Name), WithDeduplicationID(dedupID))
+		require.NoError(t, err, "Failed to create workflow with deduplication ID")
+		enqueuedHandles = append(enqueuedHandles, dedupHandle)
+
+		// Create workflow with priority
+		priorityHandle, err := RunWorkflow(ctx, blockingWorkflow, "priority-test", WithQueue(priorityQueue.Name), WithPriority(5))
+		require.NoError(t, err, "Failed to create workflow with priority")
+		enqueuedHandles = append(enqueuedHandles, priorityHandle)
+
 		// Create non-queued workflows that should NOT appear in queues-only results
 		var regularHandles []WorkflowHandle[string]
 		for i := range 2 {
@@ -639,10 +661,11 @@ func TestAdminServer(t *testing.T) {
 		err = json.NewDecoder(respQueuesOnly.Body).Decode(&queuesOnlyWorkflows)
 		require.NoError(t, err, "Failed to decode queues_only workflows response")
 
-		// Should have exactly 3 enqueued workflows and 1 pending workflow
-		assert.Equal(t, 4, len(queuesOnlyWorkflows), "Expected exactly 4 workflows")
+		// Should have exactly 7 workflows (3 original + 1 pending + 1 partition + 1 dedup + 1 priority)
+		assert.Equal(t, 7, len(queuesOnlyWorkflows), "Expected exactly 7 workflows")
 
 		// Verify all returned workflows are from the queue and have ENQUEUED/PENDING status
+		// Also verify QueuePartitionKey, DeduplicationID, and Priority fields are present
 		for _, wf := range queuesOnlyWorkflows {
 			status, ok := wf["Status"].(string)
 			require.True(t, ok, "Status should be a string")
@@ -651,7 +674,37 @@ func TestAdminServer(t *testing.T) {
 
 			queueName, ok := wf["QueueName"].(string)
 			require.True(t, ok, "QueueName should be a string")
-			assert.Equal(t, queue.Name, queueName, "Expected queue name to be 'test-queue'")
+			assert.NotEmpty(t, queueName, "QueueName should not be empty")
+
+			wfID, ok := wf["WorkflowUUID"].(string)
+			require.True(t, ok, "WorkflowUUID should be a string")
+
+			// Verify QueuePartitionKey field is present (may be empty string for non-partitioned workflows)
+			_, hasPartitionKey := wf["QueuePartitionKey"]
+			assert.True(t, hasPartitionKey, "QueuePartitionKey field should be present for workflow %s", wfID)
+
+			// Verify DeduplicationID field is present (may be empty string for workflows without dedup ID)
+			_, hasDedupID := wf["DeduplicationID"]
+			assert.True(t, hasDedupID, "DeduplicationID field should be present for workflow %s", wfID)
+
+			// Verify Priority field is present (may be 0 for workflows without priority)
+			_, hasPriority := wf["Priority"]
+			assert.True(t, hasPriority, "Priority field should be present for workflow %s", wfID)
+
+			// Verify specific values for our test workflows
+			if wfID == partitionHandle.GetWorkflowID() {
+				partitionKey, ok := wf["QueuePartitionKey"].(string)
+				require.True(t, ok, "QueuePartitionKey should be a string")
+				assert.Equal(t, "partition-1", partitionKey, "Expected partition key to be 'partition-1'")
+			} else if wfID == dedupHandle.GetWorkflowID() {
+				dedupIDResp, ok := wf["DeduplicationID"].(string)
+				require.True(t, ok, "DeduplicationID should be a string")
+				assert.Equal(t, dedupID, dedupIDResp, "Expected deduplication ID to match")
+			} else if wfID == priorityHandle.GetWorkflowID() {
+				priority, ok := wf["Priority"].(float64) // JSON numbers decode as float64
+				require.True(t, ok, "Priority should be a number")
+				assert.Equal(t, float64(5), priority, "Expected priority to be 5")
+			}
 		}
 
 		// Verify that the enqueued workflow IDs match
