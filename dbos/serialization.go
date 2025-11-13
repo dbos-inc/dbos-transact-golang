@@ -16,8 +16,8 @@ type serializer[T any] interface {
 
 // gobValue is a wrapper type for gob encoding/decoding of any value
 // It prevents encoding nil values directly, and helps us differentiate nil values and empty strings
-type gobValue struct {
-	Value any
+type gobValue[T any] struct {
+	Value T
 }
 
 // safeGobRegister attempts to register a type with gob, recovering only from
@@ -45,7 +45,7 @@ func safeGobRegister(value any) {
 // init registers the gobValue wrapper type with gob for gobSerializer
 func init() {
 	// Register wrapper type - this is required for gob encoding/decoding to work
-	safeGobRegister(gobValue{})
+	safeGobRegister(gobValue[any]{})
 }
 
 type gobSerializer[T any] struct{}
@@ -65,7 +65,7 @@ func (g *gobSerializer[T]) Encode(data T) (string, error) {
 
 	var buf bytes.Buffer
 	encoder := gob.NewEncoder(&buf)
-	wrapper := gobValue{Value: data}
+	wrapper := gobValue[T]{Value: data}
 	if err := encoder.Encode(wrapper); err != nil {
 		return "", fmt.Errorf("failed to encode data: %w", err)
 	}
@@ -73,7 +73,7 @@ func (g *gobSerializer[T]) Encode(data T) (string, error) {
 }
 
 func (g *gobSerializer[T]) Decode(data *string) (T, error) {
-	zero := *new(T)
+	var zero T
 
 	if data == nil || *data == "" {
 		return zero, nil
@@ -89,60 +89,15 @@ func (g *gobSerializer[T]) Decode(data *string) (T, error) {
 		return zero, nil
 	}
 
-	// Resolve the type of T
-	tType := reflect.TypeOf(zero)
-	if tType == nil {
-		// zero is nil, T is likely a pointer type or interface
-		// Get the type from a pointer to T's zero value
-		tType = reflect.TypeOf(&zero).Elem()
-	}
+	safeGobRegister(zero)
 
-	// Register type T before decoding
-	// This is required on the recovery path, where the process might not have been doing the encode/registering.
-	// This will panic if T is an non-registered interface type (which is not supported)
-	if tType != nil && tType.Kind() != reflect.Interface {
-		safeGobRegister(zero)
-	}
-
-	var wrapper gobValue
+	var wrapper gobValue[T]
 	decoder := gob.NewDecoder(bytes.NewReader(dataBytes))
 	if err := decoder.Decode(&wrapper); err != nil {
 		return zero, fmt.Errorf("failed to decode gob data: %w", err)
 	}
 
-	decoded := wrapper.Value
-
-	// Gob stores pointed values directly, so we need to reconstruct the pointer type
-	if tType != nil && tType.Kind() == reflect.Pointer {
-		elemType := tType.Elem()
-		decodedType := reflect.TypeOf(decoded)
-
-		// Check if decoded value matches the element type (not the pointer type)
-		if decodedType != nil && decodedType == elemType {
-			// Create a new pointer to the decoded value
-			elemValue := reflect.New(elemType)
-			elemValue.Elem().Set(reflect.ValueOf(decoded))
-			return elemValue.Interface().(T), nil
-		}
-		// If decoded is already a pointer of the correct type, try direct assertion
-		if decodedType != nil && decodedType == tType {
-			typedResult, ok := decoded.(T)
-			if ok {
-				return typedResult, nil
-			}
-		}
-		// If decoded is nil and T is a pointer type, return nil pointer
-		if decoded == nil {
-			return zero, nil
-		}
-	}
-
-	// Not a pointer -- direct type assertion
-	typedResult, ok := decoded.(T)
-	if !ok {
-		return zero, fmt.Errorf("cannot convert decoded value of type %T to %T", decoded, zero)
-	}
-	return typedResult, nil
+	return wrapper.Value, nil
 }
 
 // isNilValue checks if a value is nil (for pointer types, slice, map, etc.)
