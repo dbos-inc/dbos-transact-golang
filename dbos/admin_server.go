@@ -143,9 +143,9 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 	}
 
 	if !ws.Deadline.IsZero() {
-		result["Deadline"] = ws.Deadline.UTC().UnixMilli()
+		result["WorkflowDeadlineEpochMS"] = ws.Deadline.UTC().UnixMilli()
 	} else {
-		result["Deadline"] = nil
+		result["WorkflowDeadlineEpochMS"] = nil
 	}
 
 	if !ws.StartedAt.IsZero() {
