@@ -132,6 +132,12 @@ var migration2SQL string
 //go:embed migrations/3_add_workflow_status_index.sql
 var migration3SQL string
 
+//go:embed migrations/4_add_forked_from.sql
+var migration4SQL string
+
+//go:embed migrations/5_add_step_timestamps.sql
+var migration5SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -170,11 +176,17 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 
 	migration3SQLProcessed := fmt.Sprintf(migration3SQL, sanitizedSchema)
 
+	migration4SQLProcessed := fmt.Sprintf(migration4SQL, sanitizedSchema, sanitizedSchema)
+
+	migration5SQLProcessed := fmt.Sprintf(migration5SQL, sanitizedSchema)
+
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
 		{version: 1, sql: migration1SQLProcessed},
 		{version: 2, sql: migration2SQLProcessed},
 		{version: 3, sql: migration3SQLProcessed},
+		{version: 4, sql: migration4SQLProcessed},
+		{version: 5, sql: migration5SQLProcessed},
 	}
 
 	// Begin transaction for atomic migration execution
@@ -617,6 +629,7 @@ type listWorkflowsDBInput struct {
 	status             []WorkflowStatusType
 	applicationVersion string
 	executorIDs        []string
+	forkedFrom         string
 	limit              *int
 	offset             *int
 	sortDesc           bool
@@ -634,7 +647,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		"workflow_uuid", "status", "name", "authenticated_user", "assumed_role", "authenticated_roles",
 		"executor_id", "created_at", "updated_at", "application_version", "application_id",
 		"recovery_attempts", "queue_name", "workflow_timeout_ms", "workflow_deadline_epoch_ms", "started_at_epoch_ms",
-		"deduplication_id", "priority", "queue_partition_key",
+		"deduplication_id", "priority", "queue_partition_key", "forked_from",
 	}
 
 	if input.loadOutput {
@@ -679,6 +692,9 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 	}
 	if len(input.executorIDs) > 0 {
 		qb.addWhereAny("executor_id", input.executorIDs)
+	}
+	if input.forkedFrom != "" {
+		qb.addWhere("forked_from", input.forkedFrom)
 	}
 
 	// Build complete query
@@ -738,6 +754,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var executorID *string
 		var authenticatedRoles *string
 		var queuePartitionKey *string
+		var forkedFrom *string
 
 		// Build scan arguments dynamically based on loaded columns
 		scanArgs := []any{
@@ -745,7 +762,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			&authenticatedRoles, &executorID, &createdAtMs,
 			&updatedAtMs, &applicationVersion, &wf.ApplicationID,
 			&wf.Attempts, &queueName, &timeoutMs,
-			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey,
+			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey, &forkedFrom,
 		}
 
 		if input.loadOutput {
@@ -784,6 +801,10 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 
 		if queuePartitionKey != nil && len(*queuePartitionKey) > 0 {
 			wf.QueuePartitionKey = *queuePartitionKey
+		}
+
+		if forkedFrom != nil && len(*forkedFrom) > 0 {
+			wf.ForkedFrom = *forkedFrom
 		}
 
 		// Convert milliseconds to time.Time
@@ -1115,8 +1136,9 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		inputs,
 		created_at,
 		updated_at,
-		recovery_attempts
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, pgx.Identifier{s.schema}.Sanitize())
+		recovery_attempts,
+		forked_from
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`, pgx.Identifier{s.schema}.Sanitize())
 
 	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
 	authenticatedRoles, err := json.Marshal(originalWorkflow.AuthenticatedRoles)
@@ -1138,7 +1160,8 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		originalWorkflow.Input, // encoded
 		time.Now().UnixMilli(),
 		time.Now().UnixMilli(),
-		0)
+		0,
+		input.originalWorkflowID) // forked_from
 
 	if err != nil {
 		return "", fmt.Errorf("failed to insert forked workflow status: %w", err)
@@ -1147,8 +1170,8 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 	// If startStep > 0, copy the original workflow's outputs into the forked workflow
 	if input.startStep > 0 {
 		copyOutputsQuery := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-			(workflow_uuid, function_id, output, error, function_name, child_workflow_id)
-			SELECT $1, function_id, output, error, function_name, child_workflow_id
+			(workflow_uuid, function_id, output, error, function_name, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms)
+			SELECT $1, function_id, output, error, function_name, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms
 			FROM %s.operation_outputs
 			WHERE workflow_uuid = $2 AND function_id < $3`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
 
@@ -1202,18 +1225,23 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (*st
 }
 
 type recordOperationResultDBInput struct {
-	workflowID string
-	stepID     int
-	stepName   string
-	output     *string
-	err        error
-	tx         pgx.Tx
+	workflowID  string
+	stepID      int
+	stepName    string
+	output      *string
+	err         error
+	tx          pgx.Tx
+	startedAt   time.Time
+	completedAt time.Time
 }
 
 func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
+	startedAtMs := input.startedAt.UnixMilli()
+	completedAtMs := input.completedAt.UnixMilli()
+
 	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, output, error, function_name)
-            VALUES ($1, $2, $3, $4, $5)`, pgx.Identifier{s.schema}.Sanitize())
+            (workflow_uuid, function_id, output, error, function_name, started_at_epoch_ms, completed_at_epoch_ms)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)`, pgx.Identifier{s.schema}.Sanitize())
 
 	var errorString *string
 	if input.err != nil {
@@ -1229,6 +1257,8 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 			input.output,
 			errorString,
 			input.stepName,
+			startedAtMs,
+			completedAtMs,
 		)
 	} else {
 		_, err = s.pool.Exec(ctx, query,
@@ -1237,6 +1267,8 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 			input.output,
 			errorString,
 			input.stepName,
+			startedAtMs,
+			completedAtMs,
 		)
 	}
 
@@ -1326,12 +1358,17 @@ type recordChildGetResultDBInput struct {
 	stepID           int
 	output           *string
 	err              error
+	startedAt        time.Time
+	completedAt      time.Time
 }
 
 func (s *sysDB) recordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error {
+	startedAtMs := input.startedAt.UnixMilli()
+	completedAtMs := input.completedAt.UnixMilli()
+
 	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, function_name, output, error, child_workflow_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            (workflow_uuid, function_id, function_name, output, error, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT DO NOTHING`, pgx.Identifier{s.schema}.Sanitize())
 
 	var errorString *string
@@ -1347,6 +1384,8 @@ func (s *sysDB) recordChildGetResult(ctx context.Context, input recordChildGetRe
 		input.output,
 		errorString,
 		input.childWorkflowID,
+		startedAtMs,
+		completedAtMs,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to record get result: %w", err)
@@ -1442,11 +1481,13 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 
 // StepInfo contains information about a workflow step execution.
 type stepInfo struct {
-	StepID          int     // The sequential ID of the step within the workflow
-	StepName        string  // The name of the step function
-	Output          *string // The output returned by the step (if any)
-	Error           error   // The error returned by the step (if any)
-	ChildWorkflowID string  // The ID of a child workflow spawned by this step (if applicable)
+	StepID          int       // The sequential ID of the step within the workflow
+	StepName        string    // The name of the step function
+	Output          *string   // The output returned by the step (if any)
+	Error           error     // The error returned by the step (if any)
+	ChildWorkflowID string    // The ID of a child workflow spawned by this step (if applicable)
+	StartedAt       time.Time // When the step execution started
+	CompletedAt     time.Time // When the step execution completed
 }
 
 type getWorkflowStepsInput struct {
@@ -1455,7 +1496,7 @@ type getWorkflowStepsInput struct {
 }
 
 func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]stepInfo, error) {
-	query := fmt.Sprintf(`SELECT function_id, function_name, output, error, child_workflow_id
+	query := fmt.Sprintf(`SELECT function_id, function_name, output, error, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms
 			  FROM %s.operation_outputs
 			  WHERE workflow_uuid = $1
 			  ORDER BY function_id ASC`, pgx.Identifier{s.schema}.Sanitize())
@@ -1472,10 +1513,19 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 		var outputString *string
 		var errorString *string
 		var childWorkflowID *string
+		var startedAtMs, completedAtMs *int64
 
-		err := rows.Scan(&step.StepID, &step.StepName, &outputString, &errorString, &childWorkflowID)
+		err := rows.Scan(&step.StepID, &step.StepName, &outputString, &errorString, &childWorkflowID, &startedAtMs, &completedAtMs)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan step row: %w", err)
+		}
+
+		// Convert timestamps from milliseconds to time.Time
+		if startedAtMs != nil {
+			step.StartedAt = time.Unix(0, *startedAtMs*int64(time.Millisecond))
+		}
+		if completedAtMs != nil {
+			step.CompletedAt = time.Unix(0, *completedAtMs*int64(time.Millisecond))
 		}
 
 		// Return output as encoded string if loadOutput is true
@@ -1535,6 +1585,8 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		stepID = wfState.nextStepID()
 	}
 
+	startTime := time.Now()
+
 	// Check if operation was already executed
 	checkInput := checkOperationExecutionDBInput{
 		workflowID: wfState.workflowID,
@@ -1576,12 +1628,15 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		}
 
 		// Record the operation result with the calculated end time
+		completedTime := time.Now()
 		recordInput := recordOperationResultDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-			output:     encodedEndTime,
-			err:        nil,
+			workflowID:  wfState.workflowID,
+			stepID:      stepID,
+			stepName:    functionName,
+			output:      encodedEndTime,
+			err:         nil,
+			startedAt:   startTime,
+			completedAt: completedTime,
 		}
 
 		err = s.recordOperationResult(ctx, recordInput)
@@ -1760,6 +1815,8 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	}
 	defer tx.Rollback(ctx)
 
+	startTime := time.Now()
+
 	// Check if operation was already executed and do nothing if so (only if in workflow)
 	if isInWorkflow {
 		checkInput := checkOperationExecutionDBInput{
@@ -1796,13 +1853,16 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 
 	// Record the operation result if this is called within a workflow
 	if isInWorkflow {
+		completedTime := time.Now()
 		recordInput := recordOperationResultDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-			output:     nil,
-			err:        nil,
-			tx:         tx,
+			workflowID:  wfState.workflowID,
+			stepID:      stepID,
+			stepName:    functionName,
+			output:      nil,
+			err:         nil,
+			tx:          tx,
+			startedAt:   startTime,
+			completedAt: completedTime,
 		}
 
 		err = s.recordOperationResult(ctx, recordInput)
@@ -1911,6 +1971,9 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		cond.L.Unlock()
 	}
 
+	// Capture start time before finding and deleting the message
+	startTime := time.Now()
+
 	// Find the oldest message and delete it atomically
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1940,12 +2003,15 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 	}
 
 	// Record the operation result (with encoded message string)
+	completedTime := time.Now()
 	recordInput := recordOperationResultDBInput{
-		workflowID: destinationID,
-		stepID:     stepID,
-		stepName:   functionName,
-		output:     messageString,
-		tx:         tx,
+		workflowID:  destinationID,
+		stepID:      stepID,
+		stepName:    functionName,
+		output:      messageString,
+		tx:          tx,
+		startedAt:   startTime,
+		completedAt: completedTime,
 	}
 	err = s.recordOperationResult(ctx, recordInput)
 	if err != nil {
@@ -1984,6 +2050,8 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 
 	stepID := wfState.nextStepID()
 
+	startTime := time.Now()
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -2019,13 +2087,16 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	}
 
 	// Record the operation result
+	completedTime := time.Now()
 	recordInput := recordOperationResultDBInput{
-		workflowID: wfState.workflowID,
-		stepID:     stepID,
-		stepName:   functionName,
-		output:     nil,
-		err:        nil,
-		tx:         tx,
+		workflowID:  wfState.workflowID,
+		stepID:      stepID,
+		stepName:    functionName,
+		output:      nil,
+		err:         nil,
+		tx:          tx,
+		startedAt:   startTime,
+		completedAt: completedTime,
 	}
 
 	err = s.recordOperationResult(ctx, recordInput)
@@ -2050,6 +2121,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 	var sleepStepID int
 	var isInWorkflow bool
 
+	startTime := time.Now()
 	if ok && wfState != nil {
 		isInWorkflow = true
 		if wfState.isWithinStep {
@@ -2145,12 +2217,15 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 
 	// Record the operation result if this is called within a workflow
 	if isInWorkflow {
+		completedTime := time.Now()
 		recordInput := recordOperationResultDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-			output:     valueString,
-			err:        nil,
+			workflowID:  wfState.workflowID,
+			stepID:      stepID,
+			stepName:    functionName,
+			output:      valueString,
+			err:         nil,
+			startedAt:   startTime,
+			completedAt: completedTime,
 		}
 
 		err = s.recordOperationResult(ctx, recordInput)

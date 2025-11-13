@@ -63,6 +63,7 @@ type listWorkflowsConductorRequestBody struct {
 	SortDesc           bool       `json:"sort_desc"`
 	LoadInput          bool       `json:"load_input"`
 	LoadOutput         bool       `json:"load_output"`
+	ForkedFrom         *string    `json:"forked_from,omitempty"`
 }
 
 // listWorkflowsConductorRequest is sent by the conductor to list workflows
@@ -73,25 +74,28 @@ type listWorkflowsConductorRequest struct {
 
 // listWorkflowsConductorResponseBody represents a single workflow in the list response
 type listWorkflowsConductorResponseBody struct {
-	WorkflowUUID       string  `json:"WorkflowUUID"`
-	Status             *string `json:"Status,omitempty"`
-	WorkflowName       *string `json:"WorkflowName,omitempty"`
-	WorkflowClassName  *string `json:"WorkflowClassName,omitempty"`
-	WorkflowConfigName *string `json:"WorkflowConfigName,omitempty"`
-	AuthenticatedUser  *string `json:"AuthenticatedUser,omitempty"`
-	AssumedRole        *string `json:"AssumedRole,omitempty"`
-	AuthenticatedRoles *string `json:"AuthenticatedRoles,omitempty"`
-	Input              *string `json:"Input,omitempty"`
-	Output             *string `json:"Output,omitempty"`
-	Error              *string `json:"Error,omitempty"`
-	CreatedAt          *string `json:"CreatedAt,omitempty"`
-	UpdatedAt          *string `json:"UpdatedAt,omitempty"`
-	QueueName          *string `json:"QueueName,omitempty"`
-	QueuePartitionKey  *string `json:"QueuePartitionKey,omitempty"`
-	DeduplicationID    *string `json:"DeduplicationID,omitempty"`
-	Priority           *int    `json:"Priority,omitempty"`
-	ApplicationVersion *string `json:"ApplicationVersion,omitempty"`
-	ExecutorID         *string `json:"ExecutorID,omitempty"`
+	WorkflowUUID            string  `json:"WorkflowUUID"`
+	Status                  *string `json:"Status,omitempty"`
+	WorkflowName            *string `json:"WorkflowName,omitempty"`
+	WorkflowClassName       *string `json:"WorkflowClassName,omitempty"`
+	WorkflowConfigName      *string `json:"WorkflowConfigName,omitempty"`
+	AuthenticatedUser       *string `json:"AuthenticatedUser,omitempty"`
+	AssumedRole             *string `json:"AssumedRole,omitempty"`
+	AuthenticatedRoles      *string `json:"AuthenticatedRoles,omitempty"`
+	Input                   *string `json:"Input,omitempty"`
+	Output                  *string `json:"Output,omitempty"`
+	Error                   *string `json:"Error,omitempty"`
+	CreatedAt               *string `json:"CreatedAt,omitempty"`
+	UpdatedAt               *string `json:"UpdatedAt,omitempty"`
+	QueueName               *string `json:"QueueName,omitempty"`
+	QueuePartitionKey       *string `json:"QueuePartitionKey,omitempty"`
+	DeduplicationID         *string `json:"DeduplicationID,omitempty"`
+	Priority                *int    `json:"Priority,omitempty"`
+	ApplicationVersion      *string `json:"ApplicationVersion,omitempty"`
+	ExecutorID              *string `json:"ExecutorID,omitempty"`
+	WorkflowTimeoutMS       *string `json:"WorkflowTimeoutMS,omitempty"`
+	WorkflowDeadlineEpochMS *string `json:"WorkflowDeadlineEpochMS,omitempty"`
+	ForkedFrom              *string `json:"ForkedFrom,omitempty"`
 }
 
 // listWorkflowsConductorResponse is sent in response to list workflows requests
@@ -195,6 +199,23 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 		output.ExecutorID = &wf.ExecutorID
 	}
 
+	// Convert timeout to milliseconds string
+	if wf.Timeout > 0 {
+		timeoutStr := strconv.FormatInt(wf.Timeout.Milliseconds(), 10)
+		output.WorkflowTimeoutMS = &timeoutStr
+	}
+
+	// Convert deadline to epoch milliseconds string
+	if !wf.Deadline.IsZero() {
+		deadlineStr := strconv.FormatInt(wf.Deadline.UnixMilli(), 10)
+		output.WorkflowDeadlineEpochMS = &deadlineStr
+	}
+
+	// Copy forked from
+	if wf.ForkedFrom != "" {
+		output.ForkedFrom = &wf.ForkedFrom
+	}
+
 	return output
 }
 
@@ -206,11 +227,13 @@ type listStepsConductorRequest struct {
 
 // workflowStepsConductorResponseBody represents a single workflow step in the list response
 type workflowStepsConductorResponseBody struct {
-	FunctionID      int     `json:"function_id"`
-	FunctionName    string  `json:"function_name"`
-	Output          *string `json:"output,omitempty"`
-	Error           *string `json:"error,omitempty"`
-	ChildWorkflowID *string `json:"child_workflow_id,omitempty"`
+	FunctionID         int     `json:"function_id"`
+	FunctionName       string  `json:"function_name"`
+	Output             *string `json:"output,omitempty"`
+	Error              *string `json:"error,omitempty"`
+	ChildWorkflowID    *string `json:"child_workflow_id,omitempty"`
+	StartedAtEpochMs   *string `json:"started_at_epoch_ms,omitempty"`
+	CompletedAtEpochMs *string `json:"completed_at_epoch_ms,omitempty"`
 }
 
 // listStepsConductorResponse is sent in response to list steps requests
@@ -244,6 +267,16 @@ func formatWorkflowStepsResponseBody(step StepInfo) workflowStepsConductorRespon
 	// Set child workflow ID if present
 	if step.ChildWorkflowID != "" {
 		output.ChildWorkflowID = &step.ChildWorkflowID
+	}
+
+	// Convert timestamps to epoch milliseconds strings
+	if !step.StartedAt.IsZero() {
+		startedAtStr := strconv.FormatInt(step.StartedAt.UnixMilli(), 10)
+		output.StartedAtEpochMs = &startedAtStr
+	}
+	if !step.CompletedAt.IsZero() {
+		completedAtStr := strconv.FormatInt(step.CompletedAt.UnixMilli(), 10)
+		output.CompletedAtEpochMs = &completedAtStr
 	}
 
 	return output

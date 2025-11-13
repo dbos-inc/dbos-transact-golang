@@ -444,6 +444,14 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 				"child_workflow_id": step.ChildWorkflowID,
 			}
 
+			// Add timestamps if present
+			if !step.StartedAt.IsZero() {
+				formattedStep["started_at_epoch_ms"] = step.StartedAt.UnixMilli()
+			}
+			if !step.CompletedAt.IsZero() {
+				formattedStep["completed_at_epoch_ms"] = step.CompletedAt.UnixMilli()
+			}
+
 			if step.Output != nil {
 				// If there is a value, it should be a JSON string
 				jsonOutput, ok := step.Output.(string)

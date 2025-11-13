@@ -592,6 +592,9 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	if req.Body.Status != nil {
 		opts = append(opts, WithStatus([]WorkflowStatusType{WorkflowStatusType(*req.Body.Status)}))
 	}
+	if req.Body.ForkedFrom != nil {
+		opts = append(opts, WithForkedFrom(*req.Body.ForkedFrom))
+	}
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	if err != nil {
