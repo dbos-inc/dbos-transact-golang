@@ -118,6 +118,14 @@ func newAwaitedWorkflowCancelledError(workflowID string) *DBOSError {
 	}
 }
 
+func newAwaitedWorkflowMaxStepRetriesExceeded(workflowID string) *DBOSError {
+	return &DBOSError{
+		Message:    fmt.Sprintf("Awaited workflow %s has exceeded the maximum number of step retries", workflowID),
+		Code:       MaxStepRetriesExceeded,
+		WorkflowID: workflowID,
+	}
+}
+
 func newWorkflowCancelledError(workflowID string) *DBOSError {
 	return &DBOSError{
 		Message: fmt.Sprintf("Workflow %s was cancelled", workflowID),
