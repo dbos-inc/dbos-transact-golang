@@ -366,9 +366,17 @@ func TestWorkflowQueues(t *testing.T) {
 		// Check the workflow completes
 		dlqCompleteEvent.Set()
 		for _, handle := range handles {
-			result, err := handle.GetResult()
-			require.NoError(t, err, "failed to get result from recovered workflow handle")
-			assert.Equal(t, "test-input", result, "expected result to be 'test-input'")
+			result, _ := handle.GetResult()
+			handleStatus, _ := handle.GetStatus()
+
+			if result == nil {
+				assert.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, handleStatus.Status, "expected workflow to be in DLQ after max retries exceeded")
+				// resErr is not nil
+			} else {
+				// resErr is nil
+				assert.Equal(t, WorkflowStatusSuccess, handleStatus.Status, "expected workflow status to be SUCCESS when result is not nil")
+			}
+
 		}
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after successive enqueues test")

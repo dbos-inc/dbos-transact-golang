@@ -1218,6 +1218,8 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string) (*st
 			return outputString, errors.New(*errorStr)
 		case WorkflowStatusCancelled:
 			return outputString, newAwaitedWorkflowCancelledError(workflowID)
+		case WorkflowStatusMaxRecoveryAttemptsExceeded:
+			return outputString, newAwaitedWorkflowMaxStepRetriesExceeded(workflowID)
 		default:
 			time.Sleep(_DB_RETRY_INTERVAL)
 		}
