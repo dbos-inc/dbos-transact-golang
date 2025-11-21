@@ -104,7 +104,12 @@ type GetResultOption func(*getResultOptions)
 
 // getResultOptions holds the configuration for GetResult execution.
 type getResultOptions struct {
-	timeout time.Duration
+	timeout      time.Duration
+	pollInterval time.Duration
+}
+
+func defaultGetResultOptions() *getResultOptions {
+	return &getResultOptions{pollInterval: _DB_RETRY_INTERVAL}
 }
 
 // WithHandleTimeout sets a timeout for the GetResult operation.
@@ -112,6 +117,16 @@ type getResultOptions struct {
 func WithHandleTimeout(timeout time.Duration) GetResultOption {
 	return func(opts *getResultOptions) {
 		opts.timeout = timeout
+	}
+}
+
+// WithPollingInterval sets the polling interval for awaiting workflow completion in GetResult.
+// If a non-positive interval is provided, the default interval is used.
+func WithPollingInterval(interval time.Duration) GetResultOption {
+	return func(opts *getResultOptions) {
+		if interval > 0 {
+			opts.pollInterval = interval
+		}
 	}
 }
 
@@ -186,7 +201,7 @@ type workflowHandle[R any] struct {
 }
 
 func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
-	options := &getResultOptions{}
+	options := defaultGetResultOptions()
 	for _, opt := range opts {
 		opt(options)
 	}
@@ -253,7 +268,7 @@ type workflowPollingHandle[R any] struct {
 }
 
 func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
-	options := &getResultOptions{}
+	options := defaultGetResultOptions()
 	for _, opt := range opts {
 		opt(options)
 	}
@@ -269,7 +284,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	}
 
 	encodedResult, err := retryWithResult(ctx, func() (any, error) {
-		return h.dbosContext.(*dbosContext).systemDB.awaitWorkflowResult(ctx, h.workflowID)
+		return h.dbosContext.(*dbosContext).systemDB.awaitWorkflowResult(ctx, h.workflowID, options.pollInterval)
 	}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 
 	completedTime := time.Now()
@@ -1051,7 +1066,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
 			var encodedResult any
 			encodedResult, err = retryWithResult(c, func() (any, error) {
-				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID)
+				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID, _DB_RETRY_INTERVAL)
 			}, withRetrierLogger(c.logger))
 			// Keep the encoded result - decoding will happen in RunWorkflow[P,R] when we know the target type
 			outcomeChan <- workflowOutcome[any]{result: encodedResult, err: err, needsDecoding: true}
