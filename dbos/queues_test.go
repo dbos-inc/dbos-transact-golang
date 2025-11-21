@@ -367,11 +367,17 @@ func TestWorkflowQueues(t *testing.T) {
 		// Check the workflow completes
 		dlqCompleteEvent.Set()
 		for _, handle := range handles {
-			res, resErr := handle.GetResult()
-			status, statusErr := handle.GetStatus()
-			fmt.Printf("GetResult -> result: %v, error: %v\n", res, resErr)
-			fmt.Printf("GetStatus -> status: %+v, error: %v\n", status, statusErr)
-			// assert.Equal(t, "Awaited workflow blocking-workflow-test has exceeded the maximum number of step retries", err)
+			result, _ := handle.GetResult()
+			handleStatus, _ := handle.GetStatus()
+
+			if result == nil {
+				assert.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, handleStatus.Status, "expected workflow to be in DLQ after max retries exceeded")
+				// resErr is not nil
+			} else {
+				// resErr is nil
+				assert.Equal(t, WorkflowStatusSuccess, handleStatus.Status, "expected workflow status to be SUCCESS when result is not nil")
+			}
+
 		}
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after successive enqueues test")
