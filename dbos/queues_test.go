@@ -367,10 +367,8 @@ func TestWorkflowQueues(t *testing.T) {
 		// Check the workflow completes
 		dlqCompleteEvent.Set()
 		for _, handle := range handles {
-			result, err := handle.GetResult()
-			fmt.Print(result)
-			fmt.Print(err)
-			// assert.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, err.Status, "expected workflow to be in DLQ after max retries exceeded")
+			_, err := handle.GetResult()
+			assert.Equal(t, "Awaited workflow blocking-workflow-test has exceeded the maximum number of step retries", err)
 		}
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after successive enqueues test")
