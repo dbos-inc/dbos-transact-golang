@@ -4543,21 +4543,21 @@ func TestWorkflowIdentity(t *testing.T) {
 	})
 }
 
-func TestWorkflowHandleTimeout(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
-	RegisterWorkflow(dbosCtx, slowWorkflow)
+func TestWorkflowHandles(t *testing.T) {
+dbosCtx := setupDBOS(t, true, true)
+RegisterWorkflow(dbosCtx, slowWorkflow)
 
-	t.Run("WorkflowHandleTimeout", func(t *testing.T) {
-		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 10*time.Second)
-		require.NoError(t, err, "failed to start workflow")
+t.Run("WorkflowHandleTimeout", func(t *testing.T) {
+handle, err := RunWorkflow(dbosCtx, slowWorkflow, 10*time.Second)
+require.NoError(t, err, "failed to start workflow")
 
-		start := time.Now()
-		_, err = handle.GetResult(WithHandleTimeout(10 * time.Millisecond))
-		duration := time.Since(start)
+start := time.Now()
+_, err = handle.GetResult(WithHandleTimeout(10*time.Millisecond), WithPollingInterval(1*time.Millisecond))
+duration := time.Since(start)
 
-		require.Error(t, err, "expected timeout error")
-		assert.Contains(t, err.Error(), "workflow result timeout")
-		assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
+require.Error(t, err, "expected timeout error")
+assert.Contains(t, err.Error(), "workflow result timeout")
+assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
 		assert.True(t, errors.Is(err, context.DeadlineExceeded),
 			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
 	})
@@ -4567,18 +4567,18 @@ func TestWorkflowHandleTimeout(t *testing.T) {
 		originalHandle, err := RunWorkflow(dbosCtx, slowWorkflow, 10*time.Second)
 		require.NoError(t, err, "failed to start workflow")
 
-		pollingHandle, err := RetrieveWorkflow[string](dbosCtx, originalHandle.GetWorkflowID())
-		require.NoError(t, err, "failed to retrieve workflow")
+pollingHandle, err := RetrieveWorkflow[string](dbosCtx, originalHandle.GetWorkflowID())
+require.NoError(t, err, "failed to retrieve workflow")
 
-		_, ok := pollingHandle.(*workflowPollingHandle[string])
-		require.True(t, ok, "expected polling handle, got %T", pollingHandle)
+_, ok := pollingHandle.(*workflowPollingHandle[string])
+require.True(t, ok, "expected polling handle, got %T", pollingHandle)
 
-		_, err = pollingHandle.GetResult(WithHandleTimeout(10 * time.Millisecond))
+_, err = pollingHandle.GetResult(WithHandleTimeout(10*time.Millisecond), WithPollingInterval(1*time.Millisecond))
 
-		require.Error(t, err, "expected timeout error")
-		assert.True(t, errors.Is(err, context.DeadlineExceeded),
-			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
-	})
+require.Error(t, err, "expected timeout error")
+assert.True(t, errors.Is(err, context.DeadlineExceeded),
+"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
+})
 }
 
 func TestWorkflowHandleContextCancel(t *testing.T) {
