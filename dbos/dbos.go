@@ -383,7 +383,9 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	// Initialize conductor if API key is provided
 	if config.ConductorAPIKey != "" {
-		initExecutor.executorID = uuid.NewString()
+		if initExecutor.executorID == "" {
+			initExecutor.executorID = uuid.NewString()
+		}
 		if config.ConductorURL == "" {
 			dbosDomain := os.Getenv("DBOS_DOMAIN")
 			if dbosDomain == "" {
