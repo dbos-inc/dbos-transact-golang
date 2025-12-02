@@ -367,8 +367,10 @@ func TestWorkflowQueues(t *testing.T) {
 		// Check the workflow completes
 		dlqCompleteEvent.Set()
 		for _, handle := range handles {
-			result, _ := handle.GetResult()
-			handleStatus, _ := handle.GetStatus()
+			result, resErr := handle.GetResult()
+			handleStatus, statusErr := handle.GetStatus()
+
+			fmt.Println("DLQ Test Handle Result:", result, "Error:", resErr, "Status:", handleStatus, "StatusErr:", statusErr)
 
 			if result == nil {
 				assert.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, handleStatus.Status, "expected workflow to be in DLQ after max retries exceeded")
