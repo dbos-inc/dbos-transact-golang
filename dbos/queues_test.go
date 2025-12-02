@@ -364,7 +364,7 @@ func TestWorkflowQueues(t *testing.T) {
 		}
 
 		// Check the workflow completes
-		dlqCompleteEvent.Set()
+		// dlqCompleteEvent.Set()
 		for _, handle := range handles {
 			result, resErr := handle.GetResult()
 			handleStatus, statusErr := handle.GetStatus()
