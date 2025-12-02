@@ -371,7 +371,7 @@ func TestWorkflowQueues(t *testing.T) {
 			var dbosErr *DBOSError
 			require.ErrorAs(t, resultErr, &dbosErr, "expected error to be of type *DBOSError, got %T", resultErr)
 
-			assert.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, dbosErr.Code, "expected workflow to be in DLQ after max retries exceeded")
+			assert.Equal(t, DBOSErrorCode(13), dbosErr.Code, "expected workflow to be in DLQ after max retries exceeded")
 		}
 		dlqCompleteEvent.Set()
 
