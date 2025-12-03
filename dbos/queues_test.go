@@ -1628,14 +1628,14 @@ func TestPartitionedQueues(t *testing.T) {
 
 func TestNewQueueRunner(t *testing.T) {
 	t.Run("init queue with default interval", func(t *testing.T) {
-		runner := newQueueRunner(slog.New(slog.NewTextHandler(os.Stdout, nil)), QueueConfig{})
+		runner := newQueueRunner(slog.New(slog.NewTextHandler(os.Stdout, nil)), QueueRunnerConfig{})
 		require.Equal(t, _DEFAULT_BASE_INTERVAL, runner.baseInterval)
 		require.Equal(t, _DEFAULT_MAX_INTERVAL, runner.maxInterval)
 		require.Equal(t, _DEFAULT_MIN_INTERVAL, runner.minInterval)
 	})
 
 	t.Run("init queue with custom interval", func(t *testing.T) {
-		runner := newQueueRunner(slog.New(slog.NewTextHandler(os.Stdout, nil)), QueueConfig{
+		runner := newQueueRunner(slog.New(slog.NewTextHandler(os.Stdout, nil)), QueueRunnerConfig{
 			BaseInterval: 1,
 			MinInterval:  2,
 			MaxInterval:  3,

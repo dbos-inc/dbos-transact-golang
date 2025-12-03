@@ -29,25 +29,18 @@ const (
 // Config holds configuration parameters for initializing a DBOS context.
 // DatabaseURL and AppName are required.
 type Config struct {
-	AppName            string        // Application name for identification (required)
-	DatabaseURL        string        // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
-	SystemDBPool       *pgxpool.Pool // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
-	DatabaseSchema     string        // Database schema name (defaults to "dbos")
-	Logger             *slog.Logger  // Custom logger instance (defaults to a new slog logger)
-	AdminServer        bool          // Enable Transact admin HTTP server (disabled by default)
-	AdminServerPort    int           // Port for the admin HTTP server (default: 3001)
-	ConductorURL       string        // DBOS conductor service URL (optional)
-	ConductorAPIKey    string        // DBOS conductor API key (optional)
-	ApplicationVersion string        // Application version (optional, overridden by DBOS__APPVERSION env var)
-	ExecutorID         string        // Executor ID (optional, overridden by DBOS__VMID env var)
-	QueueRunner        QueueConfig   // Queue configuration (optional)
-}
-
-// QueueConfig configures the queue runner polling behavior.
-type QueueConfig struct {
-	BaseInterval float64 // seconds
-	MinInterval  float64 // seconds
-	MaxInterval  float64 // seconds
+	AppName            string            // Application name for identification (required)
+	DatabaseURL        string            // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
+	SystemDBPool       *pgxpool.Pool     // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
+	DatabaseSchema     string            // Database schema name (defaults to "dbos")
+	Logger             *slog.Logger      // Custom logger instance (defaults to a new slog logger)
+	AdminServer        bool              // Enable Transact admin HTTP server (disabled by default)
+	AdminServerPort    int               // Port for the admin HTTP server (default: 3001)
+	ConductorURL       string            // DBOS conductor service URL (optional)
+	ConductorAPIKey    string            // DBOS conductor API key (optional)
+	ApplicationVersion string            // Application version (optional, overridden by DBOS__APPVERSION env var)
+	ExecutorID         string            // Executor ID (optional, overridden by DBOS__VMID env var)
+	QueueRunnerConfig  QueueRunnerConfig // Queue runner configuration (optional)
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -62,7 +55,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
 	}
 
-	if inputConfig.QueueRunner.MinInterval > inputConfig.QueueRunner.MaxInterval {
+	if inputConfig.QueueRunnerConfig.MinInterval > inputConfig.QueueRunnerConfig.MaxInterval {
 		return nil, fmt.Errorf("minInterval must be less than maxInterval")
 	}
 
@@ -78,7 +71,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ApplicationVersion: inputConfig.ApplicationVersion,
 		ExecutorID:         inputConfig.ExecutorID,
 		SystemDBPool:       inputConfig.SystemDBPool,
-		QueueRunner:        inputConfig.QueueRunner,
+		QueueRunnerConfig:  inputConfig.QueueRunnerConfig,
 	}
 
 	// Load defaults
@@ -401,7 +394,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.logger.Debug("System database initialized")
 
 	// Initialize the queue runner and register DBOS internal queue
-	initExecutor.queueRunner = newQueueRunner(initExecutor.logger, config.QueueRunner)
+	initExecutor.queueRunner = newQueueRunner(initExecutor.logger, config.QueueRunnerConfig)
 
 	// Initialize conductor if API key is provided
 	if config.ConductorAPIKey != "" {
