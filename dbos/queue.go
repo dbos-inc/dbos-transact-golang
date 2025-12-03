@@ -14,6 +14,9 @@ import (
 const (
 	_DBOS_INTERNAL_QUEUE_NAME        = "_dbos_internal_queue"
 	_DEFAULT_MAX_TASKS_PER_ITERATION = 100
+	_DEFAULT_BASE_INTERVAL           = 1.0
+	_DEFAULT_MAX_INTERVAL            = 120.0
+	_DEFAULT_MIN_INTERVAL            = 1.0
 )
 
 // RateLimiter configures rate limiting for workflow queue execution.
@@ -159,11 +162,21 @@ type queueRunner struct {
 	completionChan chan struct{}
 }
 
-func newQueueRunner(logger *slog.Logger) *queueRunner {
+func newQueueRunner(logger *slog.Logger, config QueueConfig) *queueRunner {
+	if config.BaseInterval == 0 {
+		config.BaseInterval = _DEFAULT_BASE_INTERVAL
+	}
+	if config.MinInterval == 0 {
+		config.MinInterval = _DEFAULT_MIN_INTERVAL
+	}
+	if config.MaxInterval == 0 {
+		config.MaxInterval = _DEFAULT_MAX_INTERVAL
+	}
+
 	return &queueRunner{
-		baseInterval:          1.0,
-		minInterval:           1.0,
-		maxInterval:           120.0,
+		baseInterval:          config.BaseInterval,
+		minInterval:           config.MinInterval,
+		maxInterval:           config.MaxInterval,
 		backoffFactor:         2.0,
 		scalebackFactor:       0.9,
 		jitterMin:             0.95,

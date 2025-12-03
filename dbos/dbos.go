@@ -40,6 +40,14 @@ type Config struct {
 	ConductorAPIKey    string        // DBOS conductor API key (optional)
 	ApplicationVersion string        // Application version (optional, overridden by DBOS__APPVERSION env var)
 	ExecutorID         string        // Executor ID (optional, overridden by DBOS__VMID env var)
+	QueueRunner        QueueConfig   // Queue configuration (optional)
+}
+
+// QueueConfig configures the queue runner polling behavior.
+type QueueConfig struct {
+	BaseInterval float64 // seconds
+	MinInterval  float64 // seconds
+	MaxInterval  float64 // seconds
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -54,6 +62,10 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
 	}
 
+	if inputConfig.QueueRunner.MinInterval > inputConfig.QueueRunner.MaxInterval {
+		return nil, fmt.Errorf("minInterval must be less than maxInterval")
+	}
+
 	dbosConfig := &Config{
 		DatabaseURL:        inputConfig.DatabaseURL,
 		AppName:            inputConfig.AppName,
@@ -66,6 +78,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ApplicationVersion: inputConfig.ApplicationVersion,
 		ExecutorID:         inputConfig.ExecutorID,
 		SystemDBPool:       inputConfig.SystemDBPool,
+		QueueRunner:        inputConfig.QueueRunner,
 	}
 
 	// Load defaults
@@ -379,7 +392,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.logger.Debug("System database initialized")
 
 	// Initialize the queue runner and register DBOS internal queue
-	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
+	initExecutor.queueRunner = newQueueRunner(initExecutor.logger, config.QueueRunner)
 
 	// Initialize conductor if API key is provided
 	if config.ConductorAPIKey != "" {
