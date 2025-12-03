@@ -143,6 +143,13 @@ func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) 
 	return q
 }
 
+// QueueRunnerConfig configures the queue runner polling behavior.
+type QueueRunnerConfig struct {
+	BaseInterval float64 // seconds
+	MinInterval  float64 // seconds
+	MaxInterval  float64 // seconds
+}
+
 type queueRunner struct {
 	logger *slog.Logger
 
@@ -162,7 +169,7 @@ type queueRunner struct {
 	completionChan chan struct{}
 }
 
-func newQueueRunner(logger *slog.Logger, config QueueConfig) *queueRunner {
+func newQueueRunner(logger *slog.Logger, config QueueRunnerConfig) *queueRunner {
 	if config.BaseInterval == 0 {
 		config.BaseInterval = _DEFAULT_BASE_INTERVAL
 	}
