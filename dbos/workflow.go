@@ -120,9 +120,9 @@ func WithHandleTimeout(timeout time.Duration) GetResultOption {
 	}
 }
 
-// WithPollingInterval sets the polling interval for awaiting workflow completion in GetResult.
+// WithHandlePollingInterval sets the polling interval for awaiting workflow completion in GetResult.
 // If a non-positive interval is provided, the default interval is used.
-func WithPollingInterval(interval time.Duration) GetResultOption {
+func WithHandlePollingInterval(interval time.Duration) GetResultOption {
 	return func(opts *getResultOptions) {
 		if interval > 0 {
 			opts.pollInterval = interval
