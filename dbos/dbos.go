@@ -140,6 +140,7 @@ type DBOSContext interface {
 	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                            // List workflows based on filtering criteria
 	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)                                         // Get the execution steps of a workflow
 	ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) // List registered workflows with filtering options
+	ListRegisteredQueues() []WorkflowQueue                                                                         // List all registered workflow queues
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -300,6 +301,14 @@ func (c *dbosContext) GetExecutorID() string {
 
 func (c *dbosContext) GetApplicationID() string {
 	return c.applicationID
+}
+
+// ListRegisteredQueues returns all registered workflow queues.
+func (c *dbosContext) ListRegisteredQueues() []WorkflowQueue {
+	if c.queueRunner == nil {
+		return []WorkflowQueue{}
+	}
+	return c.queueRunner.listQueues()
 }
 
 // ListRegisteredWorkflows returns information about registered workflows with their registration parameters.
