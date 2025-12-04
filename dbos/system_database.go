@@ -1300,41 +1300,31 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 	startedAtMs := input.startedAt.UnixMilli()
 	completedAtMs := input.completedAt.UnixMilli()
 
-	var query string
-	args := []any{
-		input.workflowID,
-		input.stepID,
-		input.output,
-	}
-
 	var errorString *string
 	if input.err != nil {
 		e := input.err.Error()
 		errorString = &e
 	}
-	args = append(args, errorString)
-	args = append(args, input.stepName)
 
-	columns := "workflow_uuid, function_id, output, error, function_name, started_at_epoch_ms, completed_at_epoch_ms"
-	values := "$1, $2, $3, $4, $5, $6, $7"
+	columns := []string{"workflow_uuid", "function_id", "output", "error", "function_name", "started_at_epoch_ms", "completed_at_epoch_ms"}
+	placeholders := []string{"$1", "$2", "$3", "$4", "$5", "$6", "$7"}
+	args := []any{input.workflowID, input.stepID, input.output, errorString, input.stepName, startedAtMs, completedAtMs}
 	argCounter := 7
 
 	if input.childWorkflowID != "" {
-		columns += ", child_workflow_id"
+		columns = append(columns, "child_workflow_id")
 		argCounter++
-		values += fmt.Sprintf(", $%d", argCounter)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", argCounter))
 		args = append(args, input.childWorkflowID)
 	}
-
-	args = append(args, startedAtMs, completedAtMs)
 
 	conflictClause := ""
 	if input.isGetResult {
 		conflictClause = "ON CONFLICT DO NOTHING"
 	}
 
-	query = fmt.Sprintf(`INSERT INTO %s.operation_outputs (%s) VALUES (%s) %s`,
-		pgx.Identifier{s.schema}.Sanitize(), columns, values, conflictClause)
+	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs (%s) VALUES (%s) %s`,
+		pgx.Identifier{s.schema}.Sanitize(), strings.Join(columns, ", "), strings.Join(placeholders, ", "), conflictClause)
 
 	var err error
 	if input.tx != nil {
