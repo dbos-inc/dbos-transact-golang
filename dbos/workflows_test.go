@@ -4543,7 +4543,7 @@ func TestWorkflowIdentity(t *testing.T) {
 	})
 }
 
-func TestWorkflowHandleTimeout(t *testing.T) {
+func TestWorkflowHandles(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 	RegisterWorkflow(dbosCtx, slowWorkflow)
 
@@ -4552,7 +4552,7 @@ func TestWorkflowHandleTimeout(t *testing.T) {
 		require.NoError(t, err, "failed to start workflow")
 
 		start := time.Now()
-		_, err = handle.GetResult(WithHandleTimeout(10 * time.Millisecond))
+		_, err = handle.GetResult(WithHandleTimeout(10*time.Millisecond), WithHandlePollingInterval(1*time.Millisecond))
 		duration := time.Since(start)
 
 		require.Error(t, err, "expected timeout error")
@@ -4573,7 +4573,7 @@ func TestWorkflowHandleTimeout(t *testing.T) {
 		_, ok := pollingHandle.(*workflowPollingHandle[string])
 		require.True(t, ok, "expected polling handle, got %T", pollingHandle)
 
-		_, err = pollingHandle.GetResult(WithHandleTimeout(10 * time.Millisecond))
+		_, err = pollingHandle.GetResult(WithHandleTimeout(10*time.Millisecond), WithHandlePollingInterval(1*time.Millisecond))
 
 		require.Error(t, err, "expected timeout error")
 		assert.True(t, errors.Is(err, context.DeadlineExceeded),

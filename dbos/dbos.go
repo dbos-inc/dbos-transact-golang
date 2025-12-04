@@ -29,17 +29,18 @@ const (
 // Config holds configuration parameters for initializing a DBOS context.
 // DatabaseURL and AppName are required.
 type Config struct {
-	AppName            string        // Application name for identification (required)
-	DatabaseURL        string        // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
-	SystemDBPool       *pgxpool.Pool // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
-	DatabaseSchema     string        // Database schema name (defaults to "dbos")
-	Logger             *slog.Logger  // Custom logger instance (defaults to a new slog logger)
-	AdminServer        bool          // Enable Transact admin HTTP server (disabled by default)
-	AdminServerPort    int           // Port for the admin HTTP server (default: 3001)
-	ConductorURL       string        // DBOS conductor service URL (optional)
-	ConductorAPIKey    string        // DBOS conductor API key (optional)
-	ApplicationVersion string        // Application version (optional, overridden by DBOS__APPVERSION env var)
-	ExecutorID         string        // Executor ID (optional, overridden by DBOS__VMID env var)
+	AppName            string            // Application name for identification (required)
+	DatabaseURL        string            // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
+	SystemDBPool       *pgxpool.Pool     // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
+	DatabaseSchema     string            // Database schema name (defaults to "dbos")
+	Logger             *slog.Logger      // Custom logger instance (defaults to a new slog logger)
+	AdminServer        bool              // Enable Transact admin HTTP server (disabled by default)
+	AdminServerPort    int               // Port for the admin HTTP server (default: 3001)
+	ConductorURL       string            // DBOS conductor service URL (optional)
+	ConductorAPIKey    string            // DBOS conductor API key (optional)
+	ApplicationVersion string            // Application version (optional, overridden by DBOS__APPVERSION env var)
+	ExecutorID         string            // Executor ID (optional, overridden by DBOS__VMID env var)
+	QueueRunnerConfig  QueueRunnerConfig // Queue runner configuration (optional)
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -54,6 +55,10 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
 	}
 
+	if inputConfig.QueueRunnerConfig.MinInterval > inputConfig.QueueRunnerConfig.MaxInterval {
+		return nil, fmt.Errorf("minInterval must be less than maxInterval")
+	}
+
 	dbosConfig := &Config{
 		DatabaseURL:        inputConfig.DatabaseURL,
 		AppName:            inputConfig.AppName,
@@ -66,6 +71,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ApplicationVersion: inputConfig.ApplicationVersion,
 		ExecutorID:         inputConfig.ExecutorID,
 		SystemDBPool:       inputConfig.SystemDBPool,
+		QueueRunnerConfig:  inputConfig.QueueRunnerConfig,
 	}
 
 	// Load defaults
@@ -127,6 +133,7 @@ type DBOSContext interface {
 	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                            // List workflows based on filtering criteria
 	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)                                         // Get the execution steps of a workflow
 	ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) // List registered workflows with filtering options
+	ListRegisteredQueues() []WorkflowQueue                                                                         // List all registered workflow queues
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -289,6 +296,14 @@ func (c *dbosContext) GetApplicationID() string {
 	return c.applicationID
 }
 
+// ListRegisteredQueues returns all registered workflow queues.
+func (c *dbosContext) ListRegisteredQueues() []WorkflowQueue {
+	if c.queueRunner == nil {
+		return []WorkflowQueue{}
+	}
+	return c.queueRunner.listQueues()
+}
+
 // ListRegisteredWorkflows returns information about registered workflows with their registration parameters.
 // Supports filtering using functional options.
 func (c *dbosContext) ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) {
@@ -379,7 +394,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.logger.Debug("System database initialized")
 
 	// Initialize the queue runner and register DBOS internal queue
-	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
+	initExecutor.queueRunner = newQueueRunner(initExecutor.logger, config.QueueRunnerConfig)
 
 	// Initialize conductor if API key is provided
 	if config.ConductorAPIKey != "" {

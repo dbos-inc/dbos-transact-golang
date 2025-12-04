@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"reflect"
 	"runtime"
@@ -492,6 +493,51 @@ func TestWorkflowQueues(t *testing.T) {
 		require.NotNil(t, unwrappedErr, "expected error to have an unwrapped error")
 		expectedMsgPart := "does not exist"
 		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
+	})
+
+	t.Run("ListRegisteredQueues", func(t *testing.T) {
+		// Get all registered queues
+		registeredQueues := dbosCtx.ListRegisteredQueues()
+
+		// Create a map of expected queue names for easy lookup
+		expectedQueueNames := map[string]bool{
+			queue.Name:                true,
+			dlqEnqueueQueue.Name:      true,
+			conflictQueue1.Name:       true,
+			conflictQueue2.Name:       true,
+			dedupQueue.Name:           true,
+			_DBOS_INTERNAL_QUEUE_NAME: true, // Internal queue is always registered
+		}
+
+		// Verify we got the expected number of queues
+		assert.Equal(t, len(expectedQueueNames), len(registeredQueues), "expected %d registered queues, got %d", len(expectedQueueNames), len(registeredQueues))
+
+		// Verify all expected queues are present
+		actualQueueNames := make(map[string]bool)
+		for _, q := range registeredQueues {
+			actualQueueNames[q.Name] = true
+			// Verify the queue exists in our expected list
+			assert.True(t, expectedQueueNames[q.Name], "unexpected queue found: %s", q.Name)
+		}
+
+		// Verify all expected queues are in the result
+		for queueName := range expectedQueueNames {
+			assert.True(t, actualQueueNames[queueName], "expected queue %s not found in registered queues", queueName)
+		}
+
+		// Verify specific queue properties for known queues
+		for _, q := range registeredQueues {
+			switch q.Name {
+			case queue.Name:
+				// Verify default queue properties
+				assert.Nil(t, q.WorkerConcurrency, "expected queue to have nil WorkerConcurrency")
+				assert.Nil(t, q.GlobalConcurrency, "expected queue to have nil GlobalConcurrency")
+				assert.False(t, q.PriorityEnabled, "expected queue to have PriorityEnabled=false")
+			case dedupQueue.Name:
+				// Verify dedup queue properties
+				assert.Nil(t, q.WorkerConcurrency, "expected dedup queue to have nil WorkerConcurrency")
+			}
+		}
 	})
 }
 
@@ -1581,5 +1627,26 @@ func TestPartitionedQueues(t *testing.T) {
 		// Now unblock partition 1 blocking workflow
 		partition1BlockEvent.Set()
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after partitioned queue test")
+	})
+}
+
+func TestNewQueueRunner(t *testing.T) {
+	t.Run("init queue with default interval", func(t *testing.T) {
+		runner := newQueueRunner(slog.New(slog.NewTextHandler(os.Stdout, nil)), QueueRunnerConfig{})
+		require.Equal(t, _DEFAULT_BASE_INTERVAL, runner.baseInterval)
+		require.Equal(t, _DEFAULT_MAX_INTERVAL, runner.maxInterval)
+		require.Equal(t, _DEFAULT_MIN_INTERVAL, runner.minInterval)
+	})
+
+	t.Run("init queue with custom interval", func(t *testing.T) {
+		runner := newQueueRunner(slog.New(slog.NewTextHandler(os.Stdout, nil)), QueueRunnerConfig{
+			BaseInterval: 1,
+			MinInterval:  2,
+			MaxInterval:  3,
+		})
+		require.Equal(t, float64(1), runner.baseInterval)
+		require.Equal(t, float64(2), runner.minInterval)
+		require.Equal(t, float64(3), runner.maxInterval)
+
 	})
 }
