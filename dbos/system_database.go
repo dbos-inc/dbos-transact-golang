@@ -1412,6 +1412,7 @@ func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, funct
 
 	return childWorkflowID, nil
 }
+
 /*******************************/
 /******* STEPS ********/
 /*******************************/
