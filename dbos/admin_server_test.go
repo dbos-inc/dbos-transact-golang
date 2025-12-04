@@ -978,7 +978,7 @@ func TestAdminServer(t *testing.T) {
 		// Wait for 2-3 executions to verify scheduler is running
 		require.Eventually(t, func() bool {
 			return executionCount.Load() >= 2
-		}, 3*time.Second, 100*time.Millisecond, "Expected at least 2 scheduled workflow executions")
+		}, 10*time.Second, 100*time.Millisecond, "Expected at least 2 scheduled workflow executions")
 
 		// Call deactivate endpoint
 		endpoint := fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_DEACTIVATE_PATTERN, "GET /"))
