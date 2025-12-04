@@ -1627,22 +1627,36 @@ func TestPartitionedQueues(t *testing.T) {
 }
 
 func TestNewQueueRunner(t *testing.T) {
-	t.Run("init queue with default interval", func(t *testing.T) {
-		runner := newQueueRunner(slog.New(slog.NewTextHandler(os.Stdout, nil)), QueueRunnerConfig{})
-		require.Equal(t, _DEFAULT_BASE_INTERVAL, runner.baseInterval)
-		require.Equal(t, _DEFAULT_MAX_INTERVAL, runner.maxInterval)
-		require.Equal(t, _DEFAULT_MIN_INTERVAL, runner.minInterval)
+	t.Run("init queue runner", func(t *testing.T) {
+		runner := newQueueRunner(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+		require.NotNil(t, runner)
+		require.NotNil(t, runner.workflowQueueRegistry)
+	})
+}
+
+func TestQueuePollingIntervals(t *testing.T) {
+	t.Run("queue uses default intervals when not specified", func(t *testing.T) {
+		ctx := setupDBOS(t, false, false)
+
+		queue := NewWorkflowQueue(ctx, "test-queue")
+		// Intervals are resolved during creation, so defaults should be applied
+		require.Equal(t, _DEFAULT_BASE_POLLING_INTERVAL, queue.BasePollingInterval)
+		require.Equal(t, _DEFAULT_MAX_POLLING_INTERVAL, queue.MaxPollingInterval)
+		require.Equal(t, _DEFAULT_BASE_POLLING_INTERVAL, queue.currentPollingInterval)
 	})
 
-	t.Run("init queue with custom interval", func(t *testing.T) {
-		runner := newQueueRunner(slog.New(slog.NewTextHandler(os.Stdout, nil)), QueueRunnerConfig{
-			BaseInterval: 1,
-			MinInterval:  2,
-			MaxInterval:  3,
-		})
-		require.Equal(t, float64(1), runner.baseInterval)
-		require.Equal(t, float64(2), runner.minInterval)
-		require.Equal(t, float64(3), runner.maxInterval)
+	t.Run("queue uses custom intervals when specified", func(t *testing.T) {
+		ctx := setupDBOS(t, false, false)
 
+		basePollingInterval := 2 * time.Second
+		maxPollingInterval := 60 * time.Second
+
+		queue := NewWorkflowQueue(ctx, "test-queue",
+			WithQueueBasePollingInterval(basePollingInterval),
+			WithQueueMaxPollingInterval(maxPollingInterval),
+		)
+
+		require.Equal(t, basePollingInterval, queue.BasePollingInterval)
+		require.Equal(t, maxPollingInterval, queue.MaxPollingInterval)
 	})
 }
