@@ -1354,6 +1354,75 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 }
 
 /*******************************/
+/******* CHILD WORKFLOWS ********/
+/*******************************/
+
+type recordChildWorkflowDBInput struct {
+	parentWorkflowID string
+	childWorkflowID  string
+	stepID           int
+	stepName         string
+	tx               pgx.Tx
+}
+
+func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error {
+	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
+            (workflow_uuid, function_id, function_name, child_workflow_id)
+            VALUES ($1, $2, $3, $4)`, pgx.Identifier{s.schema}.Sanitize())
+
+	var commandTag pgconn.CommandTag
+	var err error
+
+	if input.tx != nil {
+		commandTag, err = input.tx.Exec(ctx, query,
+			input.parentWorkflowID,
+			input.stepID,
+			input.stepName,
+			input.childWorkflowID,
+		)
+	} else {
+		commandTag, err = s.pool.Exec(ctx, query,
+			input.parentWorkflowID,
+			input.stepID,
+			input.stepName,
+			input.childWorkflowID,
+		)
+	}
+
+	if err != nil {
+		// Check for unique constraint violation (conflict ID error)
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
+			return fmt.Errorf(
+				"child workflow %s already registered for parent workflow %s (operation ID: %d)",
+				input.childWorkflowID, input.parentWorkflowID, input.stepID)
+		}
+		return fmt.Errorf("failed to record child workflow: %w", err)
+	}
+
+	if commandTag.RowsAffected() == 0 {
+		s.logger.Warn("RecordChildWorkflow No rows were affected by the insert")
+	}
+
+	return nil
+}
+
+func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, functionID int) (*string, error) {
+	query := fmt.Sprintf(`SELECT child_workflow_id
+              FROM %s.operation_outputs
+              WHERE workflow_uuid = $1 AND function_id = $2`, pgx.Identifier{s.schema}.Sanitize())
+
+	var childWorkflowID *string
+	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to check child workflow: %w", err)
+	}
+
+	return childWorkflowID, nil
+}
+/*******************************/
 /******* STEPS ********/
 /*******************************/
 
