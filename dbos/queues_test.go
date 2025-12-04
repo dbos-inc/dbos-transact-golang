@@ -1640,9 +1640,8 @@ func TestQueuePollingIntervals(t *testing.T) {
 
 		queue := NewWorkflowQueue(ctx, "test-queue")
 		// Intervals are resolved during creation, so defaults should be applied
-		require.Equal(t, _DEFAULT_BASE_POLLING_INTERVAL, queue.BasePollingInterval)
-		require.Equal(t, _DEFAULT_MAX_POLLING_INTERVAL, queue.MaxPollingInterval)
-		require.Equal(t, _DEFAULT_BASE_POLLING_INTERVAL, queue.currentPollingInterval)
+		require.Equal(t, _DEFAULT_BASE_POLLING_INTERVAL, queue.basePollingInterval)
+		require.Equal(t, _DEFAULT_MAX_POLLING_INTERVAL, queue.maxPollingInterval)
 	})
 
 	t.Run("queue uses custom intervals when specified", func(t *testing.T) {
@@ -1656,7 +1655,7 @@ func TestQueuePollingIntervals(t *testing.T) {
 			WithQueueMaxPollingInterval(maxPollingInterval),
 		)
 
-		require.Equal(t, basePollingInterval, queue.BasePollingInterval)
-		require.Equal(t, maxPollingInterval, queue.MaxPollingInterval)
+		require.Equal(t, basePollingInterval, queue.basePollingInterval)
+		require.Equal(t, maxPollingInterval, queue.maxPollingInterval)
 	})
 }

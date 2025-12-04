@@ -28,16 +28,15 @@ type RateLimiter struct {
 // WorkflowQueue defines a named queue for workflow execution.
 // Queues provide controlled workflow execution with concurrency limits, priority scheduling, and rate limiting.
 type WorkflowQueue struct {
-	Name                   string        `json:"name"`                          // Unique queue name
-	WorkerConcurrency      *int          `json:"workerConcurrency,omitempty"`   // Max concurrent workflows per executor
-	GlobalConcurrency      *int          `json:"concurrency,omitempty"`         // Max concurrent workflows across all executors
-	PriorityEnabled        bool          `json:"priorityEnabled,omitempty"`     // Enable priority-based scheduling
-	RateLimit              *RateLimiter  `json:"rateLimit,omitempty"`           // Rate limiting configuration
-	MaxTasksPerIteration   int           `json:"maxTasksPerIteration"`          // Max workflows to dequeue per iteration
-	PartitionQueue         bool          `json:"partitionQueue,omitempty"`      // Enable partitioned queue mode
-	BasePollingInterval    time.Duration `json:"basePollingInterval,omitempty"` // Initial polling interval (minimum, never poll faster)
-	MaxPollingInterval     time.Duration `json:"maxPollingInterval,omitempty"`  // Maximum polling interval (never poll slower)
-	currentPollingInterval time.Duration
+	Name                 string        `json:"name"`                        // Unique queue name
+	WorkerConcurrency    *int          `json:"workerConcurrency,omitempty"` // Max concurrent workflows per executor
+	GlobalConcurrency    *int          `json:"concurrency,omitempty"`       // Max concurrent workflows across all executors
+	PriorityEnabled      bool          `json:"priorityEnabled,omitempty"`   // Enable priority-based scheduling
+	RateLimit            *RateLimiter  `json:"rateLimit,omitempty"`         // Rate limiting configuration
+	MaxTasksPerIteration int           `json:"maxTasksPerIteration"`        // Max workflows to dequeue per iteration
+	PartitionQueue       bool          `json:"partitionQueue,omitempty"`    // Enable partitioned queue mode
+	basePollingInterval  time.Duration // Base polling interval (minimum, never poll faster)
+	maxPollingInterval   time.Duration // Maximum polling interval (never poll slower)
 }
 
 // QueueOption is a functional option for configuring a workflow queue
@@ -98,8 +97,7 @@ func WithPartitionQueue() QueueOption {
 // If not set (0), the queue will use the default base polling interval during creation.
 func WithQueueBasePollingInterval(interval time.Duration) QueueOption {
 	return func(q *WorkflowQueue) {
-		q.BasePollingInterval = interval
-		q.currentPollingInterval = interval
+		q.basePollingInterval = interval
 	}
 }
 
@@ -108,7 +106,7 @@ func WithQueueBasePollingInterval(interval time.Duration) QueueOption {
 // If not set (0), the queue will use the default max polling interval during creation.
 func WithQueueMaxPollingInterval(interval time.Duration) QueueOption {
 	return func(q *WorkflowQueue) {
-		q.MaxPollingInterval = interval
+		q.maxPollingInterval = interval
 	}
 }
 
@@ -147,15 +145,14 @@ func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) 
 
 	// Create queue with default settings
 	q := WorkflowQueue{
-		Name:                   name,
-		WorkerConcurrency:      nil,
-		GlobalConcurrency:      nil,
-		PriorityEnabled:        false,
-		RateLimit:              nil,
-		MaxTasksPerIteration:   _DEFAULT_MAX_TASKS_PER_ITERATION,
-		BasePollingInterval:    _DEFAULT_BASE_POLLING_INTERVAL,
-		MaxPollingInterval:     _DEFAULT_MAX_POLLING_INTERVAL,
-		currentPollingInterval: _DEFAULT_BASE_POLLING_INTERVAL,
+		Name:                 name,
+		WorkerConcurrency:    nil,
+		GlobalConcurrency:    nil,
+		PriorityEnabled:      false,
+		RateLimit:            nil,
+		MaxTasksPerIteration: _DEFAULT_MAX_TASKS_PER_ITERATION,
+		basePollingInterval:  _DEFAULT_BASE_POLLING_INTERVAL,
+		maxPollingInterval:   _DEFAULT_MAX_POLLING_INTERVAL,
 	}
 
 	// Apply functional options
@@ -163,7 +160,7 @@ func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) 
 		option(&q)
 	}
 	// Register the queue in the global registry
-	ctx.queueRunner.workflowQueueRegistry[name] = &q
+	ctx.queueRunner.workflowQueueRegistry[name] = q
 
 	return q
 }
@@ -178,7 +175,7 @@ type queueRunner struct {
 	jitterMax       float64
 
 	// Queue registry
-	workflowQueueRegistry map[string]*WorkflowQueue
+	workflowQueueRegistry map[string]WorkflowQueue
 
 	// WaitGroup to track all queue goroutines
 	queueGoroutinesWg sync.WaitGroup
@@ -193,7 +190,7 @@ func newQueueRunner(logger *slog.Logger) *queueRunner {
 		scalebackFactor:       0.9,
 		jitterMin:             0.95,
 		jitterMax:             1.05,
-		workflowQueueRegistry: make(map[string]*WorkflowQueue),
+		workflowQueueRegistry: make(map[string]WorkflowQueue),
 		completionChan:        make(chan struct{}, 1),
 		logger:                logger.With("service", "queue_runner"),
 	}
@@ -202,14 +199,14 @@ func newQueueRunner(logger *slog.Logger) *queueRunner {
 func (qr *queueRunner) listQueues() []WorkflowQueue {
 	queues := make([]WorkflowQueue, 0, len(qr.workflowQueueRegistry))
 	for _, queue := range qr.workflowQueueRegistry {
-		queues = append(queues, *queue)
+		queues = append(queues, queue)
 	}
 	return queues
 }
 
 // getQueue returns the queue with the given name from the registry.
-// Returns a pointer to the queue if found, or nil if the queue does not exist.
-func (qr *queueRunner) getQueue(queueName string) *WorkflowQueue {
+// Returns the queue if found, or an empty queue if it does not exist.
+func (qr *queueRunner) getQueue(queueName string) WorkflowQueue {
 	return qr.workflowQueueRegistry[queueName]
 }
 
@@ -226,10 +223,12 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 	qr.completionChan <- struct{}{}
 }
 
-func (qr *queueRunner) runQueue(ctx *dbosContext, queue *WorkflowQueue) {
+func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 	defer qr.queueGoroutinesWg.Done()
 
 	queueLogger := qr.logger.With("queue_name", queue.Name)
+	// Current polling interval starts at the base interval and adjusts based on errors
+	currentPollingInterval := queue.basePollingInterval
 
 	for {
 		hasBackoffError := false
@@ -261,7 +260,7 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue *WorkflowQueue) {
 		if !skipDequeue {
 			var dequeuedWorkflows []dequeuedWorkflow
 			for _, partitionKey := range partitionKeys {
-				workflows, shouldContinue := qr.dequeueWorkflows(ctx, *queue, partitionKey, &hasBackoffError)
+				workflows, shouldContinue := qr.dequeueWorkflows(ctx, queue, partitionKey, &hasBackoffError)
 				if shouldContinue {
 					continue
 				}
@@ -301,17 +300,17 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue *WorkflowQueue) {
 		// Adjust polling interval for this queue based on errors
 		if hasBackoffError {
 			// Increase polling interval using exponential backoff, but never exceed maxPollingInterval
-			newInterval := time.Duration(float64(queue.currentPollingInterval) * qr.backoffFactor)
-			queue.currentPollingInterval = min(newInterval, queue.MaxPollingInterval)
+			newInterval := time.Duration(float64(currentPollingInterval) * qr.backoffFactor)
+			currentPollingInterval = min(newInterval, queue.maxPollingInterval)
 		} else {
-			// Scale back polling interval on successful iteration, but never go below basePollingInterval
-			newInterval := time.Duration(float64(queue.currentPollingInterval) * qr.scalebackFactor)
-			queue.currentPollingInterval = max(newInterval, queue.BasePollingInterval)
+			// Scale back polling interval on successful iteration, but never go below base interval
+			newInterval := time.Duration(float64(currentPollingInterval) * qr.scalebackFactor)
+			currentPollingInterval = max(newInterval, queue.basePollingInterval)
 		}
 
 		// Apply jitter to this queue's polling interval
 		jitter := qr.jitterMin + rand.Float64()*(qr.jitterMax-qr.jitterMin) // #nosec G404 -- non-crypto jitter; acceptable
-		sleepDuration := time.Duration(float64(queue.currentPollingInterval) * jitter)
+		sleepDuration := time.Duration(float64(currentPollingInterval) * jitter)
 
 		// Sleep with jittered interval, but allow early exit on context cancellation
 		select {
