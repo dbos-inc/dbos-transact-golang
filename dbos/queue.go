@@ -233,6 +233,7 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue *WorkflowQueue) {
 
 	for {
 		hasBackoffError := false
+		skipDequeue := false
 
 		// Build list of partition keys to dequeue from
 		// Default to empty string for non-partitioned queues
@@ -242,6 +243,7 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue *WorkflowQueue) {
 				return ctx.systemDB.getQueuePartitions(ctx, queue.Name)
 			}, withRetrierLogger(queueLogger))
 			if err != nil {
+				skipDequeue = true
 				if pgErr, ok := err.(*pgconn.PgError); ok {
 					switch pgErr.Code {
 					case pgerrcode.SerializationFailure, pgerrcode.LockNotAvailable:
@@ -256,41 +258,43 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue *WorkflowQueue) {
 		}
 
 		// Dequeue from each partition (or once for non-partitioned queues)
-		var dequeuedWorkflows []dequeuedWorkflow
-		for _, partitionKey := range partitionKeys {
-			workflows, shouldContinue := qr.dequeueWorkflows(ctx, *queue, partitionKey, &hasBackoffError)
-			if shouldContinue {
-				continue
-			}
-			dequeuedWorkflows = append(dequeuedWorkflows, workflows...)
-		}
-
-		if len(dequeuedWorkflows) > 0 {
-			queueLogger.Debug("Dequeued workflows from queue", "workflows", len(dequeuedWorkflows))
-		}
-		for _, workflow := range dequeuedWorkflows {
-			// Find the workflow in the registry
-			wfName, ok := ctx.workflowCustomNametoFQN.Load(workflow.name)
-			if !ok {
-				queueLogger.Error("Workflow not found in registry", "workflow_name", workflow.name)
-				continue
+		if !skipDequeue {
+			var dequeuedWorkflows []dequeuedWorkflow
+			for _, partitionKey := range partitionKeys {
+				workflows, shouldContinue := qr.dequeueWorkflows(ctx, *queue, partitionKey, &hasBackoffError)
+				if shouldContinue {
+					continue
+				}
+				dequeuedWorkflows = append(dequeuedWorkflows, workflows...)
 			}
 
-			registeredWorkflowAny, exists := ctx.workflowRegistry.Load(wfName.(string))
-			if !exists {
-				queueLogger.Error("workflow function not found in registry", "workflow_name", workflow.name)
-				continue
+			if len(dequeuedWorkflows) > 0 {
+				queueLogger.Debug("Dequeued workflows from queue", "workflows", len(dequeuedWorkflows))
 			}
-			registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
-			if !ok {
-				queueLogger.Error("invalid workflow registry entry type", "workflow_name", workflow.name)
-				continue
-			}
+			for _, workflow := range dequeuedWorkflows {
+				// Find the workflow in the registry
+				wfName, ok := ctx.workflowCustomNametoFQN.Load(workflow.name)
+				if !ok {
+					queueLogger.Error("Workflow not found in registry", "workflow_name", workflow.name)
+					continue
+				}
 
-			// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
-			_, err := registeredWorkflow.wrappedFunction(ctx, workflow.input, WithWorkflowID(workflow.id))
-			if err != nil {
-				queueLogger.Error("Error running queued workflow", "error", err)
+				registeredWorkflowAny, exists := ctx.workflowRegistry.Load(wfName.(string))
+				if !exists {
+					queueLogger.Error("workflow function not found in registry", "workflow_name", workflow.name)
+					continue
+				}
+				registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
+				if !ok {
+					queueLogger.Error("invalid workflow registry entry type", "workflow_name", workflow.name)
+					continue
+				}
+
+				// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
+				_, err := registeredWorkflow.wrappedFunction(ctx, workflow.input, WithWorkflowID(workflow.id))
+				if err != nil {
+					queueLogger.Error("Error running queued workflow", "error", err)
+				}
 			}
 		}
 
