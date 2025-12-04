@@ -365,12 +365,16 @@ func TestWorkflowQueues(t *testing.T) {
 		}
 
 		// Check the workflow completes
-		dlqCompleteEvent.Set()
 		for _, handle := range handles {
-			result, err := handle.GetResult()
-			require.NoError(t, err, "failed to get result from recovered workflow handle")
-			assert.Equal(t, "test-input", result, "expected result to be 'test-input'")
+
+			_, resultErr := handle.GetResult()
+
+			var dbosErr *DBOSError
+			require.ErrorAs(t, resultErr, &dbosErr, "expected error to be of type *DBOSError, got %T", resultErr)
+
+			assert.Equal(t, MaxStepRetriesExceeded, dbosErr.Code, "expected workflow to be in DLQ after max retries exceeded")
 		}
+		dlqCompleteEvent.Set()
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after successive enqueues test")
 	})
