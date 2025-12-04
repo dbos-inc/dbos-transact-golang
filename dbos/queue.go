@@ -207,11 +207,10 @@ func (qr *queueRunner) listQueues() []WorkflowQueue {
 // getQueue returns the queue with the given name from the registry.
 // Returns a pointer to the queue if found, or nil if it does not exist.
 func (qr *queueRunner) getQueue(queueName string) *WorkflowQueue {
-	queue, exists := qr.workflowQueueRegistry[queueName]
-	if !exists {
-		return nil
+	if queue, exists := qr.workflowQueueRegistry[queueName]; exists {
+		return &queue
 	}
-	return &queue
+	return nil
 }
 
 // run starts a goroutine for each registered queue to handle polling independently.
