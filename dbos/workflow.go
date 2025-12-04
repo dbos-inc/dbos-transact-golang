@@ -244,17 +244,19 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		if encErr != nil {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 		}
-		recordGetResultInput := recordChildGetResultDBInput{
-			parentWorkflowID: workflowState.workflowID,
-			childWorkflowID:  h.workflowID,
-			stepID:           workflowState.nextStepID(),
-			output:           encodedOutput,
-			err:              outcome.err,
-			startedAt:        startTime,
-			completedAt:      completedTime,
+		recordGetResultInput := recordOperationResultDBInput{
+			workflowID:      workflowState.workflowID,
+			childWorkflowID: h.workflowID,
+			stepID:          workflowState.nextStepID(),
+			output:          encodedOutput,
+			err:             outcome.err,
+			startedAt:       startTime,
+			completedAt:     completedTime,
+			isGetResult:     true,
+			stepName:        "DBOS.getResult",
 		}
 		recordResultErr := retry(h.dbosContext, func() error {
-			return h.dbosContext.(*dbosContext).systemDB.recordChildGetResult(h.dbosContext, recordGetResultInput)
+			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
 		}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 		if recordResultErr != nil {
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -308,17 +310,19 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 		isWithinWorkflow := ok && workflowState != nil
 		if isWithinWorkflow {
-			recordGetResultInput := recordChildGetResultDBInput{
-				parentWorkflowID: workflowState.workflowID,
-				childWorkflowID:  h.workflowID,
-				stepID:           workflowState.nextStepID(),
-				output:           encodedStr,
-				err:              err,
-				startedAt:        startTime,
-				completedAt:      completedTime,
+			recordGetResultInput := recordOperationResultDBInput{
+				workflowID:      workflowState.workflowID,
+				childWorkflowID: h.workflowID,
+				stepID:          workflowState.nextStepID(),
+				output:          encodedStr,
+				err:             err,
+				startedAt:       startTime,
+				completedAt:     completedTime,
+				isGetResult:     true,
+				stepName:        "DBOS.getResult",
 			}
 			recordResultErr := retry(h.dbosContext, func() error {
-				return h.dbosContext.(*dbosContext).systemDB.recordChildGetResult(h.dbosContext, recordGetResultInput)
+				return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
 			}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 			if recordResultErr != nil {
 				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)

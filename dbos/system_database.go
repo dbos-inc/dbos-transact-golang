@@ -47,7 +47,6 @@ type systemDatabase interface {
 	// Child workflows
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
 	checkChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
-	recordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
 
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
@@ -1285,51 +1284,63 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, poll
 }
 
 type recordOperationResultDBInput struct {
-	workflowID  string
-	stepID      int
-	stepName    string
-	output      *string
-	err         error
-	tx          pgx.Tx
-	startedAt   time.Time
-	completedAt time.Time
+	workflowID      string
+	childWorkflowID string
+	stepID          int
+	stepName        string
+	output          *string
+	err             error
+	tx              pgx.Tx
+	startedAt       time.Time
+	completedAt     time.Time
+	isGetResult     bool
 }
 
 func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
 	startedAtMs := input.startedAt.UnixMilli()
 	completedAtMs := input.completedAt.UnixMilli()
 
-	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, output, error, function_name, started_at_epoch_ms, completed_at_epoch_ms)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)`, pgx.Identifier{s.schema}.Sanitize())
+	var query string
+	args := []any{
+		input.workflowID,
+		input.stepID,
+		input.output,
+	}
 
 	var errorString *string
 	if input.err != nil {
 		e := input.err.Error()
 		errorString = &e
 	}
+	args = append(args, errorString)
+	args = append(args, input.stepName)
+
+	columns := "workflow_uuid, function_id, output, error, function_name, started_at_epoch_ms, completed_at_epoch_ms"
+	values := "$1, $2, $3, $4, $5, $6, $7"
+	argCounter := 7
+
+	if input.childWorkflowID != "" {
+		columns += ", child_workflow_id"
+		argCounter++
+		values += fmt.Sprintf(", $%d", argCounter)
+		args = append(args, input.childWorkflowID)
+	}
+
+	args = append(args, startedAtMs, completedAtMs)
+
+	conflictClause := ""
+	if input.isGetResult {
+		conflictClause = "ON CONFLICT DO NOTHING"
+	}
+
+	query = fmt.Sprintf(`INSERT INTO %s.operation_outputs (%s) VALUES (%s) %s`,
+		pgx.Identifier{s.schema}.Sanitize(), columns, values, conflictClause)
 
 	var err error
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, query,
-			input.workflowID,
-			input.stepID,
-			input.output,
-			errorString,
-			input.stepName,
-			startedAtMs,
-			completedAtMs,
-		)
+		_, err = input.tx.Exec(ctx, query, args...)
 	} else {
-		_, err = s.pool.Exec(ctx, query,
-			input.workflowID,
-			input.stepID,
-			input.output,
-			errorString,
-			input.stepName,
-			startedAtMs,
-			completedAtMs,
-		)
+		_, err = s.pool.Exec(ctx, query, args...)
 	}
 
 	if err != nil {
@@ -1339,117 +1350,6 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		return err
 	}
 
-	return nil
-}
-
-/*******************************/
-/******* CHILD WORKFLOWS ********/
-/*******************************/
-
-type recordChildWorkflowDBInput struct {
-	parentWorkflowID string
-	childWorkflowID  string
-	stepID           int
-	stepName         string
-	tx               pgx.Tx
-}
-
-func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error {
-	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, function_name, child_workflow_id)
-            VALUES ($1, $2, $3, $4)`, pgx.Identifier{s.schema}.Sanitize())
-
-	var commandTag pgconn.CommandTag
-	var err error
-
-	if input.tx != nil {
-		commandTag, err = input.tx.Exec(ctx, query,
-			input.parentWorkflowID,
-			input.stepID,
-			input.stepName,
-			input.childWorkflowID,
-		)
-	} else {
-		commandTag, err = s.pool.Exec(ctx, query,
-			input.parentWorkflowID,
-			input.stepID,
-			input.stepName,
-			input.childWorkflowID,
-		)
-	}
-
-	if err != nil {
-		// Check for unique constraint violation (conflict ID error)
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
-			return fmt.Errorf(
-				"child workflow %s already registered for parent workflow %s (operation ID: %d)",
-				input.childWorkflowID, input.parentWorkflowID, input.stepID)
-		}
-		return fmt.Errorf("failed to record child workflow: %w", err)
-	}
-
-	if commandTag.RowsAffected() == 0 {
-		s.logger.Warn("RecordChildWorkflow No rows were affected by the insert")
-	}
-
-	return nil
-}
-
-func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, functionID int) (*string, error) {
-	query := fmt.Sprintf(`SELECT child_workflow_id
-              FROM %s.operation_outputs
-              WHERE workflow_uuid = $1 AND function_id = $2`, pgx.Identifier{s.schema}.Sanitize())
-
-	var childWorkflowID *string
-	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to check child workflow: %w", err)
-	}
-
-	return childWorkflowID, nil
-}
-
-type recordChildGetResultDBInput struct {
-	parentWorkflowID string
-	childWorkflowID  string
-	stepID           int
-	output           *string
-	err              error
-	startedAt        time.Time
-	completedAt      time.Time
-}
-
-func (s *sysDB) recordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error {
-	startedAtMs := input.startedAt.UnixMilli()
-	completedAtMs := input.completedAt.UnixMilli()
-
-	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, function_name, output, error, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT DO NOTHING`, pgx.Identifier{s.schema}.Sanitize())
-
-	var errorString *string
-	if input.err != nil {
-		e := input.err.Error()
-		errorString = &e
-	}
-
-	_, err := s.pool.Exec(ctx, query,
-		input.parentWorkflowID,
-		input.stepID,
-		"DBOS.getResult",
-		input.output,
-		errorString,
-		input.childWorkflowID,
-		startedAtMs,
-		completedAtMs,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to record get result: %w", err)
-	}
 	return nil
 }
 
