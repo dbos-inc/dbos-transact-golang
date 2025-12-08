@@ -70,6 +70,9 @@ type systemDatabase interface {
 
 	// Garbage collection
 	garbageCollectWorkflows(ctx context.Context, input garbageCollectWorkflowsInput) error
+
+	// Metrics
+	getMetrics(ctx context.Context, startTime string, endTime string) ([]metricData, error)
 }
 
 type sysDB struct {
@@ -2531,6 +2534,118 @@ func (s *sysDB) getQueuePartitions(ctx context.Context, queueName string) ([]str
 	}
 
 	return partitions, nil
+}
+
+/*******************************/
+/******* METRICS ********/
+/*******************************/
+
+type metricData struct {
+	MetricName string  `json:"metric_name"` // step name or workflow name
+	MetricType string  `json:"metric_type"` // workflow_count, step_count, etc
+	Value      float64 `json:"value"`
+}
+
+func (s *sysDB) getMetrics(ctx context.Context, startTime, endTime string) ([]metricData, error) {
+	// Parse ISO timestamp strings to time.Time
+	startTimeParsed, err := time.Parse(time.RFC3339, startTime)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start_time format: %w", err)
+	}
+	endTimeParsed, err := time.Parse(time.RFC3339, endTime)
+	if err != nil {
+		return nil, fmt.Errorf("invalid end_time format: %w", err)
+	}
+
+	// Convert to epoch milliseconds
+	startEpochMs := startTimeParsed.UnixMilli()
+	endEpochMs := endTimeParsed.UnixMilli()
+
+	var metrics []metricData
+
+	// Query workflow metrics
+	workflowMetrics, err := s.getMetricWorkflowCount(ctx, startEpochMs, endEpochMs)
+	if err != nil {
+		return nil, err
+	}
+	metrics = append(metrics, workflowMetrics...)
+
+	// Query step metrics
+	stepMetrics, err := s.getMetricStepCount(ctx, startEpochMs, endEpochMs)
+	if err != nil {
+		return nil, err
+	}
+	metrics = append(metrics, stepMetrics...)
+
+	return metrics, nil
+}
+
+func (s *sysDB) getMetricWorkflowCount(ctx context.Context, startEpochMs, endEpochMs int64) ([]metricData, error) {
+	workflowQuery := fmt.Sprintf(`
+		SELECT name, COUNT(workflow_uuid) as count
+		FROM %s.workflow_status
+		WHERE created_at >= $1 AND created_at < $2
+		GROUP BY name
+	`, pgx.Identifier{s.schema}.Sanitize())
+
+	rows, err := s.pool.Query(ctx, workflowQuery, startEpochMs, endEpochMs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query workflow metrics: %w", err)
+	}
+	defer rows.Close()
+
+	var metrics []metricData
+	for rows.Next() {
+		var workflowName string
+		var workflowCount int64
+		if err := rows.Scan(&workflowName, &workflowCount); err != nil {
+			return nil, fmt.Errorf("failed to scan workflow metric: %w", err)
+		}
+		metrics = append(metrics, metricData{
+			MetricType: "workflow_count",
+			MetricName: workflowName,
+			Value:      float64(workflowCount),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating workflow metrics: %w", err)
+	}
+
+	return metrics, nil
+}
+
+func (s *sysDB) getMetricStepCount(ctx context.Context, startEpochMs, endEpochMs int64) ([]metricData, error) {
+	stepQuery := fmt.Sprintf(`
+		SELECT function_name, COUNT(*) as count
+		FROM %s.operation_outputs
+		WHERE completed_at_epoch_ms >= $1 AND completed_at_epoch_ms < $2
+		GROUP BY function_name
+	`, pgx.Identifier{s.schema}.Sanitize())
+
+	rows, err := s.pool.Query(ctx, stepQuery, startEpochMs, endEpochMs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query step metrics: %w", err)
+	}
+	defer rows.Close()
+
+	var metrics []metricData
+	for rows.Next() {
+		var stepName string
+		var stepCount int64
+		if err := rows.Scan(&stepName, &stepCount); err != nil {
+			return nil, fmt.Errorf("failed to scan step metric: %w", err)
+		}
+		metrics = append(metrics, metricData{
+			MetricType: "step_count",
+			MetricName: stepName,
+			Value:      float64(stepCount),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating step metrics: %w", err)
+	}
+
+	return metrics, nil
 }
 
 /*******************************/
