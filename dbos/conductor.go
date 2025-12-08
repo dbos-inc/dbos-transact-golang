@@ -344,6 +344,8 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleExistPendingWorkflowsRequest(data, base.RequestID)
 	case retentionMessage:
 		return c.handleRetentionRequest(data, base.RequestID)
+	case getMetricsMessage:
+		return c.handleGetMetricsRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
@@ -551,6 +553,49 @@ func (c *conductor) handleRetentionRequest(data []byte, requestID string) error 
 	}
 
 	return c.sendResponse(response, string(retentionMessage))
+}
+
+func (c *conductor) handleGetMetricsRequest(data []byte, requestID string) error {
+	var req getMetricsConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse get metrics request", "error", err)
+		return fmt.Errorf("failed to parse get metrics request: %w", err)
+	}
+	c.logger.Debug("Handling get metrics request",
+		"start_time", req.StartTime,
+		"end_time", req.EndTime,
+		"metric_class", req.MetricClass,
+		"request_id", requestID)
+
+	var errorMsg *string
+	var metricsData []metricData
+
+	if req.MetricClass == "workflow_step_count" {
+		var err error
+		metricsData, err = c.dbosCtx.systemDB.getMetrics(c.dbosCtx, req.StartTime, req.EndTime)
+		if err != nil {
+			c.logger.Error("Failed to get metrics", "error", err)
+			errStr := fmt.Sprintf("Exception encountered when getting metrics: %v", err)
+			errorMsg = &errStr
+		}
+	} else {
+		errStr := fmt.Sprintf("Unexpected metric class: %s", req.MetricClass)
+		errorMsg = &errStr
+		c.logger.Warn("Unexpected metric class", "metric_class", req.MetricClass)
+	}
+
+	response := getMetricsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      getMetricsMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
+		},
+		Metrics: metricsData,
+	}
+
+	return c.sendResponse(response, string(getMetricsMessage))
 }
 
 func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) error {
