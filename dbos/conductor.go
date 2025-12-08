@@ -374,6 +374,8 @@ func (c *conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 		ExecutorID:         c.dbosCtx.GetExecutorID(),
 		ApplicationVersion: c.dbosCtx.GetApplicationVersion(),
 		Hostname:           &hostname,
+		DBOSVersion:        getDBOSVersion(),
+		Language:           "go",
 	}
 
 	return c.sendResponse(response, string(executorInfo))

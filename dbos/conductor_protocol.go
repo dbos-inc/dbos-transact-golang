@@ -46,6 +46,8 @@ type executorInfoResponse struct {
 	ExecutorID         string  `json:"executor_id"`
 	ApplicationVersion string  `json:"application_version"`
 	Hostname           *string `json:"hostname,omitempty"`
+	DBOSVersion        string  `json:"dbos_version"`
+	Language           string  `json:"language"`
 }
 
 // listWorkflowsConductorRequestBody contains filter parameters for listing workflows
