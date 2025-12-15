@@ -141,6 +141,9 @@ var migration4SQL string
 //go:embed migrations/5_add_step_timestamps.sql
 var migration5SQL string
 
+//go:embed migrations/6_add_workflow_events_history.sql
+var migration6SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -183,6 +186,8 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 
 	migration5SQLProcessed := fmt.Sprintf(migration5SQL, sanitizedSchema)
 
+	migration6SQLProcessed := fmt.Sprintf(migration6SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
 		{version: 1, sql: migration1SQLProcessed},
@@ -190,6 +195,7 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 		{version: 3, sql: migration3SQLProcessed},
 		{version: 4, sql: migration4SQLProcessed},
 		{version: 5, sql: migration5SQLProcessed},
+		{version: 6, sql: migration6SQLProcessed},
 	}
 
 	// Begin transaction for atomic migration execution
