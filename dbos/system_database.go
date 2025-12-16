@@ -1188,6 +1188,33 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		if err != nil {
 			return "", fmt.Errorf("failed to copy operation outputs: %w", err)
 		}
+
+		// Copy workflow events history for steps before startStep
+		copyEventsHistoryQuery := fmt.Sprintf(`INSERT INTO %s.workflow_events_history
+			(workflow_uuid, function_id, key, value)
+			SELECT $1, function_id, key, value
+			FROM %s.workflow_events_history
+			WHERE workflow_uuid = $2 AND function_id < $3`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
+
+		_, err = tx.Exec(ctx, copyEventsHistoryQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
+		if err != nil {
+			return "", fmt.Errorf("failed to copy workflow events history: %w", err)
+		}
+
+		// Copy the latest version of each event (highest function_id for each key) into workflow_events
+		copyLatestEventsQuery := fmt.Sprintf(`INSERT INTO %s.workflow_events (workflow_uuid, key, value)
+			SELECT $1, key, value
+			FROM (
+				SELECT DISTINCT ON (key) key, value
+				FROM %s.workflow_events_history
+				WHERE workflow_uuid = $2 AND function_id < $3
+				ORDER BY key, function_id DESC
+			) AS latest_events`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
+
+		_, err = tx.Exec(ctx, copyLatestEventsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
+		if err != nil {
+			return "", fmt.Errorf("failed to copy latest workflow events: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -2098,6 +2125,17 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Message)
 	if err != nil {
 		return fmt.Errorf("failed to insert/update workflow event: %w", err)
+	}
+
+	// Record event in workflow_events_history
+	insertHistoryQuery := fmt.Sprintf(`INSERT INTO %s.workflow_events_history (workflow_uuid, function_id, key, value)
+					VALUES ($1, $2, $3, $4)
+					ON CONFLICT (workflow_uuid, function_id, key)
+					DO UPDATE SET value = EXCLUDED.value`, pgx.Identifier{s.schema}.Sanitize())
+
+	_, err = tx.Exec(ctx, insertHistoryQuery, wfState.workflowID, stepID, input.Key, input.Message)
+	if err != nil {
+		return fmt.Errorf("failed to insert workflow event history: %w", err)
 	}
 
 	// Record the operation result
