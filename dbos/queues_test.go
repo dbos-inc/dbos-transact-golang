@@ -497,7 +497,8 @@ func TestWorkflowQueues(t *testing.T) {
 
 	t.Run("ListRegisteredQueues", func(t *testing.T) {
 		// Get all registered queues
-		registeredQueues := dbosCtx.ListRegisteredQueues()
+		registeredQueues, err := ListRegisteredQueues(dbosCtx)
+		require.NoError(t, err, "failed to list registered queues")
 
 		// Create a map of expected queue names for easy lookup
 		expectedQueueNames := map[string]bool{

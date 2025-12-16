@@ -2376,3 +2376,18 @@ func ListRegisteredWorkflows(ctx DBOSContext, opts ...ListRegisteredWorkflowsOpt
 	}
 	return ctx.ListRegisteredWorkflows(ctx, opts...)
 }
+
+// ListRegisteredQueues returns all registered workflow queues.
+//
+// Example:
+//
+//	queues := dbos.ListRegisteredQueues(ctx)
+//	for _, queue := range queues {
+//	    log.Printf("Queue: %s", queue.Name)
+//	}
+func ListRegisteredQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
+	if ctx == nil {
+		return []WorkflowQueue{}, errors.New("ctx cannot be nil")
+	}
+	return ctx.ListRegisteredQueues(ctx)
+}
