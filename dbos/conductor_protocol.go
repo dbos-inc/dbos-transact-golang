@@ -21,6 +21,7 @@ const (
 	forkWorkflowMessage          messageType = "fork_workflow"
 	existPendingWorkflowsMessage messageType = "exist_pending_workflows"
 	retentionMessage             messageType = "retention"
+	getMetricsMessage            messageType = "get_metrics"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -46,6 +47,8 @@ type executorInfoResponse struct {
 	ExecutorID         string  `json:"executor_id"`
 	ApplicationVersion string  `json:"application_version"`
 	Hostname           *string `json:"hostname,omitempty"`
+	DBOSVersion        string  `json:"dbos_version"`
+	Language           string  `json:"language"`
 }
 
 // listWorkflowsConductorRequestBody contains filter parameters for listing workflows
@@ -377,4 +380,18 @@ type retentionConductorRequest struct {
 type retentionConductorResponse struct {
 	baseResponse
 	Success bool `json:"success"`
+}
+
+// getMetricsConductorRequest is sent by the conductor to request metrics
+type getMetricsConductorRequest struct {
+	baseMessage
+	StartTime   string `json:"start_time"`
+	EndTime     string `json:"end_time"`
+	MetricClass string `json:"metric_class"`
+}
+
+// getMetricsConductorResponse is sent in response to metrics requests
+type getMetricsConductorResponse struct {
+	baseResponse
+	Metrics []metricData `json:"metrics"`
 }
