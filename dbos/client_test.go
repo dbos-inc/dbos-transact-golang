@@ -2,12 +2,15 @@ package dbos
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -609,6 +612,27 @@ func TestForkWorkflow(t *testing.T) {
 
 	// Parent workflow with 2 steps and 2 child workflows
 	parentWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		// Set events: A=1, B=1, A=2, B=2
+		err := SetEvent(ctx, "A", "1")
+		if err != nil {
+			return "", err
+		}
+
+		err = SetEvent(ctx, "B", "1")
+		if err != nil {
+			return "", err
+		}
+
+		err = SetEvent(ctx, "A", "2")
+		if err != nil {
+			return "", err
+		}
+
+		err = SetEvent(ctx, "B", "2")
+		if err != nil {
+			return "", err
+		}
+
 		// Step 1
 		step1Result, err := RunAsStep(ctx, func(ctx context.Context) (string, error) {
 			stepCount1++
@@ -693,18 +717,33 @@ func TestForkWorkflow(t *testing.T) {
 		assert.Equal(t, 1, child1Count, "child1 counter should be 1")
 		assert.Equal(t, 1, child2Count, "child2 counter should be 1")
 
-		// 2. Fork from each step 1 to 6 and verify results
-		// Note: there's 6 steps: 2 steps 2 children and 2 GetResults
-		for step := 1; step <= 6; step++ {
-			t.Logf("Forking at step %d", step)
+		// 2. Fork from each startStep 1 to 10 and verify results
+		// Step mapping: 0=SetEvent A=1, 1=SetEvent B=1, 2=SetEvent A=2, 3=SetEvent B=2,
+		//               4=RunAsStep(step1), 5=RunWorkflow(child1), 6=GetResult(child1),
+		//               7=RunAsStep(step2), 8=RunWorkflow(child2), 9=GetResult(child2)
+		// Expected events history: function_id 0: A=1, function_id 1: B=1, function_id 2: A=2, function_id 3: B=2
+		type eventTuple struct {
+			functionID int
+			key        string
+			value      string
+		}
+		expectedEventTuples := []eventTuple{
+			{0, "A", "1"},
+			{1, "B", "1"},
+			{2, "A", "2"},
+			{3, "B", "2"},
+		}
 
-			customForkedWorkflowID := fmt.Sprintf("forked-workflow-step-%d", step)
+		for startStep := 0; startStep <= 9; startStep++ {
+			t.Logf("Forking at step %d", startStep)
+
+			customForkedWorkflowID := fmt.Sprintf("forked-workflow-step-%d", startStep)
 			forkedHandle, err := client.ForkWorkflow(ForkWorkflowInput{
 				OriginalWorkflowID: originalWorkflowID,
 				ForkedWorkflowID:   customForkedWorkflowID,
-				StartStep:          uint(step - 1),
+				StartStep:          uint(startStep),
 			})
-			require.NoError(t, err, "failed to fork workflow at step %d", step)
+			require.NoError(t, err, "failed to fork workflow at step %d", startStep)
 
 			forkedWorkflowID := forkedHandle.GetWorkflowID()
 			assert.Equal(t, customForkedWorkflowID, forkedWorkflowID, "expected forked workflow ID to match")
@@ -715,39 +754,59 @@ func TestForkWorkflow(t *testing.T) {
 			assert.Equal(t, originalWorkflowID, forkedStatus.ForkedFrom, "expected forked_from to be set to original workflow ID")
 
 			forkedResult, err := forkedHandle.GetResult()
-			require.NoError(t, err, "failed to get result from forked workflow at step %d", step)
+			require.NoError(t, err, "failed to get result from forked workflow at step %d", startStep)
 
 			// 1) Verify workflow result is correct
-			assert.Equal(t, expectedResult, forkedResult, "forked workflow at step %d: expected result to match", step)
+			assert.Equal(t, expectedResult, forkedResult, "forked workflow at step %d: expected result to match", startStep)
 
-			// 2) Verify counters are at expected totals based on the step where we're forking
-			t.Logf("Step %d: actual counters - step1:%d, step2:%d, child1:%d, child2:%d", step, stepCount1, stepCount2, child1Count, child2Count)
+			// 2) Verify events in workflow_events_history table
+			// The forked workflow will always execute all 4 SetEvent calls, so we should always have all 4 entries
+			// Get database pool from serverCtx to query workflow_events_history
+			dbosCtx, ok := serverCtx.(*dbosContext)
+			require.True(t, ok, "expected dbosContext")
+			sysDB, ok := dbosCtx.systemDB.(*sysDB)
+			require.True(t, ok, "expected sysDB")
 
-			// First step is executed only once
-			assert.Equal(t, 2, stepCount1, "forked workflow at step %d: step1 counter should be 2", step)
+			// Query all events from workflow_events_history
+			query := fmt.Sprintf(`SELECT function_id, key, value FROM %s.workflow_events_history WHERE workflow_uuid = $1 ORDER BY function_id, key`, pgx.Identifier{sysDB.schema}.Sanitize())
+			rows, err := sysDB.pool.Query(context.Background(), query, forkedWorkflowID)
+			require.NoError(t, err, "failed to query workflow_events_history for forked workflow at step %d", startStep)
+			defer rows.Close()
 
-			// First child will be executed twice
-			if step < 3 {
-				assert.Equal(t, 1+step, child1Count, "forked workflow at step %d: child1 counter should be %d", step, 1+step)
-			} else {
-				assert.Equal(t, 3, child1Count, "forked workflow at step %d: child1 counter should be 3", step)
+			// Collect all events as (function_id, key, value) tuples
+
+			var actualEventTuples []eventTuple
+			for rows.Next() {
+				var functionID int
+				var key, jsonb64Value string
+				err := rows.Scan(&functionID, &key, &jsonb64Value)
+				require.NoError(t, err, "failed to scan workflow_events_history row")
+				jsonValue, err := base64.StdEncoding.DecodeString(jsonb64Value)
+				require.NoError(t, err, "failed to decode base64 value")
+				var value string
+				err = json.Unmarshal(jsonValue, &value)
+				require.NoError(t, err, "failed to unmarshal value")
+				actualEventTuples = append(actualEventTuples, eventTuple{functionID, key, value})
 			}
+			require.NoError(t, rows.Err(), "error iterating workflow_events_history rows")
 
-			// Second step (in reality step 4) will be executed 4 times
-			if step < 5 {
-				assert.Equal(t, 1+step, stepCount2, "forked workflow at step %d: step2 counter should be %d", step, 1+step)
-			} else {
-				assert.Equal(t, 5, stepCount2, "forked workflow at step %d: step2 counter should be 5", step)
-			}
+			// Verify all 4 events are present and match
+			assert.Equal(t, expectedEventTuples, actualEventTuples, "forked workflow at step %d: events history mismatch", startStep)
 
-			// Second child will be executed 5 times
-			if step < 6 {
-				assert.Equal(t, 1+step, child2Count, "forked workflow at step %d: child2 counter should be %d", step, 1+step)
-			} else {
-				assert.Equal(t, 6, child2Count, "forked workflow at step %d: child2 counter should be 6", step)
-			}
+			// 3) Verify counters are at expected totals based on the step where we're forking
+			t.Logf("Step %d: actual counters - step1:%d, step2:%d, child1:%d, child2:%d", startStep, stepCount1, stepCount2, child1Count, child2Count)
 
-			t.Logf("Step %d: all counter totals verified correctly", step)
+			expectedStep1Count := 1 + min(startStep+1, 5)
+			assert.Equal(t, expectedStep1Count, stepCount1, "forked workflow at step %d: step1 counter should be %d", startStep, expectedStep1Count)
+
+			expectedChild1Count := 1 + min(startStep+1, 6)
+			assert.Equal(t, expectedChild1Count, child1Count, "forked workflow at step %d: child1 counter should be %d", startStep, expectedChild1Count)
+
+			expectedStep2Count := 1 + min(startStep+1, 8)
+			assert.Equal(t, expectedStep2Count, stepCount2, "forked workflow at step %d: step2 counter should be %d", startStep, expectedStep2Count)
+
+			expectedChild2Count := 1 + min(startStep+1, 9)
+			assert.Equal(t, expectedChild2Count, child2Count, "forked workflow at step %d: child2 counter should be %d", startStep, expectedChild2Count)
 		}
 
 		t.Logf("Final counters after all forks - steps:%d, child1:%d, child2:%d", stepCount1, child1Count, child2Count)
