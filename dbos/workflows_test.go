@@ -4610,3 +4610,127 @@ func TestWorkflowHandleContextCancel(t *testing.T) {
 			"expected error to be detectable as context.Canceled, got: %v", err)
 	})
 }
+
+func TestPatching(t *testing.T) {
+	/*
+		For patching we test these situations:
+			[x] new workflows (take the new path)
+			[x] old workflows being forked at an earlier step (take the new path)
+			[x] forking old workflows after the patch step (take the old path)
+		Finally, deprecate path
+
+		Note we don't test the recovery paths, because effectively equivalent:
+			* recovering workflows that already executed beyond the patch step
+			* old workflows being recovered, which didn't reach the patch step yet
+	*/
+
+	step := func(input int) (int, error) {
+		fmt.Println("step", input, "returning", input+1)
+		return input + 1, nil
+	}
+
+	stepPatched := func(input int) (int, error) {
+		return input + 2, nil
+	}
+
+	wf := func(ctx DBOSContext, input int) (int, error) {
+		// step < step to patch
+		RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			return step(input)
+		})
+		// step to patch
+		res, _ := RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			return step(input)
+		}, WithStepName("patch-step"))
+		// step > step to patch
+		RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			return step(input)
+		})
+		return res, nil
+	}
+
+	wfPatched := func(ctx DBOSContext, input int) (int, error) {
+		fmt.Println("===========entering wf===========")
+		fmt.Println("input", input)
+		// step < step to patch
+		RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			return step(input)
+		})
+
+		// step to patch
+		patched, err := Patch(ctx, "my-patch")
+		if err != nil {
+			return 0, err
+		}
+		var res int
+		if patched {
+			res, _ = RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return stepPatched(input)
+			}, WithStepName("patched-step"))
+			fmt.Println("ran patched step", "res", res)
+		} else {
+			res, err = RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("patch-step"))
+			fmt.Println("ran original step", "res", res, "err", err)
+		}
+
+		// step > step to patch
+		RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			return step(input)
+		})
+
+		return res, nil
+	}
+
+	dbosCtx := setupDBOS(t, true, true)
+	RegisterWorkflow(dbosCtx, wf, WithWorkflowName("wf"))
+
+	handle, err := RunWorkflow(dbosCtx, wf, 1)
+	require.NoError(t, err, "failed to start workflow")
+	result, err := handle.GetResult()
+	require.NoError(t, err, "failed to get result")
+	require.Equal(t, 2, result, "expected result to be 2")
+
+	// (hack) Clear the context registry, reset is_launched, and re-gister the patched wf with the same name
+	dbosCtx.(*dbosContext).workflowRegistry.Clear()
+	dbosCtx.(*dbosContext).workflowCustomNametoFQN.Clear()
+	RegisterWorkflow(dbosCtx, wfPatched, WithWorkflowName("wf"))
+	dbosCtx.Launch()
+
+	// new invocation takes the new code and has the patch step recorded
+	newHandle, err := RunWorkflow(dbosCtx, wfPatched, 1)
+	require.NoError(t, err, "failed to start workflow")
+	result, err = newHandle.GetResult()
+	require.NoError(t, err, "failed to get result")
+	require.Equal(t, 3, result, "expected result to be 3")
+	steps, err := GetWorkflowSteps(dbosCtx, newHandle.GetWorkflowID())
+	require.NoError(t, err, "failed to get workflow steps")
+	require.Equal(t, 4, len(steps), "expected 4 steps")
+	require.Equal(t, "my-patch", steps[1].StepName, "expected step name to be my-patch")
+
+	// Fork the workflow at different steps and verify behavior
+	// Steps 0 and 1 should take the new code (patched), step 2 should take the old code
+	for startStep := 0; startStep <= 2; startStep++ {
+		forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: handle.GetWorkflowID(),
+			StartStep:          uint(startStep),
+		})
+		require.NoError(t, err, "failed to fork workflow at step %d", startStep)
+		result, err := forkHandle.GetResult()
+		require.NoError(t, err, "failed to get result for fork at step %d", startStep)
+		steps, err := GetWorkflowSteps(dbosCtx, forkHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for fork at step %d", startStep)
+
+		if startStep < 2 {
+			// Forking before step 2 should take the new code
+			require.Equal(t, 3, result, "expected result to be 3 when forking at step %d", startStep)
+			require.Equal(t, 4, len(steps), "expected 4 steps when forking at step %d", startStep)
+			require.Equal(t, "my-patch", steps[1].StepName, "expected step name to be my-patch when forking at step %d", startStep)
+		} else {
+			// Forking at step 2 should take the old code
+			require.Equal(t, 2, result, "expected result to be 2 when forking at step %d", startStep)
+			require.Equal(t, 3, len(steps), "expected 3 steps when forking at step %d", startStep)
+		}
+	}
+}

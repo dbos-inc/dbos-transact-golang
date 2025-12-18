@@ -116,6 +116,8 @@ type DBOSContext interface {
 	SetEvent(_ DBOSContext, key string, message any) error                                                      // Set a key-value event for this workflow
 	GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error)            // Get a key-value event from a target workflow
 	Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error)                                         // Durable sleep that survives workflow recovery
+	Patch(_ DBOSContext, patchName string) (bool, error)                                                        // Check if workflow should use patched code
+	DeprecatePatch(_ DBOSContext, patchName string) (bool, error)                                               // Check if patch should be deprecated (skipped)
 	GetWorkflowID() (string, error)                                                                             // Get the current workflow ID (only available within workflows)
 	GetStepID() (int, error)                                                                                    // Get the current step ID (only available within workflows)
 
