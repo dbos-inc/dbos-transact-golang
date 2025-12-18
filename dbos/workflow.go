@@ -1718,7 +1718,7 @@ func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) (bool, err
 	patchNameFromDB, err := retryWithResult(c, func() (string, error) {
 		return c.systemDB.doesPatchExists(c, patchDBInput{
 			workflowID: wfState.workflowID,
-			stepID:     wfState.stepID,
+			stepID:     wfState.stepID + 1,
 			patchName:  patchName,
 		})
 	}, withRetrierLogger(c.logger))
