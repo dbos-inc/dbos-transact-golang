@@ -2391,3 +2391,45 @@ func ListRegisteredQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
 	}
 	return ctx.ListRegisteredQueues(ctx)
 }
+
+func (c *dbosContext) ListenQueues(_ DBOSContext, queues ...WorkflowQueue) {
+	if c.launched.Load() {
+		panic("Cannot call ListenQueues after DBOS has launched")
+	}
+
+	// Set listen to true for each provided queue
+	for _, queue := range queues {
+		if registeredQueue, exists := c.queueRunner.workflowQueueRegistry[queue.Name]; exists {
+			registeredQueue.listen = true
+			c.queueRunner.workflowQueueRegistry[queue.Name] = registeredQueue
+		} else {
+			c.logger.Warn("Queue not found in registry when calling ListenQueues. Did you create it with NewWorkflowQueue?", "queue_name", queue.Name)
+		}
+	}
+}
+
+// ListenQueues configures which queues the current DBOS process should listen to.
+// By default, all registered queues are listened to. When ListenQueues is called,
+// only the specified queues (and the internal DBOS queue) will be listened to.
+// This allows multiple DBOS processes to share the same queue registry but listen
+// to different subsets of queues.
+//
+// ListenQueues can only be called before DBOS has been launched. Calling it after
+// Launch will result in a panic.
+//
+// Example:
+//
+//	queue1 := dbos.NewWorkflowQueue(ctx, "queue-1")
+//	queue2 := dbos.NewWorkflowQueue(ctx, "queue-2")
+//	queue3 := dbos.NewWorkflowQueue(ctx, "queue-3")
+//
+//	// Only listen to queue1 and queue2
+//	dbos.ListenQueues(ctx, queue1, queue2)
+//
+//	dbos.Launch(ctx)
+func ListenQueues(ctx DBOSContext, queues ...WorkflowQueue) {
+	if ctx == nil {
+		panic("ctx cannot be nil")
+	}
+	ctx.ListenQueues(ctx, queues...)
+}
