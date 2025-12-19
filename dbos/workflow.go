@@ -252,7 +252,6 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			err:             outcome.err,
 			startedAt:       startTime,
 			completedAt:     completedTime,
-			isGetResult:     true,
 			stepName:        "DBOS.getResult",
 		}
 		recordResultErr := retry(h.dbosContext, func() error {
@@ -318,7 +317,6 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 				err:             err,
 				startedAt:       startTime,
 				completedAt:     completedTime,
-				isGetResult:     true,
 				stepName:        "DBOS.getResult",
 			}
 			recordResultErr := retry(h.dbosContext, func() error {

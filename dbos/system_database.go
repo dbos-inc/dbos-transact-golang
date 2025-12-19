@@ -1293,7 +1293,6 @@ type recordOperationResultDBInput struct {
 	tx              pgx.Tx
 	startedAt       time.Time
 	completedAt     time.Time
-	isGetResult     bool
 }
 
 func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
@@ -1318,13 +1317,8 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		args = append(args, input.childWorkflowID)
 	}
 
-	conflictClause := ""
-	if input.isGetResult {
-		conflictClause = "ON CONFLICT DO NOTHING"
-	}
-
-	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs (%s) VALUES (%s) %s`,
-		pgx.Identifier{s.schema}.Sanitize(), strings.Join(columns, ", "), strings.Join(placeholders, ", "), conflictClause)
+	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs (%s) VALUES (%s)`,
+		pgx.Identifier{s.schema}.Sanitize(), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
 
 	var err error
 	if input.tx != nil {
