@@ -376,10 +376,11 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 
 	newSystemDatabaseInputs := newSystemDatabaseInput{
-		databaseURL:    config.DatabaseURL,
-		databaseSchema: config.DatabaseSchema,
-		customPool:     config.SystemDBPool,
-		logger:         initExecutor.logger,
+		databaseURL:     config.DatabaseURL,
+		databaseSchema:  config.DatabaseSchema,
+		customPool:      config.SystemDBPool,
+		logger:          initExecutor.logger,
+		applicationName: config.AppName,
 	}
 
 	// Create the system database
