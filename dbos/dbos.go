@@ -133,6 +133,9 @@ type DBOSContext interface {
 	GetApplicationVersion() string // Get the application version for this context
 	GetExecutorID() string         // Get the executor ID for this context
 	GetApplicationID() string      // Get the application ID for this context
+
+	// Queue configuration
+	ListenQueues(_ DBOSContext, queues ...WorkflowQueue) // Configure which queues this process should listen to
 }
 
 type dbosContext struct {

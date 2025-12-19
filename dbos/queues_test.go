@@ -1664,3 +1664,121 @@ func TestQueuePollingIntervals(t *testing.T) {
 		require.Equal(t, maxPollingInterval, queue.maxPollingInterval)
 	})
 }
+
+func TestListenQueues(t *testing.T) {
+	t.Run("ListenToSubsetOfQueues", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, true, true)
+
+		// Register 3 queues
+		queue1 := NewWorkflowQueue(dbosCtx, "listen-test-queue-1")
+		queue2 := NewWorkflowQueue(dbosCtx, "listen-test-queue-2")
+		queue3 := NewWorkflowQueue(dbosCtx, "listen-test-queue-3")
+
+		// Register a simple workflow
+		testWorkflow := func(ctx DBOSContext, input string) (string, error) {
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, testWorkflow)
+
+		// Call ListenQueues twice, each time with a list of one queue (so we want to listen to only 2 out of 3 queues)
+		ListenQueues(dbosCtx, queue1)
+		ListenQueues(dbosCtx, queue2)
+
+		// Launch DBOS
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Enqueue workflows in all 3 queues
+		handle1, err := RunWorkflow(dbosCtx, testWorkflow, "queue1-input", WithQueue(queue1.Name))
+		require.NoError(t, err, "failed to enqueue workflow to queue1")
+
+		handle2, err := RunWorkflow(dbosCtx, testWorkflow, "queue2-input", WithQueue(queue2.Name))
+		require.NoError(t, err, "failed to enqueue workflow to queue2")
+
+		handle3, err := RunWorkflow(dbosCtx, testWorkflow, "queue3-input", WithQueue(queue3.Name))
+		require.NoError(t, err, "failed to enqueue workflow to queue3")
+
+		// Verify that workflows are dequeued and complete in the 2 queues we are actively listening from
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from queue1 workflow")
+		assert.Equal(t, "queue1-input", result1, "expected queue1 workflow to complete")
+
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result from queue2 workflow")
+		assert.Equal(t, "queue2-input", result2, "expected queue2 workflow to complete")
+
+		// Verify that workflow stays in ENQUEUED state for the queue that's not listened from
+		// Wait a bit to ensure the queue runner has had time to process
+		time.Sleep(2 * time.Second)
+
+		status3, err := handle3.GetStatus()
+		require.NoError(t, err, "failed to get status of queue3 workflow")
+		assert.Equal(t, WorkflowStatusEnqueued, status3.Status, "expected queue3 workflow to remain ENQUEUED")
+	})
+
+	t.Run("InternalQueueIsAlwaysListenedTo", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, true, true)
+
+		// Register a queue
+		queue1 := NewWorkflowQueue(dbosCtx, "listen-internal-test-queue-1")
+
+		// Register a simple workflow
+		testWorkflow := func(ctx DBOSContext, input string) (string, error) {
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, testWorkflow)
+
+		// Call ListenQueues with only queue1 (internal queue should still be listened to)
+		ListenQueues(dbosCtx, queue1)
+
+		// Launch DBOS
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Run a workflow that completes successfully
+		originalHandle, err := RunWorkflow(dbosCtx, testWorkflow, "original-input")
+		require.NoError(t, err, "failed to run original workflow")
+		originalResult, err := originalHandle.GetResult()
+		require.NoError(t, err, "failed to get result from original workflow")
+		assert.Equal(t, "original-input", originalResult, "expected original workflow to complete")
+
+		// Fork the workflow - this will enqueue it to the internal queue
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: originalHandle.GetWorkflowID(),
+			StartStep:          0,
+		})
+		require.NoError(t, err, "failed to fork workflow")
+
+		// Verify the forked workflow completes (proving the internal queue is being listened to)
+		forkResult, err := forkHandle.GetResult()
+		require.NoError(t, err, "failed to get result from forked workflow")
+		assert.Equal(t, "original-input", forkResult, "expected forked workflow to complete")
+
+		// Verify the forked workflow was on the internal queue
+		forkStatus, err := forkHandle.GetStatus()
+		require.NoError(t, err, "failed to get status of forked workflow")
+		assert.Equal(t, _DBOS_INTERNAL_QUEUE_NAME, forkStatus.QueueName, "expected forked workflow to be on internal queue")
+
+	})
+
+	t.Run("ListenQueuesAfterLaunchPanics", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, true, true)
+
+		queue1 := NewWorkflowQueue(dbosCtx, "listen-panic-test-queue-1")
+		queue2 := NewWorkflowQueue(dbosCtx, "listen-panic-test-queue-2")
+
+		// Launch DBOS first
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Attempting to call ListenQueues after Launch should panic
+		defer func() {
+			r := recover()
+			assert.NotNil(t, r, "expected panic from ListenQueues after launch but got none")
+			assert.Contains(t, fmt.Sprintf("%v", r), "Cannot call ListenQueues after DBOS has launched", "expected panic message to contain specific text")
+		}()
+
+		ListenQueues(dbosCtx, queue1, queue2)
+		t.Error("expected panic from ListenQueues after launch, but none occurred")
+	})
+}

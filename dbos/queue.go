@@ -35,6 +35,7 @@ type WorkflowQueue struct {
 	RateLimit            *RateLimiter  `json:"rateLimit,omitempty"`         // Rate limiting configuration
 	MaxTasksPerIteration int           `json:"maxTasksPerIteration"`        // Max workflows to dequeue per iteration
 	PartitionQueue       bool          `json:"partitionQueue,omitempty"`    // Enable partitioned queue mode
+	listen               bool          // Whether this queue should be listened to by the current process
 	basePollingInterval  time.Duration // Base polling interval (minimum, never poll faster)
 	maxPollingInterval   time.Duration // Maximum polling interval (never poll slower)
 }
@@ -215,7 +216,23 @@ func (qr *queueRunner) getQueue(queueName string) *WorkflowQueue {
 
 // run starts a goroutine for each registered queue to handle polling independently.
 func (qr *queueRunner) run(ctx *dbosContext) {
+	// Build map of queues to listen to
+	queuesToListenMap := make(map[string]WorkflowQueue)
 	for _, queue := range qr.workflowQueueRegistry {
+		if queue.listen {
+			queuesToListenMap[queue.Name] = queue
+		}
+	}
+
+	// If no queues have listen set to true, listen to all queues (default behavior)
+	// Else, add the internal queue to the map
+	if len(queuesToListenMap) == 0 {
+		queuesToListenMap = qr.workflowQueueRegistry
+	} else {
+		queuesToListenMap[_DBOS_INTERNAL_QUEUE_NAME] = qr.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
+	}
+
+	for _, queue := range queuesToListenMap {
 		qr.queueGoroutinesWg.Add(1)
 		go qr.runQueue(ctx, queue)
 	}
