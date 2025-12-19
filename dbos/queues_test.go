@@ -34,7 +34,7 @@ func queueStep(_ context.Context, input string) (string, error) {
 }
 
 func TestWorkflowQueues(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	queue := NewWorkflowQueue(dbosCtx, "test-queue")
 	dlqEnqueueQueue := NewWorkflowQueue(dbosCtx, "test-successive-enqueue-queue")
@@ -543,7 +543,7 @@ func TestWorkflowQueues(t *testing.T) {
 }
 
 func TestQueueRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	recoveryQueue := NewWorkflowQueue(dbosCtx, "recovery-queue")
 	var recoveryStepCounter int64
@@ -652,7 +652,7 @@ func TestQueueRecovery(t *testing.T) {
 
 // Note: we could update this test to have the same logic than TestWorkerConcurrency
 func TestGlobalConcurrency(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	globalConcurrencyQueue := NewWorkflowQueue(dbosCtx, "test-global-concurrency-queue", WithGlobalConcurrency(1))
 	workflowEvent1 := NewEvent()
@@ -711,9 +711,9 @@ func TestGlobalConcurrency(t *testing.T) {
 func TestWorkerConcurrency(t *testing.T) {
 	// Create two contexts that will represent 2 DBOS executors
 	os.Setenv("DBOS__VMID", "worker1")
-	dbosCtx1 := setupDBOS(t, true, true)
+	dbosCtx1 := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	os.Setenv("DBOS__VMID", "worker2")
-	dbosCtx2 := setupDBOS(t, false, false) // Don't check for leaks because t.Cancel is called in LIFO order. Also don't reset the DB here.
+	dbosCtx2 := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false}) // Don't check for leaks because t.Cancel is called in LIFO order. Also don't reset the DB here.
 	os.Unsetenv("DBOS__VMID")
 
 	assert.Equal(t, "worker1", dbosCtx1.GetExecutorID(), "expected first executor ID to be 'worker1'")
@@ -826,7 +826,7 @@ func TestWorkerConcurrency(t *testing.T) {
 }
 
 func TestWorkerConcurrencyXRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	workerConcurrencyRecoveryQueue := NewWorkflowQueue(dbosCtx, "test-worker-concurrency-recovery-queue", WithWorkerConcurrency(1))
 	workerConcurrencyRecoveryStartEvent1 := NewEvent()
@@ -915,7 +915,7 @@ func rateLimiterTestWorkflow(ctx DBOSContext, _ string) (time.Time, error) {
 }
 
 func TestQueueRateLimiter(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	rateLimiterQueue := NewWorkflowQueue(dbosCtx, "test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: time.Duration(1800 * time.Millisecond)}))
 
@@ -998,7 +998,7 @@ func TestQueueRateLimiter(t *testing.T) {
 }
 
 func TestQueueTimeouts(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	timeoutQueue := NewWorkflowQueue(dbosCtx, "timeout-queue")
 
@@ -1221,7 +1221,7 @@ func TestQueueTimeouts(t *testing.T) {
 }
 
 func TestPriorityQueue(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create priority-enabled queue with max concurrency of 1
 	priorityQueue := NewWorkflowQueue(dbosCtx, "test_queue_priority", WithGlobalConcurrency(1), WithPriorityEnabled())
@@ -1316,7 +1316,7 @@ func TestPriorityQueue(t *testing.T) {
 }
 
 func TestListQueuedWorkflows(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Simple test workflow that completes immediately
 	testWorkflow := func(ctx DBOSContext, input string) (string, error) {
@@ -1421,7 +1421,7 @@ func TestListQueuedWorkflows(t *testing.T) {
 
 func TestPartitionedQueues(t *testing.T) {
 	t.Run("PartitionKeyWithoutQueue", func(t *testing.T) {
-		dbosCtx := setupDBOS(t, true, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 		// Register a simple workflow
 		simpleWorkflow := func(ctx DBOSContext, input string) (string, error) {
@@ -1452,7 +1452,7 @@ func TestPartitionedQueues(t *testing.T) {
 	})
 
 	t.Run("PartitionKeyOnNonPartitionedQueue", func(t *testing.T) {
-		dbosCtx := setupDBOS(t, true, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 		// Create a non-partitioned queue
 		nonPartitionedQueue := NewWorkflowQueue(dbosCtx, "non-partitioned-queue")
@@ -1486,7 +1486,7 @@ func TestPartitionedQueues(t *testing.T) {
 	})
 
 	t.Run("PartitionedQueueWithoutPartitionKey", func(t *testing.T) {
-		dbosCtx := setupDBOS(t, true, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 		// Create a partitioned queue
 		partitionedQueue := NewWorkflowQueue(dbosCtx, "partitioned-queue-required", WithPartitionQueue())
@@ -1520,7 +1520,7 @@ func TestPartitionedQueues(t *testing.T) {
 	})
 
 	t.Run("PartitionKeyWithDeduplicationID", func(t *testing.T) {
-		dbosCtx := setupDBOS(t, true, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 		// Create a partitioned queue
 		partitionedQueue := NewWorkflowQueue(dbosCtx, "partitioned-queue-test", WithPartitionQueue())
@@ -1554,7 +1554,7 @@ func TestPartitionedQueues(t *testing.T) {
 	})
 
 	t.Run("Dequeue", func(t *testing.T) {
-		dbosCtx := setupDBOS(t, true, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 		// Create a partitioned queue with concurrency limit of 1 per partition
 		partitionedQueue := NewWorkflowQueue(dbosCtx, "partitioned-queue", WithPartitionQueue(), WithGlobalConcurrency(1))
@@ -1641,7 +1641,7 @@ func TestNewQueueRunner(t *testing.T) {
 
 func TestQueuePollingIntervals(t *testing.T) {
 	t.Run("queue uses default intervals when not specified", func(t *testing.T) {
-		ctx := setupDBOS(t, false, false)
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
 
 		queue := NewWorkflowQueue(ctx, "test-queue")
 		// Intervals are resolved during creation, so defaults should be applied
@@ -1650,7 +1650,7 @@ func TestQueuePollingIntervals(t *testing.T) {
 	})
 
 	t.Run("queue uses custom intervals when specified", func(t *testing.T) {
-		ctx := setupDBOS(t, false, false)
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
 
 		basePollingInterval := 2 * time.Second
 		maxPollingInterval := 60 * time.Second

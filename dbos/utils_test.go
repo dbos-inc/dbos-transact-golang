@@ -49,19 +49,30 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 	require.NoError(t, err)
 }
 
+type setupDBOSOptions struct {
+	dropDB          bool
+	checkLeaks      bool
+	useListenNotify *bool
+}
+
 /* Test database setup */
-func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
+func setupDBOS(t *testing.T, opts setupDBOSOptions) DBOSContext {
 	t.Helper()
 
 	databaseURL := getDatabaseURL()
-	if dropDB {
+	if opts.dropDB {
 		resetTestDatabase(t, databaseURL)
 	}
 
-	dbosCtx, err := NewDBOSContext(context.Background(), Config{
+	config := Config{
 		DatabaseURL: databaseURL,
 		AppName:     "test-app",
-	})
+	}
+	if opts.useListenNotify != nil {
+		config.UseListenNotify = opts.useListenNotify
+	}
+
+	dbosCtx, err := NewDBOSContext(context.Background(), config)
 	require.NoError(t, err)
 	require.NotNil(t, dbosCtx)
 
@@ -72,7 +83,7 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 			Shutdown(dbosCtx, 30*time.Second) // Wait for workflows to finish and shutdown admin server and system database
 		}
 		dbosCtx = nil
-		if checkLeaks {
+		if opts.checkLeaks {
 			goleak.VerifyNone(t,
 				// Ignore pgx health checks
 				// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
