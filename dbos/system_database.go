@@ -285,10 +285,11 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 }
 
 type newSystemDatabaseInput struct {
-	databaseURL    string
-	databaseSchema string
-	customPool     *pgxpool.Pool
-	logger         *slog.Logger
+	databaseURL     string
+	databaseSchema  string
+	customPool      *pgxpool.Pool
+	logger          *slog.Logger
+	applicationName string
 }
 
 // New creates a new SystemDatabase instance and runs migrations
@@ -334,6 +335,14 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 
 		// Add acquire timeout to prevent indefinite blocking
 		config.ConnConfig.ConnectTimeout = 10 * time.Second
+
+		// Set application_name parameter if provided
+		if inputs.applicationName != "" {
+			if config.ConnConfig.RuntimeParams == nil {
+				config.ConnConfig.RuntimeParams = make(map[string]string)
+			}
+			config.ConnConfig.RuntimeParams["application_name"] = inputs.applicationName
+		}
 
 		// Create pool with configuration
 		newPool, err := pgxpool.NewWithConfig(ctx, config)
