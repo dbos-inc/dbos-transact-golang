@@ -10,7 +10,7 @@ import (
 )
 
 func TestGetMetrics(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	defer Shutdown(dbosCtx, 1*time.Minute)
 
 	// Get the internal systemDB instance
@@ -113,7 +113,7 @@ func TestGetMetrics(t *testing.T) {
 }
 
 func TestGetMetricsEmptyTimeRange(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	defer Shutdown(dbosCtx, 1*time.Minute)
 
 	sysDB, ok := dbosCtx.(*dbosContext)

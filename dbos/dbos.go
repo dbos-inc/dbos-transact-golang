@@ -41,6 +41,7 @@ type Config struct {
 	ApplicationVersion string        // Application version (optional, overridden by DBOS__APPVERSION env var)
 	ExecutorID         string        // Executor ID (optional, overridden by DBOS__VMID env var)
 	EnablePatching     bool          // Enable the patching system for Patch and DeprecatePatch (default: false)
+	UseListenNotify    *bool         // Use PostgreSQL LISTEN/NOTIFY for notifications (default: true). If false, uses polling instead.
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -68,6 +69,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ExecutorID:         inputConfig.ExecutorID,
 		SystemDBPool:       inputConfig.SystemDBPool,
 		EnablePatching:     inputConfig.EnablePatching,
+		UseListenNotify:    inputConfig.UseListenNotify,
 	}
 
 	// Load defaults
@@ -97,6 +99,13 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 	if dbosConfig.ExecutorID == "" {
 		dbosConfig.ExecutorID = "local"
+	}
+	// Default UseListenNotify to true if not explicitly set
+	if inputConfig.UseListenNotify == nil {
+		useListenNotifyDefault := true
+		dbosConfig.UseListenNotify = &useListenNotifyDefault
+	} else {
+		dbosConfig.UseListenNotify = inputConfig.UseListenNotify
 	}
 
 	return dbosConfig, nil
@@ -418,12 +427,14 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 
+	// UseListenNotify is guaranteed to be non-nil after processConfig
 	newSystemDatabaseInputs := newSystemDatabaseInput{
 		databaseURL:     config.DatabaseURL,
 		databaseSchema:  config.DatabaseSchema,
 		customPool:      config.SystemDBPool,
 		logger:          initExecutor.logger,
 		applicationName: config.AppName,
+		useListenNotify: *config.UseListenNotify,
 	}
 
 	// Create the system database

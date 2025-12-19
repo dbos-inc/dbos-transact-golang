@@ -93,6 +93,7 @@ type sysDB struct {
 	logger                        *slog.Logger
 	schema                        string
 	launched                      bool
+	useListenNotify               bool
 }
 
 /*******************************/
@@ -139,6 +140,9 @@ func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *
 //go:embed migrations/1_initial_dbos_schema.sql
 var migration1SQL string
 
+//go:embed migrations/1_initial_dbos_schema_listen_notify.sql
+var migration1ListenNotifySQL string
+
 //go:embed migrations/2_add_queue_partition_key.sql
 var migration2SQL string
 
@@ -181,15 +185,20 @@ const (
 	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
-func runMigrations(pool *pgxpool.Pool, schema string) error {
+func runMigrations(pool *pgxpool.Pool, schema string, useListenNotify bool) error {
 	// Process the migration SQL with fmt.Sprintf
 	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
 	migration1SQLProcessed := fmt.Sprintf(migration1SQL,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
-		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
-		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
-		sanitizedSchema)
+		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+
+	// If useListenNotify is true, merge the listen/notify triggers with the main migration
+	if useListenNotify {
+		migration1ListenNotifySQLProcessed := fmt.Sprintf(migration1ListenNotifySQL,
+			sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+		migration1SQLProcessed = migration1SQLProcessed + "\n" + migration1ListenNotifySQLProcessed
+	}
 
 	migration2SQLProcessed := fmt.Sprintf(migration2SQL, sanitizedSchema)
 
@@ -303,6 +312,7 @@ type newSystemDatabaseInput struct {
 	customPool      *pgxpool.Pool
 	logger          *slog.Logger
 	applicationName string
+	useListenNotify bool
 }
 
 // New creates a new SystemDatabase instance and runs migrations
@@ -382,7 +392,7 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	}
 
 	// Run migrations
-	if err := runMigrations(pool, databaseSchema); err != nil {
+	if err := runMigrations(pool, databaseSchema, inputs.useListenNotify); err != nil {
 		if customPool == nil {
 			pool.Close()
 		}
@@ -412,12 +422,19 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		notificationLoopDone:          make(chan struct{}),
 		logger:                        logger.With("service", "system_database"),
 		schema:                        databaseSchema,
+		useListenNotify:               inputs.useListenNotify,
 	}, nil
 }
 
 func (s *sysDB) launch(ctx context.Context) {
-	// Start the notification listener loop
-	go s.notificationListenerLoop(ctx)
+	// Start the appropriate notification loop based on configuration
+	if s.useListenNotify {
+		// Start the LISTEN/NOTIFY-based notification listener loop
+		go s.notificationListenerLoop(ctx)
+	} else {
+		// Start the polling-based notification poller loop
+		go s.notificationPollerLoop(ctx)
+	}
 	s.launched = true
 }
 
@@ -1907,6 +1924,109 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (s *sysDB) notificationPollerLoop(ctx context.Context) {
+	defer func() {
+		s.logger.Debug("Notification poller loop exiting")
+		s.notificationLoopDone <- struct{}{}
+	}()
+
+	s.logger.Debug("DBOS: Starting notification poller loop")
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Debug("Notification poller exiting (context canceled)", "cause", context.Cause(ctx))
+			return
+		case <-ticker.C:
+			s.pollNotifications(ctx)
+			s.pollEvents(ctx)
+		}
+	}
+}
+
+func (s *sysDB) pollNotifications(ctx context.Context) {
+	// Iterate through all registered notification payloads
+	s.workflowNotificationsMap.Range(func(key, value any) bool {
+		payload, ok := key.(string)
+		if !ok {
+			return true // Continue to next item
+		}
+
+		// Parse payload: format is "destinationID::topic"
+		parts := strings.SplitN(payload, "::", 2)
+		if len(parts) != 2 {
+			s.logger.Warn("Invalid notification payload format", "payload", payload)
+			return true // Continue to next item
+		}
+
+		destinationID := parts[0]
+		topic := parts[1]
+
+		// Query database to check if notification exists
+		query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.notifications WHERE destination_uuid = $1 AND topic = $2)`, pgx.Identifier{s.schema}.Sanitize())
+		var exists bool
+		err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
+		if err != nil {
+			s.logger.Warn("Failed to poll notification", "payload", payload, "error", err)
+			return true // Continue to next item
+		}
+
+		// If notification exists, signal the condition variable
+		if exists {
+			if cond, ok := value.(*sync.Cond); ok {
+				cond.L.Lock()
+				cond.Broadcast()
+				cond.L.Unlock()
+			}
+		}
+
+		return true // Continue to next item
+	})
+}
+
+func (s *sysDB) pollEvents(ctx context.Context) {
+	// Iterate through all registered event payloads
+	s.workflowEventsMap.Range(func(key, value any) bool {
+		payload, ok := key.(string)
+		if !ok {
+			return true // Continue to next item
+		}
+
+		// Parse payload: format is "targetWorkflowID::key"
+		parts := strings.SplitN(payload, "::", 2)
+		if len(parts) != 2 {
+			s.logger.Warn("Invalid event payload format", "payload", payload)
+			return true // Continue to next item
+		}
+
+		targetWorkflowID := parts[0]
+		eventKey := parts[1]
+
+		// Query database to check if event exists
+		query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.workflow_events WHERE workflow_uuid = $1 AND key = $2)`, pgx.Identifier{s.schema}.Sanitize())
+		var exists bool
+		err := s.pool.QueryRow(ctx, query, targetWorkflowID, eventKey).Scan(&exists)
+		if err != nil {
+			s.logger.Warn("Failed to poll event", "payload", payload, "error", err)
+			return true // Continue to next item
+		}
+
+		// If event exists, signal the condition variable
+		if exists {
+			if cond, ok := value.(*sync.Cond); ok {
+				cond.L.Lock()
+				cond.Broadcast()
+				cond.L.Unlock()
+			}
+		}
+
+		return true // Continue to next item
+	})
 }
 
 const _DBOS_NULL_TOPIC = "__null__topic__"

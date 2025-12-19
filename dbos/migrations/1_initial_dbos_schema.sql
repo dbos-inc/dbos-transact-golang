@@ -59,21 +59,6 @@ CREATE TABLE %s.notifications (
 );
 CREATE INDEX idx_workflow_topic ON %s.notifications (destination_uuid, topic);
 
--- Create notification function
-CREATE OR REPLACE FUNCTION %s.notifications_function() RETURNS TRIGGER AS $$
-DECLARE
-    payload text := NEW.destination_uuid || '::' || NEW.topic;
-BEGIN
-    PERFORM pg_notify('dbos_notifications_channel', payload);
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Create notification trigger
-CREATE TRIGGER dbos_notifications_trigger
-AFTER INSERT ON %s.notifications
-FOR EACH ROW EXECUTE FUNCTION %s.notifications_function();
-
 CREATE TABLE %s.workflow_events (
     workflow_uuid TEXT NOT NULL,
     key TEXT NOT NULL,
@@ -82,21 +67,6 @@ CREATE TABLE %s.workflow_events (
     FOREIGN KEY (workflow_uuid) REFERENCES %s.workflow_status(workflow_uuid) 
         ON UPDATE CASCADE ON DELETE CASCADE
 );
-
--- Create events function
-CREATE OR REPLACE FUNCTION %s.workflow_events_function() RETURNS TRIGGER AS $$
-DECLARE
-    payload text := NEW.workflow_uuid || '::' || NEW.key;
-BEGIN
-    PERFORM pg_notify('dbos_workflow_events_channel', payload);
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Create events trigger
-CREATE TRIGGER dbos_workflow_events_trigger
-AFTER INSERT ON %s.workflow_events
-FOR EACH ROW EXECUTE FUNCTION %s.workflow_events_function();
 
 CREATE TABLE %s.streams (
     workflow_uuid TEXT NOT NULL,

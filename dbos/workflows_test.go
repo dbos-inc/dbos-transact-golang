@@ -101,7 +101,7 @@ func Identity[T any](dbosCtx DBOSContext, in T) (T, error) {
 }
 
 func TestWorkflowsRegistration(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Setup workflows with executor
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -314,7 +314,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DoubleRegistrationWithoutName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
 
 		// First registration should work
 		RegisterWorkflow(freshCtx, simpleWorkflow)
@@ -332,7 +332,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DoubleRegistrationWithCustomName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
 
 		// First registration with custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("custom-workflow"))
@@ -350,7 +350,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DifferentWorkflowsSameCustomName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
 
 		// First registration with custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("same-name"))
@@ -368,7 +368,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("RegisterAfterLaunchPanics", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
 
 		// Launch DBOS context
 		err := Launch(freshCtx)
@@ -464,7 +464,7 @@ func genericStepWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 }
 
 func TestSteps(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create workflows with executor
 	RegisterWorkflow(dbosCtx, stepWithinAStepWorkflow)
@@ -1114,7 +1114,7 @@ func TestSelect(t *testing.T) {
 }
 
 func TestChildWorkflow(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	type Inheritance struct {
 		ParentID string
@@ -1504,7 +1504,7 @@ func idempotencyWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 }
 
 func TestWorkflowIdempotency(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, idempotencyWorkflow)
 
 	t.Run("WorkflowExecutedOnlyOnce", func(t *testing.T) {
@@ -1541,7 +1541,7 @@ func TestWorkflowIdempotency(t *testing.T) {
 }
 
 func TestWorkflowRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	var (
 		recoveryCounters   []int64
@@ -1738,7 +1738,7 @@ func infiniteDeadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error)
 	return 0, nil
 }
 func TestWorkflowDeadLetterQueue(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
 	RegisterWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
 
@@ -1868,7 +1868,7 @@ var (
 )
 
 func TestScheduledWorkflows(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	RegisterWorkflow(dbosCtx, func(ctx DBOSContext, scheduledTime time.Time) (string, error) {
 		startTime := time.Now()
@@ -2086,7 +2086,7 @@ func recvContextCancelWorkflow(ctx DBOSContext, topic string) (string, error) {
 }
 
 func TestSendRecv(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register all send/recv workflows with executor
 	RegisterWorkflow(dbosCtx, sendWorkflow)
@@ -2639,6 +2639,80 @@ func TestSendRecv(t *testing.T) {
 	})
 }
 
+func TestSendRecvPoll(t *testing.T) {
+	useListenNotify := false
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, useListenNotify: &useListenNotify})
+
+	// Register all send/recv workflows with executor
+	RegisterWorkflow(dbosCtx, sendWorkflow)
+	RegisterWorkflow(dbosCtx, receiveWorkflow)
+	RegisterWorkflow(dbosCtx, receiveWorkflowCoordinated)
+	RegisterWorkflow(dbosCtx, sendStructWorkflow)
+	RegisterWorkflow(dbosCtx, receiveStructWorkflow)
+	RegisterWorkflow(dbosCtx, sendIdempotencyWorkflow)
+	RegisterWorkflow(dbosCtx, receiveIdempotencyWorkflow)
+	RegisterWorkflow(dbosCtx, durableRecvSleepWorkflow)
+	RegisterWorkflow(dbosCtx, workflowThatCallsSendInStep)
+	RegisterWorkflow(dbosCtx, recvContextCancelWorkflow)
+
+	Launch(dbosCtx)
+
+	t.Run("SendRecvSuccess", func(t *testing.T) {
+		// Clear the sync event before starting
+		sendRecvSyncEvent.Clear()
+
+		// Start the receive workflow - it will wait for sendRecvSyncEvent before calling Recv
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "test-topic")
+		require.NoError(t, err, "failed to start receive workflow")
+
+		// Send messages to the receive workflow
+		sendHandle, err := RunWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{
+			DestinationID: receiveHandle.GetWorkflowID(),
+			Topic:         "test-topic",
+		})
+		require.NoError(t, err, "failed to send message")
+
+		// Wait for send workflow to complete
+		_, err = sendHandle.GetResult()
+		require.NoError(t, err, "failed to get result from send workflow")
+
+		// Now that the send workflow has completed, signal the receive workflow to proceed
+		sendRecvSyncEvent.Set()
+
+		// Wait for receive workflow to complete
+		result, err := receiveHandle.GetResult()
+		require.NoError(t, err, "failed to get result from receive workflow")
+		require.Equal(t, "message1-message2-message3", result)
+
+		// Verify step counting for send workflow (sendWorkflow calls Send 3 times)
+		sendSteps, err := GetWorkflowSteps(dbosCtx, sendHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for send workflow")
+		require.Len(t, sendSteps, 3, "expected 3 steps in send workflow (3 Send calls), got %d", len(sendSteps))
+		for i, step := range sendSteps {
+			require.Equal(t, i, step.StepID, "expected step %d to have correct StepID", i)
+			require.Equal(t, "DBOS.send", step.StepName, "expected step %d to have StepName 'DBOS.send'", i)
+			require.False(t, step.StartedAt.IsZero(), "expected step %d to have StartedAt set", i)
+			require.False(t, step.CompletedAt.IsZero(), "expected step %d to have CompletedAt set", i)
+			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
+				"expected step %d CompletedAt to be after or equal to StartedAt", i)
+		}
+
+		// Verify step counting for receive workflow (receiveWorkflow calls Recv 3 times)
+		receiveSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for receive workflow")
+		require.Len(t, receiveSteps, 3, "expected 3 steps in receive workflow (3 Recv calls), got %d", len(receiveSteps))
+		require.Equal(t, "DBOS.recv", receiveSteps[0].StepName, "expected step 0 to have StepName 'DBOS.recv'")
+		require.Equal(t, "DBOS.recv", receiveSteps[1].StepName, "expected step 1 to have StepName 'DBOS.recv'")
+		require.Equal(t, "DBOS.recv", receiveSteps[2].StepName, "expected step 2 to have StepName 'DBOS.recv'")
+		for i, step := range receiveSteps {
+			require.False(t, step.StartedAt.IsZero(), "expected recv step %d to have StartedAt set", i)
+			require.False(t, step.CompletedAt.IsZero(), "expected recv step %d to have CompletedAt set", i)
+			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
+				"expected recv step %d CompletedAt to be after or equal to StartedAt", i)
+		}
+	})
+}
+
 var (
 	setEventStart                 = NewEvent()
 	setEventStartIdempotencyEvent = NewEvent()
@@ -2789,7 +2863,7 @@ func workflowWithMultipleSteps(dbosCtx DBOSContext, input string) (string, error
 }
 
 func TestWorkflowExecutionMismatch(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register workflows for testing
 	RegisterWorkflow(dbosCtx, conflictWorkflowA)
@@ -2855,7 +2929,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 }
 
 func TestSetGetEvent(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register all set/get event workflows with executor
 	RegisterWorkflow(dbosCtx, setEventWorkflow)
@@ -3389,6 +3463,155 @@ func TestSetGetEvent(t *testing.T) {
 	})
 }
 
+func TestSetGetEventPoll(t *testing.T) {
+	useListenNotify := false
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, useListenNotify: &useListenNotify})
+
+	// Register all set/get event workflows with executor
+	RegisterWorkflow(dbosCtx, setEventWorkflow)
+	RegisterWorkflow(dbosCtx, getEventWorkflow)
+	RegisterWorkflow(dbosCtx, setTwoEventsWorkflow)
+	RegisterWorkflow(dbosCtx, setEventIdempotencyWorkflow)
+	RegisterWorkflow(dbosCtx, getEventIdempotencyWorkflow)
+	RegisterWorkflow(dbosCtx, durableGetEventSleepWorkflow)
+
+	Launch(dbosCtx)
+
+	t.Run("SetGetEventFromWorkflow", func(t *testing.T) {
+		// Clear the signal event before starting
+		setSecondEventSignal.Clear()
+
+		setWorkflowID := uuid.NewString()
+		// Start a workflow to get the first event
+		getFirstEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, getEventWorkflowInput{
+			TargetWorkflowID: setWorkflowID, // Target workflow ID
+			Key:              "event",       // Event key
+		})
+		require.NoError(t, err, "failed to start get first event workflow")
+		getEventWorkflowStartedSignal.Wait()
+		getEventWorkflowStartedSignal.Clear()
+
+		time.Sleep(500 * time.Millisecond)
+
+		// Start the workflow that sets two events
+		setHandle, err := RunWorkflow(dbosCtx, setTwoEventsWorkflow, setEventWorkflowInput{
+			Key:     setWorkflowID,
+			Message: "unused",
+		}, WithWorkflowID(setWorkflowID))
+		require.NoError(t, err, "failed to start set two events workflow")
+
+		// Verify we can get the first event
+		firstMessage, err := getFirstEventHandle.GetResult()
+		require.NoError(t, err, "failed to get result from first event workflow")
+		assert.Equal(t, "first-event-message", firstMessage, "expected first message to be 'first-event-message'")
+
+		// Signal the workflow to set the second event
+		setSecondEventSignal.Set()
+
+		time.Sleep(500 * time.Millisecond)
+
+		// Start a workflow to get the second event
+		getSecondEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, getEventWorkflowInput{
+			TargetWorkflowID: setWorkflowID, // Target workflow ID
+			Key:              "event",       // Event key
+		})
+		require.NoError(t, err, "failed to start get second event workflow")
+		getEventWorkflowStartedSignal.Wait()
+		getEventWorkflowStartedSignal.Clear()
+
+		// Verify we can get the second event
+		secondMessage, err := getSecondEventHandle.GetResult()
+		require.NoError(t, err, "failed to get result from second event workflow")
+		assert.Equal(t, "second-event-message", secondMessage, "expected second message to be 'second-event-message'")
+
+		// Start a workflow to get the third event
+		getThirdEventHandle, err := RunWorkflow(dbosCtx, getEventWorkflow, getEventWorkflowInput{
+			TargetWorkflowID: setWorkflowID,  // Target workflow ID
+			Key:              "anotherevent", // Event key
+		})
+		require.NoError(t, err, "failed to start get third event workflow")
+		getEventWorkflowStartedSignal.Wait() // So we know we're waiting on GetEvent
+
+		// Signal the workflow to set the third event and wait until it's done
+		setThirdEventSignal.Set()
+
+		// Verify we can get the third event
+		thirdMessage, err := getThirdEventHandle.GetResult()
+		require.NoError(t, err, "failed to get result from third event workflow")
+		assert.Equal(t, "third-event-message", thirdMessage, "expected third message to be 'third-event-message'")
+
+		// Wait for the set workflow to complete
+		result, err := setHandle.GetResult()
+		require.NoError(t, err, "failed to get result from set two events workflow")
+		assert.Equal(t, "two-events-set", result, "expected result to be 'two-events-set'")
+
+		// Verify step counting for setTwoEventsWorkflow (calls SetEvent 3 times)
+		setSteps, err := GetWorkflowSteps(dbosCtx, setHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for set two events workflow")
+		require.Len(t, setSteps, 3, "expected 3 steps in set two events workflow (3 SetEvent calls), got %d", len(setSteps))
+		for i, step := range setSteps {
+			assert.Equal(t, i, step.StepID, "expected step %d to have StepID %d", i, i)
+			assert.Equal(t, "DBOS.setEvent", step.StepName, "expected step %d to have StepName 'DBOS.setEvent'", i)
+			require.False(t, step.StartedAt.IsZero(), "expected setEvent step %d to have StartedAt set", i)
+			require.False(t, step.CompletedAt.IsZero(), "expected setEvent step %d to have CompletedAt set", i)
+			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
+				"expected setEvent step %d CompletedAt to be after or equal to StartedAt", i)
+		}
+
+		// Verify step counting for the first get event workflow
+		getFirstSteps, err := GetWorkflowSteps(dbosCtx, getFirstEventHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for get first event workflow")
+		require.Len(t, getFirstSteps, 2, "expected 2 steps in get first event workflow (getEvent + sleep), got %d", len(getFirstSteps))
+		// First step should be the getEvent step with stepID 0
+		assert.Equal(t, 0, getFirstSteps[0].StepID, "expected first step to have StepID 0")
+		assert.Equal(t, "DBOS.getEvent", getFirstSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
+		require.False(t, getFirstSteps[0].StartedAt.IsZero(), "expected getEvent step to have StartedAt set")
+		require.False(t, getFirstSteps[0].CompletedAt.IsZero(), "expected getEvent step to have CompletedAt set")
+		require.True(t, getFirstSteps[0].CompletedAt.After(getFirstSteps[0].StartedAt) || getFirstSteps[0].CompletedAt.Equal(getFirstSteps[0].StartedAt),
+			"expected getEvent step CompletedAt to be after or equal to StartedAt")
+		// Second step should be the sleep step with stepID 1
+		assert.Equal(t, 1, getFirstSteps[1].StepID, "expected second step to have StepID 1")
+		assert.Equal(t, "DBOS.sleep", getFirstSteps[1].StepName, "expected second step to have StepName 'DBOS.sleep'")
+		require.False(t, getFirstSteps[1].StartedAt.IsZero(), "expected sleep step to have StartedAt set")
+		require.False(t, getFirstSteps[1].CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
+		require.True(t, getFirstSteps[1].CompletedAt.After(getFirstSteps[1].StartedAt) || getFirstSteps[1].CompletedAt.Equal(getFirstSteps[1].StartedAt),
+			"expected sleep step CompletedAt to be after or equal to StartedAt")
+
+		// Verify step counting for the second get event workflow
+		// This one does not sleep because the event was already set
+		getSecondSteps, err := GetWorkflowSteps(dbosCtx, getSecondEventHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for get second event workflow")
+		require.Len(t, getSecondSteps, 1, "expected 1 step in get second event workflow (getEvent only), got %d", len(getSecondSteps))
+		// First step should be the getEvent step with stepID 0
+		assert.Equal(t, 0, getSecondSteps[0].StepID, "expected first step to have StepID 0")
+		assert.Equal(t, "DBOS.getEvent", getSecondSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
+		require.False(t, getSecondSteps[0].StartedAt.IsZero(), "expected getEvent step to have StartedAt set")
+		require.False(t, getSecondSteps[0].CompletedAt.IsZero(), "expected getEvent step to have CompletedAt set")
+		require.True(t, getSecondSteps[0].CompletedAt.After(getSecondSteps[0].StartedAt) || getSecondSteps[0].CompletedAt.Equal(getSecondSteps[0].StartedAt),
+			"expected getEvent step CompletedAt to be after or equal to StartedAt")
+
+		// Verify step counting for the third get event workflow
+		// This one sleeps because the event wasn't set yet
+		getThirdSteps, err := GetWorkflowSteps(dbosCtx, getThirdEventHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for get third event workflow")
+		require.Len(t, getThirdSteps, 2, "expected 2 steps in get third event workflow (getEvent + sleep), got %d", len(getThirdSteps))
+		// First step should be the getEvent step with stepID 0
+		assert.Equal(t, 0, getThirdSteps[0].StepID, "expected first step to have StepID 0")
+		assert.Equal(t, "DBOS.getEvent", getThirdSteps[0].StepName, "expected first step to have StepName 'DBOS.getEvent'")
+		require.False(t, getThirdSteps[0].StartedAt.IsZero(), "expected getEvent step to have StartedAt set")
+		require.False(t, getThirdSteps[0].CompletedAt.IsZero(), "expected getEvent step to have CompletedAt set")
+		require.True(t, getThirdSteps[0].CompletedAt.After(getThirdSteps[0].StartedAt) || getThirdSteps[0].CompletedAt.Equal(getThirdSteps[0].StartedAt),
+			"expected getEvent step CompletedAt to be after or equal to StartedAt")
+		// Second step should be the sleep step with stepID 1
+		assert.Equal(t, 1, getThirdSteps[1].StepID, "expected second step to have StepID")
+		assert.Equal(t, "DBOS.sleep", getThirdSteps[1].StepName, "expected second step to have StepName 'DBOS.sleep'")
+		require.False(t, getThirdSteps[1].StartedAt.IsZero(), "expected sleep step to have StartedAt set")
+		require.False(t, getThirdSteps[1].CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
+		require.True(t, getThirdSteps[1].CompletedAt.After(getThirdSteps[1].StartedAt) || getThirdSteps[1].CompletedAt.Equal(getThirdSteps[1].StartedAt),
+			"expected sleep step CompletedAt to be after or equal to StartedAt")
+	})
+}
+
 var (
 	sleepStartEvent *Event
 	sleepStopEvent  *Event
@@ -3406,7 +3629,7 @@ func sleepRecoveryWorkflow(dbosCtx DBOSContext, duration time.Duration) (time.Du
 }
 
 func TestSleep(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, sleepRecoveryWorkflow)
 
 	t.Run("SleepDurableRecovery", func(t *testing.T) {
@@ -3470,7 +3693,7 @@ func TestSleep(t *testing.T) {
 }
 
 func TestWorkflowTimeout(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	waitForCancelWorkflow := func(ctx DBOSContext, _ string) (string, error) {
 		// This workflow will wait indefinitely until it is cancelled
@@ -3866,7 +4089,7 @@ func concurrentSimpleWorkflow(dbosCtx DBOSContext, input int) (int, error) {
 }
 
 func TestConcurrentWorkflows(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, concurrentSimpleWorkflow)
 	RegisterWorkflow(dbosCtx, notificationWaiterWorkflow)
 	RegisterWorkflow(dbosCtx, notificationSetterWorkflow)
@@ -4086,7 +4309,7 @@ func TestConcurrentWorkflows(t *testing.T) {
 }
 
 func TestWorkflowAtVersion(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
 
@@ -4106,7 +4329,7 @@ func TestWorkflowAtVersion(t *testing.T) {
 }
 
 func TestWorkflowCancel(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	blockingEvent := NewEvent()
 
@@ -4215,7 +4438,7 @@ func cancelAllBeforeBlockingWorkflow(ctx DBOSContext, input string) (string, err
 }
 
 func TestCancelAllBefore(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	RegisterWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow)
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -4339,7 +4562,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectWithOffset", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 		gcTestEvent := NewEvent()
 
 		// Ensure the event is set at the end to unblock any remaining workflows
@@ -4428,7 +4651,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectWithCutoffTime", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 		gcTestEvent := NewEvent()
 
 		// Ensure the event is set at the end to unblock any remaining workflows
@@ -4537,7 +4760,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectEmptyDatabase", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
 		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
@@ -4574,7 +4797,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectOnlyCompletedWorkflows", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 		gcTestEvent := NewEvent()
 
 		// Ensure the event is set at the end to unblock any remaining workflows
@@ -4679,7 +4902,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("ThresholdAndCutoffTimestampInteraction", func(t *testing.T) {
 		// Reset database for clean test environment
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 
 		// Register the test workflow
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
@@ -4756,7 +4979,7 @@ func TestGarbageCollect(t *testing.T) {
 // TestSpecialSteps tests that special workflow functions (ListWorkflows, CancelWorkflow,
 // ResumeWorkflow, ForkWorkflow, GetWorkflowSteps) work correctly as durable steps
 func TestSpecialSteps(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	specialStepsEvent := NewEvent()
 	blockingEvent := NewEvent()
@@ -4928,7 +5151,7 @@ func TestSpecialSteps(t *testing.T) {
 }
 
 func TestRegisteredWorkflowListing(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register some regular workflows
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -4994,7 +5217,7 @@ func TestRegisteredWorkflowListing(t *testing.T) {
 }
 
 func TestWorkflowIdentity(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
 	handle, err := RunWorkflow(
 		dbosCtx,
@@ -5024,7 +5247,7 @@ func TestWorkflowIdentity(t *testing.T) {
 }
 
 func TestWorkflowHandles(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, slowWorkflow)
 
 	t.Run("WorkflowHandleTimeout", func(t *testing.T) {
@@ -5062,7 +5285,7 @@ func TestWorkflowHandles(t *testing.T) {
 }
 
 func TestWorkflowHandleContextCancel(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, getEventWorkflow)
 
 	t.Run("WorkflowHandleContextCancel", func(t *testing.T) {
