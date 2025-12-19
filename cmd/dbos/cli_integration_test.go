@@ -377,6 +377,9 @@ func testListWorkflows(t *testing.T, cliPath string, baseArgs []string, dbRole s
 	assert.True(t, exists, "Response should contain workflow_id")
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
 
+	// Wait until the QueueWorkflow has enqueued all workflows.
+	// This is to avoid a race condition where the test checks for queued workflows
+	// before they are all enqueued.
 	require.Eventually(t, func() bool {
 		args := append([]string{"workflow", "list", "--queue", "example-queue"}, baseArgs...)
 		cmd := exec.Command(cliPath, args...)
