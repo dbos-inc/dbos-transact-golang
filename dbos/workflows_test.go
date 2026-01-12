@@ -4613,6 +4613,25 @@ func TestWorkflowHandleContextCancel(t *testing.T) {
 
 func TestPatching(t *testing.T) {
 	t.Run("PatchingEnabled", func(t *testing.T) {
+		// Create a DBOS context with patching enabled
+		databaseURL := getDatabaseURL()
+		resetTestDatabase(t, databaseURL)
+		dbosCtx, err := NewDBOSContext(context.Background(), Config{
+			DatabaseURL:        databaseURL,
+			AppName:            "test-app-patching-enabled",
+			EnablePatching:     true,
+			ApplicationVersion: "PATCHING_ENABLED",
+		})
+		require.NoError(t, err, "failed to create DBOS context with patching enabled")
+		require.Equal(t, "PATCHING_ENABLED", dbosCtx.GetApplicationVersion(), "expected application version to be PATCHING_ENABLED")
+
+		// Register cleanup
+		t.Cleanup(func() {
+			if dbosCtx != nil {
+				Shutdown(dbosCtx, 30*time.Second)
+			}
+		})
+
 		step := func(input int) (int, error) {
 			return input + 1, nil
 		}
@@ -4637,8 +4656,6 @@ func TestPatching(t *testing.T) {
 			return res, nil
 		}
 
-		dbosCtx := setupDBOS(t, true, true)
-		dbosCtx.(*dbosContext).config.EnablePatching = true
 		RegisterWorkflow(dbosCtx, wf, WithWorkflowName("wf"))
 
 		handle, err := RunWorkflow(dbosCtx, wf, 1)
@@ -4773,6 +4790,7 @@ func TestPatching(t *testing.T) {
 			EnablePatching: false, // Explicitly disable patching
 		})
 		require.NoError(t, err, "failed to create DBOS context without patching")
+		require.False(t, dbosCtxNoPatching.GetApplicationVersion() == "PATCHING_ENABLED", "expected application version to not be PATCHING_ENABLED")
 
 		// Register a workflow that calls Patch
 		wfWithPatch := func(ctx DBOSContext, input int) (int, error) {
