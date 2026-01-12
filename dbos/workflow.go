@@ -1648,6 +1648,10 @@ func Sleep(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
 }
 
 func (c *dbosContext) Patch(_ DBOSContext, patchName string) (bool, error) {
+	if !c.config.EnablePatching {
+		return false, newPatchingNotEnabledError()
+	}
+
 	if patchName == "" {
 		return false, errors.New("patch name cannot be empty")
 	}
@@ -1701,6 +1705,10 @@ func Patch(ctx DBOSContext, patchName string) (bool, error) {
 }
 
 func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) (bool, error) {
+	if !c.config.EnablePatching {
+		return false, newPatchingNotEnabledError()
+	}
+
 	if patchName == "" {
 		return false, errors.New("patch name cannot be empty")
 	}

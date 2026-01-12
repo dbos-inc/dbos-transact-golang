@@ -40,6 +40,7 @@ type Config struct {
 	ConductorAPIKey    string        // DBOS conductor API key (optional)
 	ApplicationVersion string        // Application version (optional, overridden by DBOS__APPVERSION env var)
 	ExecutorID         string        // Executor ID (optional, overridden by DBOS__VMID env var)
+	EnablePatching     bool          // Enable the patching system for Patch and DeprecatePatch (default: false)
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -66,6 +67,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ApplicationVersion: inputConfig.ApplicationVersion,
 		ExecutorID:         inputConfig.ExecutorID,
 		SystemDBPool:       inputConfig.SystemDBPool,
+		EnablePatching:     inputConfig.EnablePatching,
 	}
 
 	// Load defaults
@@ -203,6 +205,7 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 		launched := dbosCtx.launched.Load()
 		childCtx := &dbosContext{
 			ctx:                     context.WithValue(dbosCtx.ctx, key, val), // Spawn a new child context with the value set
+			config:                  dbosCtx.config,
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
 			workflowsWg:             dbosCtx.workflowsWg,
@@ -232,6 +235,7 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 		// but retains all other values
 		childCtx := &dbosContext{
 			ctx:                     context.WithoutCancel(dbosCtx.ctx),
+			config:                  dbosCtx.config,
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
 			workflowsWg:             dbosCtx.workflowsWg,
@@ -260,6 +264,7 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 		newCtx, cancelFunc := context.WithTimeoutCause(dbosCtx.ctx, timeout, errors.New("DBOS context timeout"))
 		childCtx := &dbosContext{
 			ctx:                     newCtx,
+			config:                  dbosCtx.config,
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
 			workflowsWg:             dbosCtx.workflowsWg,
