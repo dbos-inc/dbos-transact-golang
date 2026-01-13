@@ -4656,15 +4656,18 @@ func TestPatching(t *testing.T) {
 			// step < step to patch
 			RunAsStep(ctx, func(ctx context.Context) (int, error) {
 				return step(input)
-			})
+			}, WithStepName("firstStep"))
 			// step to patch
-			res, _ := RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			res, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
 				return step(input)
 			}, WithStepName("patch-step"))
+			if err != nil {
+				return 0, err
+			}
 			// step > step to patch
 			RunAsStep(ctx, func(ctx context.Context) (int, error) {
 				return step(input)
-			})
+			}, WithStepName("lastStep"))
 			return res, nil
 		}
 
@@ -4680,7 +4683,7 @@ func TestPatching(t *testing.T) {
 			// step < step to patch
 			RunAsStep(ctx, func(ctx context.Context) (int, error) {
 				return step(input)
-			})
+			}, WithStepName("firstStep"))
 
 			// step to patch
 			patched, err := Patch(ctx, "my-patch")
@@ -4689,19 +4692,25 @@ func TestPatching(t *testing.T) {
 			}
 			var res int
 			if patched {
-				res, _ = RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				res, err = RunAsStep(ctx, func(ctx context.Context) (int, error) {
 					return stepPatched(input)
 				}, WithStepName("patched-step"))
+				if err != nil {
+					return 0, err
+				}
 			} else {
-				res, _ = RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				res, err = RunAsStep(ctx, func(ctx context.Context) (int, error) {
 					return step(input)
 				}, WithStepName("patch-step"))
+				if err != nil {
+					return 0, err
+				}
 			}
 
 			// step > step to patch
 			RunAsStep(ctx, func(ctx context.Context) (int, error) {
 				return step(input)
-			})
+			}, WithStepName("lastStep"))
 
 			return res, nil
 		}
@@ -4751,14 +4760,17 @@ func TestPatching(t *testing.T) {
 		wfDeprecatePatch := func(ctx DBOSContext, input int) (int, error) {
 			RunAsStep(ctx, func(ctx context.Context) (int, error) {
 				return step(input)
-			})
+			}, WithStepName("firstStep"))
 			DeprecatePatch(ctx, "my-patch")
-			res, _ := RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			res, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
 				return stepPatched(input)
 			}, WithStepName("patched-step"))
+			if err != nil {
+				return 0, err
+			}
 			RunAsStep(ctx, func(ctx context.Context) (int, error) {
 				return step(input)
-			})
+			}, WithStepName("lastStep"))
 			return res, nil
 		}
 
@@ -4778,19 +4790,33 @@ func TestPatching(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow steps")
 		require.Equal(t, 3, len(steps), "expected 3 steps")
 
-		// Forking an old workflow (patch-time), _after_ the patch step, on the new code should work without non-determinism errors
+		// Forking an old workflow (post-patch), at or after the patch step, on the new code should work without non-determinism errors
+		// Because step 1 (the patch) is matched by DeprecatePatch in the new code
+		for _, startStep := range []uint{2, 3} {
+			forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+				OriginalWorkflowID: patchedHandle.GetWorkflowID(),
+				StartStep:          uint(startStep),
+			})
+			require.NoError(t, err, "failed to fork workflow")
+			result, err = forkHandle.GetResult()
+			require.NoError(t, err, "failed to get result")
+			require.Equal(t, 3, result, "expected result to be 3")
+			steps, err = GetWorkflowSteps(dbosCtx, forkHandle.GetWorkflowID())
+			require.NoError(t, err, "failed to get workflow steps")
+			require.Equal(t, 4, len(steps), "expected 4 steps")
+			require.Equal(t, "DBOS.patch-my-patch", steps[1].StepName, "expected step name to be DBOS.patch-my-patch")
+		}
+
+		// Forking an old workflow (pre-patch), after the patch step, on the new code will result in a non-determinism error, because the 2nd step name changed
+		// Because the patch step now has a new name
 		forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
-			OriginalWorkflowID: patchedHandle.GetWorkflowID(),
-			StartStep:          3,
+			OriginalWorkflowID: handle.GetWorkflowID(),
+			StartStep:          2,
 		})
 		require.NoError(t, err, "failed to fork workflow")
-		result, err = forkHandle.GetResult()
-		require.NoError(t, err, "failed to get result")
-		require.Equal(t, 3, result, "expected result to be 3")
-		steps, err = GetWorkflowSteps(dbosCtx, forkHandle.GetWorkflowID())
-		require.NoError(t, err, "failed to get workflow steps")
-		require.Equal(t, 4, len(steps), "expected 4 steps")
-		require.Equal(t, "DBOS.patch-my-patch", steps[1].StepName, "expected step name to be DBOS.patch-my-patch")
+		_, err = forkHandle.GetResult()
+		require.Error(t, err, "expected error when forking old workflow onto new workflow")
+		require.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %d", UnexpectedStep))
 	})
 
 	t.Run("PatchingNotEnabledError", func(t *testing.T) {

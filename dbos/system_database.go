@@ -1517,7 +1517,7 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 		return nil, fmt.Errorf("failed to get operation outputs: %w", err)
 	}
 
-	// If the provided and recorded function name are different, throw an exception
+	// If the provided and recorded function name are different, return an error
 	if input.stepName != recordedFunctionName {
 		return nil, newUnexpectedStepError(input.workflowID, input.stepID, input.stepName, recordedFunctionName)
 	}
