@@ -3437,7 +3437,11 @@ func TestConcurrentWorkflows(t *testing.T) {
 		close(results)
 		close(errors)
 
-		require.Equal(t, 0, len(errors), "Expected no errors from concurrent workflows")
+		if len(errors) > 0 {
+			for err := range errors {
+				t.Errorf("Error from send/recv workflows: %v", err)
+			}
+		}
 
 		resultCount := 0
 		receivedResults := make(map[int]bool)
@@ -3504,7 +3508,11 @@ func TestConcurrentWorkflows(t *testing.T) {
 		close(setterResults)
 		close(errors)
 
-		require.Equal(t, 0, len(errors), "Expected no errors from notification workflows")
+		if len(errors) > 0 {
+			for err := range errors {
+				t.Errorf("Error from send/recv workflows: %v", err)
+			}
+		}
 
 		waiterCount := 0
 		receivedWaiterResults := make(map[string]bool)
@@ -3579,7 +3587,11 @@ func TestConcurrentWorkflows(t *testing.T) {
 		close(senderResults)
 		close(errors)
 
-		require.Equal(t, 0, len(errors), "Expected no errors from send/recv workflows")
+		if len(errors) > 0 {
+			for err := range errors {
+				t.Errorf("Error from send/recv workflows: %v", err)
+			}
+		}
 
 		receiverCount := 0
 		receivedReceiverResults := make(map[string]bool)
