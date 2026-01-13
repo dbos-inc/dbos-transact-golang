@@ -1647,6 +1647,8 @@ func Sleep(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
 	return ctx.Sleep(ctx, duration)
 }
 
+const _DBOS_PATCH_PREFIX = "DBOS.patch-"
+
 func (c *dbosContext) Patch(_ DBOSContext, patchName string) (bool, error) {
 	if !c.config.EnablePatching {
 		return false, newPatchingNotEnabledError()
@@ -1666,11 +1668,14 @@ func (c *dbosContext) Patch(_ DBOSContext, patchName string) (bool, error) {
 		return false, newStepExecutionError(wfState.workflowID, patchName, fmt.Errorf("cannot call Patch within a step"))
 	}
 
+	// Automatically prefix the patch name with _DBOS_PATCH_PREFIX
+	prefixedPatchName := _DBOS_PATCH_PREFIX + patchName
+
 	patched, err := retryWithResult(c, func() (bool, error) {
 		return c.systemDB.patch(c, patchDBInput{
 			workflowID: wfState.workflowID,
 			stepID:     wfState.stepID + 1, // We are checking if the upcoming step should use the patched code
-			patchName:  patchName,
+			patchName:  prefixedPatchName,
 		})
 	}, withRetrierLogger(c.logger))
 
@@ -1723,15 +1728,18 @@ func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) (bool, err
 		return false, newStepExecutionError(wfState.workflowID, patchName, fmt.Errorf("cannot call DeprecatePatch within a step"))
 	}
 
+	// Automatically prefix the patch name with _DBOS_PATCH_PREFIX
+	prefixedPatchName := _DBOS_PATCH_PREFIX + patchName
+
 	patchNameFromDB, err := retryWithResult(c, func() (string, error) {
 		return c.systemDB.doesPatchExists(c, patchDBInput{
 			workflowID: wfState.workflowID,
 			stepID:     wfState.stepID + 1,
-			patchName:  patchName,
+			patchName:  prefixedPatchName,
 		})
 	}, withRetrierLogger(c.logger))
 
-	if patchNameFromDB != patchName || err == pgx.ErrNoRows {
+	if patchNameFromDB != prefixedPatchName || err == pgx.ErrNoRows {
 		return true, nil
 	}
 	wfState.nextStepID()

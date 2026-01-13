@@ -4709,7 +4709,7 @@ func TestPatching(t *testing.T) {
 		steps, err := GetWorkflowSteps(dbosCtx, patchedHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
 		require.Equal(t, 4, len(steps), "expected 4 steps")
-		require.Equal(t, "my-patch", steps[1].StepName, "expected step name to be my-patch")
+		require.Equal(t, "DBOS.patch-my-patch", steps[1].StepName, "expected step name to be DBOS.patch-my-patch")
 
 		// Fork the workflow at different steps and verify behavior
 		// Steps 0 and 1 should take the new code (patched), step 2 should take the old code
@@ -4728,7 +4728,7 @@ func TestPatching(t *testing.T) {
 				// Forking before step 2 should take the new code
 				require.Equal(t, 3, result, "expected result to be 3 when forking at step %d", startStep)
 				require.Equal(t, 4, len(steps), "expected 4 steps when forking at step %d", startStep)
-				require.Equal(t, "my-patch", steps[1].StepName, "expected step name to be my-patch when forking at step %d", startStep)
+				require.Equal(t, "DBOS.patch-my-patch", steps[1].StepName, "expected step name to be DBOS.patch-my-patch when forking at step %d", startStep)
 			} else {
 				// Forking at step 2 should take the old code
 				require.Equal(t, 2, result, "expected result to be 2 when forking at step %d", startStep)
@@ -4778,7 +4778,7 @@ func TestPatching(t *testing.T) {
 		steps, err = GetWorkflowSteps(dbosCtx, forkHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
 		require.Equal(t, 4, len(steps), "expected 4 steps")
-		require.Equal(t, "my-patch", steps[1].StepName, "expected step name to be my-patch")
+		require.Equal(t, "DBOS.patch-my-patch", steps[1].StepName, "expected step name to be DBOS.patch-my-patch")
 	})
 
 	t.Run("PatchingNotEnabledError", func(t *testing.T) {
