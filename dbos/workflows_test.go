@@ -4807,14 +4807,11 @@ func TestPatching(t *testing.T) {
 
 		// Test DeprecatePatch as well
 		wfWithDeprecatePatch := func(ctx DBOSContext, input int) (int, error) {
-			deprecated, err := DeprecatePatch(ctx, "test-patch")
+			err := DeprecatePatch(ctx, "test-patch")
 			if err != nil {
 				return 0, err
 			}
-			if deprecated {
-				return input + 10, nil
-			}
-			return input, nil
+			return input + 10, nil
 		}
 		RegisterWorkflow(dbosCtxNoPatching, wfWithDeprecatePatch)
 

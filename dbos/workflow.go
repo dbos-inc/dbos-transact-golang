@@ -1709,23 +1709,23 @@ func Patch(ctx DBOSContext, patchName string) (bool, error) {
 	return ctx.Patch(ctx, patchName)
 }
 
-func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) (bool, error) {
+func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) error {
 	if !c.config.EnablePatching {
-		return false, newPatchingNotEnabledError()
+		return newPatchingNotEnabledError()
 	}
 
 	if patchName == "" {
-		return false, errors.New("patch name cannot be empty")
+		return errors.New("patch name cannot be empty")
 	}
 
 	// Get workflow state to determine current step ID
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return false, errors.New("deprecate patch can only be called within a workflow")
+		return errors.New("deprecate patch can only be called within a workflow")
 	}
 
 	if wfState.isWithinStep {
-		return false, newStepExecutionError(wfState.workflowID, patchName, fmt.Errorf("cannot call DeprecatePatch within a step"))
+		return newStepExecutionError(wfState.workflowID, patchName, fmt.Errorf("cannot call DeprecatePatch within a step"))
 	}
 
 	// Automatically prefix the patch name with _DBOS_PATCH_PREFIX
@@ -1739,11 +1739,19 @@ func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) (bool, err
 		})
 	}, withRetrierLogger(c.logger))
 
+	// If patch doesn't exist, it's already deprecated (or never existed)
 	if patchNameFromDB != prefixedPatchName || err == pgx.ErrNoRows {
-		return true, nil
+		return nil
 	}
+
+	// If there was an error checking, return it
+	if err != nil {
+		return err
+	}
+
+	// Patch exists, deprecate it by incrementing step ID
 	wfState.nextStepID()
-	return false, err
+	return nil
 }
 
 // DeprecatePatch allows removing patches from code while ensuring the correct history
@@ -1751,11 +1759,16 @@ func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) (bool, err
 //
 // Example:
 //
-// dbos.DeprecatePatch(ctx, "my-patch")
+// err := dbos.DeprecatePatch(ctx, "my-patch")
+//
+//	if err != nil {
+//	    return err
+//	}
+//
 // // New code path
-func DeprecatePatch(ctx DBOSContext, patchName string) (bool, error) {
+func DeprecatePatch(ctx DBOSContext, patchName string) error {
 	if ctx == nil {
-		return false, errors.New("ctx cannot be nil")
+		return errors.New("ctx cannot be nil")
 	}
 	return ctx.DeprecatePatch(ctx, patchName)
 }
