@@ -1199,7 +1199,6 @@ func WithMaxInterval(interval time.Duration) StepOption {
 	}
 }
 
-
 func WithNextStepID(stepID int) StepOption {
 	return func(opts *stepOptions) {
 		opts.preGeneratedStepID = &stepID
@@ -1438,26 +1437,25 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 }
 
 // Go runs a step inside a Go routine and returns a channel to receive the result.
-// Go generates a deterministic step ID for the step before running the step in a routine, since routines are not deterministic.
-// The step ID is used to track the steps within the same workflow and use the step ID to perform recovery.
-// The folliwing examples shows how to use Go:
+// Go generates a deterministic step ID for the step before running the step in a routine, since goroutines are not deterministic.
+// Example:
 //
-//		resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
-//			return "Hello, World!", nil
-//		})
+// resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
+//   return "Hello, World!", nil
+// })
 //
-//		resultChan := <-resultChan // wait for the channel to receive
-//		if resultChan.err != nil {
-//			// Handle error
-//		}
-//	 result := resultChan.result
+// resultChan := <-resultChan // wait for the channel to receive
+// if resultChan.err != nil {
+//   // Handle error
+// }
+
 func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcome[R], error) {
 	if ctx == nil {
-		return *new(chan StepOutcome[R]), newStepExecutionError("", "", "ctx cannot be nil")
+		return nil, newStepExecutionError("", "", errors.New("ctx cannot be nil"))
 	}
 
 	if fn == nil {
-		return *new(chan StepOutcome[R]), newStepExecutionError("", "", "step function cannot be nil")
+		return nil, newStepExecutionError("", "", errors.New("step function cannot be nil"))
 	}
 
 	// Append WithStepName option to ensure the step name is set. This will not erase a user-provided step name
@@ -1468,17 +1466,18 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcom
 	typeErasedFn := StepFunc(func(ctx context.Context) (any, error) { return fn(ctx) })
 
 	result, err := ctx.Go(ctx, typeErasedFn, opts...)
-	// Step function could return a nil result
-	if result == nil {
-		return *new(chan StepOutcome[R]), err
+	if err != nil {
+		return nil, err
 	}
+	defer close(result)
 
+	// We need to decode the result from the step, and repipe it to a typed channel
+	// Note that we do not close this channel: the caller is responsible for closing it when they are done with it
 	outcomeChan := make(chan StepOutcome[R], 1)
-	defer close(outcomeChan)
 
-	outcome := <-result
-
-	if outcome.err != nil {
+	outcome := <-result // The channel is buffered so this will not block the processor
+	// If the step function returns a nil result, just return the channel with the error
+	if outcome.result == nil {
 		outcomeChan <- StepOutcome[R]{
 			result: *new(R),
 			err:    outcome.err,
@@ -1486,30 +1485,43 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcom
 		return outcomeChan, nil
 	}
 
-	// Otherwise type-check and cast the result
-	typedResult, ok := outcome.result.(R)
-	if !ok {
-		return *new(chan StepOutcome[R]), fmt.Errorf("unexpected result type: expected %T, got %T", *new(R), result)
+	var typedResult R
+	// First check if this is a checkpointed outcome (encoded value from database)
+	if checkpointed, ok := outcome.result.(stepCheckpointedOutcome); ok {
+		encodedResult, ok := checkpointed.value.(*string)
+		if !ok {
+			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+			return nil, newStepExecutionError(workflowID, stepName, fmt.Errorf("unexpected result type: expected *string, got %T", checkpointed.value))
+		}
+		serializer := newJSONSerializer[R]()
+		var decodeErr error
+		typedResult, decodeErr = serializer.Decode(encodedResult)
+		if decodeErr != nil {
+			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to decode checkpointed result: %w", decodeErr))
+		}
+	} else if typedRes, ok := outcome.result.(R); ok {
+		typedResult = typedRes
+	} else {
+		workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+		return nil, newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", outcome.result))
 	}
 	outcomeChan <- StepOutcome[R]{
 		result: typedResult,
-		err:    nil,
+		err:    outcome.err,
 	}
-
 	return outcomeChan, nil
 }
 
 func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (chan StepOutcome[any], error) {
-	// create a determistic step ID
-	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	// Create a determistic step ID
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return nil, newStepExecutionError("", stepName, "workflow state not found in context: are you running this step within a workflow?")
+		return nil, newStepExecutionError("", "", errors.New("workflow state not found in context: are you running this step within a workflow?"))
 	}
-	stepID := wfState.nextStepID()
-	opts = append(opts, WithNextStepID(stepID))
+	opts = append(opts, WithNextStepID(wfState.nextStepID()))
 
-	// run step inside a Go routine by passing a stepID
+	// Run step inside a Go routine
 	result := make(chan StepOutcome[any], 1)
 	go func() {
 		res, err := ctx.RunAsStep(ctx, fn, opts...)
