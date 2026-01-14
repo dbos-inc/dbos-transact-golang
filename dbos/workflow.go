@@ -1508,7 +1508,7 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcom
 				workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
 				outcomeChan <- StepOutcome[R]{
 					result: *new(R),
-					err:    newWorkflowExecutionError(workflowID, fmt.Errorf("failed to decode checkpointed result: %w", decodeErr)),
+					err:    newStepExecutionError(workflowID, stepName, fmt.Errorf("failed to decode checkpointed result: %w", decodeErr)),
 				}
 				return
 			}
