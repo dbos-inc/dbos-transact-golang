@@ -1478,7 +1478,6 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcom
 		defer close(outcomeChan)
 
 		outcome := <-result // Block here waiting for the step to complete
-		close(result)
 
 		// If the step function returns a nil result, send the error through the channel
 		if outcome.result == nil {
@@ -1543,6 +1542,7 @@ func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (chan
 	// Run step inside a Go routine
 	result := make(chan StepOutcome[any], 1)
 	go func() {
+		defer close(result)
 		res, err := ctx.RunAsStep(ctx, fn, opts...)
 		result <- StepOutcome[any]{
 			result: res,
