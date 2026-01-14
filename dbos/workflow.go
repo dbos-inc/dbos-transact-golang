@@ -1137,7 +1137,7 @@ type stepOptions struct {
 	baseInterval       time.Duration // Initial delay between retries (default: 100ms)
 	maxInterval        time.Duration // Maximum delay between retries (default: 5s)
 	stepName           string        // Custom name for the step (defaults to function name)
-	preGeneratedStepID *int          // Pre generated stepID in case we want to run the function in a Go routine
+	preGeneratedStepID *int          // Pre generated stepID
 }
 
 // setDefaults applies default values to stepOptions

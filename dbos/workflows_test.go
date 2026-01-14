@@ -750,7 +750,6 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 	})
 
 	t.Run("Go must execute 100 steps simultaneously then return the stepIDs in the correct sequence", func(t *testing.T) {
-		// run 100 steps simultaneously
 		const numSteps = 100
 		results := make(chan string, numSteps)
 		defer close(results)
@@ -785,7 +784,6 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 	})
 
 	t.Run("Go executes the same workflow twice, whilst blocking the first workflow, to test for deterministic execution when using Go routines", func(t *testing.T) {
-
 		stepDeterminismStartEvent = NewEvent()
 		stepDeterminismEvent = NewEvent()
 
