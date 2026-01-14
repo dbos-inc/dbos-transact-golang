@@ -780,6 +780,10 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 			res := <-resultChan
 			assert.Equal(t, i, res.result, "expected step ID to be %d, got %d", i, res.result)
 			assert.NoError(t, res.err, "expected no error, got %v", res.err)
+
+			res2, ok := <-resultChan
+			assert.False(t, ok, "channel should be closed after receiving result")
+			assert.Equal(t, StepOutcome[int]{}, res2, "closed channel should return zero value")
 		}
 	})
 
