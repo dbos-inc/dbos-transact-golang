@@ -790,20 +790,32 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		stepDeterminismEvent = NewEvent()
 
 		goWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+			channels := make([]chan StepOutcome[string], 0, 11)
+
 			for range 10 {
-				_, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				ch, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 					return stepWithSleep(ctx, 1*time.Second)
 				})
 				if err != nil {
 					return "", err
 				}
+				channels = append(channels, ch)
 			}
 
-			_, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+			ch, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 				return stepThatBlocks(ctx)
 			})
 			if err != nil {
 				return "", err
+			}
+			channels = append(channels, ch)
+
+			// read all the channels to ensure the corresponding goroutines have completed
+			for _, ch := range channels {
+				outcome := <-ch
+				if outcome.err != nil {
+					return "", outcome.err
+				}
 			}
 
 			return "", nil

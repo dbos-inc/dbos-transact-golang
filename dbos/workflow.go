@@ -1469,47 +1469,66 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcom
 	if err != nil {
 		return nil, err
 	}
-	defer close(result)
 
-	// We need to decode the result from the step, and repipe it to a typed channel
-	// Note that we do not close this channel: the caller is responsible for closing it when they are done with it
+	// Create the typed channel to return immediately (non-blocking)
 	outcomeChan := make(chan StepOutcome[R], 1)
 
-	outcome := <-result // The channel is buffered so this will not block the processor
-	// If the step function returns a nil result, just return the channel with the error
-	if outcome.result == nil {
+	// Start a goroutine to handle decoding and type conversion asynchronously
+	go func() {
+		defer close(outcomeChan)
+
+		outcome := <-result // Block here waiting for the step to complete
+		close(result)
+
+		// If the step function returns a nil result, send the error through the channel
+		if outcome.result == nil {
+			outcomeChan <- StepOutcome[R]{
+				result: *new(R),
+				err:    outcome.err,
+			}
+			return
+		}
+
+		var typedResult R
+		// First check if this is a checkpointed outcome (encoded value from database)
+		if checkpointed, ok := outcome.result.(stepCheckpointedOutcome); ok {
+			encodedResult, ok := checkpointed.value.(*string)
+			if !ok {
+				workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+				outcomeChan <- StepOutcome[R]{
+					result: *new(R),
+					err:    newStepExecutionError(workflowID, stepName, fmt.Errorf("unexpected result type: expected *string, got %T", checkpointed.value)),
+				}
+				return
+			}
+			serializer := newJSONSerializer[R]()
+			var decodeErr error
+			typedResult, decodeErr = serializer.Decode(encodedResult)
+			if decodeErr != nil {
+				workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+				outcomeChan <- StepOutcome[R]{
+					result: *new(R),
+					err:    newWorkflowExecutionError(workflowID, fmt.Errorf("failed to decode checkpointed result: %w", decodeErr)),
+				}
+				return
+			}
+		} else if typedRes, ok := outcome.result.(R); ok {
+			typedResult = typedRes
+		} else {
+			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+			outcomeChan <- StepOutcome[R]{
+				result: *new(R),
+				err:    newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", outcome.result)),
+			}
+			return
+		}
+
 		outcomeChan <- StepOutcome[R]{
-			result: *new(R),
+			result: typedResult,
 			err:    outcome.err,
 		}
-		return outcomeChan, nil
-	}
+	}()
 
-	var typedResult R
-	// First check if this is a checkpointed outcome (encoded value from database)
-	if checkpointed, ok := outcome.result.(stepCheckpointedOutcome); ok {
-		encodedResult, ok := checkpointed.value.(*string)
-		if !ok {
-			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-			return nil, newStepExecutionError(workflowID, stepName, fmt.Errorf("unexpected result type: expected *string, got %T", checkpointed.value))
-		}
-		serializer := newJSONSerializer[R]()
-		var decodeErr error
-		typedResult, decodeErr = serializer.Decode(encodedResult)
-		if decodeErr != nil {
-			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to decode checkpointed result: %w", decodeErr))
-		}
-	} else if typedRes, ok := outcome.result.(R); ok {
-		typedResult = typedRes
-	} else {
-		workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-		return nil, newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", outcome.result))
-	}
-	outcomeChan <- StepOutcome[R]{
-		result: typedResult,
-		err:    outcome.err,
-	}
 	return outcomeChan, nil
 }
 
