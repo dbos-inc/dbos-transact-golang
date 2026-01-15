@@ -1208,8 +1208,8 @@ func WithNextStepID(stepID int) StepOption {
 // StepOutcome holds the result and error from a step execution
 // This struct is returned as part of a channel from the Go function when running the step inside a Go routine
 type StepOutcome[R any] struct {
-	result R
-	err    error
+	Result R     `json:"result"`
+	Err    error `json:"err"`
 }
 
 // RunAsStep executes a function as a durable step within a workflow.
@@ -1480,23 +1480,23 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcom
 		outcome := <-result // Block here waiting for the step to complete
 
 		// If the step function returns a nil result, send the error through the channel
-		if outcome.result == nil {
+		if outcome.Result == nil {
 			outcomeChan <- StepOutcome[R]{
-				result: *new(R),
-				err:    outcome.err,
+				Result: *new(R),
+				Err:    outcome.Err,
 			}
 			return
 		}
 
 		var typedResult R
 		// First check if this is a checkpointed outcome (encoded value from database)
-		if checkpointed, ok := outcome.result.(stepCheckpointedOutcome); ok {
+		if checkpointed, ok := outcome.Result.(stepCheckpointedOutcome); ok {
 			encodedResult, ok := checkpointed.value.(*string)
 			if !ok {
 				workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
 				outcomeChan <- StepOutcome[R]{
-					result: *new(R),
-					err:    newStepExecutionError(workflowID, stepName, fmt.Errorf("unexpected result type: expected *string, got %T", checkpointed.value)),
+					Result: *new(R),
+					Err:    newStepExecutionError(workflowID, stepName, fmt.Errorf("unexpected result type: expected *string, got %T", checkpointed.value)),
 				}
 				return
 			}
@@ -1506,25 +1506,25 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcom
 			if decodeErr != nil {
 				workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
 				outcomeChan <- StepOutcome[R]{
-					result: *new(R),
-					err:    newStepExecutionError(workflowID, stepName, fmt.Errorf("failed to decode checkpointed result: %w", decodeErr)),
+					Result: *new(R),
+					Err:    newStepExecutionError(workflowID, stepName, fmt.Errorf("failed to decode checkpointed result: %w", decodeErr)),
 				}
 				return
 			}
-		} else if typedRes, ok := outcome.result.(R); ok {
+		} else if typedRes, ok := outcome.Result.(R); ok {
 			typedResult = typedRes
 		} else {
 			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
 			outcomeChan <- StepOutcome[R]{
-				result: *new(R),
-				err:    newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", outcome.result)),
+				Result: *new(R),
+				Err:    newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", outcome.Result)),
 			}
 			return
 		}
 
 		outcomeChan <- StepOutcome[R]{
-			result: typedResult,
-			err:    outcome.err,
+			Result: typedResult,
+			Err:    outcome.Err,
 		}
 	}()
 
@@ -1545,8 +1545,8 @@ func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (chan
 		defer close(result)
 		res, err := ctx.RunAsStep(ctx, fn, opts...)
 		result <- StepOutcome[any]{
-			result: res,
-			err:    err,
+			Result: res,
+			Err:    err,
 		}
 	}()
 
@@ -1590,8 +1590,8 @@ func Select[R any](ctx DBOSContext, channels []<-chan StepOutcome[R]) (StepOutco
 			defer close(anyCh)
 			for outcome := range srcCh {
 				anyCh <- StepOutcome[any]{
-					result: outcome.result,
-					err:    outcome.err,
+					Result: outcome.Result,
+					Err:    outcome.Err,
 				}
 			}
 		}()
@@ -1624,20 +1624,20 @@ func Select[R any](ctx DBOSContext, channels []<-chan StepOutcome[R]) (StepOutco
 		} else if anyOutcome, ok := result.(StepOutcome[any]); ok {
 			// When the step is executed, convert from StepOutcome[any] to StepOutcome[R]
 			// Extract the result and type assert it
-			if anyOutcome.result == nil {
+			if anyOutcome.Result == nil {
 				typedResult = StepOutcome[R]{
-					result: *new(R),
-					err:    anyOutcome.err,
+					Result: *new(R),
+					Err:    anyOutcome.Err,
 				}
 			} else {
-				typedRes, ok := anyOutcome.result.(R)
+				typedRes, ok := anyOutcome.Result.(R)
 				if !ok {
 					workflowID, _ := GetWorkflowID(ctx)
-					return StepOutcome[R]{}, newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", anyOutcome.result))
+					return StepOutcome[R]{}, newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", anyOutcome.Result))
 				}
 				typedResult = StepOutcome[R]{
-					result: typedRes,
-					err:    anyOutcome.err,
+					Result: typedRes,
+					Err:    anyOutcome.Err,
 				}
 			}
 		} else {
@@ -1647,20 +1647,20 @@ func Select[R any](ctx DBOSContext, channels []<-chan StepOutcome[R]) (StepOutco
 	} else {
 		// Fallback for testing/mocking scenarios
 		if anyOutcome, ok := result.(StepOutcome[any]); ok {
-			if anyOutcome.result == nil {
+			if anyOutcome.Result == nil {
 				typedResult = StepOutcome[R]{
-					result: *new(R),
-					err:    anyOutcome.err,
+					Result: *new(R),
+					Err:    anyOutcome.Err,
 				}
 			} else {
-				typedRes, ok := anyOutcome.result.(R)
+				typedRes, ok := anyOutcome.Result.(R)
 				if !ok {
 					workflowID, _ := GetWorkflowID(ctx)
-					return StepOutcome[R]{}, newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("StepOutcome[%T]", *new(R)), fmt.Sprintf("%T", anyOutcome.result))
+					return StepOutcome[R]{}, newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("StepOutcome[%T]", *new(R)), fmt.Sprintf("%T", anyOutcome.Result))
 				}
 				typedResult = StepOutcome[R]{
-					result: typedRes,
-					err:    anyOutcome.err,
+					Result: typedRes,
+					Err:    anyOutcome.Err,
 				}
 			}
 		} else {
