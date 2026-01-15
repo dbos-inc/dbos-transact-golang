@@ -118,6 +118,8 @@ type DBOSContext interface {
 	// Workflow operations
 	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
 	RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
+	Go(_ DBOSContext, fn StepFunc, opts ...StepOption) (chan StepOutcome[any], error)                           // Starts a step inside a Go routine and returns a channel to receive the result
+	Select(_ DBOSContext, channels []<-chan StepOutcome[any]) (any, error)                                      // Performs a durable select over a slice of channels, checkpointing the selected channel and value
 	Send(_ DBOSContext, destinationID string, message any, topic string) error                                  // Send a message to another workflow
 	Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error)                                       // Receive a message sent to this workflow
 	SetEvent(_ DBOSContext, key string, message any) error                                                      // Set a key-value event for this workflow
@@ -257,9 +259,34 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 	return nil
 }
 
-// WithTimeout returns a copy of the DBOS context with a timeout.
-// The returned context will be canceled after the specified duration.
+// WithCancelCause returns a copy of the DBOS context that can be canceled with a cause.
+// The returned context will be canceled when the returned CancelCauseFunc is called with a cause.
 // No-op if the provided context is not a concrete dbos.dbosContext.
+func WithCancelCause(ctx DBOSContext) (DBOSContext, context.CancelCauseFunc) {
+	if ctx == nil {
+		return nil, func(error) {}
+	}
+	if dbosCtx, ok := ctx.(*dbosContext); ok {
+		launched := dbosCtx.launched.Load()
+		newCtx, cancelCauseFunc := context.WithCancelCause(dbosCtx.ctx)
+		childCtx := &dbosContext{
+			ctx:                     newCtx,
+			logger:                  dbosCtx.logger,
+			systemDB:                dbosCtx.systemDB,
+			workflowsWg:             dbosCtx.workflowsWg,
+			workflowRegistry:        dbosCtx.workflowRegistry,
+			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
+			applicationVersion:      dbosCtx.applicationVersion,
+			executorID:              dbosCtx.executorID,
+			applicationID:           dbosCtx.applicationID,
+			queueRunner:             dbosCtx.queueRunner,
+		}
+		childCtx.launched.Store(launched)
+		return childCtx, cancelCauseFunc
+	}
+	return nil, func(error) {}
+}
+
 func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) {
 	if ctx == nil {
 		return nil, func() {}
