@@ -868,7 +868,7 @@ func TestSelect(t *testing.T) {
 	})
 
 	t.Run("Select with empty channels slice", func(t *testing.T) {
-		selectWorkflow := func(dbosCtx DBOSContext, input string) (StepOutcome[string], error) {
+		selectWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 			return Select(dbosCtx, []<-chan StepOutcome[string]{})
 		}
 		RegisterWorkflow(dbosCtx, selectWorkflow)
@@ -877,8 +877,8 @@ func TestSelect(t *testing.T) {
 		require.NoError(t, err, "failed to run select workflow")
 		result, err := handle.GetResult()
 		require.NoError(t, err, "expected no error for empty channels")
-		// Should return zero value StepOutcome
-		assert.Equal(t, StepOutcome[string]{}, result)
+		// Should return zero value string
+		assert.Equal(t, "", result)
 
 		// Verify DBOS.select step is present (empty channels don't create a step, so no steps expected)
 		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
@@ -890,14 +890,14 @@ func TestSelect(t *testing.T) {
 		selectBlockStartEvent := NewEvent()
 		selectBlockEvent := NewEvent()
 
-		selectWorkflow := func(dbosCtx DBOSContext, input string) (StepOutcome[string], error) {
+		selectWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 			ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 				selectBlockStartEvent.Set()
 				selectBlockEvent.Wait()
 				return "result", nil
 			})
 			if err != nil {
-				return StepOutcome[string]{}, err
+				return "", err
 			}
 
 			// Select will block waiting for the channel, but context cancellation should interrupt it
@@ -923,7 +923,7 @@ func TestSelect(t *testing.T) {
 		// Verify that Select returns with a cancellation error
 		result, err := handle.GetResult()
 		require.Error(t, err, "expected error from cancelled workflow")
-		assert.Equal(t, StepOutcome[string]{}, result, "expected zero value StepOutcome when cancelled")
+		assert.Equal(t, "", result, "expected zero value string when cancelled")
 
 		// Verify the error is a cancellation error
 		assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled error, got: %v", err)
@@ -949,7 +949,7 @@ func TestSelect(t *testing.T) {
 		selectBlockEvent := NewEvent()
 		selectEndCompleteEvent := NewEvent()
 
-		selectWorkflow := func(dbosCtx DBOSContext, input string) (StepOutcome[string], error) {
+		selectWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 			ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 				selectStartEvent.Set()
 				selectBlockEvent.Wait()
@@ -957,14 +957,14 @@ func TestSelect(t *testing.T) {
 				return "result1", nil
 			})
 			if err != nil {
-				return StepOutcome[string]{}, err
+				return "", err
 			}
 
 			ch2, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 				return "result2", nil
 			})
 			if err != nil {
-				return StepOutcome[string]{}, err
+				return "", err
 			}
 
 			// Select will checkpoint which channel was selected
@@ -982,8 +982,8 @@ func TestSelect(t *testing.T) {
 
 		result1, err := handle1.GetResult()
 		require.NoError(t, err, "failed to get result from first workflow")
-		assert.Equal(t, "result2", result1.Result, "first execution should return result2 (second step was ready first)")
-		assert.NoError(t, result1.Err, "expected no error, got %v", result1.Err)
+		assert.Equal(t, "result2", result1, "first execution should return result2 (second step was ready first)")
+		assert.NoError(t, err, "expected no error, got %v", err)
 
 		// Verify DBOS.select step is present at index 2 (after Go steps at indices 0 and 1) for first workflow
 		// Note that there will only be 2 steps recorded, because 1 never completed
@@ -1010,9 +1010,8 @@ func TestSelect(t *testing.T) {
 			require.NoError(t, err, "failed to get result from recovered workflow (iteration %d)", i)
 
 			// Results should be the same (deterministic replay)
-			assert.Equal(t, result1.Result, result2.Result, "recovered execution (iteration %d) should return same result as first execution", i)
-			assert.Equal(t, result1.Err, result2.Err, "errors should match on replay (iteration %d)", i)
-			assert.NoError(t, result2.Err, "expected no error, got %v (iteration %d)", result2.Err, i)
+			assert.Equal(t, result1, result2, "recovered execution (iteration %d) should return same result as first execution", i)
+			assert.NoError(t, err, "expected no error, got %v (iteration %d)", err, i)
 
 			// Verify DBOS.select step is present at index 2 in recovered workflow
 			steps2, err := GetWorkflowSteps(dbosCtx, handle2.GetWorkflowID())
