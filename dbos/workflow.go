@@ -1510,36 +1510,11 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcom
 			return
 		}
 
-		var typedResult R
-		// First check if this is a checkpointed outcome (encoded value from database)
-		if checkpointed, ok := outcome.Result.(stepCheckpointedOutcome); ok {
-			encodedResult, ok := checkpointed.value.(*string)
-			if !ok {
-				workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-				outcomeChan <- StepOutcome[R]{
-					Result: *new(R),
-					Err:    newStepExecutionError(workflowID, stepName, fmt.Errorf("unexpected result type: expected *string, got %T", checkpointed.value)),
-				}
-				return
-			}
-			serializer := newJSONSerializer[R]()
-			var decodeErr error
-			typedResult, decodeErr = serializer.Decode(encodedResult)
-			if decodeErr != nil {
-				workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-				outcomeChan <- StepOutcome[R]{
-					Result: *new(R),
-					Err:    newStepExecutionError(workflowID, stepName, fmt.Errorf("failed to decode checkpointed result: %w", decodeErr)),
-				}
-				return
-			}
-		} else if typedRes, ok := outcome.Result.(R); ok {
-			typedResult = typedRes
-		} else {
-			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+		typedResult, convertErr := convertStepResult[R](ctx, outcome.Result)
+		if convertErr != nil {
 			outcomeChan <- StepOutcome[R]{
 				Result: *new(R),
-				Err:    newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", new(R)), fmt.Sprintf("%T", outcome.Result)),
+				Err:    convertErr,
 			}
 			return
 		}
