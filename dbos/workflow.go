@@ -1553,6 +1553,185 @@ func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (chan
 	return result, nil
 }
 
+// Select performs a durable select operation over a slice of channels obtained from Go.
+// It checkpoints the selected channel index and value so that workflow replay produces deterministic results.
+// Select can only be called from within a workflow and becomes part of the workflow's durable state.
+//
+// Example:
+//
+//	ch1, _ := dbos.Go(ctx, func(ctx context.Context) (string, error) { return "result1", nil })
+//	ch2, _ := dbos.Go(ctx, func(ctx context.Context) (string, error) { return "result2", nil })
+//	outcome, err := dbos.Select(ctx, []<-chan dbos.StepOutcome[string]{ch1, ch2})
+//	if err != nil {
+//	    // Handle error
+//	    return err
+//	}
+//	log.Printf("Selected result: %v, error: %v", outcome.result, outcome.err)
+func Select[R any](ctx DBOSContext, channels []<-chan StepOutcome[R]) (StepOutcome[R], error) {
+	if ctx == nil {
+		return StepOutcome[R]{}, errors.New("ctx cannot be nil")
+	}
+
+	// If channels slice is empty, log warning and return zero value
+	if len(channels) == 0 {
+		if c, ok := ctx.(*dbosContext); ok {
+			c.logger.Warn("Select called with empty channels slice, returning zero value")
+		}
+		return StepOutcome[R]{}, nil
+	}
+
+	// Convert typed channels to any channels for internal processing
+	anyChannels := make([]<-chan StepOutcome[any], len(channels))
+	for i := range channels {
+		anyCh := make(chan StepOutcome[any], cap(channels[i]))
+		// Use a closure with proper variable capture
+		srcCh := channels[i]
+		go func() {
+			defer close(anyCh)
+			for outcome := range srcCh {
+				anyCh <- StepOutcome[any]{
+					result: outcome.result,
+					err:    outcome.err,
+				}
+			}
+		}()
+		anyChannels[i] = anyCh
+	}
+
+	result, err := ctx.Select(ctx, anyChannels)
+	if err != nil {
+		return StepOutcome[R]{}, err
+	}
+
+	var typedResult StepOutcome[R]
+	// Check if we're in a real DBOS context (not a mock)
+	if _, ok := ctx.(*dbosContext); ok {
+		// First check if this is a checkpointed outcome (encoded value from database)
+		if checkpointed, ok := result.(stepCheckpointedOutcome); ok {
+			// This came from the database and needs decoding
+			encodedOutput, ok := checkpointed.value.(*string)
+			if !ok {
+				workflowID, _ := GetWorkflowID(ctx)
+				return StepOutcome[R]{}, newWorkflowExecutionError(workflowID, fmt.Errorf("checkpointed outcome value is not *string, got %T", checkpointed.value))
+			}
+			serializer := newJSONSerializer[StepOutcome[R]]()
+			var decodeErr error
+			typedResult, decodeErr = serializer.Decode(encodedOutput)
+			if decodeErr != nil {
+				workflowID, _ := GetWorkflowID(ctx)
+				return StepOutcome[R]{}, newWorkflowExecutionError(workflowID, fmt.Errorf("decoding step result to expected type StepOutcome[%T]: %w", *new(R), decodeErr))
+			}
+		} else if anyOutcome, ok := result.(StepOutcome[any]); ok {
+			// When the step is executed, convert from StepOutcome[any] to StepOutcome[R]
+			// Extract the result and type assert it
+			if anyOutcome.result == nil {
+				typedResult = StepOutcome[R]{
+					result: *new(R),
+					err:    anyOutcome.err,
+				}
+			} else {
+				typedRes, ok := anyOutcome.result.(R)
+				if !ok {
+					workflowID, _ := GetWorkflowID(ctx)
+					return StepOutcome[R]{}, newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", anyOutcome.result))
+				}
+				typedResult = StepOutcome[R]{
+					result: typedRes,
+					err:    anyOutcome.err,
+				}
+			}
+		} else {
+			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+			return StepOutcome[R]{}, newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("StepOutcome[%T]", *new(R)), fmt.Sprintf("%T", result))
+		}
+	} else {
+		// Fallback for testing/mocking scenarios
+		if anyOutcome, ok := result.(StepOutcome[any]); ok {
+			if anyOutcome.result == nil {
+				typedResult = StepOutcome[R]{
+					result: *new(R),
+					err:    anyOutcome.err,
+				}
+			} else {
+				typedRes, ok := anyOutcome.result.(R)
+				if !ok {
+					workflowID, _ := GetWorkflowID(ctx)
+					return StepOutcome[R]{}, newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("StepOutcome[%T]", *new(R)), fmt.Sprintf("%T", anyOutcome.result))
+				}
+				typedResult = StepOutcome[R]{
+					result: typedRes,
+					err:    anyOutcome.err,
+				}
+			}
+		} else {
+			workflowID, _ := GetWorkflowID(ctx)
+			return StepOutcome[R]{}, newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("StepOutcome[%T]", *new(R)), fmt.Sprintf("%T", result))
+		}
+	}
+
+	return typedResult, nil
+}
+
+func (c *dbosContext) Select(_ DBOSContext, channels []<-chan StepOutcome[any]) (any, error) {
+	// If channels slice is empty, log warning and return zero value
+	if len(channels) == 0 {
+		c.logger.Warn("Select called with empty channels slice, returning zero value")
+		return StepOutcome[any]{}, nil
+	}
+
+	// Use RunAsStep to wrap the select operation
+	result, err := c.RunAsStep(c, func(ctx context.Context) (any, error) {
+		// Build select cases using reflect.Select
+		cases := make([]reflect.SelectCase, 0, len(channels)+1)
+
+		// Add context cancellation case first (highest priority)
+		cases = append(cases, reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(ctx.Done()),
+		})
+
+		// Add all channel cases
+		for _, ch := range channels {
+			cases = append(cases, reflect.SelectCase{
+				Dir:  reflect.SelectRecv,
+				Chan: reflect.ValueOf(ch),
+			})
+		}
+
+		// Perform the select
+		chosen, value, ok := reflect.Select(cases)
+
+		// Handle context cancellation (chosen == 0 means context.Done() was selected)
+		if chosen == 0 {
+			return nil, ctx.Err()
+		}
+
+		// Check if channel was closed
+		if !ok {
+			// Adjust index since context case is at index 0
+			selectedIndex := chosen - 1
+			return nil, fmt.Errorf("channel at index %d was closed", selectedIndex)
+		}
+
+		// Extract the StepOutcome[any] from the reflect.Value
+		outcomeValue := value.Interface()
+		outcome, ok := outcomeValue.(StepOutcome[any])
+		if !ok {
+			// Adjust index since context case is at index 0
+			selectedIndex := chosen - 1
+			return nil, fmt.Errorf("unexpected value type from channel at index %d: expected StepOutcome[any], got %T", selectedIndex, outcomeValue)
+		}
+
+		return outcome, nil
+	}, WithStepName("DBOS.select"))
+
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 /****************************************/
 /******* WORKFLOW COMMUNICATIONS ********/
 /****************************************/

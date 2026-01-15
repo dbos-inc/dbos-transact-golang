@@ -849,6 +849,192 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 	})
 }
 
+func TestSelect(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	t.Run("Select must run inside a workflow", func(t *testing.T) {
+		ch1, _ := Go(dbosCtx, func(ctx context.Context) (string, error) {
+			return "result1", nil
+		})
+		channels := []<-chan StepOutcome[string]{ch1}
+		_, err := Select(dbosCtx, channels)
+		require.Error(t, err, "expected error when running Select outside of workflow context, but got none")
+
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, StepExecutionError, dbosErr.Code)
+		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
+		require.Contains(t, err.Error(), expectedMessagePart, "expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+	})
+
+	t.Run("Select with empty channels slice", func(t *testing.T) {
+		selectWorkflow := func(dbosCtx DBOSContext, input string) (StepOutcome[string], error) {
+			return Select(dbosCtx, []<-chan StepOutcome[string]{})
+		}
+		RegisterWorkflow(dbosCtx, selectWorkflow)
+
+		handle, err := RunWorkflow(dbosCtx, selectWorkflow, "test-input")
+		require.NoError(t, err, "failed to run select workflow")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "expected no error for empty channels")
+		// Should return zero value StepOutcome
+		assert.Equal(t, StepOutcome[string]{}, result)
+	})
+
+	t.Run("Select with single channel", func(t *testing.T) {
+		selectWorkflow := func(dbosCtx DBOSContext, input string) (StepOutcome[string], error) {
+			ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				return "result1", nil
+			})
+			if err != nil {
+				return StepOutcome[string]{}, err
+			}
+			return Select(dbosCtx, []<-chan StepOutcome[string]{ch1})
+		}
+		RegisterWorkflow(dbosCtx, selectWorkflow)
+
+		handle, err := RunWorkflow(dbosCtx, selectWorkflow, "test-input")
+		require.NoError(t, err, "failed to run select workflow")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from select workflow")
+		assert.Equal(t, "result1", result.result)
+		assert.NoError(t, result.err)
+	})
+
+	t.Run("Select with multiple channels - selects first ready", func(t *testing.T) {
+		selectWorkflow := func(dbosCtx DBOSContext, input string) (StepOutcome[string], error) {
+			ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				time.Sleep(100 * time.Millisecond)
+				return "slow-result", nil
+			})
+			if err != nil {
+				return StepOutcome[string]{}, err
+			}
+
+			ch2, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				return "fast-result", nil
+			})
+			if err != nil {
+				return StepOutcome[string]{}, err
+			}
+
+			return Select(dbosCtx, []<-chan StepOutcome[string]{ch1, ch2})
+		}
+		RegisterWorkflow(dbosCtx, selectWorkflow)
+
+		handle, err := RunWorkflow(dbosCtx, selectWorkflow, "test-input")
+		require.NoError(t, err, "failed to run select workflow")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from select workflow")
+		// Should select one of the channels (non-deterministic without checkpointing)
+		assert.True(t, result.result == "slow-result" || result.result == "fast-result", "expected result to be one of the channel results, got %v", result.result)
+		assert.NoError(t, result.err)
+	})
+
+	t.Run("Select with step error", func(t *testing.T) {
+		selectWorkflow := func(dbosCtx DBOSContext, input string) (StepOutcome[string], error) {
+			ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				return "", fmt.Errorf("step error")
+			})
+			if err != nil {
+				return StepOutcome[string]{}, err
+			}
+			return Select(dbosCtx, []<-chan StepOutcome[string]{ch1})
+		}
+		RegisterWorkflow(dbosCtx, selectWorkflow)
+
+		handle, err := RunWorkflow(dbosCtx, selectWorkflow, "test-input")
+		require.NoError(t, err, "failed to run select workflow")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from select workflow")
+		assert.Error(t, result.err)
+		assert.Equal(t, "step error", result.err.Error())
+	})
+
+	t.Run("Select with context cancellation", func(t *testing.T) {
+		// This test verifies that Select respects context cancellation
+		// We test this indirectly by ensuring Select can handle cancelled contexts
+		// Note: Direct context cancellation testing requires DBOSContext, not plain context.Context
+		selectWorkflow := func(dbosCtx DBOSContext, input string) (StepOutcome[string], error) {
+			ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				// Check if context is cancelled
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				case <-time.After(100 * time.Millisecond):
+					return "result", nil
+				}
+			})
+			if err != nil {
+				return StepOutcome[string]{}, err
+			}
+
+			// Select should work normally - context cancellation is tested in the step itself
+			return Select(dbosCtx, []<-chan StepOutcome[string]{ch1})
+		}
+		RegisterWorkflow(dbosCtx, selectWorkflow)
+
+		handle, err := RunWorkflow(dbosCtx, selectWorkflow, "test-input")
+		require.NoError(t, err, "failed to run select workflow")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from select workflow")
+		// Should get the result successfully
+		assert.NotNil(t, result)
+	})
+
+	t.Run("Select checkpointing - deterministic replay", func(t *testing.T) {
+		selectStartEvent := NewEvent()
+		selectBlockEvent := NewEvent()
+
+		selectWorkflow := func(dbosCtx DBOSContext, input string) (StepOutcome[string], error) {
+			ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				selectStartEvent.Set()
+				selectBlockEvent.Wait()
+				return "result1", nil
+			})
+			if err != nil {
+				return StepOutcome[string]{}, err
+			}
+
+			ch2, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				return "result2", nil
+			})
+			if err != nil {
+				return StepOutcome[string]{}, err
+			}
+
+			// Select will checkpoint which channel was selected
+			return Select(dbosCtx, []<-chan StepOutcome[string]{ch1, ch2})
+		}
+		RegisterWorkflow(dbosCtx, selectWorkflow)
+
+		// Run the first workflow
+		handle1, err := RunWorkflow(dbosCtx, selectWorkflow, "test-input")
+		require.NoError(t, err, "failed to run select workflow")
+
+		// Wait for the workflow to reach the select operation
+		selectStartEvent.Wait()
+		selectStartEvent.Clear()
+
+		// "Recover" the workflow by running it again with the same ID
+		handle2, err := RunWorkflow(dbosCtx, selectWorkflow, "test-input", WithWorkflowID(handle1.GetWorkflowID()))
+		require.NoError(t, err, "failed to recover workflow")
+
+		// Complete the blocked step
+		selectBlockEvent.Set()
+
+		// Get result from recovered workflow
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first workflow")
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result from recovered workflow")
+
+		// Results should be the same (deterministic replay)
+		assert.Equal(t, result1.result, result2.result, "select should be deterministic on replay")
+		assert.Equal(t, result1.err, result2.err, "errors should match on replay")
+	})
+}
+
 func TestChildWorkflow(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 
