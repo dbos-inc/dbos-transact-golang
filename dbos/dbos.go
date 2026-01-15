@@ -40,6 +40,7 @@ type Config struct {
 	ConductorAPIKey    string        // DBOS conductor API key (optional)
 	ApplicationVersion string        // Application version (optional, overridden by DBOS__APPVERSION env var)
 	ExecutorID         string        // Executor ID (optional, overridden by DBOS__VMID env var)
+	EnablePatching     bool          // Enable the patching system for Patch and DeprecatePatch (default: false)
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -66,6 +67,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ApplicationVersion: inputConfig.ApplicationVersion,
 		ExecutorID:         inputConfig.ExecutorID,
 		SystemDBPool:       inputConfig.SystemDBPool,
+		EnablePatching:     inputConfig.EnablePatching,
 	}
 
 	// Load defaults
@@ -74,6 +76,11 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 	if dbosConfig.DatabaseSchema == "" {
 		dbosConfig.DatabaseSchema = _DEFAULT_SYSTEM_DB_SCHEMA
+	}
+
+	// If patching is enabled and application version is not set, fix the application version
+	if dbosConfig.EnablePatching && dbosConfig.ApplicationVersion == "" {
+		dbosConfig.ApplicationVersion = "PATCHING_ENABLED"
 	}
 
 	// Override with environment variables if set
@@ -116,6 +123,8 @@ type DBOSContext interface {
 	SetEvent(_ DBOSContext, key string, message any) error                                                      // Set a key-value event for this workflow
 	GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error)            // Get a key-value event from a target workflow
 	Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error)                                         // Durable sleep that survives workflow recovery
+	Patch(_ DBOSContext, patchName string) (bool, error)                                                        // Check if workflow should use patched code
+	DeprecatePatch(_ DBOSContext, patchName string) error                                                       // Deprecate a patch
 	GetWorkflowID() (string, error)                                                                             // Get the current workflow ID (only available within workflows)
 	GetStepID() (int, error)                                                                                    // Get the current step ID (only available within workflows)
 
@@ -201,6 +210,7 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 		launched := dbosCtx.launched.Load()
 		childCtx := &dbosContext{
 			ctx:                     context.WithValue(dbosCtx.ctx, key, val), // Spawn a new child context with the value set
+			config:                  dbosCtx.config,
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
 			workflowsWg:             dbosCtx.workflowsWg,
@@ -230,6 +240,7 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 		// but retains all other values
 		childCtx := &dbosContext{
 			ctx:                     context.WithoutCancel(dbosCtx.ctx),
+			config:                  dbosCtx.config,
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
 			workflowsWg:             dbosCtx.workflowsWg,
@@ -258,6 +269,7 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 		newCtx, cancelFunc := context.WithTimeoutCause(dbosCtx.ctx, timeout, errors.New("DBOS context timeout"))
 		childCtx := &dbosContext{
 			ctx:                     newCtx,
+			config:                  dbosCtx.config,
 			logger:                  dbosCtx.logger,
 			systemDB:                dbosCtx.systemDB,
 			workflowsWg:             dbosCtx.workflowsWg,

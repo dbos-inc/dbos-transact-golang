@@ -20,6 +20,7 @@ const (
 	DeadLetterQueueError                                  // Workflow moved to dead letter queue after max retries
 	MaxStepRetriesExceeded                                // Step exceeded maximum retry attempts
 	QueueDeduplicated                                     // Workflow was deduplicated in the queue
+	PatchingNotEnabled                                    // Patching system is not enabled in the DBOS context configuration
 )
 
 // DBOSError is the unified error type for all DBOS operations.
@@ -202,5 +203,12 @@ func newQueueDeduplicatedError(workflowID, queueName, deduplicationID string) *D
 		WorkflowID:      workflowID,
 		QueueName:       queueName,
 		DeduplicationID: deduplicationID,
+	}
+}
+
+func newPatchingNotEnabledError() *DBOSError {
+	return &DBOSError{
+		Message: "Patching system is not enabled. Set EnablePatching to true in the DBOS context configuration to use Patch and DeprecatePatch",
+		Code:    PatchingNotEnabled,
 	}
 }

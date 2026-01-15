@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/robfig/cron/v3"
 )
 
@@ -577,7 +578,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 
 	// If this is a scheduled workflow, register a cron job
 	if registrationParams.cronSchedule != "" {
-		if reflect.TypeOf(p) != reflect.TypeOf(time.Time{}) {
+		if reflect.TypeOf(p) != reflect.TypeFor[time.Time]() {
 			panic(fmt.Sprintf("scheduled workflow function must accept a time.Time as input, got %T", p))
 		}
 		registerScheduledWorkflow(ctx, fqn, typedErasedWorkflow, registrationParams.cronSchedule)
@@ -1644,6 +1645,132 @@ func Sleep(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
 		return 0, errors.New("ctx cannot be nil")
 	}
 	return ctx.Sleep(ctx, duration)
+}
+
+const _DBOS_PATCH_PREFIX = "DBOS.patch-"
+
+func (c *dbosContext) Patch(_ DBOSContext, patchName string) (bool, error) {
+	if !c.config.EnablePatching {
+		return false, newPatchingNotEnabledError()
+	}
+
+	if patchName == "" {
+		return false, errors.New("patch name cannot be empty")
+	}
+
+	// Get workflow state to determine current step ID
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return false, errors.New("patch can only be called within a workflow")
+	}
+
+	if wfState.isWithinStep {
+		return false, newStepExecutionError(wfState.workflowID, patchName, fmt.Errorf("cannot call Patch within a step"))
+	}
+
+	// Automatically prefix the patch name with _DBOS_PATCH_PREFIX
+	prefixedPatchName := _DBOS_PATCH_PREFIX + patchName
+
+	patched, err := retryWithResult(c, func() (bool, error) {
+		return c.systemDB.patch(c, patchDBInput{
+			workflowID: wfState.workflowID,
+			stepID:     wfState.stepID + 1, // We are checking if the upcoming step should use the patched code
+			patchName:  prefixedPatchName,
+		})
+	}, withRetrierLogger(c.logger))
+
+	if patched && err == nil {
+		// The patch take its own step ID
+		wfState.nextStepID()
+	}
+
+	return patched, err
+}
+
+// Patch checks if the current workflow should use patched code.
+// Returns true if the workflow should use new code, false if it should use old code.
+//
+// The patch system allows modifying code while long-lived workflows are running:
+// - Existing workflows that already passed this patch point continue with old code
+// - New workflows use new code
+// - Workflows that started but haven't reached this point yet use new code
+//
+// Example:
+//
+//	if dbos.Patch(ctx, "my-patch") {
+//	    // New code path
+//	} else {
+//	    // Old code path
+//	}
+func Patch(ctx DBOSContext, patchName string) (bool, error) {
+	if ctx == nil {
+		return false, errors.New("ctx cannot be nil")
+	}
+	return ctx.Patch(ctx, patchName)
+}
+
+func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) error {
+	if !c.config.EnablePatching {
+		return newPatchingNotEnabledError()
+	}
+
+	if patchName == "" {
+		return errors.New("patch name cannot be empty")
+	}
+
+	// Get workflow state to determine current step ID
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return errors.New("deprecate patch can only be called within a workflow")
+	}
+
+	if wfState.isWithinStep {
+		return newStepExecutionError(wfState.workflowID, patchName, fmt.Errorf("cannot call DeprecatePatch within a step"))
+	}
+
+	// Automatically prefix the patch name with _DBOS_PATCH_PREFIX
+	prefixedPatchName := _DBOS_PATCH_PREFIX + patchName
+
+	patchNameFromDB, err := retryWithResult(c, func() (string, error) {
+		return c.systemDB.doesPatchExists(c, patchDBInput{
+			workflowID: wfState.workflowID,
+			stepID:     wfState.stepID + 1,
+			patchName:  prefixedPatchName,
+		})
+	}, withRetrierLogger(c.logger))
+
+	// If patch doesn't exist, it's already deprecated (or never existed)
+	if patchNameFromDB != prefixedPatchName || err == pgx.ErrNoRows {
+		return nil
+	}
+
+	// If there was an error checking, return it
+	if err != nil {
+		return err
+	}
+
+	// Patch exists, deprecate it by incrementing step ID
+	wfState.nextStepID()
+	return nil
+}
+
+// DeprecatePatch allows removing patches from code while ensuring the correct history
+// of workflows that were executing before the patch was deprecated.
+//
+// Example:
+//
+// err := dbos.DeprecatePatch(ctx, "my-patch")
+//
+//	if err != nil {
+//	    return err
+//	}
+//
+// // New code path
+func DeprecatePatch(ctx DBOSContext, patchName string) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.DeprecatePatch(ctx, patchName)
 }
 
 /***********************************/

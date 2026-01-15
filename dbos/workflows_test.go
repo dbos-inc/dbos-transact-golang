@@ -3437,7 +3437,11 @@ func TestConcurrentWorkflows(t *testing.T) {
 		close(results)
 		close(errors)
 
-		require.Equal(t, 0, len(errors), "Expected no errors from concurrent workflows")
+		if len(errors) > 0 {
+			for err := range errors {
+				t.Errorf("Error from send/recv workflows: %v", err)
+			}
+		}
 
 		resultCount := 0
 		receivedResults := make(map[int]bool)
@@ -3504,7 +3508,11 @@ func TestConcurrentWorkflows(t *testing.T) {
 		close(setterResults)
 		close(errors)
 
-		require.Equal(t, 0, len(errors), "Expected no errors from notification workflows")
+		if len(errors) > 0 {
+			for err := range errors {
+				t.Errorf("Error from send/recv workflows: %v", err)
+			}
+		}
 
 		waiterCount := 0
 		receivedWaiterResults := make(map[string]bool)
@@ -3579,7 +3587,11 @@ func TestConcurrentWorkflows(t *testing.T) {
 		close(senderResults)
 		close(errors)
 
-		require.Equal(t, 0, len(errors), "Expected no errors from send/recv workflows")
+		if len(errors) > 0 {
+			for err := range errors {
+				t.Errorf("Error from send/recv workflows: %v", err)
+			}
+		}
 
 		receiverCount := 0
 		receivedReceiverResults := make(map[string]bool)
@@ -4608,5 +4620,318 @@ func TestWorkflowHandleContextCancel(t *testing.T) {
 		require.Error(t, err, "expected error from cancelled context")
 		assert.True(t, errors.Is(err, context.Canceled),
 			"expected error to be detectable as context.Canceled, got: %v", err)
+	})
+}
+
+func TestPatching(t *testing.T) {
+	t.Run("PatchingEnabled", func(t *testing.T) {
+		// Create a DBOS context with patching enabled
+		databaseURL := getDatabaseURL()
+		resetTestDatabase(t, databaseURL)
+		dbosCtx, err := NewDBOSContext(context.Background(), Config{
+			DatabaseURL:        databaseURL,
+			AppName:            "test-app-patching-enabled",
+			EnablePatching:     true,
+			ApplicationVersion: "PATCHING_ENABLED",
+		})
+		require.NoError(t, err, "failed to create DBOS context with patching enabled")
+		require.Equal(t, "PATCHING_ENABLED", dbosCtx.GetApplicationVersion(), "expected application version to be PATCHING_ENABLED")
+
+		// Register cleanup
+		t.Cleanup(func() {
+			if dbosCtx != nil {
+				Shutdown(dbosCtx, 30*time.Second)
+			}
+		})
+
+		step := func(input int) (int, error) {
+			return input + 1, nil
+		}
+
+		stepPatched := func(input int) (int, error) {
+			return input + 2, nil
+		}
+
+		wf := func(ctx DBOSContext, input int) (int, error) {
+			// step < step to patch
+			RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("firstStep"))
+			// step to patch
+			res, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("patch-step"))
+			if err != nil {
+				return 0, err
+			}
+			// step > step to patch
+			RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("lastStep"))
+			return res, nil
+		}
+
+		RegisterWorkflow(dbosCtx, wf, WithWorkflowName("wf"))
+
+		handle, err := RunWorkflow(dbosCtx, wf, 1)
+		require.NoError(t, err, "failed to start workflow")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result")
+		require.Equal(t, 2, result, "expected result to be 2")
+
+		wfPatched := func(ctx DBOSContext, input int) (int, error) {
+			// step < step to patch
+			RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("firstStep"))
+
+			// step to patch
+			patched, err := Patch(ctx, "my-patch")
+			if err != nil {
+				return 0, err
+			}
+			var res int
+			if patched {
+				res, err = RunAsStep(ctx, func(ctx context.Context) (int, error) {
+					return stepPatched(input)
+				}, WithStepName("patched-step"))
+				if err != nil {
+					return 0, err
+				}
+			} else {
+				res, err = RunAsStep(ctx, func(ctx context.Context) (int, error) {
+					return step(input)
+				}, WithStepName("patch-step"))
+				if err != nil {
+					return 0, err
+				}
+			}
+
+			// step > step to patch
+			RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("lastStep"))
+
+			return res, nil
+		}
+
+		// (hack) Clear the context registry and re-gister the patched wf with the same name
+		dbosCtx.(*dbosContext).workflowRegistry.Clear()
+		dbosCtx.(*dbosContext).workflowCustomNametoFQN.Clear()
+		RegisterWorkflow(dbosCtx, wfPatched, WithWorkflowName("wf"))
+		dbosCtx.Launch()
+
+		// new invocation takes the new code and has the patch step recorded
+		patchedHandle, err := RunWorkflow(dbosCtx, wfPatched, 1)
+		require.NoError(t, err, "failed to start workflow")
+		result, err = patchedHandle.GetResult()
+		require.NoError(t, err, "failed to get result")
+		require.Equal(t, 3, result, "expected result to be 3")
+		steps, err := GetWorkflowSteps(dbosCtx, patchedHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Equal(t, 4, len(steps), "expected 4 steps")
+		require.Equal(t, "DBOS.patch-my-patch", steps[1].StepName, "expected step name to be DBOS.patch-my-patch")
+
+		// Fork the workflow at different steps and verify behavior
+		// Steps 0 and 1 should take the new code (patched), step 2 should take the old code
+		for startStep := 0; startStep <= 2; startStep++ {
+			forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+				OriginalWorkflowID: handle.GetWorkflowID(),
+				StartStep:          uint(startStep),
+			})
+			require.NoError(t, err, "failed to fork workflow at step %d", startStep)
+			result, err := forkHandle.GetResult()
+			require.NoError(t, err, "failed to get result for fork at step %d", startStep)
+			steps, err := GetWorkflowSteps(dbosCtx, forkHandle.GetWorkflowID())
+			require.NoError(t, err, "failed to get workflow steps for fork at step %d", startStep)
+
+			if startStep < 2 {
+				// Forking before step 2 should take the new code
+				require.Equal(t, 3, result, "expected result to be 3 when forking at step %d", startStep)
+				require.Equal(t, 4, len(steps), "expected 4 steps when forking at step %d", startStep)
+				require.Equal(t, "DBOS.patch-my-patch", steps[1].StepName, "expected step name to be DBOS.patch-my-patch when forking at step %d", startStep)
+			} else {
+				// Forking at step 2 should take the old code
+				require.Equal(t, 2, result, "expected result to be 2 when forking at step %d", startStep)
+				require.Equal(t, 3, len(steps), "expected 3 steps when forking at step %d", startStep)
+			}
+		}
+
+		wfDeprecatePatch := func(ctx DBOSContext, input int) (int, error) {
+			RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("firstStep"))
+			DeprecatePatch(ctx, "my-patch")
+			res, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return stepPatched(input)
+			}, WithStepName("patched-step"))
+			if err != nil {
+				return 0, err
+			}
+			RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("lastStep"))
+			return res, nil
+		}
+
+		// (hack) Clear the context registry, reset is_launched, and register the deprecated wf with the same name
+		dbosCtx.(*dbosContext).workflowRegistry.Clear()
+		dbosCtx.(*dbosContext).workflowCustomNametoFQN.Clear()
+		dbosCtx.(*dbosContext).launched.Store(false)
+		RegisterWorkflow(dbosCtx, wfDeprecatePatch, WithWorkflowName("wf"))
+
+		// deprecated invocation skips the patch deprecation entirely
+		deprecatedHandle, err := RunWorkflow(dbosCtx, wfDeprecatePatch, 1)
+		require.NoError(t, err, "failed to start workflow")
+		result, err = deprecatedHandle.GetResult()
+		require.NoError(t, err, "failed to get result")
+		require.Equal(t, 3, result, "expected result to be 3")
+		steps, err = GetWorkflowSteps(dbosCtx, deprecatedHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Equal(t, 3, len(steps), "expected 3 steps")
+
+		// Forking an old workflow (post-patch), at or after the patch step, on the new code should work without non-determinism errors
+		// Because step 1 (the patch) is matched by DeprecatePatch in the new code
+		for _, startStep := range []uint{2, 3} {
+			forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+				OriginalWorkflowID: patchedHandle.GetWorkflowID(),
+				StartStep:          uint(startStep),
+			})
+			require.NoError(t, err, "failed to fork workflow")
+			result, err = forkHandle.GetResult()
+			require.NoError(t, err, "failed to get result")
+			require.Equal(t, 3, result, "expected result to be 3")
+			steps, err = GetWorkflowSteps(dbosCtx, forkHandle.GetWorkflowID())
+			require.NoError(t, err, "failed to get workflow steps")
+			require.Equal(t, 4, len(steps), "expected 4 steps")
+			require.Equal(t, "DBOS.patch-my-patch", steps[1].StepName, "expected step name to be DBOS.patch-my-patch")
+		}
+
+		// Forking an old workflow (pre-patch), after the patch step, on the new code will result in a non-determinism error, because the 2nd step name changed
+		// Because the patch step now has a new name
+		forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: handle.GetWorkflowID(),
+			StartStep:          2,
+		})
+		require.NoError(t, err, "failed to fork workflow")
+		_, err = forkHandle.GetResult()
+		require.Error(t, err, "expected error when forking old workflow onto new workflow")
+		require.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %d", UnexpectedStep))
+	})
+
+	t.Run("PatchingNotEnabledError", func(t *testing.T) {
+		// Create a DBOS context without enabling patching
+		databaseURL := getDatabaseURL()
+		dbosCtxNoPatching, err := NewDBOSContext(context.Background(), Config{
+			DatabaseURL:    databaseURL,
+			AppName:        "test-app-no-patching",
+			EnablePatching: false, // Explicitly disable patching
+		})
+		require.NoError(t, err, "failed to create DBOS context without patching")
+		require.False(t, dbosCtxNoPatching.GetApplicationVersion() == "PATCHING_ENABLED", "expected application version to not be PATCHING_ENABLED")
+
+		// Register a workflow that calls Patch
+		wfWithPatch := func(ctx DBOSContext, input int) (int, error) {
+			patched, err := Patch(ctx, "test-patch")
+			if err != nil {
+				return 0, err
+			}
+			if patched {
+				return input + 10, nil
+			}
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtxNoPatching, wfWithPatch)
+
+		// Test DeprecatePatch as well
+		wfWithDeprecatePatch := func(ctx DBOSContext, input int) (int, error) {
+			err := DeprecatePatch(ctx, "test-patch")
+			if err != nil {
+				return 0, err
+			}
+			return input + 10, nil
+		}
+		RegisterWorkflow(dbosCtxNoPatching, wfWithDeprecatePatch)
+
+		err = Launch(dbosCtxNoPatching)
+		require.NoError(t, err, "failed to launch DBOS context")
+		defer Shutdown(dbosCtxNoPatching, 10*time.Second)
+
+		// Run the workflow - it should fail with PatchingNotEnabled error
+		handle, err := RunWorkflow(dbosCtxNoPatching, wfWithPatch, 1)
+		require.NoError(t, err, "failed to start workflow")
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected error when calling Patch without EnablePatching")
+
+		// Verify it's the correct error type
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, PatchingNotEnabled, dbosErr.Code, "expected error code to be PatchingNotEnabled")
+		require.Contains(t, dbosErr.Message, "Patching system is not enabled", "expected error message to mention patching is not enabled")
+		require.Contains(t, dbosErr.Message, "EnablePatching", "expected error message to mention EnablePatching")
+
+		// Deprecate path
+		handle2, err := RunWorkflow(dbosCtxNoPatching, wfWithDeprecatePatch, 1)
+		require.NoError(t, err, "failed to start workflow with DeprecatePatch")
+		_, err = handle2.GetResult()
+		require.Error(t, err, "expected error when calling DeprecatePatch without EnablePatching")
+
+		// Verify it's the correct error type
+		dbosErr2, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, PatchingNotEnabled, dbosErr2.Code, "expected error code to be PatchingNotEnabled")
+		require.Contains(t, dbosErr2.Message, "Patching system is not enabled", "expected error message to mention patching is not enabled")
+		require.Contains(t, dbosErr2.Message, "EnablePatching", "expected error message to mention EnablePatching")
+	})
+
+	t.Run("PatchingEnabledWithVersioning", func(t *testing.T) {
+		databaseURL := getDatabaseURL()
+
+		t.Run("PreservesApplicationVersionWhenSetInConfig", func(t *testing.T) {
+			// Clear env vars to ensure we're testing config values
+			t.Setenv("DBOS__APPVERSION", "")
+			resetTestDatabase(t, databaseURL)
+
+			// Create a DBOS context with patching enabled and a custom application version
+			dbosCtx, err := NewDBOSContext(context.Background(), Config{
+				DatabaseURL:        databaseURL,
+				AppName:            "test-app-patching-with-version",
+				EnablePatching:     true,
+				ApplicationVersion: "custom-version-1.2.3",
+			})
+			require.NoError(t, err, "failed to create DBOS context with patching enabled and custom version")
+			require.Equal(t, "custom-version-1.2.3", dbosCtx.GetApplicationVersion(), "expected application version to be preserved from config")
+
+			// Register cleanup
+			t.Cleanup(func() {
+				if dbosCtx != nil {
+					Shutdown(dbosCtx, 30*time.Second)
+				}
+			})
+		})
+
+		t.Run("EnvironmentVariableOverridesPatchingEnabled", func(t *testing.T) {
+			// Set environment variable to override the automatic PATCHING_ENABLED value
+			t.Setenv("DBOS__APPVERSION", "env-override-version-2.0.0")
+			resetTestDatabase(t, databaseURL)
+
+			// Create a DBOS context with patching enabled but no application version in config
+			// The env var should override the automatic "PATCHING_ENABLED" value
+			dbosCtx, err := NewDBOSContext(context.Background(), Config{
+				DatabaseURL:    databaseURL,
+				AppName:        "test-app-patching-env-override",
+				EnablePatching: true,
+				// ApplicationVersion left empty - should default to "PATCHING_ENABLED" but env var overrides it
+			})
+			require.NoError(t, err, "failed to create DBOS context with patching enabled")
+			require.Equal(t, "env-override-version-2.0.0", dbosCtx.GetApplicationVersion(), "expected environment variable to override PATCHING_ENABLED")
+
+			// Register cleanup
+			t.Cleanup(func() {
+				if dbosCtx != nil {
+					Shutdown(dbosCtx, 30*time.Second)
+				}
+			})
+		})
 	})
 }

@@ -63,6 +63,10 @@ type systemDatabase interface {
 	// Timers (special steps)
 	sleep(ctx context.Context, input sleepInput) (time.Duration, error)
 
+	// Patches
+	patch(ctx context.Context, input patchDBInput) (bool, error)
+	doesPatchExists(ctx context.Context, input patchDBInput) (string, error)
+
 	// Queues
 	dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error)
 	clearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
@@ -1513,7 +1517,7 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 		return nil, fmt.Errorf("failed to get operation outputs: %w", err)
 	}
 
-	// If the provided and recorded function name are different, throw an exception
+	// If the provided and recorded function name are different, return an error
 	if input.stepName != recordedFunctionName {
 		return nil, newUnexpectedStepError(input.workflowID, input.stepID, input.stepName, recordedFunctionName)
 	}
@@ -1708,6 +1712,43 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 	}
 
 	return remainingDuration, nil
+}
+
+/****************************************/
+/******* PATCHES ********/
+/****************************************/
+
+type patchDBInput struct {
+	workflowID string
+	stepID     int
+	patchName  string
+}
+
+func (s *sysDB) doesPatchExists(ctx context.Context, input patchDBInput) (string, error) {
+	var functionName string
+	query := fmt.Sprintf(`SELECT function_name FROM %s.operation_outputs WHERE workflow_uuid = $1 AND function_id = $2`, pgx.Identifier{s.schema}.Sanitize())
+	return functionName, s.pool.QueryRow(ctx, query, input.workflowID, input.stepID).Scan(&functionName)
+}
+
+func (s *sysDB) patch(ctx context.Context, input patchDBInput) (bool, error) {
+	functionName, err := s.doesPatchExists(ctx, input)
+	if err != nil {
+		// No result means this is a new workflow, or an existing workflow that has not reached this step yet
+		// Insert the patch marker and return true
+		if err == pgx.ErrNoRows {
+			insertQuery := fmt.Sprintf(`INSERT INTO %s.operation_outputs (workflow_uuid, function_id, function_name) VALUES ($1, $2, $3)`, pgx.Identifier{s.schema}.Sanitize())
+			_, err = s.pool.Exec(ctx, insertQuery, input.workflowID, input.stepID, input.patchName)
+			if err != nil {
+				return false, fmt.Errorf("failed to insert patch marker: %w", err)
+			}
+			return true, nil
+		}
+		return false, fmt.Errorf("failed to check for patch: %w", err)
+	}
+
+	// If functionName != patchName, this is a workflow that existed before the patch was applied
+	// Else this a new (patched) workflow that is being re-executed (e.g., recovery, or forked at a later step)
+	return functionName == input.patchName, nil
 }
 
 /****************************************/
