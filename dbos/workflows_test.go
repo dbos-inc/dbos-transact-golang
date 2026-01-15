@@ -906,8 +906,8 @@ func TestSelect(t *testing.T) {
 		RegisterWorkflow(dbosCtx, selectWorkflow)
 
 		// Create a cancellable context
-		cancelCtx, cancelFunc := WithCancel(dbosCtx)
-		defer cancelFunc()
+		cancelCtx, cancelFunc := WithCancelCause(dbosCtx)
+		defer cancelFunc(nil)
 
 		// Run the workflow with the cancellable context
 		handle, err := RunWorkflow(cancelCtx, selectWorkflow, "test-input")
@@ -918,7 +918,7 @@ func TestSelect(t *testing.T) {
 		selectBlockStartEvent.Clear()
 
 		// Cancel the context manually
-		cancelFunc()
+		cancelFunc(nil)
 
 		// Verify that Select returns with a cancellation error
 		result, err := handle.GetResult()

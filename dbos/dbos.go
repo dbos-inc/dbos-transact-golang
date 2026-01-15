@@ -259,20 +259,16 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 	return nil
 }
 
-// WithTimeout returns a copy of the DBOS context with a timeout.
-// The returned context will be canceled after the specified duration.
+// WithCancelCause returns a copy of the DBOS context that can be canceled with a cause.
+// The returned context will be canceled when the returned CancelCauseFunc is called with a cause.
 // No-op if the provided context is not a concrete dbos.dbosContext.
-func WithCancel(ctx DBOSContext) (DBOSContext, context.CancelFunc) {
+func WithCancelCause(ctx DBOSContext) (DBOSContext, context.CancelCauseFunc) {
 	if ctx == nil {
-		return nil, func() {}
+		return nil, func(error) {}
 	}
 	if dbosCtx, ok := ctx.(*dbosContext); ok {
 		launched := dbosCtx.launched.Load()
 		newCtx, cancelCauseFunc := context.WithCancelCause(dbosCtx.ctx)
-		// Wrap CancelCauseFunc to match CancelFunc signature
-		cancelFunc := func() {
-			cancelCauseFunc(nil)
-		}
 		childCtx := &dbosContext{
 			ctx:                     newCtx,
 			logger:                  dbosCtx.logger,
@@ -286,9 +282,9 @@ func WithCancel(ctx DBOSContext) (DBOSContext, context.CancelFunc) {
 			queueRunner:             dbosCtx.queueRunner,
 		}
 		childCtx.launched.Store(launched)
-		return childCtx, cancelFunc
+		return childCtx, cancelCauseFunc
 	}
-	return nil, func() {}
+	return nil, func(error) {}
 }
 
 func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) {
