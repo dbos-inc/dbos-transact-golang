@@ -1583,17 +1583,34 @@ func Select[R any](ctx DBOSContext, channels []<-chan StepOutcome[R]) (R, error)
 	}
 
 	// Convert typed channels to any channels for internal processing
+	// Create a context that will be cancelled when Select completes to prevent goroutine leaks
+	selectCtx, cancelSelect := context.WithCancel(ctx)
+	defer cancelSelect() // Ensure all goroutines are cancelled when Select completes
+
 	anyChannels := make([]<-chan StepOutcome[any], len(channels))
 	for i := range channels {
 		anyCh := make(chan StepOutcome[any], cap(channels[i]))
-		// Use a closure with proper variable capture
 		srcCh := channels[i]
 		go func() {
 			defer close(anyCh)
-			for outcome := range srcCh {
-				anyCh <- StepOutcome[any]{
-					Result: outcome.Result,
-					Err:    outcome.Err,
+			for {
+				select {
+				case <-selectCtx.Done():
+					return
+				case outcome, ok := <-srcCh:
+					if !ok {
+						// Source channel closed
+						return
+					}
+					select {
+					case anyCh <- StepOutcome[any]{
+						Result: outcome.Result,
+						Err:    outcome.Err,
+					}:
+					case <-selectCtx.Done():
+						// Select completed while trying to send, discard value
+						return
+					}
 				}
 			}
 		}()
