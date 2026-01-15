@@ -852,6 +852,65 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 func TestSelect(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 
+	selectWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		return Select(dbosCtx, []<-chan StepOutcome[string]{})
+	}
+	RegisterWorkflow(dbosCtx, selectWorkflow)
+
+	selectBlockStartEvent := NewEvent()
+	selectBlockEvent := NewEvent()
+	selectCancelWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+			selectBlockStartEvent.Set()
+			selectBlockEvent.Wait()
+			return "result", nil
+		})
+		if err != nil {
+			return "", err
+		}
+
+		// Select will block waiting for the channel, but context cancellation should interrupt it
+		return Select(dbosCtx, []<-chan StepOutcome[string]{ch1})
+	}
+	RegisterWorkflow(dbosCtx, selectCancelWorkflow)
+
+	step1BlockEvent := NewEvent()
+	step2CompleteEvent := NewEvent()
+	workflowBlockStartEvent := NewEvent()
+	workflowBlockEvent := NewEvent()
+
+	selectDeterministicWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+			step1BlockEvent.Wait()
+			step2CompleteEvent.Set()
+			return "result1", nil
+		})
+		if err != nil {
+			return "", err
+		}
+
+		ch2, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+			return "result2", nil
+		})
+		if err != nil {
+			return "", err
+		}
+
+		// Select will checkpoint which channel was selected
+		selectedResult, err := Select(dbosCtx, []<-chan StepOutcome[string]{ch1, ch2})
+		if err != nil {
+			return "", err
+		}
+
+		workflowBlockStartEvent.Set()
+		workflowBlockEvent.Wait()
+
+		return selectedResult, nil
+	}
+	RegisterWorkflow(dbosCtx, selectDeterministicWorkflow)
+
+	dbosCtx.Launch()
+
 	t.Run("Select must run inside a workflow", func(t *testing.T) {
 		ch1, _ := Go(dbosCtx, func(ctx context.Context) (string, error) {
 			return "result1", nil
@@ -868,11 +927,6 @@ func TestSelect(t *testing.T) {
 	})
 
 	t.Run("Select with empty channels slice", func(t *testing.T) {
-		selectWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-			return Select(dbosCtx, []<-chan StepOutcome[string]{})
-		}
-		RegisterWorkflow(dbosCtx, selectWorkflow)
-
 		handle, err := RunWorkflow(dbosCtx, selectWorkflow, "test-input")
 		require.NoError(t, err, "failed to run select workflow")
 		result, err := handle.GetResult()
@@ -887,30 +941,12 @@ func TestSelect(t *testing.T) {
 	})
 
 	t.Run("Select with context cancellation", func(t *testing.T) {
-		selectBlockStartEvent := NewEvent()
-		selectBlockEvent := NewEvent()
-
-		selectWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-			ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
-				selectBlockStartEvent.Set()
-				selectBlockEvent.Wait()
-				return "result", nil
-			})
-			if err != nil {
-				return "", err
-			}
-
-			// Select will block waiting for the channel, but context cancellation should interrupt it
-			return Select(dbosCtx, []<-chan StepOutcome[string]{ch1})
-		}
-		RegisterWorkflow(dbosCtx, selectWorkflow)
-
 		// Create a cancellable context
 		cancelCtx, cancelFunc := WithCancelCause(dbosCtx)
 		defer cancelFunc(nil)
 
 		// Run the workflow with the cancellable context
-		handle, err := RunWorkflow(cancelCtx, selectWorkflow, "test-input")
+		handle, err := RunWorkflow(cancelCtx, selectCancelWorkflow, "test-input")
 		require.NoError(t, err, "failed to run select workflow")
 
 		// Wait for the workflow to reach the Select call (step has started and set the event)
@@ -945,81 +981,73 @@ func TestSelect(t *testing.T) {
 	})
 
 	t.Run("Select checkpointing - deterministic replay", func(t *testing.T) {
-		selectStartEvent := NewEvent()
-		selectBlockEvent := NewEvent()
-		selectEndCompleteEvent := NewEvent()
-
-		selectWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-			ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
-				selectStartEvent.Set()
-				selectBlockEvent.Wait()
-				selectEndCompleteEvent.Set()
-				return "result1", nil
-			})
-			if err != nil {
-				return "", err
-			}
-
-			ch2, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
-				return "result2", nil
-			})
-			if err != nil {
-				return "", err
-			}
-
-			// Select will checkpoint which channel was selected
-			// FIXME this is not testing what we want, we need to have a blocking step so the workflow does not returns
-			return Select(dbosCtx, []<-chan StepOutcome[string]{ch1, ch2})
-		}
-		RegisterWorkflow(dbosCtx, selectWorkflow)
-
 		// Run the first workflow
-		handle1, err := RunWorkflow(dbosCtx, selectWorkflow, "test-input")
+		handle, err := RunWorkflow(dbosCtx, selectDeterministicWorkflow, "test-input")
 		require.NoError(t, err, "failed to run select workflow")
 
-		// Wait for the first step to start
-		selectStartEvent.Wait()
+		workflowBlockStartEvent.Wait()
+		workflowBlockStartEvent.Clear()
 
-		result1, err := handle1.GetResult()
-		require.NoError(t, err, "failed to get result from first workflow")
-		assert.Equal(t, "result2", result1, "first execution should return result2 (second step was ready first)")
-		assert.NoError(t, err, "expected no error, got %v", err)
-
-		// Verify DBOS.select step is present at index 2 (after Go steps at indices 0 and 1) for first workflow
-		// Note that there will only be 2 steps recorded, because 1 never completed
-		steps1, err := GetWorkflowSteps(dbosCtx, handle1.GetWorkflowID())
-		require.NoError(t, err, "failed to get workflow steps for first workflow")
-		require.Len(t, steps1, 2, "expected 2 steps (1 Go + Select)")
-		assert.Equal(t, "DBOS.select", steps1[1].StepName, "expected step 2 to be DBOS.select in first workflow")
-		assert.Equal(t, 2, steps1[1].StepID, "expected DBOS.select step to have StepID 2 in first workflow")
+		time.Sleep(10 * time.Second)
+		// Check the steps recorded so far, there should be 2 recorded steps: the second Go step and the Select step
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 2, "expected 2 steps (1 Go + Select)")
+		assert.Equal(t, "DBOS.select", steps[1].StepName, "expected step 2 to be DBOS.select")
+		assert.Equal(t, 2, steps[1].StepID, "expected DBOS.select step to have StepID 1")
+		var output0 string
+		err = json.Unmarshal([]byte(steps[0].Output.(string)), &output0)
+		require.NoError(t, err, "failed to decode step 0 output")
+		assert.Equal(t, "result2", output0, "Second Go step should have output 'result2'")
+		var output1 string
+		err = json.Unmarshal([]byte(steps[1].Output.(string)), &output1)
+		require.NoError(t, err, "failed to decode step 1 output")
+		assert.Equal(t, "result2", output1, "Select step should have output 'result2'")
 
 		// Unblock the first step before recovery so both channels will be ready on replay
-		selectBlockEvent.Set()
-		selectEndCompleteEvent.Wait()
+		step1BlockEvent.Set()
+		step2CompleteEvent.Wait()
 
-		// Run recovery 10 times to verify deterministic replay
+		// Run recovery 10 times to verify deterministic replay & step result decoding
 		for i := range 10 {
-			// "Recover" the workflow by running it again with the same ID
-			// On replay, both steps will be ready, but Select should return the result of the second step
-			// because that's what was checkpointed the first time (ch2 was ready first)
-			handle2, err := RunWorkflow(dbosCtx, selectWorkflow, "test-input", WithWorkflowID(handle1.GetWorkflowID()))
+			_, err = RunWorkflow(dbosCtx, selectDeterministicWorkflow, "test-input", WithWorkflowID(handle.GetWorkflowID()))
 			require.NoError(t, err, "failed to recover workflow (iteration %d)", i)
-
-			// Get result from recovered workflow
-			result2, err := handle2.GetResult()
-			require.NoError(t, err, "failed to get result from recovered workflow (iteration %d)", i)
-
-			// Results should be the same (deterministic replay)
-			assert.Equal(t, result1, result2, "recovered execution (iteration %d) should return same result as first execution", i)
-			assert.NoError(t, err, "expected no error, got %v (iteration %d)", err, i)
-
-			// Verify DBOS.select step is present at index 2 in recovered workflow
-			steps2, err := GetWorkflowSteps(dbosCtx, handle2.GetWorkflowID())
-			require.NoError(t, err, "failed to get workflow steps for recovered workflow (iteration %d)", i)
-			require.Len(t, steps2, 3, "expected 3 steps (2 Go + Select) in recovered workflow (iteration %d)", i)
-			assert.Equal(t, "DBOS.select", steps2[2].StepName, "expected step 2 to be DBOS.select in recovered workflow (iteration %d)", i)
-			assert.Equal(t, 2, steps2[2].StepID, "expected DBOS.select step to have StepID 2 in recovered workflow (iteration %d)", i)
+			workflowBlockStartEvent.Wait()
+			workflowBlockStartEvent.Clear()
 		}
+
+		// Check the status is PENDING. If there was a non-deterministic error during the steps execution (specifically, during the Select step), the status would be WorkflowStatusError.
+		// (Also, the event would not have been set and this test would be pending forever.)
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get status from first workflow")
+		require.Equal(t, WorkflowStatusPending, status.Status, "expected workflow status to be WorkflowStatusPending")
+
+		// Unblock the workflow to allow it to complete
+		workflowBlockEvent.Set()
+
+		// Get result from the workflow to verify it returns the correct value
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from first workflow")
+		assert.Equal(t, "result2", result, "first execution should return result2 (second step was ready first)")
+
+		// Check the steps again, there should be 3 steps: the first Go step, the second Go step and the Select step
+		steps2, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps for recovered workflow")
+		require.Len(t, steps2, 3, "expected 3 steps (1 Go + 1 Go + Select) in recovered workflow")
+		assert.Equal(t, "DBOS.select", steps2[2].StepName, "expected step 2 to be DBOS.select in recovered workflow")
+		assert.Equal(t, 2, steps2[2].StepID, "expected DBOS.select step to have StepID 2 in recovered workflow")
+		var output2_0 string
+		err = json.Unmarshal([]byte(steps2[0].Output.(string)), &output2_0)
+		require.NoError(t, err, "failed to decode step2[0] output")
+		assert.Equal(t, "result1", output2_0, "First Go step should have output 'result1'")
+		var output2_1 string
+		err = json.Unmarshal([]byte(steps2[1].Output.(string)), &output2_1)
+		require.NoError(t, err, "failed to decode step2[1] output")
+		assert.Equal(t, "result2", output2_1, "Second Go step should have output 'result2'")
+		var output2_2 string
+		err = json.Unmarshal([]byte(steps2[2].Output.(string)), &output2_2)
+		require.NoError(t, err, "failed to decode step2[2] output")
+		assert.Equal(t, "result2", output2_2, "Select step should have output 'result2'")
 	})
 }
 
