@@ -4883,4 +4883,55 @@ func TestPatching(t *testing.T) {
 		require.Contains(t, dbosErr2.Message, "Patching system is not enabled", "expected error message to mention patching is not enabled")
 		require.Contains(t, dbosErr2.Message, "EnablePatching", "expected error message to mention EnablePatching")
 	})
+
+	t.Run("PatchingEnabledWithVersioning", func(t *testing.T) {
+		databaseURL := getDatabaseURL()
+
+		t.Run("PreservesApplicationVersionWhenSetInConfig", func(t *testing.T) {
+			// Clear env vars to ensure we're testing config values
+			t.Setenv("DBOS__APPVERSION", "")
+			resetTestDatabase(t, databaseURL)
+
+			// Create a DBOS context with patching enabled and a custom application version
+			dbosCtx, err := NewDBOSContext(context.Background(), Config{
+				DatabaseURL:        databaseURL,
+				AppName:            "test-app-patching-with-version",
+				EnablePatching:     true,
+				ApplicationVersion: "custom-version-1.2.3",
+			})
+			require.NoError(t, err, "failed to create DBOS context with patching enabled and custom version")
+			require.Equal(t, "custom-version-1.2.3", dbosCtx.GetApplicationVersion(), "expected application version to be preserved from config")
+
+			// Register cleanup
+			t.Cleanup(func() {
+				if dbosCtx != nil {
+					Shutdown(dbosCtx, 30*time.Second)
+				}
+			})
+		})
+
+		t.Run("EnvironmentVariableOverridesPatchingEnabled", func(t *testing.T) {
+			// Set environment variable to override the automatic PATCHING_ENABLED value
+			t.Setenv("DBOS__APPVERSION", "env-override-version-2.0.0")
+			resetTestDatabase(t, databaseURL)
+
+			// Create a DBOS context with patching enabled but no application version in config
+			// The env var should override the automatic "PATCHING_ENABLED" value
+			dbosCtx, err := NewDBOSContext(context.Background(), Config{
+				DatabaseURL:    databaseURL,
+				AppName:        "test-app-patching-env-override",
+				EnablePatching: true,
+				// ApplicationVersion left empty - should default to "PATCHING_ENABLED" but env var overrides it
+			})
+			require.NoError(t, err, "failed to create DBOS context with patching enabled")
+			require.Equal(t, "env-override-version-2.0.0", dbosCtx.GetApplicationVersion(), "expected environment variable to override PATCHING_ENABLED")
+
+			// Register cleanup
+			t.Cleanup(func() {
+				if dbosCtx != nil {
+					Shutdown(dbosCtx, 30*time.Second)
+				}
+			})
+		})
+	})
 }

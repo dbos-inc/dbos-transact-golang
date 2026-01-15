@@ -78,8 +78,8 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		dbosConfig.DatabaseSchema = _DEFAULT_SYSTEM_DB_SCHEMA
 	}
 
-	// If patching is enabled, fix the application version
-	if dbosConfig.EnablePatching {
+	// If patching is enabled and application version is not set, fix the application version
+	if dbosConfig.EnablePatching && dbosConfig.ApplicationVersion == "" {
 		dbosConfig.ApplicationVersion = "PATCHING_ENABLED"
 	}
 
