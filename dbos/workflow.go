@@ -1212,6 +1212,47 @@ type StepOutcome[R any] struct {
 	Err    error `json:"err"`
 }
 
+// convertStepResult converts a generic step result to a typed result R.
+// It handles both checkpointed outcomes (encoded values from database) and direct type conversions.
+// Supports both real DBOS contexts and testing/mocking scenarios.
+func convertStepResult[R any](ctx DBOSContext, result any) (R, error) {
+	var typedResult R
+	// Check if we're in a real DBOS context (not a mock)
+	if _, ok := ctx.(*dbosContext); ok {
+		// First check if this is a checkpointed outcome (encoded value from database)
+		if checkpointed, ok := result.(stepCheckpointedOutcome); ok {
+			// This came from the database and needs decoding
+			encodedOutput, ok := checkpointed.value.(*string)
+			if !ok {
+				workflowID, _ := GetWorkflowID(ctx)
+				return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("checkpointed outcome value is not *string, got %T", checkpointed.value))
+			}
+			serializer := newJSONSerializer[R]()
+			var decodeErr error
+			typedResult, decodeErr = serializer.Decode(encodedOutput)
+			if decodeErr != nil {
+				workflowID, _ := GetWorkflowID(ctx)
+				return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("decoding step result to expected type %T: %w", *new(R), decodeErr))
+			}
+		} else if typedRes, ok := result.(R); ok {
+			// When the step is executed, the result is already decoded and should be directly convertible
+			typedResult = typedRes
+		} else {
+			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
+			return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", result))
+		}
+	} else {
+		// Fallback for testing/mocking scenarios
+		if typedRes, ok := result.(R); ok {
+			typedResult = typedRes
+		} else {
+			workflowID, _ := GetWorkflowID(ctx)
+			return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", result))
+		}
+	}
+	return typedResult, nil
+}
+
 // RunAsStep executes a function as a durable step within a workflow.
 // Steps provide at-least-once execution guarantees and automatic retry capabilities.
 // If a step has already been executed (e.g., during workflow recovery), its recorded
@@ -1273,28 +1314,9 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 	if result == nil {
 		return *new(R), err
 	}
-	var typedResult R
-	// First check if this is a checkpointed outcome (encoded value from database)
-	if checkpointed, ok := result.(stepCheckpointedOutcome); ok {
-		// This came from the database and needs decoding
-		encodedOutput, ok := checkpointed.value.(*string)
-		if !ok {
-			workflowID, _ := GetWorkflowID(ctx)
-			return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("checkpointed outcome value is not *string, got %T", checkpointed.value))
-		}
-		serializer := newJSONSerializer[R]()
-		var decodeErr error
-		typedResult, decodeErr = serializer.Decode(encodedOutput)
-		if decodeErr != nil {
-			workflowID, _ := GetWorkflowID(ctx)
-			return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("decoding step result to expected type %T: %w", *new(R), decodeErr))
-		}
-	} else if typedRes, ok := result.(R); ok {
-		// When the step is executed, the result is already decoded and should be directly convertible
-		typedResult = typedRes
-	} else {
-		workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-		return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", result))
+	typedResult, convertErr := convertStepResult[R](ctx, result)
+	if convertErr != nil {
+		return *new(R), convertErr
 	}
 	return typedResult, err
 }
@@ -1622,39 +1644,9 @@ func Select[R any](ctx DBOSContext, channels []<-chan StepOutcome[R]) (R, error)
 	if result == nil {
 		return *new(R), err
 	}
-	var typedResult R
-	// Check if we're in a real DBOS context (not a mock)
-	if _, ok := ctx.(*dbosContext); ok {
-		// First check if this is a checkpointed outcome (encoded value from database)
-		if checkpointed, ok := result.(stepCheckpointedOutcome); ok {
-			// This came from the database and needs decoding
-			encodedOutput, ok := checkpointed.value.(*string)
-			if !ok {
-				workflowID, _ := GetWorkflowID(ctx)
-				return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("checkpointed outcome value is not *string, got %T", checkpointed.value))
-			}
-			serializer := newJSONSerializer[R]()
-			var decodeErr error
-			typedResult, decodeErr = serializer.Decode(encodedOutput)
-			if decodeErr != nil {
-				workflowID, _ := GetWorkflowID(ctx)
-				return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("decoding step result to expected type %T: %w", *new(R), decodeErr))
-			}
-		} else if typedRes, ok := result.(R); ok {
-			// When the step is executed, the result is already decoded and should be directly convertible
-			typedResult = typedRes
-		} else {
-			workflowID, _ := GetWorkflowID(ctx) // Must be within a workflow so we can ignore the error
-			return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", result))
-		}
-	} else {
-		// Fallback for testing/mocking scenarios
-		if typedRes, ok := result.(R); ok {
-			typedResult = typedRes
-		} else {
-			workflowID, _ := GetWorkflowID(ctx)
-			return *new(R), newWorkflowUnexpectedResultType(workflowID, fmt.Sprintf("%T", *new(R)), fmt.Sprintf("%T", result))
-		}
+	typedResult, convertErr := convertStepResult[R](ctx, result)
+	if convertErr != nil {
+		return *new(R), convertErr
 	}
 	// Return both result and error, similar to RunAsStep
 	// The step function can return both a result and an error
