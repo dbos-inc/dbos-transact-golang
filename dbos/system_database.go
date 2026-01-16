@@ -2102,7 +2102,6 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		stepID:      stepID,
 		stepName:    functionName,
 		output:      messageString,
-		err:         err,
 		tx:          tx,
 		startedAt:   startTime,
 		completedAt: completedTime,
