@@ -1931,7 +1931,6 @@ func receiveWorkflowCoordinated(ctx DBOSContext, input struct {
 	concurrentRecvReadyEvents[input.i].Set()
 
 	// Wait for the coordination event before starting to receive
-
 	concurrentRecvStartEvent.Wait()
 
 	// Do a single Recv call with timeout
