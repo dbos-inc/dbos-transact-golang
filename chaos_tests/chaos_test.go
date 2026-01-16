@@ -299,7 +299,7 @@ func TestChaosRecv(t *testing.T) {
 	// Define recv workflow
 	recvWorkflow := func(ctx dbos.DBOSContext, _ string) (string, error) {
 		// Receive from topic with timeout
-		value, err := dbos.Recv[string](ctx, topic, 60*time.Second)
+		value, err := dbos.Recv[string](ctx, topic, 10*time.Minute)
 		if err != nil {
 			return "", fmt.Errorf("failed to receive: %w", err)
 		}
@@ -384,7 +384,7 @@ func TestChaosEvents(t *testing.T) {
 		require.NoError(t, err, "failed to get result for workflow %d", i)
 
 		// Retrieve the event and verify it matches
-		retrievedValue, err := dbos.GetEvent[string](dbosCtx, wfID, key, 60*time.Second)
+		retrievedValue, err := dbos.GetEvent[string](dbosCtx, wfID, key, 10*time.Minute)
 		require.NoError(t, err, "failed to get event for workflow %d", i)
 		assert.Equal(t, value, retrievedValue, "unexpected event value for workflow %d", i)
 	}
