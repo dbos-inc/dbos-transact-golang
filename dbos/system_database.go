@@ -2033,6 +2033,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		cond.L.Unlock()
 		return nil, fmt.Errorf("failed to check message: %w", err)
 	}
+	var timeoutOccurred bool
 	if !exists {
 		done := make(chan struct{})
 		go func() {
@@ -2053,6 +2054,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		select {
 		case <-done:
 		case <-time.After(timeout):
+			timeoutOccurred = true
 			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
 		case <-ctx.Done():
 			s.logger.Warn("Recv() context cancelled", "payload", payload, "cause", context.Cause(ctx))
@@ -2100,10 +2102,17 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		stepID:      stepID,
 		stepName:    functionName,
 		output:      messageString,
+		err:         err,
 		tx:          tx,
 		startedAt:   startTime,
 		completedAt: completedTime,
 	}
+
+	// Record an error if no message found and timeout occurred
+	if timeoutOccurred {
+		recordInput.err = newTimeoutError(destinationID, functionName, fmt.Sprintf("no message received within %v", input.Timeout))
+	}
+
 	err = s.recordOperationResult(ctx, recordInput)
 	if err != nil {
 		return nil, err
@@ -2113,8 +2122,8 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Return the message string pointer
-	return messageString, nil
+	// Return the message string pointer and the timeout error if any
+	return messageString, recordInput.err
 }
 
 type WorkflowSetEventInput struct {
