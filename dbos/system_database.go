@@ -80,13 +80,14 @@ type systemDatabase interface {
 }
 
 type sysDB struct {
-	pool                     *pgxpool.Pool
-	notificationLoopDone     chan struct{}
-	workflowNotificationsMap *sync.Map
-	workflowEventsMap        *sync.Map
-	logger                   *slog.Logger
-	schema                   string
-	launched                 bool
+	pool                          *pgxpool.Pool
+	notificationLoopDone          chan struct{}
+	workflowNotificationsMap      *sync.Map
+	workflowNotificationRepollMap *sync.Map
+	workflowEventsMap             *sync.Map
+	logger                        *slog.Logger
+	schema                        string
+	launched                      bool
 }
 
 /*******************************/
@@ -1838,6 +1839,12 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 					time.Sleep(backoffWithJitter(retryAttempt))
 					retryAttempt++
 				}
+				// The connection is re-aquired. Signal to all waiters they should poll the database for a potentially missed value.
+				s.workflowNotificationRepollMap.Range(func(key, value any) bool {
+					repollChannel := value.(chan struct{})
+					repollChannel <- struct{}{}
+					return true
+				})
 				continue
 			}
 			// Other transient errors. Backoff and continue on same conn
@@ -2018,10 +2025,13 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		s.logger.Error("Receive already called for workflow", "destination_id", destinationID)
 		return nil, newWorkflowConflictIDError(destinationID)
 	}
+	repollChannel := make(chan struct{})
+	s.workflowNotificationRepollMap.LoadOrStore(payload, repollChannel)
 	defer func() {
 		// Clean up the condition variable after we're done and broadcast to wake up any waiting goroutines
 		cond.Broadcast()
 		s.workflowNotificationsMap.Delete(payload)
+		s.workflowNotificationRepollMap.Delete(payload)
 	}()
 
 	// Now check if there is already a message available in the database.
@@ -2034,34 +2044,49 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		return nil, fmt.Errorf("failed to check message: %w", err)
 	}
 	var timeoutOccurred bool
-	if !exists {
-		done := make(chan struct{})
-		go func() {
-			defer cond.L.Unlock()
-			cond.Wait()
-			close(done)
-		}()
+	for {
+		if !exists {
+			done := make(chan struct{})
+			go func() {
+				defer cond.L.Unlock()
+				cond.Wait()
+				close(done)
+			}()
 
-		timeout, err := s.sleep(ctx, sleepInput{
-			duration:  input.Timeout,
-			skipSleep: true,
-			stepID:    &sleepStepID,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to sleep before recv timeout: %w", err)
-		}
+			timeout, err := s.sleep(ctx, sleepInput{
+				duration:  input.Timeout,
+				skipSleep: true,
+				stepID:    &sleepStepID,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to sleep before recv timeout: %w", err)
+			}
 
-		select {
-		case <-done:
-		case <-time.After(timeout):
-			timeoutOccurred = true
-			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
-		case <-ctx.Done():
-			s.logger.Warn("Recv() context cancelled", "payload", payload, "cause", context.Cause(ctx))
-			return nil, ctx.Err()
+			select {
+			case <-done:
+			case <-time.After(timeout):
+				timeoutOccurred = true
+				s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
+				break
+			case <-repollChannel:
+				// We were instructed to poll again because the connection was disconnected
+				err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
+				if err != nil {
+					cond.L.Unlock()
+					return nil, fmt.Errorf("failed to check message: %w", err)
+				}
+				// Restart at the beginning of the loop.
+				// If the value was found, we'll exit the loop and process to consuming the value.
+				// Else, the loop will create a new goroutine waiting for the condition. All such goroutines will terminate when the condition is signaled, at the end of the recv() function, by the defered Broadcast.
+				continue
+			case <-ctx.Done():
+				s.logger.Warn("Recv() context cancelled", "payload", payload, "cause", context.Cause(ctx))
+				return nil, ctx.Err()
+			}
+		} else {
+			cond.L.Unlock()
+			break
 		}
-	} else {
-		cond.L.Unlock()
 	}
 
 	// Capture start time before finding and deleting the message
