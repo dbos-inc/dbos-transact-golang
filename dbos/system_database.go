@@ -391,15 +391,17 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 
 	// Create a map of notification payloads to channels
 	workflowNotificationsMap := &sync.Map{}
+	workflowNotificationRepollMap := &sync.Map{}
 	workflowEventsMap := &sync.Map{}
 
 	return &sysDB{
-		pool:                     pool,
-		workflowNotificationsMap: workflowNotificationsMap,
-		workflowEventsMap:        workflowEventsMap,
-		notificationLoopDone:     make(chan struct{}),
-		logger:                   logger.With("service", "system_database"),
-		schema:                   databaseSchema,
+		pool:                          pool,
+		workflowNotificationsMap:      workflowNotificationsMap,
+		workflowNotificationRepollMap: workflowNotificationRepollMap,
+		workflowEventsMap:             workflowEventsMap,
+		notificationLoopDone:          make(chan struct{}),
+		logger:                        logger.With("service", "system_database"),
+		schema:                        databaseSchema,
 	}, nil
 }
 
@@ -2044,48 +2046,49 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		return nil, fmt.Errorf("failed to check message: %w", err)
 	}
 	var timeoutOccurred bool
-	for {
-		if !exists {
-			done := make(chan struct{})
-			go func() {
-				defer cond.L.Unlock()
-				cond.Wait()
-				close(done)
-			}()
 
-			timeout, err := s.sleep(ctx, sleepInput{
-				duration:  input.Timeout,
-				skipSleep: true,
-				stepID:    &sleepStepID,
-			})
+	// Create the waiting goroutine once (only if !exists, so we don't attempt to unlock twice)
+	done := make(chan struct{})
+	if !exists {
+		go func() {
+			// This is the only place we unlock the condition variable if the value did not exist
+			// Because of the deferred Broadcast, we'll eventually hit this before returning
+			defer cond.L.Unlock()
+			cond.Wait()
+			close(done)
+		}()
+	} else {
+		cond.L.Unlock()
+	}
+
+loop:
+	for !exists {
+		timeout, err := s.sleep(ctx, sleepInput{
+			duration:  input.Timeout,
+			skipSleep: true,
+			stepID:    &sleepStepID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to sleep before recv timeout: %w", err)
+		}
+
+		select {
+		case <-done:
+		case <-time.After(timeout):
+			timeoutOccurred = true
+			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
+			break loop
+		case <-repollChannel:
+			// We were instructed to poll again because the connection was disconnected
+			err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 			if err != nil {
-				return nil, fmt.Errorf("failed to sleep before recv timeout: %w", err)
+				return nil, fmt.Errorf("failed to check message: %w", err)
 			}
-
-			select {
-			case <-done:
-			case <-time.After(timeout):
-				timeoutOccurred = true
-				s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
-				break
-			case <-repollChannel:
-				// We were instructed to poll again because the connection was disconnected
-				err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
-				if err != nil {
-					cond.L.Unlock()
-					return nil, fmt.Errorf("failed to check message: %w", err)
-				}
-				// Restart at the beginning of the loop.
-				// If the value was found, we'll exit the loop and process to consuming the value.
-				// Else, the loop will create a new goroutine waiting for the condition. All such goroutines will terminate when the condition is signaled, at the end of the recv() function, by the defered Broadcast.
-				continue
-			case <-ctx.Done():
-				s.logger.Warn("Recv() context cancelled", "payload", payload, "cause", context.Cause(ctx))
-				return nil, ctx.Err()
-			}
-		} else {
-			cond.L.Unlock()
-			break
+			// Restart at the beginning of the loop. If the value was found, we'll exit the loop and process to consuming the value.
+			continue
+		case <-ctx.Done():
+			s.logger.Warn("Recv() context cancelled", "payload", payload, "cause", context.Cause(ctx))
+			return nil, ctx.Err()
 		}
 	}
 
