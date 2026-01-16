@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2629,13 +2630,13 @@ func getEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (
 func durableGetEventSleepWorkflow(ctx DBOSContext, targetWorkflowID string) (string, error) {
 	// First GetEvent with 2-second timeout (will timeout)
 	val1, err := GetEvent[string](ctx, targetWorkflowID, "key1", 2*time.Second)
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), "timed out") {
 		return "", fmt.Errorf("unexpected error in first getEvent: %w", err)
 	}
 
 	// Second GetEvent with 2-second timeout (will not timeout)
 	val2, err := GetEvent[string](ctx, targetWorkflowID, "key2", 2*time.Second)
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), "timed out") {
 		return "", fmt.Errorf("unexpected error in second getEvent: %w", err)
 	}
 
@@ -2948,11 +2949,14 @@ func TestSetGetEvent(t *testing.T) {
 	t.Run("GetEventTimeout", func(t *testing.T) {
 		// Try to get an event from a non-existent workflow
 		nonExistentID := uuid.NewString()
-		message, err := GetEvent[string](dbosCtx, nonExistentID, "test-key", 3*time.Second)
-		require.NoError(t, err, "failed to get event from non-existent workflow")
-		if message != "" {
-			t.Fatalf("expected empty result on timeout, got '%s'", message)
-		}
+		_, err := GetEvent[string](dbosCtx, nonExistentID, "test-key", 3*time.Second)
+		require.Error(t, err, "expected timeout error when getting event from non-existent workflow, but got none")
+
+		// Check that the error is a TimeoutError
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, TimeoutError, dbosErr.Code, "expected TimeoutError code")
+		require.Contains(t, err.Error(), "no event found for key 'test-key' within 3s", "expected error message to contain 'no event found for key 'test-key' within 3s'")
 
 		// Try to get an event from an existing workflow but with a key that doesn't exist
 		setHandle, err := RunWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
@@ -2962,11 +2966,15 @@ func TestSetGetEvent(t *testing.T) {
 		require.NoError(t, err, "failed to set event")
 		_, err = setHandle.GetResult()
 		require.NoError(t, err, "failed to get result from set event workflow")
-		message, err = GetEvent[string](dbosCtx, setHandle.GetWorkflowID(), "non-existent-key", 3*time.Second)
-		require.NoError(t, err, "failed to get event with non-existent key")
-		if message != "" {
-			t.Fatalf("expected empty result on timeout with non-existent key, got '%s'", message)
-		}
+		_, err = GetEvent[string](dbosCtx, setHandle.GetWorkflowID(), "non-existent-key", 3*time.Second)
+		require.Error(t, err, "expected timeout error when getting event with non-existent key, but got none")
+		require.Contains(t, err.Error(), "no event found for key 'non-existent-key' within 3s", "expected error message to contain 'no event found for key 'non-existent-key' within 3s'")
+
+		// Check that the error is a TimeoutError
+		dbosErr, ok = err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, TimeoutError, dbosErr.Code, "expected TimeoutError code")
+		require.Contains(t, err.Error(), "no event found for key 'non-existent-key' within 3s", "expected error message to contain 'no event found for key 'non-existent-key' within 3s'")
 	})
 
 	t.Run("SetGetEventMustRunInsideWorkflows", func(t *testing.T) {

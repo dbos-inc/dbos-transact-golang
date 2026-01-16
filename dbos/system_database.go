@@ -2287,6 +2287,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 		return nil, fmt.Errorf("failed to query workflow event: %w", err)
 	}
 
+	var timeoutOccurred bool
 	if err == pgx.ErrNoRows { // this implies isLaunched is True
 		// Wait for notification with timeout using condition variable
 		done := make(chan struct{})
@@ -2312,6 +2313,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 		case <-done:
 			// Received notification
 		case <-time.After(timeout):
+			timeoutOccurred = true
 			s.logger.Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
 		case <-ctx.Done():
 			s.logger.Warn("GetEvent() context cancelled", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "cause", context.Cause(ctx))
@@ -2327,6 +2329,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 	}
 
 	// Record the operation result if this is called within a workflow
+	var timeoutErr error
 	if isInWorkflow {
 		completedTime := time.Now()
 		recordInput := recordOperationResultDBInput{
@@ -2339,14 +2342,25 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 			completedAt: completedTime,
 		}
 
+		// Record an error if no event found and timeout occurred
+		if timeoutOccurred && valueString == nil {
+			recordInput.err = newTimeoutError(wfState.workflowID, functionName, fmt.Sprintf("no event found for key '%s' within %v", input.Key, input.Timeout))
+			timeoutErr = recordInput.err
+		}
+
 		err = s.recordOperationResult(ctx, recordInput)
 		if err != nil {
 			return nil, err
 		}
+	} else {
+		// If not in workflow and timeout occurred with no event found, return error
+		if timeoutOccurred && valueString == nil {
+			timeoutErr = newTimeoutError("", functionName, fmt.Sprintf("no event found for key '%s' within %v", input.Key, input.Timeout))
+		}
 	}
 
-	// Return the value string pointer
-	return valueString, nil
+	// Return the value string pointer and the timeout error if any
+	return valueString, timeoutErr
 }
 
 /*******************************/
