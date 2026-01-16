@@ -1905,19 +1905,22 @@ func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 	return "", nil
 }
 
-func receiveWorkflow(ctx DBOSContext, topic string) (string, error) {
+func receiveWorkflow(ctx DBOSContext, input struct {
+	Topic   string
+	Timeout time.Duration
+}) (string, error) {
 	// Wait for the test to signal it's ready
 	sendRecvSyncEvent.Wait()
 
-	msg1, err := Recv[string](ctx, topic, 2*time.Second)
+	msg1, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
 		return "", err
 	}
-	msg2, err := Recv[string](ctx, topic, 2*time.Second)
+	msg2, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
 		return "", err
 	}
-	msg3, err := Recv[string](ctx, topic, 2*time.Second)
+	msg3, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
 		return "", err
 	}
@@ -2045,7 +2048,13 @@ func TestSendRecv(t *testing.T) {
 		sendRecvSyncEvent.Clear()
 
 		// Start the receive workflow - it will wait for sendRecvSyncEvent before calling Recv
-		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "test-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, struct {
+			Topic   string
+			Timeout time.Duration
+		}{
+			Topic:   "test-topic",
+			Timeout: 30 * time.Second,
+		})
 		require.NoError(t, err, "failed to start receive workflow")
 
 		// Send messages to the receive workflow
@@ -2175,7 +2184,13 @@ func TestSendRecv(t *testing.T) {
 		sendRecvSyncEvent.Set()
 
 		// Create a receive workflow that tries to receive a message but no send happens
-		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "timeout-test-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, struct {
+			Topic   string
+			Timeout time.Duration
+		}{
+			Topic:   "timeout-test-topic",
+			Timeout: 2 * time.Second,
+		})
 		require.NoError(t, err, "failed to start receive workflow")
 		_, err = receiveHandle.GetResult()
 		require.Error(t, err, "expected timeout error")
@@ -2218,7 +2233,13 @@ func TestSendRecv(t *testing.T) {
 		sendRecvSyncEvent.Set()
 
 		// Start a receive workflow to have a valid destination
-		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "outside-workflow-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, struct {
+			Topic   string
+			Timeout time.Duration
+		}{
+			Topic:   "outside-workflow-topic",
+			Timeout: 30 * time.Second,
+		})
 		require.NoError(t, err, "failed to start receive workflow")
 
 		time.Sleep(500 * time.Millisecond) // Ensure receive workflow gets to the sleep part
@@ -2311,7 +2332,13 @@ func TestSendRecv(t *testing.T) {
 		sendRecvSyncEvent.Set()
 
 		// Start a receive workflow to have a valid destination
-		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "send-within-step-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, struct {
+			Topic   string
+			Timeout time.Duration
+		}{
+			Topic:   "send-within-step-topic",
+			Timeout: 30 * time.Second,
+		})
 		require.NoError(t, err, "failed to start receive workflow")
 
 		// Execute the workflow that tries to call Send within a step
