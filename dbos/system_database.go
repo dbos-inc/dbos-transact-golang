@@ -2136,7 +2136,7 @@ loop:
 	}
 
 	// Record an error if no message found and timeout occurred
-	if timeoutOccurred {
+	if timeoutOccurred && messageString == nil {
 		recordInput.err = newTimeoutError(destinationID, functionName, fmt.Sprintf("no message received within %v", input.Timeout))
 	}
 

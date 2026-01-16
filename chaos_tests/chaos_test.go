@@ -343,7 +343,7 @@ func TestChaosRecv(t *testing.T) {
 		signals[index].Set()
 
 		// Receive from topic with timeout
-		value, err := dbos.Recv[string](ctx, topic, 10*time.Minute)
+		value, err := dbos.Recv[string](ctx, topic, 10*time.Second)
 		if err != nil {
 			return "", fmt.Errorf("failed to receive: %w", err)
 		}
