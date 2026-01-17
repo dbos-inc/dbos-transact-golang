@@ -85,6 +85,7 @@ type sysDB struct {
 	workflowNotificationsMap      *sync.Map
 	workflowNotificationRepollMap *sync.Map
 	workflowEventsMap             *sync.Map
+	workflowEventsRepollMap       *sync.Map
 	logger                        *slog.Logger
 	schema                        string
 	launched                      bool
@@ -393,12 +394,14 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	workflowNotificationsMap := &sync.Map{}
 	workflowNotificationRepollMap := &sync.Map{}
 	workflowEventsMap := &sync.Map{}
+	workflowEventsRepollMap := &sync.Map{}
 
 	return &sysDB{
 		pool:                          pool,
 		workflowNotificationsMap:      workflowNotificationsMap,
 		workflowNotificationRepollMap: workflowNotificationRepollMap,
 		workflowEventsMap:             workflowEventsMap,
+		workflowEventsRepollMap:       workflowEventsRepollMap,
 		notificationLoopDone:          make(chan struct{}),
 		logger:                        logger.With("service", "system_database"),
 		schema:                        databaseSchema,
@@ -1847,6 +1850,11 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 					repollChannel <- struct{}{}
 					return true
 				})
+				s.workflowEventsRepollMap.Range(func(key, value any) bool {
+					repollChannel := value.(chan struct{})
+					repollChannel <- struct{}{}
+					return true
+				})
 				continue
 			}
 			// Other transient errors. Backoff and continue on same conn
@@ -2293,65 +2301,103 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 		// Reuse the existing condition variable
 		cond = existingCond.(*sync.Cond)
 	}
+	repollChannel := make(chan struct{})
+	s.workflowEventsRepollMap.LoadOrStore(payload, repollChannel)
 
 	// Defer broadcast to ensure any waiting goroutines eventually unlock
 	defer func() {
 		cond.Broadcast()
 		// Clean up the condition variable after we're done (Delete is a no-op if the key doesn't exist)
 		s.workflowEventsMap.Delete(payload)
+		s.workflowEventsRepollMap.Delete(payload)
 	}()
 
 	// Check if the event already exists in the database
 	query := fmt.Sprintf(`SELECT value FROM %s.workflow_events WHERE workflow_uuid = $1 AND key = $2`, pgx.Identifier{s.schema}.Sanitize())
 	var valueString *string
+	var row pgx.Row
+	var err error
 
-	row := s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
-	err := row.Scan(&valueString)
-	if err != nil && err != pgx.ErrNoRows {
-		if !loaded {
-			cond.L.Unlock()
+	// Helper function to query the event and handle errors
+	queryEvent := func() error {
+		row = s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
+		err = row.Scan(&valueString)
+		if err != nil && err != pgx.ErrNoRows {
+			if !loaded {
+				cond.L.Unlock()
+			}
+			return fmt.Errorf("failed to query workflow event: %w", err)
 		}
-		return nil, fmt.Errorf("failed to query workflow event: %w", err)
+		return nil
+	}
+
+	if err := queryEvent(); err != nil {
+		return nil, err
 	}
 
 	var timeoutOccurred bool
-	if err == pgx.ErrNoRows { // this implies isLaunched is True
-		// Wait for notification with timeout using condition variable
+	if valueString == nil {
+		// Start a goroutine to wait for the event to be set
+		// This goroutine is responsible for unlocking the CV, which will happen whenever the event is set (through either the deferred Broadcast or from the notification listener)
 		done := make(chan struct{})
 		go func() {
-			defer cond.L.Unlock()
+			if !loaded {
+				defer cond.L.Unlock()
+			}
 			cond.Wait()
 			close(done)
 		}()
 
-		timeout := input.Timeout
-		if isInWorkflow {
-			timeout, err = s.sleep(ctx, sleepInput{
-				duration:  input.Timeout,
-				skipSleep: true,
-				stepID:    &sleepStepID,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("failed to sleep before getEvent timeout: %w", err)
+	loop:
+		for valueString == nil {
+			// Wait for notification with timeout using condition variable
+			timeout := input.Timeout
+			if isInWorkflow {
+				timeout, err = s.sleep(ctx, sleepInput{
+					duration:  input.Timeout,
+					skipSleep: true,
+					stepID:    &sleepStepID,
+				})
+				if err != nil {
+					return nil, fmt.Errorf("failed to sleep before getEvent timeout: %w", err)
+				}
+			}
+
+			select {
+			case <-done:
+				// Received notification
+				if err := queryEvent(); err != nil {
+					return nil, err
+				}
+				break loop
+			case <-time.After(timeout):
+				timeoutOccurred = true
+				s.logger.Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
+				// Check if the event exists in the database -- we never know
+				if err := queryEvent(); err != nil {
+					return nil, err
+				}
+				break loop
+			case <-repollChannel:
+				// We were instructed to poll again because the connection was disconnected
+				if err := queryEvent(); err != nil {
+					return nil, err
+				}
+				// Restart at the beginning of the loop.
+				// If the value was found, we'll exit the loop
+				// Else, the loop will create a new goroutine waiting for the condition. All such goroutines will terminate when the condition is signaled, at the end of the getEvent() function, by the defered Broadcast.
+				continue
+			case <-ctx.Done():
+				s.logger.Warn("GetEvent() context cancelled", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "cause", context.Cause(ctx))
+				if !loaded {
+					cond.L.Unlock()
+				}
+				return nil, ctx.Err()
 			}
 		}
-
-		select {
-		case <-done:
-			// Received notification
-		case <-time.After(timeout):
-			timeoutOccurred = true
-			s.logger.Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
-		case <-ctx.Done():
-			s.logger.Warn("GetEvent() context cancelled", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "cause", context.Cause(ctx))
-			return nil, ctx.Err()
-		}
-
-		// Query the database again after waiting
-		row = s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
-		err = row.Scan(&valueString)
-		if err != nil && err != pgx.ErrNoRows {
-			return nil, fmt.Errorf("failed to query workflow event after wait: %w", err)
+	} else {
+		if !loaded {
+			cond.L.Unlock()
 		}
 	}
 
