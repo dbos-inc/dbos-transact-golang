@@ -2082,11 +2082,13 @@ loop:
 
 		select {
 		case <-done:
+			break loop
 		case <-time.After(timeout):
 			timeoutOccurred = true
 			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
 			break loop
 		case <-repollChannel:
+			s.logger.Warn("Receive polling after repoll channel signal", "payload", payload)
 			// We were instructed to poll again because the connection was disconnected
 			err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 			if err != nil {
