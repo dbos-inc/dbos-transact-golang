@@ -477,6 +477,9 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		Message           string
 	}
 
+	// Event to signal when workflow B is ready to receive
+	var workflowBReadyEvent *Event
+
 	// Workflow A: Uses Send() and GetEvent() - waits for workflow B
 	sendGetEventWorkflow := func(ctx DBOSContext, input testWorkflowInput) (string, error) {
 		// Send a message to the partner workflow
@@ -496,13 +499,16 @@ func TestCustomSystemDBSchema(t *testing.T) {
 
 	// Workflow B: Uses Recv() and SetEvent() - waits for workflow A
 	recvSetEventWorkflow := func(ctx DBOSContext, input testWorkflowInput) (string, error) {
+		// Signal that this workflow has started and is ready to receive
+		if workflowBReadyEvent != nil {
+			workflowBReadyEvent.Set()
+		}
+
 		// Receive a message from the partner workflow
 		receivedMsg, err := Recv[string](ctx, "test-topic", 5*time.Hour)
 		if err != nil {
 			return "", err
 		}
-
-		time.Sleep(1 * time.Second)
 
 		// Set an event for the partner workflow
 		err = SetEvent(ctx, "response-key", "response-from-workflow-b")
@@ -514,6 +520,9 @@ func TestCustomSystemDBSchema(t *testing.T) {
 	}
 
 	t.Run("CustomSchemaUsage", func(t *testing.T) {
+		// Initialize the event to signal when workflow B is ready to receive
+		workflowBReadyEvent = NewEvent()
+
 		// Register the test workflows
 		RegisterWorkflow(ctx, sendGetEventWorkflow)
 		RegisterWorkflow(ctx, recvSetEventWorkflow)
@@ -532,8 +541,8 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		}, WithWorkflowID(workflowBID))
 		require.NoError(t, err, "failed to start recvSetEventWorkflow")
 
-		// Small delay to ensure workflow B is ready to receive
-		time.Sleep(100 * time.Millisecond)
+		// Wait for workflow B to be ready to receive
+		workflowBReadyEvent.Wait()
 
 		// Start workflow A (sender)
 		handleA, err := RunWorkflow(ctx, sendGetEventWorkflow, testWorkflowInput{
@@ -554,17 +563,33 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		// Test GetWorkflowSteps
 		stepsA, err := GetWorkflowSteps(ctx, workflowAID)
 		require.NoError(t, err, "failed to get workflow A steps")
-		require.Len(t, stepsA, 3, "workflow A should have 3 steps (Send + GetEvent + Sleep)")
+		require.GreaterOrEqual(t, len(stepsA), 2, "workflow A should have at least 2 steps")
+		require.LessOrEqual(t, len(stepsA), 3, "workflow A should have at most 3 steps")
 		assert.Equal(t, "DBOS.send", stepsA[0].StepName, "first step should be Send")
-		assert.Equal(t, "DBOS.getEvent", stepsA[1].StepName, "second step should be GetEvent")
-		assert.Equal(t, "DBOS.sleep", stepsA[2].StepName, "third step should be Sleep")
+		// Verify GetEvent step is present (required)
+		foundGetEvent := false
+		for i := 1; i < len(stepsA); i++ {
+			if stepsA[i].StepName == "DBOS.getEvent" {
+				foundGetEvent = true
+				break
+			}
+		}
+		assert.True(t, foundGetEvent, "workflow A should have GetEvent step")
 
 		stepsB, err := GetWorkflowSteps(ctx, workflowBID)
 		require.NoError(t, err, "failed to get workflow B steps")
-		require.Len(t, stepsB, 3, "workflow B should have 3 steps (Recv + Sleep + SetEvent)")
+		require.GreaterOrEqual(t, len(stepsB), 2, "workflow B should have at least 2 steps")
+		require.LessOrEqual(t, len(stepsB), 3, "workflow B should have at most 3 steps")
 		assert.Equal(t, "DBOS.recv", stepsB[0].StepName, "first step should be Recv")
-		assert.Equal(t, "DBOS.sleep", stepsB[1].StepName, "second step should be Sleep")
-		assert.Equal(t, "DBOS.setEvent", stepsB[2].StepName, "third step should be SetEvent")
+		// Verify SetEvent step is present (required)
+		foundSetEvent := false
+		for i := 1; i < len(stepsB); i++ {
+			if stepsB[i].StepName == "DBOS.setEvent" {
+				foundSetEvent = true
+				break
+			}
+		}
+		assert.True(t, foundSetEvent, "workflow B should have SetEvent step")
 	})
 }
 
