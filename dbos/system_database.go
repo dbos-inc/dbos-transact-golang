@@ -2387,7 +2387,6 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 				}
 				// Restart at the beginning of the loop.
 				// If the value was found, we'll exit the loop
-				// Else, the loop will create a new goroutine waiting for the condition. All such goroutines will terminate when the condition is signaled, at the end of the getEvent() function, by the defered Broadcast.
 				continue
 			case <-ctx.Done():
 				s.logger.Warn("GetEvent() context cancelled", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "cause", context.Cause(ctx))
