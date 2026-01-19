@@ -502,7 +502,6 @@ func WithWorkflowName(name string) WorkflowRegistrationOption {
 
 // RegisterWorkflow registers a function as a durable workflow that can be executed and recovered.
 // The function is registered with type safety - P represents the input type and R the return type.
-// Types are automatically registered with gob encoding for serialization.
 //
 // Registration options include:
 //   - WithMaxRetries: Set maximum retry attempts for workflow recovery
@@ -1711,7 +1710,6 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 }
 
 // Send sends a message to another workflow with type safety.
-// The message type P is automatically registered for gob encoding.
 //
 // Send can be called from within a workflow (as a durable step) or from outside workflows.
 // When called within a workflow, the send operation becomes part of the workflow's durable state.
@@ -1814,7 +1812,6 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
 
 // SetEvent sets a key-value event for the current workflow with type safety.
 // Events are persistent and can be retrieved by other workflows using GetEvent.
-// The event type P is automatically registered for gob encoding.
 //
 // SetEvent can only be called from within a workflow and becomes part of the workflow's durable state.
 // Setting an event with the same key will overwrite the previous value.
@@ -1897,6 +1894,189 @@ func GetEvent[R any](ctx DBOSContext, targetWorkflowID, key string, timeout time
 		}
 	}
 	return typedValue, nil
+}
+
+func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
+	// Wrap in RunAsStep for durability (RunAsStep handles retries internally)
+	// value is already encoded as *string at the package level
+	encodedValue, ok := value.(*string)
+	if !ok {
+		return fmt.Errorf("value must be *string (already encoded), got %T", value)
+	}
+	_, err := RunAsStep(c, func(ctx context.Context) (string, error) {
+		return "", c.systemDB.writeStream(c, writeStreamDBInput{
+			Key:   key,
+			Value: encodedValue,
+		})
+	}, WithStepName("DBOS.writeStream"))
+	return err
+}
+
+// WriteStream writes a value to a durable stream with type safety.
+// Streams are append-only and ordered by offset.
+//
+// WriteStream can only be called from within a workflow and becomes part of the workflow's durable state.
+// The operation is automatically wrapped in RunAsStep for durability.
+//
+// Example:
+//
+//	err := dbos.WriteStream(ctx, "my-stream", "stream-value")
+func WriteStream[P any](ctx DBOSContext, key string, value P) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	// Serialize the stream value before storing (using typed serializer)
+	serializer := newJSONSerializer[P]()
+	encodedValue, err := serializer.Encode(value)
+	if err != nil {
+		return fmt.Errorf("failed to serialize stream value: %w", err)
+	}
+	return ctx.WriteStream(ctx, key, encodedValue)
+}
+
+func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) ([]any, bool, error) {
+	var allValues []any
+	currentOffset := 0
+	closed := false
+
+	// Blocking loop: continue reading until workflow is inactive or stream is closed
+	for {
+		// Read stream entries from current offset (always read at least once)
+		input := readStreamDBInput{
+			WorkflowID: workflowID,
+			Key:        key,
+			FromOffset: currentOffset,
+		}
+
+		var entries []streamEntry
+		err := retry(c, func() error {
+			var retryErr error
+			entries, closed, retryErr = c.systemDB.readStream(c, input)
+			return retryErr
+		}, withRetrierLogger(c.logger))
+
+		if err != nil {
+			return nil, false, err
+		}
+
+		// Add new entries to the result
+		for _, entry := range entries {
+			allValues = append(allValues, entry.Value)
+			currentOffset = entry.Offset + 1 // Next offset to read from
+		}
+
+		// If stream is closed (sentinel found), stop reading
+		if closed {
+			break
+		}
+
+		// Check if workflow is still active (PENDING or ENQUEUED) - check after first read
+		status, err := retryWithResult(c, func() (WorkflowStatusType, error) {
+			workflows, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{
+				workflowIDs: []string{workflowID},
+				loadInput:   false,
+				loadOutput:  false,
+			})
+			if err != nil {
+				return "", err
+			}
+			if len(workflows) == 0 { // This should never happen
+				return "", newNonExistentWorkflowError(workflowID)
+			}
+			return workflows[0].Status, nil
+		}, withRetrierLogger(c.logger))
+		if err != nil {
+			return nil, false, err
+		}
+
+		// If workflow is inactive (not PENDING or ENQUEUED), stop reading
+		if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
+			break
+		}
+
+		// If no new entries, wait a bit before polling again
+		if len(entries) == 0 {
+			select {
+			case <-c.Done():
+				return allValues, closed, c.Err()
+			case <-time.After(_DB_RETRY_INTERVAL):
+				// Continue loop to read again
+			}
+		}
+	}
+
+	return allValues, closed, nil
+}
+
+// ReadStream reads values from a durable stream.
+// This method blocks until one of the following conditions is met:
+//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
+//   - The stream is closed (sentinel value is found)
+//
+// Returns the values, whether the stream is closed, and any error.
+//
+// Example:
+//
+//	values, closed, err := dbos.ReadStream[string](ctx, "workflow-id", "my-stream")
+//	if err != nil {
+//	    return err
+//	}
+//	for _, value := range values {
+//	    log.Printf("Stream value: %s", value)
+//	}
+func ReadStream[R any](ctx DBOSContext, workflowID string, key string) ([]R, bool, error) {
+	if ctx == nil {
+		return nil, false, errors.New("ctx cannot be nil")
+	}
+	values, closed, err := ctx.ReadStream(ctx, workflowID, key)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Decode each value to type R
+	serializer := newJSONSerializer[R]()
+	typedValues := make([]R, len(values))
+	for i, val := range values {
+		encodedStr, ok := val.(string)
+		if !ok {
+			return nil, false, fmt.Errorf("stream value is not a string, got %T", val)
+		}
+		decodedValue, decodeErr := serializer.Decode(&encodedStr)
+		if decodeErr != nil {
+			return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
+		}
+		typedValues[i] = decodedValue
+	}
+
+	return typedValues, closed, nil
+}
+
+func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
+	_, err := RunAsStep(c, func(ctx context.Context) (string, error) {
+		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
+		return "", c.systemDB.writeStream(c, writeStreamDBInput{
+			Key:   key,
+			Value: &sentinel,
+		})
+	}, WithStepName("DBOS.closeStream"))
+	return err
+}
+
+// CloseStream closes a durable stream by writing the sentinel value.
+//
+// CloseStream can only be called from within a workflow and becomes part of the workflow's durable state.
+//
+// Example:
+//
+//	err := dbos.CloseStream(ctx, "my-stream")
+//	if err != nil {
+//	    return err
+//	}
+func CloseStream(ctx DBOSContext, key string) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.CloseStream(ctx, key)
 }
 
 func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error) {

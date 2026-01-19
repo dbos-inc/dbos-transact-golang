@@ -60,6 +60,10 @@ type systemDatabase interface {
 	setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	getEvent(ctx context.Context, input getEventInput) (*string, error)
 
+	// Streams
+	writeStream(ctx context.Context, input writeStreamDBInput) error
+	readStream(ctx context.Context, input readStreamDBInput) ([]streamEntry, bool, error)
+
 	// Timers (special steps)
 	sleep(ctx context.Context, input sleepInput) (time.Duration, error)
 
@@ -165,6 +169,9 @@ const (
 	// Notification channels
 	_DBOS_NOTIFICATIONS_CHANNEL   = "dbos_notifications_channel"
 	_DBOS_WORKFLOW_EVENTS_CHANNEL = "dbos_workflow_events_channel"
+
+	// Stream sentinel value for closure
+	_DBOS_STREAM_CLOSED_SENTINEL = "__DBOS_STREAM_CLOSED__"
 
 	// Database retry timeouts
 	_DB_CONNECTION_RETRY_BASE_DELAY  = 1 * time.Second
@@ -1233,6 +1240,18 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		_, err = tx.Exec(ctx, copyLatestEventsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
 		if err != nil {
 			return "", fmt.Errorf("failed to copy latest workflow events: %w", err)
+		}
+
+		// Copy streams for steps before startStep
+		copyStreamsQuery := fmt.Sprintf(`INSERT INTO %s.streams
+			(workflow_uuid, key, value, "offset", function_id)
+			SELECT $1, key, value, "offset", function_id
+			FROM %s.streams
+			WHERE workflow_uuid = $2 AND function_id < $3`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
+
+		_, err = tx.Exec(ctx, copyStreamsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
+		if err != nil {
+			return "", fmt.Errorf("failed to copy streams: %w", err)
 		}
 	}
 
@@ -2435,6 +2454,119 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 
 	// Return the value string pointer and the timeout error if any
 	return valueString, timeoutErr
+}
+
+/*******************************/
+/******* STREAMS ********/
+/*******************************/
+
+type writeStreamDBInput struct {
+	Key   string
+	Value *string // Already serialized
+}
+
+type readStreamDBInput struct {
+	WorkflowID string
+	Key        string
+	FromOffset int
+}
+
+type streamEntry struct {
+	Value  string
+	Offset int
+}
+
+func (s *sysDB) writeStream(ctx context.Context, input writeStreamDBInput) error {
+	// Get workflow state from context
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Check if stream is already closed (sentinel value exists)
+	checkClosedQuery := fmt.Sprintf(`SELECT 1 FROM %s.streams 
+		WHERE workflow_uuid = $1 AND key = $2 AND value = $3 LIMIT 1`,
+		pgx.Identifier{s.schema}.Sanitize())
+	var exists int
+	err = tx.QueryRow(ctx, checkClosedQuery, wfState.workflowID, input.Key, _DBOS_STREAM_CLOSED_SENTINEL).Scan(&exists)
+	if err == nil && exists == 1 {
+		return fmt.Errorf("stream '%s' is already closed", input.Key)
+	} else if err != pgx.ErrNoRows {
+		return fmt.Errorf("failed to check stream status: %w", err)
+	}
+
+	// Get next offset for this stream
+	var nextOffset int
+	getOffsetQuery := fmt.Sprintf(`SELECT COALESCE(MAX("offset"), -1) + 1 FROM %s.streams 
+		WHERE workflow_uuid = $1 AND key = $2`,
+		pgx.Identifier{s.schema}.Sanitize())
+	err = tx.QueryRow(ctx, getOffsetQuery, wfState.workflowID, input.Key).Scan(&nextOffset)
+	if err != nil {
+		return fmt.Errorf("failed to get next offset: %w", err)
+	}
+
+	// Insert the stream entry
+	insertQuery := fmt.Sprintf(`INSERT INTO %s.streams (workflow_uuid, key, value, "offset", function_id)
+		VALUES ($1, $2, $3, $4, $5)`,
+		pgx.Identifier{s.schema}.Sanitize())
+	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Value, nextOffset, wfState.stepID)
+	if err != nil {
+		return fmt.Errorf("failed to insert stream entry: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// readStream reads stream entries starting from a given offset.
+// Returns the entries, whether the stream is closed, and any error.
+func (s *sysDB) readStream(ctx context.Context, input readStreamDBInput) ([]streamEntry, bool, error) {
+	query := fmt.Sprintf(`SELECT value, "offset" FROM %s.streams 
+		WHERE workflow_uuid = $1 AND key = $2 AND "offset" >= $3
+		ORDER BY "offset" ASC`,
+		pgx.Identifier{s.schema}.Sanitize())
+
+	rows, err := s.pool.Query(ctx, query, input.WorkflowID, input.Key, input.FromOffset)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to query stream: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []streamEntry
+	closed := false
+
+	for rows.Next() {
+		var value string
+		var offset int
+		if err := rows.Scan(&value, &offset); err != nil {
+			return nil, false, fmt.Errorf("failed to scan stream entry: %w", err)
+		}
+
+		if value == _DBOS_STREAM_CLOSED_SENTINEL {
+			closed = true
+			break
+		}
+
+		entries = append(entries, streamEntry{
+			Value:  value,
+			Offset: offset,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("error iterating stream entries: %w", err)
+	}
+
+	return entries, closed, nil
 }
 
 /*******************************/
