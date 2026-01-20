@@ -1219,20 +1219,8 @@ func TestClientReadStream(t *testing.T) {
 	assert.Equal(t, "done", result)
 
 	// Read from the stream using client
-	valuesAny, closed, err := client.ReadStream(workflowID, streamKey)
+	values, closed, err := ClientReadStream[string](client, workflowID, streamKey)
 	require.NoError(t, err, "failed to read stream from client")
-
-	// Decode values to typed strings
-	serializer := newJSONSerializer[string]()
-	values := make([]string, len(valuesAny))
-	for i, val := range valuesAny {
-		encodedStr, ok := val.(string)
-		require.True(t, ok, "stream value is not a string, got %T", val)
-		decodedValue, decodeErr := serializer.Decode(&encodedStr)
-		require.NoError(t, decodeErr, "failed to decode stream value")
-		values[i] = decodedValue
-	}
-
 	assert.Equal(t, testValues, values, "expected stream values to match")
 	assert.False(t, closed, "expected stream not to be closed")
 
