@@ -665,6 +665,7 @@ type listWorkflowsDBInput struct {
 	applicationVersion string
 	executorIDs        []string
 	forkedFrom         string
+	deduplicationID    string
 	limit              *int
 	offset             *int
 	sortDesc           bool
@@ -730,6 +731,9 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 	}
 	if input.forkedFrom != "" {
 		qb.addWhere("forked_from", input.forkedFrom)
+	}
+	if input.deduplicationID != "" {
+		qb.addWhere("deduplication_id", input.deduplicationID)
 	}
 
 	// Build complete query

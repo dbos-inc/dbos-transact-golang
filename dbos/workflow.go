@@ -2545,6 +2545,7 @@ type listWorkflowsOptions struct {
 	queuesOnly       bool
 	executorIDs      []string
 	forkedFrom       string
+	deduplicationID  string
 }
 
 // ListWorkflowsOption is a functional option for configuring workflow listing parameters.
@@ -2670,6 +2671,13 @@ func WithForkedFrom(forkedFrom string) ListWorkflowsOption {
 	}
 }
 
+// WithFilterDeduplicationID filters workflows by the specified deduplication ID.
+func WithFilterDeduplicationID(deduplicationID string) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.deduplicationID = deduplicationID
+	}
+}
+
 func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
 	// Initialize parameters with defaults
 	loadInput := true
@@ -2712,6 +2720,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		queuesOnly:         params.queuesOnly,
 		executorIDs:        params.executorIDs,
 		forkedFrom:         params.forkedFrom,
+		deduplicationID:    params.deduplicationID,
 	}
 
 	// Call the context method to list workflows
