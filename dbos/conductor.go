@@ -246,7 +246,9 @@ func (c *conductor) connect() error {
 			body := ""
 			if resp.Body != nil {
 				bodyBytes, readErr := io.ReadAll(resp.Body)
-				resp.Body.Close()
+				if closeErr := resp.Body.Close(); closeErr != nil {
+					c.logger.Debug("Failed to close response body", "error", closeErr)
+				}
 				if readErr == nil && len(bodyBytes) > 0 {
 					body = string(bodyBytes)
 				}
