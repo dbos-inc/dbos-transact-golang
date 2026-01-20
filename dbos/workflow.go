@@ -1897,14 +1897,13 @@ func GetEvent[R any](ctx DBOSContext, targetWorkflowID, key string, timeout time
 }
 
 func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
-	// Wrap in RunAsStep for durability (RunAsStep handles retries internally)
 	// value is already encoded as *string at the package level
 	encodedValue, ok := value.(*string)
 	if !ok {
 		return fmt.Errorf("value must be *string (already encoded), got %T", value)
 	}
 	_, err := RunAsStep(c, func(ctx context.Context) (string, error) {
-		return "", c.systemDB.writeStream(c, writeStreamDBInput{
+		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
 			Key:   key,
 			Value: encodedValue,
 		})
@@ -1916,7 +1915,6 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
 // Streams are append-only and ordered by offset.
 //
 // WriteStream can only be called from within a workflow and becomes part of the workflow's durable state.
-// The operation is automatically wrapped in RunAsStep for durability.
 //
 // Example:
 //
@@ -2054,7 +2052,7 @@ func ReadStream[R any](ctx DBOSContext, workflowID string, key string) ([]R, boo
 func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
 	_, err := RunAsStep(c, func(ctx context.Context) (string, error) {
 		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
-		return "", c.systemDB.writeStream(c, writeStreamDBInput{
+		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
 			Key:   key,
 			Value: &sentinel,
 		})
