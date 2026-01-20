@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"math/rand"
@@ -236,9 +237,23 @@ func (c *conductor) connect() error {
 		HandshakeTimeout: _HANDSHAKE_TIMEOUT,
 	}
 
-	conn, _, err := dialer.Dial(c.url.String(), nil)
+	conn, resp, err := dialer.Dial(c.url.String(), nil)
 	if err != nil {
-		return fmt.Errorf("failed to dial conductor: %w", err)
+		// Include HTTP response details if available
+		baseErr := fmt.Errorf("failed to dial conductor: %w", err)
+		if resp != nil {
+			// Read response body if available
+			body := ""
+			if resp.Body != nil {
+				bodyBytes, readErr := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if readErr == nil && len(bodyBytes) > 0 {
+					body = string(bodyBytes)
+				}
+			}
+			return fmt.Errorf("%w (%s)", baseErr, body)
+		}
+		return baseErr
 	}
 
 	// Set initial read deadline
