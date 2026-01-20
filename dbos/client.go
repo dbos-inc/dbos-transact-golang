@@ -32,6 +32,7 @@ type Client interface {
 	ResumeWorkflow(workflowID string) (WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
+	ReadStream(workflowID string, key string) ([]any, bool, error)
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
 
@@ -320,6 +321,16 @@ func (c *client) ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], err
 // GetWorkflowSteps retrieves the execution steps of a workflow.
 func (c *client) GetWorkflowSteps(workflowID string) ([]StepInfo, error) {
 	return c.dbosCtx.GetWorkflowSteps(c.dbosCtx, workflowID)
+}
+
+// ReadStream reads values from a durable stream.
+// This method blocks until one of the following conditions is met:
+//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
+//   - The stream is closed (sentinel value is found)
+//
+// Returns the values, whether the stream is closed, and any error.
+func (c *client) ReadStream(workflowID string, key string) ([]any, bool, error) {
+	return c.dbosCtx.ReadStream(c.dbosCtx, workflowID, key)
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.

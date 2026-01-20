@@ -4740,7 +4740,6 @@ func TestSpecialSteps(t *testing.T) {
 		// Step 4: resume the cancelled workflow
 		resumeHandle, err := ResumeWorkflow[string](dbosCtx, childHandle.GetWorkflowID())
 		if err != nil {
-			fmt.Println("error in ResumeWorkflow:", err)
 			return "", fmt.Errorf("ResumeWorkflow failed: %w", err)
 		}
 		if resumeHandle.GetWorkflowID() != childHandle.GetWorkflowID() {
@@ -5408,8 +5407,7 @@ func TestStreams(t *testing.T) {
 		require.NoError(t, err, "failed to start writer workflow")
 
 		// Wait for writer to complete
-		res, err := writerHandle.GetResult()
-		fmt.Println("res", res, "err", err)
+		_, err = writerHandle.GetResult()
 		require.Error(t, err, "expected error when writing to closed stream")
 		require.Contains(t, err.Error(), "stream 'test-stream' is already closed")
 
@@ -5423,7 +5421,7 @@ func TestStreams(t *testing.T) {
 		// Verify steps were recorded correctly
 		steps, err := GetWorkflowSteps(dbosCtx, writerHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
-		// Should have 3 WriteStream steps (workflow-level) + 1 RunAsStep with custom name (containing step-level write) + 1 CloseStream step = 5 steps
+		// Should have 3 WriteStream steps (workflow-level) + 1 RunAsStep with custom name (containing step-level write) + 1 CloseStream step + 1 failed writeStream step = 6 steps
 		require.Len(t, steps, 6, "expected 6 steps (3 workflow writes + 1 RunAsStep with step write + 1 close + 1 failed writeStream step)")
 		require.Equal(t, "DBOS.writeStream", steps[0].StepName, "expected first step to be DBOS.writeStream")
 		require.Equal(t, "DBOS.writeStream", steps[1].StepName, "expected second step to be DBOS.writeStream")
@@ -5538,11 +5536,9 @@ func TestStreams(t *testing.T) {
 		})
 		require.NoError(t, err, "failed to start original workflow")
 
-		fmt.Println("waiting for workflow to start")
 		// Wait for workflow to start and do a few writes
 		streamStartedEvent.Wait()
 
-		fmt.Println("forking workflow")
 		// Fork workflow from step 2 (after the two first writes)
 		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
 			OriginalWorkflowID: originalHandle.GetWorkflowID(),
@@ -5576,7 +5572,6 @@ func TestStreams(t *testing.T) {
 		require.NoError(t, err, "failed to decode second stream entry")
 		require.Equal(t, "value2", decodedValue2, "expected second entry to be value2")
 
-		fmt.Println("unblocking workflows")
 		// Now unblock both workflows to let them complete
 		streamBlockEvent.Set()
 		_, err = originalHandle.GetResult()
