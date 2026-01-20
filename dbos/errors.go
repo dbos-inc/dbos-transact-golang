@@ -21,6 +21,7 @@ const (
 	MaxStepRetriesExceeded                                // Step exceeded maximum retry attempts
 	QueueDeduplicated                                     // Workflow was deduplicated in the queue
 	PatchingNotEnabled                                    // Patching system is not enabled in the DBOS context configuration
+	TimeoutError                                          // Operation timed out (e.g., recv timeout)
 )
 
 // DBOSError is the unified error type for all DBOS operations.
@@ -210,5 +211,24 @@ func newPatchingNotEnabledError() *DBOSError {
 	return &DBOSError{
 		Message: "Patching system is not enabled. Set EnablePatching to true in the DBOS context configuration to use Patch and DeprecatePatch",
 		Code:    PatchingNotEnabled,
+	}
+}
+
+func newTimeoutError(workflowID, stepName, message string) *DBOSError {
+	msg := "Operation timed out"
+	if stepName != "" {
+		msg = fmt.Sprintf("Step %s timed out", stepName)
+	}
+	if workflowID != "" {
+		msg += fmt.Sprintf(" in workflow %s", workflowID)
+	}
+	if message != "" {
+		msg += ": " + message
+	}
+	return &DBOSError{
+		Message:    msg,
+		Code:       TimeoutError,
+		WorkflowID: workflowID,
+		StepName:   stepName,
 	}
 }

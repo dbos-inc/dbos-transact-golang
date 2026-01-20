@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1904,19 +1905,22 @@ func sendWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, error) {
 	return "", nil
 }
 
-func receiveWorkflow(ctx DBOSContext, topic string) (string, error) {
+func receiveWorkflow(ctx DBOSContext, input struct {
+	Topic   string
+	Timeout time.Duration
+}) (string, error) {
 	// Wait for the test to signal it's ready
 	sendRecvSyncEvent.Wait()
 
-	msg1, err := Recv[string](ctx, topic, 2*time.Second)
+	msg1, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
 		return "", err
 	}
-	msg2, err := Recv[string](ctx, topic, 2*time.Second)
+	msg2, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
 		return "", err
 	}
-	msg3, err := Recv[string](ctx, topic, 2*time.Second)
+	msg3, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
 		return "", err
 	}
@@ -1931,7 +1935,6 @@ func receiveWorkflowCoordinated(ctx DBOSContext, input struct {
 	concurrentRecvReadyEvents[input.i].Set()
 
 	// Wait for the coordination event before starting to receive
-
 	concurrentRecvStartEvent.Wait()
 
 	// Do a single Recv call with timeout
@@ -1976,13 +1979,13 @@ func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 func durableRecvSleepWorkflow(ctx DBOSContext, topic string) (string, error) {
 	// First Recv with 2-second timeout (will timeout)
 	msg1, err := Recv[string](ctx, topic, 2*time.Second)
-	if err != nil {
+	if err != nil && !errors.Is(err, &DBOSError{Code: TimeoutError}) {
 		return "", fmt.Errorf("unexpected error in first recv: %w", err)
 	}
 
 	// Second Recv with 2-second timeout (will also timeout)
 	msg2, err := Recv[string](ctx, topic, 2*time.Second)
-	if err != nil {
+	if err != nil && !errors.Is(err, &DBOSError{Code: TimeoutError}) {
 		return "", fmt.Errorf("unexpected error in second recv: %w", err)
 	}
 
@@ -2045,7 +2048,13 @@ func TestSendRecv(t *testing.T) {
 		sendRecvSyncEvent.Clear()
 
 		// Start the receive workflow - it will wait for sendRecvSyncEvent before calling Recv
-		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "test-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, struct {
+			Topic   string
+			Timeout time.Duration
+		}{
+			Topic:   "test-topic",
+			Timeout: 30 * time.Second,
+		})
 		require.NoError(t, err, "failed to start receive workflow")
 
 		// Send messages to the receive workflow
@@ -2175,27 +2184,33 @@ func TestSendRecv(t *testing.T) {
 		sendRecvSyncEvent.Set()
 
 		// Create a receive workflow that tries to receive a message but no send happens
-		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "timeout-test-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, struct {
+			Topic   string
+			Timeout time.Duration
+		}{
+			Topic:   "timeout-test-topic",
+			Timeout: 2 * time.Second,
+		})
 		require.NoError(t, err, "failed to start receive workflow")
-		result, err := receiveHandle.GetResult()
-		require.NoError(t, err, "expected no error on timeout")
-		assert.Equal(t, "--", result, "expected -- result on timeout")
-		// Check that six steps were recorded: recv, sleep, recv, sleep, recv, sleep
+		_, err = receiveHandle.GetResult()
+		require.Error(t, err, "expected timeout error")
+
+		// Check that the error is a TimeoutError
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, TimeoutError, dbosErr.Code, "expected TimeoutError code")
+		require.Contains(t, err.Error(), "DBOS.recv timed out", "error message should contain 'Operation timed out'")
+
+		// Check that only two steps were recorded (the recv that timed out and the sleep that timed out)
 		steps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
-		require.Len(t, steps, 6, "expected 6 steps in receive workflow, got %d", len(steps))
+		require.Len(t, steps, 2, "expected 2 steps in receive workflow (recv that timed out and sleep that timed out), got %d", len(steps))
+		// First step should be recv
 		require.Equal(t, "DBOS.recv", steps[0].StepName, "expected step 0 to have StepName 'DBOS.recv'")
+		require.NotNil(t, steps[0].Error, "expected step 0 to have an error")
+		require.Contains(t, steps[0].Error.Error(), "DBOS.recv timed out", "expected step 0 to contain 'DBOS.recv timed out' in error message")
+		// Second step should be sleep
 		require.Equal(t, "DBOS.sleep", steps[1].StepName, "expected step 1 to have StepName 'DBOS.sleep'")
-		require.Equal(t, "DBOS.recv", steps[2].StepName, "expected step 2 to have StepName 'DBOS.recv'")
-		require.Equal(t, "DBOS.sleep", steps[3].StepName, "expected step 3 to have StepName 'DBOS.sleep'")
-		require.Equal(t, "DBOS.recv", steps[4].StepName, "expected step 4 to have StepName 'DBOS.recv'")
-		require.Equal(t, "DBOS.sleep", steps[5].StepName, "expected step 5 to have StepName 'DBOS.sleep'")
-		for i, step := range steps {
-			require.False(t, step.StartedAt.IsZero(), "expected step %d to have StartedAt set", i)
-			require.False(t, step.CompletedAt.IsZero(), "expected step %d to have CompletedAt set", i)
-			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
-				"expected step %d CompletedAt to be after or equal to StartedAt", i)
-		}
 	})
 
 	t.Run("RecvMustRunInsideWorkflows", func(t *testing.T) {
@@ -2218,7 +2233,13 @@ func TestSendRecv(t *testing.T) {
 		sendRecvSyncEvent.Set()
 
 		// Start a receive workflow to have a valid destination
-		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "outside-workflow-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, struct {
+			Topic   string
+			Timeout time.Duration
+		}{
+			Topic:   "outside-workflow-topic",
+			Timeout: 30 * time.Second,
+		})
 		require.NoError(t, err, "failed to start receive workflow")
 
 		time.Sleep(500 * time.Millisecond) // Ensure receive workflow gets to the sleep part
@@ -2311,7 +2332,13 @@ func TestSendRecv(t *testing.T) {
 		sendRecvSyncEvent.Set()
 
 		// Start a receive workflow to have a valid destination
-		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "send-within-step-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, struct {
+			Topic   string
+			Timeout time.Duration
+		}{
+			Topic:   "send-within-step-topic",
+			Timeout: 30 * time.Second,
+		})
 		require.NoError(t, err, "failed to start receive workflow")
 
 		// Execute the workflow that tries to call Send within a step
@@ -2335,9 +2362,9 @@ func TestSendRecv(t *testing.T) {
 		require.Contains(t, err.Error(), expectedMessagePart, "expected error message to contain expected text")
 
 		// Wait for the receive workflow to time out
-		result, err := receiveHandle.GetResult()
-		require.NoError(t, err, "failed to get result from receive workflow")
-		assert.Equal(t, "--", result, "expected receive workflow result to be '--' (timeout)")
+		_, err = receiveHandle.GetResult()
+		require.Error(t, err, "expected timout error when getting result from receive workflow, but got none")
+		require.Contains(t, err.Error(), "DBOS.recv timed out", "expected error message to contain 'DBOS.recv timed out'")
 	})
 
 	t.Run("TestConcurrentRecvs", func(t *testing.T) {
@@ -2373,7 +2400,8 @@ func TestSendRecv(t *testing.T) {
 		// Collect results from all receivers
 		for i := range numReceivers {
 			result, err := receiverHandles[i].GetResult()
-			require.NoError(t, err, "receiver %d should not error", i)
+			require.Error(t, err, "expected timeout error when getting result from receiver %d, but got none", i)
+			require.Contains(t, err.Error(), "DBOS.recv timed out", "expected error message to contain 'DBOS.recv timed out'")
 			require.Equal(t, result, "", "receiver %d should have an empty string result", i)
 		}
 	})
@@ -2629,13 +2657,13 @@ func getEventIdempotencyWorkflow(ctx DBOSContext, input setEventWorkflowInput) (
 func durableGetEventSleepWorkflow(ctx DBOSContext, targetWorkflowID string) (string, error) {
 	// First GetEvent with 2-second timeout (will timeout)
 	val1, err := GetEvent[string](ctx, targetWorkflowID, "key1", 2*time.Second)
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), "timed out") {
 		return "", fmt.Errorf("unexpected error in first getEvent: %w", err)
 	}
 
 	// Second GetEvent with 2-second timeout (will not timeout)
 	val2, err := GetEvent[string](ctx, targetWorkflowID, "key2", 2*time.Second)
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), "timed out") {
 		return "", fmt.Errorf("unexpected error in second getEvent: %w", err)
 	}
 
@@ -2948,11 +2976,14 @@ func TestSetGetEvent(t *testing.T) {
 	t.Run("GetEventTimeout", func(t *testing.T) {
 		// Try to get an event from a non-existent workflow
 		nonExistentID := uuid.NewString()
-		message, err := GetEvent[string](dbosCtx, nonExistentID, "test-key", 3*time.Second)
-		require.NoError(t, err, "failed to get event from non-existent workflow")
-		if message != "" {
-			t.Fatalf("expected empty result on timeout, got '%s'", message)
-		}
+		_, err := GetEvent[string](dbosCtx, nonExistentID, "test-key", 3*time.Second)
+		require.Error(t, err, "expected timeout error when getting event from non-existent workflow, but got none")
+
+		// Check that the error is a TimeoutError
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, TimeoutError, dbosErr.Code, "expected TimeoutError code")
+		require.Contains(t, err.Error(), "no event found for key 'test-key' within 3s", "expected error message to contain 'no event found for key 'test-key' within 3s'")
 
 		// Try to get an event from an existing workflow but with a key that doesn't exist
 		setHandle, err := RunWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
@@ -2962,11 +2993,15 @@ func TestSetGetEvent(t *testing.T) {
 		require.NoError(t, err, "failed to set event")
 		_, err = setHandle.GetResult()
 		require.NoError(t, err, "failed to get result from set event workflow")
-		message, err = GetEvent[string](dbosCtx, setHandle.GetWorkflowID(), "non-existent-key", 3*time.Second)
-		require.NoError(t, err, "failed to get event with non-existent key")
-		if message != "" {
-			t.Fatalf("expected empty result on timeout with non-existent key, got '%s'", message)
-		}
+		_, err = GetEvent[string](dbosCtx, setHandle.GetWorkflowID(), "non-existent-key", 3*time.Second)
+		require.Error(t, err, "expected timeout error when getting event with non-existent key, but got none")
+		require.Contains(t, err.Error(), "no event found for key 'non-existent-key' within 3s", "expected error message to contain 'no event found for key 'non-existent-key' within 3s'")
+
+		// Check that the error is a TimeoutError
+		dbosErr, ok = err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, TimeoutError, dbosErr.Code, "expected TimeoutError code")
+		require.Contains(t, err.Error(), "no event found for key 'non-existent-key' within 3s", "expected error message to contain 'no event found for key 'non-existent-key' within 3s'")
 	})
 
 	t.Run("SetGetEventMustRunInsideWorkflows", func(t *testing.T) {

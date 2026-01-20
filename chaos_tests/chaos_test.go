@@ -23,6 +23,40 @@ import (
 
 var testCLIPath string
 
+// Event struct provides a simple synchronization primitive that can be used to signal between goroutines.
+type Event struct {
+	mu    sync.Mutex
+	cond  *sync.Cond
+	IsSet bool
+}
+
+func NewEvent() *Event {
+	e := &Event{}
+	e.cond = sync.NewCond(&e.mu)
+	return e
+}
+
+func (e *Event) Wait() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for !e.IsSet {
+		e.cond.Wait()
+	}
+}
+
+func (e *Event) Set() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.IsSet = true
+	e.cond.Broadcast()
+}
+
+func (e *Event) Clear() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.IsSet = false
+}
+
 // TestMain builds the CLI once for all tests
 func TestMain(m *testing.M) {
 	// Get the directory where this test file is located
@@ -296,8 +330,18 @@ func TestChaosRecv(t *testing.T) {
 
 	topic := "test_topic"
 
-	// Define recv workflow
-	recvWorkflow := func(ctx dbos.DBOSContext, _ string) (string, error) {
+	// Pre-allocate signals for all workflows, indexed by workflow index
+	numWorkflows := 10000
+	signals := make([]*Event, numWorkflows)
+	for i := range numWorkflows {
+		signals[i] = NewEvent()
+	}
+
+	// Define recv workflow - takes index as parameter
+	recvWorkflow := func(ctx dbos.DBOSContext, index int) (string, error) {
+		// Signal that we've started
+		signals[index].Set()
+
 		// Receive from topic with timeout
 		value, err := dbos.Recv[string](ctx, topic, 10*time.Second)
 		if err != nil {
@@ -313,22 +357,22 @@ func TestChaosRecv(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run multiple workflows with send/recv
-	numWorkflows := 10000
 	for i := range numWorkflows {
 		if i%100 == 0 {
 			t.Logf("Starting workflow %d/%d", i+1, numWorkflows)
 		}
-		handle, err := dbos.RunWorkflow(dbosCtx, recvWorkflow, "")
+		handle, err := dbos.RunWorkflow(dbosCtx, recvWorkflow, i)
 		require.NoError(t, err, "failed to start workflow %d", i)
+
+		// Wait for the workflow to actually start before calling Recv
+		signals[i].Wait()
 
 		// Generate a random value
 		value := uuid.NewString()
 
-		// Give some time to the workflow to enter the sleep state
-		time.Sleep((5 * time.Millisecond))
-
 		// Send the value to the workflow
-		err = dbos.Send(dbosCtx, handle.GetWorkflowID(), value, topic)
+		workflowID := handle.GetWorkflowID()
+		err = dbos.Send(dbosCtx, workflowID, value, topic)
 		require.NoError(t, err, "failed to send value for workflow %d", i)
 
 		// Get the result and verify it matches
@@ -384,7 +428,7 @@ func TestChaosEvents(t *testing.T) {
 		require.NoError(t, err, "failed to get result for workflow %d", i)
 
 		// Retrieve the event and verify it matches
-		retrievedValue, err := dbos.GetEvent[string](dbosCtx, wfID, key, 0)
+		retrievedValue, err := dbos.GetEvent[string](dbosCtx, wfID, key, 10*time.Minute)
 		require.NoError(t, err, "failed to get event for workflow %d", i)
 		assert.Equal(t, value, retrievedValue, "unexpected event value for workflow %d", i)
 	}

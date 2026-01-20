@@ -1582,7 +1582,7 @@ func Select[R any](ctx DBOSContext, channels []<-chan StepOutcome[R]) (R, error)
 	// Convert typed channels to any channels for internal processing
 	// Create a context that will be cancelled when Select completes to prevent goroutine leaks
 	selectCtx, cancelSelect := context.WithCancel(ctx)
-	defer cancelSelect() // Ensure all goroutines are cancelled when Select completes
+	defer cancelSelect()
 
 	anyChannels := make([]<-chan StepOutcome[any], len(channels))
 	for i := range channels {
@@ -1623,8 +1623,6 @@ func Select[R any](ctx DBOSContext, channels []<-chan StepOutcome[R]) (R, error)
 	if convertErr != nil {
 		return *new(R), convertErr
 	}
-	// Return both result and error, similar to RunAsStep
-	// The step function can return both a result and an error
 	return typedResult, err
 }
 
@@ -1666,6 +1664,12 @@ func (c *dbosContext) Select(_ DBOSContext, channels []<-chan StepOutcome[any]) 
 		if !ok {
 			// Adjust index since context case is at index 0
 			selectedIndex := chosen - 1
+			// If context was cancelled, return cancellation error instead of channel closed error
+			// This handles the race condition after a closed channel (due to cancellation) is selected
+			// instead of context.Done() (both are eligible to be selected).
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, fmt.Errorf("channel at index %d was closed", selectedIndex)
 		}
 
