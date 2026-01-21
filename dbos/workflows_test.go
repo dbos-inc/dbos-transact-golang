@@ -5362,10 +5362,7 @@ func writeStreamWorkflow(ctx DBOSContext, input struct {
 
 	// Write from step level with custom step name
 	_, err := RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
-		// Note we don't expect users to be able to do this, because dbosContext is private.
-		// It is also pretty clear that WriteStream is a special step.
-		// This "boon" comes from the delicateness of _having_ to pass the step context to the step function (_not_ the workflow context)
-		return "", WriteStream(stepCtx.(*dbosContext), input.StreamKey, "step-value")
+		return "", WriteStream(stepCtx.(DBOSContext), input.StreamKey, "step-value")
 	}, WithStepName("not-just-write"))
 	if err != nil {
 		return "", err
