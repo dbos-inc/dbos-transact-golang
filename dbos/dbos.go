@@ -180,6 +180,9 @@ type dbosContext struct {
 	workflowRegistry        *sync.Map // map[string]WorkflowRegistryEntry
 	workflowCustomNametoFQN *sync.Map // Maps fully qualified workflow names to custom names. Usefor when client enqueues a workflow by name because registry is indexed by FQN.
 
+	// Debouncer registry - read-mostly sync.Map since registration happens only before launch
+	debouncerRegistry *sync.Map // map[string]Debouncer
+
 	// Workflow scheduler
 	workflowScheduler *cron.Cron
 
@@ -221,6 +224,7 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 			workflowsWg:             dbosCtx.workflowsWg,
 			workflowRegistry:        dbosCtx.workflowRegistry,
 			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
+			debouncerRegistry:       dbosCtx.debouncerRegistry,
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
@@ -251,6 +255,7 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 			workflowsWg:             dbosCtx.workflowsWg,
 			workflowRegistry:        dbosCtx.workflowRegistry,
 			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
+			debouncerRegistry:       dbosCtx.debouncerRegistry,
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
@@ -279,6 +284,7 @@ func WithCancelCause(ctx DBOSContext) (DBOSContext, context.CancelCauseFunc) {
 			workflowsWg:             dbosCtx.workflowsWg,
 			workflowRegistry:        dbosCtx.workflowRegistry,
 			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
+			debouncerRegistry:       dbosCtx.debouncerRegistry,
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
@@ -305,6 +311,7 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 			workflowsWg:             dbosCtx.workflowsWg,
 			workflowRegistry:        dbosCtx.workflowRegistry,
 			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
+			debouncerRegistry:       dbosCtx.debouncerRegistry,
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
@@ -398,6 +405,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 		ctxCancelFunc:           cancelFunc,
 		workflowRegistry:        &sync.Map{},
 		workflowCustomNametoFQN: &sync.Map{},
+		debouncerRegistry:       &sync.Map{},
 	}
 
 	// Load and process the configuration
