@@ -443,6 +443,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	// Initialize the queue runner and register DBOS internal queue
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
+	NewWorkflowQueue(initExecutor, _DBOS_INTERNAL_QUEUE_NAME)
 
 	// Initialize conductor if API key is provided
 	if config.ConductorAPIKey != "" {
@@ -496,7 +497,6 @@ func (c *dbosContext) Launch() error {
 	}
 
 	// Start the queue runner in a goroutine
-	NewWorkflowQueue(c, _DBOS_INTERNAL_QUEUE_NAME)
 	go func() {
 		c.queueRunner.run(c)
 	}()
