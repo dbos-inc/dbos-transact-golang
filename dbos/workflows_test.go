@@ -4740,7 +4740,6 @@ func TestSpecialSteps(t *testing.T) {
 		// Step 4: resume the cancelled workflow
 		resumeHandle, err := ResumeWorkflow[string](dbosCtx, childHandle.GetWorkflowID())
 		if err != nil {
-			fmt.Println("error in ResumeWorkflow:", err)
 			return "", fmt.Errorf("ResumeWorkflow failed: %w", err)
 		}
 		if resumeHandle.GetWorkflowID() != childHandle.GetWorkflowID() {
@@ -5331,5 +5330,308 @@ func TestPatching(t *testing.T) {
 				}
 			})
 		})
+	})
+}
+
+// Helper workflows for stream testing
+
+var (
+	streamBlockEvent   *Event
+	streamStartedEvent *Event
+)
+
+func writeStreamWorkflow(ctx DBOSContext, input struct {
+	StreamKey string
+	Values    []string
+	Close     bool
+}) (string, error) {
+	// Write from workflow level
+	for _, value := range input.Values {
+		if err := WriteStream(ctx, input.StreamKey, value); err != nil {
+			return "", err
+		}
+	}
+
+	if streamStartedEvent != nil {
+		streamStartedEvent.Set()
+	}
+
+	if streamBlockEvent != nil {
+		streamBlockEvent.Wait()
+	}
+
+	// Write from step level with custom step name
+	_, err := RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+		return "", WriteStream(stepCtx.(DBOSContext), input.StreamKey, "step-value")
+	}, WithStepName("not-just-write"))
+	if err != nil {
+		return "", err
+	}
+
+	if input.Close {
+		if err := CloseStream(ctx, input.StreamKey); err != nil {
+			return "", err
+		}
+		// Try to write after close - should error
+		return "", WriteStream(ctx, input.StreamKey, "should-fail")
+	}
+	return "done", nil
+}
+
+func TestStreams(t *testing.T) {
+	dbosCtx := setupDBOS(t, true, true)
+
+	// Register all stream workflows
+	RegisterWorkflow(dbosCtx, writeStreamWorkflow)
+
+	Launch(dbosCtx)
+
+	t.Run("SimpleReadWrite", func(t *testing.T) {
+		streamBlockEvent = NewEvent()
+		streamBlockEvent.Set()   // Set immediately so workflow proceeds
+		streamStartedEvent = nil // Not needed for this test
+
+		streamKey := "test-stream"
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"value1", "value2", "value3"},
+			Close:     true,
+		})
+		require.NoError(t, err, "failed to start writer workflow")
+
+		// Wait for writer to complete
+		_, err = writerHandle.GetResult()
+		require.Error(t, err, "expected error when writing to closed stream")
+		require.Contains(t, err.Error(), "stream 'test-stream' is already closed")
+
+		// Read from the stream
+		values, closed, err := ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey)
+		require.NoError(t, err, "failed to read stream")
+		// Should have: value1, value2, value3 (from workflow level), step-value (from RunAsStep)
+		require.Equal(t, []string{"value1", "value2", "value3", "step-value"}, values, "expected 4 values")
+		require.True(t, closed, "expected stream to be closed")
+
+		// Verify steps were recorded correctly
+		steps, err := GetWorkflowSteps(dbosCtx, writerHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		// Should have 3 WriteStream steps (workflow-level) + 1 RunAsStep with custom name (containing step-level write) + 1 CloseStream step + 1 failed writeStream step = 6 steps
+		require.Len(t, steps, 6, "expected 6 steps (3 workflow writes + 1 RunAsStep with step write + 1 close + 1 failed writeStream step)")
+		require.Equal(t, "DBOS.writeStream", steps[0].StepName, "expected first step to be DBOS.writeStream")
+		require.Equal(t, "DBOS.writeStream", steps[1].StepName, "expected second step to be DBOS.writeStream")
+		require.Equal(t, "DBOS.writeStream", steps[2].StepName, "expected third step to be DBOS.writeStream")
+		require.Equal(t, "not-just-write", steps[3].StepName, "expected fourth step to be 'not-just-write' (RunAsStep with step-level write)")
+		require.Equal(t, "DBOS.closeStream", steps[4].StepName, "expected last step to be DBOS.closeStream")
+		require.Equal(t, "DBOS.writeStream", steps[5].StepName, "expected fifth step to be DBOS.writeStream")
+	})
+
+	t.Run("ReadWorkflowTermination", func(t *testing.T) {
+		// Initialize global events for this test
+		streamBlockEvent = NewEvent()
+		streamBlockEvent.Set() // Set immediately so workflow proceeds
+
+		streamKey := "test-stream-termination"
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"value1", "value2", "value3"},
+			Close:     false, // Do NOT close stream
+		})
+		require.NoError(t, err, "failed to start writer workflow")
+
+		// Wait for writer to complete (workflow terminates)
+		_, err = writerHandle.GetResult()
+		require.NoError(t, err, "failed to get result from writer workflow")
+
+		// Read from the stream
+		values, closed, err := ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey)
+		require.NoError(t, err, "failed to read stream")
+		// Should have: value1, value2, value3 (from workflow level), step-value (from RunAsStep)
+		require.Equal(t, []string{"value1", "value2", "value3", "step-value"}, values, "expected 4 values")
+		require.False(t, closed, "expected stream not to be closed")
+
+		// Verify steps were recorded correctly
+		steps, err := GetWorkflowSteps(dbosCtx, writerHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		// Should have 3 WriteStream steps (workflow-level) + 1 RunAsStep with custom name (containing step-level write) = 4 steps (no CloseStream step)
+		require.Len(t, steps, 4, "expected 4 steps (3 workflow writes + 1 RunAsStep with step write, no close)")
+		require.Equal(t, "DBOS.writeStream", steps[0].StepName, "expected first step to be DBOS.writeStream")
+		require.Equal(t, "DBOS.writeStream", steps[1].StepName, "expected second step to be DBOS.writeStream")
+		require.Equal(t, "DBOS.writeStream", steps[2].StepName, "expected third step to be DBOS.writeStream")
+		require.Equal(t, "not-just-write", steps[3].StepName, "expected fourth step to be 'not-just-write' (RunAsStep with step-level write)")
+	})
+
+	t.Run("StreamWorkflowRecovery", func(t *testing.T) {
+		streamBlockEvent = NewEvent()
+		streamStartedEvent = NewEvent()
+
+		streamKey := "test-stream-recovery"
+		workflowID := uuid.NewString()
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"value1", "value2", "value3"},
+			Close:     false, // Do NOT close stream
+		}, WithWorkflowID(workflowID))
+		require.NoError(t, err, "failed to start writer workflow")
+
+		// Wait for workflow to start and do a few writes
+		streamStartedEvent.Wait()
+		streamStartedEvent.Clear()
+
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		require.Len(t, recoveredHandles, 1, "expected 1 recovered workflow")
+
+		// Unblock the event (both executions will race to write)
+		streamBlockEvent.Set()
+
+		// Wait for both executions to complete
+		_, err = writerHandle.GetResult()
+		require.NoError(t, err, "failed to get result from original workflow")
+		_, err = recoveredHandles[0].GetResult()
+		require.NoError(t, err, "failed to get result from recovered workflow")
+
+		// Verify exactly-once semantics: all values appear exactly once
+		values, closed, err := ReadStream[string](dbosCtx, workflowID, streamKey)
+		require.NoError(t, err, "failed to read stream")
+		// Should have: value1, value2, value3 (from workflow level), step-value (from RunAsStep)
+		require.Equal(t, []string{"value1", "value2", "value3", "step-value"}, values, "expected all 4 values exactly once")
+		require.False(t, closed, "expected stream not to be closed")
+		// Check the number of steps is unchanged
+		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 4, "expected 4 steps (3 workflow writes + 1 RunAsStep with step write)")
+		require.Equal(t, "DBOS.writeStream", steps[0].StepName, "expected first step to be DBOS.writeStream")
+		require.Equal(t, "DBOS.writeStream", steps[1].StepName, "expected second step to be DBOS.writeStream")
+		require.Equal(t, "DBOS.writeStream", steps[2].StepName, "expected third step to be DBOS.writeStream")
+		require.Equal(t, "not-just-write", steps[3].StepName, "expected fourth step to be 'not-just-write' (RunAsStep with step-level write)")
+	})
+
+	t.Run("ForkStreams", func(t *testing.T) {
+		streamBlockEvent = NewEvent()
+		streamStartedEvent = NewEvent()
+
+		streamKey := "test-stream-fork"
+		originalHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"value1", "value2"},
+			Close:     false,
+		})
+		require.NoError(t, err, "failed to start original workflow")
+
+		// Wait for workflow to start and do a few writes
+		streamStartedEvent.Wait()
+
+		// Fork workflow from step 2 (after the two first writes)
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: originalHandle.GetWorkflowID(),
+			StartStep:          2,
+		})
+		require.NoError(t, err, "failed to fork workflow")
+
+		// Verify forked workflow has stream entries up to step 2 (stream history copied)
+		// Query database directly to avoid blocking (ReadStream would block)
+		dbosCtxInternal, ok := dbosCtx.(*dbosContext)
+		require.True(t, ok, "expected dbosContext")
+		sysDB, ok := dbosCtxInternal.systemDB.(*sysDB)
+		require.True(t, ok, "expected sysDB")
+
+		entries, closed, err := sysDB.readStream(context.Background(), readStreamDBInput{
+			WorkflowID: forkHandle.GetWorkflowID(),
+			Key:        streamKey,
+			FromOffset: 0,
+		})
+		require.NoError(t, err, "failed to read stream from database")
+		require.False(t, closed, "expected stream not to be closed")
+		require.Len(t, entries, 2, "expected 2 stream entries in forked workflow")
+
+		// Decode base64-encoded JSON values from database
+		serializer := newJSONSerializer[string]()
+		decodedValue1, err := serializer.Decode(&entries[0].Value)
+		require.NoError(t, err, "failed to decode first stream entry")
+		require.Equal(t, "value1", decodedValue1, "expected first entry to be value1")
+
+		decodedValue2, err := serializer.Decode(&entries[1].Value)
+		require.NoError(t, err, "failed to decode second stream entry")
+		require.Equal(t, "value2", decodedValue2, "expected second entry to be value2")
+
+		// Now unblock both workflows to let them complete
+		streamBlockEvent.Set()
+		_, err = originalHandle.GetResult()
+		require.NoError(t, err, "failed to get result from original workflow")
+		_, err = forkHandle.GetResult()
+		require.NoError(t, err, "failed to get result from forked workflow")
+	})
+
+	t.Run("WriteReadToClosedStream", func(t *testing.T) {
+		streamBlockEvent = NewEvent()
+		streamBlockEvent.Set()   // Set immediately so workflow proceeds
+		streamStartedEvent = nil // Not needed for this test
+
+		streamKey := "test-stream-closed"
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"value1"},
+			Close:     true, // Close stream, then try to write again
+		})
+		require.NoError(t, err, "failed to start writer workflow")
+
+		// Wait for writer to complete (should error on second write)
+		_, err = writerHandle.GetResult()
+		require.Error(t, err, "expected error when writing to closed stream")
+		require.Contains(t, err.Error(), "stream 'test-stream-closed' is already closed")
+
+		// Verify the stream is closed
+		_, closed, err := ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey)
+		require.NoError(t, err, "failed to read stream")
+		require.True(t, closed, "expected stream to be closed")
+	})
+
+	t.Run("StreamWithStruct", func(t *testing.T) {
+		streamBlockEvent = NewEvent()
+		streamBlockEvent.Set() // Set immediately so workflow proceeds
+
+		streamKey := "test-stream-struct"
+		// Use struct values in the workflow
+		testData := []string{"value1", "value2", "value3"}
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    testData,
+			Close:     false,
+		})
+		require.NoError(t, err, "failed to start writer workflow")
+
+		// Wait for writer to complete
+		_, err = writerHandle.GetResult()
+		require.NoError(t, err, "failed to get result from writer workflow")
+
+		// Read the values from stream
+		values, closed, err := ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey)
+		require.NoError(t, err, "failed to read stream")
+		// Should have: value1, value2, value3 (from workflow level), step-value (from RunAsStep)
+		require.Equal(t, []string{"value1", "value2", "value3", "step-value"}, values, "expected all 4 values")
+		require.False(t, closed, "expected stream not to be closed")
 	})
 }

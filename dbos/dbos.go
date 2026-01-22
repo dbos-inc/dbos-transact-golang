@@ -124,6 +124,9 @@ type DBOSContext interface {
 	Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error)                                       // Receive a message sent to this workflow
 	SetEvent(_ DBOSContext, key string, message any) error                                                      // Set a key-value event for this workflow
 	GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error)            // Get a key-value event from a target workflow
+	WriteStream(_ DBOSContext, key string, value any) error                                                     // Write a value to a durable stream
+	CloseStream(_ DBOSContext, key string) error                                                                // Close a durable stream
+	ReadStream(_ DBOSContext, workflowID string, key string) ([]any, bool, error)                               // Read values from a durable stream (blocks until workflow inactive or stream closed)
 	Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error)                                         // Durable sleep that survives workflow recovery
 	Patch(_ DBOSContext, patchName string) (bool, error)                                                        // Check if workflow should use patched code
 	DeprecatePatch(_ DBOSContext, patchName string) error                                                       // Deprecate a patch

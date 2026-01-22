@@ -1156,3 +1156,74 @@ func TestGetWorkflowSteps(t *testing.T) {
 	// Verify all queue entries are cleaned up
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after get workflow steps test")
 }
+
+func TestClientReadStream(t *testing.T) {
+	// Setup server context
+	serverCtx := setupDBOS(t, true, true)
+
+	// Create queue for communication
+	queue := NewWorkflowQueue(serverCtx, "read-stream-queue")
+
+	// Workflow that writes to a stream
+	streamWriterWorkflow := func(ctx DBOSContext, input struct {
+		StreamKey string
+		Values    []string
+	}) (string, error) {
+		// Write values to stream
+		for _, value := range input.Values {
+			if err := WriteStream(ctx, input.StreamKey, value); err != nil {
+				return "", err
+			}
+		}
+		return "done", nil
+	}
+	RegisterWorkflow(serverCtx, streamWriterWorkflow, WithWorkflowName("StreamWriterWorkflow"))
+
+	// Launch server
+	err := Launch(serverCtx)
+	require.NoError(t, err)
+
+	// Setup client
+	databaseURL := getDatabaseURL()
+	config := ClientConfig{
+		DatabaseURL: databaseURL,
+	}
+	client, err := NewClient(context.Background(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
+
+	streamKey := "test-client-stream"
+	workflowID := "test-read-stream-workflow"
+	testValues := []string{"value1", "value2", "value3"}
+
+	// Enqueue and run the writer workflow
+	handle, err := Enqueue[struct {
+		StreamKey string
+		Values    []string
+	}, string](client, queue.Name, "StreamWriterWorkflow", struct {
+		StreamKey string
+		Values    []string
+	}{
+		StreamKey: streamKey,
+		Values:    testValues,
+	}, WithEnqueueWorkflowID(workflowID))
+	require.NoError(t, err, "failed to enqueue stream writer workflow")
+
+	// Wait for workflow to complete
+	result, err := handle.GetResult()
+	require.NoError(t, err, "failed to get result from writer workflow")
+	assert.Equal(t, "done", result)
+
+	// Read from the stream using client
+	values, closed, err := ClientReadStream[string](client, workflowID, streamKey)
+	require.NoError(t, err, "failed to read stream from client")
+	assert.Equal(t, testValues, values, "expected stream values to match")
+	assert.False(t, closed, "expected stream not to be closed")
+
+	// Verify all queue entries are cleaned up
+	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after read stream test")
+}

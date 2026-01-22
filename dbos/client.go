@@ -32,6 +32,7 @@ type Client interface {
 	ResumeWorkflow(workflowID string) (WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
+	ClientReadStream(workflowID string, key string) ([]any, bool, error)
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
 
@@ -320,6 +321,59 @@ func (c *client) ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], err
 // GetWorkflowSteps retrieves the execution steps of a workflow.
 func (c *client) GetWorkflowSteps(workflowID string) ([]StepInfo, error) {
 	return c.dbosCtx.GetWorkflowSteps(c.dbosCtx, workflowID)
+}
+
+// ReadStream reads values from a durable stream.
+// This method blocks until one of the following conditions is met:
+//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
+//   - The stream is closed (sentinel value is found)
+//
+// Returns the values, whether the stream is closed, and any error.
+func (c *client) ClientReadStream(workflowID string, key string) ([]any, bool, error) {
+	return c.dbosCtx.ReadStream(c.dbosCtx, workflowID, key)
+}
+
+// ClientReadStream reads values from a durable stream with type safety.
+// This method blocks until one of the following conditions is met:
+//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
+//   - The stream is closed (sentinel value is found)
+//
+// Returns the typed values, whether the stream is closed, and any error.
+//
+// Example:
+//
+//	values, closed, err := dbos.ClientReadStream[string](client, "workflow-id", "my-stream")
+//	if err != nil {
+//	    return err
+//	}
+//	for _, value := range values {
+//	    log.Printf("Stream value: %s", value)
+//	}
+func ClientReadStream[R any](c Client, workflowID string, key string) ([]R, bool, error) {
+	if c == nil {
+		return nil, false, errors.New("client cannot be nil")
+	}
+	values, closed, err := c.ClientReadStream(workflowID, key)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Decode each value to type R
+	serializer := newJSONSerializer[R]()
+	typedValues := make([]R, len(values))
+	for i, val := range values {
+		encodedStr, ok := val.(string)
+		if !ok {
+			return nil, false, fmt.Errorf("stream value is not a string, got %T", val)
+		}
+		decodedValue, decodeErr := serializer.Decode(&encodedStr)
+		if decodeErr != nil {
+			return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
+		}
+		typedValues[i] = decodedValue
+	}
+
+	return typedValues, closed, nil
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.
