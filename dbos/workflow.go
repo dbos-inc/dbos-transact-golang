@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -500,6 +501,25 @@ func WithWorkflowName(name string) WorkflowRegistrationOption {
 	}
 }
 
+// resolveWorkflowFunctionName resolves the function name for a workflow function,
+// handling generic workflows by appending the actual type parameters.
+func resolveWorkflowFunctionName[P any, R any](fn Workflow[P, R]) string {
+	ptr := reflect.ValueOf(fn).Pointer()
+	fqn := runtime.FuncForPC(ptr).Name()
+
+	// If this is a generic workflow, append the actual types to the FQN
+	if strings.Contains(fqn, "[") {
+		fqn = strings.Split(fqn, "[")[0]
+		fqn = fmt.Sprintf("%s[%s,%s]",
+			fqn,
+			reflect.TypeFor[P]().String(),
+			reflect.TypeFor[R]().String(),
+		)
+	}
+
+	return fqn
+}
+
 // RegisterWorkflow registers a function as a durable workflow that can be executed and recovered.
 // The function is registered with type safety - P represents the input type and R the return type.
 // Types are automatically registered with gob encoding for serialization.
@@ -544,7 +564,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		opt(&registrationParams)
 	}
 
-	fqn := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	fqn := resolveWorkflowFunctionName(fn)
 
 	// Register a type-erased version of the durable workflow for recovery and queue runner
 	// Input will always come from the database and encoded as *string, so we decode it into the target type (captured by this wrapped closure)
@@ -718,7 +738,7 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 	}
 
 	// Add the fn name to the options so we can communicate it with DBOSContext.RunWorkflow
-	opts = append(opts, withWorkflowName(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()))
+	opts = append(opts, withWorkflowName(resolveWorkflowFunctionName(fn)))
 
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 		return fn(ctx, input.(P))

@@ -119,6 +119,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 	RegisterWorkflow(dbosCtx, workflowIface.Execute)
 	// Generic workflow
 	RegisterWorkflow(dbosCtx, Identity[int])
+	RegisterWorkflow(dbosCtx, Identity[string])
 	// Closure with captured state
 	prefix := "hello-"
 	closureWorkflow := func(dbosCtx DBOSContext, in string) (string, error) {
@@ -231,7 +232,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 		{
 			name: "GenericWorkflow",
 			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
-				handle, err := RunWorkflow(dbosCtx, Identity, 42, opts...)
+				handle, err := RunWorkflow(dbosCtx, Identity[int], 42, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -239,6 +240,19 @@ func TestWorkflowsRegistration(t *testing.T) {
 			},
 			input:          "42", // input not used in this case
 			expectedResult: 42,
+			expectError:    false,
+		},
+		{
+			name: "GenericWorkflowWithString",
+			workflowFunc: func(dbosCtx DBOSContext, input string, opts ...WorkflowOption) (any, error) {
+				handle, err := RunWorkflow(dbosCtx, Identity[string], input, opts...)
+				if err != nil {
+					return nil, err
+				}
+				return handle.GetResult()
+			},
+			input:          "test-generic",
+			expectedResult: "test-generic",
 			expectError:    false,
 		},
 		{
@@ -422,6 +436,33 @@ func testStepWf2(dbosCtx DBOSContext, input string) (string, error) {
 	return RunAsStep(dbosCtx, step2)
 }
 
+// genericStep is a generic step function that processes a value of any type
+func genericStep[T any](ctx context.Context, value T) (T, error) {
+	return value, nil
+}
+
+// genericStepWorkflow uses a generic step function with both string and int types
+func genericStepWorkflow(dbosCtx DBOSContext, input string) (string, error) {
+	// Use the generic step with a string type
+	result1, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+		return genericStep(ctx, input+"-processed")
+	})
+	if err != nil {
+		return "", err
+	}
+
+	// Use the generic step with an int type
+	result2, err := RunAsStep(dbosCtx, func(ctx context.Context) (int, error) {
+		return genericStep(ctx, 21)
+	})
+	if err != nil {
+		return "", err
+	}
+
+	// Combine results
+	return fmt.Sprintf("%s-%d", result1, result2*2), nil
+}
+
 func TestSteps(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 
@@ -430,6 +471,7 @@ func TestSteps(t *testing.T) {
 	RegisterWorkflow(dbosCtx, stepRetryWorkflow)
 	RegisterWorkflow(dbosCtx, testStepWf1)
 	RegisterWorkflow(dbosCtx, testStepWf2)
+	RegisterWorkflow(dbosCtx, genericStepWorkflow)
 	// Create a workflow that uses custom step names
 	customNameWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 		// Run a step with a custom name
@@ -693,6 +735,23 @@ func TestSteps(t *testing.T) {
 		assert.Len(t, storedOutput.Details, 3, "Details array length incorrect")
 		assert.Equal(t, []string{"step1", "step2", "step3"}, storedOutput.Details, "Details array not correctly serialized")
 		assert.False(t, storedOutput.ProcessedAt.IsZero(), "ProcessedAt timestamp should not be zero")
+	})
+
+	t.Run("genericStepFunction", func(t *testing.T) {
+		// Execute the workflow that uses generic step with both string and int
+		handle, err := RunWorkflow(dbosCtx, genericStepWorkflow, "test-input")
+		require.NoError(t, err, "failed to run workflow with generic step function")
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from workflow with generic step function")
+		assert.Equal(t, "test-input-processed-42", result, "expected combined result from both generic steps")
+
+		// Verify both steps were recorded
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 2, "expected 2 steps (one for string, one for int)")
+		assert.NotEmpty(t, steps[0].StepName, "first step name should not be empty")
+		assert.NotEmpty(t, steps[1].StepName, "second step name should not be empty")
 	})
 }
 
