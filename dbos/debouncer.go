@@ -18,9 +18,9 @@ type DebouncerInput[P any] struct {
 	InitialInput      P
 	TargetWorkflowFQN string
 	TargetWorkflowID  string
-	Delay             time.Duration    // Time by which to delay workflow execution
-	Timeout           time.Duration    // Maximum time before starting the workflow
-	WorkflowOptions   []WorkflowOption // Options to pass to target workflow
+	Delay             time.Duration   // Time by which to delay workflow execution
+	Timeout           time.Duration   // Maximum time before starting the workflow
+	WorkflowOptions   workflowOptions // Options to pass to target workflow (serializable)
 }
 
 // DebounceMessage is sent to the debouncer workflow to update inputs
@@ -43,8 +43,9 @@ type DebounceMessage[P any] struct {
 // Each workflow can have at most one debouncer configuration. The same debouncer
 // can be used with different keys to debounce multiple independent groups of workflow invocations.
 type Debouncer[P any, R any] struct {
-	WorkflowFQN string        // Fully qualified name of the target workflow
-	Timeout     time.Duration // Maximum time before starting the workflow (0 = no timeout)
+	WorkflowFQN          string        // Fully qualified name of the target workflow
+	Timeout              time.Duration // Maximum time before starting the workflow (0 = no timeout)
+	InternalDebouncerFQN string        // Fully qualified name of the internal debouncer workflow
 }
 
 // NewDebouncer creates and registers a new debouncer for the specified workflow.
@@ -103,10 +104,17 @@ func NewDebouncer[P any, R any](
 		panic(newNonExistentWorkflowError(fqn))
 	}
 
+	// Register the internal debouncer workflow for this debouncer if it has not been registered yet (first debouncer)
+	internalDebouncerFQN := resolveWorkflowFunctionName(internalDebouncerWF[P, R])
+	if _, exists := dbosCtx.workflowCustomNametoFQN.Load(internalDebouncerFQN); !exists {
+		RegisterWorkflow(ctx, internalDebouncerWF[P, R])
+	}
+
 	// Create and register the debouncer in the global registry, indexed by FQN
 	d := Debouncer[P, R]{
-		WorkflowFQN: fqn,
-		Timeout:     timeout,
+		WorkflowFQN:          fqn,
+		Timeout:              timeout,
+		InternalDebouncerFQN: internalDebouncerFQN,
 	}
 	dbosCtx.debouncerRegistry.Store(fqn, d)
 
@@ -122,19 +130,19 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 	for _, opt := range opts {
 		opt(&options)
 	}
-	if options.workflowID == "" {
+	if options.WorkflowID == "" {
 		if isWithinWorkflow {
 			workflowID, err := RunAsStep(ctx, func(ctx context.Context) (string, error) {
 				return uuid.New().String(), nil
-			}, WithStepName("Debounce.assignWorkflowID"))
+			}, WithStepName("DBOS.debounce.assignWorkflowID"))
 			if err != nil {
 				return nil, err
 			}
-			options.workflowID = workflowID
+			options.WorkflowID = workflowID
 		} else {
-			options.workflowID = uuid.New().String()
+			options.WorkflowID = uuid.New().String()
 		}
-		opts = append(opts, WithWorkflowID(options.workflowID))
+		opts = append(opts, WithWorkflowID(options.WorkflowID))
 	}
 
 	// Generate a message ID if communicating with an existing internal debouncing workflow.
@@ -143,7 +151,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 		_, err := RunAsStep(ctx, func(ctx context.Context) (string, error) {
 			messageID = uuid.New().String()
 			return messageID, nil
-		}, WithStepName("Debounce.assignMessageID"))
+		}, WithStepName("DBOS.debounce.assignMessageID"))
 		if err != nil {
 			return nil, err
 		}
@@ -154,14 +162,15 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 	debouncerInput := DebouncerInput[P]{
 		InitialInput:      input,
 		TargetWorkflowFQN: d.WorkflowFQN,
-		TargetWorkflowID:  options.workflowID,
+		TargetWorkflowID:  options.WorkflowID,
 		Delay:             delay,
 		Timeout:           d.Timeout,
-		WorkflowOptions:   opts,
+		WorkflowOptions:   options,
 	}
 
 	for {
-		_, err := RunWorkflow(ctx, internalDebouncerWF[P, R], debouncerInput, WithQueue(_DBOS_INTERNAL_QUEUE_NAME), WithDeduplicationID(key))
+		// internalDebouncerWF[P, R] is a generic workflow, so its dynamic name resolution will yield a different name than its registration name
+		_, err := RunWorkflow(ctx, internalDebouncerWF[P, R], debouncerInput, WithQueue(_DBOS_INTERNAL_QUEUE_NAME), WithDeduplicationID(key), withWorkflowName(d.InternalDebouncerFQN))
 		if err == nil {
 			return newWorkflowPollingHandle[R](ctx, debouncerInput.TargetWorkflowID), nil
 		} else {
@@ -295,6 +304,36 @@ func internalDebouncerWF[P any, R any](ctx DBOSContext, input DebouncerInput[P])
 		return zero, fmt.Errorf("invalid workflow registry entry type for workflow %s", input.TargetWorkflowFQN)
 	}
 
+	// Reconstruct WorkflowOptions from serializable format
+	workflowOpts := []WorkflowOption{}
+	if input.WorkflowOptions.WorkflowID != "" {
+		workflowOpts = append(workflowOpts, WithWorkflowID(input.WorkflowOptions.WorkflowID))
+	}
+	if input.WorkflowOptions.QueueName != "" {
+		workflowOpts = append(workflowOpts, WithQueue(input.WorkflowOptions.QueueName))
+	}
+	if input.WorkflowOptions.ApplicationVersion != "" {
+		workflowOpts = append(workflowOpts, WithApplicationVersion(input.WorkflowOptions.ApplicationVersion))
+	}
+	if input.WorkflowOptions.DeduplicationID != "" {
+		workflowOpts = append(workflowOpts, WithDeduplicationID(input.WorkflowOptions.DeduplicationID))
+	}
+	if input.WorkflowOptions.Priority > 0 {
+		workflowOpts = append(workflowOpts, WithPriority(input.WorkflowOptions.Priority))
+	}
+	if input.WorkflowOptions.AuthenticatedUser != "" {
+		workflowOpts = append(workflowOpts, WithAuthenticatedUser(input.WorkflowOptions.AuthenticatedUser))
+	}
+	if input.WorkflowOptions.AssumedRole != "" {
+		workflowOpts = append(workflowOpts, WithAssumedRole(input.WorkflowOptions.AssumedRole))
+	}
+	if len(input.WorkflowOptions.AuthenticatedRoles) > 0 {
+		workflowOpts = append(workflowOpts, WithAuthenticatedRoles(input.WorkflowOptions.AuthenticatedRoles))
+	}
+	if input.WorkflowOptions.QueuePartitionKey != "" {
+		workflowOpts = append(workflowOpts, WithQueuePartitionKey(input.WorkflowOptions.QueuePartitionKey))
+	}
+
 	// Because we reuse the workflow registry, where the wrapped function is expecting an encoded input, we need to serialize it
 	// In the future we could optimize this with a dedicated registry for debouncers, where the wrapped function is expecting a non-encoded, typed input
 	serializer := newJSONSerializer[P]()
@@ -304,7 +343,7 @@ func internalDebouncerWF[P any, R any](ctx DBOSContext, input DebouncerInput[P])
 	}
 
 	// Call the target workflow using its wrapped function
-	_, err = registeredWorkflow.wrappedFunction(ctx, encodedInput, input.WorkflowOptions...)
+	_, err = registeredWorkflow.wrappedFunction(ctx, encodedInput, workflowOpts...)
 	if err != nil {
 		return zero, fmt.Errorf("failed to run target workflow: %w", err)
 	}
