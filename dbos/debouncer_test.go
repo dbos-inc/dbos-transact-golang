@@ -35,7 +35,7 @@ func workflowThatCallsDebounce(ctx DBOSContext, input debounceCallInput) (string
 	var lastHandle WorkflowHandle[string]
 	var err error
 
-	for i, inp := range input.Inputs {
+	for _, inp := range input.Inputs {
 		lastHandle, err = (&testDebouncer).Debounce(ctx, input.Key, input.Delay, inp, WithAssumedRole("test-role"))
 		if err != nil {
 			fmt.Println("error in debounce call", err)
@@ -46,12 +46,6 @@ func workflowThatCallsDebounce(ctx DBOSContext, input debounceCallInput) (string
 		_, ok := lastHandle.(*workflowPollingHandle[string])
 		if !ok {
 			return "", fmt.Errorf("expected handle to be of type workflowPollingHandle, got %T", lastHandle)
-		}
-
-		// Small sleep between calls to ensure they happen at different times
-		// Only sleep if there are more inputs to process
-		if i < len(input.Inputs)-1 {
-			Sleep(ctx, 10*time.Millisecond)
 		}
 	}
 
@@ -75,7 +69,6 @@ func TestDebouncer(t *testing.T) {
 
 	// Create debouncers after Launch (each workflow debouncer can only be registered once)
 	testDebouncer = NewDebouncer(dbosCtx, debounceTestWorkflow, 10*time.Second)
-	fmt.Printf("testDebouncer: %+v\n", testDebouncer)
 	/*
 		testDebouncerTimeout = NewDebouncer(dbosCtx, debounceTestWorkflowTimeout, 200*time.Millisecond)
 		fmt.Printf("testDebouncerTimeout: %+v\n", testDebouncerTimeout)
