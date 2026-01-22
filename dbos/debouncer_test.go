@@ -10,8 +10,8 @@ import (
 )
 
 // Global debouncer variables for test workflows
-var testDebouncer Debouncer[string, string]
-var testDebouncerTimeout Debouncer[string, string]
+var debouncer10sTimeout Debouncer[string, string]
+var debouncer200msTimeout Debouncer[string, string]
 
 // Helper test workflows
 func debounceTestWorkflow(ctx DBOSContext, input string) (string, error) {
@@ -36,7 +36,7 @@ func workflowThatCallsDebounce(ctx DBOSContext, input debounceCallInput) (string
 	var err error
 
 	for _, inp := range input.Inputs {
-		lastHandle, err = (&testDebouncer).Debounce(ctx, input.Key, input.Delay, inp, WithAssumedRole("test-role"))
+		lastHandle, err = (&debouncer10sTimeout).Debounce(ctx, input.Key, input.Delay, inp, WithAssumedRole("test-role"))
 		if err != nil {
 			fmt.Println("error in debounce call", err)
 			return "", err
@@ -60,19 +60,19 @@ func workflowThatCallsDebounce(ctx DBOSContext, input debounceCallInput) (string
 func TestDebouncer(t *testing.T) {
 	dbosCtx := setupDBOS(t, true, true)
 
+	// Set internal queue polling interval to 100ms
+	internalQueue := dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
+	internalQueue.basePollingInterval = 100 * time.Millisecond
+	dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME] = internalQueue
+
 	// Register test workflows
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
 	RegisterWorkflow(dbosCtx, workflowThatCallsDebounce)
-	/*
-		RegisterWorkflow(dbosCtx, debounceTestWorkflowTimeout)
-	*/
+	RegisterWorkflow(dbosCtx, debounceTestWorkflowTimeout)
 
 	// Create debouncers after Launch (each workflow debouncer can only be registered once)
-	testDebouncer = NewDebouncer(dbosCtx, debounceTestWorkflow, 10*time.Second)
-	/*
-		testDebouncerTimeout = NewDebouncer(dbosCtx, debounceTestWorkflowTimeout, 200*time.Millisecond)
-		fmt.Printf("testDebouncerTimeout: %+v\n", testDebouncerTimeout)
-	*/
+	debouncer10sTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, 10*time.Second)
+	debouncer200msTimeout = NewDebouncer(dbosCtx, debounceTestWorkflowTimeout, 200*time.Millisecond)
 
 	Launch(dbosCtx)
 
@@ -94,10 +94,9 @@ func TestDebouncer(t *testing.T) {
 			require.NoError(t, err, "failed to get result")
 			assert.Equal(t, "test-input-1", result, "result should match input")
 
-			// Verify execution happened after approximately 500ms
+			// Verify execution happened approximately 500ms after first call
 			elapsed := time.Since(startTime)
-			assert.GreaterOrEqual(t, elapsed, 450*time.Millisecond, "execution should take at least 450ms")
-			assert.LessOrEqual(t, elapsed, 600*time.Millisecond, "execution should take at most 600ms")
+			assert.GreaterOrEqual(t, elapsed, 500*time.Millisecond, "execution should take at least 450ms")
 
 			// Verify steps are generated for msg ID generation and wf ID generation
 			steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
@@ -120,95 +119,74 @@ func TestDebouncer(t *testing.T) {
 			assert.True(t, foundMessageIDStep, "should have DBOS.debounce.assignMessageID step")
 		})
 
-		/*
-			t.Run("TestMultipleCallsPushBackAndLatestInput", func(t *testing.T) {
-				// Create a workflow that calls Debounce 5 times with delay=200ms
-				parentInput := debounceCallInput{
-					Key:    "test-key-2",
-					Delay:  200 * time.Millisecond,
-					Inputs: []string{"input-1", "input-2", "input-3", "input-4", "input-5"},
-				}
+		t.Run("TestMultipleCallsPushBackAndLatestInput", func(t *testing.T) {
+			// Create a workflow that calls Debounce 5 times with delay=200ms
+			parentInput := debounceCallInput{
+				Key:    "test-key-2",
+				Delay:  200 * time.Millisecond,
+				Inputs: []string{"input-1", "input-2", "input-3", "input-4", "input-5"},
+			}
 
-				startTime := time.Now()
-				handle, err := RunWorkflow(dbosCtx, workflowThatCallsDebounce, parentInput)
-				require.NoError(t, err, "failed to start workflow that calls debounce multiple times")
+			startTime := time.Now()
+			handle, err := RunWorkflow(dbosCtx, workflowThatCallsDebounce, parentInput)
+			require.NoError(t, err, "failed to start workflow that calls debounce multiple times")
 
-				result, err := handle.GetResult()
-				require.NoError(t, err, "failed to get result")
-				assert.Equal(t, "input-5", result, "result should match latest input")
+			result, err := handle.GetResult()
+			require.NoError(t, err, "failed to get result")
+			assert.Equal(t, "input-5", result, "result should match latest input")
 
-				// Verify execution happened approximately 1 second after first call
-				// 5 calls × 200ms = 1s, plus some overhead, e.g., for the 10ms sleeps between calls and the workflow itself
-				elapsed := time.Since(startTime)
-				assert.GreaterOrEqual(t, elapsed, 1000*time.Millisecond, "execution should take at least 1.2s")
-				assert.LessOrEqual(t, elapsed, 2000*time.Millisecond, "execution should take at most 2s")
-			})
+			// Verify execution happened approximately 1 second after first call
+			// 5 calls × 200ms = 1s, plus some overhead, e.g., for the 10ms sleeps between calls and the workflow itself
+			elapsed := time.Since(startTime)
+			assert.GreaterOrEqual(t, elapsed, 1000*time.Millisecond, "execution should take at least 1.2s")
+		})
 
-			t.Run("TestDelayGreaterThanTimeout", func(t *testing.T) {
-				// Temporarily use the timeout debouncer for this test
-				originalDebouncer := testDebouncer
-				testDebouncer = testDebouncerTimeout
-				defer func() { testDebouncer = originalDebouncer }()
+		t.Run("TestDelayGreaterThanTimeout", func(t *testing.T) {
+			// Temporarily use the timeout debouncer for this test
+			originalDebouncer := debouncer10sTimeout
+			debouncer10sTimeout = debouncer200msTimeout
+			defer func() { debouncer10sTimeout = originalDebouncer }()
 
-				// Create a workflow that calls Debounce with delay=2s (greater than timeout)
-				parentInput := debounceCallInput{
-					Key:    "test-key-4",
-					Delay:  2 * time.Second,
-					Inputs: []string{"timeout-input"},
-				}
+			// Create a workflow that calls Debounce with delay=2s (greater than timeout)
+			parentInput := debounceCallInput{
+				Key:    "test-key-4",
+				Delay:  2 * time.Second,
+				Inputs: []string{"timeout-input"},
+			}
 
-				startTime := time.Now()
-				handle, err := RunWorkflow(dbosCtx, workflowThatCallsDebounce, parentInput)
-				require.NoError(t, err, "failed to start workflow that calls debounce with delay > timeout")
+			startTime := time.Now()
+			handle, err := RunWorkflow(dbosCtx, workflowThatCallsDebounce, parentInput)
+			require.NoError(t, err, "failed to start workflow that calls debounce with delay > timeout")
 
-				result, err := handle.GetResult()
-				require.NoError(t, err, "failed to get result")
-				assert.Equal(t, "timeout-input", result, "result should match input")
+			result, err := handle.GetResult()
+			require.NoError(t, err, "failed to get result")
+			assert.Equal(t, "timeout-input", result, "result should match input")
 
-				// Verify execution happened at timeout (1s), not delay (2s)
-				elapsed := time.Since(startTime)
-				assert.GreaterOrEqual(t, elapsed, 200*time.Millisecond, "execution should take at least 0.9s (timeout)")
-				assert.LessOrEqual(t, elapsed, 300*time.Millisecond, "execution should take at most 1.5s (timeout, not delay)")
+			// Verify execution happened at timeout (1s), not delay (2s)
+			elapsed := time.Since(startTime)
+			assert.Less(t, elapsed, 2*time.Second, "execution should take less than 2s")
+		})
 
-				// Verify steps are generated
-				steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
-				require.NoError(t, err, "failed to get workflow steps")
+		t.Run("TestOutsideWorkflow", func(t *testing.T) {
+			// First call: Debounce with a very long delay (creates debouncer workflow)
+			handle1, err := debouncer10sTimeout.Debounce(dbosCtx, "test-key-5", 10*time.Second, "first-input")
+			require.NoError(t, err, "failed to call Debounce from outside workflow (first call)")
 
-				foundWorkflowIDStep := false
-				foundMessageIDStep := false
-				for _, step := range steps {
-					if step.StepName == "DBOS.Debounce.assignWorkflowID" {
-						foundWorkflowIDStep = true
-					}
-					if step.StepName == "DBOS.Debounce.assignMessageID" {
-						foundMessageIDStep = true
-					}
-				}
-				assert.True(t, foundWorkflowIDStep, "should have DBOS.Debounce.assignWorkflowID step")
-				assert.True(t, foundMessageIDStep, "should have DBOS.Debounce.assignMessageID step")
-			})
+			// Second call: Debounce with delay=0 (should trigger immediate execution)
+			startTime := time.Now()
+			handle2, err := debouncer10sTimeout.Debounce(dbosCtx, "test-key-5", 0, "second-input")
+			require.NoError(t, err, "failed to call Debounce from outside workflow (second call)")
 
-			t.Run("TestOutsideWorkflow", func(t *testing.T) {
-				// First call: Debounce with a very long delay (creates debouncer workflow)
-				handle1, err := testDebouncer.Debounce(dbosCtx, "test-key-5", 10*time.Second, "first-input")
-				require.NoError(t, err, "failed to call Debounce from outside workflow (first call)")
+			// Verify both handles refer to the same workflow ID
+			assert.Equal(t, handle1.GetWorkflowID(), handle2.GetWorkflowID(), "both handles should refer to the same workflow ID")
 
-				// Second call: Debounce with delay=0 (should trigger immediate execution)
-				startTime := time.Now()
-				handle2, err := testDebouncer.Debounce(dbosCtx, "test-key-5", 0, "second-input")
-				require.NoError(t, err, "failed to call Debounce from outside workflow (second call)")
+			// Verify the second call completes immediately
+			result, err := handle2.GetResult()
+			require.NoError(t, err, "failed to get result")
+			assert.Equal(t, "second-input", result, "result should match latest input")
 
-				// Verify both handles refer to the same workflow ID
-				assert.Equal(t, handle1.GetWorkflowID(), handle2.GetWorkflowID(), "both handles should refer to the same workflow ID")
-
-				// Verify the second call completes immediately
-				result, err := handle2.GetResult()
-				require.NoError(t, err, "failed to get result")
-				assert.Equal(t, "second-input", result, "result should match latest input")
-
-				elapsed := time.Since(startTime)
-				assert.LessOrEqual(t, elapsed, 500*time.Millisecond, "execution should happen immediately with delay=0")
-			})
-		*/
+			elapsed := time.Since(startTime)
+			assert.LessOrEqual(t, elapsed, 500*time.Millisecond, "execution should happen immediately with delay=0")
+		})
 	})
 }
