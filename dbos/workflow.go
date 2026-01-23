@@ -1954,10 +1954,18 @@ func WriteStream[P any](ctx DBOSContext, key string, value P) error {
 
 func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) ([]any, bool, error) {
 	var allValues []any
+	closed, err := c.ReadStreamWithCallback(c, workflowID, key, func(value any) error {
+		allValues = append(allValues, value)
+		return nil
+	})
+	return allValues, closed, err
+}
+
+func (c *dbosContext) ReadStreamWithCallback(_ DBOSContext, workflowID string, key string, callback func(value any) error) (bool, error) {
 	currentOffset := 0
 	closed := false
 
-	// Blocking loop: continue reading until workflow is inactive or stream is closed
+	// Blocking loop: continue reading until workflow is inactive, stream is closed, or callback returns error
 	for {
 		// Read stream entries from current offset (always read at least once)
 		input := readStreamDBInput{
@@ -1974,12 +1982,14 @@ func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) (
 		}, withRetrierLogger(c.logger))
 
 		if err != nil {
-			return nil, false, err
+			return false, err
 		}
 
-		// Add new entries to the result
+		// Process new entries via callback
 		for _, entry := range entries {
-			allValues = append(allValues, entry.Value)
+			if err := callback(entry.Value); err != nil {
+				return closed, err
+			}
 			currentOffset = entry.Offset + 1 // Next offset to read from
 		}
 
@@ -2004,7 +2014,7 @@ func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) (
 			return workflows[0].Status, nil
 		}, withRetrierLogger(c.logger))
 		if err != nil {
-			return nil, false, err
+			return false, err
 		}
 
 		// If workflow is inactive (not PENDING or ENQUEUED), stop reading
@@ -2016,14 +2026,14 @@ func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) (
 		if len(entries) == 0 {
 			select {
 			case <-c.Done():
-				return allValues, closed, c.Err()
+				return closed, c.Err()
 			case <-time.After(_DB_RETRY_INTERVAL):
 				// Continue loop to read again
 			}
 		}
 	}
 
-	return allValues, closed, nil
+	return closed, nil
 }
 
 // ReadStream reads values from a durable stream.
