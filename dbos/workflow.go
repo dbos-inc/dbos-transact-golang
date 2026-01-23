@@ -621,17 +621,18 @@ type Workflow[P any, R any] func(ctx DBOSContext, input P) (R, error)
 type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
 
 type workflowOptions struct {
-	WorkflowName       string
-	WorkflowID         string
-	QueueName          string
-	ApplicationVersion string
-	MaxRetries         int
-	DeduplicationID    string
-	Priority           uint
-	AuthenticatedUser  string
-	AssumedRole        string
-	AuthenticatedRoles []string
-	QueuePartitionKey  string
+	WorkflowName        string
+	WorkflowID          string
+	QueueName           string
+	ApplicationVersion  string
+	MaxRetries          int
+	DeduplicationID     string
+	Priority            uint
+	AuthenticatedUser   string
+	AssumedRole         string
+	AuthenticatedRoles  []string
+	QueuePartitionKey   string
+	alreadyEncodedInput bool
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
@@ -689,6 +690,13 @@ func withWorkflowName(name string) WorkflowOption {
 		if p.WorkflowName == "" {
 			p.WorkflowName = name
 		}
+	}
+}
+
+// An internal option we use to indicate that the input is already encoded, so we don't need to encode it again
+func withAlreadyEncodedInput() WorkflowOption {
+	return func(p *workflowOptions) {
+		p.alreadyEncodedInput = true
 	}
 }
 
@@ -837,10 +845,12 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	// Lookup the registry for registration-time options
 	registeredWorkflowAny, exists := c.workflowRegistry.Load(params.WorkflowName)
 	if !exists {
+		c.logger.Error("workflow not found in registry", "workflow_name", params.WorkflowName)
 		return nil, newNonExistentWorkflowError(params.WorkflowName)
 	}
 	registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
 	if !ok {
+		c.logger.Error("invalid workflow registry entry type for workflow", "workflow_name", params.WorkflowName)
 		return nil, fmt.Errorf("invalid workflow registry entry type for workflow %s", params.WorkflowName)
 	}
 	if registeredWorkflow.MaxRetries > 0 {
@@ -852,11 +862,13 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// Validate partition key is not provided without queue name
 	if len(params.QueuePartitionKey) > 0 && len(params.QueueName) == 0 {
+		c.logger.Error("partition key provided but queue name is missing", "workflow_name", params.WorkflowName)
 		return nil, newWorkflowExecutionError("", fmt.Errorf("partition key provided but queue name is missing"))
 	}
 
 	// Validate partition key and deduplication ID are not both provided (they are incompatible)
 	if len(params.QueuePartitionKey) > 0 && len(params.DeduplicationID) > 0 {
+		c.logger.Error("partition key and deduplication ID cannot be used together", "workflow_name", params.WorkflowName)
 		return nil, newWorkflowExecutionError("", fmt.Errorf("partition key and deduplication ID cannot be used together"))
 	}
 
@@ -864,14 +876,17 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	if len(params.QueueName) > 0 {
 		queue := c.queueRunner.getQueue(params.QueueName)
 		if queue == nil {
+			c.logger.Error("queue does not exist", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
 			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s does not exist", params.QueueName))
 		}
 		// If queue has partitions enabled, partition key must be provided
 		if queue.PartitionQueue && len(params.QueuePartitionKey) == 0 {
+			c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
 			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
 		}
 		// If partition key is provided, queue must have partitions enabled
 		if len(params.QueuePartitionKey) > 0 && !queue.PartitionQueue {
+			c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
 			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
 		}
 	}
@@ -882,6 +897,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// Prevent spawning child workflows from within a step
 	if isChildWorkflow && parentWorkflowState.isWithinStep {
+		c.logger.Error("cannot spawn child workflow from within a step", "workflow_name", params.WorkflowName, "parent_workflow_id", parentWorkflowState.workflowID)
 		return nil, newStepExecutionError(parentWorkflowState.workflowID, params.WorkflowName, fmt.Errorf("cannot spawn child workflow from within a step"))
 	}
 
@@ -911,9 +927,11 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	if isChildWorkflow {
 		childWorkflowID, err := c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		if err != nil {
+			c.logger.Error("failed to check child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("checking child workflow: %w", err))
 		}
 		if childWorkflowID != nil {
+			c.logger.Info("child workflow already recorded", "workflow_name", params.WorkflowName, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID, "child_workflow_id", *childWorkflowID)
 			return newWorkflowPollingHandle[any](uncancellableCtx, *childWorkflowID), nil
 		}
 	}
@@ -944,14 +962,22 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	}
 
 	if params.Priority > uint(math.MaxInt) {
+		c.logger.Error("priority exceeds maximum allowed value", "workflow_name", params.WorkflowName, "priority", params.Priority, "max_allowed_value", math.MaxInt)
 		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.Priority, math.MaxInt)
 	}
 
 	// Serialize input before storing in workflow status
-	serializer := newJSONSerializer[any]()
-	encodedInput, serErr := serializer.Encode(input)
-	if serErr != nil {
-		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize workflow input: %w", serErr))
+	var encodedInput any
+	if params.alreadyEncodedInput {
+		encodedInput = input
+	} else {
+		serializer := newJSONSerializer[any]()
+		var serErr error
+		encodedInput, serErr = serializer.Encode(input)
+		if serErr != nil {
+			c.logger.Error("failed to serialize workflow input", "error", serErr, "workflow_id", workflowID)
+			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize workflow input: %w", serErr))
+		}
 	}
 
 	workflowStatus := WorkflowStatus{

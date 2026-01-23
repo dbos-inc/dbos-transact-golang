@@ -2,10 +2,9 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
-	"runtime"
 	"time"
 
 	"github.com/google/uuid"
@@ -87,16 +86,16 @@ func NewDebouncer[P any, R any](
 		return Debouncer[P, R]{} // Do nothing if the concrete type is not dbosContext
 	}
 
+	// Enforce that debouncers can only be created before DBOS has launched
+	// because they need to register the internal debouncer workflow
+	if dbosCtx.launched.Load() {
+		panic(newInitializationError("cannot create debouncer after DBOS has launched"))
+	}
+
 	// Get the fully qualified name of the workflow function using reflection
-	fqn := runtime.FuncForPC(reflect.ValueOf(workflow).Pointer()).Name()
+	fqn := resolveWorkflowFunctionName(workflow)
 
 	dbosCtx.logger.Debug("Creating new debouncer", "workflow_fqn", fqn)
-
-	// Check if debouncer already exists for this workflow
-	// Assertively panic if the debouncer is already registered for this workflow, as a sign of highly unexpected behavior
-	if _, exists := dbosCtx.debouncerRegistry.Load(fqn); exists {
-		panic(newConflictingRegistrationError(fqn))
-	}
 
 	// Validate that the workflow is registered in the registry
 	// Assertively panic if the workflow is not registered, as a sign of highly unexpected behavior
@@ -116,7 +115,6 @@ func NewDebouncer[P any, R any](
 		Timeout:              timeout,
 		InternalDebouncerFQN: internalDebouncerFQN,
 	}
-	dbosCtx.debouncerRegistry.Store(fqn, d)
 
 	return d
 }
@@ -198,7 +196,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 				}
 
 				// Acknowledge the send by getting an event with the message ID
-				_, err = GetEvent[bool](ctx, debouncerWorkflowID, key, 1*time.Second) // XXX unclear what's a good timeout here.
+				_, err = GetEvent[bool](ctx, debouncerWorkflowID, messageID, 2*time.Second) // XXX unclear what's a good timeout here.
 				if errors.Is(err, &DBOSError{Code: TimeoutError}) {
 					continue // The debouncer workflow might have started the user workflow and exited already, in which case we should try again to create a new internal debouncer workflow
 				} else if err != nil {
@@ -206,15 +204,14 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 				}
 
 				// Retrieve the user workflow ID from the input of the internal debouncer workflow
-				// The input comes from the DB and is encoded
-				serializer := newJSONSerializer[DebouncerInput[P]]()
-				encodedInput, ok := debouncerWorkflowStatus[0].Input.(*string)
+				// The input comes from the DB and was decoded as a typeless JSON string
+				encodedInput, ok := debouncerWorkflowStatus[0].Input.(string)
 				if !ok {
 					return nil, fmt.Errorf("internal debouncer workflow input is not encoded")
 				}
-				decodedInput, err := serializer.Decode(encodedInput)
-				if err != nil {
-					return nil, fmt.Errorf("failed to decode internal debouncer workflow input: %w", err)
+				var decodedInput DebouncerInput[P]
+				if err := json.Unmarshal([]byte(encodedInput), &decodedInput); err != nil {
+					return nil, fmt.Errorf("failed to unmarshal debouncer workflow input: %w", err)
 				}
 				return newWorkflowPollingHandle[R](ctx, decodedInput.TargetWorkflowID), nil
 			} else {
@@ -334,8 +331,10 @@ func internalDebouncerWF[P any, R any](ctx DBOSContext, input DebouncerInput[P])
 		workflowOpts = append(workflowOpts, WithQueuePartitionKey(input.WorkflowOptions.QueuePartitionKey))
 	}
 
-	// Because we reuse the workflow registry, where the wrapped function is expecting an encoded input, we need to serialize it
-	// In the future we could optimize this with a dedicated registry for debouncers, where the wrapped function is expecting a non-encoded, typed input
+	// We use the wrapped, type-erased workflow wrapper from the workflow registry that calls ctx.RunWorkflow
+	// Which doesn't do any pre-encoding of the input, and calls a type-erased function that expects an encoded input
+	// So we need to serialize the input here
+	workflowOpts = append(workflowOpts, withAlreadyEncodedInput())
 	serializer := newJSONSerializer[P]()
 	encodedInput, err := serializer.Encode(currentInput)
 	if err != nil {
