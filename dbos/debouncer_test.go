@@ -88,6 +88,7 @@ func TestDebouncer(t *testing.T) {
 		// Verify execution happened approximately 500ms after first call
 		elapsed := time.Since(startTime)
 		assert.GreaterOrEqual(t, elapsed, 500*time.Millisecond, "execution should take at least 450ms")
+		assert.LessOrEqual(t, elapsed, 10*time.Second, "execution should take less than 10s")
 
 		// Verify steps are generated for msg ID generation and wf ID generation
 		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
@@ -130,35 +131,26 @@ func TestDebouncer(t *testing.T) {
 		// 5 calls × 200ms = 1s, plus some overhead, e.g., for the 10ms sleeps between calls and the workflow itself
 		elapsed := time.Since(startTime)
 		assert.GreaterOrEqual(t, elapsed, 1000*time.Millisecond, "execution should take at least 1.2s")
+		assert.LessOrEqual(t, elapsed, 10*time.Second, "execution should take less than 10s")
 	})
 
 	t.Run("TestDelayGreaterThanTimeout", func(t *testing.T) {
-		// Temporarily use the timeout debouncer for this test
-		originalDebouncer := debouncer10sTimeout
-		debouncer10sTimeout = debouncer200msTimeout
-		defer func() { debouncer10sTimeout = originalDebouncer }()
-
-		// Create a workflow that calls Debounce with delay=2s (greater than timeout)
-		parentInput := debounceCallInput{
-			Key:    "test-key-4",
-			Delay:  2 * time.Second,
-			Inputs: []string{"timeout-input"},
-		}
-
+		// Call Debounce directly with delay=2s (greater than timeout of 200ms)
 		startTime := time.Now()
-		handle, err := RunWorkflow(dbosCtx, workflowThatCallsDebounce, parentInput)
-		require.NoError(t, err, "failed to start workflow that calls debounce with delay > timeout")
+		handle, err := debouncer200msTimeout.Debounce(dbosCtx, "test-key-4", 2*time.Second, "timeout-input")
+		require.NoError(t, err, "failed to call Debounce with delay > timeout")
 
 		result, err := handle.GetResult()
 		require.NoError(t, err, "failed to get result")
 		assert.Equal(t, "timeout-input", result, "result should match input")
 
-		// Verify execution happened at timeout (1s), not delay (2s)
+		// Verify execution happened at timeout (200ms), not delay (2s)
 		elapsed := time.Since(startTime)
-		assert.Less(t, elapsed, 2*time.Second, "execution should take less than 2s")
+		assert.GreaterOrEqual(t, elapsed, 200*time.Millisecond, "execution should take at least 200ms")
+		assert.LessOrEqual(t, elapsed, 2*time.Second, "execution should take less than 2s")
 	})
 
-	t.Run("TestOutsideWorkflow", func(t *testing.T) {
+	t.Run("TestDelayOverride", func(t *testing.T) {
 		// First call: Debounce with a very long delay (creates debouncer workflow)
 		handle1, err := debouncer10sTimeout.Debounce(dbosCtx, "test-key-5", 10*time.Second, "first-input")
 		require.NoError(t, err, "failed to call Debounce from outside workflow (first call)")
@@ -212,7 +204,7 @@ func TestDebouncer(t *testing.T) {
 
 	t.Run("TestDifferentKeysExecuteIndependently", func(t *testing.T) {
 		// Call Debounce with different keys and verify they execute independently
-		handle1, err := debouncer10sTimeout.Debounce(dbosCtx, "independent-key-1", 2*time.Second, "independent-1")
+		handle1, err := debouncer10sTimeout.Debounce(dbosCtx, "independent-key-1", 5*time.Second, "independent-1")
 		require.NoError(t, err, "failed to call Debounce with first key")
 
 		startTime2 := time.Now()
@@ -226,7 +218,7 @@ func TestDebouncer(t *testing.T) {
 		// Verify key-2 executed independently (should complete before the 2s delay of key-1)
 		elapsed2 := time.Since(startTime2)
 		assert.GreaterOrEqual(t, elapsed2, 200*time.Millisecond, "key-2 should execute after its delay")
-		assert.Less(t, elapsed2, 2*time.Second, "key-2 should not be affected by key-1's delay")
+		assert.Less(t, elapsed2, 5*time.Second, "key-2 should not be affected by key-1's delay")
 
 		result1, err := handle1.GetResult()
 		require.NoError(t, err, "failed to get result from first handle")
