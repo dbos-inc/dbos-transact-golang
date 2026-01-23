@@ -44,7 +44,18 @@ type DebounceMessage[P any] struct {
 type Debouncer[P any, R any] struct {
 	WorkflowFQN          string        // Fully qualified name of the target workflow
 	Timeout              time.Duration // Maximum time before starting the workflow (0 = no timeout)
-	InternalDebouncerFQN string        // Fully qualified name of the internal debouncer workflow
+	internalDebouncerFQN string        // Fully qualified name of the internal debouncer workflow
+}
+
+// DebouncerOption is a functional option for configuring debouncer creation parameters.
+type DebouncerOption func(*time.Duration)
+
+// WithDebouncerTimeout sets the maximum time before starting the workflow.
+// If timeout is zero (the default), there is no maximum time limit.
+func WithDebouncerTimeout(timeout time.Duration) DebouncerOption {
+	return func(t *time.Duration) {
+		*t = timeout
+	}
 }
 
 // NewDebouncer creates and registers a new debouncer for the specified workflow.
@@ -52,7 +63,7 @@ type Debouncer[P any, R any] struct {
 // The debouncer delays workflow execution. Each call to Debounce pushes back
 // the start time by a specified delay. If a timeout is
 // specified, the start time cannot exceed the timeout from the first invocation.
-// If timeout is zero, there is no maximum time limit.
+// If timeout is zero (the default), there is no maximum time limit.
 //
 // Each workflow can have at most one debouncer configuration, indexed by the
 // workflow's fully qualified name (FQN). But multiple invocations of the same workflow function
@@ -61,17 +72,18 @@ type Debouncer[P any, R any] struct {
 // Parameters:
 //   - ctx: DBOS context for the debouncer
 //   - workflow: The workflow function to debounce (must be registered)
-//   - timeout: Maximum time before starting the workflow (0 = no timeout)
+//   - opts: Optional functional options for configuring the debouncer:
+//     - WithDebouncerTimeout: Maximum time before starting the workflow (0 = no timeout) [optional]
 //
 // Returns a Debouncer instance that can be used to call Debounce.
 //
 // Example:
 //
 //	// Register a debouncer with maximum timeout of 10 seconds
-//	debouncer := dbos.NewDebouncer(ctx, MyWorkflowFunction, 10*time.Second)
+//	debouncer := dbos.NewDebouncer(ctx, MyWorkflowFunction, WithDebouncerTimeout(10*time.Second))
 //
 //	// Register a debouncer with no timeout
-//	debouncerNoTimeout := dbos.NewDebouncer(ctx, MyWorkflowFunction, 0)
+//	debouncerNoTimeout := dbos.NewDebouncer(ctx, MyWorkflowFunction)
 //
 //	// Later, use the debouncer with different keys and delays
 //	handle1, err := debouncer.Debounce(ctx, "user-123", 2*time.Second, inputData1)
@@ -79,8 +91,14 @@ type Debouncer[P any, R any] struct {
 func NewDebouncer[P any, R any](
 	ctx DBOSContext,
 	workflow Workflow[P, R],
-	timeout time.Duration,
+	opts ...DebouncerOption,
 ) Debouncer[P, R] {
+	// Apply options to build configuration
+	timeout := time.Duration(0) // Default: no timeout
+	for _, opt := range opts {
+		opt(&timeout)
+	}
+
 	dbosCtx, ok := ctx.(*dbosContext)
 	if !ok {
 		return Debouncer[P, R]{} // Do nothing if the concrete type is not dbosContext
@@ -113,7 +131,7 @@ func NewDebouncer[P any, R any](
 	d := Debouncer[P, R]{
 		WorkflowFQN:          fqn,
 		Timeout:              timeout,
-		InternalDebouncerFQN: internalDebouncerFQN,
+		internalDebouncerFQN: internalDebouncerFQN,
 	}
 
 	return d
@@ -168,7 +186,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 
 	for {
 		// internalDebouncerWF[P, R] is a generic workflow, so its dynamic name resolution will yield a different name than its registration name
-		_, err := RunWorkflow(ctx, internalDebouncerWF[P, R], debouncerInput, WithQueue(_DBOS_INTERNAL_QUEUE_NAME), WithDeduplicationID(key), withWorkflowName(d.InternalDebouncerFQN))
+		_, err := RunWorkflow(ctx, internalDebouncerWF[P, R], debouncerInput, WithQueue(_DBOS_INTERNAL_QUEUE_NAME), WithDeduplicationID(key), withWorkflowName(d.internalDebouncerFQN))
 		if err == nil {
 			return newWorkflowPollingHandle[R](ctx, debouncerInput.TargetWorkflowID), nil
 		} else {

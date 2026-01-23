@@ -64,8 +64,8 @@ func TestDebouncer(t *testing.T) {
 	RegisterWorkflow(dbosCtx, workflowThatCallsDebounce)
 
 	// Create debouncers after Launch (each workflow debouncer can only be registered once)
-	debouncer10sTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, 10*time.Second)
-	debouncer200msTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, 200*time.Millisecond)
+	debouncer10sTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
+	debouncer200msTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(200*time.Millisecond))
 
 	Launch(dbosCtx)
 
@@ -240,7 +240,7 @@ func TestDebouncerCannotBeCreatedAfterLaunch(t *testing.T) {
 
 	// Verify that creating a debouncer after launch panics
 	assert.Panics(t, func() {
-		NewDebouncer(dbosCtx, debounceTestWorkflow, 10*time.Second)
+		NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
 	}, "creating a debouncer after launch should panic")
 
 	// Verify the panic is with the correct error type
@@ -257,7 +257,7 @@ func TestDebouncerCannotBeCreatedAfterLaunch(t *testing.T) {
 				}
 			}
 		}()
-		NewDebouncer(dbosCtx, debounceTestWorkflow, 10*time.Second)
+		NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
 	}()
 
 	assert.True(t, panicked, "should have panicked")
@@ -273,7 +273,7 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
 
-	debouncer := NewDebouncer(dbosCtx, debounceTestWorkflow, 10*time.Second)
+	debouncer := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
 
 	Launch(dbosCtx)
 
