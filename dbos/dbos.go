@@ -128,6 +128,7 @@ type DBOSContext interface {
 	CloseStream(_ DBOSContext, key string) error                                                                // Close a durable stream
 	ReadStream(_ DBOSContext, workflowID string, key string) ([]any, bool, error)                                          // Read values from a durable stream (blocks until workflow inactive or stream closed)
 	ReadStreamWithCallback(_ DBOSContext, workflowID string, key string, callback func(value any) error) (bool, error) // Read stream values via callback (blocks until workflow inactive, stream closed, or callback returns error)
+	ReadStreamToChannel(_ DBOSContext, workflowID string, key string) (<-chan any, func() (bool, error))                   // Read stream values to a channel; call the returned func after channel closes to get final status
 	Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error)                                         // Durable sleep that survives workflow recovery
 	Patch(_ DBOSContext, patchName string) (bool, error)                                                        // Check if workflow should use patched code
 	DeprecatePatch(_ DBOSContext, patchName string) error                                                       // Deprecate a patch

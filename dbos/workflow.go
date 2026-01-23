@@ -2036,6 +2036,24 @@ func (c *dbosContext) ReadStreamWithCallback(_ DBOSContext, workflowID string, k
 	return closed, nil
 }
 
+func (c *dbosContext) ReadStreamToChannel(_ DBOSContext, workflowID string, key string) (<-chan any, func() (bool, error)) {
+	ch := make(chan any)
+	var finalClosed bool
+	var finalErr error
+
+	go func() {
+		defer close(ch)
+		finalClosed, finalErr = c.ReadStreamWithCallback(c, workflowID, key, func(value any) error {
+			ch <- value
+			return nil
+		})
+	}()
+
+	return ch, func() (bool, error) {
+		return finalClosed, finalErr
+	}
+}
+
 // ReadStream reads values from a durable stream.
 // This method blocks until one of the following conditions is met:
 //   - The workflow becomes inactive (status is not PENDING or ENQUEUED)

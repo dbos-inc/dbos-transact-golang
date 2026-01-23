@@ -34,6 +34,7 @@ type Client interface {
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
 	ClientReadStream(workflowID string, key string) ([]any, bool, error)
 	ClientReadStreamWithCallback(workflowID string, key string, callback func(value any) error) (bool, error)
+	ClientReadStreamToChannel(workflowID string, key string) (<-chan any, func() (bool, error))
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
 
@@ -345,6 +346,21 @@ func (c *client) ClientReadStreamWithCallback(workflowID string, key string, cal
 	return c.dbosCtx.ReadStreamWithCallback(c.dbosCtx, workflowID, key, callback)
 }
 
+// ClientReadStreamToChannel reads values from a durable stream, returning a channel of values.
+// The channel closes when reading stops (workflow inactive, stream closed, or context cancelled).
+// Call the returned function after the channel closes to get the final status.
+//
+// Example:
+//
+//	ch, status := client.ClientReadStreamToChannel("workflow-id", "my-stream")
+//	for value := range ch {
+//	    log.Printf("Stream value: %v", value)
+//	}
+//	closed, err := status()
+func (c *client) ClientReadStreamToChannel(workflowID string, key string) (<-chan any, func() (bool, error)) {
+	return c.dbosCtx.ReadStreamToChannel(c.dbosCtx, workflowID, key)
+}
+
 // ClientReadStream reads values from a durable stream with type safety.
 // This method blocks until one of the following conditions is met:
 //   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
@@ -422,6 +438,52 @@ func ClientReadStreamWithCallback[R any](c Client, workflowID string, key string
 		}
 		return callback(decodedValue)
 	})
+}
+
+// ClientReadStreamToChannel reads values from a durable stream with type safety, returning a channel of typed values.
+// The channel closes when reading stops (workflow inactive, stream closed, or context cancelled).
+// Call the returned function after the channel closes to get the final status.
+//
+// Example:
+//
+//	ch, status := dbos.ClientReadStreamToChannel[string](client, "workflow-id", "my-stream")
+//	for value := range ch {
+//	    log.Printf("Stream value: %s", value)
+//	}
+//	closed, err := status()
+func ClientReadStreamToChannel[R any](c Client, workflowID string, key string) (<-chan R, func() (bool, error)) {
+	if c == nil {
+		ch := make(chan R)
+		close(ch)
+		return ch, func() (bool, error) {
+			return false, errors.New("client cannot be nil")
+		}
+	}
+
+	typedCh := make(chan R)
+	var finalClosed bool
+	var finalErr error
+
+	go func() {
+		defer close(typedCh)
+		serializer := newJSONSerializer[R]()
+		finalClosed, finalErr = c.ClientReadStreamWithCallback(workflowID, key, func(val any) error {
+			encodedStr, ok := val.(string)
+			if !ok {
+				return fmt.Errorf("stream value is not a string, got %T", val)
+			}
+			decodedValue, decodeErr := serializer.Decode(&encodedStr)
+			if decodeErr != nil {
+				return fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
+			}
+			typedCh <- decodedValue
+			return nil
+		})
+	}()
+
+	return typedCh, func() (bool, error) {
+		return finalClosed, finalErr
+	}
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.
