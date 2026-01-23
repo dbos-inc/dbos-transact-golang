@@ -12,14 +12,14 @@ import (
 
 const _DEBOUNCER_TOPIC = "_dbos_debouncer_topic"
 
-// DebouncerInput is the input to the internal debouncer workflow
-type DebouncerInput[P any] struct {
-	InitialInput      P
-	TargetWorkflowFQN string
-	TargetWorkflowID  string
-	Delay             time.Duration   // Time by which to delay workflow execution
-	Timeout           time.Duration   // Maximum time before starting the workflow
-	WorkflowOptions   workflowOptions // Options to pass to target workflow (serializable)
+// debouncerInput is the input to the internal debouncer workflow
+type debouncerInput[P any] struct {
+	InitialInput                  P
+	TargetWorkflowFQNOrCustomName string
+	TargetWorkflowID              string
+	Delay                         time.Duration   // Time by which to delay workflow execution
+	Timeout                       time.Duration   // Maximum time before starting the workflow
+	WorkflowOptions               workflowOptions // Options to pass to target workflow (serializable)
 }
 
 // DebounceMessage is sent to the debouncer workflow to update inputs
@@ -73,7 +73,7 @@ func WithDebouncerTimeout(timeout time.Duration) DebouncerOption {
 //   - ctx: DBOS context for the debouncer
 //   - workflow: The workflow function to debounce (must be registered)
 //   - opts: Optional functional options for configuring the debouncer:
-//     - WithDebouncerTimeout: Maximum time before starting the workflow (0 = no timeout) [optional]
+//   - WithDebouncerTimeout: Maximum time before starting the workflow (0 = no timeout) [optional]
 //
 // Returns a Debouncer instance that can be used to call Debounce.
 //
@@ -93,7 +93,6 @@ func NewDebouncer[P any, R any](
 	workflow Workflow[P, R],
 	opts ...DebouncerOption,
 ) Debouncer[P, R] {
-	// Apply options to build configuration
 	timeout := time.Duration(0) // Default: no timeout
 	for _, opt := range opts {
 		opt(&timeout)
@@ -175,20 +174,20 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 		messageID = uuid.New().String()
 	}
 
-	debouncerInput := DebouncerInput[P]{
-		InitialInput:      input,
-		TargetWorkflowFQN: d.WorkflowFQN,
-		TargetWorkflowID:  options.WorkflowID,
-		Delay:             delay,
-		Timeout:           d.Timeout,
-		WorkflowOptions:   options,
+	dInput := debouncerInput[P]{
+		InitialInput:                  input,
+		TargetWorkflowFQNOrCustomName: d.WorkflowFQN,
+		TargetWorkflowID:              options.WorkflowID,
+		Delay:                         delay,
+		Timeout:                       d.Timeout,
+		WorkflowOptions:               options,
 	}
 
 	for {
 		// internalDebouncerWF[P, R] is a generic workflow, so its dynamic name resolution will yield a different name than its registration name
-		_, err := RunWorkflow(ctx, internalDebouncerWF[P, R], debouncerInput, WithQueue(_DBOS_INTERNAL_QUEUE_NAME), WithDeduplicationID(key), withWorkflowName(d.internalDebouncerFQN))
+		_, err := RunWorkflow(ctx, internalDebouncerWF[P, R], dInput, WithQueue(_DBOS_INTERNAL_QUEUE_NAME), WithDeduplicationID(key), withWorkflowName(d.internalDebouncerFQN))
 		if err == nil {
-			return newWorkflowPollingHandle[R](ctx, debouncerInput.TargetWorkflowID), nil
+			return newWorkflowPollingHandle[R](ctx, dInput.TargetWorkflowID), nil
 		} else {
 			// A dedup error means the internal debouncer workflow was already started, in which case we should send it the new input
 			var dbosErr *DBOSError
@@ -227,7 +226,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 				if !ok {
 					return nil, fmt.Errorf("internal debouncer workflow input is not encoded")
 				}
-				var decodedInput DebouncerInput[P]
+				var decodedInput debouncerInput[P]
 				if err := json.Unmarshal([]byte(encodedInput), &decodedInput); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal debouncer workflow input: %w", err)
 				}
@@ -239,9 +238,145 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 	}
 }
 
+// DebouncerClient provides workflow debouncing functionality using a Client.
+// It is similar to Debouncer but uses a Client interface instead of a DBOSContext
+// and takes a workflow name string instead of a workflow function.
+type DebouncerClient[P any, R any] struct {
+	WorkflowName         string        // Name of the target workflow
+	Client               Client        // DBOS client for operations
+	Timeout              time.Duration // Maximum time before starting the workflow (0 = no timeout)
+	internalDebouncerFQN string        // Fully qualified name of the internal debouncer workflow
+}
+
+// NewDebouncerClient creates a new debouncer client for the specified workflow.
+//
+// Parameters:
+//   - workflowName: The name of the workflow to debounce
+//   - client: The DBOS client to use for operations
+//   - opts: Optional functional options for configuring the debouncer:
+//   - WithDebouncerTimeout: Maximum time before starting the workflow (0 = no timeout) [optional]
+//
+// Returns a DebouncerClient instance that can be used to call Debounce.
+func NewDebouncerClient[P any, R any](
+	workflowName string,
+	client Client,
+	opts ...DebouncerOption,
+) DebouncerClient[P, R] {
+	timeout := time.Duration(0) // Default: no timeout
+	for _, opt := range opts {
+		opt(&timeout)
+	}
+
+	return DebouncerClient[P, R]{
+		WorkflowName: workflowName,
+		Client:       client,
+		Timeout:      timeout,
+		// Use the any,any internal debouncer workflow FQN because that's all the server knows
+		internalDebouncerFQN: resolveWorkflowFunctionName(internalDebouncerWF[any, any]),
+	}
+}
+
+// Debounce delays workflow execution by a configurable delay amount, with each
+// subsequent call pushing back the start time by the delay (up to an optional maximum timeout).
+//
+// Unlike Debouncer.Debounce, this method never checks if we're within a workflow
+// and never attempts to run operations as steps. It uses the Client's Enqueue,
+// Send, ListWorkflows, and GetEvent methods.
+//
+// Parameters:
+//   - key: A unique key to group debounce calls (calls with the same key are debounced together)
+//   - delay: Time by which to delay workflow execution
+//   - input: Input parameters to pass to the workflow
+//   - opts: Optional workflow options (e.g., WithWorkflowID, WithQueue, etc.)
+//
+// Returns a WorkflowHandle that can be used to check status and retrieve results.
+func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
+	// Resolve workflow options
+	options := workflowOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	// Generate workflow ID if not provided
+	if options.WorkflowID == "" {
+		options.WorkflowID = uuid.New().String()
+	}
+
+	// Generate message ID for ACK protocol
+	messageID := uuid.New().String()
+
+	// Create debouncer input
+	dInput := debouncerInput[P]{
+		InitialInput:                  input,
+		TargetWorkflowFQNOrCustomName: dc.WorkflowName,
+		TargetWorkflowID:              options.WorkflowID,
+		Delay:                         delay,
+		Timeout:                       dc.Timeout,
+		WorkflowOptions:               options,
+	}
+
+	for {
+		// Try to enqueue the internal debouncer workflow
+		// Use the package-level Enqueue function which handles encoding automatically
+		_, err := Enqueue[debouncerInput[P], R](dc.Client, _DBOS_INTERNAL_QUEUE_NAME, dc.internalDebouncerFQN, dInput, WithEnqueueDeduplicationID(key))
+		if err == nil {
+			return newWorkflowPollingHandle[R](dc.Client.(*client).dbosCtx, dInput.TargetWorkflowID), nil
+		}
+
+		// Check if error is due to deduplication (workflow already exists)
+		var dbosErr *DBOSError
+		if errors.As(err, &dbosErr) && dbosErr.Code == QueueDeduplicated {
+			// The internal debouncer workflow already exists, send it the new input
+			// List workflows with the deduplication ID to find the existing debouncer workflow
+			debouncerWorkflowStatus, err := dc.Client.ListWorkflows(WithFilterDeduplicationID(key), WithLoadInput(true))
+			if err != nil {
+				return nil, err
+			}
+			if len(debouncerWorkflowStatus) == 0 {
+				// The debouncer workflow might have started the user workflow and exited already, try again
+				continue
+			}
+			debouncerWorkflowID := debouncerWorkflowStatus[0].ID
+
+			// Send the new input to the internal debouncer workflow
+			err = dc.Client.Send(debouncerWorkflowID, DebounceMessage[P]{
+				Input: input,
+				Delay: delay,
+				ID:    messageID,
+			}, _DEBOUNCER_TOPIC)
+			if err != nil {
+				return nil, err
+			}
+
+			// Acknowledge the send by getting an event with the message ID
+			_, err = dc.Client.GetEvent(debouncerWorkflowID, messageID, 2*time.Second)
+			if errors.Is(err, &DBOSError{Code: TimeoutError}) {
+				// The debouncer workflow might have started the user workflow and exited already, try again
+				continue
+			} else if err != nil {
+				return nil, err
+			}
+
+			// Retrieve the user workflow ID from the input of the internal debouncer workflow
+			// The input comes from the DB and was decoded as a typeless JSON string
+			encodedInputStr, ok := debouncerWorkflowStatus[0].Input.(string)
+			if !ok {
+				return nil, fmt.Errorf("internal debouncer workflow input is not encoded")
+			}
+			var decodedInput debouncerInput[P]
+			if err := json.Unmarshal([]byte(encodedInputStr), &decodedInput); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal debouncer workflow input: %w", err)
+			}
+			return newWorkflowPollingHandle[R](dc.Client.(*client).dbosCtx, decodedInput.TargetWorkflowID), nil
+		} else {
+			return nil, err
+		}
+	}
+}
+
 // internalDebouncerWF is the internal workflow that implements debouncing logic.
 // It collects inputs, delays execution, and runs the target workflow with the latest input.
-func internalDebouncerWF[P any, R any](ctx DBOSContext, input DebouncerInput[P]) (R, error) {
+func internalDebouncerWF[P any, R any](ctx DBOSContext, input debouncerInput[P]) (R, error) {
 	var zero R
 
 	dbosCtx, ok := ctx.(*dbosContext)
@@ -309,14 +444,21 @@ func internalDebouncerWF[P any, R any](ctx DBOSContext, input DebouncerInput[P])
 
 	// Now execute the target workflow with the latest input
 	// Look up the workflow from the registry
-	registeredWorkflowAny, exists := dbosCtx.workflowRegistry.Load(input.TargetWorkflowFQN)
+	// First resolve the FQN
+	// workflowCustomNametoFQN stores all types of name to FQN: custom name -> FQN if the workflow was registered with a custom name, otherwise FQN->FQN
+	targetWorkflowFQN := input.TargetWorkflowFQNOrCustomName
+	if fqn, ok := dbosCtx.workflowCustomNametoFQN.Load(input.TargetWorkflowFQNOrCustomName); ok { // ok should always be true
+		targetWorkflowFQN = fqn.(string)
+	}
+
+	registeredWorkflowAny, exists := dbosCtx.workflowRegistry.Load(targetWorkflowFQN)
 	if !exists {
-		return zero, fmt.Errorf("target workflow %s not found in registry", input.TargetWorkflowFQN)
+		return zero, fmt.Errorf("target workflow %s not found in registry", input.TargetWorkflowFQNOrCustomName)
 	}
 
 	registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
 	if !ok {
-		return zero, fmt.Errorf("invalid workflow registry entry type for workflow %s", input.TargetWorkflowFQN)
+		return zero, fmt.Errorf("invalid workflow registry entry type for workflow %s", input.TargetWorkflowFQNOrCustomName)
 	}
 
 	// Reconstruct WorkflowOptions from serializable format

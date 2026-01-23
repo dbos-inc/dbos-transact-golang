@@ -437,6 +437,10 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
 	NewWorkflowQueue(initExecutor, _DBOS_INTERNAL_QUEUE_NAME)
 
+	// Register the any,any internal debouncer workflow so it's always available for execution
+	// This allows a client to debounce workflow and the server side to run them, even without knowing the actual workflow types
+	RegisterWorkflow(initExecutor, internalDebouncerWF[any, any])
+
 	// Initialize conductor if API key is provided
 	if config.ConductorAPIKey != "" {
 		initExecutor.executorID = uuid.NewString()
