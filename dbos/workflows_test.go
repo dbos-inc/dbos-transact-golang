@@ -5513,7 +5513,7 @@ func TestStreams(t *testing.T) {
 		require.NoError(t, err, "failed to read stream")
 		// Should have: value1, value2, value3 (from workflow level), step-value (from RunAsStep)
 		require.Equal(t, []string{"value1", "value2", "value3", "step-value"}, values, "expected 4 values")
-		require.False(t, closed, "expected stream not to be closed")
+		require.True(t, closed, "expected stream to be closed when workflow terminates")
 
 		// Verify steps were recorded correctly
 		steps, err := GetWorkflowSteps(dbosCtx, writerHandle.GetWorkflowID())
@@ -5565,7 +5565,7 @@ func TestStreams(t *testing.T) {
 		require.NoError(t, err, "failed to read stream")
 		// Should have: value1, value2, value3 (from workflow level), step-value (from RunAsStep)
 		require.Equal(t, []string{"value1", "value2", "value3", "step-value"}, values, "expected all 4 values exactly once")
-		require.False(t, closed, "expected stream not to be closed")
+		require.True(t, closed, "expected stream to be closed when workflow terminates")
 		// Check the number of steps is unchanged
 		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
 		require.NoError(t, err, "failed to get workflow steps")

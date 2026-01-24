@@ -33,6 +33,7 @@ type Client interface {
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
 	ClientReadStream(workflowID string, key string) ([]any, bool, error)
+	ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error)
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
 
@@ -379,6 +380,85 @@ func ClientReadStream[R any](c Client, workflowID string, key string) ([]R, bool
 	}
 
 	return typedValues, closed, nil
+}
+
+// ClientReadStreamAsync reads values from a durable stream asynchronously.
+// Returns a channel that will receive StreamValue items as they're read.
+func (c *client) ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error) {
+	return c.dbosCtx.ReadStreamAsync(c.dbosCtx, workflowID, key)
+}
+
+// ClientReadStreamAsync reads values from a durable stream asynchronously with type safety.
+// Returns a channel that will receive StreamValue items as they're read.
+//
+// This method returns immediately with a channel. Values will be sent to the channel
+// as they're read from the stream. The channel will be closed when:
+//   - The stream is closed (sentinel value is found)
+//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
+//   - An error occurs
+//
+// Example:
+//
+//	ch, err := dbos.ClientReadStreamAsync[string](client, "workflow-id", "my-stream")
+//	if err != nil {
+//	    return err
+//	}
+//	for streamValue := range ch {
+//	    if streamValue.Err != nil {
+//	        log.Printf("Error: %v", streamValue.Err)
+//	        break
+//	    }
+//	    if streamValue.Closed {
+//	        log.Println("Stream closed")
+//	        break
+//	    }
+//	    log.Printf("Received value: %s", streamValue.Value)
+//	}
+func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-chan StreamValue[R], error) {
+	if c == nil {
+		return nil, errors.New("client cannot be nil")
+	}
+
+	anyCh, err := c.ClientReadStreamAsync(workflowID, key)
+	if err != nil {
+		return nil, err
+	}
+
+	typedCh := make(chan StreamValue[R], 1)
+
+	go func() {
+		defer close(typedCh)
+
+		serializer := newJSONSerializer[R]()
+
+		for streamValue := range anyCh {
+			if streamValue.Err != nil {
+				typedCh <- StreamValue[R]{Err: streamValue.Err}
+				return
+			}
+
+			if streamValue.Closed {
+				typedCh <- StreamValue[R]{Closed: true}
+				return
+			}
+
+			encodedStr, ok := streamValue.Value.(string)
+			if !ok {
+				typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not a string, got %T", streamValue.Value)}
+				return
+			}
+
+			decodedValue, decodeErr := serializer.Decode(&encodedStr)
+			if decodeErr != nil {
+				typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
+				return
+			}
+
+			typedCh <- StreamValue[R]{Value: decodedValue}
+		}
+	}()
+
+	return typedCh, nil
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.

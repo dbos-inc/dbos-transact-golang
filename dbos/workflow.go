@@ -1259,6 +1259,14 @@ type StepOutcome[R any] struct {
 	Err    error `json:"err"`
 }
 
+// StreamValue holds a value, error, and closed status from a stream read operation
+// This struct is returned as part of a channel from ReadStreamAsync
+type StreamValue[R any] struct {
+	Value  R     // The stream value (zero value if error/closed)
+	Err    error // Error if one occurred (nil otherwise)
+	Closed bool  // Whether the stream is closed
+}
+
 // convertStepResult converts a generic step result to a typed result R.
 // It handles both checkpointed outcomes (encoded values from database) and direct type conversions.
 // Supports both real DBOS contexts and testing/mocking scenarios.
@@ -1980,75 +1988,111 @@ func WriteStream[P any](ctx DBOSContext, key string, value P) error {
 	return ctx.WriteStream(ctx, key, encodedValue)
 }
 
+// readStream runs the read stream polling logic in a goroutine
+// and sends values through a channel as they're read
+func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamValue[any] {
+	ch := make(chan StreamValue[any], 1) // Buffered to allow non-blocking sends
+
+	go func() {
+		defer close(ch)
+
+		var currentOffset int
+		closed := false
+
+		// Blocking loop: continue reading until workflow is inactive or stream is closed
+		for {
+			// Read stream entries from current offset
+			input := readStreamDBInput{
+				WorkflowID: workflowID,
+				Key:        key,
+				FromOffset: currentOffset,
+			}
+
+			var entries []streamEntry
+			err := retry(c, func() error {
+				var retryErr error
+				entries, closed, retryErr = c.systemDB.readStream(c, input)
+				return retryErr
+			}, withRetrierLogger(c.logger))
+
+			if err != nil {
+				ch <- StreamValue[any]{Err: err}
+				return
+			}
+
+			// Send each entry value to the channel
+			for _, entry := range entries {
+				ch <- StreamValue[any]{Value: entry.Value}
+				currentOffset = entry.Offset + 1 // Next offset to read from
+			}
+
+			// If stream is closed (sentinel found), send final message and stop
+			if closed {
+				ch <- StreamValue[any]{Closed: true}
+				return
+			}
+
+			// Check if workflow is still active (PENDING or ENQUEUED)
+			status, err := retryWithResult(c, func() (WorkflowStatusType, error) {
+				workflows, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{
+					workflowIDs: []string{workflowID},
+					loadInput:   false,
+					loadOutput:  false,
+				})
+				if err != nil {
+					return "", err
+				}
+				if len(workflows) == 0 {
+					return "", newNonExistentWorkflowError(workflowID)
+				}
+				return workflows[0].Status, nil
+			}, withRetrierLogger(c.logger))
+
+			if err != nil {
+				ch <- StreamValue[any]{Err: err}
+				return
+			}
+
+			// If workflow is inactive, send final message with Closed: true (BUG FIX)
+			if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
+				ch <- StreamValue[any]{Closed: true}
+				return
+			}
+
+			// If no new entries, wait a bit before polling again
+			if len(entries) == 0 {
+				select {
+				case <-c.Done():
+					ch <- StreamValue[any]{Err: c.Err()}
+					return
+				case <-time.After(_DB_RETRY_INTERVAL):
+					// Continue loop to read again
+				}
+			}
+		}
+	}()
+
+	return ch
+}
+
 func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) ([]any, bool, error) {
 	var allValues []any
-	currentOffset := 0
 	closed := false
 
-	// Blocking loop: continue reading until workflow is inactive or stream is closed
-	for {
-		// Read stream entries from current offset (always read at least once)
-		input := readStreamDBInput{
-			WorkflowID: workflowID,
-			Key:        key,
-			FromOffset: currentOffset,
+	ch := c.readStream(workflowID, key)
+
+	for streamValue := range ch {
+		if streamValue.Err != nil {
+			return nil, false, streamValue.Err
 		}
 
-		var entries []streamEntry
-		err := retry(c, func() error {
-			var retryErr error
-			entries, closed, retryErr = c.systemDB.readStream(c, input)
-			return retryErr
-		}, withRetrierLogger(c.logger))
-
-		if err != nil {
-			return nil, false, err
-		}
-
-		// Add new entries to the result
-		for _, entry := range entries {
-			allValues = append(allValues, entry.Value)
-			currentOffset = entry.Offset + 1 // Next offset to read from
-		}
-
-		// If stream is closed (sentinel found), stop reading
-		if closed {
+		if streamValue.Closed {
+			closed = true
 			break
 		}
 
-		// Check if workflow is still active (PENDING or ENQUEUED) - check after first read
-		status, err := retryWithResult(c, func() (WorkflowStatusType, error) {
-			workflows, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{
-				workflowIDs: []string{workflowID},
-				loadInput:   false,
-				loadOutput:  false,
-			})
-			if err != nil {
-				return "", err
-			}
-			if len(workflows) == 0 { // This should never happen
-				return "", newNonExistentWorkflowError(workflowID)
-			}
-			return workflows[0].Status, nil
-		}, withRetrierLogger(c.logger))
-		if err != nil {
-			return nil, false, err
-		}
-
-		// If workflow is inactive (not PENDING or ENQUEUED), stop reading
-		if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
-			break
-		}
-
-		// If no new entries, wait a bit before polling again
-		if len(entries) == 0 {
-			select {
-			case <-c.Done():
-				return allValues, closed, c.Err()
-			case <-time.After(_DB_RETRY_INTERVAL):
-				// Continue loop to read again
-			}
-		}
+		// Collect the value
+		allValues = append(allValues, streamValue.Value)
 	}
 
 	return allValues, closed, nil
@@ -2095,6 +2139,85 @@ func ReadStream[R any](ctx DBOSContext, workflowID string, key string) ([]R, boo
 	}
 
 	return typedValues, closed, nil
+}
+
+// ReadStreamAsync reads values from a durable stream asynchronously.
+// Returns a channel that will receive StreamValue items as they're read.
+func (c *dbosContext) ReadStreamAsync(_ DBOSContext, workflowID string, key string) (<-chan StreamValue[any], error) {
+	return c.readStream(workflowID, key), nil
+}
+
+// ReadStreamAsync reads values from a durable stream asynchronously.
+// Returns a channel that will receive StreamValue items as they're read.
+//
+// This method returns immediately with a channel. Values will be sent to the channel
+// as they're read from the stream. The channel will be closed when:
+//   - The stream is closed (sentinel value is found)
+//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
+//   - An error occurs
+//
+// Example:
+//
+//	ch, err := dbos.ReadStreamAsync[string](ctx, "workflow-id", "my-stream")
+//	if err != nil {
+//	    return err
+//	}
+//	for streamValue := range ch {
+//	    if streamValue.Err != nil {
+//	        log.Printf("Error: %v", streamValue.Err)
+//	        break
+//	    }
+//	    if streamValue.Closed {
+//	        log.Println("Stream closed")
+//	        break
+//	    }
+//	    log.Printf("Received value: %s", streamValue.Value)
+//	}
+func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-chan StreamValue[R], error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+
+	anyCh, err := ctx.ReadStreamAsync(ctx, workflowID, key)
+	if err != nil {
+		return nil, err
+	}
+
+	typedCh := make(chan StreamValue[R], 1)
+
+	go func() {
+		defer close(typedCh)
+
+		serializer := newJSONSerializer[R]()
+
+		for streamValue := range anyCh {
+			if streamValue.Err != nil {
+				typedCh <- StreamValue[R]{Err: streamValue.Err}
+				return
+			}
+
+			if streamValue.Closed {
+				typedCh <- StreamValue[R]{Closed: true}
+				return
+			}
+
+			encodedStr, ok := streamValue.Value.(string)
+			if !ok {
+				typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not a string, got %T", streamValue.Value)}
+				return
+			}
+
+			decodedValue, decodeErr := serializer.Decode(&encodedStr)
+			if decodeErr != nil {
+				typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
+				return
+			}
+
+			typedCh <- StreamValue[R]{Value: decodedValue}
+		}
+	}()
+
+	return typedCh, nil
 }
 
 func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
