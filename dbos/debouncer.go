@@ -369,7 +369,12 @@ func internalDebouncerWF[P any, R any](ctx DBOSContext, input debouncerInput[P])
 	}
 
 	// Track the first creation time and current input
-	startTime := time.Now()
+	startTime, err := RunAsStep(ctx, func(ctx context.Context) (time.Time, error) {
+		return time.Now(), nil
+	}, WithStepName("DBOS.debounce.startTime"))
+	if err != nil {
+		return zero, err
+	}
 	currentInput := input.InitialInput
 	delay := input.Delay
 	timeout := input.Timeout

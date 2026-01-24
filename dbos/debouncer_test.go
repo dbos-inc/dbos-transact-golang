@@ -109,6 +109,23 @@ func TestDebouncer(t *testing.T) {
 		}
 		assert.True(t, foundWorkflowIDStep, "should have DBOS.debounce.assignWorkflowID step")
 		assert.True(t, foundMessageIDStep, "should have DBOS.debounce.assignMessageID step")
+
+		// also verify the start time step is present in the internal debouncer workflow
+		// First find it: it should be the only workflow in the internal queue
+		workflows, err := ListWorkflows(dbosCtx, WithQueueName(_DBOS_INTERNAL_QUEUE_NAME))
+		require.NoError(t, err, "failed to list workflows")
+		require.Len(t, workflows, 1, "should have exactly one workflow in the internal queue")
+		// Now find the step in the workflow
+		steps, err = GetWorkflowSteps(dbosCtx, workflows[0].ID)
+		require.NoError(t, err, "failed to get workflow steps")
+		foundStartTimeStep := false
+		for _, step := range steps {
+			if step.StepName == "DBOS.debounce.startTime" {
+				foundStartTimeStep = true
+				break
+			}
+		}
+		assert.True(t, foundStartTimeStep, "should have DBOS.debounce.startTime step")
 	})
 
 	t.Run("TestMultipleCallsPushBackAndLatestInput", func(t *testing.T) {
