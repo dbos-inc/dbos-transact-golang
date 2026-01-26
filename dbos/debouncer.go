@@ -392,9 +392,14 @@ func internalDebouncerWF[P any, R any](ctx DBOSContext, input debouncerInput[P])
 
 	// Loop until we reach the target start time
 	for {
-		now := time.Now()
+		var now time.Time
+		now, err = RunAsStep(ctx, func(ctx context.Context) (time.Time, error) {
+			return time.Now(), nil
+		}, WithStepName("DBOS.debounce.loopTime"))
+		if err != nil {
+			return zero, err
+		}
 		remainingTime := targetStartTime.Sub(now)
-
 		// If we've reached or passed the target start time, break and execute
 		if remainingTime <= 0 {
 			break

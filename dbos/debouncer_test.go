@@ -1,6 +1,7 @@
 package dbos
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -66,9 +67,9 @@ func TestDebouncer(t *testing.T) {
 	// Create debouncers after Launch (each workflow debouncer can only be registered once)
 	debouncer10sTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
 	debouncer200msTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(200*time.Millisecond))
+	debouncer2sTimeout := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(2*time.Second))
 
 	Launch(dbosCtx)
-
 	t.Run("TestSingleDebounceCall", func(t *testing.T) {
 		// Create a workflow that calls Debounce
 		parentInput := debounceCallInput{
@@ -240,6 +241,46 @@ func TestDebouncer(t *testing.T) {
 		require.NoError(t, err, "failed to get result from first handle")
 		assert.Equal(t, "independent-1", result1, "first handle should get its own input")
 
+	})
+
+	t.Run("TestRecoverDebouncedWorkflow", func(t *testing.T) {
+		// Call Debounce directly using the 2 second timeout debouncer
+		handle1, err := debouncer2sTimeout.Debounce(dbosCtx, "recovery-test-key", 200*time.Millisecond, "recovery-input-1")
+		require.NoError(t, err, "failed to call Debounce")
+
+		// Wait for it to exit
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first run")
+		assert.Equal(t, "recovery-input-1", result1, "result should match input")
+
+		// Access systemDB and manually change status to PENDING
+		sysDB, ok := dbosCtx.(*dbosContext)
+		require.True(t, ok, "expected dbosContext")
+		require.NotNil(t, sysDB.systemDB)
+
+		// Sleep for a few seconds, which would push back the time computation in the debouncer workflow
+		time.Sleep(3 * time.Second)
+
+		// Update the internal debouncer workflow to pending
+		debouncerWorkflow, err := ListWorkflows(dbosCtx, WithQueueName(_DBOS_INTERNAL_QUEUE_NAME))
+		require.NoError(t, err, "failed to list workflows")
+		require.Len(t, debouncerWorkflow, 1, "should have exactly one workflow in the internal queue")
+		err = sysDB.systemDB.updateWorkflowOutcome(context.Background(), updateWorkflowOutcomeDBInput{
+			workflowID: debouncerWorkflow[0].ID,
+			status:     WorkflowStatusPending,
+			output:     nil,
+			err:        nil,
+			tx:         nil,
+		})
+		require.NoError(t, err, "failed to update workflow status to PENDING")
+
+		cleared, err := sysDB.systemDB.clearQueueAssignment(context.Background(), debouncerWorkflow[0].ID)
+		require.NoError(t, err, "failed to clear queue assignment")
+		require.True(t, cleared, "should have cleared queue assignment")
+
+		debouncerWorkflowHandle := newWorkflowPollingHandle[any](dbosCtx, debouncerWorkflow[0].ID)
+		_, err = debouncerWorkflowHandle.GetResult()
+		require.NoError(t, err, "shouldn't have errored")
 	})
 }
 
