@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -254,19 +255,26 @@ func TestDebouncer(t *testing.T) {
 		assert.Equal(t, "recovery-input-1", result1, "result should match input")
 
 		// Access systemDB and manually change status to PENDING
-		sysDB, ok := dbosCtx.(*dbosContext)
+		dbosCtxInstance, ok := dbosCtx.(*dbosContext)
 		require.True(t, ok, "expected dbosContext")
-		require.NotNil(t, sysDB.systemDB)
+		require.NotNil(t, dbosCtxInstance.systemDB)
 
 		// Sleep for a few seconds, which would push back the time computation in the debouncer workflow
 		time.Sleep(3 * time.Second)
 
-		// Update the internal debouncer workflow to pending
-		debouncerWorkflow, err := ListWorkflows(dbosCtx, WithQueueName(_DBOS_INTERNAL_QUEUE_NAME))
-		require.NoError(t, err, "failed to list workflows")
-		require.Len(t, debouncerWorkflow, 1, "should have exactly one workflow in the internal queue")
-		err = sysDB.systemDB.updateWorkflowOutcome(context.Background(), updateWorkflowOutcomeDBInput{
-			workflowID: debouncerWorkflow[0].ID,
+		// Find the internal debouncer workflow by querying operation_outputs table
+		// The debouncer workflow is the one that has a step with child_workflow_id set to handle1's workflow ID
+		sysDBInstance, ok := dbosCtxInstance.systemDB.(*sysDB)
+		require.True(t, ok, "expected sysDB instance")
+
+		query := fmt.Sprintf(`SELECT workflow_uuid FROM %s.operation_outputs WHERE child_workflow_id = $1 LIMIT 1`, pgx.Identifier{sysDBInstance.schema}.Sanitize())
+		var debouncerWorkflowID string
+		err = sysDBInstance.pool.QueryRow(context.Background(), query, handle1.GetWorkflowID()).Scan(&debouncerWorkflowID)
+		require.NoError(t, err, "failed to find debouncer workflow in operation_outputs")
+		require.NotEmpty(t, debouncerWorkflowID, "debouncer workflow ID should not be empty")
+
+		err = dbosCtxInstance.systemDB.updateWorkflowOutcome(context.Background(), updateWorkflowOutcomeDBInput{
+			workflowID: debouncerWorkflowID,
 			status:     WorkflowStatusPending,
 			output:     nil,
 			err:        nil,
@@ -274,11 +282,11 @@ func TestDebouncer(t *testing.T) {
 		})
 		require.NoError(t, err, "failed to update workflow status to PENDING")
 
-		cleared, err := sysDB.systemDB.clearQueueAssignment(context.Background(), debouncerWorkflow[0].ID)
+		cleared, err := dbosCtxInstance.systemDB.clearQueueAssignment(context.Background(), debouncerWorkflowID)
 		require.NoError(t, err, "failed to clear queue assignment")
 		require.True(t, cleared, "should have cleared queue assignment")
 
-		debouncerWorkflowHandle := newWorkflowPollingHandle[any](dbosCtx, debouncerWorkflow[0].ID)
+		debouncerWorkflowHandle := newWorkflowPollingHandle[any](dbosCtx, debouncerWorkflowID)
 		_, err = debouncerWorkflowHandle.GetResult()
 		require.NoError(t, err, "shouldn't have errored")
 	})
