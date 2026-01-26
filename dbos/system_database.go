@@ -93,7 +93,7 @@ type sysDB struct {
 	logger                        *slog.Logger
 	schema                        string
 	launched                      bool
-	useListenNotify               bool
+	isCockroachDB                 bool
 }
 
 /*******************************/
@@ -185,7 +185,8 @@ const (
 	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
-func runMigrations(pool *pgxpool.Pool, schema string, useListenNotify bool) error {
+func runMigrations(pool *pgxpool.Pool, schema string, isCockroach bool) error {
+
 	// Process the migration SQL with fmt.Sprintf
 	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
 	migration1SQLProcessed := fmt.Sprintf(migration1SQL,
@@ -193,8 +194,8 @@ func runMigrations(pool *pgxpool.Pool, schema string, useListenNotify bool) erro
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
 
-	// If useListenNotify is true, merge the listen/notify triggers with the main migration
-	if useListenNotify {
+	// If not CockroachDB, merge the listen/notify triggers with the main migration
+	if !isCockroach {
 		migration1ListenNotifySQLProcessed := fmt.Sprintf(migration1ListenNotifySQL,
 			sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
 		migration1SQLProcessed = migration1SQLProcessed + "\n" + migration1ListenNotifySQLProcessed
@@ -375,6 +376,17 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		pool = newPool
 	}
 
+	// Detect if we're running CockroachDB
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		if customPool == nil {
+			pool.Close()
+		}
+		return nil, fmt.Errorf("failed to acquire connection to detect database type: %v", err)
+	}
+	isCockroach := isCockroachDB(ctx, conn.Conn())
+	conn.Release()
+
 	// Displaying Masked Database URL
 	maskedDatabaseURL, err := maskPassword(pool.Config().ConnString())
 	if err != nil {
@@ -392,7 +404,7 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	}
 
 	// Run migrations
-	if err := runMigrations(pool, databaseSchema, inputs.useListenNotify); err != nil {
+	if err := runMigrations(pool, databaseSchema, isCockroach); err != nil {
 		if customPool == nil {
 			pool.Close()
 		}
@@ -422,17 +434,17 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		notificationLoopDone:          make(chan struct{}),
 		logger:                        logger.With("service", "system_database"),
 		schema:                        databaseSchema,
-		useListenNotify:               inputs.useListenNotify,
+		isCockroachDB:                 isCockroach,
 	}, nil
 }
 
 func (s *sysDB) launch(ctx context.Context) {
-	// Start the appropriate notification loop based on configuration
-	if s.useListenNotify {
-		// Start the LISTEN/NOTIFY-based notification listener loop
+	// Start the appropriate notification loop based on database type
+	if !s.isCockroachDB {
+		// Start the LISTEN/NOTIFY-based notification listener loop (PostgreSQL only)
 		go s.notificationListenerLoop(ctx)
 	} else {
-		// Start the polling-based notification poller loop
+		// Start the polling-based notification poller loop (CockroachDB)
 		go s.notificationPollerLoop(ctx)
 	}
 	s.launched = true
