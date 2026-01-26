@@ -39,7 +39,7 @@ jobs:
       run: |
         timeout=60
         elapsed=0
-        while ! docker exec cockroach cockroach sql --certs-dir=/certs --execute="SELECT 1" > /dev/null 2>&1; do
+        while ! docker exec cockroach cockroach sql --insecure --execute="SELECT 1" > /dev/null 2>&1; do
           if [ $elapsed -ge $timeout ]; then
             echo "CockroachDB failed to start within $timeout seconds"
             exit 1
@@ -49,10 +49,6 @@ jobs:
           elapsed=$((elapsed + 2))
         done
         echo "CockroachDB is ready!"
-
-    - name: Set up root user password
-      run: |
-        docker exec cockroach cockroach sql --certs-dir=/certs --execute='ALTER USER root WITH PASSWORD $$a!b@c$d()e*_,/:;=?@ff[]22$$;'
 
     - name: Download dependencies
       run: go mod download
@@ -71,24 +67,21 @@ jobs:
       run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
       working-directory: ./integration
       env:
-        PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
-        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/defaultdb?sslmode=require
+        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/defaultdb?sslmode=disable
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Run CLI tests
       run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
       working-directory: ./cmd/dbos
       env:
-        PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
-        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/defaultdb?sslmode=require
+        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/defaultdb?sslmode=disable
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Run tests
       run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
       working-directory: ./dbos
       env:
-        PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
-        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/defaultdb?sslmode=require
+        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/defaultdb?sslmode=disable
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Cleanup CockroachDB container
