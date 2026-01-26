@@ -338,11 +338,11 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		if err != nil {
 			return nil, fmt.Errorf("failed to validate custom pool: %v", err)
 		}
+		defer poolConn.Release()
 		err = poolConn.Ping(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to validate custom pool: %v", err)
 		}
-		poolConn.Release()
 		pool = customPool
 	} else {
 		// Parse the connection string to get a config
@@ -384,8 +384,8 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		}
 		return nil, fmt.Errorf("failed to acquire connection to detect database type: %v", err)
 	}
+	defer conn.Release()
 	isCockroach := isCockroachDB(ctx, conn.Conn())
-	conn.Release()
 
 	// Displaying Masked Database URL
 	maskedDatabaseURL, err := maskPassword(pool.Config().ConnString())
