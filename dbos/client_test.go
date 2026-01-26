@@ -1227,3 +1227,269 @@ func TestClientReadStream(t *testing.T) {
 	// Verify all queue entries are cleaned up
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after read stream test")
 }
+
+// TestDebouncerClient tests the DebouncerClient functionality using a Client interface
+func TestDebouncerClient(t *testing.T) {
+	// Setup server context - this will process tasks
+	serverCtx := setupDBOS(t, true, true)
+
+	// Set internal queue polling interval to 10ms for faster tests
+	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
+	internalQueue.basePollingInterval = 10 * time.Millisecond
+	serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME] = internalQueue
+
+	// Register test workflow with a custom name
+	debounceTestWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		return input, nil
+	}
+	RegisterWorkflow(serverCtx, debounceTestWorkflow, WithWorkflowName("DebounceTestWorkflow"))
+
+	// Launch the server context to start processing tasks
+	err := Launch(serverCtx)
+	require.NoError(t, err)
+
+	// Setup client
+	databaseURL := getDatabaseURL()
+	config := ClientConfig{
+		DatabaseURL: databaseURL,
+	}
+	client, err := NewClient(context.Background(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
+
+	// Create debouncer clients
+	debouncer10sTimeout := NewDebouncerClient[string, string]("DebounceTestWorkflow", client, WithDebouncerTimeout(10*time.Second))
+	debouncer200msTimeout := NewDebouncerClient[string, string]("DebounceTestWorkflow", client, WithDebouncerTimeout(200*time.Millisecond))
+
+	t.Run("TestSingleDebounceCall", func(t *testing.T) {
+		startTime := time.Now()
+		handle, err := debouncer10sTimeout.Debounce("test-key-1", 500*time.Millisecond, "test-input-1")
+		require.NoError(t, err, "failed to call Debounce")
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result")
+		assert.Equal(t, "test-input-1", result, "result should match input")
+
+		// Verify execution happened approximately 500ms after first call
+		elapsed := time.Since(startTime)
+		assert.GreaterOrEqual(t, elapsed, 500*time.Millisecond, "execution should take at least 450ms")
+		assert.LessOrEqual(t, elapsed, 10*time.Second, "execution should take less than 10s")
+	})
+
+	t.Run("TestMultipleCallsPushBackAndLatestInput", func(t *testing.T) {
+		// Call Debounce 5 times with delay=200ms
+		key := "test-key-2"
+		startTime := time.Now()
+
+		// First call
+		handle1, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-1")
+		require.NoError(t, err, "failed to call Debounce (first call)")
+
+		handle2, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-2")
+		require.NoError(t, err, "failed to call Debounce (second call)")
+
+		handle3, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-3")
+		require.NoError(t, err, "failed to call Debounce (third call)")
+
+		handle4, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-4")
+		require.NoError(t, err, "failed to call Debounce (fourth call)")
+
+		handle5, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-5")
+		require.NoError(t, err, "failed to call Debounce (fifth call)")
+
+		// All handles should refer to the same workflow ID
+		assert.Equal(t, handle1.GetWorkflowID(), handle2.GetWorkflowID(), "all handles should refer to the same workflow ID")
+		assert.Equal(t, handle1.GetWorkflowID(), handle3.GetWorkflowID(), "all handles should refer to the same workflow ID")
+		assert.Equal(t, handle1.GetWorkflowID(), handle4.GetWorkflowID(), "all handles should refer to the same workflow ID")
+		assert.Equal(t, handle1.GetWorkflowID(), handle5.GetWorkflowID(), "all handles should refer to the same workflow ID")
+
+		result, err := handle5.GetResult()
+		require.NoError(t, err, "failed to get result")
+		assert.Equal(t, "input-5", result, "result should match latest input")
+
+		// Verify execution happened at least 200ms after first call (200ms debounce in rapid succession)
+		elapsed := time.Since(startTime)
+		assert.GreaterOrEqual(t, elapsed, 200*time.Millisecond, "execution should take at least 200ms")
+		assert.LessOrEqual(t, elapsed, 10*time.Second, "execution should take less than 10s")
+	})
+
+	t.Run("TestDelayGreaterThanTimeout", func(t *testing.T) {
+		// Call Debounce with delay=2s (greater than timeout of 200ms)
+		startTime := time.Now()
+		handle, err := debouncer200msTimeout.Debounce("test-key-4", 2*time.Second, "timeout-input")
+		require.NoError(t, err, "failed to call Debounce with delay > timeout")
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result")
+		assert.Equal(t, "timeout-input", result, "result should match input")
+
+		// Verify execution happened at timeout (200ms), not delay (2s)
+		elapsed := time.Since(startTime)
+		assert.GreaterOrEqual(t, elapsed, 200*time.Millisecond, "execution should take at least 200ms")
+		assert.LessOrEqual(t, elapsed, 2*time.Second, "execution should take less than 2s")
+	})
+
+	t.Run("TestDelayOverride", func(t *testing.T) {
+		// First call: Debounce with a very long delay (creates debouncer workflow)
+		key := "test-key-5"
+		handle1, err := debouncer10sTimeout.Debounce(key, 10*time.Second, "first-input")
+		require.NoError(t, err, "failed to call Debounce (first call)")
+
+		// Second call: Debounce with delay=0 (should trigger immediate execution)
+		startTime := time.Now()
+		handle2, err := debouncer10sTimeout.Debounce(key, 0, "second-input")
+		require.NoError(t, err, "failed to call Debounce (second call)")
+
+		// Verify both handles refer to the same workflow ID
+		assert.Equal(t, handle1.GetWorkflowID(), handle2.GetWorkflowID(), "both handles should refer to the same workflow ID")
+
+		// Verify the second call completes immediately
+		result, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result")
+		assert.Equal(t, "second-input", result, "result should match latest input")
+
+		elapsed := time.Since(startTime)
+		assert.LessOrEqual(t, elapsed, 2*time.Second, "execution should happen immediately with delay=0")
+	})
+
+	t.Run("TestDifferentKeys", func(t *testing.T) {
+		// Call Debounce with different keys - each should create a separate group
+		handle1, err := debouncer10sTimeout.Debounce("different-key-1", 200*time.Millisecond, "input-key-1")
+		require.NoError(t, err, "failed to call Debounce with first key")
+
+		handle2, err := debouncer10sTimeout.Debounce("different-key-2", 200*time.Millisecond, "input-key-2")
+		require.NoError(t, err, "failed to call Debounce with second key")
+
+		handle3, err := debouncer10sTimeout.Debounce("different-key-3", 200*time.Millisecond, "input-key-3")
+		require.NoError(t, err, "failed to call Debounce with third key")
+
+		// All handles should have different workflow IDs
+		assert.NotEqual(t, handle1.GetWorkflowID(), handle2.GetWorkflowID(), "different keys should create different workflow IDs")
+		assert.NotEqual(t, handle2.GetWorkflowID(), handle3.GetWorkflowID(), "different keys should create different workflow IDs")
+		assert.NotEqual(t, handle1.GetWorkflowID(), handle3.GetWorkflowID(), "different keys should create different workflow IDs")
+
+		// Each handle should get its own input
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first handle")
+		assert.Equal(t, "input-key-1", result1, "first handle should get its own input")
+
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result from second handle")
+		assert.Equal(t, "input-key-2", result2, "second handle should get its own input")
+
+		result3, err := handle3.GetResult()
+		require.NoError(t, err, "failed to get result from third handle")
+		assert.Equal(t, "input-key-3", result3, "third handle should get its own input")
+	})
+
+	t.Run("TestDifferentKeysExecuteIndependently", func(t *testing.T) {
+		// Call Debounce with different keys and verify they execute independently
+		handle1, err := debouncer10sTimeout.Debounce("independent-key-1", 5*time.Second, "independent-1")
+		require.NoError(t, err, "failed to call Debounce with first key")
+
+		startTime2 := time.Now()
+		handle2, err := debouncer10sTimeout.Debounce("independent-key-2", 200*time.Millisecond, "independent-2")
+		require.NoError(t, err, "failed to call Debounce with second key")
+
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result from second handle")
+		assert.Equal(t, "independent-2", result2, "second handle should get its own input")
+
+		// Verify key-2 executed independently (should complete before the 5s delay of key-1)
+		elapsed2 := time.Since(startTime2)
+		assert.GreaterOrEqual(t, elapsed2, 200*time.Millisecond, "key-2 should execute after its delay")
+		assert.Less(t, elapsed2, 5*time.Second, "key-2 should not be affected by key-1's delay")
+
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first handle")
+		assert.Equal(t, "independent-1", result1, "first handle should get its own input")
+	})
+}
+
+func TestDebouncerClientWorkflowOptions(t *testing.T) {
+	// Setup server context
+	serverCtx := setupDBOS(t, true, true)
+
+	// Create test queue
+	testQueue := NewWorkflowQueue(serverCtx, "debouncer-client-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())
+
+	// Register test workflow with a custom name
+	debounceTestWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		return input, nil
+	}
+	RegisterWorkflow(serverCtx, debounceTestWorkflow, WithWorkflowName("DebounceTestWorkflow"))
+
+	// Launch the server context
+	err := Launch(serverCtx)
+	require.NoError(t, err)
+
+	// Setup client
+	databaseURL := getDatabaseURL()
+	config := ClientConfig{
+		DatabaseURL: databaseURL,
+	}
+	client, err := NewClient(context.Background(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
+
+	// Create debouncer client
+	debouncer := NewDebouncerClient[string, string]("DebounceTestWorkflow", client, WithDebouncerTimeout(10*time.Second))
+
+	// Test workflow options
+	expectedWorkflowID := "test-workflow-id-12345"
+	expectedPriority := uint(5)
+	expectedPartitionKey := "partition-key-123"
+	expectedAssumedRole := "test-assumed-role"
+	expectedAuthenticatedUser := "test-user"
+	expectedAuthenticatedRoles := []string{"role1", "role2", "role3"}
+	testInput := "test-input-with-options"
+
+	// Call Debounce with all workflow options
+	handle, err := debouncer.Debounce(
+		"workflow-options-key",
+		200*time.Millisecond,
+		testInput,
+		WithWorkflowID(expectedWorkflowID),
+		WithQueue(testQueue.Name),
+		WithPriority(expectedPriority),
+		WithQueuePartitionKey(expectedPartitionKey),
+		WithAssumedRole(expectedAssumedRole),
+		WithAuthenticatedUser(expectedAuthenticatedUser),
+		WithAuthenticatedRoles(expectedAuthenticatedRoles),
+	)
+	require.NoError(t, err, "failed to call Debounce with workflow options")
+
+	// Verify the handle returns the expected workflow ID
+	workflowID := handle.GetWorkflowID()
+	assert.Equal(t, expectedWorkflowID, workflowID, "handle should return the expected workflow ID")
+
+	// Wait for the workflow to execute
+	result, err := handle.GetResult()
+	require.NoError(t, err, "failed to get result")
+	assert.Equal(t, testInput, result, "result should match input")
+
+	// List the workflow to verify all options are set correctly
+	workflows, err := client.ListWorkflows(WithWorkflowIDs([]string{workflowID}))
+	require.NoError(t, err, "failed to list workflows")
+	require.Len(t, workflows, 1, "should find exactly one workflow")
+
+	workflow := workflows[0]
+
+	// Verify all workflow options are set correctly
+	assert.Equal(t, expectedWorkflowID, workflow.ID, "workflow ID should match")
+	assert.Equal(t, testQueue.Name, workflow.QueueName, "queue name should match")
+	assert.Equal(t, int(expectedPriority), workflow.Priority, "priority should match")
+	assert.Equal(t, expectedPartitionKey, workflow.QueuePartitionKey, "queue partition key should match")
+	assert.Equal(t, expectedAssumedRole, workflow.AssumedRole, "assumed role should match")
+	assert.Equal(t, expectedAuthenticatedUser, workflow.AuthenticatedUser, "authenticated user should match")
+	assert.Equal(t, expectedAuthenticatedRoles, workflow.AuthenticatedRoles, "authenticated roles should match")
+	assert.Equal(t, WorkflowStatusSuccess, workflow.Status, "workflow should have succeeded")
+}

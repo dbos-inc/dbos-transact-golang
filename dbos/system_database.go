@@ -665,6 +665,7 @@ type listWorkflowsDBInput struct {
 	applicationVersion string
 	executorIDs        []string
 	forkedFrom         string
+	deduplicationID    string
 	limit              *int
 	offset             *int
 	sortDesc           bool
@@ -730,6 +731,9 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 	}
 	if input.forkedFrom != "" {
 		qb.addWhere("forked_from", input.forkedFrom)
+	}
+	if input.deduplicationID != "" {
+		qb.addWhere("deduplication_id", input.deduplicationID)
 	}
 
 	// Build complete query
@@ -1401,7 +1405,7 @@ func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkfl
 		// Check for unique constraint violation (conflict ID error)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
 			return fmt.Errorf(
-				"child workflow %s already registered for parent workflow %s (operation ID: %d)",
+				"child workflow %s already registered for parent workflow %s (operation ID: %d). Is your workflow deterministic?",
 				input.childWorkflowID, input.parentWorkflowID, input.stepID)
 		}
 		return fmt.Errorf("failed to record child workflow: %w", err)
@@ -2041,7 +2045,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		return nil, err
 	}
 	if recordedResult != nil {
-		return recordedResult.output, nil
+		return recordedResult.output, recordedResult.err
 	}
 
 	// First check if there's already a receiver for this workflow/topic to avoid unnecessary database load

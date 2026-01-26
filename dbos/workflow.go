@@ -621,17 +621,18 @@ type Workflow[P any, R any] func(ctx DBOSContext, input P) (R, error)
 type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
 
 type workflowOptions struct {
-	workflowName        string
-	workflowID          string
-	queueName           string
-	applicationVersion  string
-	maxRetries          int
-	deduplicationID     string
-	priority            uint
-	authenticated_user  string
-	assumed_role        string
-	authenticated_roles []string
-	queuePartitionKey   string
+	WorkflowName        string
+	WorkflowID          string
+	QueueName           string
+	ApplicationVersion  string
+	MaxRetries          int
+	DeduplicationID     string
+	Priority            uint
+	AuthenticatedUser   string
+	AssumedRole         string
+	AuthenticatedRoles  []string
+	QueuePartitionKey   string
+	alreadyEncodedInput bool
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
@@ -640,7 +641,7 @@ type WorkflowOption func(*workflowOptions)
 // WithWorkflowID sets a custom workflow ID instead of generating one automatically.
 func WithWorkflowID(id string) WorkflowOption {
 	return func(p *workflowOptions) {
-		p.workflowID = id
+		p.WorkflowID = id
 	}
 }
 
@@ -648,7 +649,7 @@ func WithWorkflowID(id string) WorkflowOption {
 // Queued workflows will be processed by the queue runner according to the queue's configuration.
 func WithQueue(queueName string) WorkflowOption {
 	return func(p *workflowOptions) {
-		p.queueName = queueName
+		p.QueueName = queueName
 	}
 }
 
@@ -656,21 +657,21 @@ func WithQueue(queueName string) WorkflowOption {
 // This affects workflow recovery.
 func WithApplicationVersion(version string) WorkflowOption {
 	return func(p *workflowOptions) {
-		p.applicationVersion = version
+		p.ApplicationVersion = version
 	}
 }
 
 // WithDeduplicationID sets a deduplication ID for a queue workflow.
 func WithDeduplicationID(id string) WorkflowOption {
 	return func(p *workflowOptions) {
-		p.deduplicationID = id
+		p.DeduplicationID = id
 	}
 }
 
 // WithPriority sets the execution priority for a queue workflow.
 func WithPriority(priority uint) WorkflowOption {
 	return func(p *workflowOptions) {
-		p.priority = priority
+		p.Priority = priority
 	}
 }
 
@@ -679,35 +680,44 @@ func WithPriority(priority uint) WorkflowOption {
 // with separate concurrency limits per partition.
 func WithQueuePartitionKey(partitionKey string) WorkflowOption {
 	return func(p *workflowOptions) {
-		p.queuePartitionKey = partitionKey
+		p.QueuePartitionKey = partitionKey
 	}
 }
 
 // An internal option we use to map the reflection function name to the registration options.
 func withWorkflowName(name string) WorkflowOption {
 	return func(p *workflowOptions) {
-		p.workflowName = name
+		if p.WorkflowName == "" {
+			p.WorkflowName = name
+		}
+	}
+}
+
+// An internal option we use to indicate that the input is already encoded, so we don't need to encode it again
+func withAlreadyEncodedInput() WorkflowOption {
+	return func(p *workflowOptions) {
+		p.alreadyEncodedInput = true
 	}
 }
 
 // Sets the authenticated user for the workflow
 func WithAuthenticatedUser(user string) WorkflowOption {
 	return func(p *workflowOptions) {
-		p.authenticated_user = user
+		p.AuthenticatedUser = user
 	}
 }
 
 // Sets the assumed role for the workflow
 func WithAssumedRole(role string) WorkflowOption {
 	return func(p *workflowOptions) {
-		p.assumed_role = role
+		p.AssumedRole = role
 	}
 }
 
 // Sets the authenticated role for the workflow
 func WithAuthenticatedRoles(roles []string) WorkflowOption {
 	return func(p *workflowOptions) {
-		p.authenticated_roles = roles
+		p.AuthenticatedRoles = roles
 	}
 }
 
@@ -826,51 +836,58 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 	// Apply options to build params
 	params := workflowOptions{
-		applicationVersion: c.GetApplicationVersion(),
+		ApplicationVersion: c.GetApplicationVersion(),
 	}
 	for _, opt := range opts {
 		opt(&params)
 	}
 
 	// Lookup the registry for registration-time options
-	registeredWorkflowAny, exists := c.workflowRegistry.Load(params.workflowName)
+	registeredWorkflowAny, exists := c.workflowRegistry.Load(params.WorkflowName)
 	if !exists {
-		return nil, newNonExistentWorkflowError(params.workflowName)
+		c.logger.Error("workflow not found in registry", "workflow_name", params.WorkflowName)
+		return nil, newNonExistentWorkflowError(params.WorkflowName)
 	}
 	registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
 	if !ok {
-		return nil, fmt.Errorf("invalid workflow registry entry type for workflow %s", params.workflowName)
+		c.logger.Error("invalid workflow registry entry type for workflow", "workflow_name", params.WorkflowName)
+		return nil, fmt.Errorf("invalid workflow registry entry type for workflow %s", params.WorkflowName)
 	}
 	if registeredWorkflow.MaxRetries > 0 {
-		params.maxRetries = registeredWorkflow.MaxRetries
+		params.MaxRetries = registeredWorkflow.MaxRetries
 	}
 	if len(registeredWorkflow.Name) > 0 {
-		params.workflowName = registeredWorkflow.Name
+		params.WorkflowName = registeredWorkflow.Name
 	}
 
 	// Validate partition key is not provided without queue name
-	if len(params.queuePartitionKey) > 0 && len(params.queueName) == 0 {
+	if len(params.QueuePartitionKey) > 0 && len(params.QueueName) == 0 {
+		c.logger.Error("partition key provided but queue name is missing", "workflow_name", params.WorkflowName)
 		return nil, newWorkflowExecutionError("", fmt.Errorf("partition key provided but queue name is missing"))
 	}
 
 	// Validate partition key and deduplication ID are not both provided (they are incompatible)
-	if len(params.queuePartitionKey) > 0 && len(params.deduplicationID) > 0 {
+	if len(params.QueuePartitionKey) > 0 && len(params.DeduplicationID) > 0 {
+		c.logger.Error("partition key and deduplication ID cannot be used together", "workflow_name", params.WorkflowName)
 		return nil, newWorkflowExecutionError("", fmt.Errorf("partition key and deduplication ID cannot be used together"))
 	}
 
 	// Validate queue exists if provided
-	if len(params.queueName) > 0 {
-		queue := c.queueRunner.getQueue(params.queueName)
+	if len(params.QueueName) > 0 {
+		queue := c.queueRunner.getQueue(params.QueueName)
 		if queue == nil {
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s does not exist", params.queueName))
+			c.logger.Error("queue does not exist", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s does not exist", params.QueueName))
 		}
 		// If queue has partitions enabled, partition key must be provided
-		if queue.PartitionQueue && len(params.queuePartitionKey) == 0 {
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.queueName))
+		if queue.PartitionQueue && len(params.QueuePartitionKey) == 0 {
+			c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
 		}
 		// If partition key is provided, queue must have partitions enabled
-		if len(params.queuePartitionKey) > 0 && !queue.PartitionQueue {
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.queueName))
+		if len(params.QueuePartitionKey) > 0 && !queue.PartitionQueue {
+			c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
 		}
 	}
 
@@ -880,7 +897,8 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// Prevent spawning child workflows from within a step
 	if isChildWorkflow && parentWorkflowState.isWithinStep {
-		return nil, newStepExecutionError(parentWorkflowState.workflowID, params.workflowName, fmt.Errorf("cannot spawn child workflow from within a step"))
+		c.logger.Error("cannot spawn child workflow from within a step", "workflow_name", params.WorkflowName, "parent_workflow_id", parentWorkflowState.workflowID)
+		return nil, newStepExecutionError(parentWorkflowState.workflowID, params.WorkflowName, fmt.Errorf("cannot spawn child workflow from within a step"))
 	}
 
 	if isChildWorkflow {
@@ -890,7 +908,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// Generate an ID for the workflow if not provided
 	var workflowID string
-	if params.workflowID == "" {
+	if params.WorkflowID == "" {
 		if isChildWorkflow {
 			stepID := parentWorkflowState.stepID
 			workflowID = fmt.Sprintf("%s-%d", parentWorkflowState.workflowID, stepID)
@@ -898,7 +916,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			workflowID = uuid.New().String()
 		}
 	} else {
-		workflowID = params.workflowID
+		workflowID = params.WorkflowID
 	}
 
 	// Create an uncancellable context for the DBOS operations
@@ -909,15 +927,17 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	if isChildWorkflow {
 		childWorkflowID, err := c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		if err != nil {
+			c.logger.Error("failed to check child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("checking child workflow: %w", err))
 		}
 		if childWorkflowID != nil {
+			c.logger.Info("child workflow already recorded", "workflow_name", params.WorkflowName, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID, "child_workflow_id", *childWorkflowID)
 			return newWorkflowPollingHandle[any](uncancellableCtx, *childWorkflowID), nil
 		}
 	}
 
 	var status WorkflowStatusType
-	if params.queueName != "" {
+	if params.QueueName != "" {
 		status = WorkflowStatusEnqueued
 	} else {
 		status = WorkflowStatusPending
@@ -941,20 +961,28 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		deadline = time.Time{}
 	}
 
-	if params.priority > uint(math.MaxInt) {
-		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.priority, math.MaxInt)
+	if params.Priority > uint(math.MaxInt) {
+		c.logger.Error("priority exceeds maximum allowed value", "workflow_name", params.WorkflowName, "priority", params.Priority, "max_allowed_value", math.MaxInt)
+		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.Priority, math.MaxInt)
 	}
 
 	// Serialize input before storing in workflow status
-	serializer := newJSONSerializer[any]()
-	encodedInput, serErr := serializer.Encode(input)
-	if serErr != nil {
-		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize workflow input: %w", serErr))
+	var encodedInput any
+	if params.alreadyEncodedInput {
+		encodedInput = input
+	} else {
+		serializer := newJSONSerializer[any]()
+		var serErr error
+		encodedInput, serErr = serializer.Encode(input)
+		if serErr != nil {
+			c.logger.Error("failed to serialize workflow input", "error", serErr, "workflow_id", workflowID)
+			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize workflow input: %w", serErr))
+		}
 	}
 
 	workflowStatus := WorkflowStatus{
-		Name:               params.workflowName,
-		ApplicationVersion: params.applicationVersion,
+		Name:               params.WorkflowName,
+		ApplicationVersion: params.ApplicationVersion,
 		ExecutorID:         c.GetExecutorID(),
 		Status:             status,
 		ID:                 workflowID,
@@ -963,13 +991,13 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		Timeout:            timeout,
 		Input:              encodedInput,
 		ApplicationID:      c.GetApplicationID(),
-		QueueName:          params.queueName,
-		DeduplicationID:    params.deduplicationID,
-		Priority:           int(params.priority),
-		AuthenticatedUser:  params.authenticated_user,
-		AssumedRole:        params.assumed_role,
-		AuthenticatedRoles: params.authenticated_roles,
-		QueuePartitionKey:  params.queuePartitionKey,
+		QueueName:          params.QueueName,
+		DeduplicationID:    params.DeduplicationID,
+		Priority:           int(params.Priority),
+		AuthenticatedUser:  params.AuthenticatedUser,
+		AssumedRole:        params.AssumedRole,
+		AuthenticatedRoles: params.AuthenticatedRoles,
+		QueuePartitionKey:  params.QueuePartitionKey,
 	}
 
 	var earlyReturnPollingHandle *workflowPollingHandle[any]
@@ -986,7 +1014,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		// Insert workflow status with transaction
 		insertInput := insertWorkflowStatusDBInput{
 			status:     workflowStatus,
-			maxRetries: params.maxRetries,
+			maxRetries: params.MaxRetries,
 			tx:         tx,
 		}
 		insertStatusResult, err = c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
@@ -1001,7 +1029,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			childInput := recordChildWorkflowDBInput{
 				parentWorkflowID: parentWorkflowState.workflowID,
 				childWorkflowID:  workflowID,
-				stepName:         params.workflowName,
+				stepName:         params.WorkflowName,
 				stepID:           parentWorkflowState.stepID,
 				tx:               tx,
 			}
@@ -1013,7 +1041,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		}
 
 		// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
-		if len(params.queueName) > 0 || insertStatusResult.status == WorkflowStatusSuccess || insertStatusResult.status == WorkflowStatusError {
+		if len(params.QueueName) > 0 || insertStatusResult.status == WorkflowStatusSuccess || insertStatusResult.status == WorkflowStatusError {
 			// Commit the transaction to update the number of attempts and/or enact the enqueue
 			if err := tx.Commit(uncancellableCtx); err != nil {
 				return newWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
@@ -2565,6 +2593,7 @@ type listWorkflowsOptions struct {
 	queuesOnly       bool
 	executorIDs      []string
 	forkedFrom       string
+	deduplicationID  string
 }
 
 // ListWorkflowsOption is a functional option for configuring workflow listing parameters.
@@ -2690,6 +2719,13 @@ func WithForkedFrom(forkedFrom string) ListWorkflowsOption {
 	}
 }
 
+// WithFilterDeduplicationID filters workflows by the specified deduplication ID.
+func WithFilterDeduplicationID(deduplicationID string) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.deduplicationID = deduplicationID
+	}
+}
+
 func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
 	// Initialize parameters with defaults
 	loadInput := true
@@ -2732,6 +2768,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		queuesOnly:         params.queuesOnly,
 		executorIDs:        params.executorIDs,
 		forkedFrom:         params.forkedFrom,
+		deduplicationID:    params.deduplicationID,
 	}
 
 	// Call the context method to list workflows

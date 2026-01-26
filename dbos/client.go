@@ -64,6 +64,11 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 		return nil, err
 	}
 
+	asDBOSCtx, ok := dbosCtx.(*dbosContext)
+	if ok {
+		asDBOSCtx.systemDB.launch(asDBOSCtx)
+	}
+
 	return &client{
 		dbosCtx: dbosCtx,
 	}, nil
@@ -386,6 +391,9 @@ func (c *client) Shutdown(timeout time.Duration) {
 
 	// Close the system database
 	if dbosCtx.systemDB != nil {
+		// Cancel the context to signal all resources to stop
+		dbosCtx.ctxCancelFunc(errors.New("client shutdown initiated"))
+
 		dbosCtx.logger.Debug("Shutting down system database")
 		dbosCtx.systemDB.shutdown(dbosCtx, timeout)
 	}
