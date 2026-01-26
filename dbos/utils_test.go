@@ -45,7 +45,7 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 	require.NoError(t, err)
 	defer conn.Close(context.Background())
 
-	_, err = conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)")
+	err = dropDatabaseIfExists(context.Background(), conn, dbName)
 	require.NoError(t, err)
 }
 
