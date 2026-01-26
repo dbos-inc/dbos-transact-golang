@@ -1157,6 +1157,23 @@ func TestGetWorkflowSteps(t *testing.T) {
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after get workflow steps test")
 }
 
+// clientReadStreamFunc is a function type that reads from a stream using a client and returns values, closed status, and error
+type clientReadStreamFunc func(c Client, workflowID string, key string) ([]string, bool, error)
+
+// syncClientReadStream wraps ClientReadStream for use in test table
+func syncClientReadStream(c Client, workflowID string, key string) ([]string, bool, error) {
+	return ClientReadStream[string](c, workflowID, key)
+}
+
+// asyncClientReadStream wraps ClientReadStreamAsync and collects values for use in test table
+func asyncClientReadStream(c Client, workflowID string, key string) ([]string, bool, error) {
+	ch, err := ClientReadStreamAsync[string](c, workflowID, key)
+	if err != nil {
+		return nil, false, err
+	}
+	return collectStreamValues(ch)
+}
+
 func TestClientReadStream(t *testing.T) {
 	// Setup server context
 	serverCtx := setupDBOS(t, true, true)
@@ -1196,36 +1213,46 @@ func TestClientReadStream(t *testing.T) {
 		}
 	})
 
-	streamKey := "test-client-stream"
-	workflowID := "test-read-stream-workflow"
-	testValues := []string{"value1", "value2", "value3"}
+	// Test table for sync and async versions
+	readFuncs := map[string]clientReadStreamFunc{
+		"Sync":  syncClientReadStream,
+		"Async": asyncClientReadStream,
+	}
 
-	// Enqueue and run the writer workflow
-	handle, err := Enqueue[struct {
-		StreamKey string
-		Values    []string
-	}, string](client, queue.Name, "StreamWriterWorkflow", struct {
-		StreamKey string
-		Values    []string
-	}{
-		StreamKey: streamKey,
-		Values:    testValues,
-	}, WithEnqueueWorkflowID(workflowID))
-	require.NoError(t, err, "failed to enqueue stream writer workflow")
+	for name, readFunc := range readFuncs {
+		t.Run(name, func(t *testing.T) {
+			streamKey := "test-client-stream"
+			workflowID := "test-read-stream-workflow-" + name
+			testValues := []string{"value1", "value2", "value3"}
 
-	// Wait for workflow to complete
-	result, err := handle.GetResult()
-	require.NoError(t, err, "failed to get result from writer workflow")
-	assert.Equal(t, "done", result)
+			// Enqueue and run the writer workflow
+			handle, err := Enqueue[struct {
+				StreamKey string
+				Values    []string
+			}, string](client, queue.Name, "StreamWriterWorkflow", struct {
+				StreamKey string
+				Values    []string
+			}{
+				StreamKey: streamKey,
+				Values:    testValues,
+			}, WithEnqueueWorkflowID(workflowID))
+			require.NoError(t, err, "failed to enqueue stream writer workflow")
 
-	// Read from the stream using client
-	values, closed, err := ClientReadStream[string](client, workflowID, streamKey)
-	require.NoError(t, err, "failed to read stream from client")
-	assert.Equal(t, testValues, values, "expected stream values to match")
-	assert.False(t, closed, "expected stream not to be closed")
+			// Wait for workflow to complete
+			result, err := handle.GetResult()
+			require.NoError(t, err, "failed to get result from writer workflow")
+			assert.Equal(t, "done", result)
 
-	// Verify all queue entries are cleaned up
-	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after read stream test")
+			// Read from the stream using client
+			values, closed, err := readFunc(client, workflowID, streamKey)
+			require.NoError(t, err, "failed to read stream from client")
+			assert.Equal(t, testValues, values, "expected stream values to match")
+			assert.True(t, closed, "expected stream to be closed when workflow terminates")
+
+			// Verify all queue entries are cleaned up
+			require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after read stream test")
+		})
+	}
 }
 
 // TestDebouncerClient tests the DebouncerClient functionality using a Client interface
