@@ -50,9 +50,8 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 }
 
 type setupDBOSOptions struct {
-	dropDB          bool
-	checkLeaks      bool
-	useListenNotify *bool
+	dropDB     bool
+	checkLeaks bool
 }
 
 /* Test database setup */
@@ -67,9 +66,6 @@ func setupDBOS(t *testing.T, opts setupDBOSOptions) DBOSContext {
 	config := Config{
 		DatabaseURL: databaseURL,
 		AppName:     "test-app",
-	}
-	if opts.useListenNotify != nil {
-		config.UseListenNotify = opts.useListenNotify
 	}
 
 	dbosCtx, err := NewDBOSContext(context.Background(), config)

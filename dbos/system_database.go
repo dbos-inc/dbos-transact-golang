@@ -313,7 +313,6 @@ type newSystemDatabaseInput struct {
 	customPool      *pgxpool.Pool
 	logger          *slog.Logger
 	applicationName string
-	useListenNotify bool
 }
 
 // New creates a new SystemDatabase instance and runs migrations
@@ -376,17 +375,6 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		pool = newPool
 	}
 
-	// Detect if we're running CockroachDB
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		if customPool == nil {
-			pool.Close()
-		}
-		return nil, fmt.Errorf("failed to acquire connection to detect database type: %v", err)
-	}
-	defer conn.Release()
-	isCockroach := isCockroachDB(ctx, conn.Conn())
-
 	// Displaying Masked Database URL
 	maskedDatabaseURL, err := maskPassword(pool.Config().ConnString())
 	if err != nil {
@@ -401,6 +389,21 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 			pool.Close()
 			return nil, fmt.Errorf("failed to create database: %v", err)
 		}
+	}
+
+	// Detect if we're running CockroachDB
+	// This must happen after we ensured the database exist
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		if customPool == nil {
+			pool.Close()
+		}
+		return nil, fmt.Errorf("failed to acquire connection to detect database type: %v", err)
+	}
+	defer conn.Release()
+	isCockroach := isCockroachDB(ctx, conn.Conn())
+	if isCockroach {
+		logger.Info("detected CockroachDB")
 	}
 
 	// Run migrations
