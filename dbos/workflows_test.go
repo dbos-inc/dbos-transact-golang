@@ -2038,13 +2038,13 @@ func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 func durableRecvSleepWorkflow(ctx DBOSContext, topic string) (string, error) {
 	// First Recv with 2-second timeout (will timeout)
 	msg1, err := Recv[string](ctx, topic, 2*time.Second)
-	if err != nil && !errors.Is(err, &DBOSError{Code: TimeoutError}) {
+	if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("DBOS Error %d", TimeoutError)) {
 		return "", fmt.Errorf("unexpected error in first recv: %w", err)
 	}
 
 	// Second Recv with 2-second timeout (will also timeout)
 	msg2, err := Recv[string](ctx, topic, 2*time.Second)
-	if err != nil && !errors.Is(err, &DBOSError{Code: TimeoutError}) {
+	if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("DBOS Error %d", TimeoutError)) {
 		return "", fmt.Errorf("unexpected error in second recv: %w", err)
 	}
 
@@ -2495,6 +2495,8 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, 0, steps[0].StepID, "expected first step ID to be 0")
 		require.Equal(t, "DBOS.recv", steps[0].StepName, "expected first step to be recv")
 		require.Nil(t, steps[0].Output, "expected first recv step output to be nil (timeout)")
+		require.NotNil(t, steps[0].Error, "expected first recv step to have an error")
+		require.Contains(t, steps[0].Error.Error(), "DBOS.recv timed out", "expected step 0 to contain 'DBOS.recv timed out' in error message")
 		require.False(t, steps[0].StartedAt.IsZero(), "expected recv step to have StartedAt set")
 		require.False(t, steps[0].CompletedAt.IsZero(), "expected recv step to have CompletedAt set")
 		require.True(t, steps[0].CompletedAt.After(steps[0].StartedAt) || steps[0].CompletedAt.Equal(steps[0].StartedAt),
@@ -2512,6 +2514,8 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, 2, steps[2].StepID, "expected third step ID to be 2")
 		require.Equal(t, "DBOS.recv", steps[2].StepName, "expected third step to be recv")
 		require.Nil(t, steps[2].Output, "expected second recv step output to be nil (timeout)")
+		require.NotNil(t, steps[2].Error, "expected second recv step to have an error")
+		require.Contains(t, steps[2].Error.Error(), "DBOS.recv timed out", "expected step 2 to contain 'DBOS.recv timed out' in error message")
 		require.False(t, steps[2].StartedAt.IsZero(), "expected recv step to have StartedAt set")
 		require.False(t, steps[2].CompletedAt.IsZero(), "expected recv step to have CompletedAt set")
 		require.True(t, steps[2].CompletedAt.After(steps[2].StartedAt) || steps[2].CompletedAt.Equal(steps[2].StartedAt),
@@ -2549,6 +2553,8 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, 0, steps[0].StepID, "expected first step ID to be 0")
 		require.Equal(t, "DBOS.recv", steps[0].StepName, "expected first step to be recv")
 		require.Nil(t, steps[0].Output, "expected first recv step output to still be nil (timeout)")
+		require.NotNil(t, steps[0].Error, "expected first recv step to still have an error")
+		require.Contains(t, steps[0].Error.Error(), "DBOS.recv timed out", "expected step 0 to still contain 'DBOS.recv timed out' in error message")
 
 		// First sleep (step 1)
 		require.Equal(t, 1, steps[1].StepID, "expected second step ID to be 1")
@@ -2558,6 +2564,8 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, 2, steps[2].StepID, "expected third step ID to be 2")
 		require.Equal(t, "DBOS.recv", steps[2].StepName, "expected third step to be recv")
 		require.Nil(t, steps[2].Output, "expected second recv step output to still be nil (timeout)")
+		require.NotNil(t, steps[2].Error, "expected second recv step to still have an error")
+		require.Contains(t, steps[2].Error.Error(), "DBOS.recv timed out", "expected step 2 to still contain 'DBOS.recv timed out' in error message")
 
 		// Second sleep (step 3)
 		require.Equal(t, 3, steps[3].StepID, "expected fourth step ID to be 3")
@@ -2590,6 +2598,8 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, 0, steps[0].StepID, "expected first step ID to be 0")
 		require.Equal(t, "DBOS.recv", steps[0].StepName, "expected first step to be recv")
 		require.Nil(t, steps[0].Output, "expected first recv step output to still be nil (timeout)")
+		require.NotNil(t, steps[0].Error, "expected first recv step to still have an error")
+		require.Contains(t, steps[0].Error.Error(), "DBOS.recv timed out", "expected step 0 to still contain 'DBOS.recv timed out' in error message")
 
 		// First sleep (step 1)
 		require.Equal(t, 1, steps[1].StepID, "expected second step ID to be 1")
@@ -2599,6 +2609,8 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, 2, steps[2].StepID, "expected third step ID to be 2")
 		require.Equal(t, "DBOS.recv", steps[2].StepName, "expected third step to be recv")
 		require.Nil(t, steps[2].Output, "expected second recv step output to still be nil (timeout)")
+		require.NotNil(t, steps[2].Error, "expected second recv step to still have an error")
+		require.Contains(t, steps[2].Error.Error(), "DBOS.recv timed out", "expected step 2 to still contain 'DBOS.recv timed out' in error message")
 
 		// Second sleep (step 3)
 		require.Equal(t, 3, steps[3].StepID, "expected fourth step ID to be 3")

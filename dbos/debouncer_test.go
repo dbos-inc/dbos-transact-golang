@@ -1,10 +1,12 @@
 package dbos
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -66,9 +68,9 @@ func TestDebouncer(t *testing.T) {
 	// Create debouncers after Launch (each workflow debouncer can only be registered once)
 	debouncer10sTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
 	debouncer200msTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(200*time.Millisecond))
+	debouncer2sTimeout := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(2*time.Second))
 
 	Launch(dbosCtx)
-
 	t.Run("TestSingleDebounceCall", func(t *testing.T) {
 		// Create a workflow that calls Debounce
 		parentInput := debounceCallInput{
@@ -240,6 +242,53 @@ func TestDebouncer(t *testing.T) {
 		require.NoError(t, err, "failed to get result from first handle")
 		assert.Equal(t, "independent-1", result1, "first handle should get its own input")
 
+	})
+
+	t.Run("TestRecoverDebouncedWorkflow", func(t *testing.T) {
+		// Call Debounce directly using the 2 second timeout debouncer
+		handle1, err := debouncer2sTimeout.Debounce(dbosCtx, "recovery-test-key", 200*time.Millisecond, "recovery-input-1")
+		require.NoError(t, err, "failed to call Debounce")
+
+		// Wait for it to exit
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first run")
+		assert.Equal(t, "recovery-input-1", result1, "result should match input")
+
+		// Access systemDB and manually change status to PENDING
+		dbosCtxInstance, ok := dbosCtx.(*dbosContext)
+		require.True(t, ok, "expected dbosContext")
+		require.NotNil(t, dbosCtxInstance.systemDB)
+
+		// Sleep for a few seconds, which would push back the time computation in the debouncer workflow
+		time.Sleep(3 * time.Second)
+
+		// Find the internal debouncer workflow by querying operation_outputs table
+		// The debouncer workflow is the one that has a step with child_workflow_id set to handle1's workflow ID
+		sysDBInstance, ok := dbosCtxInstance.systemDB.(*sysDB)
+		require.True(t, ok, "expected sysDB instance")
+
+		query := fmt.Sprintf(`SELECT workflow_uuid FROM %s.operation_outputs WHERE child_workflow_id = $1 LIMIT 1`, pgx.Identifier{sysDBInstance.schema}.Sanitize())
+		var debouncerWorkflowID string
+		err = sysDBInstance.pool.QueryRow(context.Background(), query, handle1.GetWorkflowID()).Scan(&debouncerWorkflowID)
+		require.NoError(t, err, "failed to find debouncer workflow in operation_outputs")
+		require.NotEmpty(t, debouncerWorkflowID, "debouncer workflow ID should not be empty")
+
+		err = dbosCtxInstance.systemDB.updateWorkflowOutcome(context.Background(), updateWorkflowOutcomeDBInput{
+			workflowID: debouncerWorkflowID,
+			status:     WorkflowStatusPending,
+			output:     nil,
+			err:        nil,
+			tx:         nil,
+		})
+		require.NoError(t, err, "failed to update workflow status to PENDING")
+
+		cleared, err := dbosCtxInstance.systemDB.clearQueueAssignment(context.Background(), debouncerWorkflowID)
+		require.NoError(t, err, "failed to clear queue assignment")
+		require.True(t, cleared, "should have cleared queue assignment")
+
+		debouncerWorkflowHandle := newWorkflowPollingHandle[any](dbosCtx, debouncerWorkflowID)
+		_, err = debouncerWorkflowHandle.GetResult()
+		require.NoError(t, err, "shouldn't have errored")
 	})
 }
 
