@@ -1667,7 +1667,7 @@ func TestQueuePollingIntervals(t *testing.T) {
 
 func TestListenQueues(t *testing.T) {
 	t.Run("ListenToSubsetOfQueues", func(t *testing.T) {
-		dbosCtx := setupDBOS(t, true, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 		// Register 3 queues
 		queue1 := NewWorkflowQueue(dbosCtx, "listen-test-queue-1")
@@ -1717,7 +1717,7 @@ func TestListenQueues(t *testing.T) {
 	})
 
 	t.Run("InternalQueueIsAlwaysListenedTo", func(t *testing.T) {
-		dbosCtx := setupDBOS(t, true, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 		// Register a queue
 		queue1 := NewWorkflowQueue(dbosCtx, "listen-internal-test-queue-1")
@@ -1762,7 +1762,7 @@ func TestListenQueues(t *testing.T) {
 	})
 
 	t.Run("ListenQueuesAfterLaunchPanics", func(t *testing.T) {
-		dbosCtx := setupDBOS(t, true, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 		queue1 := NewWorkflowQueue(dbosCtx, "listen-panic-test-queue-1")
 		queue2 := NewWorkflowQueue(dbosCtx, "listen-panic-test-queue-2")

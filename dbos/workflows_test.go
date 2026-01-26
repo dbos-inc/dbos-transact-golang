@@ -776,7 +776,7 @@ func stepThatBlocks(_ context.Context) (string, error) {
 }
 
 func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	t.Run("Go must run steps inside a workflow", func(t *testing.T) {
 		_, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
@@ -910,7 +910,7 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 }
 
 func TestSelect(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	selectWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 		return Select(dbosCtx, []<-chan StepOutcome[string]{})
@@ -2662,7 +2662,12 @@ func TestSendRecvPoll(t *testing.T) {
 		sendRecvSyncEvent.Clear()
 
 		// Start the receive workflow - it will wait for sendRecvSyncEvent before calling Recv
-		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, "test-topic")
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, struct {
+			Topic   string
+			Timeout time.Duration
+		}{
+			Topic: "test-topic",
+		})
 		require.NoError(t, err, "failed to start receive workflow")
 
 		// Send messages to the receive workflow
@@ -5690,7 +5695,7 @@ func asyncReadStream(ctx DBOSContext, workflowID string, key string) ([]string, 
 }
 
 func TestStreams(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register all stream workflows
 	RegisterWorkflow(dbosCtx, writeStreamWorkflow)

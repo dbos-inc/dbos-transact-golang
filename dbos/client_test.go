@@ -1176,7 +1176,7 @@ func asyncClientReadStream(c Client, workflowID string, key string) ([]string, b
 
 func TestClientReadStream(t *testing.T) {
 	// Setup server context
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication
 	queue := NewWorkflowQueue(serverCtx, "read-stream-queue")
@@ -1258,7 +1258,7 @@ func TestClientReadStream(t *testing.T) {
 // TestDebouncerClient tests the DebouncerClient functionality using a Client interface
 func TestDebouncerClient(t *testing.T) {
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Set internal queue polling interval to 10ms for faster tests
 	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
@@ -1439,7 +1439,7 @@ func TestDebouncerClient(t *testing.T) {
 
 func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	// Setup server context
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create test queue
 	testQueue := NewWorkflowQueue(serverCtx, "debouncer-client-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())
