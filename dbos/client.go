@@ -340,9 +340,8 @@ func (c *client) ClientReadStream(workflowID string, key string) ([]any, bool, e
 }
 
 // ClientReadStream reads values from a durable stream with type safety.
-// This method blocks until one of the following conditions is met:
-//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
-//   - The stream is closed (sentinel value is found)
+// This method blocks until the stream is closed or an error occurs.
+// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
 //
 // Returns the typed values, whether the stream is closed, and any error.
 //
@@ -392,10 +391,8 @@ func (c *client) ClientReadStreamAsync(workflowID string, key string) (<-chan St
 // Returns a channel that will receive StreamValue items as they're read.
 //
 // This method returns immediately with a channel. Values will be sent to the channel
-// as they're read from the stream. The channel will be closed when:
-//   - The stream is closed (sentinel value is found)
-//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
-//   - An error occurs
+// as they're read from the stream. The channel will be closed when the stream is closed or an error occurs.
+// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
 //
 // Example:
 //

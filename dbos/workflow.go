@@ -1999,7 +1999,7 @@ func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamVal
 		var currentOffset int
 		closed := false
 
-		// Blocking loop: continue reading until workflow is inactive or stream is closed
+		// Continue reading until workflow is inactive or stream is closed
 		for {
 			// Read stream entries from current offset
 			input := readStreamDBInput{
@@ -2099,9 +2099,8 @@ func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) (
 }
 
 // ReadStream reads values from a durable stream.
-// This method blocks until one of the following conditions is met:
-//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
-//   - The stream is closed (sentinel value is found)
+// This method blocks until the stream is closed or an error occurs.
+// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
 //
 // Returns the values, whether the stream is closed, and any error.
 //
@@ -2151,10 +2150,8 @@ func (c *dbosContext) ReadStreamAsync(_ DBOSContext, workflowID string, key stri
 // Returns a channel that will receive StreamValue items as they're read.
 //
 // This method returns immediately with a channel. Values will be sent to the channel
-// as they're read from the stream. The channel will be closed when:
-//   - The stream is closed (sentinel value is found)
-//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
-//   - An error occurs
+// as they're read from the stream. The channel will be closed when the stream is closed or an error occurs.
+// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
 //
 // Example:
 //
