@@ -921,7 +921,7 @@ type updateWorkflowOutcomeDBInput struct {
 func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error {
 	query := fmt.Sprintf(`UPDATE %s.workflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
-			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 in ($7, $8))`, pgx.Identifier{s.schema}.Sanitize())
+			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1::TEXT IN ($7, $8))`, pgx.Identifier{s.schema}.Sanitize())
 
 	var errorStr string
 	if input.err != nil {
