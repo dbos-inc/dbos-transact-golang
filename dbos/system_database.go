@@ -404,7 +404,7 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	defer conn.Release()
 	isCockroach := isCockroachDB(ctx, conn.Conn())
 	if isCockroach {
-		logger.Info("detected CockroachDB")
+		logger.Info("Detected CockroachDB")
 	}
 
 	// Run migrations
@@ -446,12 +446,12 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 
 func (s *sysDB) launch(ctx context.Context) {
 	// Start the appropriate notification loop based on database type
-	if !s.isCockroachDB {
-		// Start the LISTEN/NOTIFY-based notification listener loop (PostgreSQL only)
-		go s.notificationListenerLoop(ctx)
-	} else {
+	if s.isCockroachDB {
 		// Start the polling-based notification poller loop (CockroachDB)
 		go s.notificationPollerLoop(ctx)
+	} else {
+		// Otherwise start the LISTEN/NOTIFY-based notification listener loop
+		go s.notificationListenerLoop(ctx)
 	}
 	s.launched = true
 }
