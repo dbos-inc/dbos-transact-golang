@@ -185,7 +185,7 @@ const (
 	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
-func runMigrations(pool *pgxpool.Pool, schema string, isCockroach bool) error {
+func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCockroach bool) error {
 
 	// Process the migration SQL with fmt.Sprintf
 	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
@@ -222,7 +222,6 @@ func runMigrations(pool *pgxpool.Pool, schema string, isCockroach bool) error {
 	}
 
 	// Begin transaction for atomic migration execution
-	ctx := context.Background()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %v", err)
@@ -385,7 +384,9 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 
 	if customPool == nil {
 		// Create the database if it doesn't exist
-		if err := createDatabaseIfNotExists(ctx, pool, logger); err != nil {
+		if err := retry(ctx, func() error {
+			return createDatabaseIfNotExists(ctx, pool, logger)
+		}, withRetrierLogger(logger)); err != nil {
 			pool.Close()
 			return nil, fmt.Errorf("failed to create database: %v", err)
 		}
@@ -407,7 +408,9 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	}
 
 	// Run migrations
-	if err := runMigrations(pool, databaseSchema, isCockroach); err != nil {
+	if err := retry(ctx, func() error {
+		return runMigrations(ctx, pool, databaseSchema, isCockroach)
+	}, withRetrierLogger(logger)); err != nil {
 		if customPool == nil {
 			pool.Close()
 		}

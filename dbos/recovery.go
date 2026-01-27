@@ -15,7 +15,9 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 
 	for _, workflow := range pendingWorkflows {
 		if workflow.QueueName != "" {
-			cleared, err := ctx.systemDB.clearQueueAssignment(ctx, workflow.ID)
+			cleared, err := retryWithResult(ctx, func() (bool, error) {
+				return ctx.systemDB.clearQueueAssignment(ctx, workflow.ID)
+			}, withRetrierLogger(ctx.logger))
 			if err != nil {
 				ctx.logger.Error("Error clearing queue assignment for workflow", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
 				continue

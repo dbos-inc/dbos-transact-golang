@@ -533,7 +533,9 @@ func (c *conductor) handleRetentionRequest(data []byte, requestID string) error 
 			rowsThreshold:          rowsThreshold,
 		}
 
-		err := c.dbosCtx.systemDB.garbageCollectWorkflows(c.dbosCtx, input)
+		err := retry(c.dbosCtx, func() error {
+			return c.dbosCtx.systemDB.garbageCollectWorkflows(c.dbosCtx, input)
+		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("Failed to garbage collect workflows", "error", err)
 			errStr := fmt.Sprintf("failed to garbage collect workflows: %v", err)
@@ -547,7 +549,9 @@ func (c *conductor) handleRetentionRequest(data []byte, requestID string) error 
 	// Handle timeout enforcement if parameter is provided and garbage collection succeeded
 	if success && req.Body.TimeoutCutoffEpochMs != nil {
 		cutoffTime := time.UnixMilli(int64(*req.Body.TimeoutCutoffEpochMs))
-		err := c.dbosCtx.systemDB.cancelAllBefore(c.dbosCtx, cutoffTime)
+		err := retry(c.dbosCtx, func() error {
+			return c.dbosCtx.systemDB.cancelAllBefore(c.dbosCtx, cutoffTime)
+		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("Failed to timeout workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs, "error", err)
 			errStr := fmt.Sprintf("failed to timeout workflows: %v", err)
@@ -589,7 +593,9 @@ func (c *conductor) handleGetMetricsRequest(data []byte, requestID string) error
 
 	if req.MetricClass == "workflow_step_count" {
 		var err error
-		metricsData, err = c.dbosCtx.systemDB.getMetrics(c.dbosCtx, req.StartTime, req.EndTime)
+		metricsData, err = retryWithResult(c.dbosCtx, func() ([]metricData, error) {
+			return c.dbosCtx.systemDB.getMetrics(c.dbosCtx, req.StartTime, req.EndTime)
+		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("Failed to get metrics", "error", err)
 			errStr := fmt.Sprintf("Exception encountered when getting metrics: %v", err)
