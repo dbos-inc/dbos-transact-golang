@@ -337,7 +337,12 @@ func TestConfig(t *testing.T) {
 		t.Run("DBOSContextCreation", func(t *testing.T) {
 			// Use the actual password from config for integration test
 			actualPassword := parsedURL.ConnConfig.Password
-			keyValueConnStr := fmt.Sprintf("user='%s' password='%s' database=%s host=%s%s", user, actualPassword, database, host, portSSL)
+			var keyValueConnStr string
+			if actualPassword == "" {
+				keyValueConnStr = fmt.Sprintf("user='%s' database=%s host=%s%s", user, database, host, portSSL)
+			} else {
+				keyValueConnStr = fmt.Sprintf("user='%s' password='%s' database=%s host=%s%s", user, actualPassword, database, host, portSSL)
+			}
 
 			ctx, err := NewDBOSContext(context.Background(), Config{
 				DatabaseURL: keyValueConnStr,
@@ -367,8 +372,13 @@ func TestConfig(t *testing.T) {
 			poolConnStr := sysDB.pool.Config().ConnString()
 			maskedConnStr, err := maskPassword(poolConnStr)
 			require.NoError(t, err)
-			assert.Contains(t, maskedConnStr, "password=***")
-			assert.NotContains(t, maskedConnStr, fmt.Sprintf("password=%s", actualPassword))
+			if actualPassword == "" {
+				assert.NotContains(t, maskedConnStr, "password=")
+			} else {
+				assert.Contains(t, maskedConnStr, "password=***")
+				assert.NotContains(t, maskedConnStr, fmt.Sprintf("password=%s", actualPassword))
+
+			}
 		})
 	})
 
