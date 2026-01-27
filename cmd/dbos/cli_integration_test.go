@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -40,7 +41,6 @@ const (
 )
 
 // getDatabaseConfig extracts database connection parameters from standard PostgreSQL environment variables
-// Uses PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSSLMODE (see https://www.postgresql.org/docs/current/libpq-envars.html)
 // Always defaults to sslmode=disable for test setups
 func getDatabaseConfig(dbRole string) (user, password, host, port, dbName, sslmode string) {
 	// Read from standard PostgreSQL environment variables
@@ -77,7 +77,7 @@ func getDatabaseURL(dbRole string) string {
 
 	dsn := &url.URL{
 		Scheme:   "postgres",
-		Host:     host + ":" + port,
+		Host:     net.JoinHostPort(host, port),
 		Path:     "/" + dbName,
 		RawQuery: "sslmode=" + sslmode,
 	}
