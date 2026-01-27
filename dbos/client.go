@@ -32,6 +32,8 @@ type Client interface {
 	ResumeWorkflow(workflowID string) (WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
+	ClientReadStream(workflowID string, key string) ([]any, bool, error)
+	ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error)
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
 
@@ -61,6 +63,11 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	asDBOSCtx, ok := dbosCtx.(*dbosContext)
+	if ok {
+		asDBOSCtx.systemDB.launch(asDBOSCtx)
 	}
 
 	return &client{
@@ -322,6 +329,135 @@ func (c *client) GetWorkflowSteps(workflowID string) ([]StepInfo, error) {
 	return c.dbosCtx.GetWorkflowSteps(c.dbosCtx, workflowID)
 }
 
+// ReadStream reads values from a durable stream.
+// This method blocks until one of the following conditions is met:
+//   - The workflow becomes inactive (status is not PENDING or ENQUEUED)
+//   - The stream is closed (sentinel value is found)
+//
+// Returns the values, whether the stream is closed, and any error.
+func (c *client) ClientReadStream(workflowID string, key string) ([]any, bool, error) {
+	return c.dbosCtx.ReadStream(c.dbosCtx, workflowID, key)
+}
+
+// ClientReadStream reads values from a durable stream with type safety.
+// This method blocks until the stream is closed or an error occurs.
+// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
+//
+// Returns the typed values, whether the stream is closed, and any error.
+//
+// Example:
+//
+//	values, closed, err := dbos.ClientReadStream[string](client, "workflow-id", "my-stream")
+//	if err != nil {
+//	    return err
+//	}
+//	for _, value := range values {
+//	    log.Printf("Stream value: %s", value)
+//	}
+func ClientReadStream[R any](c Client, workflowID string, key string) ([]R, bool, error) {
+	if c == nil {
+		return nil, false, errors.New("client cannot be nil")
+	}
+	values, closed, err := c.ClientReadStream(workflowID, key)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Decode each value to type R
+	serializer := newJSONSerializer[R]()
+	typedValues := make([]R, len(values))
+	for i, val := range values {
+		encodedStr, ok := val.(string)
+		if !ok {
+			return nil, false, fmt.Errorf("stream value is not a string, got %T", val)
+		}
+		decodedValue, decodeErr := serializer.Decode(&encodedStr)
+		if decodeErr != nil {
+			return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
+		}
+		typedValues[i] = decodedValue
+	}
+
+	return typedValues, closed, nil
+}
+
+// ClientReadStreamAsync reads values from a durable stream asynchronously.
+// Returns a channel that will receive StreamValue items as they're read.
+func (c *client) ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error) {
+	return c.dbosCtx.ReadStreamAsync(c.dbosCtx, workflowID, key)
+}
+
+// ClientReadStreamAsync reads values from a durable stream asynchronously with type safety.
+// Returns a channel that will receive StreamValue items as they're read.
+//
+// This method returns immediately with a channel. Values will be sent to the channel
+// as they're read from the stream. The channel will be closed when the stream is closed or an error occurs.
+// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
+//
+// Example:
+//
+//	ch, err := dbos.ClientReadStreamAsync[string](client, "workflow-id", "my-stream")
+//	if err != nil {
+//	    return err
+//	}
+//	for streamValue := range ch {
+//	    if streamValue.Err != nil {
+//	        log.Printf("Error: %v", streamValue.Err)
+//	        break
+//	    }
+//	    if streamValue.Closed {
+//	        log.Println("Stream closed")
+//	        break
+//	    }
+//	    log.Printf("Received value: %s", streamValue.Value)
+//	}
+func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-chan StreamValue[R], error) {
+	if c == nil {
+		return nil, errors.New("client cannot be nil")
+	}
+
+	anyCh, err := c.ClientReadStreamAsync(workflowID, key)
+	if err != nil {
+		return nil, err
+	}
+
+	typedCh := make(chan StreamValue[R], 1)
+
+	go func() {
+		defer close(typedCh)
+
+		serializer := newJSONSerializer[R]()
+
+		for streamValue := range anyCh {
+			if streamValue.Err != nil {
+				typedCh <- StreamValue[R]{Err: streamValue.Err}
+				return
+			}
+
+			if streamValue.Closed {
+				typedCh <- StreamValue[R]{Closed: true}
+				return
+			}
+
+			encodedStr, ok := streamValue.Value.(string)
+			if !ok {
+				typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not a string, got %T", streamValue.Value)}
+				return
+			}
+
+			decodedValue, decodeErr := serializer.Decode(&encodedStr)
+			if decodeErr != nil {
+				typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
+				return
+			}
+
+			typedCh <- StreamValue[R]{Value: decodedValue}
+		}
+	}()
+
+	return typedCh, nil
+}
+
 // Shutdown gracefully shuts down the client and closes the system database connection.
 func (c *client) Shutdown(timeout time.Duration) {
 	// Get the concrete dbosContext to access internal fields
@@ -332,6 +468,9 @@ func (c *client) Shutdown(timeout time.Duration) {
 
 	// Close the system database
 	if dbosCtx.systemDB != nil {
+		// Cancel the context to signal all resources to stop
+		dbosCtx.ctxCancelFunc(errors.New("client shutdown initiated"))
+
 		dbosCtx.logger.Debug("Shutting down system database")
 		dbosCtx.systemDB.shutdown(dbosCtx, timeout)
 	}
