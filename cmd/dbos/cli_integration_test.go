@@ -39,30 +39,61 @@ const (
 	dbosInternalQueueName = "_dbos_internal_queue"
 )
 
-// getDatabaseURL returns a default database URL if none is configured, following dbos/utils_test.go pattern
-func getDatabaseURL(dbRole string) string {
-	password := os.Getenv("PGPASSWORD")
+// getDatabaseConfig extracts database connection parameters from standard PostgreSQL environment variables
+// Uses PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSSLMODE (see https://www.postgresql.org/docs/current/libpq-envars.html)
+// Always defaults to sslmode=disable for test setups
+func getDatabaseConfig(dbRole string) (user, password, host, port, dbName, sslmode string) {
+	// Read from standard PostgreSQL environment variables
+	host = os.Getenv("PGHOST")
+	port = os.Getenv("PGPORT")
+	dbName = os.Getenv("PGDATABASE")
+	user = os.Getenv("PGUSER")
+	password = os.Getenv("PGPASSWORD")
+
+	// Apply defaults for any unset values
+	if host == "" {
+		host = "localhost"
+	}
+	if port == "" {
+		port = "5432"
+	}
+	if dbName == "" {
+		dbName = "dbos"
+	}
+	if user == "" {
+		user = dbRole
+	}
 	if password == "" {
 		password = "dbos"
 	}
+	sslmode = "disable"
+
+	return user, password, host, port, dbName, sslmode
+}
+
+// getDatabaseURL returns a default database URL if none is configured, following dbos/utils_test.go pattern
+func getDatabaseURL(dbRole string) string {
+	user, password, host, port, dbName, sslmode := getDatabaseConfig(dbRole)
+
 	dsn := &url.URL{
 		Scheme:   "postgres",
-		Host:     "localhost:5432",
-		Path:     "/dbos",
-		RawQuery: "sslmode=disable",
+		Host:     host + ":" + port,
+		Path:     "/" + dbName,
+		RawQuery: "sslmode=" + sslmode,
 	}
-	dsn.User = url.UserPassword(dbRole, password)
+	dsn.User = url.UserPassword(user, password)
 	return dsn.String()
 }
 
 // getDatabaseURLKeyValue returns the same connection string in libpq key-value format
 // This is useful for testing that commands handle both URL and key-value formats
 func getDatabaseURLKeyValue(dbRole string) string {
-	password := os.Getenv("PGPASSWORD")
-	if password == "" {
-		password = "dbos"
+	user, password, host, port, dbName, sslmode := getDatabaseConfig(dbRole)
+
+	if password != "" {
+		return fmt.Sprintf("user='%s' password='%s' database=%s host=%s port=%s sslmode=%s", user, password, dbName, host, port, sslmode)
 	}
-	return fmt.Sprintf("user='%s' password='%s' database=dbos host=localhost port=5432 sslmode=disable", dbRole, password)
+	return fmt.Sprintf("user='%s' database=%s host=%s port=%s sslmode=%s", user, dbName, host, port, sslmode)
 }
 
 // TestCLIWorkflow provides comprehensive integration testing of the DBOS CLI
@@ -108,6 +139,12 @@ func TestCLIWorkflow(t *testing.T) {
 
 	for _, config := range testConfigs {
 		t.Run(config.name, func(t *testing.T) {
+			// If we are using CockroachDB, ignore the funky user name (not supported) and use postgres instead
+			isCockroachDB := os.Getenv("ISCRDB") == "true"
+			if isCockroachDB && config.dbRole == "User Name-123@acme.com#$%&!" {
+				config.dbRole = "postgres"
+			}
+
 			// Create temporary directory for test
 			tempDir := t.TempDir()
 			originalDir, err := os.Getwd()

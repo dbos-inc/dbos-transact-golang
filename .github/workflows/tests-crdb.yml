@@ -67,21 +67,25 @@ jobs:
       run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
       working-directory: ./integration
       env:
-        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/defaultdb?sslmode=disable
+        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/dbos?sslmode=disable
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Run CLI tests
       run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
       working-directory: ./cmd/dbos
       env:
-        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/defaultdb?sslmode=disable
+        ISCRDB: true
+        PGHOST: localhost
+        PGPORT: "26257"
+        PGDATABASE: dbos
+        PGUSER: root
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Run tests
       run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
       working-directory: ./dbos
       env:
-        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/defaultdb?sslmode=disable
+        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/dbos?sslmode=disable
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Cleanup CockroachDB container
