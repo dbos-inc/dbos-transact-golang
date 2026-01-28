@@ -2765,6 +2765,7 @@ func durableGetEventSleepWorkflow(ctx DBOSContext, targetWorkflowID string) (str
 
 	return val1 + val2, nil
 }
+
 func TestSetGetEvent(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
