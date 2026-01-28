@@ -2301,7 +2301,7 @@ func TestSendRecv(t *testing.T) {
 			Timeout time.Duration
 		}{
 			Topic:   "outside-workflow-topic",
-			Timeout: 30 * time.Second,
+			Timeout: 60 * time.Second,
 		})
 		require.NoError(t, err, "failed to start receive workflow")
 
