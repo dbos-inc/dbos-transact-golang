@@ -925,7 +925,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
+		childWorkflowID, err := retryWithResult(uncancellableCtx, func() (*string, error) {
+			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
+		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to check child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("checking child workflow: %w", err))
@@ -1033,7 +1035,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				stepID:           parentWorkflowState.stepID,
 				tx:               tx,
 			}
-			err = c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
+			err = retry(uncancellableCtx, func() error {
+				return c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
+			}, withRetrierLogger(c.logger))
 			if err != nil {
 				c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
 				return newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))

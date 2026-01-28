@@ -1,0 +1,93 @@
+name: Run Go Tests (CockroachDB)
+
+on:
+    push:
+      branches:
+        - main
+    pull_request:
+      branches:
+      types:
+        - ready_for_review
+        - opened
+        - reopened
+        - synchronize
+    workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.25.5'
+
+    - name: Start CockroachDB container
+      run: |
+        docker run --rm -d \
+          --name cockroach \
+          -p 26257:26257 \
+          cockroachdb/cockroach:latest \
+          start-single-node --insecure
+
+    - name: Wait for CockroachDB to be ready
+      run: |
+        timeout=60
+        elapsed=0
+        while ! docker exec cockroach cockroach sql --insecure --execute="SELECT 1" > /dev/null 2>&1; do
+          if [ $elapsed -ge $timeout ]; then
+            echo "CockroachDB failed to start within $timeout seconds"
+            exit 1
+          fi
+          echo "Waiting for CockroachDB to be ready..."
+          sleep 2
+          elapsed=$((elapsed + 2))
+        done
+        echo "CockroachDB is ready!"
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Install gotestsum
+      run: go install gotest.tools/gotestsum@latest
+
+    - name: Install mockery
+      run: go install github.com/vektra/mockery/v3@latest
+
+    - name: Generate mocks
+      run: mockery
+      working-directory: ./integration
+
+    - name: Run integration tests
+      run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
+      working-directory: ./integration
+      env:
+        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/dbos?sslmode=disable
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Run CLI tests
+      run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
+      working-directory: ./cmd/dbos
+      env:
+        ISCRDB: true
+        PGHOST: localhost
+        PGPORT: "26257"
+        PGDATABASE: dbos
+        PGUSER: root
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Run tests
+      run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
+      working-directory: ./dbos
+      env:
+        DBOS_SYSTEM_DATABASE_URL: postgresql://root@localhost:26257/dbos?sslmode=disable
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Cleanup CockroachDB container
+      if: always()
+      run: docker stop cockroach || true

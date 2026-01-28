@@ -17,7 +17,7 @@ import (
 
 func TestClientEnqueue(t *testing.T) {
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication between client and server
 	queue := NewWorkflowQueue(serverCtx, "client-enqueue-queue")
@@ -349,7 +349,7 @@ func TestCancelResume(t *testing.T) {
 	var stepsCompleted int
 
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication between client and server
 	queue := NewWorkflowQueue(serverCtx, "cancel-resume-queue")
@@ -592,7 +592,7 @@ func TestForkWorkflow(t *testing.T) {
 	)
 
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication between client and server
 	queue := NewWorkflowQueue(serverCtx, "fork-workflow-queue")
@@ -1088,7 +1088,7 @@ func TestListWorkflows(t *testing.T) {
 
 func TestGetWorkflowSteps(t *testing.T) {
 	// Setup server context
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication
 	queue := NewWorkflowQueue(serverCtx, "get-workflow-steps-queue")
@@ -1176,7 +1176,7 @@ func asyncClientReadStream(c Client, workflowID string, key string) ([]string, b
 
 func TestClientReadStream(t *testing.T) {
 	// Setup server context
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication
 	queue := NewWorkflowQueue(serverCtx, "read-stream-queue")
@@ -1258,7 +1258,7 @@ func TestClientReadStream(t *testing.T) {
 // TestDebouncerClient tests the DebouncerClient functionality using a Client interface
 func TestDebouncerClient(t *testing.T) {
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Set internal queue polling interval to 10ms for faster tests
 	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
@@ -1308,24 +1308,39 @@ func TestDebouncerClient(t *testing.T) {
 	})
 
 	t.Run("TestMultipleCallsPushBackAndLatestInput", func(t *testing.T) {
-		// Call Debounce 5 times with delay=200ms
+
+		pool := serverCtx.(*dbosContext).systemDB.(*sysDB).pool
+		conn, err := pool.Acquire(serverCtx)
+		require.NoError(t, err)
+		defer conn.Release()
+		isCockroachDB := isCockroachDB(context.Background(), conn.Conn())
+
+		// CockroachDB has longer notification latency due to polling
+		var delay time.Duration
+		if isCockroachDB {
+			delay = 2000 * time.Millisecond
+		} else {
+			delay = 200 * time.Millisecond
+		}
+
+		// Call Debounce 5 times
 		key := "test-key-2"
 		startTime := time.Now()
 
 		// First call
-		handle1, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-1")
+		handle1, err := debouncer10sTimeout.Debounce(key, delay, "input-1")
 		require.NoError(t, err, "failed to call Debounce (first call)")
 
-		handle2, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-2")
+		handle2, err := debouncer10sTimeout.Debounce(key, delay, "input-2")
 		require.NoError(t, err, "failed to call Debounce (second call)")
 
-		handle3, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-3")
+		handle3, err := debouncer10sTimeout.Debounce(key, delay, "input-3")
 		require.NoError(t, err, "failed to call Debounce (third call)")
 
-		handle4, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-4")
+		handle4, err := debouncer10sTimeout.Debounce(key, delay, "input-4")
 		require.NoError(t, err, "failed to call Debounce (fourth call)")
 
-		handle5, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-5")
+		handle5, err := debouncer10sTimeout.Debounce(key, delay, "input-5")
 		require.NoError(t, err, "failed to call Debounce (fifth call)")
 
 		// All handles should refer to the same workflow ID
@@ -1338,9 +1353,9 @@ func TestDebouncerClient(t *testing.T) {
 		require.NoError(t, err, "failed to get result")
 		assert.Equal(t, "input-5", result, "result should match latest input")
 
-		// Verify execution happened at least 200ms after first call (200ms debounce in rapid succession)
+		// Verify execution happened at least delay after first call
 		elapsed := time.Since(startTime)
-		assert.GreaterOrEqual(t, elapsed, 200*time.Millisecond, "execution should take at least 200ms")
+		assert.GreaterOrEqual(t, elapsed, delay, "execution should take at least delay")
 		assert.LessOrEqual(t, elapsed, 10*time.Second, "execution should take less than 10s")
 	})
 
@@ -1439,7 +1454,7 @@ func TestDebouncerClient(t *testing.T) {
 
 func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	// Setup server context
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create test queue
 	testQueue := NewWorkflowQueue(serverCtx, "debouncer-client-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())

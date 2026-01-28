@@ -101,7 +101,7 @@ func Identity[T any](dbosCtx DBOSContext, in T) (T, error) {
 }
 
 func TestWorkflowsRegistration(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Setup workflows with executor
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -314,7 +314,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DoubleRegistrationWithoutName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
 
 		// First registration should work
 		RegisterWorkflow(freshCtx, simpleWorkflow)
@@ -332,7 +332,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DoubleRegistrationWithCustomName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
 
 		// First registration with custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("custom-workflow"))
@@ -350,7 +350,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DifferentWorkflowsSameCustomName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
 
 		// First registration with custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("same-name"))
@@ -368,7 +368,7 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("RegisterAfterLaunchPanics", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, false, true) // Don't reset DB but do check for leaks
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
 
 		// Launch DBOS context
 		err := Launch(freshCtx)
@@ -464,7 +464,7 @@ func genericStepWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 }
 
 func TestSteps(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create workflows with executor
 	RegisterWorkflow(dbosCtx, stepWithinAStepWorkflow)
@@ -776,7 +776,7 @@ func stepThatBlocks(_ context.Context) (string, error) {
 }
 
 func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	t.Run("Go must run steps inside a workflow", func(t *testing.T) {
 		_, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
@@ -910,7 +910,7 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 }
 
 func TestSelect(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	selectWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 		return Select(dbosCtx, []<-chan StepOutcome[string]{})
@@ -1114,7 +1114,7 @@ func TestSelect(t *testing.T) {
 }
 
 func TestChildWorkflow(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	type Inheritance struct {
 		ParentID string
@@ -1504,7 +1504,7 @@ func idempotencyWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 }
 
 func TestWorkflowIdempotency(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, idempotencyWorkflow)
 
 	t.Run("WorkflowExecutedOnlyOnce", func(t *testing.T) {
@@ -1541,7 +1541,7 @@ func TestWorkflowIdempotency(t *testing.T) {
 }
 
 func TestWorkflowRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	var (
 		recoveryCounters   []int64
@@ -1738,7 +1738,7 @@ func infiniteDeadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error)
 	return 0, nil
 }
 func TestWorkflowDeadLetterQueue(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
 	RegisterWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
 
@@ -1868,7 +1868,7 @@ var (
 )
 
 func TestScheduledWorkflows(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	RegisterWorkflow(dbosCtx, func(ctx DBOSContext, scheduledTime time.Time) (string, error) {
 		startTime := time.Now()
@@ -2086,7 +2086,7 @@ func recvContextCancelWorkflow(ctx DBOSContext, topic string) (string, error) {
 }
 
 func TestSendRecv(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register all send/recv workflows with executor
 	RegisterWorkflow(dbosCtx, sendWorkflow)
@@ -2789,7 +2789,7 @@ func workflowWithMultipleSteps(dbosCtx DBOSContext, input string) (string, error
 }
 
 func TestWorkflowExecutionMismatch(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register workflows for testing
 	RegisterWorkflow(dbosCtx, conflictWorkflowA)
@@ -2855,7 +2855,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 }
 
 func TestSetGetEvent(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register all set/get event workflows with executor
 	RegisterWorkflow(dbosCtx, setEventWorkflow)
@@ -3406,7 +3406,7 @@ func sleepRecoveryWorkflow(dbosCtx DBOSContext, duration time.Duration) (time.Du
 }
 
 func TestSleep(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, sleepRecoveryWorkflow)
 
 	t.Run("SleepDurableRecovery", func(t *testing.T) {
@@ -3470,7 +3470,7 @@ func TestSleep(t *testing.T) {
 }
 
 func TestWorkflowTimeout(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	waitForCancelWorkflow := func(ctx DBOSContext, _ string) (string, error) {
 		// This workflow will wait indefinitely until it is cancelled
@@ -3866,7 +3866,7 @@ func concurrentSimpleWorkflow(dbosCtx DBOSContext, input int) (int, error) {
 }
 
 func TestConcurrentWorkflows(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, concurrentSimpleWorkflow)
 	RegisterWorkflow(dbosCtx, notificationWaiterWorkflow)
 	RegisterWorkflow(dbosCtx, notificationSetterWorkflow)
@@ -4086,7 +4086,7 @@ func TestConcurrentWorkflows(t *testing.T) {
 }
 
 func TestWorkflowAtVersion(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
 
@@ -4106,7 +4106,7 @@ func TestWorkflowAtVersion(t *testing.T) {
 }
 
 func TestWorkflowCancel(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	blockingEvent := NewEvent()
 
@@ -4215,7 +4215,7 @@ func cancelAllBeforeBlockingWorkflow(ctx DBOSContext, input string) (string, err
 }
 
 func TestCancelAllBefore(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	RegisterWorkflow(dbosCtx, cancelAllBeforeBlockingWorkflow)
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -4339,7 +4339,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectWithOffset", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 		gcTestEvent := NewEvent()
 
 		// Ensure the event is set at the end to unblock any remaining workflows
@@ -4428,7 +4428,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectWithCutoffTime", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 		gcTestEvent := NewEvent()
 
 		// Ensure the event is set at the end to unblock any remaining workflows
@@ -4537,7 +4537,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectEmptyDatabase", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
 		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
@@ -4574,7 +4574,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectOnlyCompletedWorkflows", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 		gcTestEvent := NewEvent()
 
 		// Ensure the event is set at the end to unblock any remaining workflows
@@ -4679,7 +4679,7 @@ func TestGarbageCollect(t *testing.T) {
 	t.Run("ThresholdAndCutoffTimestampInteraction", func(t *testing.T) {
 		// Reset database for clean test environment
 		resetTestDatabase(t, databaseURL)
-		dbosCtx := setupDBOS(t, false, true)
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 
 		// Register the test workflow
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
@@ -4756,7 +4756,7 @@ func TestGarbageCollect(t *testing.T) {
 // TestSpecialSteps tests that special workflow functions (ListWorkflows, CancelWorkflow,
 // ResumeWorkflow, ForkWorkflow, GetWorkflowSteps) work correctly as durable steps
 func TestSpecialSteps(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	specialStepsEvent := NewEvent()
 	blockingEvent := NewEvent()
@@ -4928,7 +4928,7 @@ func TestSpecialSteps(t *testing.T) {
 }
 
 func TestRegisteredWorkflowListing(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register some regular workflows
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
@@ -4994,7 +4994,7 @@ func TestRegisteredWorkflowListing(t *testing.T) {
 }
 
 func TestWorkflowIdentity(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
 	handle, err := RunWorkflow(
 		dbosCtx,
@@ -5024,7 +5024,7 @@ func TestWorkflowIdentity(t *testing.T) {
 }
 
 func TestWorkflowHandles(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, slowWorkflow)
 
 	t.Run("WorkflowHandleTimeout", func(t *testing.T) {
@@ -5062,7 +5062,7 @@ func TestWorkflowHandles(t *testing.T) {
 }
 
 func TestWorkflowHandleContextCancel(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, getEventWorkflow)
 
 	t.Run("WorkflowHandleContextCancel", func(t *testing.T) {
@@ -5467,7 +5467,7 @@ func asyncReadStream(ctx DBOSContext, workflowID string, key string) ([]string, 
 }
 
 func TestStreams(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register all stream workflows
 	RegisterWorkflow(dbosCtx, writeStreamWorkflow)

@@ -429,6 +429,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	// Create the system database
 	systemDB, err := newSystemDatabase(initExecutor, newSystemDatabaseInputs)
 	if err != nil {
+		initExecutor.logger.Error("failed to create system database", "error", err)
 		return nil, newInitializationError(err.Error())
 	}
 	initExecutor.systemDB = systemDB

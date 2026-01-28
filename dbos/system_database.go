@@ -93,6 +93,7 @@ type sysDB struct {
 	logger                        *slog.Logger
 	schema                        string
 	launched                      bool
+	isCockroachDB                 bool
 }
 
 /*******************************/
@@ -139,6 +140,9 @@ func createDatabaseIfNotExists(ctx context.Context, pool *pgxpool.Pool, logger *
 //go:embed migrations/1_initial_dbos_schema.sql
 var migration1SQL string
 
+//go:embed migrations/1_initial_dbos_schema_listen_notify.sql
+var migration1ListenNotifySQL string
+
 //go:embed migrations/2_add_queue_partition_key.sql
 var migration2SQL string
 
@@ -181,15 +185,21 @@ const (
 	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
-func runMigrations(pool *pgxpool.Pool, schema string) error {
+func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCockroach bool) error {
+
 	// Process the migration SQL with fmt.Sprintf
 	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
 	migration1SQLProcessed := fmt.Sprintf(migration1SQL,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
-		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
-		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
-		sanitizedSchema)
+		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+
+	// If not CockroachDB, merge the listen/notify triggers with the main migration
+	if !isCockroach {
+		migration1ListenNotifySQLProcessed := fmt.Sprintf(migration1ListenNotifySQL,
+			sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+		migration1SQLProcessed = migration1SQLProcessed + "\n" + migration1ListenNotifySQLProcessed
+	}
 
 	migration2SQLProcessed := fmt.Sprintf(migration2SQL, sanitizedSchema)
 
@@ -212,7 +222,6 @@ func runMigrations(pool *pgxpool.Pool, schema string) error {
 	}
 
 	// Begin transaction for atomic migration execution
-	ctx := context.Background()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %v", err)
@@ -327,11 +336,11 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		if err != nil {
 			return nil, fmt.Errorf("failed to validate custom pool: %v", err)
 		}
+		defer poolConn.Release()
 		err = poolConn.Ping(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to validate custom pool: %v", err)
 		}
-		poolConn.Release()
 		pool = customPool
 	} else {
 		// Parse the connection string to get a config
@@ -375,14 +384,33 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 
 	if customPool == nil {
 		// Create the database if it doesn't exist
-		if err := createDatabaseIfNotExists(ctx, pool, logger); err != nil {
+		if err := retry(ctx, func() error {
+			return createDatabaseIfNotExists(ctx, pool, logger)
+		}, withRetrierLogger(logger)); err != nil {
 			pool.Close()
 			return nil, fmt.Errorf("failed to create database: %v", err)
 		}
 	}
 
+	// Detect if we're running CockroachDB
+	// This must happen after we ensured the database exist
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		if customPool == nil {
+			pool.Close()
+		}
+		return nil, fmt.Errorf("failed to acquire connection to detect database type: %v", err)
+	}
+	defer conn.Release()
+	isCockroach := isCockroachDB(ctx, conn.Conn())
+	if isCockroach {
+		logger.Info("Detected CockroachDB")
+	}
+
 	// Run migrations
-	if err := runMigrations(pool, databaseSchema); err != nil {
+	if err := retry(ctx, func() error {
+		return runMigrations(ctx, pool, databaseSchema, isCockroach)
+	}, withRetrierLogger(logger)); err != nil {
 		if customPool == nil {
 			pool.Close()
 		}
@@ -412,12 +440,19 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		notificationLoopDone:          make(chan struct{}),
 		logger:                        logger.With("service", "system_database"),
 		schema:                        databaseSchema,
+		isCockroachDB:                 isCockroach,
 	}, nil
 }
 
 func (s *sysDB) launch(ctx context.Context) {
-	// Start the notification listener loop
-	go s.notificationListenerLoop(ctx)
+	// Start the appropriate notification loop based on database type
+	if s.isCockroachDB {
+		// Start the polling-based notification poller loop (CockroachDB)
+		go s.notificationPollerLoop(ctx)
+	} else {
+		// Otherwise start the LISTEN/NOTIFY-based notification listener loop
+		go s.notificationListenerLoop(ctx)
+	}
 	s.launched = true
 }
 
@@ -904,7 +939,7 @@ type updateWorkflowOutcomeDBInput struct {
 func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error {
 	query := fmt.Sprintf(`UPDATE %s.workflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
-			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1 in ($7, $8))`, pgx.Identifier{s.schema}.Sanitize())
+			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1::TEXT IN ($7, $8))`, pgx.Identifier{s.schema}.Sanitize())
 
 	var errorStr string
 	if input.err != nil {
@@ -1909,6 +1944,109 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 	}
 }
 
+func (s *sysDB) notificationPollerLoop(ctx context.Context) {
+	defer func() {
+		s.logger.Debug("Notification poller loop exiting")
+		s.notificationLoopDone <- struct{}{}
+	}()
+
+	s.logger.Debug("DBOS: Starting notification poller loop")
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Debug("Notification poller exiting (context canceled)", "cause", context.Cause(ctx))
+			return
+		case <-ticker.C:
+			s.pollNotifications(ctx)
+			s.pollEvents(ctx)
+		}
+	}
+}
+
+func (s *sysDB) pollNotifications(ctx context.Context) {
+	// Iterate through all registered notification payloads
+	s.workflowNotificationsMap.Range(func(key, value any) bool {
+		payload, ok := key.(string)
+		if !ok {
+			return true // Continue to next item
+		}
+
+		// Parse payload: format is "destinationID::topic"
+		parts := strings.SplitN(payload, "::", 2)
+		if len(parts) != 2 {
+			s.logger.Warn("Invalid notification payload format", "payload", payload)
+			return true // Continue to next item
+		}
+
+		destinationID := parts[0]
+		topic := parts[1]
+
+		// Query database to check if notification exists
+		query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.notifications WHERE destination_uuid = $1 AND topic = $2)`, pgx.Identifier{s.schema}.Sanitize())
+		var exists bool
+		err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
+		if err != nil {
+			s.logger.Warn("Failed to poll notification", "payload", payload, "error", err)
+			return true // Continue to next item
+		}
+
+		// If notification exists, signal the condition variable
+		if exists {
+			if cond, ok := value.(*sync.Cond); ok {
+				cond.L.Lock()
+				cond.Broadcast()
+				cond.L.Unlock()
+			}
+		}
+
+		return true // Continue to next item
+	})
+}
+
+func (s *sysDB) pollEvents(ctx context.Context) {
+	// Iterate through all registered event payloads
+	s.workflowEventsMap.Range(func(key, value any) bool {
+		payload, ok := key.(string)
+		if !ok {
+			return true // Continue to next item
+		}
+
+		// Parse payload: format is "targetWorkflowID::key"
+		parts := strings.SplitN(payload, "::", 2)
+		if len(parts) != 2 {
+			s.logger.Warn("Invalid event payload format", "payload", payload)
+			return true // Continue to next item
+		}
+
+		targetWorkflowID := parts[0]
+		eventKey := parts[1]
+
+		// Query database to check if event exists
+		query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.workflow_events WHERE workflow_uuid = $1 AND key = $2)`, pgx.Identifier{s.schema}.Sanitize())
+		var exists bool
+		err := s.pool.QueryRow(ctx, query, targetWorkflowID, eventKey).Scan(&exists)
+		if err != nil {
+			s.logger.Warn("Failed to poll event", "payload", payload, "error", err)
+			return true // Continue to next item
+		}
+
+		// If event exists, signal the condition variable
+		if exists {
+			if cond, ok := value.(*sync.Cond); ok {
+				cond.L.Lock()
+				cond.Broadcast()
+				cond.L.Unlock()
+			}
+		}
+
+		return true // Continue to next item
+	})
+}
+
 const _DBOS_NULL_TOPIC = "__null__topic__"
 
 type WorkflowSendInput struct {
@@ -2787,7 +2925,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			    started_at_epoch_ms = $4,
 			    workflow_deadline_epoch_ms = CASE
 			        WHEN workflow_timeout_ms IS NOT NULL AND workflow_deadline_epoch_ms IS NULL
-			        THEN EXTRACT(epoch FROM NOW()) * 1000 + workflow_timeout_ms
+			        THEN (EXTRACT(epoch FROM NOW()) * 1000)::BIGINT + workflow_timeout_ms
 			        ELSE workflow_deadline_epoch_ms
 			    END
 			WHERE workflow_uuid = $5
@@ -2979,6 +3117,47 @@ func (s *sysDB) getMetricStepCount(ctx context.Context, startEpochMs, endEpochMs
 /******* UTILS ********/
 /*******************************/
 
+func isCockroachDB(ctx context.Context, conn *pgx.Conn) bool {
+	var dummy int
+	err := conn.QueryRow(ctx, "SELECT 1 FROM crdb_internal.cluster_settings LIMIT 1").Scan(&dummy)
+	return err == nil
+}
+
+// dropDatabaseIfExists drops a database in a way that works with both PostgreSQL and CockroachDB.
+// For CockroachDB, it terminates active connections first, then drops the database.
+// For PostgreSQL, it uses the WITH (FORCE) syntax.
+func dropDatabaseIfExists(ctx context.Context, conn *pgx.Conn, dbName string) error {
+	crdb := isCockroachDB(ctx, conn)
+
+	sanitizedDBName := pgx.Identifier{dbName}.Sanitize()
+
+	var err error
+	if crdb {
+		// In CockroachDB, we can't force drop, so we terminate connections manually
+		// Try to terminate connections to the target database
+		terminateQuery := `
+			SELECT pg_terminate_backend(pid)
+			FROM pg_stat_activity
+			WHERE datname = $1 AND pid != pg_backend_pid()`
+		_, _ = conn.Exec(ctx, terminateQuery, dbName) // Ignore errors, proceed anyway
+
+		dropSQL := fmt.Sprintf("DROP DATABASE IF EXISTS %s", sanitizedDBName)
+		_, err = conn.Exec(ctx, dropSQL)
+		if err != nil {
+			return fmt.Errorf("failed to drop database %s: %w", dbName, err)
+		}
+	} else {
+		// For PostgreSQL, use WITH (FORCE) to drop even with active connections
+		dropSQL := fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", sanitizedDBName)
+		_, err = conn.Exec(ctx, dropSQL)
+		if err != nil {
+			return fmt.Errorf("failed to drop database %s: %w", dbName, err)
+		}
+	}
+
+	return nil
+}
+
 func (s *sysDB) resetSystemDB(ctx context.Context) error {
 	// Get the current database configuration from the pool
 	config := s.pool.Config()
@@ -3006,11 +3185,10 @@ func (s *sysDB) resetSystemDB(ctx context.Context) error {
 	}
 	defer conn.Close(ctx)
 
-	// Drop the database
-	dropSQL := fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", pgx.Identifier{dbName}.Sanitize())
-	_, err = conn.Exec(ctx, dropSQL)
+	// Drop the database using the helper function
+	err = dropDatabaseIfExists(ctx, conn, dbName)
 	if err != nil {
-		return fmt.Errorf("failed to drop database %s: %w", dbName, err)
+		return err
 	}
 
 	return nil

@@ -1,6 +1,3 @@
--- Enable uuid extension for generating UUIDs
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
 CREATE TABLE %s.workflow_status (
     workflow_uuid TEXT PRIMARY KEY,
     status TEXT,
@@ -12,8 +9,8 @@ CREATE TABLE %s.workflow_status (
     output TEXT,
     error TEXT,
     executor_id TEXT,
-    created_at BIGINT NOT NULL DEFAULT (EXTRACT(epoch FROM now()) * 1000::numeric)::bigint,
-    updated_at BIGINT NOT NULL DEFAULT (EXTRACT(epoch FROM now()) * 1000::numeric)::bigint,
+    created_at BIGINT NOT NULL DEFAULT (EXTRACT(epoch FROM now())::numeric * 1000)::bigint,
+    updated_at BIGINT NOT NULL DEFAULT (EXTRACT(epoch FROM now())::numeric * 1000)::bigint,
     application_version TEXT,
     application_id TEXT,
     class_name VARCHAR(255) DEFAULT NULL,
@@ -52,27 +49,12 @@ CREATE TABLE %s.notifications (
     destination_uuid TEXT NOT NULL,
     topic TEXT,
     message TEXT NOT NULL,
-    created_at_epoch_ms BIGINT NOT NULL DEFAULT (EXTRACT(epoch FROM now()) * 1000::numeric)::bigint,
+    created_at_epoch_ms BIGINT NOT NULL DEFAULT (EXTRACT(epoch FROM now())::numeric * 1000)::bigint,
     message_uuid TEXT NOT NULL DEFAULT gen_random_uuid(), -- Built-in function
     FOREIGN KEY (destination_uuid) REFERENCES %s.workflow_status(workflow_uuid) 
         ON UPDATE CASCADE ON DELETE CASCADE
 );
 CREATE INDEX idx_workflow_topic ON %s.notifications (destination_uuid, topic);
-
--- Create notification function
-CREATE OR REPLACE FUNCTION %s.notifications_function() RETURNS TRIGGER AS $$
-DECLARE
-    payload text := NEW.destination_uuid || '::' || NEW.topic;
-BEGIN
-    PERFORM pg_notify('dbos_notifications_channel', payload);
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Create notification trigger
-CREATE TRIGGER dbos_notifications_trigger
-AFTER INSERT ON %s.notifications
-FOR EACH ROW EXECUTE FUNCTION %s.notifications_function();
 
 CREATE TABLE %s.workflow_events (
     workflow_uuid TEXT NOT NULL,
@@ -82,21 +64,6 @@ CREATE TABLE %s.workflow_events (
     FOREIGN KEY (workflow_uuid) REFERENCES %s.workflow_status(workflow_uuid) 
         ON UPDATE CASCADE ON DELETE CASCADE
 );
-
--- Create events function
-CREATE OR REPLACE FUNCTION %s.workflow_events_function() RETURNS TRIGGER AS $$
-DECLARE
-    payload text := NEW.workflow_uuid || '::' || NEW.key;
-BEGIN
-    PERFORM pg_notify('dbos_workflow_events_channel', payload);
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Create events trigger
-CREATE TRIGGER dbos_workflow_events_trigger
-AFTER INSERT ON %s.workflow_events
-FOR EACH ROW EXECUTE FUNCTION %s.workflow_events_function();
 
 CREATE TABLE %s.streams (
     workflow_uuid TEXT NOT NULL,
