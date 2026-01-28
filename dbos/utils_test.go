@@ -168,22 +168,3 @@ func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 
 	return success
 }
-
-func checkWfStatus(ctx DBOSContext, expectedStatus WorkflowStatusType) (bool, error) {
-	wfid, err := GetWorkflowID(ctx)
-	if err != nil {
-		return false, err
-	}
-	me, err := RetrieveWorkflow[string](ctx, wfid)
-	if err != nil {
-		return false, err
-	}
-	meStatus, err := me.GetStatus()
-	if err != nil {
-		return false, err
-	}
-	if meStatus.Status == expectedStatus {
-		return true, nil
-	}
-	return false, nil
-}

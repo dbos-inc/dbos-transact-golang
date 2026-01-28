@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -3576,24 +3577,36 @@ func TestWorkflowTimeout(t *testing.T) {
 	})
 
 	waitForCancelWorkflowWithStepAfterCancel := func(ctx DBOSContext, _ string) (string, error) {
+		uncancellableCtx := WithoutCancel(ctx)
 		// Wait for cancellation
 		<-ctx.Done()
 		// Check that we have the correct cancellation error
 		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
 		}
+
 		// The status of this workflow should transition to cancelled
-		maxtries := 10
-		for range maxtries {
-			isCancelled, err := checkWfStatus(ctx, WorkflowStatusCancelled)
-			if err != nil {
-				return "", err
-			}
-			if isCancelled {
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
+		wfid, err := GetWorkflowID(uncancellableCtx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get workflow ID: %w", err)
 		}
+		dbosCtxInternal, ok := uncancellableCtx.(*dbosContext)
+		if !ok {
+			return "", fmt.Errorf("failed to cast DBOSContext to dbosContext")
+		}
+		sysDB, ok := dbosCtxInternal.systemDB.(*sysDB)
+		if !ok {
+			return "", fmt.Errorf("failed to cast systemDB to sysDB")
+		}
+		query := fmt.Sprintf(`SELECT status FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{sysDB.schema}.Sanitize())
+		require.Eventually(t, func() bool {
+			var status WorkflowStatusType
+			err := sysDB.pool.QueryRow(uncancellableCtx, query, wfid).Scan(&status)
+			if err != nil {
+				return false
+			}
+			return status == WorkflowStatusCancelled
+		}, 5*time.Second, 50*time.Millisecond, "workflow did not transition to cancelled status in time")
 
 		// After cancellation, try to run a simple step
 		// This should return a WorkflowCancelled error
@@ -3613,15 +3626,8 @@ func TestWorkflowTimeout(t *testing.T) {
 		// The workflow should return a WorkflowCancelled error from the step
 		require.Error(t, err, "expected error from workflow")
 
-		// Check if the error is a DBOSError with WorkflowCancelled code
-		var dbosErr *DBOSError
-		if errors.As(err, &dbosErr) {
-			assert.Equal(t, WorkflowCancelled, dbosErr.Code, "expected WorkflowCancelled error code, got: %v", dbosErr.Code)
-		} else {
-			// If not a DBOSError, check if it's a context error
-			assert.True(t, errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
-				"expected context.Canceled or context.DeadlineExceeded error, got: %v", err)
-		}
+		targetErr := &DBOSError{Code: WorkflowCancelled}
+		assert.True(t, errors.Is(err, targetErr), "expected WorkflowCancelled error, got: %v", err)
 		assert.Equal(t, "", result, "expected result to be an empty string")
 
 		// Check the workflow status: should be cancelled
