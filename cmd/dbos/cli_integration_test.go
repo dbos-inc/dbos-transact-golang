@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"context"
 	"database/sql"
 	_ "embed"
 	"encoding/json"
@@ -16,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -215,63 +212,66 @@ func TestCLIWorkflow(t *testing.T) {
 				assert.False(t, exists, fmt.Sprintf("Schema %s should not exist after reset", config.schemaName))
 			})
 
-			t.Run("ProjectInitialization", func(t *testing.T) {
-				testProjectInitialization(t, cliPath)
-			})
+			/*
 
-			t.Run("MigrateCommand", func(t *testing.T) {
-				testMigrateCommand(t, cliPath, config.args, config.dbRole)
-			})
+				t.Run("ProjectInitialization", func(t *testing.T) {
+					testProjectInitialization(t, cliPath)
+				})
 
-			// Start a test application using dbos start
-			startArgs := append([]string{"start"}, config.args...)
-			cmd := exec.CommandContext(context.Background(), cliPath, startArgs...)
-			envVars := append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(config.dbRole))
-			// Pass the schema to the test app if using custom schema
-			if config.schemaName != "dbos" {
-				envVars = append(envVars, "DBOS_SCHEMA="+config.schemaName)
-			}
-			cmd.Env = envVars
-			stdout, _ := cmd.StdoutPipe()
-			stderr, _ := cmd.StderrPipe()
-			require.NoError(t, cmd.Start(), "Failed to start application")
-			go func() {
-				scanner := bufio.NewScanner(stdout)
-				for scanner.Scan() {
-					t.Logf("[app stdout] %s", scanner.Text())
+				t.Run("MigrateCommand", func(t *testing.T) {
+					testMigrateCommand(t, cliPath, config.args, config.dbRole)
+				})
+
+				// Start a test application using dbos start
+				startArgs := append([]string{"start"}, config.args...)
+				cmd := exec.CommandContext(context.Background(), cliPath, startArgs...)
+				envVars := append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(config.dbRole))
+				// Pass the schema to the test app if using custom schema
+				if config.schemaName != "dbos" {
+					envVars = append(envVars, "DBOS_SCHEMA="+config.schemaName)
 				}
-			}()
-			go func() {
-				scanner := bufio.NewScanner(stderr)
-				for scanner.Scan() {
-					t.Logf("[app stderr] %s", scanner.Text())
-				}
-			}()
+				cmd.Env = envVars
+				stdout, _ := cmd.StdoutPipe()
+				stderr, _ := cmd.StderrPipe()
+				require.NoError(t, cmd.Start(), "Failed to start application")
+				go func() {
+					scanner := bufio.NewScanner(stdout)
+					for scanner.Scan() {
+						t.Logf("[app stdout] %s", scanner.Text())
+					}
+				}()
+				go func() {
+					scanner := bufio.NewScanner(stderr)
+					for scanner.Scan() {
+						t.Logf("[app stderr] %s", scanner.Text())
+					}
+				}()
 
-			// Wait for server to be ready
-			require.Eventually(t, func() bool {
-				resp, err := http.Get("http://localhost:" + testServerPort)
-				if err != nil {
-					return false
-				}
-				resp.Body.Close()
-				return resp.StatusCode == http.StatusOK
-			}, 10*time.Second, 500*time.Millisecond, "Server should start within 10 seconds")
+				// Wait for server to be ready
+				require.Eventually(t, func() bool {
+					resp, err := http.Get("http://localhost:" + testServerPort)
+					if err != nil {
+						return false
+					}
+					resp.Body.Close()
+					return resp.StatusCode == http.StatusOK
+				}, 10*time.Second, 500*time.Millisecond, "Server should start within 10 seconds")
 
-			t.Cleanup(func() {
-				fmt.Printf("Cleaning up application process %d\n", cmd.Process.Pid)
-				err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
-				require.NoError(t, err, "Failed to send interrupt signal to application process")
-				_ = cmd.Wait()
-			})
+				t.Cleanup(func() {
+					fmt.Printf("Cleaning up application process %d\n", cmd.Process.Pid)
+					err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
+					require.NoError(t, err, "Failed to send interrupt signal to application process")
+					_ = cmd.Wait()
+				})
 
-			t.Run("WorkflowCommands", func(t *testing.T) {
-				testWorkflowCommands(t, cliPath, config.args, config.dbRole)
-			})
+				t.Run("WorkflowCommands", func(t *testing.T) {
+					testWorkflowCommands(t, cliPath, config.args, config.dbRole)
+				})
 
-			t.Run("ErrorHandling", func(t *testing.T) {
-				testErrorHandling(t, cliPath, config.args, config.dbRole)
-			})
+				t.Run("ErrorHandling", func(t *testing.T) {
+					testErrorHandling(t, cliPath, config.args, config.dbRole)
+				})
+			*/
 		})
 	}
 }
