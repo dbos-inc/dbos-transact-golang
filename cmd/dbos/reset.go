@@ -64,8 +64,15 @@ func runReset(cmd *cobra.Command, args []string) error {
 	}
 	defer conn.Close(ctx)
 
+	// Test the connection
+	err = conn.Ping(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to ping PostgreSQL server: %w", err)
+	}
+
 	// Drop the system database if it exists
-	logger.Info("Resetting system database", "database", dbName)
+	maskedPostgresConfig := maskPasswordInKeyValueFormat(postgresConfig.ConnString())
+	logger.Info("Resetting system database", "database", dbName, "connection string", maskedPostgresConfig)
 	err = dropDatabaseIfExists(ctx, conn, dbName)
 	if err != nil {
 		return fmt.Errorf("failed to drop system database: %w", err)
