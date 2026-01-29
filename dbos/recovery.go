@@ -3,12 +3,14 @@ package dbos
 func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
-	pendingWorkflows, err := ctx.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
-		status:             []WorkflowStatusType{WorkflowStatusPending},
-		executorIDs:        executorIDs,
-		applicationVersion: ctx.applicationVersion,
-		loadInput:          true,
-	})
+	pendingWorkflows, err := retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+		return ctx.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
+			status:             []WorkflowStatusType{WorkflowStatusPending},
+			executorIDs:        executorIDs,
+			applicationVersion: ctx.applicationVersion,
+			loadInput:          true,
+		})
+	}, withRetrierLogger(ctx.logger))
 	if err != nil {
 		return nil, err
 	}
