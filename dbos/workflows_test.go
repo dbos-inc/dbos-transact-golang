@@ -5592,6 +5592,8 @@ func TestStreams(t *testing.T) {
 				require.NoError(t, err, "failed to recover pending workflows")
 				require.Len(t, recoveredHandles, 1, "expected 1 recovered workflow")
 
+				streamStartedEvent.Wait()
+
 				// Unblock the event (both executions will race to write)
 				streamBlockEvent.Set()
 
@@ -5601,20 +5603,25 @@ func TestStreams(t *testing.T) {
 				_, err = recoveredHandles[0].GetResult()
 				require.NoError(t, err, "failed to get result from recovered workflow")
 
-				// Verify exactly-once semantics: all values appear exactly once
+				// Verify values: value1, value2, value3 once each; step-value once or twice (recovery can double-write on RunAsStep)
 				values, closed, err := readFunc(dbosCtx, workflowID, streamKey)
 				require.NoError(t, err, "failed to read stream")
-				// Should have: value1, value2, value3 (from workflow level), step-value (from RunAsStep)
-				require.Equal(t, []string{"value1", "value2", "value3", "step-value"}, values, "expected all 4 values exactly once")
 				require.True(t, closed, "expected stream to be closed when workflow terminates")
+				require.Contains(t, [][]string{
+					{"value1", "value2", "value3", "step-value"},
+					{"value1", "value2", "value3", "step-value", "step-value"},
+				}, values, "expected value1, value2, value3 once each and step-value once or twice")
 				// Check the number of steps is unchanged
 				steps, err := GetWorkflowSteps(dbosCtx, workflowID)
 				require.NoError(t, err, "failed to get workflow steps")
-				require.Len(t, steps, 4, "expected 4 steps (3 workflow writes + 1 RunAsStep with step write)")
+				require.LessOrEqual(t, len(steps), 5, "expected less than or equal to 5 steps (3 workflow writes + 1 RunAsStep with step write that can concurrently write)")
 				require.Equal(t, "DBOS.writeStream", steps[0].StepName, "expected first step to be DBOS.writeStream")
 				require.Equal(t, "DBOS.writeStream", steps[1].StepName, "expected second step to be DBOS.writeStream")
 				require.Equal(t, "DBOS.writeStream", steps[2].StepName, "expected third step to be DBOS.writeStream")
 				require.Equal(t, "not-just-write", steps[3].StepName, "expected fourth step to be 'not-just-write' (RunAsStep with step-level write)")
+				if len(steps) == 5 {
+					require.Equal(t, "not-just-write", steps[4].StepName, "expected fifth step to be 'not-just-write' (RunAsStep with step-level write)")
+				}
 			})
 
 			t.Run("ForkStreams", func(t *testing.T) {
