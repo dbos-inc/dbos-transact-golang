@@ -179,7 +179,10 @@ func PostgresChaosMonkey(t *testing.T, ctx context.Context, wg *sync.WaitGroup) 
 			// Check for context cancellation first
 			select {
 			case <-ctx.Done():
-				startPostgres(t, cliPath)
+				require.Eventually(t, func() bool {
+					startPostgres(t, cliPath)
+					return true
+				}, 5*time.Second, 100*time.Millisecond)
 				return
 			default:
 			}
