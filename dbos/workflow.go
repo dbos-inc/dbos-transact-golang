@@ -1181,12 +1181,12 @@ type StepFunc func(ctx context.Context) (any, error)
 // Step represents a type-safe step function with a specific output type R.
 type Step[R any] func(ctx context.Context) (R, error)
 
-// specialStepFunc represents a type-erased special step function that receives a transaction.
-// Used internally by runAsSpecialStep when the step body and checkpoint share one transaction.
-type specialStepFunc func(ctx context.Context, tx pgx.Tx) (any, error)
+// txnFunc represents a type-erased step function that receives a transaction.
+// Used internally by runAsTxn when the step body and checkpoint share one transaction.
+type txnFunc func(ctx context.Context, tx pgx.Tx) (any, error)
 
-// specialStep represents a type-safe special step function with output type R that receives a transaction.
-type specialStep[R any] func(ctx context.Context, tx pgx.Tx) (R, error)
+// txn represents a type-safe step function with output type R that receives a transaction.
+type txn[R any] func(ctx context.Context, tx pgx.Tx) (R, error)
 
 // stepOptions holds the configuration for step execution using functional options pattern.
 type stepOptions struct {
@@ -1524,10 +1524,10 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	return stepOutput, stepError
 }
 
-// runAsSpecialStep executes a special step function that receives a transaction when run on its own.
+// runAsTxn executes a step function that receives a transaction when run on its own.
 // The step body and checkpoint share one transaction, so system DB writes and recordOperationResult commit together.
-// Like RunAsStep but uses specialStep[R] / specialStepFunc; transaction is begun and committed inside this function.
-func runAsSpecialStep[R any](ctx DBOSContext, fn specialStep[R], opts ...StepOption) (R, error) {
+// Like RunAsStep but uses txn[R] / txnFunc; transaction is begun and committed inside this function.
+func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
 	}
@@ -1538,15 +1538,15 @@ func runAsSpecialStep[R any](ctx DBOSContext, fn specialStep[R], opts ...StepOpt
 
 	c, ok := ctx.(*dbosContext)
 	if !ok {
-		return *new(R), newStepExecutionError("", "", fmt.Errorf("runAsSpecialStep requires *dbosContext. Mock the caller of this function if you are testing."))
+		return *new(R), newStepExecutionError("", "", fmt.Errorf("runAsTxn requires *dbosContext. Mock the caller of this function if you are testing."))
 	}
 
 	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	opts = append(opts, WithStepName(stepName))
 
-	typeErasedFn := specialStepFunc(func(ctx context.Context, tx pgx.Tx) (any, error) { return fn(ctx, tx) })
+	typeErasedFn := txnFunc(func(ctx context.Context, tx pgx.Tx) (any, error) { return fn(ctx, tx) })
 
-	result, err := c.runAsSpecialStep(ctx, typeErasedFn, opts...)
+	result, err := c.runAsTxn(ctx, typeErasedFn, opts...)
 	if result == nil {
 		return *new(R), err
 	}
@@ -1557,7 +1557,7 @@ func runAsSpecialStep[R any](ctx DBOSContext, fn specialStep[R], opts ...StepOpt
 	return typedResult, err
 }
 
-func (c *dbosContext) runAsSpecialStep(_ DBOSContext, fn specialStepFunc, opts ...StepOption) (any, error) {
+func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (any, error) {
 	prep, err := prepareStepExecution(c, opts)
 	if err != nil {
 		return nil, err
@@ -2077,7 +2077,7 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
 	if !ok {
 		return fmt.Errorf("value must be *string (already encoded), got %T", value)
 	}
-	_, err := runAsSpecialStep(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
 			Key:   key,
 			Value: encodedValue,
@@ -2338,7 +2338,7 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 }
 
 func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
-	_, err := runAsSpecialStep(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
 			Key:   key,
@@ -2644,7 +2644,7 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		_, err := runAsSpecialStep(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 			err := c.systemDB.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflowID, tx: tx})
 			return "", err
 		}, WithStepName("DBOS.cancelWorkflow"))
@@ -2681,7 +2681,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	isWithinWorkflow := ok && workflowState != nil
 	var err error
 	if isWithinWorkflow {
-		_, err = runAsSpecialStep(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 			err := c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
 			return "", err
 		}, WithStepName("DBOS.resumeWorkflow"))
@@ -2758,7 +2758,7 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 	var forkedWorkflowID string
 	var err error
 	if isWithinWorkflow {
-		forkedWorkflowID, err = runAsSpecialStep(c, func(ctx context.Context, tx pgx.Tx) (string, error) {
+		forkedWorkflowID, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (string, error) {
 			dbInput.tx = tx
 			return c.systemDB.forkWorkflow(ctx, dbInput)
 		}, WithStepName("DBOS.forkWorkflow"))
