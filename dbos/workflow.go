@@ -1620,7 +1620,9 @@ func (c *dbosContext) runAsSpecialStep(_ DBOSContext, fn specialStepFunc, opts .
 		output:      encodedStepOutput,
 		tx:          tx,
 	}
-	recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+	recErr := retry(c, func() error {
+		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+	}, withRetrierLogger(c.logger))
 	if recErr != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
 	}
