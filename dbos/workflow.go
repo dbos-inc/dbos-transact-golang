@@ -1092,7 +1092,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		workflowCancelFunction := func() {
 			c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
 			err = retry(c, func() error {
-				return c.systemDB.cancelWorkflow(uncancellableCtx, workflowID)
+				return c.systemDB.cancelWorkflow(uncancellableCtx, cancelWorkflowDBInput{workflowID: workflowID})
 			}, withRetrierLogger(c.logger))
 			if err != nil {
 				c.logger.Error("Failed to cancel workflow", "error", err)
@@ -1180,6 +1180,13 @@ type StepFunc func(ctx context.Context) (any, error)
 
 // Step represents a type-safe step function with a specific output type R.
 type Step[R any] func(ctx context.Context) (R, error)
+
+// txnFunc represents a type-erased step function that receives a transaction.
+// Used internally by runAsTxn when the step body and checkpoint share one transaction.
+type txnFunc func(ctx context.Context, tx pgx.Tx) (any, error)
+
+// txn represents a type-safe step function with output type R that receives a transaction.
+type txn[R any] func(ctx context.Context, tx pgx.Tx) (R, error)
 
 // stepOptions holds the configuration for step execution using functional options pattern.
 type stepOptions struct {
@@ -1312,6 +1319,78 @@ func convertStepResult[R any](ctx DBOSContext, result any) (R, error) {
 	return typedResult, nil
 }
 
+type preparedStep struct {
+	WorkflowID   string         // for error messages when StepState is nil
+	StepOpts     *stepOptions   // always set
+	StepState    *workflowState // nil when IsWithinStep
+	IsWithinStep bool
+}
+
+// prepareStepExecution parses opts, loads workflow state, and optionally computes stepState.
+// When wfState.isWithinStep, returns IsWithinStep=true and StepState=nil; caller should return fn(c) or fn(c,nil) and not continue.
+func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, error) {
+	stepOpts := &stepOptions{}
+	for _, opt := range opts {
+		opt(stepOpts)
+	}
+	stepOpts.setDefaults()
+
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return nil, newStepExecutionError("", stepOpts.stepName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
+	}
+
+	if wfState.isWithinStep {
+		return &preparedStep{WorkflowID: wfState.workflowID, StepOpts: stepOpts, StepState: nil, IsWithinStep: true}, nil
+	}
+
+	var stepID int
+	if stepOpts.preGeneratedStepID != nil {
+		stepID = *stepOpts.preGeneratedStepID
+	} else {
+		stepID = wfState.nextStepID()
+	}
+	stepState := workflowState{
+		workflowID:   wfState.workflowID,
+		stepID:       stepID,
+		isWithinStep: true,
+	}
+	return &preparedStep{WorkflowID: wfState.workflowID, StepOpts: stepOpts, StepState: &stepState, IsWithinStep: false}, nil
+}
+
+// executeStepWithRetry runs runOnce (the step body) and retries with backoff on error when maxRetries > 0.
+func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptions, runOnce func() (any, error)) (stepOutput any, stepError error) {
+	stepOutput, stepError = runOnce()
+	if stepError == nil || stepOpts.maxRetries <= 0 {
+		return stepOutput, stepError
+	}
+	var joinedErrors error
+	joinedErrors = errors.Join(joinedErrors, stepError)
+	for retry := 1; retry <= stepOpts.maxRetries; retry++ {
+		delay := stepOpts.baseInterval
+		if retry > 1 {
+			exponentialDelay := float64(stepOpts.baseInterval) * math.Pow(stepOpts.backoffFactor, float64(retry-1))
+			delay = time.Duration(math.Min(exponentialDelay, float64(stepOpts.maxInterval)))
+		}
+		c.logger.Error("step failed, retrying", "step_name", stepOpts.stepName, "retry", retry, "max_retries", stepOpts.maxRetries, "delay", delay, "error", stepError)
+		select {
+		case <-c.Done():
+			return nil, newStepExecutionError(workflowID, stepOpts.stepName, fmt.Errorf("context cancelled during retry: %w", c.Err()))
+		case <-time.After(delay):
+		}
+		stepOutput, stepError = runOnce()
+		if stepError == nil {
+			return stepOutput, stepError
+		}
+		joinedErrors = errors.Join(joinedErrors, stepError)
+		if retry == stepOpts.maxRetries {
+			stepError = newMaxStepRetriesExceededError(workflowID, stepOpts.stepName, stepOpts.maxRetries, joinedErrors)
+			break
+		}
+	}
+	return stepOutput, stepError
+}
+
 // RunAsStep executes a function as a durable step within a workflow.
 // Steps provide at-least-once execution guarantees and automatic retry capabilities.
 // If a step has already been executed (e.g., during workflow recovery), its recorded
@@ -1381,46 +1460,20 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 }
 
 func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error) {
-	// Process functional options
-	stepOpts := &stepOptions{}
-	for _, opt := range opts {
-		opt(stepOpts)
+	prep, err := prepareStepExecution(c, opts)
+	if err != nil {
+		return nil, err
 	}
-	stepOpts.setDefaults()
-
-	// Get workflow state from context
-	wfState, ok := c.Value(workflowStateKey).(*workflowState)
-	if !ok || wfState == nil {
-		return nil, newStepExecutionError("", stepOpts.stepName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
-	}
-
-	// This should not happen when called from the package-level RunAsStep
 	if fn == nil {
-		return nil, newStepExecutionError(wfState.workflowID, stepOpts.stepName, fmt.Errorf("step function cannot be nil"))
+		return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("step function cannot be nil"))
 	}
-
-	// If within a step, just run the function directly
-	if wfState.isWithinStep {
+	if prep.IsWithinStep {
 		return fn(c)
 	}
 
-	// Get stepID if it has been pre generated
-	var stepID int
-	if stepOpts.preGeneratedStepID != nil {
-		stepID = *stepOpts.preGeneratedStepID
-	} else {
-		stepID = wfState.nextStepID() // crucially, this increments the step ID on the *workflow* state
-	}
-
-	// Setup step state
-	stepState := workflowState{
-		workflowID:   wfState.workflowID,
-		stepID:       stepID,
-		isWithinStep: true,
-	}
-
-	// Uncancellable context for DBOS operations
 	uncancellableCtx := WithoutCancel(c)
+	stepState := prep.StepState
+	stepOpts := prep.StepOpts
 
 	// Check the step is cancelled, has already completed, or is called with a different name
 	recordedOutput, err := retryWithResult(c, func() (*recordedResult, error) {
@@ -1439,55 +1492,9 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		return stepCheckpointedOutcome{value: recordedOutput.output}, recordedOutput.err
 	}
 
-	// Spawn a child DBOSContext with the step state
-	stepCtx := WithValue(c, workflowStateKey, &stepState)
-
-	// Record start time before executing the step
+	stepCtx := WithValue(c, workflowStateKey, stepState)
 	stepStartTime := time.Now()
-
-	stepOutput, stepError := fn(stepCtx)
-
-	// Retry if MaxRetries > 0 and the first execution failed
-	var joinedErrors error
-	if stepError != nil && stepOpts.maxRetries > 0 {
-		joinedErrors = errors.Join(joinedErrors, stepError)
-
-		for retry := 1; retry <= stepOpts.maxRetries; retry++ {
-			// Calculate delay for exponential backoff
-			delay := stepOpts.baseInterval
-			if retry > 1 {
-				exponentialDelay := float64(stepOpts.baseInterval) * math.Pow(stepOpts.backoffFactor, float64(retry-1))
-				delay = time.Duration(math.Min(exponentialDelay, float64(stepOpts.maxInterval)))
-			}
-
-			c.logger.Error("step failed, retrying", "step_name", stepOpts.stepName, "retry", retry, "max_retries", stepOpts.maxRetries, "delay", delay, "error", stepError)
-
-			// Wait before retry
-			select {
-			case <-c.Done():
-				return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("context cancelled during retry: %w", c.Err()))
-			case <-time.After(delay):
-				// Continue to retry
-			}
-
-			// Execute the retry
-			stepOutput, stepError = fn(stepCtx)
-
-			// If successful, break
-			if stepError == nil {
-				break
-			}
-
-			// Join the error with existing errors
-			joinedErrors = errors.Join(joinedErrors, stepError)
-
-			// If max retries reached, create MaxStepRetriesExceeded error
-			if retry == stepOpts.maxRetries {
-				stepError = newMaxStepRetriesExceededError(stepState.workflowID, stepOpts.stepName, stepOpts.maxRetries, joinedErrors)
-				break
-			}
-		}
-	}
+	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx) })
 
 	// Serialize step output before recording
 	serializer := newJSONSerializer[any]()
@@ -1514,6 +1521,114 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
 	}
 
+	return stepOutput, stepError
+}
+
+// runAsTxn executes a step function that receives a transaction when run on its own.
+// The step body and checkpoint share one transaction, so system DB writes and recordOperationResult commit together.
+// Like RunAsStep but uses txn[R] / txnFunc; transaction is begun and committed inside this function.
+func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) {
+	if ctx == nil {
+		return *new(R), newStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
+	}
+
+	if fn == nil {
+		return *new(R), newStepExecutionError("", "", fmt.Errorf("step function cannot be nil"))
+	}
+
+	c, ok := ctx.(*dbosContext)
+	if !ok {
+		return *new(R), newStepExecutionError("", "", fmt.Errorf("runAsTxn requires *dbosContext. Mock the caller of this function if you are testing."))
+	}
+
+	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	opts = append(opts, WithStepName(stepName))
+
+	typeErasedFn := txnFunc(func(ctx context.Context, tx pgx.Tx) (any, error) { return fn(ctx, tx) })
+
+	result, err := c.runAsTxn(ctx, typeErasedFn, opts...)
+	if result == nil {
+		return *new(R), err
+	}
+	typedResult, convertErr := convertStepResult[R](ctx, result)
+	if convertErr != nil {
+		return *new(R), convertErr
+	}
+	return typedResult, err
+}
+
+func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (any, error) {
+	prep, err := prepareStepExecution(c, opts)
+	if err != nil {
+		return nil, err
+	}
+	if fn == nil {
+		return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("step function cannot be nil"))
+	}
+	if prep.IsWithinStep {
+		return fn(c, nil)
+	}
+
+	uncancellableCtx := WithoutCancel(c)
+	stepState := prep.StepState
+	stepOpts := prep.StepOpts
+
+	pool := c.systemDB.(*sysDB).pool
+	tx, err := pool.Begin(uncancellableCtx)
+	if err != nil {
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
+	}
+	defer tx.Rollback(uncancellableCtx)
+
+	_, err = tx.Exec(uncancellableCtx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+	if err != nil {
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to set transaction isolation level: %w", err))
+	}
+
+	recordedOutput, err := retryWithResult(c, func() (*recordedResult, error) {
+		return c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
+			workflowID: stepState.workflowID,
+			stepID:     stepState.stepID,
+			stepName:   stepOpts.stepName,
+			tx:         tx,
+		})
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
+	}
+	if recordedOutput != nil {
+		return stepCheckpointedOutcome{value: recordedOutput.output}, recordedOutput.err
+	}
+
+	stepCtx := WithValue(c, workflowStateKey, stepState)
+	stepStartTime := time.Now()
+	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
+
+	serializer := newJSONSerializer[any]()
+	encodedStepOutput, serErr := serializer.Encode(stepOutput)
+	if serErr != nil {
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
+	}
+	stepCompletedTime := time.Now()
+	dbInput := recordOperationResultDBInput{
+		workflowID:  stepState.workflowID,
+		stepName:    stepOpts.stepName,
+		stepID:      stepState.stepID,
+		err:         stepError,
+		startedAt:   stepStartTime,
+		completedAt: stepCompletedTime,
+		output:      encodedStepOutput,
+		tx:          tx,
+	}
+	recErr := retry(c, func() error {
+		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+	}, withRetrierLogger(c.logger))
+	if recErr != nil {
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
+	}
+	if err := tx.Commit(uncancellableCtx); err != nil {
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
+	}
 	return stepOutput, stepError
 }
 
@@ -1962,10 +2077,11 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
 	if !ok {
 		return fmt.Errorf("value must be *string (already encoded), got %T", value)
 	}
-	_, err := RunAsStep(c, func(ctx context.Context) (string, error) {
+	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
 			Key:   key,
 			Value: encodedValue,
+			tx:    tx,
 		})
 	}, WithStepName("DBOS.writeStream"))
 	return err
@@ -2222,11 +2338,12 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 }
 
 func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
-	_, err := RunAsStep(c, func(ctx context.Context) (string, error) {
+	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
 			Key:   key,
 			Value: &sentinel,
+			tx:    tx,
 		})
 	}, WithStepName("DBOS.closeStream"))
 	return err
@@ -2527,13 +2644,13 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		_, err := RunAsStep(c, func(ctx context.Context) (string, error) {
-			err := c.systemDB.cancelWorkflow(ctx, workflowID)
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			err := c.systemDB.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflowID, tx: tx})
 			return "", err
 		}, WithStepName("DBOS.cancelWorkflow"))
 		return err
 	} else {
-		return c.systemDB.cancelWorkflow(c, workflowID)
+		return c.systemDB.cancelWorkflow(c, cancelWorkflowDBInput{workflowID: workflowID})
 	}
 }
 
@@ -2564,12 +2681,12 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	isWithinWorkflow := ok && workflowState != nil
 	var err error
 	if isWithinWorkflow {
-		_, err = RunAsStep(c, func(ctx context.Context) (string, error) {
-			err := c.systemDB.resumeWorkflow(ctx, workflowID)
+		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			err := c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
 			return "", err
 		}, WithStepName("DBOS.resumeWorkflow"))
 	} else {
-		err = c.systemDB.resumeWorkflow(c, workflowID)
+		err = c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
 	}
 	if err != nil {
 		return nil, err
@@ -2641,7 +2758,8 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 	var forkedWorkflowID string
 	var err error
 	if isWithinWorkflow {
-		forkedWorkflowID, err = RunAsStep(c, func(ctx context.Context) (string, error) {
+		forkedWorkflowID, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (string, error) {
+			dbInput.tx = tx
 			return c.systemDB.forkWorkflow(ctx, dbInput)
 		}, WithStepName("DBOS.forkWorkflow"))
 	} else {

@@ -39,9 +39,9 @@ type systemDatabase interface {
 	listWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error)
 	updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error
 	awaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*string, error)
-	cancelWorkflow(ctx context.Context, workflowID string) error
+	cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput) error
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
-	resumeWorkflow(ctx context.Context, workflowID string) error
+	resumeWorkflow(ctx context.Context, input resumeWorkflowDBInput) error
 	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error)
 
 	// Child workflows
@@ -960,50 +960,44 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 	return nil
 }
 
-func (s *sysDB) cancelWorkflow(ctx context.Context, workflowID string) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
+type cancelWorkflowDBInput struct {
+	workflowID string
+	tx         pgx.Tx
+}
 
-	// Check if workflow exists
+func (s *sysDB) cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput) error {
 	listInput := listWorkflowsDBInput{
-		workflowIDs: []string{workflowID},
+		workflowIDs: []string{input.workflowID},
 		loadInput:   true,
 		loadOutput:  true,
-		tx:          tx,
+		tx:          input.tx,
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
 	if err != nil {
 		return err
 	}
 	if len(wfs) == 0 {
-		return newNonExistentWorkflowError(workflowID)
+		return newNonExistentWorkflowError(input.workflowID)
 	}
 
 	wf := wfs[0]
 	switch wf.Status {
 	case WorkflowStatusSuccess, WorkflowStatusError, WorkflowStatusCancelled:
 		// Workflow is already in a terminal state, rollback and return
-		if err := tx.Rollback(ctx); err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
-		}
 		return nil
 	}
 
-	// Set the workflow's status to CANCELLED and started_at_epoch_ms to NULL (so it does not block the queue, if any)
 	updateStatusQuery := fmt.Sprintf(`UPDATE %s.workflow_status
 						  SET status = $1, updated_at = $2, started_at_epoch_ms = NULL
 						  WHERE workflow_uuid = $3`, pgx.Identifier{s.schema}.Sanitize())
 
-	_, err = tx.Exec(ctx, updateStatusQuery, WorkflowStatusCancelled, time.Now().UnixMilli(), workflowID)
+	if input.tx != nil {
+		_, err = input.tx.Exec(ctx, updateStatusQuery, WorkflowStatusCancelled, time.Now().UnixMilli(), input.workflowID)
+	} else {
+		_, err = s.pool.Exec(ctx, updateStatusQuery, WorkflowStatusCancelled, time.Now().UnixMilli(), input.workflowID)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to update workflow status to CANCELLED: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil
@@ -1023,7 +1017,7 @@ func (s *sysDB) cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 
 	// Cancel each workflow
 	for _, workflow := range workflows {
-		if err := s.cancelWorkflow(ctx, workflow.ID); err != nil {
+		if err := s.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflow.ID}); err != nil {
 			s.logger.Error("Failed to cancel workflow during cancelAllBefore", "workflowID", workflow.ID, "error", err)
 			// Continue with other workflows even if one fails
 			// If desired we could funnel the errors back the caller (conductor, admin server)
@@ -1091,25 +1085,17 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 	return nil
 }
 
-func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
+type resumeWorkflowDBInput struct {
+	workflowID string
+	tx         pgx.Tx
+}
 
-	// Execute with snapshot isolation in case of concurrent calls on the same workflow
-	_, err = tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-	if err != nil {
-		return fmt.Errorf("failed to set transaction isolation level: %w", err)
-	}
-
-	// Check the status of the workflow. If it is complete, do nothing.
+func (s *sysDB) resumeWorkflow(ctx context.Context, input resumeWorkflowDBInput) error {
 	listInput := listWorkflowsDBInput{
-		workflowIDs: []string{workflowID},
+		workflowIDs: []string{input.workflowID},
 		loadInput:   true,
 		loadOutput:  true,
-		tx:          tx,
+		tx:          input.tx,
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
 	if err != nil {
@@ -1117,7 +1103,7 @@ func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 		return err
 	}
 	if len(wfs) == 0 {
-		return newNonExistentWorkflowError(workflowID)
+		return newNonExistentWorkflowError(input.workflowID)
 	}
 
 	wf := wfs[0]
@@ -1132,18 +1118,23 @@ func (s *sysDB) resumeWorkflow(ctx context.Context, workflowID string) error {
 						      started_at_epoch_ms = NULL, updated_at = $4
 						  WHERE workflow_uuid = $5`, pgx.Identifier{s.schema}.Sanitize())
 
-	_, err = tx.Exec(ctx, updateStatusQuery,
-		WorkflowStatusEnqueued,
-		_DBOS_INTERNAL_QUEUE_NAME,
-		0,
-		time.Now().UnixMilli(),
-		workflowID)
+	if input.tx != nil {
+		_, err = input.tx.Exec(ctx, updateStatusQuery,
+			WorkflowStatusEnqueued,
+			_DBOS_INTERNAL_QUEUE_NAME,
+			0,
+			time.Now().UnixMilli(),
+			input.workflowID)
+	} else {
+		_, err = s.pool.Exec(ctx, updateStatusQuery,
+			WorkflowStatusEnqueued,
+			_DBOS_INTERNAL_QUEUE_NAME,
+			0,
+			time.Now().UnixMilli(),
+			input.workflowID)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to update workflow status to ENQUEUED: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil
@@ -1154,6 +1145,7 @@ type forkWorkflowDBInput struct {
 	forkedWorkflowID   string
 	startStep          int
 	applicationVersion string
+	tx                 pgx.Tx
 }
 
 func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error) {
@@ -1168,17 +1160,19 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		return "", fmt.Errorf("startStep must be >= 0, got %d", input.startStep)
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to begin transaction: %w", err)
+	// When no transaction is provided, run queries on the pool directly (no transaction).
+	execCtx := func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		if input.tx != nil {
+			return input.tx.Exec(ctx, sql, args...)
+		}
+		return s.pool.Exec(ctx, sql, args...)
 	}
-	defer tx.Rollback(ctx)
 
 	// Get the original workflow status
 	listInput := listWorkflowsDBInput{
 		workflowIDs: []string{input.originalWorkflowID},
 		loadInput:   true,
-		tx:          tx,
+		tx:          input.tx,
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
 	if err != nil {
@@ -1216,12 +1210,11 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 
 	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
 	authenticatedRoles, err := json.Marshal(originalWorkflow.AuthenticatedRoles)
-
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal the authenticated roles: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, insertQuery,
+	_, err = execCtx(ctx, insertQuery,
 		forkedWorkflowID,
 		WorkflowStatusEnqueued,
 		originalWorkflow.Name,
@@ -1249,7 +1242,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 			FROM %s.operation_outputs
 			WHERE workflow_uuid = $2 AND function_id < $3`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
 
-		_, err = tx.Exec(ctx, copyOutputsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
+		_, err = execCtx(ctx, copyOutputsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
 		if err != nil {
 			return "", fmt.Errorf("failed to copy operation outputs: %w", err)
 		}
@@ -1261,7 +1254,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 			FROM %s.workflow_events_history
 			WHERE workflow_uuid = $2 AND function_id < $3`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
 
-		_, err = tx.Exec(ctx, copyEventsHistoryQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
+		_, err = execCtx(ctx, copyEventsHistoryQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
 		if err != nil {
 			return "", fmt.Errorf("failed to copy workflow events history: %w", err)
 		}
@@ -1276,7 +1269,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 				ORDER BY key, function_id DESC
 			) AS latest_events`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
 
-		_, err = tx.Exec(ctx, copyLatestEventsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
+		_, err = execCtx(ctx, copyLatestEventsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
 		if err != nil {
 			return "", fmt.Errorf("failed to copy latest workflow events: %w", err)
 		}
@@ -1288,14 +1281,10 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 			FROM %s.streams
 			WHERE workflow_uuid = $2 AND function_id < $3`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
 
-		_, err = tx.Exec(ctx, copyStreamsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
+		_, err = execCtx(ctx, copyStreamsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
 		if err != nil {
 			return "", fmt.Errorf("failed to copy streams: %w", err)
 		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return forkedWorkflowID, nil
@@ -2605,6 +2594,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 type writeStreamDBInput struct {
 	Key   string
 	Value *string // Already serialized
+	tx    pgx.Tx
 }
 
 type readStreamDBInput struct {
@@ -2625,45 +2615,53 @@ func (s *sysDB) writeStream(ctx context.Context, input writeStreamDBInput) error
 		return fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+	// When no transaction is provided, run queries on the pool directly (no transaction).
+	tx := input.tx
+	queryRow := func(ctx context.Context, sql string, args ...any) pgx.Row {
+		if tx != nil {
+			return tx.QueryRow(ctx, sql, args...)
+		}
+		return s.pool.QueryRow(ctx, sql, args...)
 	}
-	defer tx.Rollback(ctx)
 
-	// Check if stream is already closed (sentinel value exists)
+	exec := func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		if tx != nil {
+			return tx.Exec(ctx, sql, args...)
+		}
+		return s.pool.Exec(ctx, sql, args...)
+	}
+
 	checkClosedQuery := fmt.Sprintf(`SELECT 1 FROM %s.streams 
 		WHERE workflow_uuid = $1 AND key = $2 AND value = $3 LIMIT 1`,
 		pgx.Identifier{s.schema}.Sanitize())
-	var exists int
-	err = tx.QueryRow(ctx, checkClosedQuery, wfState.workflowID, input.Key, _DBOS_STREAM_CLOSED_SENTINEL).Scan(&exists)
-	if err == nil && exists == 1 {
-		return fmt.Errorf("stream '%s' is already closed", input.Key)
-	} else if err != pgx.ErrNoRows {
-		return fmt.Errorf("failed to check stream status: %w", err)
-	}
 
-	// Get next offset for this stream
-	var nextOffset int
 	getOffsetQuery := fmt.Sprintf(`SELECT COALESCE(MAX("offset"), -1) + 1 FROM %s.streams 
 		WHERE workflow_uuid = $1 AND key = $2`,
 		pgx.Identifier{s.schema}.Sanitize())
-	err = tx.QueryRow(ctx, getOffsetQuery, wfState.workflowID, input.Key).Scan(&nextOffset)
+
+	insertQuery := fmt.Sprintf(`INSERT INTO %s.streams (workflow_uuid, key, value, "offset", function_id)
+		VALUES ($1, $2, $3, $4, $5)`,
+		pgx.Identifier{s.schema}.Sanitize())
+
+	var err error
+	var exists int
+	var nextOffset int
+
+	err = queryRow(ctx, checkClosedQuery, wfState.workflowID, input.Key, _DBOS_STREAM_CLOSED_SENTINEL).Scan(&exists)
+	if err == nil && exists == 1 {
+		return fmt.Errorf("stream '%s' is already closed", input.Key)
+	} else if err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("failed to check stream status: %w", err)
+	}
+
+	err = queryRow(ctx, getOffsetQuery, wfState.workflowID, input.Key).Scan(&nextOffset)
 	if err != nil {
 		return fmt.Errorf("failed to get next offset: %w", err)
 	}
 
-	// Insert the stream entry
-	insertQuery := fmt.Sprintf(`INSERT INTO %s.streams (workflow_uuid, key, value, "offset", function_id)
-		VALUES ($1, $2, $3, $4, $5)`,
-		pgx.Identifier{s.schema}.Sanitize())
-	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Value, nextOffset, wfState.stepID)
+	_, err = exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Value, nextOffset, wfState.stepID)
 	if err != nil {
 		return fmt.Errorf("failed to insert stream entry: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil
