@@ -1161,10 +1161,9 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 	}
 
 	// When no transaction is provided, run queries on the pool directly (no transaction).
-	tx := input.tx
 	execCtx := func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-		if tx != nil {
-			return tx.Exec(ctx, sql, args...)
+		if input.tx != nil {
+			return input.tx.Exec(ctx, sql, args...)
 		}
 		return s.pool.Exec(ctx, sql, args...)
 	}
@@ -1173,7 +1172,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 	listInput := listWorkflowsDBInput{
 		workflowIDs: []string{input.originalWorkflowID},
 		loadInput:   true,
-		tx:          tx,
+		tx:          input.tx,
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
 	if err != nil {
