@@ -384,6 +384,84 @@ func TestConfig(t *testing.T) {
 
 }
 
+func TestContext(t *testing.T) {
+	databaseURL := getDatabaseURL()
+
+	t.Run("PreservesContextValues", func(t *testing.T) {
+		// Define test keys and values
+		type contextKey string
+		key1 := contextKey("test-key-1")
+		key2 := contextKey("test-key-2")
+		value1 := "test-value-1"
+		value2 := 42
+
+		// Create a context with seeded values
+		baseCtx := context.Background()
+		ctxWithValues := context.WithValue(baseCtx, key1, value1)
+		ctxWithValues = context.WithValue(ctxWithValues, key2, value2)
+
+		// Create DBOSContext with the seeded context
+		dbosCtx, err := NewDBOSContext(ctxWithValues, Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-context-values",
+		})
+		require.NoError(t, err)
+		defer func() {
+			if dbosCtx != nil {
+				Shutdown(dbosCtx, 1*time.Minute)
+			}
+		}()
+
+		require.NotNil(t, dbosCtx)
+
+		// Verify that the context values are preserved in DBOSContext
+		assert.Equal(t, value1, dbosCtx.Value(key1), "DBOSContext should preserve context value for key1")
+		assert.Equal(t, value2, dbosCtx.Value(key2), "DBOSContext should preserve context value for key2")
+
+		// Verify that non-existent keys return nil
+		nonExistentKey := contextKey("non-existent-key")
+		assert.Nil(t, dbosCtx.Value(nonExistentKey), "DBOSContext should return nil for non-existent keys")
+	})
+
+	t.Run("FromPreservesDerivedContextValues", func(t *testing.T) {
+		type contextKey string
+		key1 := contextKey("from-test-key-1")
+		key2 := contextKey("from-test-key-2")
+		key3 := contextKey("from-test-key-3")
+		value1 := "old-value-1"
+		value2 := 100
+		value3 := "new-value-3"
+
+		// Build a context chain: base has key1, key2; derived adds key3
+		baseCtx := context.Background()
+		baseCtx = context.WithValue(baseCtx, key1, value1)
+		baseCtx = context.WithValue(baseCtx, key2, value2)
+		derivedCtx := context.WithValue(baseCtx, key3, value3)
+
+		// Create DBOSContext with the base context
+		dbosCtx, err := NewDBOSContext(baseCtx, Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-context-from",
+		})
+		require.NoError(t, err)
+		defer func() {
+			if dbosCtx != nil {
+				Shutdown(dbosCtx, 1*time.Minute)
+			}
+		}()
+		require.NotNil(t, dbosCtx)
+
+		// From(derivedCtx) returns a DBOS context that wraps the derived context
+		fromCtx := dbosCtx.From(derivedCtx)
+		require.NotNil(t, fromCtx)
+
+		// Value must return all values: from the base (old) and from the derived (new)
+		assert.Equal(t, value1, fromCtx.Value(key1), "From DBOS context should return value from ancestor context")
+		assert.Equal(t, value2, fromCtx.Value(key2), "From DBOS context should return value from ancestor context")
+		assert.Equal(t, value3, fromCtx.Value(key3), "From DBOS context should return value from derived context")
+	})
+}
+
 func TestCustomSystemDBSchema(t *testing.T) {
 	defer goleak.VerifyNone(t,
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),

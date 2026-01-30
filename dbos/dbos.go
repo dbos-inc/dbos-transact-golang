@@ -149,6 +149,9 @@ type DBOSContext interface {
 	GetExecutorID() string         // Get the executor ID for this context
 	GetApplicationID() string      // Get the application ID for this context
 
+	// Context management
+	From(ctx context.Context) DBOSContext // Returns a copy of the current DBOSContext wrapping the provided context.Context
+
 	// Queue configuration
 	ListenQueues(_ DBOSContext, queues ...WorkflowQueue) // Configure which queues this process should listen to
 }
@@ -202,6 +205,31 @@ func (c *dbosContext) Err() error {
 
 func (c *dbosContext) Value(key any) any {
 	return c.ctx.Value(key)
+}
+
+// From returns a copy of the current DBOSContext with the underlying context.Context set to the provided ctx.
+// The provided context must be a child of a context.Context that was provided by DBOS (e.g., the first argument of RunWorkflow or RunAsStep)
+// That is because such context embeds important metadata necessary for DBOS to function correctly.
+func (c *dbosContext) From(ctx context.Context) DBOSContext {
+	if ctx == nil {
+		return nil
+	}
+	launched := c.launched.Load()
+	childCtx := &dbosContext{
+		ctx:                     ctx, // Use the provided context
+		config:                  c.config,
+		logger:                  c.logger,
+		systemDB:                c.systemDB,
+		workflowsWg:             c.workflowsWg,
+		workflowRegistry:        c.workflowRegistry,
+		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
+		applicationVersion:      c.applicationVersion,
+		executorID:              c.executorID,
+		applicationID:           c.applicationID,
+		queueRunner:             c.queueRunner,
+	}
+	childCtx.launched.Store(launched)
+	return childCtx
 }
 
 // WithValue returns a copy of the DBOS context with the given key-value pair.
