@@ -62,31 +62,14 @@ type WorkflowStatus struct {
 // workflowState holds the runtime state for a workflow execution
 type workflowState struct {
 	workflowID   string
-	stepID       *int
+	stepID       int
 	isWithinStep bool
 }
 
-// getStepID returns the current step ID, or -1 if unset.
-func (ws *workflowState) getStepID() int {
-	if ws == nil || ws.stepID == nil {
-		return -1
-	}
-	return *ws.stepID
-}
-
-// nextStepID returns the next step ID and increments the counter.
-// If stepID is nil, it is initialized to 0 and 0 is returned (first step).
+// nextStepID returns the next step ID and increments the counter
 func (ws *workflowState) nextStepID() int {
-	if ws == nil {
-		return -1
-	}
-	if ws.stepID == nil {
-		id := 0
-		ws.stepID = &id
-		return 0
-	}
-	*ws.stepID++
-	return *ws.stepID
+	ws.stepID++
+	return ws.stepID
 }
 
 /********************************/
@@ -927,7 +910,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	var workflowID string
 	if params.WorkflowID == "" {
 		if isChildWorkflow {
-			stepID := parentWorkflowState.getStepID()
+			stepID := parentWorkflowState.stepID
 			workflowID = fmt.Sprintf("%s-%d", parentWorkflowState.workflowID, stepID)
 		} else {
 			workflowID = uuid.New().String()
@@ -943,14 +926,14 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
 		childWorkflowID, err := retryWithResult(uncancellableCtx, func() (*string, error) {
-			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.getStepID())
+			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		}, withRetrierLogger(c.logger))
 		if err != nil {
-			c.logger.Error("failed to check child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.getStepID())
+			c.logger.Error("failed to check child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("checking child workflow: %w", err))
 		}
 		if childWorkflowID != nil {
-			c.logger.Info("child workflow already recorded", "workflow_name", params.WorkflowName, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.getStepID(), "child_workflow_id", *childWorkflowID)
+			c.logger.Info("child workflow already recorded", "workflow_name", params.WorkflowName, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID, "child_workflow_id", *childWorkflowID)
 			return newWorkflowPollingHandle[any](uncancellableCtx, *childWorkflowID), nil
 		}
 	}
@@ -1049,7 +1032,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				parentWorkflowID: parentWorkflowState.workflowID,
 				childWorkflowID:  workflowID,
 				stepName:         params.WorkflowName,
-				stepID:           parentWorkflowState.getStepID(),
+				stepID:           parentWorkflowState.stepID,
 				tx:               tx,
 			}
 			err = c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
@@ -1086,6 +1069,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID: workflowID,
+		stepID:     -1, // Steps are O-indexed
 	}
 	workflowCtx := WithValue(c, workflowStateKey, wfState)
 
@@ -1358,15 +1342,15 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 		return &preparedStep{WorkflowID: wfState.workflowID, StepOpts: stepOpts, StepState: nil, IsWithinStep: true}, nil
 	}
 
+	var stepID int
 	if stepOpts.preGeneratedStepID != nil {
-		*wfState.stepID = *stepOpts.preGeneratedStepID
+		stepID = *stepOpts.preGeneratedStepID
 	} else {
-		wfState.nextStepID()
+		stepID = wfState.nextStepID()
 	}
-
 	stepState := workflowState{
 		workflowID:   wfState.workflowID,
-		stepID:       wfState.stepID,
+		stepID:       stepID,
 		isWithinStep: true,
 	}
 	return &preparedStep{WorkflowID: wfState.workflowID, StepOpts: stepOpts, StepState: &stepState, IsWithinStep: false}, nil
@@ -1493,7 +1477,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	recordedOutput, err := retryWithResult(c, func() (*recordedResult, error) {
 		return c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 			workflowID: stepState.workflowID,
-			stepID:     stepState.getStepID(),
+			stepID:     stepState.stepID,
 			stepName:   stepOpts.stepName,
 		})
 	}, withRetrierLogger(c.logger))
@@ -1522,7 +1506,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	dbInput := recordOperationResultDBInput{
 		workflowID:  stepState.workflowID,
 		stepName:    stepOpts.stepName,
-		stepID:      stepState.getStepID(),
+		stepID:      stepState.stepID,
 		err:         stepError,
 		startedAt:   stepStartTime,
 		completedAt: stepCompletedTime,
@@ -1602,7 +1586,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 	recordedOutput, err := retryWithResult(c, func() (*recordedResult, error) {
 		return c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 			workflowID: stepState.workflowID,
-			stepID:     stepState.getStepID(),
+			stepID:     stepState.stepID,
 			stepName:   stepOpts.stepName,
 			tx:         tx,
 		})
@@ -1627,7 +1611,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 	dbInput := recordOperationResultDBInput{
 		workflowID:  stepState.workflowID,
 		stepName:    stepOpts.stepName,
-		stepID:      stepState.getStepID(),
+		stepID:      stepState.stepID,
 		err:         stepError,
 		startedAt:   stepStartTime,
 		completedAt: stepCompletedTime,
@@ -2481,7 +2465,7 @@ func (c *dbosContext) Patch(_ DBOSContext, patchName string) (bool, error) {
 	patched, err := retryWithResult(c, func() (bool, error) {
 		return c.systemDB.patch(c, patchDBInput{
 			workflowID: wfState.workflowID,
-			stepID:     wfState.getStepID() + 1, // We are checking if the upcoming step should use the patched code
+			stepID:     wfState.stepID + 1, // We are checking if the upcoming step should use the patched code
 			patchName:  prefixedPatchName,
 		})
 	}, withRetrierLogger(c.logger))
@@ -2541,7 +2525,7 @@ func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) error {
 	patchNameFromDB, err := retryWithResult(c, func() (string, error) {
 		return c.systemDB.doesPatchExists(c, patchDBInput{
 			workflowID: wfState.workflowID,
-			stepID:     wfState.getStepID() + 1,
+			stepID:     wfState.stepID + 1,
 			patchName:  prefixedPatchName,
 		})
 	}, withRetrierLogger(c.logger))
@@ -2597,7 +2581,7 @@ func (c *dbosContext) GetStepID() (int, error) {
 	if !ok || wfState == nil {
 		return -1, errors.New("not within a DBOS workflow context")
 	}
-	return wfState.getStepID(), nil
+	return wfState.stepID, nil
 }
 
 // GetWorkflowID retrieves the workflow ID from the context if called within a DBOS workflow.

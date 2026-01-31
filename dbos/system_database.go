@@ -2283,9 +2283,9 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 					DO UPDATE SET value = EXCLUDED.value`, pgx.Identifier{s.schema}.Sanitize())
 
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, insertHistoryQuery, wfState.workflowID, wfState.getStepID(), input.Key, input.Message)
+		_, err = input.tx.Exec(ctx, insertHistoryQuery, wfState.workflowID, wfState.stepID, input.Key, input.Message)
 	} else {
-		_, err = s.pool.Exec(ctx, insertHistoryQuery, wfState.workflowID, wfState.getStepID(), input.Key, input.Message)
+		_, err = s.pool.Exec(ctx, insertHistoryQuery, wfState.workflowID, wfState.stepID, input.Key, input.Message)
 	}
 	return err
 }
@@ -2539,7 +2539,7 @@ func (s *sysDB) writeStream(ctx context.Context, input writeStreamDBInput) error
 		return fmt.Errorf("failed to get next offset: %w", err)
 	}
 
-	_, err = exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Value, nextOffset, wfState.getStepID())
+	_, err = exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Value, nextOffset, wfState.stepID)
 	if err != nil {
 		return fmt.Errorf("failed to insert stream entry: %w", err)
 	}
