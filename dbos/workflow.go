@@ -1022,7 +1022,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		insertStatusResult, err = c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
 			c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
-			return err
+			return newWorkflowExecutionError(workflowID, fmt.Errorf("failed to insert workflow status: %w", err))
 		}
 
 		// Record child workflow relationship if this is a child workflow
