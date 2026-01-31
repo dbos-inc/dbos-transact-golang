@@ -47,7 +47,6 @@ type systemDatabase interface {
 	// Child workflows
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
 	checkChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
-	recordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
 
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
@@ -1332,23 +1331,20 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, poll
 }
 
 type recordOperationResultDBInput struct {
-	workflowID  string
-	stepID      int
-	stepName    string
-	output      *string
-	err         error
-	tx          pgx.Tx
-	startedAt   time.Time
-	completedAt time.Time
+	workflowID      string
+	childWorkflowID string
+	stepID          int
+	stepName        string
+	output          *string
+	err             error
+	tx              pgx.Tx
+	startedAt       time.Time
+	completedAt     time.Time
 }
 
 func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
 	startedAtMs := input.startedAt.UnixMilli()
 	completedAtMs := input.completedAt.UnixMilli()
-
-	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, output, error, function_name, started_at_epoch_ms, completed_at_epoch_ms)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)`, pgx.Identifier{s.schema}.Sanitize())
 
 	var errorString *string
 	if input.err != nil {
@@ -1356,27 +1352,26 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		errorString = &e
 	}
 
+	columns := []string{"workflow_uuid", "function_id", "output", "error", "function_name", "started_at_epoch_ms", "completed_at_epoch_ms"}
+	placeholders := []string{"$1", "$2", "$3", "$4", "$5", "$6", "$7"}
+	args := []any{input.workflowID, input.stepID, input.output, errorString, input.stepName, startedAtMs, completedAtMs}
+	argCounter := 7
+
+	if input.childWorkflowID != "" {
+		columns = append(columns, "child_workflow_id")
+		argCounter++
+		placeholders = append(placeholders, fmt.Sprintf("$%d", argCounter))
+		args = append(args, input.childWorkflowID)
+	}
+
+	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs (%s) VALUES (%s)`,
+		pgx.Identifier{s.schema}.Sanitize(), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
+
 	var err error
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, query,
-			input.workflowID,
-			input.stepID,
-			input.output,
-			errorString,
-			input.stepName,
-			startedAtMs,
-			completedAtMs,
-		)
+		_, err = input.tx.Exec(ctx, query, args...)
 	} else {
-		_, err = s.pool.Exec(ctx, query,
-			input.workflowID,
-			input.stepID,
-			input.output,
-			errorString,
-			input.stepName,
-			startedAtMs,
-			completedAtMs,
-		)
+		_, err = s.pool.Exec(ctx, query, args...)
 	}
 
 	if err != nil {
@@ -1457,47 +1452,6 @@ func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, funct
 	}
 
 	return childWorkflowID, nil
-}
-
-type recordChildGetResultDBInput struct {
-	parentWorkflowID string
-	childWorkflowID  string
-	stepID           int
-	output           *string
-	err              error
-	startedAt        time.Time
-	completedAt      time.Time
-}
-
-func (s *sysDB) recordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error {
-	startedAtMs := input.startedAt.UnixMilli()
-	completedAtMs := input.completedAt.UnixMilli()
-
-	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, function_name, output, error, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT DO NOTHING`, pgx.Identifier{s.schema}.Sanitize())
-
-	var errorString *string
-	if input.err != nil {
-		e := input.err.Error()
-		errorString = &e
-	}
-
-	_, err := s.pool.Exec(ctx, query,
-		input.parentWorkflowID,
-		input.stepID,
-		"DBOS.getResult",
-		input.output,
-		errorString,
-		input.childWorkflowID,
-		startedAtMs,
-		completedAtMs,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to record get result: %w", err)
-	}
-	return nil
 }
 
 /*******************************/

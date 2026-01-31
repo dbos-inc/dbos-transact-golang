@@ -413,6 +413,27 @@ func testListWorkflows(t *testing.T, cliPath string, baseArgs []string, dbRole s
 	workflowID, exists := response["workflow_id"]
 	assert.True(t, exists, "Response should contain workflow_id")
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
+
+	// Wait until the QueueWorkflow has enqueued all workflows.
+	// This is to avoid a race condition where the test checks for queued workflows
+	// before they are all enqueued.
+	require.Eventually(t, func() bool {
+		args := append([]string{"workflow", "list", "--queue", "example-queue"}, baseArgs...)
+		cmd := exec.Command(cliPath, args...)
+		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return false
+		}
+		var workflows []dbos.WorkflowStatus
+		err = json.Unmarshal(output, &workflows)
+		if err != nil {
+			return false
+		}
+		return len(workflows) >= 10
+	}, 5*time.Second, 500*time.Millisecond, "Should find at least 10 workflows in the queue")
+
 	// Get the current time for time-based filtering
 	currentTime := time.Now()
 
