@@ -2085,11 +2085,13 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
 		return fmt.Errorf("value must be *string (already encoded), got %T", value)
 	}
 	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
-			Key:   key,
-			Value: encodedValue,
-			tx:    tx,
-		})
+		return "", retry(ctx, func() error {
+			return c.systemDB.writeStream(ctx, writeStreamDBInput{
+				Key:   key,
+				Value: encodedValue,
+				tx:    tx,
+			})
+		}, withRetrierLogger(c.logger))
 	}, WithStepName("DBOS.writeStream"))
 	return err
 }
@@ -2347,11 +2349,13 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
 	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
-		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
-			Key:   key,
-			Value: &sentinel,
-			tx:    tx,
-		})
+		return "", retry(ctx, func() error {
+			return c.systemDB.writeStream(ctx, writeStreamDBInput{
+				Key:   key,
+				Value: &sentinel,
+				tx:    tx,
+			})
+		}, withRetrierLogger(c.logger))
 	}, WithStepName("DBOS.closeStream"))
 	return err
 }
@@ -2600,18 +2604,22 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 	var err error
 	if isWithinWorkflow {
 		workflowStatus, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
+			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+				return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
+					workflowIDs: []string{workflowID},
+					loadInput:   loadInput,
+					loadOutput:  loadOutput,
+				})
+			}, withRetrierLogger(c.logger))
+		}, WithStepName("DBOS.retrieveWorkflow"))
+	} else {
+		workflowStatus, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
+			return c.systemDB.listWorkflows(c, listWorkflowsDBInput{
 				workflowIDs: []string{workflowID},
 				loadInput:   loadInput,
 				loadOutput:  loadOutput,
 			})
-		}, WithStepName("DBOS.retrieveWorkflow"))
-	} else {
-		workflowStatus, err = c.systemDB.listWorkflows(c, listWorkflowsDBInput{
-			workflowIDs: []string{workflowID},
-			loadInput:   loadInput,
-			loadOutput:  loadOutput,
-		})
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve workflow status: %w", err)
@@ -2659,12 +2667,15 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			err := c.systemDB.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflowID, tx: tx})
-			return "", err
+			return "", retry(ctx, func() error {
+				return c.systemDB.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflowID, tx: tx})
+			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.cancelWorkflow"))
 		return err
 	} else {
-		return c.systemDB.cancelWorkflow(c, cancelWorkflowDBInput{workflowID: workflowID})
+		return retry(c, func() error {
+			return c.systemDB.cancelWorkflow(c, cancelWorkflowDBInput{workflowID: workflowID})
+		}, withRetrierLogger(c.logger))
 	}
 }
 
@@ -2696,11 +2707,14 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	var err error
 	if isWithinWorkflow {
 		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			err := c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
-			return "", err
+			return "", retry(ctx, func() error {
+				return c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
+			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.resumeWorkflow"))
 	} else {
-		err = c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
+		err = retry(c, func() error {
+			return c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
@@ -2774,10 +2788,14 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 	if isWithinWorkflow {
 		forkedWorkflowID, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (string, error) {
 			dbInput.tx = tx
-			return c.systemDB.forkWorkflow(ctx, dbInput)
+			return retryWithResult(ctx, func() (string, error) {
+				return c.systemDB.forkWorkflow(ctx, dbInput)
+			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.forkWorkflow"))
 	} else {
-		forkedWorkflowID, err = c.systemDB.forkWorkflow(c, dbInput)
+		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
+			return c.systemDB.forkWorkflow(c, dbInput)
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
@@ -3034,10 +3052,14 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		workflows, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return c.systemDB.listWorkflows(ctx, dbInput)
+			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+				return c.systemDB.listWorkflows(ctx, dbInput)
+			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.listWorkflows"))
 	} else {
-		workflows, err = c.systemDB.listWorkflows(c, dbInput)
+		workflows, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
+			return c.systemDB.listWorkflows(c, dbInput)
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
@@ -3161,10 +3183,14 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		steps, err = RunAsStep(c, func(ctx context.Context) ([]stepInfo, error) {
-			return c.systemDB.getWorkflowSteps(ctx, getWorkflowStepsInput)
+			return retryWithResult(ctx, func() ([]stepInfo, error) {
+				return c.systemDB.getWorkflowSteps(ctx, getWorkflowStepsInput)
+			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getWorkflowSteps"))
 	} else {
-		steps, err = c.systemDB.getWorkflowSteps(c, getWorkflowStepsInput)
+		steps, err = retryWithResult(c, func() ([]stepInfo, error) {
+			return c.systemDB.getWorkflowSteps(c, getWorkflowStepsInput)
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
