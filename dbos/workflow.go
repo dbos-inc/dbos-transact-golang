@@ -1638,7 +1638,11 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
 	}, withRetrierLogger(c.logger))
 	if recErr != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
+		e := recErr
+		if stepError != nil { // join errors if needed
+			e = errors.Join(e, stepError)
+		}
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, e)
 	}
 	if err := tx.Commit(uncancellableCtx); err != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
@@ -1883,19 +1887,42 @@ func (c *dbosContext) Select(_ DBOSContext, channels []<-chan StepOutcome[any]) 
 /****************************************/
 
 func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string) error {
+	// Send cannot be sent from within a step if used within a workflow
+	isWithinWorkflow := false
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if ok && wfState != nil {
+		isWithinWorkflow = true
+		if wfState.isWithinStep {
+			return newStepExecutionError(wfState.workflowID, "DBOS.send", fmt.Errorf("cannot call Send within a step"))
+		}
+	}
+
 	// Serialize the message before sending
 	serializer := newJSONSerializer[any]()
 	encodedMessage, err := serializer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
-	return retry(c, func() error {
-		return c.systemDB.send(c, WorkflowSendInput{
-			DestinationID: destinationID,
-			Message:       encodedMessage,
-			Topic:         topic,
-		})
-	}, withRetrierLogger(c.logger))
+
+	input := WorkflowSendInput{
+		DestinationID: destinationID,
+		Message:       encodedMessage,
+		Topic:         topic,
+	}
+
+	if isWithinWorkflow {
+		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			input.tx = tx
+			return nil, retry(ctx, func() error {
+				return c.systemDB.send(ctx, input)
+			}, withRetrierLogger(c.logger))
+		}, WithStepName("DBOS.send"))
+	} else {
+		err = retry(c, func() error {
+			return c.systemDB.send(c, input)
+		}, withRetrierLogger(c.logger))
+	}
+	return err
 }
 
 // Send sends a message to another workflow with type safety.
