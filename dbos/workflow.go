@@ -1998,12 +1998,17 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
 		return fmt.Errorf("failed to serialize event value: %w", err)
 	}
 
-	return retry(c, func() error {
-		return c.systemDB.setEvent(c, WorkflowSetEventInput{
+	_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+		input := WorkflowSetEventInput{
 			Key:     key,
 			Message: encodedMessage,
-		})
-	}, withRetrierLogger(c.logger))
+			tx:      tx,
+		}
+		return nil, retry(ctx, func() error {
+			return c.systemDB.setEvent(ctx, input)
+		}, withRetrierLogger(c.logger))
+	}, WithStepName("DBOS.setEvent"))
+	return err
 }
 
 // SetEvent sets a key-value event for the current workflow with type safety.
