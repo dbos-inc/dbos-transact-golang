@@ -2651,7 +2651,7 @@ func (s *sysDB) writeStream(ctx context.Context, input writeStreamDBInput) error
 		return fmt.Errorf("failed to get next offset: %w", err)
 	}
 
-	_, err = exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Value, nextOffset, wfState.stepID)
+	_, err = exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Value, nextOffset, wfState.getStepID())
 	if err != nil {
 		return fmt.Errorf("failed to insert stream entry: %w", err)
 	}
