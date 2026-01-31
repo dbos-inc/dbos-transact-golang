@@ -2083,7 +2083,7 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
 		return fmt.Errorf("value must be *string (already encoded), got %T", value)
 	}
 	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-		return "", retry(ctx, func() error {
+		return nil, retry(ctx, func() error {
 			return c.systemDB.writeStream(ctx, writeStreamDBInput{
 				Key:   key,
 				Value: encodedValue,
@@ -2347,7 +2347,7 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
 	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
-		return "", retry(ctx, func() error {
+		return nil, retry(ctx, func() error {
 			return c.systemDB.writeStream(ctx, writeStreamDBInput{
 				Key:   key,
 				Value: &sentinel,
@@ -2665,7 +2665,7 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			return "", retry(ctx, func() error {
+			return nil, retry(ctx, func() error {
 				return c.systemDB.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflowID, tx: tx})
 			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.cancelWorkflow"))
@@ -2705,7 +2705,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	var err error
 	if isWithinWorkflow {
 		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			return "", retry(ctx, func() error {
+			return nil, retry(ctx, func() error {
 				return c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
 			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.resumeWorkflow"))
