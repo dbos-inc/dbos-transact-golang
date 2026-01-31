@@ -1680,10 +1680,6 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		return 0, newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
 	}
 
-	if wfState.isWithinStep {
-		return 0, newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call Sleep within a step"))
-	}
-
 	// Determine step ID
 	var stepID int
 	if input.stepID != nil && *input.stepID >= 0 {
@@ -2145,10 +2141,6 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return nil, newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
-	}
-
-	if wfState.isWithinStep {
-		return nil, newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call Recv within a step"))
 	}
 
 	stepID := wfState.nextStepID()

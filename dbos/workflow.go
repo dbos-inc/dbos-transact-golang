@@ -1905,6 +1905,13 @@ type recvInput struct {
 }
 
 func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error) {
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return nil, newStepExecutionError("", "DBOS.recv", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
+	}
+	if wfState.isWithinStep {
+		return nil, newStepExecutionError(wfState.workflowID, "DBOS.recv", fmt.Errorf("cannot call Recv within a step"))
+	}
 	input := recvInput{
 		Topic:   topic,
 		Timeout: timeout,
@@ -2367,6 +2374,13 @@ func CloseStream(ctx DBOSContext, key string) error {
 }
 
 func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error) {
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return 0, newStepExecutionError("", "DBOS.sleep", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
+	}
+	if wfState.isWithinStep {
+		return 0, newStepExecutionError(wfState.workflowID, "DBOS.sleep", fmt.Errorf("cannot call Sleep within a step"))
+	}
 	return retryWithResult(c, func() (time.Duration, error) {
 		return c.systemDB.sleep(c, sleepInput{duration: duration, skipSleep: false})
 	}, withRetrierLogger(c.logger))
