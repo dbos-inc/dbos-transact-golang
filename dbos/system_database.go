@@ -1680,10 +1680,6 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		return 0, newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
 	}
 
-	if wfState.isWithinStep {
-		return 0, newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call Sleep within a step"))
-	}
-
 	// Determine step ID
 	var stepID int
 	if input.stepID != nil && *input.stepID >= 0 {
@@ -2042,55 +2038,15 @@ type WorkflowSendInput struct {
 	DestinationID string
 	Message       any
 	Topic         string
+	tx            pgx.Tx
 }
 
 // Send is a special type of step that sends a message to another workflow.
 // Can be called both within a workflow (as a step) or outside a workflow (directly).
 // When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution
 func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
-	functionName := "DBOS.send"
-
-	// Get workflow state from context (optional for Send as we can send from outside a workflow)
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	var stepID int
-	var isInWorkflow bool
-
-	if ok && wfState != nil {
-		isInWorkflow = true
-		if wfState.isWithinStep {
-			return newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call Send within a step"))
-		}
-		stepID = wfState.nextStepID()
-	}
-
 	if _, ok := input.Message.(*string); !ok {
 		return fmt.Errorf("message must be a pointer to a string")
-	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	startTime := time.Now()
-
-	// Check if operation was already executed and do nothing if so (only if in workflow)
-	if isInWorkflow {
-		checkInput := checkOperationExecutionDBInput{
-			workflowID: wfState.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-			tx:         tx,
-		}
-		recordedResult, err := s.checkOperationExecution(ctx, checkInput)
-		if err != nil {
-			return err
-		}
-		if recordedResult != nil {
-			// when hitting this case, recordedResult will be &{<nil> <nil>}
-			return nil
-		}
 	}
 
 	// Set default topic if not provided
@@ -2100,38 +2056,18 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	}
 
 	insertQuery := fmt.Sprintf(`INSERT INTO %s.notifications (destination_uuid, topic, message) VALUES ($1, $2, $3)`, pgx.Identifier{s.schema}.Sanitize())
-	_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
+	var err error
+	if input.tx != nil {
+		_, err = input.tx.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
+	} else {
+		_, err = s.pool.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
+	}
 	if err != nil {
 		// Check for foreign key violation (destination workflow doesn't exist)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_FOREIGN_KEY_VIOLATION {
 			return newNonExistentWorkflowError(input.DestinationID)
 		}
 		return fmt.Errorf("failed to insert notification: %w", err)
-	}
-
-	// Record the operation result if this is called within a workflow
-	if isInWorkflow {
-		completedTime := time.Now()
-		recordInput := recordOperationResultDBInput{
-			workflowID:  wfState.workflowID,
-			stepID:      stepID,
-			stepName:    functionName,
-			output:      nil,
-			err:         nil,
-			tx:          tx,
-			startedAt:   startTime,
-			completedAt: completedTime,
-		}
-
-		err = s.recordOperationResult(ctx, recordInput)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Commit transaction
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil
@@ -2145,10 +2081,6 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return nil, newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
-	}
-
-	if wfState.isWithinStep {
-		return nil, newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call Recv within a step"))
 	}
 
 	stepID := wfState.nextStepID()
@@ -2316,49 +2248,18 @@ loop:
 type WorkflowSetEventInput struct {
 	Key     string
 	Message any
+	tx      pgx.Tx
 }
 
 func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error {
-	functionName := "DBOS.setEvent"
-
 	// Get workflow state from context
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
-		return newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
+		return newStepExecutionError("", "DBOS.setEvent", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
 	}
 
 	if _, ok := input.Message.(*string); !ok {
 		return fmt.Errorf("message must be a pointer to a string")
-	}
-
-	if wfState.isWithinStep {
-		return newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call SetEvent within a step"))
-	}
-
-	stepID := wfState.nextStepID()
-
-	startTime := time.Now()
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	// Check if operation was already executed and do nothing if so
-	checkInput := checkOperationExecutionDBInput{
-		workflowID: wfState.workflowID,
-		stepID:     stepID,
-		stepName:   functionName,
-		tx:         tx,
-	}
-	recordedResult, err := s.checkOperationExecution(ctx, checkInput)
-	if err != nil {
-		return err
-	}
-	if recordedResult != nil {
-		// when hitting this case, recordedResult will be &{<nil> <nil>}
-		return nil
 	}
 
 	// input.Message is already encoded *string from the typed layer
@@ -2368,9 +2269,11 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 					ON CONFLICT (workflow_uuid, key)
 					DO UPDATE SET value = EXCLUDED.value`, pgx.Identifier{s.schema}.Sanitize())
 
-	_, err = tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Message)
-	if err != nil {
-		return fmt.Errorf("failed to insert/update workflow event: %w", err)
+	var err error
+	if input.tx != nil {
+		_, err = input.tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Message)
+	} else {
+		_, err = s.pool.Exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Message)
 	}
 
 	// Record event in workflow_events_history
@@ -2379,35 +2282,12 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 					ON CONFLICT (workflow_uuid, function_id, key)
 					DO UPDATE SET value = EXCLUDED.value`, pgx.Identifier{s.schema}.Sanitize())
 
-	_, err = tx.Exec(ctx, insertHistoryQuery, wfState.workflowID, stepID, input.Key, input.Message)
-	if err != nil {
-		return fmt.Errorf("failed to insert workflow event history: %w", err)
+	if input.tx != nil {
+		_, err = input.tx.Exec(ctx, insertHistoryQuery, wfState.workflowID, wfState.stepID, input.Key, input.Message)
+	} else {
+		_, err = s.pool.Exec(ctx, insertHistoryQuery, wfState.workflowID, wfState.stepID, input.Key, input.Message)
 	}
-
-	// Record the operation result
-	completedTime := time.Now()
-	recordInput := recordOperationResultDBInput{
-		workflowID:  wfState.workflowID,
-		stepID:      stepID,
-		stepName:    functionName,
-		output:      nil,
-		err:         nil,
-		tx:          tx,
-		startedAt:   startTime,
-		completedAt: completedTime,
-	}
-
-	err = s.recordOperationResult(ctx, recordInput)
-	if err != nil {
-		return err
-	}
-
-	// Commit transaction
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	return nil
+	return err
 }
 
 func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, error) {
