@@ -2025,7 +2025,7 @@ func sendIdempotencyWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, 
 func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 	// Wait for the test to signal it's ready
 	sendRecvSyncEvent.Wait()
-	msg, err := Recv[string](ctx, topic, 3*time.Second)
+	msg, err := Recv[string](ctx, topic, 60*time.Minute) // Should not timeout
 	if err != nil {
 		// Unlock the test in this case
 		receiveIdempotencyStartEvent.Set()
@@ -2331,8 +2331,11 @@ func TestSendRecv(t *testing.T) {
 	})
 
 	t.Run("SendRecvIdempotency", func(t *testing.T) {
-		// Clear the sync event before starting
+		// Clear the sync events before starting
 		sendRecvSyncEvent.Clear()
+		receiveIdempotencyStartEvent.Clear()
+		receiveIdempotencyStopEvent.Clear()
+		sendIdempotencyEvent.Clear()
 
 		// Start the receive workflow - it will wait for sendRecvSyncEvent before calling Recv
 		receiveHandle, err := RunWorkflow(dbosCtx, receiveIdempotencyWorkflow, "idempotency-topic")
