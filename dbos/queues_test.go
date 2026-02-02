@@ -397,10 +397,7 @@ func TestWorkflowQueues(t *testing.T) {
 		require.Error(t, err, "expected ConflictingWorkflowError when enqueueing same workflow ID on different queue, but got none")
 
 		// Check that it's the correct error type
-		var dbosErr *DBOSError
-		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
-
-		assert.Equal(t, ConflictingWorkflowError, dbosErr.Code, "expected error code to be ConflictingWorkflowError")
+		require.True(t, errors.Is(err, &DBOSError{Code: ConflictingWorkflowError}), "expected error to be ConflictingWorkflowError, got %T", err)
 
 		// Check that the error message contains queue information
 		expectedMsgPart := "Workflow already exists in a different queue"
@@ -440,9 +437,7 @@ func TestWorkflowQueues(t *testing.T) {
 		require.Error(t, err, "expected error when enqueueing workflow with same deduplication ID")
 
 		// Check that it's the correct error type and message
-		var dbosErr *DBOSError
-		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
-		assert.Equal(t, QueueDeduplicated, dbosErr.Code, "expected error code to be QueueDeduplicated")
+		require.True(t, errors.Is(err, &DBOSError{Code: QueueDeduplicated}), "expected error to be QueueDeduplicated, got %T", err)
 
 		expectedMsgPart := fmt.Sprintf("Workflow %s was deduplicated due to an existing workflow in queue %s with deduplication ID %s", wfid2, dedupQueue.Name, dedupID)
 		assert.Contains(t, err.Error(), expectedMsgPart, "expected error message to contain deduplication information")

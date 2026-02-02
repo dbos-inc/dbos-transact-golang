@@ -1769,9 +1769,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		_, err = recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.Error(t, err, "expected dead letter queue error but got none")
 
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected DBOSError, got %T", err)
-		require.Equal(t, DeadLetterQueueError, dbosErr.Code)
+		require.True(t, errors.Is(err, &DBOSError{Code: DeadLetterQueueError}), "expected error to be DeadLetterQueueError, got %T", err)
 
 		// Verify workflow status is MAX_RECOVERY_ATTEMPTS_EXCEEDED
 		status, err := handle.GetStatus()
@@ -1782,9 +1780,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		_, err = RunWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		require.Error(t, err, "expected dead letter queue error when restarting workflow with same ID but got none")
 
-		dbosErr, ok = err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
-		require.Equal(t, dbosErr.Code, DeadLetterQueueError, "expected error code to be DeadLetterQueueError")
+		require.True(t, errors.Is(err, &DBOSError{Code: DeadLetterQueueError}), "expected error to be DeadLetterQueueError, got %T", err)
 
 		// Now resume the workflow -- this clears the DLQ status
 		resumedHandle, err := ResumeWorkflow[int](dbosCtx, wfID)
@@ -3348,9 +3344,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 		require.Error(t, err, "expected ConflictingWorkflowError when running different workflow with same ID, but got none")
 
 		// Check that it's the correct error type
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
-		require.Equal(t, ConflictingWorkflowError, dbosErr.Code)
+		require.True(t, errors.Is(err, &DBOSError{Code: ConflictingWorkflowError}), "expected error to be ConflictingWorkflowError, got %T", err)
 
 		// Check that the error message contains the workflow names
 		expectedMsgPart := "Workflow already exists with a different name"
