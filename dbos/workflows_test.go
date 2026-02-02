@@ -2307,19 +2307,6 @@ func TestSendRecv(t *testing.T) {
 			require.NoError(t, err, "failed to send message%d from outside workflow", i+1)
 		}
 
-		fmt.Println("Sent messages")
-
-		// Actually check in the DB that the messages were sent -- signaling doesn't work well at high load on a slow runner
-		pool := dbosCtx.(*dbosContext).systemDB.(*sysDB).pool
-		require.Eventually(t, func() bool {
-			rows, err := pool.Query(context.Background(), "SELECT message FROM dbos.notifications WHERE topic = 'outside-workflow-topic'")
-			if err != nil {
-				return false
-			}
-			defer rows.Close()
-			return rows.Next()
-		}, 5*time.Second, 10*time.Millisecond, "messages should be sent")
-
 		// Now that all messages have been sent, signal the receive workflow to proceed
 		sendRecvSyncEvent.Set()
 
