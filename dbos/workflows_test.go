@@ -1976,12 +1976,12 @@ func receiveWorkflow(ctx DBOSContext, input struct {
 	}
 	msg2, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
-		logger.Error("failed to receive second message", "error", err)
+		logger.Error("failed to receive second message", "error", err, "msg1", msg1)
 		return "", err
 	}
 	msg3, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
-		logger.Error("failed to receive third message", "error", err)
+		logger.Error("failed to receive third message", "error", err, "msg1", msg1, "msg2", msg2)
 		return "", err
 	}
 	return msg1 + "-" + msg2 + "-" + msg3, nil
