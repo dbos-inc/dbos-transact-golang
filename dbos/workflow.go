@@ -151,8 +151,8 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
 				return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
 					workflowIDs: []string{h.workflowID},
-					loadInput:   false,
-					loadOutput:  false,
+					loadInput:   loadInput,
+					loadOutput:  loadOutput,
 				})
 			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getStatus"))
