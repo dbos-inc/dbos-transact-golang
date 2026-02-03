@@ -2312,6 +2312,18 @@ func TestSendRecv(t *testing.T) {
 
 		// Verify the receive workflow gets all messages
 		result, err := receiveHandle.GetResult()
+		if err != nil {
+			// Inspect the DB to see if the messages were sent
+			rows, err := dbosCtx.(*dbosContext).systemDB.(*sysDB).pool.Query(context.Background(), "SELECT message FROM dbos.notifications WHERE topic = 'outside-workflow-topic'")
+			require.NoError(t, err, "failed to query notifications")
+			defer rows.Close()
+			for rows.Next() {
+				var message string
+				err := rows.Scan(&message)
+				require.NoError(t, err, "failed to scan notification")
+				fmt.Println("Message:", message)
+			}
+		}
 		require.NoError(t, err, "failed to get result from receive workflow")
 		assert.Equal(t, "message1-message2-message3", result, "expected correct result from receive workflow")
 
