@@ -1572,11 +1572,15 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 	stepOpts := prep.StepOpts
 
 	pool := c.systemDB.(*sysDB).pool
-	tx, err := pool.Begin(uncancellableCtx)
+	tx, err := retryWithResult(c, func() (pgx.Tx, error) {
+		return pool.Begin(uncancellableCtx)
+	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
 	}
-	defer tx.Rollback(uncancellableCtx)
+	defer retry(c, func() error {
+		return tx.Rollback(uncancellableCtx)
+	}, withRetrierLogger(c.logger))
 
 	_, err = tx.Exec(uncancellableCtx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
 	if err != nil {
@@ -1628,7 +1632,9 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 		}
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, e)
 	}
-	if err := tx.Commit(uncancellableCtx); err != nil {
+	if err := retry(c, func() error {
+		return tx.Commit(uncancellableCtx)
+	}, withRetrierLogger(c.logger)); err != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
 	}
 	return stepOutput, stepError
