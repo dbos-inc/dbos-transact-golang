@@ -2060,19 +2060,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	if input.tx != nil {
 		_, err = input.tx.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
 	} else {
-		tx, err := s.pool.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction: %w", err)
-		}
-		defer tx.Rollback(ctx)
-		_, err = tx.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
-		if err != nil {
-			return fmt.Errorf("failed to insert notification: %w", err)
-		}
-		err = tx.Commit(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
-		}
+		_, err = s.pool.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
 	}
 	if err != nil {
 		// Check for foreign key violation (destination workflow doesn't exist)
