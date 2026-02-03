@@ -201,13 +201,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 				// re-check debouncer status; if it is no longer PENDING, the debouncer may have finished
 				// and we can retry the loop (same as when the workflow already exited).
 				if errors.Is(err, &pgconn.PgError{Code: pgerrcode.SerializationFailure}) {
-					debouncerWorkflowStatus, reErr := ListWorkflows(ctx, WithFilterDeduplicationID(key))
-					if reErr != nil {
-						return nil, reErr
-					}
-					if len(debouncerWorkflowStatus) == 0 || debouncerWorkflowStatus[0].Status != WorkflowStatusPending {
-						continue
-					}
+					continue
 				}
 				return nil, err
 			}
