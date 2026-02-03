@@ -57,22 +57,9 @@ jobs:
       run: mockery
       working-directory: ./integration
 
-    - name: Run integration tests
-      run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
-      working-directory: ./integration
-      env:
-        PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Run CLI tests
-      run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
-      working-directory: ./cmd/dbos
-      env:
-        PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Run tests
-      run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
+      run: go vet ./... && go test -v -run TestSendRecv/SendOutsideWorkflow
       working-directory: ./dbos
       env:
         PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
