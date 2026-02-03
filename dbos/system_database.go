@@ -2207,7 +2207,11 @@ loop:
           AND created_at_epoch_ms = (SELECT created_at_epoch_ms FROM oldest_entry)
         RETURNING message`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
 
+	s.logger.Info("querying for message", "query", query, "destination_id", destinationID, "topic", topic)
 	var messageString *string
+	if messageString != nil {
+		s.logger.Info("message found", "message", *messageString)
+	}
 	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString)
 	if err != nil {
 		if err != pgx.ErrNoRows {
