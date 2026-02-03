@@ -1969,19 +1969,23 @@ func receiveWorkflow(ctx DBOSContext, input struct {
 	Topic   string
 	Timeout time.Duration
 }) (string, error) {
+	logger := ctx.(*dbosContext).logger
 	// Wait for the test to signal it's ready
 	sendRecvSyncEvent.Wait()
 
 	msg1, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
+		logger.Error("failed to receive first message", "error", err)
 		return "", err
 	}
 	msg2, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
+		logger.Error("failed to receive second message", "error", err)
 		return "", err
 	}
 	msg3, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
+		logger.Error("failed to receive third message", "error", err)
 		return "", err
 	}
 	return msg1 + "-" + msg2 + "-" + msg3, nil
