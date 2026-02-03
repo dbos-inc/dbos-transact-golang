@@ -1891,13 +1891,10 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 	}
 
 	if isWithinWorkflow {
-		err = retry(c, func() error {
-			_, e := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-				input.tx = tx
-				return nil, ctx.(*dbosContext).systemDB.send(ctx, input)
-			}, WithStepName("DBOS.send"))
-			return e
-		}, withRetrierLogger(c.logger))
+		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			input.tx = tx
+			return nil, ctx.(*dbosContext).systemDB.send(ctx, input)
+		}, WithStepName("DBOS.send"))
 	} else {
 		err = retry(c, func() error {
 			return c.systemDB.send(c, input)
