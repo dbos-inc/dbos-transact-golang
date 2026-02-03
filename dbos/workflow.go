@@ -1899,6 +1899,7 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 			return nil, ctx.(*dbosContext).systemDB.send(ctx, input)
 		}, WithStepName("DBOS.send"))
 	} else {
+		c.logger.Info("sending notification outside of workflow", "destination_id", input.DestinationID, "topic", input.Topic, "message", input.Message)
 		err = retry(c, func() error {
 			return c.systemDB.send(c, input)
 		}, withRetrierLogger(c.logger))

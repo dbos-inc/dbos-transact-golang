@@ -2062,7 +2062,9 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	} else {
 		_, err = s.pool.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
 	}
+	s.logger.Info("inserted notification", "query", insertQuery, "destination_id", input.DestinationID, "topic", topic, "message", input.Message)
 	if err != nil {
+		s.logger.Error("failed to insert notification", "error", err, "query", insertQuery, "destination_id", input.DestinationID, "topic", topic, "message", input.Message)
 		// Check for foreign key violation (destination workflow doesn't exist)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_FOREIGN_KEY_VIOLATION {
 			return newNonExistentWorkflowError(input.DestinationID)
