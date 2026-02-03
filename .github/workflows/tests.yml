@@ -59,7 +59,7 @@ jobs:
 
 
     - name: Run tests
-      run: go vet ./... && go test -v -run TestScheduleWorkflows -run TestWorkflowDeadLetterQueue -run TestWorkflowRecovery -run   -run TestSendRecv
+      run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
       working-directory: ./dbos
       env:
         PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
