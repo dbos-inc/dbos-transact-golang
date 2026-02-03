@@ -2229,10 +2229,7 @@ func TestSendRecv(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error when sending to non-existent UUID but got none")
-
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
-		require.True(t, errors.As(err, &dbosErr), "expected error to be of type NonExistentWorkflowError, got %T", err)
+		require.True(t, errors.Is(err, &DBOSError{Code: NonExistentWorkflowError}), "expected error to be NonExistentWorkflowError, got %T", err)
 
 		expectedErrorMsg := fmt.Sprintf("workflow %s does not exist", destUUID)
 		require.Contains(t, err.Error(), expectedErrorMsg)
