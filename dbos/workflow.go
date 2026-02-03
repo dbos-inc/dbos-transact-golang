@@ -1571,59 +1571,61 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 	stepState := prep.StepState
 	stepOpts := prep.StepOpts
 
-	pool := c.systemDB.(*sysDB).pool
-	tx, err := pool.Begin(uncancellableCtx)
-	if err != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
-	}
-	defer tx.Rollback(uncancellableCtx)
+	return retryWithResult(c, func() (any, error) {
+		pool := c.systemDB.(*sysDB).pool
+		tx, err := pool.Begin(uncancellableCtx)
+		if err != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		defer tx.Rollback(uncancellableCtx)
 
-	_, err = tx.Exec(uncancellableCtx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-	if err != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to set transaction isolation level: %w", err))
-	}
+		_, err = tx.Exec(uncancellableCtx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+		if err != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to set transaction isolation level: %w", err))
+		}
 
-	recordedOutput, err := c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
-		workflowID: stepState.workflowID,
-		stepID:     stepState.stepID,
-		stepName:   stepOpts.stepName,
-		tx:         tx,
-	})
-	if err != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
-	}
-	if recordedOutput != nil {
-		return stepCheckpointedOutcome{value: recordedOutput.output}, recordedOutput.err
-	}
+		recordedOutput, err := c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
+			workflowID: stepState.workflowID,
+			stepID:     stepState.stepID,
+			stepName:   stepOpts.stepName,
+			tx:         tx,
+		})
+		if err != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
+		}
+		if recordedOutput != nil {
+			return stepCheckpointedOutcome{value: recordedOutput.output}, recordedOutput.err
+		}
 
-	stepCtx := WithValue(c, workflowStateKey, stepState)
-	stepStartTime := time.Now()
-	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
+		stepCtx := WithValue(c, workflowStateKey, stepState)
+		stepStartTime := time.Now()
+		stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
 
-	serializer := newJSONSerializer[any]()
-	encodedStepOutput, serErr := serializer.Encode(stepOutput)
-	if serErr != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
-	}
-	stepCompletedTime := time.Now()
-	dbInput := recordOperationResultDBInput{
-		workflowID:  stepState.workflowID,
-		stepName:    stepOpts.stepName,
-		stepID:      stepState.stepID,
-		err:         stepError,
-		startedAt:   stepStartTime,
-		completedAt: stepCompletedTime,
-		output:      encodedStepOutput,
-		tx:          tx,
-	}
-	recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
-	if recErr != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
-	}
-	if err := tx.Commit(uncancellableCtx); err != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
-	}
-	return stepOutput, stepError
+		serializer := newJSONSerializer[any]()
+		encodedStepOutput, serErr := serializer.Encode(stepOutput)
+		if serErr != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
+		}
+		stepCompletedTime := time.Now()
+		dbInput := recordOperationResultDBInput{
+			workflowID:  stepState.workflowID,
+			stepName:    stepOpts.stepName,
+			stepID:      stepState.stepID,
+			err:         stepError,
+			startedAt:   stepStartTime,
+			completedAt: stepCompletedTime,
+			output:      encodedStepOutput,
+			tx:          tx,
+		}
+		recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+		if recErr != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
+		}
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
+		}
+		return stepOutput, stepError
+	}, withRetrierLogger(c.logger))
 }
 
 // Go runs a step inside a Go routine and returns a channel to receive the result.
@@ -2071,16 +2073,13 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
 	if !ok {
 		return fmt.Errorf("value must be *string (already encoded), got %T", value)
 	}
-	err := retry(c, func() error {
-		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
-				Key:   key,
-				Value: encodedValue,
-				tx:    tx,
-			})
-		}, WithStepName("DBOS.writeStream"))
-		return err
-	}, withRetrierLogger(c.logger))
+	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
+			Key:   key,
+			Value: encodedValue,
+			tx:    tx,
+		})
+	}, WithStepName("DBOS.writeStream"))
 	return err
 }
 
@@ -2335,17 +2334,14 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 }
 
 func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
-	err := retry(c, func() error {
-		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			sentinel := _DBOS_STREAM_CLOSED_SENTINEL
-			return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
-				Key:   key,
-				Value: &sentinel,
-				tx:    tx,
-			})
-		}, WithStepName("DBOS.closeStream"))
-		return err
-	}, withRetrierLogger(c.logger))
+	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
+		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
+			Key:   key,
+			Value: &sentinel,
+			tx:    tx,
+		})
+	}, WithStepName("DBOS.closeStream"))
 	return err
 }
 
@@ -2648,13 +2644,10 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		err := retry(c, func() error {
-			_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-				err := c.systemDB.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflowID, tx: tx})
-				return "", err
-			}, WithStepName("DBOS.cancelWorkflow"))
-			return err
-		}, withRetrierLogger(c.logger))
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			err := c.systemDB.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflowID, tx: tx})
+			return "", err
+		}, WithStepName("DBOS.cancelWorkflow"))
 		return err
 	} else {
 		return c.systemDB.cancelWorkflow(c, cancelWorkflowDBInput{workflowID: workflowID})
@@ -2688,12 +2681,9 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	isWithinWorkflow := ok && workflowState != nil
 	var err error
 	if isWithinWorkflow {
-		_, err = retryWithResult(c, func() (any, error) {
-			return runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-				err := c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
-				return "", err
-			}, WithStepName("DBOS.resumeWorkflow"))
-		}, withRetrierLogger(c.logger))
+		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			return nil, c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
+		}, WithStepName("DBOS.resumeWorkflow"))
 	} else {
 		err = c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
 	}
@@ -2767,12 +2757,10 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 	var forkedWorkflowID string
 	var err error
 	if isWithinWorkflow {
-		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
-			return runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (string, error) {
-				dbInput.tx = tx
-				return c.systemDB.forkWorkflow(ctx, dbInput)
-			}, WithStepName("DBOS.forkWorkflow"))
-		}, withRetrierLogger(c.logger))
+		forkedWorkflowID, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (string, error) {
+			dbInput.tx = tx
+			return c.systemDB.forkWorkflow(ctx, dbInput)
+		}, WithStepName("DBOS.forkWorkflow"))
 	} else {
 		forkedWorkflowID, err = c.systemDB.forkWorkflow(c, dbInput)
 	}
