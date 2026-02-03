@@ -2275,6 +2275,9 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	} else {
 		_, err = s.pool.Exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Message)
 	}
+	if err != nil {
+		return fmt.Errorf("failed to insert event: %w", err)
+	}
 
 	// Record event in workflow_events_history
 	insertHistoryQuery := fmt.Sprintf(`INSERT INTO %s.workflow_events_history (workflow_uuid, function_id, key, value)
