@@ -147,15 +147,15 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 	var workflowStatuses []WorkflowStatus
 	var err error
 	if isWithinWorkflow {
-		workflowStatuses, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
-			return RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
+		workflowStatuses, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
+			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
 				return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
 					workflowIDs: []string{h.workflowID},
-					loadInput:   loadInput,
-					loadOutput:  loadOutput,
+					loadInput:   false,
+					loadOutput:  false,
 				})
-			}, WithStepName("DBOS.getStatus"))
-		}, withRetrierLogger(c.logger))
+			}, withRetrierLogger(c.logger))
+		}, WithStepName("DBOS.getStatus"))
 	} else {
 		workflowStatuses, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
 			return c.systemDB.listWorkflows(c, listWorkflowsDBInput{
@@ -1570,9 +1570,12 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 	uncancellableCtx := WithoutCancel(c)
 	stepState := prep.StepState
 	stepOpts := prep.StepOpts
+	pool := c.systemDB.(*sysDB).pool
+	stepCtx := WithValue(c, workflowStateKey, stepState)
+	stepStartTime := time.Now()
+	serializer := newJSONSerializer[any]()
 
 	return retryWithResult(c, func() (any, error) {
-		pool := c.systemDB.(*sysDB).pool
 		tx, err := pool.Begin(uncancellableCtx)
 		if err != nil {
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
@@ -1597,23 +1600,20 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 			return stepCheckpointedOutcome{value: recordedOutput.output}, recordedOutput.err
 		}
 
-		stepCtx := WithValue(c, workflowStateKey, stepState)
-		stepStartTime := time.Now()
 		stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
 
-		serializer := newJSONSerializer[any]()
 		encodedStepOutput, serErr := serializer.Encode(stepOutput)
 		if serErr != nil {
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
 		}
-		stepCompletedTime := time.Now()
+
 		dbInput := recordOperationResultDBInput{
 			workflowID:  stepState.workflowID,
 			stepName:    stepOpts.stepName,
 			stepID:      stepState.stepID,
 			err:         stepError,
 			startedAt:   stepStartTime,
-			completedAt: stepCompletedTime,
+			completedAt: time.Now(),
 			output:      encodedStepOutput,
 			tx:          tx,
 		}
@@ -2581,15 +2581,15 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 	var workflowStatus []WorkflowStatus
 	var err error
 	if isWithinWorkflow {
-		workflowStatus, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
-			return RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
+		workflowStatus, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
+			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
 				return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
 					workflowIDs: []string{workflowID},
 					loadInput:   loadInput,
 					loadOutput:  loadOutput,
 				})
-			}, WithStepName("DBOS.retrieveWorkflow"))
-		}, withRetrierLogger(c.logger))
+			}, withRetrierLogger(c.logger))
+		}, WithStepName("DBOS.retrieveWorkflow"))
 	} else {
 		workflowStatus, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
 			return c.systemDB.listWorkflows(c, listWorkflowsDBInput{
@@ -3018,11 +3018,11 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		workflows, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
-			return RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
+		workflows, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
+			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
 				return c.systemDB.listWorkflows(ctx, dbInput)
-			}, WithStepName("DBOS.listWorkflows"))
-		}, withRetrierLogger(c.logger))
+			}, withRetrierLogger(c.logger))
+		}, WithStepName("DBOS.listWorkflows"))
 	} else {
 		workflows, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
 			return c.systemDB.listWorkflows(c, dbInput)
