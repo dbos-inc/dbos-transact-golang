@@ -1894,9 +1894,7 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 		err = retry(c, func() error {
 			_, e := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 				input.tx = tx
-				return nil, retry(ctx, func() error {
-					return c.systemDB.send(ctx, input)
-				}, withRetrierLogger(c.logger))
+				return nil, ctx.(*dbosContext).systemDB.send(ctx, input)
 			}, WithStepName("DBOS.send"))
 			return e
 		}, withRetrierLogger(c.logger))
@@ -2015,9 +2013,7 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
 				Message: encodedMessage,
 				tx:      tx,
 			}
-			return nil, retry(ctx, func() error {
-				return c.systemDB.setEvent(ctx, input)
-			}, withRetrierLogger(c.logger))
+			return nil, ctx.(*dbosContext).systemDB.setEvent(ctx, input)
 		}, WithStepName("DBOS.setEvent"))
 		return e
 	}, withRetrierLogger(c.logger))
@@ -2118,13 +2114,11 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
 	}
 	err := retry(c, func() error {
 		_, e := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			return nil, retry(ctx, func() error {
-				return c.systemDB.writeStream(ctx, writeStreamDBInput{
-					Key:   key,
-					Value: encodedValue,
-					tx:    tx,
-				})
-			}, withRetrierLogger(c.logger))
+			return nil, ctx.(*dbosContext).systemDB.writeStream(ctx, writeStreamDBInput{
+				Key:   key,
+				Value: encodedValue,
+				tx:    tx,
+			})
 		}, WithStepName("DBOS.writeStream"))
 		return e
 	}, withRetrierLogger(c.logger))
@@ -2385,13 +2379,11 @@ func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
 	err := retry(c, func() error {
 		_, e := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 			sentinel := _DBOS_STREAM_CLOSED_SENTINEL
-			return nil, retry(ctx, func() error {
-				return c.systemDB.writeStream(ctx, writeStreamDBInput{
-					Key:   key,
-					Value: &sentinel,
-					tx:    tx,
-				})
-			}, withRetrierLogger(c.logger))
+			return nil, ctx.(*dbosContext).systemDB.writeStream(ctx, writeStreamDBInput{
+				Key:   key,
+				Value: &sentinel,
+				tx:    tx,
+			})
 		}, WithStepName("DBOS.closeStream"))
 		return e
 	}, withRetrierLogger(c.logger))
@@ -2706,9 +2698,7 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	if isWithinWorkflow {
 		return retry(c, func() error {
 			_, e := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-				return nil, retry(ctx, func() error {
-					return c.systemDB.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflowID, tx: tx})
-				}, withRetrierLogger(c.logger))
+				return nil, ctx.(*dbosContext).systemDB.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflowID, tx: tx})
 			}, WithStepName("DBOS.cancelWorkflow"))
 			return e
 		}, withRetrierLogger(c.logger))
@@ -2748,9 +2738,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	if isWithinWorkflow {
 		err = retry(c, func() error {
 			_, e := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-				return nil, retry(ctx, func() error {
-					return c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
-				}, withRetrierLogger(c.logger))
+				return nil, ctx.(*dbosContext).systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
 			}, WithStepName("DBOS.resumeWorkflow"))
 			return e
 		}, withRetrierLogger(c.logger))
@@ -2832,9 +2820,7 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
 			return runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (string, error) {
 				dbInput.tx = tx
-				return retryWithResult(ctx, func() (string, error) {
-					return c.systemDB.forkWorkflow(ctx, dbInput)
-				}, withRetrierLogger(c.logger))
+				return ctx.(*dbosContext).systemDB.forkWorkflow(ctx, dbInput)
 			}, WithStepName("DBOS.forkWorkflow"))
 		}, withRetrierLogger(c.logger))
 	} else {
