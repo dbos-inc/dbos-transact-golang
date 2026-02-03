@@ -2148,6 +2148,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		cond.L.Unlock()
 		return nil, fmt.Errorf("failed to check message: %w", err)
 	}
+	s.logger.Info("message exists", "exists", exists, "query", query, "destination_id", destinationID, "topic", topic)
 	var timeoutOccurred bool
 
 	// Create the waiting goroutine once (only if !exists, so we don't attempt to unlock twice)
