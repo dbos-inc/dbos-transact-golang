@@ -2209,10 +2209,10 @@ loop:
 
 	s.logger.Info("querying for message", "query", query, "destination_id", destinationID, "topic", topic)
 	var messageString *string
+	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString)
 	if messageString != nil {
 		s.logger.Info("message found", "message", *messageString)
 	}
-	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString)
 	if err != nil {
 		if err != pgx.ErrNoRows {
 			return nil, fmt.Errorf("failed to consume message: %w", err)
