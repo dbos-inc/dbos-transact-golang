@@ -200,8 +200,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 				// On serialization failure (e.g. REPEATABLE READ conflict with FK on workflow_status),
 				// re-check debouncer status; if it is no longer PENDING, the debouncer may have finished
 				// and we can retry the loop (same as when the workflow already exited).
-				var pgErr *pgconn.PgError
-				if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.SerializationFailure {
+				if errors.Is(err, &pgconn.PgError{Code: pgerrcode.SerializationFailure}) {
 					debouncerWorkflowStatus, reErr := ListWorkflows(ctx, WithFilterDeduplicationID(key))
 					if reErr != nil {
 						return nil, reErr
