@@ -3407,8 +3407,6 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 		// Success and rollback case
 		if lastErr == nil {
 			return nil
-		} else {
-			config.logger.Error("Operation failed", "error", lastErr)
 		}
 
 		// Check if error is retryable
