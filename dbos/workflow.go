@@ -147,15 +147,15 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 	var workflowStatuses []WorkflowStatus
 	var err error
 	if isWithinWorkflow {
-		workflowStatuses, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+		workflowStatuses, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
+			return RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
 				return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
 					workflowIDs: []string{h.workflowID},
 					loadInput:   loadInput,
 					loadOutput:  loadOutput,
 				})
-			}, withRetrierLogger(c.logger))
-		}, WithStepName("DBOS.getStatus"))
+			}, WithStepName("DBOS.getStatus"))
+		}, withRetrierLogger(c.logger))
 	} else {
 		workflowStatuses, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
 			return c.systemDB.listWorkflows(c, listWorkflowsDBInput{
@@ -2585,15 +2585,15 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 	var workflowStatus []WorkflowStatus
 	var err error
 	if isWithinWorkflow {
-		workflowStatus, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+		workflowStatus, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
+			return RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
 				return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
 					workflowIDs: []string{workflowID},
 					loadInput:   loadInput,
 					loadOutput:  loadOutput,
 				})
-			}, withRetrierLogger(c.logger))
-		}, WithStepName("DBOS.retrieveWorkflow"))
+			}, WithStepName("DBOS.retrieveWorkflow"))
+		}, withRetrierLogger(c.logger))
 	} else {
 		workflowStatus, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
 			return c.systemDB.listWorkflows(c, listWorkflowsDBInput{
@@ -3030,11 +3030,11 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		workflows, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+		workflows, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
+			return RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
 				return c.systemDB.listWorkflows(ctx, dbInput)
-			}, withRetrierLogger(c.logger))
-		}, WithStepName("DBOS.listWorkflows"))
+			}, WithStepName("DBOS.listWorkflows"))
+		}, withRetrierLogger(c.logger))
 	} else {
 		workflows, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
 			return c.systemDB.listWorkflows(c, dbInput)
