@@ -1867,43 +1867,19 @@ func (c *dbosContext) Select(_ DBOSContext, channels []<-chan StepOutcome[any]) 
 /****************************************/
 
 func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string) error {
-	// Send cannot be sent from within a step if used within a workflow
-	isWithinWorkflow := false
-	wfState, ok := c.Value(workflowStateKey).(*workflowState)
-	if ok && wfState != nil {
-		isWithinWorkflow = true
-		if wfState.isWithinStep {
-			return newStepExecutionError(wfState.workflowID, "DBOS.send", fmt.Errorf("cannot call Send within a step"))
-		}
-	}
-
 	// Serialize the message before sending
 	serializer := newJSONSerializer[any]()
 	encodedMessage, err := serializer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
-
-	input := WorkflowSendInput{
-		DestinationID: destinationID,
-		Message:       encodedMessage,
-		Topic:         topic,
-	}
-
-	if isWithinWorkflow {
-		err = retry(c, func() error {
-			_, e := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-				input.tx = tx
-				return nil, ctx.(*dbosContext).systemDB.send(ctx, input)
-			}, WithStepName("DBOS.send"))
-			return e
-		}, withRetrierLogger(c.logger))
-	} else {
-		err = retry(c, func() error {
-			return c.systemDB.send(c, input)
-		}, withRetrierLogger(c.logger))
-	}
-	return err
+	return retry(c, func() error {
+		return c.systemDB.send(c, WorkflowSendInput{
+			DestinationID: destinationID,
+			Message:       encodedMessage,
+			Topic:         topic,
+		})
+	}, withRetrierLogger(c.logger))
 }
 
 // Send sends a message to another workflow with type safety.
