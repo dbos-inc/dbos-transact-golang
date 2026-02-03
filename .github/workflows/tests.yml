@@ -59,7 +59,7 @@ jobs:
 
 
     - name: Run tests
-      run: go vet ./... && go test -v -run TestSendRecv/SendOutsideWorkflow
+      run: go vet ./... && go test -v -run TestSendRecv
       working-directory: ./dbos
       env:
         PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
