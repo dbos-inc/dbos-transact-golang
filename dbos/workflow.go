@@ -1621,6 +1621,9 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 		}
 		recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
 		if recErr != nil {
+			if stepError != nil {
+				recErr = errors.Join(recErr, stepError)
+			}
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
 		}
 		if err := tx.Commit(uncancellableCtx); err != nil {
