@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgerrcode"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const _DEBOUNCER_TOPIC = "_dbos_debouncer_topic"
@@ -197,12 +195,6 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 				ID:    messageID,
 			}, _DEBOUNCER_TOPIC)
 			if err != nil {
-				// On serialization failure (e.g. REPEATABLE READ conflict with FK on workflow_status),
-				// re-check debouncer status; if it is no longer PENDING, the debouncer may have finished
-				// and we can retry the loop (same as when the workflow already exited).
-				if errors.Is(err, &pgconn.PgError{Code: pgerrcode.SerializationFailure}) {
-					continue
-				}
 				return nil, err
 			}
 

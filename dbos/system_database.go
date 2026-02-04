@@ -1119,12 +1119,20 @@ func (s *sysDB) resumeWorkflow(ctx context.Context, input resumeWorkflowDBInput)
 						  WHERE workflow_uuid = $5`, pgx.Identifier{s.schema}.Sanitize())
 
 	if input.tx != nil {
+		_, err = input.tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+		if err != nil {
+			return fmt.Errorf("failed to set transaction isolation level: %w", err)
+		}
 		_, err = input.tx.Exec(ctx, updateStatusQuery,
 			WorkflowStatusEnqueued,
 			_DBOS_INTERNAL_QUEUE_NAME,
 			0,
 			time.Now().UnixMilli(),
 			input.workflowID)
+		_, err = input.tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+		if err != nil {
+			return fmt.Errorf("failed to set transaction isolation level: %w", err)
+		}
 	} else {
 		_, err = s.pool.Exec(ctx, updateStatusQuery,
 			WorkflowStatusEnqueued,

@@ -1584,11 +1584,6 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 		}
 		defer tx.Rollback(uncancellableCtx)
 
-		_, err = tx.Exec(uncancellableCtx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-		if err != nil {
-			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to set transaction isolation level: %w", err))
-		}
-
 		recordedOutput, err := c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 			workflowID: stepState.workflowID,
 			stepID:     stepState.stepID,
