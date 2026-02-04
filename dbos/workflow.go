@@ -1938,9 +1938,13 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 		Topic:   topic,
 		Timeout: timeout,
 	}
+	recvRetryOpts := []retryOption{withRetrierLogger(c.logger)}
+	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
+		recvRetryOpts = append(recvRetryOpts, withRetryCondition(isRetryableTransaction))
+	}
 	return retryWithResult(c, func() (*string, error) {
 		return c.systemDB.recv(c, input)
-	}, withRetrierLogger(c.logger))
+	}, recvRetryOpts...)
 }
 
 // Recv receives a message sent to this workflow with type safety.

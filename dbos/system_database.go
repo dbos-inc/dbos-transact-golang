@@ -3239,16 +3239,29 @@ func isRetryablePGError(err error, logger *slog.Logger) bool {
 	return errors.As(err, &nerr)
 }
 
+// isRetryableTransaction returns true for PG error 40001 (SerializationFailure).
+// Used when chaining with isRetryablePGError for CockroachDB transaction retries.
+func isRetryableTransaction(err error, _ *slog.Logger) bool {
+	if err == nil {
+		return false
+	}
+	var pgerr *pgconn.PgError
+	if errors.As(err, &pgerr) && pgerr.Code == pgerrcode.SerializationFailure {
+		return true
+	}
+	return false
+}
+
 // retryConfig holds the configuration for a retry operation
 type retryConfig struct {
-	maxRetries     int // -1 for infinite retries
-	baseDelay      time.Duration
-	maxDelay       time.Duration
-	backoffFactor  float64
-	jitterMin      float64
-	jitterMax      float64
-	retryCondition func(error, *slog.Logger) bool
-	logger         *slog.Logger
+	maxRetries          int // -1 for infinite retries
+	baseDelay           time.Duration
+	maxDelay            time.Duration
+	backoffFactor       float64
+	jitterMin           float64
+	jitterMax           float64
+	retryConditionChain []func(error, *slog.Logger) bool
+	logger              *slog.Logger
 }
 
 // retryOption is a functional option for configuring retry behavior
@@ -3261,17 +3274,25 @@ func withRetrierLogger(logger *slog.Logger) retryOption {
 	}
 }
 
+// withRetryCondition appends the given condition functions to the retry condition chain.
+// An error is retryable if any function in the chain returns true.
+func withRetryCondition(fns ...func(error, *slog.Logger) bool) retryOption {
+	return func(c *retryConfig) {
+		c.retryConditionChain = append(c.retryConditionChain, fns...)
+	}
+}
+
 // retry executes a function with retry logic using functional options
 func retry(ctx context.Context, fn func() error, options ...retryOption) error {
-	// Start with default configuration
+	// Start with default configuration: chain of one condition (isRetryablePGError)
 	config := &retryConfig{
-		maxRetries:     -1,
-		baseDelay:      100 * time.Millisecond,
-		maxDelay:       30 * time.Second,
-		backoffFactor:  2.0,
-		jitterMin:      0.95,
-		jitterMax:      1.05,
-		retryCondition: isRetryablePGError,
+		maxRetries:          -1,
+		baseDelay:           100 * time.Millisecond,
+		maxDelay:            30 * time.Second,
+		backoffFactor:       2.0,
+		jitterMin:           0.95,
+		jitterMax:           1.05,
+		retryConditionChain: []func(error, *slog.Logger) bool{isRetryablePGError},
 	}
 
 	// Apply options
@@ -3291,8 +3312,15 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 			return nil
 		}
 
-		// Check if error is retryable
-		if !config.retryCondition(lastErr, config.logger) {
+		// Check if error is retryable (any condition in the chain returns true)
+		retryable := false
+		for _, cond := range config.retryConditionChain {
+			if cond(lastErr, config.logger) {
+				retryable = true
+				break
+			}
+		}
+		if !retryable {
 			if config.logger != nil {
 				config.logger.Debug("Non-retryable error encountered", "error", lastErr)
 			}
