@@ -2117,7 +2117,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		s.logger.Error("Receive already called for workflow", "destination_id", destinationID)
 		return nil, newWorkflowConflictIDError(destinationID)
 	}
-	repollChannel := make(chan struct{})
+	repollChannel := make(chan struct{}, 1)
 	s.workflowNotificationRepollMap.LoadOrStore(payload, repollChannel)
 	defer func() {
 		// Clean up the condition variable after we're done and broadcast to wake up any waiting goroutines
@@ -2335,7 +2335,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 		// Reuse the existing condition variable
 		cond = existingCond.(*sync.Cond)
 	}
-	repollChannel := make(chan struct{})
+	repollChannel := make(chan struct{}, 1)
 	s.workflowEventsRepollMap.LoadOrStore(payload, repollChannel)
 
 	// Defer broadcast to ensure any waiting goroutines eventually unlock
