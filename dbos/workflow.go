@@ -1572,64 +1572,62 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 	uncancellableCtx := WithoutCancel(c)
 	stepState := prep.StepState
 	stepOpts := prep.StepOpts
-
 	pool := c.systemDB.(*sysDB).pool
-	tx, err := pool.Begin(uncancellableCtx)
-	if err != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
-	}
-	defer tx.Rollback(uncancellableCtx)
+	stepCtx := WithValue(c, workflowStateKey, stepState)
+	stepStartTime := time.Now()
+	serializer := newJSONSerializer[any]()
 
-	_, err = tx.Exec(uncancellableCtx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-	if err != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to set transaction isolation level: %w", err))
-	}
+	return retryWithResult(c, func() (any, error) {
+		tx, err := pool.Begin(uncancellableCtx)
+		if err != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		defer tx.Rollback(uncancellableCtx)
 
-	recordedOutput, err := retryWithResult(c, func() (*recordedResult, error) {
-		return c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
+		_, err = tx.Exec(uncancellableCtx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+		if err != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to set transaction isolation level: %w", err))
+		}
+
+		recordedOutput, err := c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 			workflowID: stepState.workflowID,
 			stepID:     stepState.stepID,
 			stepName:   stepOpts.stepName,
 			tx:         tx,
 		})
-	}, withRetrierLogger(c.logger))
-	if err != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
-	}
-	if recordedOutput != nil {
-		return stepCheckpointedOutcome{value: recordedOutput.output}, recordedOutput.err
-	}
+		if err != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
+		}
+		if recordedOutput != nil {
+			return stepCheckpointedOutcome{value: recordedOutput.output}, recordedOutput.err
+		}
 
-	stepCtx := WithValue(c, workflowStateKey, stepState)
-	stepStartTime := time.Now()
-	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
+		stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
 
-	serializer := newJSONSerializer[any]()
-	encodedStepOutput, serErr := serializer.Encode(stepOutput)
-	if serErr != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
-	}
-	stepCompletedTime := time.Now()
-	dbInput := recordOperationResultDBInput{
-		workflowID:  stepState.workflowID,
-		stepName:    stepOpts.stepName,
-		stepID:      stepState.stepID,
-		err:         stepError,
-		startedAt:   stepStartTime,
-		completedAt: stepCompletedTime,
-		output:      encodedStepOutput,
-		tx:          tx,
-	}
-	recErr := retry(c, func() error {
-		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+		encodedStepOutput, serErr := serializer.Encode(stepOutput)
+		if serErr != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
+		}
+
+		dbInput := recordOperationResultDBInput{
+			workflowID:  stepState.workflowID,
+			stepName:    stepOpts.stepName,
+			stepID:      stepState.stepID,
+			err:         stepError,
+			startedAt:   stepStartTime,
+			completedAt: time.Now(),
+			output:      encodedStepOutput,
+			tx:          tx,
+		}
+		recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+		if recErr != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
+		}
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
+		}
+		return stepOutput, stepError
 	}, withRetrierLogger(c.logger))
-	if recErr != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
-	}
-	if err := tx.Commit(uncancellableCtx); err != nil {
-		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
-	}
-	return stepOutput, stepError
 }
 
 // Go runs a step inside a Go routine and returns a channel to receive the result.
@@ -2586,18 +2584,22 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 	var err error
 	if isWithinWorkflow {
 		workflowStatus, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
+			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+				return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
+					workflowIDs: []string{workflowID},
+					loadInput:   loadInput,
+					loadOutput:  loadOutput,
+				})
+			}, withRetrierLogger(c.logger))
+		}, WithStepName("DBOS.retrieveWorkflow"))
+	} else {
+		workflowStatus, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
+			return c.systemDB.listWorkflows(c, listWorkflowsDBInput{
 				workflowIDs: []string{workflowID},
 				loadInput:   loadInput,
 				loadOutput:  loadOutput,
 			})
-		}, WithStepName("DBOS.retrieveWorkflow"))
-	} else {
-		workflowStatus, err = c.systemDB.listWorkflows(c, listWorkflowsDBInput{
-			workflowIDs: []string{workflowID},
-			loadInput:   loadInput,
-			loadOutput:  loadOutput,
-		})
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve workflow status: %w", err)
@@ -2682,8 +2684,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	var err error
 	if isWithinWorkflow {
 		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			err := c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
-			return "", err
+			return nil, c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
 		}, WithStepName("DBOS.resumeWorkflow"))
 	} else {
 		err = c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
@@ -3020,10 +3021,14 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		workflows, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return c.systemDB.listWorkflows(ctx, dbInput)
+			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+				return c.systemDB.listWorkflows(ctx, dbInput)
+			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.listWorkflows"))
 	} else {
-		workflows, err = c.systemDB.listWorkflows(c, dbInput)
+		workflows, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
+			return c.systemDB.listWorkflows(c, dbInput)
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
@@ -3147,10 +3152,14 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		steps, err = RunAsStep(c, func(ctx context.Context) ([]stepInfo, error) {
-			return c.systemDB.getWorkflowSteps(ctx, getWorkflowStepsInput)
+			return retryWithResult(ctx, func() ([]stepInfo, error) {
+				return c.systemDB.getWorkflowSteps(ctx, getWorkflowStepsInput)
+			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getWorkflowSteps"))
 	} else {
-		steps, err = c.systemDB.getWorkflowSteps(c, getWorkflowStepsInput)
+		steps, err = retryWithResult(c, func() ([]stepInfo, error) {
+			return c.systemDB.getWorkflowSteps(c, getWorkflowStepsInput)
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
