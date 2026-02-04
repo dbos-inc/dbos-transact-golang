@@ -1022,7 +1022,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		insertStatusResult, err = c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
 			c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
-			return err
+			return newWorkflowExecutionError(workflowID, fmt.Errorf("failed to insert workflow status: %w", err))
 		}
 
 		// Record child workflow relationship if this is a child workflow
@@ -1190,12 +1190,13 @@ type txn[R any] func(ctx context.Context, tx pgx.Tx) (R, error)
 
 // stepOptions holds the configuration for step execution using functional options pattern.
 type stepOptions struct {
-	maxRetries         int           // Maximum number of retry attempts (0 = no retries)
-	backoffFactor      float64       // Exponential backoff multiplier between retries (default: 2.0)
-	baseInterval       time.Duration // Initial delay between retries (default: 100ms)
-	maxInterval        time.Duration // Maximum delay between retries (default: 5s)
-	stepName           string        // Custom name for the step (defaults to function name)
-	preGeneratedStepID *int          // Pre generated stepID
+	maxRetries         int             // Maximum number of retry attempts (0 = no retries)
+	backoffFactor      float64         // Exponential backoff multiplier between retries (default: 2.0)
+	baseInterval       time.Duration   // Initial delay between retries (default: 100ms)
+	maxInterval        time.Duration   // Maximum delay between retries (default: 5s)
+	stepName           string          // Custom name for the step (defaults to function name)
+	preGeneratedStepID *int            // Pre generated stepID
+	txIsoLevel         *pgx.TxIsoLevel // Transaction isolation level for runAsTxn (nil = ReadCommitted)
 }
 
 // setDefaults applies default values to stepOptions
@@ -1260,6 +1261,13 @@ func WithMaxInterval(interval time.Duration) StepOption {
 func WithNextStepID(stepID int) StepOption {
 	return func(opts *stepOptions) {
 		opts.preGeneratedStepID = &stepID
+	}
+}
+
+// withTxIsolationLevel sets the transaction isolation level for runAsTxn (package-private).
+func withTxIsolationLevel(level pgx.TxIsoLevel) StepOption {
+	return func(opts *stepOptions) {
+		opts.txIsoLevel = &level
 	}
 }
 
@@ -1577,17 +1585,16 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 	stepStartTime := time.Now()
 	serializer := newJSONSerializer[any]()
 
+	txOpts := pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
+	if stepOpts.txIsoLevel != nil {
+		txOpts.IsoLevel = *stepOpts.txIsoLevel
+	}
 	return retryWithResult(c, func() (any, error) {
-		tx, err := pool.Begin(uncancellableCtx)
+		tx, err := pool.BeginTx(uncancellableCtx, txOpts)
 		if err != nil {
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
 		}
 		defer tx.Rollback(uncancellableCtx)
-
-		_, err = tx.Exec(uncancellableCtx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-		if err != nil {
-			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to set transaction isolation level: %w", err))
-		}
 
 		recordedOutput, err := c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 			workflowID: stepState.workflowID,
@@ -1621,6 +1628,9 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 		}
 		recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
 		if recErr != nil {
+			if stepError != nil {
+				recErr = errors.Join(recErr, stepError)
+			}
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
 		}
 		if err := tx.Commit(uncancellableCtx); err != nil {
@@ -1867,19 +1877,40 @@ func (c *dbosContext) Select(_ DBOSContext, channels []<-chan StepOutcome[any]) 
 /****************************************/
 
 func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string) error {
+	// Send cannot be sent from within a step if used within a workflow
+	isWithinWorkflow := false
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if ok && wfState != nil {
+		isWithinWorkflow = true
+		if wfState.isWithinStep {
+			return newStepExecutionError(wfState.workflowID, "DBOS.send", fmt.Errorf("cannot call Send within a step"))
+		}
+	}
+
 	// Serialize the message before sending
 	serializer := newJSONSerializer[any]()
 	encodedMessage, err := serializer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
-	return retry(c, func() error {
-		return c.systemDB.send(c, WorkflowSendInput{
-			DestinationID: destinationID,
-			Message:       encodedMessage,
-			Topic:         topic,
-		})
-	}, withRetrierLogger(c.logger))
+
+	input := WorkflowSendInput{
+		DestinationID: destinationID,
+		Message:       encodedMessage,
+		Topic:         topic,
+	}
+
+	if isWithinWorkflow {
+		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			input.tx = tx
+			return nil, ctx.(*dbosContext).systemDB.send(ctx, input)
+		}, WithStepName("DBOS.send"))
+	} else {
+		err = retry(c, func() error {
+			return c.systemDB.send(c, input)
+		}, withRetrierLogger(c.logger))
+	}
+	return err
 }
 
 // Send sends a message to another workflow with type safety.
@@ -1903,13 +1934,24 @@ type recvInput struct {
 }
 
 func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error) {
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return nil, newStepExecutionError("", "DBOS.recv", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
+	}
+	if wfState.isWithinStep {
+		return nil, newStepExecutionError(wfState.workflowID, "DBOS.recv", fmt.Errorf("cannot call Recv within a step"))
+	}
 	input := recvInput{
 		Topic:   topic,
 		Timeout: timeout,
 	}
+	recvRetryOpts := []retryOption{withRetrierLogger(c.logger)}
+	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
+		recvRetryOpts = append(recvRetryOpts, withRetryCondition(isRetryableTransaction))
+	}
 	return retryWithResult(c, func() (*string, error) {
 		return c.systemDB.recv(c, input)
-	}, withRetrierLogger(c.logger))
+	}, recvRetryOpts...)
 }
 
 // Recv receives a message sent to this workflow with type safety.
@@ -1975,12 +2017,14 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
 		return fmt.Errorf("failed to serialize event value: %w", err)
 	}
 
-	return retry(c, func() error {
-		return c.systemDB.setEvent(c, WorkflowSetEventInput{
+	_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+		return nil, c.systemDB.setEvent(ctx, WorkflowSetEventInput{
 			Key:     key,
 			Message: encodedMessage,
+			tx:      tx,
 		})
-	}, withRetrierLogger(c.logger))
+	}, WithStepName("DBOS.setEvent"))
+	return err
 }
 
 // SetEvent sets a key-value event for the current workflow with type safety.
@@ -2365,6 +2409,13 @@ func CloseStream(ctx DBOSContext, key string) error {
 }
 
 func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error) {
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return 0, newStepExecutionError("", "DBOS.sleep", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
+	}
+	if wfState.isWithinStep {
+		return 0, newStepExecutionError(wfState.workflowID, "DBOS.sleep", fmt.Errorf("cannot call Sleep within a step"))
+	}
 	return retryWithResult(c, func() (time.Duration, error) {
 		return c.systemDB.sleep(c, sleepInput{duration: duration, skipSleep: false})
 	}, withRetrierLogger(c.logger))
@@ -2685,7 +2736,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	if isWithinWorkflow {
 		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 			return nil, c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
-		}, WithStepName("DBOS.resumeWorkflow"))
+		}, withTxIsolationLevel(pgx.RepeatableRead), WithStepName("DBOS.resumeWorkflow"))
 	} else {
 		err = c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
 	}

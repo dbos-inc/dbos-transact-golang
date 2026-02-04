@@ -1769,9 +1769,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		_, err = recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.Error(t, err, "expected dead letter queue error but got none")
 
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected DBOSError, got %T", err)
-		require.Equal(t, DeadLetterQueueError, dbosErr.Code)
+		require.True(t, errors.Is(err, &DBOSError{Code: DeadLetterQueueError}), "expected error to be DeadLetterQueueError, got %T", err)
 
 		// Verify workflow status is MAX_RECOVERY_ATTEMPTS_EXCEEDED
 		status, err := handle.GetStatus()
@@ -1782,9 +1780,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		_, err = RunWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		require.Error(t, err, "expected dead letter queue error when restarting workflow with same ID but got none")
 
-		dbosErr, ok = err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
-		require.Equal(t, dbosErr.Code, DeadLetterQueueError, "expected error code to be DeadLetterQueueError")
+		require.True(t, errors.Is(err, &DBOSError{Code: DeadLetterQueueError}), "expected error to be DeadLetterQueueError, got %T", err)
 
 		// Now resume the workflow -- this clears the DLQ status
 		resumedHandle, err := ResumeWorkflow[int](dbosCtx, wfID)
@@ -1980,12 +1976,12 @@ func receiveWorkflow(ctx DBOSContext, input struct {
 	}
 	msg2, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
-		logger.Error("failed to receive second message", "error", err)
+		logger.Error("failed to receive second message", "error", err, "msg1", msg1)
 		return "", err
 	}
 	msg3, err := Recv[string](ctx, input.Topic, input.Timeout)
 	if err != nil {
-		logger.Error("failed to receive third message", "error", err)
+		logger.Error("failed to receive third message", "error", err, "msg1", msg1, "msg2", msg2)
 		return "", err
 	}
 	return msg1 + "-" + msg2 + "-" + msg3, nil
@@ -2033,7 +2029,7 @@ func sendIdempotencyWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, 
 func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 	// Wait for the test to signal it's ready
 	sendRecvSyncEvent.Wait()
-	msg, err := Recv[string](ctx, topic, 3*time.Second)
+	msg, err := Recv[string](ctx, topic, 60*time.Minute) // Should not timeout
 	if err != nil {
 		// Unlock the test in this case
 		receiveIdempotencyStartEvent.Set()
@@ -2237,10 +2233,7 @@ func TestSendRecv(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error when sending to non-existent UUID but got none")
-
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
-		require.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+		require.True(t, errors.Is(err, &DBOSError{Code: NonExistentWorkflowError}), "expected error to be NonExistentWorkflowError, got %T", err)
 
 		expectedErrorMsg := fmt.Sprintf("workflow %s does not exist", destUUID)
 		require.Contains(t, err.Error(), expectedErrorMsg)
@@ -2305,7 +2298,7 @@ func TestSendRecv(t *testing.T) {
 			Timeout time.Duration
 		}{
 			Topic:   "outside-workflow-topic",
-			Timeout: 5 * time.Minute, // This should not timeout
+			Timeout: 30 * time.Second, // This should not timeout
 		})
 		require.NoError(t, err, "failed to start receive workflow")
 
@@ -2339,8 +2332,11 @@ func TestSendRecv(t *testing.T) {
 	})
 
 	t.Run("SendRecvIdempotency", func(t *testing.T) {
-		// Clear the sync event before starting
+		// Clear the sync events before starting
 		sendRecvSyncEvent.Clear()
+		receiveIdempotencyStartEvent.Clear()
+		receiveIdempotencyStopEvent.Clear()
+		sendIdempotencyEvent.Clear()
 
 		// Start the receive workflow - it will wait for sendRecvSyncEvent before calling Recv
 		receiveHandle, err := RunWorkflow(dbosCtx, receiveIdempotencyWorkflow, "idempotency-topic")
@@ -3352,9 +3348,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 		require.Error(t, err, "expected ConflictingWorkflowError when running different workflow with same ID, but got none")
 
 		// Check that it's the correct error type
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
-		require.Equal(t, ConflictingWorkflowError, dbosErr.Code)
+		require.True(t, errors.Is(err, &DBOSError{Code: ConflictingWorkflowError}), "expected error to be ConflictingWorkflowError, got %T", err)
 
 		// Check that the error message contains the workflow names
 		expectedMsgPart := "Workflow already exists with a different name"
