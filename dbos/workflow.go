@@ -1190,12 +1190,13 @@ type txn[R any] func(ctx context.Context, tx pgx.Tx) (R, error)
 
 // stepOptions holds the configuration for step execution using functional options pattern.
 type stepOptions struct {
-	maxRetries         int           // Maximum number of retry attempts (0 = no retries)
-	backoffFactor      float64       // Exponential backoff multiplier between retries (default: 2.0)
-	baseInterval       time.Duration // Initial delay between retries (default: 100ms)
-	maxInterval        time.Duration // Maximum delay between retries (default: 5s)
-	stepName           string        // Custom name for the step (defaults to function name)
-	preGeneratedStepID *int          // Pre generated stepID
+	maxRetries         int             // Maximum number of retry attempts (0 = no retries)
+	backoffFactor      float64         // Exponential backoff multiplier between retries (default: 2.0)
+	baseInterval       time.Duration   // Initial delay between retries (default: 100ms)
+	maxInterval        time.Duration   // Maximum delay between retries (default: 5s)
+	stepName           string          // Custom name for the step (defaults to function name)
+	preGeneratedStepID *int            // Pre generated stepID
+	txIsoLevel         *pgx.TxIsoLevel // Transaction isolation level for runAsTxn (nil = ReadCommitted)
 }
 
 // setDefaults applies default values to stepOptions
@@ -1260,6 +1261,13 @@ func WithMaxInterval(interval time.Duration) StepOption {
 func WithNextStepID(stepID int) StepOption {
 	return func(opts *stepOptions) {
 		opts.preGeneratedStepID = &stepID
+	}
+}
+
+// withTxIsolationLevel sets the transaction isolation level for runAsTxn (package-private).
+func withTxIsolationLevel(level pgx.TxIsoLevel) StepOption {
+	return func(opts *stepOptions) {
+		opts.txIsoLevel = &level
 	}
 }
 
@@ -1577,8 +1585,12 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 	stepStartTime := time.Now()
 	serializer := newJSONSerializer[any]()
 
+	txOpts := pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
+	if stepOpts.txIsoLevel != nil {
+		txOpts.IsoLevel = *stepOpts.txIsoLevel
+	}
 	return retryWithResult(c, func() (any, error) {
-		tx, err := pool.Begin(uncancellableCtx)
+		tx, err := pool.BeginTx(uncancellableCtx, txOpts)
 		if err != nil {
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
 		}
@@ -2724,7 +2736,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	if isWithinWorkflow {
 		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 			return nil, c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
-		}, WithStepName("DBOS.resumeWorkflow"))
+		}, withTxIsolationLevel(pgx.RepeatableRead), WithStepName("DBOS.resumeWorkflow"))
 	} else {
 		err = c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
 	}
