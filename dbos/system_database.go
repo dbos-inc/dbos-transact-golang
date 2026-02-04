@@ -2057,11 +2057,13 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 
 	insertQuery := fmt.Sprintf(`INSERT INTO %s.notifications (destination_uuid, topic, message) VALUES ($1, $2, $3)`, pgx.Identifier{s.schema}.Sanitize())
 	var err error
+	var tag pgconn.CommandTag
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
+		tag, err = input.tx.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
 	} else {
-		_, err = s.pool.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
+		tag, err = s.pool.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message)
 	}
+	s.logger.Info("inserted notification", "rows_affected", tag.RowsAffected(), "destination_id", input.DestinationID, "topic", topic, "message", input.Message, "error", err)
 	if err != nil {
 		s.logger.Error("failed to insert notification", "error", err, "query", insertQuery, "destination_id", input.DestinationID, "topic", topic, "message", input.Message)
 		// Check for foreign key violation (destination workflow doesn't exist)
@@ -2070,7 +2072,6 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 		}
 		return fmt.Errorf("failed to insert notification: %w", err)
 	}
-
 	return nil
 }
 
