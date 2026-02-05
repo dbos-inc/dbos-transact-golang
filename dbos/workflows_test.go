@@ -756,11 +756,6 @@ func TestSteps(t *testing.T) {
 	})
 }
 
-var (
-	stepDeterminismStartEvent *Event
-	stepDeterminismEvent      *Event
-)
-
 func stepReturningStepID(ctx context.Context) (int, error) {
 	stepID, err := GetStepID(ctx.(DBOSContext))
 	if err != nil {
@@ -2369,16 +2364,13 @@ func TestSendRecv(t *testing.T) {
 }
 
 var (
-	setEventStart                  = NewEvent()
-	setEventStartIdempotencyEvent  = NewEvent()
-	setEvenStopIdempotencyEvent    = NewEvent()
-	setSecondEventSignal           = NewEvent()
-	setThirdEventSignal            = NewEvent()
-	getEventWorkflowStartedSignal  = NewEvent()
-	firstEventSetSignal            = NewEvent()
-	secondEventSetSignal           = NewEvent()
-	thirdEventSetSignal            = NewEvent()
-	setEventIdempotencyReadySignal = NewEvent()
+	setEventStart                 = NewEvent()
+	setSecondEventSignal          = NewEvent()
+	setThirdEventSignal           = NewEvent()
+	getEventWorkflowStartedSignal = NewEvent()
+	firstEventSetSignal           = NewEvent()
+	secondEventSetSignal          = NewEvent()
+	thirdEventSetSignal           = NewEvent()
 )
 
 type setEventWorkflowInput struct {
