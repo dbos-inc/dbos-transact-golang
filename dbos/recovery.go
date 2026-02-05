@@ -50,6 +50,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 		// Convert workflow parameters to options
 		opts := []WorkflowOption{
 			WithWorkflowID(workflow.ID),
+			withIsRecovery(),
 		}
 		// Create a workflow context from the executor context
 		// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type

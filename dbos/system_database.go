@@ -158,6 +158,9 @@ var migration5SQL string
 //go:embed migrations/6_add_workflow_events_history.sql
 var migration6SQL string
 
+//go:embed migrations/7_add_owner_xid.sql
+var migration7SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -211,6 +214,8 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 
 	migration6SQLProcessed := fmt.Sprintf(migration6SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema)
 
+	migration7SQLProcessed := fmt.Sprintf(migration7SQL, sanitizedSchema)
+
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
 		{version: 1, sql: migration1SQLProcessed},
@@ -219,6 +224,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 		{version: 4, sql: migration4SQLProcessed},
 		{version: 5, sql: migration5SQLProcessed},
 		{version: 6, sql: migration6SQLProcessed},
+		{version: 7, sql: migration7SQLProcessed},
 	}
 
 	// Begin transaction for atomic migration execution
@@ -500,12 +506,14 @@ type insertWorkflowResult struct {
 	queueName        *string
 	timeout          time.Duration
 	workflowDeadline time.Time
+	ownerXID         string
 }
 
 type insertWorkflowStatusDBInput struct {
 	status     WorkflowStatus
 	maxRetries int
 	tx         pgx.Tx
+	ownerXID   *string
 }
 
 func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error) {
@@ -571,24 +579,26 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
         inputs,
         deduplication_id,
         priority,
-        queue_partition_key
-    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        queue_partition_key,
+        owner_xid
+    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
 			recovery_attempts = CASE
-                WHEN EXCLUDED.status != $20 THEN workflow_status.recovery_attempts + 1
+                WHEN EXCLUDED.status != $21 THEN workflow_status.recovery_attempts + 1
                 ELSE workflow_status.recovery_attempts
             END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status = $21 THEN workflow_status.executor_id
+                WHEN EXCLUDED.status = $22 THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
-        RETURNING recovery_attempts, status, name, queue_name, workflow_timeout_ms, workflow_deadline_epoch_ms`, pgx.Identifier{s.schema}.Sanitize())
+        RETURNING recovery_attempts, status, name, queue_name, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, pgx.Identifier{s.schema}.Sanitize())
 
 	var result insertWorkflowResult
 	var timeoutMSResult *int64
 	var workflowDeadlineEpochMS *int64
+	var ownerXIDReturn *string
 
 	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
 	authenticatedRoles, err := json.Marshal(input.status.AuthenticatedRoles)
@@ -617,6 +627,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		deduplicationID,
 		input.status.Priority,
 		queuePartitionKey,
+		input.ownerXID,
 		WorkflowStatusEnqueued,
 		WorkflowStatusEnqueued,
 	).Scan(
@@ -626,7 +637,11 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		&result.queueName,
 		&timeoutMSResult,
 		&workflowDeadlineEpochMS,
+		&ownerXIDReturn,
 	)
+	if ownerXIDReturn != nil {
+		result.ownerXID = *ownerXIDReturn
+	}
 	if err != nil {
 		// Handle unique constraint violation for the deduplication ID (this should be the only case for a 23505)
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == _PG_ERROR_UNIQUE_VIOLATION {
@@ -658,6 +673,12 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 
 	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
 	// When this number becomes equal to `maxRetries + 1`, we mark the workflow as `MAX_RECOVERY_ATTEMPTS_EXCEEDED`.
+	fmt.Println("================================================")
+	fmt.Println("result.status", result.status)
+	fmt.Println("result.attempts", result.attempts)
+	fmt.Println("input.maxRetries", input.maxRetries)
+	fmt.Println("result.attempts > input.maxRetries+1", result.attempts > input.maxRetries+1)
+	fmt.Println("================================================")
 	if result.status != WorkflowStatusSuccess && result.status != WorkflowStatusError &&
 		input.maxRetries > 0 && result.attempts > input.maxRetries+1 {
 

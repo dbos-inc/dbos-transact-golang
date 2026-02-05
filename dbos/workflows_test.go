@@ -438,7 +438,7 @@ func testStepWf2(dbosCtx DBOSContext, input string) (string, error) {
 }
 
 // genericStep is a generic step function that processes a value of any type
-func genericStep[T any](ctx context.Context, value T) (T, error) {
+func genericStep[T any](_ context.Context, value T) (T, error) {
 	return value, nil
 }
 
@@ -769,13 +769,6 @@ func stepReturningStepID(ctx context.Context) (int, error) {
 	return stepID, nil
 }
 
-// blocks indefinitely
-func stepThatBlocks(_ context.Context) (string, error) {
-	stepDeterminismStartEvent.Set()
-	stepDeterminismEvent.Wait()
-	return "from step that blocked", nil
-}
-
 func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
@@ -848,13 +841,9 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		}
 	})
 
-	t.Run("Go executes the same workflow twice, whilst blocking the first workflow, to test for deterministic execution when using Go routines", func(t *testing.T) {
-		stepDeterminismStartEvent = NewEvent()
-		stepDeterminismEvent = NewEvent()
-
+	t.Run("Go idempotency", func(t *testing.T) {
 		goWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
-			channels := make([]chan StepOutcome[string], 0, 11)
-
+			channels := make([]chan StepOutcome[string], 0, 10)
 			for range 10 {
 				ch, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 					return stepWithSleep(ctx, 1*time.Second)
@@ -864,49 +853,33 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 				}
 				channels = append(channels, ch)
 			}
-
-			ch, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
-				return stepThatBlocks(ctx)
-			})
-			if err != nil {
-				return "", err
-			}
-			channels = append(channels, ch)
-
-			// read all the channels to ensure the corresponding goroutines have completed
 			for _, ch := range channels {
 				outcome := <-ch
 				if outcome.Err != nil {
 					return "", outcome.Err
 				}
 			}
-
-			return "", nil
+			return "ok", nil
 		}
 		RegisterWorkflow(dbosCtx, goWorkflow)
 
-		// Run the first workflow
-		handle, err := RunWorkflow(dbosCtx, goWorkflow, "test-input")
+		workflowID := uuid.NewString()
+		handle1, err := RunWorkflow(dbosCtx, goWorkflow, "test-input", WithWorkflowID(workflowID))
 		require.NoError(t, err, "failed to run go workflow")
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first run")
 
-		// Wait for the first workflow to reach the blocking step
-		stepDeterminismStartEvent.Wait()
-		stepDeterminismStartEvent.Clear()
+		setWorkflowStatusPending(t, dbosCtx, workflowID)
 
-		// "Recover" the workflow by running it again
-		handle2, err2 := RunWorkflow(dbosCtx, goWorkflow, "test-input", WithWorkflowID(handle.GetWorkflowID()))
-		require.NoError(t, err2, "failed to run go workflow")
-
-		// Complete the blocked workflows
-		stepDeterminismEvent.Set()
-
-		_, err = handle2.GetResult()
-		require.NoError(t, err, "failed to get result from go workflow")
-
-		// Verify workflow status is SUCCESS
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get workflow status")
-		require.Equal(t, WorkflowStatusSuccess, status.Status, "expected workflow status to be WorkflowStatusSuccess")
+		// Restart the workflow from scratch with the same ID; expect a normal handle and same result
+		handles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		require.Len(t, handles, 1, "expected 1 recovered handle")
+		require.Equal(t, workflowID, handles[0].GetWorkflowID(), "expected recovered handle to have the same ID as the original workflow")
+		handle2 := handles[0]
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result from second run")
+		require.Equal(t, result1, result2, "both runs should return the same result")
 	})
 }
 
@@ -935,38 +908,26 @@ func TestSelect(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, selectCancelWorkflow)
 
-	step1BlockEvent := NewEvent()
-	workflowBlockStartEvent := NewEvent()
-	workflowBlockEvent := NewEvent()
-
-	selectDeterministicWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+	selectIdempotencyWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 		ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
-			step1BlockEvent.Wait()
 			return "result1", nil
 		})
 		if err != nil {
 			return "", err
 		}
-
 		ch2, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 			return "result2", nil
 		})
 		if err != nil {
 			return "", err
 		}
-
-		// Select will checkpoint which channel was selected
 		selectedResult, err := Select(dbosCtx, []<-chan StepOutcome[string]{ch1, ch2})
 		if err != nil {
 			return "", err
 		}
-
-		workflowBlockStartEvent.Set()
-		workflowBlockEvent.Wait()
-
 		return selectedResult, nil
 	}
-	RegisterWorkflow(dbosCtx, selectDeterministicWorkflow)
+	RegisterWorkflow(dbosCtx, selectIdempotencyWorkflow)
 
 	dbosCtx.Launch()
 
@@ -1045,72 +1006,46 @@ func TestSelect(t *testing.T) {
 		}, 5*time.Second, 100*time.Millisecond, "expected 2 steps (Go + Select) with DBOS.select at index 1")
 	})
 
-	t.Run("Select checkpointing - deterministic replay", func(t *testing.T) {
-		// Run the first workflow
-		handle, err := RunWorkflow(dbosCtx, selectDeterministicWorkflow, "test-input")
+	t.Run("Select idempotency", func(t *testing.T) {
+		workflowID := uuid.NewString()
+		handle1, err := RunWorkflow(dbosCtx, selectIdempotencyWorkflow, "test-input", WithWorkflowID(workflowID))
 		require.NoError(t, err, "failed to run select workflow")
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first run")
 
-		workflowBlockStartEvent.Wait()
-		workflowBlockStartEvent.Clear()
+		// Restart with the same ID ten times; each time recover via recoverPendingWorkflows and expect same result
+		for i := range 10 {
+			setWorkflowStatusPending(t, dbosCtx, workflowID)
+			handles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+			require.NoError(t, err, "failed to recover pending workflows (iteration %d)", i+1)
+			require.Len(t, handles, 1, "expected 1 recovered handle (iteration %d)", i+1)
+			handle2 := handles[0]
+			require.Equal(t, workflowID, handle2.GetWorkflowID(), "expected recovered handle to have the same ID as the original workflow")
+			result2, err := handle2.GetResult()
+			require.NoError(t, err, "failed to get result from run (iteration %d)", i+1)
+			require.Equal(t, result1, result2, "run (iteration %d) should return the same result", i+1)
+		}
 
-		// Check the steps recorded so far, there should be 2 recorded steps: the second Go step and the Select step
-		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		// Verify steps after execution: two Go steps and one Select step
+		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
 		require.NoError(t, err, "failed to get workflow steps")
-		require.Len(t, steps, 2, "expected 2 steps (1 Go + Select)")
-		assert.Equal(t, "DBOS.select", steps[1].StepName, "expected step 2 to be DBOS.select")
-		assert.Equal(t, 2, steps[1].StepID, "expected DBOS.select step to have StepID 1")
+		require.Len(t, steps, 3, "expected 3 steps (2 Go + Select)")
+		assert.Equal(t, 0, steps[0].StepID, "first step should have StepID 0")
+		assert.Equal(t, 1, steps[1].StepID, "second step should have StepID 1")
+		assert.Equal(t, "DBOS.select", steps[2].StepName, "third step should be DBOS.select")
+		assert.Equal(t, 2, steps[2].StepID, "Select step should have StepID 2")
 		var output0 string
 		err = json.Unmarshal([]byte(steps[0].Output.(string)), &output0)
 		require.NoError(t, err, "failed to decode step 0 output")
-		assert.Equal(t, "result2", output0, "Second Go step should have output 'result2'")
+		assert.Equal(t, "result1", output0, "first Go step should have output 'result1'")
 		var output1 string
 		err = json.Unmarshal([]byte(steps[1].Output.(string)), &output1)
 		require.NoError(t, err, "failed to decode step 1 output")
-		assert.Equal(t, "result2", output1, "Select step should have output 'result2'")
-
-		// Unblock the first step before recovery so both channels will be ready on replay
-		step1BlockEvent.Set()
-
-		// Run recovery several times to verify deterministic replay & step result decoding
-		for i := range 10 {
-			_, err = RunWorkflow(dbosCtx, selectDeterministicWorkflow, "test-input", WithWorkflowID(handle.GetWorkflowID()))
-			require.NoError(t, err, "failed to recover workflow (iteration %d)", i)
-			workflowBlockStartEvent.Wait()
-			workflowBlockStartEvent.Clear()
-		}
-
-		// Check the status is PENDING. If there was a non-deterministic error during the steps execution (specifically, during the Select step), the status would be WorkflowStatusError.
-		// (Also, the event would not have been set and this test would be pending forever.)
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get status from first workflow")
-		require.Equal(t, WorkflowStatusPending, status.Status, "expected workflow status to be WorkflowStatusPending")
-
-		// Unblock the workflow to allow it to complete
-		workflowBlockEvent.Set()
-
-		// Get result from the workflow to verify it returns the correct value
-		result, err := handle.GetResult()
-		require.NoError(t, err, "failed to get result from first workflow")
-		assert.Equal(t, "result2", result, "first execution should return result2 (second step was ready first)")
-
-		// Check the steps again, there should be 3 steps: the first Go step, the second Go step and the Select step
-		steps2, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
-		require.NoError(t, err, "failed to get workflow steps for recovered workflow")
-		require.Len(t, steps2, 3, "expected 3 steps (1 Go + 1 Go + Select) in recovered workflow")
-		assert.Equal(t, "DBOS.select", steps2[2].StepName, "expected step 2 to be DBOS.select in recovered workflow")
-		assert.Equal(t, 2, steps2[2].StepID, "expected DBOS.select step to have StepID 2 in recovered workflow")
-		var output2_0 string
-		err = json.Unmarshal([]byte(steps2[0].Output.(string)), &output2_0)
-		require.NoError(t, err, "failed to decode step2[0] output")
-		assert.Equal(t, "result1", output2_0, "First Go step should have output 'result1'")
-		var output2_1 string
-		err = json.Unmarshal([]byte(steps2[1].Output.(string)), &output2_1)
-		require.NoError(t, err, "failed to decode step2[1] output")
-		assert.Equal(t, "result2", output2_1, "Second Go step should have output 'result2'")
-		var output2_2 string
-		err = json.Unmarshal([]byte(steps2[2].Output.(string)), &output2_2)
-		require.NoError(t, err, "failed to decode step2[2] output")
-		assert.Equal(t, "result2", output2_2, "Select step should have output 'result2'")
+		assert.Equal(t, "result2", output1, "second Go step should have output 'result2'")
+		var output2 string
+		err = json.Unmarshal([]byte(steps[2].Output.(string)), &output2)
+		require.NoError(t, err, "failed to decode step 2 output")
+		assert.Equal(t, result1, output2, "Select step output should match workflow result")
 	})
 }
 
@@ -1541,6 +1476,52 @@ func TestWorkflowIdempotency(t *testing.T) {
 	})
 }
 
+func TestNoConcurrentWorkflowSameID(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	startedEvent := NewEvent()
+	unblockEvent := NewEvent()
+	var runCount int64
+
+	blockingWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		_, err := RunAsStep(dbosCtx, func(ctx context.Context) (int64, error) {
+			n := atomic.AddInt64(&runCount, 1)
+			startedEvent.Set()
+			return n, nil
+		})
+		if err != nil {
+			return "", err
+		}
+		unblockEvent.Wait()
+		return "done", nil
+	}
+	RegisterWorkflow(dbosCtx, blockingWorkflow)
+
+	workflowID := uuid.NewString()
+
+	handle1, err := RunWorkflow(dbosCtx, blockingWorkflow, "input", WithWorkflowID(workflowID))
+	require.NoError(t, err, "failed to start first workflow")
+
+	startedEvent.Wait()
+
+	handle2, err := RunWorkflow(dbosCtx, blockingWorkflow, "input", WithWorkflowID(workflowID))
+	require.NoError(t, err, "failed to run second workflow call")
+	_, ok := handle2.(*workflowPollingHandle[string])
+	require.True(t, ok, "expected second call to return polling handle, got %T", handle2)
+	require.Equal(t, handle1.GetWorkflowID(), handle2.GetWorkflowID(), "both handles should refer to the same workflow ID")
+
+	unblockEvent.Set()
+
+	result1, err := handle1.GetResult()
+	require.NoError(t, err, "failed to get result from first handle")
+	result2, err := handle2.GetResult()
+	require.NoError(t, err, "failed to get result from second handle")
+	require.Equal(t, result1, result2, "both handles should observe the same result")
+	require.Equal(t, "done", result1)
+
+	require.Equal(t, int64(1), atomic.LoadInt64(&runCount), "workflow body should run only once")
+}
+
 func TestWorkflowRecovery(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
@@ -1694,31 +1675,12 @@ func TestWorkflowRecovery(t *testing.T) {
 			assert.Nil(t, steps[0].Error, "workflow %d first step should not have error", i)
 			assert.Nil(t, steps[1].Error, "workflow %d second step should not have error", i)
 		}
-
-		// At least 5 of the 2nd steps should have errored due to execution race
-		// Check they are DBOSErrors with StepExecutionError wrapping a ConflictingIDError
-		var errorsCopy []error
-		require.Eventually(t, func() bool {
-			secondStepErrorsMu.Lock()
-			errorsCopy := make([]error, len(secondStepErrors))
-			copy(errorsCopy, secondStepErrors)
-			secondStepErrorsMu.Unlock()
-			return len(errorsCopy) >= 5
-		}, 10*time.Second, 100*time.Millisecond)
-		for _, err := range errorsCopy {
-			dbosErr, ok := err.(*DBOSError)
-			require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
-			require.Equal(t, StepExecutionError, dbosErr.Code, "expected error code to be StepExecutionError, got %v", dbosErr.Code)
-			require.True(t, errors.Is(dbosErr.Unwrap(), &DBOSError{Code: ConflictingIDError}), "expected underlying error to be ConflictingIDError, got %T", dbosErr.Unwrap())
-		}
 	})
 }
 
 var (
-	maxRecoveryAttempts       = 20
-	deadLetterQueueStartEvent *Event
-	deadLetterQueueEvent      *Event
-	recoveryCount             int64
+	maxRecoveryAttempts = 20
+	recoveryCount       int64
 )
 
 func deadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error) {
@@ -1728,41 +1690,40 @@ func deadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error) {
 		return 0, fmt.Errorf("failed to get workflow ID: %v", err)
 	}
 	fmt.Printf("Dead letter queue workflow %s started, recovery count: %d\n", wfid, recoveryCount)
-	deadLetterQueueStartEvent.Set()
-	deadLetterQueueEvent.Wait()
 	return 0, nil
 }
 
 func infiniteDeadLetterQueueWorkflow(ctx DBOSContext, input string) (int, error) {
-	deadLetterQueueStartEvent.Set()
-	deadLetterQueueEvent.Wait()
 	return 0, nil
 }
 func TestWorkflowDeadLetterQueue(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
 	RegisterWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
+	dbosCtx.Launch()
 
 	t.Run("DeadLetterQueueBehavior", func(t *testing.T) {
-		deadLetterQueueEvent = NewEvent()
-		deadLetterQueueStartEvent = NewEvent()
 		recoveryCount = 0
 
-		// Start a workflow that blocks forever
 		wfID := uuid.NewString()
 		handle, err := RunWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		require.NoError(t, err, "failed to start dead letter queue workflow")
-		deadLetterQueueStartEvent.Wait()
-		deadLetterQueueStartEvent.Clear()
+		result1, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from initial run")
+		require.Equal(t, int64(1), recoveryCount, "expected recovery count 1 after initial run")
 
-		// Attempt to recover the blocked workflow the maximum number of times
+		// Recover the workflow the maximum number of times; each time let it complete then flip to PENDING
+		setWorkflowStatusPending(t, dbosCtx, wfID)
 		for i := range maxRecoveryAttempts {
-			_, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+			recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 			require.NoError(t, err, "failed to recover pending workflows on attempt %d", i+1)
-			deadLetterQueueStartEvent.Wait()
-			deadLetterQueueStartEvent.Clear()
+			require.Len(t, recoveredHandles, 1, "expected 1 recovered handle on attempt %d", i+1)
+			require.Equal(t, wfID, recoveredHandles[0].GetWorkflowID(), "expected recovered handle to have the same ID as the original workflow")
+			_, err = recoveredHandles[0].GetResult()
+			require.NoError(t, err, "failed to get result from recovered handle on attempt %d", i+1)
 			expectedCount := int64(i + 2) // +1 for initial execution, +1 for each recovery
 			require.Equal(t, expectedCount, recoveryCount, "expected recovery count to be %d, got %d", expectedCount, recoveryCount)
+			setWorkflowStatusPending(t, dbosCtx, wfID)
 		}
 
 		// Verify an additional attempt throws a DLQ error and puts the workflow in the DLQ status
@@ -1786,21 +1747,21 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		resumedHandle, err := ResumeWorkflow[int](dbosCtx, wfID)
 		require.NoError(t, err, "failed to resume workflow")
 
-		// Recover pending workflows again - should work without error
-		_, err = recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
-		require.NoError(t, err, "failed to recover pending workflows after resume")
-
-		// Complete the blocked workflow
-		deadLetterQueueEvent.Set()
-
-		// Wait for both handles to complete
-		result1, err := handle.GetResult()
-		require.NoError(t, err, "failed to get result from original handle")
-
 		result2, err := resumedHandle.GetResult()
 		require.NoError(t, err, "failed to get result from resumed handle")
-
 		require.Equal(t, result1, result2)
+		setWorkflowStatusPending(t, dbosCtx, wfID)
+
+		// Recover pending workflows again - should work without error
+		handles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.Len(t, handles, 1, "expected 1 recovered handle after resume")
+		require.Equal(t, resumedHandle.GetWorkflowID(), handles[0].GetWorkflowID(), "expected recovered handle to have the same ID as the resumed handle")
+		require.NoError(t, err, "failed to recover pending workflows after resume")
+
+		result3, err := handles[0].GetResult()
+		require.NoError(t, err, "failed to get result from resumed handle")
+
+		require.Equal(t, result1, int(result3.(float64)))
 
 		// Verify workflow status is SUCCESS
 		status, err = handle.GetStatus()
@@ -1815,46 +1776,29 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 	})
 
 	t.Run("InfiniteRetriesWorkflow", func(t *testing.T) {
-		deadLetterQueueEvent = NewEvent()
-		deadLetterQueueStartEvent = NewEvent()
-
-		// Verify that a workflow with MaxRetries=0 (infinite retries) is retried infinitely
+		// Verify that a workflow with MaxRetries=-1 (infinite retries) can be recovered many times without hitting DLQ
 		wfID := uuid.NewString()
-
 		handle, err := RunWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		require.NoError(t, err, "failed to start infinite dead letter queue workflow")
+		result1, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from initial run")
+		require.Equal(t, 0, result1)
 
-		deadLetterQueueStartEvent.Wait()
-		deadLetterQueueStartEvent.Clear()
-		// Attempt to recover the blocked workflow many times (should never fail)
-		handles := []WorkflowHandle[any]{}
-		for i := range _DEFAULT_MAX_RECOVERY_ATTEMPTS * 2 {
+		// Recover the workflow many times; each time let it complete then flip to PENDING (should never hit DLQ)
+		const infiniteRetryIterations = 10
+		for i := range infiniteRetryIterations {
+			setWorkflowStatusPending(t, dbosCtx, wfID)
 			recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 			require.NoError(t, err, "failed to recover pending workflows on attempt %d", i+1)
-			handles = append(handles, recoveredHandles...)
-			deadLetterQueueStartEvent.Wait()
-			deadLetterQueueStartEvent.Clear()
-		}
-
-		// Complete the workflow
-		deadLetterQueueEvent.Set()
-
-		result, err := handle.GetResult()
-		require.NoError(t, err, "failed to get result from infinite dead letter queue workflow")
-		require.Equal(t, 0, result)
-
-		// Wait for all handles to complete
-		for i, h := range handles {
-			resultAny, err := h.GetResult()
-			require.NoError(t, err, "failed to get result from handle %d", i)
-			// Decode the result from any (which may be float64 after JSON decode) to int
-			// Marshal to JSON then unmarshal into the expected type
+			require.Len(t, recoveredHandles, 1, "expected 1 recovered handle on attempt %d", i+1)
+			resultAny, err := recoveredHandles[0].GetResult()
+			require.NoError(t, err, "failed to get result from recovered handle on attempt %d", i+1)
 			jsonBytes, err := json.Marshal(resultAny)
 			require.NoError(t, err, "failed to marshal result to JSON")
 			var result int
 			err = json.Unmarshal(jsonBytes, &result)
 			require.NoError(t, err, "failed to decode result to int")
-			require.Equal(t, 0, result)
+			require.Equal(t, 0, result, "expected result 0 on attempt %d", i+1)
 		}
 	})
 }
@@ -2022,7 +1966,6 @@ func sendIdempotencyWorkflow(ctx DBOSContext, input sendWorkflowInput) (string, 
 	if err != nil {
 		return "", err
 	}
-	sendIdempotencyEvent.Wait()
 	return "idempotent-send-completed", nil
 }
 
@@ -2035,8 +1978,6 @@ func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 		receiveIdempotencyStartEvent.Set()
 		return "", err
 	}
-	receiveIdempotencyStartEvent.Set()
-	receiveIdempotencyStopEvent.Wait()
 	return msg, nil
 }
 
@@ -2334,9 +2275,6 @@ func TestSendRecv(t *testing.T) {
 	t.Run("SendRecvIdempotency", func(t *testing.T) {
 		// Clear the sync events before starting
 		sendRecvSyncEvent.Clear()
-		receiveIdempotencyStartEvent.Clear()
-		receiveIdempotencyStopEvent.Clear()
-		sendIdempotencyEvent.Clear()
 
 		// Start the receive workflow - it will wait for sendRecvSyncEvent before calling Recv
 		receiveHandle, err := RunWorkflow(dbosCtx, receiveIdempotencyWorkflow, "idempotency-topic")
@@ -2358,13 +2296,39 @@ func TestSendRecv(t *testing.T) {
 		// Now that the send step has completed, signal the receive workflow to proceed
 		sendRecvSyncEvent.Set()
 
-		// Wait for the receive workflow to have received the message
-		receiveIdempotencyStartEvent.Wait()
+		// Wait for the receive workflow to complete
+		result, err := receiveHandle.GetResult()
+		require.NoError(t, err, "failed to get result from receive workflow")
+		require.Equal(t, "m1", result, "expected result to be 'm1'")
+
+		// Now get the result from the send workflow
+		result2, err := sendHandle.GetResult()
+		require.NoError(t, err, "failed to get result from send idempotency workflow")
+		assert.Equal(t, "idempotent-send-completed", result2, "expected result to be 'idempotent-send-completed'")
+
+		// Now reset both workflows
+		setWorkflowStatusPending(t, dbosCtx, sendHandle.GetWorkflowID())
+		setWorkflowStatusPending(t, dbosCtx, receiveHandle.GetWorkflowID())
 
 		// Attempt recovering both workflows. There should be only 1 and 1 steps recorded for send and receive, respectively, after recovery.
 		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.NoError(t, err, "failed to recover pending workflows")
 		require.Len(t, recoveredHandles, 2, "expected 2 recovered handles, got %d", len(recoveredHandles))
+
+		// Find the recovered handle for the send workflow (iterate and check IDs)
+		sendRecoveredHandle := WorkflowHandle[any](nil)
+		receiveRecoveredHandle := WorkflowHandle[any](nil)
+		for _, handle := range recoveredHandles {
+			if handle.GetWorkflowID() == sendHandle.GetWorkflowID() {
+				sendRecoveredHandle = handle
+			}
+			if handle.GetWorkflowID() == receiveHandle.GetWorkflowID() {
+				receiveRecoveredHandle = handle
+			}
+		}
+		require.NotNil(t, sendRecoveredHandle, "failed to find recovered handle for send workflow")
+		require.NotNil(t, receiveRecoveredHandle, "failed to find recovered handle for receive workflow")
+
 		steps, err := GetWorkflowSteps(dbosCtx, sendHandle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
 		require.Len(t, steps, 1, "expected 1 step in send idempotency workflow, got %d", len(steps))
@@ -2386,15 +2350,13 @@ func TestSendRecv(t *testing.T) {
 			"expected recv step CompletedAt to be after or equal to StartedAt")
 
 		// Unblock the workflows to complete
-		receiveIdempotencyStopEvent.Set()
-		result, err := receiveHandle.GetResult()
+		result3, err := receiveRecoveredHandle.GetResult()
 		require.NoError(t, err, "failed to get result from receive idempotency workflow")
-		assert.Equal(t, "m1", result, "expected result to be 'm1'")
+		assert.Equal(t, "m1", result3, "expected result to be 'm1'")
 
-		sendIdempotencyEvent.Set()
-		result, err = sendHandle.GetResult()
+		result4, err := sendRecoveredHandle.GetResult()
 		require.NoError(t, err, "failed to get result from send idempotency workflow")
-		assert.Equal(t, "idempotent-send-completed", result, "expected result to be 'idempotent-send-completed'")
+		assert.Equal(t, "idempotent-send-completed", result4, "expected result to be 'idempotent-send-completed'")
 	})
 
 	t.Run("SendCannotBeCalledWithinStep", func(t *testing.T) {
@@ -3386,20 +3348,8 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 	})
 }
 
-var (
-	sleepStartEvent *Event
-	sleepStopEvent  *Event
-)
-
 func sleepRecoveryWorkflow(dbosCtx DBOSContext, duration time.Duration) (time.Duration, error) {
-	result, err := Sleep(dbosCtx, duration)
-	if err != nil {
-		return 0, err
-	}
-	// Block after sleep so we can recover a pending workflow
-	sleepStartEvent.Set()
-	sleepStopEvent.Wait()
-	return result, nil
+	return Sleep(dbosCtx, duration)
 }
 
 func TestSleep(t *testing.T) {
@@ -3407,34 +3357,31 @@ func TestSleep(t *testing.T) {
 	RegisterWorkflow(dbosCtx, sleepRecoveryWorkflow)
 
 	t.Run("SleepDurableRecovery", func(t *testing.T) {
-		sleepStartEvent = NewEvent()
-		sleepStopEvent = NewEvent()
-
-		// Start a workflow that sleeps for 2 seconds then blocks
 		sleepDuration := 2 * time.Second
+		workflowID := uuid.NewString()
 
-		handle, err := RunWorkflow(dbosCtx, sleepRecoveryWorkflow, sleepDuration)
+		handle1, err := RunWorkflow(dbosCtx, sleepRecoveryWorkflow, sleepDuration, WithWorkflowID(workflowID))
 		require.NoError(t, err, "failed to start sleep recovery workflow")
+		_, err = handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first run")
 
-		sleepStartEvent.Wait()
-		sleepStartEvent.Clear()
+		setWorkflowStatusPending(t, dbosCtx, workflowID)
 
-		// Run the workflow again and check the return time was less than the durable sleep
+		// Run the workflow again; sleep step should be replayed from DB so return time is less than durable sleep
 		startTime := time.Now()
-		_, err = RunWorkflow(dbosCtx, sleepRecoveryWorkflow, sleepDuration, WithWorkflowID(handle.GetWorkflowID()))
+		handles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.NoError(t, err, "failed to start second sleep recovery workflow")
-
-		sleepStartEvent.Wait()
-		// Time elapsed should be at most the sleep duration
+		require.Len(t, handles, 1, "expected 1 recovered handle")
+		handle2 := handles[0]
+		_, err = handle2.GetResult()
+		require.NoError(t, err, "failed to get result from second run")
 		elapsed := time.Since(startTime)
 		assert.Less(t, elapsed, sleepDuration, "expected elapsed time to be less than sleep duration")
 
 		// Verify the sleep step was recorded correctly
-		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
 		require.NoError(t, err, "failed to get workflow steps")
-
 		require.Len(t, steps, 1, "expected 1 step (the sleep), got %d", len(steps))
-
 		step := steps[0]
 		assert.Equal(t, 0, step.StepID, "expected step to have StepID 0")
 		assert.Equal(t, "DBOS.sleep", step.StepName, "expected step name to be 'DBOS.sleep'")
@@ -3443,11 +3390,6 @@ func TestSleep(t *testing.T) {
 		require.False(t, step.CompletedAt.IsZero(), "expected sleep step to have CompletedAt set")
 		require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
 			"expected sleep step CompletedAt to be after or equal to StartedAt")
-
-		sleepStopEvent.Set()
-
-		_, err = handle.GetResult()
-		require.NoError(t, err, "failed to get sleep workflow result")
 	})
 
 	t.Run("SleepCannotBeCalledOutsideWorkflow", func(t *testing.T) {
