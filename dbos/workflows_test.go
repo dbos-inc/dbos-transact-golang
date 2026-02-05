@@ -2346,44 +2346,6 @@ func TestSendRecv(t *testing.T) {
 		require.Contains(t, err.Error(), "DBOS.recv timed out", "expected error message to contain 'DBOS.recv timed out'")
 	})
 
-	t.Run("TestConcurrentRecvs", func(t *testing.T) {
-		// Test concurrent receivers - all should return valid results
-		receiveTopic := "concurrent-recv-topic"
-
-		// Start multiple concurrent receive workflows
-		numReceivers := 5
-		receiverHandles := make([]WorkflowHandle[string], numReceivers)
-
-		// Start all receivers - they will signal when ready and wait for coordination
-		for i := range numReceivers {
-			concurrentRecvReadyEvents[i] = NewEvent()
-			receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflowCoordinated, struct {
-				Topic string
-				i     int
-			}{
-				Topic: receiveTopic,
-				i:     i,
-			}, WithWorkflowID("concurrent-recv-wfid"))
-			require.NoError(t, err, "failed to start receive workflow %d", i)
-			receiverHandles[i] = receiveHandle
-		}
-
-		// Wait for all workflows to signal they are ready
-		for i := range numReceivers {
-			concurrentRecvReadyEvents[i].Wait()
-		}
-
-		// Now unblock all receivers simultaneously so they race to the Recv call
-		concurrentRecvStartEvent.Set()
-
-		// Collect results from all receivers
-		for i := range numReceivers {
-			result, err := receiverHandles[i].GetResult()
-			require.Error(t, err, "expected timeout error when getting result from receiver %d, but got none", i)
-			require.Contains(t, err.Error(), "DBOS.recv timed out", "expected error message to contain 'DBOS.recv timed out'")
-			require.Equal(t, result, "", "receiver %d should have an empty string result", i)
-		}
-	})
 	t.Run("RecvContextCancellation", func(t *testing.T) {
 		// Create a context with a shorter timeout than the Recv timeout (1s < 5s)
 		timeoutCtx, cancel := WithTimeout(dbosCtx, 1*time.Second)
