@@ -1729,7 +1729,6 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// Verify an additional attempt throws a DLQ error and puts the workflow in the DLQ status
 		_, err = recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.Error(t, err, "expected dead letter queue error but got none")
-
 		require.True(t, errors.Is(err, &DBOSError{Code: DeadLetterQueueError}), "expected error to be DeadLetterQueueError, got %T", err)
 
 		// Verify workflow status is MAX_RECOVERY_ATTEMPTS_EXCEEDED

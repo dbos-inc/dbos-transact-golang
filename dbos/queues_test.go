@@ -308,73 +308,78 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 
 	t.Run("QueueWorkflowDLQ", func(t *testing.T) {
-		workflowID := "blocking-workflow-test"
+		workflowID := "queue-dlq-workflow-test"
+		dlqCompleteEvent.Clear()
 
-		// Enqueue the workflow for the first time
+		// Enqueue once; workflow will run and block on dlqCompleteEvent
 		originalHandle, err := RunWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
 		require.NoError(t, err)
 
-		// Wait for the workflow to start
+		// Wait for the workflow to start (blocked on dlqCompleteEvent)
 		dlqStartEvent.Wait()
 		dlqStartEvent.Clear()
 
-		// Try to enqueue the same workflow more times
+		// Re-enqueue the same workflow ID many times; should not trigger DLQ (attempts stay 1)
 		for i := range dlqMaxRetries * 2 {
 			_, err := RunWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue.Name), WithWorkflowID(workflowID))
 			require.NoError(t, err, "failed to enqueue workflow attempt %d", i+1)
 		}
 
-		// Get the status from the original handle and check the attempts counter
+		// ListWorkflows for this queue should show a single pending workflow
+		workflows, err := ListWorkflows(dbosCtx, WithQueueName(dlqEnqueueQueue.Name))
+		require.NoError(t, err, "failed to list workflows for queue")
+		require.Len(t, workflows, 1, "expected single workflow on queue, got %d", len(workflows))
+		assert.Equal(t, WorkflowStatusPending, workflows[0].Status, "expected workflow to be PENDING")
+
+		// Attempts counter should still be 1 (re-enqueues do not increment it)
 		status, err := originalHandle.GetStatus()
 		require.NoError(t, err, "failed to get status of original workflow handle")
-
-		// The attempts counter should still be 1 (the original enqueue)
 		assert.Equal(t, 1, status.Attempts, "expected attempts to be 1")
 
-		// Check that the workflow hits DLQ after re-running max retries
-		handles := make([]WorkflowHandle[any], 0, dlqMaxRetries+1)
-		for range dlqMaxRetries {
-			recoveryHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
-			require.NoError(t, err, "failed to recover pending workflows")
-			assert.Len(t, recoveryHandles, 1, "expected 1 handle")
-			dlqStartEvent.Wait()
-			dlqStartEvent.Clear()
-			handle := recoveryHandles[0]
-			handles = append(handles, handle)
-			status, err := handle.GetStatus()
-			require.NoError(t, err, "failed to get status of recovered workflow handle")
-			assert.Equal(t, WorkflowStatusPending, status.Status, "expected workflow to be in PENDING status after recovery")
-		}
-
-		dlqHandle, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
-		require.NoError(t, err, "failed to recover pending workflows")
-		assert.Len(t, dlqHandle, 1, "expected 1 handle in DLQ")
-		retries := 0
-		for {
-			dlqStatus, err := dlqHandle[0].GetStatus()
-			require.NoError(t, err, "failed to get status of DLQ workflow handle")
-			if dlqStatus.Status != WorkflowStatusMaxRecoveryAttemptsExceeded && retries < 10 {
-				time.Sleep(1 * time.Second) // Wait a bit before checking again
-				retries++
-				continue
-			}
-			require.NoError(t, err, "failed to get status of DLQ workflow handle")
-			assert.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, dlqStatus.Status, "expected workflow to be in DLQ after max retries exceeded")
-			handles = append(handles, dlqHandle[0])
-			break
-		}
-
-		// Check the workflow completes
-		for _, handle := range handles {
-
-			_, resultErr := handle.GetResult()
-
-			var dbosErr *DBOSError
-			require.ErrorAs(t, resultErr, &dbosErr, "expected error to be of type *DBOSError, got %T", resultErr)
-
-			assert.Equal(t, MaxStepRetriesExceeded, dbosErr.Code, "expected workflow to be in DLQ after max retries exceeded")
-		}
+		// Deblock so the workflow can complete
 		dlqCompleteEvent.Set()
+		result, err := originalHandle.GetResult()
+		require.NoError(t, err, "failed to get result from initial run")
+		assert.Equal(t, "test-input", result)
+
+		// Flip to PENDING and loop: recover, GetResult, flip (same pattern as TestWorkflowDeadLetterQueue)
+		setWorkflowStatusPending(t, dbosCtx, workflowID)
+		for i := range dlqMaxRetries {
+			recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+			require.NoError(t, err, "failed to recover pending workflows on attempt %d", i+1)
+			require.Len(t, recoveredHandles, 1, "expected 1 handle on attempt %d", i+1)
+			_, err = recoveredHandles[0].GetResult()
+			require.NoError(t, err, "failed to get result from recovered handle on attempt %d", i+1)
+			// check number of attempts is correctly increment
+			status, err := recoveredHandles[0].GetStatus()
+			require.NoError(t, err, "failed to get status from recovered handle")
+			assert.Equal(t, i+2, status.Attempts, "expected number of attempts to be %d, got %d", i+2, status.Attempts)
+			setWorkflowStatusPending(t, dbosCtx, workflowID)
+		}
+
+		// Next recover should clear the queue assignment, no error should be returned
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "expected no error when recovering pending workflows")
+		require.Len(t, recoveredHandles, 1, "expected 1 recovered handle")
+		require.Equal(t, workflowID, recoveredHandles[0].GetWorkflowID(), "expected recovered handle to have the same ID as the original workflow")
+
+		// The workflow will be eventually dequeued but hit a DLQ error
+		require.Eventually(t, func() bool {
+			status, err := recoveredHandles[0].GetStatus()
+			return err == nil && status.Status == WorkflowStatusMaxRecoveryAttemptsExceeded
+		}, 10*time.Second, 100*time.Millisecond, "expected workflow status to become MAX_RECOVERY_ATTEMPTS_EXCEEDED")
+
+		// Resume the workflow (clears DLQ status), wait for result, then verify it completes with SUCCESS
+		resumedHandle, err := ResumeWorkflow[string](dbosCtx, workflowID)
+		require.NoError(t, err, "failed to resume workflow")
+		resumedResult, err := resumedHandle.GetResult()
+		require.NoError(t, err, "failed to get result from resumed handle")
+		assert.Equal(t, "test-input", resumedResult)
+
+		require.Eventually(t, func() bool {
+			status, err := originalHandle.GetStatus()
+			return err == nil && status.Status == WorkflowStatusSuccess
+		}, 10*time.Second, 100*time.Millisecond, "expected workflow status to become SUCCESS after resume")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after successive enqueues test")
 	})
