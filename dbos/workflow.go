@@ -935,6 +935,11 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		workflowID = params.WorkflowID
 	}
 
+	/*
+		fmt.Println("===== RUN WORKFLOW =====")
+		fmt.Println("calling ctx.RunWorkflow with workflowID", workflowID, "isChildWorkflow", isChildWorkflow)
+		fmt.Println("================================================")
+	*/
 	// Create an uncancellable context for the DBOS operations
 	// This detaches it from any deadline or cancellation signal set by the user
 	uncancellableCtx := WithoutCancel(c)
@@ -1032,10 +1037,11 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		// Insert workflow status with transaction
 		ownerXID := uuid.New().String()
 		insertInput := insertWorkflowStatusDBInput{
-			status:     workflowStatus,
-			maxRetries: params.MaxRetries,
-			tx:         tx,
-			ownerXID:   &ownerXID,
+			status:            workflowStatus,
+			maxRetries:        params.MaxRetries,
+			tx:                tx,
+			ownerXID:          &ownerXID,
+			incrementAttempts: params.isDequeue || params.isRecovery,
 		}
 		insertStatusResult, err = c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
@@ -1075,14 +1081,16 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				(!params.isDequeue && !params.isRecovery && insertStatusResult.ownerXID != ownerXID) || // another executor, not us dequeueing or being instructed to recover, is already owning the workflow OR
 				loaded // this executor is already running the workflow
 
-		// Debug: print each condition
-		fmt.Println("================================================")
-		fmt.Println("len(params.QueueName) > 0", len(params.QueueName) > 0)
-		fmt.Println("insertStatusResult.status == WorkflowStatusSuccess", insertStatusResult.status == WorkflowStatusSuccess)
-		fmt.Println("insertStatusResult.status == WorkflowStatusError", insertStatusResult.status == WorkflowStatusError)
-		fmt.Println("!params.isDequeue && !params.isRecovery && insertStatusResult.ownerXID != ownerXID", !params.isDequeue && !params.isRecovery && insertStatusResult.ownerXID != ownerXID)
-		fmt.Println("loaded", loaded)
-		fmt.Println("shouldSkip", shouldSkip)
+			/*
+				// Debug: print each condition
+				fmt.Println("================================================")
+				fmt.Println("len(params.QueueName) > 0", len(params.QueueName) > 0)
+				fmt.Println("insertStatusResult.status == WorkflowStatusSuccess", insertStatusResult.status == WorkflowStatusSuccess)
+				fmt.Println("insertStatusResult.status == WorkflowStatusError", insertStatusResult.status == WorkflowStatusError)
+				fmt.Println("!params.isDequeue && !params.isRecovery && insertStatusResult.ownerXID != ownerXID", !params.isDequeue && !params.isRecovery && insertStatusResult.ownerXID != ownerXID)
+				fmt.Println("loaded", loaded)
+				fmt.Println("shouldSkip", shouldSkip)
+			*/
 
 		if shouldSkip {
 			// Commit the transaction to update the number of attempts and/or enact the enqueue

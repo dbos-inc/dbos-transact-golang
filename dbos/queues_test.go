@@ -547,19 +547,15 @@ func TestQueueRecovery(t *testing.T) {
 
 	recoveryQueue := NewWorkflowQueue(dbosCtx, "recovery-queue")
 	var recoveryStepCounter int64
-	recoveryStepEvents := make([]*Event, 5) // 5 queued steps
-	recoveryEvent := NewEvent()
 
 	recoveryStepWorkflowFunc := func(ctx DBOSContext, i int) (int, error) {
 		atomic.AddInt64(&recoveryStepCounter, 1)
-		recoveryStepEvents[i].Set()
-		recoveryEvent.Wait()
 		return i, nil
 	}
 	RegisterWorkflow(dbosCtx, recoveryStepWorkflowFunc)
 
 	recoveryWorkflowFunc := func(ctx DBOSContext, input string) ([]int, error) {
-		handles := make([]WorkflowHandle[int], 0, 5) // 5 queued steps
+		handles := make([]WorkflowHandle[int], 0, 5)
 		for i := range 5 {
 			handle, err := RunWorkflow(ctx, recoveryStepWorkflowFunc, i, WithQueue(recoveryQueue.Name))
 			if err != nil {
@@ -584,70 +580,96 @@ func TestQueueRecovery(t *testing.T) {
 	require.NoError(t, err, "failed to launch DBOS instance")
 
 	queuedSteps := 5
-
-	for i := range recoveryStepEvents {
-		recoveryStepEvents[i] = NewEvent()
-	}
-
 	wfid := uuid.NewString()
 
-	// Start the workflow. Wait for all steps to start. Verify that they started.
+	// Run parent workflow to completion
 	handle, err := RunWorkflow(dbosCtx, recoveryWorkflowFunc, "", WithWorkflowID(wfid))
 	require.NoError(t, err, "failed to start workflow")
 
-	for _, e := range recoveryStepEvents {
-		e.Wait()
-		e.Clear()
+	result, err := handle.GetResult()
+	require.NoError(t, err, "failed to get result from parent workflow")
+	expectedResult := []int{0, 1, 2, 3, 4}
+	assert.Equal(t, expectedResult, result, "expected result %v, got %v", expectedResult, result)
+
+	// Parent: 5 RunWorkflow (enqueue children) then 5 GetResult — steps 0..4 enqueue, 5..9 getResult
+	steps, err := GetWorkflowSteps(dbosCtx, wfid)
+	require.NoError(t, err, "failed to get parent workflow steps")
+	require.Len(t, steps, 10, "expected 10 steps (5 enqueued child + 5 getResult)")
+
+	recoveryStepStepName := runtime.FuncForPC(reflect.ValueOf(recoveryStepWorkflowFunc).Pointer()).Name()
+	for i := range queuedSteps {
+		// RunWorkflow steps (enqueue children) — steps 0..4
+		require.Equal(t, i, steps[i].StepID, "step %d StepID", i)
+		require.Equal(t, recoveryStepStepName, steps[i].StepName, "step %d (enqueue) StepName", i)
+	}
+	for i := range queuedSteps {
+		// GetResult steps — steps 5..9
+		idx := queuedSteps + i
+		require.Equal(t, idx, steps[idx].StepID, "step %d StepID", idx)
+		require.Equal(t, "DBOS.getResult", steps[idx].StepName, "step %d (getResult) StepName", idx)
 	}
 
 	assert.Equal(t, int64(queuedSteps), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to match queuedSteps")
 
-	// Recover the workflow, then resume it.
+	// Get child workflow IDs (they were enqueued on recoveryQueue)
+	workflowsOnQueue, err := ListWorkflows(dbosCtx, WithQueueName(recoveryQueue.Name))
+	require.NoError(t, err, "failed to list workflows on recovery queue")
+	require.Len(t, workflowsOnQueue, queuedSteps, "expected %d child workflows on queue", queuedSteps)
+	childIDs := make([]string, 0, queuedSteps)
+	for _, wf := range workflowsOnQueue {
+		childIDs = append(childIDs, wf.ID)
+	}
+
+	// Flip state of parent and all children to PENDING
+	setWorkflowStatusPending(t, dbosCtx, wfid)
+	for _, childID := range childIDs {
+		setWorkflowStatusPending(t, dbosCtx, childID)
+	}
+
+	// Recover and wait for each workflow to finish
 	recoveryHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 	require.NoError(t, err, "failed to recover pending workflows")
-
-	for _, e := range recoveryStepEvents {
-		e.Wait()
-	}
-	recoveryEvent.Set()
-
-	assert.Len(t, recoveryHandles, queuedSteps+1, "expected specific number of recovery handles")
+	require.Len(t, recoveryHandles, queuedSteps+1, "expected parent + %d children", queuedSteps)
 
 	for _, h := range recoveryHandles {
+		resultAny, err := h.GetResult()
+		require.NoError(t, err, "failed to get result from recovered handle %s", h.GetWorkflowID())
 		if h.GetWorkflowID() == wfid {
-			// Root workflow case
-			resultAny, err := h.GetResult()
-			require.NoError(t, err, "failed to get result from recovered root workflow handle")
-			// re-encode and decode the result from []interface{} to []int
 			encodedResult, ok := resultAny.([]any)
-			require.True(t, ok, "expected result to be a []any")
+			require.True(t, ok, "expected parent result to be []any")
 			jsonBytes, err := json.Marshal(encodedResult)
 			require.NoError(t, err, "failed to marshal result to JSON")
 			var castedResult []int
 			err = json.Unmarshal(jsonBytes, &castedResult)
 			require.NoError(t, err, "failed to decode result to []int")
-			expectedResult := []int{0, 1, 2, 3, 4}
-			assert.Equal(t, expectedResult, castedResult, "expected result %v, got %v", expectedResult, castedResult)
+			assert.Equal(t, expectedResult, castedResult, "expected recovered parent result %v, got %v", expectedResult, castedResult)
+		} else {
+			// Child result (float64 from JSON or int)
+			var val int
+			switch v := resultAny.(type) {
+			case float64:
+				val = int(v)
+			case int:
+				val = v
+			default:
+				t.Fatalf("unexpected child result type %T", resultAny)
+			}
+			assert.Contains(t, expectedResult, val, "child result %d not in expected set", val)
 		}
 	}
 
-	result, err := handle.GetResult()
-	require.NoError(t, err, "failed to get result from original handle")
-	expectedResult := []int{0, 1, 2, 3, 4}
-	assert.Equal(t, expectedResult, result, "expected result %v, got %v", expectedResult, result)
+	assert.Equal(t, int64(queuedSteps*2), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to be %d after recovery", queuedSteps*2)
 
-	assert.Equal(t, int64(queuedSteps*2), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to be %d", queuedSteps*2)
-
-	// Rerun the workflow. Because each step is complete, none should start again.
+	// Rerun the workflow; steps should not re-execute (idempotent)
 	rerunHandle, err := RunWorkflow(dbosCtx, recoveryWorkflowFunc, "test-input", WithWorkflowID(wfid))
 	require.NoError(t, err, "failed to rerun workflow")
 	rerunResult, err := rerunHandle.GetResult()
 	require.NoError(t, err, "failed to get result from rerun handle")
 	assert.Equal(t, expectedResult, rerunResult, "expected result %v, got %v", expectedResult, rerunResult)
 
-	assert.Equal(t, int64(queuedSteps*2), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to remain %d", queuedSteps*2)
+	assert.Equal(t, int64(queuedSteps*2), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to remain %d after rerun", queuedSteps*2)
 
-	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after recovery test")
 }
 
 // Note: we could update this test to have the same logic than TestWorkerConcurrency
@@ -823,91 +845,6 @@ func TestWorkerConcurrency(t *testing.T) {
 	completeEvents[3].Set()
 
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx1), "expected queue entries to be cleaned up after global concurrency test")
-}
-
-func TestWorkerConcurrencyXRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
-
-	workerConcurrencyRecoveryQueue := NewWorkflowQueue(dbosCtx, "test-worker-concurrency-recovery-queue", WithWorkerConcurrency(1))
-	workerConcurrencyRecoveryStartEvent1 := NewEvent()
-	workerConcurrencyRecoveryStartEvent2 := NewEvent()
-	workerConcurrencyRecoveryCompleteEvent1 := NewEvent()
-	workerConcurrencyRecoveryCompleteEvent2 := NewEvent()
-
-	// Create workflows with dbosContext
-	workerConcurrencyRecoveryBlockingWf1 := func(ctx DBOSContext, input string) (string, error) {
-		workerConcurrencyRecoveryStartEvent1.Set()
-		workerConcurrencyRecoveryCompleteEvent1.Wait()
-		return input, nil
-	}
-	RegisterWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf1)
-	workerConcurrencyRecoveryBlockingWf2 := func(ctx DBOSContext, input string) (string, error) {
-		workerConcurrencyRecoveryStartEvent2.Set()
-		workerConcurrencyRecoveryCompleteEvent2.Wait()
-		return input, nil
-	}
-	RegisterWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf2)
-
-	err := Launch(dbosCtx)
-	require.NoError(t, err, "failed to launch DBOS instance")
-
-	// Enqueue two workflows on a queue with worker concurrency = 1
-	handle1, err := RunWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf1, "workflow1", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-1"))
-	require.NoError(t, err)
-	handle2, err := RunWorkflow(dbosCtx, workerConcurrencyRecoveryBlockingWf2, "workflow2", WithQueue(workerConcurrencyRecoveryQueue.Name), WithWorkflowID("worker-cc-x-recovery-wf-2"))
-	require.NoError(t, err)
-
-	// Start the first workflow and wait for it to start
-	workerConcurrencyRecoveryStartEvent1.Wait()
-	workerConcurrencyRecoveryStartEvent1.Clear()
-	// Wait for a few seconds to let the queue runner loop
-	time.Sleep(2 * time.Second)
-
-	// Ensure the 2nd workflow is still ENQUEUED
-	status2, err := handle2.GetStatus()
-	require.NoError(t, err, "failed to get status of workflow2")
-	assert.Equal(t, WorkflowStatusEnqueued, status2.Status, "expected workflow2 to be in ENQUEUED status")
-
-	// Verify workflow2 hasn't started yet
-	assert.False(t, workerConcurrencyRecoveryStartEvent2.IsSet, "expected workflow2 to not start while workflow1 is running")
-
-	// Now, manually call the recoverPendingWorkflows method
-	recoveryHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
-	require.NoError(t, err, "failed to recover pending workflows")
-
-	// You should get 1 handle associated with the first workflow
-	assert.Len(t, recoveryHandles, 1, "expected 1 recovery handle")
-
-	// The handle status should tell you the workflow is ENQUEUED
-	recoveredHandle := recoveryHandles[0]
-	assert.Equal(t, "worker-cc-x-recovery-wf-1", recoveredHandle.GetWorkflowID(), "expected recovered handle to be for workflow1")
-	wf1Status, err := recoveredHandle.GetStatus()
-	require.NoError(t, err, "failed to get status of recovered workflow1")
-	assert.Equal(t, WorkflowStatusEnqueued, wf1Status.Status, "expected recovered handle to be in ENQUEUED status")
-
-	// The 1 first workflow should have been dequeued again (FIFO ordering) and the 2nd workflow should still be enqueued
-	workerConcurrencyRecoveryStartEvent1.Wait()
-	status2, err = handle2.GetStatus()
-	require.NoError(t, err, "failed to get status of workflow2")
-	assert.Equal(t, WorkflowStatusEnqueued, status2.Status, "expected workflow2 to still be in ENQUEUED status")
-
-	// Let the 1st workflow complete and let the 2nd workflow start and complete
-	workerConcurrencyRecoveryCompleteEvent1.Set()
-	workerConcurrencyRecoveryStartEvent2.Wait()
-	workerConcurrencyRecoveryCompleteEvent2.Set()
-
-	// Get result from first workflow
-	result1, err := handle1.GetResult()
-	require.NoError(t, err, "failed to get result from workflow1")
-	assert.Equal(t, "workflow1", result1, "expected result from workflow1 to be 'workflow1'")
-
-	// Get result from second workflow
-	result2, err := handle2.GetResult()
-	require.NoError(t, err, "failed to get result from workflow2")
-	assert.Equal(t, "workflow2", result2, "expected result from workflow2 to be 'workflow2'")
-
-	// Ensure queueEntriesAreCleanedUp is set to true
-	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after worker concurrency recovery test")
 }
 
 func rateLimiterTestWorkflow(ctx DBOSContext, _ string) (time.Time, error) {

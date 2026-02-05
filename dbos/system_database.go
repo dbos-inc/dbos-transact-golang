@@ -510,10 +510,11 @@ type insertWorkflowResult struct {
 }
 
 type insertWorkflowStatusDBInput struct {
-	status     WorkflowStatus
-	maxRetries int
-	tx         pgx.Tx
-	ownerXID   *string
+	status            WorkflowStatus
+	maxRetries        int
+	tx                pgx.Tx
+	ownerXID          *string
+	incrementAttempts bool
 }
 
 func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error) {
@@ -585,7 +586,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
 			recovery_attempts = CASE
-                WHEN EXCLUDED.status != $21 THEN workflow_status.recovery_attempts + 1
+                WHEN EXCLUDED.status != $21 THEN workflow_status.recovery_attempts + $23
                 ELSE workflow_status.recovery_attempts
             END,
             updated_at = EXCLUDED.updated_at,
@@ -607,6 +608,10 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		return nil, fmt.Errorf("failed to marshal the authenticated roles: %w", err)
 	}
 
+	recoveryIncrement := 0
+	if input.incrementAttempts {
+		recoveryIncrement = 1
+	}
 	err = input.tx.QueryRow(ctx, query,
 		input.status.ID,
 		input.status.Status,
@@ -630,6 +635,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		input.ownerXID,
 		WorkflowStatusEnqueued,
 		WorkflowStatusEnqueued,
+		recoveryIncrement,
 	).Scan(
 		&result.attempts,
 		&result.status,
@@ -673,12 +679,14 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 
 	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
 	// When this number becomes equal to `maxRetries + 1`, we mark the workflow as `MAX_RECOVERY_ATTEMPTS_EXCEEDED`.
-	fmt.Println("================================================")
-	fmt.Println("result.status", result.status)
-	fmt.Println("result.attempts", result.attempts)
-	fmt.Println("input.maxRetries", input.maxRetries)
-	fmt.Println("result.attempts > input.maxRetries+1", result.attempts > input.maxRetries+1)
-	fmt.Println("================================================")
+	/*
+		fmt.Println("================================================")
+		fmt.Println("result.status", result.status)
+		fmt.Println("result.attempts", result.attempts)
+		fmt.Println("input.maxRetries", input.maxRetries)
+		fmt.Println("result.attempts > input.maxRetries+1", result.attempts > input.maxRetries+1)
+		fmt.Println("================================================")
+	*/
 	if result.status != WorkflowStatusSuccess && result.status != WorkflowStatusError &&
 		input.maxRetries > 0 && result.attempts > input.maxRetries+1 {
 
