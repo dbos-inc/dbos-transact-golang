@@ -1871,7 +1871,9 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 
 	s.logger.Debug("DBOS: Starting notification listener loop")
 
-	poolConn, err := acquire(ctx)
+	poolConn, err := retryWithResult(ctx, func() (*pgxpool.Conn, error) {
+		return acquire(ctx)
+	}, withRetrierLogger(s.logger))
 	if err != nil {
 		s.logger.Error("Failed to acquire listener connection", "error", err)
 		return

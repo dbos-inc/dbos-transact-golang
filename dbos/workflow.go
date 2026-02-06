@@ -2742,7 +2742,9 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 		}, WithStepName("DBOS.cancelWorkflow"))
 		return err
 	} else {
-		return c.systemDB.cancelWorkflow(c, cancelWorkflowDBInput{workflowID: workflowID})
+		return retry(c, func() error {
+			return c.systemDB.cancelWorkflow(c, cancelWorkflowDBInput{workflowID: workflowID})
+		}, withRetrierLogger(c.logger))
 	}
 }
 
@@ -2777,7 +2779,9 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 			return nil, c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
 		}, withTxIsolationLevel(pgx.RepeatableRead), WithStepName("DBOS.resumeWorkflow"))
 	} else {
-		err = c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
+		err = retry(c, func() error {
+			return c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
@@ -2854,7 +2858,9 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 			return c.systemDB.forkWorkflow(ctx, dbInput)
 		}, WithStepName("DBOS.forkWorkflow"))
 	} else {
-		forkedWorkflowID, err = c.systemDB.forkWorkflow(c, dbInput)
+		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
+			return c.systemDB.forkWorkflow(c, dbInput)
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
