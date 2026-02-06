@@ -1674,6 +1674,9 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			require.NoError(t, err, "failed to get result from recovered handle on attempt %d", i+1)
 			expectedCount := int64(i + 2) // +1 for initial execution, +1 for each recovery
 			require.Equal(t, expectedCount, recoveryCount, "expected recovery count to be %d, got %d", expectedCount, recoveryCount)
+			status, err := recoveredHandles[0].GetStatus()
+			require.NoError(t, err, "failed to get status from recovered handle")
+			require.Equal(t, int(expectedCount), status.Attempts, "expected number of attempts to be %d, got %d", expectedCount, status.Attempts)
 			setWorkflowStatusPending(t, dbosCtx, wfID)
 		}
 
