@@ -184,6 +184,9 @@ type dbosContext struct {
 	workflowRegistry        *sync.Map // map[string]WorkflowRegistryEntry
 	workflowCustomNametoFQN *sync.Map // Maps fully qualified workflow names to custom names. Usefor when client enqueues a workflow by name because registry is indexed by FQN.
 
+	// Set of workflow IDs currently running on this context (key = workflow ID, value = struct{}{})
+	activeWorkflowIDs *sync.Map
+
 	// Workflow scheduler
 	workflowScheduler *cron.Cron
 
@@ -223,6 +226,7 @@ func (c *dbosContext) From(ctx context.Context) DBOSContext {
 		workflowsWg:             c.workflowsWg,
 		workflowRegistry:        c.workflowRegistry,
 		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
+		activeWorkflowIDs:       c.activeWorkflowIDs,
 		applicationVersion:      c.applicationVersion,
 		executorID:              c.executorID,
 		applicationID:           c.applicationID,
@@ -250,6 +254,7 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 			workflowsWg:             dbosCtx.workflowsWg,
 			workflowRegistry:        dbosCtx.workflowRegistry,
 			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
+			activeWorkflowIDs:       dbosCtx.activeWorkflowIDs,
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
@@ -280,6 +285,7 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 			workflowsWg:             dbosCtx.workflowsWg,
 			workflowRegistry:        dbosCtx.workflowRegistry,
 			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
+			activeWorkflowIDs:       dbosCtx.activeWorkflowIDs,
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
@@ -308,6 +314,7 @@ func WithCancelCause(ctx DBOSContext) (DBOSContext, context.CancelCauseFunc) {
 			workflowsWg:             dbosCtx.workflowsWg,
 			workflowRegistry:        dbosCtx.workflowRegistry,
 			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
+			activeWorkflowIDs:       dbosCtx.activeWorkflowIDs,
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
@@ -334,6 +341,7 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 			workflowsWg:             dbosCtx.workflowsWg,
 			workflowRegistry:        dbosCtx.workflowRegistry,
 			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
+			activeWorkflowIDs:       dbosCtx.activeWorkflowIDs,
 			applicationVersion:      dbosCtx.applicationVersion,
 			executorID:              dbosCtx.executorID,
 			applicationID:           dbosCtx.applicationID,
@@ -427,6 +435,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 		ctxCancelFunc:           cancelFunc,
 		workflowRegistry:        &sync.Map{},
 		workflowCustomNametoFQN: &sync.Map{},
+		activeWorkflowIDs:       &sync.Map{},
 	}
 
 	// Load and process the configuration

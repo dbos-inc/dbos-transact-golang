@@ -633,6 +633,8 @@ type workflowOptions struct {
 	AuthenticatedRoles  []string
 	QueuePartitionKey   string
 	alreadyEncodedInput bool
+	isDequeue           bool
+	isRecovery          bool
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
@@ -697,6 +699,20 @@ func withWorkflowName(name string) WorkflowOption {
 func withAlreadyEncodedInput() WorkflowOption {
 	return func(p *workflowOptions) {
 		p.alreadyEncodedInput = true
+	}
+}
+
+// Private option set when RunWorkflow is invoked from the queue runner (dbos/queue.go).
+func withIsDequeue() WorkflowOption {
+	return func(p *workflowOptions) {
+		p.isDequeue = true
+	}
+}
+
+// Private option set when RunWorkflow is invoked from the recovery path (dbos/recovery.go).
+func withIsRecovery() WorkflowOption {
+	return func(p *workflowOptions) {
+		p.isRecovery = true
 	}
 }
 
@@ -1014,10 +1030,13 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		defer tx.Rollback(uncancellableCtx) // Rollback if not committed
 
 		// Insert workflow status with transaction
+		ownerXID := uuid.New().String()
 		insertInput := insertWorkflowStatusDBInput{
-			status:     workflowStatus,
-			maxRetries: params.MaxRetries,
-			tx:         tx,
+			status:            workflowStatus,
+			maxRetries:        params.MaxRetries,
+			tx:                tx,
+			ownerXID:          &ownerXID,
+			incrementAttempts: params.isDequeue || params.isRecovery,
 		}
 		insertStatusResult, err = c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
@@ -1026,6 +1045,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		}
 
 		// Record child workflow relationship if this is a child workflow
+		// We already have checked this earlier so this path should only be taken if the child is executing the first time
 		if isChildWorkflow {
 			// Get the step ID that was used for generating the child workflow ID
 			childInput := recordChildWorkflowDBInput{
@@ -1044,8 +1064,19 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			}
 		}
 
-		// Return a polling handle if: we are enqueueing, the workflow is already in a terminal state (success or error),
-		if len(params.QueueName) > 0 || insertStatusResult.status == WorkflowStatusSuccess || insertStatusResult.status == WorkflowStatusError {
+		var loaded bool
+		if c.activeWorkflowIDs != nil {
+			_, loaded = c.activeWorkflowIDs.Load(workflowID)
+		}
+
+		shouldSkip :=
+			len(params.QueueName) > 0 || // We are enqueueing OR
+				insertStatusResult.status == WorkflowStatusSuccess || // workflow is in a terminal state (success) OR
+				insertStatusResult.status == WorkflowStatusError || // workflow is in a terminal state (error) OR
+				(!params.isDequeue && !params.isRecovery && insertStatusResult.ownerXID != ownerXID) || // another executor, not us dequeueing or being instructed to recover, is already owning the workflow OR
+				loaded // this executor is already running the workflow
+
+		if shouldSkip {
 			// Commit the transaction to update the number of attempts and/or enact the enqueue
 			if err := tx.Commit(uncancellableCtx); err != nil {
 				return newWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
@@ -1107,6 +1138,14 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	c.workflowsWg.Add(1)
 	go func() {
 		defer c.workflowsWg.Done()
+
+		if c.activeWorkflowIDs != nil {
+			_, loaded := c.activeWorkflowIDs.LoadOrStore(workflowID, struct{}{})
+			if loaded { // This should never happen, but if it does, we need to log it
+				c.logger.Error("UNREACHABLE: workflow already running on this context", "workflow_id", workflowID)
+			}
+			defer c.activeWorkflowIDs.Delete(workflowID)
+		}
 
 		var result any
 		var err error
@@ -2703,7 +2742,9 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 		}, WithStepName("DBOS.cancelWorkflow"))
 		return err
 	} else {
-		return c.systemDB.cancelWorkflow(c, cancelWorkflowDBInput{workflowID: workflowID})
+		return retry(c, func() error {
+			return c.systemDB.cancelWorkflow(c, cancelWorkflowDBInput{workflowID: workflowID})
+		}, withRetrierLogger(c.logger))
 	}
 }
 
@@ -2738,7 +2779,9 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 			return nil, c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
 		}, withTxIsolationLevel(pgx.RepeatableRead), WithStepName("DBOS.resumeWorkflow"))
 	} else {
-		err = c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
+		err = retry(c, func() error {
+			return c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
@@ -2815,7 +2858,9 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 			return c.systemDB.forkWorkflow(ctx, dbInput)
 		}, WithStepName("DBOS.forkWorkflow"))
 	} else {
-		forkedWorkflowID, err = c.systemDB.forkWorkflow(c, dbInput)
+		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
+			return c.systemDB.forkWorkflow(c, dbInput)
+		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err

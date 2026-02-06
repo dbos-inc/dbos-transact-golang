@@ -310,7 +310,7 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 				}
 
 				// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
-				_, err := registeredWorkflow.wrappedFunction(ctx, workflow.input, WithWorkflowID(workflow.id))
+				_, err := registeredWorkflow.wrappedFunction(ctx, workflow.input, WithWorkflowID(workflow.id), withIsDequeue())
 				if err != nil {
 					queueLogger.Error("Error running queued workflow", "error", err)
 				}

@@ -127,7 +127,20 @@ func (e *Event) Clear() {
 	e.IsSet = false
 }
 
-/* Helpers */
+// setWorkflowStatusPending sets the workflow's status to PENDING in the DB (clearing output, error, started_at_epoch_ms).
+func setWorkflowStatusPending(t *testing.T, dbosCtx DBOSContext, workflowID string) {
+	t.Helper()
+	c, ok := dbosCtx.(*dbosContext)
+	require.True(t, ok, "expected DBOSContext to be *dbosContext")
+	sysDB, ok := c.systemDB.(*sysDB)
+	require.True(t, ok, "expected systemDB to be *sysDB")
+	updateQuery := fmt.Sprintf(`UPDATE %s.workflow_status
+		SET status = $1, output = NULL, error = NULL, started_at_epoch_ms = NULL, updated_at = $2
+		WHERE workflow_uuid = $3`, pgx.Identifier{sysDB.schema}.Sanitize())
+	_, err := sysDB.pool.Exec(context.Background(), updateQuery,
+		WorkflowStatusPending, time.Now().UnixMilli(), workflowID)
+	require.NoError(t, err, "failed to set workflow status to PENDING")
+}
 
 func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 	maxTries := 10
