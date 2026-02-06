@@ -36,11 +36,21 @@ func queueStep(_ context.Context, input string) (string, error) {
 func TestWorkflowQueues(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	queue := NewWorkflowQueue(dbosCtx, "test-queue")
-	dlqEnqueueQueue := NewWorkflowQueue(dbosCtx, "test-successive-enqueue-queue")
-	conflictQueue1 := NewWorkflowQueue(dbosCtx, "conflict-queue-1")
-	conflictQueue2 := NewWorkflowQueue(dbosCtx, "conflict-queue-2")
-	dedupQueue := NewWorkflowQueue(dbosCtx, "test-dedup-queue")
+	queue := NewWorkflowQueue(dbosCtx, "test-queue",
+		WithQueueBasePollingInterval(50*time.Millisecond),
+		WithQueueMaxPollingInterval(500*time.Millisecond))
+	dlqEnqueueQueue := NewWorkflowQueue(dbosCtx, "test-successive-enqueue-queue",
+		WithQueueBasePollingInterval(50*time.Millisecond),
+		WithQueueMaxPollingInterval(500*time.Millisecond))
+	conflictQueue1 := NewWorkflowQueue(dbosCtx, "conflict-queue-1",
+		WithQueueBasePollingInterval(50*time.Millisecond),
+		WithQueueMaxPollingInterval(500*time.Millisecond))
+	conflictQueue2 := NewWorkflowQueue(dbosCtx, "conflict-queue-2",
+		WithQueueBasePollingInterval(50*time.Millisecond),
+		WithQueueMaxPollingInterval(500*time.Millisecond))
+	dedupQueue := NewWorkflowQueue(dbosCtx, "test-dedup-queue",
+		WithQueueBasePollingInterval(50*time.Millisecond),
+		WithQueueMaxPollingInterval(500*time.Millisecond))
 
 	dlqStartEvent := NewEvent()
 	dlqCompleteEvent := NewEvent()
