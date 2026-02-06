@@ -1312,7 +1312,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 }
 
 func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*string, error) {
-	query := fmt.Sprintf(`SELECT status, output, error FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
+	query := fmt.Sprintf(`SELECT status, output, error, recovery_attempts FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
 	var status WorkflowStatusType
 	if pollInterval <= 0 {
 		pollInterval = _DB_RETRY_INTERVAL
@@ -1327,7 +1327,8 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, poll
 		row := s.pool.QueryRow(ctx, query, workflowID)
 		var outputString *string
 		var errorStr *string
-		err := row.Scan(&status, &outputString, &errorStr)
+		var attempts int
+		err := row.Scan(&status, &outputString, &errorStr, &attempts)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				time.Sleep(pollInterval)
@@ -1345,7 +1346,7 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, poll
 		case WorkflowStatusCancelled:
 			return outputString, newAwaitedWorkflowCancelledError(workflowID)
 		case WorkflowStatusMaxRecoveryAttemptsExceeded:
-			return outputString, newAwaitedWorkflowMaxStepRetriesExceeded(workflowID)
+			return outputString, newDeadLetterQueueError(workflowID, attempts-1)
 		default:
 			time.Sleep(pollInterval)
 		}

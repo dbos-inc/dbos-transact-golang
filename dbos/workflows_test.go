@@ -1690,6 +1690,13 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
 
+		// Verify that getResult returns the DLQ error. Need a new handle
+		retrievedHandle, err := RetrieveWorkflow[int](dbosCtx, wfID)
+		require.NoError(t, err, "failed to retrieve workflow")
+		_, err = retrievedHandle.GetResult()
+		require.Error(t, err, "expected dead letter queue error but got none")
+		require.Contains(t, err.Error(), "dead-letter queue", "expected error to mention dead-letter queue, got: %v", err)
+
 		// Verify that attempting to start a workflow with the same ID throws a DLQ error
 		_, err = RunWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		require.Error(t, err, "expected dead letter queue error when restarting workflow with same ID but got none")
