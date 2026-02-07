@@ -1695,7 +1695,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		require.NoError(t, err, "failed to retrieve workflow")
 		_, err = retrievedHandle.GetResult()
 		require.Error(t, err, "expected dead letter queue error but got none")
-		expectedDLQMsg := fmt.Sprintf("Workflow %s has been moved to the dead-letter queue after exceeding the maximum of %d retries", wfID, maxRecoveryAttempts+1)
+		expectedDLQMsg := fmt.Sprintf("Workflow %s has been moved to the dead-letter queue after exceeding the maximum of %d retries", wfID, maxRecoveryAttempts)
 		require.Contains(t, err.Error(), expectedDLQMsg, "expected error to mention dead-letter queue, got: %v", err)
 
 		// Verify that attempting to start a workflow with the same ID throws a DLQ error

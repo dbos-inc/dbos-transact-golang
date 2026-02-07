@@ -1346,7 +1346,7 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, poll
 		case WorkflowStatusCancelled:
 			return outputString, newAwaitedWorkflowCancelledError(workflowID)
 		case WorkflowStatusMaxRecoveryAttemptsExceeded:
-			return outputString, newDeadLetterQueueError(workflowID, attempts-1)
+			return outputString, newDeadLetterQueueError(workflowID, attempts-2)
 		default:
 			time.Sleep(pollInterval)
 		}
