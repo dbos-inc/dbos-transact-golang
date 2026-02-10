@@ -451,8 +451,8 @@ func TestContext(t *testing.T) {
 		}()
 		require.NotNil(t, dbosCtx)
 
-		// From(derivedCtx) returns a DBOS context that wraps the derived context
-		fromCtx := dbosCtx.From(derivedCtx)
+		// From(dbosCtx, derivedCtx) returns a DBOS context that wraps the derived context
+		fromCtx := From(dbosCtx, derivedCtx)
 		require.NotNil(t, fromCtx)
 
 		// Value must return all values: from the base (old) and from the derived (new)
