@@ -872,8 +872,26 @@ func TestListWorkflows(t *testing.T) {
 		}
 		return fmt.Sprintf("result-%d-%s", input.Value, input.ID), nil
 	}
+	otherWorkflow := func(ctx DBOSContext, input testInput) (string, error) {
+		if input.Value < 0 {
+			return "", fmt.Errorf("negative value: %d", input.Value)
+		}
+		return fmt.Sprintf("result-%d-%s", input.Value, input.ID), nil
+	}
 	RegisterWorkflow(serverCtx, simpleWorkflow, WithWorkflowName("SimpleWorkflow"))
-	RegisterWorkflow(serverCtx, simpleWorkflow, WithWorkflowName("OtherWorkflow"))
+	RegisterWorkflow(serverCtx, otherWorkflow, WithWorkflowName("OtherWorkflow"))
+
+	// Parent/child workflows for WithParentWorkflowID filter test
+	childWfForListTest := func(ctx DBOSContext, input string) (string, error) { return input, nil }
+	parentWfForListTest := func(ctx DBOSContext, _ string) (string, error) {
+		h, err := RunWorkflow(ctx, childWfForListTest, "child-input")
+		if err != nil {
+			return "", err
+		}
+		return h.GetResult()
+	}
+	RegisterWorkflow(serverCtx, childWfForListTest, WithWorkflowName("ChildForListTest"))
+	RegisterWorkflow(serverCtx, parentWfForListTest, WithWorkflowName("ParentForListTest"))
 
 	// Launch server
 	err = Launch(serverCtx)
@@ -1007,7 +1025,7 @@ func TestListWorkflows(t *testing.T) {
 			WithWorkflowIDPrefix("test-"), // Only our test workflows
 			WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}))
 		require.NoError(t, err, "failed to list successful workflows")
-		assert.Len(t, successWorkflows, 8, "expected 8 successful workflows")
+		assert.Len(t, successWorkflows, 12, "expected 12 successful workflows (8 initial + 2 OtherWorkflow + 2 queue2)")
 		// Verify all returned workflows have SUCCESS status
 		for _, wf := range successWorkflows {
 			assert.Equal(t, WorkflowStatusSuccess, wf.Status, "workflow %s has unexpected status", wf.ID)
@@ -1032,12 +1050,12 @@ func TestListWorkflows(t *testing.T) {
 		require.NoError(t, err, "failed to list first half workflows by time range")
 		assert.Len(t, firstHalfWorkflows, 5, "expected 5 workflows in first half time range")
 
-		// Test 6b: Filter by time range - last 5 workflows (start+500ms to end)
+		// Test 6b: Filter by time range - workflows started at or after firstHalfTime
 		secondHalfWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithStartTime(firstHalfTime))
 		require.NoError(t, err, "failed to list second half workflows by time range")
-		assert.Len(t, secondHalfWorkflows, 5, "expected 5 workflows in second half time range")
+		assert.Len(t, secondHalfWorkflows, 9, "expected 9 workflows in second half (5 test-other-5..9 + 2 test-other-name + 2 test-queue2)")
 
 		// Test 7: Test sorting order (ascending - default)
 		ascWorkflows, err := client.ListWorkflows(
@@ -1139,6 +1157,23 @@ func TestListWorkflows(t *testing.T) {
 		}
 		assert.GreaterOrEqual(t, queuesSeen[queue.Name], 12, "expected at least 12 workflows on first queue")
 		assert.GreaterOrEqual(t, queuesSeen[queue2.Name], 2, "expected at least 2 workflows on second queue")
+
+		// Test 14: Filter by parent workflow ID
+		parentHandle, err := Enqueue[string, string](client, queue.Name, "ParentForListTest", "ignored",
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err, "failed to enqueue parent workflow")
+		_, err = parentHandle.GetResult()
+		require.NoError(t, err, "parent workflow should succeed")
+		parentID := parentHandle.GetWorkflowID()
+		childWorkflows, err := client.ListWorkflows(WithParentWorkflowID(parentID))
+		require.NoError(t, err, "failed to list workflows by parent ID")
+		assert.Len(t, childWorkflows, 1, "expected one child workflow")
+		assert.Equal(t, parentID, childWorkflows[0].ParentWorkflowID, "child should have ParentWorkflowID set")
+		assert.NotEmpty(t, childWorkflows[0].ID, "child workflow ID should be non-empty")
+		// Filter with nonexistent parent returns empty
+		nonexistent, err := client.ListWorkflows(WithParentWorkflowID("nonexistent-parent-id"))
+		require.NoError(t, err)
+		assert.Len(t, nonexistent, 0)
 	})
 	// Verify all queue entries are cleaned up
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after list workflows tests")
