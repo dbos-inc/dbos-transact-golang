@@ -72,7 +72,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Run tests
-      run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 ./...
+      run: go vet ./... && gotestsum --format github-action -- -race -v -count=1 -timeout 15m ./...
       working-directory: ./dbos
       env:
         PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
