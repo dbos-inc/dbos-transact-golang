@@ -1158,18 +1158,21 @@ func TestListWorkflows(t *testing.T) {
 		assert.GreaterOrEqual(t, queuesSeen[queue.Name], 12, "expected at least 12 workflows on first queue")
 		assert.GreaterOrEqual(t, queuesSeen[queue2.Name], 2, "expected at least 2 workflows on second queue")
 
-		// Test 14: Filter by parent workflow ID
+		// Test 14: Filter by parent workflow ID (child ID is parentID-0 for first step)
+		parentID := "list-test-parent-id"
 		parentHandle, err := Enqueue[string, string](client, queue.Name, "ParentForListTest", "ignored",
+			WithEnqueueWorkflowID(parentID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue parent workflow")
 		_, err = parentHandle.GetResult()
 		require.NoError(t, err, "parent workflow should succeed")
-		parentID := parentHandle.GetWorkflowID()
+		assert.Equal(t, parentID, parentHandle.GetWorkflowID(), "parent should have requested workflow ID")
+		expectedChildID := parentID + "-0"
 		childWorkflows, err := client.ListWorkflows(WithParentWorkflowID(parentID))
 		require.NoError(t, err, "failed to list workflows by parent ID")
 		assert.Len(t, childWorkflows, 1, "expected one child workflow")
 		assert.Equal(t, parentID, childWorkflows[0].ParentWorkflowID, "child should have ParentWorkflowID set")
-		assert.NotEmpty(t, childWorkflows[0].ID, "child workflow ID should be non-empty")
+		assert.Equal(t, expectedChildID, childWorkflows[0].ID, "child workflow ID should be parentID-0")
 		// Filter with nonexistent parent returns empty
 		nonexistent, err := client.ListWorkflows(WithParentWorkflowID("nonexistent-parent-id"))
 		require.NoError(t, err)
