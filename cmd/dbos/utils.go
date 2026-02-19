@@ -124,8 +124,8 @@ func confirmAction(prompt string) bool {
 }
 
 func isCockroachDB(ctx context.Context, conn *pgx.Conn) bool {
-	var dummy int
-	err := conn.QueryRow(ctx, "SELECT 1 FROM crdb_internal.cluster_settings LIMIT 1").Scan(&dummy)
+	var version string
+	err := conn.QueryRow(ctx, "SHOW CLUSTER SETTING version").Scan(&version)
 	return err == nil
 }
 
