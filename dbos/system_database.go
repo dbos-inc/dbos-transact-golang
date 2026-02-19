@@ -707,21 +707,23 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 	return &result, nil
 }
 
-// ListWorkflowsInput represents the input parameters for listing workflows
+// listWorkflowsDBInput represents the input parameters for listing workflows.
+// String filter fields are slices to support filtering by one or many values.
 type listWorkflowsDBInput struct {
-	workflowName       string
-	queueName          string
+	workflowName       []string
+	queueName          []string
 	queuesOnly         bool
-	workflowIDPrefix   string
+	workflowIDPrefix   []string
 	workflowIDs        []string
-	authenticatedUser  string
+	authenticatedUser  []string
 	startTime          time.Time
 	endTime            time.Time
 	status             []WorkflowStatusType
-	applicationVersion string
+	applicationVersion []string
 	executorIDs        []string
-	forkedFrom         string
-	deduplicationID    string
+	forkedFrom         []string
+	parentWorkflowID   []string
+	deduplicationID    []string
 	limit              *int
 	offset             *int
 	sortDesc           bool
@@ -739,7 +741,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		"workflow_uuid", "status", "name", "authenticated_user", "assumed_role", "authenticated_roles",
 		"executor_id", "created_at", "updated_at", "application_version", "application_id",
 		"recovery_attempts", "queue_name", "workflow_timeout_ms", "workflow_deadline_epoch_ms", "started_at_epoch_ms",
-		"deduplication_id", "priority", "queue_partition_key", "forked_from",
+		"deduplication_id", "priority", "queue_partition_key", "forked_from", "parent_workflow_id",
 	}
 
 	if input.loadOutput {
@@ -752,23 +754,23 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 	baseQuery := fmt.Sprintf("SELECT %s FROM %s.workflow_status", strings.Join(loadColumns, ", "), pgx.Identifier{s.schema}.Sanitize())
 
 	// Add filters using query builder
-	if input.workflowName != "" {
-		qb.addWhere("name", input.workflowName)
+	if len(input.workflowName) > 0 {
+		qb.addWhereAny("name", input.workflowName)
 	}
-	if input.queueName != "" {
-		qb.addWhere("queue_name", input.queueName)
+	if len(input.queueName) > 0 {
+		qb.addWhereAny("queue_name", input.queueName)
 	}
 	if input.queuesOnly {
 		qb.addWhereIsNotNull("queue_name")
 	}
-	if input.workflowIDPrefix != "" {
-		qb.addWhereLike("workflow_uuid", input.workflowIDPrefix+"%")
+	if len(input.workflowIDPrefix) > 0 {
+		qb.addWhereLikeAny("workflow_uuid", input.workflowIDPrefix, "%")
 	}
 	if len(input.workflowIDs) > 0 {
 		qb.addWhereAny("workflow_uuid", input.workflowIDs)
 	}
-	if input.authenticatedUser != "" {
-		qb.addWhere("authenticated_user", input.authenticatedUser)
+	if len(input.authenticatedUser) > 0 {
+		qb.addWhereAny("authenticated_user", input.authenticatedUser)
 	}
 	if !input.startTime.IsZero() {
 		qb.addWhereGreaterEqual("created_at", input.startTime.UnixMilli())
@@ -779,17 +781,20 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 	if len(input.status) > 0 {
 		qb.addWhereAny("status", input.status)
 	}
-	if input.applicationVersion != "" {
-		qb.addWhere("application_version", input.applicationVersion)
+	if len(input.applicationVersion) > 0 {
+		qb.addWhereAny("application_version", input.applicationVersion)
 	}
 	if len(input.executorIDs) > 0 {
 		qb.addWhereAny("executor_id", input.executorIDs)
 	}
-	if input.forkedFrom != "" {
-		qb.addWhere("forked_from", input.forkedFrom)
+	if len(input.forkedFrom) > 0 {
+		qb.addWhereAny("forked_from", input.forkedFrom)
 	}
-	if input.deduplicationID != "" {
-		qb.addWhere("deduplication_id", input.deduplicationID)
+	if len(input.parentWorkflowID) > 0 {
+		qb.addWhereAny("parent_workflow_id", input.parentWorkflowID)
+	}
+	if len(input.deduplicationID) > 0 {
+		qb.addWhereAny("deduplication_id", input.deduplicationID)
 	}
 
 	// Build complete query
@@ -3144,6 +3149,20 @@ func (qb *queryBuilder) addWhereAny(column string, values any) {
 	qb.argCounter++
 	qb.whereClauses = append(qb.whereClauses, fmt.Sprintf("%s = ANY($%d)", column, qb.argCounter))
 	qb.args = append(qb.args, values)
+}
+
+// addWhereLikeAny adds (column LIKE $n OR column LIKE $n+1 OR ...) for each prefix+suffix pattern.
+func (qb *queryBuilder) addWhereLikeAny(column string, prefixes []string, suffix string) {
+	if len(prefixes) == 0 {
+		return
+	}
+	ors := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		qb.argCounter++
+		ors[i] = fmt.Sprintf("%s LIKE $%d", column, qb.argCounter)
+		qb.args = append(qb.args, p+suffix)
+	}
+	qb.whereClauses = append(qb.whereClauses, "("+strings.Join(ors, " OR ")+")")
 }
 
 func (qb *queryBuilder) addWhereGreaterEqual(column string, value any) {

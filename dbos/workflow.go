@@ -1017,6 +1017,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		AuthenticatedRoles: params.AuthenticatedRoles,
 		QueuePartitionKey:  params.QueuePartitionKey,
 	}
+	if isChildWorkflow {
+		workflowStatus.ParentWorkflowID = parentWorkflowState.workflowID
+	}
 
 	var earlyReturnPollingHandle *workflowPollingHandle[any]
 	var insertStatusResult *insertWorkflowResult
@@ -2919,20 +2922,21 @@ type listWorkflowsOptions struct {
 	status           []WorkflowStatusType
 	startTime        time.Time
 	endTime          time.Time
-	name             string
-	appVersion       string
-	user             string
+	name             []string
+	appVersion       []string
+	user             []string
 	limit            *int
 	offset           *int
 	sortDesc         bool
-	workflowIDPrefix string
+	workflowIDPrefix []string
 	loadInput        bool
 	loadOutput       bool
-	queueName        string
+	queueName        []string
 	queuesOnly       bool
 	executorIDs      []string
-	forkedFrom       string
-	deduplicationID  string
+	forkedFrom       []string
+	parentWorkflowID []string
+	deduplicationID  []string
 }
 
 // ListWorkflowsOption is a functional option for configuring workflow listing parameters.
@@ -2966,22 +2970,23 @@ func WithEndTime(endTime time.Time) ListWorkflowsOption {
 	}
 }
 
-// WithName filters workflows by the specified workflow function name.
-func WithName(name string) ListWorkflowsOption {
+// WithName filters workflows by the specified workflow function name(s).
+// Pass one or more names; workflows matching any of them are returned.
+func WithName(name ...string) ListWorkflowsOption {
 	return func(p *listWorkflowsOptions) {
 		p.name = name
 	}
 }
 
-// WithAppVersion filters workflows by the specified application version.
-func WithAppVersion(appVersion string) ListWorkflowsOption {
+// WithAppVersion filters workflows by the specified application version(s).
+func WithAppVersion(appVersion ...string) ListWorkflowsOption {
 	return func(p *listWorkflowsOptions) {
 		p.appVersion = appVersion
 	}
 }
 
-// WithUser filters workflows by the specified authenticated user.
-func WithUser(user string) ListWorkflowsOption {
+// WithUser filters workflows by the specified authenticated user(s).
+func WithUser(user ...string) ListWorkflowsOption {
 	return func(p *listWorkflowsOptions) {
 		p.user = user
 	}
@@ -3008,8 +3013,9 @@ func WithSortDesc() ListWorkflowsOption {
 	}
 }
 
-// WithWorkflowIDPrefix filters workflows by workflow ID prefix.
-func WithWorkflowIDPrefix(prefix string) ListWorkflowsOption {
+// WithWorkflowIDPrefix filters workflows by workflow ID prefix(es).
+// Pass one or more prefixes; workflows whose ID starts with any of them are returned.
+func WithWorkflowIDPrefix(prefix ...string) ListWorkflowsOption {
 	return func(p *listWorkflowsOptions) {
 		p.workflowIDPrefix = prefix
 	}
@@ -3029,9 +3035,9 @@ func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
 	}
 }
 
-// WithQueueName filters workflows by the specified queue name.
+// WithQueueName filters workflows by the specified queue name(s).
 // This is typically used when listing queued workflows.
-func WithQueueName(queueName string) ListWorkflowsOption {
+func WithQueueName(queueName ...string) ListWorkflowsOption {
 	return func(p *listWorkflowsOptions) {
 		p.queueName = queueName
 	}
@@ -3051,15 +3057,22 @@ func WithExecutorIDs(executorIDs []string) ListWorkflowsOption {
 	}
 }
 
-// WithForkedFrom filters workflows by the specified forked_from workflow ID.
-func WithForkedFrom(forkedFrom string) ListWorkflowsOption {
+// WithForkedFrom filters workflows by the specified forked_from workflow ID(s).
+func WithForkedFrom(forkedFrom ...string) ListWorkflowsOption {
 	return func(p *listWorkflowsOptions) {
 		p.forkedFrom = forkedFrom
 	}
 }
 
-// WithFilterDeduplicationID filters workflows by the specified deduplication ID.
-func WithFilterDeduplicationID(deduplicationID string) ListWorkflowsOption {
+// WithParentWorkflowID filters workflows by the specified parent workflow ID(s).
+func WithParentWorkflowID(parentWorkflowID ...string) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.parentWorkflowID = parentWorkflowID
+	}
+}
+
+// WithFilterDeduplicationID filters workflows by the specified deduplication ID(s).
+func WithFilterDeduplicationID(deduplicationID ...string) ListWorkflowsOption {
 	return func(p *listWorkflowsOptions) {
 		p.deduplicationID = deduplicationID
 	}
@@ -3090,24 +3103,25 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 
 	// Convert to system database input structure
 	dbInput := listWorkflowsDBInput{
-		workflowIDs:        params.workflowIDs,
-		status:             params.status,
-		startTime:          params.startTime,
-		endTime:            params.endTime,
-		workflowName:       params.name,
-		applicationVersion: params.appVersion,
-		authenticatedUser:  params.user,
-		limit:              params.limit,
-		offset:             params.offset,
-		sortDesc:           params.sortDesc,
-		workflowIDPrefix:   params.workflowIDPrefix,
-		loadInput:          params.loadInput,
-		loadOutput:         params.loadOutput,
-		queueName:          params.queueName,
-		queuesOnly:         params.queuesOnly,
-		executorIDs:        params.executorIDs,
-		forkedFrom:         params.forkedFrom,
-		deduplicationID:    params.deduplicationID,
+		workflowIDs:         params.workflowIDs,
+		status:              params.status,
+		startTime:           params.startTime,
+		endTime:             params.endTime,
+		workflowName:        params.name,
+		applicationVersion:  params.appVersion,
+		authenticatedUser:   params.user,
+		limit:               params.limit,
+		offset:              params.offset,
+		sortDesc:            params.sortDesc,
+		workflowIDPrefix:    params.workflowIDPrefix,
+		loadInput:           params.loadInput,
+		loadOutput:          params.loadOutput,
+		queueName:           params.queueName,
+		queuesOnly:          params.queuesOnly,
+		executorIDs:         params.executorIDs,
+		forkedFrom:          params.forkedFrom,
+		parentWorkflowID:    params.parentWorkflowID,
+		deduplicationID:     params.deduplicationID,
 	}
 
 	// Call the context method to list workflows
