@@ -1335,6 +1335,26 @@ func TestChildWorkflow(t *testing.T) {
 		require.NoError(t, err, "failed to execute grand parent workflow")
 		_, err = h.GetResult()
 		require.NoError(t, err, "failed to get result from grand parent workflow")
+
+		// Verify ParentWorkflowID along the chain: grandparent -> parent -> child
+		grandParentID := h.GetWorkflowID()
+		grandParentStatus, err := h.GetStatus()
+		require.NoError(t, err, "failed to get grandparent workflow status")
+		require.Empty(t, grandParentStatus.ParentWorkflowID, "top-level grandparent should have no ParentWorkflowID")
+
+		parentID := fmt.Sprintf("%s-0", grandParentID)
+		parentHandle, err := RetrieveWorkflow[string](dbosCtx, parentID)
+		require.NoError(t, err, "failed to retrieve parent workflow")
+		parentStatus, err := parentHandle.GetStatus()
+		require.NoError(t, err, "failed to get parent workflow status")
+		require.Equal(t, grandParentID, parentStatus.ParentWorkflowID, "parent workflow ParentWorkflowID should be grandparent's ID")
+
+		childID := fmt.Sprintf("%s-0", parentID)
+		childHandle, err := RetrieveWorkflow[string](dbosCtx, childID)
+		require.NoError(t, err, "failed to retrieve child workflow")
+		childStatus, err := childHandle.GetStatus()
+		require.NoError(t, err, "failed to get child workflow status")
+		require.Equal(t, parentID, childStatus.ParentWorkflowID, "child workflow ParentWorkflowID should be parent's ID")
 	})
 
 	t.Run("ChildWorkflowWithCustomID", func(t *testing.T) {
@@ -1361,6 +1381,17 @@ func TestChildWorkflow(t *testing.T) {
 		require.Equal(t, 1, steps[1].StepID)
 		require.Equal(t, "DBOS.getResult", steps[1].StepName)
 		require.Equal(t, customChildID, steps[1].ChildWorkflowID)
+
+		// Verify ParentWorkflowID: parent has none, child has parent's ID
+		parentStatus, err := parentHandle.GetStatus()
+		require.NoError(t, err, "failed to get parent workflow status")
+		require.Empty(t, parentStatus.ParentWorkflowID, "top-level parent workflow should have no ParentWorkflowID")
+
+		childHandle, err := RetrieveWorkflow[string](dbosCtx, customChildID)
+		require.NoError(t, err, "failed to retrieve child workflow")
+		childStatus, err := childHandle.GetStatus()
+		require.NoError(t, err, "failed to get child workflow status")
+		require.Equal(t, parentHandle.GetWorkflowID(), childStatus.ParentWorkflowID, "child workflow ParentWorkflowID should be parent's workflow ID")
 	})
 
 	t.Run("RecoveredChildWorkflowPollingHandle", func(t *testing.T) {

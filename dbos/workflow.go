@@ -57,6 +57,7 @@ type WorkflowStatus struct {
 	Priority           int                `json:"priority,omitempty"`            // Queue execution priority (lower numbers have higher priority)
 	QueuePartitionKey  string             `json:"queue_partition_key,omitempty"` // Queue partition key for partitioned queues
 	ForkedFrom         string             `json:"forked_from,omitempty"`         // ID of the original workflow if this is a fork
+	ParentWorkflowID   string             `json:"parent_workflow_id,omitempty"`  // ID of the parent workflow if this is a child
 }
 
 // workflowState holds the runtime state for a workflow execution

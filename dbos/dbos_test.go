@@ -251,7 +251,7 @@ func TestConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, exists, "dbos_migrations table should exist")
 
-		// Verify migration version is 7 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, workflow events history migration, and owner_xid migration)
+		// Verify migration version is 8 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, workflow events history migration, owner_xid migration, and parent_workflow_id migration)
 		var version int64
 		var count int
 		err = sysDB.pool.QueryRow(dbCtx, "SELECT COUNT(*) FROM dbos.dbos_migrations").Scan(&count)
@@ -260,7 +260,7 @@ func TestConfig(t *testing.T) {
 
 		err = sysDB.pool.QueryRow(dbCtx, "SELECT version FROM dbos.dbos_migrations").Scan(&version)
 		require.NoError(t, err)
-		assert.Equal(t, int64(7), version, "migration version should be 7 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, workflow events history migration, and owner_xid migration)")
+		assert.Equal(t, int64(8), version, "migration version should be 8 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, workflow events history migration, owner_xid migration, and parent_workflow_id migration)")
 
 		// Test manual shutdown and recreate
 		Shutdown(ctx, 1*time.Minute)
@@ -547,7 +547,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, exists, "dbos_migrations table should exist in custom schema")
 
-		// Verify migration version is 7 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, workflow events history migration, and owner_xid migration)
+		// Verify migration version is 8 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, workflow events history migration, owner_xid migration, and parent_workflow_id migration)
 		var version int64
 		var count int
 		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT COUNT(*) FROM %s.dbos_migrations", customSchema)).Scan(&count)
@@ -556,7 +556,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 
 		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT version FROM %s.dbos_migrations", customSchema)).Scan(&version)
 		require.NoError(t, err)
-		assert.Equal(t, int64(7), version, "migration version should be 7 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, workflow events history migration, and owner_xid migration)")
+		assert.Equal(t, int64(8), version, "migration version should be 8 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, workflow events history migration, owner_xid migration, and parent_workflow_id migration)")
 	})
 
 	// Test workflows for exercising Send/Recv and SetEvent/GetEvent

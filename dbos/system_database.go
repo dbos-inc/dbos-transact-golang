@@ -161,6 +161,9 @@ var migration6SQL string
 //go:embed migrations/7_add_owner_xid.sql
 var migration7SQL string
 
+//go:embed migrations/8_add_parent_workflow_id.sql
+var migration8SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -216,6 +219,8 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 
 	migration7SQLProcessed := fmt.Sprintf(migration7SQL, sanitizedSchema)
 
+	migration8SQLProcessed := fmt.Sprintf(migration8SQL, sanitizedSchema, sanitizedSchema)
+
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
 		{version: 1, sql: migration1SQLProcessed},
@@ -225,6 +230,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 		{version: 5, sql: migration5SQLProcessed},
 		{version: 6, sql: migration6SQLProcessed},
 		{version: 7, sql: migration7SQLProcessed},
+		{version: 8, sql: migration8SQLProcessed},
 	}
 
 	// Begin transaction for atomic migration execution
@@ -561,6 +567,11 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		queuePartitionKey = &input.status.QueuePartitionKey
 	}
 
+	var parentWorkflowID *string
+	if len(input.status.ParentWorkflowID) > 0 {
+		parentWorkflowID = &input.status.ParentWorkflowID
+	}
+
 	query := fmt.Sprintf(`INSERT INTO %s.workflow_status (
         workflow_uuid,
         status,
@@ -581,17 +592,18 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
         deduplication_id,
         priority,
         queue_partition_key,
-        owner_xid
-    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        owner_xid,
+        parent_workflow_id
+    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
 			recovery_attempts = CASE
-                WHEN EXCLUDED.status != $21 THEN workflow_status.recovery_attempts + $23
+                WHEN EXCLUDED.status != $22 THEN workflow_status.recovery_attempts + $24
                 ELSE workflow_status.recovery_attempts
             END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status = $22 THEN workflow_status.executor_id
+                WHEN EXCLUDED.status = $23 THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
         RETURNING recovery_attempts, status, name, queue_name, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, pgx.Identifier{s.schema}.Sanitize())
@@ -633,6 +645,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		input.status.Priority,
 		queuePartitionKey,
 		input.ownerXID,
+		parentWorkflowID,
 		WorkflowStatusEnqueued,
 		WorkflowStatusEnqueued,
 		recoveryIncrement,
@@ -855,6 +868,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var authenticatedRoles *string
 		var queuePartitionKey *string
 		var forkedFrom *string
+		var parentWorkflowID *string
 
 		// Build scan arguments dynamically based on loaded columns
 		scanArgs := []any{
@@ -862,7 +876,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			&authenticatedRoles, &executorID, &createdAtMs,
 			&updatedAtMs, &applicationVersion, &wf.ApplicationID,
 			&wf.Attempts, &queueName, &timeoutMs,
-			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey, &forkedFrom,
+			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey, &forkedFrom, &parentWorkflowID,
 		}
 
 		if input.loadOutput {
@@ -905,6 +919,10 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 
 		if forkedFrom != nil && len(*forkedFrom) > 0 {
 			wf.ForkedFrom = *forkedFrom
+		}
+
+		if parentWorkflowID != nil && len(*parentWorkflowID) > 0 {
+			wf.ParentWorkflowID = *parentWorkflowID
 		}
 
 		// Convert milliseconds to time.Time
