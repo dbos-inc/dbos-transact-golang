@@ -4,11 +4,15 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
 	pendingWorkflows, err := retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+		appVersion := []string{}
+		if ctx.applicationVersion != "" {
+			appVersion = []string{ctx.applicationVersion}
+		}
 		return ctx.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
-			status:             []WorkflowStatusType{WorkflowStatusPending},
-			executorIDs:        executorIDs,
-			applicationVersion: ctx.applicationVersion,
-			loadInput:          true,
+			status:              []WorkflowStatusType{WorkflowStatusPending},
+			executorIDs:         executorIDs,
+			applicationVersion: appVersion,
+			loadInput:           true,
 		})
 	}, withRetrierLogger(ctx.logger))
 	if err != nil {

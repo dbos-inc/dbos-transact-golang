@@ -635,17 +635,20 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	if req.Body.SortDesc {
 		opts = append(opts, WithSortDesc())
 	}
+	if req.Body.QueuesOnly {
+		opts = append(opts, WithQueuesOnly())
+	}
 	if len(req.Body.WorkflowUUIDs) > 0 {
 		opts = append(opts, WithWorkflowIDs(req.Body.WorkflowUUIDs))
 	}
-	if req.Body.WorkflowName != nil {
-		opts = append(opts, WithName(*req.Body.WorkflowName))
+	if len(req.Body.WorkflowName) > 0 {
+		opts = append(opts, WithName(req.Body.WorkflowName.toSlice()...))
 	}
-	if req.Body.AuthenticatedUser != nil {
-		opts = append(opts, WithUser(*req.Body.AuthenticatedUser))
+	if len(req.Body.AuthenticatedUser) > 0 {
+		opts = append(opts, WithUser(req.Body.AuthenticatedUser.toSlice()...))
 	}
-	if req.Body.ApplicationVersion != nil {
-		opts = append(opts, WithAppVersion(*req.Body.ApplicationVersion))
+	if len(req.Body.ApplicationVersion) > 0 {
+		opts = append(opts, WithAppVersion(req.Body.ApplicationVersion.toSlice()...))
 	}
 	if req.Body.Limit != nil {
 		opts = append(opts, WithLimit(*req.Body.Limit))
@@ -659,11 +662,27 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	if req.Body.EndTime != nil {
 		opts = append(opts, WithEndTime(*req.Body.EndTime))
 	}
-	if req.Body.Status != nil {
-		opts = append(opts, WithStatus([]WorkflowStatusType{WorkflowStatusType(*req.Body.Status)}))
+	if len(req.Body.Status) > 0 {
+		statuses := make([]WorkflowStatusType, len(req.Body.Status))
+		for i, s := range req.Body.Status {
+			statuses[i] = WorkflowStatusType(s)
+		}
+		opts = append(opts, WithStatus(statuses))
 	}
-	if req.Body.ForkedFrom != nil {
-		opts = append(opts, WithForkedFrom(*req.Body.ForkedFrom))
+	if len(req.Body.ForkedFrom) > 0 {
+		opts = append(opts, WithForkedFrom(req.Body.ForkedFrom.toSlice()...))
+	}
+	if len(req.Body.ParentWorkflowID) > 0 {
+		opts = append(opts, WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
+	}
+	if len(req.Body.QueueName) > 0 {
+		opts = append(opts, WithQueueName(req.Body.QueueName.toSlice()...))
+	}
+	if len(req.Body.WorkflowIDPrefix) > 0 {
+		opts = append(opts, WithWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
+	}
+	if len(req.Body.ExecutorID) > 0 {
+		opts = append(opts, WithExecutorIDs(req.Body.ExecutorID.toSlice()))
 	}
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
@@ -717,13 +736,14 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 
 	// Add status filter for queued workflows
 	queuedStatuses := make([]WorkflowStatusType, 0)
-	if req.Body.Status != nil {
-		// If a specific status is requested, use that status
-		status := WorkflowStatusType(*req.Body.Status)
-		if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
-			c.logger.Warn("Received unexpected filtering status for listing queued workflows", "status", status)
+	if len(req.Body.Status) > 0 {
+		for _, s := range req.Body.Status {
+			status := WorkflowStatusType(s)
+			if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
+				c.logger.Warn("Received unexpected filtering status for listing queued workflows", "status", status)
+			}
+			queuedStatuses = append(queuedStatuses, status)
 		}
-		queuedStatuses = append(queuedStatuses, status)
 	}
 	if len(queuedStatuses) == 0 {
 		queuedStatuses = []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued}
@@ -733,8 +753,8 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	if req.Body.SortDesc {
 		opts = append(opts, WithSortDesc())
 	}
-	if req.Body.WorkflowName != nil {
-		opts = append(opts, WithName(*req.Body.WorkflowName))
+	if len(req.Body.WorkflowName) > 0 {
+		opts = append(opts, WithName(req.Body.WorkflowName.toSlice()...))
 	}
 	if req.Body.Limit != nil {
 		opts = append(opts, WithLimit(*req.Body.Limit))
@@ -748,8 +768,17 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	if req.Body.EndTime != nil {
 		opts = append(opts, WithEndTime(*req.Body.EndTime))
 	}
-	if req.Body.QueueName != nil {
-		opts = append(opts, WithQueueName(*req.Body.QueueName))
+	if len(req.Body.QueueName) > 0 {
+		opts = append(opts, WithQueueName(req.Body.QueueName.toSlice()...))
+	}
+	if len(req.Body.ExecutorID) > 0 {
+		opts = append(opts, WithExecutorIDs(req.Body.ExecutorID.toSlice()))
+	}
+	if len(req.Body.WorkflowIDPrefix) > 0 {
+		opts = append(opts, WithWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
+	}
+	if len(req.Body.ParentWorkflowID) > 0 {
+		opts = append(opts, WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
 	}
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
