@@ -78,7 +78,6 @@ type executorInfoResponse struct {
 }
 
 // listWorkflowsConductorRequestBody contains filter parameters for listing workflows.
-// Matches conductor models.ListWorkflowsBody / ListQueuedWorkflowsBody.
 type listWorkflowsConductorRequestBody struct {
 	WorkflowUUIDs      []string     `json:"workflow_uuids,omitempty"`
 	WorkflowName       stringOrList `json:"workflow_name,omitempty"`
@@ -218,11 +217,9 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 		output.DeduplicationID = &wf.DeduplicationID
 	}
 
-	// Copy priority
-	if wf.Priority != 0 {
-		priorityStr := strconv.Itoa(wf.Priority)
-		output.Priority = &priorityStr
-	}
+	// Copy priority (include "0" so conductor receives a string)
+	priorityStr := strconv.Itoa(wf.Priority)
+	output.Priority = &priorityStr
 
 	// Copy application version
 	if wf.ApplicationVersion != "" {

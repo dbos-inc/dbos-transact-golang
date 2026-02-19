@@ -733,6 +733,9 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	opts = append(opts, WithLoadInput(req.Body.LoadInput))
 	opts = append(opts, WithLoadOutput(false)) // Don't load output for queued workflows
 	opts = append(opts, WithQueuesOnly())      // Only include workflows that are in queues
+	if len(req.Body.WorkflowUUIDs) > 0 {
+		opts = append(opts, WithWorkflowIDs(req.Body.WorkflowUUIDs))
+	}
 
 	// Add status filter for queued workflows
 	queuedStatuses := make([]WorkflowStatusType, 0)
@@ -779,6 +782,12 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	}
 	if len(req.Body.ParentWorkflowID) > 0 {
 		opts = append(opts, WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
+	}
+	if len(req.Body.AuthenticatedUser) > 0 {
+		opts = append(opts, WithUser(req.Body.AuthenticatedUser.toSlice()...))
+	}
+	if len(req.Body.ApplicationVersion) > 0 {
+		opts = append(opts, WithAppVersion(req.Body.ApplicationVersion.toSlice()...))
 	}
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
