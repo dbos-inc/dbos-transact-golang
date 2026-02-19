@@ -721,7 +721,6 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 }
 
 // listWorkflowsDBInput represents the input parameters for listing workflows.
-// String filter fields are slices to support filtering by one or many values.
 type listWorkflowsDBInput struct {
 	workflowName       []string
 	queueName          []string

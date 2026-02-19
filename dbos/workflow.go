@@ -2972,7 +2972,6 @@ func WithEndTime(endTime time.Time) ListWorkflowsOption {
 }
 
 // WithName filters workflows by the specified workflow function name(s).
-// Pass one or more names; workflows matching any of them are returned.
 func WithName(name ...string) ListWorkflowsOption {
 	return func(p *listWorkflowsOptions) {
 		p.name = name
@@ -3015,7 +3014,6 @@ func WithSortDesc() ListWorkflowsOption {
 }
 
 // WithWorkflowIDPrefix filters workflows by workflow ID prefix(es).
-// Pass one or more prefixes; workflows whose ID starts with any of them are returned.
 func WithWorkflowIDPrefix(prefix ...string) ListWorkflowsOption {
 	return func(p *listWorkflowsOptions) {
 		p.workflowIDPrefix = prefix
@@ -3104,25 +3102,25 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 
 	// Convert to system database input structure
 	dbInput := listWorkflowsDBInput{
-		workflowIDs:         params.workflowIDs,
-		status:              params.status,
-		startTime:           params.startTime,
-		endTime:             params.endTime,
-		workflowName:        params.name,
-		applicationVersion:  params.appVersion,
-		authenticatedUser:   params.user,
-		limit:               params.limit,
-		offset:              params.offset,
-		sortDesc:            params.sortDesc,
-		workflowIDPrefix:    params.workflowIDPrefix,
-		loadInput:           params.loadInput,
-		loadOutput:          params.loadOutput,
-		queueName:           params.queueName,
-		queuesOnly:          params.queuesOnly,
-		executorIDs:         params.executorIDs,
-		forkedFrom:          params.forkedFrom,
-		parentWorkflowID:    params.parentWorkflowID,
-		deduplicationID:     params.deduplicationID,
+		workflowIDs:        params.workflowIDs,
+		status:             params.status,
+		startTime:          params.startTime,
+		endTime:            params.endTime,
+		workflowName:       params.name,
+		applicationVersion: params.appVersion,
+		authenticatedUser:  params.user,
+		limit:              params.limit,
+		offset:             params.offset,
+		sortDesc:           params.sortDesc,
+		workflowIDPrefix:   params.workflowIDPrefix,
+		loadInput:          params.loadInput,
+		loadOutput:         params.loadOutput,
+		queueName:          params.queueName,
+		queuesOnly:         params.queuesOnly,
+		executorIDs:        params.executorIDs,
+		forkedFrom:         params.forkedFrom,
+		parentWorkflowID:   params.parentWorkflowID,
+		deduplicationID:    params.deduplicationID,
 	}
 
 	// Call the context method to list workflows
