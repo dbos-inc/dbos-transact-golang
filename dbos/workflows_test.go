@@ -4555,8 +4555,10 @@ func TestWorkflowHandles(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, slowWorkflow)
 
+	workflowSleep := 1 * time.Second
+
 	t.Run("WorkflowHandleTimeout", func(t *testing.T) {
-		handle, err := RunWorkflow(dbosCtx, slowWorkflow, 10*time.Second)
+		handle, err := RunWorkflow(dbosCtx, slowWorkflow, workflowSleep)
 		require.NoError(t, err, "failed to start workflow")
 
 		start := time.Now()
@@ -4572,7 +4574,7 @@ func TestWorkflowHandles(t *testing.T) {
 
 	t.Run("WorkflowPollingHandleTimeout", func(t *testing.T) {
 		// Start a workflow that will block on the first signal
-		originalHandle, err := RunWorkflow(dbosCtx, slowWorkflow, 10*time.Second)
+		originalHandle, err := RunWorkflow(dbosCtx, slowWorkflow, workflowSleep)
 		require.NoError(t, err, "failed to start workflow")
 
 		pollingHandle, err := RetrieveWorkflow[string](dbosCtx, originalHandle.GetWorkflowID())
@@ -4581,8 +4583,11 @@ func TestWorkflowHandles(t *testing.T) {
 		_, ok := pollingHandle.(*workflowPollingHandle[string])
 		require.True(t, ok, "expected polling handle, got %T", pollingHandle)
 
+		start := time.Now()
 		_, err = pollingHandle.GetResult(WithHandleTimeout(10*time.Millisecond), WithHandlePollingInterval(1*time.Millisecond))
+		duration := time.Since(start)
 
+		assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
 		require.Error(t, err, "expected timeout error")
 		assert.True(t, errors.Is(err, context.DeadlineExceeded),
 			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
@@ -4668,6 +4673,7 @@ func TestPatching(t *testing.T) {
 		}
 
 		RegisterWorkflow(dbosCtx, wf, WithWorkflowName("wf"))
+		require.NoError(t, Launch(dbosCtx))
 
 		handle, err := RunWorkflow(dbosCtx, wf, 1)
 		require.NoError(t, err, "failed to start workflow")
@@ -4712,10 +4718,11 @@ func TestPatching(t *testing.T) {
 		}
 
 		// (hack) Clear the context registry and re-gister the patched wf with the same name
+		dbosCtx.(*dbosContext).launched.Store(false)
 		dbosCtx.(*dbosContext).workflowRegistry.Clear()
 		dbosCtx.(*dbosContext).workflowCustomNametoFQN.Clear()
 		RegisterWorkflow(dbosCtx, wfPatched, WithWorkflowName("wf"))
-		dbosCtx.Launch()
+		dbosCtx.(*dbosContext).launched.Store(true)
 
 		// new invocation takes the new code and has the patch step recorded
 		patchedHandle, err := RunWorkflow(dbosCtx, wfPatched, 1)
@@ -4775,6 +4782,7 @@ func TestPatching(t *testing.T) {
 		dbosCtx.(*dbosContext).workflowCustomNametoFQN.Clear()
 		dbosCtx.(*dbosContext).launched.Store(false)
 		RegisterWorkflow(dbosCtx, wfDeprecatePatch, WithWorkflowName("wf"))
+		dbosCtx.(*dbosContext).launched.Store(true)
 
 		// deprecated invocation skips the patch deprecation entirely
 		deprecatedHandle, err := RunWorkflow(dbosCtx, wfDeprecatePatch, 1)
