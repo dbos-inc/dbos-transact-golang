@@ -39,7 +39,7 @@ jobs:
       run: |
         timeout=60
         elapsed=0
-        while ! docker exec cockroach cockroach sql --insecure --execute="SHOW CLUSTER SETTING version" > /dev/null 2>&1; do
+        while ! docker exec cockroach cockroach sql --insecure --execute="SHOW CLUSTER SETTING version"; do
           if [ $elapsed -ge $timeout ]; then
             echo "CockroachDB failed to start within $timeout seconds"
             exit 1
