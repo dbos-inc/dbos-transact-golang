@@ -43,11 +43,13 @@ type systemDatabase interface {
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	resumeWorkflow(ctx context.Context, input resumeWorkflowDBInput) error
 	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error)
+	deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput) error
 
 	// Child workflows
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
 	checkChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
 	recordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
+	getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error)
 
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
@@ -1488,6 +1490,59 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 	}
 
 	return nil
+}
+
+type deleteWorkflowDBInput struct {
+	workflowIDs []string
+	tx          pgx.Tx
+}
+
+func (s *sysDB) deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput) error {
+	for _, workflowID := range input.workflowIDs {
+		listInput := listWorkflowsDBInput{
+			workflowIDs: []string{workflowID},
+			tx:          input.tx,
+		}
+		wfs, err := s.listWorkflows(ctx, listInput)
+		if err != nil {
+			return err
+		}
+		if len(wfs) == 0 {
+			return newNonExistentWorkflowError(workflowID)
+		}
+
+		wf := wfs[0]
+		switch wf.Status {
+		case WorkflowStatusPending, WorkflowStatusEnqueued:
+			return fmt.Errorf("cannot delete workflow %s: workflow is still active with status %s", workflowID, wf.Status)
+		}
+
+		deleteQuery := fmt.Sprintf(`DELETE FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
+
+		if input.tx != nil {
+			_, err = input.tx.Exec(ctx, deleteQuery, workflowID)
+		} else {
+			_, err = s.pool.Exec(ctx, deleteQuery, workflowID)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to delete workflow: %w", err)
+		}
+	}
+
+	return nil
+}
+
+type getWorkflowChildrenDBInput struct {
+	workflowID string
+	tx         pgx.Tx
+}
+
+// getWorkflowChildren retrieves all direct child workflows of the given parent workflow.
+func (s *sysDB) getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error) {
+	return s.listWorkflows(ctx, listWorkflowsDBInput{
+		parentWorkflowID: []string{input.workflowID},
+		tx:               input.tx,
+	})
 }
 
 /*******************************/

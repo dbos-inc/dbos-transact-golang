@@ -143,6 +143,7 @@ type DBOSContext interface {
 	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)                                         // Get the execution steps of a workflow
 	ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) // List registered workflows with filtering options
 	ListRegisteredQueues(_ DBOSContext) ([]WorkflowQueue, error)                                                   // List all registered workflow queues
+	DeleteWorkflow(_ DBOSContext, workflowID string, opts ...DeleteWorkflowOption) error                           // Delete a workflow and all its associated data
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -150,9 +151,9 @@ type DBOSContext interface {
 	GetApplicationID() string      // Get the application ID for this context
 
 	// Context management
-	From(_ DBOSContext, ctx context.Context) DBOSContext                                                        // Returns a copy of the current DBOSContext wrapping the provided context.Context
-	WithoutCancel(_ DBOSContext) DBOSContext                                                                     // Returns a copy that is not canceled when the parent is canceled
-	WithTimeout(_ DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc)                            // Returns a copy that is canceled after the timeout
+	From(_ DBOSContext, ctx context.Context) DBOSContext                                // Returns a copy of the current DBOSContext wrapping the provided context.Context
+	WithoutCancel(_ DBOSContext) DBOSContext                                            // Returns a copy that is not canceled when the parent is canceled
+	WithTimeout(_ DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) // Returns a copy that is canceled after the timeout
 
 	// Queue configuration
 	ListenQueues(_ DBOSContext, queues ...WorkflowQueue) // Configure which queues this process should listen to

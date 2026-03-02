@@ -5368,3 +5368,117 @@ func collectStreamValues[R any](ch <-chan StreamValue[R]) ([]R, bool, error) {
 
 	return values, closed, err
 }
+
+func TestWorkflowDelete(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// Simple workflow that completes immediately
+	deleteSimpleWf := func(ctx DBOSContext, input string) (string, error) {
+		return "done: " + input, nil
+	}
+	RegisterWorkflow(dbosCtx, deleteSimpleWf)
+
+	// Child workflow for parent-child test
+	deleteChildWf := func(ctx DBOSContext, input string) (string, error) {
+		return "child: " + input, nil
+	}
+	RegisterWorkflow(dbosCtx, deleteChildWf)
+
+	// Parent workflow that spawns a child
+	deleteParentWf := func(ctx DBOSContext, input string) (string, error) {
+		childHandle, err := RunWorkflow(ctx, deleteChildWf, input, WithWorkflowID("delete-test-child-wf"))
+		if err != nil {
+			return "", err
+		}
+		childResult, err := childHandle.GetResult()
+		if err != nil {
+			return "", err
+		}
+		return "parent: " + childResult, nil
+	}
+	RegisterWorkflow(dbosCtx, deleteParentWf)
+
+	blockEvent := NewEvent()
+	deleteBlockingWf := func(ctx DBOSContext, _ string) (string, error) {
+		blockEvent.Wait()
+		return "done", nil
+	}
+	RegisterWorkflow(dbosCtx, deleteBlockingWf)
+	t.Cleanup(func() { blockEvent.Set() })
+
+	t.Run("DeleteCompletedWorkflow", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, deleteSimpleWf, "test-delete")
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "done: test-delete", result)
+
+		// Delete using the DBOSContext API
+		err = DeleteWorkflow(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err)
+
+		// Verify workflow no longer exists
+		_, err = RetrieveWorkflow[string](dbosCtx, handle.GetWorkflowID())
+		require.Error(t, err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+	})
+
+	t.Run("DeletePendingWorkflowFails", func(t *testing.T) {
+		blockEvent.Clear()
+		handle, err := RunWorkflow(dbosCtx, deleteBlockingWf, "pending")
+		require.NoError(t, err)
+
+		// Attempt to delete — should fail because workflow is still PENDING
+		err = DeleteWorkflow(dbosCtx, handle.GetWorkflowID())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "still active")
+
+		blockEvent.Set()
+		_, _ = handle.GetResult()
+	})
+
+	t.Run("DeleteNonExistentWorkflow", func(t *testing.T) {
+		err := DeleteWorkflow(dbosCtx, "non-existent-delete-wf-id")
+		require.Error(t, err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+	})
+
+	t.Run("DeleteWithChildren", func(t *testing.T) {
+		parentID := "delete-test-parent-wf"
+		childID := "delete-test-child-wf"
+
+		handle, err := RunWorkflow(dbosCtx, deleteParentWf, "child-test", WithWorkflowID(parentID))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "parent: child: child-test", result)
+
+		// Verify both exist
+		_, err = RetrieveWorkflow[string](dbosCtx, parentID)
+		require.NoError(t, err)
+		_, err = RetrieveWorkflow[string](dbosCtx, childID)
+		require.NoError(t, err)
+
+		// Delete parent with children
+		err = DeleteWorkflow(dbosCtx, parentID, WithDeleteChildren())
+		require.NoError(t, err)
+
+		// Verify both are gone
+		_, err = RetrieveWorkflow[string](dbosCtx, parentID)
+		require.Error(t, err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+
+		_, err = RetrieveWorkflow[string](dbosCtx, childID)
+		require.Error(t, err)
+		require.ErrorAs(t, err, &dbosErr)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+	})
+}
