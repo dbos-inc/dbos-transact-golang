@@ -164,6 +164,9 @@ var migration7SQL string
 //go:embed migrations/8_add_parent_workflow_id.sql
 var migration8SQL string
 
+//go:embed migrations/9_add_workflow_schedules.sql
+var migration9SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -221,6 +224,8 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 
 	migration8SQLProcessed := fmt.Sprintf(migration8SQL, sanitizedSchema, sanitizedSchema)
 
+	migration9SQLProcessed := fmt.Sprintf(migration9SQL, sanitizedSchema)
+
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
 		{version: 1, sql: migration1SQLProcessed},
@@ -231,6 +236,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 		{version: 6, sql: migration6SQLProcessed},
 		{version: 7, sql: migration7SQLProcessed},
 		{version: 8, sql: migration8SQLProcessed},
+		{version: 9, sql: migration9SQLProcessed},
 	}
 
 	// Begin transaction for atomic migration execution
