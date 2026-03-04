@@ -170,6 +170,15 @@ var migration9SQL string
 //go:embed migrations/10_add_notifications_pkey.sql
 var migration10SQL string
 
+//go:embed migrations/11_add_serialization_columns.sql
+var migration11SQL string
+
+//go:embed migrations/12_add_notifications_consumed.sql
+var migration12SQL string
+
+//go:embed migrations/13_add_application_versions.sql
+var migration13SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -231,6 +240,12 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 
 	migration10SQLProcessed := fmt.Sprintf(migration10SQL, schema, sanitizedSchema)
 
+	migration11SQLProcessed := fmt.Sprintf(migration11SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+
+	migration12SQLProcessed := fmt.Sprintf(migration12SQL, sanitizedSchema, sanitizedSchema)
+
+	migration13SQLProcessed := fmt.Sprintf(migration13SQL, sanitizedSchema)
+
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
 		{version: 1, sql: migration1SQLProcessed},
@@ -243,6 +258,9 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 		{version: 8, sql: migration8SQLProcessed},
 		{version: 9, sql: migration9SQLProcessed},
 		{version: 10, sql: migration10SQLProcessed},
+		{version: 11, sql: migration11SQLProcessed},
+		{version: 12, sql: migration12SQLProcessed},
+		{version: 13, sql: migration13SQLProcessed},
 	}
 
 	// Begin transaction for atomic migration execution
