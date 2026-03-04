@@ -29,6 +29,7 @@ type Client interface {
 	GetEvent(targetWorkflowID, key string, timeout time.Duration) (any, error)
 	RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error)
 	CancelWorkflow(workflowID string) error
+	DeleteWorkflow(workflowID string, opts ...DeleteWorkflowOption) error
 	ResumeWorkflow(workflowID string) (WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
@@ -312,6 +313,11 @@ func (c *client) RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error
 // CancelWorkflow cancels a running or enqueued workflow.
 func (c *client) CancelWorkflow(workflowID string) error {
 	return c.dbosCtx.CancelWorkflow(c.dbosCtx, workflowID)
+}
+
+// DeleteWorkflow permanently deletes a workflow and all its associated data.
+func (c *client) DeleteWorkflow(workflowID string, opts ...DeleteWorkflowOption) error {
+	return c.dbosCtx.DeleteWorkflow(c.dbosCtx, workflowID, opts...)
 }
 
 // ResumeWorkflow resumes a workflow from its last completed step.

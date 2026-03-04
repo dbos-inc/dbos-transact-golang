@@ -582,6 +582,179 @@ func TestCancelResume(t *testing.T) {
 	})
 }
 
+func TestDeleteWorkflow(t *testing.T) {
+	// Setup server context - this will process tasks
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// Create queue for communication between client and server
+	queue := NewWorkflowQueue(serverCtx, "delete-workflow-queue")
+
+	// Simple workflow that completes immediately
+	simpleWf := func(ctx DBOSContext, input string) (string, error) {
+		return "done: " + input, nil
+	}
+	RegisterWorkflow(serverCtx, simpleWf, WithWorkflowName("SimpleDeleteWorkflow"))
+
+	// Blocking workflow for testing deletion of active workflows
+	blockingWf := func(ctx DBOSContext, _ string) (string, error) {
+		for {
+			select {
+			case <-ctx.Done():
+				return "cancelled", ctx.Err()
+			default:
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}
+	RegisterWorkflow(serverCtx, blockingWf, WithWorkflowName("BlockingDeleteWorkflow"))
+
+	// Child workflow for parent-child delete test
+	childWorkflowID := "test-delete-child-workflow"
+	deleteChildWf := func(ctx DBOSContext, input string) (string, error) {
+		return "child: " + input, nil
+	}
+	RegisterWorkflow(serverCtx, deleteChildWf, WithWorkflowName("DeleteChildWorkflow"))
+
+	// Parent workflow that spawns a child
+	deleteParentWf := func(ctx DBOSContext, input string) (string, error) {
+		childHandle, err := RunWorkflow(ctx, deleteChildWf, input, WithWorkflowID(childWorkflowID))
+		if err != nil {
+			return "", err
+		}
+		childResult, err := childHandle.GetResult()
+		if err != nil {
+			return "", err
+		}
+		return "parent: " + childResult, nil
+	}
+	RegisterWorkflow(serverCtx, deleteParentWf, WithWorkflowName("DeleteParentWorkflow"))
+
+	// Launch the server context to start processing tasks
+	err := Launch(serverCtx)
+	require.NoError(t, err)
+
+	// Setup client
+	databaseURL := getDatabaseURL()
+	config := ClientConfig{
+		DatabaseURL: databaseURL,
+	}
+	client, err := NewClient(context.Background(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
+
+	t.Run("DeleteCompletedWorkflow", func(t *testing.T) {
+		workflowID := "test-delete-completed-workflow"
+
+		// Enqueue and wait for completion
+		handle, err := Enqueue[string, string](client, queue.Name, "SimpleDeleteWorkflow", "test",
+			WithEnqueueWorkflowID(workflowID),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "done: test", result)
+
+		// Verify workflow exists
+		_, err = client.RetrieveWorkflow(workflowID)
+		require.NoError(t, err)
+
+		// Delete the workflow
+		err = client.DeleteWorkflow(workflowID)
+		require.NoError(t, err)
+
+		// Verify workflow no longer exists
+		_, err = client.RetrieveWorkflow(workflowID)
+		require.Error(t, err, "expected error when retrieving deleted workflow")
+
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+	})
+
+	t.Run("DeleteCancelledWorkflow", func(t *testing.T) {
+		workflowID := "test-delete-cancelled-workflow"
+
+		// Enqueue a blocking workflow
+		handle, err := Enqueue[string, string](client, queue.Name, "BlockingDeleteWorkflow", "block",
+			WithEnqueueWorkflowID(workflowID),
+			WithEnqueueTimeout(500*time.Millisecond),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		// Wait a bit then cancel
+		time.Sleep(100 * time.Millisecond)
+		err = client.CancelWorkflow(workflowID)
+		require.NoError(t, err)
+
+		// Verify workflow is cancelled
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusCancelled, status.Status)
+
+		// Delete the cancelled workflow
+		err = client.DeleteWorkflow(workflowID)
+		require.NoError(t, err)
+
+		// Verify workflow no longer exists
+		_, err = client.RetrieveWorkflow(workflowID)
+		require.Error(t, err)
+
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+	})
+
+	t.Run("DeleteNonExistentWorkflow", func(t *testing.T) {
+		nonExistentWorkflowID := "non-existent-delete-workflow-id"
+
+		err := client.DeleteWorkflow(nonExistentWorkflowID)
+		require.NoError(t, err, "expected no error when deleting non-existent workflow")
+	})
+
+	t.Run("DeleteWithChildren", func(t *testing.T) {
+		parentWorkflowID := "test-delete-parent-workflow"
+
+		// Enqueue and wait for completion
+		handle, err := Enqueue[string, string](client, queue.Name, "DeleteParentWorkflow", "test",
+			WithEnqueueWorkflowID(parentWorkflowID),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "parent: child: test", result)
+
+		// Verify both parent and child exist
+		_, err = client.RetrieveWorkflow(parentWorkflowID)
+		require.NoError(t, err)
+		_, err = client.RetrieveWorkflow(childWorkflowID)
+		require.NoError(t, err)
+
+		// Delete parent with children
+		err = client.DeleteWorkflow(parentWorkflowID, WithDeleteChildren())
+		require.NoError(t, err)
+
+		// Verify parent is gone
+		_, err = client.RetrieveWorkflow(parentWorkflowID)
+		require.Error(t, err, "expected error when retrieving deleted parent workflow")
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+
+		// Verify child is also gone
+		_, err = client.RetrieveWorkflow(childWorkflowID)
+		require.Error(t, err, "expected error when retrieving deleted child workflow")
+		dbosErr, ok = err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+	})
+}
+
 func TestForkWorkflow(t *testing.T) {
 	// Global counters for tracking execution (no mutex needed since workflows run solo)
 	var (

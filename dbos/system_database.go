@@ -41,15 +41,15 @@ type systemDatabase interface {
 	awaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*string, error)
 	cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput) error
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
+	deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput) error
 	resumeWorkflow(ctx context.Context, input resumeWorkflowDBInput) error
 	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error)
-	deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput) error
 
 	// Child workflows
+	getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error)
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
 	checkChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
 	recordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
-	getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error)
 
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
@@ -1105,6 +1105,105 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput)
 	return nil
 }
 
+type deleteWorkflowDBInput struct {
+	workflowID     string
+	deleteChildren bool
+	tx             pgx.Tx
+}
+
+func (s *sysDB) deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput) error {
+	// If no transaction is provided, create one so the entire operation is atomic
+	tx := input.tx
+	if tx == nil {
+		var err error
+		tx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for deleteWorkflow: %w", err)
+		}
+		defer tx.Rollback(ctx)
+	}
+
+	// Collect all workflow IDs to delete
+	workflowIDs := []string{input.workflowID}
+
+	if input.deleteChildren {
+		children, err := s.getWorkflowChildren(ctx, getWorkflowChildrenDBInput{
+			workflowID: input.workflowID,
+			recursive:  true,
+			tx:         tx,
+		})
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			workflowIDs = append(workflowIDs, child.ID)
+		}
+	}
+
+	// Delete all matching workflows regardless of their state
+	deleteQuery := fmt.Sprintf(
+		`DELETE FROM %s.workflow_status WHERE workflow_uuid = ANY($1)`,
+		pgx.Identifier{s.schema}.Sanitize())
+	_, err := tx.Exec(ctx, deleteQuery, workflowIDs)
+	if err != nil {
+		return fmt.Errorf("failed to delete workflow(s): %w", err)
+	}
+
+	// If we created the transaction internally, commit it
+	if input.tx == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit deleteWorkflow transaction: %w", err)
+		}
+	}
+
+	return nil
+}
+
+type getWorkflowChildrenDBInput struct {
+	workflowID string
+	recursive  bool
+	tx         pgx.Tx
+}
+
+// getWorkflowChildren retrieves child workflows of the given parent workflow.
+// When recursive is true, it iteratively discovers all descendants (breadth-first)
+// within the same transaction.
+func (s *sysDB) getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error) {
+
+	children, err := s.listWorkflows(ctx, listWorkflowsDBInput{
+		parentWorkflowID: []string{input.workflowID},
+		tx:               input.tx,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get children of workflow %s: %w", input.workflowID, err)
+	}
+
+	if input.recursive {
+		queue := make([]string, 0, len(children))
+		for _, child := range children {
+			queue = append(queue, child.ID)
+		}
+		for len(queue) > 0 {
+			parentID := queue[0]
+			queue = queue[1:]
+
+			grandchildren, err := s.listWorkflows(ctx, listWorkflowsDBInput{
+				parentWorkflowID: []string{parentID},
+				tx:               input.tx,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to get children of workflow %s: %w", parentID, err)
+			}
+			for _, gc := range grandchildren {
+				children = append(children, gc)
+				queue = append(queue, gc.ID)
+			}
+		}
+	}
+
+	return children, nil
+}
+
 func (s *sysDB) cancelAllBefore(ctx context.Context, cutoffTime time.Time) error {
 	// List all workflows in PENDING or ENQUEUED state ending at cutoffTime
 	listInput := listWorkflowsDBInput{
@@ -1490,59 +1589,6 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 	}
 
 	return nil
-}
-
-type deleteWorkflowDBInput struct {
-	workflowIDs []string
-	tx          pgx.Tx
-}
-
-func (s *sysDB) deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput) error {
-	for _, workflowID := range input.workflowIDs {
-		listInput := listWorkflowsDBInput{
-			workflowIDs: []string{workflowID},
-			tx:          input.tx,
-		}
-		wfs, err := s.listWorkflows(ctx, listInput)
-		if err != nil {
-			return err
-		}
-		if len(wfs) == 0 {
-			return newNonExistentWorkflowError(workflowID)
-		}
-
-		wf := wfs[0]
-		switch wf.Status {
-		case WorkflowStatusPending, WorkflowStatusEnqueued:
-			return fmt.Errorf("cannot delete workflow %s: workflow is still active with status %s", workflowID, wf.Status)
-		}
-
-		deleteQuery := fmt.Sprintf(`DELETE FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
-
-		if input.tx != nil {
-			_, err = input.tx.Exec(ctx, deleteQuery, workflowID)
-		} else {
-			_, err = s.pool.Exec(ctx, deleteQuery, workflowID)
-		}
-		if err != nil {
-			return fmt.Errorf("failed to delete workflow: %w", err)
-		}
-	}
-
-	return nil
-}
-
-type getWorkflowChildrenDBInput struct {
-	workflowID string
-	tx         pgx.Tx
-}
-
-// getWorkflowChildren retrieves all direct child workflows of the given parent workflow.
-func (s *sysDB) getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error) {
-	return s.listWorkflows(ctx, listWorkflowsDBInput{
-		parentWorkflowID: []string{input.workflowID},
-		tx:               input.tx,
-	})
 }
 
 /*******************************/
