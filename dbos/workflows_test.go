@@ -1370,6 +1370,22 @@ func TestChildWorkflow(t *testing.T) {
 		return "root:" + input, nil
 	}
 	RegisterWorkflow(dbosCtx, deleteRootWf)
+
+	// Workflow for cascade data deletion test
+	deleteCascadeWf := func(ctx DBOSContext, _ string) (string, error) {
+		if err := SetEvent(ctx, "cascade-key", "cascade-value"); err != nil {
+			return "", err
+		}
+		if err := WriteStream(ctx, "cascade-stream", "stream-data"); err != nil {
+			return "", err
+		}
+		if err := CloseStream(ctx, "cascade-stream"); err != nil {
+			return "", err
+		}
+		return "done", nil
+	}
+	RegisterWorkflow(dbosCtx, deleteCascadeWf)
+
 	t.Cleanup(func() { deleteBlockEvent.Set() })
 
 	// Launch the context once for all subtests
@@ -1541,6 +1557,64 @@ func TestChildWorkflow(t *testing.T) {
 	t.Run("DeleteNonExistentWorkflowIsNoOp", func(t *testing.T) {
 		err := DeleteWorkflow(dbosCtx, "non-existent-delete-wf-id")
 		require.NoError(t, err, "expected no error when deleting non-existent workflow")
+	})
+
+	t.Run("DeleteCascadesRelatedData", func(t *testing.T) {
+		wfID := "delete-cascade-test-wf"
+		handle, err := RunWorkflow(dbosCtx, deleteCascadeWf, "input", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		// Send a notification to the completed workflow from outside
+		err = Send(dbosCtx, wfID, "test-notification", "test-topic")
+		require.NoError(t, err)
+
+		// Verify events, streams, notifications exist via direct DB query
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		schema := pgx.Identifier{sysDB.schema}.Sanitize()
+
+		var eventCount, streamCount, notifCount int
+		err = sysDB.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.workflow_events WHERE workflow_uuid = $1`, schema),
+			wfID).Scan(&eventCount)
+		require.NoError(t, err)
+		require.Greater(t, eventCount, 0, "expected events to exist before deletion")
+
+		err = sysDB.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.streams WHERE workflow_uuid = $1`, schema),
+			wfID).Scan(&streamCount)
+		require.NoError(t, err)
+		require.Greater(t, streamCount, 0, "expected stream entries to exist before deletion")
+
+		err = sysDB.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.notifications WHERE destination_uuid = $1`, schema),
+			wfID).Scan(&notifCount)
+		require.NoError(t, err)
+		require.Greater(t, notifCount, 0, "expected notifications to exist before deletion")
+
+		// Delete the workflow
+		err = DeleteWorkflow(dbosCtx, wfID)
+		require.NoError(t, err)
+
+		// Verify all related data was cascade-deleted
+		err = sysDB.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.workflow_events WHERE workflow_uuid = $1`, schema),
+			wfID).Scan(&eventCount)
+		require.NoError(t, err)
+		require.Equal(t, 0, eventCount, "expected events to be cascade-deleted")
+
+		err = sysDB.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.streams WHERE workflow_uuid = $1`, schema),
+			wfID).Scan(&streamCount)
+		require.NoError(t, err)
+		require.Equal(t, 0, streamCount, "expected stream entries to be cascade-deleted")
+
+		err = sysDB.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.notifications WHERE destination_uuid = $1`, schema),
+			wfID).Scan(&notifCount)
+		require.NoError(t, err)
+		require.Equal(t, 0, notifCount, "expected notifications to be cascade-deleted")
 	})
 
 	t.Run("DeleteWithChildrenThreeLayers", func(t *testing.T) {
