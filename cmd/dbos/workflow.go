@@ -55,6 +55,13 @@ var workflowForkCmd = &cobra.Command{
 	RunE:  runWorkflowFork,
 }
 
+var workflowDeleteCmd = &cobra.Command{
+	Use:   "delete [workflow-id]",
+	Short: "Permanently delete a workflow and all its associated data",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runWorkflowDelete,
+}
+
 func init() {
 	// Add subcommands to workflow
 	workflowCmd.AddCommand(workflowListCmd)
@@ -63,6 +70,10 @@ func init() {
 	workflowCmd.AddCommand(workflowCancelCmd)
 	workflowCmd.AddCommand(workflowResumeCmd)
 	workflowCmd.AddCommand(workflowForkCmd)
+	workflowCmd.AddCommand(workflowDeleteCmd)
+
+	// Delete command flags
+	workflowDeleteCmd.Flags().BoolP("children", "c", false, "Also delete all child workflows recursively")
 
 	// List command flags
 	workflowListCmd.Flags().IntP("limit", "l", 10, "Limit the results returned")
@@ -367,4 +378,34 @@ func runWorkflowFork(cmd *cobra.Command, args []string) error {
 
 	// Output results as JSON
 	return outputJSON(status)
+}
+
+func runWorkflowDelete(cmd *cobra.Command, args []string) error {
+	workflowID := args[0]
+
+	// Get database URL
+	dbURL, err := getDBURL()
+	if err != nil {
+		return err
+	}
+
+	user_ctx := context.Background()
+
+	// Create DBOS context
+	ctx, err := createDBOSContext(user_ctx, dbURL)
+	if err != nil {
+		return err
+	}
+
+	var opts []dbos.DeleteWorkflowOption
+	if children, _ := cmd.Flags().GetBool("children"); children {
+		opts = append(opts, dbos.WithDeleteChildren())
+	}
+
+	if err := ctx.DeleteWorkflow(ctx, workflowID, opts...); err != nil {
+		return err
+	}
+
+	logger.Info("Successfully deleted workflow", "id", workflowID)
+	return nil
 }
