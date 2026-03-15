@@ -150,9 +150,11 @@ type DBOSContext interface {
 	GetApplicationID() string      // Get the application ID for this context
 
 	// Context management
-	From(_ DBOSContext, ctx context.Context) DBOSContext                                                        // Returns a copy of the current DBOSContext wrapping the provided context.Context
-	WithoutCancel(_ DBOSContext) DBOSContext                                                                     // Returns a copy that is not canceled when the parent is canceled
-	WithTimeout(_ DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc)                            // Returns a copy that is canceled after the timeout
+	From(_ DBOSContext, ctx context.Context) DBOSContext                                // Returns a copy of the current DBOSContext wrapping the provided context.Context
+	WithoutCancel(_ DBOSContext) DBOSContext                                            // Returns a copy that is not canceled when the parent is canceled
+	WithTimeout(_ DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) // Returns a copy that is canceled after the timeout
+	WithValue(key, val any) DBOSContext                                                 // Returns a copy of the DBOS context with the given key-value pair
+	WithCancelCause() (DBOSContext, context.CancelCauseFunc)                            // Returns a copy of the DBOS context that can be canceled with a cause
 
 	// Queue configuration
 	ListenQueues(_ DBOSContext, queues ...WorkflowQueue) // Configure which queues this process should listen to
@@ -247,32 +249,31 @@ func From(dbosCtx DBOSContext, ctx context.Context) DBOSContext {
 
 // WithValue returns a copy of the DBOS context with the given key-value pair.
 // This is similar to context.WithValue but maintains DBOS context capabilities.
-// No-op if the provided context is not a concrete dbos.dbosContext.
 func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 	if ctx == nil {
 		return nil
 	}
-	// Will do nothing if the concrete type is not dbosContext
-	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		launched := dbosCtx.launched.Load()
-		childCtx := &dbosContext{
-			ctx:                     context.WithValue(dbosCtx.ctx, key, val), // Spawn a new child context with the value set
-			config:                  dbosCtx.config,
-			logger:                  dbosCtx.logger,
-			systemDB:                dbosCtx.systemDB,
-			workflowsWg:             dbosCtx.workflowsWg,
-			workflowRegistry:        dbosCtx.workflowRegistry,
-			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
-			activeWorkflowIDs:       dbosCtx.activeWorkflowIDs,
-			applicationVersion:      dbosCtx.applicationVersion,
-			executorID:              dbosCtx.executorID,
-			applicationID:           dbosCtx.applicationID,
-			queueRunner:             dbosCtx.queueRunner,
-		}
-		childCtx.launched.Store(launched)
-		return childCtx
+	return ctx.WithValue(key, val)
+}
+
+func (c *dbosContext) WithValue(key, val any) DBOSContext {
+	launched := c.launched.Load()
+	childCtx := &dbosContext{
+		ctx:                     context.WithValue(c.ctx, key, val), // Spawn a new child context with the value set
+		config:                  c.config,
+		logger:                  c.logger,
+		systemDB:                c.systemDB,
+		workflowsWg:             c.workflowsWg,
+		workflowRegistry:        c.workflowRegistry,
+		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
+		activeWorkflowIDs:       c.activeWorkflowIDs,
+		applicationVersion:      c.applicationVersion,
+		executorID:              c.executorID,
+		applicationID:           c.applicationID,
+		queueRunner:             c.queueRunner,
 	}
-	return nil
+	childCtx.launched.Store(launched)
+	return childCtx
 }
 
 func (c *dbosContext) WithoutCancel(_ DBOSContext) DBOSContext {
@@ -304,33 +305,33 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 	return ctx.WithoutCancel(ctx)
 }
 
+func (c *dbosContext) WithCancelCause() (DBOSContext, context.CancelCauseFunc) {
+	launched := c.launched.Load()
+	newCtx, cancelCauseFunc := context.WithCancelCause(c.ctx)
+	childCtx := &dbosContext{
+		ctx:                     newCtx,
+		logger:                  c.logger,
+		systemDB:                c.systemDB,
+		workflowsWg:             c.workflowsWg,
+		workflowRegistry:        c.workflowRegistry,
+		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
+		activeWorkflowIDs:       c.activeWorkflowIDs,
+		applicationVersion:      c.applicationVersion,
+		executorID:              c.executorID,
+		applicationID:           c.applicationID,
+		queueRunner:             c.queueRunner,
+	}
+	childCtx.launched.Store(launched)
+	return childCtx, cancelCauseFunc
+}
+
 // WithCancelCause returns a copy of the DBOS context that can be canceled with a cause.
 // The returned context will be canceled when the returned CancelCauseFunc is called with a cause.
-// No-op if the provided context is not a concrete dbos.dbosContext.
 func WithCancelCause(ctx DBOSContext) (DBOSContext, context.CancelCauseFunc) {
 	if ctx == nil {
 		return nil, func(error) {}
 	}
-	if dbosCtx, ok := ctx.(*dbosContext); ok {
-		launched := dbosCtx.launched.Load()
-		newCtx, cancelCauseFunc := context.WithCancelCause(dbosCtx.ctx)
-		childCtx := &dbosContext{
-			ctx:                     newCtx,
-			logger:                  dbosCtx.logger,
-			systemDB:                dbosCtx.systemDB,
-			workflowsWg:             dbosCtx.workflowsWg,
-			workflowRegistry:        dbosCtx.workflowRegistry,
-			workflowCustomNametoFQN: dbosCtx.workflowCustomNametoFQN,
-			activeWorkflowIDs:       dbosCtx.activeWorkflowIDs,
-			applicationVersion:      dbosCtx.applicationVersion,
-			executorID:              dbosCtx.executorID,
-			applicationID:           dbosCtx.applicationID,
-			queueRunner:             dbosCtx.queueRunner,
-		}
-		childCtx.launched.Store(launched)
-		return childCtx, cancelCauseFunc
-	}
-	return nil, func(error) {}
+	return ctx.WithCancelCause()
 }
 
 func (c *dbosContext) WithTimeout(_ DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) {

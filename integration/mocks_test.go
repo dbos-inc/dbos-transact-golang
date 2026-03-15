@@ -188,8 +188,89 @@ func TestMocks(t *testing.T) {
 	mockCtx.On("GetExecutorID").Return("test-executor")
 	mockCtx.On("GetApplicationID").Return("test-app-id")
 
+	// Context management
+	mockValCtx := mocks.NewMockDBOSContext(t)
+	mockCtx.On("WithValue", "key", "val").Return(mockValCtx)
+	valCtx := dbos.WithValue(mockCtx, "key", "val")
+	if valCtx != dbos.DBOSContext(mockValCtx) {
+		t.Fatal("WithValue did not return mock context")
+	}
+
+	mockCancelCtx := mocks.NewMockDBOSContext(t)
+	var cancelFunc context.CancelCauseFunc = func(error) {}
+	mockCtx.On("WithCancelCause").Return(mockCancelCtx, cancelFunc)
+	cancelCtx, cf := dbos.WithCancelCause(mockCtx)
+	if cancelCtx != dbos.DBOSContext(mockCancelCtx) {
+		t.Fatal("WithCancelCause did not return mock context")
+	}
+	if cf == nil {
+		t.Fatal("WithCancelCause did not return cancel function")
+	}
+
 	err := aRealProgramFunction(mockCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// Test MockClient
+	mockClient := mocks.NewMockClient(t)
+	mockClient.On("Enqueue", "q", "wf", "input", mock.Anything).Return(mockGenericHandle, nil)
+	mockClient.On("Shutdown", 1*time.Second).Return()
+
+	h, err := mockClient.Enqueue("q", "wf", "input")
+	if err != nil || h != mockGenericHandle {
+		t.Fatal("MockClient Enqueue failed")
+	}
+	mockClient.Shutdown(1 * time.Second)
+
+	// Test remaining DBOSContext methods (optional expectations)
+	mockCtx2 := mocks.NewMockDBOSContext(t)
+
+	// Go
+	outcomeChan := make(chan dbos.StepOutcome[any], 1)
+	mockCtx2.On("Go", mockCtx2, mock.Anything, mock.Anything).Return(outcomeChan, nil).Maybe()
+
+	// Select
+	mockCtx2.On("Select", mockCtx2, mock.Anything).Return(42, nil).Maybe()
+
+	// WriteStream
+	mockCtx2.On("WriteStream", mockCtx2, "key", "value").Return(nil).Maybe()
+
+	// CloseStream
+	mockCtx2.On("CloseStream", mockCtx2, "key").Return(nil).Maybe()
+
+	// ReadStream
+	mockCtx2.On("ReadStream", mockCtx2, "wf-id", "key").Return([]any{1, 2, 3}, true, nil).Maybe()
+
+	// ReadStreamAsync
+	streamChan := make(chan dbos.StreamValue[any], 1)
+	mockCtx2.On("ReadStreamAsync", mockCtx2, "wf-id", "key").Return((<-chan dbos.StreamValue[any])(streamChan), nil).Maybe()
+
+	// Patch
+	mockCtx2.On("Patch", mockCtx2, "patch-name").Return(true, nil).Maybe()
+
+	// DeprecatePatch
+	mockCtx2.On("DeprecatePatch", mockCtx2, "patch-name").Return(nil).Maybe()
+
+	// ListRegisteredWorkflows
+	mockCtx2.On("ListRegisteredWorkflows", mockCtx2).Return([]dbos.WorkflowRegistryEntry{}, nil).Maybe()
+
+	// ListRegisteredQueues
+	mockCtx2.On("ListRegisteredQueues", mockCtx2).Return([]dbos.WorkflowQueue{}, nil).Maybe()
+
+	// From
+	mockFromCtx := mocks.NewMockDBOSContext(t)
+	mockCtx2.On("From", mockCtx2, mock.Anything).Return(mockFromCtx).Maybe()
+
+	// WithoutCancel
+	mockNoCancelCtx := mocks.NewMockDBOSContext(t)
+	mockCtx2.On("WithoutCancel", mockCtx2).Return(mockNoCancelCtx).Maybe()
+
+	// WithTimeout
+	mockTimeoutCtx := mocks.NewMockDBOSContext(t)
+	var cancel context.CancelFunc = func() {}
+	mockCtx2.On("WithTimeout", mockCtx2, mock.Anything).Return(mockTimeoutCtx, cancel).Maybe()
+
+	// ListenQueues
+	mockCtx2.On("ListenQueues", mockCtx2, mock.Anything).Maybe()
 }
