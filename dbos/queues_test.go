@@ -964,9 +964,8 @@ func TestQueueTimeouts(t *testing.T) {
 		// Workflow should get AwaitedWorkflowCancelled DBOSError
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error when waiting for enqueued workflow to complete, but got none")
-		var dbosErr *DBOSError
+		dbosErr := &DBOSError{Code: AwaitedWorkflowCancelled}
 		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
-		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
 		return "", nil
 	}
 	RegisterWorkflow(dbosCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow)

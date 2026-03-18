@@ -3237,7 +3237,7 @@ func TestWorkflowTimeout(t *testing.T) {
 
 		// Wait for the child workflow to complete
 		result, err := childHandle.GetResult()
-		assert.True(t, errors.Is(err, context.DeadlineExceeded), "expected child workflow to be cancelled, got: %v", err)
+		assert.True(t, errors.Is(err, &DBOSError{Code: WorkflowCancelled}), "expected child workflow to be cancelled, got: %v", err)
 		return result, ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelParent)
