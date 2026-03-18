@@ -3,19 +3,27 @@ package dbos
 func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
-	pendingWorkflows, err := ctx.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
-		status:             []WorkflowStatusType{WorkflowStatusPending},
-		executorIDs:        executorIDs,
-		applicationVersion: ctx.applicationVersion,
-		loadInput:          true,
-	})
+	pendingWorkflows, err := retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+		appVersion := []string{}
+		if ctx.applicationVersion != "" {
+			appVersion = []string{ctx.applicationVersion}
+		}
+		return ctx.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
+			status:              []WorkflowStatusType{WorkflowStatusPending},
+			executorIDs:         executorIDs,
+			applicationVersion: appVersion,
+			loadInput:           true,
+		})
+	}, withRetrierLogger(ctx.logger))
 	if err != nil {
 		return nil, err
 	}
 
 	for _, workflow := range pendingWorkflows {
 		if workflow.QueueName != "" {
-			cleared, err := ctx.systemDB.clearQueueAssignment(ctx, workflow.ID)
+			cleared, err := retryWithResult(ctx, func() (bool, error) {
+				return ctx.systemDB.clearQueueAssignment(ctx, workflow.ID)
+			}, withRetrierLogger(ctx.logger))
 			if err != nil {
 				ctx.logger.Error("Error clearing queue assignment for workflow", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
 				continue
@@ -46,6 +54,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 		// Convert workflow parameters to options
 		opts := []WorkflowOption{
 			WithWorkflowID(workflow.ID),
+			withIsRecovery(),
 		}
 		// Create a workflow context from the executor context
 		// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type

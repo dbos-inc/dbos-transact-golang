@@ -17,7 +17,7 @@ import (
 
 func TestClientEnqueue(t *testing.T) {
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication between client and server
 	queue := NewWorkflowQueue(serverCtx, "client-enqueue-queue")
@@ -349,7 +349,7 @@ func TestCancelResume(t *testing.T) {
 	var stepsCompleted int
 
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication between client and server
 	queue := NewWorkflowQueue(serverCtx, "cancel-resume-queue")
@@ -592,7 +592,7 @@ func TestForkWorkflow(t *testing.T) {
 	)
 
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication between client and server
 	queue := NewWorkflowQueue(serverCtx, "fork-workflow-queue")
@@ -856,8 +856,9 @@ func TestListWorkflows(t *testing.T) {
 		}
 	})
 
-	// Create queue for communication
+	// Create queues for communication (second queue used for multi-value filter tests)
 	queue := NewWorkflowQueue(serverCtx, "list-workflows-queue")
+	queue2 := NewWorkflowQueue(serverCtx, "list-workflows-queue-2")
 
 	// Simple test workflow
 	type testInput struct {
@@ -871,7 +872,26 @@ func TestListWorkflows(t *testing.T) {
 		}
 		return fmt.Sprintf("result-%d-%s", input.Value, input.ID), nil
 	}
+	otherWorkflow := func(ctx DBOSContext, input testInput) (string, error) {
+		if input.Value < 0 {
+			return "", fmt.Errorf("negative value: %d", input.Value)
+		}
+		return fmt.Sprintf("result-%d-%s", input.Value, input.ID), nil
+	}
 	RegisterWorkflow(serverCtx, simpleWorkflow, WithWorkflowName("SimpleWorkflow"))
+	RegisterWorkflow(serverCtx, otherWorkflow, WithWorkflowName("OtherWorkflow"))
+
+	// Parent/child workflows for WithParentWorkflowID filter test
+	childWfForListTest := func(ctx DBOSContext, input string) (string, error) { return input, nil }
+	parentWfForListTest := func(ctx DBOSContext, _ string) (string, error) {
+		h, err := RunWorkflow(ctx, childWfForListTest, "child-input")
+		if err != nil {
+			return "", err
+		}
+		return h.GetResult()
+	}
+	RegisterWorkflow(serverCtx, childWfForListTest, WithWorkflowName("ChildForListTest"))
+	RegisterWorkflow(serverCtx, parentWfForListTest, WithWorkflowName("ParentForListTest"))
 
 	// Launch server
 	err = Launch(serverCtx)
@@ -941,10 +961,30 @@ func TestListWorkflows(t *testing.T) {
 			}
 		}
 
+		// Run 2 workflows with different name (OtherWorkflow) for multi-name filter test
+		for i := range 2 {
+			h, err := Enqueue[testInput, string](client, queue.Name, "OtherWorkflow", testInput{Value: i, ID: fmt.Sprintf("other-%d", i)},
+				WithEnqueueWorkflowID(fmt.Sprintf("test-other-name-%d", i)),
+				WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+			require.NoError(t, err, "failed to enqueue OtherWorkflow %d", i)
+			_, err = h.GetResult()
+			require.NoError(t, err, "OtherWorkflow %d should succeed", i)
+		}
+
+		// Run 2 workflows on second queue for multi-queue filter test
+		for i := range 2 {
+			h, err := Enqueue[testInput, string](client, queue2.Name, "SimpleWorkflow", testInput{Value: 100 + i, ID: fmt.Sprintf("q2-%d", i)},
+				WithEnqueueWorkflowID(fmt.Sprintf("test-queue2-%d", i)),
+				WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+			require.NoError(t, err, "failed to enqueue to queue2 %d", i)
+			_, err = h.GetResult()
+			require.NoError(t, err, "queue2 workflow %d should succeed", i)
+		}
+
 		// Test 1: List all workflows (no filters)
 		allWorkflows, err := client.ListWorkflows()
 		require.NoError(t, err, "failed to list all workflows")
-		assert.GreaterOrEqual(t, len(allWorkflows), 10, "expected at least 10 workflows")
+		assert.GreaterOrEqual(t, len(allWorkflows), 14, "expected at least 14 workflows (10 initial + 2 OtherWorkflow + 2 on queue2)")
 
 		for _, wf := range allWorkflows {
 			// These fields should exist (may be zero/empty for some workflows)
@@ -985,7 +1025,7 @@ func TestListWorkflows(t *testing.T) {
 			WithWorkflowIDPrefix("test-"), // Only our test workflows
 			WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}))
 		require.NoError(t, err, "failed to list successful workflows")
-		assert.Len(t, successWorkflows, 8, "expected 8 successful workflows")
+		assert.Len(t, successWorkflows, 12, "expected 12 successful workflows (8 initial + 2 OtherWorkflow + 2 queue2)")
 		// Verify all returned workflows have SUCCESS status
 		for _, wf := range successWorkflows {
 			assert.Equal(t, WorkflowStatusSuccess, wf.Status, "workflow %s has unexpected status", wf.ID)
@@ -1010,12 +1050,12 @@ func TestListWorkflows(t *testing.T) {
 		require.NoError(t, err, "failed to list first half workflows by time range")
 		assert.Len(t, firstHalfWorkflows, 5, "expected 5 workflows in first half time range")
 
-		// Test 6b: Filter by time range - last 5 workflows (start+500ms to end)
+		// Test 6b: Filter by time range - workflows started at or after firstHalfTime
 		secondHalfWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithStartTime(firstHalfTime))
 		require.NoError(t, err, "failed to list second half workflows by time range")
-		assert.Len(t, secondHalfWorkflows, 5, "expected 5 workflows in second half time range")
+		assert.Len(t, secondHalfWorkflows, 9, "expected 9 workflows in second half (5 test-other-5..9 + 2 test-other-name + 2 test-queue2)")
 
 		// Test 7: Test sorting order (ascending - default)
 		ascWorkflows, err := client.ListWorkflows(
@@ -1081,6 +1121,62 @@ func TestListWorkflows(t *testing.T) {
 			assert.Nil(t, wf.Input, "expected input to be nil when LoadInput=false")
 			assert.Nil(t, wf.Output, "expected output to be nil when LoadOutput=false")
 		}
+
+		// Test 11: Filter by multiple workflow ID prefixes (slice option)
+		multiPrefixWorkflows, err := client.ListWorkflows(WithWorkflowIDPrefix("test-batch-", "test-other-"))
+		require.NoError(t, err, "failed to list workflows by multiple prefixes")
+		// Matches test-batch-0..4 (5) + test-other-5..9 (5) + test-other-name-0,1 (2) = 12
+		assert.Len(t, multiPrefixWorkflows, 12, "expected 12 workflows matching either prefix")
+		for _, wf := range multiPrefixWorkflows {
+			assert.True(t, strings.HasPrefix(wf.ID, "test-batch-") || strings.HasPrefix(wf.ID, "test-other-"),
+				"workflow ID %s should have one of the prefixes", wf.ID)
+		}
+
+		// Test 12: Filter by multiple workflow names (slice option)
+		multiNameWorkflows, err := client.ListWorkflows(WithName("SimpleWorkflow", "OtherWorkflow"))
+		require.NoError(t, err, "failed to list workflows by multiple names")
+		assert.Len(t, multiNameWorkflows, 14, "expected 14 workflows (10 SimpleWorkflow + 2 OtherWorkflow + 2 SimpleWorkflow on queue2)")
+		namesSeen := make(map[string]int)
+		for _, wf := range multiNameWorkflows {
+			if wf.Name != "" {
+				namesSeen[wf.Name]++
+			}
+		}
+		assert.GreaterOrEqual(t, namesSeen["SimpleWorkflow"], 12, "expected at least 12 SimpleWorkflow")
+		assert.GreaterOrEqual(t, namesSeen["OtherWorkflow"], 2, "expected at least 2 OtherWorkflow")
+
+		// Test 13: Filter by multiple queue names (slice option)
+		multiQueueWorkflows, err := client.ListWorkflows(WithQueueName(queue.Name, queue2.Name))
+		require.NoError(t, err, "failed to list workflows by multiple queues")
+		assert.Len(t, multiQueueWorkflows, 14, "expected 14 workflows (12 on queue + 2 on queue2)")
+		queuesSeen := make(map[string]int)
+		for _, wf := range multiQueueWorkflows {
+			if wf.QueueName != "" {
+				queuesSeen[wf.QueueName]++
+			}
+		}
+		assert.GreaterOrEqual(t, queuesSeen[queue.Name], 12, "expected at least 12 workflows on first queue")
+		assert.GreaterOrEqual(t, queuesSeen[queue2.Name], 2, "expected at least 2 workflows on second queue")
+
+		// Test 14: Filter by parent workflow ID (child ID is parentID-0 for first step)
+		parentID := "list-test-parent-id"
+		parentHandle, err := Enqueue[string, string](client, queue.Name, "ParentForListTest", "ignored",
+			WithEnqueueWorkflowID(parentID),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err, "failed to enqueue parent workflow")
+		_, err = parentHandle.GetResult()
+		require.NoError(t, err, "parent workflow should succeed")
+		assert.Equal(t, parentID, parentHandle.GetWorkflowID(), "parent should have requested workflow ID")
+		expectedChildID := parentID + "-0"
+		childWorkflows, err := client.ListWorkflows(WithParentWorkflowID(parentID))
+		require.NoError(t, err, "failed to list workflows by parent ID")
+		assert.Len(t, childWorkflows, 1, "expected one child workflow")
+		assert.Equal(t, parentID, childWorkflows[0].ParentWorkflowID, "child should have ParentWorkflowID set")
+		assert.Equal(t, expectedChildID, childWorkflows[0].ID, "child workflow ID should be parentID-0")
+		// Filter with nonexistent parent returns empty
+		nonexistent, err := client.ListWorkflows(WithParentWorkflowID("nonexistent-parent-id"))
+		require.NoError(t, err)
+		assert.Len(t, nonexistent, 0)
 	})
 	// Verify all queue entries are cleaned up
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after list workflows tests")
@@ -1088,7 +1184,7 @@ func TestListWorkflows(t *testing.T) {
 
 func TestGetWorkflowSteps(t *testing.T) {
 	// Setup server context
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication
 	queue := NewWorkflowQueue(serverCtx, "get-workflow-steps-queue")
@@ -1176,7 +1272,7 @@ func asyncClientReadStream(c Client, workflowID string, key string) ([]string, b
 
 func TestClientReadStream(t *testing.T) {
 	// Setup server context
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication
 	queue := NewWorkflowQueue(serverCtx, "read-stream-queue")
@@ -1258,7 +1354,7 @@ func TestClientReadStream(t *testing.T) {
 // TestDebouncerClient tests the DebouncerClient functionality using a Client interface
 func TestDebouncerClient(t *testing.T) {
 	// Setup server context - this will process tasks
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Set internal queue polling interval to 10ms for faster tests
 	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
@@ -1308,24 +1404,39 @@ func TestDebouncerClient(t *testing.T) {
 	})
 
 	t.Run("TestMultipleCallsPushBackAndLatestInput", func(t *testing.T) {
-		// Call Debounce 5 times with delay=200ms
+
+		pool := serverCtx.(*dbosContext).systemDB.(*sysDB).pool
+		conn, err := pool.Acquire(serverCtx)
+		require.NoError(t, err)
+		defer conn.Release()
+		isCockroachDB := isCockroachDB(context.Background(), conn.Conn())
+
+		// CockroachDB has longer notification latency due to polling
+		var delay time.Duration
+		if isCockroachDB {
+			delay = 2000 * time.Millisecond
+		} else {
+			delay = 200 * time.Millisecond
+		}
+
+		// Call Debounce 5 times
 		key := "test-key-2"
 		startTime := time.Now()
 
 		// First call
-		handle1, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-1")
+		handle1, err := debouncer10sTimeout.Debounce(key, delay, "input-1")
 		require.NoError(t, err, "failed to call Debounce (first call)")
 
-		handle2, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-2")
+		handle2, err := debouncer10sTimeout.Debounce(key, delay, "input-2")
 		require.NoError(t, err, "failed to call Debounce (second call)")
 
-		handle3, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-3")
+		handle3, err := debouncer10sTimeout.Debounce(key, delay, "input-3")
 		require.NoError(t, err, "failed to call Debounce (third call)")
 
-		handle4, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-4")
+		handle4, err := debouncer10sTimeout.Debounce(key, delay, "input-4")
 		require.NoError(t, err, "failed to call Debounce (fourth call)")
 
-		handle5, err := debouncer10sTimeout.Debounce(key, 200*time.Millisecond, "input-5")
+		handle5, err := debouncer10sTimeout.Debounce(key, delay, "input-5")
 		require.NoError(t, err, "failed to call Debounce (fifth call)")
 
 		// All handles should refer to the same workflow ID
@@ -1338,9 +1449,9 @@ func TestDebouncerClient(t *testing.T) {
 		require.NoError(t, err, "failed to get result")
 		assert.Equal(t, "input-5", result, "result should match latest input")
 
-		// Verify execution happened at least 200ms after first call (200ms debounce in rapid succession)
+		// Verify execution happened at least delay after first call
 		elapsed := time.Since(startTime)
-		assert.GreaterOrEqual(t, elapsed, 200*time.Millisecond, "execution should take at least 200ms")
+		assert.GreaterOrEqual(t, elapsed, delay, "execution should take at least delay")
 		assert.LessOrEqual(t, elapsed, 10*time.Second, "execution should take less than 10s")
 	})
 
@@ -1439,7 +1550,7 @@ func TestDebouncerClient(t *testing.T) {
 
 func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	// Setup server context
-	serverCtx := setupDBOS(t, true, true)
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create test queue
 	testQueue := NewWorkflowQueue(serverCtx, "debouncer-client-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())

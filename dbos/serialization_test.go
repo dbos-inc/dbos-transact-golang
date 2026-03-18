@@ -498,7 +498,7 @@ func (p *TestStringProcessor) Process(data string) string {
 // slices, arrays, byte slices, maps, and custom types. It also tests Send/Recv and
 // SetEvent/GetEvent communication patterns.
 func TestSerializer(t *testing.T) {
-	executor := setupDBOS(t, true, true)
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create a test queue for queued workflow tests
 	testQueue := NewWorkflowQueue(executor, "serializer-test-queue")

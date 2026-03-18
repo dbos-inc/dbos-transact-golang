@@ -54,7 +54,7 @@ func workflowThatCallsDebounce(ctx DBOSContext, input debounceCallInput) (string
 }
 
 func TestDebouncer(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Set internal queue polling interval to 100ms
 	internalQueue := dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
@@ -294,7 +294,7 @@ func TestDebouncer(t *testing.T) {
 
 func TestDebouncerCannotBeCreatedAfterLaunch(t *testing.T) {
 	// Set up a new DBOS context for this test (not launched)
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Register a workflow for this test (reuse existing workflow)
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
@@ -332,7 +332,7 @@ func TestDebouncerCannotBeCreatedAfterLaunch(t *testing.T) {
 }
 
 func TestDebouncerWorkflowOptions(t *testing.T) {
-	dbosCtx := setupDBOS(t, true, true)
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	testQueue := NewWorkflowQueue(dbosCtx, "debouncer-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())
 

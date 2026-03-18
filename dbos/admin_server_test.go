@@ -33,6 +33,7 @@ func TestAdminServer(t *testing.T) {
 	databaseURL := getDatabaseURL()
 
 	t.Run("Admin server is not started by default", func(t *testing.T) {
+		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",

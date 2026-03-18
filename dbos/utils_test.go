@@ -45,23 +45,30 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 	require.NoError(t, err)
 	defer conn.Close(context.Background())
 
-	_, err = conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)")
+	err = dropDatabaseIfExists(context.Background(), conn, dbName)
 	require.NoError(t, err)
 }
 
+type setupDBOSOptions struct {
+	dropDB     bool
+	checkLeaks bool
+}
+
 /* Test database setup */
-func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
+func setupDBOS(t *testing.T, opts setupDBOSOptions) DBOSContext {
 	t.Helper()
 
 	databaseURL := getDatabaseURL()
-	if dropDB {
+	if opts.dropDB {
 		resetTestDatabase(t, databaseURL)
 	}
 
-	dbosCtx, err := NewDBOSContext(context.Background(), Config{
+	config := Config{
 		DatabaseURL: databaseURL,
 		AppName:     "test-app",
-	})
+	}
+
+	dbosCtx, err := NewDBOSContext(context.Background(), config)
 	require.NoError(t, err)
 	require.NotNil(t, dbosCtx)
 
@@ -72,7 +79,7 @@ func setupDBOS(t *testing.T, dropDB bool, checkLeaks bool) DBOSContext {
 			Shutdown(dbosCtx, 30*time.Second) // Wait for workflows to finish and shutdown admin server and system database
 		}
 		dbosCtx = nil
-		if checkLeaks {
+		if opts.checkLeaks {
 			goleak.VerifyNone(t,
 				// Ignore pgx health checks
 				// https://github.com/jackc/pgx/blob/15bca4a4e14e0049777c1245dba4c16300fe4fd0/pgxpool/pool.go#L417
@@ -120,7 +127,20 @@ func (e *Event) Clear() {
 	e.IsSet = false
 }
 
-/* Helpers */
+// setWorkflowStatusPending sets the workflow's status to PENDING in the DB (clearing output, error, started_at_epoch_ms).
+func setWorkflowStatusPending(t *testing.T, dbosCtx DBOSContext, workflowID string) {
+	t.Helper()
+	c, ok := dbosCtx.(*dbosContext)
+	require.True(t, ok, "expected DBOSContext to be *dbosContext")
+	sysDB, ok := c.systemDB.(*sysDB)
+	require.True(t, ok, "expected systemDB to be *sysDB")
+	updateQuery := fmt.Sprintf(`UPDATE %s.workflow_status
+		SET status = $1, output = NULL, error = NULL, started_at_epoch_ms = NULL, updated_at = $2
+		WHERE workflow_uuid = $3`, pgx.Identifier{sysDB.schema}.Sanitize())
+	_, err := sysDB.pool.Exec(context.Background(), updateQuery,
+		WorkflowStatusPending, time.Now().UnixMilli(), workflowID)
+	require.NoError(t, err, "failed to set workflow status to PENDING")
+}
 
 func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 	maxTries := 10
@@ -160,23 +180,4 @@ func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 	}
 
 	return success
-}
-
-func checkWfStatus(ctx DBOSContext, expectedStatus WorkflowStatusType) (bool, error) {
-	wfid, err := GetWorkflowID(ctx)
-	if err != nil {
-		return false, err
-	}
-	me, err := RetrieveWorkflow[string](ctx, wfid)
-	if err != nil {
-		return false, err
-	}
-	meStatus, err := me.GetStatus()
-	if err != nil {
-		return false, err
-	}
-	if meStatus.Status == expectedStatus {
-		return true, nil
-	}
-	return false, nil
 }

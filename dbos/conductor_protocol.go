@@ -6,6 +6,32 @@ import (
 	"time"
 )
 
+// stringOrList is a custom JSON type that accepts either a single string
+// or an array of strings, matching the conductor's StringOrList for filter fields.
+type stringOrList []string
+
+func (s *stringOrList) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*s = nil
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		*s = stringOrList{single}
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return err
+	}
+	*s = stringOrList(list)
+	return nil
+}
+
+func (s stringOrList) toSlice() []string {
+	return []string(s)
+}
+
 // messageType represents the type of message exchanged with the conductor
 type messageType string
 
@@ -51,22 +77,26 @@ type executorInfoResponse struct {
 	Language           string  `json:"language"`
 }
 
-// listWorkflowsConductorRequestBody contains filter parameters for listing workflows
+// listWorkflowsConductorRequestBody contains filter parameters for listing workflows.
 type listWorkflowsConductorRequestBody struct {
-	WorkflowUUIDs      []string   `json:"workflow_uuids,omitempty"`
-	WorkflowName       *string    `json:"workflow_name,omitempty"`
-	AuthenticatedUser  *string    `json:"authenticated_user,omitempty"`
-	StartTime          *time.Time `json:"start_time,omitempty"`
-	EndTime            *time.Time `json:"end_time,omitempty"`
-	Status             *string    `json:"status,omitempty"`
-	ApplicationVersion *string    `json:"application_version,omitempty"`
-	QueueName          *string    `json:"queue_name,omitempty"`
-	Limit              *int       `json:"limit,omitempty"`
-	Offset             *int       `json:"offset,omitempty"`
-	SortDesc           bool       `json:"sort_desc"`
-	LoadInput          bool       `json:"load_input"`
-	LoadOutput         bool       `json:"load_output"`
-	ForkedFrom         *string    `json:"forked_from,omitempty"`
+	WorkflowUUIDs      []string     `json:"workflow_uuids,omitempty"`
+	WorkflowName       stringOrList `json:"workflow_name,omitempty"`
+	AuthenticatedUser  stringOrList `json:"authenticated_user,omitempty"`
+	StartTime          *time.Time   `json:"start_time,omitempty"` // ISO 8601
+	EndTime            *time.Time   `json:"end_time,omitempty"`   // ISO 8601
+	Status             stringOrList `json:"status,omitempty"`
+	ApplicationVersion stringOrList `json:"application_version,omitempty"`
+	ForkedFrom         stringOrList `json:"forked_from,omitempty"`
+	ParentWorkflowID   stringOrList `json:"parent_workflow_id,omitempty"`
+	QueueName          stringOrList `json:"queue_name,omitempty"`
+	Limit              *int         `json:"limit,omitempty"`
+	Offset             *int         `json:"offset,omitempty"`
+	SortDesc           bool         `json:"sort_desc"`
+	WorkflowIDPrefix   stringOrList `json:"workflow_id_prefix,omitempty"`
+	LoadInput          bool         `json:"load_input"`
+	LoadOutput         bool         `json:"load_output"`
+	ExecutorID         stringOrList `json:"executor_id,omitempty"`
+	QueuesOnly         bool         `json:"queues_only"`
 }
 
 // listWorkflowsConductorRequest is sent by the conductor to list workflows
@@ -91,14 +121,16 @@ type listWorkflowsConductorResponseBody struct {
 	CreatedAt               *string `json:"CreatedAt,omitempty"`
 	UpdatedAt               *string `json:"UpdatedAt,omitempty"`
 	QueueName               *string `json:"QueueName,omitempty"`
-	QueuePartitionKey       *string `json:"QueuePartitionKey,omitempty"`
-	DeduplicationID         *string `json:"DeduplicationID,omitempty"`
-	Priority                *int    `json:"Priority,omitempty"`
 	ApplicationVersion      *string `json:"ApplicationVersion,omitempty"`
 	ExecutorID              *string `json:"ExecutorID,omitempty"`
 	WorkflowTimeoutMS       *string `json:"WorkflowTimeoutMS,omitempty"`
 	WorkflowDeadlineEpochMS *string `json:"WorkflowDeadlineEpochMS,omitempty"`
+	DeduplicationID         *string `json:"DeduplicationID,omitempty"`
+	Priority                *string `json:"Priority,omitempty"`
+	QueuePartitionKey       *string `json:"QueuePartitionKey,omitempty"`
 	ForkedFrom              *string `json:"ForkedFrom,omitempty"`
+	ParentWorkflowID        *string `json:"ParentWorkflowID,omitempty"`
+	DequeuedAt              *string `json:"DequeuedAt,omitempty"`
 }
 
 // listWorkflowsConductorResponse is sent in response to list workflows requests
@@ -185,10 +217,9 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 		output.DeduplicationID = &wf.DeduplicationID
 	}
 
-	// Copy priority
-	if wf.Priority != 0 {
-		output.Priority = &wf.Priority
-	}
+	// Copy priority (include "0" so conductor receives a string)
+	priorityStr := strconv.Itoa(wf.Priority)
+	output.Priority = &priorityStr
 
 	// Copy application version
 	if wf.ApplicationVersion != "" {
@@ -215,6 +246,18 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 	// Copy forked from
 	if wf.ForkedFrom != "" {
 		output.ForkedFrom = &wf.ForkedFrom
+	}
+
+	// Copy parent workflow ID
+	if wf.ParentWorkflowID != "" {
+		output.ParentWorkflowID = &wf.ParentWorkflowID
+	}
+
+	// DequeuedAt: when a workflow is dequeued and starts running, started_at is set.
+	// Use StartedAt as DequeuedAt for workflows that have been dequeued (PENDING with started_at).
+	if (wf.Status == WorkflowStatusPending) && !wf.StartedAt.IsZero() {
+		dequeuedStr := strconv.FormatInt(wf.StartedAt.UnixMilli(), 10)
+		output.DequeuedAt = &dequeuedStr
 	}
 
 	return output

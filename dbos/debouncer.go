@@ -177,8 +177,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 			return newWorkflowPollingHandle[R](ctx, dInput.TargetWorkflowID), nil
 		}
 		// A dedup error means the internal debouncer workflow was already started, in which case we should send it the new input
-		var dbosErr *DBOSError
-		if errors.As(err, &dbosErr) && dbosErr.Code == QueueDeduplicated {
+		if errors.Is(err, &DBOSError{Code: QueueDeduplicated}) {
 			// Identify the ID of the internal debouncer workflow from the dedup error
 			debouncerWorkflowStatus, err := ListWorkflows(ctx, WithFilterDeduplicationID(key))
 			if err != nil {

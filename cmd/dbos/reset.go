@@ -66,8 +66,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 
 	// Drop the system database if it exists
 	logger.Info("Resetting system database", "database", dbName)
-	dropSQL := fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", pgx.Identifier{dbName}.Sanitize())
-	_, err = conn.Exec(ctx, dropSQL)
+	err = dropDatabaseIfExists(ctx, conn, dbName)
 	if err != nil {
 		return fmt.Errorf("failed to drop system database: %w", err)
 	}

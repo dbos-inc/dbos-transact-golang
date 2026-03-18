@@ -251,7 +251,7 @@ func TestConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, exists, "dbos_migrations table should exist")
 
-		// Verify migration version is 6 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, and workflow events history migration)
+		// Verify migration version is 13 (after initial migration through application_versions)
 		var version int64
 		var count int
 		err = sysDB.pool.QueryRow(dbCtx, "SELECT COUNT(*) FROM dbos.dbos_migrations").Scan(&count)
@@ -260,7 +260,7 @@ func TestConfig(t *testing.T) {
 
 		err = sysDB.pool.QueryRow(dbCtx, "SELECT version FROM dbos.dbos_migrations").Scan(&version)
 		require.NoError(t, err)
-		assert.Equal(t, int64(6), version, "migration version should be 6 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, and workflow events history migration)")
+		assert.Equal(t, int64(13), version, "migration version should be 13 (after initial migration through application_versions)")
 
 		// Test manual shutdown and recreate
 		Shutdown(ctx, 1*time.Minute)
@@ -337,7 +337,12 @@ func TestConfig(t *testing.T) {
 		t.Run("DBOSContextCreation", func(t *testing.T) {
 			// Use the actual password from config for integration test
 			actualPassword := parsedURL.ConnConfig.Password
-			keyValueConnStr := fmt.Sprintf("user='%s' password='%s' database=%s host=%s%s", user, actualPassword, database, host, portSSL)
+			var keyValueConnStr string
+			if actualPassword == "" {
+				keyValueConnStr = fmt.Sprintf("user='%s' database=%s host=%s%s", user, database, host, portSSL)
+			} else {
+				keyValueConnStr = fmt.Sprintf("user='%s' password='%s' database=%s host=%s%s", user, actualPassword, database, host, portSSL)
+			}
 
 			ctx, err := NewDBOSContext(context.Background(), Config{
 				DatabaseURL: keyValueConnStr,
@@ -367,11 +372,94 @@ func TestConfig(t *testing.T) {
 			poolConnStr := sysDB.pool.Config().ConnString()
 			maskedConnStr, err := maskPassword(poolConnStr)
 			require.NoError(t, err)
-			assert.Contains(t, maskedConnStr, "password=***")
-			assert.NotContains(t, maskedConnStr, fmt.Sprintf("password=%s", actualPassword))
+			if actualPassword == "" {
+				assert.NotContains(t, maskedConnStr, "password=")
+			} else {
+				assert.Contains(t, maskedConnStr, "password=***")
+				assert.NotContains(t, maskedConnStr, fmt.Sprintf("password=%s", actualPassword))
+
+			}
 		})
 	})
 
+}
+
+func TestContext(t *testing.T) {
+	databaseURL := getDatabaseURL()
+
+	t.Run("PreservesContextValues", func(t *testing.T) {
+		// Define test keys and values
+		type contextKey string
+		key1 := contextKey("test-key-1")
+		key2 := contextKey("test-key-2")
+		value1 := "test-value-1"
+		value2 := 42
+
+		// Create a context with seeded values
+		baseCtx := context.Background()
+		ctxWithValues := context.WithValue(baseCtx, key1, value1)
+		ctxWithValues = context.WithValue(ctxWithValues, key2, value2)
+
+		// Create DBOSContext with the seeded context
+		dbosCtx, err := NewDBOSContext(ctxWithValues, Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-context-values",
+		})
+		require.NoError(t, err)
+		defer func() {
+			if dbosCtx != nil {
+				Shutdown(dbosCtx, 1*time.Minute)
+			}
+		}()
+
+		require.NotNil(t, dbosCtx)
+
+		// Verify that the context values are preserved in DBOSContext
+		assert.Equal(t, value1, dbosCtx.Value(key1), "DBOSContext should preserve context value for key1")
+		assert.Equal(t, value2, dbosCtx.Value(key2), "DBOSContext should preserve context value for key2")
+
+		// Verify that non-existent keys return nil
+		nonExistentKey := contextKey("non-existent-key")
+		assert.Nil(t, dbosCtx.Value(nonExistentKey), "DBOSContext should return nil for non-existent keys")
+	})
+
+	t.Run("FromPreservesDerivedContextValues", func(t *testing.T) {
+		type contextKey string
+		key1 := contextKey("from-test-key-1")
+		key2 := contextKey("from-test-key-2")
+		key3 := contextKey("from-test-key-3")
+		value1 := "old-value-1"
+		value2 := 100
+		value3 := "new-value-3"
+
+		// Build a context chain: base has key1, key2; derived adds key3
+		baseCtx := context.Background()
+		baseCtx = context.WithValue(baseCtx, key1, value1)
+		baseCtx = context.WithValue(baseCtx, key2, value2)
+		derivedCtx := context.WithValue(baseCtx, key3, value3)
+
+		// Create DBOSContext with the base context
+		dbosCtx, err := NewDBOSContext(baseCtx, Config{
+			DatabaseURL: databaseURL,
+			AppName:     "test-context-from",
+		})
+		require.NoError(t, err)
+		defer func() {
+			if dbosCtx != nil {
+				Shutdown(dbosCtx, 1*time.Minute)
+			}
+		}()
+		require.NotNil(t, dbosCtx)
+
+		// From(dbosCtx, derivedCtx) returns a DBOS context that wraps the derived context
+		fromCtx := From(dbosCtx, derivedCtx)
+		require.NotNil(t, fromCtx)
+
+		// Value must return all values: from the base (old) and from the derived (new)
+		assert.Equal(t, value1, fromCtx.Value(key1), "From DBOS context should return value from ancestor context")
+		assert.Equal(t, value2, fromCtx.Value(key2), "From DBOS context should return value from ancestor context")
+		assert.Equal(t, value3, fromCtx.Value(key3), "From DBOS context should return value from derived context")
+	})
 }
 
 func TestCustomSystemDBSchema(t *testing.T) {
@@ -459,7 +547,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, exists, "dbos_migrations table should exist in custom schema")
 
-		// Verify migration version is 6 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, and workflow events history migration)
+		// Verify migration version is 13 (after initial migration through application_versions)
 		var version int64
 		var count int
 		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT COUNT(*) FROM %s.dbos_migrations", customSchema)).Scan(&count)
@@ -468,7 +556,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 
 		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT version FROM %s.dbos_migrations", customSchema)).Scan(&version)
 		require.NoError(t, err)
-		assert.Equal(t, int64(6), version, "migration version should be 6 (after initial migration, queue partition key migration, workflow status index migration, forked_from migration, step timestamps migration, and workflow events history migration)")
+		assert.Equal(t, int64(13), version, "migration version should be 13 (after initial migration through application_versions)")
 	})
 
 	// Test workflows for exercising Send/Recv and SetEvent/GetEvent
