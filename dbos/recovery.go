@@ -9,10 +9,10 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 			appVersion = []string{ctx.applicationVersion}
 		}
 		return ctx.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
-			status:              []WorkflowStatusType{WorkflowStatusPending},
-			executorIDs:         executorIDs,
+			status:             []WorkflowStatusType{WorkflowStatusPending},
+			executorIDs:        executorIDs,
 			applicationVersion: appVersion,
-			loadInput:           true,
+			loadInput:          true,
 		})
 	}, withRetrierLogger(ctx.logger))
 	if err != nil {
