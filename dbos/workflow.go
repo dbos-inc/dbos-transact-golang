@@ -198,6 +198,38 @@ func newWorkflowPollingHandle[R any](ctx DBOSContext, workflowID string) *workfl
 	}
 }
 
+// checkGetResultExecution checks if GetResult was already executed as a step within a workflow.
+// Returns (result, found, err). Callers that need workflowState should retrieve it separately.
+func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
+	workflowState, ok := dbosCtx.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if !isWithinWorkflow {
+		return *new(R), false, nil
+	}
+	recordedOutputs, err := retryWithResult(dbosCtx, func() (*recordedResult, error) {
+		uncancelableCtx, cancel := context.WithCancel(dbosCtx)
+		defer cancel()
+		return dbosCtx.(*dbosContext).systemDB.checkOperationExecution(uncancelableCtx, checkOperationExecutionDBInput{
+			workflowID: workflowState.workflowID,
+			stepID:     workflowState.stepID + 1,
+			stepName:   "DBOS.getResult",
+		})
+	}, withRetrierLogger(dbosCtx.(*dbosContext).logger))
+	if err != nil {
+		return *new(R), false, newStepExecutionError(workflowState.workflowID, "DBOS.getResult", fmt.Errorf("Checking operation execution: %w", err))
+	}
+	if recordedOutputs != nil {
+		workflowState.nextStepID()
+		serializer := newJSONSerializer[R]()
+		decodedOutput, err := serializer.Decode(recordedOutputs.output)
+		if err != nil {
+			return *new(R), false, fmt.Errorf("failed to decode operation result: %w", err)
+		}
+		return decodedOutput, true, nil
+	}
+	return *new(R), false, nil
+}
+
 type workflowHandle[R any] struct {
 	baseWorkflowHandle
 	outcomeChan chan workflowOutcome[R]
@@ -207,6 +239,15 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 	options := defaultGetResultOptions()
 	for _, opt := range opts {
 		opt(options)
+	}
+
+	// If within a workflow, check if we already ran that step
+	result, found, err := checkGetResultExecution[R](h.dbosContext)
+	if err != nil {
+		return *new(R), err
+	}
+	if found {
+		return result, nil
 	}
 
 	startTime := time.Now()
@@ -275,6 +316,15 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	options := defaultGetResultOptions()
 	for _, opt := range opts {
 		opt(options)
+	}
+
+	// If within a workflow, check if we already ran that step
+	result, found, err := checkGetResultExecution[R](h.dbosContext)
+	if err != nil {
+		return *new(R), err
+	}
+	if found {
+		return result, nil
 	}
 
 	startTime := time.Now()
