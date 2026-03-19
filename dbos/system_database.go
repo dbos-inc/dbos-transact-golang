@@ -1128,7 +1128,6 @@ func (s *sysDB) deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput)
 	if input.deleteChildren {
 		children, err := s.getWorkflowChildren(ctx, getWorkflowChildrenDBInput{
 			workflowID: input.workflowID,
-			recursive:  true,
 			tx:         tx,
 		})
 		if err != nil {
@@ -1160,13 +1159,11 @@ func (s *sysDB) deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput)
 
 type getWorkflowChildrenDBInput struct {
 	workflowID string
-	recursive  bool
 	tx         pgx.Tx
 }
 
-// getWorkflowChildren retrieves child workflows of the given parent workflow.
-// When recursive is true, it iteratively discovers all descendants (breadth-first)
-// within the same transaction.
+// getWorkflowChildren retrieves all descendant workflows of the given parent workflow
+// (breadth-first) within the same transaction.
 func (s *sysDB) getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error) {
 
 	children, err := s.listWorkflows(ctx, listWorkflowsDBInput{
@@ -1177,26 +1174,24 @@ func (s *sysDB) getWorkflowChildren(ctx context.Context, input getWorkflowChildr
 		return nil, fmt.Errorf("failed to get children of workflow %s: %w", input.workflowID, err)
 	}
 
-	if input.recursive {
-		queue := make([]string, 0, len(children))
-		for _, child := range children {
-			queue = append(queue, child.ID)
-		}
-		for len(queue) > 0 {
-			parentID := queue[0]
-			queue = queue[1:]
+	queue := make([]string, 0, len(children))
+	for _, child := range children {
+		queue = append(queue, child.ID)
+	}
+	for len(queue) > 0 {
+		parentID := queue[0]
+		queue = queue[1:]
 
-			grandchildren, err := s.listWorkflows(ctx, listWorkflowsDBInput{
-				parentWorkflowID: []string{parentID},
-				tx:               input.tx,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("failed to get children of workflow %s: %w", parentID, err)
-			}
-			for _, gc := range grandchildren {
-				children = append(children, gc)
-				queue = append(queue, gc.ID)
-			}
+		grandchildren, err := s.listWorkflows(ctx, listWorkflowsDBInput{
+			parentWorkflowID: []string{parentID},
+			tx:               input.tx,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to get children of workflow %s: %w", parentID, err)
+		}
+		for _, gc := range grandchildren {
+			children = append(children, gc)
+			queue = append(queue, gc.ID)
 		}
 	}
 

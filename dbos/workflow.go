@@ -2885,7 +2885,7 @@ func WithDeleteChildren() DeleteWorkflowOption {
 //   - ctx: DBOS context for the operation
 //   - workflowID: The unique identifier of the workflow to delete
 //
-// Returns an error if the workflow does not exist, is still active, or if the deletion fails.
+// Returns an error if the workflow does not exist or if the deletion fails.
 //
 // Example:
 //
