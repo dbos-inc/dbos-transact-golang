@@ -1382,6 +1382,11 @@ func TestChildWorkflow(t *testing.T) {
 		if err := CloseStream(ctx, "cascade-stream"); err != nil {
 			return "", err
 		}
+		// Recv the notification so it's recorded as a step
+		_, err := Recv[string](ctx, "test-topic", 10*time.Second)
+		if err != nil {
+			return "", err
+		}
 		return "done", nil
 	}
 	RegisterWorkflow(dbosCtx, deleteCascadeWf)
@@ -1526,7 +1531,7 @@ func TestChildWorkflow(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "from step", result)
 
-		err = DeleteWorkflow(dbosCtx, handle.GetWorkflowID())
+		err = DeleteWorkflows(dbosCtx, []string{handle.GetWorkflowID()})
 		require.NoError(t, err)
 
 		// Verify workflow no longer exists
@@ -1543,7 +1548,7 @@ func TestChildWorkflow(t *testing.T) {
 		require.NoError(t, err)
 
 		// Delete succeeds even though workflow is still PENDING
-		err = DeleteWorkflow(dbosCtx, handle.GetWorkflowID())
+		err = DeleteWorkflows(dbosCtx, []string{handle.GetWorkflowID()})
 		require.NoError(t, err)
 
 		// Verify the workflow is gone
@@ -1555,7 +1560,7 @@ func TestChildWorkflow(t *testing.T) {
 	})
 
 	t.Run("DeleteNonExistentWorkflowIsNoOp", func(t *testing.T) {
-		err := DeleteWorkflow(dbosCtx, "non-existent-delete-wf-id")
+		err := DeleteWorkflows(dbosCtx, []string{"non-existent-delete-wf-id"})
 		require.NoError(t, err, "expected no error when deleting non-existent workflow")
 	})
 
@@ -1563,18 +1568,23 @@ func TestChildWorkflow(t *testing.T) {
 		wfID := "delete-cascade-test-wf"
 		handle, err := RunWorkflow(dbosCtx, deleteCascadeWf, "input", WithWorkflowID(wfID))
 		require.NoError(t, err)
-		_, err = handle.GetResult()
-		require.NoError(t, err)
 
-		// Send a notification to the completed workflow from outside
+		// Send a notification while the workflow is running so it can Recv it
 		err = Send(dbosCtx, wfID, "test-notification", "test-topic")
 		require.NoError(t, err)
 
-		// Verify events, streams, notifications exist via direct DB query
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		// Send another notification to the completed workflow (unconsumed, stays in table)
+		err = Send(dbosCtx, wfID, "extra-notification", "test-topic")
+		require.NoError(t, err)
+
+		// Verify events, streams, notifications, and steps exist via direct DB query
 		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
 		schema := pgx.Identifier{sysDB.schema}.Sanitize()
 
-		var eventCount, streamCount, notifCount int
+		var eventCount, streamCount, notifCount, stepCount int
 		err = sysDB.pool.QueryRow(dbosCtx,
 			fmt.Sprintf(`SELECT COUNT(*) FROM %s.workflow_events WHERE workflow_uuid = $1`, schema),
 			wfID).Scan(&eventCount)
@@ -1593,8 +1603,18 @@ func TestChildWorkflow(t *testing.T) {
 		require.NoError(t, err)
 		require.Greater(t, notifCount, 0, "expected notifications to exist before deletion")
 
+		steps, err := GetWorkflowSteps(dbosCtx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 4, "expected 4 steps: SetEvent, WriteStream, CloseStream, Recv")
+
+		err = sysDB.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.operation_outputs WHERE workflow_uuid = $1`, schema),
+			wfID).Scan(&stepCount)
+		require.NoError(t, err)
+		require.Greater(t, stepCount, 0, "expected operation_outputs to exist before deletion")
+
 		// Delete the workflow
-		err = DeleteWorkflow(dbosCtx, wfID)
+		err = DeleteWorkflows(dbosCtx, []string{wfID})
 		require.NoError(t, err)
 
 		// Verify all related data was cascade-deleted
@@ -1615,6 +1635,12 @@ func TestChildWorkflow(t *testing.T) {
 			wfID).Scan(&notifCount)
 		require.NoError(t, err)
 		require.Equal(t, 0, notifCount, "expected notifications to be cascade-deleted")
+
+		err = sysDB.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.operation_outputs WHERE workflow_uuid = $1`, schema),
+			wfID).Scan(&stepCount)
+		require.NoError(t, err)
+		require.Equal(t, 0, stepCount, "expected operation_outputs to be cascade-deleted")
 	})
 
 	t.Run("DeleteWithChildrenThreeLayers", func(t *testing.T) {
@@ -1648,10 +1674,58 @@ func TestChildWorkflow(t *testing.T) {
 		}
 
 		// Delete root with children — should recursively delete all 7
-		err = DeleteWorkflow(dbosCtx, rootID, WithDeleteChildren())
+		err = DeleteWorkflows(dbosCtx, []string{rootID}, WithDeleteChildren())
 		require.NoError(t, err)
 
 		// Verify all 7 are gone
+		for _, id := range allIDs {
+			_, err := RetrieveWorkflow[string](dbosCtx, id)
+			require.Error(t, err, "expected workflow %s to be deleted", id)
+			var dbosErr *DBOSError
+			require.ErrorAs(t, err, &dbosErr)
+			require.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+		}
+	})
+
+	t.Run("DeleteMultipleWorkflowsWithChildren", func(t *testing.T) {
+		// Create two independent trees, each: root → 2 mid → 4 leaf (7 per tree, 14 total)
+		root1 := "delete-multi-root-1"
+		root2 := "delete-multi-root-2"
+
+		h1, err := RunWorkflow(dbosCtx, deleteRootWf, root1, WithWorkflowID(root1))
+		require.NoError(t, err)
+		h2, err := RunWorkflow(dbosCtx, deleteRootWf, root2, WithWorkflowID(root2))
+		require.NoError(t, err)
+		_, err = h1.GetResult()
+		require.NoError(t, err)
+		_, err = h2.GetResult()
+		require.NoError(t, err)
+
+		// Build all 14 expected IDs
+		var allIDs []string
+		for _, root := range []string{root1, root2} {
+			allIDs = append(allIDs, root)
+			for i := range 2 {
+				mid := fmt.Sprintf("%s-mid-%d", root, i)
+				allIDs = append(allIDs, mid)
+				for j := range 2 {
+					allIDs = append(allIDs, fmt.Sprintf("%s-leaf-%d", mid, j))
+				}
+			}
+		}
+		require.Len(t, allIDs, 14)
+
+		// Verify all 14 exist
+		for _, id := range allIDs {
+			_, err := RetrieveWorkflow[string](dbosCtx, id)
+			require.NoError(t, err, "expected workflow %s to exist", id)
+		}
+
+		// Delete both roots with children in a single call
+		err = DeleteWorkflows(dbosCtx, []string{root1, root2}, WithDeleteChildren())
+		require.NoError(t, err)
+
+		// Verify all 14 are gone
 		for _, id := range allIDs {
 			_, err := RetrieveWorkflow[string](dbosCtx, id)
 			require.Error(t, err, "expected workflow %s to be deleted", id)
@@ -5751,8 +5825,8 @@ func TestExportImportWorkflow(t *testing.T) {
 		require.Len(t, exported, 3)
 
 		// Delete all workflows so we can re-import
-		err = sdb.deleteWorkflow(dbosCtx, deleteWorkflowDBInput{
-			workflowID:     parentID,
+		err = sdb.deleteWorkflows(dbosCtx, deleteWorkflowsDBInput{
+			workflowIDs:    []string{parentID},
 			deleteChildren: true,
 		})
 		require.NoError(t, err)

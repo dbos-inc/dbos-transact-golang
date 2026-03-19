@@ -41,7 +41,7 @@ type systemDatabase interface {
 	awaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*string, error)
 	cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput) error
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
-	deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput) error
+	deleteWorkflows(ctx context.Context, input deleteWorkflowsDBInput) error
 	resumeWorkflow(ctx context.Context, input resumeWorkflowDBInput) error
 	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error)
 
@@ -1118,37 +1118,40 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput)
 	return nil
 }
 
-type deleteWorkflowDBInput struct {
-	workflowID     string
+type deleteWorkflowsDBInput struct {
+	workflowIDs    []string
 	deleteChildren bool
 	tx             pgx.Tx
 }
 
-func (s *sysDB) deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput) error {
+func (s *sysDB) deleteWorkflows(ctx context.Context, input deleteWorkflowsDBInput) error {
 	// If no transaction is provided, create one so the entire operation is atomic
 	tx := input.tx
 	if tx == nil {
 		var err error
 		tx, err = s.pool.Begin(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to begin transaction for deleteWorkflow: %w", err)
+			return fmt.Errorf("failed to begin transaction for deleteWorkflows: %w", err)
 		}
 		defer tx.Rollback(ctx)
 	}
 
 	// Collect all workflow IDs to delete
-	workflowIDs := []string{input.workflowID}
+	workflowIDs := make([]string, len(input.workflowIDs))
+	copy(workflowIDs, input.workflowIDs)
 
 	if input.deleteChildren {
-		children, err := s.getWorkflowChildren(ctx, getWorkflowChildrenDBInput{
-			workflowID: input.workflowID,
-			tx:         tx,
-		})
-		if err != nil {
-			return err
-		}
-		for _, child := range children {
-			workflowIDs = append(workflowIDs, child.ID)
+		for _, wfID := range input.workflowIDs {
+			children, err := s.getWorkflowChildren(ctx, getWorkflowChildrenDBInput{
+				workflowID: wfID,
+				tx:         tx,
+			})
+			if err != nil {
+				return err
+			}
+			for _, child := range children {
+				workflowIDs = append(workflowIDs, child.ID)
+			}
 		}
 	}
 
@@ -1164,7 +1167,7 @@ func (s *sysDB) deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput)
 	// If we created the transaction internally, commit it
 	if input.tx == nil {
 		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("failed to commit deleteWorkflow transaction: %w", err)
+			return fmt.Errorf("failed to commit deleteWorkflows transaction: %w", err)
 		}
 	}
 
