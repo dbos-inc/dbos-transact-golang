@@ -82,6 +82,20 @@ type systemDatabase interface {
 
 	// Metrics
 	getMetrics(ctx context.Context, startTime string, endTime string) ([]metricData, error)
+
+	// Workflow export/import
+	exportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error)
+	importWorkflow(ctx context.Context, workflows []ExportedWorkflow) error
+}
+
+// ExportedWorkflow contains all data for a single workflow, in a portable format suitable for
+// exporting from one environment and importing into another.
+type ExportedWorkflow struct {
+	WorkflowStatus        map[string]any   `json:"workflow_status"`
+	OperationOutputs      []map[string]any `json:"operation_outputs"`
+	WorkflowEvents        []map[string]any `json:"workflow_events"`
+	WorkflowEventsHistory []map[string]any `json:"workflow_events_history"`
+	Streams               []map[string]any `json:"streams"`
 }
 
 type sysDB struct {
@@ -3553,4 +3567,328 @@ func retryWithResult[T any](ctx context.Context, fn func() (T, error), options .
 		return result, capturedErr
 	}
 	return result, nil
+}
+
+func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction for exportWorkflow: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	workflowIDs := []string{workflowID}
+	if exportChildren {
+		children, err := s.getWorkflowChildren(ctx, getWorkflowChildrenDBInput{
+			workflowID: workflowID,
+			tx:         tx,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			workflowIDs = append(workflowIDs, child.ID)
+		}
+	}
+
+	exported := make([]ExportedWorkflow, 0, len(workflowIDs))
+
+	for _, wfID := range workflowIDs {
+		// Export workflow_status
+		statusQuery := fmt.Sprintf(`SELECT
+				workflow_uuid, status, name, authenticated_user, assumed_role, authenticated_roles,
+				output, error, executor_id, created_at, updated_at, application_version, application_id,
+				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
+				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
+				queue_partition_key, forked_from, parent_workflow_id
+			FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
+
+		row := tx.QueryRow(ctx, statusQuery, wfID)
+		var (
+			wfUUID, status, name                                         *string
+			authUser, assumedRole, authRoles, output, errStr, executorID *string
+			appVersion, appID, className, configName, queueName          *string
+			dedupID, inputs, queuePartitionKey, forkedFrom               *string
+			parentWorkflowID                                             *string
+			createdAt, updatedAt, recoveryAttempts                       *int64
+			workflowTimeoutMs, workflowDeadlineEpochMs, startedAtEpochMs *int64
+			priority                                                     *int
+		)
+		err := row.Scan(
+			&wfUUID, &status, &name, &authUser, &assumedRole, &authRoles,
+			&output, &errStr, &executorID, &createdAt, &updatedAt, &appVersion, &appID,
+			&className, &configName, &recoveryAttempts, &queueName, &workflowTimeoutMs,
+			&workflowDeadlineEpochMs, &startedAtEpochMs, &dedupID, &inputs, &priority,
+			&queuePartitionKey, &forkedFrom, &parentWorkflowID,
+		)
+		if err != nil {
+			if err == pgx.ErrNoRows {
+				return nil, newNonExistentWorkflowError(wfID)
+			}
+			return nil, fmt.Errorf("failed to export workflow_status for %s: %w", wfID, err)
+		}
+
+		workflowStatus := map[string]any{
+			"workflow_uuid":              wfUUID,
+			"status":                     status,
+			"name":                       name,
+			"authenticated_user":         authUser,
+			"assumed_role":               assumedRole,
+			"authenticated_roles":        authRoles,
+			"output":                     output,
+			"error":                      errStr,
+			"executor_id":                executorID,
+			"created_at":                 createdAt,
+			"updated_at":                 updatedAt,
+			"application_version":        appVersion,
+			"application_id":             appID,
+			"class_name":                 className,
+			"config_name":                configName,
+			"recovery_attempts":          recoveryAttempts,
+			"queue_name":                 queueName,
+			"workflow_timeout_ms":        workflowTimeoutMs,
+			"workflow_deadline_epoch_ms": workflowDeadlineEpochMs,
+			"started_at_epoch_ms":        startedAtEpochMs,
+			"deduplication_id":           dedupID,
+			"inputs":                     inputs,
+			"priority":                   priority,
+			"queue_partition_key":        queuePartitionKey,
+			"forked_from":               forkedFrom,
+			"parent_workflow_id":         parentWorkflowID,
+		}
+
+		// Export operation_outputs
+		outputsQuery := fmt.Sprintf(`SELECT workflow_uuid, function_id, function_name, output, error,
+				child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms
+			FROM %s.operation_outputs WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
+
+		outputRows, err := tx.Query(ctx, outputsQuery, wfID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to export operation_outputs for %s: %w", wfID, err)
+		}
+		var operationOutputs []map[string]any
+		for outputRows.Next() {
+			var opWfUUID, opFuncName *string
+			var opFuncID *int
+			var opOutput, opError, opChildWfID *string
+			var opStartedAt, opCompletedAt *int64
+			if err := outputRows.Scan(&opWfUUID, &opFuncID, &opFuncName, &opOutput, &opError, &opChildWfID, &opStartedAt, &opCompletedAt); err != nil {
+				outputRows.Close()
+				return nil, fmt.Errorf("failed to scan operation_outputs row for %s: %w", wfID, err)
+			}
+			operationOutputs = append(operationOutputs, map[string]any{
+				"workflow_uuid":         opWfUUID,
+				"function_id":          opFuncID,
+				"function_name":        opFuncName,
+				"output":               opOutput,
+				"error":                opError,
+				"child_workflow_id":    opChildWfID,
+				"started_at_epoch_ms":  opStartedAt,
+				"completed_at_epoch_ms": opCompletedAt,
+			})
+		}
+		outputRows.Close()
+		if err := outputRows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating operation_outputs for %s: %w", wfID, err)
+		}
+
+		// Export workflow_events
+		eventsQuery := fmt.Sprintf(`SELECT workflow_uuid, key, value
+			FROM %s.workflow_events WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
+
+		eventRows, err := tx.Query(ctx, eventsQuery, wfID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to export workflow_events for %s: %w", wfID, err)
+		}
+		var workflowEvents []map[string]any
+		for eventRows.Next() {
+			var evWfUUID, evKey, evValue *string
+			if err := eventRows.Scan(&evWfUUID, &evKey, &evValue); err != nil {
+				eventRows.Close()
+				return nil, fmt.Errorf("failed to scan workflow_events row for %s: %w", wfID, err)
+			}
+			workflowEvents = append(workflowEvents, map[string]any{
+				"workflow_uuid": evWfUUID,
+				"key":          evKey,
+				"value":        evValue,
+			})
+		}
+		eventRows.Close()
+		if err := eventRows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating workflow_events for %s: %w", wfID, err)
+		}
+
+		// Export workflow_events_history
+		historyQuery := fmt.Sprintf(`SELECT workflow_uuid, function_id, key, value
+			FROM %s.workflow_events_history WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
+
+		historyRows, err := tx.Query(ctx, historyQuery, wfID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to export workflow_events_history for %s: %w", wfID, err)
+		}
+		var workflowEventsHistory []map[string]any
+		for historyRows.Next() {
+			var hWfUUID, hKey, hValue *string
+			var hFuncID *int
+			if err := historyRows.Scan(&hWfUUID, &hFuncID, &hKey, &hValue); err != nil {
+				historyRows.Close()
+				return nil, fmt.Errorf("failed to scan workflow_events_history row for %s: %w", wfID, err)
+			}
+			workflowEventsHistory = append(workflowEventsHistory, map[string]any{
+				"workflow_uuid": hWfUUID,
+				"function_id":  hFuncID,
+				"key":          hKey,
+				"value":        hValue,
+			})
+		}
+		historyRows.Close()
+		if err := historyRows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating workflow_events_history for %s: %w", wfID, err)
+		}
+
+		// Export streams
+		streamsQuery := fmt.Sprintf(`SELECT workflow_uuid, key, value, "offset", function_id
+			FROM %s.streams WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
+
+		streamRows, err := tx.Query(ctx, streamsQuery, wfID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to export streams for %s: %w", wfID, err)
+		}
+		var streams []map[string]any
+		for streamRows.Next() {
+			var sWfUUID, sKey, sValue *string
+			var sOffset, sFuncID *int
+			if err := streamRows.Scan(&sWfUUID, &sKey, &sValue, &sOffset, &sFuncID); err != nil {
+				streamRows.Close()
+				return nil, fmt.Errorf("failed to scan streams row for %s: %w", wfID, err)
+			}
+			streams = append(streams, map[string]any{
+				"workflow_uuid": sWfUUID,
+				"key":          sKey,
+				"value":        sValue,
+				"offset":       sOffset,
+				"function_id":  sFuncID,
+			})
+		}
+		streamRows.Close()
+		if err := streamRows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating streams for %s: %w", wfID, err)
+		}
+
+		exported = append(exported, ExportedWorkflow{
+			WorkflowStatus:        workflowStatus,
+			OperationOutputs:      operationOutputs,
+			WorkflowEvents:        workflowEvents,
+			WorkflowEventsHistory: workflowEventsHistory,
+			Streams:               streams,
+		})
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit exportWorkflow transaction: %w", err)
+	}
+	return exported, nil
+}
+
+func (s *sysDB) importWorkflow(ctx context.Context, workflows []ExportedWorkflow) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction for importWorkflow: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	for _, wf := range workflows {
+		status := wf.WorkflowStatus
+
+		// Import workflow_status
+		insertStatusQuery := fmt.Sprintf(`INSERT INTO %s.workflow_status (
+				workflow_uuid, status, name, authenticated_user, assumed_role, authenticated_roles,
+				output, error, executor_id, created_at, updated_at, application_version, application_id,
+				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
+				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
+				queue_partition_key, forked_from, parent_workflow_id
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
+			pgx.Identifier{s.schema}.Sanitize())
+
+		_, err := tx.Exec(ctx, insertStatusQuery,
+			status["workflow_uuid"], status["status"], status["name"],
+			status["authenticated_user"], status["assumed_role"], status["authenticated_roles"],
+			status["output"], status["error"], status["executor_id"],
+			status["created_at"], status["updated_at"], status["application_version"], status["application_id"],
+			status["class_name"], status["config_name"], status["recovery_attempts"], status["queue_name"],
+			status["workflow_timeout_ms"], status["workflow_deadline_epoch_ms"], status["started_at_epoch_ms"],
+			status["deduplication_id"], status["inputs"], status["priority"],
+			status["queue_partition_key"], status["forked_from"], status["parent_workflow_id"],
+		)
+		if err != nil {
+			return fmt.Errorf("failed to import workflow_status: %w", err)
+		}
+
+		// Import operation_outputs
+		for _, op := range wf.OperationOutputs {
+			insertOpQuery := fmt.Sprintf(`INSERT INTO %s.operation_outputs (
+					workflow_uuid, function_id, function_name, output, error,
+					child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+				pgx.Identifier{s.schema}.Sanitize())
+
+			_, err := tx.Exec(ctx, insertOpQuery,
+				op["workflow_uuid"], op["function_id"], op["function_name"],
+				op["output"], op["error"], op["child_workflow_id"],
+				op["started_at_epoch_ms"], op["completed_at_epoch_ms"],
+			)
+			if err != nil {
+				return fmt.Errorf("failed to import operation_outputs: %w", err)
+			}
+		}
+
+		// Import workflow_events
+		for _, ev := range wf.WorkflowEvents {
+			insertEvQuery := fmt.Sprintf(`INSERT INTO %s.workflow_events (
+					workflow_uuid, key, value
+				) VALUES ($1, $2, $3)`,
+				pgx.Identifier{s.schema}.Sanitize())
+
+			_, err := tx.Exec(ctx, insertEvQuery,
+				ev["workflow_uuid"], ev["key"], ev["value"],
+			)
+			if err != nil {
+				return fmt.Errorf("failed to import workflow_events: %w", err)
+			}
+		}
+
+		// Import workflow_events_history
+		for _, h := range wf.WorkflowEventsHistory {
+			insertHistQuery := fmt.Sprintf(`INSERT INTO %s.workflow_events_history (
+					workflow_uuid, function_id, key, value
+				) VALUES ($1, $2, $3, $4)`,
+				pgx.Identifier{s.schema}.Sanitize())
+
+			_, err := tx.Exec(ctx, insertHistQuery,
+				h["workflow_uuid"], h["function_id"], h["key"], h["value"],
+			)
+			if err != nil {
+				return fmt.Errorf("failed to import workflow_events_history: %w", err)
+			}
+		}
+
+		// Import streams
+		for _, st := range wf.Streams {
+			insertStreamQuery := fmt.Sprintf(`INSERT INTO %s.streams (
+					workflow_uuid, key, value, "offset", function_id
+				) VALUES ($1, $2, $3, $4, $5)`,
+				pgx.Identifier{s.schema}.Sanitize())
+
+			_, err := tx.Exec(ctx, insertStreamQuery,
+				st["workflow_uuid"], st["key"], st["value"], st["offset"], st["function_id"],
+			)
+			if err != nil {
+				return fmt.Errorf("failed to import streams: %w", err)
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit importWorkflow transaction: %w", err)
+	}
+	return nil
 }
