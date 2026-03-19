@@ -50,6 +50,7 @@ const (
 	getMetricsMessage            messageType = "get_metrics"
 	exportWorkflowMessage        messageType = "export_workflow"
 	importWorkflowMessage        messageType = "import_workflow"
+	deleteWorkflowMessage        messageType = "delete"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -462,6 +463,19 @@ type importWorkflowConductorRequest struct {
 
 // importWorkflowConductorResponse is sent in response to import workflow requests
 type importWorkflowConductorResponse struct {
+	baseResponse
+	Success bool `json:"success"`
+}
+
+// deleteWorkflowConductorRequest is sent by the conductor to delete workflow(s)
+type deleteWorkflowConductorRequest struct {
+	baseMessage
+	WorkflowIDs    []string `json:"workflow_ids"`
+	DeleteChildren bool     `json:"delete_children"`
+}
+
+// deleteWorkflowConductorResponse is sent in response to delete workflow requests
+type deleteWorkflowConductorResponse struct {
 	baseResponse
 	Success bool `json:"success"`
 }

@@ -370,6 +370,8 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleExportWorkflowRequest(data, base.RequestID)
 	case importWorkflowMessage:
 		return c.handleImportWorkflowRequest(data, base.RequestID)
+	case deleteWorkflowMessage:
+		return c.handleDeleteWorkflowRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
@@ -1150,6 +1152,46 @@ func (c *conductor) handleImportWorkflowRequest(data []byte, requestID string) e
 	}
 
 	return c.sendResponse(response, string(importWorkflowMessage))
+}
+
+func (c *conductor) handleDeleteWorkflowRequest(data []byte, requestID string) error {
+	var req deleteWorkflowConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse delete workflow request", "error", err)
+		return fmt.Errorf("failed to parse delete workflow request: %w", err)
+	}
+	c.logger.Debug("Handling delete workflow request", "workflow_ids", req.WorkflowIDs, "delete_children", req.DeleteChildren, "request_id", requestID)
+
+	success := true
+	var errorMsg *string
+
+	err := retry(c.dbosCtx, func() error {
+		return c.dbosCtx.systemDB.deleteWorkflows(c.dbosCtx, deleteWorkflowsDBInput{
+			workflowIDs:    req.WorkflowIDs,
+			deleteChildren: req.DeleteChildren,
+		})
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		c.logger.Error("Failed to delete workflows", "workflow_ids", req.WorkflowIDs, "error", err)
+		errStr := fmt.Sprintf("failed to delete workflows: %v", err)
+		errorMsg = &errStr
+		success = false
+	} else {
+		c.logger.Info("Successfully deleted workflows", "workflow_ids", req.WorkflowIDs)
+	}
+
+	response := deleteWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      deleteWorkflowMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
+		},
+		Success: success,
+	}
+
+	return c.sendResponse(response, string(deleteWorkflowMessage))
 }
 
 func (c *conductor) sendResponse(response any, responseType string) error {
