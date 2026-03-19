@@ -1115,7 +1115,9 @@ func (c *conductor) handleImportWorkflowRequest(data []byte, requestID string) e
 			success = false
 		} else {
 			jsonData, err := io.ReadAll(gz)
-			gz.Close()
+			if closeErr := gz.Close(); closeErr != nil && err == nil {
+				err = closeErr
+			}
 			if err != nil {
 				errStr := fmt.Sprintf("Failed to decompress workflow data: %v", err)
 				errorMsg = &errStr

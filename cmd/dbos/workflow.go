@@ -56,9 +56,9 @@ var workflowForkCmd = &cobra.Command{
 }
 
 var workflowDeleteCmd = &cobra.Command{
-	Use:   "delete [workflow-id]",
-	Short: "Permanently delete a workflow and all its associated data",
-	Args:  cobra.ExactArgs(1),
+	Use:   "delete [workflow-id...]",
+	Short: "Permanently delete one or more workflows and all their associated data",
+	Args:  cobra.MinimumNArgs(1),
 	RunE:  runWorkflowDelete,
 }
 
@@ -381,8 +381,6 @@ func runWorkflowFork(cmd *cobra.Command, args []string) error {
 }
 
 func runWorkflowDelete(cmd *cobra.Command, args []string) error {
-	workflowID := args[0]
-
 	// Get database URL
 	dbURL, err := getDBURL()
 	if err != nil {
@@ -402,10 +400,10 @@ func runWorkflowDelete(cmd *cobra.Command, args []string) error {
 		opts = append(opts, dbos.WithDeleteChildren())
 	}
 
-	if err := ctx.DeleteWorkflow(ctx, workflowID, opts...); err != nil {
+	if err := ctx.DeleteWorkflows(ctx, args, opts...); err != nil {
 		return err
 	}
 
-	logger.Info("Successfully deleted workflow", "id", workflowID)
+	logger.Info("Successfully deleted workflow(s)", "ids", args)
 	return nil
 }
