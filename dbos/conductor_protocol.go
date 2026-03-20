@@ -470,6 +470,7 @@ type importWorkflowConductorResponse struct {
 // deleteWorkflowConductorRequest is sent by the conductor to delete workflow(s)
 type deleteWorkflowConductorRequest struct {
 	baseMessage
+	WorkflowID     string   `json:"workflow_id"`
 	WorkflowIDs    []string `json:"workflow_ids"`
 	DeleteChildren bool     `json:"delete_children"`
 }

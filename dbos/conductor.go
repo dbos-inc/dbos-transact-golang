@@ -1162,24 +1162,28 @@ func (c *conductor) handleDeleteWorkflowRequest(data []byte, requestID string) e
 		c.logger.Error("Failed to parse delete workflow request", "error", err)
 		return fmt.Errorf("failed to parse delete workflow request: %w", err)
 	}
-	c.logger.Debug("Handling delete workflow request", "workflow_ids", req.WorkflowIDs, "delete_children", req.DeleteChildren, "request_id", requestID)
+	workflowIDs := req.WorkflowIDs
+	if len(workflowIDs) == 0 && req.WorkflowID != "" {
+		workflowIDs = []string{req.WorkflowID}
+	}
+	c.logger.Debug("Handling delete workflow request", "workflow_ids", workflowIDs, "delete_children", req.DeleteChildren, "request_id", requestID)
 
 	success := true
 	var errorMsg *string
 
 	err := retry(c.dbosCtx, func() error {
 		return c.dbosCtx.systemDB.deleteWorkflows(c.dbosCtx, deleteWorkflowsDBInput{
-			workflowIDs:    req.WorkflowIDs,
+			workflowIDs:    workflowIDs,
 			deleteChildren: req.DeleteChildren,
 		})
 	}, withRetrierLogger(c.logger))
 	if err != nil {
-		c.logger.Error("Failed to delete workflows", "workflow_ids", req.WorkflowIDs, "error", err)
+		c.logger.Error("Failed to delete workflows", "workflow_ids", workflowIDs, "error", err)
 		errStr := fmt.Sprintf("failed to delete workflows: %v", err)
 		errorMsg = &errStr
 		success = false
 	} else {
-		c.logger.Info("Successfully deleted workflows", "workflow_ids", req.WorkflowIDs)
+		c.logger.Info("Successfully deleted workflows", "workflow_ids", workflowIDs)
 	}
 
 	response := deleteWorkflowConductorResponse{
