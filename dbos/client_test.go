@@ -582,6 +582,53 @@ func TestCancelResume(t *testing.T) {
 	})
 }
 
+func TestDeleteWorkflow(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	queue := NewWorkflowQueue(serverCtx, "delete-workflow-queue")
+
+	simpleWf := func(ctx DBOSContext, input string) (string, error) {
+		return "done: " + input, nil
+	}
+	RegisterWorkflow(serverCtx, simpleWf, WithWorkflowName("SimpleDeleteWorkflow"))
+
+	err := Launch(serverCtx)
+	require.NoError(t, err)
+
+	databaseURL := getDatabaseURL()
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
+
+	t.Run("DeleteCompletedWorkflow", func(t *testing.T) {
+		workflowID := "test-delete-completed-workflow"
+
+		handle, err := Enqueue[string, string](client, queue.Name, "SimpleDeleteWorkflow", "test",
+			WithEnqueueWorkflowID(workflowID),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "done: test", result)
+
+		_, err = client.RetrieveWorkflow(workflowID)
+		require.NoError(t, err)
+
+		err = client.DeleteWorkflow(workflowID)
+		require.NoError(t, err)
+
+		_, err = client.RetrieveWorkflow(workflowID)
+		require.Error(t, err)
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+	})
+}
+
 func TestForkWorkflow(t *testing.T) {
 	// Global counters for tracking execution (no mutex needed since workflows run solo)
 	var (
@@ -794,7 +841,7 @@ func TestForkWorkflow(t *testing.T) {
 			assert.Equal(t, expectedEventTuples, actualEventTuples, "forked workflow at step %d: events history mismatch", startStep)
 
 			// 3) Verify counters are at expected totals based on the step where we're forking
-			t.Logf("Step %d: actual counters - step1:%d, step2:%d, child1:%d, child2:%d", startStep, stepCount1, stepCount2, child1Count, child2Count)
+			t.Logf("Start step %d: actual counters - step1:%d, step2:%d, child1:%d, child2:%d", startStep, stepCount1, stepCount2, child1Count, child2Count)
 
 			expectedStep1Count := 1 + min(startStep+1, 5)
 			assert.Equal(t, expectedStep1Count, stepCount1, "forked workflow at step %d: step1 counter should be %d", startStep, expectedStep1Count)

@@ -385,6 +385,10 @@ func testWorkflowCommands(t *testing.T, cliPath string, baseArgs []string, dbRol
 	t.Run("GetWorkflowSteps", func(t *testing.T) {
 		testGetWorkflowSteps(t, cliPath, baseArgs, dbRole)
 	})
+
+	t.Run("DeleteWorkflow", func(t *testing.T) {
+		testDeleteWorkflow(t, cliPath, baseArgs, dbRole)
+	})
 }
 
 // testListWorkflows tests various workflow listing scenarios
@@ -413,6 +417,27 @@ func testListWorkflows(t *testing.T, cliPath string, baseArgs []string, dbRole s
 	workflowID, exists := response["workflow_id"]
 	assert.True(t, exists, "Response should contain workflow_id")
 	assert.NotEmpty(t, workflowID, "Workflow ID should not be empty")
+
+	// Wait until the QueueWorkflow has enqueued all workflows.
+	// This is to avoid a race condition where the test checks for queued workflows
+	// before they are all enqueued.
+	require.Eventually(t, func() bool {
+		args := append([]string{"workflow", "list", "--queue", "example-queue"}, baseArgs...)
+		cmd := exec.Command(cliPath, args...)
+		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return false
+		}
+		var workflows []dbos.WorkflowStatus
+		err = json.Unmarshal(output, &workflows)
+		if err != nil {
+			return false
+		}
+		return len(workflows) >= 10
+	}, 5*time.Second, 500*time.Millisecond, "Should find at least 10 workflows in the queue")
+
 	// Get the current time for time-based filtering
 	currentTime := time.Now()
 
@@ -943,6 +968,62 @@ func testErrorHandling(t *testing.T, cliPath string, baseArgs []string, dbRole s
 				assert.Contains(t, outputStr, "connection") ||
 				assert.Contains(t, outputStr, "url"),
 			"Should contain database-related error")
+	})
+}
+
+// testDeleteWorkflow tests the workflow delete CLI command
+func testDeleteWorkflow(t *testing.T, cliPath string, baseArgs []string, dbRole string) {
+	// Create a workflow via the test app HTTP endpoint
+	resp, err := http.Get("http://localhost:" + testServerPort + "/workflow")
+	require.NoError(t, err, "Failed to trigger workflow")
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "Workflow endpoint should return 200: %s", string(body))
+
+	// We need a workflow ID to delete. List SUCCESS workflows and pick one.
+	listArgs := append([]string{"workflow", "list", "--status", "SUCCESS", "--limit", "1"}, baseArgs...)
+	listCmd := exec.Command(cliPath, listArgs...)
+	listCmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
+
+	listOutput, err := listCmd.CombinedOutput()
+	require.NoError(t, err, "List workflows failed: %s", string(listOutput))
+
+	var workflows []dbos.WorkflowStatus
+	err = json.Unmarshal(listOutput, &workflows)
+	require.NoError(t, err, "JSON output should be valid")
+	require.Greater(t, len(workflows), 0, "Should have at least one SUCCESS workflow to delete")
+
+	workflowID := workflows[0].ID
+
+	t.Run("DeleteWorkflow", func(t *testing.T) {
+		// Delete the workflow
+		args := append([]string{"workflow", "delete", workflowID}, baseArgs...)
+		cmd := exec.Command(cliPath, args...)
+		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
+
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "Delete workflow command failed: %s", string(output))
+		assert.Contains(t, string(output), "Successfully deleted", "Should confirm deletion")
+
+		// Verify workflow is gone
+		getArgs := append([]string{"workflow", "get", workflowID}, baseArgs...)
+		getCmd := exec.Command(cliPath, getArgs...)
+		getCmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
+
+		getOutput, err := getCmd.CombinedOutput()
+		// Should fail since the workflow no longer exists
+		assert.Error(t, err, "Get deleted workflow should fail: %s", string(getOutput))
+	})
+
+	t.Run("DeleteNonExistentWorkflow", func(t *testing.T) {
+		fakeID := uuid.NewString()
+		args := append([]string{"workflow", "delete", fakeID}, baseArgs...)
+		cmd := exec.Command(cliPath, args...)
+		cmd.Env = append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL="+getDatabaseURL(dbRole))
+
+		output, err := cmd.CombinedOutput()
+		assert.NoError(t, err, "Deleting non-existent workflow should be a no-op: %s", string(output))
 	})
 }
 

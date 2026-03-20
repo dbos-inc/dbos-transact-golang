@@ -198,6 +198,38 @@ func newWorkflowPollingHandle[R any](ctx DBOSContext, workflowID string) *workfl
 	}
 }
 
+// checkGetResultExecution checks if GetResult was already executed as a step within a workflow.
+// Returns (result, found, err). Callers that need workflowState should retrieve it separately.
+func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
+	workflowState, ok := dbosCtx.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if !isWithinWorkflow {
+		return *new(R), false, nil
+	}
+	recordedOutputs, err := retryWithResult(dbosCtx, func() (*recordedResult, error) {
+		uncancelableCtx, cancel := context.WithCancel(dbosCtx)
+		defer cancel()
+		return dbosCtx.(*dbosContext).systemDB.checkOperationExecution(uncancelableCtx, checkOperationExecutionDBInput{
+			workflowID: workflowState.workflowID,
+			stepID:     workflowState.stepID + 1,
+			stepName:   "DBOS.getResult",
+		})
+	}, withRetrierLogger(dbosCtx.(*dbosContext).logger))
+	if err != nil {
+		return *new(R), false, newStepExecutionError(workflowState.workflowID, "DBOS.getResult", fmt.Errorf("Checking operation execution: %w", err))
+	}
+	if recordedOutputs != nil {
+		workflowState.nextStepID()
+		serializer := newJSONSerializer[R]()
+		decodedOutput, err := serializer.Decode(recordedOutputs.output)
+		if err != nil {
+			return *new(R), false, fmt.Errorf("failed to decode operation result: %w", err)
+		}
+		return decodedOutput, true, nil
+	}
+	return *new(R), false, nil
+}
+
 type workflowHandle[R any] struct {
 	baseWorkflowHandle
 	outcomeChan chan workflowOutcome[R]
@@ -207,6 +239,15 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 	options := defaultGetResultOptions()
 	for _, opt := range opts {
 		opt(options)
+	}
+
+	// If within a workflow, check if we already ran that step
+	result, found, err := checkGetResultExecution[R](h.dbosContext)
+	if err != nil {
+		return *new(R), err
+	}
+	if found {
+		return result, nil
 	}
 
 	startTime := time.Now()
@@ -246,17 +287,18 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		if encErr != nil {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 		}
-		recordGetResultInput := recordChildGetResultDBInput{
-			parentWorkflowID: workflowState.workflowID,
-			childWorkflowID:  h.workflowID,
-			stepID:           workflowState.nextStepID(),
-			output:           encodedOutput,
-			err:              outcome.err,
-			startedAt:        startTime,
-			completedAt:      completedTime,
+		recordGetResultInput := recordOperationResultDBInput{
+			workflowID:      workflowState.workflowID,
+			childWorkflowID: h.workflowID,
+			stepID:          workflowState.nextStepID(),
+			output:          encodedOutput,
+			err:             outcome.err,
+			startedAt:       startTime,
+			completedAt:     completedTime,
+			stepName:        "DBOS.getResult",
 		}
 		recordResultErr := retry(h.dbosContext, func() error {
-			return h.dbosContext.(*dbosContext).systemDB.recordChildGetResult(h.dbosContext, recordGetResultInput)
+			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
 		}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 		if recordResultErr != nil {
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -274,6 +316,15 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	options := defaultGetResultOptions()
 	for _, opt := range opts {
 		opt(options)
+	}
+
+	// If within a workflow, check if we already ran that step
+	result, found, err := checkGetResultExecution[R](h.dbosContext)
+	if err != nil {
+		return *new(R), err
+	}
+	if found {
+		return result, nil
 	}
 
 	startTime := time.Now()
@@ -310,17 +361,18 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 		isWithinWorkflow := ok && workflowState != nil
 		if isWithinWorkflow {
-			recordGetResultInput := recordChildGetResultDBInput{
-				parentWorkflowID: workflowState.workflowID,
-				childWorkflowID:  h.workflowID,
-				stepID:           workflowState.nextStepID(),
-				output:           encodedStr,
-				err:              err,
-				startedAt:        startTime,
-				completedAt:      completedTime,
+			recordGetResultInput := recordOperationResultDBInput{
+				workflowID:      workflowState.workflowID,
+				childWorkflowID: h.workflowID,
+				stepID:          workflowState.nextStepID(),
+				output:          encodedStr,
+				err:             err,
+				startedAt:       startTime,
+				completedAt:     completedTime,
+				stepName:        "DBOS.getResult",
 			}
 			recordResultErr := retry(h.dbosContext, func() error {
-				return h.dbosContext.(*dbosContext).systemDB.recordChildGetResult(h.dbosContext, recordGetResultInput)
+				return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
 			}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 			if recordResultErr != nil {
 				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -2772,6 +2824,81 @@ func CancelWorkflow(ctx DBOSContext, workflowID string) error {
 		return errors.New("ctx cannot be nil")
 	}
 	return ctx.CancelWorkflow(ctx, workflowID)
+}
+
+func (c *dbosContext) DeleteWorkflow(_ DBOSContext, workflowID string, opts ...DeleteWorkflowOption) error {
+	// Process options
+	params := &deleteWorkflowOptions{}
+	for _, opt := range opts {
+		opt(params)
+	}
+
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if isWithinWorkflow {
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			err := c.systemDB.deleteWorkflow(ctx, deleteWorkflowDBInput{
+				workflowID:     workflowID,
+				deleteChildren: params.deleteChildren,
+				tx:             tx,
+			})
+			return "", err
+		}, WithStepName("DBOS.deleteWorkflow"))
+		return err
+	} else {
+		return retry(c, func() error {
+			return c.systemDB.deleteWorkflow(c, deleteWorkflowDBInput{
+				workflowID:     workflowID,
+				deleteChildren: params.deleteChildren,
+			})
+		}, withRetrierLogger(c.logger))
+	}
+}
+
+// deleteWorkflowOptions holds configuration parameters for deleting workflows.
+type deleteWorkflowOptions struct {
+	deleteChildren bool
+}
+
+// DeleteWorkflowOption is a functional option for configuring workflow deletion.
+type DeleteWorkflowOption func(*deleteWorkflowOptions)
+
+// WithDeleteChildren enables recursive deletion of child workflows.
+// When set, all child workflows (and their children, recursively) will be deleted
+// along with the parent workflow.
+func WithDeleteChildren() DeleteWorkflowOption {
+	return func(o *deleteWorkflowOptions) {
+		o.deleteChildren = true
+	}
+}
+
+// DeleteWorkflow permanently deletes a workflow and all its associated data from the database,
+// regardless of its current status. This includes active (PENDING, ENQUEUED) workflows.
+//
+// This operation is irreversible and removes the workflow status, operation outputs,
+// events, event history, and streams associated with the workflow.
+//
+// Options:
+//   - WithDeleteChildren: Also delete all child workflows recursively
+//
+// Parameters:
+//   - ctx: DBOS context for the operation
+//   - workflowID: The unique identifier of the workflow to delete
+//
+// Returns an error if the workflow does not exist, is still active, or if the deletion fails.
+//
+// Example:
+//
+//	// Delete a single workflow
+//	err := dbos.DeleteWorkflow(ctx, "workflow-to-delete")
+//
+//	// Delete a workflow and all its children
+//	err := dbos.DeleteWorkflow(ctx, "workflow-to-delete", dbos.WithDeleteChildren())
+func DeleteWorkflow(ctx DBOSContext, workflowID string, opts ...DeleteWorkflowOption) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.DeleteWorkflow(ctx, workflowID, opts...)
 }
 
 func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {

@@ -41,13 +41,14 @@ type systemDatabase interface {
 	awaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*string, error)
 	cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput) error
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
+	deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput) error
 	resumeWorkflow(ctx context.Context, input resumeWorkflowDBInput) error
 	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error)
 
 	// Child workflows
+	getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error)
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
 	checkChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
-	recordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error
 
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
@@ -1103,6 +1104,105 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput)
 	return nil
 }
 
+type deleteWorkflowDBInput struct {
+	workflowID     string
+	deleteChildren bool
+	tx             pgx.Tx
+}
+
+func (s *sysDB) deleteWorkflow(ctx context.Context, input deleteWorkflowDBInput) error {
+	// If no transaction is provided, create one so the entire operation is atomic
+	tx := input.tx
+	if tx == nil {
+		var err error
+		tx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for deleteWorkflow: %w", err)
+		}
+		defer tx.Rollback(ctx)
+	}
+
+	// Collect all workflow IDs to delete
+	workflowIDs := []string{input.workflowID}
+
+	if input.deleteChildren {
+		children, err := s.getWorkflowChildren(ctx, getWorkflowChildrenDBInput{
+			workflowID: input.workflowID,
+			recursive:  true,
+			tx:         tx,
+		})
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			workflowIDs = append(workflowIDs, child.ID)
+		}
+	}
+
+	// Delete all matching workflows regardless of their state
+	deleteQuery := fmt.Sprintf(
+		`DELETE FROM %s.workflow_status WHERE workflow_uuid = ANY($1)`,
+		pgx.Identifier{s.schema}.Sanitize())
+	_, err := tx.Exec(ctx, deleteQuery, workflowIDs)
+	if err != nil {
+		return fmt.Errorf("failed to delete workflow(s): %w", err)
+	}
+
+	// If we created the transaction internally, commit it
+	if input.tx == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit deleteWorkflow transaction: %w", err)
+		}
+	}
+
+	return nil
+}
+
+type getWorkflowChildrenDBInput struct {
+	workflowID string
+	recursive  bool
+	tx         pgx.Tx
+}
+
+// getWorkflowChildren retrieves child workflows of the given parent workflow.
+// When recursive is true, it iteratively discovers all descendants (breadth-first)
+// within the same transaction.
+func (s *sysDB) getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error) {
+
+	children, err := s.listWorkflows(ctx, listWorkflowsDBInput{
+		parentWorkflowID: []string{input.workflowID},
+		tx:               input.tx,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get children of workflow %s: %w", input.workflowID, err)
+	}
+
+	if input.recursive {
+		queue := make([]string, 0, len(children))
+		for _, child := range children {
+			queue = append(queue, child.ID)
+		}
+		for len(queue) > 0 {
+			parentID := queue[0]
+			queue = queue[1:]
+
+			grandchildren, err := s.listWorkflows(ctx, listWorkflowsDBInput{
+				parentWorkflowID: []string{parentID},
+				tx:               input.tx,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to get children of workflow %s: %w", parentID, err)
+			}
+			for _, gc := range grandchildren {
+				children = append(children, gc)
+				queue = append(queue, gc.ID)
+			}
+		}
+	}
+
+	return children, nil
+}
+
 func (s *sysDB) cancelAllBefore(ctx context.Context, cutoffTime time.Time) error {
 	// List all workflows in PENDING or ENQUEUED state ending at cutoffTime
 	listInput := listWorkflowsDBInput{
@@ -1433,23 +1533,20 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, poll
 }
 
 type recordOperationResultDBInput struct {
-	workflowID  string
-	stepID      int
-	stepName    string
-	output      *string
-	err         error
-	tx          pgx.Tx
-	startedAt   time.Time
-	completedAt time.Time
+	workflowID      string
+	childWorkflowID string
+	stepID          int
+	stepName        string
+	output          *string
+	err             error
+	tx              pgx.Tx
+	startedAt       time.Time
+	completedAt     time.Time
 }
 
 func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error {
 	startedAtMs := input.startedAt.UnixMilli()
 	completedAtMs := input.completedAt.UnixMilli()
-
-	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, output, error, function_name, started_at_epoch_ms, completed_at_epoch_ms)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)`, pgx.Identifier{s.schema}.Sanitize())
 
 	var errorString *string
 	if input.err != nil {
@@ -1457,27 +1554,26 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		errorString = &e
 	}
 
+	columns := []string{"workflow_uuid", "function_id", "output", "error", "function_name", "started_at_epoch_ms", "completed_at_epoch_ms"}
+	placeholders := []string{"$1", "$2", "$3", "$4", "$5", "$6", "$7"}
+	args := []any{input.workflowID, input.stepID, input.output, errorString, input.stepName, startedAtMs, completedAtMs}
+	argCounter := 7
+
+	if input.childWorkflowID != "" {
+		columns = append(columns, "child_workflow_id")
+		argCounter++
+		placeholders = append(placeholders, fmt.Sprintf("$%d", argCounter))
+		args = append(args, input.childWorkflowID)
+	}
+
+	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs (%s) VALUES (%s)`,
+		pgx.Identifier{s.schema}.Sanitize(), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
+
 	var err error
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, query,
-			input.workflowID,
-			input.stepID,
-			input.output,
-			errorString,
-			input.stepName,
-			startedAtMs,
-			completedAtMs,
-		)
+		_, err = input.tx.Exec(ctx, query, args...)
 	} else {
-		_, err = s.pool.Exec(ctx, query,
-			input.workflowID,
-			input.stepID,
-			input.output,
-			errorString,
-			input.stepName,
-			startedAtMs,
-			completedAtMs,
-		)
+		_, err = s.pool.Exec(ctx, query, args...)
 	}
 
 	if err != nil {
@@ -1558,47 +1654,6 @@ func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, funct
 	}
 
 	return childWorkflowID, nil
-}
-
-type recordChildGetResultDBInput struct {
-	parentWorkflowID string
-	childWorkflowID  string
-	stepID           int
-	output           *string
-	err              error
-	startedAt        time.Time
-	completedAt      time.Time
-}
-
-func (s *sysDB) recordChildGetResult(ctx context.Context, input recordChildGetResultDBInput) error {
-	startedAtMs := input.startedAt.UnixMilli()
-	completedAtMs := input.completedAt.UnixMilli()
-
-	query := fmt.Sprintf(`INSERT INTO %s.operation_outputs
-            (workflow_uuid, function_id, function_name, output, error, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT DO NOTHING`, pgx.Identifier{s.schema}.Sanitize())
-
-	var errorString *string
-	if input.err != nil {
-		e := input.err.Error()
-		errorString = &e
-	}
-
-	_, err := s.pool.Exec(ctx, query,
-		input.parentWorkflowID,
-		input.stepID,
-		"DBOS.getResult",
-		input.output,
-		errorString,
-		input.childWorkflowID,
-		startedAtMs,
-		completedAtMs,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to record get result: %w", err)
-	}
-	return nil
 }
 
 /*******************************/
