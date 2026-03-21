@@ -1,7 +1,10 @@
 package dbos
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -102,6 +105,7 @@ func testAllSerializationPaths[T any](
 	})
 
 	// Check the last step output (the workflow result)
+	customSer := getCustomSerializer(executor)
 	t.Run("GetWorkflowSteps", func(t *testing.T) {
 		steps, err := GetWorkflowSteps(executor, handle.GetWorkflowID())
 		require.NoError(t, err)
@@ -109,23 +113,25 @@ func testAllSerializationPaths[T any](
 		if len(steps) > 0 {
 			lastStep := steps[len(steps)-1]
 			if isNilExpected {
-				// Should be an empty string
 				assert.Nil(t, lastStep.Output, "Step output should be nil")
 			} else {
 				require.NotNil(t, lastStep.Output)
-				// GetWorkflowSteps returns a string (base64-decoded JSON)
-				// Unmarshal the JSON string into type T
-				strValue, ok := lastStep.Output.(string)
-				require.True(t, ok, "Step output should be a string")
-				// We encode zero values as empty strings. End users are expected to handle this.
-				if strValue == "" {
-					var zero T
-					assert.Equal(t, zero, expectedOutput, "Step output should be the zero value of type T")
+				if customSer != nil {
+					// Custom serializer: output is already decoded to concrete type
+					assert.Equal(t, expectedOutput, lastStep.Output, "Step output should match expected output")
 				} else {
-					var decodedOutput T
-					err := json.Unmarshal([]byte(strValue), &decodedOutput)
-					require.NoError(t, err, "Failed to unmarshal step output to type T")
-					assert.Equal(t, expectedOutput, decodedOutput, "Step output should match expected output")
+					// Default JSON: output is a base64-decoded JSON string
+					strValue, ok := lastStep.Output.(string)
+					require.True(t, ok, "Step output should be a string")
+					if strValue == "" {
+						var zero T
+						assert.Equal(t, zero, expectedOutput, "Step output should be the zero value of type T")
+					} else {
+						var decodedOutput T
+						err := json.Unmarshal([]byte(strValue), &decodedOutput)
+						require.NoError(t, err, "Failed to unmarshal step output to type T")
+						assert.Equal(t, expectedOutput, decodedOutput, "Step output should match expected output")
+					}
 				}
 			}
 			assert.Nil(t, lastStep.Error)
@@ -141,38 +147,42 @@ func testAllSerializationPaths[T any](
 		require.Len(t, wfs, 1)
 		wf := wfs[0]
 		if isNilExpected {
-			// Should be an empty string
 			require.Nil(t, wf.Input, "Workflow input should be nil")
 			require.Nil(t, wf.Output, "Workflow output should be nil")
 		} else {
 			require.NotNil(t, wf.Input)
 			require.NotNil(t, wf.Output)
 
-			// ListWorkflows returns strings (base64-decoded JSON)
-			// Unmarshal the JSON strings into type T
-			inputStr, ok := wf.Input.(string)
-			require.True(t, ok, "Workflow input should be a string")
-			outputStr, ok := wf.Output.(string)
-			require.True(t, ok, "Workflow output should be a string")
-
-			if inputStr == "" {
-				var zero T
-				assert.Equal(t, zero, input, "Workflow input should be the zero value of type T")
+			if customSer != nil {
+				// Custom serializer: input/output are already decoded to concrete types
+				assert.Equal(t, input, wf.Input, "Workflow input should match input")
+				assert.Equal(t, expectedOutput, wf.Output, "Workflow output should match expected output")
 			} else {
-				var decodedInput T
-				err := json.Unmarshal([]byte(inputStr), &decodedInput)
-				require.NoError(t, err, "Failed to unmarshal workflow input to type T")
-				assert.Equal(t, input, decodedInput, "Workflow input should match input")
-			}
+				// Default JSON: input/output are base64-decoded JSON strings
+				inputStr, ok := wf.Input.(string)
+				require.True(t, ok, "Workflow input should be a string")
+				outputStr, ok := wf.Output.(string)
+				require.True(t, ok, "Workflow output should be a string")
 
-			if outputStr == "" {
-				var zero T
-				assert.Equal(t, zero, expectedOutput, "Workflow output should be the zero value of type T")
-			} else {
-				var decodedOutput T
-				err = json.Unmarshal([]byte(outputStr), &decodedOutput)
-				require.NoError(t, err, "Failed to unmarshal workflow output to type T")
-				assert.Equal(t, expectedOutput, decodedOutput, "Workflow output should match expected output")
+				if inputStr == "" {
+					var zero T
+					assert.Equal(t, zero, input, "Workflow input should be the zero value of type T")
+				} else {
+					var decodedInput T
+					err := json.Unmarshal([]byte(inputStr), &decodedInput)
+					require.NoError(t, err, "Failed to unmarshal workflow input to type T")
+					assert.Equal(t, input, decodedInput, "Workflow input should match input")
+				}
+
+				if outputStr == "" {
+					var zero T
+					assert.Equal(t, zero, expectedOutput, "Workflow output should be the zero value of type T")
+				} else {
+					var decodedOutput T
+					err = json.Unmarshal([]byte(outputStr), &decodedOutput)
+					require.NoError(t, err, "Failed to unmarshal workflow output to type T")
+					assert.Equal(t, expectedOutput, decodedOutput, "Workflow output should match expected output")
+				}
 			}
 		}
 	})
@@ -353,6 +363,9 @@ var (
 	serializerMyIntSetEventWorkflow  = makeSetEventWorkflow[MyInt]()
 	serializerMyIntGetEventWorkflow  = makeGetEventWorkflow[MyInt]()
 )
+
+// Stream workflows
+var serializerStreamWorkflow = makeStreamWorkflow[TestWorkflowData]()
 
 // makeSenderWorkflow creates a generic sender workflow that sends a message to a receiver workflow.
 func makeSenderWorkflow[T any]() Workflow[T, T] {
@@ -546,6 +559,7 @@ func TestSerializer(t *testing.T) {
 	RegisterWorkflow(executor, serializerIntPtrGetEventWorkflow)
 	RegisterWorkflow(executor, serializerMyIntSetEventWorkflow)
 	RegisterWorkflow(executor, serializerMyIntGetEventWorkflow)
+	RegisterWorkflow(executor, serializerStreamWorkflow)
 
 	err := Launch(executor)
 	require.NoError(t, err)
@@ -873,5 +887,403 @@ func TestSerializer(t *testing.T) {
 		result, err := handle.GetResult()
 		require.NoError(t, err, "queued workflow should complete successfully")
 		assert.Equal(t, input, result, "queued workflow result should match input")
+	})
+
+	// Test WriteStream/ReadStream
+	t.Run("WriteReadStream", func(t *testing.T) {
+		input := TestWorkflowData{
+			ID: "stream-test", Message: "stream data", Value: 111,
+			Data:     TestData{Message: "streamed", Value: 222},
+			Metadata: map[string]string{"stream": "json"},
+		}
+		handle, err := RunWorkflow(executor, serializerStreamWorkflow, input, WithWorkflowID("json-stream-wf"))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, input, result)
+
+		values, closed, err := ReadStream[TestWorkflowData](executor, "json-stream-wf", "test-stream")
+		require.NoError(t, err)
+		assert.True(t, closed)
+		require.Len(t, values, 1)
+		assert.Equal(t, input, values[0])
+	})
+}
+
+// ===== Gob Serializer Tests =====
+
+// GobOnlyType is a type that uses GobEncoder/GobDecoder for custom binary encoding.
+// JSON cannot handle this because it has unexported fields and custom encoding logic.
+type GobOnlyType struct {
+	real float64
+	imag float64
+	tag  string
+}
+
+func (g GobOnlyType) GobEncode() ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(g.real); err != nil {
+		return nil, err
+	}
+	if err := enc.Encode(g.imag); err != nil {
+		return nil, err
+	}
+	if err := enc.Encode(g.tag); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (g *GobOnlyType) GobDecode(data []byte) error {
+	buf := bytes.NewReader(data)
+	dec := gob.NewDecoder(buf)
+	if err := dec.Decode(&g.real); err != nil {
+		return err
+	}
+	if err := dec.Decode(&g.imag); err != nil {
+		return err
+	}
+	return dec.Decode(&g.tag)
+}
+
+func init() {
+	// Register types for gob encoding/decoding through any interface
+	gob.Register(TestWorkflowData{})
+	gob.Register(TestData{})
+	gob.Register(NestedTestData{})
+	gob.Register(map[string]string{})
+	gob.Register([]NestedTestData{})
+	gob.Register(map[string]MyInt{})
+	gob.Register(MyInt(0))
+	gob.Register(MyString(""))
+	gob.Register([]MyString{})
+	gob.Register(map[string]int{})
+	gob.Register([]int{})
+	gob.Register([3]int{})
+	gob.Register([]byte{})
+	gob.Register(GobOnlyType{})
+	gob.Register(Chicken{})
+}
+
+var (
+	gobRecoveryStructWorkflow     = makeRecoveryWorkflow[TestWorkflowData]()
+	gobRecoveryIntWorkflow        = makeRecoveryWorkflow[int]()
+	gobRecoveryStringWorkflow     = makeRecoveryWorkflow[string]()
+	gobRecoveryIntSliceWorkflow   = makeRecoveryWorkflow[[]int]()
+	gobRecoveryMapWorkflow        = makeRecoveryWorkflow[map[string]int]()
+	gobRecoveryMyIntWorkflow      = makeRecoveryWorkflow[MyInt]()
+	gobRecoveryGobOnlyWorkflow    = makeRecoveryWorkflow[GobOnlyType]()
+	gobSenderWorkflow             = makeSenderWorkflow[TestWorkflowData]()
+	gobReceiverWorkflow           = makeReceiverWorkflow[TestWorkflowData]()
+	gobSetEventWorkflow           = makeSetEventWorkflow[TestWorkflowData]()
+	gobGetEventWorkflow           = makeGetEventWorkflow[TestWorkflowData]()
+	gobGobOnlyWorkflow            = makeTestWorkflow[GobOnlyType]()
+	gobGobOnlySenderWorkflow      = makeSenderWorkflow[GobOnlyType]()
+	gobGobOnlyReceiverWorkflow    = makeReceiverWorkflow[GobOnlyType]()
+	gobGobOnlySetEventWorkflow    = makeSetEventWorkflow[GobOnlyType]()
+	gobGobOnlyGetEventWorkflow    = makeGetEventWorkflow[GobOnlyType]()
+	gobStreamWorkflow             = makeStreamWorkflow[TestWorkflowData]()
+	gobGobOnlyStreamWorkflow      = makeStreamWorkflow[GobOnlyType]()
+	gobQueuedWorkflow             = makeTestWorkflow[TestWorkflowData]()
+)
+
+// TestGobSerializer tests the built-in gob serializer through all workflow paths.
+func TestGobSerializer(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: NewGobSerializer()})
+
+	RegisterWorkflow(executor, gobRecoveryStructWorkflow)
+	RegisterWorkflow(executor, gobRecoveryIntWorkflow)
+	RegisterWorkflow(executor, gobRecoveryStringWorkflow)
+	RegisterWorkflow(executor, gobRecoveryIntSliceWorkflow)
+	RegisterWorkflow(executor, gobRecoveryMapWorkflow)
+	RegisterWorkflow(executor, gobRecoveryMyIntWorkflow)
+	RegisterWorkflow(executor, gobRecoveryGobOnlyWorkflow)
+	RegisterWorkflow(executor, gobSenderWorkflow)
+	RegisterWorkflow(executor, gobReceiverWorkflow)
+	RegisterWorkflow(executor, gobSetEventWorkflow)
+	RegisterWorkflow(executor, gobGetEventWorkflow)
+	RegisterWorkflow(executor, gobGobOnlyWorkflow)
+	RegisterWorkflow(executor, gobGobOnlySenderWorkflow)
+	RegisterWorkflow(executor, gobGobOnlyReceiverWorkflow)
+	RegisterWorkflow(executor, gobGobOnlySetEventWorkflow)
+	RegisterWorkflow(executor, gobGobOnlyGetEventWorkflow)
+	RegisterWorkflow(executor, gobStreamWorkflow)
+	RegisterWorkflow(executor, gobGobOnlyStreamWorkflow)
+	RegisterWorkflow(executor, gobQueuedWorkflow)
+
+	gobTestQueue := NewWorkflowQueue(executor, "gob-serializer-test-queue")
+
+	err := Launch(executor)
+	require.NoError(t, err)
+	defer Shutdown(executor, 10*time.Second)
+
+	t.Run("Struct", func(t *testing.T) {
+		input := TestWorkflowData{
+			ID:      "gob-test",
+			Message: "gob message",
+			Value:   42,
+			Active:  true,
+			Data:    TestData{Message: "embedded", Value: 123, Active: false},
+			Metadata: map[string]string{"key": "value"},
+			NestedSlice: []NestedTestData{
+				{Key: "nested1", Count: 10},
+			},
+			NestedMap: map[string]MyInt{"k": MyInt(100)},
+		}
+		testAllSerializationPaths(t, executor, gobRecoveryStructWorkflow, input, "gob-struct-wf")
+	})
+
+	t.Run("Int", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, gobRecoveryIntWorkflow, 42, "gob-int-wf")
+	})
+
+	t.Run("String", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, gobRecoveryStringWorkflow, "hello gob", "gob-string-wf")
+	})
+
+	t.Run("IntSlice", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, gobRecoveryIntSliceWorkflow, []int{1, 2, 3}, "gob-int-slice-wf")
+	})
+
+	t.Run("Map", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, gobRecoveryMapWorkflow, map[string]int{"x": 1, "y": 2}, "gob-map-wf")
+	})
+
+	t.Run("MyInt", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, gobRecoveryMyIntWorkflow, MyInt(7), "gob-myint-wf")
+	})
+
+	// Test gob-only type: uses GobEncoder/GobDecoder with unexported fields.
+	// JSON cannot serialize this type. Uses a simple workflow (not recovery-based)
+	// because recovery involves step output re-encoding which differs for GobOnly types.
+	t.Run("GobOnlyType", func(t *testing.T) {
+		input := GobOnlyType{real: 3.14, imag: 2.71, tag: "complex-value"}
+		handle, err := RunWorkflow(executor, gobGobOnlyWorkflow, input, WithWorkflowID("gob-only-type-wf"))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, input, result, "gob-only type should roundtrip correctly")
+
+		// Verify RetrieveWorkflow also works (reads from DB, decodes with gob)
+		h2, err := RetrieveWorkflow[GobOnlyType](executor, "gob-only-type-wf")
+		require.NoError(t, err)
+		result2, err := h2.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, input, result2, "gob-only type should roundtrip via RetrieveWorkflow")
+	})
+
+	t.Run("SendRecv", func(t *testing.T) {
+		input := TestWorkflowData{
+			ID: "gob-sendrecv", Message: "gob msg", Value: 99,
+			Data: TestData{Message: "nested", Value: 200},
+			Metadata: map[string]string{"comm": "gob"},
+		}
+		testSendRecv(t, executor, gobSenderWorkflow, gobReceiverWorkflow, input, "gob-sender-wf")
+	})
+
+	t.Run("SetGetEvent", func(t *testing.T) {
+		input := TestWorkflowData{
+			ID: "gob-event", Message: "gob event", Value: 77,
+			Data: TestData{Message: "event nested", Value: 333},
+			Metadata: map[string]string{"type": "gob-event"},
+		}
+		testSetGetEvent(t, executor, gobSetEventWorkflow, gobGetEventWorkflow, input, "gob-setevent-wf", "gob-getevent-wf")
+	})
+
+	// Test gob-only type through Send/Recv
+	t.Run("GobOnlySendRecv", func(t *testing.T) {
+		input := GobOnlyType{real: 1.5, imag: 2.5, tag: "sendrecv"}
+		testSendRecv(t, executor, gobGobOnlySenderWorkflow, gobGobOnlyReceiverWorkflow, input, "gob-only-sender-wf")
+	})
+
+	// Test gob-only type through SetEvent/GetEvent
+	t.Run("GobOnlySetGetEvent", func(t *testing.T) {
+		input := GobOnlyType{real: 9.8, imag: 6.7, tag: "event"}
+		testSetGetEvent(t, executor, gobGobOnlySetEventWorkflow, gobGobOnlyGetEventWorkflow, input, "gob-only-setevent-wf", "gob-only-getevent-wf")
+	})
+
+	// Test WriteStream/ReadStream with struct
+	t.Run("WriteReadStream", func(t *testing.T) {
+		input := TestWorkflowData{
+			ID: "gob-stream", Message: "stream data", Value: 55,
+			Data: TestData{Message: "streamed", Value: 555},
+			Metadata: map[string]string{"stream": "gob"},
+		}
+		handle, err := RunWorkflow(executor, gobStreamWorkflow, input, WithWorkflowID("gob-stream-wf"))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, input, result)
+
+		values, closed, err := ReadStream[TestWorkflowData](executor, "gob-stream-wf", "test-stream")
+		require.NoError(t, err)
+		assert.True(t, closed)
+		require.Len(t, values, 1)
+		assert.Equal(t, input, values[0])
+	})
+
+	// Test WriteStream/ReadStream with gob-only type
+	t.Run("GobOnlyWriteReadStream", func(t *testing.T) {
+		input := GobOnlyType{real: 7.7, imag: 8.8, tag: "streamed"}
+		handle, err := RunWorkflow(executor, gobGobOnlyStreamWorkflow, input, WithWorkflowID("gob-only-stream-wf"))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, input, result)
+
+		values, closed, err := ReadStream[GobOnlyType](executor, "gob-only-stream-wf", "test-stream")
+		require.NoError(t, err)
+		assert.True(t, closed)
+		require.Len(t, values, 1)
+		assert.Equal(t, input, values[0])
+	})
+
+	// Test queued workflow
+	t.Run("QueuedWorkflow", func(t *testing.T) {
+		input := TestWorkflowData{
+			ID: "gob-queued", Message: "queued msg", Value: 88,
+			Data: TestData{Message: "queued", Value: 888},
+			Metadata: map[string]string{"type": "gob-queued"},
+		}
+		handle, err := RunWorkflow(executor, gobQueuedWorkflow, input, WithWorkflowID("gob-queued-wf"), WithQueue(gobTestQueue.Name))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, input, result)
+	})
+
+	// Test recovery with gob-only type
+	t.Run("GobOnlyRecovery", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, gobRecoveryGobOnlyWorkflow, GobOnlyType{real: 5.5, imag: 6.6, tag: "recovered"}, "gob-only-recovery-wf")
+	})
+}
+
+// ===== Chicken Serializer Tests =====
+
+// Chicken is a whimsical struct used to test fully custom serializers.
+type Chicken struct {
+	Name  string
+	Noise string
+	Legs  int
+}
+
+// fixedChicken is the canonical chicken that the chickenSerializer always returns.
+var fixedChicken = Chicken{Name: "Poulet", Noise: "cotcotcodet", Legs: 2}
+
+// chickenSerializer is a custom serializer that always encodes/decodes to a fixed Chicken value,
+// regardless of the actual input. This tests that the custom serializer plumbing is actually used:
+// the workflow will always receive fixedChicken as input, no matter what was originally provided.
+type chickenSerializer struct{}
+
+func (s *chickenSerializer) Name() string { return "chicken" }
+
+func (s *chickenSerializer) Encode(data any) (*string, error) {
+	if isNilValue(data) {
+		marker := string(nilMarker)
+		return &marker, nil
+	}
+	// Always encode the fixed chicken, ignoring the actual data
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	chicken := any(fixedChicken)
+	if err := enc.Encode(&chicken); err != nil {
+		return nil, fmt.Errorf("chicken encode failed: %w", err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
+	return &encoded, nil
+}
+
+func (s *chickenSerializer) Decode(data *string) (any, error) {
+	if data == nil || *data == nilMarker {
+		return nil, nil
+	}
+	decodedBytes, err := base64.StdEncoding.DecodeString(*data)
+	if err != nil {
+		return nil, fmt.Errorf("chicken base64 decode failed: %w", err)
+	}
+	var result any
+	dec := gob.NewDecoder(bytes.NewReader(decodedBytes))
+	if err := dec.Decode(&result); err != nil {
+		return nil, fmt.Errorf("chicken gob decode failed: %w", err)
+	}
+	return result, nil
+}
+
+// makeStreamWorkflow creates a workflow that writes a value to a stream, then closes it.
+func makeStreamWorkflow[T any]() Workflow[T, T] {
+	return func(ctx DBOSContext, input T) (T, error) {
+		if err := WriteStream(ctx, "test-stream", input); err != nil {
+			return *new(T), fmt.Errorf("write stream failed: %w", err)
+		}
+		if err := CloseStream(ctx, "test-stream"); err != nil {
+			return *new(T), fmt.Errorf("close stream failed: %w", err)
+		}
+		return input, nil
+	}
+}
+
+var (
+	chickenRecoveryWorkflow = makeRecoveryWorkflow[Chicken]()
+	chickenSenderWorkflow   = makeSenderWorkflow[Chicken]()
+	chickenReceiverWorkflow = makeReceiverWorkflow[Chicken]()
+	chickenSetEventWorkflow = makeSetEventWorkflow[Chicken]()
+	chickenGetEventWorkflow = makeGetEventWorkflow[Chicken]()
+	chickenStreamWorkflow   = makeStreamWorkflow[Chicken]()
+)
+
+// TestChickenSerializer tests a fully custom user-provided serializer.
+// The chicken serializer always encodes/decodes a fixed Chicken value.
+// On first execution the workflow receives the original input (in-memory, no serializer roundtrip).
+// On recovery, the input is read from DB through the serializer, so it becomes fixedChicken.
+// testAllSerializationPaths exercises recovery, proving the custom serializer is used.
+func TestChickenSerializer(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: &chickenSerializer{}})
+
+	RegisterWorkflow(executor, chickenRecoveryWorkflow)
+	RegisterWorkflow(executor, chickenSenderWorkflow)
+	RegisterWorkflow(executor, chickenReceiverWorkflow)
+	RegisterWorkflow(executor, chickenSetEventWorkflow)
+	RegisterWorkflow(executor, chickenGetEventWorkflow)
+	RegisterWorkflow(executor, chickenStreamWorkflow)
+
+	err := Launch(executor)
+	require.NoError(t, err)
+	defer Shutdown(executor, 10*time.Second)
+
+	// On recovery, the serializer decodes the DB input to fixedChicken.
+	// The recovery workflow returns its input, so the result should be fixedChicken.
+	t.Run("RecoveryReturnsFixedChicken", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, chickenRecoveryWorkflow, fixedChicken, "chicken-wf")
+	})
+
+	t.Run("SendRecv", func(t *testing.T) {
+		// Send/Recv encode through the serializer, so both sides get fixedChicken
+		testSendRecv(t, executor, chickenSenderWorkflow, chickenReceiverWorkflow, fixedChicken, "chicken-sender-wf")
+	})
+
+	t.Run("SetGetEvent", func(t *testing.T) {
+		testSetGetEvent(t, executor, chickenSetEventWorkflow, chickenGetEventWorkflow, fixedChicken, "chicken-setevent-wf", "chicken-getevent-wf")
+	})
+
+	t.Run("WriteReadStream", func(t *testing.T) {
+		handle, err := RunWorkflow(executor, chickenStreamWorkflow, fixedChicken, WithWorkflowID("chicken-stream-wf"))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, fixedChicken, result)
+
+		// Read the stream values back
+		values, closed, err := ReadStream[Chicken](executor, "chicken-stream-wf", "test-stream")
+		require.NoError(t, err)
+		assert.True(t, closed)
+		require.Len(t, values, 1)
+		assert.Equal(t, fixedChicken, values[0])
 	})
 }

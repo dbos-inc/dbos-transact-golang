@@ -275,8 +275,7 @@ func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, op
 	}
 
 	// Serialize input
-	serializer := newJSONSerializer[P]()
-	encodedInput, err := serializer.Encode(input)
+	encodedInput, err := encodeValue(c.(*client).dbosCtx.(*dbosContext).serializer, input)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize workflow input: %w", err)
 	}
@@ -370,14 +369,14 @@ func ClientReadStream[R any](c Client, workflowID string, key string) ([]R, bool
 	}
 
 	// Decode each value to type R
-	serializer := newJSONSerializer[R]()
+	customSer := c.(*client).dbosCtx.(*dbosContext).serializer
 	typedValues := make([]R, len(values))
 	for i, val := range values {
 		encodedStr, ok := val.(string)
 		if !ok {
 			return nil, false, fmt.Errorf("stream value is not a string, got %T", val)
 		}
-		decodedValue, decodeErr := serializer.Decode(&encodedStr)
+		decodedValue, decodeErr := decodeValue[R](customSer, &encodedStr)
 		if decodeErr != nil {
 			return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
 		}
@@ -432,7 +431,7 @@ func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-ch
 	go func() {
 		defer close(typedCh)
 
-		serializer := newJSONSerializer[R]()
+		customSer := c.(*client).dbosCtx.(*dbosContext).serializer
 
 		for streamValue := range anyCh {
 			if streamValue.Err != nil {
@@ -451,7 +450,7 @@ func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-ch
 				return
 			}
 
-			decodedValue, decodeErr := serializer.Decode(&encodedStr)
+			decodedValue, decodeErr := decodeValue[R](customSer, &encodedStr)
 			if decodeErr != nil {
 				typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
 				return

@@ -52,6 +52,7 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 type setupDBOSOptions struct {
 	dropDB     bool
 	checkLeaks bool
+	serializer Serializer[any]
 }
 
 /* Test database setup */
@@ -66,6 +67,7 @@ func setupDBOS(t *testing.T, opts setupDBOSOptions) DBOSContext {
 	config := Config{
 		DatabaseURL: databaseURL,
 		AppName:     "test-app",
+		Serializer:  opts.serializer,
 	}
 
 	dbosCtx, err := NewDBOSContext(context.Background(), config)

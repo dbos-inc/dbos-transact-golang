@@ -488,8 +488,7 @@ func internalDebouncerWF[P any, R any](ctx DBOSContext, input debouncerInput[P])
 	// Which doesn't do any pre-encoding of the input, and calls a type-erased function that expects an encoded input
 	// So we need to serialize the input here
 	workflowOpts = append(workflowOpts, withAlreadyEncodedInput())
-	serializer := newJSONSerializer[P]()
-	encodedInput, err := serializer.Encode(currentInput)
+	encodedInput, err := encodeValue(getCustomSerializer(ctx), currentInput)
 	if err != nil {
 		return zero, fmt.Errorf("failed to serialize input: %w", err)
 	}
