@@ -119,7 +119,22 @@ func workflow(ctx dbos.DBOSContext, i int) (int, error) {
 	_ = executorID
 	_ = appID
 
-	return a + b + c + d, nil
+	// Test Go and Select methods (using stepAny to match Select signature)
+	stepAny := func(ctx context.Context) (any, error) {
+		return 1, nil
+	}
+	outcomeChan, err := dbos.Go(ctx, stepAny)
+	if err != nil {
+		return 0, err
+	}
+
+	// Test Select method
+	e, err := dbos.Select(ctx, []<-chan dbos.StepOutcome[any]{outcomeChan})
+	if err != nil {
+		return 0, err
+	}
+
+	return a + b + c + d + e.(int), nil
 }
 
 func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
@@ -136,9 +151,28 @@ func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
 	if err != nil {
 		return err
 	}
-	if res != 4 {
+	if res != 5 {
 		return fmt.Errorf("unexpected result: %v", res)
 	}
+	return nil
+}
+
+// clientUsingFunction demonstrates Client usage with specific values
+func clientUsingFunction(client dbos.Client) error {
+	handle, err := client.Enqueue("my-queue", "my-workflow", "input-data")
+	if err != nil {
+		return err
+	}
+
+	status, err := handle.GetStatus()
+	if err != nil {
+		return err
+	}
+
+	if status.ID == "" {
+		return fmt.Errorf("expected workflow ID")
+	}
+
 	return nil
 }
 
@@ -149,6 +183,9 @@ func TestMocks(t *testing.T) {
 	// Context lifecycle
 	mockCtx.On("Launch").Return(nil)
 	mockCtx.On("Shutdown", mock.Anything).Return()
+
+	// Context methods
+	mockCtx.On("Done").Return((<-chan struct{})(nil))
 
 	// Basic workflow operations (existing)
 	mockCtx.On("RunAsStep", mockCtx, mock.Anything, mock.Anything).Return(1, nil)
@@ -172,9 +209,7 @@ func TestMocks(t *testing.T) {
 
 	// Workflow management
 	mockGenericHandle := mocks.NewMockWorkflowHandle[any](t)
-	mockGenericHandle.On("GetWorkflowID").Return("generic-workflow-id").Maybe()
-	mockGenericHandle.On("GetResult").Return(42, nil).Maybe()
-	mockGenericHandle.On("GetStatus").Return(dbos.WorkflowStatus{}, nil).Maybe()
+	mockGenericHandle.On("GetWorkflowID").Return("generic-workflow-id")
 
 	mockCtx.On("RetrieveWorkflow", mockCtx, "test-workflow-id").Return(mockGenericHandle, nil)
 	mockCtx.On("CancelWorkflow", mockCtx, "test-workflow-id").Return(nil)
@@ -187,6 +222,19 @@ func TestMocks(t *testing.T) {
 	mockCtx.On("GetApplicationVersion").Return("test-version")
 	mockCtx.On("GetExecutorID").Return("test-executor")
 	mockCtx.On("GetApplicationID").Return("test-app-id")
+
+	// Go and Select expectations
+	outcomeChan := make(chan dbos.StepOutcome[any], 1)
+	outcomeChan <- dbos.StepOutcome[any]{Result: 1, Err: nil}
+	close(outcomeChan)
+
+	mockCtx.On("Go", mockCtx, mock.MatchedBy(func(fn interface{}) bool {
+		return fn != nil
+	}), mock.Anything).Return(outcomeChan, nil).Once()
+
+	mockCtx.On("Select", mockCtx, mock.MatchedBy(func(chans []<-chan dbos.StepOutcome[any]) bool {
+		return len(chans) == 1 && chans != nil
+	})).Return(1, nil).Once()
 
 	// Context management
 	mockValCtx := mocks.NewMockDBOSContext(t)
@@ -212,65 +260,132 @@ func TestMocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Test MockClient
+	// Test MockClient with specific values
 	mockClient := mocks.NewMockClient(t)
-	mockClient.On("Enqueue", "q", "wf", "input", mock.Anything).Return(mockGenericHandle, nil)
+	mockClientHandle := mocks.NewMockWorkflowHandle[any](t)
+
+	// Enqueue with specific values
+	mockClientHandle.On("GetStatus").Return(dbos.WorkflowStatus{ID: "wf-123"}, nil).Once()
+	mockClient.On("Enqueue", "my-queue", "my-workflow", "input-data", mock.Anything).Return(mockClientHandle, nil).Once()
 	mockClient.On("Shutdown", 1*time.Second).Return()
 
-	h, err := mockClient.Enqueue("q", "wf", "input")
-	if err != nil || h != mockGenericHandle {
-		t.Fatal("MockClient Enqueue failed")
+	err = clientUsingFunction(mockClient)
+	if err != nil {
+		t.Fatalf("clientUsingFunction failed: %v", err)
 	}
 	mockClient.Shutdown(1 * time.Second)
 
-	// Test remaining DBOSContext methods (optional expectations)
+	// Test remaining DBOSContext methods
 	mockCtx2 := mocks.NewMockDBOSContext(t)
+	mockCtx2.On("Done").Return((<-chan struct{})(nil)).Maybe()
 
-	// Go
-	outcomeChan := make(chan dbos.StepOutcome[any], 1)
-	mockCtx2.On("Go", mockCtx2, mock.Anything, mock.Anything).Return(outcomeChan, nil).Maybe()
-
-	// Select
-	mockCtx2.On("Select", mockCtx2, mock.Anything).Return(42, nil).Maybe()
-
-	// WriteStream
-	mockCtx2.On("WriteStream", mockCtx2, "key", "value").Return(nil).Maybe()
+	// WriteStream - note: the value is encoded to *string before being passed to the context
+	mockCtx2.On("WriteStream", mockCtx2, "stream-key", mock.MatchedBy(func(s *string) bool {
+		return s != nil
+	})).Return(nil).Once()
+	err = dbos.WriteStream(mockCtx2, "stream-key", "stream-value")
+	if err != nil {
+		t.Fatalf("WriteStream failed: %v", err)
+	}
 
 	// CloseStream
-	mockCtx2.On("CloseStream", mockCtx2, "key").Return(nil).Maybe()
+	mockCtx2.On("CloseStream", mockCtx2, "stream-key").Return(nil).Once()
+	err = dbos.CloseStream(mockCtx2, "stream-key")
+	if err != nil {
+		t.Fatalf("CloseStream failed: %v", err)
+	}
 
-	// ReadStream
-	mockCtx2.On("ReadStream", mockCtx2, "wf-id", "key").Return([]any{1, 2, 3}, true, nil).Maybe()
+	// ReadStream - returns base64-encoded JSON strings
+	// "val1" as JSON is "val1", base64 encoded is: InZhbDEi
+	// "val2" as JSON is "val2", base64 encoded is: InZhbDIi
+	// "val3" as JSON is "val3", base64 encoded is: InZhbDMi
+	mockCtx2.On("ReadStream", mockCtx2, "wf-id-123", "stream-key").Return([]any{"InZhbDEi", "InZhbDIi", "InZhbDMi"}, true, nil).Once()
+	_, _, err = dbos.ReadStream[any](mockCtx2, "wf-id-123", "stream-key")
+	if err != nil {
+		t.Fatalf("ReadStream failed: %v", err)
+	}
 
 	// ReadStreamAsync
 	streamChan := make(chan dbos.StreamValue[any], 1)
-	mockCtx2.On("ReadStreamAsync", mockCtx2, "wf-id", "key").Return((<-chan dbos.StreamValue[any])(streamChan), nil).Maybe()
+	mockCtx2.On("ReadStreamAsync", mockCtx2, "wf-id-456", "async-key").Return((<-chan dbos.StreamValue[any])(streamChan), nil).Once()
+	asyncChan, err := dbos.ReadStreamAsync[any](mockCtx2, "wf-id-456", "async-key")
+	if err != nil {
+		t.Fatalf("ReadStreamAsync failed: %v", err)
+	}
+	// Close the channel to allow the goroutine to complete
+	close(streamChan)
+	// Drain the channel to ensure the goroutine finishes
+	for range asyncChan {
+	}
 
 	// Patch
-	mockCtx2.On("Patch", mockCtx2, "patch-name").Return(true, nil).Maybe()
+	mockCtx2.On("Patch", mockCtx2, "feature-patch").Return(true, nil).Once()
+	enabled, err := dbos.Patch(mockCtx2, "feature-patch")
+	if err != nil || !enabled {
+		t.Fatalf("Patch failed: enabled=%v, err=%v", enabled, err)
+	}
 
 	// DeprecatePatch
-	mockCtx2.On("DeprecatePatch", mockCtx2, "patch-name").Return(nil).Maybe()
+	mockCtx2.On("DeprecatePatch", mockCtx2, "old-patch").Return(nil).Once()
+	err = dbos.DeprecatePatch(mockCtx2, "old-patch")
+	if err != nil {
+		t.Fatalf("DeprecatePatch failed: %v", err)
+	}
 
 	// ListRegisteredWorkflows
-	mockCtx2.On("ListRegisteredWorkflows", mockCtx2).Return([]dbos.WorkflowRegistryEntry{}, nil).Maybe()
+	mockCtx2.On("ListRegisteredWorkflows", mockCtx2).Return([]dbos.WorkflowRegistryEntry{
+		{Name: "Workflow1", FQN: "workflow1"},
+	}, nil).Once()
+	entries, err := dbos.ListRegisteredWorkflows(mockCtx2)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("ListRegisteredWorkflows failed: entries=%v, err=%v", entries, err)
+	}
 
 	// ListRegisteredQueues
-	mockCtx2.On("ListRegisteredQueues", mockCtx2).Return([]dbos.WorkflowQueue{}, nil).Maybe()
+	mockCtx2.On("ListRegisteredQueues", mockCtx2).Return([]dbos.WorkflowQueue{
+		{Name: "queue1"},
+	}, nil).Once()
+	queues, err := dbos.ListRegisteredQueues(mockCtx2)
+	if err != nil || len(queues) != 1 {
+		t.Fatalf("ListRegisteredQueues failed: queues=%v, err=%v", queues, err)
+	}
 
 	// From
 	mockFromCtx := mocks.NewMockDBOSContext(t)
-	mockCtx2.On("From", mockCtx2, mock.Anything).Return(mockFromCtx).Maybe()
+	mockCtx2.On("From", mockCtx2, mock.Anything).Return(mockFromCtx, nil).Once()
+	fromCtx := dbos.From(mockCtx2, context.Background())
+	if fromCtx != mockFromCtx {
+		t.Fatal("From did not return expected context")
+	}
 
 	// WithoutCancel
 	mockNoCancelCtx := mocks.NewMockDBOSContext(t)
-	mockCtx2.On("WithoutCancel", mockCtx2).Return(mockNoCancelCtx).Maybe()
+	mockCtx2.On("WithoutCancel", mockCtx2).Return(mockNoCancelCtx, nil).Once()
+	noCancelCtx := dbos.WithoutCancel(mockCtx2)
+	if noCancelCtx != mockNoCancelCtx {
+		t.Fatal("WithoutCancel did not return expected context")
+	}
 
 	// WithTimeout
 	mockTimeoutCtx := mocks.NewMockDBOSContext(t)
-	var cancel context.CancelFunc = func() {}
-	mockCtx2.On("WithTimeout", mockCtx2, mock.Anything).Return(mockTimeoutCtx, cancel).Maybe()
+	var timeoutCancelFunc context.CancelFunc = func() {}
+	mockCtx2.On("WithTimeout", mockCtx2, 5*time.Minute).Return(mockTimeoutCtx, timeoutCancelFunc, nil).Once()
+	timeoutCtx, timeoutCancel := dbos.WithTimeout(mockCtx2, 5*time.Minute)
+	if timeoutCtx != dbos.DBOSContext(mockTimeoutCtx) || timeoutCancel == nil {
+		t.Fatal("WithTimeout did not return expected context or cancel function")
+	}
 
 	// ListenQueues
-	mockCtx2.On("ListenQueues", mockCtx2, mock.Anything).Maybe()
+	queuesToList := []dbos.WorkflowQueue{{Name: "queue1"}, {Name: "queue2"}}
+	mockCtx2.On("ListenQueues", mockCtx2, mock.MatchedBy(func(qs []dbos.WorkflowQueue) bool {
+		return len(qs) == 2
+	})).Return(nil).Once()
+	dbos.ListenQueues(mockCtx2, queuesToList...)
+
+	// DeleteWorkflow
+	mockCtx2.On("DeleteWorkflow", mockCtx2, "wf-to-delete", mock.Anything).Return(nil).Once()
+	err = dbos.DeleteWorkflow(mockCtx2, "wf-to-delete")
+	if err != nil {
+		t.Fatalf("DeleteWorkflow failed: %v", err)
+	}
 }
