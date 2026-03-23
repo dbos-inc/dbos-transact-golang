@@ -143,7 +143,7 @@ type DBOSContext interface {
 	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)                                         // Get the execution steps of a workflow
 	ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) // List registered workflows with filtering options
 	ListRegisteredQueues(_ DBOSContext) ([]WorkflowQueue, error)                                                   // List all registered workflow queues
-	DeleteWorkflow(_ DBOSContext, workflowID string, opts ...DeleteWorkflowOption) error                           // Delete a workflow and all its associated data
+	DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts ...DeleteWorkflowOption) error                       // Delete workflows and all their associated data
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context

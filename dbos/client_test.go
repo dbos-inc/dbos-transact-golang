@@ -618,7 +618,7 @@ func TestDeleteWorkflow(t *testing.T) {
 		_, err = client.RetrieveWorkflow(workflowID)
 		require.NoError(t, err)
 
-		err = client.DeleteWorkflow(workflowID)
+		err = client.DeleteWorkflows([]string{workflowID})
 		require.NoError(t, err)
 
 		_, err = client.RetrieveWorkflow(workflowID)

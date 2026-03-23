@@ -2826,7 +2826,7 @@ func CancelWorkflow(ctx DBOSContext, workflowID string) error {
 	return ctx.CancelWorkflow(ctx, workflowID)
 }
 
-func (c *dbosContext) DeleteWorkflow(_ DBOSContext, workflowID string, opts ...DeleteWorkflowOption) error {
+func (c *dbosContext) DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts ...DeleteWorkflowOption) error {
 	// Process options
 	params := &deleteWorkflowOptions{}
 	for _, opt := range opts {
@@ -2837,18 +2837,18 @@ func (c *dbosContext) DeleteWorkflow(_ DBOSContext, workflowID string, opts ...D
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			err := c.systemDB.deleteWorkflow(ctx, deleteWorkflowDBInput{
-				workflowID:     workflowID,
+			err := c.systemDB.deleteWorkflows(ctx, deleteWorkflowsDBInput{
+				workflowIDs:    workflowIDs,
 				deleteChildren: params.deleteChildren,
 				tx:             tx,
 			})
 			return "", err
-		}, WithStepName("DBOS.deleteWorkflow"))
+		}, WithStepName("DBOS.deleteWorkflows"))
 		return err
 	} else {
 		return retry(c, func() error {
-			return c.systemDB.deleteWorkflow(c, deleteWorkflowDBInput{
-				workflowID:     workflowID,
+			return c.systemDB.deleteWorkflows(c, deleteWorkflowsDBInput{
+				workflowIDs:    workflowIDs,
 				deleteChildren: params.deleteChildren,
 			})
 		}, withRetrierLogger(c.logger))
@@ -2872,33 +2872,31 @@ func WithDeleteChildren() DeleteWorkflowOption {
 	}
 }
 
-// DeleteWorkflow permanently deletes a workflow and all its associated data from the database,
-// regardless of its current status. This includes active (PENDING, ENQUEUED) workflows.
+// DeleteWorkflows permanently deletes one or more workflows and all their associated data
+// from the database, regardless of their current status. This includes active (PENDING, ENQUEUED) workflows.
 //
 // This operation is irreversible and removes the workflow status, operation outputs,
-// events, event history, and streams associated with the workflow.
+// events, event history, and streams associated with each workflow.
 //
 // Options:
 //   - WithDeleteChildren: Also delete all child workflows recursively
 //
 // Parameters:
 //   - ctx: DBOS context for the operation
-//   - workflowID: The unique identifier of the workflow to delete
-//
-// Returns an error if the workflow does not exist, is still active, or if the deletion fails.
+//   - workflowIDs: The unique identifiers of the workflows to delete
 //
 // Example:
 //
 //	// Delete a single workflow
-//	err := dbos.DeleteWorkflow(ctx, "workflow-to-delete")
+//	err := dbos.DeleteWorkflows(ctx, []string{"workflow-to-delete"})
 //
-//	// Delete a workflow and all its children
-//	err := dbos.DeleteWorkflow(ctx, "workflow-to-delete", dbos.WithDeleteChildren())
-func DeleteWorkflow(ctx DBOSContext, workflowID string, opts ...DeleteWorkflowOption) error {
+//	// Delete workflows and all their children
+//	err := dbos.DeleteWorkflows(ctx, []string{"wf1", "wf2"}, dbos.WithDeleteChildren())
+func DeleteWorkflows(ctx DBOSContext, workflowIDs []string, opts ...DeleteWorkflowOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.DeleteWorkflow(ctx, workflowID, opts...)
+	return ctx.DeleteWorkflows(ctx, workflowIDs, opts...)
 }
 
 func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {

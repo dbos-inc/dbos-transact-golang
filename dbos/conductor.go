@@ -1,7 +1,10 @@
 package dbos
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -363,6 +366,12 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleRetentionRequest(data, base.RequestID)
 	case getMetricsMessage:
 		return c.handleGetMetricsRequest(data, base.RequestID)
+	case exportWorkflowMessage:
+		return c.handleExportWorkflowRequest(data, base.RequestID)
+	case importWorkflowMessage:
+		return c.handleImportWorkflowRequest(data, base.RequestID)
+	case deleteWorkflowMessage:
+		return c.handleDeleteWorkflowRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
@@ -1027,6 +1036,168 @@ func (c *conductor) handleUnknownMessageType(requestID string, msgType messageTy
 	}
 
 	return c.sendResponse(response, "unknown message type response")
+}
+
+func (c *conductor) handleExportWorkflowRequest(data []byte, requestID string) error {
+	var req exportWorkflowConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse export workflow request", "error", err)
+		return fmt.Errorf("failed to parse export workflow request: %w", err)
+	}
+	c.logger.Debug("Handling export workflow request", "workflow_id", req.WorkflowID, "export_children", req.ExportChildren)
+
+	var serializedWorkflow *string
+	var errorMsg *string
+
+	exported, err := retryWithResult(c.dbosCtx, func() ([]ExportedWorkflow, error) {
+		return c.dbosCtx.systemDB.exportWorkflow(c.dbosCtx, req.WorkflowID, req.ExportChildren)
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		c.logger.Error("Failed to export workflow", "workflow_id", req.WorkflowID, "error", err)
+		errStr := fmt.Sprintf("Exception encountered when exporting workflow %s: %v", req.WorkflowID, err)
+		errorMsg = &errStr
+	} else {
+		jsonData, err := json.Marshal(exported)
+		if err != nil {
+			errStr := fmt.Sprintf("Failed to marshal exported workflow: %v", err)
+			errorMsg = &errStr
+		} else {
+			var buf bytes.Buffer
+			gz := gzip.NewWriter(&buf)
+			if _, err := gz.Write(jsonData); err != nil {
+				errStr := fmt.Sprintf("Failed to gzip exported workflow: %v", err)
+				errorMsg = &errStr
+			} else if err := gz.Close(); err != nil {
+				errStr := fmt.Sprintf("Failed to close gzip writer: %v", err)
+				errorMsg = &errStr
+			} else {
+				encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
+				serializedWorkflow = &encoded
+			}
+		}
+	}
+
+	response := exportWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      exportWorkflowMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
+		},
+		SerializedWorkflow: serializedWorkflow,
+	}
+
+	return c.sendResponse(response, string(exportWorkflowMessage))
+}
+
+func (c *conductor) handleImportWorkflowRequest(data []byte, requestID string) error {
+	var req importWorkflowConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse import workflow request", "error", err)
+		return fmt.Errorf("failed to parse import workflow request: %w", err)
+	}
+	c.logger.Debug("Handling import workflow request")
+
+	success := true
+	var errorMsg *string
+
+	compressed, err := base64.StdEncoding.DecodeString(req.SerializedWorkflow)
+	if err != nil {
+		errStr := fmt.Sprintf("Failed to base64 decode serialized workflow: %v", err)
+		errorMsg = &errStr
+		success = false
+	} else {
+		gz, err := gzip.NewReader(bytes.NewReader(compressed))
+		if err != nil {
+			errStr := fmt.Sprintf("Failed to create gzip reader: %v", err)
+			errorMsg = &errStr
+			success = false
+		} else {
+			jsonData, err := io.ReadAll(gz)
+			if closeErr := gz.Close(); closeErr != nil && err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				errStr := fmt.Sprintf("Failed to decompress workflow data: %v", err)
+				errorMsg = &errStr
+				success = false
+			} else {
+				var workflows []ExportedWorkflow
+				if err := json.Unmarshal(jsonData, &workflows); err != nil {
+					errStr := fmt.Sprintf("Failed to unmarshal workflow data: %v", err)
+					errorMsg = &errStr
+					success = false
+				} else {
+					err := retry(c.dbosCtx, func() error {
+						return c.dbosCtx.systemDB.importWorkflow(c.dbosCtx, workflows)
+					}, withRetrierLogger(c.logger))
+					if err != nil {
+						errStr := fmt.Sprintf("Exception encountered when importing workflow: %v", err)
+						errorMsg = &errStr
+						success = false
+					}
+				}
+			}
+		}
+	}
+
+	response := importWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      importWorkflowMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
+		},
+		Success: success,
+	}
+
+	return c.sendResponse(response, string(importWorkflowMessage))
+}
+
+func (c *conductor) handleDeleteWorkflowRequest(data []byte, requestID string) error {
+	var req deleteWorkflowConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse delete workflow request", "error", err)
+		return fmt.Errorf("failed to parse delete workflow request: %w", err)
+	}
+	workflowIDs := req.WorkflowIDs
+	if len(workflowIDs) == 0 && req.WorkflowID != "" {
+		workflowIDs = []string{req.WorkflowID}
+	}
+	c.logger.Debug("Handling delete workflow request", "workflow_ids", workflowIDs, "delete_children", req.DeleteChildren, "request_id", requestID)
+
+	success := true
+	var errorMsg *string
+
+	err := retry(c.dbosCtx, func() error {
+		return c.dbosCtx.systemDB.deleteWorkflows(c.dbosCtx, deleteWorkflowsDBInput{
+			workflowIDs:    workflowIDs,
+			deleteChildren: req.DeleteChildren,
+		})
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		c.logger.Error("Failed to delete workflows", "workflow_ids", workflowIDs, "error", err)
+		errStr := fmt.Sprintf("failed to delete workflows: %v", err)
+		errorMsg = &errStr
+		success = false
+	} else {
+		c.logger.Info("Successfully deleted workflows", "workflow_ids", workflowIDs)
+	}
+
+	response := deleteWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      deleteWorkflowMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
+		},
+		Success: success,
+	}
+
+	return c.sendResponse(response, string(deleteWorkflowMessage))
 }
 
 func (c *conductor) sendResponse(response any, responseType string) error {

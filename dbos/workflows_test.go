@@ -1382,6 +1382,11 @@ func TestChildWorkflow(t *testing.T) {
 		if err := CloseStream(ctx, "cascade-stream"); err != nil {
 			return "", err
 		}
+		// Recv the notification so it's recorded as a step
+		_, err := Recv[string](ctx, "test-topic", 10*time.Second)
+		if err != nil {
+			return "", err
+		}
 		return "done", nil
 	}
 	RegisterWorkflow(dbosCtx, deleteCascadeWf)
@@ -1526,7 +1531,7 @@ func TestChildWorkflow(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "from step", result)
 
-		err = DeleteWorkflow(dbosCtx, handle.GetWorkflowID())
+		err = DeleteWorkflows(dbosCtx, []string{handle.GetWorkflowID()})
 		require.NoError(t, err)
 
 		// Verify workflow no longer exists
@@ -1543,7 +1548,7 @@ func TestChildWorkflow(t *testing.T) {
 		require.NoError(t, err)
 
 		// Delete succeeds even though workflow is still PENDING
-		err = DeleteWorkflow(dbosCtx, handle.GetWorkflowID())
+		err = DeleteWorkflows(dbosCtx, []string{handle.GetWorkflowID()})
 		require.NoError(t, err)
 
 		// Verify the workflow is gone
@@ -1555,7 +1560,7 @@ func TestChildWorkflow(t *testing.T) {
 	})
 
 	t.Run("DeleteNonExistentWorkflowIsNoOp", func(t *testing.T) {
-		err := DeleteWorkflow(dbosCtx, "non-existent-delete-wf-id")
+		err := DeleteWorkflows(dbosCtx, []string{"non-existent-delete-wf-id"})
 		require.NoError(t, err, "expected no error when deleting non-existent workflow")
 	})
 
@@ -1563,18 +1568,23 @@ func TestChildWorkflow(t *testing.T) {
 		wfID := "delete-cascade-test-wf"
 		handle, err := RunWorkflow(dbosCtx, deleteCascadeWf, "input", WithWorkflowID(wfID))
 		require.NoError(t, err)
-		_, err = handle.GetResult()
-		require.NoError(t, err)
 
-		// Send a notification to the completed workflow from outside
+		// Send a notification while the workflow is running so it can Recv it
 		err = Send(dbosCtx, wfID, "test-notification", "test-topic")
 		require.NoError(t, err)
 
-		// Verify events, streams, notifications exist via direct DB query
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		// Send another notification to the completed workflow (unconsumed, stays in table)
+		err = Send(dbosCtx, wfID, "extra-notification", "test-topic")
+		require.NoError(t, err)
+
+		// Verify events, streams, notifications, and steps exist via direct DB query
 		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
 		schema := pgx.Identifier{sysDB.schema}.Sanitize()
 
-		var eventCount, streamCount, notifCount int
+		var eventCount, streamCount, notifCount, stepCount int
 		err = sysDB.pool.QueryRow(dbosCtx,
 			fmt.Sprintf(`SELECT COUNT(*) FROM %s.workflow_events WHERE workflow_uuid = $1`, schema),
 			wfID).Scan(&eventCount)
@@ -1593,8 +1603,18 @@ func TestChildWorkflow(t *testing.T) {
 		require.NoError(t, err)
 		require.Greater(t, notifCount, 0, "expected notifications to exist before deletion")
 
+		steps, err := GetWorkflowSteps(dbosCtx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 4, "expected 4 steps: SetEvent, WriteStream, CloseStream, Recv")
+
+		err = sysDB.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.operation_outputs WHERE workflow_uuid = $1`, schema),
+			wfID).Scan(&stepCount)
+		require.NoError(t, err)
+		require.Greater(t, stepCount, 0, "expected operation_outputs to exist before deletion")
+
 		// Delete the workflow
-		err = DeleteWorkflow(dbosCtx, wfID)
+		err = DeleteWorkflows(dbosCtx, []string{wfID})
 		require.NoError(t, err)
 
 		// Verify all related data was cascade-deleted
@@ -1615,6 +1635,12 @@ func TestChildWorkflow(t *testing.T) {
 			wfID).Scan(&notifCount)
 		require.NoError(t, err)
 		require.Equal(t, 0, notifCount, "expected notifications to be cascade-deleted")
+
+		err = sysDB.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.operation_outputs WHERE workflow_uuid = $1`, schema),
+			wfID).Scan(&stepCount)
+		require.NoError(t, err)
+		require.Equal(t, 0, stepCount, "expected operation_outputs to be cascade-deleted")
 	})
 
 	t.Run("DeleteWithChildrenThreeLayers", func(t *testing.T) {
@@ -1648,10 +1674,58 @@ func TestChildWorkflow(t *testing.T) {
 		}
 
 		// Delete root with children — should recursively delete all 7
-		err = DeleteWorkflow(dbosCtx, rootID, WithDeleteChildren())
+		err = DeleteWorkflows(dbosCtx, []string{rootID}, WithDeleteChildren())
 		require.NoError(t, err)
 
 		// Verify all 7 are gone
+		for _, id := range allIDs {
+			_, err := RetrieveWorkflow[string](dbosCtx, id)
+			require.Error(t, err, "expected workflow %s to be deleted", id)
+			var dbosErr *DBOSError
+			require.ErrorAs(t, err, &dbosErr)
+			require.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+		}
+	})
+
+	t.Run("DeleteMultipleWorkflowsWithChildren", func(t *testing.T) {
+		// Create two independent trees, each: root → 2 mid → 4 leaf (7 per tree, 14 total)
+		root1 := "delete-multi-root-1"
+		root2 := "delete-multi-root-2"
+
+		h1, err := RunWorkflow(dbosCtx, deleteRootWf, root1, WithWorkflowID(root1))
+		require.NoError(t, err)
+		h2, err := RunWorkflow(dbosCtx, deleteRootWf, root2, WithWorkflowID(root2))
+		require.NoError(t, err)
+		_, err = h1.GetResult()
+		require.NoError(t, err)
+		_, err = h2.GetResult()
+		require.NoError(t, err)
+
+		// Build all 14 expected IDs
+		var allIDs []string
+		for _, root := range []string{root1, root2} {
+			allIDs = append(allIDs, root)
+			for i := range 2 {
+				mid := fmt.Sprintf("%s-mid-%d", root, i)
+				allIDs = append(allIDs, mid)
+				for j := range 2 {
+					allIDs = append(allIDs, fmt.Sprintf("%s-leaf-%d", mid, j))
+				}
+			}
+		}
+		require.Len(t, allIDs, 14)
+
+		// Verify all 14 exist
+		for _, id := range allIDs {
+			_, err := RetrieveWorkflow[string](dbosCtx, id)
+			require.NoError(t, err, "expected workflow %s to exist", id)
+		}
+
+		// Delete both roots with children in a single call
+		err = DeleteWorkflows(dbosCtx, []string{root1, root2}, WithDeleteChildren())
+		require.NoError(t, err)
+
+		// Verify all 14 are gone
 		for _, id := range allIDs {
 			_, err := RetrieveWorkflow[string](dbosCtx, id)
 			require.Error(t, err, "expected workflow %s to be deleted", id)
@@ -5573,4 +5647,305 @@ func collectStreamValues[R any](ch <-chan StreamValue[R]) ([]R, bool, error) {
 	}
 
 	return values, closed, err
+}
+
+// Complex nested struct for testing rich input/output serialization in export/import
+type exportTestAddress struct {
+	Street  string `json:"street"`
+	City    string `json:"city"`
+	ZipCode int    `json:"zip_code"`
+}
+
+type exportTestPerson struct {
+	Name      string              `json:"name"`
+	Age       int                 `json:"age"`
+	Addresses []exportTestAddress `json:"addresses"`
+	Tags      map[string]string   `json:"tags"`
+	Scores    []float64           `json:"scores"`
+}
+
+func TestExportImportWorkflow(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	eventKey := "export-event-key"
+	streamKey := "export-stream-key"
+
+	stepCounter := 0
+	exportStep := func(_ context.Context) (string, error) {
+		stepCounter++
+		return fmt.Sprintf("step-result-%d", stepCounter), nil
+	}
+
+	grandchildWf := func(ctx DBOSContext, input string) (string, error) {
+		return input + "-grandchild", nil
+	}
+
+	childWf := func(ctx DBOSContext, input exportTestPerson) (exportTestPerson, error) {
+		gcHandle, err := RunWorkflow(ctx, grandchildWf, input.Name)
+		if err != nil {
+			return exportTestPerson{}, err
+		}
+		gcResult, err := gcHandle.GetResult()
+		if err != nil {
+			return exportTestPerson{}, err
+		}
+		input.Tags["grandchild_result"] = gcResult
+		return input, nil
+	}
+
+	parentWf := func(ctx DBOSContext, input exportTestPerson) (exportTestPerson, error) {
+		// Step 0: spawn child workflow
+		childHandle, err := RunWorkflow(ctx, childWf, input)
+		if err != nil {
+			return exportTestPerson{}, err
+		}
+		// Step 1: get child result
+		childResult, err := childHandle.GetResult()
+		if err != nil {
+			return exportTestPerson{}, err
+		}
+
+		// Steps 2-6: run 5 steps
+		for i := 0; i < 5; i++ {
+			_, err := RunAsStep(ctx, func(sctx context.Context) (string, error) {
+				return exportStep(sctx)
+			})
+			if err != nil {
+				return exportTestPerson{}, err
+			}
+		}
+
+		// Step 7: set event with nested value
+		eventValue := map[string]any{
+			"status":  "completed",
+			"details": map[string]any{"count": float64(42), "flag": true},
+		}
+		if err := SetEvent(ctx, eventKey, eventValue); err != nil {
+			return exportTestPerson{}, err
+		}
+
+		// Step 8: write stream with structured data
+		streamValue := map[string]any{
+			"batch": float64(1),
+			"items": []any{"alpha", "beta", "gamma"},
+		}
+		if err := WriteStream(ctx, streamKey, streamValue); err != nil {
+			return exportTestPerson{}, err
+		}
+
+		childResult.Scores = append(childResult.Scores, 100.0)
+		return childResult, nil
+	}
+
+	RegisterWorkflow(dbosCtx, parentWf)
+	RegisterWorkflow(dbosCtx, childWf)
+	RegisterWorkflow(dbosCtx, grandchildWf)
+
+	Launch(dbosCtx)
+
+	input := exportTestPerson{
+		Name: "Alice",
+		Age:  30,
+		Addresses: []exportTestAddress{
+			{Street: "123 Main St", City: "Springfield", ZipCode: 62701},
+			{Street: "456 Oak Ave", City: "Shelbyville", ZipCode: 62702},
+		},
+		Tags:   map[string]string{"role": "admin", "department": "engineering"},
+		Scores: []float64{95.5, 87.3, 92.1},
+	}
+
+	parentID := uuid.NewString()
+	handle, err := RunWorkflow(dbosCtx, parentWf, input, WithWorkflowID(parentID))
+	require.NoError(t, err)
+
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "Alice", result.Name)
+	assert.Equal(t, "Alice-grandchild", result.Tags["grandchild_result"])
+	assert.Equal(t, float64(100.0), result.Scores[len(result.Scores)-1])
+
+	childID := fmt.Sprintf("%s-0", parentID)
+	grandchildID := fmt.Sprintf("%s-0", childID)
+
+	// Parent: spawn child (0) + getResult (1) + 5 steps (2-6) + setEvent (7) + writeStream (8) = 9 steps
+	// Child: spawn grandchild (0) + getResult (1) = 2 steps
+	// Grandchild: no steps (just returns)
+	originalParentSteps, err := GetWorkflowSteps(dbosCtx, parentID)
+	require.NoError(t, err)
+	require.Len(t, originalParentSteps, 9, "parent should have 9 steps")
+
+	originalChildSteps, err := GetWorkflowSteps(dbosCtx, childID)
+	require.NoError(t, err)
+	require.Len(t, originalChildSteps, 2, "child should have 2 steps")
+
+	originalGrandchildSteps, err := GetWorkflowSteps(dbosCtx, grandchildID)
+	require.NoError(t, err)
+	require.Len(t, originalGrandchildSteps, 0, "grandchild should have 0 steps")
+
+	sdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+
+	t.Run("ExportWithChildren", func(t *testing.T) {
+		exported, err := sdb.exportWorkflow(dbosCtx, parentID, true)
+		require.NoError(t, err)
+		require.Len(t, exported, 3, "expected 3 exported workflows (parent + child + grandchild)")
+
+		parentExport := exported[0]
+		assert.Equal(t, parentID, *parentExport.WorkflowStatus["workflow_uuid"].(*string))
+		assert.NotEmpty(t, parentExport.OperationOutputs, "expected operation outputs for parent")
+		assert.NotEmpty(t, parentExport.WorkflowEvents, "expected workflow events for parent")
+		assert.NotEmpty(t, parentExport.WorkflowEventsHistory, "expected workflow events history for parent")
+		assert.NotEmpty(t, parentExport.Streams, "expected streams for parent")
+	})
+
+	t.Run("ExportWithoutChildren", func(t *testing.T) {
+		exported, err := sdb.exportWorkflow(dbosCtx, parentID, false)
+		require.NoError(t, err)
+		require.Len(t, exported, 1, "expected only 1 exported workflow without children")
+	})
+
+	t.Run("ExportNonExistentWorkflow", func(t *testing.T) {
+		_, err := sdb.exportWorkflow(dbosCtx, "non-existent-wf-id", false)
+		require.Error(t, err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+	})
+
+	t.Run("ImportConflict", func(t *testing.T) {
+		exported, err := sdb.exportWorkflow(dbosCtx, parentID, true)
+		require.NoError(t, err)
+
+		err = sdb.importWorkflow(dbosCtx, exported)
+		require.Error(t, err, "expected error when importing duplicate workflow")
+	})
+
+	t.Run("ImportIntoCleanDB", func(t *testing.T) {
+		exported, err := sdb.exportWorkflow(dbosCtx, parentID, true)
+		require.NoError(t, err)
+		require.Len(t, exported, 3)
+
+		// Delete all workflows so we can re-import
+		err = sdb.deleteWorkflows(dbosCtx, deleteWorkflowsDBInput{
+			workflowIDs:    []string{parentID},
+			deleteChildren: true,
+		})
+		require.NoError(t, err)
+
+		// Verify all 3 workflows are gone
+		wfs, err := sdb.listWorkflows(dbosCtx, listWorkflowsDBInput{
+			workflowIDs: []string{parentID, childID, grandchildID},
+		})
+		require.NoError(t, err)
+		require.Empty(t, wfs, "expected no workflows after deletion")
+
+		// Import the exported workflows
+		err = sdb.importWorkflow(dbosCtx, exported)
+		require.NoError(t, err)
+
+		// Verify all 3 workflows are present with correct input/output
+		wfs, err = sdb.listWorkflows(dbosCtx, listWorkflowsDBInput{
+			workflowIDs: []string{parentID, childID, grandchildID},
+			loadInput:   true,
+			loadOutput:  true,
+		})
+		require.NoError(t, err)
+		require.Len(t, wfs, 3, "expected 3 workflows after import")
+
+		// Build a map for easy lookup
+		wfByID := make(map[string]WorkflowStatus)
+		for _, wf := range wfs {
+			wfByID[wf.ID] = wf
+		}
+
+		// Check parent workflow status and output
+		parentWF := wfByID[parentID]
+		assert.Equal(t, WorkflowStatusSuccess, parentWF.Status)
+		require.NotNil(t, parentWF.Output)
+		require.NotNil(t, parentWF.Input)
+		// Deserialize and verify the parent output using our serializer
+		ser := newJSONSerializer[exportTestPerson]()
+		outputPtr, ok := parentWF.Output.(*string)
+		require.True(t, ok)
+		parentOutput, err := ser.Decode(outputPtr)
+		require.NoError(t, err)
+		assert.Equal(t, "Alice", parentOutput.Name)
+		assert.Equal(t, "Alice-grandchild", parentOutput.Tags["grandchild_result"])
+		assert.Equal(t, float64(100.0), parentOutput.Scores[len(parentOutput.Scores)-1])
+		// Deserialize and verify the parent input
+		inputPtr, ok := parentWF.Input.(*string)
+		require.True(t, ok)
+		parentInput, err := ser.Decode(inputPtr)
+		require.NoError(t, err)
+		assert.Equal(t, "Alice", parentInput.Name)
+		assert.Equal(t, 30, parentInput.Age)
+		assert.Len(t, parentInput.Addresses, 2)
+		assert.Equal(t, "123 Main St", parentInput.Addresses[0].Street)
+
+		// Check child workflow
+		childWF := wfByID[childID]
+		assert.Equal(t, WorkflowStatusSuccess, childWF.Status)
+		assert.Equal(t, parentID, childWF.ParentWorkflowID)
+
+		// Check grandchild workflow
+		grandchildWF := wfByID[grandchildID]
+		assert.Equal(t, WorkflowStatusSuccess, grandchildWF.Status)
+		assert.Equal(t, childID, grandchildWF.ParentWorkflowID)
+
+		// Verify steps for all 3 workflows
+		importedParentSteps, err := GetWorkflowSteps(dbosCtx, parentID)
+		require.NoError(t, err)
+		require.Len(t, importedParentSteps, 9, "imported parent should have 9 steps")
+		for i, imported := range importedParentSteps {
+			assert.Equal(t, originalParentSteps[i].StepID, imported.StepID, "parent step ID mismatch at index %d", i)
+			assert.Equal(t, originalParentSteps[i].StepName, imported.StepName, "parent step name mismatch at index %d", i)
+		}
+
+		importedChildSteps, err := GetWorkflowSteps(dbosCtx, childID)
+		require.NoError(t, err)
+		require.Len(t, importedChildSteps, 2, "imported child should have 2 steps")
+		for i, imported := range importedChildSteps {
+			assert.Equal(t, originalChildSteps[i].StepID, imported.StepID, "child step ID mismatch at index %d", i)
+			assert.Equal(t, originalChildSteps[i].StepName, imported.StepName, "child step name mismatch at index %d", i)
+		}
+
+		importedGrandchildSteps, err := GetWorkflowSteps(dbosCtx, grandchildID)
+		require.NoError(t, err)
+		require.Len(t, importedGrandchildSteps, 0, "imported grandchild should have 0 steps")
+
+		// Verify events, streams, and history via direct DB queries
+		schema := pgx.Identifier{sdb.schema}.Sanitize()
+
+		var eventCount int
+		err = sdb.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.workflow_events WHERE workflow_uuid = $1`, schema),
+			parentID).Scan(&eventCount)
+		require.NoError(t, err)
+		assert.Greater(t, eventCount, 0, "expected events to be imported")
+
+		var streamCount int
+		err = sdb.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.streams WHERE workflow_uuid = $1`, schema),
+			parentID).Scan(&streamCount)
+		require.NoError(t, err)
+		assert.Greater(t, streamCount, 0, "expected streams to be imported")
+
+		var historyCount int
+		err = sdb.pool.QueryRow(dbosCtx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s.workflow_events_history WHERE workflow_uuid = $1`, schema),
+			parentID).Scan(&historyCount)
+		require.NoError(t, err)
+		assert.Greater(t, historyCount, 0, "expected workflow events history to be imported")
+
+		// Verify the imported workflow can be forked
+		forkHandle, err := ForkWorkflow[exportTestPerson](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: parentID,
+			StartStep:          uint(len(importedParentSteps)),
+		})
+		require.NoError(t, err)
+
+		forkResult, err := forkHandle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "Alice", forkResult.Name)
+		assert.Equal(t, "Alice-grandchild", forkResult.Tags["grandchild_result"])
+	})
 }

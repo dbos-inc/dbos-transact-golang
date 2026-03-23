@@ -48,6 +48,9 @@ const (
 	existPendingWorkflowsMessage messageType = "exist_pending_workflows"
 	retentionMessage             messageType = "retention"
 	getMetricsMessage            messageType = "get_metrics"
+	exportWorkflowMessage        messageType = "export_workflow"
+	importWorkflowMessage        messageType = "import_workflow"
+	deleteWorkflowMessage        messageType = "delete"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -437,4 +440,43 @@ type getMetricsConductorRequest struct {
 type getMetricsConductorResponse struct {
 	baseResponse
 	Metrics []metricData `json:"metrics"`
+}
+
+// exportWorkflowConductorRequest is sent by the conductor to export a workflow
+type exportWorkflowConductorRequest struct {
+	baseMessage
+	WorkflowID     string `json:"workflow_id"`
+	ExportChildren bool   `json:"export_children"`
+}
+
+// exportWorkflowConductorResponse is sent in response to export workflow requests
+type exportWorkflowConductorResponse struct {
+	baseResponse
+	SerializedWorkflow *string `json:"serialized_workflow,omitempty"`
+}
+
+// importWorkflowConductorRequest is sent by the conductor to import a workflow
+type importWorkflowConductorRequest struct {
+	baseMessage
+	SerializedWorkflow string `json:"serialized_workflow"`
+}
+
+// importWorkflowConductorResponse is sent in response to import workflow requests
+type importWorkflowConductorResponse struct {
+	baseResponse
+	Success bool `json:"success"`
+}
+
+// deleteWorkflowConductorRequest is sent by the conductor to delete workflow(s)
+type deleteWorkflowConductorRequest struct {
+	baseMessage
+	WorkflowID     string   `json:"workflow_id"`
+	WorkflowIDs    []string `json:"workflow_ids"`
+	DeleteChildren bool     `json:"delete_children"`
+}
+
+// deleteWorkflowConductorResponse is sent in response to delete workflow requests
+type deleteWorkflowConductorResponse struct {
+	baseResponse
+	Success bool `json:"success"`
 }
