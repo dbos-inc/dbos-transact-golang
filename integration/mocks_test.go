@@ -173,6 +173,88 @@ func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
 	return nil
 }
 
+// clientMethodsFunction exercises remaining DBOSContext methods
+func clientMethodsFunction(ctx dbos.DBOSContext) error {
+	// WriteStream
+	err := dbos.WriteStream(ctx, "stream-key", "stream-value")
+	if err != nil {
+		return fmt.Errorf("WriteStream failed: %w", err)
+	}
+
+	// CloseStream
+	err = dbos.CloseStream(ctx, "stream-key")
+	if err != nil {
+		return fmt.Errorf("CloseStream failed: %w", err)
+	}
+
+	// ReadStream
+	_, _, err = dbos.ReadStream[any](ctx, "wf-id-123", "stream-key")
+	if err != nil {
+		return fmt.Errorf("ReadStream failed: %w", err)
+	}
+
+	// ReadStreamAsync
+	asyncChan, err := dbos.ReadStreamAsync[any](ctx, "wf-id-456", "async-key")
+	if err != nil {
+		return fmt.Errorf("ReadStreamAsync failed: %w", err)
+	}
+	for range asyncChan {
+	}
+
+	// Patch
+	enabled, err := dbos.Patch(ctx, "feature-patch")
+	if err != nil || !enabled {
+		return fmt.Errorf("Patch failed: enabled=%v, err=%v", enabled, err)
+	}
+
+	// DeprecatePatch
+	err = dbos.DeprecatePatch(ctx, "old-patch")
+	if err != nil {
+		return fmt.Errorf("DeprecatePatch failed: %w", err)
+	}
+
+	// ListRegisteredWorkflows
+	entries, err := dbos.ListRegisteredWorkflows(ctx)
+	if err != nil || len(entries) != 1 {
+		return fmt.Errorf("ListRegisteredWorkflows failed: entries=%v, err=%v", entries, err)
+	}
+
+	// ListRegisteredQueues
+	queues, err := dbos.ListRegisteredQueues(ctx)
+	if err != nil || len(queues) != 1 {
+		return fmt.Errorf("ListRegisteredQueues failed: queues=%v, err=%v", queues, err)
+	}
+
+	// From
+	fromCtx := dbos.From(ctx, context.Background())
+	if fromCtx == nil {
+		return fmt.Errorf("From returned nil")
+	}
+
+	// WithoutCancel
+	noCancelCtx := dbos.WithoutCancel(ctx)
+	if noCancelCtx == nil {
+		return fmt.Errorf("WithoutCancel returned nil")
+	}
+
+	// WithTimeout
+	timeoutCtx, timeoutCancel := dbos.WithTimeout(ctx, 5*time.Minute)
+	if timeoutCtx == nil || timeoutCancel == nil {
+		return fmt.Errorf("WithTimeout returned nil")
+	}
+
+	// ListenQueues
+	dbos.ListenQueues(ctx, dbos.WorkflowQueue{Name: "queue1"}, dbos.WorkflowQueue{Name: "queue2"})
+
+	// DeleteWorkflows
+	err = dbos.DeleteWorkflows(ctx, []string{"wf-to-delete"})
+	if err != nil {
+		return fmt.Errorf("DeleteWorkflows failed: %w", err)
+	}
+
+	return nil
+}
+
 // clientUsingFunction demonstrates Client usage with specific values
 func clientUsingFunction(client dbos.Client) error {
 	handle, err := client.Enqueue("my-queue", "my-workflow", "input-data")
@@ -282,115 +364,62 @@ func TestMocks(t *testing.T) {
 
 	// Test remaining DBOSContext methods
 	mockCtx2 := mocks.NewMockDBOSContext(t)
-	mockCtx2.On("Done").Return((<-chan struct{})(nil)).Maybe()
 
-	// WriteStream - note: the value is encoded to *string before being passed to the context
+	// WriteStream
 	mockCtx2.On("WriteStream", mockCtx2, "stream-key", mock.MatchedBy(func(s *string) bool {
 		return s != nil
 	})).Return(nil).Once()
-	err = dbos.WriteStream(mockCtx2, "stream-key", "stream-value")
-	if err != nil {
-		t.Fatalf("WriteStream failed: %v", err)
-	}
 
 	// CloseStream
 	mockCtx2.On("CloseStream", mockCtx2, "stream-key").Return(nil).Once()
-	err = dbos.CloseStream(mockCtx2, "stream-key")
-	if err != nil {
-		t.Fatalf("CloseStream failed: %v", err)
-	}
 
-	// ReadStream - returns base64-encoded JSON strings
-	// "val1" as JSON is "val1", base64 encoded is: InZhbDEi
-	// "val2" as JSON is "val2", base64 encoded is: InZhbDIi
-	// "val3" as JSON is "val3", base64 encoded is: InZhbDMi
+	// ReadStream
 	mockCtx2.On("ReadStream", mockCtx2, "wf-id-123", "stream-key").Return([]any{"InZhbDEi", "InZhbDIi", "InZhbDMi"}, true, nil).Once()
-	_, _, err = dbos.ReadStream[any](mockCtx2, "wf-id-123", "stream-key")
-	if err != nil {
-		t.Fatalf("ReadStream failed: %v", err)
-	}
 
 	// ReadStreamAsync
 	streamChan := make(chan dbos.StreamValue[any], 1)
-	mockCtx2.On("ReadStreamAsync", mockCtx2, "wf-id-456", "async-key").Return((<-chan dbos.StreamValue[any])(streamChan), nil).Once()
-	asyncChan, err := dbos.ReadStreamAsync[any](mockCtx2, "wf-id-456", "async-key")
-	if err != nil {
-		t.Fatalf("ReadStreamAsync failed: %v", err)
-	}
-	// Close the channel to allow the goroutine to complete
 	close(streamChan)
-	// Drain the channel to ensure the goroutine finishes
-	for range asyncChan {
-	}
+	mockCtx2.On("ReadStreamAsync", mockCtx2, "wf-id-456", "async-key").Return((<-chan dbos.StreamValue[any])(streamChan), nil).Once()
 
 	// Patch
 	mockCtx2.On("Patch", mockCtx2, "feature-patch").Return(true, nil).Once()
-	enabled, err := dbos.Patch(mockCtx2, "feature-patch")
-	if err != nil || !enabled {
-		t.Fatalf("Patch failed: enabled=%v, err=%v", enabled, err)
-	}
 
 	// DeprecatePatch
 	mockCtx2.On("DeprecatePatch", mockCtx2, "old-patch").Return(nil).Once()
-	err = dbos.DeprecatePatch(mockCtx2, "old-patch")
-	if err != nil {
-		t.Fatalf("DeprecatePatch failed: %v", err)
-	}
 
 	// ListRegisteredWorkflows
 	mockCtx2.On("ListRegisteredWorkflows", mockCtx2).Return([]dbos.WorkflowRegistryEntry{
 		{Name: "Workflow1", FQN: "workflow1"},
 	}, nil).Once()
-	entries, err := dbos.ListRegisteredWorkflows(mockCtx2)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("ListRegisteredWorkflows failed: entries=%v, err=%v", entries, err)
-	}
 
 	// ListRegisteredQueues
 	mockCtx2.On("ListRegisteredQueues", mockCtx2).Return([]dbos.WorkflowQueue{
 		{Name: "queue1"},
 	}, nil).Once()
-	queues, err := dbos.ListRegisteredQueues(mockCtx2)
-	if err != nil || len(queues) != 1 {
-		t.Fatalf("ListRegisteredQueues failed: queues=%v, err=%v", queues, err)
-	}
 
 	// From
 	mockFromCtx := mocks.NewMockDBOSContext(t)
 	mockCtx2.On("From", mockCtx2, mock.Anything).Return(mockFromCtx, nil).Once()
-	fromCtx := dbos.From(mockCtx2, context.Background())
-	if fromCtx != mockFromCtx {
-		t.Fatal("From did not return expected context")
-	}
 
 	// WithoutCancel
 	mockNoCancelCtx := mocks.NewMockDBOSContext(t)
 	mockCtx2.On("WithoutCancel", mockCtx2).Return(mockNoCancelCtx, nil).Once()
-	noCancelCtx := dbos.WithoutCancel(mockCtx2)
-	if noCancelCtx != mockNoCancelCtx {
-		t.Fatal("WithoutCancel did not return expected context")
-	}
 
 	// WithTimeout
 	mockTimeoutCtx := mocks.NewMockDBOSContext(t)
 	var timeoutCancelFunc context.CancelFunc = func() {}
 	mockCtx2.On("WithTimeout", mockCtx2, 5*time.Minute).Return(mockTimeoutCtx, timeoutCancelFunc, nil).Once()
-	timeoutCtx, timeoutCancel := dbos.WithTimeout(mockCtx2, 5*time.Minute)
-	if timeoutCtx != dbos.DBOSContext(mockTimeoutCtx) || timeoutCancel == nil {
-		t.Fatal("WithTimeout did not return expected context or cancel function")
-	}
 
 	// ListenQueues
-	queuesToList := []dbos.WorkflowQueue{{Name: "queue1"}, {Name: "queue2"}}
 	mockCtx2.On("ListenQueues", mockCtx2, mock.MatchedBy(func(qs []dbos.WorkflowQueue) bool {
 		return len(qs) == 2
 	})).Return(nil).Once()
-	dbos.ListenQueues(mockCtx2, queuesToList...)
 
 	// DeleteWorkflows
 	mockCtx2.On("DeleteWorkflows", mockCtx2, []string{"wf-to-delete"}, mock.Anything).Return(nil).Once()
-	err = dbos.DeleteWorkflows(mockCtx2, []string{"wf-to-delete"})
+
+	err = clientMethodsFunction(mockCtx2)
 	if err != nil {
-		t.Fatalf("DeleteWorkflows failed: %v", err)
+		t.Fatalf("clientMethodsFunction failed: %v", err)
 	}
 }
