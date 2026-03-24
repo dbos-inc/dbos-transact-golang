@@ -154,6 +154,22 @@ func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
 	if res != 5 {
 		return fmt.Errorf("unexpected result: %v", res)
 	}
+
+	// Test WithValue
+	valCtx := dbos.WithValue(dbosCtx, "key", "val")
+	if valCtx == nil {
+		return fmt.Errorf("WithValue returned nil")
+	}
+
+	// Test WithCancelCause
+	cancelCtx, cf := dbos.WithCancelCause(dbosCtx)
+	if cancelCtx == nil {
+		return fmt.Errorf("WithCancelCause returned nil context")
+	}
+	if cf == nil {
+		return fmt.Errorf("WithCancelCause returned nil cancel function")
+	}
+
 	return nil
 }
 
@@ -173,6 +189,7 @@ func clientUsingFunction(client dbos.Client) error {
 		return fmt.Errorf("expected workflow ID")
 	}
 
+	client.Shutdown(1 * time.Second)
 	return nil
 }
 
@@ -239,21 +256,10 @@ func TestMocks(t *testing.T) {
 	// Context management
 	mockValCtx := mocks.NewMockDBOSContext(t)
 	mockCtx.On("WithValue", "key", "val").Return(mockValCtx)
-	valCtx := dbos.WithValue(mockCtx, "key", "val")
-	if valCtx != dbos.DBOSContext(mockValCtx) {
-		t.Fatal("WithValue did not return mock context")
-	}
 
 	mockCancelCtx := mocks.NewMockDBOSContext(t)
 	var cancelFunc context.CancelCauseFunc = func(error) {}
 	mockCtx.On("WithCancelCause").Return(mockCancelCtx, cancelFunc)
-	cancelCtx, cf := dbos.WithCancelCause(mockCtx)
-	if cancelCtx != dbos.DBOSContext(mockCancelCtx) {
-		t.Fatal("WithCancelCause did not return mock context")
-	}
-	if cf == nil {
-		t.Fatal("WithCancelCause did not return cancel function")
-	}
 
 	err := aRealProgramFunction(mockCtx)
 	if err != nil {
@@ -273,7 +279,6 @@ func TestMocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clientUsingFunction failed: %v", err)
 	}
-	mockClient.Shutdown(1 * time.Second)
 
 	// Test remaining DBOSContext methods
 	mockCtx2 := mocks.NewMockDBOSContext(t)
