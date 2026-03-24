@@ -3655,7 +3655,7 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			"inputs":                     inputs,
 			"priority":                   priority,
 			"queue_partition_key":        queuePartitionKey,
-			"forked_from":               forkedFrom,
+			"forked_from":                forkedFrom,
 			"parent_workflow_id":         parentWorkflowID,
 		}
 
@@ -3680,12 +3680,12 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			}
 			operationOutputs = append(operationOutputs, map[string]any{
 				"workflow_uuid":         opWfUUID,
-				"function_id":          opFuncID,
-				"function_name":        opFuncName,
-				"output":               opOutput,
-				"error":                opError,
-				"child_workflow_id":    opChildWfID,
-				"started_at_epoch_ms":  opStartedAt,
+				"function_id":           opFuncID,
+				"function_name":         opFuncName,
+				"output":                opOutput,
+				"error":                 opError,
+				"child_workflow_id":     opChildWfID,
+				"started_at_epoch_ms":   opStartedAt,
 				"completed_at_epoch_ms": opCompletedAt,
 			})
 		}
@@ -3711,8 +3711,8 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			}
 			workflowEvents = append(workflowEvents, map[string]any{
 				"workflow_uuid": evWfUUID,
-				"key":          evKey,
-				"value":        evValue,
+				"key":           evKey,
+				"value":         evValue,
 			})
 		}
 		eventRows.Close()
@@ -3738,9 +3738,9 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			}
 			workflowEventsHistory = append(workflowEventsHistory, map[string]any{
 				"workflow_uuid": hWfUUID,
-				"function_id":  hFuncID,
-				"key":          hKey,
-				"value":        hValue,
+				"function_id":   hFuncID,
+				"key":           hKey,
+				"value":         hValue,
 			})
 		}
 		historyRows.Close()
@@ -3766,10 +3766,10 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			}
 			streams = append(streams, map[string]any{
 				"workflow_uuid": sWfUUID,
-				"key":          sKey,
-				"value":        sValue,
-				"offset":       sOffset,
-				"function_id":  sFuncID,
+				"key":           sKey,
+				"value":         sValue,
+				"offset":        sOffset,
+				"function_id":   sFuncID,
 			})
 		}
 		streamRows.Close()
