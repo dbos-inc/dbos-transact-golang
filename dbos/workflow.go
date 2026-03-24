@@ -58,6 +58,7 @@ type WorkflowStatus struct {
 	QueuePartitionKey  string             `json:"queue_partition_key,omitempty"` // Queue partition key for partitioned queues
 	ForkedFrom         string             `json:"forked_from,omitempty"`         // ID of the original workflow if this is a fork
 	ParentWorkflowID   string             `json:"parent_workflow_id,omitempty"`  // ID of the parent workflow if this is a child
+	Serialization      string             `json:"serialization,omitempty"`       // Serialization format used for inputs/outputs (e.g., "DBOS_JSON", "portable_json")
 }
 
 // workflowState holds the runtime state for a workflow execution
@@ -81,11 +82,13 @@ func (ws *workflowState) nextStepID() int {
 type workflowOutcome[R any] struct {
 	result        R
 	err           error
-	needsDecoding bool // true if result came from awaitWorkflowResult (ID conflict path) and needs decoding
+	needsDecoding bool   // true if result came from awaitWorkflowResult (ID conflict path) and needs decoding
+	serialization string // serialization format of the encoded result (only used when needsDecoding is true)
 }
 
 type stepCheckpointedOutcome struct {
-	value any // The encoded value (should be a *string)
+	value         any    // The encoded value (should be a *string)
+	serialization string // DB-stored serialization format
 }
 
 // WorkflowHandle provides methods to interact with a running or completed workflow.
@@ -220,7 +223,7 @@ func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
 	}
 	if recordedOutputs != nil {
 		workflowState.nextStepID()
-		decodedOutput, err := decodeValue[R](dbosCtx.(*dbosContext).serializer, recordedOutputs.output)
+		decodedOutput, err := decodeValue[R](dbosCtx.(*dbosContext).serializer, recordedOutputs.output, recordedOutputs.serialization)
 		if err != nil {
 			return *new(R), false, fmt.Errorf("failed to decode operation result: %w", err)
 		}
@@ -294,6 +297,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			startedAt:       startTime,
 			completedAt:     completedTime,
 			stepName:        "DBOS.getResult",
+			serialization:   serializerName(h.dbosContext.(*dbosContext).serializer),
 		}
 		recordResultErr := retry(h.dbosContext, func() error {
 			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
@@ -335,7 +339,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		defer cancel()
 	}
 
-	encodedStr, err := retryWithResult(ctx, func() (*string, error) {
+	awaitResult, err := retryWithResult(ctx, func() (*awaitWorkflowResultOutput, error) {
 		return h.dbosContext.(*dbosContext).systemDB.awaitWorkflowResult(ctx, h.workflowID, options.pollInterval)
 	}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 
@@ -343,9 +347,13 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 
 	// Deserialize the result directly into the target type
 	var typedResult R
+	var encodedStr *string
+	if awaitResult != nil {
+		encodedStr = awaitResult.output
+	}
 	if encodedStr != nil {
 		var deserErr error
-		typedResult, deserErr = decodeValue[R](h.dbosContext.(*dbosContext).serializer, encodedStr)
+		typedResult, deserErr = decodeValue[R](h.dbosContext.(*dbosContext).serializer, encodedStr, serializerName(h.dbosContext.(*dbosContext).serializer))
 		if deserErr != nil {
 			return *new(R), fmt.Errorf("failed to deserialize workflow result: %w", deserErr)
 		}
@@ -363,6 +371,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 				startedAt:       startTime,
 				completedAt:     completedTime,
 				stepName:        "DBOS.getResult",
+				serialization:   serializerName(h.dbosContext.(*dbosContext).serializer),
 			}
 			recordResultErr := retry(h.dbosContext, func() error {
 				return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
@@ -409,7 +418,7 @@ func (h *workflowHandleProxy[R]) GetWorkflowID() string {
 /**********************************/
 /******* WORKFLOW REGISTRY *******/
 /**********************************/
-type wrappedWorkflowFunc func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error)
+type wrappedWorkflowFunc func(ctx DBOSContext, input any, inputSerialization string, opts ...WorkflowOption) (WorkflowHandle[any], error)
 
 type WorkflowRegistryEntry struct {
 	wrappedFunction wrappedWorkflowFunc
@@ -613,7 +622,8 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 
 	// Register a type-erased version of the durable workflow for recovery and queue runner
 	// Input will always come from the database and encoded as *string, so we decode it into the target type (captured by this wrapped closure)
-	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
+	// inputSerialization is the DB-stored serialization format for the encoded input.
+	typedErasedWorkflow := func(ctx DBOSContext, input any, inputSerialization string) (any, error) {
 		workflowID, err := GetWorkflowID(ctx)
 		if err != nil {
 			return *new(R), newWorkflowExecutionError("", fmt.Errorf("getting workflow ID: %w", err))
@@ -622,17 +632,19 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		if !ok {
 			return *new(R), newWorkflowUnexpectedInputType(fqn, "*string (encoded)", fmt.Sprintf("%T", input))
 		}
-		// Decode directly into the target type
-		typedInput, err := decodeValue[P](getCustomSerializer(ctx), encodedInput)
+		typedInput, err := decodeValue[P](getCustomSerializer(ctx), encodedInput, inputSerialization)
 		if err != nil {
 			return *new(R), newWorkflowExecutionError(workflowID, err)
 		}
 		return fn(ctx, typedInput)
-	})
+	}
 
-	typeErasedWrapper := wrappedWorkflowFunc(func(ctx DBOSContext, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
+	typeErasedWrapper := wrappedWorkflowFunc(func(ctx DBOSContext, input any, inputSerialization string, opts ...WorkflowOption) (WorkflowHandle[any], error) {
+		wfFunc := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
+			return typedErasedWorkflow(ctx, input, inputSerialization)
+		})
 		opts = append(opts, withWorkflowName(fqn)) // Append the name so ctx.RunWorkflow can look it up from the registry to apply registration-time options
-		handle, err := ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
+		handle, err := ctx.RunWorkflow(ctx, wfFunc, input, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -645,7 +657,10 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		if reflect.TypeOf(p) != reflect.TypeFor[time.Time]() {
 			panic(fmt.Sprintf("scheduled workflow function must accept a time.Time as input, got %T", p))
 		}
-		registerScheduledWorkflow(ctx, fqn, typedErasedWorkflow, registrationParams.cronSchedule)
+		scheduledWfFunc := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
+			return typedErasedWorkflow(ctx, input, serializerName(getCustomSerializer(ctx)))
+		})
+		registerScheduledWorkflow(ctx, fqn, scheduledWfFunc, registrationParams.cronSchedule)
 	}
 }
 
@@ -761,6 +776,7 @@ func withIsRecovery() WorkflowOption {
 	}
 }
 
+
 // Sets the authenticated user for the workflow
 func WithAuthenticatedUser(user string) WorkflowOption {
 	return func(p *workflowOptions) {
@@ -864,7 +880,7 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 				} else {
 					// Result is encoded, decode directly into target type
 					var decodeErr error
-					typedResult, decodeErr = decodeValue[R](getCustomSerializer(ctx), encodedResult)
+					typedResult, decodeErr = decodeValue[R](getCustomSerializer(ctx), encodedResult, outcome.serialization)
 					if decodeErr != nil {
 						resultErr = errors.Join(resultErr, newWorkflowExecutionError(handle.workflowID, fmt.Errorf("decoding workflow result to type %T: %w", *new(R), decodeErr)))
 					}
@@ -1059,6 +1075,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		AssumedRole:        params.AssumedRole,
 		AuthenticatedRoles: params.AuthenticatedRoles,
 		QueuePartitionKey:  params.QueuePartitionKey,
+		Serialization:      serializerName(c.serializer),
 	}
 	if isChildWorkflow {
 		workflowStatus.ParentWorkflowID = parentWorkflowState.workflowID
@@ -1201,12 +1218,18 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		// Handle DBOS ID conflict errors by waiting workflow result
 		if errors.Is(err, &DBOSError{Code: ConflictingIDError}) {
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
-			var encodedResult any
-			encodedResult, err = retryWithResult(c, func() (any, error) {
+			awaitOut, awaitErr := retryWithResult(c, func() (*awaitWorkflowResultOutput, error) {
 				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID, _DB_RETRY_INTERVAL)
 			}, withRetrierLogger(c.logger))
+			err = awaitErr
+			var encodedResult any
+			var ser string
+			if awaitOut != nil {
+				encodedResult = awaitOut.output
+				ser = awaitOut.serialization
+			}
 			// Keep the encoded result - decoding will happen in RunWorkflow[P,R] when we know the target type
-			outcomeChan <- workflowOutcome[any]{result: encodedResult, err: err, needsDecoding: true}
+			outcomeChan <- workflowOutcome[any]{result: encodedResult, err: err, needsDecoding: true, serialization: ser}
 			close(outcomeChan)
 			return
 		} else {
@@ -1386,7 +1409,7 @@ func convertStepResult[R any](ctx DBOSContext, result any) (R, error) {
 				return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("checkpointed outcome value is not *string, got %T", checkpointed.value))
 			}
 			var decodeErr error
-			typedResult, decodeErr = decodeValue[R](getCustomSerializer(ctx), encodedOutput)
+			typedResult, decodeErr = decodeValue[R](getCustomSerializer(ctx), encodedOutput, checkpointed.serialization)
 			if decodeErr != nil {
 				workflowID, _ := GetWorkflowID(ctx)
 				return *new(R), newWorkflowExecutionError(workflowID, fmt.Errorf("decoding step result to expected type %T: %w", *new(R), decodeErr))
@@ -1580,7 +1603,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	if recordedOutput != nil {
 		// Return the encoded output wrapped in stepCheckpointedOutcome
 		// This allows RunAsStep[R] to distinguish encoded values from direct values
-		return stepCheckpointedOutcome{value: recordedOutput.output}, recordedOutput.err
+		return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, recordedOutput.err
 	}
 
 	stepCtx := WithValue(c, workflowStateKey, stepState)
@@ -1596,13 +1619,14 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	// Record the final result
 	stepCompletedTime := time.Now()
 	dbInput := recordOperationResultDBInput{
-		workflowID:  stepState.workflowID,
-		stepName:    stepOpts.stepName,
-		stepID:      stepState.stepID,
-		err:         stepError,
-		startedAt:   stepStartTime,
-		completedAt: stepCompletedTime,
-		output:      encodedStepOutput,
+		workflowID:    stepState.workflowID,
+		stepName:      stepOpts.stepName,
+		stepID:        stepState.stepID,
+		err:           stepError,
+		startedAt:     stepStartTime,
+		completedAt:   stepCompletedTime,
+		output:        encodedStepOutput,
+		serialization: serializerName(c.serializer),
 	}
 	recErr := retry(c, func() error {
 		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
@@ -1687,7 +1711,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
 		}
 		if recordedOutput != nil {
-			return stepCheckpointedOutcome{value: recordedOutput.output}, recordedOutput.err
+			return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, recordedOutput.err
 		}
 
 		stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
@@ -1698,14 +1722,15 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 		}
 
 		dbInput := recordOperationResultDBInput{
-			workflowID:  stepState.workflowID,
-			stepName:    stepOpts.stepName,
-			stepID:      stepState.stepID,
-			err:         stepError,
-			startedAt:   stepStartTime,
-			completedAt: time.Now(),
-			output:      encodedStepOutput,
-			tx:          tx,
+			workflowID:    stepState.workflowID,
+			stepName:      stepOpts.stepName,
+			stepID:        stepState.stepID,
+			err:           stepError,
+			startedAt:     stepStartTime,
+			completedAt:   time.Now(),
+			output:        encodedStepOutput,
+			tx:            tx,
+			serialization: serializerName(c.serializer),
 		}
 		recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
 		if recErr != nil {
@@ -1978,6 +2003,7 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 		DestinationID: destinationID,
 		Message:       encodedMessage,
 		Topic:         topic,
+		serialization: serializerName(c.serializer),
 	}
 
 	if isWithinWorkflow {
@@ -2009,8 +2035,9 @@ func Send[P any](ctx DBOSContext, destinationID string, message P, topic string)
 }
 
 type recvInput struct {
-	Topic   string        // Topic to listen for (empty string receives from default topic)
-	Timeout time.Duration // Maximum time to wait for a message
+	Topic         string        // Topic to listen for (empty string receives from default topic)
+	Timeout       time.Duration // Maximum time to wait for a message
+	serialization string        // serialization format name for recording the operation result
 }
 
 func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error) {
@@ -2022,8 +2049,9 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 		return nil, newStepExecutionError(wfState.workflowID, "DBOS.recv", fmt.Errorf("cannot call Recv within a step"))
 	}
 	input := recvInput{
-		Topic:   topic,
-		Timeout: timeout,
+		Topic:         topic,
+		Timeout:       timeout,
+		serialization: serializerName(c.serializer),
 	}
 	recvRetryOpts := []retryOption{withRetrierLogger(c.logger)}
 	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
@@ -2071,7 +2099,7 @@ func Recv[R any](ctx DBOSContext, topic string, timeout time.Duration) (R, error
 			return *new(R), newWorkflowUnexpectedResultType(workflowID, "string (encoded)", fmt.Sprintf("%T", msg))
 		}
 		var decodeErr error
-		typedMessage, decodeErr = decodeValue[R](getCustomSerializer(ctx), encodedMsg)
+		typedMessage, decodeErr = decodeValue[R](getCustomSerializer(ctx), encodedMsg, serializerName(getCustomSerializer(ctx)))
 		if decodeErr != nil {
 			return *new(R), fmt.Errorf("decoding received message to type %T: %w", *new(R), decodeErr)
 		}
@@ -2097,9 +2125,10 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
 
 	_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return nil, c.systemDB.setEvent(ctx, WorkflowSetEventInput{
-			Key:     key,
-			Message: encodedMessage,
-			tx:      tx,
+			Key:           key,
+			Message:       encodedMessage,
+			tx:            tx,
+			serialization: serializerName(c.serializer),
 		})
 	}, WithStepName("DBOS.setEvent"))
 	return err
@@ -2125,6 +2154,7 @@ type getEventInput struct {
 	TargetWorkflowID string        // Workflow ID to get the event from
 	Key              string        // Event key to retrieve
 	Timeout          time.Duration // Maximum time to wait for the event to be set
+	serialization    string        // serialization format name for recording the operation result
 }
 
 func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, timeout time.Duration) (any, error) {
@@ -2132,6 +2162,7 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 		TargetWorkflowID: targetWorkflowID,
 		Key:              key,
 		Timeout:          timeout,
+		serialization:    serializerName(c.serializer),
 	}
 	return retryWithResult(c, func() (any, error) {
 		return c.systemDB.getEvent(c, input)
@@ -2174,7 +2205,7 @@ func GetEvent[R any](ctx DBOSContext, targetWorkflowID, key string, timeout time
 		}
 
 		var decodeErr error
-		typedValue, decodeErr = decodeValue[R](getCustomSerializer(ctx), encodedValue)
+		typedValue, decodeErr = decodeValue[R](getCustomSerializer(ctx), encodedValue, serializerName(getCustomSerializer(ctx)))
 		if decodeErr != nil {
 			return *new(R), fmt.Errorf("decoding event value to type %T: %w", *new(R), decodeErr)
 		}
@@ -2198,9 +2229,10 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
 	}
 	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
-			Key:   key,
-			Value: encodedValue,
-			tx:    tx,
+			Key:           key,
+			Value:         encodedValue,
+			tx:            tx,
+			serialization: serializerName(c.serializer),
 		})
 	}, WithStepName("DBOS.writeStream"))
 	return err
@@ -2368,7 +2400,7 @@ func ReadStream[R any](ctx DBOSContext, workflowID string, key string) ([]R, boo
 		if !ok {
 			return nil, false, fmt.Errorf("stream value is not a string, got %T", val)
 		}
-		decodedValue, decodeErr := decodeValue[R](customSer, &encodedStr)
+		decodedValue, decodeErr := decodeValue[R](customSer, &encodedStr, serializerName(customSer))
 		if decodeErr != nil {
 			return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
 		}
@@ -2442,7 +2474,7 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 				return
 			}
 
-			decodedValue, decodeErr := decodeValue[R](customSer, &encodedStr)
+			decodedValue, decodeErr := decodeValue[R](customSer, &encodedStr, serializerName(customSer))
 			if decodeErr != nil {
 				typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
 				return
@@ -2459,9 +2491,10 @@ func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
 	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
-			Key:   key,
-			Value: &sentinel,
-			tx:    tx,
+			Key:           key,
+			Value:         &sentinel,
+			tx:            tx,
+			serialization: serializerName(c.serializer),
 		})
 	}, WithStepName("DBOS.closeStream"))
 	return err

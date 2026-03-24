@@ -58,7 +58,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 		}
 		// Create a workflow context from the executor context
 		// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
-		handle, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, opts...)
+		handle, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, workflow.Serialization, opts...)
 		if err != nil {
 			return nil, err
 		}

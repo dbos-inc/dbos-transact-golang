@@ -494,7 +494,7 @@ func internalDebouncerWF[P any, R any](ctx DBOSContext, input debouncerInput[P])
 	}
 
 	// Call the target workflow using its wrapped function
-	_, err = registeredWorkflow.wrappedFunction(ctx, encodedInput, workflowOpts...)
+	_, err = registeredWorkflow.wrappedFunction(ctx, encodedInput, serializerName(getCustomSerializer(ctx)), workflowOpts...)
 	if err != nil {
 		return zero, fmt.Errorf("failed to run target workflow: %w", err)
 	}

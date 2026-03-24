@@ -968,25 +968,25 @@ func init() {
 }
 
 var (
-	gobRecoveryStructWorkflow     = makeRecoveryWorkflow[TestWorkflowData]()
-	gobRecoveryIntWorkflow        = makeRecoveryWorkflow[int]()
-	gobRecoveryStringWorkflow     = makeRecoveryWorkflow[string]()
-	gobRecoveryIntSliceWorkflow   = makeRecoveryWorkflow[[]int]()
-	gobRecoveryMapWorkflow        = makeRecoveryWorkflow[map[string]int]()
-	gobRecoveryMyIntWorkflow      = makeRecoveryWorkflow[MyInt]()
-	gobRecoveryGobOnlyWorkflow    = makeRecoveryWorkflow[GobOnlyType]()
-	gobSenderWorkflow             = makeSenderWorkflow[TestWorkflowData]()
-	gobReceiverWorkflow           = makeReceiverWorkflow[TestWorkflowData]()
-	gobSetEventWorkflow           = makeSetEventWorkflow[TestWorkflowData]()
-	gobGetEventWorkflow           = makeGetEventWorkflow[TestWorkflowData]()
-	gobGobOnlyWorkflow            = makeTestWorkflow[GobOnlyType]()
-	gobGobOnlySenderWorkflow      = makeSenderWorkflow[GobOnlyType]()
-	gobGobOnlyReceiverWorkflow    = makeReceiverWorkflow[GobOnlyType]()
-	gobGobOnlySetEventWorkflow    = makeSetEventWorkflow[GobOnlyType]()
-	gobGobOnlyGetEventWorkflow    = makeGetEventWorkflow[GobOnlyType]()
-	gobStreamWorkflow             = makeStreamWorkflow[TestWorkflowData]()
-	gobGobOnlyStreamWorkflow      = makeStreamWorkflow[GobOnlyType]()
-	gobQueuedWorkflow             = makeTestWorkflow[TestWorkflowData]()
+	gobRecoveryStructWorkflow   = makeRecoveryWorkflow[TestWorkflowData]()
+	gobRecoveryIntWorkflow      = makeRecoveryWorkflow[int]()
+	gobRecoveryStringWorkflow   = makeRecoveryWorkflow[string]()
+	gobRecoveryIntSliceWorkflow = makeRecoveryWorkflow[[]int]()
+	gobRecoveryMapWorkflow      = makeRecoveryWorkflow[map[string]int]()
+	gobRecoveryMyIntWorkflow    = makeRecoveryWorkflow[MyInt]()
+	gobRecoveryGobOnlyWorkflow  = makeRecoveryWorkflow[GobOnlyType]()
+	gobSenderWorkflow           = makeSenderWorkflow[TestWorkflowData]()
+	gobReceiverWorkflow         = makeReceiverWorkflow[TestWorkflowData]()
+	gobSetEventWorkflow         = makeSetEventWorkflow[TestWorkflowData]()
+	gobGetEventWorkflow         = makeGetEventWorkflow[TestWorkflowData]()
+	gobGobOnlyWorkflow          = makeTestWorkflow[GobOnlyType]()
+	gobGobOnlySenderWorkflow    = makeSenderWorkflow[GobOnlyType]()
+	gobGobOnlyReceiverWorkflow  = makeReceiverWorkflow[GobOnlyType]()
+	gobGobOnlySetEventWorkflow  = makeSetEventWorkflow[GobOnlyType]()
+	gobGobOnlyGetEventWorkflow  = makeGetEventWorkflow[GobOnlyType]()
+	gobStreamWorkflow           = makeStreamWorkflow[TestWorkflowData]()
+	gobGobOnlyStreamWorkflow    = makeStreamWorkflow[GobOnlyType]()
+	gobQueuedWorkflow           = makeTestWorkflow[TestWorkflowData]()
 )
 
 // TestGobSerializer tests the built-in gob serializer through all workflow paths.
@@ -1021,11 +1021,11 @@ func TestGobSerializer(t *testing.T) {
 
 	t.Run("Struct", func(t *testing.T) {
 		input := TestWorkflowData{
-			ID:      "gob-test",
-			Message: "gob message",
-			Value:   42,
-			Active:  true,
-			Data:    TestData{Message: "embedded", Value: 123, Active: false},
+			ID:       "gob-test",
+			Message:  "gob message",
+			Value:    42,
+			Active:   true,
+			Data:     TestData{Message: "embedded", Value: 123, Active: false},
 			Metadata: map[string]string{"key": "value"},
 			NestedSlice: []NestedTestData{
 				{Key: "nested1", Count: 10},
@@ -1078,7 +1078,7 @@ func TestGobSerializer(t *testing.T) {
 	t.Run("SendRecv", func(t *testing.T) {
 		input := TestWorkflowData{
 			ID: "gob-sendrecv", Message: "gob msg", Value: 99,
-			Data: TestData{Message: "nested", Value: 200},
+			Data:     TestData{Message: "nested", Value: 200},
 			Metadata: map[string]string{"comm": "gob"},
 		}
 		testSendRecv(t, executor, gobSenderWorkflow, gobReceiverWorkflow, input, "gob-sender-wf")
@@ -1087,7 +1087,7 @@ func TestGobSerializer(t *testing.T) {
 	t.Run("SetGetEvent", func(t *testing.T) {
 		input := TestWorkflowData{
 			ID: "gob-event", Message: "gob event", Value: 77,
-			Data: TestData{Message: "event nested", Value: 333},
+			Data:     TestData{Message: "event nested", Value: 333},
 			Metadata: map[string]string{"type": "gob-event"},
 		}
 		testSetGetEvent(t, executor, gobSetEventWorkflow, gobGetEventWorkflow, input, "gob-setevent-wf", "gob-getevent-wf")
@@ -1109,7 +1109,7 @@ func TestGobSerializer(t *testing.T) {
 	t.Run("WriteReadStream", func(t *testing.T) {
 		input := TestWorkflowData{
 			ID: "gob-stream", Message: "stream data", Value: 55,
-			Data: TestData{Message: "streamed", Value: 555},
+			Data:     TestData{Message: "streamed", Value: 555},
 			Metadata: map[string]string{"stream": "gob"},
 		}
 		handle, err := RunWorkflow(executor, gobStreamWorkflow, input, WithWorkflowID("gob-stream-wf"))
@@ -1147,7 +1147,7 @@ func TestGobSerializer(t *testing.T) {
 	t.Run("QueuedWorkflow", func(t *testing.T) {
 		input := TestWorkflowData{
 			ID: "gob-queued", Message: "queued msg", Value: 88,
-			Data: TestData{Message: "queued", Value: 888},
+			Data:     TestData{Message: "queued", Value: 888},
 			Metadata: map[string]string{"type": "gob-queued"},
 		}
 		handle, err := RunWorkflow(executor, gobQueuedWorkflow, input, WithWorkflowID("gob-queued-wf"), WithQueue(gobTestQueue.Name))
@@ -1421,5 +1421,135 @@ func TestChickenSerializer(t *testing.T) {
 		assert.True(t, closed)
 		require.Len(t, values, 1)
 		assert.Equal(t, fixedChicken, values[0])
+	})
+}
+
+// TestPortableInterop tests cross-language interoperability using the portable JSON format.
+// It simulates another language inserting a workflow into the DB with portable_json serialization,
+// and verifies that Go can recover and execute it correctly.
+func TestPortableInterop(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// InteropInput exercises the full portable JSON value space:
+	// strings, integers, floats, booleans, nulls, arrays, nested objects, RFC3339 timestamps
+	type NestedObj struct {
+		Deep bool `json:"deep"`
+	}
+	type MapArg struct {
+		Key1   string    `json:"key1"`
+		Key2   int       `json:"key2"`
+		Nested NestedObj `json:"nested"`
+	}
+
+	// The workflow accepts 7 positional args matching the golden JSON below.
+	// Go workflows take a single input param, so we use a struct that mirrors the positional args.
+	type InteropArgs struct {
+		Str       string   `json:"str"`
+		Num       int      `json:"num"`
+		Timestamp string   `json:"timestamp"`
+		Arr       []string `json:"arr"`
+		Obj       MapArg   `json:"obj"`
+		Flag      bool     `json:"flag"`
+		Nullable  *string  `json:"nullable"`
+	}
+
+	expectedArgs := InteropArgs{
+		Str:       "hello-interop",
+		Num:       42,
+		Timestamp: "2025-06-15T10:30:00.000Z",
+		Arr:       []string{"alpha", "beta", "gamma"},
+		Obj:       MapArg{Key1: "value1", Key2: 99, Nested: NestedObj{Deep: true}},
+		Flag:      true,
+		Nullable:  nil,
+	}
+
+	// Golden JSON matching what Python/TS would produce, including namedArgs (ignored by Go)
+	goldenInputsJSON := `{"positionalArgs":[{"str":"hello-interop","num":42,"timestamp":"2025-06-15T10:30:00.000Z","arr":["alpha","beta","gamma"],"obj":{"key1":"value1","key2":99,"nested":{"deep":true}},"flag":true,"nullable":null}],"namedArgs":{"unused_kwarg":"should_be_ignored","another":123}}`
+
+	// Register a workflow that receives the interop input and returns it
+	portableWf := func(ctx DBOSContext, input InteropArgs) (InteropArgs, error) {
+		return input, nil
+	}
+	RegisterWorkflow(executor, portableWf, WithWorkflowName("interop_workflow"))
+	NewWorkflowQueue(executor, "portable-interop-queue")
+
+	require.NoError(t, Launch(executor))
+
+	t.Run("DirectDBInsertRecovery", func(t *testing.T) {
+		workflowID := "interop-recovery-" + t.Name()
+
+		c := executor.(*dbosContext)
+		sysDB := c.systemDB.(*sysDB)
+		insertQuery := fmt.Sprintf(`INSERT INTO %s.workflow_status (
+			workflow_uuid, status, name, inputs, serialization,
+			created_at, updated_at, recovery_attempts, executor_id, priority
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+
+		now := time.Now().UnixMilli()
+		_, err := sysDB.pool.Exec(context.Background(), insertQuery,
+			workflowID, WorkflowStatusPending, "interop_workflow", goldenInputsJSON, PortableSerializerName,
+			now, now, 0, "local", 0)
+		require.NoError(t, err)
+
+		// Recover the workflow — Go should decode the portable_json input correctly
+		handles, err := recoverPendingWorkflows(c, []string{"local"})
+		require.NoError(t, err)
+		require.Len(t, handles, 1)
+
+		// Wait for result
+		result, err := handles[0].GetResult()
+		require.NoError(t, err)
+
+		// The result is an encoded *string (Go's default base64 JSON serializer)
+		encodedResult, ok := result.(*string)
+		require.True(t, ok, "expected *string result, got %T", result)
+		var decoded InteropArgs
+		decodedBytes, err := base64.StdEncoding.DecodeString(*encodedResult)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(decodedBytes, &decoded))
+
+		assert.Equal(t, expectedArgs, decoded)
+	})
+
+	t.Run("ClientEnqueuePortable", func(t *testing.T) {
+		client, err := NewClient(context.Background(), ClientConfig{
+			DatabaseURL: getDatabaseURL(),
+		})
+		require.NoError(t, err)
+
+		handle, err := Enqueue[InteropArgs, InteropArgs](client, "portable-interop-queue", "interop_workflow", expectedArgs,
+			WithPortableInputs())
+		require.NoError(t, err)
+		require.NotEmpty(t, handle.GetWorkflowID())
+
+		// Verify the DB has portable_json serialization and the correct envelope
+		c := executor.(*dbosContext)
+		sysDB := c.systemDB.(*sysDB)
+		var storedInputs, storedSerialization string
+		selectQuery := fmt.Sprintf(`SELECT inputs, serialization FROM %s.workflow_status WHERE workflow_uuid = $1`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		err = sysDB.pool.QueryRow(context.Background(), selectQuery, handle.GetWorkflowID()).Scan(&storedInputs, &storedSerialization)
+		require.NoError(t, err)
+
+		assert.Equal(t, PortableSerializerName, storedSerialization)
+
+		// Verify the stored input is in the portable envelope format
+		var envelope portableWorkflowArgs
+		require.NoError(t, json.Unmarshal([]byte(storedInputs), &envelope))
+		assert.Len(t, envelope.PositionalArgs, 1)
+		assert.NotNil(t, envelope.NamedArgs)
+
+		var storedArg InteropArgs
+		require.NoError(t, json.Unmarshal(envelope.PositionalArgs[0], &storedArg))
+		assert.Equal(t, expectedArgs, storedArg)
+
+		// Wait for the workflow to be dequeued and executed by the Go runtime
+		retrievedHandle, err := RetrieveWorkflow[InteropArgs](executor, handle.GetWorkflowID())
+		require.NoError(t, err)
+
+		wfResult, err := retrievedHandle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, expectedArgs, wfResult)
 	})
 }
