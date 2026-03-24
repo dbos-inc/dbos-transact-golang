@@ -16,3 +16,4 @@ packages:
     interfaces:
       DBOSContext:
       WorkflowHandle:
+      Client:

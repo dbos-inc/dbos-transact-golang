@@ -119,7 +119,22 @@ func workflow(ctx dbos.DBOSContext, i int) (int, error) {
 	_ = executorID
 	_ = appID
 
-	return a + b + c + d, nil
+	// Test Go and Select methods (using stepAny to match Select signature)
+	stepAny := func(ctx context.Context) (any, error) {
+		return 1, nil
+	}
+	outcomeChan, err := dbos.Go(ctx, stepAny)
+	if err != nil {
+		return 0, err
+	}
+
+	// Test Select method
+	e, err := dbos.Select(ctx, []<-chan dbos.StepOutcome[any]{outcomeChan})
+	if err != nil {
+		return 0, err
+	}
+
+	return a + b + c + d + e.(int), nil
 }
 
 func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
@@ -136,9 +151,127 @@ func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
 	if err != nil {
 		return err
 	}
-	if res != 4 {
+	if res != 5 {
 		return fmt.Errorf("unexpected result: %v", res)
 	}
+
+	// Test WithValue
+	valCtx := dbos.WithValue(dbosCtx, "key", "val")
+	if valCtx == nil {
+		return fmt.Errorf("WithValue returned nil")
+	}
+
+	// Test WithCancelCause
+	cancelCtx, cf := dbos.WithCancelCause(dbosCtx)
+	if cancelCtx == nil {
+		return fmt.Errorf("WithCancelCause returned nil context")
+	}
+	if cf == nil {
+		return fmt.Errorf("WithCancelCause returned nil cancel function")
+	}
+
+	return nil
+}
+
+// clientMethodsFunction exercises remaining DBOSContext methods
+func clientMethodsFunction(ctx dbos.DBOSContext) error {
+	// WriteStream
+	err := dbos.WriteStream(ctx, "stream-key", "stream-value")
+	if err != nil {
+		return fmt.Errorf("WriteStream failed: %w", err)
+	}
+
+	// CloseStream
+	err = dbos.CloseStream(ctx, "stream-key")
+	if err != nil {
+		return fmt.Errorf("CloseStream failed: %w", err)
+	}
+
+	// ReadStream
+	_, _, err = dbos.ReadStream[any](ctx, "wf-id-123", "stream-key")
+	if err != nil {
+		return fmt.Errorf("ReadStream failed: %w", err)
+	}
+
+	// ReadStreamAsync
+	asyncChan, err := dbos.ReadStreamAsync[any](ctx, "wf-id-456", "async-key")
+	if err != nil {
+		return fmt.Errorf("ReadStreamAsync failed: %w", err)
+	}
+	for range asyncChan {
+	}
+
+	// Patch
+	enabled, err := dbos.Patch(ctx, "feature-patch")
+	if err != nil || !enabled {
+		return fmt.Errorf("Patch failed: enabled=%v, err=%v", enabled, err)
+	}
+
+	// DeprecatePatch
+	err = dbos.DeprecatePatch(ctx, "old-patch")
+	if err != nil {
+		return fmt.Errorf("DeprecatePatch failed: %w", err)
+	}
+
+	// ListRegisteredWorkflows
+	entries, err := dbos.ListRegisteredWorkflows(ctx)
+	if err != nil || len(entries) != 1 {
+		return fmt.Errorf("ListRegisteredWorkflows failed: entries=%v, err=%v", entries, err)
+	}
+
+	// ListRegisteredQueues
+	queues, err := dbos.ListRegisteredQueues(ctx)
+	if err != nil || len(queues) != 1 {
+		return fmt.Errorf("ListRegisteredQueues failed: queues=%v, err=%v", queues, err)
+	}
+
+	// From
+	fromCtx := dbos.From(ctx, context.Background())
+	if fromCtx == nil {
+		return fmt.Errorf("From returned nil")
+	}
+
+	// WithoutCancel
+	noCancelCtx := dbos.WithoutCancel(ctx)
+	if noCancelCtx == nil {
+		return fmt.Errorf("WithoutCancel returned nil")
+	}
+
+	// WithTimeout
+	timeoutCtx, timeoutCancel := dbos.WithTimeout(ctx, 5*time.Minute)
+	if timeoutCtx == nil || timeoutCancel == nil {
+		return fmt.Errorf("WithTimeout returned nil")
+	}
+
+	// ListenQueues
+	dbos.ListenQueues(ctx, dbos.WorkflowQueue{Name: "queue1"}, dbos.WorkflowQueue{Name: "queue2"})
+
+	// DeleteWorkflows
+	err = dbos.DeleteWorkflows(ctx, []string{"wf-to-delete"})
+	if err != nil {
+		return fmt.Errorf("DeleteWorkflows failed: %w", err)
+	}
+
+	return nil
+}
+
+// clientUsingFunction demonstrates Client usage with specific values
+func clientUsingFunction(client dbos.Client) error {
+	handle, err := client.Enqueue("my-queue", "my-workflow", "input-data")
+	if err != nil {
+		return err
+	}
+
+	status, err := handle.GetStatus()
+	if err != nil {
+		return err
+	}
+
+	if status.ID == "" {
+		return fmt.Errorf("expected workflow ID")
+	}
+
+	client.Shutdown(1 * time.Second)
 	return nil
 }
 
@@ -149,6 +282,9 @@ func TestMocks(t *testing.T) {
 	// Context lifecycle
 	mockCtx.On("Launch").Return(nil)
 	mockCtx.On("Shutdown", mock.Anything).Return()
+
+	// Context methods
+	mockCtx.On("Done").Return((<-chan struct{})(nil))
 
 	// Basic workflow operations (existing)
 	mockCtx.On("RunAsStep", mockCtx, mock.Anything, mock.Anything).Return(1, nil)
@@ -172,9 +308,7 @@ func TestMocks(t *testing.T) {
 
 	// Workflow management
 	mockGenericHandle := mocks.NewMockWorkflowHandle[any](t)
-	mockGenericHandle.On("GetWorkflowID").Return("generic-workflow-id").Maybe()
-	mockGenericHandle.On("GetResult").Return(42, nil).Maybe()
-	mockGenericHandle.On("GetStatus").Return(dbos.WorkflowStatus{}, nil).Maybe()
+	mockGenericHandle.On("GetWorkflowID").Return("generic-workflow-id")
 
 	mockCtx.On("RetrieveWorkflow", mockCtx, "test-workflow-id").Return(mockGenericHandle, nil)
 	mockCtx.On("CancelWorkflow", mockCtx, "test-workflow-id").Return(nil)
@@ -188,8 +322,104 @@ func TestMocks(t *testing.T) {
 	mockCtx.On("GetExecutorID").Return("test-executor")
 	mockCtx.On("GetApplicationID").Return("test-app-id")
 
+	// Go and Select expectations
+	outcomeChan := make(chan dbos.StepOutcome[any], 1)
+	outcomeChan <- dbos.StepOutcome[any]{Result: 1, Err: nil}
+	close(outcomeChan)
+
+	mockCtx.On("Go", mockCtx, mock.MatchedBy(func(fn interface{}) bool {
+		return fn != nil
+	}), mock.Anything).Return(outcomeChan, nil).Once()
+
+	mockCtx.On("Select", mockCtx, mock.MatchedBy(func(chans []<-chan dbos.StepOutcome[any]) bool {
+		return len(chans) == 1 && chans != nil
+	})).Return(1, nil).Once()
+
+	// Context management
+	mockValCtx := mocks.NewMockDBOSContext(t)
+	mockCtx.On("WithValue", "key", "val").Return(mockValCtx)
+
+	mockCancelCtx := mocks.NewMockDBOSContext(t)
+	var cancelFunc context.CancelCauseFunc = func(error) {}
+	mockCtx.On("WithCancelCause").Return(mockCancelCtx, cancelFunc)
+
 	err := aRealProgramFunction(mockCtx)
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	// Test MockClient with specific values
+	mockClient := mocks.NewMockClient(t)
+	mockClientHandle := mocks.NewMockWorkflowHandle[any](t)
+
+	// Enqueue with specific values
+	mockClientHandle.On("GetStatus").Return(dbos.WorkflowStatus{ID: "wf-123"}, nil).Once()
+	mockClient.On("Enqueue", "my-queue", "my-workflow", "input-data", mock.Anything).Return(mockClientHandle, nil).Once()
+	mockClient.On("Shutdown", 1*time.Second).Return()
+
+	err = clientUsingFunction(mockClient)
+	if err != nil {
+		t.Fatalf("clientUsingFunction failed: %v", err)
+	}
+
+	// Test remaining DBOSContext methods
+	mockCtx2 := mocks.NewMockDBOSContext(t)
+
+	// WriteStream
+	mockCtx2.On("WriteStream", mockCtx2, "stream-key", mock.MatchedBy(func(s *string) bool {
+		return s != nil
+	})).Return(nil).Once()
+
+	// CloseStream
+	mockCtx2.On("CloseStream", mockCtx2, "stream-key").Return(nil).Once()
+
+	// ReadStream
+	mockCtx2.On("ReadStream", mockCtx2, "wf-id-123", "stream-key").Return([]any{"InZhbDEi", "InZhbDIi", "InZhbDMi"}, true, nil).Once()
+
+	// ReadStreamAsync
+	streamChan := make(chan dbos.StreamValue[any], 1)
+	close(streamChan)
+	mockCtx2.On("ReadStreamAsync", mockCtx2, "wf-id-456", "async-key").Return((<-chan dbos.StreamValue[any])(streamChan), nil).Once()
+
+	// Patch
+	mockCtx2.On("Patch", mockCtx2, "feature-patch").Return(true, nil).Once()
+
+	// DeprecatePatch
+	mockCtx2.On("DeprecatePatch", mockCtx2, "old-patch").Return(nil).Once()
+
+	// ListRegisteredWorkflows
+	mockCtx2.On("ListRegisteredWorkflows", mockCtx2).Return([]dbos.WorkflowRegistryEntry{
+		{Name: "Workflow1", FQN: "workflow1"},
+	}, nil).Once()
+
+	// ListRegisteredQueues
+	mockCtx2.On("ListRegisteredQueues", mockCtx2).Return([]dbos.WorkflowQueue{
+		{Name: "queue1"},
+	}, nil).Once()
+
+	// From
+	mockFromCtx := mocks.NewMockDBOSContext(t)
+	mockCtx2.On("From", mockCtx2, mock.Anything).Return(mockFromCtx, nil).Once()
+
+	// WithoutCancel
+	mockNoCancelCtx := mocks.NewMockDBOSContext(t)
+	mockCtx2.On("WithoutCancel", mockCtx2).Return(mockNoCancelCtx, nil).Once()
+
+	// WithTimeout
+	mockTimeoutCtx := mocks.NewMockDBOSContext(t)
+	var timeoutCancelFunc context.CancelFunc = func() {}
+	mockCtx2.On("WithTimeout", mockCtx2, 5*time.Minute).Return(mockTimeoutCtx, timeoutCancelFunc, nil).Once()
+
+	// ListenQueues
+	mockCtx2.On("ListenQueues", mockCtx2, mock.MatchedBy(func(qs []dbos.WorkflowQueue) bool {
+		return len(qs) == 2
+	})).Return(nil).Once()
+
+	// DeleteWorkflows
+	mockCtx2.On("DeleteWorkflows", mockCtx2, []string{"wf-to-delete"}, mock.Anything).Return(nil).Once()
+
+	err = clientMethodsFunction(mockCtx2)
+	if err != nil {
+		t.Fatalf("clientMethodsFunction failed: %v", err)
 	}
 }
