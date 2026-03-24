@@ -17,7 +17,7 @@ const (
 // Serializer defines the interface for encoding and decoding workflow data for storage.
 // The type parameter T determines what types the serializer handles.
 // The built-in JSON serializer uses concrete types (Serializer[P]) for correct struct unmarshaling.
-// Custom serializers implement Serializer[any] and must embed type info in payloads (e.g., using a type enveloppe^
+// Custom serializers implement Serializer[any] and must embed type info in payloads (e.g., using a type envelope)
 type Serializer[T any] interface {
 	// Name returns the name of the serialization format (e.g., "DBOS_JSON", "DBOS_GOB").
 	Name() string
