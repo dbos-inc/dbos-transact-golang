@@ -382,10 +382,10 @@ func TestMocks(t *testing.T) {
 	})).Return(nil).Once()
 	dbos.ListenQueues(mockCtx2, queuesToList...)
 
-	// DeleteWorkflow
-	mockCtx2.On("DeleteWorkflow", mockCtx2, "wf-to-delete", mock.Anything).Return(nil).Once()
-	err = dbos.DeleteWorkflow(mockCtx2, "wf-to-delete")
+	// DeleteWorkflows
+	mockCtx2.On("DeleteWorkflows", mockCtx2, []string{"wf-to-delete"}, mock.Anything).Return(nil).Once()
+	err = dbos.DeleteWorkflows(mockCtx2, []string{"wf-to-delete"})
 	if err != nil {
-		t.Fatalf("DeleteWorkflow failed: %v", err)
+		t.Fatalf("DeleteWorkflows failed: %v", err)
 	}
 }
