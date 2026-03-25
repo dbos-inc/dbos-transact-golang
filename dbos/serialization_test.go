@@ -1565,6 +1565,34 @@ func TestPortableInterop(t *testing.T) {
 		result, err := retrievedHandle.GetResult()
 		require.NoError(t, err)
 		verifyResult(t, result)
+
+		// Verify ListWorkflows returns portable inputs/outputs correctly
+		wfs, err := ListWorkflows(executor,
+			WithWorkflowIDs([]string{workflowID}),
+			WithLoadInput(true), WithLoadOutput(true))
+		require.NoError(t, err)
+		require.Len(t, wfs, 1)
+		wf := wfs[0]
+		assert.Equal(t, PortableSerializerName, wf.Serialization)
+
+		require.NotNil(t, wf.Input)
+		inputStr, ok := wf.Input.(string)
+		require.True(t, ok, "expected string for portable input, got %T", wf.Input)
+		assert.True(t, json.Valid([]byte(inputStr)), "input should be valid JSON")
+		var envelope PortableWorkflowArgs
+		require.NoError(t, json.Unmarshal([]byte(inputStr), &envelope))
+		assert.Len(t, envelope.PositionalArgs, 1)
+
+		require.NotNil(t, wf.Output)
+		outputStr, ok := wf.Output.(string)
+		require.True(t, ok, "expected string for portable output, got %T", wf.Output)
+		assert.True(t, json.Valid([]byte(outputStr)), "output should be valid JSON")
+		var outputMap map[string]any
+		require.NoError(t, json.Unmarshal([]byte(outputStr), &outputMap))
+		assert.Contains(t, outputMap, "input")
+		assert.Contains(t, outputMap, "stepOutput")
+		assert.Contains(t, outputMap, "recvOutput")
+		assert.Contains(t, outputMap, "eventOutput")
 	})
 
 	// 2. Queue path: direct DB insert with status=ENQUEUED + queue_name, let the queue runner dequeue.
@@ -1619,48 +1647,4 @@ func TestPortableInterop(t *testing.T) {
 		require.NoError(t, err)
 		verifyResult(t, result)
 	})
-
-	// 4. ListWorkflows with loadInputs/loadOutput for portable workflows.
-	t.Run("ListWorkflowsPortable", func(t *testing.T) {
-		workflowID := "interop-list-" + t.Name()
-		handle, err := RunWorkflow(executor, portableWf, expectedArgs,
-			WithWorkflowID(workflowID), withPortableWorkflow())
-		require.NoError(t, err)
-
-		result, err := handle.GetResult()
-		require.NoError(t, err)
-		verifyResult(t, result)
-
-		wfs, err := ListWorkflows(executor,
-			WithWorkflowIDs([]string{workflowID}),
-			WithLoadInput(true), WithLoadOutput(true))
-		require.NoError(t, err)
-		require.Len(t, wfs, 1)
-		wf := wfs[0]
-		assert.Equal(t, PortableSerializerName, wf.Serialization)
-
-		// Input is a raw JSON string (including the envelope)
-		require.NotNil(t, wf.Input)
-		inputStr, ok := wf.Input.(string)
-		require.True(t, ok, "expected string for portable input, got %T", wf.Input)
-		assert.True(t, json.Valid([]byte(inputStr)), "input should be valid JSON")
-		// Verify the envelope structure is preserved
-		var envelope PortableWorkflowArgs
-		require.NoError(t, json.Unmarshal([]byte(inputStr), &envelope))
-		assert.Len(t, envelope.PositionalArgs, 1)
-
-		// Output is a raw JSON string
-		require.NotNil(t, wf.Output)
-		outputStr, ok := wf.Output.(string)
-		require.True(t, ok, "expected string for portable output, got %T", wf.Output)
-		assert.True(t, json.Valid([]byte(outputStr)), "output should be valid JSON")
-		// Verify the output contains expected fields
-		var outputMap map[string]any
-		require.NoError(t, json.Unmarshal([]byte(outputStr), &outputMap))
-		require.Contains(t, outputMap, "input")
-		require.Contains(t, outputMap, "stepOutput")
-		require.Contains(t, outputMap, "recvOutput")
-		require.Contains(t, outputMap, "eventOutput")
-	})
-
 }
