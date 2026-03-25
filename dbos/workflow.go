@@ -668,7 +668,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		})
 		opts = append(opts, withWorkflowName(fqn), withAlreadyEncodedInput()) // Append the name so ctx.RunWorkflow can look it up from the registry to apply registration-time options
 		if inputSerialization == PortableSerializerName {
-			opts = append(opts, withPortableWorkflow())
+			opts = append(opts, WithPortableWorkflow())
 		}
 		handle, err := ctx.RunWorkflow(ctx, wfFunc, input, opts...)
 		if err != nil {
@@ -803,10 +803,10 @@ func withIsRecovery() WorkflowOption {
 	}
 }
 
-// withPortableWorkflow marks the workflow to use the cross-language portable JSON format
+// WithPortableWorkflow marks the workflow to use the cross-language portable JSON format
 // for all serialized data (inputs, step outputs, events, messages, streams).
-// This is set internally during dequeue/recovery for workflows stored with portable serialization.
-func withPortableWorkflow() WorkflowOption {
+// This is set automatically during dequeue/recovery for workflows stored with portable serialization.
+func WithPortableWorkflow() WorkflowOption {
 	return func(p *workflowOptions) {
 		p.isPortableWorkflow = true
 	}
@@ -1086,8 +1086,15 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// Serialize input before storing in workflow status
 	var encodedInput any
-	if params.alreadyEncodedInput {
+	if params.alreadyEncodedInput { // Comes from the queue runner, or the recovery path
 		encodedInput = input
+	} else if params.isPortableWorkflow { // Direct call to a portable workflow
+		var serErr error
+		encodedInput, serErr = encodePortableArgs(input)
+		if serErr != nil {
+			c.logger.Error("failed to serialize portable workflow input", "error", serErr, "workflow_id", workflowID)
+			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize portable workflow input: %w", serErr))
+		}
 	} else {
 		var serErr error
 		encodedInput, serErr = resolveEncoder(c).Encode(input)

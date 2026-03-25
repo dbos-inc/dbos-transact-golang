@@ -1783,3 +1783,151 @@ func TestCrossFormatRecvAndGetEvent(t *testing.T) {
 		assert.Equal(t, expected, result)
 	})
 }
+
+// TestDirectRunPortableWorkflow tests starting a workflow in portable mode via RunWorkflow,
+// verifying the DB contains the correct portable JSON envelope, then recovering it.
+func TestDirectRunPortableWorkflow(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	type InteropInput struct {
+		Name  string `json:"name"`
+		Value int    `json:"value"`
+	}
+
+	expectedInput := InteropInput{Name: "direct-portable", Value: 99}
+
+	// Simple workflow that returns its input through a step (exercises encode/decode).
+	portableEchoWf := func(ctx DBOSContext, input InteropInput) (InteropInput, error) {
+		stepOut, err := RunAsStep(ctx, func(_ context.Context) (InteropInput, error) {
+			return input, nil
+		})
+		if err != nil {
+			return InteropInput{}, err
+		}
+		return stepOut, nil
+	}
+	RegisterWorkflow(executor, portableEchoWf, WithWorkflowName("portable_echo"))
+
+	// Workflow that accepts the full PortableWorkflowArgs envelope directly.
+	portableEnvelopeWf := func(ctx DBOSContext, input PortableWorkflowArgs) (PortableWorkflowArgs, error) {
+		stepOut, err := RunAsStep(ctx, func(_ context.Context) (PortableWorkflowArgs, error) {
+			return input, nil
+		})
+		if err != nil {
+			return PortableWorkflowArgs{}, err
+		}
+		return stepOut, nil
+	}
+	RegisterWorkflow(executor, portableEnvelopeWf, WithWorkflowName("portable_envelope"))
+
+	require.NoError(t, Launch(executor))
+	defer Shutdown(executor, 10*time.Second)
+
+	c := executor.(*dbosContext)
+	sysDB := c.systemDB.(*sysDB)
+
+	// Helper: read the stored inputs and serialization from the DB.
+	readStoredInputs := func(t *testing.T, workflowID string) (string, string) {
+		t.Helper()
+		var storedInputs, storedSerialization string
+		q := fmt.Sprintf(`SELECT inputs, serialization FROM %s.workflow_status WHERE workflow_uuid = $1`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		err := sysDB.pool.QueryRow(context.Background(), q, workflowID).Scan(&storedInputs, &storedSerialization)
+		require.NoError(t, err)
+		return storedInputs, storedSerialization
+	}
+
+	// Helper: flip a completed workflow back to PENDING for recovery.
+	resetToPending := func(t *testing.T, workflowID string) {
+		t.Helper()
+		q := fmt.Sprintf(`UPDATE %s.workflow_status SET status = $1, output = NULL, error = NULL WHERE workflow_uuid = $2`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		_, err := sysDB.pool.Exec(context.Background(), q, string(WorkflowStatusPending), workflowID)
+		require.NoError(t, err)
+		// Also clear operation outputs so the workflow re-executes its steps.
+		dq := fmt.Sprintf(`DELETE FROM %s.operation_outputs WHERE workflow_uuid = $1`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		_, err = sysDB.pool.Exec(context.Background(), dq, workflowID)
+		require.NoError(t, err)
+	}
+
+	// 1. Normal struct input → WithPortableWorkflow → run, verify DB envelope, recover.
+	t.Run("NormalInputPortableMode", func(t *testing.T) {
+		workflowID := "direct-portable-normal-" + t.Name()
+		handle, err := RunWorkflow(executor, portableEchoWf, expectedInput,
+			WithWorkflowID(workflowID), WithPortableWorkflow())
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, expectedInput, result)
+
+		// Verify the DB has portable_json serialization with the correct envelope.
+		storedInputs, storedSerialization := readStoredInputs(t, workflowID)
+		assert.Equal(t, PortableSerializerName, storedSerialization)
+
+		var envelope portableArgsRaw
+		require.NoError(t, json.Unmarshal([]byte(storedInputs), &envelope))
+		assert.Len(t, envelope.PositionalArgs, 1, "expected 1 positional arg")
+		// The first positional arg should unmarshal to expectedInput.
+		var decoded InteropInput
+		require.NoError(t, json.Unmarshal(envelope.PositionalArgs[0], &decoded))
+		assert.Equal(t, expectedInput, decoded)
+
+		// Reset workflow to PENDING and recover — should re-execute and produce the same result.
+		resetToPending(t, workflowID)
+		handles, err := recoverPendingWorkflows(c, []string{"local"})
+		require.NoError(t, err)
+		require.Len(t, handles, 1)
+		_, err = handles[0].GetResult()
+		require.NoError(t, err)
+
+		retrieved, err := RetrieveWorkflow[InteropInput](executor, workflowID)
+		require.NoError(t, err)
+		recoveredResult, err := retrieved.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, expectedInput, recoveredResult)
+	})
+
+	// 2. PortableWorkflowArgs envelope input → WithPortableWorkflow → run, verify, recover.
+	t.Run("EnvelopeInputPortableMode", func(t *testing.T) {
+		workflowID := "direct-portable-envelope-" + t.Name()
+		envelopeInput := PortableWorkflowArgs{
+			PositionalArgs: []any{expectedInput, "extra", 42},
+			NamedArgs:      map[string]any{"lang": "go", "debug": false},
+		}
+		handle, err := RunWorkflow(executor, portableEnvelopeWf, envelopeInput,
+			WithWorkflowID(workflowID), WithPortableWorkflow())
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		// The workflow receives and returns the full envelope.
+		assert.Len(t, result.PositionalArgs, 3)
+		assert.Len(t, result.NamedArgs, 2)
+
+		// Verify DB: the stored inputs should be the envelope itself (not double-wrapped).
+		storedInputs, storedSerialization := readStoredInputs(t, workflowID)
+		assert.Equal(t, PortableSerializerName, storedSerialization)
+
+		var storedEnvelope PortableWorkflowArgs
+		require.NoError(t, json.Unmarshal([]byte(storedInputs), &storedEnvelope))
+		assert.Len(t, storedEnvelope.PositionalArgs, 3, "envelope should not be double-wrapped")
+		assert.Len(t, storedEnvelope.NamedArgs, 2)
+
+		// Reset and recover.
+		resetToPending(t, workflowID)
+		handles, err := recoverPendingWorkflows(c, []string{"local"})
+		require.NoError(t, err)
+		require.Len(t, handles, 1)
+		_, err = handles[0].GetResult()
+		require.NoError(t, err)
+
+		retrieved, err := RetrieveWorkflow[PortableWorkflowArgs](executor, workflowID)
+		require.NoError(t, err)
+		recoveredResult, err := retrieved.GetResult()
+		require.NoError(t, err)
+		assert.Len(t, recoveredResult.PositionalArgs, 3)
+		assert.Len(t, recoveredResult.NamedArgs, 2)
+	})
+}

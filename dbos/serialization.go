@@ -202,10 +202,39 @@ type portableArgsRaw struct {
 	NamedArgs      map[string]any    `json:"namedArgs"`
 }
 
+// encodePortableArgs wraps a value into the portable args envelope and encodes it as plain JSON.
+// If the value is already a PortableWorkflowArgs, it is encoded as-is.
+// Otherwise, the value is placed as the single positional arg inside a new envelope.
+func encodePortableArgs(data any) (*string, error) {
+	var toEncode any
+	if _, ok := data.(PortableWorkflowArgs); ok {
+		toEncode = data
+	} else {
+		argBytes, err := json.Marshal(data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal portable arg: %w", err)
+		}
+		toEncode = portableArgsRaw{
+			PositionalArgs: []json.RawMessage{argBytes},
+			NamedArgs:      map[string]any{},
+		}
+	}
+	return newPortableSerializer[any]().Encode(toEncode)
+}
+
 // decodePortableArgs unwraps the first positional arg from the portable args envelope into T.
+// If T is PortableWorkflowArgs, the full envelope is decoded as-is (no unwrapping).
 func decodePortableArgs[T any](data *string) (T, error) {
 	if data == nil || *data == "null" {
 		return getNilOrZeroValue[T](), nil
+	}
+	// If T is the envelope type itself, decode the full data directly.
+	if reflect.TypeFor[T]() == reflect.TypeFor[PortableWorkflowArgs]() {
+		var result T
+		if err := json.Unmarshal([]byte(*data), &result); err != nil {
+			return *new(T), fmt.Errorf("failed to decode portable args envelope as %T: %w", *new(T), err)
+		}
+		return result, nil
 	}
 	var envelope portableArgsRaw
 	if err := json.Unmarshal([]byte(*data), &envelope); err != nil {
