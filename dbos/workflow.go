@@ -354,11 +354,9 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	// Deserialize the result directly into the target type
 	var typedResult R
 	var encodedStr *string
-	if awaitResult != nil {
-		encodedStr = awaitResult.output
-	}
 	var storedSerialization string
 	if awaitResult != nil {
+		encodedStr = awaitResult.output
 		storedSerialization = awaitResult.serialization
 	}
 	if encodedStr != nil {
@@ -914,15 +912,13 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 					resultErr = errors.Join(resultErr, newWorkflowUnexpectedResultType(handle.workflowID, "string (encoded)", fmt.Sprintf("%T", outcome.result)))
 				} else {
 					// Result is encoded, decode directly into target type
-					var decodeErr error
 					resultDecoder, resolveErr := resolveDecoder[R](outcome.serialization, getCustomSerializerFromCtx(ctx))
 					if resolveErr != nil {
 						resultErr = errors.Join(resultErr, newWorkflowExecutionError(handle.workflowID, resolveErr))
-					} else {
-						typedResult, decodeErr = resultDecoder.Decode(encodedResult)
-					}
-					if decodeErr != nil {
+					} else if decoded, decodeErr := resultDecoder.Decode(encodedResult); decodeErr != nil {
 						resultErr = errors.Join(resultErr, newWorkflowExecutionError(handle.workflowID, fmt.Errorf("decoding workflow result to type %T: %w", *new(R), decodeErr)))
+					} else {
+						typedResult = decoded
 					}
 				}
 			} else if typedRes, ok := outcome.result.(R); ok {
@@ -2620,10 +2616,9 @@ func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
 	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
-			Key:           key,
-			Value:         &sentinel,
-			tx:            tx,
-			serialization: resolveEncoder(c).Name(),
+			Key:   key,
+			Value: &sentinel,
+			tx:    tx,
 		})
 	}, WithStepName("DBOS.closeStream"))
 	return err

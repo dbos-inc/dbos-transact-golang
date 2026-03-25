@@ -1863,6 +1863,17 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	}
 	RegisterWorkflow(executor, portableEnvelopeWf, WithWorkflowName("portable_envelope"))
 
+	// Workflows for primitive input tests (int, string).
+	portableIntEchoWf := func(ctx DBOSContext, input int) (int, error) {
+		return RunAsStep(ctx, func(_ context.Context) (int, error) { return input, nil })
+	}
+	RegisterWorkflow(executor, portableIntEchoWf, WithWorkflowName("portable_int_echo"))
+
+	portableStringEchoWf := func(ctx DBOSContext, input string) (string, error) {
+		return RunAsStep(ctx, func(_ context.Context) (string, error) { return input, nil })
+	}
+	RegisterWorkflow(executor, portableStringEchoWf, WithWorkflowName("portable_string_echo"))
+
 	// Multi-step workflow for partial recovery test (must register before Launch).
 	type PartialRecoveryResult struct {
 		StepOut  InteropInput `json:"stepOut"`
@@ -2012,7 +2023,81 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 		assert.Len(t, recoveredResult.NamedArgs, 2)
 	})
 
-	// 3. Partial recovery: run a multi-step portable workflow, keep operation_outputs,
+	// 3. Primitive int input → WithPortableWorkflow → run, verify DB envelope, recover.
+	t.Run("PrimitiveIntInputPortableMode", func(t *testing.T) {
+		workflowID := "direct-portable-int-" + t.Name()
+		handle, err := RunWorkflow(executor, portableIntEchoWf, 42,
+			WithWorkflowID(workflowID), WithPortableWorkflow())
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 42, result)
+
+		// Verify DB envelope wraps the primitive as a single positional arg.
+		storedInputs, storedSerialization := readStoredInputs(t, workflowID)
+		assert.Equal(t, PortableSerializerName, storedSerialization)
+
+		var envelope portableArgsRaw
+		require.NoError(t, json.Unmarshal([]byte(storedInputs), &envelope))
+		assert.Len(t, envelope.PositionalArgs, 1, "expected 1 positional arg")
+		var decoded int
+		require.NoError(t, json.Unmarshal(envelope.PositionalArgs[0], &decoded))
+		assert.Equal(t, 42, decoded)
+
+		// Recover.
+		resetToPending(t, workflowID)
+		handles, err := recoverPendingWorkflows(c, []string{"local"})
+		require.NoError(t, err)
+		require.Len(t, handles, 1)
+		_, err = handles[0].GetResult()
+		require.NoError(t, err)
+
+		retrieved, err := RetrieveWorkflow[int](executor, workflowID)
+		require.NoError(t, err)
+		recoveredResult, err := retrieved.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 42, recoveredResult)
+	})
+
+	// 4. Primitive string input → WithPortableWorkflow → run, verify DB envelope, recover.
+	t.Run("PrimitiveStringInputPortableMode", func(t *testing.T) {
+		workflowID := "direct-portable-str-" + t.Name()
+		handle, err := RunWorkflow(executor, portableStringEchoWf, "hello-portable",
+			WithWorkflowID(workflowID), WithPortableWorkflow())
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "hello-portable", result)
+
+		// Verify DB envelope wraps the string as a single positional arg.
+		storedInputs, storedSerialization := readStoredInputs(t, workflowID)
+		assert.Equal(t, PortableSerializerName, storedSerialization)
+
+		var envelope portableArgsRaw
+		require.NoError(t, json.Unmarshal([]byte(storedInputs), &envelope))
+		assert.Len(t, envelope.PositionalArgs, 1, "expected 1 positional arg")
+		var decoded string
+		require.NoError(t, json.Unmarshal(envelope.PositionalArgs[0], &decoded))
+		assert.Equal(t, "hello-portable", decoded)
+
+		// Recover.
+		resetToPending(t, workflowID)
+		handles, err := recoverPendingWorkflows(c, []string{"local"})
+		require.NoError(t, err)
+		require.Len(t, handles, 1)
+		_, err = handles[0].GetResult()
+		require.NoError(t, err)
+
+		retrieved, err := RetrieveWorkflow[string](executor, workflowID)
+		require.NoError(t, err)
+		recoveredResult, err := retrieved.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "hello-portable", recoveredResult)
+	})
+
+	// 5. Partial recovery: run a multi-step portable workflow, keep operation_outputs,
 	// reset to PENDING. On recovery every step is replayed from stored results using
 	// the serialization column in operation_outputs — NOT re-executed.
 	t.Run("PartialRecoveryFromStoredSteps", func(t *testing.T) {
