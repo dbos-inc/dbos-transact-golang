@@ -404,19 +404,19 @@ func ClientReadStream[R any](c Client, workflowID string, key string) ([]R, bool
 		return nil, false, err
 	}
 
-	// Decode each value to type R
+	// Decode each value using the serialization stored with that stream entry.
 	customSer := c.(*client).dbosCtx.(*dbosContext).serializer
-	decoder, resolveErr := resolveDecoder[R](resolveEncoder(c.(*client).dbosCtx.(*dbosContext)).Name(), customSer)
-	if resolveErr != nil {
-		return nil, false, resolveErr
-	}
 	typedValues := make([]R, len(values))
 	for i, val := range values {
-		encodedStr, ok := val.(string)
+		entry, ok := val.(streamEntryWithSerialization)
 		if !ok {
-			return nil, false, fmt.Errorf("stream value is not a string, got %T", val)
+			return nil, false, fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", val)
 		}
-		decodedValue, decodeErr := decoder.Decode(&encodedStr)
+		decoder, resolveErr := resolveDecoder[R](entry.serialization, customSer)
+		if resolveErr != nil {
+			return nil, false, resolveErr
+		}
+		decodedValue, decodeErr := decoder.Decode(&entry.value)
 		if decodeErr != nil {
 			return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
 		}
@@ -471,12 +471,7 @@ func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-ch
 	go func() {
 		defer close(typedCh)
 
-		dbosCtx := c.(*client).dbosCtx.(*dbosContext)
-		decoder, resolveErr := resolveDecoder[R](resolveEncoder(dbosCtx).Name(), dbosCtx.serializer)
-		if resolveErr != nil {
-			typedCh <- StreamValue[R]{Err: resolveErr}
-			return
-		}
+		customSer := c.(*client).dbosCtx.(*dbosContext).serializer
 
 		for streamValue := range anyCh {
 			if streamValue.Err != nil {
@@ -489,13 +484,19 @@ func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-ch
 				return
 			}
 
-			encodedStr, ok := streamValue.Value.(string)
+			entry, ok := streamValue.Value.(streamEntryWithSerialization)
 			if !ok {
-				typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not a string, got %T", streamValue.Value)}
+				typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", streamValue.Value)}
 				return
 			}
 
-			decodedValue, decodeErr := decoder.Decode(&encodedStr)
+			decoder, resolveErr := resolveDecoder[R](entry.serialization, customSer)
+			if resolveErr != nil {
+				typedCh <- StreamValue[R]{Err: resolveErr}
+				return
+			}
+
+			decodedValue, decodeErr := decoder.Decode(&entry.value)
 			if decodeErr != nil {
 				typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
 				return

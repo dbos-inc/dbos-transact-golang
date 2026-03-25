@@ -1784,6 +1784,47 @@ func TestCrossFormatRecvAndGetEvent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, expected, result)
 	})
+
+	// 3. Cross-format stream: insert portable_json stream entries directly, read from standard context.
+	t.Run("PortableStreamToStandardReadStream", func(t *testing.T) {
+		sourceWfID := "xfmt-stream-" + t.Name()
+
+		// Create the source workflow_status row.
+		now := time.Now().UnixMilli()
+		insertWfQuery := fmt.Sprintf(`INSERT INTO %s.workflow_status (
+			workflow_uuid, status, name, created_at, updated_at, recovery_attempts,
+			executor_id, priority, application_version, application_id,
+			authenticated_user, assumed_role, authenticated_roles
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		_, err := sysDB.pool.Exec(context.Background(), insertWfQuery,
+			sourceWfID, string(WorkflowStatusSuccess), "stream_source",
+			now, now, 0, "local", 0, c.applicationVersion, "", "", "", "[]")
+		require.NoError(t, err)
+
+		// Insert portable_json stream entries (plain JSON, no base64).
+		portableVal, err := json.Marshal(expected)
+		require.NoError(t, err)
+		portableValStr := string(portableVal)
+
+		insertStreamQuery := fmt.Sprintf(
+			`INSERT INTO %s.streams (workflow_uuid, key, value, "offset", function_id, serialization) VALUES ($1, $2, $3, $4, $5, $6)`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		_, err = sysDB.pool.Exec(context.Background(), insertStreamQuery,
+			sourceWfID, "xfmt-stream", portableValStr, 0, 0, PortableSerializerName)
+		require.NoError(t, err)
+		// Insert sentinel to close the stream.
+		_, err = sysDB.pool.Exec(context.Background(), insertStreamQuery,
+			sourceWfID, "xfmt-stream", _DBOS_STREAM_CLOSED_SENTINEL, 1, 1, "")
+		require.NoError(t, err)
+
+		// Read from a standard (non-portable) context.
+		values, closed, err := ReadStream[TestPayload](executor, sourceWfID, "xfmt-stream")
+		require.NoError(t, err)
+		assert.True(t, closed)
+		require.Len(t, values, 1)
+		assert.Equal(t, expected, values[0])
+	})
 }
 
 // TestDirectRunPortableWorkflow tests starting a workflow in portable mode via RunWorkflow,

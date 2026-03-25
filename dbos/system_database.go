@@ -2705,8 +2705,9 @@ type readStreamDBInput struct {
 }
 
 type streamEntry struct {
-	Value  string
-	Offset int
+	Value         string
+	Offset        int
+	Serialization string
 }
 
 func (s *sysDB) writeStream(ctx context.Context, input writeStreamDBInput) error {
@@ -2771,7 +2772,7 @@ func (s *sysDB) writeStream(ctx context.Context, input writeStreamDBInput) error
 // readStream reads stream entries starting from a given offset.
 // Returns the entries, whether the stream is closed, and any error.
 func (s *sysDB) readStream(ctx context.Context, input readStreamDBInput) ([]streamEntry, bool, error) {
-	query := fmt.Sprintf(`SELECT value, "offset" FROM %s.streams
+	query := fmt.Sprintf(`SELECT value, "offset", serialization FROM %s.streams
 		WHERE workflow_uuid = $1 AND key = $2 AND "offset" >= $3
 		ORDER BY "offset" ASC`,
 		pgx.Identifier{s.schema}.Sanitize())
@@ -2788,7 +2789,8 @@ func (s *sysDB) readStream(ctx context.Context, input readStreamDBInput) ([]stre
 	for rows.Next() {
 		var value string
 		var offset int
-		if err := rows.Scan(&value, &offset); err != nil {
+		var serialization *string
+		if err := rows.Scan(&value, &offset, &serialization); err != nil {
 			return nil, false, fmt.Errorf("failed to scan stream entry: %w", err)
 		}
 
@@ -2797,9 +2799,14 @@ func (s *sysDB) readStream(ctx context.Context, input readStreamDBInput) ([]stre
 			break
 		}
 
+		var ser string
+		if serialization != nil {
+			ser = *serialization
+		}
 		entries = append(entries, streamEntry{
-			Value:  value,
-			Offset: offset,
+			Value:         value,
+			Offset:        offset,
+			Serialization: ser,
 		})
 	}
 
