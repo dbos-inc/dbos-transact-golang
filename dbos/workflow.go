@@ -1456,7 +1456,10 @@ func convertStepResult[R any](ctx DBOSContext, result any) (R, error) {
 			var decodeErr error
 			stepDecoder, resolveErr := resolveDecoder[R](checkpointed.serialization, getCustomSerializerFromCtx(ctx))
 			if resolveErr != nil {
-				workflowID, _ := GetWorkflowID(ctx)
+				workflowID, err := GetWorkflowID(ctx)
+				if err != nil {
+					return *new(R), fmt.Errorf("getting workflow ID from context: %w; original error: %v", err, resolveErr)
+				}
 				return *new(R), newWorkflowExecutionError(workflowID, resolveErr)
 			}
 			typedResult, decodeErr = stepDecoder.Decode(encodedOutput)
