@@ -365,6 +365,9 @@ func TestMocks(t *testing.T) {
 	// Test remaining DBOSContext methods
 	mockCtx2 := mocks.NewMockDBOSContext(t)
 
+	// resolveEncoder calls ctx.Value(workflowStateKey) to check for portable workflows
+	mockCtx2.On("Value", mock.Anything).Return(nil)
+
 	// WriteStream
 	mockCtx2.On("WriteStream", mockCtx2, "stream-key", mock.MatchedBy(func(s *string) bool {
 		return s != nil
