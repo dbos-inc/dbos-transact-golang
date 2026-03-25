@@ -1733,10 +1733,12 @@ func TestCrossFormatRecvAndGetEvent(t *testing.T) {
 				workflowID, "xfmt-topic", portableMsgStr, PortableSerializerName)
 			require.NoError(t, insertErr)
 
-			// Wake up the recv listener via pg NOTIFY
-			_, notifyErr := sysDB.pool.Exec(context.Background(),
-				fmt.Sprintf("NOTIFY %s, '%s'", _DBOS_NOTIFICATIONS_CHANNEL, workflowID+"::xfmt-topic"))
-			require.NoError(t, notifyErr)
+			// Wake up the recv listener via pg NOTIFY (skip on CockroachDB which uses polling)
+			if !sysDB.isCockroachDB {
+				_, notifyErr := sysDB.pool.Exec(context.Background(),
+					fmt.Sprintf("NOTIFY %s, '%s'", _DBOS_NOTIFICATIONS_CHANNEL, workflowID+"::xfmt-topic"))
+				require.NoError(t, notifyErr)
+			}
 		}()
 
 		result, err := handle.GetResult()
