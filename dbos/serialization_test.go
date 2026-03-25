@@ -1624,7 +1624,7 @@ func TestPortableInterop(t *testing.T) {
 	t.Run("ListWorkflowsPortable", func(t *testing.T) {
 		workflowID := "interop-list-" + t.Name()
 		handle, err := RunWorkflow(executor, portableWf, expectedArgs,
-			WithWorkflowID(workflowID), WithPortableWorkflow())
+			WithWorkflowID(workflowID), withPortableWorkflow())
 		require.NoError(t, err)
 
 		result, err := handle.GetResult()

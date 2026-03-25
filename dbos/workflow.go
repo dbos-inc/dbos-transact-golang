@@ -665,9 +665,9 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		wfFunc := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 			return typedErasedWorkflow(ctx, input, inputSerialization)
 		})
-		opts = append(opts, withWorkflowName(fqn)) // Append the name so ctx.RunWorkflow can look it up from the registry to apply registration-time options
+		opts = append(opts, withWorkflowName(fqn), withAlreadyEncodedInput()) // Append the name so ctx.RunWorkflow can look it up from the registry to apply registration-time options
 		if inputSerialization == PortableSerializerName {
-			opts = append(opts, WithPortableWorkflow())
+			opts = append(opts, withPortableWorkflow())
 		}
 		handle, err := ctx.RunWorkflow(ctx, wfFunc, input, opts...)
 		if err != nil {
@@ -802,9 +802,10 @@ func withIsRecovery() WorkflowOption {
 	}
 }
 
-// WithPortableWorkflow marks the workflow to use the cross-language portable JSON format
+// withPortableWorkflow marks the workflow to use the cross-language portable JSON format
 // for all serialized data (inputs, step outputs, events, messages, streams).
-func WithPortableWorkflow() WorkflowOption {
+// This is set internally during dequeue/recovery for workflows stored with portable serialization.
+func withPortableWorkflow() WorkflowOption {
 	return func(p *workflowOptions) {
 		p.isPortableWorkflow = true
 	}
@@ -1086,17 +1087,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	var encodedInput any
 	if params.alreadyEncodedInput {
 		encodedInput = input
-	} else if params.isPortableWorkflow {
-		if _, ok := input.(PortableWorkflowArgs); !ok {
-			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("portable workflow input must be PortableWorkflowArgs, got %T", input))
-		}
-		ser := newPortableSerializer[any]()
-		var serErr error
-		encodedInput, serErr = ser.Encode(input)
-		if serErr != nil {
-			c.logger.Error("failed to serialize portable workflow input", "error", serErr, "workflow_id", workflowID)
-			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize portable workflow input: %w", serErr))
-		}
 	} else {
 		var serErr error
 		encodedInput, serErr = resolveEncoder(c).Encode(input)
