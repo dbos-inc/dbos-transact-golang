@@ -13,10 +13,11 @@ import (
 )
 
 type ClientConfig struct {
-	DatabaseURL    string        // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
-	SystemDBPool   *pgxpool.Pool // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
-	DatabaseSchema string        // Database schema name (defaults to "dbos")
-	Logger         *slog.Logger  // Optional custom logger
+	DatabaseURL    string          // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
+	SystemDBPool   *pgxpool.Pool   // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
+	DatabaseSchema string          // Database schema name (defaults to "dbos")
+	Logger         *slog.Logger    // Optional custom logger
+	Serializer     Serializer[any] // Optional custom serializer (defaults to JSON)
 }
 
 // Client provides a programmatic way to interact with your DBOS application from external code.
@@ -61,6 +62,7 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 		AppName:        "dbos-client",
 		Logger:         config.Logger,
 		SystemDBPool:   config.SystemDBPool,
+		Serializer:     config.Serializer,
 	})
 	if err != nil {
 		return nil, err

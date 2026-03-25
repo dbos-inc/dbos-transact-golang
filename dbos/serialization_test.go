@@ -1166,6 +1166,142 @@ func TestGobSerializer(t *testing.T) {
 
 // ===== Chicken Serializer Tests =====
 
+// TestClientCustomSerializer tests that a Client created with a custom serializer
+// correctly uses it for Enqueue, Send, GetEvent, and ClientReadStream.
+func TestClientCustomSerializer(t *testing.T) {
+	gob.Register(Chicken{})
+
+	customSer := &chickenSerializer{}
+
+	// Server uses the same custom serializer so it can decode what the client encodes
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: customSer})
+
+	queue := NewWorkflowQueue(serverCtx, "client-ser-queue")
+
+	// Workflow that returns its input — on the server side the deserialized input
+	// will be fixedChicken because the chickenSerializer always decodes to that.
+	echoWorkflow := func(ctx DBOSContext, input Chicken) (Chicken, error) {
+		return input, nil
+	}
+	RegisterWorkflow(serverCtx, echoWorkflow, WithWorkflowName("ClientSerEchoWorkflow"))
+
+	// Workflow that writes to a stream
+	streamWorkflow := func(ctx DBOSContext, input Chicken) (Chicken, error) {
+		if err := WriteStream(ctx, "client-ser-stream", input); err != nil {
+			return Chicken{}, err
+		}
+		if err := CloseStream(ctx, "client-ser-stream"); err != nil {
+			return Chicken{}, err
+		}
+		return input, nil
+	}
+	RegisterWorkflow(serverCtx, streamWorkflow, WithWorkflowName("ClientSerStreamWorkflow"))
+
+	// Workflow that waits for a message via Recv then returns it
+	recvWorkflow := func(ctx DBOSContext, _ Chicken) (Chicken, error) {
+		msg, err := Recv[Chicken](ctx, "client-topic", 10*time.Second)
+		if err != nil {
+			return Chicken{}, err
+		}
+		return msg, nil
+	}
+	RegisterWorkflow(serverCtx, recvWorkflow, WithWorkflowName("ClientSerRecvWorkflow"))
+
+	// Workflow that sets an event
+	setEventWorkflow := func(ctx DBOSContext, input Chicken) (Chicken, error) {
+		if err := SetEvent(ctx, "client-event-key", input); err != nil {
+			return Chicken{}, err
+		}
+		return input, nil
+	}
+	RegisterWorkflow(serverCtx, setEventWorkflow, WithWorkflowName("ClientSerSetEventWorkflow"))
+
+	err := Launch(serverCtx)
+	require.NoError(t, err)
+	defer Shutdown(serverCtx, 10*time.Second)
+
+	// Create client with the same custom serializer
+	databaseURL := getDatabaseURL()
+	client, err := NewClient(context.Background(), ClientConfig{
+		DatabaseURL: databaseURL,
+		Serializer:  customSer,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+
+	t.Run("EnqueueWithCustomSerializer", func(t *testing.T) {
+		// The chicken serializer always encodes to fixedChicken, so regardless
+		// of what we pass in, the server should decode fixedChicken.
+		handle, err := Enqueue[Chicken, Chicken](client, queue.Name, "ClientSerEchoWorkflow",
+			Chicken{Name: "ignored", Noise: "ignored", Legs: 99},
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, fixedChicken, result)
+	})
+
+	t.Run("SendWithCustomSerializer", func(t *testing.T) {
+		// Enqueue a workflow that waits for a message
+		handle, err := Enqueue[Chicken, Chicken](client, queue.Name, "ClientSerRecvWorkflow",
+			Chicken{},
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		// Send a message via client — the serializer encodes it to fixedChicken
+		err = client.Send(handle.GetWorkflowID(), Chicken{Name: "ignored"}, "client-topic")
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, fixedChicken, result)
+	})
+
+	t.Run("GetEventWithCustomSerializer", func(t *testing.T) {
+		// Enqueue a workflow that sets an event
+		handle, err := Enqueue[Chicken, Chicken](client, queue.Name, "ClientSerSetEventWorkflow",
+			fixedChicken,
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		// Wait for the workflow to complete so the event is set
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		// The untyped client.GetEvent returns a raw *string (encoded).
+		// Decode it manually to verify the custom serializer was used for encoding.
+		rawEvent, err := client.GetEvent(handle.GetWorkflowID(), "client-event-key", 10*time.Second)
+		require.NoError(t, err)
+		require.NotNil(t, rawEvent)
+		encodedStr, ok := rawEvent.(*string)
+		require.True(t, ok, "expected *string, got %T", rawEvent)
+
+		decoded, err := customSer.Decode(encodedStr)
+		require.NoError(t, err)
+		assert.Equal(t, fixedChicken, decoded)
+	})
+
+	t.Run("ClientReadStreamWithCustomSerializer", func(t *testing.T) {
+		// Enqueue a workflow that writes to a stream
+		handle, err := Enqueue[Chicken, Chicken](client, queue.Name, "ClientSerStreamWorkflow",
+			fixedChicken,
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		// Wait for completion
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		// Read stream via typed client API
+		values, closed, err := ClientReadStream[Chicken](client, handle.GetWorkflowID(), "client-ser-stream")
+		require.NoError(t, err)
+		assert.True(t, closed)
+		require.Len(t, values, 1)
+		assert.Equal(t, fixedChicken, values[0])
+	})
+}
+
 // Chicken is a whimsical struct used to test fully custom serializers.
 type Chicken struct {
 	Name  string
