@@ -57,9 +57,9 @@ type systemDatabase interface {
 
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
-	recv(ctx context.Context, input recvInput) (*string, error)
+	recv(ctx context.Context, input recvInput) (*recvResult, error)
 	setEvent(ctx context.Context, input WorkflowSetEventInput) error
-	getEvent(ctx context.Context, input getEventInput) (*string, error)
+	getEvent(ctx context.Context, input getEventInput) (*getEventResult, error)
 
 	// Streams
 	writeStream(ctx context.Context, input writeStreamDBInput) error
@@ -2275,7 +2275,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 }
 
 // Recv is a special type of step that receives a message destined for a given workflow
-func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
+func (s *sysDB) recv(ctx context.Context, input recvInput) (*recvResult, error) {
 	functionName := "DBOS.recv"
 
 	// Get workflow state from context
@@ -2305,7 +2305,7 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*string, error) {
 		return nil, err
 	}
 	if recordedResult != nil {
-		return recordedResult.output, recordedResult.err
+		return &recvResult{message: recordedResult.output, serialization: recordedResult.serialization}, recordedResult.err
 	}
 
 	// First check if there's already a receiver for this workflow/topic to avoid unnecessary database load
@@ -2397,7 +2397,7 @@ loop:
 	// Use message_uuid so we delete exactly one row; created_at_epoch_ms can match multiple rows when inserts occur in the same millisecond.
 	query = fmt.Sprintf(`
     WITH oldest_entry AS (
-        SELECT message_uuid, message
+        SELECT message_uuid, message, serialization
         FROM %s.notifications
         WHERE destination_uuid = $1 AND topic = $2
         ORDER BY created_at_epoch_ms ASC
@@ -2405,14 +2405,21 @@ loop:
     )
     DELETE FROM %s.notifications
     WHERE message_uuid = (SELECT message_uuid FROM oldest_entry)
-    RETURNING message`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
+    RETURNING message, serialization`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
 
 	var messageString *string
-	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString)
+	var msgSerialization *string
+	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString, &msgSerialization)
 	if err != nil {
 		if err != pgx.ErrNoRows {
 			return nil, fmt.Errorf("failed to consume message: %w", err)
 		}
+	}
+
+	// Use the sender's serialization from the notification; fall back to receiver's format for timeout/no-message case
+	serialization := input.serialization
+	if msgSerialization != nil && len(*msgSerialization) > 0 {
+		serialization = *msgSerialization
 	}
 
 	// Record the operation result (with encoded message string)
@@ -2425,7 +2432,7 @@ loop:
 		tx:            tx,
 		startedAt:     startTime,
 		completedAt:   completedTime,
-		serialization: input.serialization,
+		serialization: serialization,
 	}
 
 	// Record an error if no message found and timeout occurred
@@ -2442,8 +2449,8 @@ loop:
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Return the message string pointer and the timeout error if any
-	return messageString, recordInput.err
+	// Return the message and its serialization format
+	return &recvResult{message: messageString, serialization: serialization}, recordInput.err
 }
 
 type WorkflowSetEventInput struct {
@@ -2495,7 +2502,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	return err
 }
 
-func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, error) {
+func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*getEventResult, error) {
 	functionName := "DBOS.getEvent"
 
 	// Get workflow state from context (optional for GetEvent as we can get an event from outside a workflow)
@@ -2524,7 +2531,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 			return nil, err
 		}
 		if recordedResult != nil {
-			return recordedResult.output, recordedResult.err
+			return &getEventResult{value: recordedResult.output, serialization: recordedResult.serialization}, recordedResult.err
 		}
 	}
 
@@ -2550,15 +2557,16 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 	}()
 
 	// Check if the event already exists in the database
-	query := fmt.Sprintf(`SELECT value FROM %s.workflow_events WHERE workflow_uuid = $1 AND key = $2`, pgx.Identifier{s.schema}.Sanitize())
+	query := fmt.Sprintf(`SELECT value, serialization FROM %s.workflow_events WHERE workflow_uuid = $1 AND key = $2`, pgx.Identifier{s.schema}.Sanitize())
 	var valueString *string
+	var evtSerialization *string
 	var row pgx.Row
 	var err error
 
 	// Helper function to query the event and handle errors
 	queryEvent := func() error {
 		row = s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
-		err = row.Scan(&valueString)
+		err = row.Scan(&valueString, &evtSerialization)
 		if err != nil && err != pgx.ErrNoRows {
 			if !loaded {
 				cond.L.Unlock()
@@ -2637,6 +2645,12 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 		}
 	}
 
+	// Use the event's serialization from the DB; fall back to caller's format for timeout/no-event case
+	serialization := input.serialization
+	if evtSerialization != nil && len(*evtSerialization) > 0 {
+		serialization = *evtSerialization
+	}
+
 	// Record the operation result if this is called within a workflow
 	var timeoutErr error
 	if isInWorkflow {
@@ -2649,7 +2663,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 			err:           nil,
 			startedAt:     startTime,
 			completedAt:   completedTime,
-			serialization: input.serialization,
+			serialization: serialization,
 		}
 
 		// Record an error if no event found and timeout occurred
@@ -2669,8 +2683,8 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*string, err
 		}
 	}
 
-	// Return the value string pointer and the timeout error if any
-	return valueString, timeoutErr
+	// Return the event value and its serialization format
+	return &getEventResult{value: valueString, serialization: serialization}, timeoutErr
 }
 
 /*******************************/
@@ -3024,11 +3038,11 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			input.executorID,
 			time.Now().UnixMilli(),
 			id).Scan(&retWorkflow.name, &retWorkflow.input, &serialization)
-		if serialization != nil {
-			retWorkflow.serialization = *serialization
-		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
+		}
+		if serialization != nil {
+			retWorkflow.serialization = *serialization
 		}
 
 		retWorkflows = append(retWorkflows, retWorkflow)

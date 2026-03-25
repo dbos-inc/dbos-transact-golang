@@ -1669,3 +1669,117 @@ func TestPortableInterop(t *testing.T) {
 		verifyResult(t, result)
 	})
 }
+
+// TestCrossFormatRecvAndGetEvent tests that a non-portable Go workflow can correctly
+// receive messages and events that were serialized using the portable JSON format.
+// This simulates a portable workflow (e.g., Python) sending a message or setting an event
+// that a standard Go workflow reads.
+func TestCrossFormatRecvAndGetEvent(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	type TestPayload struct {
+		Name  string `json:"name"`
+		Value int    `json:"value"`
+	}
+
+	expected := TestPayload{Name: "cross-format", Value: 42}
+
+	// Workflow that receives a message and reads an event.
+	crossFormatRecvWf := func(ctx DBOSContext, _ string) (TestPayload, error) {
+		msg, err := Recv[TestPayload](ctx, "xfmt-topic", 10*time.Second)
+		if err != nil {
+			return TestPayload{}, fmt.Errorf("recv failed: %w", err)
+		}
+		return msg, nil
+	}
+	RegisterWorkflow(executor, crossFormatRecvWf, WithWorkflowName("cross_format_recv"))
+
+	crossFormatEventWf := func(ctx DBOSContext, targetWfID string) (TestPayload, error) {
+		evt, err := GetEvent[TestPayload](ctx, targetWfID, "xfmt-key", 10*time.Second)
+		if err != nil {
+			return TestPayload{}, fmt.Errorf("get event failed: %w", err)
+		}
+		return evt, nil
+	}
+	RegisterWorkflow(executor, crossFormatEventWf, WithWorkflowName("cross_format_event"))
+
+	require.NoError(t, Launch(executor))
+	defer Shutdown(executor, 10*time.Second)
+
+	c := executor.(*dbosContext)
+	sysDB := c.systemDB.(*sysDB)
+
+	// 1. Cross-format recv: start the workflow (which blocks on recv), then insert a
+	// portable_json notification from a goroutine (simulating a portable sender).
+	t.Run("PortableSendToStandardRecv", func(t *testing.T) {
+		workflowID := "xfmt-recv-" + t.Name()
+
+		// Start the workflow — it will block on Recv waiting for a notification
+		handle, err := RunWorkflow(executor, crossFormatRecvWf, "unused", WithWorkflowID(workflowID))
+		require.NoError(t, err)
+
+		// Insert a portable_json notification (simulating a portable sender).
+		// Portable format uses plain JSON (no base64).
+		go func() {
+			// Small delay to let the workflow register its recv listener
+			time.Sleep(200 * time.Millisecond)
+			portableMsg, marshalErr := json.Marshal(expected)
+			require.NoError(t, marshalErr)
+			portableMsgStr := string(portableMsg)
+
+			insertQuery := fmt.Sprintf(`INSERT INTO %s.notifications (destination_uuid, topic, message, serialization) VALUES ($1, $2, $3, $4)`,
+				pgx.Identifier{sysDB.schema}.Sanitize())
+			_, insertErr := sysDB.pool.Exec(context.Background(), insertQuery,
+				workflowID, "xfmt-topic", portableMsgStr, PortableSerializerName)
+			require.NoError(t, insertErr)
+
+			// Wake up the recv listener via pg NOTIFY
+			_, notifyErr := sysDB.pool.Exec(context.Background(),
+				fmt.Sprintf("NOTIFY %s, '%s'", _DBOS_NOTIFICATIONS_CHANNEL, workflowID+"::xfmt-topic"))
+			require.NoError(t, notifyErr)
+		}()
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, expected, result)
+	})
+
+	// 2. Cross-format getEvent: insert a portable_json event, have a standard workflow read it.
+	t.Run("PortableEventToStandardGetEvent", func(t *testing.T) {
+		// First, create a "source" workflow that has a portable event set on it.
+		sourceWfID := "xfmt-evt-source-" + t.Name()
+
+		// Insert the event directly into workflow_events with portable_json serialization.
+		portableEvt, err := json.Marshal(expected)
+		require.NoError(t, err)
+		portableEvtStr := string(portableEvt)
+
+		// We need a workflow_status row for the source workflow (foreign key).
+		now := time.Now().UnixMilli()
+		insertWfQuery := fmt.Sprintf(`INSERT INTO %s.workflow_status (
+			workflow_uuid, status, name, created_at, updated_at, recovery_attempts,
+			executor_id, priority, application_version, application_id,
+			authenticated_user, assumed_role, authenticated_roles
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		_, err = sysDB.pool.Exec(context.Background(), insertWfQuery,
+			sourceWfID, string(WorkflowStatusSuccess), "source_wf",
+			now, now, 0, "local", 0, c.applicationVersion, "", "", "", "[]")
+		require.NoError(t, err)
+
+		insertEvtQuery := fmt.Sprintf(`INSERT INTO %s.workflow_events (workflow_uuid, key, value, serialization) VALUES ($1, $2, $3, $4)`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		_, err = sysDB.pool.Exec(context.Background(), insertEvtQuery,
+			sourceWfID, "xfmt-key", portableEvtStr, PortableSerializerName)
+		require.NoError(t, err)
+
+		// Now run a standard (non-portable) workflow that reads this event.
+		handle, err := RunWorkflow(executor, crossFormatEventWf, sourceWfID,
+			WithWorkflowID("xfmt-evt-reader-"+t.Name()))
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, expected, result)
+	})
+}

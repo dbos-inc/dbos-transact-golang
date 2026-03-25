@@ -329,7 +329,15 @@ func (c *client) Send(destinationID string, message any, topic string) error {
 
 // GetEvent retrieves a key-value event from a target workflow.
 func (c *client) GetEvent(targetWorkflowID, key string, timeout time.Duration) (any, error) {
-	return c.dbosCtx.GetEvent(c.dbosCtx, targetWorkflowID, key, timeout)
+	result, err := c.dbosCtx.GetEvent(c.dbosCtx, targetWorkflowID, key, timeout)
+	if err != nil {
+		return nil, err
+	}
+	// Unwrap the internal result type for the public API
+	if evtResult, ok := result.(*getEventResult); ok {
+		return evtResult.value, nil
+	}
+	return result, nil
 }
 
 // RetrieveWorkflow returns a handle to an existing workflow.
