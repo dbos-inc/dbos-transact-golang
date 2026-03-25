@@ -1468,14 +1468,15 @@ func TestPortableInterop(t *testing.T) {
 
 	// InteropResult captures intermediate results to prove each encode/decode path works.
 	type InteropResult struct {
-		Input       InteropArgs `json:"input"`
-		StepOutput  InteropArgs `json:"stepOutput"`
-		RecvOutput  InteropArgs `json:"recvOutput"`
-		EventOutput InteropArgs `json:"eventOutput"`
+		Input        InteropArgs `json:"input"`
+		StepOutput   InteropArgs `json:"stepOutput"`
+		RecvOutput   InteropArgs `json:"recvOutput"`
+		EventOutput  InteropArgs `json:"eventOutput"`
+		StreamOutput InteropArgs `json:"streamOutput"`
 	}
 
 	// A single workflow that exercises all serialization paths:
-	// step output, send/recv, set_event/get_event, and streams.
+	// step output, send/recv, set_event/get_event, and write_stream/read_stream.
 	portableWf := func(ctx DBOSContext, input InteropArgs) (InteropResult, error) {
 		// 1. Step: encode/decode step output
 		stepOut, err := RunAsStep(ctx, func(_ context.Context) (InteropArgs, error) {
@@ -1507,11 +1508,30 @@ func TestPortableInterop(t *testing.T) {
 			return InteropResult{}, fmt.Errorf("get event failed: %w", err)
 		}
 
+		// 4. Stream: write, close, then read back
+		if err := WriteStream(ctx, "test-stream", input); err != nil {
+			return InteropResult{}, fmt.Errorf("write stream failed: %w", err)
+		}
+		if err := CloseStream(ctx, "test-stream"); err != nil {
+			return InteropResult{}, fmt.Errorf("close stream failed: %w", err)
+		}
+		streamValues, closed, err := ReadStream[InteropArgs](ctx, wfID, "test-stream")
+		if err != nil {
+			return InteropResult{}, fmt.Errorf("read stream failed: %w", err)
+		}
+		if !closed {
+			return InteropResult{}, fmt.Errorf("expected stream to be closed")
+		}
+		if len(streamValues) != 1 {
+			return InteropResult{}, fmt.Errorf("expected 1 stream value, got %d", len(streamValues))
+		}
+
 		return InteropResult{
-			Input:       input,
-			StepOutput:  stepOut,
-			RecvOutput:  recvOut,
-			EventOutput: eventOut,
+			Input:        input,
+			StepOutput:   stepOut,
+			RecvOutput:   recvOut,
+			EventOutput:  eventOut,
+			StreamOutput: streamValues[0],
 		}, nil
 	}
 	RegisterWorkflow(executor, portableWf, WithWorkflowName("interop_workflow"))
@@ -1545,6 +1565,7 @@ func TestPortableInterop(t *testing.T) {
 		assert.Equal(t, expectedArgs, result.StepOutput, "step output")
 		assert.Equal(t, expectedArgs, result.RecvOutput, "recv output")
 		assert.Equal(t, expectedArgs, result.EventOutput, "event output")
+		assert.Equal(t, expectedArgs, result.StreamOutput, "stream output")
 	}
 
 	// 1. Recovery path: direct DB insert with status=PENDING, then recover.
