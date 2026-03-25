@@ -179,28 +179,27 @@ func (a *typedCustomSerializerAdapter[T]) Decode(data *string) (T, error) {
 	return typed, nil
 }
 
-// portableWorkflowArgs is the cross-language envelope for workflow inputs.
-type portableWorkflowArgs struct {
-	PositionalArgs []json.RawMessage `json:"positionalArgs"`
-	NamedArgs      map[string]any    `json:"namedArgs"`
+// PortableWorkflowArgs is the cross-language envelope for workflow inputs.
+// Use this to pass positional and/or named arguments when enqueuing
+// a workflow that will be executed by a DBOS application in another language.
+//
+// Example:
+//
+//	args := dbos.PortableWorkflowArgs{
+//	    PositionalArgs: []any{"hello", 42},
+//	    NamedArgs:      map[string]any{"key": "value"},
+//	}
+//	handle, err := client.Enqueue("queue", "pyWorkflow", args)
+type PortableWorkflowArgs struct {
+	PositionalArgs []any          `json:"positionalArgs"`
+	NamedArgs      map[string]any `json:"namedArgs"`
 }
 
-// encodePortableArgs wraps a single Go workflow input into the portable args envelope as plain JSON.
-func encodePortableArgs(data any) (*string, error) {
-	argBytes, err := json.Marshal(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal portable arg: %w", err)
-	}
-	envelope := portableWorkflowArgs{
-		PositionalArgs: []json.RawMessage{argBytes},
-		NamedArgs:      map[string]any{},
-	}
-	b, err := json.Marshal(envelope)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal portable args envelope: %w", err)
-	}
-	s := string(b)
-	return &s, nil
+// portableArgsRaw is used internally for decoding, where json.RawMessage
+// preserves the original JSON for type-safe unmarshaling of individual args.
+type portableArgsRaw struct {
+	PositionalArgs []json.RawMessage `json:"positionalArgs"`
+	NamedArgs      map[string]any    `json:"namedArgs"`
 }
 
 // decodePortableArgs unwraps the first positional arg from the portable args envelope into T.
@@ -208,7 +207,7 @@ func decodePortableArgs[T any](data *string) (T, error) {
 	if data == nil || *data == "null" {
 		return getNilOrZeroValue[T](), nil
 	}
-	var envelope portableWorkflowArgs
+	var envelope portableArgsRaw
 	if err := json.Unmarshal([]byte(*data), &envelope); err != nil {
 		return *new(T), fmt.Errorf("failed to unmarshal portable args envelope: %w", err)
 	}

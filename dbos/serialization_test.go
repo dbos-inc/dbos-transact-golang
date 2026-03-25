@@ -1580,7 +1580,7 @@ func TestPortableInterop(t *testing.T) {
 		verifyResult(t, result)
 	})
 
-	// 3. Client enqueue path: Go client with WithPortableInputs.
+	// 3. Client enqueue path: Go client with PortableWorkflowArgs.
 	t.Run("ClientEnqueuePortable", func(t *testing.T) {
 		client, err := NewClient(context.Background(), ClientConfig{
 			DatabaseURL: getDatabaseURL(),
@@ -1588,8 +1588,11 @@ func TestPortableInterop(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { client.Shutdown(5 * time.Second) })
 
-		handle, err := Enqueue[InteropArgs, InteropResult](client, "portable-interop-queue", "interop_workflow", expectedArgs,
-			WithPortableInputs())
+		portableArgs := PortableWorkflowArgs{
+			PositionalArgs: []any{expectedArgs, "extra-positional", 99},
+			NamedArgs:      map[string]any{"lang": "python", "debug": true},
+		}
+		handle, err := Enqueue[PortableWorkflowArgs, InteropResult](client, "portable-interop-queue", "interop_workflow", portableArgs)
 		require.NoError(t, err)
 		require.NotEmpty(t, handle.GetWorkflowID())
 
@@ -1603,10 +1606,11 @@ func TestPortableInterop(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, PortableSerializerName, storedSerialization)
 
-		// Verify envelope format
-		var envelope portableWorkflowArgs
+		// Verify envelope format — extra positional/named args are preserved in the DB
+		var envelope PortableWorkflowArgs
 		require.NoError(t, json.Unmarshal([]byte(storedInputs), &envelope))
-		assert.Len(t, envelope.PositionalArgs, 1)
+		assert.Len(t, envelope.PositionalArgs, 3)
+		assert.Len(t, envelope.NamedArgs, 2)
 
 		// Wait for execution and verify all paths
 		retrievedHandle, err := RetrieveWorkflow[InteropResult](executor, handle.GetWorkflowID())
@@ -1641,7 +1645,7 @@ func TestPortableInterop(t *testing.T) {
 		require.True(t, ok, "expected string for portable input, got %T", wf.Input)
 		assert.True(t, json.Valid([]byte(inputStr)), "input should be valid JSON")
 		// Verify the envelope structure is preserved
-		var envelope portableWorkflowArgs
+		var envelope PortableWorkflowArgs
 		require.NoError(t, json.Unmarshal([]byte(inputStr), &envelope))
 		assert.Len(t, envelope.PositionalArgs, 1)
 

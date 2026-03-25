@@ -125,14 +125,6 @@ func WithEnqueueQueuePartitionKey(partitionKey string) EnqueueOption {
 	}
 }
 
-// WithPortableInputs encodes the workflow input in the cross-language portable JSON format.
-// Use this when enqueuing a workflow that will be executed by a DBOS application in another language.
-func WithPortableInputs() EnqueueOption {
-	return func(opts *enqueueOptions) {
-		opts.portableInputs = true
-	}
-}
-
 type enqueueOptions struct {
 	workflowName       string
 	workflowID         string
@@ -142,7 +134,6 @@ type enqueueOptions struct {
 	workflowTimeout    time.Duration
 	workflowInput      any
 	queuePartitionKey  string
-	portableInputs     bool
 }
 
 // EnqueueWorkflow enqueues a workflow to a named queue for deferred execution.
@@ -193,9 +184,10 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 	// Encode input and determine serialization format
 	var encodedInput *string
 	var serialization string
-	if params.portableInputs {
+	if _, ok := input.(PortableWorkflowArgs); ok {
+		ser := newPortableSerializer[any]()
 		var err error
-		encodedInput, err = encodePortableArgs(input)
+		encodedInput, err = ser.Encode(input)
 		if err != nil {
 			return nil, fmt.Errorf("failed to serialize portable workflow input: %w", err)
 		}
@@ -301,6 +293,16 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 //	handle, err := dbos.Enqueue[MyInputType, MyOutputType](client, "my-queue", "MyWorkflow", MyInputType{Field: "value"},
 //	    dbos.WithEnqueueWorkflowID("custom-workflow-id"),
 //	    dbos.WithEnqueueDeduplicationID("unique-operation-id"))
+//
+// To enqueue a workflow for a DBOS application in another language (e.g., Python),
+// pass a [PortableWorkflowArgs] as the input. This automatically uses portable JSON
+// serialization, encoding the envelope with positional and named arguments:
+//
+//	args := dbos.PortableWorkflowArgs{
+//	    PositionalArgs: []any{"hello", 42},
+//	    NamedArgs:      map[string]any{"key": "value"},
+//	}
+//	handle, err := dbos.Enqueue[dbos.PortableWorkflowArgs, any](client, "queue", "py_workflow", args)
 func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, opts ...EnqueueOption) (WorkflowHandle[R], error) {
 	if c == nil {
 		return nil, errors.New("client cannot be nil")

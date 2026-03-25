@@ -1087,8 +1087,12 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	if params.alreadyEncodedInput {
 		encodedInput = input
 	} else if params.isPortableWorkflow {
+		if _, ok := input.(PortableWorkflowArgs); !ok {
+			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("portable workflow input must be PortableWorkflowArgs, got %T", input))
+		}
+		ser := newPortableSerializer[any]()
 		var serErr error
-		encodedInput, serErr = encodePortableArgs(input)
+		encodedInput, serErr = ser.Encode(input)
 		if serErr != nil {
 			c.logger.Error("failed to serialize portable workflow input", "error", serErr, "workflow_id", workflowID)
 			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize portable workflow input: %w", serErr))
