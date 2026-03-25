@@ -1822,6 +1822,44 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	}
 	RegisterWorkflow(executor, portableEnvelopeWf, WithWorkflowName("portable_envelope"))
 
+	// Multi-step workflow for partial recovery test (must register before Launch).
+	type PartialRecoveryResult struct {
+		StepOut  InteropInput `json:"stepOut"`
+		RecvOut  InteropInput `json:"recvOut"`
+		EventOut InteropInput `json:"eventOut"`
+	}
+	multiStepWf := func(ctx DBOSContext, input InteropInput) (PartialRecoveryResult, error) {
+		stepOut, err := RunAsStep(ctx, func(_ context.Context) (InteropInput, error) {
+			return input, nil
+		})
+		if err != nil {
+			return PartialRecoveryResult{}, fmt.Errorf("step: %w", err)
+		}
+
+		wfID, err := GetWorkflowID(ctx)
+		if err != nil {
+			return PartialRecoveryResult{}, err
+		}
+		if err := Send(ctx, wfID, input, "partial-topic"); err != nil {
+			return PartialRecoveryResult{}, fmt.Errorf("send: %w", err)
+		}
+		recvOut, err := Recv[InteropInput](ctx, "partial-topic", 10*time.Second)
+		if err != nil {
+			return PartialRecoveryResult{}, fmt.Errorf("recv: %w", err)
+		}
+
+		if err := SetEvent(ctx, "partial-key", input); err != nil {
+			return PartialRecoveryResult{}, fmt.Errorf("setEvent: %w", err)
+		}
+		eventOut, err := GetEvent[InteropInput](ctx, wfID, "partial-key", 10*time.Second)
+		if err != nil {
+			return PartialRecoveryResult{}, fmt.Errorf("getEvent: %w", err)
+		}
+
+		return PartialRecoveryResult{StepOut: stepOut, RecvOut: recvOut, EventOut: eventOut}, nil
+	}
+	RegisterWorkflow(executor, multiStepWf, WithWorkflowName("partial_recovery_wf"))
+
 	require.NoError(t, Launch(executor))
 	defer Shutdown(executor, 10*time.Second)
 
@@ -1931,5 +1969,48 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, recoveredResult.PositionalArgs, 3)
 		assert.Len(t, recoveredResult.NamedArgs, 2)
+	})
+
+	// 3. Partial recovery: run a multi-step portable workflow, keep operation_outputs,
+	// reset to PENDING. On recovery every step is replayed from stored results using
+	// the serialization column in operation_outputs — NOT re-executed.
+	t.Run("PartialRecoveryFromStoredSteps", func(t *testing.T) {
+		workflowID := "partial-recovery-" + t.Name()
+		handle, err := RunWorkflow(executor, multiStepWf, expectedInput,
+			WithWorkflowID(workflowID), WithPortableWorkflow())
+		require.NoError(t, err)
+		firstResult, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, expectedInput, firstResult.StepOut)
+		assert.Equal(t, expectedInput, firstResult.RecvOut)
+		assert.Equal(t, expectedInput, firstResult.EventOut)
+
+		// Verify operation_outputs exist for this workflow.
+		var stepCount int
+		countQ := fmt.Sprintf(`SELECT count(*) FROM %s.operation_outputs WHERE workflow_uuid = $1`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		require.NoError(t, sysDB.pool.QueryRow(context.Background(), countQ, workflowID).Scan(&stepCount))
+		require.Greater(t, stepCount, 0, "expected operation_outputs rows from first execution")
+
+		// Reset to PENDING but KEEP operation_outputs — steps will be replayed from DB.
+		resetQ := fmt.Sprintf(`UPDATE %s.workflow_status SET status = $1, output = NULL, error = NULL WHERE workflow_uuid = $2`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		_, err = sysDB.pool.Exec(context.Background(), resetQ, string(WorkflowStatusPending), workflowID)
+		require.NoError(t, err)
+
+		// Recover — each step hits checkOperationExecution and decodes from stored serialization.
+		handles, err := recoverPendingWorkflows(c, []string{"local"})
+		require.NoError(t, err)
+		require.Len(t, handles, 1)
+		_, err = handles[0].GetResult()
+		require.NoError(t, err)
+
+		retrieved, err := RetrieveWorkflow[PartialRecoveryResult](executor, workflowID)
+		require.NoError(t, err)
+		recoveredResult, err := retrieved.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, expectedInput, recoveredResult.StepOut, "step replayed from DB")
+		assert.Equal(t, expectedInput, recoveredResult.RecvOut, "recv replayed from DB")
+		assert.Equal(t, expectedInput, recoveredResult.EventOut, "getEvent replayed from DB")
 	})
 }
