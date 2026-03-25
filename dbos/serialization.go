@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/gob"
 	"encoding/json"
@@ -30,40 +31,64 @@ type Serializer[T any] interface {
 	Decode(data *string) (T, error)
 }
 
-type jsonSerializer[T any] struct{}
+type jsonSerializer[T any] struct {
+	portable bool
+}
 
 func newJSONSerializer[T any]() Serializer[T] {
-	return &jsonSerializer[T]{}
+	return &jsonSerializer[T]{portable: false}
+}
+
+func newPortableSerializer[T any]() Serializer[T] {
+	return &jsonSerializer[T]{portable: true}
 }
 
 func (j *jsonSerializer[T]) Name() string {
+	if j.portable {
+		return PortableSerializerName
+	}
 	return "DBOS_JSON"
 }
 
 func (j *jsonSerializer[T]) Encode(data T) (*string, error) {
-	// Check if the value is nil (for pointer types, slice, map, etc.)
 	if isNilValue(data) {
-		// For nil values, return the special marker so it can be stored in the database
+		if j.portable {
+			s := "null"
+			return &s, nil
+		}
 		marker := string(nilMarker)
 		return &marker, nil
 	}
 
-	// Check if the value is a zero value (but not nil)
 	jsonBytes, err := json.Marshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode data: %w", err)
+	}
+
+	if j.portable {
+		s := string(jsonBytes)
+		return &s, nil
 	}
 	encodedStr := base64.StdEncoding.EncodeToString(jsonBytes)
 	return &encodedStr, nil
 }
 
 func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
-	// If data is a nil pointer, return nil (for pointer types) or zero value (for non-pointer types)
+	if j.portable {
+		if data == nil || *data == "null" {
+			return getNilOrZeroValue[T](), nil
+		}
+		var result T
+		if err := json.Unmarshal([]byte(*data), &result); err != nil {
+			return result, fmt.Errorf("failed to decode portable json data: %w", err)
+		}
+		return result, nil
+	}
+
 	if data == nil || *data == nilMarker {
 		return getNilOrZeroValue[T](), nil
 	}
 
-	// If *data is an empty string, return zero value
 	var result T
 	dataBytes, err := base64.StdEncoding.DecodeString(*data)
 	if err != nil {
@@ -125,6 +150,35 @@ func (g *GobSerializer) Decode(data *string) (any, error) {
 	return result, nil
 }
 
+// typedCustomSerializerAdapter wraps a user-provided Serializer[any] into Serializer[T],
+// handling the type assertion on decode.
+type typedCustomSerializerAdapter[T any] struct {
+	inner Serializer[any]
+}
+
+func (a *typedCustomSerializerAdapter[T]) Name() string {
+	return a.inner.Name()
+}
+
+func (a *typedCustomSerializerAdapter[T]) Encode(data T) (*string, error) {
+	return a.inner.Encode(data)
+}
+
+func (a *typedCustomSerializerAdapter[T]) Decode(data *string) (T, error) {
+	decoded, err := a.inner.Decode(data)
+	if err != nil {
+		return *new(T), err
+	}
+	if decoded == nil {
+		return getNilOrZeroValue[T](), nil
+	}
+	typed, ok := decoded.(T)
+	if !ok {
+		return *new(T), fmt.Errorf("custom serializer returned %T, expected %T", decoded, *new(T))
+	}
+	return typed, nil
+}
+
 // portableWorkflowArgs is the cross-language envelope for workflow inputs.
 type portableWorkflowArgs struct {
 	PositionalArgs []json.RawMessage `json:"positionalArgs"`
@@ -168,56 +222,35 @@ func decodePortableArgs[T any](data *string) (T, error) {
 	return result, nil
 }
 
-// serializerName returns the name of the active serializer, defaulting to "DBOS_JSON" if nil.
-func serializerName(ser Serializer[any]) string {
-	if ser != nil {
-		return ser.Name()
+// resolveEncoder returns the serializer to use for encoding values within a workflow.
+// Priority: portable workflow → user custom serializer → default JSON.
+func resolveEncoder(ctx context.Context) Serializer[any] {
+	if wfState, ok := ctx.Value(workflowStateKey).(*workflowState); ok && wfState != nil && wfState.isPortableWorkflow {
+		return newPortableSerializer[any]()
 	}
-	return "DBOS_JSON"
+	if dc, ok := ctx.(*dbosContext); ok && dc.serializer != nil {
+		return dc.serializer
+	}
+	return newJSONSerializer[any]()
 }
 
-// encodeValue uses the custom serializer if set, otherwise the default JSON serializer.
-func encodeValue(customSer Serializer[any], data any) (*string, error) {
-	if customSer != nil {
-		return customSer.Encode(data)
-	}
-	return newJSONSerializer[any]().Encode(data)
-}
-
-// decodeValue decodes a value from the database using the serialization format stored alongside it.
-// Dispatch logic:
-//  1. If customSer matches storedSerialization (and isn't portable) → use customSer
-//  2. If storedSerialization is "portable_json" → use PortableJSONSerializer + re-marshal to T
-//  3. If storedSerialization is "DBOS_JSON" or empty → use the built-in typed JSON serializer
-//  4. Otherwise → unknown format error
-func decodeValue[T any](customSer Serializer[any], data *string, storedSerialization string) (T, error) {
-	if customSer != nil && customSer.Name() == storedSerialization && storedSerialization != PortableSerializerName {
-		decoded, err := customSer.Decode(data)
-		if err != nil {
-			return *new(T), err
-		}
-		if decoded == nil {
-			return getNilOrZeroValue[T](), nil
-		}
-		typed, ok := decoded.(T)
-		if !ok {
-			return *new(T), fmt.Errorf("custom serializer returned %T, expected %T", decoded, *new(T))
-		}
-		return typed, nil
-	}
+// resolveDecoder returns a typed serializer for decoding a value based on the stored serialization format.
+// Priority: portable_json → user custom serializer → default JSON.
+func resolveDecoder[T any](storedSerialization string, customSer Serializer[any]) (Serializer[T], error) {
 	if storedSerialization == PortableSerializerName {
-		// Portable workflow inputs are wrapped in {"positionalArgs": [...], "namedArgs": {}}.
-		// Unwrap the first positional arg and decode into T.
-		return decodePortableArgs[T](data)
+		return newPortableSerializer[T](), nil
+	}
+	if customSer != nil && customSer.Name() == storedSerialization {
+		return &typedCustomSerializerAdapter[T]{inner: customSer}, nil
 	}
 	if storedSerialization == "" || storedSerialization == "DBOS_JSON" {
-		return newJSONSerializer[T]().Decode(data)
+		return newJSONSerializer[T](), nil
 	}
-	return *new(T), fmt.Errorf("unknown serialization format %q", storedSerialization)
+	return nil, fmt.Errorf("unknown serialization format %q", storedSerialization)
 }
 
-// getCustomSerializer extracts the custom serializer from a DBOSContext, if set.
-func getCustomSerializer(ctx DBOSContext) Serializer[any] {
+// getCustomSerializerFromCtx extracts the user-provided custom serializer from a DBOSContext, if set.
+func getCustomSerializerFromCtx(ctx DBOSContext) Serializer[any] {
 	if dc, ok := ctx.(*dbosContext); ok {
 		return dc.serializer
 	}

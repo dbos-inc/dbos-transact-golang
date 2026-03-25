@@ -201,12 +201,13 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		}
 		serialization = PortableSerializerName
 	} else {
+		ser := resolveEncoder(dbosCtx)
 		var err error
-		encodedInput, err = encodeValue(dbosCtx.serializer, input)
+		encodedInput, err = ser.Encode(input)
 		if err != nil {
 			return nil, fmt.Errorf("failed to serialize workflow input: %w", err)
 		}
-		serialization = serializerName(dbosCtx.serializer)
+		serialization = ser.Name()
 	}
 
 	status := WorkflowStatus{
@@ -395,13 +396,17 @@ func ClientReadStream[R any](c Client, workflowID string, key string) ([]R, bool
 
 	// Decode each value to type R
 	customSer := c.(*client).dbosCtx.(*dbosContext).serializer
+	decoder, resolveErr := resolveDecoder[R](resolveEncoder(c.(*client).dbosCtx.(*dbosContext)).Name(), customSer)
+	if resolveErr != nil {
+		return nil, false, resolveErr
+	}
 	typedValues := make([]R, len(values))
 	for i, val := range values {
 		encodedStr, ok := val.(string)
 		if !ok {
 			return nil, false, fmt.Errorf("stream value is not a string, got %T", val)
 		}
-		decodedValue, decodeErr := decodeValue[R](customSer, &encodedStr, serializerName(customSer))
+		decodedValue, decodeErr := decoder.Decode(&encodedStr)
 		if decodeErr != nil {
 			return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
 		}
@@ -456,7 +461,12 @@ func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-ch
 	go func() {
 		defer close(typedCh)
 
-		customSer := c.(*client).dbosCtx.(*dbosContext).serializer
+		dbosCtx := c.(*client).dbosCtx.(*dbosContext)
+		decoder, resolveErr := resolveDecoder[R](resolveEncoder(dbosCtx).Name(), dbosCtx.serializer)
+		if resolveErr != nil {
+			typedCh <- StreamValue[R]{Err: resolveErr}
+			return
+		}
 
 		for streamValue := range anyCh {
 			if streamValue.Err != nil {
@@ -475,7 +485,7 @@ func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-ch
 				return
 			}
 
-			decodedValue, decodeErr := decodeValue[R](customSer, &encodedStr, serializerName(customSer))
+			decodedValue, decodeErr := decoder.Decode(&encodedStr)
 			if decodeErr != nil {
 				typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
 				return

@@ -488,13 +488,14 @@ func internalDebouncerWF[P any, R any](ctx DBOSContext, input debouncerInput[P])
 	// Which doesn't do any pre-encoding of the input, and calls a type-erased function that expects an encoded input
 	// So we need to serialize the input here
 	workflowOpts = append(workflowOpts, withAlreadyEncodedInput())
-	encodedInput, err := encodeValue(getCustomSerializer(ctx), currentInput)
+	ser := resolveEncoder(ctx)
+	encodedInput, err := ser.Encode(currentInput)
 	if err != nil {
 		return zero, fmt.Errorf("failed to serialize input: %w", err)
 	}
 
 	// Call the target workflow using its wrapped function
-	_, err = registeredWorkflow.wrappedFunction(ctx, encodedInput, serializerName(getCustomSerializer(ctx)), workflowOpts...)
+	_, err = registeredWorkflow.wrappedFunction(ctx, encodedInput, ser.Name(), workflowOpts...)
 	if err != nil {
 		return zero, fmt.Errorf("failed to run target workflow: %w", err)
 	}
