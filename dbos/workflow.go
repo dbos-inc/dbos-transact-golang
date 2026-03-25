@@ -2489,22 +2489,33 @@ func ReadStream[R any](ctx DBOSContext, workflowID string, key string) ([]R, boo
 	}
 
 	// Decode each value using the serialization stored with that stream entry.
-	customSer := getCustomSerializerFromCtx(ctx)
 	typedValues := make([]R, len(values))
-	for i, val := range values {
-		entry, ok := val.(streamEntryWithSerialization)
-		if !ok {
-			return nil, false, fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", val)
+	if _, ok := ctx.(*dbosContext); ok {
+		customSer := getCustomSerializerFromCtx(ctx)
+		for i, val := range values {
+			entry, ok := val.(streamEntryWithSerialization)
+			if !ok {
+				return nil, false, fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", val)
+			}
+			decoder, resolveErr := resolveDecoder[R](entry.serialization, customSer)
+			if resolveErr != nil {
+				return nil, false, resolveErr
+			}
+			decodedValue, decodeErr := decoder.Decode(&entry.value)
+			if decodeErr != nil {
+				return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
+			}
+			typedValues[i] = decodedValue
 		}
-		decoder, resolveErr := resolveDecoder[R](entry.serialization, customSer)
-		if resolveErr != nil {
-			return nil, false, resolveErr
+	} else {
+		// Fallback for testing/mocking scenarios
+		for i, val := range values {
+			typedVal, ok := val.(R)
+			if !ok {
+				return nil, false, fmt.Errorf("stream value is not %T, got %T", *new(R), val)
+			}
+			typedValues[i] = typedVal
 		}
-		decodedValue, decodeErr := decoder.Decode(&entry.value)
-		if decodeErr != nil {
-			return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
-		}
-		typedValues[i] = decodedValue
 	}
 
 	return typedValues, closed, nil
@@ -2552,6 +2563,8 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 
 	typedCh := make(chan StreamValue[R], 1)
 
+	_, isReal := ctx.(*dbosContext)
+
 	go func() {
 		defer close(typedCh)
 
@@ -2568,25 +2581,35 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 				return
 			}
 
-			entry, ok := streamValue.Value.(streamEntryWithSerialization)
-			if !ok {
-				typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", streamValue.Value)}
-				return
-			}
+			if isReal {
+				entry, ok := streamValue.Value.(streamEntryWithSerialization)
+				if !ok {
+					typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", streamValue.Value)}
+					return
+				}
 
-			asyncDecoder, resolveErr := resolveDecoder[R](entry.serialization, customSer)
-			if resolveErr != nil {
-				typedCh <- StreamValue[R]{Err: resolveErr}
-				return
-			}
+				asyncDecoder, resolveErr := resolveDecoder[R](entry.serialization, customSer)
+				if resolveErr != nil {
+					typedCh <- StreamValue[R]{Err: resolveErr}
+					return
+				}
 
-			decodedValue, decodeErr := asyncDecoder.Decode(&entry.value)
-			if decodeErr != nil {
-				typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
-				return
-			}
+				decodedValue, decodeErr := asyncDecoder.Decode(&entry.value)
+				if decodeErr != nil {
+					typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
+					return
+				}
 
-			typedCh <- StreamValue[R]{Value: decodedValue}
+				typedCh <- StreamValue[R]{Value: decodedValue}
+			} else {
+				// Fallback for testing/mocking scenarios
+				typedVal, ok := streamValue.Value.(R)
+				if !ok {
+					typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not %T, got %T", *new(R), streamValue.Value)}
+					return
+				}
+				typedCh <- StreamValue[R]{Value: typedVal}
+			}
 		}
 	}()
 
