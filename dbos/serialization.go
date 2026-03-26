@@ -50,6 +50,10 @@ func (j *jsonSerializer[T]) Name() string {
 	return "DBOS_JSON"
 }
 
+func (j *jsonSerializer[T]) Name() string {
+	return "DBOS_JSON"
+}
+
 func (j *jsonSerializer[T]) Encode(data T) (*string, error) {
 	if isNilValue(data) {
 		if j.portable {

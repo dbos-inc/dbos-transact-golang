@@ -1078,7 +1078,7 @@ func TestGobSerializer(t *testing.T) {
 	t.Run("SendRecv", func(t *testing.T) {
 		input := TestWorkflowData{
 			ID: "gob-sendrecv", Message: "gob msg", Value: 99,
-			Data:     TestData{Message: "nested", Value: 200},
+			Data: TestData{Message: "nested", Value: 200},
 			Metadata: map[string]string{"comm": "gob"},
 		}
 		testSendRecv(t, executor, gobSenderWorkflow, gobReceiverWorkflow, input, "gob-sender-wf")
@@ -1087,7 +1087,7 @@ func TestGobSerializer(t *testing.T) {
 	t.Run("SetGetEvent", func(t *testing.T) {
 		input := TestWorkflowData{
 			ID: "gob-event", Message: "gob event", Value: 77,
-			Data:     TestData{Message: "event nested", Value: 333},
+			Data: TestData{Message: "event nested", Value: 333},
 			Metadata: map[string]string{"type": "gob-event"},
 		}
 		testSetGetEvent(t, executor, gobSetEventWorkflow, gobGetEventWorkflow, input, "gob-setevent-wf", "gob-getevent-wf")
@@ -1109,7 +1109,7 @@ func TestGobSerializer(t *testing.T) {
 	t.Run("WriteReadStream", func(t *testing.T) {
 		input := TestWorkflowData{
 			ID: "gob-stream", Message: "stream data", Value: 55,
-			Data:     TestData{Message: "streamed", Value: 555},
+			Data: TestData{Message: "streamed", Value: 555},
 			Metadata: map[string]string{"stream": "gob"},
 		}
 		handle, err := RunWorkflow(executor, gobStreamWorkflow, input, WithWorkflowID("gob-stream-wf"))
@@ -1147,7 +1147,7 @@ func TestGobSerializer(t *testing.T) {
 	t.Run("QueuedWorkflow", func(t *testing.T) {
 		input := TestWorkflowData{
 			ID: "gob-queued", Message: "queued msg", Value: 88,
-			Data:     TestData{Message: "queued", Value: 888},
+			Data: TestData{Message: "queued", Value: 888},
 			Metadata: map[string]string{"type": "gob-queued"},
 		}
 		handle, err := RunWorkflow(executor, gobQueuedWorkflow, input, WithWorkflowID("gob-queued-wf"), WithQueue(gobTestQueue.Name))
