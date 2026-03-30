@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 )
@@ -312,3 +313,62 @@ func getNilOrZeroValue[T any]() T {
 	// Otherwise return zero value
 	return result
 }
+
+// PortableWorkflowError is the cross-language error type for workflows using portable serialization.
+// When a workflow using the portable JSON format fails, errors are stored in this structure,
+// readable by all DBOS-supported languages.
+//
+// Raise a PortableWorkflowError to pass structured error info to callers in other languages:
+//
+//	return nil, &dbos.PortableWorkflowError{Name: "ValidationError", Message: "invalid input", Code: 400}
+type PortableWorkflowError struct {
+	Name    string `json:"name"`            // Error type/class name
+	Message string `json:"message"`         // Human-readable error message
+	Code    any    `json:"code,omitempty"`  // Optional application-specific error code (number or string)
+	Data    any    `json:"data,omitempty"`  // Optional structured error details
+}
+
+func (e *PortableWorkflowError) Error() string {
+	return e.Message
+}
+
+// serializeWorkflowError serializes an error for DB storage.
+// For portable workflows, uses the portable JSON format ({"name":..., "message":..., ...}).
+// For all others, stores the plain error string.
+func serializeWorkflowError(err error, serialization string) string {
+	if serialization != PortableSerializerName {
+		return err.Error()
+	}
+	var errData PortableWorkflowError
+	if pe := (*PortableWorkflowError)(nil); errors.As(err, &pe) {
+		errData = *pe
+	} else {
+		errData = PortableWorkflowError{
+			Name:    "Portable Error",
+			Message: err.Error(),
+		}
+	}
+	b, jsonErr := json.Marshal(errData)
+	if jsonErr != nil {
+		return err.Error() // fallback to plain string
+	}
+	return string(b)
+}
+
+// deserializeWorkflowError deserializes an error from DB storage.
+// For portable serialization, parses the JSON into a PortableWorkflowError.
+// For all others, creates a plain error from the string.
+func deserializeWorkflowError(errStr *string, serialization string) error {
+	if errStr == nil || *errStr == "" {
+		return nil
+	}
+	if serialization != PortableSerializerName {
+		return errors.New(*errStr)
+	}
+	var pe PortableWorkflowError
+	if err := json.Unmarshal([]byte(*errStr), &pe); err != nil {
+		return errors.New(*errStr) // fallback: return plain error
+	}
+	return &pe
+}
+
