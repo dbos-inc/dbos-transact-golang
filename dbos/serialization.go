@@ -322,10 +322,10 @@ func getNilOrZeroValue[T any]() T {
 //
 //	return nil, &dbos.PortableWorkflowError{Name: "ValidationError", Message: "invalid input", Code: 400}
 type PortableWorkflowError struct {
-	Name    string `json:"name"`            // Error type/class name
-	Message string `json:"message"`         // Human-readable error message
-	Code    any    `json:"code,omitempty"`  // Optional application-specific error code (number or string)
-	Data    any    `json:"data,omitempty"`  // Optional structured error details
+	Name    string `json:"name"`           // Error type/class name
+	Message string `json:"message"`        // Human-readable error message
+	Code    any    `json:"code,omitempty"` // Optional application-specific error code (number or string)
+	Data    any    `json:"data,omitempty"` // Optional structured error details
 }
 
 func (e *PortableWorkflowError) Error() string {
@@ -371,4 +371,3 @@ func deserializeWorkflowError(errStr *string, serialization string) error {
 	}
 	return &pe
 }
-

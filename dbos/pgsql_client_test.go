@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -19,50 +18,42 @@ import (
 )
 
 // callEnqueueWorkflow calls the enqueue_workflow plpgsql stored function directly.
+// Uses positional parameters (not named) for CockroachDB compatibility.
+// Signature: enqueue_workflow(workflow_name, queue_name, positional_args, named_args,
+//
+//	class_name, config_name, workflow_id, app_version, timeout_ms,
+//	deadline_epoch_ms, deduplication_id, priority, queue_partition_key)
 func callEnqueueWorkflow(ctx context.Context, pool *pgxpool.Pool, schema string, params map[string]any) (string, error) {
 	sanitized := pgx.Identifier{schema}.Sanitize()
-	query := fmt.Sprintf(`SELECT %s.enqueue_workflow(
-		workflow_name => $1,
-		queue_name => $2,
-		positional_args => $3::json[],
-		named_args => $4::json,
-		workflow_id => $5,
-		app_version => $6,
-		timeout_ms => $7,
-		deadline_epoch_ms => $8,
-		deduplication_id => $9,
-		priority => $10,
-		queue_partition_key => $11
-	)`, sanitized)
+	query := fmt.Sprintf(`SELECT %s.enqueue_workflow($1, $2, $3::json[], $4::json, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, sanitized)
 
 	get := func(key string) any { return params[key] }
 
 	var wfID string
 	err := pool.QueryRow(ctx, query,
-		get("workflow_name"),
-		get("queue_name"),
-		get("positional_args"),
-		get("named_args"),
-		get("workflow_id"),
-		get("app_version"),
-		get("timeout_ms"),
-		get("deadline_epoch_ms"),
-		get("deduplication_id"),
-		get("priority"),
-		get("queue_partition_key"),
+		get("workflow_name"),       // $1
+		get("queue_name"),          // $2
+		get("positional_args"),     // $3
+		get("named_args"),          // $4
+		get("class_name"),          // $5
+		get("config_name"),         // $6
+		get("workflow_id"),         // $7
+		get("app_version"),         // $8
+		get("timeout_ms"),          // $9
+		get("deadline_epoch_ms"),   // $10
+		get("deduplication_id"),    // $11
+		get("priority"),            // $12
+		get("queue_partition_key"), // $13
 	).Scan(&wfID)
 	return wfID, err
 }
 
 // callSendMessage calls the send_message plpgsql stored function directly.
+// Uses positional parameters (not named) for CockroachDB compatibility.
+// Signature: send_message(destination_id, message, topic, message_id)
 func callSendMessage(ctx context.Context, pool *pgxpool.Pool, schema string, destinationID string, message any, topic *string, messageID *string) error {
 	sanitized := pgx.Identifier{schema}.Sanitize()
-	query := fmt.Sprintf(`SELECT %s.send_message(
-		destination_id => $1,
-		message => $2::json,
-		topic => $3,
-		message_id => $4
-	)`, sanitized)
+	query := fmt.Sprintf(`SELECT %s.send_message($1, $2::json, $3, $4)`, sanitized)
 
 	msgJSON, err := json.Marshal(message)
 	if err != nil {
@@ -87,9 +78,6 @@ func jsonArray(values ...any) ([]string, error) {
 }
 
 func TestPgsqlClient(t *testing.T) {
-	if os.Getenv("ISCRDB") != "" {
-		t.Skip("plpgsql stored functions not supported on CockroachDB")
-	}
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	pool := serverCtx.(*dbosContext).systemDB.(*sysDB).pool
@@ -154,16 +142,16 @@ func TestPgsqlClient(t *testing.T) {
 		require.NoError(t, err)
 
 		wfID, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
-			"workflow_name":      "pgsql_enqueue_test",
-			"queue_name":         queue.Name,
-			"positional_args":    args,
-			"named_args":         `{"ignored_key": "ignored_value"}`,
-			"workflow_id":        nil,
-			"app_version":        serverCtx.GetApplicationVersion(),
-			"timeout_ms":         nil,
-			"deadline_epoch_ms":  nil,
-			"deduplication_id":   nil,
-			"priority":           nil,
+			"workflow_name":       "pgsql_enqueue_test",
+			"queue_name":          queue.Name,
+			"positional_args":     args,
+			"named_args":          `{"ignored_key": "ignored_value"}`,
+			"workflow_id":         nil,
+			"app_version":         serverCtx.GetApplicationVersion(),
+			"timeout_ms":          nil,
+			"deadline_epoch_ms":   nil,
+			"deduplication_id":    nil,
+			"priority":            nil,
 			"queue_partition_key": nil,
 		})
 		require.NoError(t, err)
@@ -178,16 +166,16 @@ func TestPgsqlClient(t *testing.T) {
 
 	t.Run("EnqueueWithTimeout", func(t *testing.T) {
 		wfID, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
-			"workflow_name":      "pgsql_blocked_workflow",
-			"queue_name":         queue.Name,
-			"positional_args":    []string{`""`},
-			"named_args":         `{}`,
-			"workflow_id":        nil,
-			"app_version":        serverCtx.GetApplicationVersion(),
-			"timeout_ms":         int64(500),
-			"deadline_epoch_ms":  nil,
-			"deduplication_id":   nil,
-			"priority":           nil,
+			"workflow_name":       "pgsql_blocked_workflow",
+			"queue_name":          queue.Name,
+			"positional_args":     []string{`""`},
+			"named_args":          `{}`,
+			"workflow_id":         nil,
+			"app_version":         serverCtx.GetApplicationVersion(),
+			"timeout_ms":          int64(500),
+			"deadline_epoch_ms":   nil,
+			"deduplication_id":    nil,
+			"priority":            nil,
 			"queue_partition_key": nil,
 		})
 		require.NoError(t, err)
@@ -204,16 +192,16 @@ func TestPgsqlClient(t *testing.T) {
 	t.Run("EnqueueIdempotent", func(t *testing.T) {
 		wfID := fmt.Sprintf("pgsql-idempotent-%d", time.Now().UnixNano())
 		params := map[string]any{
-			"workflow_name":      "pgsql_retrieve_test",
-			"queue_name":         queue.Name,
-			"positional_args":    []string{`"idempotent-input"`},
-			"named_args":         `{}`,
-			"workflow_id":        wfID,
-			"app_version":        serverCtx.GetApplicationVersion(),
-			"timeout_ms":         nil,
-			"deadline_epoch_ms":  nil,
-			"deduplication_id":   nil,
-			"priority":           nil,
+			"workflow_name":       "pgsql_retrieve_test",
+			"queue_name":          queue.Name,
+			"positional_args":     []string{`"idempotent-input"`},
+			"named_args":          `{}`,
+			"workflow_id":         wfID,
+			"app_version":         serverCtx.GetApplicationVersion(),
+			"timeout_ms":          nil,
+			"deadline_epoch_ms":   nil,
+			"deduplication_id":    nil,
+			"priority":            nil,
 			"queue_partition_key": nil,
 		}
 
@@ -237,48 +225,48 @@ func TestPgsqlClient(t *testing.T) {
 
 		// First enqueue succeeds.
 		_, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
-			"workflow_name":      "pgsql_retrieve_test",
-			"queue_name":         queue.Name,
-			"positional_args":    []string{`"abc"`},
-			"named_args":         `{}`,
-			"workflow_id":        wfID1,
-			"app_version":        serverCtx.GetApplicationVersion(),
-			"timeout_ms":         nil,
-			"deadline_epoch_ms":  nil,
-			"deduplication_id":   dedupID,
-			"priority":           nil,
+			"workflow_name":       "pgsql_retrieve_test",
+			"queue_name":          queue.Name,
+			"positional_args":     []string{`"abc"`},
+			"named_args":          `{}`,
+			"workflow_id":         wfID1,
+			"app_version":         serverCtx.GetApplicationVersion(),
+			"timeout_ms":          nil,
+			"deadline_epoch_ms":   nil,
+			"deduplication_id":    dedupID,
+			"priority":            nil,
 			"queue_partition_key": nil,
 		})
 		require.NoError(t, err)
 
 		// Same wfID again is idempotent.
 		_, err = callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
-			"workflow_name":      "pgsql_retrieve_test",
-			"queue_name":         queue.Name,
-			"positional_args":    []string{`"abc"`},
-			"named_args":         `{}`,
-			"workflow_id":        wfID1,
-			"app_version":        serverCtx.GetApplicationVersion(),
-			"timeout_ms":         nil,
-			"deadline_epoch_ms":  nil,
-			"deduplication_id":   dedupID,
-			"priority":           nil,
+			"workflow_name":       "pgsql_retrieve_test",
+			"queue_name":          queue.Name,
+			"positional_args":     []string{`"abc"`},
+			"named_args":          `{}`,
+			"workflow_id":         wfID1,
+			"app_version":         serverCtx.GetApplicationVersion(),
+			"timeout_ms":          nil,
+			"deadline_epoch_ms":   nil,
+			"deduplication_id":    dedupID,
+			"priority":            nil,
 			"queue_partition_key": nil,
 		})
 		require.NoError(t, err)
 
 		// Different wfID with same dedup key must fail.
 		_, err = callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
-			"workflow_name":      "pgsql_retrieve_test",
-			"queue_name":         queue.Name,
-			"positional_args":    []string{`"def"`},
-			"named_args":         `{}`,
-			"workflow_id":        wfID2,
-			"app_version":        serverCtx.GetApplicationVersion(),
-			"timeout_ms":         nil,
-			"deadline_epoch_ms":  nil,
-			"deduplication_id":   dedupID,
-			"priority":           nil,
+			"workflow_name":       "pgsql_retrieve_test",
+			"queue_name":          queue.Name,
+			"positional_args":     []string{`"def"`},
+			"named_args":          `{}`,
+			"workflow_id":         wfID2,
+			"app_version":         serverCtx.GetApplicationVersion(),
+			"timeout_ms":          nil,
+			"deadline_epoch_ms":   nil,
+			"deduplication_id":    dedupID,
+			"priority":            nil,
 			"queue_partition_key": nil,
 		})
 		require.Error(t, err)
@@ -299,16 +287,16 @@ func TestPgsqlClient(t *testing.T) {
 		wfID := fmt.Sprintf("pgsql-priority-%d", time.Now().UnixNano())
 
 		_, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
-			"workflow_name":      "pgsql_retrieve_test",
-			"queue_name":         queue.Name,
-			"positional_args":    []string{`"priority-input"`},
-			"named_args":         `{}`,
-			"workflow_id":        wfID,
-			"app_version":        serverCtx.GetApplicationVersion(),
-			"timeout_ms":         nil,
-			"deadline_epoch_ms":  nil,
-			"deduplication_id":   nil,
-			"priority":           int32(5),
+			"workflow_name":       "pgsql_retrieve_test",
+			"queue_name":          queue.Name,
+			"positional_args":     []string{`"priority-input"`},
+			"named_args":          `{}`,
+			"workflow_id":         wfID,
+			"app_version":         serverCtx.GetApplicationVersion(),
+			"timeout_ms":          nil,
+			"deadline_epoch_ms":   nil,
+			"deduplication_id":    nil,
+			"priority":            int32(5),
 			"queue_partition_key": nil,
 		})
 		require.NoError(t, err)

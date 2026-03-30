@@ -198,9 +198,8 @@ var migration13SQL string
 var migration14SQL string
 
 type migrationFile struct {
-	version         int64
-	sql             string
-	skipOnCockroach bool
+	version int64
+	sql     string
 }
 
 const (
@@ -282,7 +281,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 		{version: 11, sql: migration11SQLProcessed},
 		{version: 12, sql: migration12SQLProcessed},
 		{version: 13, sql: migration13SQLProcessed},
-		{version: 14, sql: migration14SQLProcessed, skipOnCockroach: true},
+		{version: 14, sql: migration14SQLProcessed},
 	}
 
 	// Begin transaction for atomic migration execution
@@ -336,11 +335,6 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 	// Apply migrations starting from the next version
 	for _, migration := range migrations {
 		if migration.version <= currentVersion {
-			continue
-		}
-
-		// Skip migrations that are not supported on CockroachDB.
-		if isCockroach && migration.skipOnCockroach {
 			continue
 		}
 

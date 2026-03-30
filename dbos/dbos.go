@@ -277,7 +277,7 @@ func (c *dbosContext) WithValue(key, val any) DBOSContext {
 		executorID:              c.executorID,
 		applicationID:           c.applicationID,
 		queueRunner:             c.queueRunner,
-    serializer:              c.serializer,
+		serializer:              c.serializer,
 	}
 	childCtx.launched.Store(launched)
 	return childCtx
@@ -328,7 +328,7 @@ func (c *dbosContext) WithCancelCause() (DBOSContext, context.CancelCauseFunc) {
 		executorID:              c.executorID,
 		applicationID:           c.applicationID,
 		queueRunner:             c.queueRunner,
-    serializer:              c.serializer,
+		serializer:              c.serializer,
 	}
 	childCtx.launched.Store(launched)
 	return childCtx, cancelCauseFunc
