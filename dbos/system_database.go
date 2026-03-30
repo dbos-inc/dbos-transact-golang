@@ -194,9 +194,13 @@ var migration12SQL string
 //go:embed migrations/13_add_application_versions.sql
 var migration13SQL string
 
+//go:embed migrations/14_add_pgsql_client_functions.sql
+var migration14SQL string
+
 type migrationFile struct {
-	version int64
-	sql     string
+	version         int64
+	sql             string
+	skipOnCockroach bool
 }
 
 const (
@@ -261,6 +265,8 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 
 	migration13SQLProcessed := fmt.Sprintf(migration13SQL, sanitizedSchema)
 
+	migration14SQLProcessed := fmt.Sprintf(migration14SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
 		{version: 1, sql: migration1SQLProcessed},
@@ -276,6 +282,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 		{version: 11, sql: migration11SQLProcessed},
 		{version: 12, sql: migration12SQLProcessed},
 		{version: 13, sql: migration13SQLProcessed},
+		{version: 14, sql: migration14SQLProcessed, skipOnCockroach: true},
 	}
 
 	// Begin transaction for atomic migration execution
@@ -329,6 +336,11 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 	// Apply migrations starting from the next version
 	for _, migration := range migrations {
 		if migration.version <= currentVersion {
+			continue
+		}
+
+		// Skip migrations that are not supported on CockroachDB.
+		if isCockroach && migration.skipOnCockroach {
 			continue
 		}
 
@@ -945,11 +957,14 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var parentWorkflowID *string
 		var serialization *string
 
-		// Build scan arguments dynamically based on loaded columns
+		// Build scan arguments dynamically based on loaded columns.
+		// Use *string temporaries for struct fields that are `string` (not pointer)
+		// so that NULL columns from the database can be scanned correctly.
+		var authenticatedUser, assumedRole, applicationID *string
 		scanArgs := []any{
-			&wf.ID, &wf.Status, &wf.Name, &wf.AuthenticatedUser, &wf.AssumedRole,
+			&wf.ID, &wf.Status, &wf.Name, &authenticatedUser, &assumedRole,
 			&authenticatedRoles, &executorID, &createdAtMs,
-			&updatedAtMs, &applicationVersion, &wf.ApplicationID,
+			&updatedAtMs, &applicationVersion, &applicationID,
 			&wf.Attempts, &queueName, &timeoutMs,
 			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey, &forkedFrom, &parentWorkflowID,
 			&serialization,
@@ -965,6 +980,16 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		err := rows.Scan(scanArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan workflow row: %w", err)
+		}
+
+		if authenticatedUser != nil {
+			wf.AuthenticatedUser = *authenticatedUser
+		}
+		if assumedRole != nil {
+			wf.AssumedRole = *assumedRole
+		}
+		if applicationID != nil {
+			wf.ApplicationID = *applicationID
 		}
 
 		if authenticatedRoles != nil && *authenticatedRoles != "" {
