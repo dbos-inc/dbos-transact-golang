@@ -294,12 +294,17 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		if encErr != nil {
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
 		}
+		var serializedOutcomeErr *string
+		if outcome.err != nil {
+			s := serializeWorkflowError(outcome.err, ser.Name())
+			serializedOutcomeErr = &s
+		}
 		recordGetResultInput := recordOperationResultDBInput{
 			workflowID:      workflowState.workflowID,
 			childWorkflowID: h.workflowID,
 			stepID:          workflowState.nextStepID(),
 			output:          encodedOutput,
-			err:             outcome.err,
+			errStr:          serializedOutcomeErr,
 			startedAt:       startTime,
 			completedAt:     completedTime,
 			stepName:        "DBOS.getResult",
@@ -345,11 +350,17 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		defer cancel()
 	}
 
-	awaitResult, err := retryWithResult(ctx, func() (*awaitWorkflowResultOutput, error) {
+	awaitResult, awaitErr := retryWithResult(ctx, func() (*awaitWorkflowResultOutput, error) {
 		return h.dbosContext.(*dbosContext).systemDB.awaitWorkflowResult(ctx, h.workflowID, options.pollInterval)
 	}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 
 	completedTime := time.Now()
+
+	// awaitErr is a real DB/network/cancellation error; the workflow's recorded error is in awaitResult.errStr
+	err = awaitErr
+	if awaitErr == nil && awaitResult.errStr != nil {
+		err = deserializeWorkflowError(awaitResult.errStr, awaitResult.serialization)
+	}
 
 	// Deserialize the result directly into the target type
 	var typedResult R
@@ -379,7 +390,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 				childWorkflowID: h.workflowID,
 				stepID:          workflowState.nextStepID(),
 				output:          encodedStr,
-				err:             err,
+				errStr:          awaitResult.errStr,
 				startedAt:       startTime,
 				completedAt:     completedTime,
 				stepName:        "DBOS.getResult",
@@ -1271,6 +1282,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID, _DB_RETRY_INTERVAL)
 			}, withRetrierLogger(c.logger))
 			err = awaitErr
+			if awaitErr == nil && awaitOut != nil && awaitOut.errStr != nil {
+				err = deserializeWorkflowError(awaitOut.errStr, awaitOut.serialization)
+			}
 			var encodedResult any
 			var ser string
 			if awaitOut != nil {
@@ -1305,11 +1319,15 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				return
 			}
 
+			var serializedErr string
+			if err != nil {
+				serializedErr = serializeWorkflowError(err, resolveEncoder(workflowCtx).Name())
+			}
 			recordErr := retry(c, func() error {
 				return c.systemDB.updateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
 					workflowID: workflowID,
 					status:     status,
-					err:        err,
+					errStr:     serializedErr,
 					output:     encodedOutput,
 				})
 			}, withRetrierLogger(c.logger))
@@ -1660,7 +1678,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	if recordedOutput != nil {
 		// Return the encoded output wrapped in stepCheckpointedOutcome
 		// This allows RunAsStep[R] to distinguish encoded values from direct values
-		return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, recordedOutput.err
+		return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, deserializeWorkflowError(recordedOutput.errStr, recordedOutput.serialization)
 	}
 
 	stepCtx := WithValue(c, workflowStateKey, stepState)
@@ -1676,11 +1694,16 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 
 	// Record the final result
 	stepCompletedTime := time.Now()
+	var serializedStepErr *string
+	if stepError != nil {
+		s := serializeWorkflowError(stepError, ser.Name())
+		serializedStepErr = &s
+	}
 	dbInput := recordOperationResultDBInput{
 		workflowID:    stepState.workflowID,
 		stepName:      stepOpts.stepName,
 		stepID:        stepState.stepID,
-		err:           stepError,
+		errStr:        serializedStepErr,
 		startedAt:     stepStartTime,
 		completedAt:   stepCompletedTime,
 		output:        encodedStepOutput,
@@ -1769,7 +1792,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
 		}
 		if recordedOutput != nil {
-			return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, recordedOutput.err
+			return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, deserializeWorkflowError(recordedOutput.errStr, recordedOutput.serialization)
 		}
 
 		stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
@@ -1780,11 +1803,16 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
 		}
 
+		var serializedTxnErr *string
+		if stepError != nil {
+			s := serializeWorkflowError(stepError, txnSer.Name())
+			serializedTxnErr = &s
+		}
 		dbInput := recordOperationResultDBInput{
 			workflowID:    stepState.workflowID,
 			stepName:      stepOpts.stepName,
 			stepID:        stepState.stepID,
-			err:           stepError,
+			errStr:        serializedTxnErr,
 			startedAt:     stepStartTime,
 			completedAt:   time.Now(),
 			output:        encodedStepOutput,
@@ -3458,6 +3486,10 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 					workflows[i].Output = string(decodedBytes)
 				}
 			}
+			if params.loadOutput && workflows[i].Error != nil {
+				s := workflows[i].Error.Error()
+				workflows[i].Error = deserializeWorkflowError(&s, workflows[i].Serialization)
+			}
 		}
 	}
 
@@ -3557,10 +3589,15 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 	}
 	stepInfos := make([]StepInfo, len(steps))
 	for i, step := range steps {
+		var stepErr error
+		if step.Error != nil {
+			s := step.Error.Error()
+			stepErr = deserializeWorkflowError(&s, step.Serialization)
+		}
 		stepInfos[i] = StepInfo{
 			StepID:          step.StepID,
 			StepName:        step.StepName,
-			Error:           step.Error,
+			Error:           stepErr,
 			ChildWorkflowID: step.ChildWorkflowID,
 			StartedAt:       step.StartedAt,
 			CompletedAt:     step.CompletedAt,
@@ -3575,7 +3612,10 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 				stepInfos[i].Output = nil
 				continue
 			}
-			if c.serializer != nil {
+			if steps[i].Serialization == PortableSerializerName {
+				// Portable outputs are plain JSON — return raw string as-is.
+				stepInfos[i].Output = *encodedOutput
+			} else if c.serializer != nil {
 				// Custom serializer: fully decode using the serializer
 				decoded, err := c.serializer.Decode(encodedOutput)
 				if err != nil {

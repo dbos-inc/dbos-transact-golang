@@ -1054,7 +1054,7 @@ type updateWorkflowOutcomeDBInput struct {
 	workflowID string
 	status     WorkflowStatusType
 	output     *string
-	err        error
+	errStr     string
 	tx         pgx.Tx
 }
 
@@ -1065,17 +1065,12 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
 			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND $1::TEXT IN ($7, $8))`, pgx.Identifier{s.schema}.Sanitize())
 
-	var errorStr string
-	if input.err != nil {
-		errorStr = input.err.Error()
-	}
-
 	// input.output is already a *string from the database layer
 	var err error
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, query, input.status, input.output, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
+		_, err = input.tx.Exec(ctx, query, input.status, input.output, input.errStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
 	} else {
-		_, err = s.pool.Exec(ctx, query, input.status, input.output, errorStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
+		_, err = s.pool.Exec(ctx, query, input.status, input.output, input.errStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
 	}
 
 	if err != nil {
@@ -1514,6 +1509,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 type awaitWorkflowResultOutput struct {
 	output        *string
 	serialization string
+	errStr        *string
 }
 
 func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*awaitWorkflowResultOutput, error) {
@@ -1551,10 +1547,10 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, poll
 
 		switch status {
 		case WorkflowStatusSuccess, WorkflowStatusError:
-			if errorStr == nil || len(*errorStr) == 0 {
-				return result, nil
+			if errorStr != nil && len(*errorStr) > 0 {
+				result.errStr = errorStr
 			}
-			return result, errors.New(*errorStr)
+			return result, nil
 		case WorkflowStatusCancelled:
 			return result, newAwaitedWorkflowCancelledError(workflowID)
 		case WorkflowStatusMaxRecoveryAttemptsExceeded:
@@ -1571,7 +1567,7 @@ type recordOperationResultDBInput struct {
 	stepID          int
 	stepName        string
 	output          *string
-	err             error
+	errStr          *string
 	tx              pgx.Tx
 	startedAt       time.Time
 	completedAt     time.Time
@@ -1582,15 +1578,9 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 	startedAtMs := input.startedAt.UnixMilli()
 	completedAtMs := input.completedAt.UnixMilli()
 
-	var errorString *string
-	if input.err != nil {
-		e := input.err.Error()
-		errorString = &e
-	}
-
 	columns := []string{"workflow_uuid", "function_id", "output", "error", "function_name", "started_at_epoch_ms", "completed_at_epoch_ms", "serialization"}
 	placeholders := []string{"$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8"}
-	args := []any{input.workflowID, input.stepID, input.output, errorString, input.stepName, startedAtMs, completedAtMs, input.serialization}
+	args := []any{input.workflowID, input.stepID, input.output, input.errStr, input.stepName, startedAtMs, completedAtMs, input.serialization}
 	argCounter := 8
 
 	if input.childWorkflowID != "" {
@@ -1696,7 +1686,7 @@ func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, funct
 
 type recordedResult struct {
 	output        *string
-	err           error
+	errStr        *string
 	serialization string
 }
 
@@ -1767,17 +1757,17 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 		return nil, newUnexpectedStepError(input.workflowID, input.stepID, input.stepName, recordedFunctionName)
 	}
 
-	var recordedError error
-	if errorStr != nil && *errorStr != "" {
-		recordedError = errors.New(*errorStr)
-	}
 	var storedSerialization string
 	if serialization != nil {
 		storedSerialization = *serialization
 	}
+	var recordedErrStr *string
+	if errorStr != nil && *errorStr != "" {
+		recordedErrStr = errorStr
+	}
 	result := &recordedResult{
 		output:        outputString,
-		err:           recordedError,
+		errStr:        recordedErrStr,
 		serialization: storedSerialization,
 	}
 	return result, nil
@@ -1792,6 +1782,7 @@ type stepInfo struct {
 	ChildWorkflowID string    // The ID of a child workflow spawned by this step (if applicable)
 	StartedAt       time.Time // When the step execution started
 	CompletedAt     time.Time // When the step execution completed
+	Serialization   string    // The serialization format used for this step
 }
 
 type getWorkflowStepsInput struct {
@@ -1800,7 +1791,7 @@ type getWorkflowStepsInput struct {
 }
 
 func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]stepInfo, error) {
-	query := fmt.Sprintf(`SELECT function_id, function_name, output, error, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms
+	query := fmt.Sprintf(`SELECT function_id, function_name, output, error, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms, serialization
 			  FROM %s.operation_outputs
 			  WHERE workflow_uuid = $1
 			  ORDER BY function_id ASC`, pgx.Identifier{s.schema}.Sanitize())
@@ -1818,8 +1809,9 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 		var errorString *string
 		var childWorkflowID *string
 		var startedAtMs, completedAtMs *int64
+		var serialization *string
 
-		err := rows.Scan(&step.StepID, &step.StepName, &outputString, &errorString, &childWorkflowID, &startedAtMs, &completedAtMs)
+		err := rows.Scan(&step.StepID, &step.StepName, &outputString, &errorString, &childWorkflowID, &startedAtMs, &completedAtMs, &serialization)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan step row: %w", err)
 		}
@@ -1837,6 +1829,11 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 			step.Output = outputString
 		}
 
+		var storedSerialization string
+		if serialization != nil {
+			storedSerialization = *serialization
+		}
+		step.Serialization = storedSerialization
 		// Convert error string to error if present
 		if errorString != nil && *errorString != "" {
 			step.Error = errors.New(*errorString)
@@ -1913,8 +1910,8 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 			return 0, fmt.Errorf("failed to decode sleep end time: %w", err)
 		}
 
-		if recordedResult.err != nil { // This should never happen
-			return 0, recordedResult.err
+		if recordedResult.errStr != nil { // This should never happen
+			return 0, errors.New(*recordedResult.errStr)
 		}
 	} else {
 		// First execution: calculate and record the end time
@@ -1934,7 +1931,6 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 			stepID:        stepID,
 			stepName:      functionName,
 			output:        encodedEndTime,
-			err:           nil,
 			startedAt:     startTime,
 			completedAt:   completedTime,
 			serialization: "DBOS_JSON",
@@ -2305,7 +2301,11 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*recvResult, error) 
 		return nil, err
 	}
 	if recordedResult != nil {
-		return &recvResult{message: recordedResult.output, serialization: recordedResult.serialization}, recordedResult.err
+		var recvErr error
+		if recordedResult.errStr != nil {
+			recvErr = errors.New(*recordedResult.errStr)
+		}
+		return &recvResult{message: recordedResult.output, serialization: recordedResult.serialization}, recvErr
 	}
 
 	// First check if there's already a receiver for this workflow/topic to avoid unnecessary database load
@@ -2436,8 +2436,11 @@ loop:
 	}
 
 	// Record an error if no message found and timeout occurred
+	var timeoutErr error
 	if timeoutOccurred && messageString == nil {
-		recordInput.err = newTimeoutError(destinationID, functionName, fmt.Sprintf("no message received within %v", input.Timeout))
+		timeoutErr = newTimeoutError(destinationID, functionName, fmt.Sprintf("no message received within %v", input.Timeout))
+		s := timeoutErr.Error()
+		recordInput.errStr = &s
 	}
 
 	err = s.recordOperationResult(ctx, recordInput)
@@ -2450,7 +2453,7 @@ loop:
 	}
 
 	// Return the message and its serialization format
-	return &recvResult{message: messageString, serialization: serialization}, recordInput.err
+	return &recvResult{message: messageString, serialization: serialization}, timeoutErr
 }
 
 type WorkflowSetEventInput struct {
@@ -2531,7 +2534,11 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*getEventRes
 			return nil, err
 		}
 		if recordedResult != nil {
-			return &getEventResult{value: recordedResult.output, serialization: recordedResult.serialization}, recordedResult.err
+			var evtErr error
+			if recordedResult.errStr != nil {
+				evtErr = errors.New(*recordedResult.errStr)
+			}
+			return &getEventResult{value: recordedResult.output, serialization: recordedResult.serialization}, evtErr
 		}
 	}
 
@@ -2660,7 +2667,6 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*getEventRes
 			stepID:        stepID,
 			stepName:      functionName,
 			output:        valueString,
-			err:           nil,
 			startedAt:     startTime,
 			completedAt:   completedTime,
 			serialization: serialization,
@@ -2668,8 +2674,9 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*getEventRes
 
 		// Record an error if no event found and timeout occurred
 		if timeoutOccurred && valueString == nil {
-			recordInput.err = newTimeoutError(wfState.workflowID, functionName, fmt.Sprintf("no event found for key '%s' within %v", input.Key, input.Timeout))
-			timeoutErr = recordInput.err
+			timeoutErr = newTimeoutError(wfState.workflowID, functionName, fmt.Sprintf("no event found for key '%s' within %v", input.Key, input.Timeout))
+			s := timeoutErr.Error()
+			recordInput.errStr = &s
 		}
 
 		err = s.recordOperationResult(ctx, recordInput)

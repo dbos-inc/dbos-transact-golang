@@ -277,7 +277,6 @@ func TestDebouncer(t *testing.T) {
 			workflowID: debouncerWorkflowID,
 			status:     WorkflowStatusPending,
 			output:     nil,
-			err:        nil,
 			tx:         nil,
 		})
 		require.NoError(t, err, "failed to update workflow status to PENDING")

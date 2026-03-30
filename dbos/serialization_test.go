@@ -2140,3 +2140,195 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 		assert.Equal(t, expectedInput, recoveredResult.EventOut, "getEvent replayed from DB")
 	})
 }
+
+func TestPortableWorkflowError(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// Workflow that runs a step then raises a PortableWorkflowError with all fields set.
+	portableErrWf := func(ctx DBOSContext, input string) (string, error) {
+		_, err := RunAsStep(ctx, func(_ context.Context) (string, error) {
+			return input, nil
+		})
+		if err != nil {
+			return "", err
+		}
+		return "", &PortableWorkflowError{
+			Name:    "ValidationError",
+			Message: "invalid input: " + input,
+			Code:    400,
+			Data:    map[string]any{"field": "input"},
+		}
+	}
+	RegisterWorkflow(executor, portableErrWf, WithWorkflowName("portable_err_wf"))
+
+	// Workflow that runs a step that itself fails with a PortableWorkflowError.
+	portableStepErrWf := func(ctx DBOSContext, input string) (string, error) {
+		return RunAsStep(ctx, func(_ context.Context) (string, error) {
+			return "", &PortableWorkflowError{
+				Name:    "StepError",
+				Message: "step failed: " + input,
+				Code:    500,
+			}
+		})
+	}
+	RegisterWorkflow(executor, portableStepErrWf, WithWorkflowName("portable_step_err_wf"))
+
+	// Workflow that runs a step then raises a plain Go error (triggers best-effort conversion).
+	plainErrWf := func(ctx DBOSContext, input string) (string, error) {
+		_, err := RunAsStep(ctx, func(_ context.Context) (string, error) {
+			return input, nil
+		})
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("something went wrong: %s", input)
+	}
+	RegisterWorkflow(executor, plainErrWf, WithWorkflowName("plain_err_portable_wf"))
+
+	require.NoError(t, Launch(executor))
+	defer Shutdown(executor, 10*time.Second)
+
+	c := executor.(*dbosContext)
+	sysDB := c.systemDB.(*sysDB)
+
+	readStoredError := func(t *testing.T, workflowID string) string {
+		t.Helper()
+		var storedError *string
+		q := fmt.Sprintf(`SELECT error FROM %s.workflow_status WHERE workflow_uuid = $1`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		require.NoError(t, sysDB.pool.QueryRow(context.Background(), q, workflowID).Scan(&storedError))
+		require.NotNil(t, storedError)
+		return *storedError
+	}
+
+	readStoredStepError := func(t *testing.T, workflowID string, stepID int) string {
+		t.Helper()
+		var storedError *string
+		q := fmt.Sprintf(`SELECT error FROM %s.operation_outputs WHERE workflow_uuid = $1 AND function_id = $2`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		require.NoError(t, sysDB.pool.QueryRow(context.Background(), q, workflowID, stepID).Scan(&storedError))
+		require.NotNil(t, storedError)
+		return *storedError
+	}
+
+	t.Run("PortableWorkflowErrorFields", func(t *testing.T) {
+		wfID := "portable-err-fields"
+		handle, err := RunWorkflow(executor, portableErrWf, "test-value",
+			WithWorkflowID(wfID), WithPortableWorkflow())
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.Error(t, err)
+
+		// Direct handle returns the raw *PortableWorkflowError from the goroutine.
+		var pe *PortableWorkflowError
+		require.ErrorAs(t, err, &pe)
+		assert.Equal(t, "ValidationError", pe.Name)
+		assert.Equal(t, "invalid input: test-value", pe.Message)
+
+		// Stored in DB as portable JSON.
+		var errData map[string]any
+		require.NoError(t, json.Unmarshal([]byte(readStoredError(t, wfID)), &errData))
+		assert.Equal(t, "ValidationError", errData["name"])
+		assert.Equal(t, "invalid input: test-value", errData["message"])
+		assert.Equal(t, float64(400), errData["code"])
+
+		// RetrieveWorkflow goes through DB deserialization — returns *PortableWorkflowError.
+		retrieved, err := RetrieveWorkflow[string](executor, wfID)
+		require.NoError(t, err)
+		_, err = retrieved.GetResult()
+		require.Error(t, err)
+		var dbPe *PortableWorkflowError
+		require.ErrorAs(t, err, &dbPe)
+		assert.Equal(t, "ValidationError", dbPe.Name)
+		assert.Equal(t, "invalid input: test-value", dbPe.Message)
+		assert.Equal(t, float64(400), dbPe.Code) // JSON numbers unmarshal to float64
+		dbData, ok := dbPe.Data.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "input", dbData["field"])
+	})
+
+	t.Run("PlainErrorBestEffortConversion", func(t *testing.T) {
+		wfID := "portable-err-plain"
+		handle, err := RunWorkflow(executor, plainErrWf, "oops",
+			WithWorkflowID(wfID), WithPortableWorkflow())
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.Error(t, err)
+
+		// Stored in DB as portable JSON with best-effort name and message.
+		var errData map[string]any
+		require.NoError(t, json.Unmarshal([]byte(readStoredError(t, wfID)), &errData))
+		assert.Equal(t, "something went wrong: oops", errData["message"])
+		assert.Equal(t, "Portable Error", errData["name"])
+
+		// The stored JSON deserializes directly into *PortableWorkflowError.
+		var storedPe PortableWorkflowError
+		require.NoError(t, json.Unmarshal([]byte(readStoredError(t, wfID)), &storedPe))
+		assert.Equal(t, "something went wrong: oops", storedPe.Message)
+		assert.Equal(t, "Portable Error", storedPe.Name)
+
+		// RetrieveWorkflow deserializes the portable JSON back to *PortableWorkflowError.
+		retrieved, err := RetrieveWorkflow[string](executor, wfID)
+		require.NoError(t, err)
+		_, err = retrieved.GetResult()
+		require.Error(t, err)
+		var pe *PortableWorkflowError
+		require.ErrorAs(t, err, &pe)
+		assert.Equal(t, "something went wrong: oops", pe.Message)
+		assert.Equal(t, "Portable Error", pe.Name)
+	})
+
+	t.Run("StepPortableWorkflowError", func(t *testing.T) {
+		wfID := "portable-step-err"
+		handle, err := RunWorkflow(executor, portableStepErrWf, "step-input",
+			WithWorkflowID(wfID), WithPortableWorkflow())
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.Error(t, err)
+
+		// Step error stored as portable JSON in operation_outputs (step 0).
+		var stepErrData map[string]any
+		require.NoError(t, json.Unmarshal([]byte(readStoredStepError(t, wfID, 0)), &stepErrData))
+		assert.Equal(t, "StepError", stepErrData["name"])
+		assert.Equal(t, "step failed: step-input", stepErrData["message"])
+		assert.Equal(t, float64(500), stepErrData["code"])
+
+		// GetWorkflowSteps deserializes the step error as *PortableWorkflowError.
+		steps, err := GetWorkflowSteps(executor, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		var stepPe *PortableWorkflowError
+		require.ErrorAs(t, steps[0].Error, &stepPe)
+		assert.Equal(t, "StepError", stepPe.Name)
+		assert.Equal(t, "step failed: step-input", stepPe.Message)
+		assert.Equal(t, float64(500), stepPe.Code)
+	})
+
+	t.Run("ListWorkflowsAndGetWorkflowSteps", func(t *testing.T) {
+		wfID := "portable-list-wf"
+		handle, err := RunWorkflow(executor, portableErrWf, "list-test",
+			WithWorkflowID(wfID), WithPortableWorkflow())
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.Error(t, err)
+
+		// ListWorkflows: error goes through errors.New → .Error() → deserializeWorkflowError.
+		wfs, err := ListWorkflows(executor, WithWorkflowIDs([]string{wfID}))
+		require.NoError(t, err)
+		require.Len(t, wfs, 1)
+		var listPe *PortableWorkflowError
+		require.ErrorAs(t, wfs[0].Error, &listPe)
+		assert.Equal(t, "ValidationError", listPe.Name)
+		assert.Equal(t, "invalid input: list-test", listPe.Message)
+		assert.Equal(t, float64(400), listPe.Code)
+
+		// GetWorkflowSteps: first step succeeds (just echoes input), workflow error is separate.
+		steps, err := GetWorkflowSteps(executor, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		assert.Nil(t, steps[0].Error) // step succeeded; error is on the workflow, not the step
+		// Portable step output is returned as raw JSON string (not base64-decoded).
+		require.NotNil(t, steps[0].Output)
+		assert.Equal(t, `"list-test"`, steps[0].Output)
+	})
+}
