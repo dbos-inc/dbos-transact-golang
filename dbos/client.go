@@ -125,6 +125,25 @@ func WithEnqueueQueuePartitionKey(partitionKey string) EnqueueOption {
 	}
 }
 
+// WithEnqueueClassName sets the class/namespace name for the enqueued workflow.
+// This is required when enqueueing to Python, TypeScript, or Java targets, which
+// dispatch workflows by (class_name, workflow_name) pair.
+func WithEnqueueClassName(className string) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.className = className
+	}
+}
+
+// WithEnqueueConfigName sets the config/instance name for the enqueued workflow.
+// This is required when enqueueing to Python, TypeScript, or Java targets that
+// register workflows on class instances (e.g. DBOSConfiguredInstance / ConfiguredInstance).
+// Pass an empty string ("") to target the default (unnamed) instance.
+func WithEnqueueConfigName(configName string) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.configName = &configName
+	}
+}
+
 type enqueueOptions struct {
 	workflowName       string
 	workflowID         string
@@ -134,6 +153,8 @@ type enqueueOptions struct {
 	workflowTimeout    time.Duration
 	workflowInput      any
 	queuePartitionKey  string
+	className          string
+	configName         *string
 }
 
 // EnqueueWorkflow enqueues a workflow to a named queue for deferred execution.
@@ -215,6 +236,8 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		DeduplicationID:    params.deduplicationID,
 		Priority:           int(params.priority),
 		QueuePartitionKey:  params.queuePartitionKey,
+		ClassName:          params.className,
+		ConfigName:         params.configName,
 		Serialization:      serialization,
 	}
 

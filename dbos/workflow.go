@@ -58,6 +58,8 @@ type WorkflowStatus struct {
 	QueuePartitionKey  string             `json:"queue_partition_key,omitempty"` // Queue partition key for partitioned queues
 	ForkedFrom         string             `json:"forked_from,omitempty"`         // ID of the original workflow if this is a fork
 	ParentWorkflowID   string             `json:"parent_workflow_id,omitempty"`  // ID of the parent workflow if this is a child
+	ClassName          string             `json:"class_name,omitempty"`          // Class/namespace name for cross-language dispatch
+	ConfigName         *string            `json:"config_name,omitempty"`         // Instance/config name for cross-language dispatch (nil = unset, pointer to "" = explicit empty)
 	Serialization      string             `json:"serialization,omitempty"`       // Serialization format used for inputs/outputs (e.g., "DBOS_JSON", "portable_json")
 }
 

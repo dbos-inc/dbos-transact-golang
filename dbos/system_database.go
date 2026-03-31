@@ -650,6 +650,11 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		parentWorkflowID = &input.status.ParentWorkflowID
 	}
 
+	var className *string
+	if len(input.status.ClassName) > 0 {
+		className = &input.status.ClassName
+	}
+
 	query := fmt.Sprintf(`INSERT INTO %s.workflow_status (
         workflow_uuid,
         status,
@@ -672,17 +677,19 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
         queue_partition_key,
         owner_xid,
         parent_workflow_id,
+        class_name,
+        config_name,
         serialization
-    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
 			recovery_attempts = CASE
-                WHEN EXCLUDED.status != $23 THEN workflow_status.recovery_attempts + $25
+                WHEN EXCLUDED.status != $25 THEN workflow_status.recovery_attempts + $27
                 ELSE workflow_status.recovery_attempts
             END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status = $24 THEN workflow_status.executor_id
+                WHEN EXCLUDED.status = $26 THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
         RETURNING recovery_attempts, status, name, queue_name, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, pgx.Identifier{s.schema}.Sanitize())
@@ -725,6 +732,8 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		queuePartitionKey,
 		input.ownerXID,
 		parentWorkflowID,
+		className,
+		input.status.ConfigName, // *string: nil → NULL, &"" → empty string
 		input.status.Serialization,
 		WorkflowStatusEnqueued,
 		WorkflowStatusEnqueued,
