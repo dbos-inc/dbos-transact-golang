@@ -726,14 +726,14 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		updatedAt.UnixMilli(),
 		timeoutMs,
 		deadline,
-		input.status.Input, // encoded input (already *string)
+		input.status.Input,
 		deduplicationID,
 		input.status.Priority,
 		queuePartitionKey,
 		input.ownerXID,
 		parentWorkflowID,
 		className,
-		input.status.ConfigName, // *string: nil → NULL, &"" → empty string
+		input.status.ConfigName,
 		input.status.Serialization,
 		WorkflowStatusEnqueued,
 		WorkflowStatusEnqueued,
@@ -959,11 +959,11 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var forkedFrom *string
 		var parentWorkflowID *string
 		var serialization *string
+		var authenticatedUser *string
+		var assumedRole *string
+		var applicationID *string
 
 		// Build scan arguments dynamically based on loaded columns.
-		// Use *string temporaries for struct fields that are `string` (not pointer)
-		// so that NULL columns from the database can be scanned correctly.
-		var authenticatedUser, assumedRole, applicationID *string
 		scanArgs := []any{
 			&wf.ID, &wf.Status, &wf.Name, &authenticatedUser, &assumedRole,
 			&authenticatedRoles, &executorID, &createdAtMs,
