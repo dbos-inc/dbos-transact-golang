@@ -1668,6 +1668,37 @@ func TestPortableInterop(t *testing.T) {
 		require.NoError(t, err)
 		verifyResult(t, result)
 	})
+
+	// 4. Wrong-type input: enqueue with a string where InteropArgs is expected.
+	// Go's type system catches this during deserialization; the workflow should fail.
+	t.Run("WrongTypeInput", func(t *testing.T) {
+		workflowID := "interop-wrongtype-" + t.Name()
+		queueName := "portable-interop-queue"
+		badInputsJSON := `{"positionalArgs":["not-an-object"],"namedArgs":{}}`
+
+		c := executor.(*dbosContext)
+		sysDB := c.systemDB.(*sysDB)
+		insertQuery := fmt.Sprintf(`INSERT INTO %s.workflow_status (
+			workflow_uuid, status, name, inputs, serialization, queue_name,
+			created_at, updated_at, recovery_attempts, executor_id, priority,
+			application_version, application_id, authenticated_user, assumed_role, authenticated_roles
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		now := time.Now().UnixMilli()
+		_, err := sysDB.pool.Exec(context.Background(), insertQuery,
+			workflowID, string(WorkflowStatusEnqueued), "interop_workflow", badInputsJSON, PortableSerializerName, &queueName,
+			now, now, 0, "local", 0, c.applicationVersion, "", "", "", "[]")
+		require.NoError(t, err)
+
+		retrievedHandle, err := RetrieveWorkflow[InteropResult](executor, workflowID)
+		require.NoError(t, err)
+		_, err = retrievedHandle.GetResult()
+		require.Error(t, err)
+		var pe *PortableWorkflowError
+		require.ErrorAs(t, err, &pe)
+		assert.Equal(t, "Portable Error", pe.Name)
+		assert.Contains(t, err.Error(), "DBOS Error 10")
+	})
 }
 
 // TestCrossFormatRecvAndGetEvent tests that a non-portable Go workflow can correctly
