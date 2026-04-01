@@ -2071,7 +2071,23 @@ func (c *dbosContext) Select(_ DBOSContext, channels []<-chan StepOutcome[any]) 
 /******* WORKFLOW COMMUNICATIONS ********/
 /****************************************/
 
-func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string) error {
+// sendOptions holds configuration for a Send call.
+type sendOptions struct {
+	usePortableSerializer bool
+}
+
+// SendOption is a functional option for configuring a Send call.
+type SendOption func(*sendOptions)
+
+// WithPortableSend configures Send to use the portable JSON serializer,
+// enabling cross-language interoperability regardless of the workflow's serializer.
+func WithPortableSend() SendOption {
+	return func(opts *sendOptions) {
+		opts.usePortableSerializer = true
+	}
+}
+
+func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, topic string, opts ...SendOption) error {
 	// Send cannot be sent from within a step if used within a workflow
 	isWithinWorkflow := false
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
@@ -2082,8 +2098,18 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 		}
 	}
 
-	// Serialize the message before sending
-	sendSer := resolveEncoder(c)
+	options := &sendOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	var sendSer Serializer[any]
+	if options.usePortableSerializer {
+		sendSer = newPortableSerializer[any]()
+	} else {
+		sendSer = resolveEncoder(c)
+	}
+
 	encodedMessage, err := sendSer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
@@ -2117,11 +2143,11 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 // Example:
 //
 //	err := dbos.Send(ctx, "target-workflow-id", "Hello from sender", "notifications")
-func Send[P any](ctx DBOSContext, destinationID string, message P, topic string) error {
+func Send[P any](ctx DBOSContext, destinationID string, message P, topic string, opts ...SendOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.Send(ctx, destinationID, message, topic)
+	return ctx.Send(ctx, destinationID, message, topic, opts...)
 }
 
 type recvInput struct {
@@ -2219,9 +2245,35 @@ func Recv[R any](ctx DBOSContext, topic string, timeout time.Duration) (R, error
 	return typedMessage, nil
 }
 
-func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
-	// Serialize the event value before storing
-	evtSer := resolveEncoder(c)
+// setEventOptions holds configuration for a SetEvent call.
+type setEventOptions struct {
+	usePortableSerializer bool
+}
+
+// SetEventOption is a functional option for configuring a SetEvent call.
+type SetEventOption func(*setEventOptions)
+
+// WithPortableSetEvent configures SetEvent to use the portable JSON serializer,
+// enabling cross-language interoperability regardless of the workflow's serializer.
+func WithPortableSetEvent() SetEventOption {
+	return func(opts *setEventOptions) {
+		opts.usePortableSerializer = true
+	}
+}
+
+func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any, opts ...SetEventOption) error {
+	options := &setEventOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	var evtSer Serializer[any]
+	if options.usePortableSerializer {
+		evtSer = newPortableSerializer[any]()
+	} else {
+		evtSer = resolveEncoder(c)
+	}
+
 	encodedMessage, err := evtSer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize event value: %w", err)
@@ -2247,11 +2299,11 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any) error {
 // Example:
 //
 //	err := dbos.SetEvent(ctx, "status", "processing-complete")
-func SetEvent[P any](ctx DBOSContext, key string, message P) error {
+func SetEvent[P any](ctx DBOSContext, key string, message P, opts ...SetEventOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.SetEvent(ctx, key, message)
+	return ctx.SetEvent(ctx, key, message, opts...)
 }
 
 type getEventInput struct {
@@ -2337,18 +2389,46 @@ func GetEvent[R any](ctx DBOSContext, targetWorkflowID, key string, timeout time
 	return typedValue, nil
 }
 
-func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
-	// value is already encoded as *string at the package level
-	encodedValue, ok := value.(*string)
-	if !ok {
-		return fmt.Errorf("value must be *string (already encoded), got %T", value)
+// writeStreamOptions holds configuration for a WriteStream call.
+type writeStreamOptions struct {
+	usePortableSerializer bool
+}
+
+// WriteStreamOption is a functional option for configuring a WriteStream call.
+type WriteStreamOption func(*writeStreamOptions)
+
+// WithPortableWriteStream configures WriteStream to use the portable JSON serializer,
+// enabling cross-language interoperability regardless of the workflow's serializer.
+func WithPortableWriteStream() WriteStreamOption {
+	return func(opts *writeStreamOptions) {
+		opts.usePortableSerializer = true
 	}
-	_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+}
+
+func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any, opts ...WriteStreamOption) error {
+	options := &writeStreamOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	var ser Serializer[any]
+	if options.usePortableSerializer {
+		ser = newPortableSerializer[any]()
+	} else {
+		ser = resolveEncoder(c)
+	}
+
+	encodedValue, err := ser.Encode(value)
+	if err != nil {
+		return fmt.Errorf("failed to serialize stream value: %w", err)
+	}
+
+	_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
 			Key:           key,
 			Value:         encodedValue,
 			tx:            tx,
-			serialization: resolveEncoder(c).Name(),
+			serialization: ser.Name(),
 		})
 	}, WithStepName("DBOS.writeStream"))
 	return err
@@ -2362,16 +2442,11 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any) error {
 // Example:
 //
 //	err := dbos.WriteStream(ctx, "my-stream", "stream-value")
-func WriteStream[P any](ctx DBOSContext, key string, value P) error {
+func WriteStream[P any](ctx DBOSContext, key string, value P, opts ...WriteStreamOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	// Serialize the stream value before storing
-	encodedValue, err := resolveEncoder(ctx).Encode(value)
-	if err != nil {
-		return fmt.Errorf("failed to serialize stream value: %w", err)
-	}
-	return ctx.WriteStream(ctx, key, encodedValue)
+	return ctx.WriteStream(ctx, key, value, opts...)
 }
 
 // readStream runs the read stream polling logic in a goroutine

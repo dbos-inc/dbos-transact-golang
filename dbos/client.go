@@ -26,7 +26,7 @@ type ClientConfig struct {
 type Client interface {
 	Enqueue(queueName, workflowName string, input any, opts ...EnqueueOption) (WorkflowHandle[any], error)
 	ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, error)
-	Send(destinationID string, message any, topic string) error
+	Send(destinationID string, message any, topic string, opts ...SendOption) error
 	GetEvent(targetWorkflowID, key string, timeout time.Duration) (any, error)
 	RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error)
 	CancelWorkflow(workflowID string) error
@@ -346,8 +346,8 @@ func (c *client) ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, e
 }
 
 // Send sends a message to another workflow.
-func (c *client) Send(destinationID string, message any, topic string) error {
-	return c.dbosCtx.Send(c.dbosCtx, destinationID, message, topic)
+func (c *client) Send(destinationID string, message any, topic string, opts ...SendOption) error {
+	return c.dbosCtx.Send(c.dbosCtx, destinationID, message, topic, opts...)
 }
 
 // GetEvent retrieves a key-value event from a target workflow.

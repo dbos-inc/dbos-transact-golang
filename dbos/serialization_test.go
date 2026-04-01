@@ -1827,6 +1827,151 @@ func TestCrossFormatRecvAndGetEvent(t *testing.T) {
 	})
 }
 
+// TestPortablePerOperationOptions verifies that WithPortableSend, WithPortableSetEvent, and
+// WithPortableWriteStream force portable_json serialization for individual operations,
+// even when the calling workflow uses the default serializer.
+func TestPortablePerOperationOptions(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	type Payload struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+
+	payload := Payload{Name: "portable-op", Count: 7}
+
+	c := executor.(*dbosContext)
+	sysDB := c.systemDB.(*sysDB)
+
+	// Helper: fetch the serialization recorded in operation_outputs for the Recv step of a workflow.
+	// The Recv step stores the serialization of the message it consumed, which reflects what the sender used.
+	recvStepSerialization := func(t *testing.T, workflowID string) string {
+		t.Helper()
+		var ser string
+		q := fmt.Sprintf(`SELECT serialization FROM %s.operation_outputs WHERE workflow_uuid = $1 AND function_name = 'DBOS.recv' ORDER BY function_id ASC LIMIT 1`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		require.NoError(t, sysDB.pool.QueryRow(context.Background(), q, workflowID).Scan(&ser))
+		return ser
+	}
+
+	// Helper: fetch the serialization column for a workflow event.
+	eventSerialization := func(t *testing.T, workflowID, key string) string {
+		t.Helper()
+		var ser string
+		q := fmt.Sprintf(`SELECT serialization FROM %s.workflow_events WHERE workflow_uuid = $1 AND key = $2`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		require.NoError(t, sysDB.pool.QueryRow(context.Background(), q, workflowID, key).Scan(&ser))
+		return ser
+	}
+
+	// Helper: fetch the serialization column for the first stream entry (non-sentinel).
+	streamSerialization := func(t *testing.T, workflowID, key string) string {
+		t.Helper()
+		var ser string
+		q := fmt.Sprintf(`SELECT serialization FROM %s.streams WHERE workflow_uuid = $1 AND key = $2 AND value != $3 ORDER BY "offset" LIMIT 1`,
+			pgx.Identifier{sysDB.schema}.Sanitize())
+		require.NoError(t, sysDB.pool.QueryRow(context.Background(), q, workflowID, key, _DBOS_STREAM_CLOSED_SENTINEL).Scan(&ser))
+		return ser
+	}
+
+	// Workflows must be registered before Launch.
+	var (
+		portableSendSenderWf   Workflow[string, string]
+		portableSendReceiverWf Workflow[string, Payload]
+		portableSetterWf       Workflow[string, string]
+		portableGetterWf       Workflow[string, Payload]
+		portableWriterWf       Workflow[string, string]
+	)
+
+	portableSendSenderWf = func(ctx DBOSContext, receiverID string) (string, error) {
+		return "", Send(ctx, receiverID, payload, "topic", WithPortableSend())
+	}
+	portableSendReceiverWf = func(ctx DBOSContext, _ string) (Payload, error) {
+		return Recv[Payload](ctx, "topic", 10*time.Second)
+	}
+	portableSetterWf = func(ctx DBOSContext, _ string) (string, error) {
+		return "", SetEvent(ctx, "evt-key", payload, WithPortableSetEvent())
+	}
+	portableGetterWf = func(ctx DBOSContext, targetID string) (Payload, error) {
+		return GetEvent[Payload](ctx, targetID, "evt-key", 10*time.Second)
+	}
+	portableWriterWf = func(ctx DBOSContext, _ string) (string, error) {
+		if err := WriteStream(ctx, "stream-key", payload, WithPortableWriteStream()); err != nil {
+			return "", err
+		}
+		return "", CloseStream(ctx, "stream-key")
+	}
+
+	RegisterWorkflow(executor, portableSendSenderWf, WithWorkflowName("portable-op-send-sender"))
+	RegisterWorkflow(executor, portableSendReceiverWf, WithWorkflowName("portable-op-send-receiver"))
+	RegisterWorkflow(executor, portableSetterWf, WithWorkflowName("portable-op-setter"))
+	RegisterWorkflow(executor, portableGetterWf, WithWorkflowName("portable-op-getter"))
+	RegisterWorkflow(executor, portableWriterWf, WithWorkflowName("portable-op-writer"))
+
+	require.NoError(t, Launch(executor))
+	defer Shutdown(executor, 10*time.Second)
+
+	// WithPortableSend: a standard workflow sends with portable serialization; a standard
+	// workflow Recvs it and gets the correct value back. The serialization recorded in the
+	// receiver's Recv step output reflects what the sender used.
+	t.Run("WithPortableSend", func(t *testing.T) {
+		receiverID := "portable-op-send-receiver-" + t.Name()
+		senderID := "portable-op-send-sender-" + t.Name()
+
+		receiverHandle, err := RunWorkflow(executor, portableSendReceiverWf, "", WithWorkflowID(receiverID))
+		require.NoError(t, err)
+
+		_, err = RunWorkflow(executor, portableSendSenderWf, receiverID, WithWorkflowID(senderID))
+		require.NoError(t, err)
+
+		result, err := receiverHandle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, payload, result)
+
+		// The Recv step records the serialization of the consumed message in operation_outputs.
+		assert.Equal(t, PortableSerializerName, recvStepSerialization(t, receiverID))
+	})
+
+	// WithPortableSetEvent: a standard workflow sets an event with portable serialization;
+	// a standard GetEvent reads it back correctly.
+	t.Run("WithPortableSetEvent", func(t *testing.T) {
+		setterID := "portable-op-setter-" + t.Name()
+		getterID := "portable-op-getter-" + t.Name()
+
+		setHandle, err := RunWorkflow(executor, portableSetterWf, "", WithWorkflowID(setterID))
+		require.NoError(t, err)
+		_, err = setHandle.GetResult()
+		require.NoError(t, err)
+
+		assert.Equal(t, PortableSerializerName, eventSerialization(t, setterID, "evt-key"))
+
+		getHandle, err := RunWorkflow(executor, portableGetterWf, setterID, WithWorkflowID(getterID))
+		require.NoError(t, err)
+		result, err := getHandle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, payload, result)
+	})
+
+	// WithPortableWriteStream: a standard workflow writes with portable serialization;
+	// ReadStream reads it back correctly.
+	t.Run("WithPortableWriteStream", func(t *testing.T) {
+		wfID := "portable-op-writer-" + t.Name()
+
+		handle, err := RunWorkflow(executor, portableWriterWf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		assert.Equal(t, PortableSerializerName, streamSerialization(t, wfID, "stream-key"))
+
+		values, closed, err := ReadStream[Payload](executor, wfID, "stream-key")
+		require.NoError(t, err)
+		assert.True(t, closed)
+		require.Len(t, values, 1)
+		assert.Equal(t, payload, values[0])
+	})
+}
+
 // TestDirectRunPortableWorkflow tests starting a workflow in portable mode via RunWorkflow,
 // verifying the DB contains the correct portable JSON envelope, then recovering it.
 func TestDirectRunPortableWorkflow(t *testing.T) {
