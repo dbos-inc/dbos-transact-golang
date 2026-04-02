@@ -203,6 +203,18 @@ type dbosContext struct {
 	serializer Serializer[any]
 }
 
+// ClearRegistries clears the workflow and queue registries,
+// allowing re-registration of workflows and queues. Intended for testing only.
+func (c *dbosContext) ClearRegistries() {
+	c.workflowRegistry.Clear()
+	c.workflowCustomNametoFQN.Clear()
+	for name := range c.queueRunner.workflowQueueRegistry {
+		if name != _DBOS_INTERNAL_QUEUE_NAME {
+			delete(c.queueRunner.workflowQueueRegistry, name)
+		}
+	}
+}
+
 func (c *dbosContext) Deadline() (deadline time.Time, ok bool) {
 	return c.ctx.Deadline()
 }
@@ -768,4 +780,14 @@ func Shutdown(ctx DBOSContext, timeout time.Duration) {
 		return
 	}
 	ctx.Shutdown(timeout)
+}
+
+// ClearRegistries clears the workflow and queue registries,
+// allowing re-registration of workflows and queues. Intended for testing only.
+func ClearRegistries(ctx DBOSContext) {
+	c, ok := ctx.(*dbosContext)
+	if !ok {
+		return
+	}
+	c.ClearRegistries()
 }
