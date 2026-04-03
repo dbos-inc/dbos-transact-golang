@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -103,16 +104,20 @@ func (m *mockWebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Req
 		return nil
 	})
 
-	// Start dedicated read goroutine - only reads, never writes
+	// Start dedicated read goroutine - reads and forwards messages
 	readDone := make(chan error, 1)
 	go func() {
 		defer close(readDone)
 		for {
-			_, _, err := conn.ReadMessage()
+			_, data, err := conn.ReadMessage()
 			if err != nil {
 				fmt.Printf("WebSocket read error: %v\n", err)
 				readDone <- err
 				return
+			}
+			select {
+			case m.messages <- data:
+			default:
 			}
 		}
 	}()
@@ -211,6 +216,36 @@ func (m *mockWebSocketServer) waitForConnection(timeout time.Duration) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+// sendTextMessage sends a text WebSocket message to the connected client
+func (m *mockWebSocketServer) sendTextMessage(data []byte) error {
+	m.connMu.Lock()
+	hasConn := m.conn != nil
+	m.connMu.Unlock()
+
+	if !hasConn {
+		return fmt.Errorf("no connection")
+	}
+
+	response := make(chan error, 1)
+	cmd := writeCommand{
+		messageType: websocket.TextMessage,
+		data:        data,
+		response:    response,
+	}
+
+	select {
+	case m.writeCmds <- cmd:
+		select {
+		case err := <-response:
+			return err
+		case <-time.After(1 * time.Second):
+			return fmt.Errorf("write timeout")
+		}
+	case <-time.After(1 * time.Second):
+		return fmt.Errorf("write command queue full")
+	}
 }
 
 // sendBinaryMessage sends a binary WebSocket message to the connected client
@@ -661,6 +696,186 @@ func TestConductorReconnection(t *testing.T) {
 		cancel()
 
 		// Give conductor time to clean up
+		time.Sleep(500 * time.Millisecond)
+	})
+}
+
+func TestConductorAlertHandler(t *testing.T) {
+	t.Run("WithHandler", func(t *testing.T) {
+		defer goleak.VerifyNone(t)
+
+		mockServer := newMockWebSocketServer()
+		defer mockServer.shutdown()
+
+		config := conductorConfig{
+			url:     mockServer.getURL(),
+			apiKey:  "test-key",
+			appName: "test-app",
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Track handler invocations
+		var handlerName, handlerMessage string
+		var handlerMetadata map[string]string
+		handlerCalled := make(chan struct{}, 1)
+
+		dbosCtx := &dbosContext{
+			ctx:    ctx,
+			logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
+			alertHandler: func(name string, message string, metadata map[string]string) {
+				handlerName = name
+				handlerMessage = message
+				handlerMetadata = metadata
+				handlerCalled <- struct{}{}
+			},
+		}
+
+		cond, err := newConductor(dbosCtx, config)
+		require.NoError(t, err)
+		cond.pingInterval = 100 * time.Millisecond
+		cond.pingTimeout = 200 * time.Millisecond
+		cond.reconnectWait = 100 * time.Millisecond
+
+		cond.launch()
+		assert.True(t, mockServer.waitForConnection(5*time.Second), "Should establish connection")
+
+		// Send an alert message
+		alertMsg := `{"type":"alert","request_id":"req-123","name":"test-alert","message":"something happened","metadata":{"key1":"val1","key2":"val2"}}`
+		err = mockServer.sendTextMessage([]byte(alertMsg))
+		require.NoError(t, err)
+
+		// Wait for handler to be called
+		select {
+		case <-handlerCalled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("alert handler was not called")
+		}
+
+		assert.Equal(t, "test-alert", handlerName)
+		assert.Equal(t, "something happened", handlerMessage)
+		assert.Equal(t, map[string]string{"key1": "val1", "key2": "val2"}, handlerMetadata)
+
+		// Read the response sent back by conductor
+		select {
+		case respData := <-mockServer.messages:
+			var resp alertConductorResponse
+			err = json.Unmarshal(respData, &resp)
+			require.NoError(t, err)
+			assert.True(t, resp.Success)
+			assert.Equal(t, "req-123", resp.RequestID)
+			assert.Equal(t, alertMessage, resp.Type)
+			assert.Nil(t, resp.ErrorMessage)
+		case <-time.After(5 * time.Second):
+			t.Fatal("did not receive alert response")
+		}
+
+		cancel()
+		time.Sleep(500 * time.Millisecond)
+	})
+
+	t.Run("WithoutHandler", func(t *testing.T) {
+		defer goleak.VerifyNone(t)
+
+		mockServer := newMockWebSocketServer()
+		defer mockServer.shutdown()
+
+		config := conductorConfig{
+			url:     mockServer.getURL(),
+			apiKey:  "test-key",
+			appName: "test-app",
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		dbosCtx := &dbosContext{
+			ctx:    ctx,
+			logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		}
+
+		cond, err := newConductor(dbosCtx, config)
+		require.NoError(t, err)
+		cond.pingInterval = 100 * time.Millisecond
+		cond.pingTimeout = 200 * time.Millisecond
+		cond.reconnectWait = 100 * time.Millisecond
+
+		cond.launch()
+		assert.True(t, mockServer.waitForConnection(5*time.Second), "Should establish connection")
+
+		// Send an alert with no handler registered
+		alertMsg := `{"type":"alert","request_id":"req-456","name":"unhandled","message":"no handler","metadata":{}}`
+		err = mockServer.sendTextMessage([]byte(alertMsg))
+		require.NoError(t, err)
+
+		// Should still get a success response (alert is logged but not an error)
+		select {
+		case respData := <-mockServer.messages:
+			var resp alertConductorResponse
+			err = json.Unmarshal(respData, &resp)
+			require.NoError(t, err)
+			assert.True(t, resp.Success)
+			assert.Equal(t, "req-456", resp.RequestID)
+		case <-time.After(5 * time.Second):
+			t.Fatal("did not receive alert response")
+		}
+
+		cancel()
+		time.Sleep(500 * time.Millisecond)
+	})
+
+	t.Run("HandlerPanic", func(t *testing.T) {
+		defer goleak.VerifyNone(t)
+
+		mockServer := newMockWebSocketServer()
+		defer mockServer.shutdown()
+
+		config := conductorConfig{
+			url:     mockServer.getURL(),
+			apiKey:  "test-key",
+			appName: "test-app",
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		dbosCtx := &dbosContext{
+			ctx:    ctx,
+			logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
+			alertHandler: func(name string, message string, metadata map[string]string) {
+				panic("handler exploded")
+			},
+		}
+
+		cond, err := newConductor(dbosCtx, config)
+		require.NoError(t, err)
+		cond.pingInterval = 100 * time.Millisecond
+		cond.pingTimeout = 200 * time.Millisecond
+		cond.reconnectWait = 100 * time.Millisecond
+
+		cond.launch()
+		assert.True(t, mockServer.waitForConnection(5*time.Second), "Should establish connection")
+
+		alertMsg := `{"type":"alert","request_id":"req-789","name":"panic-alert","message":"trigger panic","metadata":{}}`
+		err = mockServer.sendTextMessage([]byte(alertMsg))
+		require.NoError(t, err)
+
+		// Should get a failure response with error message
+		select {
+		case respData := <-mockServer.messages:
+			var resp alertConductorResponse
+			err = json.Unmarshal(respData, &resp)
+			require.NoError(t, err)
+			assert.False(t, resp.Success)
+			assert.Equal(t, "req-789", resp.RequestID)
+			assert.NotNil(t, resp.ErrorMessage)
+			assert.Contains(t, *resp.ErrorMessage, "panic in alert handler")
+		case <-time.After(5 * time.Second):
+			t.Fatal("did not receive alert response")
+		}
+
+		cancel()
 		time.Sleep(500 * time.Millisecond)
 	})
 }

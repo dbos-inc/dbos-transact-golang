@@ -372,6 +372,8 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleImportWorkflowRequest(data, base.RequestID)
 	case deleteWorkflowMessage:
 		return c.handleDeleteWorkflowRequest(data, base.RequestID)
+	case alertMessage:
+		return c.handleAlertRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
@@ -1020,6 +1022,48 @@ func (c *conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 	}
 
 	return c.sendResponse(response, string(existPendingWorkflowsMessage))
+}
+
+func (c *conductor) handleAlertRequest(data []byte, requestID string) error {
+	var req alertRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse alert request", "error", err)
+		return fmt.Errorf("failed to parse alert request: %w", err)
+	}
+	c.logger.Debug("Handling alert request", "name", req.Name, "request_id", requestID)
+
+	success := true
+	var errorMsg *string
+
+	handler := c.dbosCtx.alertHandler
+	if handler != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					errStr := fmt.Sprintf("panic in alert handler: %v", r)
+					c.logger.Error(errStr)
+					errorMsg = &errStr
+					success = false
+				}
+			}()
+			handler(req.Name, req.Message, req.Metadata)
+		}()
+	} else {
+		c.logger.Info("Alert received (no handler registered)", "name", req.Name, "message", req.Message, "metadata", req.Metadata)
+	}
+
+	response := alertConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      alertMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
+		},
+		Success: success,
+	}
+
+	return c.sendResponse(response, string(alertMessage))
 }
 
 func (c *conductor) handleUnknownMessageType(requestID string, msgType messageType, errorMsg string) error {

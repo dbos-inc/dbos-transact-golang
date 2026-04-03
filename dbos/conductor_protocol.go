@@ -51,6 +51,7 @@ const (
 	exportWorkflowMessage        messageType = "export_workflow"
 	importWorkflowMessage        messageType = "import_workflow"
 	deleteWorkflowMessage        messageType = "delete"
+	alertMessage                 messageType = "alert"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -477,6 +478,20 @@ type deleteWorkflowConductorRequest struct {
 
 // deleteWorkflowConductorResponse is sent in response to delete workflow requests
 type deleteWorkflowConductorResponse struct {
+	baseResponse
+	Success bool `json:"success"`
+}
+
+// alertRequest is sent by the conductor to deliver an alert
+type alertRequest struct {
+	baseMessage
+	Name     string            `json:"name"`
+	Message  string            `json:"message"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+// alertConductorResponse is sent in response to alert requests
+type alertConductorResponse struct {
 	baseResponse
 	Success bool `json:"success"`
 }
