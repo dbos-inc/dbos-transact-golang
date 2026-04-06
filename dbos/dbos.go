@@ -249,18 +249,6 @@ func (c *dbosContext) ClearRegistries() {
 	c.alertHandler = nil
 }
 
-// ClearRegistries clears the workflow and queue registries,
-// allowing re-registration of workflows and queues. Intended for testing only.
-func (c *dbosContext) ClearRegistries() {
-	c.workflowRegistry.Clear()
-	c.workflowCustomNametoFQN.Clear()
-	for name := range c.queueRunner.workflowQueueRegistry {
-		if name != _DBOS_INTERNAL_QUEUE_NAME {
-			delete(c.queueRunner.workflowQueueRegistry, name)
-		}
-	}
-}
-
 func (c *dbosContext) Deadline() (deadline time.Time, ok bool) {
 	return c.ctx.Deadline()
 }
