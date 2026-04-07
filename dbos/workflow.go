@@ -3149,7 +3149,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 	if isWithinWorkflow {
 		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
 			return nil, c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
-		}, withTxIsolationLevel(pgx.RepeatableRead), WithStepName("DBOS.resumeWorkflow"))
+		}, WithStepName("DBOS.resumeWorkflow"))
 	} else {
 		err = retry(c, func() error {
 			return c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})

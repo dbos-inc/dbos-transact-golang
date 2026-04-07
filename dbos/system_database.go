@@ -1336,52 +1336,47 @@ type resumeWorkflowDBInput struct {
 }
 
 func (s *sysDB) resumeWorkflow(ctx context.Context, input resumeWorkflowDBInput) error {
-	listInput := listWorkflowsDBInput{
-		workflowIDs: []string{input.workflowID},
-		loadInput:   true,
-		loadOutput:  true,
-		tx:          input.tx,
+	schema := pgx.Identifier{s.schema}.Sanitize()
+
+	query := fmt.Sprintf(`WITH existing AS (
+			SELECT workflow_uuid FROM %s.workflow_status WHERE workflow_uuid = $5
+		), updated AS (
+			UPDATE %s.workflow_status
+			SET status = $1, queue_name = $2, recovery_attempts = $3,
+			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
+			    started_at_epoch_ms = NULL, updated_at = $4
+			WHERE workflow_uuid = $5 AND status NOT IN ($6, $7)
+			RETURNING workflow_uuid
+		)
+		SELECT
+			EXISTS(SELECT 1 FROM existing) AS found,
+			EXISTS(SELECT 1 FROM updated) AS updated`, schema, schema)
+
+	args := []any{
+		WorkflowStatusEnqueued,
+		_DBOS_INTERNAL_QUEUE_NAME,
+		0,
+		time.Now().UnixMilli(),
+		input.workflowID,
+		WorkflowStatusSuccess,
+		WorkflowStatusError,
 	}
-	wfs, err := s.listWorkflows(ctx, listInput)
+
+	var found, updated bool
+	var err error
+	if input.tx != nil {
+		err = input.tx.QueryRow(ctx, query, args...).Scan(&found, &updated)
+	} else {
+		err = s.pool.QueryRow(ctx, query, args...).Scan(&found, &updated)
+	}
 	if err != nil {
-		s.logger.Error("ResumeWorkflow: failed to list workflows", "error", err)
-		return err
+		return fmt.Errorf("failed to resume workflow: %w", err)
 	}
-	if len(wfs) == 0 {
+
+	if !found {
 		return newNonExistentWorkflowError(input.workflowID)
 	}
-
-	wf := wfs[0]
-	if wf.Status == WorkflowStatusSuccess || wf.Status == WorkflowStatusError {
-		return nil // Workflow is complete, do nothing
-	}
-
-	// Set the workflow's status to ENQUEUED and clear its recovery attempts, set new deadline
-	updateStatusQuery := fmt.Sprintf(`UPDATE %s.workflow_status
-						  SET status = $1, queue_name = $2, recovery_attempts = $3,
-						      workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
-						      started_at_epoch_ms = NULL, updated_at = $4
-						  WHERE workflow_uuid = $5`, pgx.Identifier{s.schema}.Sanitize())
-
-	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, updateStatusQuery,
-			WorkflowStatusEnqueued,
-			_DBOS_INTERNAL_QUEUE_NAME,
-			0,
-			time.Now().UnixMilli(),
-			input.workflowID)
-	} else {
-		_, err = s.pool.Exec(ctx, updateStatusQuery,
-			WorkflowStatusEnqueued,
-			_DBOS_INTERNAL_QUEUE_NAME,
-			0,
-			time.Now().UnixMilli(),
-			input.workflowID)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to update workflow status to ENQUEUED: %w", err)
-	}
-
+	// found && !updated means the workflow is in a terminal state — nothing to do.
 	return nil
 }
 
@@ -2769,21 +2764,20 @@ func (s *sysDB) writeStream(ctx context.Context, input writeStreamDBInput) error
 		return s.pool.Exec(ctx, sql, args...)
 	}
 
+	schema := pgx.Identifier{s.schema}.Sanitize()
+
 	checkClosedQuery := fmt.Sprintf(`SELECT 1 FROM %s.streams
 		WHERE workflow_uuid = $1 AND key = $2 AND value = $3 LIMIT 1`,
-		pgx.Identifier{s.schema}.Sanitize())
-
-	getOffsetQuery := fmt.Sprintf(`SELECT COALESCE(MAX("offset"), -1) + 1 FROM %s.streams
-		WHERE workflow_uuid = $1 AND key = $2`,
-		pgx.Identifier{s.schema}.Sanitize())
+		schema)
 
 	insertQuery := fmt.Sprintf(`INSERT INTO %s.streams (workflow_uuid, key, value, "offset", function_id, serialization)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		pgx.Identifier{s.schema}.Sanitize())
+		SELECT $1, $2, $3, COALESCE(
+			(SELECT MAX("offset") FROM %s.streams WHERE workflow_uuid = $1 AND key = $2), -1
+		) + 1, $4, $5`,
+		schema, schema)
 
 	var err error
 	var exists int
-	var nextOffset int
 
 	err = queryRow(ctx, checkClosedQuery, wfState.workflowID, input.Key, _DBOS_STREAM_CLOSED_SENTINEL).Scan(&exists)
 	if err == nil && exists == 1 {
@@ -2792,12 +2786,7 @@ func (s *sysDB) writeStream(ctx context.Context, input writeStreamDBInput) error
 		return fmt.Errorf("failed to check stream status: %w", err)
 	}
 
-	err = queryRow(ctx, getOffsetQuery, wfState.workflowID, input.Key).Scan(&nextOffset)
-	if err != nil {
-		return fmt.Errorf("failed to get next offset: %w", err)
-	}
-
-	_, err = exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Value, nextOffset, wfState.stepID, input.serialization)
+	_, err = exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Value, wfState.stepID, input.serialization)
 	if err != nil {
 		return fmt.Errorf("failed to insert stream entry: %w", err)
 	}
