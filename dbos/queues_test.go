@@ -506,7 +506,8 @@ func TestWorkflowQueues(t *testing.T) {
 		// Unblock any running workflow code
 		workflowEvent.Set()
 
-		// Verify the workflow was cancelled
+		// Wait for the workflow to reach a terminal state, then verify it was cancelled
+		_, _ = handle.GetResult()
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get status of cancelled workflow")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be CANCELLED")
