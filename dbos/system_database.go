@@ -1135,7 +1135,8 @@ func (s *sysDB) cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput)
 	}
 
 	updateStatusQuery := fmt.Sprintf(`UPDATE %s.workflow_status
-						  SET status = $1, updated_at = $2, started_at_epoch_ms = NULL
+						  SET status = $1, updated_at = $2, started_at_epoch_ms = NULL,
+						      queue_name = NULL, deduplication_id = NULL
 						  WHERE workflow_uuid = $3`, pgx.Identifier{s.schema}.Sanitize())
 
 	if input.tx != nil {
