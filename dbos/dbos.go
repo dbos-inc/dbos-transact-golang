@@ -104,6 +104,9 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	return dbosConfig, nil
 }
 
+// AlertHandler is a function that handles alerts received from DBOS Conductor.
+type AlertHandler func(name string, message string, metadata map[string]string)
+
 // DBOSContext represents a DBOS execution context that provides workflow orchestration capabilities.
 // It extends the standard Go context.Context and adds methods for running workflows and steps,
 // inter-workflow communication, and state management.
@@ -122,7 +125,7 @@ type DBOSContext interface {
 	RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
 	Go(_ DBOSContext, fn StepFunc, opts ...StepOption) (chan StepOutcome[any], error)                           // Starts a step inside a Go routine and returns a channel to receive the result
 	Select(_ DBOSContext, channels []<-chan StepOutcome[any]) (any, error)                                      // Performs a durable select over a slice of channels, checkpointing the selected channel and value
-	Send(_ DBOSContext, destinationID string, message any, topic string, opts ...SendOption) error               // Send a message to another workflow
+	Send(_ DBOSContext, destinationID string, message any, topic string, opts ...SendOption) error              // Send a message to another workflow
 	Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error)                                       // Receive a message sent to this workflow
 	SetEvent(_ DBOSContext, key string, message any, opts ...SetEventOption) error                              // Set a key-value event for this workflow
 	GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error)            // Get a key-value event from a target workflow
@@ -161,6 +164,9 @@ type DBOSContext interface {
 
 	// Queue configuration
 	ListenQueues(_ DBOSContext, queues ...WorkflowQueue) // Configure which queues this process should listen to
+
+	// Alert handling
+	SetAlertHandler(handler AlertHandler) // Register a handler for alerts from DBOS Conductor (must be called before Launch)
 }
 
 type dbosContext struct {
@@ -201,6 +207,46 @@ type dbosContext struct {
 	logger *slog.Logger
 
 	serializer Serializer[any]
+
+	// Alert handler
+	alertHandler AlertHandler
+}
+
+// SetAlertHandler registers a handler function for alerts received from DBOS Conductor.
+// Must be called before Launch(). Only one handler is allowed per context.
+func (c *dbosContext) SetAlertHandler(handler AlertHandler) {
+	if handler == nil {
+		panic("alert handler cannot be nil")
+	}
+	if c.launched.Load() {
+		panic("cannot set alert handler after Launch()")
+	}
+	if c.alertHandler != nil {
+		panic("alert handler is already registered")
+	}
+	c.alertHandler = handler
+}
+
+// SetAlertHandler registers a handler function for alerts received from DBOS Conductor.
+// Must be called before Launch(). Only one handler is allowed per context.
+func SetAlertHandler(ctx DBOSContext, handler AlertHandler) {
+	if ctx == nil {
+		panic("ctx cannot be nil")
+	}
+	ctx.SetAlertHandler(handler)
+}
+
+// ClearRegistries clears the workflow and queue registries,
+// allowing re-registration of workflows and queues. Intended for testing only.
+func (c *dbosContext) ClearRegistries() {
+	c.workflowRegistry.Clear()
+	c.workflowCustomNametoFQN.Clear()
+	for name := range c.queueRunner.workflowQueueRegistry {
+		if name != _DBOS_INTERNAL_QUEUE_NAME {
+			delete(c.queueRunner.workflowQueueRegistry, name)
+		}
+	}
+	c.alertHandler = nil
 }
 
 func (c *dbosContext) Deadline() (deadline time.Time, ok bool) {
@@ -768,4 +814,14 @@ func Shutdown(ctx DBOSContext, timeout time.Duration) {
 		return
 	}
 	ctx.Shutdown(timeout)
+}
+
+// ClearRegistries clears the workflow and queue registries,
+// allowing re-registration of workflows and queues. Intended for testing only.
+func ClearRegistries(ctx DBOSContext) {
+	c, ok := ctx.(*dbosContext)
+	if !ok {
+		return
+	}
+	c.ClearRegistries()
 }

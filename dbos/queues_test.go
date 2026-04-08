@@ -485,6 +485,45 @@ func TestWorkflowQueues(t *testing.T) {
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after deduplication test")
 	})
 
+	t.Run("QueueDeduplicationCancelAndRestart", func(t *testing.T) {
+		// Verify that cancelling a workflow with a dedup ID clears the dedup constraint,
+		// allowing a new workflow with the same dedup ID to be enqueued.
+		workflowEvent := NewEvent()
+		dedupWorkflowEvent = workflowEvent
+		defer func() {
+			dedupWorkflowEvent = nil
+		}()
+
+		dedupID := "cancel_dedup_id"
+		wfid := uuid.NewString()
+		handle, err := RunWorkflow(dbosCtx, testWorkflow, "cancel-me", WithQueue(dedupQueue.Name), WithWorkflowID(wfid), WithDeduplicationID(dedupID))
+		require.NoError(t, err, "failed to enqueue workflow with dedup ID")
+
+		// Cancel the workflow before it completes
+		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to cancel workflow")
+
+		// Unblock any running workflow code
+		workflowEvent.Set()
+
+		// Wait for the workflow to reach a terminal state, then verify it was cancelled
+		_, _ = handle.GetResult()
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get status of cancelled workflow")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be CANCELLED")
+
+		// Enqueue a new workflow with the same dedup ID — should succeed because cancel cleared the constraint
+		wfid2 := uuid.NewString()
+		handle2, err := RunWorkflow(dbosCtx, testWorkflow, "restarted", WithQueue(dedupQueue.Name), WithWorkflowID(wfid2), WithDeduplicationID(dedupID))
+		require.NoError(t, err, "failed to enqueue workflow with same dedup ID after cancel")
+
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result from re-enqueued workflow")
+		assert.Equal(t, "restarted-c-p", result2, "expected re-enqueued workflow to complete with correct result")
+
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after cancel-and-restart test")
+	})
+
 	t.Run("NonExistingQueue", func(t *testing.T) {
 		// Attempt to enqueue to a non-existing queue
 		// This should return an error
