@@ -473,11 +473,16 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFun
 	}
 
 	// Check if workflow already exists and store atomically using LoadOrStore
+	// If no custom name is provided, default to the FQN
+	name := customName
+	if len(name) == 0 {
+		name = workflowFQN
+	}
 	entry := WorkflowRegistryEntry{
 		wrappedFunction: fn,
 		FQN:             workflowFQN,
 		MaxRetries:      maxRetries,
-		Name:            customName,
+		Name:            name,
 		CronSchedule:    cronSchedule,
 	}
 

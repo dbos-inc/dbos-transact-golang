@@ -207,8 +207,8 @@ _, err := dbos.RunWorkflow(ctx, task, i, dbos.WithWorkflowID(exactlyOnceEventID)
 Schedule workflows using cron syntax, or use durable sleep to pause workflows for as long as you like (even days or weeks) before executing.
 
 ```golang
-dbos.RegisterWorkflow(dbosCtx, func(ctx dbos.DBOSContext, scheduledTime time.Time) (string, error) {
-    return fmt.Sprintf("Workflow executed at %s", scheduledTime), nil
+dbos.RegisterWorkflow(dbosCtx, func(ctx dbos.DBOSContext, input *dbos.ScheduledWorkflowTimes) (string, error) {
+    return fmt.Sprintf("Workflow executed at %s", input.ScheduledTime), nil
 }, dbos.WithSchedule("* * * * * *")) // Every second
 ```
 
