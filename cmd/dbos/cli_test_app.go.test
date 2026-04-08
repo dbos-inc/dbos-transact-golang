@@ -106,7 +106,7 @@ func main() {
 	dbos.RegisterWorkflow(dbosCtx, ExampleWorkflow)
 	dbos.RegisterWorkflow(dbosCtx, QueueWorkflow)
 	dbos.RegisterWorkflow(dbosCtx, QueuedStepWorkflow)
-	dbos.RegisterWorkflow(dbosCtx, ScheduledWorkflow, dbos.WithSchedule("*/15 * * * * *"))
+	dbos.RegisterScheduledWorkflow(dbosCtx, ScheduledWorkflow, "*/15 * * * * *")
 
 	// Create queue
 	dbos.NewWorkflowQueue(dbosCtx, "example-queue")
