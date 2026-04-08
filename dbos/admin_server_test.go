@@ -1012,10 +1012,10 @@ func TestAdminServer(t *testing.T) {
 		var executionCount atomic.Int32
 
 		// Register a scheduled workflow that runs every second
-		RegisterWorkflow(ctx, func(dbosCtx DBOSContext, scheduledTime time.Time) (string, error) {
+		RegisterScheduledWorkflow(ctx, func(dbosCtx DBOSContext, scheduledTime, actualTime time.Time) (string, error) {
 			executionCount.Add(1)
-			return fmt.Sprintf("executed at %v", scheduledTime), nil
-		}, WithSchedule("* * * * * *")) // Every second
+			return fmt.Sprintf("executed at %v (scheduled: %v)", actualTime, scheduledTime), nil
+		}, "* * * * * *") // Every second
 
 		err = Launch(ctx)
 		require.NoError(t, err)

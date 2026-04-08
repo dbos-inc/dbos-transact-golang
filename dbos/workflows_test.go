@@ -60,8 +60,8 @@ func simpleWorkflowWithStepError(dbosCtx DBOSContext, input string) (string, err
 	})
 }
 
-func simpleWorkflowWithSchedule(dbosCtx DBOSContext, scheduledTime time.Time) (time.Time, error) {
-	return scheduledTime, nil
+func simpleWorkflowWithSchedule(dbosCtx DBOSContext, scheduledTime, actualTime time.Time) (string, error) {
+	return fmt.Sprintf("Scheduled: %v, Actual: %v", scheduledTime, actualTime), nil
 }
 
 // idempotencyWorkflow increments a global counter and returns the input
@@ -2083,17 +2083,16 @@ var (
 func TestScheduledWorkflows(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	RegisterWorkflow(dbosCtx, func(ctx DBOSContext, scheduledTime time.Time) (string, error) {
-		startTime := time.Now()
+	RegisterScheduledWorkflow(dbosCtx, func(ctx DBOSContext, scheduledTime, actualTime time.Time) (string, error) {
 		if counter.Add(1) == 10 {
 			return "", fmt.Errorf("counter reached 10, stopping workflow")
 		}
 		select {
-		case counter1Ch <- startTime:
+		case counter1Ch <- actualTime:
 		default:
 		}
-		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", scheduledTime, startTime), nil
-	}, WithSchedule("* * * * * *")) // Every second
+		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", scheduledTime, actualTime), nil
+	}, "* * * * * *") // Every second
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
@@ -4742,7 +4741,7 @@ func TestRegisteredWorkflowListing(t *testing.T) {
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
 	RegisterWorkflow(dbosCtx, simpleWorkflowError, WithMaxRetries(5))
 	RegisterWorkflow(dbosCtx, simpleWorkflowWithStep, WithWorkflowName("CustomStepWorkflow"))
-	RegisterWorkflow(dbosCtx, simpleWorkflowWithSchedule, WithWorkflowName("ScheduledWorkflow"), WithSchedule("0 0 * * * *"))
+	RegisterScheduledWorkflow(dbosCtx, simpleWorkflowWithSchedule, "0 0 * * * *")
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
@@ -4785,7 +4784,7 @@ func TestRegisteredWorkflowListing(t *testing.T) {
 		scheduledWorkflowFQN := runtime.FuncForPC(reflect.ValueOf(simpleWorkflowWithSchedule).Pointer()).Name()
 		scheduledWf, exists := workflowMap[scheduledWorkflowFQN]
 		require.True(t, exists, "ScheduledWorkflow should be found")
-		require.Equal(t, "ScheduledWorkflow", scheduledWf.Name, "ScheduledWorkflow should have the correct name")
+		require.Equal(t, scheduledWorkflowFQN, scheduledWf.Name, "ScheduledWorkflow should have the correct name")
 		require.Equal(t, "0 0 * * * *", scheduledWf.CronSchedule, "ScheduledWorkflow should have the correct cron schedule")
 	})
 

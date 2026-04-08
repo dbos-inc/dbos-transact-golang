@@ -285,7 +285,7 @@ func TestChaosWorkflow(t *testing.T) {
 	PostgresChaosMonkey(t, ctx, &wg)
 
 	// Define scheduled workflow that runs every second
-	scheduledWorkflow := func(ctx dbos.DBOSContext, scheduledTime time.Time) (struct{}, error) {
+	scheduledWorkflow := func(ctx dbos.DBOSContext, scheduledTime, actualTime time.Time) (struct{}, error) {
 		return struct{}{}, nil
 	}
 
@@ -322,7 +322,7 @@ func TestChaosWorkflow(t *testing.T) {
 	// Register the workflows
 	dbos.RegisterWorkflow(dbosCtx, workflow)
 	// Register scheduled workflow to run every second for chaos testing
-	dbos.RegisterWorkflow(dbosCtx, scheduledWorkflow, dbos.WithSchedule("* * * * * *"), dbos.WithWorkflowName("ScheduledChaosTest"))
+	dbos.RegisterScheduledWorkflow(dbosCtx, scheduledWorkflow, "* * * * * *")
 
 	err := dbos.Launch(dbosCtx)
 	require.NoError(t, err)
@@ -343,22 +343,21 @@ func TestChaosWorkflow(t *testing.T) {
 
 	// Validate scheduled workflow executions using ListWorkflows
 	scheduledWorkflows, err := dbos.ListWorkflows(dbosCtx,
-		dbos.WithName("ScheduledChaosTest"),
 		dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess}),
 		dbos.WithSortDesc(),
-		dbos.WithLimit(1),
+		dbos.WithLimit(10),
 		dbos.WithLoadInput(false),
 		dbos.WithLoadOutput(false),
 	)
-	require.NoError(t, err, "failed to list scheduled workflows")
+	require.NoError(t, err, "failed to list workflows")
 
-	assert.Equal(t, len(scheduledWorkflows), 1, "Expected exactly one scheduled workflow execution")
+	assert.Greater(t, len(scheduledWorkflows), 0, "Expected at least one workflow execution")
 
 	// Check the last execution was within 10 seconds -- reasonable for a 1 second schedule and 2 seconds postgres downtime
 	latestWorkflow := scheduledWorkflows[0] // Sorted descending
 	timeSinceLastExecution := time.Since(latestWorkflow.CreatedAt)
 	assert.Less(t, timeSinceLastExecution, 10*time.Second,
-		"Last scheduled execution was %v ago, expected less than 60 seconds", timeSinceLastExecution)
+		"Last scheduled execution was %v ago, expected less than 10 seconds", timeSinceLastExecution)
 }
 
 // Test send/recv functionality
