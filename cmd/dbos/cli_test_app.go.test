@@ -78,8 +78,8 @@ func QueueWorkflow(ctx dbos.DBOSContext, _ string) (string, error) {
 /**** SCHEDULED WORKFLOWS ****/
 /*****************************/
 
-func ScheduledWorkflow(ctx dbos.DBOSContext, scheduledTime time.Time, actualTime time.Time) (string, error) {
-	fmt.Printf("I am a scheduled workflow scheduled at %v and running at %v\n", scheduledTime, actualTime)
+func ScheduledWorkflow(ctx dbos.DBOSContext, input *dbos.ScheduledWorkflowTimes) (string, error) {
+	fmt.Printf("I am a scheduled workflow scheduled at %v and running at %v\n", input.ScheduledTime, input.ActualTime)
 	return "", nil
 }
 
@@ -106,7 +106,7 @@ func main() {
 	dbos.RegisterWorkflow(dbosCtx, ExampleWorkflow)
 	dbos.RegisterWorkflow(dbosCtx, QueueWorkflow)
 	dbos.RegisterWorkflow(dbosCtx, QueuedStepWorkflow)
-	dbos.RegisterScheduledWorkflow(dbosCtx, ScheduledWorkflow, "*/15 * * * * *")
+	dbos.RegisterWorkflow(dbosCtx, ScheduledWorkflow, dbos.WithSchedule("*/15 * * * * *"))
 
 	// Create queue
 	dbos.NewWorkflowQueue(dbosCtx, "example-queue")

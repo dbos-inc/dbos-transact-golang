@@ -285,7 +285,7 @@ func TestChaosWorkflow(t *testing.T) {
 	PostgresChaosMonkey(t, ctx, &wg)
 
 	// Define scheduled workflow that runs every second
-	scheduledWorkflow := func(ctx dbos.DBOSContext, scheduledTime, actualTime time.Time) (struct{}, error) {
+	scheduledWorkflow := func(ctx dbos.DBOSContext, input *dbos.ScheduledWorkflowTimes) (struct{}, error) {
 		return struct{}{}, nil
 	}
 
@@ -322,7 +322,7 @@ func TestChaosWorkflow(t *testing.T) {
 	// Register the workflows
 	dbos.RegisterWorkflow(dbosCtx, workflow)
 	// Register scheduled workflow to run every second for chaos testing
-	dbos.RegisterScheduledWorkflow(dbosCtx, scheduledWorkflow, "* * * * * *")
+	dbos.RegisterWorkflow(dbosCtx, scheduledWorkflow, dbos.WithSchedule("* * * * * *"))
 
 	err := dbos.Launch(dbosCtx)
 	require.NoError(t, err)

@@ -60,8 +60,8 @@ func simpleWorkflowWithStepError(dbosCtx DBOSContext, input string) (string, err
 	})
 }
 
-func simpleWorkflowWithSchedule(dbosCtx DBOSContext, scheduledTime, actualTime time.Time) (string, error) {
-	return fmt.Sprintf("Scheduled: %v, Actual: %v", scheduledTime, actualTime), nil
+func simpleWorkflowWithSchedule(dbosCtx DBOSContext, input *ScheduledWorkflowTimes) (string, error) {
+	return fmt.Sprintf("Scheduled: %v, Actual: %v", input.ScheduledTime, input.ActualTime), nil
 }
 
 // idempotencyWorkflow increments a global counter and returns the input
@@ -2083,16 +2083,16 @@ var (
 func TestScheduledWorkflows(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	RegisterScheduledWorkflow(dbosCtx, func(ctx DBOSContext, scheduledTime, actualTime time.Time) (string, error) {
+	RegisterWorkflow(dbosCtx, func(ctx DBOSContext, input *ScheduledWorkflowTimes) (string, error) {
 		if counter.Add(1) == 10 {
 			return "", fmt.Errorf("counter reached 10, stopping workflow")
 		}
 		select {
-		case counter1Ch <- actualTime:
+		case counter1Ch <- input.ActualTime:
 		default:
 		}
-		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", scheduledTime, actualTime), nil
-	}, "* * * * * *") // Every second
+		return fmt.Sprintf("Scheduled workflow scheduled at time %v and executed at time %v", input.ScheduledTime, input.ActualTime), nil
+	}, WithSchedule("* * * * * *")) // Every second
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
@@ -4741,7 +4741,7 @@ func TestRegisteredWorkflowListing(t *testing.T) {
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
 	RegisterWorkflow(dbosCtx, simpleWorkflowError, WithMaxRetries(5))
 	RegisterWorkflow(dbosCtx, simpleWorkflowWithStep, WithWorkflowName("CustomStepWorkflow"))
-	RegisterScheduledWorkflow(dbosCtx, simpleWorkflowWithSchedule, "0 0 * * * *")
+	RegisterWorkflow(dbosCtx, simpleWorkflowWithSchedule, WithSchedule("0 0 * * * *"))
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
@@ -5944,5 +5944,154 @@ func TestExportImportWorkflow(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "Alice", forkResult.Name)
 		assert.Equal(t, "Alice-grandchild", forkResult.Tags["grandchild_result"])
+	})
+}
+
+// TestOptionsBasedWorkflowRegistrationAPI tests the new options-based workflow registration API
+func TestOptionsBasedWorkflowRegistrationAPI(t *testing.T) {
+	t.Run("RegisterWorkflowWithOptions", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+		executionCount := atomic.Int32{}
+		executionCh := make(chan time.Time, 100)
+
+		// Test RegisterWorkflow with multiple options
+		RegisterWorkflow(dbosCtx, func(ctx DBOSContext, input *ScheduledWorkflowTimes) (string, error) {
+			if executionCount.Add(1) <= 3 {
+				executionCh <- input.ActualTime
+			}
+			return fmt.Sprintf("executed at %v", input.ActualTime), nil
+		},
+			WithSchedule("* * * * * *"), // Every second
+			WithMaxRetries(5),
+			WithWorkflowName("customScheduledWorkflow"),
+		)
+
+		// Verify workflow was registered with custom name
+		c, ok := dbosCtx.(*dbosContext)
+		require.True(t, ok, "dbosCtx should be *dbosContext")
+
+		_, exists := c.workflowCustomNametoFQN.Load("customScheduledWorkflow")
+		require.True(t, exists, "workflow should be registered with custom name")
+
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS")
+
+		// Wait for at least 3 executions
+		var executionTimes []time.Time
+		for len(executionTimes) < 3 {
+			select {
+			case execTime := <-executionCh:
+				executionTimes = append(executionTimes, execTime)
+			case <-time.After(5 * time.Second):
+				require.Fail(t, "timeout waiting for executions")
+			}
+		}
+
+		// Verify executions were approximately 1 second apart
+		for i := 1; i < len(executionTimes); i++ {
+			delta := executionTimes[i].Sub(executionTimes[i-1])
+			assert.LessOrEqual(t, delta.Abs(), 2*time.Second, "executions should be ~1 second apart")
+		}
+	})
+
+	t.Run("RegisterWorkflowInvalidCron", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+		// Test that invalid cron schedule panics
+		assert.Panics(t, func() {
+			RegisterWorkflow(dbosCtx, func(ctx DBOSContext, input *ScheduledWorkflowTimes) (string, error) {
+				return "test", nil
+			}, WithSchedule("invalid cron"))
+		}, "invalid cron schedule should panic")
+	})
+
+	t.Run("RegisterWorkflowWithMaxRetries", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+		// Test RegisterWorkflow with max retries
+		RegisterWorkflow(dbosCtx, func(ctx DBOSContext, input *ScheduledWorkflowTimes) (string, error) {
+			return "test", nil
+		},
+			WithSchedule("0 0 * * * *"), // Every hour
+			WithMaxRetries(10),
+		)
+
+		// Verify workflow was registered with correct max retries
+		c, ok := dbosCtx.(*dbosContext)
+		require.True(t, ok, "dbosCtx should be *dbosContext")
+
+		// Find the registered workflow
+		var foundWorkflow bool
+		c.workflowRegistry.Range(func(key, value any) bool {
+			entry := value.(WorkflowRegistryEntry)
+			if entry.CronSchedule != "" {
+				assert.Equal(t, 10, entry.MaxRetries, "max retries should be 10")
+				foundWorkflow = true
+				return false // stop iteration
+			}
+			return true
+		})
+
+		assert.True(t, foundWorkflow, "should find scheduled workflow in registry")
+	})
+}
+
+// TestWithScheduleOption tests the WithSchedule option validation
+func TestWithScheduleOption(t *testing.T) {
+	t.Run("ValidCronSchedules", func(t *testing.T) {
+		validSchedules := []string{
+			"* * * * * *",      // Every second
+			"0 * * * * *",      // Every minute
+			"0 0 * * * *",      // Every hour
+			"0 0 0 * * *",      // Every day at midnight
+			"0 0 0 * * 0",      // Every Sunday at midnight
+			"0 0 0 1 * *",      // First day of every month
+			"@hourly",          // Every hour
+			"@daily",           // Every day
+			"@weekly",          // Every week
+			"@monthly",         // Every month
+		}
+
+		for _, schedule := range validSchedules {
+			t.Run(schedule, func(t *testing.T) {
+				dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+				// Should not panic for valid schedules
+				assert.NotPanics(t, func() {
+					RegisterWorkflow(dbosCtx, func(ctx DBOSContext, input *ScheduledWorkflowTimes) (string, error) {
+						return "test", nil
+					}, WithSchedule(schedule))
+				}, "valid cron schedule should not panic: %s", schedule)
+			})
+		}
+	})
+
+	t.Run("InvalidCronSchedules", func(t *testing.T) {
+		invalidSchedules := []string{
+			"",
+			"invalid",
+			"* * * *",           // Too few fields
+			"* * * * * * * *",   // Too many fields
+			"60 * * * * *",      // Invalid second (60)
+			"* 60 * * * *",      // Invalid minute (60)
+			"* * 24 * * *",      // Invalid hour (24)
+			"* * * 32 * *",      // Invalid day (32)
+			"* * * * 13 *",      // Invalid month (13)
+			"* * * * * 8",       // Invalid weekday (8)
+		}
+
+		for _, schedule := range invalidSchedules {
+			t.Run(schedule, func(t *testing.T) {
+				dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+				// Should panic for invalid schedules
+				assert.Panics(t, func() {
+					RegisterWorkflow(dbosCtx, func(ctx DBOSContext, input *ScheduledWorkflowTimes) (string, error) {
+						return "test", nil
+					}, WithSchedule(schedule))
+				}, "invalid cron schedule should panic: %s", schedule)
+			})
+		}
 	})
 }
