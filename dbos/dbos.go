@@ -598,6 +598,11 @@ func (c *dbosContext) Launch() error {
 		c.adminServer = adminServer
 	}
 
+	// Mark the context as launched before starting the scheduler
+	// This ensures scheduled workflows can execute immediately when the scheduler starts
+	c.launched.Store(true)
+	c.logger.Info("DBOS launched", "app_version", c.applicationVersion, "executor_id", c.executorID)
+
 	// Start the queue runner in a goroutine
 	go func() {
 		c.queueRunner.run(c)
@@ -627,8 +632,6 @@ func (c *dbosContext) Launch() error {
 		c.logger.Debug("No pending workflows to recover")
 	}
 
-	c.logger.Info("DBOS launched", "app_version", c.applicationVersion, "executor_id", c.executorID)
-	c.launched.Store(true)
 	return nil
 }
 
