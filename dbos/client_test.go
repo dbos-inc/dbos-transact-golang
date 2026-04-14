@@ -1732,6 +1732,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 	})
 
 	t.Run("ClientEnqueueDelayedCancelResume", func(t *testing.T) {
+		tBefore := time.Now()
 		// Cancel a delayed workflow
 		cancelHandle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
 			WithEnqueueDelay(60*time.Second),
@@ -1749,21 +1750,13 @@ func TestClientEnqueueDelay(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, WorkflowStatusCancelled, cancelledStatus.Status)
 
-		// Resume a delayed workflow — should bypass the delay
-		resumeHandle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
-			WithEnqueueDelay(60*time.Second),
-			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		// Resume the cancelled workflow — should complete well before the 60s delay
+		_, err = client.ResumeWorkflow(cancelHandle.GetWorkflowID())
 		require.NoError(t, err)
 
-		resumeStatus, err := resumeHandle.GetStatus()
-		require.NoError(t, err)
-		assert.Equal(t, WorkflowStatusDelayed, resumeStatus.Status)
-
-		_, err = client.ResumeWorkflow(resumeHandle.GetWorkflowID())
-		require.NoError(t, err)
-
-		result, err := resumeHandle.GetResult()
+		result, err := cancelHandle.GetResult()
 		require.NoError(t, err)
 		assert.Contains(t, fmt.Sprintf("%v", result), "delayed-done")
+		assert.Less(t, time.Since(tBefore), 60*time.Second, "resume should bypass the delay")
 	})
 }
