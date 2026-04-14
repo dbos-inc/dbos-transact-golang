@@ -144,6 +144,14 @@ func WithEnqueueConfigName(configName string) EnqueueOption {
 	}
 }
 
+// WithEnqueueDelay delays execution of the enqueued workflow by the specified duration.
+// The workflow starts in the DELAYED status and transitions to ENQUEUED after the delay expires.
+func WithEnqueueDelay(delay time.Duration) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.delayDuration = delay
+	}
+}
+
 type enqueueOptions struct {
 	workflowName       string
 	workflowID         string
@@ -155,6 +163,7 @@ type enqueueOptions struct {
 	queuePartitionKey  string
 	className          string
 	configName         *string
+	delayDuration      time.Duration
 }
 
 // EnqueueWorkflow enqueues a workflow to a named queue for deferred execution.
@@ -223,10 +232,19 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		serialization = ser.Name()
 	}
 
+	var wfStatus WorkflowStatusType
+	var delayUntil time.Time
+	if params.delayDuration > 0 {
+		wfStatus = WorkflowStatusDelayed
+		delayUntil = time.Now().Add(params.delayDuration)
+	} else {
+		wfStatus = WorkflowStatusEnqueued
+	}
+
 	status := WorkflowStatus{
 		Name:               params.workflowName,
 		ApplicationVersion: params.applicationVersion,
-		Status:             WorkflowStatusEnqueued,
+		Status:             wfStatus,
 		ID:                 workflowID,
 		CreatedAt:          time.Now(),
 		Deadline:           deadline,
@@ -239,6 +257,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		ClassName:          params.className,
 		ConfigName:         params.configName,
 		Serialization:      serialization,
+		DelayUntil:         delayUntil,
 	}
 
 	uncancellableCtx := WithoutCancel(dbosCtx)

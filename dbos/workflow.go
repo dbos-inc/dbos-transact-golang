@@ -26,6 +26,7 @@ type WorkflowStatusType string
 const (
 	WorkflowStatusPending                     WorkflowStatusType = "PENDING"                        // Workflow is running or ready to run
 	WorkflowStatusEnqueued                    WorkflowStatusType = "ENQUEUED"                       // Workflow is queued and waiting for execution
+	WorkflowStatusDelayed                     WorkflowStatusType = "DELAYED"                        // Workflow is delayed and will transition to ENQUEUED after the delay expires
 	WorkflowStatusSuccess                     WorkflowStatusType = "SUCCESS"                        // Workflow completed successfully
 	WorkflowStatusError                       WorkflowStatusType = "ERROR"                          // Workflow completed with an error
 	WorkflowStatusCancelled                   WorkflowStatusType = "CANCELLED"                      // Workflow was cancelled (manually or due to timeout)
@@ -61,6 +62,7 @@ type WorkflowStatus struct {
 	ClassName          string             `json:"class_name,omitempty"`          // Class/namespace name for cross-language dispatch
 	ConfigName         *string            `json:"config_name,omitempty"`         // Instance/config name for cross-language dispatch (nil = unset, pointer to "" = explicit empty)
 	Serialization      string             `json:"serialization,omitempty"`       // Serialization format used for inputs/outputs (e.g., "DBOS_JSON", "portable_json")
+	DelayUntil         time.Time          `json:"delay_until,omitempty"`         // The time before which the workflow should not be dequeued
 }
 
 // workflowState holds the runtime state for a workflow execution
@@ -729,6 +731,7 @@ type workflowOptions struct {
 	AssumedRole         string
 	AuthenticatedRoles  []string
 	QueuePartitionKey   string
+	DelayDuration       time.Duration
 	alreadyEncodedInput bool
 	isDequeue           bool
 	isRecovery          bool
@@ -781,6 +784,15 @@ func WithPriority(priority uint) WorkflowOption {
 func WithQueuePartitionKey(partitionKey string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.QueuePartitionKey = partitionKey
+	}
+}
+
+// WithDelay delays execution of a queued workflow by the specified duration.
+// The workflow starts in the DELAYED status and transitions to ENQUEUED after the delay expires.
+// Must be used together with WithQueue.
+func WithDelay(delay time.Duration) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.DelayDuration = delay
 	}
 }
 
@@ -985,6 +997,12 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		params.WorkflowName = registeredWorkflow.Name
 	}
 
+	// Validate delay is not provided without queue name
+	if params.DelayDuration > 0 && len(params.QueueName) == 0 {
+		c.logger.Error("delay provided but queue name is missing", "workflow_name", params.WorkflowName)
+		return nil, newWorkflowExecutionError("", fmt.Errorf("delay provided but queue name is missing"))
+	}
+
 	// Validate partition key is not provided without queue name
 	if len(params.QueuePartitionKey) > 0 && len(params.QueueName) == 0 {
 		c.logger.Error("partition key provided but queue name is missing", "workflow_name", params.WorkflowName)
@@ -1065,9 +1083,18 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	var status WorkflowStatusType
 	if params.QueueName != "" {
-		status = WorkflowStatusEnqueued
+		if params.DelayDuration > 0 {
+			status = WorkflowStatusDelayed
+		} else {
+			status = WorkflowStatusEnqueued
+		}
 	} else {
 		status = WorkflowStatusPending
+	}
+
+	var delayUntil time.Time
+	if params.DelayDuration > 0 {
+		delayUntil = time.Now().Add(params.DelayDuration)
 	}
 
 	// Compute the timeout based on the context deadline, if any
@@ -1083,8 +1110,8 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			timeout = 1 * time.Millisecond
 		}
 	}
-	// When enqueuing, we do not set a deadline. It'll be computed with the timeout during dequeue.
-	if status == WorkflowStatusEnqueued {
+	// When enqueuing or delaying, we do not set a deadline. It'll be computed with the timeout during dequeue.
+	if status == WorkflowStatusEnqueued || status == WorkflowStatusDelayed {
 		deadline = time.Time{}
 	}
 
@@ -1131,6 +1158,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		AssumedRole:        params.AssumedRole,
 		AuthenticatedRoles: params.AuthenticatedRoles,
 		QueuePartitionKey:  params.QueuePartitionKey,
+		DelayUntil:         delayUntil,
 		Serialization: func() string {
 			if params.isPortableWorkflow {
 				return PortableSerializerName
@@ -3463,9 +3491,9 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		opt(params)
 	}
 
-	// If we are asked to retrieve only queue workflows with no status, only fetch ENQUEUED and PENDING tasks
+	// If we are asked to retrieve only queue workflows with no status, only fetch ENQUEUED, PENDING, and DELAYED tasks
 	if params.queuesOnly && len(params.status) == 0 {
-		params.status = []WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending}
+		params.status = []WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending, WorkflowStatusDelayed}
 	}
 
 	// Convert to system database input structure

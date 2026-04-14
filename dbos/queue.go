@@ -254,6 +254,11 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 		hasBackoffError := false
 		skipDequeue := false
 
+		// Transition any DELAYED workflows whose delay has expired to ENQUEUED.
+		if err := ctx.systemDB.transitionDelayedWorkflows(ctx); err != nil {
+			queueLogger.Warn("Exception transitioning delayed workflows", "error", err)
+		}
+
 		// Build list of partition keys to dequeue from
 		// Default to empty string for non-partitioned queues
 		partitionKeys := []string{""}

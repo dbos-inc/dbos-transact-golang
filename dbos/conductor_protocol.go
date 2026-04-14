@@ -135,6 +135,7 @@ type listWorkflowsConductorResponseBody struct {
 	ForkedFrom              *string `json:"ForkedFrom,omitempty"`
 	ParentWorkflowID        *string `json:"ParentWorkflowID,omitempty"`
 	DequeuedAt              *string `json:"DequeuedAt,omitempty"`
+	DelayUntilEpochMS       *string `json:"DelayUntilEpochMS,omitempty"`
 }
 
 // listWorkflowsConductorResponse is sent in response to list workflows requests
@@ -262,6 +263,12 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 	if (wf.Status == WorkflowStatusPending) && !wf.StartedAt.IsZero() {
 		dequeuedStr := strconv.FormatInt(wf.StartedAt.UnixMilli(), 10)
 		output.DequeuedAt = &dequeuedStr
+	}
+
+	// Convert delay_until to epoch milliseconds string
+	if !wf.DelayUntil.IsZero() {
+		delayStr := strconv.FormatInt(wf.DelayUntil.UnixMilli(), 10)
+		output.DelayUntilEpochMS = &delayStr
 	}
 
 	return output

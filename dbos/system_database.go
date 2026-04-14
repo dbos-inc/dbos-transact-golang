@@ -73,6 +73,7 @@ type systemDatabase interface {
 	doesPatchExists(ctx context.Context, input patchDBInput) (string, error)
 
 	// Queues
+	transitionDelayedWorkflows(ctx context.Context) error
 	dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error)
 	clearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
 	getQueuePartitions(ctx context.Context, queueName string) ([]string, error)
@@ -197,6 +198,12 @@ var migration13SQL string
 //go:embed migrations/14_add_pgsql_client_functions.sql
 var migration14SQL string
 
+//go:embed migrations/15_add_workflow_schedule_columns.sql
+var migration15SQL string
+
+//go:embed migrations/16_add_delay_until.sql
+var migration16SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -266,6 +273,10 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 
 	migration14SQLProcessed := fmt.Sprintf(migration14SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
 
+	migration15SQLProcessed := fmt.Sprintf(migration15SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+
+	migration16SQLProcessed := fmt.Sprintf(migration16SQL, sanitizedSchema, sanitizedSchema)
+
 	// Build migrations list with processed SQL
 	migrations := []migrationFile{
 		{version: 1, sql: migration1SQLProcessed},
@@ -282,6 +293,8 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 		{version: 12, sql: migration12SQLProcessed},
 		{version: 13, sql: migration13SQLProcessed},
 		{version: 14, sql: migration14SQLProcessed},
+		{version: 15, sql: migration15SQLProcessed},
+		{version: 16, sql: migration16SQLProcessed},
 	}
 
 	// Begin transaction for atomic migration execution
@@ -608,8 +621,14 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 
 	// Set default values
 	attempts := 1
-	if input.status.Status == WorkflowStatusEnqueued {
+	if input.status.Status == WorkflowStatusEnqueued || input.status.Status == WorkflowStatusDelayed {
 		attempts = 0
+	}
+
+	var delayUntilEpochMs *int64
+	if !input.status.DelayUntil.IsZero() {
+		millis := input.status.DelayUntil.UnixMilli()
+		delayUntilEpochMs = &millis
 	}
 
 	updatedAt := time.Now()
@@ -679,17 +698,18 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
         parent_workflow_id,
         class_name,
         config_name,
-        serialization
-    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+        serialization,
+        delay_until_epoch_ms
+    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
 			recovery_attempts = CASE
-                WHEN EXCLUDED.status != $25 THEN workflow_status.recovery_attempts + $27
+                WHEN EXCLUDED.status NOT IN ($26, $27) THEN workflow_status.recovery_attempts + $28
                 ELSE workflow_status.recovery_attempts
             END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status = $26 THEN workflow_status.executor_id
+                WHEN EXCLUDED.status IN ($26, $27) THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
         RETURNING recovery_attempts, status, name, queue_name, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, pgx.Identifier{s.schema}.Sanitize())
@@ -735,8 +755,9 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		className,
 		input.status.ConfigName,
 		input.status.Serialization,
+		delayUntilEpochMs,
 		WorkflowStatusEnqueued,
-		WorkflowStatusEnqueued,
+		WorkflowStatusDelayed,
 		recoveryIncrement,
 	).Scan(
 		&result.attempts,
@@ -843,7 +864,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		"executor_id", "created_at", "updated_at", "application_version", "application_id",
 		"recovery_attempts", "queue_name", "workflow_timeout_ms", "workflow_deadline_epoch_ms", "started_at_epoch_ms",
 		"deduplication_id", "priority", "queue_partition_key", "forked_from", "parent_workflow_id",
-		"serialization",
+		"serialization", "delay_until_epoch_ms",
 	}
 
 	if input.loadOutput {
@@ -962,6 +983,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var authenticatedUser *string
 		var assumedRole *string
 		var applicationID *string
+		var delayUntilEpochMs *int64
 
 		// Build scan arguments dynamically based on loaded columns.
 		scanArgs := []any{
@@ -970,7 +992,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			&updatedAtMs, &applicationVersion, &applicationID,
 			&wf.Attempts, &queueName, &timeoutMs,
 			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey, &forkedFrom, &parentWorkflowID,
-			&serialization,
+			&serialization, &delayUntilEpochMs,
 		}
 
 		if input.loadOutput {
@@ -1050,6 +1072,11 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		// Convert started at milliseconds to time.Time
 		if startedAtMs != nil {
 			wf.StartedAt = time.Unix(0, *startedAtMs*int64(time.Millisecond))
+		}
+
+		// Convert delay_until_epoch_ms to time.Time
+		if delayUntilEpochMs != nil {
+			wf.DelayUntil = time.Unix(0, *delayUntilEpochMs*int64(time.Millisecond))
 		}
 
 		// Handle output and error only if loadOutput is true
@@ -1249,10 +1276,10 @@ func (s *sysDB) getWorkflowChildren(ctx context.Context, input getWorkflowChildr
 }
 
 func (s *sysDB) cancelAllBefore(ctx context.Context, cutoffTime time.Time) error {
-	// List all workflows in PENDING or ENQUEUED state ending at cutoffTime
+	// List all workflows in PENDING, ENQUEUED, or DELAYED state ending at cutoffTime
 	listInput := listWorkflowsDBInput{
 		endTime: cutoffTime,
-		status:  []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued},
+		status:  []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued, WorkflowStatusDelayed},
 	}
 
 	workflows, err := s.listWorkflows(ctx, listInput)
@@ -1309,15 +1336,16 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 		return nil
 	}
 
-	// Delete all workflows older than cutoff that are NOT PENDING or ENQUEUED
+	// Delete all workflows older than cutoff that are NOT PENDING, ENQUEUED, or DELAYED
 	query := fmt.Sprintf(`DELETE FROM %s.workflow_status
 			  WHERE created_at < $1
-			    AND status NOT IN ($2, $3)`, pgx.Identifier{s.schema}.Sanitize())
+			    AND status NOT IN ($2, $3, $4)`, pgx.Identifier{s.schema}.Sanitize())
 
 	commandTag, err := s.pool.Exec(ctx, query,
 		*cutoffTimestamp,
 		WorkflowStatusPending,
-		WorkflowStatusEnqueued)
+		WorkflowStatusEnqueued,
+		WorkflowStatusDelayed)
 
 	if err != nil {
 		return fmt.Errorf("failed to garbage collect workflows: %w", err)
@@ -2846,6 +2874,21 @@ func (s *sysDB) readStream(ctx context.Context, input readStreamDBInput) ([]stre
 /******* QUEUES ********/
 /*******************************/
 
+// transitionDelayedWorkflows transitions DELAYED workflows whose delay has expired to ENQUEUED.
+func (s *sysDB) transitionDelayedWorkflows(ctx context.Context) error {
+	nowMs := time.Now().UnixMilli()
+	query := fmt.Sprintf(`UPDATE %s.workflow_status
+		SET status = $1
+		WHERE status = $2
+		  AND delay_until_epoch_ms <= $3`, pgx.Identifier{s.schema}.Sanitize())
+
+	_, err := s.pool.Exec(ctx, query, WorkflowStatusEnqueued, WorkflowStatusDelayed, nowMs)
+	if err != nil {
+		return fmt.Errorf("failed to transition delayed workflows: %w", err)
+	}
+	return nil
+}
+
 type dequeuedWorkflow struct {
 	id            string
 	name          string
@@ -2885,12 +2928,12 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		SELECT COUNT(*)
 		FROM %s.workflow_status
 		WHERE queue_name = $1
-		  AND status != $2
-		  AND started_at_epoch_ms > $3`, pgx.Identifier{s.schema}.Sanitize())
+		  AND status NOT IN ($2, $3)
+		  AND started_at_epoch_ms > $4`, pgx.Identifier{s.schema}.Sanitize())
 
-		limiterArgs := []any{input.queue.Name, WorkflowStatusEnqueued, cutoffTimeMs}
+		limiterArgs := []any{input.queue.Name, WorkflowStatusEnqueued, WorkflowStatusDelayed, cutoffTimeMs}
 		if len(input.queuePartitionKey) > 0 {
-			limiterQuery += ` AND queue_partition_key = $4`
+			limiterQuery += ` AND queue_partition_key = $5`
 			limiterArgs = append(limiterArgs, input.queuePartitionKey)
 		}
 
@@ -3688,7 +3731,7 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 				output, error, executor_id, created_at, updated_at, application_version, application_id,
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
-				queue_partition_key, forked_from, parent_workflow_id
+				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms
 			FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
 
 		row := tx.QueryRow(ctx, statusQuery, wfID)
@@ -3701,13 +3744,14 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			createdAt, updatedAt, recoveryAttempts                       *int64
 			workflowTimeoutMs, workflowDeadlineEpochMs, startedAtEpochMs *int64
 			priority                                                     *int
+			delayUntilEpochMs                                            *int64
 		)
 		err := row.Scan(
 			&wfUUID, &status, &name, &authUser, &assumedRole, &authRoles,
 			&output, &errStr, &executorID, &createdAt, &updatedAt, &appVersion, &appID,
 			&className, &configName, &recoveryAttempts, &queueName, &workflowTimeoutMs,
 			&workflowDeadlineEpochMs, &startedAtEpochMs, &dedupID, &inputs, &priority,
-			&queuePartitionKey, &forkedFrom, &parentWorkflowID,
+			&queuePartitionKey, &forkedFrom, &parentWorkflowID, &delayUntilEpochMs,
 		)
 		if err != nil {
 			if err == pgx.ErrNoRows {
@@ -3743,6 +3787,7 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			"queue_partition_key":        queuePartitionKey,
 			"forked_from":                forkedFrom,
 			"parent_workflow_id":         parentWorkflowID,
+			"delay_until_epoch_ms":       delayUntilEpochMs,
 		}
 
 		// Export operation_outputs
@@ -3894,8 +3939,8 @@ func (s *sysDB) importWorkflow(ctx context.Context, workflows []ExportedWorkflow
 				output, error, executor_id, created_at, updated_at, application_version, application_id,
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
-				queue_partition_key, forked_from, parent_workflow_id
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
+				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
 			pgx.Identifier{s.schema}.Sanitize())
 
 		_, err := tx.Exec(ctx, insertStatusQuery,
@@ -3907,6 +3952,7 @@ func (s *sysDB) importWorkflow(ctx context.Context, workflows []ExportedWorkflow
 			status["workflow_timeout_ms"], status["workflow_deadline_epoch_ms"], status["started_at_epoch_ms"],
 			status["deduplication_id"], status["inputs"], status["priority"],
 			status["queue_partition_key"], status["forked_from"], status["parent_workflow_id"],
+			status["delay_until_epoch_ms"],
 		)
 		if err != nil {
 			return fmt.Errorf("failed to import workflow_status: %w", err)
