@@ -1824,15 +1824,21 @@ func TestDelayedExecution(t *testing.T) {
 			finalStatus.StartedAt, status.DelayUntil)
 	})
 
-	t.Run("DelayedAppearsInListWorkflows", func(t *testing.T) {
-		handle, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithQueue(delayQueue.Name), WithDelay(60*time.Second))
+	t.Run("DelayedCancelAndResume", func(t *testing.T) {
+		// Cancel a DELAYED workflow — it should never run
+		cancelHandle, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithQueue(delayQueue.Name), WithDelay(60*time.Second))
 		require.NoError(t, err)
 
+		status, err := cancelHandle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		// Verify the delayed workflow appears in list queries before cancelling
 		allWorkflows, err := ListWorkflows(dbosCtx, WithStatus([]WorkflowStatusType{WorkflowStatusDelayed}))
 		require.NoError(t, err)
 		found := false
 		for _, wf := range allWorkflows {
-			if wf.ID == handle.GetWorkflowID() {
+			if wf.ID == cancelHandle.GetWorkflowID() {
 				found = true
 				break
 			}
@@ -1843,26 +1849,12 @@ func TestDelayedExecution(t *testing.T) {
 		require.NoError(t, err)
 		found = false
 		for _, wf := range queuedWorkflows {
-			if wf.ID == handle.GetWorkflowID() {
+			if wf.ID == cancelHandle.GetWorkflowID() {
 				found = true
 				break
 			}
 		}
 		assert.True(t, found, "delayed workflow should appear in list_queued_workflows")
-
-		// Clean up
-		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
-		require.NoError(t, err)
-	})
-
-	t.Run("DelayedCancelAndResume", func(t *testing.T) {
-		// Cancel a DELAYED workflow — it should never run
-		cancelHandle, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithQueue(delayQueue.Name), WithDelay(60*time.Second))
-		require.NoError(t, err)
-
-		status, err := cancelHandle.GetStatus()
-		require.NoError(t, err)
-		assert.Equal(t, WorkflowStatusDelayed, status.Status)
 
 		err = CancelWorkflow(dbosCtx, cancelHandle.GetWorkflowID())
 		require.NoError(t, err)
@@ -1871,24 +1863,19 @@ func TestDelayedExecution(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, WorkflowStatusCancelled, cancelledStatus.Status)
 
-		// Resume a DELAYED workflow — it should run immediately, bypassing the delay
-		resumeHandle, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithQueue(delayQueue.Name), WithDelay(60*time.Second))
+		// Resume the cancelled workflow — should complete immediately, bypassing the delay
+		tBefore := time.Now()
+		_, err = ResumeWorkflow[string](dbosCtx, cancelHandle.GetWorkflowID())
 		require.NoError(t, err)
 
-		resumeStatus, err := resumeHandle.GetStatus()
-		require.NoError(t, err)
-		assert.Equal(t, WorkflowStatusDelayed, resumeStatus.Status)
-
-		_, err = ResumeWorkflow[string](dbosCtx, resumeHandle.GetWorkflowID())
-		require.NoError(t, err)
-
-		result, err := resumeHandle.GetResult()
+		result, err := cancelHandle.GetResult()
 		require.NoError(t, err)
 		assert.Equal(t, "done", result)
 
-		finalStatus, err := resumeHandle.GetStatus()
+		finalStatus, err := cancelHandle.GetStatus()
 		require.NoError(t, err)
 		assert.Equal(t, WorkflowStatusSuccess, finalStatus.Status)
+		assert.Less(t, time.Since(tBefore), 10*time.Second, "resume should bypass the delay")
 	})
 
 	t.Run("DelayedDeduplication", func(t *testing.T) {
