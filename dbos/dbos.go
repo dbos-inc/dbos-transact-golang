@@ -142,6 +142,7 @@ type DBOSContext interface {
 	// Workflow management
 	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                // Get a handle to an existing workflow
 	CancelWorkflow(_ DBOSContext, workflowID string) error                                                         // Cancel a workflow by setting its status to CANCELLED
+	SetWorkflowDelay(_ DBOSContext, workflowID string, opts ...SetWorkflowDelayOption) error                       // Set or update the delay on a DELAYED workflow
 	ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                  // Resume a cancelled workflow
 	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)                              // Fork a workflow from a specific step
 	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                            // List workflows based on filtering criteria

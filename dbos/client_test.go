@@ -1759,4 +1759,60 @@ func TestClientEnqueueDelay(t *testing.T) {
 		assert.Contains(t, fmt.Sprintf("%v", result), "delayed-done")
 		assert.Less(t, time.Since(tBefore), 60*time.Second, "resume should bypass the delay")
 	})
+
+	t.Run("ClientSetWorkflowDelayDuration", func(t *testing.T) {
+		handle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
+			WithEnqueueDelay(600*time.Second),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		err = client.SetWorkflowDelay(handle.GetWorkflowID(), WithDelayDuration(500*time.Millisecond))
+		require.NoError(t, err)
+
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		assert.True(t, status.DelayUntil.Before(time.Now().Add(5*time.Second)),
+			"delay should have been shortened")
+
+		tStart := time.Now()
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Contains(t, fmt.Sprintf("%v", result), "delayed-done")
+		assert.Less(t, time.Since(tStart), 30*time.Second, "workflow should complete shortly after shortened delay")
+	})
+
+	t.Run("ClientSetWorkflowDelayUntil", func(t *testing.T) {
+		handle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
+			WithEnqueueDelay(600*time.Second),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		soon := time.Now().Add(500 * time.Millisecond)
+		err = client.SetWorkflowDelay(handle.GetWorkflowID(), WithDelayUntil(soon))
+		require.NoError(t, err)
+
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		tolerance := 100 * time.Millisecond
+		assert.True(t, status.DelayUntil.After(soon.Add(-tolerance)),
+			"delay_until should be close to requested time (got=%v, expected~%v)", status.DelayUntil, soon)
+		assert.True(t, status.DelayUntil.Before(soon.Add(tolerance)),
+			"delay_until should be close to requested time (got=%v, expected~%v)", status.DelayUntil, soon)
+
+		tStart := time.Now()
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Contains(t, fmt.Sprintf("%v", result), "delayed-done")
+		assert.Less(t, time.Since(tStart), 30*time.Second, "workflow should complete shortly after shortened delay")
+	})
 }

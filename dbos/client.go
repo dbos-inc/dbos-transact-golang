@@ -30,6 +30,7 @@ type Client interface {
 	GetEvent(targetWorkflowID, key string, timeout time.Duration) (any, error)
 	RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error)
 	CancelWorkflow(workflowID string) error
+	SetWorkflowDelay(workflowID string, opts ...SetWorkflowDelayOption) error
 	DeleteWorkflows(workflowIDs []string, opts ...DeleteWorkflowOption) error
 	ResumeWorkflow(workflowID string) (WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
@@ -390,6 +391,11 @@ func (c *client) RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error
 // CancelWorkflow cancels a running or enqueued workflow.
 func (c *client) CancelWorkflow(workflowID string) error {
 	return c.dbosCtx.CancelWorkflow(c.dbosCtx, workflowID)
+}
+
+// SetWorkflowDelay sets or updates the delay on a DELAYED workflow.
+func (c *client) SetWorkflowDelay(workflowID string, opts ...SetWorkflowDelayOption) error {
+	return c.dbosCtx.SetWorkflowDelay(c.dbosCtx, workflowID, opts...)
 }
 
 // DeleteWorkflows permanently deletes workflows and all their associated data.

@@ -73,6 +73,7 @@ type systemDatabase interface {
 	doesPatchExists(ctx context.Context, input patchDBInput) (string, error)
 
 	// Queues
+	setWorkflowDelay(ctx context.Context, input setWorkflowDelayDBInput) error
 	transitionDelayedWorkflows(ctx context.Context) error
 	dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error)
 	clearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
@@ -2873,6 +2874,36 @@ func (s *sysDB) readStream(ctx context.Context, input readStreamDBInput) ([]stre
 /*******************************/
 /******* QUEUES ********/
 /*******************************/
+
+type setWorkflowDelayDBInput struct {
+	workflowID string
+	delayUntil time.Time
+	tx         pgx.Tx
+}
+
+// setWorkflowDelay updates the delay on a DELAYED workflow.
+func (s *sysDB) setWorkflowDelay(ctx context.Context, input setWorkflowDelayDBInput) error {
+	query := fmt.Sprintf(`UPDATE %s.workflow_status
+		SET delay_until_epoch_ms = $1, updated_at = $2
+		WHERE workflow_uuid = $3
+		  AND status = $4`, pgx.Identifier{s.schema}.Sanitize())
+
+	nowMs := time.Now().UnixMilli()
+	delayMs := input.delayUntil.UnixMilli()
+
+	if input.tx != nil {
+		_, err := input.tx.Exec(ctx, query, delayMs, nowMs, input.workflowID, WorkflowStatusDelayed)
+		if err != nil {
+			return fmt.Errorf("failed to set workflow delay: %w", err)
+		}
+	} else {
+		_, err := s.pool.Exec(ctx, query, delayMs, nowMs, input.workflowID, WorkflowStatusDelayed)
+		if err != nil {
+			return fmt.Errorf("failed to set workflow delay: %w", err)
+		}
+	}
+	return nil
+}
 
 // transitionDelayedWorkflows transitions DELAYED workflows whose delay has expired to ENQUEUED.
 func (s *sysDB) transitionDelayedWorkflows(ctx context.Context) error {

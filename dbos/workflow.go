@@ -3097,6 +3097,83 @@ func CancelWorkflow(ctx DBOSContext, workflowID string) error {
 	return ctx.CancelWorkflow(ctx, workflowID)
 }
 
+// SetWorkflowDelayOption configures how the delay is set on a workflow.
+type SetWorkflowDelayOption func(*setWorkflowDelayOptions)
+
+type setWorkflowDelayOptions struct {
+	delay      time.Duration
+	delayUntil time.Time
+}
+
+// WithDelayDuration sets a relative delay from now.
+func WithDelayDuration(d time.Duration) SetWorkflowDelayOption {
+	return func(o *setWorkflowDelayOptions) {
+		o.delay = d
+	}
+}
+
+// WithDelayUntil sets an absolute time until which the workflow should remain delayed.
+func WithDelayUntil(t time.Time) SetWorkflowDelayOption {
+	return func(o *setWorkflowDelayOptions) {
+		o.delayUntil = t
+	}
+}
+
+func resolveDelayUntil(opts []SetWorkflowDelayOption) (time.Time, error) {
+	params := &setWorkflowDelayOptions{}
+	for _, opt := range opts {
+		opt(params)
+	}
+	hasDelay := params.delay > 0
+	hasUntil := !params.delayUntil.IsZero()
+	if hasDelay && hasUntil {
+		return time.Time{}, errors.New("specify either WithDelayDuration or WithDelayUntil, not both")
+	}
+	if !hasDelay && !hasUntil {
+		return time.Time{}, errors.New("must specify either WithDelayDuration or WithDelayUntil")
+	}
+	if hasDelay {
+		return time.Now().Add(params.delay), nil
+	}
+	return params.delayUntil, nil
+}
+
+func (c *dbosContext) SetWorkflowDelay(_ DBOSContext, workflowID string, opts ...SetWorkflowDelayOption) error {
+	delayUntil, err := resolveDelayUntil(opts)
+	if err != nil {
+		return err
+	}
+	input := setWorkflowDelayDBInput{workflowID: workflowID, delayUntil: delayUntil}
+
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if isWithinWorkflow {
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			input.tx = tx
+			return nil, c.systemDB.setWorkflowDelay(ctx, input)
+		}, WithStepName("DBOS.setWorkflowDelay"))
+		return err
+	}
+	return retry(c, func() error {
+		return c.systemDB.setWorkflowDelay(c, input)
+	}, withRetrierLogger(c.logger))
+}
+
+// SetWorkflowDelay sets or updates the delay on a DELAYED workflow.
+// Provide exactly one of WithDelayDuration (relative) or WithDelayUntil (absolute).
+// Only affects workflows in the DELAYED status.
+//
+// Example:
+//
+//	err := dbos.SetWorkflowDelay(ctx, workflowID, dbos.WithDelayDuration(5*time.Second))
+//	err := dbos.SetWorkflowDelay(ctx, workflowID, dbos.WithDelayUntil(time.Now().Add(10*time.Minute)))
+func SetWorkflowDelay(ctx DBOSContext, workflowID string, opts ...SetWorkflowDelayOption) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.SetWorkflowDelay(ctx, workflowID, opts...)
+}
+
 func (c *dbosContext) DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts ...DeleteWorkflowOption) error {
 	// Process options
 	params := &deleteWorkflowOptions{}

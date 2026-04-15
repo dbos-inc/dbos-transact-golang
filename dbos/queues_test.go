@@ -1900,6 +1900,59 @@ func TestDelayedExecution(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("SetWorkflowDelayDuration", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithQueue(delayQueue.Name), WithDelay(600*time.Second))
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		// Shorten the delay to 500ms
+		err = SetWorkflowDelay(dbosCtx, handle.GetWorkflowID(), WithDelayDuration(500*time.Millisecond))
+		require.NoError(t, err)
+
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		assert.True(t, status.DelayUntil.Before(time.Now().Add(5*time.Second)),
+			"delay should have been shortened")
+
+		tStart := time.Now()
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "done", result)
+		assert.Less(t, time.Since(tStart), 30*time.Second, "workflow should complete shortly after shortened delay")
+	})
+
+	t.Run("SetWorkflowDelayUntil", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithQueue(delayQueue.Name), WithDelay(600*time.Second))
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		soon := time.Now().Add(500 * time.Millisecond)
+		err = SetWorkflowDelay(dbosCtx, handle.GetWorkflowID(), WithDelayUntil(soon))
+		require.NoError(t, err)
+
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		tolerance := 100 * time.Millisecond
+		assert.True(t, status.DelayUntil.After(soon.Add(-tolerance)),
+			"delay_until should be close to requested time (got=%v, expected~%v)", status.DelayUntil, soon)
+		assert.True(t, status.DelayUntil.Before(soon.Add(tolerance)),
+			"delay_until should be close to requested time (got=%v, expected~%v)", status.DelayUntil, soon)
+
+		tStart := time.Now()
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "done", result)
+		assert.Less(t, time.Since(tStart), 30*time.Second, "workflow should complete shortly after shortened delay")
+	})
+
 	t.Run("DelayWithoutQueueErrors", func(t *testing.T) {
 		_, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithDelay(5*time.Second))
 		require.Error(t, err, "expected error when using delay without queue")
