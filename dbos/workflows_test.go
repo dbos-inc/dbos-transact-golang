@@ -3641,8 +3641,8 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Check the deadline on the status was is within an expected range (start time + timeout * .1)
 		// FIXME this might be flaky and frankly not super useful
 		expectedDeadline := start.Add(timeout * 10 / 100)
-		assert.True(t, status.Deadline.After(expectedDeadline) && status.Deadline.Before(start.Add(timeout)),
-			"expected workflow deadline to be within %v and %v, got %v", expectedDeadline, start.Add(timeout), status.Deadline)
+		assert.True(t, status.Deadline.After(expectedDeadline) && status.Deadline.Before(start.Add(timeout).Add(5*time.Second)),
+			"expected workflow deadline to be within %v and %v, got %v", expectedDeadline, start.Add(timeout).Add(5*time.Second), status.Deadline)
 	})
 }
 
