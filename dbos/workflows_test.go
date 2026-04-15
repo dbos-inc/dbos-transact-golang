@@ -2146,6 +2146,73 @@ func TestScheduledWorkflows(t *testing.T) {
 	})
 }
 
+// scheduledWfForIDTest is a shared workflow function used by two different DBOS contexts
+// with different custom names. The bug is that both contexts generate the same scheduled
+// workflow ID because it's based on the Go FQN rather than the custom name.
+func scheduledWfForIDTest(ctx DBOSContext, scheduledTime time.Time) (string, error) {
+	wfID, err := GetWorkflowID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return wfID, nil
+}
+
+// TestScheduledWorkflowIDUsesCustomName verifies that when a scheduled workflow is
+// registered with WithWorkflowName, the generated scheduled workflow ID uses the
+// custom name rather than the Go function's FQN. This prevents ID collisions when
+// multiple binaries share the same database and register the same Go function under
+// different custom names.
+func TestScheduledWorkflowIDUsesCustomName(t *testing.T) {
+	// Set up two separate DBOS contexts (simulating two binaries sharing a DB).
+	// They share the same database, simulating two different services.
+	dbosCtx1 := setupDBOS(t, setupDBOSOptions{dropDB: true})
+	dbosCtx2 := setupDBOS(t, setupDBOSOptions{dropDB: false})
+
+	// Register the SAME Go function with DIFFERENT custom names on each context
+	RegisterWorkflow(dbosCtx1, scheduledWfForIDTest,
+		WithWorkflowName("service-alpha-job"),
+		WithSchedule("* * * * * *")) // Every second
+
+	RegisterWorkflow(dbosCtx2, scheduledWfForIDTest,
+		WithWorkflowName("service-beta-job"),
+		WithSchedule("* * * * * *")) // Every second
+
+	// Launch both contexts
+	err := Launch(dbosCtx1)
+	require.NoError(t, err, "failed to launch DBOS context 1")
+	err = Launch(dbosCtx2)
+	require.NoError(t, err, "failed to launch DBOS context 2")
+
+	// Wait for at least one execution from each scheduler
+	time.Sleep(3 * time.Second)
+
+	// Stop both schedulers
+	dbosCtx1.(*dbosContext).getWorkflowScheduler().Stop()
+	dbosCtx2.(*dbosContext).getWorkflowScheduler().Stop()
+
+	// List all scheduled workflows from the shared database
+	workflows, err := ListWorkflows(dbosCtx1, WithWorkflowIDPrefix("sched-"))
+	require.NoError(t, err)
+	require.NotEmpty(t, workflows, "expected at least one scheduled workflow in the database")
+
+	var alphaIDs, betaIDs []string
+	for _, wf := range workflows {
+		if strings.Contains(wf.ID, "service-alpha-job") {
+			alphaIDs = append(alphaIDs, wf.ID)
+		}
+		if strings.Contains(wf.ID, "service-beta-job") {
+			betaIDs = append(betaIDs, wf.ID)
+		}
+	}
+
+	t.Logf("Total scheduled workflows: %d", len(workflows))
+	t.Logf("Alpha IDs: %v", alphaIDs)
+	t.Logf("Beta IDs: %v", betaIDs)
+
+	require.NotEmpty(t, alphaIDs, "expected scheduled workflow IDs containing 'service-alpha-job'")
+	require.NotEmpty(t, betaIDs, "expected scheduled workflow IDs containing 'service-beta-job'")
+}
+
 var (
 	receiveIdempotencyStartEvent = NewEvent()
 	sendRecvSyncEvent            = NewEvent() // Event to synchronize send/recv in tests

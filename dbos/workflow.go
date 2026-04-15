@@ -492,7 +492,7 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFun
 	}
 }
 
-func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn WorkflowFunc, cronSchedule string) {
+func registerScheduledWorkflow(ctx DBOSContext, workflowFQN, customName string, fn WorkflowFunc, cronSchedule string) {
 	// Skip if we don't have a concrete dbosContext
 	c, ok := ctx.(*dbosContext)
 	if !ok {
@@ -504,13 +504,13 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 	}
 
 	// Update the existing workflow entry with the cron schedule
-	registryEntryAny, exists := c.workflowRegistry.Load(workflowName)
+	registryEntryAny, exists := c.workflowRegistry.Load(workflowFQN)
 	if !exists {
-		panic(fmt.Sprintf("workflow %s must be registered before scheduling", workflowName))
+		panic(fmt.Sprintf("workflow %s must be registered before scheduling", workflowFQN))
 	}
 	registryEntry := registryEntryAny.(WorkflowRegistryEntry)
 	registryEntry.CronSchedule = cronSchedule
-	c.workflowRegistry.Store(workflowName, registryEntry)
+	c.workflowRegistry.Store(workflowFQN, registryEntry)
 
 	var entryID cron.EntryID
 	entryID, err := c.getWorkflowScheduler().AddFunc(cronSchedule, func() {
@@ -525,21 +525,27 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowName string, fn Workflow
 			// Use Next if Prev is not set, which will only happen for the first run
 			scheduledTime = entry.Next
 		}
-		wfID := fmt.Sprintf("sched-%s-%s", workflowName, scheduledTime)
+
+		name := workflowFQN
+		if len(customName) > 0 {
+			name = customName
+		}
+
+		wfID := fmt.Sprintf("sched-%s-%s", name, scheduledTime)
 		opts := []WorkflowOption{
 			WithWorkflowID(wfID),
 			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),
-			withWorkflowName(workflowName),
+			withWorkflowName(workflowFQN),
 		}
 		_, err := ctx.RunWorkflow(ctx, fn, scheduledTime, opts...)
 		if err != nil {
-			c.logger.Error("failed to run scheduled workflow", "fqn", workflowName, "error", err)
+			c.logger.Error("failed to run scheduled workflow", "fqn", workflowFQN, "customName", customName, "error", err)
 		}
 	})
 	if err != nil {
 		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
 	}
-	c.logger.Info("Registered scheduled workflow", "fqn", workflowName, "cron_schedule", cronSchedule)
+	c.logger.Info("Registered scheduled workflow", "fqn", workflowFQN, "customName", customName, "cron_schedule", cronSchedule)
 }
 
 type workflowRegistrationOptions struct {
@@ -699,7 +705,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		scheduledWfFunc := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 			return typedErasedWorkflow(ctx, input, resolveEncoder(ctx).Name())
 		})
-		registerScheduledWorkflow(ctx, fqn, scheduledWfFunc, registrationParams.cronSchedule)
+		registerScheduledWorkflow(ctx, fqn, registrationParams.name, scheduledWfFunc, registrationParams.cronSchedule)
 	}
 }
 
