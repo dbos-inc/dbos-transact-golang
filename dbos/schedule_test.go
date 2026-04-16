@@ -177,17 +177,22 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 	config := setupDBOSOptions{dropDB: true, checkLeaks: true}
 	dbosCtx := setupDBOS(t, config)
 
-	// Register workflow and create a schedule
+	// Register workflow and launch
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+	err := dbosCtx.Launch()
+	require.NoError(t, err)
 
 	scheduleName := "test-backfill-restart"
-	err := CreateSchedule(dbosCtx, CreateScheduleRequest{
+	err = CreateSchedule(dbosCtx, CreateScheduleRequest{
 		ScheduleName:      scheduleName,
 		WorkflowFn:        testWorkflowForSchedule,
 		Schedule:          "*/1 * * * * *", // Every second
 		AutomaticBackfill: true,
 	})
 	require.NoError(t, err)
+
+	// Wait for it to fire once to set LastFiredAt
+	time.Sleep(2 * time.Second)
 
 	// Shutdown the context
 	dbosCtx.Shutdown(5 * time.Second)

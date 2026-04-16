@@ -542,11 +542,14 @@ func (c *dbosContext) addScheduleToScheduler(schedule WorkflowSchedule) {
 		}
 
 		now := time.Now()
-		c.systemDB.updateSchedule(c, updateScheduleDBInput{
+		err = c.systemDB.updateSchedule(c, updateScheduleDBInput{
 			ScheduleName: scheduleName,
 			Status:       ScheduleStatusActive,
 			LastFiredAt:  &now,
 		})
+		if err != nil {
+			c.logger.Error("failed to update schedule last fired time", "schedule", scheduleName, "error", err)
+		}
 	})
 	if err != nil {
 		c.logger.Error("failed to add schedule to scheduler", "schedule", schedule.ScheduleName, "error", err)
@@ -555,6 +558,12 @@ func (c *dbosContext) addScheduleToScheduler(schedule WorkflowSchedule) {
 
 	c.scheduleEntryIDs[schedule.ScheduleName] = entryID
 	c.logger.Info("Loaded schedule from database", "schedule", schedule.ScheduleName, "workflow", schedule.WorkflowName)
+
+	// If DBOS is already launched, ensure the scheduler is started.
+	// robfig/cron.Start() is safe to call multiple times (it's a no-op if already running).
+	if c.launched.Load() {
+		c.getWorkflowScheduler().Start()
+	}
 }
 
 func (c *dbosContext) GetApplicationVersion() string {

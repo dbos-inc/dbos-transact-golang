@@ -449,14 +449,15 @@ func (h *workflowHandleProxy[R]) GetWorkflowID() string {
 type wrappedWorkflowFunc func(ctx DBOSContext, input any, inputSerialization string, opts ...WorkflowOption) (WorkflowHandle[any], error)
 
 type WorkflowRegistryEntry struct {
-	wrappedFunction wrappedWorkflowFunc
-	MaxRetries      int
-	Name            string
-	FQN             string // Fully qualified name of the workflow function
-	CronSchedule    string // Empty string for non-scheduled workflows
+	wrappedFunction  wrappedWorkflowFunc
+	OriginalFunction any // The original user-provided function
+	MaxRetries       int
+	Name             string
+	FQN              string // Fully qualified name of the workflow function
+	CronSchedule     string // Empty string for non-scheduled workflows
 }
 
-func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFunc, maxRetries int, customName string) {
+func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFunc, originalFn any, maxRetries int, customName string) {
 	// Skip if we don't have a concrete dbosContext
 	c, ok := ctx.(*dbosContext)
 	if !ok {
@@ -469,10 +470,11 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFun
 
 	// Check if workflow already exists and store atomically using LoadOrStore
 	entry := WorkflowRegistryEntry{
-		wrappedFunction: fn,
-		FQN:             workflowFQN,
-		MaxRetries:      maxRetries,
-		Name:            customName,
+		wrappedFunction:  fn,
+		OriginalFunction: originalFn,
+		FQN:              workflowFQN,
+		MaxRetries:       maxRetries,
+		Name:             customName,
 		CronSchedule:    "",
 	}
 
@@ -677,6 +679,17 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	}
 
 	typeErasedWrapper := wrappedWorkflowFunc(func(ctx DBOSContext, input any, inputSerialization string, opts ...WorkflowOption) (WorkflowHandle[any], error) {
+		// If no serialization is provided, encode the input using the default encoder.
+		// This happens when calling the wrapper directly (e.g., from the scheduler or TriggerSchedule).
+		if inputSerialization == "" {
+			var err error
+			inputSerialization = resolveEncoder(ctx).Name()
+			input, err = resolveEncoder(ctx).Encode(input)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		wfFunc := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 			return typedErasedWorkflow(ctx, input, inputSerialization)
 		})
@@ -690,7 +703,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		}
 		return newWorkflowPollingHandle[any](ctx, handle.GetWorkflowID()), nil // this is only used by recovery -- the queue runner dismisses it
 	})
-	registerWorkflow(ctx, fqn, typeErasedWrapper, registrationParams.maxRetries, registrationParams.name)
+	registerWorkflow(ctx, fqn, typeErasedWrapper, fn, registrationParams.maxRetries, registrationParams.name)
 
 	// If this is a scheduled workflow, register a cron job
 	if registrationParams.cronSchedule != "" {
@@ -3294,7 +3307,7 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, input CreateScheduleRequest)
 		return fmt.Errorf("failed to serialize context: %w", err)
 	}
 
-	return retry(c, func() error {
+	err = retry(c, func() error {
 		return c.systemDB.createSchedule(c, createScheduleDBInput{
 			ScheduleID:        scheduleID,
 			ScheduleName:      input.ScheduleName,
@@ -3307,6 +3320,18 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, input CreateScheduleRequest)
 			CronTimezone:      input.CronTimezone,
 		})
 	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return err
+	}
+
+	if c.launched.Load() && c.workflowScheduler != nil {
+		err = c.AddScheduleToScheduler(input.ScheduleName)
+		if err != nil {
+			return fmt.Errorf("failed to add schedule to scheduler: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRequest) error {
@@ -3339,7 +3364,7 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 				if !ok {
 					return true
 				}
-				if reflect.ValueOf(req.WorkflowFn).Pointer() == reflect.ValueOf(entry.wrappedFunction).Pointer() {
+				if reflect.ValueOf(req.WorkflowFn).Pointer() == reflect.ValueOf(entry.OriginalFunction).Pointer() {
 					fqn = entry.FQN
 					workflowName = entry.Name
 					parts := strings.Split(entry.FQN, ".")
@@ -3367,7 +3392,10 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 			if existing.Status != ScheduleStatusActive {
 				updateInput.Status = ScheduleStatusActive
 				if c.launched.Load() && c.workflowScheduler != nil {
-					c.AddScheduleToScheduler(req.ScheduleName)
+					err = c.AddScheduleToScheduler(req.ScheduleName)
+					if err != nil {
+						return fmt.Errorf("failed to add schedule to scheduler: %w", err)
+					}
 				}
 			}
 			err = c.systemDB.updateSchedule(c, updateInput)
@@ -3391,7 +3419,10 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 				return fmt.Errorf("failed to create schedule: %w", err)
 			}
 			if c.launched.Load() && c.workflowScheduler != nil {
-				c.AddScheduleToScheduler(req.ScheduleName)
+				err = c.AddScheduleToScheduler(req.ScheduleName)
+				if err != nil {
+					return fmt.Errorf("failed to add schedule to scheduler: %w", err)
+				}
 			}
 		}
 	}
@@ -3449,7 +3480,10 @@ func (c *dbosContext) ResumeSchedule(_ DBOSContext, scheduleName string) error {
 	}
 
 	if c.launched.Load() && c.workflowScheduler != nil {
-		c.AddScheduleToScheduler(scheduleName)
+		err = c.AddScheduleToScheduler(scheduleName)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

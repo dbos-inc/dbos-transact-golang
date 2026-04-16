@@ -3552,7 +3552,9 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 		s.logger.Debug("timezone not supported in backfill, using UTC", "timezone", schedule.CronTimezone)
 	}
 
-	scheduleEntry, err := cron.ParseStandard(spec)
+	// Parse the cron schedule, supporting seconds to match the main scheduler
+	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	scheduleEntry, err := parser.Parse(spec)
 	if err != nil {
 		return fmt.Errorf("failed to parse cron schedule: %w", err)
 	}
