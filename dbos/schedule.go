@@ -27,7 +27,6 @@ type WorkflowSchedule struct {
 	LastFiredAt       *time.Time     `json:"last_fired_at,omitempty"`
 	AutomaticBackfill bool           `json:"automatic_backfill"`
 	CronTimezone      string         `json:"cron_timezone,omitempty"`
-	QueueName         string         `json:"queue_name,omitempty"`
 }
 
 type CreateScheduleRequest struct {
@@ -39,7 +38,6 @@ type CreateScheduleRequest struct {
 	Context           any
 	AutomaticBackfill bool
 	CronTimezone      string
-	QueueName         string
 }
 
 type ApplySchedulesRequest struct {
@@ -51,7 +49,6 @@ type ApplySchedulesRequest struct {
 	Context           any
 	AutomaticBackfill bool
 	CronTimezone      string
-	QueueName         string
 }
 
 type ClientScheduleInput struct {
@@ -62,5 +59,4 @@ type ClientScheduleInput struct {
 	Context           any
 	AutomaticBackfill bool
 	CronTimezone      string
-	QueueName         string
 }

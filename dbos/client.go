@@ -610,7 +610,6 @@ func (c *client) CreateSchedule(input ClientScheduleInput) error {
 		Status:            ScheduleStatusActive,
 		AutomaticBackfill: input.AutomaticBackfill,
 		CronTimezone:      input.CronTimezone,
-		QueueName:         input.QueueName,
 	})
 }
 

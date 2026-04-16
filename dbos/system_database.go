@@ -3346,7 +3346,6 @@ type createScheduleDBInput struct {
 	Status            ScheduleStatus
 	AutomaticBackfill bool
 	CronTimezone      string
-	QueueName         string
 }
 
 type updateScheduleDBInput struct {
@@ -3366,8 +3365,8 @@ func (s *sysDB) createSchedule(ctx context.Context, input createScheduleDBInput)
 	query := fmt.Sprintf(`
 		INSERT INTO %s.workflow_schedules (
 			schedule_id, schedule_name, workflow_name, workflow_class_name,
-			schedule, context, status, automatic_backfill, cron_timezone, queue_name
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			schedule, context, status, automatic_backfill, cron_timezone
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`, pgx.Identifier{s.schema}.Sanitize())
 
 	_, err := s.pool.Exec(ctx, query,
@@ -3380,7 +3379,6 @@ func (s *sysDB) createSchedule(ctx context.Context, input createScheduleDBInput)
 		input.Status,
 		input.AutomaticBackfill,
 		input.CronTimezone,
-		input.QueueName,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create schedule: %w", err)
@@ -3392,13 +3390,13 @@ func (s *sysDB) getSchedule(ctx context.Context, scheduleName string) (*Workflow
 	query := fmt.Sprintf(`
 		SELECT schedule_id, schedule_name, workflow_name, workflow_class_name,
 		       schedule, status, context, last_fired_at, automatic_backfill,
-		       cron_timezone, queue_name
+		       cron_timezone
 		FROM %s.workflow_schedules
 		WHERE schedule_name = $1
 	`, pgx.Identifier{s.schema}.Sanitize())
 
 	var schedule WorkflowSchedule
-	var lastFiredAt *time.Time
+	var lastFiredAtStr *string
 	var contextJSON string
 
 	err := s.pool.QueryRow(ctx, query, scheduleName).Scan(
@@ -3409,10 +3407,9 @@ func (s *sysDB) getSchedule(ctx context.Context, scheduleName string) (*Workflow
 		&schedule.Schedule,
 		&schedule.Status,
 		&contextJSON,
-		&lastFiredAt,
+		&lastFiredAtStr,
 		&schedule.AutomaticBackfill,
 		&schedule.CronTimezone,
-		&schedule.QueueName,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -3421,7 +3418,17 @@ func (s *sysDB) getSchedule(ctx context.Context, scheduleName string) (*Workflow
 		return nil, fmt.Errorf("failed to get schedule: %w", err)
 	}
 
-	schedule.LastFiredAt = lastFiredAt
+	if lastFiredAtStr != nil {
+		t, err := time.Parse(time.RFC3339Nano, *lastFiredAtStr)
+		if err == nil {
+			schedule.LastFiredAt = &t
+		} else {
+			t, err = time.Parse(time.RFC3339, *lastFiredAtStr)
+			if err == nil {
+				schedule.LastFiredAt = &t
+			}
+		}
+	}
 	if err := json.Unmarshal([]byte(contextJSON), &schedule.Context); err != nil {
 		schedule.Context = contextJSON
 	}
@@ -3439,7 +3446,7 @@ func (s *sysDB) listSchedules(ctx context.Context, status string) ([]WorkflowSch
 		query = fmt.Sprintf(`
 			SELECT schedule_id, schedule_name, workflow_name, workflow_class_name,
 			       schedule, status, context, last_fired_at, automatic_backfill,
-			       cron_timezone, queue_name
+			       cron_timezone
 			FROM %s.workflow_schedules
 		`, schema)
 		rows, err = s.pool.Query(ctx, query)
@@ -3447,7 +3454,7 @@ func (s *sysDB) listSchedules(ctx context.Context, status string) ([]WorkflowSch
 		query = fmt.Sprintf(`
 			SELECT schedule_id, schedule_name, workflow_name, workflow_class_name,
 			       schedule, status, context, last_fired_at, automatic_backfill,
-			       cron_timezone, queue_name
+			       cron_timezone
 			FROM %s.workflow_schedules
 			WHERE status = $1
 		`, schema)
@@ -3462,7 +3469,7 @@ func (s *sysDB) listSchedules(ctx context.Context, status string) ([]WorkflowSch
 	var schedules []WorkflowSchedule
 	for rows.Next() {
 		var schedule WorkflowSchedule
-		var lastFiredAt *time.Time
+		var lastFiredAtStr *string
 		var contextJSON string
 
 		err := rows.Scan(
@@ -3473,16 +3480,25 @@ func (s *sysDB) listSchedules(ctx context.Context, status string) ([]WorkflowSch
 			&schedule.Schedule,
 			&schedule.Status,
 			&contextJSON,
-			&lastFiredAt,
+			&lastFiredAtStr,
 			&schedule.AutomaticBackfill,
 			&schedule.CronTimezone,
-			&schedule.QueueName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan schedule: %w", err)
 		}
 
-		schedule.LastFiredAt = lastFiredAt
+		if lastFiredAtStr != nil {
+			t, err := time.Parse(time.RFC3339Nano, *lastFiredAtStr)
+			if err == nil {
+				schedule.LastFiredAt = &t
+			} else {
+				t, err = time.Parse(time.RFC3339, *lastFiredAtStr)
+				if err == nil {
+					schedule.LastFiredAt = &t
+				}
+			}
+		}
 		if err := json.Unmarshal([]byte(contextJSON), &schedule.Context); err != nil {
 			schedule.Context = contextJSON
 		}
@@ -3500,7 +3516,12 @@ func (s *sysDB) updateSchedule(ctx context.Context, input updateScheduleDBInput)
 		WHERE schedule_name = $3
 	`, pgx.Identifier{s.schema}.Sanitize())
 
-	_, err := s.pool.Exec(ctx, query, input.Status, input.LastFiredAt, input.ScheduleName)
+	var lastFiredAtVal any
+	if input.LastFiredAt != nil {
+		lastFiredAtVal = input.LastFiredAt.Format(time.RFC3339Nano)
+	}
+
+	_, err := s.pool.Exec(ctx, query, input.Status, lastFiredAtVal, input.ScheduleName)
 	if err != nil {
 		return fmt.Errorf("failed to update schedule: %w", err)
 	}

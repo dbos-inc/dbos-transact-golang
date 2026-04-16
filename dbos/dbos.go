@@ -516,7 +516,6 @@ func (c *dbosContext) addScheduleToScheduler(schedule WorkflowSchedule) {
 
 	scheduleName := schedule.ScheduleName
 	workflowName := schedule.WorkflowName
-	queueName := schedule.QueueName
 
 	var entryID cron.EntryID
 	entryID, err = c.getWorkflowScheduler().AddFunc(schedule.Schedule, func() {
@@ -534,11 +533,7 @@ func (c *dbosContext) addScheduleToScheduler(schedule WorkflowSchedule) {
 		opts := []WorkflowOption{
 			WithWorkflowID(wfID),
 			withWorkflowName(workflowName),
-		}
-		if queueName != "" {
-			opts = append(opts, WithQueue(queueName))
-		} else {
-			opts = append(opts, WithQueue(_DBOS_INTERNAL_QUEUE_NAME))
+			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),
 		}
 
 		_, err := workflowFn(c, scheduledTime, "", opts...)

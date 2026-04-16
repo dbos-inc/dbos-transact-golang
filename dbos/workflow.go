@@ -3276,21 +3276,15 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, input CreateScheduleRequest)
 	workflowClassName := input.WorkflowClassName
 
 	if input.WorkflowFn != nil {
-		fqn := ""
-		c.workflowRegistry.Range(func(key, value any) bool {
-			entry, ok := value.(WorkflowRegistryEntry)
-			if !ok {
-				return true
+		fqn := resolveWorkflowFunctionName[any, any](Workflow[any, any](input.WorkflowFn))
+		if entry, ok := c.workflowRegistry.Load(fqn); ok {
+			e := entry.(WorkflowRegistryEntry)
+			workflowName = e.Name
+			if workflowName == "" {
+				workflowName = strings.Split(fqn, ".")[len(strings.Split(fqn, "."))-1]
 			}
-			if reflect.ValueOf(input.WorkflowFn).Pointer() == reflect.ValueOf(entry.wrappedFunction).Pointer() {
-				fqn = entry.FQN
-				workflowName = entry.Name
-				workflowClassName = extractClassName(entry.FQN)
-				return false
-			}
-			return true
-		})
-		if fqn == "" {
+			workflowClassName = extractClassName(fqn)
+		} else {
 			return errors.New("workflow function not registered")
 		}
 	}
@@ -3311,7 +3305,6 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, input CreateScheduleRequest)
 			Status:            ScheduleStatusActive,
 			AutomaticBackfill: input.AutomaticBackfill,
 			CronTimezone:      input.CronTimezone,
-			QueueName:         input.QueueName,
 		})
 	}, withRetrierLogger(c.logger))
 }
@@ -3393,7 +3386,6 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 				Status:            ScheduleStatusActive,
 				AutomaticBackfill: req.AutomaticBackfill,
 				CronTimezone:      req.CronTimezone,
-				QueueName:         req.QueueName,
 			})
 			if err != nil {
 				return fmt.Errorf("failed to create schedule: %w", err)
@@ -3535,12 +3527,7 @@ func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (strin
 	scheduledTime := time.Now()
 	workflowID := fmt.Sprintf("sched-%s-%s", scheduleName, scheduledTime.Format(time.RFC3339))
 
-	queueName := _DBOS_INTERNAL_QUEUE_NAME
-	if existing.QueueName != "" {
-		queueName = existing.QueueName
-	}
-
-	_, err = workflowFn(c, scheduledTime, "", WithWorkflowID(workflowID), WithQueue(queueName))
+	_, err = workflowFn(c, scheduledTime, "", WithWorkflowID(workflowID), WithQueue(_DBOS_INTERNAL_QUEUE_NAME))
 	if err != nil {
 		return "", fmt.Errorf("failed to trigger schedule: %w", err)
 	}

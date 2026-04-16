@@ -145,26 +145,6 @@ func TestTriggerSchedule(t *testing.T) {
 	require.Contains(t, workflowID, "trigger-schedule")
 }
 
-func TestScheduleWithQueue(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
-	defer dbosCtx.Shutdown(10 * time.Second)
-
-	// First register the workflow
-	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
-
-	err := CreateSchedule(dbosCtx, CreateScheduleRequest{
-		ScheduleName: "queue-schedule",
-		WorkflowFn:   testWorkflowForSchedule,
-		Schedule:     "0 0 * * * *",
-		QueueName:    "test-queue",
-	})
-	require.NoError(t, err)
-
-	schedule, err := GetSchedule(dbosCtx, "queue-schedule")
-	require.NoError(t, err)
-	require.Equal(t, "test-queue", schedule.QueueName)
-}
-
 func TestScheduleWithOptions(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	defer dbosCtx.Shutdown(10 * time.Second)
@@ -179,7 +159,6 @@ func TestScheduleWithOptions(t *testing.T) {
 		Context:           map[string]string{"key": "value"},
 		AutomaticBackfill: true,
 		CronTimezone:      "America/New_York",
-		QueueName:         "priority-queue",
 	})
 	require.NoError(t, err)
 
@@ -187,10 +166,90 @@ func TestScheduleWithOptions(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, schedule.AutomaticBackfill)
 	require.Equal(t, "America/New_York", schedule.CronTimezone)
-	require.Equal(t, "priority-queue", schedule.QueueName)
 }
 
 // Helper workflow for testing schedules - must match WorkflowFunc signature
 func testWorkflowForSchedule(ctx DBOSContext, input any) (any, error) {
 	return "completed", nil
+}
+
+func TestAutomaticBackfillOnRestart(t *testing.T) {
+	config := setupDBOSOptions{dropDB: true, checkLeaks: true}
+	dbosCtx := setupDBOS(t, config)
+
+	// Register workflow and create a schedule
+	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+
+	scheduleName := "test-backfill-restart"
+	err := CreateSchedule(dbosCtx, CreateScheduleRequest{
+		ScheduleName:      scheduleName,
+		WorkflowFn:        testWorkflowForSchedule,
+		Schedule:          "*/1 * * * * *", // Every second
+		AutomaticBackfill: true,
+	})
+	require.NoError(t, err)
+
+	// Shutdown the context
+	dbosCtx.Shutdown(5 * time.Second)
+
+	// Wait for a few seconds to simulate "missed" schedules
+	time.Sleep(3 * time.Second)
+
+	// Restart DBOS
+	dbosCtx2 := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
+	defer dbosCtx2.Shutdown(5 * time.Second)
+
+	// Register the same workflow again
+	RegisterWorkflow(dbosCtx2, testWorkflowForSchedule)
+
+	// Launch should trigger backfill
+	err = dbosCtx2.Launch()
+	require.NoError(t, err)
+
+	// Wait for backfill to process
+	time.Sleep(2 * time.Second)
+
+	// Verify that multiple workflows were fired (backfilled)
+	statuses, err := dbosCtx2.ListWorkflows(dbosCtx2)
+	require.NoError(t, err)
+
+	firedCount := 0
+	for _, status := range statuses {
+		if status.Name == "testWorkflowForSchedule" {
+			firedCount++
+		}
+	}
+	require.Greater(t, firedCount, 0, "Should have backfilled some workflows")
+}
+
+func TestCronTriggering(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	defer dbosCtx.Shutdown(5 * time.Second)
+
+	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+
+	err := dbosCtx.Launch()
+	require.NoError(t, err)
+
+	// Create a schedule that fires every second
+	err = CreateSchedule(dbosCtx, CreateScheduleRequest{
+		ScheduleName: "test-cron-trigger",
+		WorkflowFn:   testWorkflowForSchedule,
+		Schedule:     "*/1 * * * * *",
+	})
+	require.NoError(t, err)
+
+	// Wait for it to fire at least once
+	time.Sleep(2500 * time.Millisecond)
+
+	statuses, err := dbosCtx.ListWorkflows(dbosCtx)
+	require.NoError(t, err)
+
+	firedCount := 0
+	for _, status := range statuses {
+		if status.Name == "testWorkflowForSchedule" {
+			firedCount++
+		}
+	}
+	require.GreaterOrEqual(t, firedCount, 1, "Schedule should have fired at least once")
 }
