@@ -1767,3 +1767,195 @@ func TestListenQueues(t *testing.T) {
 		t.Error("expected panic from ListenQueues after launch, but none occurred")
 	})
 }
+
+func TestDelayedExecution(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	delayQueue := NewWorkflowQueue(dbosCtx, "test-delay-queue",
+		WithQueueBasePollingInterval(50*time.Millisecond),
+		WithQueueMaxPollingInterval(500*time.Millisecond))
+	dedupDelayQueue := NewWorkflowQueue(dbosCtx, "test-delay-dedup-queue",
+		WithQueueBasePollingInterval(50*time.Millisecond),
+		WithQueueMaxPollingInterval(500*time.Millisecond))
+
+	delayWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		return "done", nil
+	}
+
+	RegisterWorkflow(dbosCtx, delayWorkflow)
+
+	err := Launch(dbosCtx)
+	require.NoError(t, err, "failed to launch DBOS")
+
+	t.Run("BasicDelay", func(t *testing.T) {
+		delayDuration := 2 * time.Second
+		tBefore := time.Now()
+
+		handle, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithQueue(delayQueue.Name), WithDelay(delayDuration))
+		require.NoError(t, err, "failed to enqueue delayed workflow")
+
+		tAfter := time.Now()
+
+		// Check initial status is DELAYED
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		assert.False(t, status.DelayUntil.IsZero(), "delay_until should be set")
+		// Allow 100ms tolerance for timing precision (DB stores milliseconds)
+		tolerance := 100 * time.Millisecond
+		assert.True(t, status.DelayUntil.After(tBefore.Add(delayDuration).Add(-tolerance)),
+			"delay_until should be >= tBefore + delay (delay_until=%v, expected>=%v)", status.DelayUntil, tBefore.Add(delayDuration))
+		assert.True(t, status.DelayUntil.Before(tAfter.Add(delayDuration).Add(tolerance)),
+			"delay_until should be <= tAfter + delay (delay_until=%v, expected<=%v)", status.DelayUntil, tAfter.Add(delayDuration))
+
+		// Wait for the workflow to complete
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get workflow result")
+		assert.Equal(t, "done", result)
+
+		// Verify it completed
+		finalStatus, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get final status")
+		assert.Equal(t, WorkflowStatusSuccess, finalStatus.Status)
+
+		// Verify it wasn't dequeued before the delay expired
+		assert.True(t, finalStatus.StartedAt.After(status.DelayUntil) || finalStatus.StartedAt.Equal(status.DelayUntil),
+			"workflow should not have been dequeued before delay expired (started_at=%v, delay_until=%v)",
+			finalStatus.StartedAt, status.DelayUntil)
+	})
+
+	t.Run("DelayedCancelAndResume", func(t *testing.T) {
+		// Cancel a DELAYED workflow — it should never run
+		cancelHandle, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithQueue(delayQueue.Name), WithDelay(60*time.Second))
+		require.NoError(t, err)
+
+		status, err := cancelHandle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		// Verify the delayed workflow appears in list queries before cancelling
+		allWorkflows, err := ListWorkflows(dbosCtx, WithStatus([]WorkflowStatusType{WorkflowStatusDelayed}))
+		require.NoError(t, err)
+		found := false
+		for _, wf := range allWorkflows {
+			if wf.ID == cancelHandle.GetWorkflowID() {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "delayed workflow should appear in list_workflows")
+
+		queuedWorkflows, err := ListWorkflows(dbosCtx, WithQueuesOnly())
+		require.NoError(t, err)
+		found = false
+		for _, wf := range queuedWorkflows {
+			if wf.ID == cancelHandle.GetWorkflowID() {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "delayed workflow should appear in list_queued_workflows")
+
+		err = CancelWorkflow(dbosCtx, cancelHandle.GetWorkflowID())
+		require.NoError(t, err)
+
+		cancelledStatus, err := cancelHandle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusCancelled, cancelledStatus.Status)
+
+		// Resume the cancelled workflow — should complete immediately, bypassing the delay
+		tBefore := time.Now()
+		_, err = ResumeWorkflow[string](dbosCtx, cancelHandle.GetWorkflowID())
+		require.NoError(t, err)
+
+		result, err := cancelHandle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "done", result)
+
+		finalStatus, err := cancelHandle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusSuccess, finalStatus.Status)
+		assert.Less(t, time.Since(tBefore), 10*time.Second, "resume should bypass the delay")
+	})
+
+	t.Run("DelayedDeduplication", func(t *testing.T) {
+		dedupID := uuid.New().String()
+
+		handle, err := RunWorkflow(dbosCtx, delayWorkflow, "",
+			WithQueue(dedupDelayQueue.Name), WithDelay(60*time.Second), WithDeduplicationID(dedupID))
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		// Second enqueue with the same dedup ID should fail
+		_, err = RunWorkflow(dbosCtx, delayWorkflow, "",
+			WithQueue(dedupDelayQueue.Name), WithDelay(60*time.Second), WithDeduplicationID(dedupID))
+		require.Error(t, err, "expected deduplication error")
+		assert.True(t, errors.Is(err, &DBOSError{Code: QueueDeduplicated}), "expected QueueDeduplicated error, got: %v", err)
+
+		// Clean up
+		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err)
+	})
+
+	t.Run("SetWorkflowDelayDuration", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithQueue(delayQueue.Name), WithDelay(600*time.Second))
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		// Shorten the delay to 500ms
+		err = SetWorkflowDelay(dbosCtx, handle.GetWorkflowID(), WithDelayDuration(500*time.Millisecond))
+		require.NoError(t, err)
+
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		assert.True(t, status.DelayUntil.Before(time.Now().Add(5*time.Second)),
+			"delay should have been shortened")
+
+		tStart := time.Now()
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "done", result)
+		assert.Less(t, time.Since(tStart), 30*time.Second, "workflow should complete shortly after shortened delay")
+	})
+
+	t.Run("SetWorkflowDelayUntil", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithQueue(delayQueue.Name), WithDelay(600*time.Second))
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		soon := time.Now().Add(500 * time.Millisecond)
+		err = SetWorkflowDelay(dbosCtx, handle.GetWorkflowID(), WithDelayUntil(soon))
+		require.NoError(t, err)
+
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		tolerance := 100 * time.Millisecond
+		assert.True(t, status.DelayUntil.After(soon.Add(-tolerance)),
+			"delay_until should be close to requested time (got=%v, expected~%v)", status.DelayUntil, soon)
+		assert.True(t, status.DelayUntil.Before(soon.Add(tolerance)),
+			"delay_until should be close to requested time (got=%v, expected~%v)", status.DelayUntil, soon)
+
+		tStart := time.Now()
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "done", result)
+		assert.Less(t, time.Since(tStart), 30*time.Second, "workflow should complete shortly after shortened delay")
+	})
+
+	t.Run("DelayWithoutQueueErrors", func(t *testing.T) {
+		_, err := RunWorkflow(dbosCtx, delayWorkflow, "", WithDelay(5*time.Second))
+		require.Error(t, err, "expected error when using delay without queue")
+		assert.Contains(t, err.Error(), "delay provided but queue name is missing")
+	})
+}

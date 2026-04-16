@@ -753,14 +753,14 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	if len(req.Body.Status) > 0 {
 		for _, s := range req.Body.Status {
 			status := WorkflowStatusType(s)
-			if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
+			if status != WorkflowStatusPending && status != WorkflowStatusEnqueued && status != WorkflowStatusDelayed {
 				c.logger.Warn("Received unexpected filtering status for listing queued workflows", "status", status)
 			}
 			queuedStatuses = append(queuedStatuses, status)
 		}
 	}
 	if len(queuedStatuses) == 0 {
-		queuedStatuses = []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued}
+		queuedStatuses = []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued, WorkflowStatusDelayed}
 	}
 	opts = append(opts, WithStatus(queuedStatuses))
 

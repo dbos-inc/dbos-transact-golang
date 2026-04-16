@@ -1678,3 +1678,141 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	assert.Equal(t, expectedAuthenticatedRoles, workflow.AuthenticatedRoles, "authenticated roles should match")
 	assert.Equal(t, WorkflowStatusSuccess, workflow.Status, "workflow should have succeeded")
 }
+
+func TestClientEnqueueDelay(t *testing.T) {
+	// Setup server context
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	queue := NewWorkflowQueue(serverCtx, "client-delay-queue",
+		WithQueueBasePollingInterval(50*time.Millisecond),
+		WithQueueMaxPollingInterval(500*time.Millisecond))
+
+	delayWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		return "delayed-done", nil
+	}
+	RegisterWorkflow(serverCtx, delayWorkflow, WithWorkflowName("DelayWorkflow"))
+
+	err := Launch(serverCtx)
+	require.NoError(t, err)
+
+	// Setup client
+	databaseURL := getDatabaseURL()
+	config := ClientConfig{DatabaseURL: databaseURL}
+	client, err := NewClient(context.Background(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+
+	t.Run("ClientEnqueueWithDelay", func(t *testing.T) {
+		delayDuration := 2 * time.Second
+		tBefore := time.Now()
+
+		handle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
+			WithEnqueueDelay(delayDuration),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		tAfter := time.Now()
+
+		// Verify initial status is DELAYED
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		assert.False(t, status.DelayUntil.IsZero(), "delay_until should be set")
+
+		tolerance := 100 * time.Millisecond
+		assert.True(t, status.DelayUntil.After(tBefore.Add(delayDuration).Add(-tolerance)),
+			"delay_until should be >= tBefore + delay")
+		assert.True(t, status.DelayUntil.Before(tAfter.Add(delayDuration).Add(tolerance)),
+			"delay_until should be <= tAfter + delay")
+
+		// Wait for result — should complete after delay
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Contains(t, fmt.Sprintf("%v", result), "delayed-done")
+	})
+
+	t.Run("ClientEnqueueDelayedCancelResume", func(t *testing.T) {
+		tBefore := time.Now()
+		// Cancel a delayed workflow
+		cancelHandle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
+			WithEnqueueDelay(60*time.Second),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		status, err := cancelHandle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		err = client.CancelWorkflow(cancelHandle.GetWorkflowID())
+		require.NoError(t, err)
+
+		cancelledStatus, err := cancelHandle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusCancelled, cancelledStatus.Status)
+
+		// Resume the cancelled workflow — should complete well before the 60s delay
+		_, err = client.ResumeWorkflow(cancelHandle.GetWorkflowID())
+		require.NoError(t, err)
+
+		result, err := cancelHandle.GetResult()
+		require.NoError(t, err)
+		assert.Contains(t, fmt.Sprintf("%v", result), "delayed-done")
+		assert.Less(t, time.Since(tBefore), 60*time.Second, "resume should bypass the delay")
+	})
+
+	t.Run("ClientSetWorkflowDelayDuration", func(t *testing.T) {
+		handle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
+			WithEnqueueDelay(600*time.Second),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		err = client.SetWorkflowDelay(handle.GetWorkflowID(), WithDelayDuration(500*time.Millisecond))
+		require.NoError(t, err)
+
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		assert.True(t, status.DelayUntil.Before(time.Now().Add(5*time.Second)),
+			"delay should have been shortened")
+
+		tStart := time.Now()
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Contains(t, fmt.Sprintf("%v", result), "delayed-done")
+		assert.Less(t, time.Since(tStart), 30*time.Second, "workflow should complete shortly after shortened delay")
+	})
+
+	t.Run("ClientSetWorkflowDelayUntil", func(t *testing.T) {
+		handle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
+			WithEnqueueDelay(600*time.Second),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+
+		soon := time.Now().Add(500 * time.Millisecond)
+		err = client.SetWorkflowDelay(handle.GetWorkflowID(), WithDelayUntil(soon))
+		require.NoError(t, err)
+
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		tolerance := 100 * time.Millisecond
+		assert.True(t, status.DelayUntil.After(soon.Add(-tolerance)),
+			"delay_until should be close to requested time (got=%v, expected~%v)", status.DelayUntil, soon)
+		assert.True(t, status.DelayUntil.Before(soon.Add(tolerance)),
+			"delay_until should be close to requested time (got=%v, expected~%v)", status.DelayUntil, soon)
+
+		tStart := time.Now()
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Contains(t, fmt.Sprintf("%v", result), "delayed-done")
+		assert.Less(t, time.Since(tStart), 30*time.Second, "workflow should complete shortly after shortened delay")
+	})
+}

@@ -398,7 +398,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 
 		filters := req.toListWorkflowsOptions()
 		if len(req.Status) == 0 {
-			filters = append(filters, WithStatus([]WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending}))
+			filters = append(filters, WithStatus([]WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending, WorkflowStatusDelayed}))
 		}
 		filters = append(filters, WithQueuesOnly())
 		workflows, err := ListWorkflows(ctx, filters...)

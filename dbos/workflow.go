@@ -27,6 +27,7 @@ type WorkflowStatusType string
 const (
 	WorkflowStatusPending                     WorkflowStatusType = "PENDING"                        // Workflow is running or ready to run
 	WorkflowStatusEnqueued                    WorkflowStatusType = "ENQUEUED"                       // Workflow is queued and waiting for execution
+	WorkflowStatusDelayed                     WorkflowStatusType = "DELAYED"                        // Workflow is delayed and will transition to ENQUEUED after the delay expires
 	WorkflowStatusSuccess                     WorkflowStatusType = "SUCCESS"                        // Workflow completed successfully
 	WorkflowStatusError                       WorkflowStatusType = "ERROR"                          // Workflow completed with an error
 	WorkflowStatusCancelled                   WorkflowStatusType = "CANCELLED"                      // Workflow was cancelled (manually or due to timeout)
@@ -62,6 +63,7 @@ type WorkflowStatus struct {
 	ClassName          string             `json:"class_name,omitempty"`          // Class/namespace name for cross-language dispatch
 	ConfigName         *string            `json:"config_name,omitempty"`         // Instance/config name for cross-language dispatch (nil = unset, pointer to "" = explicit empty)
 	Serialization      string             `json:"serialization,omitempty"`       // Serialization format used for inputs/outputs (e.g., "DBOS_JSON", "portable_json")
+	DelayUntil         time.Time          `json:"delay_until,omitempty"`         // The time before which the workflow should not be dequeued
 }
 
 // workflowState holds the runtime state for a workflow execution
@@ -730,6 +732,7 @@ type workflowOptions struct {
 	AssumedRole         string
 	AuthenticatedRoles  []string
 	QueuePartitionKey   string
+	DelayDuration       time.Duration
 	alreadyEncodedInput bool
 	isDequeue           bool
 	isRecovery          bool
@@ -782,6 +785,15 @@ func WithPriority(priority uint) WorkflowOption {
 func WithQueuePartitionKey(partitionKey string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.QueuePartitionKey = partitionKey
+	}
+}
+
+// WithDelay delays execution of a queued workflow by the specified duration.
+// The workflow starts in the DELAYED status and transitions to ENQUEUED after the delay expires.
+// Must be used together with WithQueue.
+func WithDelay(delay time.Duration) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.DelayDuration = delay
 	}
 }
 
@@ -986,6 +998,12 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		params.WorkflowName = registeredWorkflow.Name
 	}
 
+	// Validate delay is not provided without queue name
+	if params.DelayDuration > 0 && len(params.QueueName) == 0 {
+		c.logger.Error("delay provided but queue name is missing", "workflow_name", params.WorkflowName)
+		return nil, newWorkflowExecutionError("", fmt.Errorf("delay provided but queue name is missing"))
+	}
+
 	// Validate partition key is not provided without queue name
 	if len(params.QueuePartitionKey) > 0 && len(params.QueueName) == 0 {
 		c.logger.Error("partition key provided but queue name is missing", "workflow_name", params.WorkflowName)
@@ -1066,9 +1084,18 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	var status WorkflowStatusType
 	if params.QueueName != "" {
-		status = WorkflowStatusEnqueued
+		if params.DelayDuration > 0 {
+			status = WorkflowStatusDelayed
+		} else {
+			status = WorkflowStatusEnqueued
+		}
 	} else {
 		status = WorkflowStatusPending
+	}
+
+	var delayUntil time.Time
+	if params.DelayDuration > 0 {
+		delayUntil = time.Now().Add(params.DelayDuration)
 	}
 
 	// Compute the timeout based on the context deadline, if any
@@ -1084,8 +1111,8 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			timeout = 1 * time.Millisecond
 		}
 	}
-	// When enqueuing, we do not set a deadline. It'll be computed with the timeout during dequeue.
-	if status == WorkflowStatusEnqueued {
+	// When enqueuing or delaying, we do not set a deadline. It'll be computed with the timeout during dequeue.
+	if status == WorkflowStatusEnqueued || status == WorkflowStatusDelayed {
 		deadline = time.Time{}
 	}
 
@@ -1132,6 +1159,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		AssumedRole:        params.AssumedRole,
 		AuthenticatedRoles: params.AuthenticatedRoles,
 		QueuePartitionKey:  params.QueuePartitionKey,
+		DelayUntil:         delayUntil,
 		Serialization: func() string {
 			if params.isPortableWorkflow {
 				return PortableSerializerName
@@ -3070,6 +3098,83 @@ func CancelWorkflow(ctx DBOSContext, workflowID string) error {
 	return ctx.CancelWorkflow(ctx, workflowID)
 }
 
+// SetWorkflowDelayOption configures how the delay is set on a workflow.
+type SetWorkflowDelayOption func(*setWorkflowDelayOptions)
+
+type setWorkflowDelayOptions struct {
+	delay      time.Duration
+	delayUntil time.Time
+}
+
+// WithDelayDuration sets a relative delay from now.
+func WithDelayDuration(d time.Duration) SetWorkflowDelayOption {
+	return func(o *setWorkflowDelayOptions) {
+		o.delay = d
+	}
+}
+
+// WithDelayUntil sets an absolute time until which the workflow should remain delayed.
+func WithDelayUntil(t time.Time) SetWorkflowDelayOption {
+	return func(o *setWorkflowDelayOptions) {
+		o.delayUntil = t
+	}
+}
+
+func resolveDelayUntil(opts []SetWorkflowDelayOption) (time.Time, error) {
+	params := &setWorkflowDelayOptions{}
+	for _, opt := range opts {
+		opt(params)
+	}
+	hasDelay := params.delay > 0
+	hasUntil := !params.delayUntil.IsZero()
+	if hasDelay && hasUntil {
+		return time.Time{}, errors.New("specify either WithDelayDuration or WithDelayUntil, not both")
+	}
+	if !hasDelay && !hasUntil {
+		return time.Time{}, errors.New("must specify either WithDelayDuration or WithDelayUntil")
+	}
+	if hasDelay {
+		return time.Now().Add(params.delay), nil
+	}
+	return params.delayUntil, nil
+}
+
+func (c *dbosContext) SetWorkflowDelay(_ DBOSContext, workflowID string, opts ...SetWorkflowDelayOption) error {
+	delayUntil, err := resolveDelayUntil(opts)
+	if err != nil {
+		return err
+	}
+	input := setWorkflowDelayDBInput{workflowID: workflowID, delayUntil: delayUntil}
+
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if isWithinWorkflow {
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			input.tx = tx
+			return nil, c.systemDB.setWorkflowDelay(ctx, input)
+		}, WithStepName("DBOS.setWorkflowDelay"))
+		return err
+	}
+	return retry(c, func() error {
+		return c.systemDB.setWorkflowDelay(c, input)
+	}, withRetrierLogger(c.logger))
+}
+
+// SetWorkflowDelay sets or updates the delay on a DELAYED workflow.
+// Provide exactly one of WithDelayDuration (relative) or WithDelayUntil (absolute).
+// Only affects workflows in the DELAYED status.
+//
+// Example:
+//
+//	err := dbos.SetWorkflowDelay(ctx, workflowID, dbos.WithDelayDuration(5*time.Second))
+//	err := dbos.SetWorkflowDelay(ctx, workflowID, dbos.WithDelayUntil(time.Now().Add(10*time.Minute)))
+func SetWorkflowDelay(ctx DBOSContext, workflowID string, opts ...SetWorkflowDelayOption) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.SetWorkflowDelay(ctx, workflowID, opts...)
+}
+
 func (c *dbosContext) DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts ...DeleteWorkflowOption) error {
 	// Process options
 	params := &deleteWorkflowOptions{}
@@ -3903,9 +4008,9 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		opt(params)
 	}
 
-	// If we are asked to retrieve only queue workflows with no status, only fetch ENQUEUED and PENDING tasks
+	// If we are asked to retrieve only queue workflows with no status, only fetch ENQUEUED, PENDING, and DELAYED tasks
 	if params.queuesOnly && len(params.status) == 0 {
-		params.status = []WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending}
+		params.status = []WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending, WorkflowStatusDelayed}
 	}
 
 	// Convert to system database input structure
