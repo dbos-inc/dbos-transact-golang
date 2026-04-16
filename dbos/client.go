@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -36,6 +37,15 @@ type Client interface {
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
 	ClientReadStream(workflowID string, key string) ([]any, bool, error)
 	ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error)
+
+	// Schedule management
+	CreateSchedule(input ClientScheduleInput) error
+	GetSchedule(scheduleName string) (*WorkflowSchedule, error)
+	ListSchedules(status string) ([]WorkflowSchedule, error)
+	PauseSchedule(scheduleName string) error
+	ResumeSchedule(scheduleName string) error
+	DeleteSchedule(scheduleName string) error
+
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
 
@@ -530,6 +540,141 @@ func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-ch
 	}()
 
 	return typedCh, nil
+}
+
+// CreateSchedule creates a new schedule for a workflow using the client.
+// This is used by external applications to create schedules.
+//
+// Example:
+//
+//	err := client.CreateSchedule(dbos.ClientScheduleInput{
+//	    ScheduleName: "my-schedule",
+//	    WorkflowName: "myWorkflow",
+//	    Schedule:     "*/5 * * * *",
+//	    Context:      "my context",
+//	})
+func (c *client) CreateSchedule(input ClientScheduleInput) error {
+	if input.ScheduleName == "" {
+		return errors.New("schedule_name is required")
+	}
+	if input.WorkflowName == "" {
+		return errors.New("workflow_name is required")
+	}
+	if input.Schedule == "" {
+		return errors.New("schedule is required")
+	}
+
+	dbosCtx, ok := c.dbosCtx.(*dbosContext)
+	if !ok {
+		return errors.New("invalid DBOS context")
+	}
+
+	scheduleID := uuid.New().String()
+	contextJSON, err := json.Marshal(input.Context)
+	if err != nil {
+		return fmt.Errorf("failed to serialize context: %w", err)
+	}
+
+	return dbosCtx.systemDB.createSchedule(dbosCtx, createScheduleDBInput{
+		ScheduleID:        scheduleID,
+		ScheduleName:      input.ScheduleName,
+		WorkflowName:      input.WorkflowName,
+		WorkflowClassName: input.WorkflowClassName,
+		Schedule:          input.Schedule,
+		Context:           string(contextJSON),
+		Status:            ScheduleStatusActive,
+		AutomaticBackfill: input.AutomaticBackfill,
+		CronTimezone:      input.CronTimezone,
+		QueueName:         input.QueueName,
+	})
+}
+
+// GetSchedule gets a schedule by name using the client.
+func (c *client) GetSchedule(scheduleName string) (*WorkflowSchedule, error) {
+	if scheduleName == "" {
+		return nil, errors.New("schedule_name is required")
+	}
+
+	dbosCtx, ok := c.dbosCtx.(*dbosContext)
+	if !ok {
+		return nil, errors.New("invalid DBOS context")
+	}
+
+	return dbosCtx.systemDB.getSchedule(dbosCtx, scheduleName)
+}
+
+// ListSchedules lists all schedules, optionally filtered by status.
+func (c *client) ListSchedules(status string) ([]WorkflowSchedule, error) {
+	dbosCtx, ok := c.dbosCtx.(*dbosContext)
+	if !ok {
+		return nil, errors.New("invalid DBOS context")
+	}
+
+	return dbosCtx.systemDB.listSchedules(dbosCtx, status)
+}
+
+// PauseSchedule pauses a schedule using the client.
+func (c *client) PauseSchedule(scheduleName string) error {
+	if scheduleName == "" {
+		return errors.New("schedule_name is required")
+	}
+
+	dbosCtx, ok := c.dbosCtx.(*dbosContext)
+	if !ok {
+		return errors.New("invalid DBOS context")
+	}
+
+	existing, err := dbosCtx.systemDB.getSchedule(dbosCtx, scheduleName)
+	if err != nil {
+		return fmt.Errorf("failed to get schedule: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("schedule not found: %s", scheduleName)
+	}
+
+	return dbosCtx.systemDB.updateSchedule(dbosCtx, updateScheduleDBInput{
+		ScheduleName: scheduleName,
+		Status:       ScheduleStatusPaused,
+	})
+}
+
+// ResumeSchedule resumes a paused schedule using the client.
+func (c *client) ResumeSchedule(scheduleName string) error {
+	if scheduleName == "" {
+		return errors.New("schedule_name is required")
+	}
+
+	dbosCtx, ok := c.dbosCtx.(*dbosContext)
+	if !ok {
+		return errors.New("invalid DBOS context")
+	}
+
+	existing, err := dbosCtx.systemDB.getSchedule(dbosCtx, scheduleName)
+	if err != nil {
+		return fmt.Errorf("failed to get schedule: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("schedule not found: %s", scheduleName)
+	}
+
+	return dbosCtx.systemDB.updateSchedule(dbosCtx, updateScheduleDBInput{
+		ScheduleName: scheduleName,
+		Status:       ScheduleStatusActive,
+	})
+}
+
+// DeleteSchedule deletes a schedule using the client.
+func (c *client) DeleteSchedule(scheduleName string) error {
+	if scheduleName == "" {
+		return errors.New("schedule_name is required")
+	}
+
+	dbosCtx, ok := c.dbosCtx.(*dbosContext)
+	if !ok {
+		return errors.New("invalid DBOS context")
+	}
+
+	return dbosCtx.systemDB.deleteSchedule(dbosCtx, scheduleName)
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.

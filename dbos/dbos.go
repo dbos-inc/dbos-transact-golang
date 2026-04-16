@@ -165,6 +165,17 @@ type DBOSContext interface {
 	// Queue configuration
 	ListenQueues(_ DBOSContext, queues ...WorkflowQueue) // Configure which queues this process should listen to
 
+	// Schedule management
+	CreateSchedule(_ DBOSContext, input CreateScheduleRequest) error                           // Create a new schedule
+	ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRequest) error                     // Apply schedules (create or update)
+	PauseSchedule(_ DBOSContext, scheduleName string) error                                    // Pause a schedule
+	ResumeSchedule(_ DBOSContext, scheduleName string) error                                   // Resume a paused schedule
+	DeleteSchedule(_ DBOSContext, scheduleName string) error                                   // Delete a schedule
+	GetSchedule(_ DBOSContext, scheduleName string) (*WorkflowSchedule, error)                 // Get a schedule by name
+	ListSchedules(_ DBOSContext, status string) ([]WorkflowSchedule, error)                    // List schedules with optional status filter
+	BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) error // Backfill a schedule
+	TriggerSchedule(_ DBOSContext, scheduleName string) (string, error)                        // Trigger a schedule immediately
+
 	// Alert handling
 	SetAlertHandler(handler AlertHandler) // Register a handler for alerts from DBOS Conductor (must be called before Launch)
 }
@@ -202,6 +213,9 @@ type dbosContext struct {
 
 	// Workflow scheduler
 	workflowScheduler *cron.Cron
+
+	// Schedule entry ID mapping (scheduleName -> cron.EntryID)
+	scheduleEntryIDs map[string]cron.EntryID
 
 	// logger
 	logger *slog.Logger
@@ -247,6 +261,41 @@ func (c *dbosContext) ClearRegistries() {
 		}
 	}
 	c.alertHandler = nil
+}
+
+// AddScheduleToScheduler adds a schedule to the workflow scheduler.
+// Called when a new schedule is created at runtime.
+func (c *dbosContext) AddScheduleToScheduler(scheduleName string) error {
+	schedule, err := c.systemDB.getSchedule(c, scheduleName)
+	if err != nil {
+		return fmt.Errorf("failed to get schedule: %w", err)
+	}
+	if schedule == nil {
+		return fmt.Errorf("schedule not found: %s", scheduleName)
+	}
+	if schedule.Status != ScheduleStatusActive {
+		return nil // Don't add paused schedules
+	}
+
+	c.addScheduleToScheduler(*schedule)
+	return nil
+}
+
+// RemoveScheduleFromScheduler removes a schedule from the workflow scheduler.
+func (c *dbosContext) RemoveScheduleFromScheduler(scheduleName string) {
+	if c.scheduleEntryIDs == nil {
+		return
+	}
+
+	entryID, exists := c.scheduleEntryIDs[scheduleName]
+	if !exists {
+		c.logger.Debug("schedule not found in scheduler", "schedule", scheduleName)
+		return
+	}
+
+	c.getWorkflowScheduler().Remove(entryID)
+	delete(c.scheduleEntryIDs, scheduleName)
+	c.logger.Info("Removed schedule from scheduler", "schedule", scheduleName)
 }
 
 func (c *dbosContext) Deadline() (deadline time.Time, ok bool) {
@@ -422,8 +471,94 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 func (c *dbosContext) getWorkflowScheduler() *cron.Cron {
 	if c.workflowScheduler == nil {
 		c.workflowScheduler = cron.New(cron.WithSeconds())
+		c.scheduleEntryIDs = make(map[string]cron.EntryID)
 	}
 	return c.workflowScheduler
+}
+
+func (c *dbosContext) loadSchedulesFromDatabase() {
+	schedules, err := c.systemDB.listSchedules(c, string(ScheduleStatusActive))
+	if err != nil {
+		c.logger.Error("failed to load schedules from database", "error", err)
+		return
+	}
+
+	for _, schedule := range schedules {
+		// Automatic backfill: if enabled, backfill missed executions since last_fired_at
+		if schedule.AutomaticBackfill && schedule.LastFiredAt != nil {
+			startTime := schedule.LastFiredAt.Add(time.Second)
+			endTime := time.Now()
+			if startTime.Before(endTime) {
+				c.logger.Info("performing automatic backfill", "schedule", schedule.ScheduleName, "start", startTime, "end", endTime)
+				err := c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
+					ScheduleName: schedule.ScheduleName,
+					Schedule:     schedule.Schedule,
+					StartTime:    startTime,
+					EndTime:      endTime,
+				})
+				if err != nil {
+					c.logger.Error("automatic backfill failed", "schedule", schedule.ScheduleName, "error", err)
+				}
+			}
+		}
+
+		c.addScheduleToScheduler(schedule)
+	}
+}
+
+func (c *dbosContext) addScheduleToScheduler(schedule WorkflowSchedule) {
+	workflowFn, err := c.getRegisteredWorkflow(schedule.WorkflowName, schedule.WorkflowClassName)
+	if err != nil {
+		c.logger.Error("failed to get workflow for schedule", "schedule", schedule.ScheduleName, "error", err)
+		return
+	}
+
+	scheduleName := schedule.ScheduleName
+	workflowName := schedule.WorkflowName
+	queueName := schedule.QueueName
+
+	var entryID cron.EntryID
+	entryID, err = c.getWorkflowScheduler().AddFunc(schedule.Schedule, func() {
+		if !c.launched.Load() {
+			return
+		}
+
+		entry := c.getWorkflowScheduler().Entry(entryID)
+		scheduledTime := entry.Prev
+		if scheduledTime.IsZero() {
+			scheduledTime = entry.Next
+		}
+
+		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, scheduledTime)
+		opts := []WorkflowOption{
+			WithWorkflowID(wfID),
+			withWorkflowName(workflowName),
+		}
+		if queueName != "" {
+			opts = append(opts, WithQueue(queueName))
+		} else {
+			opts = append(opts, WithQueue(_DBOS_INTERNAL_QUEUE_NAME))
+		}
+
+		_, err := workflowFn(c, scheduledTime, "", opts...)
+		if err != nil {
+			c.logger.Error("failed to run scheduled workflow", "schedule", scheduleName, "error", err)
+		}
+
+		now := time.Now()
+		c.systemDB.updateSchedule(c, updateScheduleDBInput{
+			ScheduleName: scheduleName,
+			Status:       ScheduleStatusActive,
+			LastFiredAt:  &now,
+		})
+	})
+	if err != nil {
+		c.logger.Error("failed to add schedule to scheduler", "schedule", schedule.ScheduleName, "error", err)
+		return
+	}
+
+	c.scheduleEntryIDs[schedule.ScheduleName] = entryID
+	c.logger.Info("Loaded schedule from database", "schedule", schedule.ScheduleName, "workflow", schedule.WorkflowName)
 }
 
 func (c *dbosContext) GetApplicationVersion() string {
@@ -606,6 +741,8 @@ func (c *dbosContext) Launch() error {
 
 	// Start the workflow scheduler if it has been initialized
 	if c.workflowScheduler != nil {
+		// Load schedules from database
+		c.loadSchedulesFromDatabase()
 		c.workflowScheduler.Start()
 		c.logger.Debug("Workflow scheduler started")
 	}
