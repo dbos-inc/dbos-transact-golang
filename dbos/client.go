@@ -32,7 +32,8 @@ type Client interface {
 	CancelWorkflow(workflowID string) error
 	SetWorkflowDelay(workflowID string, opts ...SetWorkflowDelayOption) error
 	DeleteWorkflows(workflowIDs []string, opts ...DeleteWorkflowOption) error
-	ResumeWorkflow(workflowID string) (WorkflowHandle[any], error)
+	ResumeWorkflow(workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)
+	ResumeWorkflows(workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
 	ClientReadStream(workflowID string, key string) ([]any, bool, error)
@@ -404,8 +405,13 @@ func (c *client) DeleteWorkflows(workflowIDs []string, opts ...DeleteWorkflowOpt
 }
 
 // ResumeWorkflow resumes a workflow from its last completed step.
-func (c *client) ResumeWorkflow(workflowID string) (WorkflowHandle[any], error) {
-	return c.dbosCtx.ResumeWorkflow(c.dbosCtx, workflowID)
+func (c *client) ResumeWorkflow(workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error) {
+	return c.dbosCtx.ResumeWorkflow(c.dbosCtx, workflowID, opts...)
+}
+
+// ResumeWorkflows resumes multiple workflows in a single database round-trip.
+func (c *client) ResumeWorkflows(workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error) {
+	return c.dbosCtx.ResumeWorkflows(c.dbosCtx, workflowIDs, opts...)
 }
 
 // ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.

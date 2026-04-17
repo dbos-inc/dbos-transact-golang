@@ -1746,6 +1746,77 @@ func TestListenQueues(t *testing.T) {
 
 	})
 
+	t.Run("ForkWorkflowToCustomQueue", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+		forkTargetQueue := NewWorkflowQueue(dbosCtx, "fork-target-queue",
+			WithQueueBasePollingInterval(50*time.Millisecond),
+			WithQueueMaxPollingInterval(500*time.Millisecond))
+
+		testWorkflow := func(ctx DBOSContext, input string) (string, error) {
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, testWorkflow)
+
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		originalHandle, err := RunWorkflow(dbosCtx, testWorkflow, "fork-queue-input")
+		require.NoError(t, err, "failed to run original workflow")
+		_, err = originalHandle.GetResult()
+		require.NoError(t, err, "failed to get result from original workflow")
+
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: originalHandle.GetWorkflowID(),
+			QueueName:          forkTargetQueue.Name,
+		})
+		require.NoError(t, err, "failed to fork workflow to custom queue")
+
+		forkResult, err := forkHandle.GetResult()
+		require.NoError(t, err, "failed to get result from forked workflow")
+		assert.Equal(t, "fork-queue-input", forkResult)
+
+		status, err := forkHandle.GetStatus()
+		require.NoError(t, err, "failed to get forked workflow status")
+		assert.Equal(t, forkTargetQueue.Name, status.QueueName, "forked workflow should be attributed to the custom queue")
+	})
+
+	t.Run("ResumeWorkflowToCustomQueue", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+		resumeTargetQueue := NewWorkflowQueue(dbosCtx, "resume-target-queue",
+			WithQueueBasePollingInterval(50*time.Millisecond),
+			WithQueueMaxPollingInterval(500*time.Millisecond))
+
+		blockEvent := NewEvent()
+		blockingWorkflow := func(ctx DBOSContext, input string) (string, error) {
+			blockEvent.Wait()
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, blockingWorkflow)
+
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		handle, err := RunWorkflow(dbosCtx, blockingWorkflow, "resume-queue-input")
+		require.NoError(t, err, "failed to start blocking workflow")
+
+		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to cancel workflow")
+		blockEvent.Set()
+
+		resumedHandle, err := ResumeWorkflow[string](dbosCtx, handle.GetWorkflowID(), WithResumeQueue(resumeTargetQueue.Name))
+		require.NoError(t, err, "failed to resume workflow to custom queue")
+
+		result, err := resumedHandle.GetResult()
+		require.NoError(t, err, "failed to get result from resumed workflow")
+		assert.Equal(t, "resume-queue-input", result)
+
+		status, err := resumedHandle.GetStatus()
+		require.NoError(t, err, "failed to get resumed workflow status")
+		assert.Equal(t, resumeTargetQueue.Name, status.QueueName, "resumed workflow should be attributed to the custom queue")
+	})
+
 	t.Run("ListenQueuesAfterLaunchPanics", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 

@@ -2075,6 +2075,113 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 	})
 }
 
+func TestResumeWorkflows(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	resumeBatchQueue := NewWorkflowQueue(dbosCtx, "resume-batch-target-queue",
+		WithQueueBasePollingInterval(50*time.Millisecond),
+		WithQueueMaxPollingInterval(500*time.Millisecond))
+
+	blockEvent := NewEvent()
+	blockingWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		blockEvent.Wait()
+		return input, nil
+	}
+	RegisterWorkflow(dbosCtx, blockingWorkflow)
+
+	err := Launch(dbosCtx)
+	require.NoError(t, err, "failed to launch DBOS instance")
+
+	cancelledIDs := func(t *testing.T, n int, prefix string) []string {
+		t.Helper()
+		ids := make([]string, n)
+		for i := range ids {
+			h, err := RunWorkflow(dbosCtx, blockingWorkflow, fmt.Sprintf("%s-%d", prefix, i))
+			require.NoError(t, err, "failed to start workflow %d", i)
+			ids[i] = h.GetWorkflowID()
+			require.NoError(t, CancelWorkflow(dbosCtx, ids[i]), "failed to cancel workflow %d", i)
+		}
+		return ids
+	}
+
+	t.Run("ResumeWorkflowsBatchOnInternalQueue", func(t *testing.T) {
+		blockEvent.Clear()
+		ids := cancelledIDs(t, 3, "resume-batch")
+		blockEvent.Set()
+
+		handles, err := ResumeWorkflows[string](dbosCtx, ids)
+		require.NoError(t, err, "failed to resume workflows batch")
+		require.Len(t, handles, len(ids), "expected one handle per resumed workflow")
+
+		expectedIDs := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			expectedIDs[id] = struct{}{}
+		}
+		for _, h := range handles {
+			_, ok := expectedIDs[h.GetWorkflowID()]
+			require.True(t, ok, "unexpected workflow ID %s in resumed handles", h.GetWorkflowID())
+
+			_, err := h.GetResult()
+			require.NoError(t, err, "failed to get result for resumed workflow %s", h.GetWorkflowID())
+
+			status, err := h.GetStatus()
+			require.NoError(t, err, "failed to get status for resumed workflow %s", h.GetWorkflowID())
+			assert.Equal(t, _DBOS_INTERNAL_QUEUE_NAME, status.QueueName, "batch resume should default to the internal queue")
+		}
+	})
+
+	t.Run("ResumeWorkflowsBatchToCustomQueue", func(t *testing.T) {
+		blockEvent.Clear()
+		ids := cancelledIDs(t, 3, "resume-batch-queue")
+		blockEvent.Set()
+
+		handles, err := ResumeWorkflows[string](dbosCtx, ids, WithResumeQueue(resumeBatchQueue.Name))
+		require.NoError(t, err, "failed to resume workflows batch to custom queue")
+		require.Len(t, handles, len(ids), "expected one handle per resumed workflow")
+
+		expectedIDs := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			expectedIDs[id] = struct{}{}
+		}
+		for _, h := range handles {
+			_, ok := expectedIDs[h.GetWorkflowID()]
+			require.True(t, ok, "unexpected workflow ID %s in resumed handles", h.GetWorkflowID())
+
+			_, err := h.GetResult()
+			require.NoError(t, err, "failed to get result for resumed workflow %s", h.GetWorkflowID())
+
+			status, err := h.GetStatus()
+			require.NoError(t, err, "failed to get status for resumed workflow %s", h.GetWorkflowID())
+			assert.Equal(t, resumeBatchQueue.Name, status.QueueName, "batch-resumed workflow should be attributed to the custom queue")
+		}
+	})
+
+	t.Run("ResumeWorkflowsSkipsMissingIDs", func(t *testing.T) {
+		blockEvent.Clear()
+		ids := cancelledIDs(t, 1, "resume-mixed")
+		blockEvent.Set()
+
+		missingID := "missing-" + uuid.NewString()
+		handles, err := ResumeWorkflows[string](dbosCtx, []string{missingID, ids[0]})
+		require.NoError(t, err, "ResumeWorkflows should not error on missing IDs")
+		require.Len(t, handles, 1, "only the existing workflow should produce a handle")
+		assert.Equal(t, ids[0], handles[0].GetWorkflowID())
+
+		_, err = handles[0].GetResult()
+		require.NoError(t, err, "failed to get result from resumed workflow")
+	})
+
+	t.Run("ResumeWorkflowSingularPreservesNonExistentError", func(t *testing.T) {
+		missingID := "missing-" + uuid.NewString()
+		_, err := ResumeWorkflow[string](dbosCtx, missingID)
+		require.Error(t, err, "expected error resuming non-existent workflow")
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr, "expected *DBOSError, got %T", err)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+		assert.Equal(t, missingID, dbosErr.DestinationID)
+	})
+}
+
 var (
 	counter    atomic.Int64
 	counter1Ch = make(chan time.Time, 100)
