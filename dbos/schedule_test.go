@@ -1,6 +1,7 @@
 package dbos
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -220,7 +221,7 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 
 	firedCount := 0
 	for _, status := range statuses {
-		if status.Name == "testWorkflowForSchedule" {
+		if strings.Contains(status.Name, "testWorkflowForSchedule") {
 			firedCount++
 		}
 	}
@@ -252,7 +253,7 @@ func TestCronTriggering(t *testing.T) {
 
 	firedCount := 0
 	for _, status := range statuses {
-		if status.Name == "testWorkflowForSchedule" {
+		if strings.Contains(status.Name, "testWorkflowForSchedule") {
 			firedCount++
 		}
 	}

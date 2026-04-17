@@ -475,7 +475,7 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFun
 		FQN:              workflowFQN,
 		MaxRetries:       maxRetries,
 		Name:             customName,
-		CronSchedule:    "",
+		CronSchedule:     "",
 	}
 
 	if _, exists := c.workflowRegistry.LoadOrStore(workflowFQN, entry); exists {
@@ -3329,6 +3329,14 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, input CreateScheduleRequest)
 		if err != nil {
 			return fmt.Errorf("failed to add schedule to scheduler: %w", err)
 		}
+	} else if c.launched.Load() && c.workflowScheduler == nil {
+		// Scheduler not initialized yet - initialize it and add the schedule
+		scheduler := c.getWorkflowScheduler()
+		err = c.AddScheduleToScheduler(input.ScheduleName)
+		if err != nil {
+			return fmt.Errorf("failed to add schedule to scheduler: %w", err)
+		}
+		scheduler.Start()
 	}
 
 	return nil

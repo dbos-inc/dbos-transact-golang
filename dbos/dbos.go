@@ -515,7 +515,11 @@ func (c *dbosContext) addScheduleToScheduler(schedule WorkflowSchedule) {
 	}
 
 	scheduleName := schedule.ScheduleName
-	workflowName := schedule.WorkflowName
+	// Construct the FQN for the scheduler callback - when WorkflowClassName is set, the name is just the function name
+	fqn := schedule.WorkflowName
+	if schedule.WorkflowClassName != "" {
+		fqn = schedule.WorkflowClassName + "." + schedule.WorkflowName
+	}
 
 	var entryID cron.EntryID
 	entryID, err = c.getWorkflowScheduler().AddFunc(schedule.Schedule, func() {
@@ -532,7 +536,7 @@ func (c *dbosContext) addScheduleToScheduler(schedule WorkflowSchedule) {
 		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, scheduledTime)
 		opts := []WorkflowOption{
 			WithWorkflowID(wfID),
-			withWorkflowName(workflowName),
+			withWorkflowName(fqn),
 			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),
 		}
 
@@ -745,11 +749,22 @@ func (c *dbosContext) Launch() error {
 	c.logger.Debug("Queue runner started")
 
 	// Start the workflow scheduler if it has been initialized
+	// Use getWorkflowScheduler() to ensure lazy initialization
 	if c.workflowScheduler != nil {
 		// Load schedules from database
 		c.loadSchedulesFromDatabase()
 		c.workflowScheduler.Start()
 		c.logger.Debug("Workflow scheduler started")
+	} else {
+		// Scheduler was never accessed before - check if there are schedules in DB
+		// and initialize the scheduler if so
+		schedules, _ := c.systemDB.listSchedules(c, string(ScheduleStatusActive))
+		if len(schedules) > 0 {
+			scheduler := c.getWorkflowScheduler()
+			c.loadSchedulesFromDatabase()
+			scheduler.Start()
+			c.logger.Debug("Workflow scheduler started for existing schedules")
+		}
 	}
 
 	// Start the conductor if it has been initialized

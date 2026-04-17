@@ -1483,8 +1483,9 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		created_at,
 		updated_at,
 		recovery_attempts,
-		forked_from
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`, pgx.Identifier{s.schema}.Sanitize())
+		forked_from,
+		serialization
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`, pgx.Identifier{s.schema}.Sanitize())
 
 	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
 	authenticatedRoles, err := json.Marshal(originalWorkflow.AuthenticatedRoles)
@@ -1506,7 +1507,8 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		time.Now().UnixMilli(),
 		time.Now().UnixMilli(),
 		0,
-		input.originalWorkflowID) // forked_from
+		input.originalWorkflowID,       // forked_from
+		originalWorkflow.Serialization) // serialization
 
 	if err != nil {
 		return "", fmt.Errorf("failed to insert forked workflow status: %w", err)
@@ -4040,7 +4042,7 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 				output, error, executor_id, created_at, updated_at, application_version, application_id,
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
-				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms
+				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization
 			FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{s.schema}.Sanitize())
 
 		row := tx.QueryRow(ctx, statusQuery, wfID)
@@ -4054,13 +4056,14 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			workflowTimeoutMs, workflowDeadlineEpochMs, startedAtEpochMs *int64
 			priority                                                     *int
 			delayUntilEpochMs                                            *int64
+			serialization                                                *string
 		)
 		err := row.Scan(
 			&wfUUID, &status, &name, &authUser, &assumedRole, &authRoles,
 			&output, &errStr, &executorID, &createdAt, &updatedAt, &appVersion, &appID,
 			&className, &configName, &recoveryAttempts, &queueName, &workflowTimeoutMs,
 			&workflowDeadlineEpochMs, &startedAtEpochMs, &dedupID, &inputs, &priority,
-			&queuePartitionKey, &forkedFrom, &parentWorkflowID, &delayUntilEpochMs,
+			&queuePartitionKey, &forkedFrom, &parentWorkflowID, &delayUntilEpochMs, &serialization,
 		)
 		if err != nil {
 			if err == pgx.ErrNoRows {
@@ -4097,6 +4100,7 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			"forked_from":                forkedFrom,
 			"parent_workflow_id":         parentWorkflowID,
 			"delay_until_epoch_ms":       delayUntilEpochMs,
+			"serialization":              serialization,
 		}
 
 		// Export operation_outputs
@@ -4248,8 +4252,8 @@ func (s *sysDB) importWorkflow(ctx context.Context, workflows []ExportedWorkflow
 				output, error, executor_id, created_at, updated_at, application_version, application_id,
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
-				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
+				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`,
 			pgx.Identifier{s.schema}.Sanitize())
 
 		_, err := tx.Exec(ctx, insertStatusQuery,
@@ -4261,7 +4265,7 @@ func (s *sysDB) importWorkflow(ctx context.Context, workflows []ExportedWorkflow
 			status["workflow_timeout_ms"], status["workflow_deadline_epoch_ms"], status["started_at_epoch_ms"],
 			status["deduplication_id"], status["inputs"], status["priority"],
 			status["queue_partition_key"], status["forked_from"], status["parent_workflow_id"],
-			status["delay_until_epoch_ms"],
+			status["delay_until_epoch_ms"], status["serialization"],
 		)
 		if err != nil {
 			return fmt.Errorf("failed to import workflow_status: %w", err)
