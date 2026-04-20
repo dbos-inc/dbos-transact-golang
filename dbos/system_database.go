@@ -1388,6 +1388,7 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
 			    started_at_epoch_ms = NULL, updated_at = $4
 			WHERE workflow_uuid = ANY($5) AND status NOT IN ($6, $7)
+			RETURNING workflow_uuid
 		)
 		SELECT workflow_uuid FROM existing`, schema, schema)
 
