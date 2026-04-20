@@ -3261,9 +3261,7 @@ type resumeWorkflowOptions struct {
 // ResumeWorkflowOption is a functional option for configuring workflow resumption.
 type ResumeWorkflowOption func(*resumeWorkflowOptions)
 
-// WithResumeQueue re-enqueues the resumed workflow(s) on the specified queue instead of
-// the internal queue. The queue does not have to be registered in this process, but it
-// must be listened to by some process for the workflow(s) to be dequeued and executed.
+// WithResumeQueue re-enqueues the resumed workflow(s) on the specified queue instead of the internal queue.
 func WithResumeQueue(queueName string) ResumeWorkflowOption {
 	return func(o *resumeWorkflowOptions) {
 		o.queueName = queueName
@@ -3355,13 +3353,11 @@ func ResumeWorkflow[R any](ctx DBOSContext, workflowID string, opts ...ResumeWor
 }
 
 // ResumeWorkflows resumes multiple workflows in a single database round-trip. Each workflow
-// that exists and is not in a terminal state is re-enqueued; terminal or missing workflows
-// are silently skipped. The returned handles are in the order of the input IDs, filtered to
-// those that existed in the database.
+// that exists and is not in a terminal state is re-enqueued; completed or missing workflows
+// are skipped.
 //
 // Unlike the singular ResumeWorkflow, this function does not return NonExistentWorkflowError
-// when some IDs are missing — callers who need that signal should compare the returned
-// handles with their input.
+// when some IDs are missing.
 //
 // Options:
 //   - WithResumeQueue: re-enqueue the workflows on a named queue instead of the internal queue.
