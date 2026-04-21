@@ -43,7 +43,7 @@ type systemDatabase interface {
 	cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput) error
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	deleteWorkflows(ctx context.Context, input deleteWorkflowsDBInput) error
-	resumeWorkflow(ctx context.Context, input resumeWorkflowDBInput) error
+	resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInput) ([]string, error)
 	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error)
 
 	// Child workflows
@@ -1368,54 +1368,73 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 	return nil
 }
 
-type resumeWorkflowDBInput struct {
-	workflowID string
-	tx         pgx.Tx
+type resumeWorkflowsDBInput struct {
+	workflowIDs []string
+	queueName   string
+	tx          pgx.Tx
 }
 
-func (s *sysDB) resumeWorkflow(ctx context.Context, input resumeWorkflowDBInput) error {
+// resumeWorkflows re-enqueues the given workflows onto the specified queue (or the internal
+// queue if unset). It returns the subset of IDs that existed in workflow_status; IDs in
+// terminal states are considered existing even though they are not updated.
+func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInput) ([]string, error) {
+	if len(input.workflowIDs) == 0 {
+		return nil, nil
+	}
+
 	schema := pgx.Identifier{s.schema}.Sanitize()
 
+	queueName := input.queueName
+	if queueName == "" {
+		queueName = _DBOS_INTERNAL_QUEUE_NAME
+	}
+
 	query := fmt.Sprintf(`WITH existing AS (
-			SELECT workflow_uuid FROM %s.workflow_status WHERE workflow_uuid = $5
+			SELECT workflow_uuid FROM %s.workflow_status WHERE workflow_uuid = ANY($5)
 		), updated AS (
 			UPDATE %s.workflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
 			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
 			    started_at_epoch_ms = NULL, updated_at = $4
-			WHERE workflow_uuid = $5 AND status NOT IN ($6, $7)
+			WHERE workflow_uuid = ANY($5) AND status NOT IN ($6, $7)
 			RETURNING workflow_uuid
 		)
-		SELECT
-			EXISTS(SELECT 1 FROM existing) AS found,
-			EXISTS(SELECT 1 FROM updated) AS updated`, schema, schema)
+		SELECT workflow_uuid FROM existing`, schema, schema)
 
 	args := []any{
 		WorkflowStatusEnqueued,
-		_DBOS_INTERNAL_QUEUE_NAME,
+		queueName,
 		0,
 		time.Now().UnixMilli(),
-		input.workflowID,
+		input.workflowIDs,
 		WorkflowStatusSuccess,
 		WorkflowStatusError,
 	}
 
-	var found, updated bool
+	var rows pgx.Rows
 	var err error
 	if input.tx != nil {
-		err = input.tx.QueryRow(ctx, query, args...).Scan(&found, &updated)
+		rows, err = input.tx.Query(ctx, query, args...)
 	} else {
-		err = s.pool.QueryRow(ctx, query, args...).Scan(&found, &updated)
+		rows, err = s.pool.Query(ctx, query, args...)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to resume workflow: %w", err)
+		return nil, fmt.Errorf("failed to resume workflows: %w", err)
 	}
+	defer rows.Close()
 
-	if !found {
-		return newNonExistentWorkflowError(input.workflowID)
+	found := make([]string, 0, len(input.workflowIDs))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan resumed workflow id: %w", err)
+		}
+		found = append(found, id)
 	}
-	// found && !updated means the workflow is in a terminal state — nothing to do.
-	return nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read resumed workflow ids: %w", err)
+	}
+	return found, nil
 }
 
 type forkWorkflowDBInput struct {
@@ -1423,6 +1442,7 @@ type forkWorkflowDBInput struct {
 	forkedWorkflowID   string
 	startStep          int
 	applicationVersion string
+	queueName          string
 	tx                 pgx.Tx
 }
 
@@ -1468,6 +1488,12 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		appVersion = input.applicationVersion
 	}
 
+	// Determine the queue to place the forked workflow on
+	queueName := input.queueName
+	if queueName == "" {
+		queueName = _DBOS_INTERNAL_QUEUE_NAME
+	}
+
 	// Create an entry for the forked workflow with the same initial values as the original
 	insertQuery := fmt.Sprintf(`INSERT INTO %s.workflow_status (
 		workflow_uuid,
@@ -1502,7 +1528,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		authenticatedRoles,
 		&appVersion,
 		originalWorkflow.ApplicationID,
-		_DBOS_INTERNAL_QUEUE_NAME,
+		queueName,
 		originalWorkflow.Input, // encoded
 		time.Now().UnixMilli(),
 		time.Now().UnixMilli(),

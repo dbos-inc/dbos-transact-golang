@@ -3722,23 +3722,67 @@ func TriggerSchedule(ctx DBOSContext, scheduleName string) (string, error) {
 	return ctx.TriggerSchedule(ctx, scheduleName)
 }
 
-func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
+// resumeWorkflowOptions holds configuration parameters for resuming workflows.
+type resumeWorkflowOptions struct {
+	queueName string
+}
+
+// ResumeWorkflowOption is a functional option for configuring workflow resumption.
+type ResumeWorkflowOption func(*resumeWorkflowOptions)
+
+// WithResumeQueue re-enqueues the resumed workflow(s) on the specified queue instead of the internal queue.
+func WithResumeQueue(queueName string) ResumeWorkflowOption {
+	return func(o *resumeWorkflowOptions) {
+		o.queueName = queueName
+	}
+}
+
+func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error) {
+	handles, err := c.ResumeWorkflows(c, []string{workflowID}, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if len(handles) == 0 {
+		return nil, newNonExistentWorkflowError(workflowID)
+	}
+	return handles[0], nil
+}
+
+func (c *dbosContext) ResumeWorkflows(_ DBOSContext, workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error) {
+	params := &resumeWorkflowOptions{}
+	for _, opt := range opts {
+		opt(params)
+	}
+
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
+	var foundIDs []string
 	var err error
 	if isWithinWorkflow {
-		_, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			return nil, c.systemDB.resumeWorkflow(ctx, resumeWorkflowDBInput{workflowID: workflowID, tx: tx})
+		foundIDs, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) ([]string, error) {
+			return c.systemDB.resumeWorkflows(ctx, resumeWorkflowsDBInput{
+				workflowIDs: workflowIDs,
+				queueName:   params.queueName,
+				tx:          tx,
+			})
 		}, WithStepName("DBOS.resumeWorkflow"))
 	} else {
-		err = retry(c, func() error {
-			return c.systemDB.resumeWorkflow(c, resumeWorkflowDBInput{workflowID: workflowID})
+		foundIDs, err = retryWithResult(c, func() ([]string, error) {
+			return c.systemDB.resumeWorkflows(c, resumeWorkflowsDBInput{
+				workflowIDs: workflowIDs,
+				queueName:   params.queueName,
+			})
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
 	}
-	return newWorkflowPollingHandle[any](c, workflowID), nil
+
+	handles := make([]WorkflowHandle[any], 0, len(foundIDs))
+	for _, id := range foundIDs {
+		handles = append(handles, newWorkflowPollingHandle[any](c, id))
+	}
+	return handles, nil
 }
 
 // ResumeWorkflow resumes a workflow by starting it from its last completed step.
@@ -3748,6 +3792,9 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 // If the workflow is already completed, this is a no-op.
 // Returns a handle that can be used to wait for completion and retrieve results.
 // Returns an error if the workflow does not exist or if the operation fails.
+//
+// Options:
+//   - WithResumeQueue: re-enqueue the workflow on a named queue instead of the internal queue.
 //
 // Example:
 //
@@ -3762,16 +3809,48 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string) (Workflow
 //	        log.Printf("Result: %d", result)
 //	    }
 //	}
-func ResumeWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle[R], error) {
+func ResumeWorkflow[R any](ctx DBOSContext, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 
-	_, err := ctx.ResumeWorkflow(ctx, workflowID)
+	_, err := ctx.ResumeWorkflow(ctx, workflowID, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return newWorkflowPollingHandle[R](ctx, workflowID), nil
+}
+
+// ResumeWorkflows resumes multiple workflows in a single database round-trip. Each workflow
+// that exists and is not in a terminal state is re-enqueued; completed or missing workflows
+// are skipped.
+//
+// Unlike the singular ResumeWorkflow, this function does not return NonExistentWorkflowError
+// when some IDs are missing.
+//
+// Options:
+//   - WithResumeQueue: re-enqueue the workflows on a named queue instead of the internal queue.
+//
+// Example:
+//
+//	handles, err := dbos.ResumeWorkflows[int](ctx, []string{"wf-1", "wf-2"}, dbos.WithResumeQueue("priority"))
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+func ResumeWorkflows[R any](ctx DBOSContext, workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[R], error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+
+	anyHandles, err := ctx.ResumeWorkflows(ctx, workflowIDs, opts...)
+	if err != nil {
+		return nil, err
+	}
+	handles := make([]WorkflowHandle[R], 0, len(anyHandles))
+	for _, h := range anyHandles {
+		handles = append(handles, newWorkflowPollingHandle[R](ctx, h.GetWorkflowID()))
+	}
+	return handles, nil
 }
 
 // ForkWorkflowInput holds configuration parameters for forking workflows.
@@ -3781,6 +3860,7 @@ type ForkWorkflowInput struct {
 	ForkedWorkflowID   string // Optional: Custom workflow ID for the forked workflow (auto-generated if empty)
 	StartStep          uint   // Optional: Step to start the forked workflow from (default: 0)
 	ApplicationVersion string // Optional: Application version for the forked workflow (inherits from original if empty)
+	QueueName          string // Optional: Queue to enqueue the forked workflow on (defaults to the internal queue)
 }
 
 func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error) {
@@ -3797,6 +3877,7 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 		forkedWorkflowID:   input.ForkedWorkflowID,
 		startStep:          int(input.StartStep),
 		applicationVersion: input.ApplicationVersion,
+		queueName:          input.QueueName,
 	}
 
 	// Call system database method
@@ -3853,6 +3934,12 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
+//
+//	// Fork onto a named queue instead of the internal queue.
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
+//	    OriginalWorkflowID: "original-workflow-id",
+//	    QueueName:          "priority",
+//	})
 func ForkWorkflow[R any](ctx DBOSContext, input ForkWorkflowInput) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
