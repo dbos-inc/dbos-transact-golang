@@ -4134,6 +4134,24 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, input CreateScheduleRequest)
 	return nil
 }
 
+// CreateSchedule creates a new schedule for a workflow.
+// Must be called after DBOS is launched.
+//
+// Example:
+//
+//	err := dbos.CreateSchedule(ctx, dbos.CreateScheduleRequest{
+//	    ScheduleName: "my-schedule",
+//	    WorkflowFn:   myWorkflow,
+//	    Schedule:    "*/5 * * * *",
+//	    Context:     "my context",
+//	})
+func CreateSchedule(ctx DBOSContext, input CreateScheduleRequest) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.CreateSchedule(ctx, input)
+}
+
 func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRequest) error {
 	if len(schedules) == 0 {
 		return nil
@@ -4229,6 +4247,22 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 	return nil
 }
 
+// ApplySchedules applies a list of schedules, creating new ones or updating existing ones.
+// This is useful for defining a set of static schedules to be created on program start.
+//
+// Example:
+//
+//	err := dbos.ApplySchedules(ctx, []dbos.ApplySchedulesRequest{
+//	    {ScheduleName: "schedule-a", WorkflowFn: workflowA, Schedule: "*/10 * * * *"},
+//	    {ScheduleName: "schedule-b", WorkflowFn: workflowB, Schedule: "0 0 * * *"},
+//	})
+func ApplySchedules(ctx DBOSContext, schedules []ApplySchedulesRequest) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.ApplySchedules(ctx, schedules)
+}
+
 func (c *dbosContext) PauseSchedule(_ DBOSContext, scheduleName string) error {
 	if scheduleName == "" {
 		return errors.New("schedule_name is required")
@@ -4254,6 +4288,18 @@ func (c *dbosContext) PauseSchedule(_ DBOSContext, scheduleName string) error {
 
 	c.RemoveScheduleFromScheduler(scheduleName)
 	return nil
+}
+
+// PauseSchedule pauses a schedule so it stops firing.
+//
+// Example:
+//
+//	err := dbos.PauseSchedule(ctx, "my-schedule")
+func PauseSchedule(ctx DBOSContext, scheduleName string) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.PauseSchedule(ctx, scheduleName)
 }
 
 func (c *dbosContext) ResumeSchedule(_ DBOSContext, scheduleName string) error {
@@ -4288,6 +4334,18 @@ func (c *dbosContext) ResumeSchedule(_ DBOSContext, scheduleName string) error {
 	return nil
 }
 
+// ResumeSchedule resumes a paused schedule.
+//
+// Example:
+//
+//	err := dbos.ResumeSchedule(ctx, "my-schedule")
+func ResumeSchedule(ctx DBOSContext, scheduleName string) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.ResumeSchedule(ctx, scheduleName)
+}
+
 func (c *dbosContext) DeleteSchedule(_ DBOSContext, scheduleName string) error {
 	if scheduleName == "" {
 		return errors.New("schedule_name is required")
@@ -4298,6 +4356,18 @@ func (c *dbosContext) DeleteSchedule(_ DBOSContext, scheduleName string) error {
 	return retry(c, func() error {
 		return c.systemDB.deleteSchedule(c, scheduleName)
 	}, withRetrierLogger(c.logger))
+}
+
+// DeleteSchedule deletes a schedule.
+//
+// Example:
+//
+//	err := dbos.DeleteSchedule(ctx, "my-schedule")
+func DeleteSchedule(ctx DBOSContext, scheduleName string) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.DeleteSchedule(ctx, scheduleName)
 }
 
 func (c *dbosContext) GetSchedule(_ DBOSContext, scheduleName string) (*WorkflowSchedule, error) {
@@ -4335,6 +4405,19 @@ func (c *dbosContext) BackfillSchedule(_ DBOSContext, scheduleName string, start
 	}, withRetrierLogger(c.logger))
 }
 
+// BackfillSchedule backfills a schedule, executing it for each time slot in the range.
+// Already-executed times are automatically skipped.
+//
+// Example:
+//
+//	err := dbos.BackfillSchedule(ctx, "my-schedule", startTime, endTime)
+func BackfillSchedule(ctx DBOSContext, scheduleName string, start, end time.Time) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.BackfillSchedule(ctx, scheduleName, start, end)
+}
+
 func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (string, error) {
 	if scheduleName == "" {
 		return "", errors.New("schedule_name is required")
@@ -4369,6 +4452,18 @@ func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (strin
 	return workflowID, nil
 }
 
+// TriggerSchedule triggers a schedule immediately, returning the workflow ID.
+//
+// Example:
+//
+//	workflowID, err := dbos.TriggerSchedule(ctx, "my-schedule")
+func TriggerSchedule(ctx DBOSContext, scheduleName string) (string, error) {
+	if ctx == nil {
+		return "", errors.New("ctx cannot be nil")
+	}
+	return ctx.TriggerSchedule(ctx, scheduleName)
+}
+
 func (c *dbosContext) getRegisteredWorkflow(workflowName string, workflowClassName string) (wrappedWorkflowFunc, error) {
 	var fqn string
 	if workflowClassName != "" {
@@ -4386,124 +4481,4 @@ func (c *dbosContext) getRegisteredWorkflow(workflowName string, workflowClassNa
 		return nil, fmt.Errorf("invalid workflow registry entry for: %s", fqn)
 	}
 	return entry.wrappedFunction, nil
-}
-
-// CreateSchedule creates a new schedule for a workflow.
-// Must be called after DBOS is launched.
-//
-// Example:
-//
-//	err := dbos.CreateSchedule(ctx, dbos.CreateScheduleRequest{
-//	    ScheduleName: "my-schedule",
-//	    WorkflowFn:   myWorkflow,
-//	    Schedule:    "*/5 * * * *",
-//	    Context:     "my context",
-//	})
-func CreateSchedule(ctx DBOSContext, input CreateScheduleRequest) error {
-	if ctx == nil {
-		return errors.New("ctx cannot be nil")
-	}
-	return ctx.CreateSchedule(ctx, input)
-}
-
-// ApplySchedules applies a list of schedules, creating new ones or updating existing ones.
-// This is useful for defining a set of static schedules to be created on program start.
-//
-// Example:
-//
-//	err := dbos.ApplySchedules(ctx, []dbos.ApplySchedulesRequest{
-//	    {ScheduleName: "schedule-a", WorkflowFn: workflowA, Schedule: "*/10 * * * *"},
-//	    {ScheduleName: "schedule-b", WorkflowFn: workflowB, Schedule: "0 0 * * *"},
-//	})
-func ApplySchedules(ctx DBOSContext, schedules []ApplySchedulesRequest) error {
-	if ctx == nil {
-		return errors.New("ctx cannot be nil")
-	}
-	return ctx.ApplySchedules(ctx, schedules)
-}
-
-// PauseSchedule pauses a schedule so it stops firing.
-//
-// Example:
-//
-//	err := dbos.PauseSchedule(ctx, "my-schedule")
-func PauseSchedule(ctx DBOSContext, scheduleName string) error {
-	if ctx == nil {
-		return errors.New("ctx cannot be nil")
-	}
-	return ctx.PauseSchedule(ctx, scheduleName)
-}
-
-// ResumeSchedule resumes a paused schedule.
-//
-// Example:
-//
-//	err := dbos.ResumeSchedule(ctx, "my-schedule")
-func ResumeSchedule(ctx DBOSContext, scheduleName string) error {
-	if ctx == nil {
-		return errors.New("ctx cannot be nil")
-	}
-	return ctx.ResumeSchedule(ctx, scheduleName)
-}
-
-// DeleteSchedule deletes a schedule.
-//
-// Example:
-//
-//	err := dbos.DeleteSchedule(ctx, "my-schedule")
-func DeleteSchedule(ctx DBOSContext, scheduleName string) error {
-	if ctx == nil {
-		return errors.New("ctx cannot be nil")
-	}
-	return ctx.DeleteSchedule(ctx, scheduleName)
-}
-
-// GetSchedule gets a schedule by name.
-//
-// Example:
-//
-//	schedule, err := dbos.GetSchedule(ctx, "my-schedule")
-func GetSchedule(ctx DBOSContext, scheduleName string) (*WorkflowSchedule, error) {
-	if ctx == nil {
-		return nil, errors.New("ctx cannot be nil")
-	}
-	return ctx.GetSchedule(ctx, scheduleName)
-}
-
-// ListSchedules lists all schedules, optionally filtered by status.
-// Status can be "ACTIVE", "PAUSED", or empty string for all.
-//
-// Example:
-//
-//	schedules, err := dbos.ListSchedules(ctx, "ACTIVE")
-func ListSchedules(ctx DBOSContext, status string) ([]WorkflowSchedule, error) {
-	if ctx == nil {
-		return nil, errors.New("ctx cannot be nil")
-	}
-	return ctx.ListSchedules(ctx, status)
-}
-
-// BackfillSchedule backfills a schedule, executing it for each time slot in the range.
-// Already-executed times are automatically skipped.
-//
-// Example:
-//
-//	err := dbos.BackfillSchedule(ctx, "my-schedule", startTime, endTime)
-func BackfillSchedule(ctx DBOSContext, scheduleName string, start, end time.Time) error {
-	if ctx == nil {
-		return errors.New("ctx cannot be nil")
-	}
-	return ctx.BackfillSchedule(ctx, scheduleName, start, end)
-}
-
-// TriggerSchedule triggers a schedule immediately, returning the workflow ID.
-//
-// Example:
-//
-//	workflowID, err := dbos.TriggerSchedule(ctx, "my-schedule")
-func TriggerSchedule(ctx DBOSContext, scheduleName string) (string, error) {
-	if ctx == nil {
-		return "", errors.New("ctx cannot be nil")
-	}
-	return ctx.TriggerSchedule(ctx, scheduleName)
 }
