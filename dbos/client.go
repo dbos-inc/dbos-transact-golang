@@ -43,7 +43,7 @@ type Client interface {
 	// Schedule management
 	CreateSchedule(input ClientScheduleInput) error
 	GetSchedule(scheduleName string) (*WorkflowSchedule, error)
-	ListSchedules(status string) ([]WorkflowSchedule, error)
+	ListSchedules(status ScheduleStatus) ([]WorkflowSchedule, error)
 	PauseSchedule(scheduleName string) error
 	ResumeSchedule(scheduleName string) error
 	DeleteSchedule(scheduleName string) error
@@ -610,12 +610,12 @@ func (c *client) CreateSchedule(input ClientScheduleInput) error {
 		ScheduleID:        scheduleID,
 		ScheduleName:      input.ScheduleName,
 		WorkflowName:      input.WorkflowName,
-		WorkflowClassName: input.WorkflowClassName,
 		Schedule:          input.Schedule,
 		Context:           string(contextJSON),
 		Status:            ScheduleStatusActive,
 		AutomaticBackfill: input.AutomaticBackfill,
 		CronTimezone:      input.CronTimezone,
+		QueueName:         input.QueueName,
 	})
 }
 
@@ -630,7 +630,7 @@ func (c *client) GetSchedule(scheduleName string) (*WorkflowSchedule, error) {
 		return nil, errors.New("invalid DBOS context")
 	}
 
-	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
+	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}})
 	if err != nil {
 		return nil, err
 	}
@@ -643,7 +643,7 @@ func (c *client) GetSchedule(scheduleName string) (*WorkflowSchedule, error) {
 }
 
 // ListSchedules lists all schedules, optionally filtered by status.
-func (c *client) ListSchedules(status string) ([]WorkflowSchedule, error) {
+func (c *client) ListSchedules(status ScheduleStatus) ([]WorkflowSchedule, error) {
 	dbosCtx, ok := c.dbosCtx.(*dbosContext)
 	if !ok {
 		return nil, errors.New("invalid DBOS context")
@@ -651,7 +651,7 @@ func (c *client) ListSchedules(status string) ([]WorkflowSchedule, error) {
 
 	var input listSchedulesDBInput
 	if status != "" {
-		input.Status = []ScheduleStatus{ScheduleStatus(status)}
+		input.Statuses = []ScheduleStatus{status}
 	}
 	return dbosCtx.systemDB.listSchedules(dbosCtx, input)
 }
@@ -667,7 +667,7 @@ func (c *client) PauseSchedule(scheduleName string) error {
 		return errors.New("invalid DBOS context")
 	}
 
-	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
+	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}})
 	if err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
 	}
@@ -699,7 +699,7 @@ func (c *client) ResumeSchedule(scheduleName string) error {
 		return errors.New("invalid DBOS context")
 	}
 
-	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
+	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}})
 	if err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
 	}

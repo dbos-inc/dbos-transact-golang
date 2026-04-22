@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -16,12 +17,10 @@ func TestScheduleCRUD(t *testing.T) {
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 
 	t.Run("CreateSchedule", func(t *testing.T) {
-		err := CreateSchedule(dbosCtx, CreateScheduleRequest{
+		err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
 			ScheduleName: "test-schedule-1",
-			WorkflowFn:   testWorkflowForSchedule,
 			Schedule:     "*/5 * * * * *",
-			Context:      "test-context",
-		})
+		}, WithScheduleContext("test-context"))
 		require.NoError(t, err)
 
 		// Verify schedule was created
@@ -29,7 +28,7 @@ func TestScheduleCRUD(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, schedule)
 		require.Equal(t, "test-schedule-1", schedule.ScheduleName)
-		require.Equal(t, "testWorkflowForSchedule", schedule.WorkflowName)
+		require.Equal(t, "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule", schedule.WorkflowName)
 		require.Equal(t, "*/5 * * * * *", schedule.Schedule)
 		require.Equal(t, ScheduleStatusActive, schedule.Status)
 	})
@@ -40,7 +39,7 @@ func TestScheduleCRUD(t *testing.T) {
 		require.GreaterOrEqual(t, len(schedules), 1)
 
 		// Filter by status
-		activeSchedules, err := ListSchedules(dbosCtx, "ACTIVE")
+		activeSchedules, err := ListSchedules(dbosCtx, ScheduleStatusActive)
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(activeSchedules), 1)
 	})
@@ -62,9 +61,8 @@ func TestScheduleCRUD(t *testing.T) {
 	})
 
 	t.Run("DeleteSchedule", func(t *testing.T) {
-		err := CreateSchedule(dbosCtx, CreateScheduleRequest{
+		err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
 			ScheduleName: "test-schedule-delete",
-			WorkflowFn:   testWorkflowForSchedule,
 			Schedule:     "0 0 * * * *",
 		})
 		require.NoError(t, err)
@@ -99,7 +97,7 @@ func TestApplySchedules(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	schedules, err := ListSchedules(dbosCtx, "ACTIVE")
+	schedules, err := ListSchedules(dbosCtx, ScheduleStatusActive)
 	require.NoError(t, err)
 	require.Equal(t, 2, len(schedules))
 }
@@ -111,9 +109,8 @@ func TestBackfillSchedule(t *testing.T) {
 	// First register the workflow
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 
-	err := CreateSchedule(dbosCtx, CreateScheduleRequest{
+	err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
 		ScheduleName: "backfill-schedule",
-		WorkflowFn:   testWorkflowForSchedule,
 		Schedule:     "*/1 * * * * *", // Every second for testing
 	})
 	require.NoError(t, err)
@@ -133,9 +130,8 @@ func TestTriggerSchedule(t *testing.T) {
 	// First register the workflow
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 
-	err := CreateSchedule(dbosCtx, CreateScheduleRequest{
+	err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
 		ScheduleName: "trigger-schedule",
-		WorkflowFn:   testWorkflowForSchedule,
 		Schedule:     "0 0 * * * *",
 	})
 	require.NoError(t, err)
@@ -153,24 +149,27 @@ func TestScheduleWithOptions(t *testing.T) {
 	// First register the workflow
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 
-	err := CreateSchedule(dbosCtx, CreateScheduleRequest{
-		ScheduleName:      "full-options-schedule",
-		WorkflowFn:        testWorkflowForSchedule,
-		Schedule:          "0 0 * * * *",
-		Context:           map[string]string{"key": "value"},
-		AutomaticBackfill: true,
-		CronTimezone:      "America/New_York",
-	})
+	err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		ScheduleName: "full-options-schedule",
+		Schedule:     "0 0 * * * *",
+	},
+		WithScheduleContext(map[string]string{"key": "value"}),
+		WithAutomaticBackfill(true),
+		WithCronTimezone("America/New_York"),
+		WithScheduleQueueName("my-queue"),
+	)
 	require.NoError(t, err)
 
 	schedule, err := GetSchedule(dbosCtx, "full-options-schedule")
 	require.NoError(t, err)
 	require.True(t, schedule.AutomaticBackfill)
 	require.Equal(t, "America/New_York", schedule.CronTimezone)
+	require.Equal(t, "my-queue", schedule.QueueName)
 }
 
-// Helper workflow for testing schedules - must match WorkflowFunc signature
-func testWorkflowForSchedule(ctx DBOSContext, input any) (any, error) {
+// Helper workflow for testing schedules — DB-backed schedules require the
+// workflow input to be a ScheduledWorkflowInput.
+func testWorkflowForSchedule(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
 	return "completed", nil
 }
 
@@ -184,12 +183,10 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 	require.NoError(t, err)
 
 	scheduleName := "test-backfill-restart"
-	err = CreateSchedule(dbosCtx, CreateScheduleRequest{
-		ScheduleName:      scheduleName,
-		WorkflowFn:        testWorkflowForSchedule,
-		Schedule:          "*/1 * * * * *", // Every second
-		AutomaticBackfill: true,
-	})
+	err = CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		ScheduleName: scheduleName,
+		Schedule:     "*/1 * * * * *", // Every second
+	}, WithAutomaticBackfill(true))
 	require.NoError(t, err)
 
 	// Wait for it to fire once to set LastFiredAt
@@ -238,9 +235,8 @@ func TestCronTriggering(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a schedule that fires every second
-	err = CreateSchedule(dbosCtx, CreateScheduleRequest{
+	err = CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
 		ScheduleName: "test-cron-trigger",
-		WorkflowFn:   testWorkflowForSchedule,
 		Schedule:     "*/1 * * * * *",
 	})
 	require.NoError(t, err)
@@ -258,4 +254,45 @@ func TestCronTriggering(t *testing.T) {
 		}
 	}
 	require.GreaterOrEqual(t, firedCount, 1, "Schedule should have fired at least once")
+}
+
+// TestScheduleCronTimezone verifies that a non-empty CronTimezone is applied
+// to the installed cron entry via the CRON_TZ= prefix: Next() from a known
+// wall-clock reference should fall at the configured hour in that tz.
+func TestScheduleCronTimezone(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	defer dbosCtx.Shutdown(5 * time.Second)
+
+	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+	require.NoError(t, dbosCtx.Launch())
+
+	const scheduleName = "tz-schedule"
+	err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		ScheduleName: scheduleName,
+		Schedule:     "0 0 9 * * *", // 09:00:00 every day
+	}, WithCronTimezone("America/New_York"))
+	require.NoError(t, err)
+
+	c := dbosCtx.(*dbosContext)
+	var entry cron.Entry
+	require.Eventually(t, func() bool {
+		id, ok := c.scheduleEntryIDs[scheduleName]
+		if !ok {
+			return false
+		}
+		entry = c.getWorkflowScheduler().Entry(id)
+		return entry.Schedule != nil
+	}, 3*time.Second, 50*time.Millisecond, "reconciler should install the cron entry")
+
+	loc, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+
+	// 06:00 NY → next fire should be 09:00 NY the same day, regardless of
+	// where the test host's local time sits.
+	ref := time.Date(2025, 1, 15, 6, 0, 0, 0, loc)
+	next := entry.Schedule.Next(ref).In(loc)
+	require.Equal(t, 9, next.Hour(), "next fire should be 09:00 NY, got %v", next)
+	require.Equal(t, 2025, next.Year())
+	require.Equal(t, time.January, next.Month())
+	require.Equal(t, 15, next.Day())
 }

@@ -1,0 +1,4 @@
+export PGHOST=localhost
+export PGPORT=26257
+export PGDATABASE=dbos
+export PGUSER=root

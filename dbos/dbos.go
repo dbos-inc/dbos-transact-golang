@@ -140,17 +140,17 @@ type DBOSContext interface {
 	GetStepID() (int, error)                                                                                    // Get the current step ID (only available within workflows)
 
 	// Workflow management
-	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                // Get a handle to an existing workflow
-	CancelWorkflow(_ DBOSContext, workflowID string) error                                                         // Cancel a workflow by setting its status to CANCELLED
-	SetWorkflowDelay(_ DBOSContext, workflowID string, opts ...SetWorkflowDelayOption) error                       // Set or update the delay on a DELAYED workflow
-	ResumeWorkflow(_ DBOSContext, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)    // Resume a cancelled workflow
+	RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error)                                   // Get a handle to an existing workflow
+	CancelWorkflow(_ DBOSContext, workflowID string) error                                                            // Cancel a workflow by setting its status to CANCELLED
+	SetWorkflowDelay(_ DBOSContext, workflowID string, opts ...SetWorkflowDelayOption) error                          // Set or update the delay on a DELAYED workflow
+	ResumeWorkflow(_ DBOSContext, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)       // Resume a cancelled workflow
 	ResumeWorkflows(_ DBOSContext, workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error) // Resume multiple workflows in a single DB round-trip
-	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)                              // Fork a workflow from a specific step
-	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                            // List workflows based on filtering criteria
-	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)                                         // Get the execution steps of a workflow
-	ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) // List registered workflows with filtering options
-	ListRegisteredQueues(_ DBOSContext) ([]WorkflowQueue, error)                                                   // List all registered workflow queues
-	DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts ...DeleteWorkflowOption) error                       // Delete workflows and all their associated data
+	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)                                 // Fork a workflow from a specific step
+	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                               // List workflows based on filtering criteria
+	GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error)                                            // Get the execution steps of a workflow
+	ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error)    // List registered workflows with filtering options
+	ListRegisteredQueues(_ DBOSContext) ([]WorkflowQueue, error)                                                      // List all registered workflow queues
+	DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts ...DeleteWorkflowOption) error                          // Delete workflows and all their associated data
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -168,15 +168,15 @@ type DBOSContext interface {
 	ListenQueues(_ DBOSContext, queues ...WorkflowQueue) // Configure which queues this process should listen to
 
 	// Schedule management
-	CreateSchedule(_ DBOSContext, input CreateScheduleRequest) error                           // Create a new schedule
-	ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRequest) error                     // Apply schedules (create or update)
-	PauseSchedule(_ DBOSContext, scheduleName string) error                                    // Pause a schedule
-	ResumeSchedule(_ DBOSContext, scheduleName string) error                                   // Resume a paused schedule
-	DeleteSchedule(_ DBOSContext, scheduleName string) error                                   // Delete a schedule
-	GetSchedule(_ DBOSContext, scheduleName string) (*WorkflowSchedule, error)                 // Get a schedule by name
-	ListSchedules(_ DBOSContext, status string) ([]WorkflowSchedule, error)                    // List schedules with optional status filter
-	BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) error // Backfill a schedule
-	TriggerSchedule(_ DBOSContext, scheduleName string) (string, error)                        // Trigger a schedule immediately
+	CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, input CreateScheduleRequest, opts ...CreateScheduleOption) error // Create a new schedule
+	ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRequest) error                         // Apply schedules (create or update)
+	PauseSchedule(_ DBOSContext, scheduleName string) error                                        // Pause a schedule
+	ResumeSchedule(_ DBOSContext, scheduleName string) error                                       // Resume a paused schedule
+	DeleteSchedule(_ DBOSContext, scheduleName string) error                                       // Delete a schedule
+	GetSchedule(_ DBOSContext, scheduleName string) (*WorkflowSchedule, error)                     // Get a schedule by name
+	ListSchedules(_ DBOSContext, status ScheduleStatus) ([]WorkflowSchedule, error)                // List schedules with optional status filter
+	BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) error     // Backfill a schedule
+	TriggerSchedule(_ DBOSContext, scheduleName string) (string, error)                            // Trigger a schedule immediately
 
 	// Alert handling
 	SetAlertHandler(handler AlertHandler) // Register a handler for alerts from DBOS Conductor (must be called before Launch)
@@ -254,6 +254,7 @@ func SetAlertHandler(ctx DBOSContext, handler AlertHandler) {
 
 // ClearRegistries clears the workflow and queue registries,
 // allowing re-registration of workflows and queues. Intended for testing only.
+// FIXME: re org close to package method
 func (c *dbosContext) ClearRegistries() {
 	c.workflowRegistry.Clear()
 	c.workflowCustomNametoFQN.Clear()
@@ -263,48 +264,6 @@ func (c *dbosContext) ClearRegistries() {
 		}
 	}
 	c.alertHandler = nil
-}
-
-// AddScheduleToScheduler adds a schedule to the workflow scheduler.
-// Called when a new schedule is created at runtime.
-func (c *dbosContext) AddScheduleToScheduler(scheduleName string) error {
-	schedules, err := c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
-	if err != nil {
-		return fmt.Errorf("failed to get schedule: %w", err)
-	}
-	var schedule *WorkflowSchedule
-	for i := range schedules {
-		if schedules[i].ScheduleName == scheduleName {
-			schedule = &schedules[i]
-			break
-		}
-	}
-	if schedule == nil {
-		return fmt.Errorf("schedule not found: %s", scheduleName)
-	}
-	if schedule.Status != ScheduleStatusActive {
-		return nil // Don't add paused schedules
-	}
-
-	c.addScheduleToScheduler(*schedule)
-	return nil
-}
-
-// RemoveScheduleFromScheduler removes a schedule from the workflow scheduler.
-func (c *dbosContext) RemoveScheduleFromScheduler(scheduleName string) {
-	if c.scheduleEntryIDs == nil {
-		return
-	}
-
-	entryID, exists := c.scheduleEntryIDs[scheduleName]
-	if !exists {
-		c.logger.Debug("schedule not found in scheduler", "schedule", scheduleName)
-		return
-	}
-
-	c.getWorkflowScheduler().Remove(entryID)
-	delete(c.scheduleEntryIDs, scheduleName)
-	c.logger.Info("Removed schedule from scheduler", "schedule", scheduleName)
 }
 
 func (c *dbosContext) Deadline() (deadline time.Time, ok bool) {
@@ -485,99 +444,6 @@ func (c *dbosContext) getWorkflowScheduler() *cron.Cron {
 	return c.workflowScheduler
 }
 
-func (c *dbosContext) loadSchedulesFromDatabase() {
-	schedules, err := c.systemDB.listSchedules(c, listSchedulesDBInput{Status: []ScheduleStatus{ScheduleStatusActive}})
-	if err != nil {
-		c.logger.Error("failed to load schedules from database", "error", err)
-		return
-	}
-
-	for _, schedule := range schedules {
-		// Automatic backfill: if enabled, backfill missed executions since last_fired_at
-		if schedule.AutomaticBackfill && schedule.LastFiredAt != nil {
-			startTime := schedule.LastFiredAt.Add(time.Second)
-			endTime := time.Now()
-			if startTime.Before(endTime) {
-				c.logger.Info("performing automatic backfill", "schedule", schedule.ScheduleName, "start", startTime, "end", endTime)
-				err := c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
-					ScheduleName: schedule.ScheduleName,
-					Schedule:     schedule.Schedule,
-					StartTime:    startTime,
-					EndTime:      endTime,
-				})
-				if err != nil {
-					c.logger.Error("automatic backfill failed", "schedule", schedule.ScheduleName, "error", err)
-				}
-			}
-		}
-
-		c.addScheduleToScheduler(schedule)
-	}
-}
-
-func (c *dbosContext) addScheduleToScheduler(schedule WorkflowSchedule) {
-	workflowFn, err := c.getRegisteredWorkflow(schedule.WorkflowName, schedule.WorkflowClassName)
-	if err != nil {
-		c.logger.Error("failed to get workflow for schedule", "schedule", schedule.ScheduleName, "error", err)
-		return
-	}
-
-	scheduleName := schedule.ScheduleName
-	// Construct the FQN for the scheduler callback - when WorkflowClassName is set, the name is just the function name
-	fqn := schedule.WorkflowName
-	if schedule.WorkflowClassName != "" {
-		fqn = schedule.WorkflowClassName + "." + schedule.WorkflowName
-	}
-
-	var entryID cron.EntryID
-	entryID, err = c.getWorkflowScheduler().AddFunc(schedule.Schedule, func() {
-		if !c.launched.Load() {
-			return
-		}
-
-		entry := c.getWorkflowScheduler().Entry(entryID)
-		scheduledTime := entry.Prev
-		if scheduledTime.IsZero() {
-			scheduledTime = entry.Next
-		}
-
-		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, scheduledTime)
-		opts := []WorkflowOption{
-			WithWorkflowID(wfID),
-			withWorkflowName(fqn),
-			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),
-		}
-
-		_, err := workflowFn(c, scheduledTime, "", opts...)
-		if err != nil {
-			c.logger.Error("failed to run scheduled workflow", "schedule", scheduleName, "error", err)
-		}
-
-		now := time.Now()
-		err = c.systemDB.updateSchedule(c, updateScheduleDBInput{
-			ScheduleName: scheduleName,
-			Status:       ScheduleStatusActive,
-			LastFiredAt:  &now,
-		})
-		if err != nil {
-			c.logger.Error("failed to update schedule last fired time", "schedule", scheduleName, "error", err)
-		}
-	})
-	if err != nil {
-		c.logger.Error("failed to add schedule to scheduler", "schedule", schedule.ScheduleName, "error", err)
-		return
-	}
-
-	c.scheduleEntryIDs[schedule.ScheduleName] = entryID
-	c.logger.Info("Loaded schedule from database", "schedule", schedule.ScheduleName, "workflow", schedule.WorkflowName)
-
-	// If DBOS is already launched, ensure the scheduler is started.
-	// robfig/cron.Start() is safe to call multiple times (it's a no-op if already running).
-	if c.launched.Load() {
-		c.getWorkflowScheduler().Start()
-	}
-}
-
 func (c *dbosContext) GetApplicationVersion() string {
 	return c.applicationVersion
 }
@@ -756,24 +622,14 @@ func (c *dbosContext) Launch() error {
 	}()
 	c.logger.Debug("Queue runner started")
 
-	// Start the workflow scheduler if it has been initialized
-	// Use getWorkflowScheduler() to ensure lazy initialization
-	if c.workflowScheduler != nil {
-		// Load schedules from database
-		c.loadSchedulesFromDatabase()
-		c.workflowScheduler.Start()
-		c.logger.Debug("Workflow scheduler started")
-	} else {
-		// Scheduler was never accessed before - check if there are schedules in DB
-		// and initialize the scheduler if so
-		schedules, _ := c.systemDB.listSchedules(c, listSchedulesDBInput{Status: []ScheduleStatus{ScheduleStatusActive}})
-		if len(schedules) > 0 {
-			scheduler := c.getWorkflowScheduler()
-			c.loadSchedulesFromDatabase()
-			scheduler.Start()
-			c.logger.Debug("Workflow scheduler started for existing schedules")
-		}
-	}
+	// Start the cron scheduler. It holds both static schedules registered via
+	// WithSchedule and dynamic schedules installed by the reconciler goroutine.
+	c.getWorkflowScheduler().Start()
+	c.logger.Debug("Workflow scheduler started")
+
+	// Start the dynamic schedule reconciler. It polls the schedules table every
+	// _SCHEDULE_POLL_INTERVAL and reconciles cron entries against DB state.
+	go c.runScheduleReconciler()
 
 	// Start the conductor if it has been initialized
 	if c.conductor != nil {
@@ -983,6 +839,7 @@ func Shutdown(ctx DBOSContext, timeout time.Duration) {
 
 // ClearRegistries clears the workflow and queue registries,
 // allowing re-registration of workflows and queues. Intended for testing only.
+// FIXME: standardize
 func ClearRegistries(ctx DBOSContext) {
 	c, ok := ctx.(*dbosContext)
 	if !ok {
