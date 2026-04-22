@@ -630,7 +630,16 @@ func (c *client) GetSchedule(scheduleName string) (*WorkflowSchedule, error) {
 		return nil, errors.New("invalid DBOS context")
 	}
 
-	return dbosCtx.systemDB.getSchedule(dbosCtx, scheduleName)
+	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
+	if err != nil {
+		return nil, err
+	}
+	for i := range schedules {
+		if schedules[i].ScheduleName == scheduleName {
+			return &schedules[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // ListSchedules lists all schedules, optionally filtered by status.
@@ -640,7 +649,11 @@ func (c *client) ListSchedules(status string) ([]WorkflowSchedule, error) {
 		return nil, errors.New("invalid DBOS context")
 	}
 
-	return dbosCtx.systemDB.listSchedules(dbosCtx, status)
+	var input listSchedulesDBInput
+	if status != "" {
+		input.Status = []ScheduleStatus{ScheduleStatus(status)}
+	}
+	return dbosCtx.systemDB.listSchedules(dbosCtx, input)
 }
 
 // PauseSchedule pauses a schedule using the client.
@@ -654,9 +667,16 @@ func (c *client) PauseSchedule(scheduleName string) error {
 		return errors.New("invalid DBOS context")
 	}
 
-	existing, err := dbosCtx.systemDB.getSchedule(dbosCtx, scheduleName)
+	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
 	if err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
+	}
+	var existing *WorkflowSchedule
+	for i := range schedules {
+		if schedules[i].ScheduleName == scheduleName {
+			existing = &schedules[i]
+			break
+		}
 	}
 	if existing == nil {
 		return fmt.Errorf("schedule not found: %s", scheduleName)
@@ -679,9 +699,16 @@ func (c *client) ResumeSchedule(scheduleName string) error {
 		return errors.New("invalid DBOS context")
 	}
 
-	existing, err := dbosCtx.systemDB.getSchedule(dbosCtx, scheduleName)
+	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
 	if err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
+	}
+	var existing *WorkflowSchedule
+	for i := range schedules {
+		if schedules[i].ScheduleName == scheduleName {
+			existing = &schedules[i]
+			break
+		}
 	}
 	if existing == nil {
 		return fmt.Errorf("schedule not found: %s", scheduleName)

@@ -4168,9 +4168,16 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 			return errors.New("schedule is required")
 		}
 
-		existing, err := c.systemDB.getSchedule(c, req.ScheduleName)
+		schedules, err := c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefix: []string{req.ScheduleName}})
 		if err != nil {
 			return fmt.Errorf("failed to check existing schedule: %w", err)
+		}
+		var existing *WorkflowSchedule
+		for i := range schedules {
+			if schedules[i].ScheduleName == req.ScheduleName {
+				existing = &schedules[i]
+				break
+			}
 		}
 
 		workflowName := req.WorkflowName
@@ -4268,9 +4275,16 @@ func (c *dbosContext) PauseSchedule(_ DBOSContext, scheduleName string) error {
 		return errors.New("schedule_name is required")
 	}
 
-	existing, err := c.systemDB.getSchedule(c, scheduleName)
+	schedules, err := c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
 	if err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
+	}
+	var existing *WorkflowSchedule
+	for i := range schedules {
+		if schedules[i].ScheduleName == scheduleName {
+			existing = &schedules[i]
+			break
+		}
 	}
 	if existing == nil {
 		return fmt.Errorf("schedule not found: %s", scheduleName)
@@ -4307,9 +4321,16 @@ func (c *dbosContext) ResumeSchedule(_ DBOSContext, scheduleName string) error {
 		return errors.New("schedule_name is required")
 	}
 
-	existing, err := c.systemDB.getSchedule(c, scheduleName)
+	schedules, err := c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
 	if err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
+	}
+	var existing *WorkflowSchedule
+	for i := range schedules {
+		if schedules[i].ScheduleName == scheduleName {
+			existing = &schedules[i]
+			break
+		}
 	}
 	if existing == nil {
 		return fmt.Errorf("schedule not found: %s", scheduleName)
@@ -4375,11 +4396,49 @@ func (c *dbosContext) GetSchedule(_ DBOSContext, scheduleName string) (*Workflow
 		return nil, errors.New("schedule_name is required")
 	}
 
-	return c.systemDB.getSchedule(c, scheduleName)
+	schedules, err := c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
+	if err != nil {
+		return nil, err
+	}
+	for i := range schedules {
+		if schedules[i].ScheduleName == scheduleName {
+			return &schedules[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// GetSchedule gets a schedule by name.
+//
+// Example:
+//
+//	schedule, err := dbos.GetSchedule(ctx, "my-schedule")
+func GetSchedule(ctx DBOSContext, scheduleName string) (*WorkflowSchedule, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.GetSchedule(ctx, scheduleName)
 }
 
 func (c *dbosContext) ListSchedules(_ DBOSContext, status string) ([]WorkflowSchedule, error) {
-	return c.systemDB.listSchedules(c, status)
+	var input listSchedulesDBInput
+	if status != "" {
+		input.Status = []ScheduleStatus{ScheduleStatus(status)}
+	}
+	return c.systemDB.listSchedules(c, input)
+}
+
+// ListSchedules lists all schedules, optionally filtered by status.
+// Status can be "ACTIVE", "PAUSED", or empty string for all.
+//
+// Example:
+//
+//	schedules, err := dbos.ListSchedules(ctx, "ACTIVE")
+func ListSchedules(ctx DBOSContext, status string) ([]WorkflowSchedule, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.ListSchedules(ctx, status)
 }
 
 func (c *dbosContext) BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) error {
@@ -4387,9 +4446,16 @@ func (c *dbosContext) BackfillSchedule(_ DBOSContext, scheduleName string, start
 		return errors.New("schedule_name is required")
 	}
 
-	existing, err := c.systemDB.getSchedule(c, scheduleName)
+	schedules, err := c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
 	if err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
+	}
+	var existing *WorkflowSchedule
+	for i := range schedules {
+		if schedules[i].ScheduleName == scheduleName {
+			existing = &schedules[i]
+			break
+		}
 	}
 	if existing == nil {
 		return fmt.Errorf("schedule not found: %s", scheduleName)
@@ -4428,9 +4494,16 @@ func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (strin
 		return "", errors.New("DBOS.TriggerSchedule cannot be called from within a workflow")
 	}
 
-	existing, err := c.systemDB.getSchedule(c, scheduleName)
+	schedules, err := c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
 	if err != nil {
 		return "", fmt.Errorf("failed to get schedule: %w", err)
+	}
+	var existing *WorkflowSchedule
+	for i := range schedules {
+		if schedules[i].ScheduleName == scheduleName {
+			existing = &schedules[i]
+			break
+		}
 	}
 	if existing == nil {
 		return "", fmt.Errorf("schedule not found: %s", scheduleName)

@@ -268,9 +268,16 @@ func (c *dbosContext) ClearRegistries() {
 // AddScheduleToScheduler adds a schedule to the workflow scheduler.
 // Called when a new schedule is created at runtime.
 func (c *dbosContext) AddScheduleToScheduler(scheduleName string) error {
-	schedule, err := c.systemDB.getSchedule(c, scheduleName)
+	schedules, err := c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefix: []string{scheduleName}})
 	if err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
+	}
+	var schedule *WorkflowSchedule
+	for i := range schedules {
+		if schedules[i].ScheduleName == scheduleName {
+			schedule = &schedules[i]
+			break
+		}
 	}
 	if schedule == nil {
 		return fmt.Errorf("schedule not found: %s", scheduleName)
@@ -479,7 +486,7 @@ func (c *dbosContext) getWorkflowScheduler() *cron.Cron {
 }
 
 func (c *dbosContext) loadSchedulesFromDatabase() {
-	schedules, err := c.systemDB.listSchedules(c, string(ScheduleStatusActive))
+	schedules, err := c.systemDB.listSchedules(c, listSchedulesDBInput{Status: []ScheduleStatus{ScheduleStatusActive}})
 	if err != nil {
 		c.logger.Error("failed to load schedules from database", "error", err)
 		return
@@ -759,7 +766,7 @@ func (c *dbosContext) Launch() error {
 	} else {
 		// Scheduler was never accessed before - check if there are schedules in DB
 		// and initialize the scheduler if so
-		schedules, _ := c.systemDB.listSchedules(c, string(ScheduleStatusActive))
+		schedules, _ := c.systemDB.listSchedules(c, listSchedulesDBInput{Status: []ScheduleStatus{ScheduleStatusActive}})
 		if len(schedules) > 0 {
 			scheduler := c.getWorkflowScheduler()
 			c.loadSchedulesFromDatabase()

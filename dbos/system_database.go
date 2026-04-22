@@ -88,8 +88,7 @@ type systemDatabase interface {
 
 	// Schedules
 	createSchedule(ctx context.Context, input createScheduleDBInput) error
-	getSchedule(ctx context.Context, scheduleName string) (*WorkflowSchedule, error)
-	listSchedules(ctx context.Context, status string) ([]WorkflowSchedule, error)
+	listSchedules(ctx context.Context, input listSchedulesDBInput) ([]WorkflowSchedule, error)
 	updateSchedule(ctx context.Context, input updateScheduleDBInput) error
 	deleteSchedule(ctx context.Context, scheduleName string) error
 	backfillSchedule(ctx context.Context, input backfillScheduleDBInput) error
@@ -3389,6 +3388,12 @@ type backfillScheduleDBInput struct {
 	EndTime      time.Time
 }
 
+type listSchedulesDBInput struct {
+	Status             []ScheduleStatus
+	WorkflowName       []string
+	ScheduleNamePrefix []string
+}
+
 func (s *sysDB) createSchedule(ctx context.Context, input createScheduleDBInput) error {
 	query := fmt.Sprintf(`
 		INSERT INTO %s.workflow_schedules (
@@ -3414,81 +3419,43 @@ func (s *sysDB) createSchedule(ctx context.Context, input createScheduleDBInput)
 	return nil
 }
 
-func (s *sysDB) getSchedule(ctx context.Context, scheduleName string) (*WorkflowSchedule, error) {
+func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) ([]WorkflowSchedule, error) {
 	query := fmt.Sprintf(`
 		SELECT schedule_id, schedule_name, workflow_name, workflow_class_name,
 		       schedule, status, context, last_fired_at, automatic_backfill,
 		       cron_timezone
 		FROM %s.workflow_schedules
-		WHERE schedule_name = $1
 	`, pgx.Identifier{s.schema}.Sanitize())
 
-	var schedule WorkflowSchedule
-	var lastFiredAtStr *string
-	var contextJSON string
-
-	err := s.pool.QueryRow(ctx, query, scheduleName).Scan(
-		&schedule.ScheduleID,
-		&schedule.ScheduleName,
-		&schedule.WorkflowName,
-		&schedule.WorkflowClassName,
-		&schedule.Schedule,
-		&schedule.Status,
-		&contextJSON,
-		&lastFiredAtStr,
-		&schedule.AutomaticBackfill,
-		&schedule.CronTimezone,
-	)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get schedule: %w", err)
+	var args []any
+	var conds []string
+	placeholder := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
 	}
 
-	if lastFiredAtStr != nil {
-		t, err := time.Parse(time.RFC3339Nano, *lastFiredAtStr)
-		if err == nil {
-			schedule.LastFiredAt = &t
-		} else {
-			t, err = time.Parse(time.RFC3339, *lastFiredAtStr)
-			if err == nil {
-				schedule.LastFiredAt = &t
-			}
+	if len(input.Status) > 0 {
+		statuses := make([]string, len(input.Status))
+		for i, st := range input.Status {
+			statuses[i] = string(st)
 		}
+		conds = append(conds, "status = ANY("+placeholder(statuses)+")")
 	}
-	if err := json.Unmarshal([]byte(contextJSON), &schedule.Context); err != nil {
-		schedule.Context = contextJSON
+	if len(input.WorkflowName) > 0 {
+		conds = append(conds, "workflow_name = ANY("+placeholder(input.WorkflowName)+")")
 	}
-
-	return &schedule, nil
-}
-
-func (s *sysDB) listSchedules(ctx context.Context, status string) ([]WorkflowSchedule, error) {
-	var query string
-	var rows pgx.Rows
-	var err error
-
-	schema := pgx.Identifier{s.schema}.Sanitize()
-	if status == "" {
-		query = fmt.Sprintf(`
-			SELECT schedule_id, schedule_name, workflow_name, workflow_class_name,
-			       schedule, status, context, last_fired_at, automatic_backfill,
-			       cron_timezone
-			FROM %s.workflow_schedules
-		`, schema)
-		rows, err = s.pool.Query(ctx, query)
-	} else {
-		query = fmt.Sprintf(`
-			SELECT schedule_id, schedule_name, workflow_name, workflow_class_name,
-			       schedule, status, context, last_fired_at, automatic_backfill,
-			       cron_timezone
-			FROM %s.workflow_schedules
-			WHERE status = $1
-		`, schema)
-		rows, err = s.pool.Query(ctx, query, status)
+	if len(input.ScheduleNamePrefix) > 0 {
+		parts := make([]string, len(input.ScheduleNamePrefix))
+		for i, p := range input.ScheduleNamePrefix {
+			parts[i] = "schedule_name LIKE " + placeholder(p+"%")
+		}
+		conds = append(conds, "("+strings.Join(parts, " OR ")+")")
+	}
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ")
 	}
 
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list schedules: %w", err)
 	}
@@ -3567,9 +3534,16 @@ func (s *sysDB) deleteSchedule(ctx context.Context, scheduleName string) error {
 }
 
 func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBInput) error {
-	schedule, err := s.getSchedule(ctx, input.ScheduleName)
+	schedules, err := s.listSchedules(ctx, listSchedulesDBInput{ScheduleNamePrefix: []string{input.ScheduleName}})
 	if err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
+	}
+	var schedule *WorkflowSchedule
+	for i := range schedules {
+		if schedules[i].ScheduleName == input.ScheduleName {
+			schedule = &schedules[i]
+			break
+		}
 	}
 	if schedule == nil {
 		return fmt.Errorf("schedule not found: %s", input.ScheduleName)
