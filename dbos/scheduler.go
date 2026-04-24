@@ -52,8 +52,8 @@ type ApplySchedulesRequest struct {
 }
 
 const (
-	_SCHEDULE_POLL_INTERVAL = 1 * time.Second
-	_SCHEDULE_MAX_JITTER    = 10 * time.Second
+	_DEFAULT_SCHEDULE_POLL_INTERVAL = 30 * time.Second
+	_SCHEDULE_MAX_JITTER            = 10 * time.Second
 )
 
 func newScheduleCronParser() cron.Parser {
@@ -232,7 +232,11 @@ func (c *dbosContext) removeDBScheduleFromScheduler(scheduleName string) {
 // Periodically lists schedules from the system database and reconciles the cron scheduler's entries
 // New active schedules are added (with optional automatic backfill), paused or deleted schedules are removed.
 func (c *dbosContext) runScheduleReconciler() {
-	ticker := time.NewTicker(_SCHEDULE_POLL_INTERVAL)
+	interval := c.config.SchedulerPollingInterval
+	if interval <= 0 {
+		interval = _DEFAULT_SCHEDULE_POLL_INTERVAL
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

@@ -3502,6 +3502,9 @@ func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) (
 			&schedule.CronTimezone,
 			&queueName,
 		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan schedule: %w", err)
+		}
 		if queueName != nil {
 			schedule.QueueName = *queueName
 		} else {
@@ -3509,9 +3512,6 @@ func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) (
 		}
 		if workflowClassName != nil {
 			schedule.WorkflowClassName = *workflowClassName
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan schedule: %w", err)
 		}
 
 		if lastFiredAtStr != nil {
@@ -3678,8 +3678,6 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 // triggerSchedule immediately enqueues the named schedule's workflow at the
 // current time, using the schedule's queue (or the internal queue by default)
 // and preserving its workflow_class_name and context. Returns the workflow ID.
-// It does not consult the Go workflow registry, so it works for schedules whose
-// workflow is registered in another-language DBOS app.
 func (s *sysDB) triggerSchedule(ctx context.Context, scheduleName string) (string, error) {
 	if scheduleName == "" {
 		return "", errors.New("schedule_name is required")

@@ -42,6 +42,11 @@ type Config struct {
 	ExecutorID         string          // Executor ID (optional, overridden by DBOS__VMID env var)
 	EnablePatching     bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
 	Serializer         Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
+
+	// SchedulerPollingInterval controls how often the dynamic schedule
+	// reconciler queries the database for schedule changes. Defaults to
+	// _DEFAULT_SCHEDULE_POLL_INTERVAL when zero.
+	SchedulerPollingInterval time.Duration
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -57,19 +62,20 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 
 	dbosConfig := &Config{
-		DatabaseURL:        inputConfig.DatabaseURL,
-		AppName:            inputConfig.AppName,
-		DatabaseSchema:     inputConfig.DatabaseSchema,
-		Logger:             inputConfig.Logger,
-		AdminServer:        inputConfig.AdminServer,
-		AdminServerPort:    inputConfig.AdminServerPort,
-		ConductorURL:       inputConfig.ConductorURL,
-		ConductorAPIKey:    inputConfig.ConductorAPIKey,
-		ApplicationVersion: inputConfig.ApplicationVersion,
-		ExecutorID:         inputConfig.ExecutorID,
-		SystemDBPool:       inputConfig.SystemDBPool,
-		EnablePatching:     inputConfig.EnablePatching,
-		Serializer:         inputConfig.Serializer,
+		DatabaseURL:              inputConfig.DatabaseURL,
+		AppName:                  inputConfig.AppName,
+		DatabaseSchema:           inputConfig.DatabaseSchema,
+		Logger:                   inputConfig.Logger,
+		AdminServer:              inputConfig.AdminServer,
+		AdminServerPort:          inputConfig.AdminServerPort,
+		ConductorURL:             inputConfig.ConductorURL,
+		ConductorAPIKey:          inputConfig.ConductorAPIKey,
+		ApplicationVersion:       inputConfig.ApplicationVersion,
+		ExecutorID:               inputConfig.ExecutorID,
+		SystemDBPool:             inputConfig.SystemDBPool,
+		EnablePatching:           inputConfig.EnablePatching,
+		Serializer:               inputConfig.Serializer,
+		SchedulerPollingInterval: inputConfig.SchedulerPollingInterval,
 	}
 
 	// Load defaults

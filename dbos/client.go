@@ -746,9 +746,7 @@ func (c *client) BackfillSchedule(scheduleName string, start, end time.Time) err
 
 // TriggerSchedule immediately enqueues the named schedule's workflow on its
 // configured queue (falling back to the internal queue) and returns the
-// workflow ID. Unlike the in-context TriggerSchedule, this bypasses the Go
-// workflow registry — so it can target schedules whose workflow is registered
-// in a DBOS app written in another language.
+// workflow ID.
 func (c *client) TriggerSchedule(scheduleName string) (string, error) {
 	dbosCtx, ok := c.dbosCtx.(*dbosContext)
 	if !ok {
