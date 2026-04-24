@@ -205,6 +205,7 @@ func (c *dbosContext) addDBScheduleToScheduler(schedule WorkflowSchedule) {
 	}
 
 	c.scheduleEntryIDs[schedule.ScheduleName] = entryID
+	c.scheduleInstalledIDs[schedule.ScheduleName] = schedule.ScheduleID
 	c.logger.Info("Added schedule to scheduler", "schedule", schedule.ScheduleName, "workflow", schedule.WorkflowName)
 }
 
@@ -216,6 +217,7 @@ func (c *dbosContext) removeDBScheduleFromScheduler(scheduleName string) {
 	}
 	c.getWorkflowScheduler().Remove(entryID)
 	delete(c.scheduleEntryIDs, scheduleName)
+	delete(c.scheduleInstalledIDs, scheduleName)
 	c.logger.Info("Removed schedule from scheduler", "schedule", scheduleName)
 }
 
@@ -248,12 +250,22 @@ func (c *dbosContext) reconcileSchedules() {
 		current[schedules[i].ScheduleName] = &schedules[i]
 	}
 
-	// Remove entries that were deleted or are no longer active.
+	// Remove entries that were deleted, paused, or replaced (re-applied with a
+	// new ScheduleID — e.g. a changed cron spec, queue, context, or timezone).
+	// Collect names first to avoid mutating the map while iterating.
+	var toRemove []string
 	for name := range c.scheduleEntryIDs {
 		sched, ok := current[name]
 		if !ok || sched.Status != ScheduleStatusActive {
-			c.removeDBScheduleFromScheduler(name)
+			toRemove = append(toRemove, name)
+			continue
 		}
+		if c.scheduleInstalledIDs[name] != sched.ScheduleID {
+			toRemove = append(toRemove, name)
+		}
+	}
+	for _, name := range toRemove {
+		c.removeDBScheduleFromScheduler(name)
 	}
 
 	// Add new active schedules.

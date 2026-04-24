@@ -3488,6 +3488,8 @@ func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) (
 		)
 		if queueName != nil {
 			schedule.QueueName = *queueName
+		} else {
+			schedule.QueueName = _DBOS_INTERNAL_QUEUE_NAME
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan schedule: %w", err)
