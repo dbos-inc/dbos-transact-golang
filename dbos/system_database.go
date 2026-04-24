@@ -90,7 +90,7 @@ type systemDatabase interface {
 	createSchedule(ctx context.Context, input createScheduleDBInput) error
 	listSchedules(ctx context.Context, input listSchedulesDBInput) ([]WorkflowSchedule, error)
 	updateSchedule(ctx context.Context, input updateScheduleDBInput) error
-	deleteSchedule(ctx context.Context, scheduleName string) error
+	deleteSchedule(ctx context.Context, input deleteScheduleDBInput) error
 	backfillSchedule(ctx context.Context, input backfillScheduleDBInput) error
 
 	// Workflow export/import
@@ -3545,10 +3545,20 @@ func (s *sysDB) updateSchedule(ctx context.Context, input updateScheduleDBInput)
 	return nil
 }
 
-func (s *sysDB) deleteSchedule(ctx context.Context, scheduleName string) error {
+type deleteScheduleDBInput struct {
+	ScheduleName string
+	tx           pgx.Tx // optional: run inside an existing transaction
+}
+
+func (s *sysDB) deleteSchedule(ctx context.Context, input deleteScheduleDBInput) error {
 	query := fmt.Sprintf(`DELETE FROM %s.workflow_schedules WHERE schedule_name = $1`, pgx.Identifier{s.schema}.Sanitize())
 
-	_, err := s.pool.Exec(ctx, query, scheduleName)
+	var err error
+	if input.tx != nil {
+		_, err = input.tx.Exec(ctx, query, input.ScheduleName)
+	} else {
+		_, err = s.pool.Exec(ctx, query, input.ScheduleName)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to delete schedule: %w", err)
 	}

@@ -4204,11 +4204,6 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 		defer tx.Rollback(c)
 
 		for _, req := range schedules {
-			existing, err := c.GetSchedule(c, req.ScheduleName)
-			if err != nil {
-				return fmt.Errorf("failed to check existing schedule: %w", err)
-			}
-
 			workflowName, err := c.resolveWorkflowName(req.WorkflowFn)
 			if err != nil {
 				return err
@@ -4219,15 +4214,17 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 				return fmt.Errorf("failed to serialize context: %w", err)
 			}
 
-			if existing != nil {
-				updateInput := updateScheduleDBInput{ScheduleName: req.ScheduleName, tx: tx}
-				if existing.Status != ScheduleStatusActive {
-					updateInput.Status = ScheduleStatusActive
-				}
-				if err := c.systemDB.updateSchedule(c, updateInput); err != nil {
-					return fmt.Errorf("failed to update schedule: %w", err)
-				}
-				continue
+			queueName := req.QueueName
+			if queueName == "" {
+				queueName = _DBOS_INTERNAL_QUEUE_NAME
+			}
+
+			// Delete any existing schedule with this name, then create the new one.
+			if err := c.systemDB.deleteSchedule(c, deleteScheduleDBInput{
+				ScheduleName: req.ScheduleName,
+				tx:           tx,
+			}); err != nil {
+				return fmt.Errorf("failed to delete existing schedule: %w", err)
 			}
 
 			scheduleID := uuid.New().String()
@@ -4240,7 +4237,7 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 				Status:            ScheduleStatusActive,
 				AutomaticBackfill: req.AutomaticBackfill,
 				CronTimezone:      req.CronTimezone,
-				QueueName:         req.QueueName,
+				QueueName:         queueName,
 				tx:                tx,
 			}); err != nil {
 				return fmt.Errorf("failed to create schedule: %w", err)
@@ -4342,7 +4339,7 @@ func (c *dbosContext) DeleteSchedule(_ DBOSContext, scheduleName string) error {
 	}
 
 	return retry(c, func() error {
-		return c.systemDB.deleteSchedule(c, scheduleName)
+		return c.systemDB.deleteSchedule(c, deleteScheduleDBInput{ScheduleName: scheduleName})
 	}, withRetrierLogger(c.logger))
 }
 

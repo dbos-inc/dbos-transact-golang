@@ -735,7 +735,7 @@ func (c *client) DeleteSchedule(scheduleName string) error {
 		return errors.New("invalid DBOS context")
 	}
 
-	return dbosCtx.systemDB.deleteSchedule(dbosCtx, scheduleName)
+	return dbosCtx.systemDB.deleteSchedule(dbosCtx, deleteScheduleDBInput{ScheduleName: scheduleName})
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.
