@@ -4134,6 +4134,31 @@ func WithScheduleQueueName(name string) CreateScheduleOption {
 	return func(o *createScheduleOptions) { o.queueName = name }
 }
 
+// listSchedulesOptions holds configuration parameters for listing schedules.
+type listSchedulesOptions struct {
+	statuses             []ScheduleStatus
+	workflowNames        []string
+	scheduleNamePrefixes []string
+}
+
+// ListSchedulesOption is a functional option for configuring schedule listing parameters.
+type ListSchedulesOption func(*listSchedulesOptions)
+
+// WithScheduleStatuses filters schedules by the specified status(es).
+func WithScheduleStatuses(statuses ...ScheduleStatus) ListSchedulesOption {
+	return func(o *listSchedulesOptions) { o.statuses = statuses }
+}
+
+// WithScheduleWorkflowNames filters schedules by the specified workflow name(s).
+func WithScheduleWorkflowNames(names ...string) ListSchedulesOption {
+	return func(o *listSchedulesOptions) { o.workflowNames = names }
+}
+
+// WithScheduleNamePrefixes filters schedules by schedule name prefix(es).
+func WithScheduleNamePrefixes(prefixes ...string) ListSchedulesOption {
+	return func(o *listSchedulesOptions) { o.scheduleNamePrefixes = prefixes }
+}
+
 // CreateSchedule creates a new schedule for a workflow. The reconciler loop
 // picks the new schedule up on its next tick and installs it in the cron
 // scheduler. The fn must already be registered via RegisterWorkflow.
@@ -4368,10 +4393,15 @@ func GetSchedule(ctx DBOSContext, scheduleName string) (*WorkflowSchedule, error
 	return ctx.GetSchedule(ctx, scheduleName)
 }
 
-func (c *dbosContext) ListSchedules(_ DBOSContext, status ScheduleStatus) ([]WorkflowSchedule, error) {
-	var input listSchedulesDBInput
-	if status != "" {
-		input.Statuses = []ScheduleStatus{status}
+func (c *dbosContext) ListSchedules(_ DBOSContext, opts ...ListSchedulesOption) ([]WorkflowSchedule, error) {
+	var o listSchedulesOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	input := listSchedulesDBInput{
+		Statuses:             o.statuses,
+		WorkflowNames:        o.workflowNames,
+		ScheduleNamePrefixes: o.scheduleNamePrefixes,
 	}
 	var schedules []WorkflowSchedule
 	err := retry(c, func() error {
@@ -4382,17 +4412,17 @@ func (c *dbosContext) ListSchedules(_ DBOSContext, status ScheduleStatus) ([]Wor
 	return schedules, err
 }
 
-// ListSchedules lists all schedules, optionally filtered by status.
-// Pass an empty status to return all schedules.
+// ListSchedules lists schedules, optionally filtered by the supplied options.
+// Pass no options to return all schedules.
 //
 // Example:
 //
-//	schedules, err := dbos.ListSchedules(ctx, dbos.ScheduleStatusActive)
-func ListSchedules(ctx DBOSContext, status ScheduleStatus) ([]WorkflowSchedule, error) {
+//	schedules, err := dbos.ListSchedules(ctx, dbos.WithScheduleStatuses(dbos.ScheduleStatusActive))
+func ListSchedules(ctx DBOSContext, opts ...ListSchedulesOption) ([]WorkflowSchedule, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
-	return ctx.ListSchedules(ctx, status)
+	return ctx.ListSchedules(ctx, opts...)
 }
 
 func (c *dbosContext) BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) error {

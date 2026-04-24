@@ -43,7 +43,7 @@ type Client interface {
 	// Schedule management
 	CreateSchedule(input ClientScheduleInput) error
 	GetSchedule(scheduleName string) (*WorkflowSchedule, error)
-	ListSchedules(status ScheduleStatus) ([]WorkflowSchedule, error)
+	ListSchedules(opts ...ListSchedulesOption) ([]WorkflowSchedule, error)
 	PauseSchedule(scheduleName string) error
 	ResumeSchedule(scheduleName string) error
 	DeleteSchedule(scheduleName string) error
@@ -642,18 +642,22 @@ func (c *client) GetSchedule(scheduleName string) (*WorkflowSchedule, error) {
 	return nil, nil
 }
 
-// ListSchedules lists all schedules, optionally filtered by status.
-func (c *client) ListSchedules(status ScheduleStatus) ([]WorkflowSchedule, error) {
+// ListSchedules lists schedules, optionally filtered by the supplied options.
+func (c *client) ListSchedules(opts ...ListSchedulesOption) ([]WorkflowSchedule, error) {
 	dbosCtx, ok := c.dbosCtx.(*dbosContext)
 	if !ok {
 		return nil, errors.New("invalid DBOS context")
 	}
 
-	var input listSchedulesDBInput
-	if status != "" {
-		input.Statuses = []ScheduleStatus{status}
+	var o listSchedulesOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
-	return dbosCtx.systemDB.listSchedules(dbosCtx, input)
+	return dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{
+		Statuses:             o.statuses,
+		WorkflowNames:        o.workflowNames,
+		ScheduleNamePrefixes: o.scheduleNamePrefixes,
+	})
 }
 
 // PauseSchedule pauses a schedule using the client.

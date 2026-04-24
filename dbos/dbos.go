@@ -169,14 +169,14 @@ type DBOSContext interface {
 
 	// Schedule management
 	CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, input CreateScheduleRequest, opts ...CreateScheduleOption) error // Create a new schedule
-	ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRequest) error                         // Apply schedules (create or update)
-	PauseSchedule(_ DBOSContext, scheduleName string) error                                        // Pause a schedule
-	ResumeSchedule(_ DBOSContext, scheduleName string) error                                       // Resume a paused schedule
-	DeleteSchedule(_ DBOSContext, scheduleName string) error                                       // Delete a schedule
-	GetSchedule(_ DBOSContext, scheduleName string) (*WorkflowSchedule, error)                     // Get a schedule by name
-	ListSchedules(_ DBOSContext, status ScheduleStatus) ([]WorkflowSchedule, error)                // List schedules with optional status filter
-	BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) error     // Backfill a schedule
-	TriggerSchedule(_ DBOSContext, scheduleName string) (string, error)                            // Trigger a schedule immediately
+	ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRequest) error                                                   // Apply schedules (create or update)
+	PauseSchedule(_ DBOSContext, scheduleName string) error                                                                  // Pause a schedule
+	ResumeSchedule(_ DBOSContext, scheduleName string) error                                                                 // Resume a paused schedule
+	DeleteSchedule(_ DBOSContext, scheduleName string) error                                                                 // Delete a schedule
+	GetSchedule(_ DBOSContext, scheduleName string) (*WorkflowSchedule, error)                                               // Get a schedule by name
+	ListSchedules(_ DBOSContext, opts ...ListSchedulesOption) ([]WorkflowSchedule, error)                                    // List schedules with optional filters
+	BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) error                               // Backfill a schedule
+	TriggerSchedule(_ DBOSContext, scheduleName string) (string, error)                                                      // Trigger a schedule immediately
 
 	// Alert handling
 	SetAlertHandler(handler AlertHandler) // Register a handler for alerts from DBOS Conductor (must be called before Launch)
@@ -254,7 +254,6 @@ func SetAlertHandler(ctx DBOSContext, handler AlertHandler) {
 
 // ClearRegistries clears the workflow and queue registries,
 // allowing re-registration of workflows and queues. Intended for testing only.
-// FIXME: re org close to package method
 func (c *dbosContext) ClearRegistries() {
 	c.workflowRegistry.Clear()
 	c.workflowCustomNametoFQN.Clear()
@@ -622,8 +621,7 @@ func (c *dbosContext) Launch() error {
 	}()
 	c.logger.Debug("Queue runner started")
 
-	// Start the cron scheduler. It holds both static schedules registered via
-	// WithSchedule and dynamic schedules installed by the reconciler goroutine.
+	// Start the cron scheduler.
 	c.getWorkflowScheduler().Start()
 	c.logger.Debug("Workflow scheduler started")
 
@@ -839,7 +837,6 @@ func Shutdown(ctx DBOSContext, timeout time.Duration) {
 
 // ClearRegistries clears the workflow and queue registries,
 // allowing re-registration of workflows and queues. Intended for testing only.
-// FIXME: standardize
 func ClearRegistries(ctx DBOSContext) {
 	c, ok := ctx.(*dbosContext)
 	if !ok {
