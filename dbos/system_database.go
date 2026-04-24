@@ -3590,6 +3590,23 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 		return fmt.Errorf("failed to parse cron schedule: %w", err)
 	}
 
+	queueName := _DBOS_INTERNAL_QUEUE_NAME
+	if schedule.QueueName != "" {
+		queueName = schedule.QueueName
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	checkQuery := fmt.Sprintf(`SELECT 1 FROM %s.workflow_status WHERE workflow_uuid = $1 LIMIT 1`, pgx.Identifier{s.schema}.Sanitize())
+	insertQuery := fmt.Sprintf(`
+		INSERT INTO %s.workflow_status (workflow_uuid, status, name, queue_name, created_at, updated_at, inputs, serialization)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, pgx.Identifier{s.schema}.Sanitize())
+
 	nextTime := scheduleEntry.Next(input.StartTime)
 	now := time.Now()
 
@@ -3597,38 +3614,35 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 		workflowID := fmt.Sprintf("sched-%s-%s", input.ScheduleName, nextTime.Format(time.RFC3339))
 
 		var exists bool
-		checkQuery := fmt.Sprintf(`SELECT 1 FROM %s.workflow_status WHERE workflow_uuid = $1 LIMIT 1`, pgx.Identifier{s.schema}.Sanitize())
-		err := s.pool.QueryRow(ctx, checkQuery, workflowID).Scan(&exists)
+		err := tx.QueryRow(ctx, checkQuery, workflowID).Scan(&exists)
 		if err == nil {
 			nextTime = scheduleEntry.Next(nextTime)
 			continue
 		}
 		if err != pgx.ErrNoRows {
-			s.logger.Warn("failed to check workflow existence", "workflow_id", workflowID, "error", err)
+			return fmt.Errorf("failed to check workflow existence for %s: %w", workflowID, err)
 		}
 
-		workflowQuery := fmt.Sprintf(`
-			INSERT INTO %s.workflow_status (workflow_uuid, status, name, queue_name, created_at, updated_at, inputs, serialization)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		`, pgx.Identifier{s.schema}.Sanitize())
-
-		_, err = s.pool.Exec(ctx, workflowQuery,
+		_, err = tx.Exec(ctx, insertQuery,
 			workflowID,
 			WorkflowStatusEnqueued,
 			schedule.WorkflowName,
-			_DBOS_INTERNAL_QUEUE_NAME,
+			queueName,
 			now.UnixMilli(),
 			now.UnixMilli(),
 			"null",
 			"null",
 		)
 		if err != nil {
-			s.logger.Warn("failed to enqueue backfill workflow", "workflow_id", workflowID, "error", err)
+			return fmt.Errorf("failed to enqueue backfill workflow %s: %w", workflowID, err)
 		}
 
 		nextTime = scheduleEntry.Next(nextTime)
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit backfill transaction: %w", err)
+	}
 	return nil
 }
 
