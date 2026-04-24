@@ -123,10 +123,8 @@ func (c *dbosContext) addScheduleCronEntry(
 	return entryID, err
 }
 
-// buildDBScheduleFunc wraps the registry's type-erased workflow wrapper into a
-// ScheduledWorkflowFunc suitable for addScheduleCronEntry. The schedule's
-// WorkflowName may be a custom name or an FQN; we translate via
-// workflowCustomNametoFQN to reach the FQN-keyed registry entry.
+// wraps the registry's type-erased workflow wrapper into a ScheduledWorkflowFunc
+// that also checks if the schedule already fired for this interval
 func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledWorkflowFunc, error) {
 	fqn, ok := c.workflowCustomNametoFQN.Load(schedule.WorkflowName)
 	if !ok {
@@ -157,9 +155,11 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 			return nil, err
 		}
 		if len(existing) > 0 {
+			c.logger.Debug("skipping schedule tick", "schedule", scheduleName, "scheduledTime", input.ScheduledTime)
 			return nil, nil
 		}
 
+		// The registry wrapper expects encoded inputs, so encode the ScheduledWorkflowInput, using the DBOS Context serializer, before invoking it.
 		ser := resolveEncoder(ctx)
 		encodedInput, err := ser.Encode(input)
 		if err != nil {

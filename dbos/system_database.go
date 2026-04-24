@@ -3382,26 +3382,6 @@ type createScheduleDBInput struct {
 	tx                pgx.Tx // optional: run inside an existing transaction
 }
 
-type updateScheduleDBInput struct {
-	ScheduleName string
-	Status       ScheduleStatus
-	LastFiredAt  *time.Time
-	tx           pgx.Tx // optional: run inside an existing transaction
-}
-
-type backfillScheduleDBInput struct {
-	ScheduleName string
-	Schedule     string
-	StartTime    time.Time
-	EndTime      time.Time
-}
-
-type listSchedulesDBInput struct {
-	Statuses             []ScheduleStatus
-	WorkflowNames        []string
-	ScheduleNamePrefixes []string
-}
-
 func (s *sysDB) createSchedule(ctx context.Context, input createScheduleDBInput) error {
 	query := fmt.Sprintf(`
 		INSERT INTO %s.workflow_schedules (
@@ -3437,6 +3417,12 @@ func (s *sysDB) createSchedule(ctx context.Context, input createScheduleDBInput)
 		return fmt.Errorf("failed to create schedule: %w", err)
 	}
 	return nil
+}
+
+type listSchedulesDBInput struct {
+	Statuses             []ScheduleStatus
+	WorkflowNames        []string
+	ScheduleNamePrefixes []string
 }
 
 func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) ([]WorkflowSchedule, error) {
@@ -3528,6 +3514,13 @@ func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) (
 	return schedules, nil
 }
 
+type updateScheduleDBInput struct {
+	ScheduleName string
+	Status       ScheduleStatus
+	LastFiredAt  *time.Time
+	tx           pgx.Tx // optional: run inside an existing transaction
+}
+
 func (s *sysDB) updateSchedule(ctx context.Context, input updateScheduleDBInput) error {
 	query := fmt.Sprintf(`
 		UPDATE %s.workflow_schedules
@@ -3560,6 +3553,13 @@ func (s *sysDB) deleteSchedule(ctx context.Context, scheduleName string) error {
 		return fmt.Errorf("failed to delete schedule: %w", err)
 	}
 	return nil
+}
+
+type backfillScheduleDBInput struct {
+	ScheduleName string
+	Schedule     string
+	StartTime    time.Time
+	EndTime      time.Time
 }
 
 func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBInput) error {
