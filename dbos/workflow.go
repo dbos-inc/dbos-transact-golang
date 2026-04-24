@@ -4059,9 +4059,6 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, in
 	if input.ScheduleName == "" {
 		return errors.New("schedule_name is required")
 	}
-	if input.Schedule == "" {
-		return errors.New("schedule is required")
-	}
 
 	workflowName, err := c.resolveWorkflowName(fn)
 	if err != nil {
@@ -4071,6 +4068,10 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, in
 	var o createScheduleOptions
 	for _, opt := range opts {
 		opt(&o)
+	}
+
+	if err := validateCronSchedule(input.Schedule, o.cronTimezone); err != nil {
+		return err
 	}
 
 	contextJSON, err := json.Marshal(o.context)
@@ -4188,8 +4189,8 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 		if req.ScheduleName == "" {
 			return errors.New("schedule_name is required")
 		}
-		if req.Schedule == "" {
-			return errors.New("schedule is required")
+		if err := validateCronSchedule(req.Schedule, req.CronTimezone); err != nil {
+			return err
 		}
 		if err := validateScheduledWorkflowFn(req.WorkflowFn); err != nil {
 			return err

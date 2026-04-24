@@ -334,6 +334,46 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 	}
 }
 
+func TestScheduleCronValidation(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	defer dbosCtx.Shutdown(10 * time.Second)
+
+	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+	require.NoError(t, dbosCtx.Launch())
+
+	// CreateSchedule rejects a garbage cron expression up-front.
+	err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		ScheduleName: "bad-cron-create",
+		Schedule:     "not a cron",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid cron schedule")
+	got, err := GetSchedule(dbosCtx, "bad-cron-create")
+	require.NoError(t, err)
+	require.Nil(t, got, "invalid-cron schedule must not be persisted")
+
+	// ApplySchedules rejects invalid cron before writing any row (atomicity).
+	err = ApplySchedules(dbosCtx, []ApplySchedulesRequest{
+		{ScheduleName: "apply-good", WorkflowFn: testWorkflowForSchedule, Schedule: "0 0 * * * *"},
+		{ScheduleName: "apply-bad", WorkflowFn: testWorkflowForSchedule, Schedule: "garbage"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid cron schedule")
+	for _, name := range []string{"apply-good", "apply-bad"} {
+		s, err := GetSchedule(dbosCtx, name)
+		require.NoError(t, err)
+		require.Nil(t, s, "schedule %s should not have been created", name)
+	}
+
+	// Invalid timezone also surfaces at validate time.
+	err = CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		ScheduleName: "bad-tz",
+		Schedule:     "0 0 * * * *",
+	}, WithCronTimezone("Not/A_Zone"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid cron schedule")
+}
+
 func TestBackfillSchedule(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	defer dbosCtx.Shutdown(10 * time.Second)

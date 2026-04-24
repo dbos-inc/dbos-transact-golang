@@ -22,7 +22,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/robfig/cron/v3"
 )
 
 /*******************************/
@@ -3615,9 +3614,7 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 		spec = "CRON_TZ=" + schedule.CronTimezone + " " + spec
 	}
 
-	// Parse the cron schedule, supporting seconds to match the main scheduler
-	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	scheduleEntry, err := parser.Parse(spec)
+	scheduleEntry, err := newScheduleCronParser().Parse(spec)
 	if err != nil {
 		return fmt.Errorf("failed to parse cron schedule: %w", err)
 	}

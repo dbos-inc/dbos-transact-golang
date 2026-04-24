@@ -1940,4 +1940,31 @@ func TestClientSchedules(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "completed", result)
 	})
+
+	t.Run("CronValidation", func(t *testing.T) {
+		// CreateSchedule rejects garbage cron up-front.
+		err := c.CreateSchedule(ClientScheduleInput{
+			ScheduleName: "client-bad-create",
+			WorkflowName: workflowFQN,
+			Schedule:     "not a cron",
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid cron schedule")
+		got, err := c.GetSchedule("client-bad-create")
+		require.NoError(t, err)
+		require.Nil(t, got)
+
+		// ApplySchedules validates every entry before writing any row.
+		err = c.ApplySchedules([]ClientScheduleInput{
+			{ScheduleName: "client-apply-good", WorkflowName: workflowFQN, Schedule: "0 0 * * * *"},
+			{ScheduleName: "client-apply-bad", WorkflowName: workflowFQN, Schedule: "garbage"},
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid cron schedule")
+		for _, name := range []string{"client-apply-good", "client-apply-bad"} {
+			s, err := c.GetSchedule(name)
+			require.NoError(t, err)
+			require.Nil(t, s, "schedule %s should not have been created", name)
+		}
+	})
 }

@@ -56,6 +56,24 @@ const (
 	_SCHEDULE_MAX_JITTER    = 10 * time.Second
 )
 
+func newScheduleCronParser() cron.Parser {
+	return cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+}
+
+func validateCronSchedule(spec, cronTimezone string) error {
+	if spec == "" {
+		return fmt.Errorf("schedule is required")
+	}
+	full := spec
+	if cronTimezone != "" {
+		full = "CRON_TZ=" + cronTimezone + " " + spec
+	}
+	if _, err := newScheduleCronParser().Parse(full); err != nil {
+		return fmt.Errorf("invalid cron schedule %q: %w", spec, err)
+	}
+	return nil
+}
+
 func jitterCap(sched cron.Schedule, scheduledTime time.Time) time.Duration {
 	if sched == nil {
 		return 0

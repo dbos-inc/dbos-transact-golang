@@ -605,8 +605,8 @@ func (c *client) CreateSchedule(input ClientScheduleInput) error {
 	if input.WorkflowName == "" {
 		return errors.New("workflow_name is required")
 	}
-	if input.Schedule == "" {
-		return errors.New("schedule is required")
+	if err := validateCronSchedule(input.Schedule, input.CronTimezone); err != nil {
+		return err
 	}
 
 	dbosCtx, ok := c.dbosCtx.(*dbosContext)
@@ -656,8 +656,8 @@ func (c *client) ApplySchedules(schedules []ClientScheduleInput) error {
 		if req.WorkflowName == "" {
 			return fmt.Errorf("schedule entry %d is missing required field 'workflow_name'", i)
 		}
-		if req.Schedule == "" {
-			return fmt.Errorf("schedule entry %d is missing required field 'schedule'", i)
+		if err := validateCronSchedule(req.Schedule, req.CronTimezone); err != nil {
+			return fmt.Errorf("schedule entry %d: %w", i, err)
 		}
 	}
 
