@@ -42,11 +42,14 @@ type Client interface {
 
 	// Schedule management
 	CreateSchedule(input ClientScheduleInput) error
+	ApplySchedules(schedules []ClientScheduleInput) error
 	GetSchedule(scheduleName string) (*WorkflowSchedule, error)
 	ListSchedules(opts ...ListSchedulesOption) ([]WorkflowSchedule, error)
 	PauseSchedule(scheduleName string) error
 	ResumeSchedule(scheduleName string) error
 	DeleteSchedule(scheduleName string) error
+	BackfillSchedule(scheduleName string, start, end time.Time) error
+	TriggerSchedule(scheduleName string) (string, error)
 
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
@@ -573,6 +576,17 @@ func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-ch
 	return typedCh, nil
 }
 
+type ClientScheduleInput struct {
+	ScheduleName      string
+	WorkflowName      string
+	WorkflowClassName string
+	Schedule          string
+	Context           any
+	AutomaticBackfill bool
+	CronTimezone      string
+	QueueName         string
+}
+
 // CreateSchedule creates a new schedule for a workflow using the client.
 // This is used by external applications to create schedules.
 //
@@ -618,6 +632,85 @@ func (c *client) CreateSchedule(input ClientScheduleInput) error {
 		CronTimezone:      input.CronTimezone,
 		QueueName:         input.QueueName,
 	})
+}
+
+// ApplySchedules atomically creates or replaces the given schedules. Each entry
+// is validated, any existing schedule with the same name is deleted, and the
+// new schedule is inserted — all within a single transaction.
+//
+// Example:
+//
+//	err := client.ApplySchedules([]dbos.ClientScheduleInput{
+//	    {ScheduleName: "a", WorkflowName: "myWorkflow", Schedule: "*/5 * * * *"},
+//	    {ScheduleName: "b", WorkflowName: "pyWorkflow", WorkflowClassName: "MyClass", Schedule: "0 * * * *"},
+//	})
+func (c *client) ApplySchedules(schedules []ClientScheduleInput) error {
+	if len(schedules) == 0 {
+		return nil
+	}
+
+	for i, req := range schedules {
+		if req.ScheduleName == "" {
+			return fmt.Errorf("schedule entry %d is missing required field 'schedule_name'", i)
+		}
+		if req.WorkflowName == "" {
+			return fmt.Errorf("schedule entry %d is missing required field 'workflow_name'", i)
+		}
+		if req.Schedule == "" {
+			return fmt.Errorf("schedule entry %d is missing required field 'schedule'", i)
+		}
+	}
+
+	dbosCtx, ok := c.dbosCtx.(*dbosContext)
+	if !ok {
+		return errors.New("invalid DBOS context")
+	}
+
+	tx, err := dbosCtx.systemDB.(*sysDB).pool.Begin(dbosCtx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(dbosCtx)
+
+	for _, req := range schedules {
+		contextJSON, err := json.Marshal(req.Context)
+		if err != nil {
+			return fmt.Errorf("failed to serialize context: %w", err)
+		}
+
+		queueName := req.QueueName
+		if queueName == "" {
+			queueName = _DBOS_INTERNAL_QUEUE_NAME
+		}
+
+		if err := dbosCtx.systemDB.deleteSchedule(dbosCtx, deleteScheduleDBInput{
+			ScheduleName: req.ScheduleName,
+			tx:           tx,
+		}); err != nil {
+			return fmt.Errorf("failed to delete existing schedule: %w", err)
+		}
+
+		if err := dbosCtx.systemDB.createSchedule(dbosCtx, createScheduleDBInput{
+			ScheduleID:        uuid.New().String(),
+			ScheduleName:      req.ScheduleName,
+			WorkflowName:      req.WorkflowName,
+			WorkflowClassName: req.WorkflowClassName,
+			Schedule:          req.Schedule,
+			Context:           string(contextJSON),
+			Status:            ScheduleStatusActive,
+			AutomaticBackfill: req.AutomaticBackfill,
+			CronTimezone:      req.CronTimezone,
+			QueueName:         queueName,
+			tx:                tx,
+		}); err != nil {
+			return fmt.Errorf("failed to create schedule: %w", err)
+		}
+	}
+
+	if err := tx.Commit(dbosCtx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
 }
 
 // GetSchedule gets a schedule by name using the client.
@@ -737,6 +830,18 @@ func (c *client) DeleteSchedule(scheduleName string) error {
 	}
 
 	return dbosCtx.systemDB.deleteSchedule(dbosCtx, deleteScheduleDBInput{ScheduleName: scheduleName})
+}
+
+// BackfillSchedule enqueues all executions of the named schedule that would
+// have run between start and end. Already-executed times are skipped.
+func (c *client) BackfillSchedule(scheduleName string, start, end time.Time) error {
+	return c.dbosCtx.BackfillSchedule(c.dbosCtx, scheduleName, start, end)
+}
+
+// TriggerSchedule immediately enqueues the named schedule's workflow at the
+// current time and returns the workflow ID.
+func (c *client) TriggerSchedule(scheduleName string) (string, error) {
+	return c.dbosCtx.TriggerSchedule(c.dbosCtx, scheduleName)
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.

@@ -52,17 +52,6 @@ type ApplySchedulesRequest struct {
 	QueueName         string
 }
 
-type ClientScheduleInput struct {
-	ScheduleName      string
-	WorkflowName      string
-	WorkflowClassName string
-	Schedule          string
-	Context           any
-	AutomaticBackfill bool
-	CronTimezone      string
-	QueueName         string
-}
-
 const (
 	_SCHEDULE_POLL_INTERVAL = 1 * time.Second
 	_SCHEDULE_MAX_JITTER    = 10 * time.Second
