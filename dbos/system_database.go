@@ -3624,6 +3624,8 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 		queueName = schedule.QueueName
 	}
 
+	ser := resolveEncoder(ctx)
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -3631,10 +3633,6 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 	defer tx.Rollback(ctx)
 
 	checkQuery := fmt.Sprintf(`SELECT 1 FROM %s.workflow_status WHERE workflow_uuid = $1 LIMIT 1`, pgx.Identifier{s.schema}.Sanitize())
-	insertQuery := fmt.Sprintf(`
-		INSERT INTO %s.workflow_status (workflow_uuid, status, name, queue_name, created_at, updated_at, inputs, serialization)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, pgx.Identifier{s.schema}.Sanitize())
 
 	nextTime := scheduleEntry.Next(input.StartTime)
 	now := time.Now()
@@ -3652,17 +3650,25 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 			return fmt.Errorf("failed to check workflow existence for %s: %w", workflowID, err)
 		}
 
-		_, err = tx.Exec(ctx, insertQuery,
-			workflowID,
-			WorkflowStatusEnqueued,
-			schedule.WorkflowName,
-			queueName,
-			now.UnixMilli(),
-			now.UnixMilli(),
-			"null",
-			"null",
-		)
-		if err != nil {
+		encodedInput, encErr := ser.Encode(ScheduledWorkflowInput{
+			ScheduledTime: nextTime,
+			Context:       schedule.Context,
+		})
+		if encErr != nil {
+			return fmt.Errorf("failed to encode scheduled workflow input for %s: %w", workflowID, encErr)
+		}
+
+		status := WorkflowStatus{
+			ID:            workflowID,
+			Status:        WorkflowStatusEnqueued,
+			Name:          schedule.WorkflowName,
+			ClassName:     schedule.WorkflowClassName,
+			QueueName:     queueName,
+			CreatedAt:     now,
+			Input:         encodedInput,
+			Serialization: ser.Name(),
+		}
+		if _, err := s.insertWorkflowStatus(ctx, insertWorkflowStatusDBInput{status: status, tx: tx}); err != nil {
 			return fmt.Errorf("failed to enqueue backfill workflow %s: %w", workflowID, err)
 		}
 
