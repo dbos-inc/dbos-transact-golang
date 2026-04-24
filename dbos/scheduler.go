@@ -3,6 +3,7 @@ package dbos
 import (
 	"fmt"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -101,13 +102,14 @@ func (c *dbosContext) addScheduleCronEntry(
 	fn ScheduledWorkflowFunc,
 	scheduleContext any,
 ) (cron.EntryID, error) {
-	var entryID cron.EntryID
-	var err error
-	entryID, err = c.getWorkflowScheduler().AddFunc(cronSchedule, func() {
+	// The closure runs in a cron-managed goroutine after AddFunc returns. Use
+	// an atomic to publish the entryID to that goroutine without a data race.
+	var entryIDAtomic atomic.Int64
+	assigned, err := c.getWorkflowScheduler().AddFunc(cronSchedule, func() {
 		if !c.launched.Load() {
 			return
 		}
-		entry := c.getWorkflowScheduler().Entry(entryID)
+		entry := c.getWorkflowScheduler().Entry(cron.EntryID(entryIDAtomic.Load()))
 		scheduledTime := entry.Prev
 		if scheduledTime.IsZero() {
 			scheduledTime = entry.Next
@@ -128,7 +130,11 @@ func (c *dbosContext) addScheduleCronEntry(
 			c.logger.Error("failed to run scheduled workflow", "schedule", scheduleName, "error", runErr)
 		}
 	})
-	return entryID, err
+	if err != nil {
+		return 0, err
+	}
+	entryIDAtomic.Store(int64(assigned))
+	return assigned, nil
 }
 
 // wraps the registry's type-erased workflow wrapper into a ScheduledWorkflowFunc
@@ -212,20 +218,33 @@ func (c *dbosContext) addDBScheduleToScheduler(schedule WorkflowSchedule) {
 		return
 	}
 
+	c.scheduleMu.Lock()
 	c.scheduleEntryIDs[schedule.ScheduleName] = entryID
 	c.scheduleInstalledIDs[schedule.ScheduleName] = schedule.ScheduleID
+	c.scheduleMu.Unlock()
 	c.logger.Info("Added schedule to scheduler", "schedule", schedule.ScheduleName, "workflow", schedule.WorkflowName)
 }
 
+func (c *dbosContext) installedScheduleEntryID(scheduleName string) (cron.EntryID, bool) {
+	c.scheduleMu.Lock()
+	defer c.scheduleMu.Unlock()
+	id, ok := c.scheduleEntryIDs[scheduleName]
+	return id, ok
+}
+
 func (c *dbosContext) removeDBScheduleFromScheduler(scheduleName string) {
+	c.scheduleMu.Lock()
 	entryID, exists := c.scheduleEntryIDs[scheduleName]
+	if exists {
+		delete(c.scheduleEntryIDs, scheduleName)
+		delete(c.scheduleInstalledIDs, scheduleName)
+	}
+	c.scheduleMu.Unlock()
 	if !exists {
 		c.logger.Warn("attempted to remove non-existent schedule from scheduler", "schedule", scheduleName)
 		return
 	}
 	c.getWorkflowScheduler().Remove(entryID)
-	delete(c.scheduleEntryIDs, scheduleName)
-	delete(c.scheduleInstalledIDs, scheduleName)
 	c.logger.Info("Removed schedule from scheduler", "schedule", scheduleName)
 }
 
@@ -266,6 +285,7 @@ func (c *dbosContext) reconcileSchedules() {
 	// new ScheduleID — e.g. a changed cron spec, queue, context, or timezone).
 	// Collect names first to avoid mutating the map while iterating.
 	var toRemove []string
+	c.scheduleMu.Lock()
 	for name := range c.scheduleEntryIDs {
 		sched, ok := current[name]
 		if !ok || sched.Status != ScheduleStatusActive {
@@ -276,6 +296,7 @@ func (c *dbosContext) reconcileSchedules() {
 			toRemove = append(toRemove, name)
 		}
 	}
+	c.scheduleMu.Unlock()
 	for _, name := range toRemove {
 		c.removeDBScheduleFromScheduler(name)
 	}
@@ -285,7 +306,10 @@ func (c *dbosContext) reconcileSchedules() {
 		if sched.Status != ScheduleStatusActive {
 			continue
 		}
-		if _, exists := c.scheduleEntryIDs[name]; exists {
+		c.scheduleMu.Lock()
+		_, exists := c.scheduleEntryIDs[name]
+		c.scheduleMu.Unlock()
+		if exists {
 			continue
 		}
 

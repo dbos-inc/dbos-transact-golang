@@ -222,6 +222,7 @@ type dbosContext struct {
 	// Workflow scheduler
 	workflowScheduler *cron.Cron
 
+	scheduleMu sync.Mutex
 	// Schedule entry ID mapping (scheduleName -> cron.EntryID)
 	scheduleEntryIDs map[string]cron.EntryID
 	// ScheduleID of the schedule currently backing each installed cron entry.

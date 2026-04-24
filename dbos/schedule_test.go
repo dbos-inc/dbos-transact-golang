@@ -46,7 +46,7 @@ func TestScheduleCRUD(t *testing.T) {
 
 		// Reconciler should install a cron entry for the new schedule.
 		require.Eventually(t, func() bool {
-			id, ok := c.scheduleEntryIDs[name]
+			id, ok := c.installedScheduleEntryID(name)
 			if !ok {
 				return false
 			}
@@ -71,7 +71,7 @@ func TestScheduleCRUD(t *testing.T) {
 
 		// Reconciler should drop the cron entry once the schedule is gone.
 		require.Eventually(t, func() bool {
-			_, ok := c.scheduleEntryIDs[name]
+			_, ok := c.installedScheduleEntryID(name)
 			return !ok
 		}, 3*time.Second, 50*time.Millisecond, "reconciler should remove the cron entry")
 	})
@@ -219,7 +219,7 @@ func TestApplySchedules(t *testing.T) {
 	)
 
 	hasEntry := func(name string) bool {
-		id, ok := c.scheduleEntryIDs[name]
+		id, ok := c.installedScheduleEntryID(name)
 		if !ok {
 			return false
 		}
@@ -551,7 +551,7 @@ func TestScheduleCronTimezone(t *testing.T) {
 	c := dbosCtx.(*dbosContext)
 	var entry cron.Entry
 	require.Eventually(t, func() bool {
-		id, ok := c.scheduleEntryIDs[scheduleName]
+		id, ok := c.installedScheduleEntryID(scheduleName)
 		if !ok {
 			return false
 		}
