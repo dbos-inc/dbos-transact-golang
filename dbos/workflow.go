@@ -4496,12 +4496,13 @@ func (c *dbosContext) BackfillSchedule(_ DBOSContext, scheduleName string, start
 	}
 
 	return retry(c, func() error {
-		return c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
+		_, err := c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
 			ScheduleName: scheduleName,
 			Schedule:     existing.Schedule,
 			StartTime:    start,
 			EndTime:      end,
 		})
+		return err
 	}, withRetrierLogger(c.logger))
 }
 

@@ -374,6 +374,18 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleDeleteWorkflowRequest(data, base.RequestID)
 	case alertMessage:
 		return c.handleAlertRequest(data, base.RequestID)
+	case listSchedulesMessage:
+		return c.handleListSchedulesRequest(data, base.RequestID)
+	case getScheduleMessage:
+		return c.handleGetScheduleRequest(data, base.RequestID)
+	case pauseScheduleMessage:
+		return c.handlePauseScheduleRequest(data, base.RequestID)
+	case resumeScheduleMessage:
+		return c.handleResumeScheduleRequest(data, base.RequestID)
+	case backfillScheduleMessage:
+		return c.handleBackfillScheduleRequest(data, base.RequestID)
+	case triggerScheduleMessage:
+		return c.handleTriggerScheduleRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
@@ -1271,4 +1283,268 @@ func (c *conductor) sendResponse(response any, responseType string) error {
 	}
 
 	return nil
+}
+
+// toScheduleConductorOutput renders a WorkflowSchedule for the conductor wire format.
+// When loadContext is true, Context is JSON-encoded into a string; otherwise it is omitted.
+func toScheduleConductorOutput(s WorkflowSchedule, loadContext bool) scheduleConductorOutput {
+	out := scheduleConductorOutput{
+		ScheduleID:        s.ScheduleID,
+		ScheduleName:      s.ScheduleName,
+		WorkflowName:      s.WorkflowName,
+		Schedule:          s.Schedule,
+		Status:            string(s.Status),
+		AutomaticBackfill: s.AutomaticBackfill,
+	}
+	if s.WorkflowClassName != "" {
+		v := s.WorkflowClassName
+		out.WorkflowClassName = &v
+	}
+	if s.LastFiredAt != nil {
+		v := s.LastFiredAt.Format(time.RFC3339Nano)
+		out.LastFiredAt = &v
+	}
+	if s.CronTimezone != "" {
+		v := s.CronTimezone
+		out.CronTimezone = &v
+	}
+	if s.QueueName != "" {
+		v := s.QueueName
+		out.QueueName = &v
+	}
+	if loadContext && s.Context != nil {
+		if b, err := json.Marshal(s.Context); err == nil {
+			str := string(b)
+			out.Context = &str
+		}
+	}
+	return out
+}
+
+func (c *conductor) handleListSchedulesRequest(data []byte, requestID string) error {
+	var req listSchedulesConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse list schedules request", "error", err)
+		return fmt.Errorf("failed to parse list schedules request: %w", err)
+	}
+
+	loadContext := true
+	if req.Body.LoadContext != nil {
+		loadContext = *req.Body.LoadContext
+	}
+
+	var opts []ListSchedulesOption
+	if len(req.Body.Status) > 0 {
+		statuses := make([]ScheduleStatus, len(req.Body.Status))
+		for i, s := range req.Body.Status {
+			statuses[i] = ScheduleStatus(s)
+		}
+		opts = append(opts, WithScheduleStatuses(statuses...))
+	}
+	if len(req.Body.WorkflowName) > 0 {
+		opts = append(opts, WithScheduleWorkflowNames(req.Body.WorkflowName.toSlice()...))
+	}
+	if len(req.Body.ScheduleNamePrefix) > 0 {
+		opts = append(opts, WithScheduleNamePrefixes(req.Body.ScheduleNamePrefix.toSlice()...))
+	}
+
+	schedules, err := c.dbosCtx.ListSchedules(c.dbosCtx, opts...)
+	output := []scheduleConductorOutput{}
+	var errorMsg *string
+	if err != nil {
+		c.logger.Error("Failed to list schedules", "error", err)
+		msg := fmt.Sprintf("failed to list schedules: %v", err)
+		errorMsg = &msg
+	} else {
+		output = make([]scheduleConductorOutput, len(schedules))
+		for i := range schedules {
+			output[i] = toScheduleConductorOutput(schedules[i], loadContext)
+		}
+	}
+
+	resp := listSchedulesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: listSchedulesMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		Output: output,
+	}
+	return c.sendResponse(resp, string(listSchedulesMessage))
+}
+
+func (c *conductor) handleGetScheduleRequest(data []byte, requestID string) error {
+	var req getScheduleConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse get schedule request", "error", err)
+		return fmt.Errorf("failed to parse get schedule request: %w", err)
+	}
+
+	loadContext := true
+	if req.LoadContext != nil {
+		loadContext = *req.LoadContext
+	}
+
+	schedule, err := c.dbosCtx.GetSchedule(c.dbosCtx, req.ScheduleName)
+	var errorMsg *string
+	var output *scheduleConductorOutput
+	if err != nil {
+		c.logger.Error("Failed to get schedule", "schedule_name", req.ScheduleName, "error", err)
+		msg := fmt.Sprintf("failed to get schedule '%s': %v", req.ScheduleName, err)
+		errorMsg = &msg
+	} else if schedule != nil {
+		o := toScheduleConductorOutput(*schedule, loadContext)
+		output = &o
+	}
+
+	resp := getScheduleConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: getScheduleMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		Output: output,
+	}
+	return c.sendResponse(resp, string(getScheduleMessage))
+}
+
+func (c *conductor) handlePauseScheduleRequest(data []byte, requestID string) error {
+	var req pauseScheduleConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse pause schedule request", "error", err)
+		return fmt.Errorf("failed to parse pause schedule request: %w", err)
+	}
+
+	success := true
+	var errorMsg *string
+	if err := c.dbosCtx.PauseSchedule(c.dbosCtx, req.ScheduleName); err != nil {
+		c.logger.Error("Failed to pause schedule", "schedule_name", req.ScheduleName, "error", err)
+		msg := fmt.Sprintf("failed to pause schedule '%s': %v", req.ScheduleName, err)
+		errorMsg = &msg
+		success = false
+	}
+
+	resp := pauseScheduleConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: pauseScheduleMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		Success: success,
+	}
+	return c.sendResponse(resp, string(pauseScheduleMessage))
+}
+
+func (c *conductor) handleResumeScheduleRequest(data []byte, requestID string) error {
+	var req resumeScheduleConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse resume schedule request", "error", err)
+		return fmt.Errorf("failed to parse resume schedule request: %w", err)
+	}
+
+	success := true
+	var errorMsg *string
+	if err := c.dbosCtx.ResumeSchedule(c.dbosCtx, req.ScheduleName); err != nil {
+		c.logger.Error("Failed to resume schedule", "schedule_name", req.ScheduleName, "error", err)
+		msg := fmt.Sprintf("failed to resume schedule '%s': %v", req.ScheduleName, err)
+		errorMsg = &msg
+		success = false
+	}
+
+	resp := resumeScheduleConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: resumeScheduleMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		Success: success,
+	}
+	return c.sendResponse(resp, string(resumeScheduleMessage))
+}
+
+func (c *conductor) handleBackfillScheduleRequest(data []byte, requestID string) error {
+	var req backfillScheduleConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse backfill schedule request", "error", err)
+		return fmt.Errorf("failed to parse backfill schedule request: %w", err)
+	}
+
+	var errorMsg *string
+	var workflowIDs []string
+
+	start, err := time.Parse(time.RFC3339Nano, req.Start)
+	if err != nil {
+		start, err = time.Parse(time.RFC3339, req.Start)
+	}
+	if err != nil {
+		msg := fmt.Sprintf("failed to parse start time '%s': %v", req.Start, err)
+		errorMsg = &msg
+	} else {
+		end, errEnd := time.Parse(time.RFC3339Nano, req.End)
+		if errEnd != nil {
+			end, errEnd = time.Parse(time.RFC3339, req.End)
+		}
+		if errEnd != nil {
+			msg := fmt.Sprintf("failed to parse end time '%s': %v", req.End, errEnd)
+			errorMsg = &msg
+		} else {
+			schedule, errGet := c.dbosCtx.GetSchedule(c.dbosCtx, req.ScheduleName)
+			if errGet != nil {
+				msg := fmt.Sprintf("failed to get schedule '%s': %v", req.ScheduleName, errGet)
+				errorMsg = &msg
+			} else if schedule == nil {
+				msg := fmt.Sprintf("schedule not found: %s", req.ScheduleName)
+				errorMsg = &msg
+			} else {
+				ids, errBf := c.dbosCtx.systemDB.backfillSchedule(c.dbosCtx, backfillScheduleDBInput{
+					ScheduleName: req.ScheduleName,
+					Schedule:     schedule.Schedule,
+					StartTime:    start,
+					EndTime:      end,
+				})
+				if errBf != nil {
+					msg := fmt.Sprintf("failed to backfill schedule '%s': %v", req.ScheduleName, errBf)
+					errorMsg = &msg
+				} else {
+					workflowIDs = ids
+				}
+			}
+		}
+	}
+
+	if workflowIDs == nil {
+		workflowIDs = []string{}
+	}
+	resp := backfillScheduleConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: backfillScheduleMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		WorkflowIDs: workflowIDs,
+	}
+	return c.sendResponse(resp, string(backfillScheduleMessage))
+}
+
+func (c *conductor) handleTriggerScheduleRequest(data []byte, requestID string) error {
+	var req triggerScheduleConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse trigger schedule request", "error", err)
+		return fmt.Errorf("failed to parse trigger schedule request: %w", err)
+	}
+
+	var errorMsg *string
+	var workflowID *string
+	id, err := c.dbosCtx.systemDB.triggerSchedule(c.dbosCtx, req.ScheduleName)
+	if err != nil {
+		c.logger.Error("Failed to trigger schedule", "schedule_name", req.ScheduleName, "error", err)
+		msg := fmt.Sprintf("failed to trigger schedule '%s': %v", req.ScheduleName, err)
+		errorMsg = &msg
+	} else {
+		workflowID = &id
+	}
+
+	resp := triggerScheduleConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: triggerScheduleMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		WorkflowID: workflowID,
+	}
+	return c.sendResponse(resp, string(triggerScheduleMessage))
 }

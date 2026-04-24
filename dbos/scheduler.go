@@ -313,7 +313,7 @@ func (c *dbosContext) reconcileSchedules() {
 			end := time.Now()
 			if start.Before(end) {
 				c.logger.Info("performing automatic backfill", "schedule", sched.ScheduleName, "start", start, "end", end)
-				if err := c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
+				if _, err := c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
 					ScheduleName: sched.ScheduleName,
 					Schedule:     sched.Schedule,
 					StartTime:    start,

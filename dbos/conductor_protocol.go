@@ -52,6 +52,12 @@ const (
 	importWorkflowMessage        messageType = "import_workflow"
 	deleteWorkflowMessage        messageType = "delete"
 	alertMessage                 messageType = "alert"
+	listSchedulesMessage         messageType = "list_schedules"
+	getScheduleMessage           messageType = "get_schedule"
+	pauseScheduleMessage         messageType = "pause_schedule"
+	resumeScheduleMessage        messageType = "resume_schedule"
+	backfillScheduleMessage      messageType = "backfill_schedule"
+	triggerScheduleMessage       messageType = "trigger_schedule"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -501,4 +507,91 @@ type alertRequest struct {
 type alertConductorResponse struct {
 	baseResponse
 	Success bool `json:"success"`
+}
+
+// scheduleConductorOutput is the wire shape of a schedule sent to the conductor.
+// Context is rendered when load_context is true on the request, otherwise omitted.
+type scheduleConductorOutput struct {
+	ScheduleID        string  `json:"schedule_id"`
+	ScheduleName      string  `json:"schedule_name"`
+	WorkflowName      string  `json:"workflow_name"`
+	WorkflowClassName *string `json:"workflow_class_name"`
+	Schedule          string  `json:"schedule"`
+	Status            string  `json:"status"`
+	Context           *string `json:"context"`
+	LastFiredAt       *string `json:"last_fired_at"`
+	AutomaticBackfill bool    `json:"automatic_backfill"`
+	CronTimezone      *string `json:"cron_timezone"`
+	QueueName         *string `json:"queue_name"`
+}
+
+// listSchedulesConductorRequestBody contains filter parameters for listing schedules.
+type listSchedulesConductorRequestBody struct {
+	Status             stringOrList `json:"status,omitempty"`
+	WorkflowName       stringOrList `json:"workflow_name,omitempty"`
+	ScheduleNamePrefix stringOrList `json:"schedule_name_prefix,omitempty"`
+	LoadContext        *bool        `json:"load_context,omitempty"`
+}
+
+type listSchedulesConductorRequest struct {
+	baseMessage
+	Body listSchedulesConductorRequestBody `json:"body"`
+}
+
+type listSchedulesConductorResponse struct {
+	baseResponse
+	Output []scheduleConductorOutput `json:"output"`
+}
+
+type getScheduleConductorRequest struct {
+	baseMessage
+	ScheduleName string `json:"schedule_name"`
+	LoadContext  *bool  `json:"load_context,omitempty"`
+}
+
+type getScheduleConductorResponse struct {
+	baseResponse
+	Output *scheduleConductorOutput `json:"output"`
+}
+
+type pauseScheduleConductorRequest struct {
+	baseMessage
+	ScheduleName string `json:"schedule_name"`
+}
+
+type pauseScheduleConductorResponse struct {
+	baseResponse
+	Success bool `json:"success"`
+}
+
+type resumeScheduleConductorRequest struct {
+	baseMessage
+	ScheduleName string `json:"schedule_name"`
+}
+
+type resumeScheduleConductorResponse struct {
+	baseResponse
+	Success bool `json:"success"`
+}
+
+type backfillScheduleConductorRequest struct {
+	baseMessage
+	ScheduleName string `json:"schedule_name"`
+	Start        string `json:"start"` // ISO 8601
+	End          string `json:"end"`   // ISO 8601
+}
+
+type backfillScheduleConductorResponse struct {
+	baseResponse
+	WorkflowIDs []string `json:"workflow_ids"`
+}
+
+type triggerScheduleConductorRequest struct {
+	baseMessage
+	ScheduleName string `json:"schedule_name"`
+}
+
+type triggerScheduleConductorResponse struct {
+	baseResponse
+	WorkflowID *string `json:"workflow_id"`
 }

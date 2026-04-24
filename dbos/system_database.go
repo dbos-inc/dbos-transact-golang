@@ -91,7 +91,7 @@ type systemDatabase interface {
 	updateSchedule(ctx context.Context, input updateScheduleDBInput) error
 	updateScheduleLastFiredAt(ctx context.Context, scheduleName string, lastFiredAt time.Time) error
 	deleteSchedule(ctx context.Context, input deleteScheduleDBInput) error
-	backfillSchedule(ctx context.Context, input backfillScheduleDBInput) error
+	backfillSchedule(ctx context.Context, input backfillScheduleDBInput) ([]string, error)
 	triggerSchedule(ctx context.Context, scheduleName string) (string, error)
 
 	// Workflow export/import
@@ -3607,10 +3607,10 @@ type backfillScheduleDBInput struct {
 	EndTime      time.Time
 }
 
-func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBInput) error {
+func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBInput) ([]string, error) {
 	schedules, err := s.listSchedules(ctx, listSchedulesDBInput{ScheduleNamePrefixes: []string{input.ScheduleName}})
 	if err != nil {
-		return fmt.Errorf("failed to get schedule: %w", err)
+		return nil, fmt.Errorf("failed to get schedule: %w", err)
 	}
 	var schedule *WorkflowSchedule
 	for i := range schedules {
@@ -3620,7 +3620,7 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 		}
 	}
 	if schedule == nil {
-		return fmt.Errorf("schedule not found: %s", input.ScheduleName)
+		return nil, fmt.Errorf("schedule not found: %s", input.ScheduleName)
 	}
 
 	spec := input.Schedule
@@ -3630,7 +3630,7 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 
 	scheduleEntry, err := newScheduleCronParser().Parse(spec)
 	if err != nil {
-		return fmt.Errorf("failed to parse cron schedule: %w", err)
+		return nil, fmt.Errorf("failed to parse cron schedule: %w", err)
 	}
 
 	queueName := _DBOS_INTERNAL_QUEUE_NAME
@@ -3642,7 +3642,7 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -3650,9 +3650,11 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 
 	nextTime := scheduleEntry.Next(input.StartTime)
 	now := time.Now()
+	var workflowIDs []string
 
 	for nextTime.Before(input.EndTime) {
 		workflowID := fmt.Sprintf("sched-%s-%s", input.ScheduleName, nextTime.Format(time.RFC3339))
+		workflowIDs = append(workflowIDs, workflowID)
 
 		var exists bool
 		err := tx.QueryRow(ctx, checkQuery, workflowID).Scan(&exists)
@@ -3661,7 +3663,7 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 			continue
 		}
 		if err != pgx.ErrNoRows {
-			return fmt.Errorf("failed to check workflow existence for %s: %w", workflowID, err)
+			return nil, fmt.Errorf("failed to check workflow existence for %s: %w", workflowID, err)
 		}
 
 		encodedInput, encErr := ser.Encode(ScheduledWorkflowInput{
@@ -3669,7 +3671,7 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 			Context:       schedule.Context,
 		})
 		if encErr != nil {
-			return fmt.Errorf("failed to encode scheduled workflow input for %s: %w", workflowID, encErr)
+			return nil, fmt.Errorf("failed to encode scheduled workflow input for %s: %w", workflowID, encErr)
 		}
 
 		status := WorkflowStatus{
@@ -3683,16 +3685,16 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 			Serialization: ser.Name(),
 		}
 		if _, err := s.insertWorkflowStatus(ctx, insertWorkflowStatusDBInput{status: status, tx: tx}); err != nil {
-			return fmt.Errorf("failed to enqueue backfill workflow %s: %w", workflowID, err)
+			return nil, fmt.Errorf("failed to enqueue backfill workflow %s: %w", workflowID, err)
 		}
 
 		nextTime = scheduleEntry.Next(nextTime)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit backfill transaction: %w", err)
+		return nil, fmt.Errorf("failed to commit backfill transaction: %w", err)
 	}
-	return nil
+	return workflowIDs, nil
 }
 
 // triggerSchedule immediately enqueues the named schedule's workflow at the
