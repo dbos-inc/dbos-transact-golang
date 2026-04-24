@@ -9,7 +9,7 @@ import (
 )
 
 func TestScheduleCRUD(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 	defer dbosCtx.Shutdown(10 * time.Second)
 
 	// First register the workflows
@@ -197,7 +197,7 @@ func TestScheduleCRUD(t *testing.T) {
 }
 
 func TestApplySchedules(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 	defer dbosCtx.Shutdown(10 * time.Second)
 
 	// First register the workflow
@@ -300,7 +300,7 @@ func TestApplySchedules(t *testing.T) {
 }
 
 func TestApplySchedulesInvalidSignature(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 	defer dbosCtx.Shutdown(10 * time.Second)
 
 	require.NoError(t, dbosCtx.Launch())
@@ -335,7 +335,7 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 }
 
 func TestScheduleCronValidation(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 	defer dbosCtx.Shutdown(10 * time.Second)
 
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
@@ -375,7 +375,7 @@ func TestScheduleCronValidation(t *testing.T) {
 }
 
 func TestBackfillSchedule(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 	defer dbosCtx.Shutdown(10 * time.Second)
 
 	// First register the workflow
@@ -405,7 +405,7 @@ func TestBackfillSchedule(t *testing.T) {
 }
 
 func TestTriggerSchedule(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 	defer dbosCtx.Shutdown(10 * time.Second)
 
 	// First register the workflow
@@ -433,7 +433,7 @@ func TestTriggerSchedule(t *testing.T) {
 }
 
 func TestScheduleWithOptions(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 	defer dbosCtx.Shutdown(10 * time.Second)
 
 	// First register the workflow
@@ -477,7 +477,7 @@ func testWorkflowForBackfillRestart(ctx DBOSContext, input ScheduledWorkflowInpu
 func TestAutomaticBackfillOnRestart(t *testing.T) {
 	backfillRestartFiredEvent = NewEvent()
 
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 
 	RegisterWorkflow(dbosCtx, testWorkflowForBackfillRestart)
 	require.NoError(t, dbosCtx.Launch())
@@ -512,7 +512,7 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 	// Simulate missed schedules while the context is down.
 	time.Sleep(2 * time.Second)
 
-	dbosCtx2 := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
+	dbosCtx2 := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 	defer dbosCtx2.Shutdown(5 * time.Second)
 
 	RegisterWorkflow(dbosCtx2, testWorkflowForBackfillRestart)
@@ -535,7 +535,7 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 // to the installed cron entry via the CRON_TZ= prefix: Next() from a known
 // wall-clock reference should fall at the configured hour in that tz.
 func TestScheduleCronTimezone(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 	defer dbosCtx.Shutdown(5 * time.Second)
 
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)

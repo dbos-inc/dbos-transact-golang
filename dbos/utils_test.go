@@ -50,9 +50,10 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 }
 
 type setupDBOSOptions struct {
-	dropDB     bool
-	checkLeaks bool
-	serializer Serializer[any]
+	dropDB                   bool
+	checkLeaks               bool
+	serializer               Serializer[any]
+	schedulerPollingInterval time.Duration
 }
 
 /* Test database setup */
@@ -65,9 +66,10 @@ func setupDBOS(t *testing.T, opts setupDBOSOptions) DBOSContext {
 	}
 
 	config := Config{
-		DatabaseURL: databaseURL,
-		AppName:     "test-app",
-		Serializer:  opts.serializer,
+		DatabaseURL:              databaseURL,
+		AppName:                  "test-app",
+		Serializer:               opts.serializer,
+		SchedulerPollingInterval: opts.schedulerPollingInterval,
 	}
 
 	dbosCtx, err := NewDBOSContext(context.Background(), config)
