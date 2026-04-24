@@ -4080,18 +4080,29 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, in
 	}
 
 	scheduleID := uuid.New().String()
+	dbInput := createScheduleDBInput{
+		ScheduleID:        scheduleID,
+		ScheduleName:      input.ScheduleName,
+		WorkflowName:      workflowName,
+		Schedule:          input.Schedule,
+		Context:           string(contextJSON),
+		Status:            ScheduleStatusActive,
+		AutomaticBackfill: o.automaticBackfill,
+		CronTimezone:      o.cronTimezone,
+		QueueName:         o.queueName,
+	}
+
+	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			input := dbInput
+			input.tx = tx
+			return nil, c.systemDB.createSchedule(ctx, input)
+		}, WithStepName("DBOS.createSchedule"))
+		return err
+	}
+
 	return retry(c, func() error {
-		return c.systemDB.createSchedule(c, createScheduleDBInput{
-			ScheduleID:        scheduleID,
-			ScheduleName:      input.ScheduleName,
-			WorkflowName:      workflowName,
-			Schedule:          input.Schedule,
-			Context:           string(contextJSON),
-			Status:            ScheduleStatusActive,
-			AutomaticBackfill: o.automaticBackfill,
-			CronTimezone:      o.cronTimezone,
-			QueueName:         o.queueName,
-		})
+		return c.systemDB.createSchedule(c, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -4181,6 +4192,10 @@ func CreateSchedule(ctx DBOSContext, fn ScheduledWorkflowFunc, input CreateSched
 }
 
 func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRequest) error {
+	if state, ok := c.Value(workflowStateKey).(*workflowState); ok && state != nil {
+		return errors.New("DBOS.ApplySchedules cannot be called from within a workflow")
+	}
+
 	if len(schedules) == 0 {
 		return nil
 	}
@@ -4281,11 +4296,22 @@ func (c *dbosContext) PauseSchedule(_ DBOSContext, scheduleName string) error {
 		return fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
+	dbInput := updateScheduleDBInput{
+		ScheduleName: scheduleName,
+		Status:       ScheduleStatusPaused,
+	}
+
+	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			in := dbInput
+			in.tx = tx
+			return nil, c.systemDB.updateSchedule(ctx, in)
+		}, WithStepName("DBOS.pauseSchedule"))
+		return err
+	}
+
 	return retry(c, func() error {
-		return c.systemDB.updateSchedule(c, updateScheduleDBInput{
-			ScheduleName: scheduleName,
-			Status:       ScheduleStatusPaused,
-		})
+		return c.systemDB.updateSchedule(c, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -4314,11 +4340,22 @@ func (c *dbosContext) ResumeSchedule(_ DBOSContext, scheduleName string) error {
 		return fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
+	dbInput := updateScheduleDBInput{
+		ScheduleName: scheduleName,
+		Status:       ScheduleStatusActive,
+	}
+
+	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			in := dbInput
+			in.tx = tx
+			return nil, c.systemDB.updateSchedule(ctx, in)
+		}, WithStepName("DBOS.resumeSchedule"))
+		return err
+	}
+
 	return retry(c, func() error {
-		return c.systemDB.updateSchedule(c, updateScheduleDBInput{
-			ScheduleName: scheduleName,
-			Status:       ScheduleStatusActive,
-		})
+		return c.systemDB.updateSchedule(c, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -4337,6 +4374,13 @@ func ResumeSchedule(ctx DBOSContext, scheduleName string) error {
 func (c *dbosContext) DeleteSchedule(_ DBOSContext, scheduleName string) error {
 	if scheduleName == "" {
 		return errors.New("schedule_name is required")
+	}
+
+	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
+			return nil, c.systemDB.deleteSchedule(ctx, deleteScheduleDBInput{ScheduleName: scheduleName, tx: tx})
+		}, WithStepName("DBOS.deleteSchedule"))
+		return err
 	}
 
 	return retry(c, func() error {
@@ -4362,12 +4406,21 @@ func (c *dbosContext) GetSchedule(_ DBOSContext, scheduleName string) (*Workflow
 		return nil, errors.New("schedule_name is required")
 	}
 
+	dbInput := listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}}
+
 	var schedules []WorkflowSchedule
-	err := retry(c, func() error {
-		var listErr error
-		schedules, listErr = c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}})
-		return listErr
-	}, withRetrierLogger(c.logger))
+	var err error
+	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
+		schedules, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) ([]WorkflowSchedule, error) {
+			in := dbInput
+			in.tx = tx
+			return c.systemDB.listSchedules(ctx, in)
+		}, WithStepName("DBOS.getSchedule"))
+	} else {
+		schedules, err = retryWithResult(c, func() ([]WorkflowSchedule, error) {
+			return c.systemDB.listSchedules(c, dbInput)
+		}, withRetrierLogger(c.logger))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -4396,18 +4449,21 @@ func (c *dbosContext) ListSchedules(_ DBOSContext, opts ...ListSchedulesOption) 
 	for _, opt := range opts {
 		opt(&o)
 	}
-	input := listSchedulesDBInput{
+	dbInput := listSchedulesDBInput{
 		Statuses:             o.statuses,
 		WorkflowNames:        o.workflowNames,
 		ScheduleNamePrefixes: o.scheduleNamePrefixes,
 	}
-	var schedules []WorkflowSchedule
-	err := retry(c, func() error {
-		var listErr error
-		schedules, listErr = c.systemDB.listSchedules(c, input)
-		return listErr
+	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
+		return runAsTxn(c, func(ctx context.Context, tx pgx.Tx) ([]WorkflowSchedule, error) {
+			in := dbInput
+			in.tx = tx
+			return c.systemDB.listSchedules(ctx, in)
+		}, WithStepName("DBOS.listSchedules"))
+	}
+	return retryWithResult(c, func() ([]WorkflowSchedule, error) {
+		return c.systemDB.listSchedules(c, dbInput)
 	}, withRetrierLogger(c.logger))
-	return schedules, err
 }
 
 // ListSchedules lists schedules, optionally filtered by the supplied options.
@@ -4424,6 +4480,9 @@ func ListSchedules(ctx DBOSContext, opts ...ListSchedulesOption) ([]WorkflowSche
 }
 
 func (c *dbosContext) BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) error {
+	if state, ok := c.Value(workflowStateKey).(*workflowState); ok && state != nil {
+		return errors.New("DBOS.BackfillSchedule cannot be called from within a workflow")
+	}
 	if scheduleName == "" {
 		return errors.New("schedule_name is required")
 	}
