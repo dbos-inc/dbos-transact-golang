@@ -1816,3 +1816,127 @@ func TestClientEnqueueDelay(t *testing.T) {
 		assert.Less(t, time.Since(tStart), 30*time.Second, "workflow should complete shortly after shortened delay")
 	})
 }
+
+// TestClientSchedules exercises the happy path of each schedule method exposed
+// on the Client. Functional coverage (reconciler behavior, cron/queue routing,
+// backfill semantics) lives in schedule_test.go; this test just verifies the
+// client wiring reaches the database.
+func TestClientSchedules(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	RegisterWorkflow(serverCtx, testWorkflowForSchedule)
+	require.NoError(t, Launch(serverCtx))
+
+	c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: getDatabaseURL()})
+	require.NoError(t, err)
+	t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+
+	// TriggerSchedule delegates to dbosCtx.TriggerSchedule, which resolves the
+	// workflow through the Go registry — so the client's internal context needs
+	// its own registration.
+	clientCtx := c.(*client).dbosCtx
+	RegisterWorkflow(clientCtx, testWorkflowForSchedule)
+
+	const workflowFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule"
+
+	t.Run("CreateGetDelete", func(t *testing.T) {
+		const name = "client-create-schedule"
+		require.NoError(t, c.CreateSchedule(ClientScheduleInput{
+			ScheduleName:      name,
+			WorkflowName:      workflowFQN,
+			WorkflowClassName: "MyClass",
+			Schedule:          "0 0 * * * *",
+		}))
+
+		got, err := c.GetSchedule(name)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Equal(t, name, got.ScheduleName)
+		require.Equal(t, workflowFQN, got.WorkflowName)
+		require.Equal(t, "MyClass", got.WorkflowClassName)
+
+		require.NoError(t, c.DeleteSchedule(name))
+		got, err = c.GetSchedule(name)
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
+	t.Run("ListPauseResume", func(t *testing.T) {
+		const name = "client-list-pause-resume"
+		require.NoError(t, c.CreateSchedule(ClientScheduleInput{
+			ScheduleName: name,
+			WorkflowName: workflowFQN,
+			Schedule:     "0 0 * * * *",
+		}))
+		t.Cleanup(func() { _ = c.DeleteSchedule(name) })
+
+		listed, err := c.ListSchedules(WithScheduleNamePrefixes(name))
+		require.NoError(t, err)
+		require.Len(t, listed, 1)
+		require.Equal(t, name, listed[0].ScheduleName)
+
+		require.NoError(t, c.PauseSchedule(name))
+		got, err := c.GetSchedule(name)
+		require.NoError(t, err)
+		require.Equal(t, ScheduleStatusPaused, got.Status)
+
+		require.NoError(t, c.ResumeSchedule(name))
+		got, err = c.GetSchedule(name)
+		require.NoError(t, err)
+		require.Equal(t, ScheduleStatusActive, got.Status)
+	})
+
+	t.Run("ApplySchedules", func(t *testing.T) {
+		const nameA = "client-apply-a"
+		const nameB = "client-apply-b"
+		require.NoError(t, c.ApplySchedules([]ClientScheduleInput{
+			{ScheduleName: nameA, WorkflowName: workflowFQN, Schedule: "0 0 * * * *"},
+			{ScheduleName: nameB, WorkflowName: workflowFQN, WorkflowClassName: "MyClass", Schedule: "0 0 * * * *"},
+		}))
+		t.Cleanup(func() {
+			_ = c.DeleteSchedule(nameA)
+			_ = c.DeleteSchedule(nameB)
+		})
+
+		a, err := c.GetSchedule(nameA)
+		require.NoError(t, err)
+		require.NotNil(t, a)
+		require.Equal(t, _DBOS_INTERNAL_QUEUE_NAME, a.QueueName, "QueueName should default to the internal queue")
+
+		b, err := c.GetSchedule(nameB)
+		require.NoError(t, err)
+		require.NotNil(t, b)
+		require.Equal(t, "MyClass", b.WorkflowClassName)
+	})
+
+	t.Run("BackfillSchedule", func(t *testing.T) {
+		const name = "client-backfill"
+		require.NoError(t, c.CreateSchedule(ClientScheduleInput{
+			ScheduleName: name,
+			WorkflowName: workflowFQN,
+			Schedule:     "*/1 * * * * *",
+		}))
+		t.Cleanup(func() { _ = c.DeleteSchedule(name) })
+
+		start := time.Now().Add(-5 * time.Second)
+		end := time.Now()
+		require.NoError(t, c.BackfillSchedule(name, start, end))
+
+		backfilled, err := ListWorkflows(serverCtx, WithWorkflowIDPrefix("sched-"+name+"-"))
+		require.NoError(t, err)
+		require.NotEmpty(t, backfilled)
+	})
+
+	t.Run("TriggerSchedule", func(t *testing.T) {
+		const name = "client-trigger"
+		require.NoError(t, c.CreateSchedule(ClientScheduleInput{
+			ScheduleName: name,
+			WorkflowName: workflowFQN,
+			Schedule:     "0 0 * * * *",
+		}))
+		t.Cleanup(func() { _ = c.DeleteSchedule(name) })
+
+		workflowID, err := c.TriggerSchedule(name)
+		require.NoError(t, err)
+		require.Contains(t, workflowID, name)
+	})
+}

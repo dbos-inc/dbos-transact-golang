@@ -15,9 +15,8 @@ import (
 type ScheduleStatus string
 
 const (
-	ScheduleStatusActive  ScheduleStatus = "ACTIVE"
-	ScheduleStatusPaused  ScheduleStatus = "PAUSED"
-	ScheduleStatusDeleted ScheduleStatus = "DELETED"
+	ScheduleStatusActive ScheduleStatus = "ACTIVE"
+	ScheduleStatusPaused ScheduleStatus = "PAUSED"
 )
 
 type WorkflowSchedule struct {

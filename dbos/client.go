@@ -715,121 +715,27 @@ func (c *client) ApplySchedules(schedules []ClientScheduleInput) error {
 
 // GetSchedule gets a schedule by name using the client.
 func (c *client) GetSchedule(scheduleName string) (*WorkflowSchedule, error) {
-	if scheduleName == "" {
-		return nil, errors.New("schedule_name is required")
-	}
-
-	dbosCtx, ok := c.dbosCtx.(*dbosContext)
-	if !ok {
-		return nil, errors.New("invalid DBOS context")
-	}
-
-	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}})
-	if err != nil {
-		return nil, err
-	}
-	for i := range schedules {
-		if schedules[i].ScheduleName == scheduleName {
-			return &schedules[i], nil
-		}
-	}
-	return nil, nil
+	return c.dbosCtx.GetSchedule(c.dbosCtx, scheduleName)
 }
 
 // ListSchedules lists schedules, optionally filtered by the supplied options.
 func (c *client) ListSchedules(opts ...ListSchedulesOption) ([]WorkflowSchedule, error) {
-	dbosCtx, ok := c.dbosCtx.(*dbosContext)
-	if !ok {
-		return nil, errors.New("invalid DBOS context")
-	}
-
-	var o listSchedulesOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
-	return dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{
-		Statuses:             o.statuses,
-		WorkflowNames:        o.workflowNames,
-		ScheduleNamePrefixes: o.scheduleNamePrefixes,
-	})
+	return c.dbosCtx.ListSchedules(c.dbosCtx, opts...)
 }
 
 // PauseSchedule pauses a schedule using the client.
 func (c *client) PauseSchedule(scheduleName string) error {
-	if scheduleName == "" {
-		return errors.New("schedule_name is required")
-	}
-
-	dbosCtx, ok := c.dbosCtx.(*dbosContext)
-	if !ok {
-		return errors.New("invalid DBOS context")
-	}
-
-	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}})
-	if err != nil {
-		return fmt.Errorf("failed to get schedule: %w", err)
-	}
-	var existing *WorkflowSchedule
-	for i := range schedules {
-		if schedules[i].ScheduleName == scheduleName {
-			existing = &schedules[i]
-			break
-		}
-	}
-	if existing == nil {
-		return fmt.Errorf("schedule not found: %s", scheduleName)
-	}
-
-	return dbosCtx.systemDB.updateSchedule(dbosCtx, updateScheduleDBInput{
-		ScheduleName: scheduleName,
-		Status:       ScheduleStatusPaused,
-	})
+	return c.dbosCtx.PauseSchedule(c.dbosCtx, scheduleName)
 }
 
 // ResumeSchedule resumes a paused schedule using the client.
 func (c *client) ResumeSchedule(scheduleName string) error {
-	if scheduleName == "" {
-		return errors.New("schedule_name is required")
-	}
-
-	dbosCtx, ok := c.dbosCtx.(*dbosContext)
-	if !ok {
-		return errors.New("invalid DBOS context")
-	}
-
-	schedules, err := dbosCtx.systemDB.listSchedules(dbosCtx, listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}})
-	if err != nil {
-		return fmt.Errorf("failed to get schedule: %w", err)
-	}
-	var existing *WorkflowSchedule
-	for i := range schedules {
-		if schedules[i].ScheduleName == scheduleName {
-			existing = &schedules[i]
-			break
-		}
-	}
-	if existing == nil {
-		return fmt.Errorf("schedule not found: %s", scheduleName)
-	}
-
-	return dbosCtx.systemDB.updateSchedule(dbosCtx, updateScheduleDBInput{
-		ScheduleName: scheduleName,
-		Status:       ScheduleStatusActive,
-	})
+	return c.dbosCtx.ResumeSchedule(c.dbosCtx, scheduleName)
 }
 
 // DeleteSchedule deletes a schedule using the client.
 func (c *client) DeleteSchedule(scheduleName string) error {
-	if scheduleName == "" {
-		return errors.New("schedule_name is required")
-	}
-
-	dbosCtx, ok := c.dbosCtx.(*dbosContext)
-	if !ok {
-		return errors.New("invalid DBOS context")
-	}
-
-	return dbosCtx.systemDB.deleteSchedule(dbosCtx, deleteScheduleDBInput{ScheduleName: scheduleName})
+	return c.dbosCtx.DeleteSchedule(c.dbosCtx, scheduleName)
 }
 
 // BackfillSchedule enqueues all executions of the named schedule that would
