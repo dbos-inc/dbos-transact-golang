@@ -3373,6 +3373,7 @@ type createScheduleDBInput struct {
 	ScheduleID        string
 	ScheduleName      string
 	WorkflowName      string
+	WorkflowClassName string
 	Schedule          string
 	Context           string // JSON serialized
 	Status            ScheduleStatus
@@ -3385,9 +3386,9 @@ type createScheduleDBInput struct {
 func (s *sysDB) createSchedule(ctx context.Context, input createScheduleDBInput) error {
 	query := fmt.Sprintf(`
 		INSERT INTO %s.workflow_schedules (
-			schedule_id, schedule_name, workflow_name,
+			schedule_id, schedule_name, workflow_name, workflow_class_name,
 			schedule, context, status, automatic_backfill, cron_timezone, queue_name
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, pgx.Identifier{s.schema}.Sanitize())
 
 	var queueNameVal any
@@ -3395,10 +3396,16 @@ func (s *sysDB) createSchedule(ctx context.Context, input createScheduleDBInput)
 		queueNameVal = input.QueueName
 	}
 
+	var workflowClassNameVal any
+	if input.WorkflowClassName != "" {
+		workflowClassNameVal = input.WorkflowClassName
+	}
+
 	args := []any{
 		input.ScheduleID,
 		input.ScheduleName,
 		input.WorkflowName,
+		workflowClassNameVal,
 		input.Schedule,
 		input.Context,
 		input.Status,
@@ -3427,7 +3434,7 @@ type listSchedulesDBInput struct {
 
 func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) ([]WorkflowSchedule, error) {
 	query := fmt.Sprintf(`
-		SELECT schedule_id, schedule_name, workflow_name,
+		SELECT schedule_id, schedule_name, workflow_name, workflow_class_name,
 		       schedule, status, context, last_fired_at, automatic_backfill,
 		       cron_timezone, queue_name
 		FROM %s.workflow_schedules
@@ -3474,10 +3481,12 @@ func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) (
 		var contextJSON string
 
 		var queueName *string
+		var workflowClassName *string
 		err := rows.Scan(
 			&schedule.ScheduleID,
 			&schedule.ScheduleName,
 			&schedule.WorkflowName,
+			&workflowClassName,
 			&schedule.Schedule,
 			&schedule.Status,
 			&contextJSON,
@@ -3490,6 +3499,9 @@ func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) (
 			schedule.QueueName = *queueName
 		} else {
 			schedule.QueueName = _DBOS_INTERNAL_QUEUE_NAME
+		}
+		if workflowClassName != nil {
+			schedule.WorkflowClassName = *workflowClassName
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan schedule: %w", err)

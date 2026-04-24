@@ -24,6 +24,7 @@ type WorkflowSchedule struct {
 	ScheduleID        string         `json:"schedule_id"`
 	ScheduleName      string         `json:"schedule_name"`
 	WorkflowName      string         `json:"workflow_name"`
+	WorkflowClassName string         `json:"workflow_class_name,omitempty"`
 	Schedule          string         `json:"schedule"`
 	Status            ScheduleStatus `json:"status"`
 	Context           any            `json:"context"`
@@ -54,6 +55,7 @@ type ApplySchedulesRequest struct {
 type ClientScheduleInput struct {
 	ScheduleName      string
 	WorkflowName      string
+	WorkflowClassName string
 	Schedule          string
 	Context           any
 	AutomaticBackfill bool

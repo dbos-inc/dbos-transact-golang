@@ -610,6 +610,7 @@ func (c *client) CreateSchedule(input ClientScheduleInput) error {
 		ScheduleID:        scheduleID,
 		ScheduleName:      input.ScheduleName,
 		WorkflowName:      input.WorkflowName,
+		WorkflowClassName: input.WorkflowClassName,
 		Schedule:          input.Schedule,
 		Context:           string(contextJSON),
 		Status:            ScheduleStatusActive,
