@@ -1,6 +1,7 @@
 package dbos
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -404,23 +405,94 @@ func TestBackfillSchedule(t *testing.T) {
 	}
 }
 
+// TestBackfillScheduleRecovery exercises the path where a backfilled workflow
+// row is flipped to PENDING (simulating an executor crash mid-run) and then
+// recovered via recoverPendingWorkflows. The recovered workflow must decode
+// the ScheduledWorkflowInput written at backfill time and run it correctly.
+func TestBackfillScheduleRecovery(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
+	defer dbosCtx.Shutdown(10 * time.Second)
+
+	scheduledInputCapture = sync.Map{}
+	RegisterWorkflow(dbosCtx, testCapturingScheduledWorkflow)
+	require.NoError(t, dbosCtx.Launch())
+
+	// Use a far-future cron so the live scheduler doesn't fire while the test runs.
+	const ctxValue = "backfill-recovery-context"
+	const scheduleName = "backfill-recovery-schedule"
+	err := CreateSchedule(dbosCtx, testCapturingScheduledWorkflow, CreateScheduleRequest{
+		ScheduleName: scheduleName,
+		Schedule:     "0 0 0 1 1 *", // Once a year
+	}, WithScheduleContext(ctxValue))
+	require.NoError(t, err)
+
+	// Backfill a 5-second window of every-second ticks.
+	start := time.Now().Add(-5 * time.Second).Truncate(time.Second)
+	end := time.Now()
+	c := dbosCtx.(*dbosContext)
+	ids, err := c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
+		ScheduleName: scheduleName,
+		Schedule:     "*/1 * * * * *",
+		StartTime:    start,
+		EndTime:      end,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, ids, "backfill should have enqueued at least one workflow")
+
+	target := ids[0]
+	require.Eventually(t, func() bool {
+		statuses, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{target}))
+		return err == nil && len(statuses) == 1 && statuses[0].Status == WorkflowStatusSuccess
+	}, 10*time.Second, 50*time.Millisecond, "queue runner should run the backfilled workflow before recovery")
+
+	// Drop the captured input from the first run so we can assert recovery's run populates it.
+	scheduledInputCapture.Delete(target)
+
+	setWorkflowStatusPending(t, dbosCtx, target)
+
+	handles, err := recoverPendingWorkflows(c, []string{"local"})
+	require.NoError(t, err)
+	var recovered WorkflowHandle[any]
+	for _, h := range handles {
+		if h.GetWorkflowID() == target {
+			recovered = h
+			break
+		}
+	}
+	require.NotNil(t, recovered, "recovery should have produced a handle for %s", target)
+
+	result, err := recovered.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "completed", result)
+
+	captured, ok := scheduledInputCapture.Load(target)
+	require.True(t, ok, "workflow should have captured its input on recovery")
+	got := captured.(ScheduledWorkflowInput)
+	require.Equal(t, ctxValue, got.Context, "Context should round-trip through DB-encoded inputs")
+	require.False(t, got.ScheduledTime.IsZero(), "ScheduledTime should be populated from DB-encoded inputs")
+	require.False(t, got.ScheduledTime.Before(start.Add(-time.Second)), "ScheduledTime should be within the backfill window")
+	require.False(t, got.ScheduledTime.After(end.Add(time.Second)), "ScheduledTime should be within the backfill window")
+}
+
 func TestTriggerSchedule(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
 	defer dbosCtx.Shutdown(10 * time.Second)
 
-	// First register the workflow
-	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+	scheduledInputCapture = sync.Map{}
+	RegisterWorkflow(dbosCtx, testCapturingScheduledWorkflow)
 
-	// Launch so the internal queue can dequeue and run the triggered workflow.
 	require.NoError(t, dbosCtx.Launch())
 
-	err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+	const ctxValue = "trigger-context-value"
+	err := CreateSchedule(dbosCtx, testCapturingScheduledWorkflow, CreateScheduleRequest{
 		ScheduleName: "trigger-schedule",
 		Schedule:     "0 0 * * * *",
-	})
+	}, WithScheduleContext(ctxValue))
 	require.NoError(t, err)
 
+	beforeTrigger := time.Now()
 	workflowID, err := TriggerSchedule(dbosCtx, "trigger-schedule")
+	afterTrigger := time.Now()
 	require.NoError(t, err)
 	require.NotEmpty(t, workflowID)
 	require.Contains(t, workflowID, "trigger-schedule")
@@ -430,6 +502,13 @@ func TestTriggerSchedule(t *testing.T) {
 	result, err := handle.GetResult()
 	require.NoError(t, err)
 	require.Equal(t, "completed", result)
+
+	captured, ok := scheduledInputCapture.Load(workflowID)
+	require.True(t, ok, "workflow should have captured its input")
+	got := captured.(ScheduledWorkflowInput)
+	require.Equal(t, ctxValue, got.Context, "Context should match the schedule's configured context")
+	require.False(t, got.ScheduledTime.Before(beforeTrigger.Add(-time.Second)), "ScheduledTime should be at or after the trigger call")
+	require.False(t, got.ScheduledTime.After(afterTrigger.Add(time.Second)), "ScheduledTime should be at or before the trigger call returns")
 }
 
 func TestScheduleWithOptions(t *testing.T) {
@@ -462,6 +541,17 @@ func testWorkflowForSchedule(ctx DBOSContext, input ScheduledWorkflowInput) (any
 }
 
 func testWorkflowForScheduleCustomName(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+	return "completed", nil
+}
+
+// scheduledInputCapture stores the ScheduledWorkflowInput received by
+// testCapturingScheduledWorkflow, keyed by workflow ID. Tests use it to assert
+// that scheduler/backfill/trigger paths deliver the expected payload.
+var scheduledInputCapture sync.Map
+
+func testCapturingScheduledWorkflow(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+	wfID, _ := GetWorkflowID(ctx)
+	scheduledInputCapture.Store(wfID, input)
 	return "completed", nil
 }
 
