@@ -117,7 +117,7 @@ func (c *dbosContext) addScheduleCronEntry(
 		// spread load when many executors share the same schedule.
 		if cap := jitterCap(entry.Schedule, scheduledTime); cap > 0 {
 			select {
-			case <-time.After(rand.N(cap)):
+			case <-time.After(rand.N(cap)): // #nosec G404 -- jitter is non-security; weak RNG is fine
 			case <-c.Done():
 				return
 			}
