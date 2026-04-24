@@ -4428,21 +4428,9 @@ func (c *dbosContext) BackfillSchedule(_ DBOSContext, scheduleName string, start
 		return errors.New("schedule_name is required")
 	}
 
-	var schedules []WorkflowSchedule
-	err := retry(c, func() error {
-		var listErr error
-		schedules, listErr = c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}})
-		return listErr
-	}, withRetrierLogger(c.logger))
+	existing, err := c.GetSchedule(c, scheduleName)
 	if err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
-	}
-	var existing *WorkflowSchedule
-	for i := range schedules {
-		if schedules[i].ScheduleName == scheduleName {
-			existing = &schedules[i]
-			break
-		}
 	}
 	if existing == nil {
 		return fmt.Errorf("schedule not found: %s", scheduleName)
@@ -4481,21 +4469,9 @@ func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (strin
 		return "", errors.New("DBOS.TriggerSchedule cannot be called from within a workflow")
 	}
 
-	var schedules []WorkflowSchedule
-	err := retry(c, func() error {
-		var listErr error
-		schedules, listErr = c.systemDB.listSchedules(c, listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}})
-		return listErr
-	}, withRetrierLogger(c.logger))
+	existing, err := c.GetSchedule(c, scheduleName)
 	if err != nil {
 		return "", fmt.Errorf("failed to get schedule: %w", err)
-	}
-	var existing *WorkflowSchedule
-	for i := range schedules {
-		if schedules[i].ScheduleName == scheduleName {
-			existing = &schedules[i]
-			break
-		}
 	}
 	if existing == nil {
 		return "", fmt.Errorf("schedule not found: %s", scheduleName)
