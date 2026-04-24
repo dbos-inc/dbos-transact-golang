@@ -4516,10 +4516,6 @@ func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (strin
 	scheduledTime := time.Now()
 	workflowID := fmt.Sprintf("sched-%s-%s", scheduleName, scheduledTime.Format(time.RFC3339))
 
-	queueName := existing.QueueName
-	if queueName == "" {
-		queueName = _DBOS_INTERNAL_QUEUE_NAME
-	}
 	ser := resolveEncoder(c)
 	encodedInput, err := ser.Encode(ScheduledWorkflowInput{
 		ScheduledTime: scheduledTime,
@@ -4528,7 +4524,7 @@ func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (strin
 	if err != nil {
 		return "", fmt.Errorf("failed to encode scheduled workflow input: %w", err)
 	}
-	_, err = entry.wrappedFunction(c, encodedInput, ser.Name(), WithWorkflowID(workflowID), WithQueue(queueName), withWorkflowName(entry.FQN))
+	_, err = entry.wrappedFunction(c, encodedInput, ser.Name(), WithWorkflowID(workflowID), withWorkflowName(entry.FQN))
 	if err != nil {
 		return "", fmt.Errorf("failed to trigger schedule: %w", err)
 	}

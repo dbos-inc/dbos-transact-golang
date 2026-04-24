@@ -744,10 +744,17 @@ func (c *client) BackfillSchedule(scheduleName string, start, end time.Time) err
 	return c.dbosCtx.BackfillSchedule(c.dbosCtx, scheduleName, start, end)
 }
 
-// TriggerSchedule immediately enqueues the named schedule's workflow at the
-// current time and returns the workflow ID.
+// TriggerSchedule immediately enqueues the named schedule's workflow on its
+// configured queue (falling back to the internal queue) and returns the
+// workflow ID. Unlike the in-context TriggerSchedule, this bypasses the Go
+// workflow registry — so it can target schedules whose workflow is registered
+// in a DBOS app written in another language.
 func (c *client) TriggerSchedule(scheduleName string) (string, error) {
-	return c.dbosCtx.TriggerSchedule(c.dbosCtx, scheduleName)
+	dbosCtx, ok := c.dbosCtx.(*dbosContext)
+	if !ok {
+		return "", errors.New("invalid DBOS context")
+	}
+	return dbosCtx.systemDB.triggerSchedule(dbosCtx, scheduleName)
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.

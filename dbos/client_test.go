@@ -1830,12 +1830,6 @@ func TestClientSchedules(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { c.Shutdown(30 * time.Second) })
 
-	// TriggerSchedule delegates to dbosCtx.TriggerSchedule, which resolves the
-	// workflow through the Go registry — so the client's internal context needs
-	// its own registration.
-	clientCtx := c.(*client).dbosCtx
-	RegisterWorkflow(clientCtx, testWorkflowForSchedule)
-
 	const workflowFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule"
 
 	t.Run("CreateGetDelete", func(t *testing.T) {
@@ -1938,5 +1932,12 @@ func TestClientSchedules(t *testing.T) {
 		workflowID, err := c.TriggerSchedule(name)
 		require.NoError(t, err)
 		require.Contains(t, workflowID, name)
+
+		// Server context should dequeue and execute the triggered workflow.
+		handle, err := RetrieveWorkflow[any](serverCtx, workflowID)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "completed", result)
 	})
 }

@@ -92,6 +92,7 @@ type systemDatabase interface {
 	updateSchedule(ctx context.Context, input updateScheduleDBInput) error
 	deleteSchedule(ctx context.Context, input deleteScheduleDBInput) error
 	backfillSchedule(ctx context.Context, input backfillScheduleDBInput) error
+	triggerSchedule(ctx context.Context, scheduleName string) (string, error)
 
 	// Workflow export/import
 	exportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error)
@@ -3430,6 +3431,7 @@ type listSchedulesDBInput struct {
 	Statuses             []ScheduleStatus
 	WorkflowNames        []string
 	ScheduleNamePrefixes []string
+	tx                   pgx.Tx // optional: run inside an existing transaction
 }
 
 func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) ([]WorkflowSchedule, error) {
@@ -3468,7 +3470,13 @@ func (s *sysDB) listSchedules(ctx context.Context, input listSchedulesDBInput) (
 		query += " WHERE " + strings.Join(conds, " AND ")
 	}
 
-	rows, err := s.pool.Query(ctx, query, args...)
+	var rows pgx.Rows
+	var err error
+	if input.tx != nil {
+		rows, err = input.tx.Query(ctx, query, args...)
+	} else {
+		rows, err = s.pool.Query(ctx, query, args...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to list schedules: %w", err)
 	}
@@ -3668,6 +3676,79 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 		return fmt.Errorf("failed to commit backfill transaction: %w", err)
 	}
 	return nil
+}
+
+// triggerSchedule immediately enqueues the named schedule's workflow at the
+// current time, using the schedule's queue (or the internal queue by default)
+// and preserving its workflow_class_name and context. Returns the workflow ID.
+// It does not consult the Go workflow registry, so it works for schedules whose
+// workflow is registered in another-language DBOS app.
+func (s *sysDB) triggerSchedule(ctx context.Context, scheduleName string) (string, error) {
+	if scheduleName == "" {
+		return "", errors.New("schedule_name is required")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	schedules, err := s.listSchedules(ctx, listSchedulesDBInput{
+		ScheduleNamePrefixes: []string{scheduleName},
+		tx:                   tx,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get schedule: %w", err)
+	}
+	var schedule *WorkflowSchedule
+	for i := range schedules {
+		if schedules[i].ScheduleName == scheduleName {
+			schedule = &schedules[i]
+			break
+		}
+	}
+	if schedule == nil {
+		return "", fmt.Errorf("schedule not found: %s", scheduleName)
+	}
+
+	queueName := schedule.QueueName
+	if queueName == "" {
+		queueName = _DBOS_INTERNAL_QUEUE_NAME
+	}
+
+	now := time.Now()
+	workflowID := fmt.Sprintf("sched-%s-trigger-%s", scheduleName, now.Format(time.RFC3339))
+
+	ser := resolveEncoder(ctx)
+	encodedInput, err := ser.Encode(ScheduledWorkflowInput{
+		ScheduledTime: now,
+		Context:       schedule.Context,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to encode scheduled workflow input: %w", err)
+	}
+
+	status := WorkflowStatus{
+		ID:            workflowID,
+		Status:        WorkflowStatusEnqueued,
+		Name:          schedule.WorkflowName,
+		ClassName:     schedule.WorkflowClassName,
+		QueueName:     queueName,
+		CreatedAt:     now,
+		Input:         encodedInput,
+		Serialization: ser.Name(),
+	}
+
+	if _, err := s.insertWorkflowStatus(ctx, insertWorkflowStatusDBInput{status: status, tx: tx}); err != nil {
+		return "", fmt.Errorf("failed to enqueue triggered workflow: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return workflowID, nil
 }
 
 /*******************************/
