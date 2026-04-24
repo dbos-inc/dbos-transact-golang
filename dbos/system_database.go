@@ -89,6 +89,7 @@ type systemDatabase interface {
 	createSchedule(ctx context.Context, input createScheduleDBInput) error
 	listSchedules(ctx context.Context, input listSchedulesDBInput) ([]WorkflowSchedule, error)
 	updateSchedule(ctx context.Context, input updateScheduleDBInput) error
+	updateScheduleLastFiredAt(ctx context.Context, scheduleName string, lastFiredAt time.Time) error
 	deleteSchedule(ctx context.Context, input deleteScheduleDBInput) error
 	backfillSchedule(ctx context.Context, input backfillScheduleDBInput) error
 	triggerSchedule(ctx context.Context, scheduleName string) (string, error)
@@ -3562,6 +3563,19 @@ func (s *sysDB) updateSchedule(ctx context.Context, input updateScheduleDBInput)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to update schedule: %w", err)
+	}
+	return nil
+}
+
+func (s *sysDB) updateScheduleLastFiredAt(ctx context.Context, scheduleName string, lastFiredAt time.Time) error {
+	query := fmt.Sprintf(`
+		UPDATE %s.workflow_schedules
+		SET last_fired_at = $1
+		WHERE schedule_name = $2
+	`, pgx.Identifier{s.schema}.Sanitize())
+	_, err := s.pool.Exec(ctx, query, lastFiredAt.Format(time.RFC3339Nano), scheduleName)
+	if err != nil {
+		return fmt.Errorf("failed to update schedule last_fired_at: %w", err)
 	}
 	return nil
 }

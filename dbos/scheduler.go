@@ -187,12 +187,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 		}
 		result, runErr := wrappedFn(ctx, encodedInput, ser.Name(), opts...)
 
-		now := time.Now()
-		if err := c.systemDB.updateSchedule(c, updateScheduleDBInput{
-			ScheduleName: scheduleName,
-			Status:       ScheduleStatusActive,
-			LastFiredAt:  &now,
-		}); err != nil {
+		if err := c.systemDB.updateScheduleLastFiredAt(c, scheduleName, time.Now()); err != nil {
 			c.logger.Error("failed to update schedule last fired time", "schedule", scheduleName, "error", err)
 		}
 
