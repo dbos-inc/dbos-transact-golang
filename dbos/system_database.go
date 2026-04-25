@@ -3656,8 +3656,8 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 		workflowID := fmt.Sprintf("sched-%s-%s", input.ScheduleName, nextTime.Format(time.RFC3339))
 		workflowIDs = append(workflowIDs, workflowID)
 
-		var exists bool
-		err := tx.QueryRow(ctx, checkQuery, workflowID).Scan(&exists)
+		var dummy int
+		err := tx.QueryRow(ctx, checkQuery, workflowID).Scan(&dummy)
 		if err == nil {
 			nextTime = scheduleEntry.Next(nextTime)
 			continue

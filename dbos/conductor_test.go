@@ -879,3 +879,147 @@ func TestConductorAlertHandler(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	})
 }
+
+// TestConductorScheduleHandlers covers the happy path for each schedule
+// message type the conductor can route to a DBOS node.
+func TestConductorScheduleHandlers(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, schedulerPollingInterval: 100 * time.Millisecond})
+	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+	require.NoError(t, dbosCtx.Launch())
+
+	const baseSchedule = "cond-base-schedule"
+	require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		ScheduleName: baseSchedule,
+		Schedule:     "0 0 0 1 1 *",
+	}, WithScheduleContext("hello")))
+
+	mockServer := newMockWebSocketServer()
+	t.Cleanup(mockServer.shutdown)
+
+	cond, err := newConductor(dbosCtx.(*dbosContext), conductorConfig{
+		url:     mockServer.getURL(),
+		apiKey:  "test-key",
+		appName: "test-app",
+	})
+	require.NoError(t, err)
+	cond.pingInterval = 100 * time.Millisecond
+	cond.pingTimeout = 200 * time.Millisecond
+	cond.reconnectWait = 100 * time.Millisecond
+	cond.launch()
+	t.Cleanup(func() { cond.shutdown(2 * time.Second) })
+	require.True(t, mockServer.waitForConnection(5*time.Second))
+
+	// expect waits for a response of the expected type, returning the raw bytes.
+	expect := func(t *testing.T, wantType messageType) []byte {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case raw := <-mockServer.messages:
+				var base baseMessage
+				if err := json.Unmarshal(raw, &base); err == nil && base.Type == wantType {
+					return raw
+				}
+				// Drop unrelated traffic (e.g. executor_info on connect).
+			case <-deadline:
+				t.Fatalf("timed out waiting for response of type %s", wantType)
+			}
+		}
+	}
+
+	t.Run("list_schedules", func(t *testing.T) {
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"list_schedules","request_id":"r1","body":{}}`)))
+		var resp listSchedulesConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, listSchedulesMessage), &resp))
+		require.Equal(t, "r1", resp.RequestID)
+		require.Nil(t, resp.ErrorMessage)
+		require.Equal(t, 1, len(resp.Output))
+		require.Equal(t, baseSchedule, resp.Output[0].ScheduleName)
+		require.NotNil(t, resp.Output[0].Context, "load_context defaults to true")
+	})
+
+	t.Run("list_schedules_no_context", func(t *testing.T) {
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"list_schedules","request_id":"r2","body":{"load_context":false}}`)))
+		var resp listSchedulesConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, listSchedulesMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.Equal(t, 1, len(resp.Output))
+		require.Nil(t, resp.Output[0].Context, "load_context=false should omit context")
+	})
+
+	t.Run("get_schedule", func(t *testing.T) {
+		req := fmt.Sprintf(`{"type":"get_schedule","request_id":"r3","schedule_name":%q}`, baseSchedule)
+		require.NoError(t, mockServer.sendTextMessage([]byte(req)))
+		var resp getScheduleConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, getScheduleMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.NotNil(t, resp.Output)
+		require.Equal(t, baseSchedule, resp.Output.ScheduleName)
+	})
+
+	t.Run("get_schedule_missing", func(t *testing.T) {
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"get_schedule","request_id":"r4","schedule_name":"does-not-exist"}`)))
+		var resp getScheduleConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, getScheduleMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.Nil(t, resp.Output)
+	})
+
+	t.Run("pause_resume_schedule", func(t *testing.T) {
+		req := fmt.Sprintf(`{"type":"pause_schedule","request_id":"r5","schedule_name":%q}`, baseSchedule)
+		require.NoError(t, mockServer.sendTextMessage([]byte(req)))
+		var pauseResp pauseScheduleConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, pauseScheduleMessage), &pauseResp))
+		require.True(t, pauseResp.Success)
+		got, err := GetSchedule(dbosCtx, baseSchedule)
+		require.NoError(t, err)
+		require.Equal(t, ScheduleStatusPaused, got.Status)
+
+		req = fmt.Sprintf(`{"type":"resume_schedule","request_id":"r6","schedule_name":%q}`, baseSchedule)
+		require.NoError(t, mockServer.sendTextMessage([]byte(req)))
+		var resumeResp resumeScheduleConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, resumeScheduleMessage), &resumeResp))
+		require.True(t, resumeResp.Success)
+		got, err = GetSchedule(dbosCtx, baseSchedule)
+		require.NoError(t, err)
+		require.Equal(t, ScheduleStatusActive, got.Status)
+	})
+
+	t.Run("backfill_schedule", func(t *testing.T) {
+		// Create a fast-cron schedule so backfill produces multiple ticks.
+		const fastSchedule = "cond-backfill-schedule"
+		require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+			ScheduleName: fastSchedule,
+			Schedule:     "*/1 * * * * *",
+		}))
+		t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, fastSchedule) })
+
+		startISO := time.Now().Add(-3 * time.Second).Format(time.RFC3339Nano)
+		endISO := time.Now().Format(time.RFC3339Nano)
+		req := fmt.Sprintf(`{"type":"backfill_schedule","request_id":"r7","schedule_name":%q,"start":%q,"end":%q}`,
+			fastSchedule, startISO, endISO)
+		require.NoError(t, mockServer.sendTextMessage([]byte(req)))
+		var resp backfillScheduleConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, backfillScheduleMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.NotEmpty(t, resp.WorkflowIDs)
+	})
+
+	t.Run("trigger_schedule", func(t *testing.T) {
+		req := fmt.Sprintf(`{"type":"trigger_schedule","request_id":"r8","schedule_name":%q}`, baseSchedule)
+		require.NoError(t, mockServer.sendTextMessage([]byte(req)))
+		var resp triggerScheduleConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, triggerScheduleMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.NotNil(t, resp.WorkflowID)
+		require.Contains(t, *resp.WorkflowID, baseSchedule)
+	})
+
+	t.Run("trigger_schedule_missing", func(t *testing.T) {
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"trigger_schedule","request_id":"r9","schedule_name":"missing"}`)))
+		var resp triggerScheduleConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, triggerScheduleMessage), &resp))
+		require.Nil(t, resp.WorkflowID)
+		require.NotNil(t, resp.ErrorMessage)
+	})
+}

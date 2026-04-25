@@ -15,6 +15,7 @@ func TestScheduleCRUD(t *testing.T) {
 
 	// First register the workflows
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+	RegisterWorkflow(dbosCtx, testCapturingScheduledWorkflow)
 	const customWorkflowName = "custom-schedule-workflow"
 	RegisterWorkflow(dbosCtx, testWorkflowForScheduleCustomName, WithWorkflowName(customWorkflowName))
 
@@ -29,18 +30,21 @@ func TestScheduleCRUD(t *testing.T) {
 	const workflowFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule"
 
 	t.Run("CreateDelete", func(t *testing.T) {
+		scheduledInputCapture = sync.Map{}
 		const name = "create-delete-schedule"
-		err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		const ctxValue = "test-context"
+		capturingFQN := "github.com/dbos-inc/dbos-transact-golang/dbos.testCapturingScheduledWorkflow"
+		err := CreateSchedule(dbosCtx, testCapturingScheduledWorkflow, CreateScheduleRequest{
 			ScheduleName: name,
 			Schedule:     "*/1 * * * * *",
-		}, WithScheduleContext("test-context"), WithScheduleQueueName(customQueue.Name))
+		}, WithScheduleContext(ctxValue), WithScheduleQueueName(customQueue.Name))
 		require.NoError(t, err)
 
 		schedule, err := GetSchedule(dbosCtx, name)
 		require.NoError(t, err)
 		require.NotNil(t, schedule)
 		require.Equal(t, name, schedule.ScheduleName)
-		require.Equal(t, workflowFQN, schedule.WorkflowName)
+		require.Equal(t, capturingFQN, schedule.WorkflowName)
 		require.Equal(t, "*/1 * * * * *", schedule.Schedule)
 		require.Equal(t, ScheduleStatusActive, schedule.Status)
 		require.Equal(t, customQueue.Name, schedule.QueueName)
@@ -54,14 +58,30 @@ func TestScheduleCRUD(t *testing.T) {
 			return c.getWorkflowScheduler().Entry(id).Schedule != nil
 		}, 3*time.Second, 50*time.Millisecond, "reconciler should install the cron entry")
 
-		// Scheduled ticks should enqueue workflows on the custom queue.
+		// Scheduled ticks should enqueue workflows on the custom queue and the
+		// fired workflow should receive the configured ScheduledTime + Context.
+		var firedWfID string
 		require.Eventually(t, func() bool {
 			wfs, err := ListWorkflows(dbosCtx,
 				WithWorkflowIDPrefix("sched-"+name+"-"),
 				WithQueueName(customQueue.Name),
 			)
-			return err == nil && len(wfs) > 0
-		}, 5*time.Second, 100*time.Millisecond, "scheduled ticks should land on the custom queue")
+			if err != nil || len(wfs) == 0 {
+				return false
+			}
+			for _, wf := range wfs {
+				if _, ok := scheduledInputCapture.Load(wf.ID); ok {
+					firedWfID = wf.ID
+					return true
+				}
+			}
+			return false
+		}, 10*time.Second, 100*time.Millisecond, "scheduled tick should land on the custom queue and execute")
+
+		captured, _ := scheduledInputCapture.Load(firedWfID)
+		got := captured.(ScheduledWorkflowInput)
+		require.Equal(t, ctxValue, got.Context)
+		require.False(t, got.ScheduledTime.IsZero())
 
 		err = DeleteSchedule(dbosCtx, name)
 		require.NoError(t, err)
@@ -170,6 +190,21 @@ func TestScheduleCRUD(t *testing.T) {
 		none, err = ListSchedules(dbosCtx, WithScheduleNamePrefixes("does-not-exist"))
 		require.NoError(t, err)
 		require.Empty(t, none)
+	})
+
+	t.Run("DuplicateName", func(t *testing.T) {
+		const name = "duplicate-name-schedule"
+		require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+			ScheduleName: name,
+			Schedule:     "0 0 * * * *",
+		}))
+		t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, name) })
+
+		err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+			ScheduleName: name,
+			Schedule:     "0 0 * * * *",
+		})
+		require.Error(t, err, "creating a schedule with a duplicate name must fail")
 	})
 
 	t.Run("PauseResumeSchedule", func(t *testing.T) {
@@ -403,6 +438,16 @@ func TestBackfillSchedule(t *testing.T) {
 	for _, wf := range backfilled {
 		require.Equal(t, WorkflowStatusEnqueued, wf.Status)
 	}
+
+	// Idempotency: re-running the same backfill should not create duplicate rows
+	// or bump recovery_attempts on the existing ones.
+	require.NoError(t, BackfillSchedule(dbosCtx, "backfill-schedule", start, end))
+	again, err := ListWorkflows(dbosCtx, WithWorkflowIDPrefix("sched-backfill-schedule-"))
+	require.NoError(t, err)
+	require.Equal(t, len(backfilled), len(again), "second backfill must not enqueue duplicates")
+	for _, wf := range again {
+		require.Equal(t, 0, wf.Attempts, "second backfill must not bump recovery_attempts")
+	}
 }
 
 // TestBackfillScheduleRecovery exercises the path where a backfilled workflow
@@ -472,6 +517,11 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 	require.False(t, got.ScheduledTime.IsZero(), "ScheduledTime should be populated from DB-encoded inputs")
 	require.False(t, got.ScheduledTime.Before(start.Add(-time.Second)), "ScheduledTime should be within the backfill window")
 	require.False(t, got.ScheduledTime.After(end.Add(time.Second)), "ScheduledTime should be within the backfill window")
+
+	// CreateSchedule inside the workflow is step-wrapped: must exist exactly once after recovery.
+	inner, err := ListSchedules(dbosCtx, WithScheduleNamePrefixes(target+"-inner"))
+	require.NoError(t, err)
+	require.Len(t, inner, 1)
 }
 
 func TestTriggerSchedule(t *testing.T) {
@@ -544,14 +594,19 @@ func testWorkflowForScheduleCustomName(ctx DBOSContext, input ScheduledWorkflowI
 	return "completed", nil
 }
 
-// scheduledInputCapture stores the ScheduledWorkflowInput received by
-// testCapturingScheduledWorkflow, keyed by workflow ID. Tests use it to assert
-// that scheduler/backfill/trigger paths deliver the expected payload.
 var scheduledInputCapture sync.Map
 
 func testCapturingScheduledWorkflow(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
 	wfID, _ := GetWorkflowID(ctx)
 	scheduledInputCapture.Store(wfID, input)
+	// CreateSchedule is wrapped as a step via runAsTxn when called inside a
+	// workflow. The inner cron never fires during tests.
+	if err := CreateSchedule(ctx, testCapturingScheduledWorkflow, CreateScheduleRequest{
+		ScheduleName: wfID + "-inner",
+		Schedule:     "0 0 0 1 1 *",
+	}); err != nil {
+		return nil, err
+	}
 	return "completed", nil
 }
 
@@ -619,6 +674,64 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 		)
 		return err == nil && len(after)-len(before) > 2
 	}, 5*time.Second, 100*time.Millisecond, "expected backfill to produce more than one additional successful workflow")
+}
+
+func testWorkflowExpectingApplySchedulesError(ctx DBOSContext, _ string) (string, error) {
+	err := ApplySchedules(ctx, []ApplySchedulesRequest{
+		{ScheduleName: "x", WorkflowFn: testWorkflowForSchedule, Schedule: "0 0 * * * *"},
+	})
+	if err == nil {
+		return "", nil
+	}
+	return err.Error(), nil
+}
+
+func testWorkflowExpectingBackfillScheduleError(ctx DBOSContext, _ string) (string, error) {
+	err := BackfillSchedule(ctx, "any", time.Now().Add(-time.Minute), time.Now())
+	if err == nil {
+		return "", nil
+	}
+	return err.Error(), nil
+}
+
+func testWorkflowExpectingTriggerScheduleError(ctx DBOSContext, _ string) (string, error) {
+	_, err := TriggerSchedule(ctx, "any")
+	if err == nil {
+		return "", nil
+	}
+	return err.Error(), nil
+}
+
+// TestScheduleWorkflowInternalRejections checks that ApplySchedules,
+// BackfillSchedule, and TriggerSchedule reject calls from within a workflow.
+func TestScheduleWorkflowInternalRejections(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
+	defer dbosCtx.Shutdown(10 * time.Second)
+
+	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+	RegisterWorkflow(dbosCtx, testWorkflowExpectingApplySchedulesError)
+	RegisterWorkflow(dbosCtx, testWorkflowExpectingBackfillScheduleError)
+	RegisterWorkflow(dbosCtx, testWorkflowExpectingTriggerScheduleError)
+	require.NoError(t, dbosCtx.Launch())
+
+	cases := []struct {
+		name string
+		fn   Workflow[string, string]
+		want string
+	}{
+		{"ApplySchedules", testWorkflowExpectingApplySchedulesError, "ApplySchedules cannot be called from within a workflow"},
+		{"BackfillSchedule", testWorkflowExpectingBackfillScheduleError, "BackfillSchedule cannot be called from within a workflow"},
+		{"TriggerSchedule", testWorkflowExpectingTriggerScheduleError, "TriggerSchedule cannot be called from within a workflow"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handle, err := RunWorkflow(dbosCtx, tc.fn, "")
+			require.NoError(t, err)
+			result, err := handle.GetResult()
+			require.NoError(t, err)
+			require.Contains(t, result, tc.want)
+		})
+	}
 }
 
 // TestScheduleCronTimezone verifies that a non-empty CronTimezone is applied
