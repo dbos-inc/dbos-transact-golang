@@ -4529,44 +4529,7 @@ func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (strin
 		return "", errors.New("DBOS.TriggerSchedule cannot be called from within a workflow")
 	}
 
-	existing, err := c.GetSchedule(c, scheduleName)
-	if err != nil {
-		return "", fmt.Errorf("failed to get schedule: %w", err)
-	}
-	if existing == nil {
-		return "", fmt.Errorf("schedule not found: %s", scheduleName)
-	}
-
-	fqn, ok := c.workflowCustomNametoFQN.Load(existing.WorkflowName)
-	if !ok {
-		return "", fmt.Errorf("workflow not found: %s", existing.WorkflowName)
-	}
-	value, ok := c.workflowRegistry.Load(fqn)
-	if !ok {
-		return "", fmt.Errorf("workflow not found: %s", existing.WorkflowName)
-	}
-	entry, ok := value.(WorkflowRegistryEntry)
-	if !ok {
-		return "", fmt.Errorf("invalid workflow registry entry for: %s", existing.WorkflowName)
-	}
-
-	scheduledTime := time.Now()
-	workflowID := fmt.Sprintf("sched-%s-trigger-%s", scheduleName, scheduledTime.Format(time.RFC3339Nano))
-
-	ser := resolveEncoder(c)
-	encodedInput, err := ser.Encode(ScheduledWorkflowInput{
-		ScheduledTime: scheduledTime,
-		Context:       existing.Context,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to encode scheduled workflow input: %w", err)
-	}
-	_, err = entry.wrappedFunction(c, encodedInput, ser.Name(), WithWorkflowID(workflowID), withWorkflowName(entry.FQN))
-	if err != nil {
-		return "", fmt.Errorf("failed to trigger schedule: %w", err)
-	}
-
-	return workflowID, nil
+	return c.systemDB.triggerSchedule(c, scheduleName)
 }
 
 // TriggerSchedule triggers a schedule immediately, returning the workflow ID.
