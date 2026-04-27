@@ -229,6 +229,15 @@ func TestScheduleCRUD(t *testing.T) {
 		schedule, err = GetSchedule(dbosCtx, name)
 		require.NoError(t, err)
 		require.Equal(t, ScheduleStatusActive, schedule.Status)
+
+		// Pausing or resuming a non-existent schedule must error.
+		err = PauseSchedule(dbosCtx, "does-not-exist")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "schedule not found")
+
+		err = ResumeSchedule(dbosCtx, "does-not-exist")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "schedule not found")
 	})
 }
 

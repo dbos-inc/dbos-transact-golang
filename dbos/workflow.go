@@ -4163,24 +4163,6 @@ type listSchedulesOptions struct {
 	scheduleNamePrefixes []string
 }
 
-// ListSchedulesOption is a functional option for configuring schedule listing parameters.
-type ListSchedulesOption func(*listSchedulesOptions)
-
-// WithScheduleStatuses filters schedules by the specified status(es).
-func WithScheduleStatuses(statuses ...ScheduleStatus) ListSchedulesOption {
-	return func(o *listSchedulesOptions) { o.statuses = statuses }
-}
-
-// WithScheduleWorkflowNames filters schedules by the specified workflow name(s).
-func WithScheduleWorkflowNames(names ...string) ListSchedulesOption {
-	return func(o *listSchedulesOptions) { o.workflowNames = names }
-}
-
-// WithScheduleNamePrefixes filters schedules by schedule name prefix(es).
-func WithScheduleNamePrefixes(prefixes ...string) ListSchedulesOption {
-	return func(o *listSchedulesOptions) { o.scheduleNamePrefixes = prefixes }
-}
-
 // CreateSchedule creates a new schedule for a workflow. The reconciler loop
 // picks the new schedule up on its next tick and installs it in the cron
 // scheduler. The fn must already be registered via RegisterWorkflow.
@@ -4474,6 +4456,24 @@ func (c *dbosContext) ListSchedules(_ DBOSContext, opts ...ListSchedulesOption) 
 	return retryWithResult(c, func() ([]WorkflowSchedule, error) {
 		return c.systemDB.listSchedules(c, dbInput)
 	}, withRetrierLogger(c.logger))
+}
+
+// ListSchedulesOption is a functional option for configuring schedule listing parameters.
+type ListSchedulesOption func(*listSchedulesOptions)
+
+// WithScheduleStatuses filters schedules by the specified status(es).
+func WithScheduleStatuses(statuses ...ScheduleStatus) ListSchedulesOption {
+	return func(o *listSchedulesOptions) { o.statuses = statuses }
+}
+
+// WithScheduleWorkflowNames filters schedules by the specified workflow name(s).
+func WithScheduleWorkflowNames(names ...string) ListSchedulesOption {
+	return func(o *listSchedulesOptions) { o.workflowNames = names }
+}
+
+// WithScheduleNamePrefixes filters schedules by schedule name prefix(es).
+func WithScheduleNamePrefixes(prefixes ...string) ListSchedulesOption {
+	return func(o *listSchedulesOptions) { o.scheduleNamePrefixes = prefixes }
 }
 
 // ListSchedules lists schedules, optionally filtered by the supplied options.
