@@ -3735,7 +3735,7 @@ func (s *sysDB) triggerSchedule(ctx context.Context, scheduleName string) (strin
 	}
 
 	now := time.Now()
-	workflowID := fmt.Sprintf("sched-%s-trigger-%s", scheduleName, now.Format(time.RFC3339))
+	workflowID := fmt.Sprintf("sched-%s-trigger-%s", scheduleName, now.Format(time.RFC3339Nano))
 
 	ser := resolveEncoder(ctx)
 	encodedInput, err := ser.Encode(ScheduledWorkflowInput{

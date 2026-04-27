@@ -160,7 +160,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 	}
 
 	return func(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
-		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, input.ScheduledTime)
+		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, input.ScheduledTime.Format(time.RFC3339))
 
 		// Skip if this tick's workflow already exists. Another executor may have enqueued it.
 		existing, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{workflowIDs: []string{wfID}})

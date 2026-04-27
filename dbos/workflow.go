@@ -4551,7 +4551,7 @@ func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (strin
 	}
 
 	scheduledTime := time.Now()
-	workflowID := fmt.Sprintf("sched-%s-%s", scheduleName, scheduledTime.Format(time.RFC3339))
+	workflowID := fmt.Sprintf("sched-%s-trigger-%s", scheduleName, scheduledTime.Format(time.RFC3339Nano))
 
 	ser := resolveEncoder(c)
 	encodedInput, err := ser.Encode(ScheduledWorkflowInput{
