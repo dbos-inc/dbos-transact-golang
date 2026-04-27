@@ -427,21 +427,25 @@ func TestBackfillSchedule(t *testing.T) {
 	start := time.Now().Add(-1 * time.Minute)
 	end := time.Now()
 
-	err = BackfillSchedule(dbosCtx, "backfill-schedule", start, end)
+	ids, err := BackfillSchedule(dbosCtx, "backfill-schedule", start, end)
 	require.NoError(t, err)
 
 	// A `*/1 * * * * *` schedule over a one-minute window should enqueue
 	// roughly 60 workflows; allow some slack for clock alignment.
+	require.GreaterOrEqual(t, len(ids), 50, "backfill should have returned ~60 IDs, got %d", len(ids))
 	backfilled, err := ListWorkflows(dbosCtx, WithWorkflowIDPrefix("sched-backfill-schedule-"))
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(backfilled), 50, "backfill should have enqueued ~60 workflows, got %d", len(backfilled))
+	require.Equal(t, len(ids), len(backfilled), "returned IDs should match enqueued workflows")
 	for _, wf := range backfilled {
 		require.Equal(t, WorkflowStatusEnqueued, wf.Status)
 	}
 
 	// Idempotency: re-running the same backfill should not create duplicate rows
-	// or bump recovery_attempts on the existing ones.
-	require.NoError(t, BackfillSchedule(dbosCtx, "backfill-schedule", start, end))
+	// or bump recovery_attempts on the existing ones. Returned IDs should still
+	// match the existing rows so callers can poll them.
+	idsAgain, err := BackfillSchedule(dbosCtx, "backfill-schedule", start, end)
+	require.NoError(t, err)
+	require.Equal(t, len(ids), len(idsAgain), "second backfill must return the same IDs")
 	again, err := ListWorkflows(dbosCtx, WithWorkflowIDPrefix("sched-backfill-schedule-"))
 	require.NoError(t, err)
 	require.Equal(t, len(backfilled), len(again), "second backfill must not enqueue duplicates")
@@ -687,7 +691,7 @@ func testWorkflowExpectingApplySchedulesError(ctx DBOSContext, _ string) (string
 }
 
 func testWorkflowExpectingBackfillScheduleError(ctx DBOSContext, _ string) (string, error) {
-	err := BackfillSchedule(ctx, "any", time.Now().Add(-time.Minute), time.Now())
+	_, err := BackfillSchedule(ctx, "any", time.Now().Add(-time.Minute), time.Now())
 	if err == nil {
 		return "", nil
 	}

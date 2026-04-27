@@ -1913,11 +1913,13 @@ func TestClientSchedules(t *testing.T) {
 
 		start := time.Now().Add(-5 * time.Second)
 		end := time.Now()
-		require.NoError(t, c.BackfillSchedule(name, start, end))
+		ids, err := c.BackfillSchedule(name, start, end)
+		require.NoError(t, err)
+		require.NotEmpty(t, ids)
 
 		backfilled, err := ListWorkflows(serverCtx, WithWorkflowIDPrefix("sched-"+name+"-"))
 		require.NoError(t, err)
-		require.NotEmpty(t, backfilled)
+		require.Equal(t, len(ids), len(backfilled))
 	})
 
 	t.Run("TriggerSchedule", func(t *testing.T) {

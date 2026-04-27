@@ -48,7 +48,7 @@ type Client interface {
 	PauseSchedule(scheduleName string) error
 	ResumeSchedule(scheduleName string) error
 	DeleteSchedule(scheduleName string) error
-	BackfillSchedule(scheduleName string, start, end time.Time) error
+	BackfillSchedule(scheduleName string, start, end time.Time) ([]string, error)
 	TriggerSchedule(scheduleName string) (string, error)
 
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
@@ -739,8 +739,9 @@ func (c *client) DeleteSchedule(scheduleName string) error {
 }
 
 // BackfillSchedule enqueues all executions of the named schedule that would
-// have run between start and end. Already-executed times are skipped.
-func (c *client) BackfillSchedule(scheduleName string, start, end time.Time) error {
+// have run between start and end. Already-executed times are skipped. Returns
+// the IDs of the workflows enqueued for the backfilled time slots.
+func (c *client) BackfillSchedule(scheduleName string, start, end time.Time) ([]string, error) {
 	return c.dbosCtx.BackfillSchedule(c.dbosCtx, scheduleName, start, end)
 }
 

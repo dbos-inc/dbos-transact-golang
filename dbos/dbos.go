@@ -181,7 +181,7 @@ type DBOSContext interface {
 	DeleteSchedule(_ DBOSContext, scheduleName string) error                                                                 // Delete a schedule
 	GetSchedule(_ DBOSContext, scheduleName string) (*WorkflowSchedule, error)                                               // Get a schedule by name
 	ListSchedules(_ DBOSContext, opts ...ListSchedulesOption) ([]WorkflowSchedule, error)                                    // List schedules with optional filters
-	BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) error                               // Backfill a schedule
+	BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) ([]string, error)                  // Backfill a schedule, returning the IDs of the enqueued workflows
 	TriggerSchedule(_ DBOSContext, scheduleName string) (string, error)                                                      // Trigger a schedule immediately
 
 	// Alert handling

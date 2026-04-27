@@ -4479,42 +4479,49 @@ func ListSchedules(ctx DBOSContext, opts ...ListSchedulesOption) ([]WorkflowSche
 	return ctx.ListSchedules(ctx, opts...)
 }
 
-func (c *dbosContext) BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) error {
+func (c *dbosContext) BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) ([]string, error) {
 	if state, ok := c.Value(workflowStateKey).(*workflowState); ok && state != nil {
-		return errors.New("DBOS.BackfillSchedule cannot be called from within a workflow")
+		return nil, errors.New("DBOS.BackfillSchedule cannot be called from within a workflow")
 	}
 	if scheduleName == "" {
-		return errors.New("schedule_name is required")
+		return nil, errors.New("schedule_name is required")
 	}
 
 	existing, err := c.GetSchedule(c, scheduleName)
 	if err != nil {
-		return fmt.Errorf("failed to get schedule: %w", err)
+		return nil, fmt.Errorf("failed to get schedule: %w", err)
 	}
 	if existing == nil {
-		return fmt.Errorf("schedule not found: %s", scheduleName)
+		return nil, fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
-	return retry(c, func() error {
-		_, err := c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
+	var ids []string
+	err = retry(c, func() error {
+		var bfErr error
+		ids, bfErr = c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
 			ScheduleName: scheduleName,
 			Schedule:     existing.Schedule,
 			StartTime:    start,
 			EndTime:      end,
 		})
-		return err
+		return bfErr
 	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // BackfillSchedule backfills a schedule, executing it for each time slot in the range.
-// Already-executed times are automatically skipped.
+// Already-executed times are automatically skipped. Returns the IDs of the
+// workflows enqueued for the backfilled time slots.
 //
 // Example:
 //
-//	err := dbos.BackfillSchedule(ctx, "my-schedule", startTime, endTime)
-func BackfillSchedule(ctx DBOSContext, scheduleName string, start, end time.Time) error {
+//	ids, err := dbos.BackfillSchedule(ctx, "my-schedule", startTime, endTime)
+func BackfillSchedule(ctx DBOSContext, scheduleName string, start, end time.Time) ([]string, error) {
 	if ctx == nil {
-		return errors.New("ctx cannot be nil")
+		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.BackfillSchedule(ctx, scheduleName, start, end)
 }
