@@ -4526,27 +4526,32 @@ func BackfillSchedule(ctx DBOSContext, scheduleName string, start, end time.Time
 	return ctx.BackfillSchedule(ctx, scheduleName, start, end)
 }
 
-func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (string, error) {
+func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (WorkflowHandle[any], error) {
 	if scheduleName == "" {
-		return "", errors.New("schedule_name is required")
+		return nil, errors.New("schedule_name is required")
 	}
 
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	if ok && workflowState != nil {
-		return "", errors.New("DBOS.TriggerSchedule cannot be called from within a workflow")
+		return nil, errors.New("DBOS.TriggerSchedule cannot be called from within a workflow")
 	}
 
-	return c.systemDB.triggerSchedule(c, scheduleName)
+	workflowID, err := c.systemDB.triggerSchedule(c, scheduleName)
+	if err != nil {
+		return nil, err
+	}
+	return newWorkflowPollingHandle[any](c, workflowID), nil
 }
 
-// TriggerSchedule triggers a schedule immediately, returning the workflow ID.
+// TriggerSchedule triggers a schedule immediately, returning a handle to the
+// enqueued workflow.
 //
 // Example:
 //
-//	workflowID, err := dbos.TriggerSchedule(ctx, "my-schedule")
-func TriggerSchedule(ctx DBOSContext, scheduleName string) (string, error) {
+//	handle, err := dbos.TriggerSchedule(ctx, "my-schedule")
+func TriggerSchedule(ctx DBOSContext, scheduleName string) (WorkflowHandle[any], error) {
 	if ctx == nil {
-		return "", errors.New("ctx cannot be nil")
+		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.TriggerSchedule(ctx, scheduleName)
 }

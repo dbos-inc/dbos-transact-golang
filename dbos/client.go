@@ -49,7 +49,7 @@ type Client interface {
 	ResumeSchedule(scheduleName string) error
 	DeleteSchedule(scheduleName string) error
 	BackfillSchedule(scheduleName string, start, end time.Time) ([]string, error)
-	TriggerSchedule(scheduleName string) (string, error)
+	TriggerSchedule(scheduleName string) (WorkflowHandle[any], error)
 
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
@@ -746,14 +746,10 @@ func (c *client) BackfillSchedule(scheduleName string, start, end time.Time) ([]
 }
 
 // TriggerSchedule immediately enqueues the named schedule's workflow on its
-// configured queue (falling back to the internal queue) and returns the
-// workflow ID.
-func (c *client) TriggerSchedule(scheduleName string) (string, error) {
-	dbosCtx, ok := c.dbosCtx.(*dbosContext)
-	if !ok {
-		return "", errors.New("invalid DBOS context")
-	}
-	return dbosCtx.systemDB.triggerSchedule(dbosCtx, scheduleName)
+// configured queue (falling back to the internal queue) and returns a handle
+// to the enqueued workflow.
+func (c *client) TriggerSchedule(scheduleName string) (WorkflowHandle[any], error) {
+	return c.dbosCtx.TriggerSchedule(c.dbosCtx, scheduleName)
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.

@@ -1931,13 +1931,12 @@ func TestClientSchedules(t *testing.T) {
 		}))
 		t.Cleanup(func() { _ = c.DeleteSchedule(name) })
 
-		workflowID, err := c.TriggerSchedule(name)
+		handle, err := c.TriggerSchedule(name)
 		require.NoError(t, err)
-		require.Contains(t, workflowID, name)
+		require.NotNil(t, handle)
+		require.Contains(t, handle.GetWorkflowID(), name)
 
 		// Server context should dequeue and execute the triggered workflow.
-		handle, err := RetrieveWorkflow[any](serverCtx, workflowID)
-		require.NoError(t, err)
 		result, err := handle.GetResult()
 		require.NoError(t, err)
 		require.Equal(t, "completed", result)

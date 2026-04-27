@@ -545,14 +545,14 @@ func TestTriggerSchedule(t *testing.T) {
 	require.NoError(t, err)
 
 	beforeTrigger := time.Now()
-	workflowID, err := TriggerSchedule(dbosCtx, "trigger-schedule")
+	handle, err := TriggerSchedule(dbosCtx, "trigger-schedule")
 	afterTrigger := time.Now()
 	require.NoError(t, err)
+	require.NotNil(t, handle)
+	workflowID := handle.GetWorkflowID()
 	require.NotEmpty(t, workflowID)
 	require.Contains(t, workflowID, "trigger-schedule")
 
-	handle, err := RetrieveWorkflow[any](dbosCtx, workflowID)
-	require.NoError(t, err)
 	result, err := handle.GetResult()
 	require.NoError(t, err)
 	require.Equal(t, "completed", result)
