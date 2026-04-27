@@ -683,19 +683,9 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	// Cancel the context to signal all resources to stop
 	c.ctxCancelFunc(errors.New("DBOS cancellation initiated"))
 
-	// Wait for all workflows to finish
-	c.logger.Debug("Waiting for all workflows to finish")
-	done := make(chan struct{})
-	go func() {
-		c.workflowsWg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		c.logger.Debug("All workflows completed")
-	case <-time.After(timeout):
-		c.logger.Warn("Timeout waiting for workflows to complete", "timeout", timeout)
-	}
+	// Stop workflow producers before draining in-flight workflows. Producers
+	// (.e.g, queue runner) call RunWorkflow, which calls workflowsWg.Add(1);
+	// waiting on the WaitGroup before they finish races with those Adds.
 
 	// Wait for queue runner to finish
 	if c.queueRunner != nil && c.launched.Load() {
@@ -737,6 +727,20 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 		} else {
 			c.logger.Debug("Admin server shutdown complete")
 		}
+	}
+
+	// Now that all producers are stopped, wait for in-flight workflows to finish
+	c.logger.Debug("Waiting for all workflows to finish")
+	done := make(chan struct{})
+	go func() {
+		c.workflowsWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		c.logger.Debug("All workflows completed")
+	case <-time.After(timeout):
+		c.logger.Warn("Timeout waiting for workflows to complete", "timeout", timeout)
 	}
 
 	// Close the system database
