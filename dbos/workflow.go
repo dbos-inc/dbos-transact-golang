@@ -4084,6 +4084,7 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, in
 		ScheduleID:        scheduleID,
 		ScheduleName:      input.ScheduleName,
 		WorkflowName:      workflowName,
+		WorkflowClassName: o.workflowClassName,
 		Schedule:          input.Schedule,
 		Context:           string(contextJSON),
 		Status:            ScheduleStatusActive,
@@ -4118,6 +4119,7 @@ type createScheduleOptions struct {
 	automaticBackfill bool
 	cronTimezone      string
 	queueName         string
+	workflowClassName string
 }
 
 type CreateScheduleOption func(*createScheduleOptions)
@@ -4144,6 +4146,14 @@ func WithCronTimezone(tz string) CreateScheduleOption {
 // instead of the default internal queue.
 func WithScheduleQueueName(name string) CreateScheduleOption {
 	return func(o *createScheduleOptions) { o.queueName = name }
+}
+
+// WithScheduleWorkflowClassName records a class/namespace name on the schedule
+// for cross-language dispatch. Use this when the scheduled workflow is owned
+// by a non-Go runtime (e.g. a Python class-based workflow) so the stored
+// schedule and Conductor view carry the correct class name.
+func WithScheduleWorkflowClassName(name string) CreateScheduleOption {
+	return func(o *createScheduleOptions) { o.workflowClassName = name }
 }
 
 // listSchedulesOptions holds configuration parameters for listing schedules.
