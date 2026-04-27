@@ -1832,8 +1832,8 @@ func TestClientSchedules(t *testing.T) {
 
 	const workflowFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule"
 
-	t.Run("CreateGetDelete", func(t *testing.T) {
-		const name = "client-create-schedule"
+	t.Run("CreateGetListPauseResumeDelete", func(t *testing.T) {
+		const name = "client-schedule-lifecycle"
 		require.NoError(t, c.CreateSchedule(ClientScheduleInput{
 			ScheduleName:      name,
 			WorkflowName:      workflowFQN,
@@ -1848,28 +1848,13 @@ func TestClientSchedules(t *testing.T) {
 		require.Equal(t, workflowFQN, got.WorkflowName)
 		require.Equal(t, "MyClass", got.WorkflowClassName)
 
-		require.NoError(t, c.DeleteSchedule(name))
-		got, err = c.GetSchedule(name)
-		require.NoError(t, err)
-		require.Nil(t, got)
-	})
-
-	t.Run("ListPauseResume", func(t *testing.T) {
-		const name = "client-list-pause-resume"
-		require.NoError(t, c.CreateSchedule(ClientScheduleInput{
-			ScheduleName: name,
-			WorkflowName: workflowFQN,
-			Schedule:     "0 0 * * * *",
-		}))
-		t.Cleanup(func() { _ = c.DeleteSchedule(name) })
-
 		listed, err := c.ListSchedules(WithScheduleNamePrefixes(name))
 		require.NoError(t, err)
 		require.Len(t, listed, 1)
 		require.Equal(t, name, listed[0].ScheduleName)
 
 		require.NoError(t, c.PauseSchedule(name))
-		got, err := c.GetSchedule(name)
+		got, err = c.GetSchedule(name)
 		require.NoError(t, err)
 		require.Equal(t, ScheduleStatusPaused, got.Status)
 
@@ -1877,6 +1862,11 @@ func TestClientSchedules(t *testing.T) {
 		got, err = c.GetSchedule(name)
 		require.NoError(t, err)
 		require.Equal(t, ScheduleStatusActive, got.Status)
+
+		require.NoError(t, c.DeleteSchedule(name))
+		got, err = c.GetSchedule(name)
+		require.NoError(t, err)
+		require.Nil(t, got)
 	})
 
 	t.Run("ApplySchedules", func(t *testing.T) {
