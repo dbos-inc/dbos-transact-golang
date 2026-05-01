@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -446,15 +447,21 @@ func TestAdminServer(t *testing.T) {
 		// Should have exactly 2 workflows that we just created
 		assert.Equal(t, 2, len(workflows1), "Expected exactly 2 workflows with start_time before timeBetween")
 
-		// Verify timestamps are epoch milliseconds
+		// Verify timestamps are epoch-millisecond strings (matches the DBOS console schema)
 		timeBetweenMillis := timeBetween.UnixMilli()
+		parseCreatedAt := func(wf map[string]any) int64 {
+			s, ok := wf["CreatedAt"].(string)
+			require.True(t, ok, "CreatedAt should be a string, got %T", wf["CreatedAt"])
+			ms, err := strconv.ParseInt(s, 10, 64)
+			require.NoError(t, err, "CreatedAt should parse as int64")
+			return ms
+		}
 		for _, wf := range workflows1 {
-			_, ok := wf["CreatedAt"].(float64)
-			require.True(t, ok, "CreatedAt should be a number")
+			parseCreatedAt(wf)
 		}
 		// Verify the timestamp is around timeBetween (within 2 seconds before or after)
-		assert.Less(t, int64(workflows1[0]["CreatedAt"].(float64)), timeBetweenMillis, "first workflow CreatedAt should be before timeBetween")
-		assert.Greater(t, int64(workflows1[1]["CreatedAt"].(float64)), timeBetweenMillis, "second workflow CreatedAt should be before timeBetween")
+		assert.Less(t, parseCreatedAt(workflows1[0]), timeBetweenMillis, "first workflow CreatedAt should be before timeBetween")
+		assert.Greater(t, parseCreatedAt(workflows1[1]), timeBetweenMillis, "second workflow CreatedAt should be before timeBetween")
 
 		// Verify both workflow IDs are present
 		foundIDs1 := make(map[string]bool)

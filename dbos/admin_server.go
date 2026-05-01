@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -129,30 +130,17 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 		"Input":              ws.Input,
 	}
 
-	// Convert time fields to UTC Unix timestamps (milliseconds)
-	if !ws.CreatedAt.IsZero() {
-		result["CreatedAt"] = ws.CreatedAt.UTC().UnixMilli()
-	} else {
-		result["CreatedAt"] = nil
+	formatEpochMs := func(t time.Time) any {
+		if t.IsZero() {
+			return nil
+		}
+		return strconv.FormatInt(t.UTC().UnixMilli(), 10)
 	}
 
-	if !ws.UpdatedAt.IsZero() {
-		result["UpdatedAt"] = ws.UpdatedAt.UTC().UnixMilli()
-	} else {
-		result["UpdatedAt"] = nil
-	}
-
-	if !ws.Deadline.IsZero() {
-		result["WorkflowDeadlineEpochMS"] = ws.Deadline.UTC().UnixMilli()
-	} else {
-		result["WorkflowDeadlineEpochMS"] = nil
-	}
-
-	if !ws.StartedAt.IsZero() {
-		result["StartedAt"] = ws.StartedAt.UTC().UnixMilli()
-	} else {
-		result["StartedAt"] = nil
-	}
+	result["CreatedAt"] = formatEpochMs(ws.CreatedAt)
+	result["UpdatedAt"] = formatEpochMs(ws.UpdatedAt)
+	result["WorkflowDeadlineEpochMS"] = formatEpochMs(ws.Deadline)
+	result["StartedAt"] = formatEpochMs(ws.StartedAt)
 
 	if ws.Input != nil {
 		// If there is a value, it should be a JSON string
