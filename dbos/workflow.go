@@ -1284,7 +1284,8 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		workflowCancelFunction := func() {
 			c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
 			err = retry(c, func() error {
-				return c.systemDB.cancelWorkflow(uncancellableCtx, cancelWorkflowDBInput{workflowID: workflowID})
+				_, err := c.systemDB.cancelWorkflows(uncancellableCtx, cancelWorkflowsDBInput{workflowIDs: []string{workflowID}})
+				return err
 			}, withRetrierLogger(c.logger))
 			if err != nil {
 				c.logger.Error("Failed to cancel workflow", "error", err)
@@ -3063,17 +3064,24 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle
 func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
+	var found []string
+	var err error
 	if isWithinWorkflow {
-		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) (any, error) {
-			err := c.systemDB.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflowID, tx: tx})
-			return "", err
+		found, err = runAsTxn(c, func(ctx context.Context, tx pgx.Tx) ([]string, error) {
+			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{workflowIDs: []string{workflowID}, tx: tx})
 		}, WithStepName("DBOS.cancelWorkflow"))
-		return err
 	} else {
-		return retry(c, func() error {
-			return c.systemDB.cancelWorkflow(c, cancelWorkflowDBInput{workflowID: workflowID})
+		found, err = retryWithResult(c, func() ([]string, error) {
+			return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{workflowIDs: []string{workflowID}})
 		}, withRetrierLogger(c.logger))
 	}
+	if err != nil {
+		return err
+	}
+	if len(found) == 0 {
+		return newNonExistentWorkflowError(workflowID)
+	}
+	return nil
 }
 
 // CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED and removing it from the queue.
@@ -3096,6 +3104,40 @@ func CancelWorkflow(ctx DBOSContext, workflowID string) error {
 		return errors.New("ctx cannot be nil")
 	}
 	return ctx.CancelWorkflow(ctx, workflowID)
+}
+
+func (c *dbosContext) CancelWorkflows(_ DBOSContext, workflowIDs []string) error {
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if isWithinWorkflow {
+		_, err := runAsTxn(c, func(ctx context.Context, tx pgx.Tx) ([]string, error) {
+			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{workflowIDs: workflowIDs, tx: tx})
+		}, WithStepName("DBOS.cancelWorkflows"))
+		return err
+	}
+	_, err := retryWithResult(c, func() ([]string, error) {
+		return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{workflowIDs: workflowIDs})
+	}, withRetrierLogger(c.logger))
+	return err
+}
+
+// CancelWorkflows cancels multiple workflows in a single database round-trip.
+// Each workflow that exists and is not already in a terminal state (SUCCESS, ERROR, CANCELLED)
+// is moved to CANCELLED and removed from its queue. Missing or already-terminal IDs are silently
+// skipped. Unlike the singular CancelWorkflow, this function does not return
+// NonExistentWorkflowError when some IDs are missing.
+//
+// Example:
+//
+//	err := dbos.CancelWorkflows(ctx, []string{"wf-1", "wf-2"})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+func CancelWorkflows(ctx DBOSContext, workflowIDs []string) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.CancelWorkflows(ctx, workflowIDs)
 }
 
 // SetWorkflowDelayOption configures how the delay is set on a workflow.

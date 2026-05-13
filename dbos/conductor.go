@@ -464,18 +464,22 @@ func (c *conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 		c.logger.Error("Failed to parse cancel workflow request", "error", err)
 		return fmt.Errorf("failed to parse cancel workflow request: %w", err)
 	}
-	c.logger.Debug("Handling cancel workflow request", "workflow_id", req.WorkflowID, "request_id", requestID)
+	workflowIDs := req.WorkflowIDs
+	if len(workflowIDs) == 0 && req.WorkflowID != "" {
+		workflowIDs = []string{req.WorkflowID}
+	}
+	c.logger.Debug("Handling cancel workflow request", "workflow_ids", workflowIDs, "request_id", requestID)
 
 	success := true
 	var errorMsg *string
 
-	if err := c.dbosCtx.CancelWorkflow(c.dbosCtx, req.WorkflowID); err != nil {
-		c.logger.Error("Failed to cancel workflow", "workflow_id", req.WorkflowID, "error", err)
-		errStr := fmt.Sprintf("failed to cancel workflow: %v", err)
+	if err := c.dbosCtx.CancelWorkflows(c.dbosCtx, workflowIDs); err != nil {
+		c.logger.Error("Failed to cancel workflows", "workflow_ids", workflowIDs, "error", err)
+		errStr := fmt.Sprintf("failed to cancel workflows: %v", err)
 		errorMsg = &errStr
 		success = false
 	} else {
-		c.logger.Info("Successfully cancelled workflow", "workflow_id", req.WorkflowID)
+		c.logger.Info("Successfully cancelled workflows", "workflow_ids", workflowIDs)
 	}
 
 	response := cancelWorkflowConductorResponse{
@@ -498,7 +502,11 @@ func (c *conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 		c.logger.Error("Failed to parse resume workflow request", "error", err)
 		return fmt.Errorf("failed to parse resume workflow request: %w", err)
 	}
-	c.logger.Debug("Handling resume workflow request", "workflow_id", req.WorkflowID, "request_id", requestID)
+	workflowIDs := req.WorkflowIDs
+	if len(workflowIDs) == 0 && req.WorkflowID != "" {
+		workflowIDs = []string{req.WorkflowID}
+	}
+	c.logger.Debug("Handling resume workflow request", "workflow_ids", workflowIDs, "request_id", requestID)
 
 	success := true
 	var errorMsg *string
@@ -507,14 +515,14 @@ func (c *conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 	if req.QueueName != nil {
 		resumeOpts = append(resumeOpts, WithResumeQueue(*req.QueueName))
 	}
-	_, err := c.dbosCtx.ResumeWorkflow(c.dbosCtx, req.WorkflowID, resumeOpts...)
+	_, err := c.dbosCtx.ResumeWorkflows(c.dbosCtx, workflowIDs, resumeOpts...)
 	if err != nil {
-		c.logger.Error("Failed to resume workflow", "workflow_id", req.WorkflowID, "error", err)
-		errStr := fmt.Sprintf("failed to resume workflow: %v", err)
+		c.logger.Error("Failed to resume workflows", "workflow_ids", workflowIDs, "error", err)
+		errStr := fmt.Sprintf("failed to resume workflows: %v", err)
 		errorMsg = &errStr
 		success = false
 	} else {
-		c.logger.Info("Successfully resumed workflow", "workflow_id", req.WorkflowID)
+		c.logger.Info("Successfully resumed workflows", "workflow_ids", workflowIDs)
 	}
 
 	response := resumeWorkflowConductorResponse{
