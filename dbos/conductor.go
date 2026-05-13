@@ -503,7 +503,11 @@ func (c *conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 	success := true
 	var errorMsg *string
 
-	_, err := c.dbosCtx.ResumeWorkflow(c.dbosCtx, req.WorkflowID)
+	var resumeOpts []ResumeWorkflowOption
+	if req.QueueName != nil {
+		resumeOpts = append(resumeOpts, WithResumeQueue(*req.QueueName))
+	}
+	_, err := c.dbosCtx.ResumeWorkflow(c.dbosCtx, req.WorkflowID, resumeOpts...)
 	if err != nil {
 		c.logger.Error("Failed to resume workflow", "workflow_id", req.WorkflowID, "error", err)
 		errStr := fmt.Sprintf("failed to resume workflow: %v", err)
@@ -968,6 +972,12 @@ func (c *conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	}
 	if req.Body.ApplicationVersion != nil {
 		input.ApplicationVersion = *req.Body.ApplicationVersion
+	}
+	if req.Body.QueueName != nil {
+		input.QueueName = *req.Body.QueueName
+	}
+	if req.Body.QueuePartitionKey != nil {
+		input.QueuePartitionKey = *req.Body.QueuePartitionKey
 	}
 
 	// Execute the fork workflow

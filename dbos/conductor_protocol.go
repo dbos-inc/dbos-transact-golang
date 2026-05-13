@@ -360,6 +360,8 @@ type forkWorkflowConductorRequestBody struct {
 	StartStep          int     `json:"start_step"`
 	ApplicationVersion *string `json:"application_version,omitempty"`
 	NewWorkflowID      *string `json:"new_workflow_id,omitempty"`
+	QueueName          *string `json:"queue_name,omitempty"`
+	QueuePartitionKey  *string `json:"queue_partition_key,omitempty"`
 }
 
 // forkWorkflowConductorRequest is sent by the conductor to fork a workflow
@@ -414,7 +416,8 @@ type existPendingWorkflowsConductorResponse struct {
 // resumeWorkflowConductorRequest is sent by the conductor to resume a workflow
 type resumeWorkflowConductorRequest struct {
 	baseMessage
-	WorkflowID string `json:"workflow_id"`
+	WorkflowID string  `json:"workflow_id"`
+	QueueName  *string `json:"queue_name,omitempty"`
 }
 
 // resumeWorkflowConductorResponse is sent in response to resume workflow requests

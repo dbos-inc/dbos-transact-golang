@@ -1449,6 +1449,7 @@ type forkWorkflowDBInput struct {
 	startStep          int
 	applicationVersion string
 	queueName          string
+	queuePartitionKey  string
 	tx                 pgx.Tx
 }
 
@@ -1511,18 +1512,24 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		application_version,
 		application_id,
 		queue_name,
+		queue_partition_key,
 		inputs,
 		created_at,
 		updated_at,
 		recovery_attempts,
 		forked_from,
 		serialization
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`, pgx.Identifier{s.schema}.Sanitize())
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`, pgx.Identifier{s.schema}.Sanitize())
 
 	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
 	authenticatedRoles, err := json.Marshal(originalWorkflow.AuthenticatedRoles)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal the authenticated roles: %w", err)
+	}
+
+	var queuePartitionKey any
+	if input.queuePartitionKey != "" {
+		queuePartitionKey = input.queuePartitionKey
 	}
 
 	_, err = execCtx(ctx, insertQuery,
@@ -1535,6 +1542,7 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		&appVersion,
 		originalWorkflow.ApplicationID,
 		queueName,
+		queuePartitionKey,
 		originalWorkflow.Input, // encoded
 		time.Now().UnixMilli(),
 		time.Now().UnixMilli(),

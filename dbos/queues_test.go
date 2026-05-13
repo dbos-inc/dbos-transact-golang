@@ -1781,6 +1781,45 @@ func TestListenQueues(t *testing.T) {
 		assert.Equal(t, forkTargetQueue.Name, status.QueueName, "forked workflow should be attributed to the custom queue")
 	})
 
+	t.Run("ForkWorkflowToPartitionedQueue", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+		forkPartitionedQueue := NewWorkflowQueue(dbosCtx, "fork-partitioned-queue",
+			WithPartitionQueue(),
+			WithQueueBasePollingInterval(50*time.Millisecond),
+			WithQueueMaxPollingInterval(500*time.Millisecond))
+
+		testWorkflow := func(ctx DBOSContext, input string) (string, error) {
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, testWorkflow)
+
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		originalHandle, err := RunWorkflow(dbosCtx, testWorkflow, "fork-partition-input",
+			WithQueue(forkPartitionedQueue.Name), WithQueuePartitionKey("orig-partition"))
+		require.NoError(t, err, "failed to run original workflow")
+		_, err = originalHandle.GetResult()
+		require.NoError(t, err, "failed to get result from original workflow")
+
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: originalHandle.GetWorkflowID(),
+			QueueName:          forkPartitionedQueue.Name,
+			QueuePartitionKey:  "forked-partition",
+		})
+		require.NoError(t, err, "failed to fork workflow to partitioned queue")
+
+		forkResult, err := forkHandle.GetResult()
+		require.NoError(t, err, "failed to get result from forked workflow")
+		assert.Equal(t, "fork-partition-input", forkResult)
+
+		status, err := forkHandle.GetStatus()
+		require.NoError(t, err, "failed to get forked workflow status")
+		assert.Equal(t, forkPartitionedQueue.Name, status.QueueName, "forked workflow should be attributed to the custom queue")
+		assert.Equal(t, "forked-partition", status.QueuePartitionKey, "forked workflow should carry the supplied partition key")
+	})
+
 	t.Run("ResumeWorkflowToCustomQueue", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 

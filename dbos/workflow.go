@@ -3387,11 +3387,15 @@ type ForkWorkflowInput struct {
 	StartStep          uint   // Optional: Step to start the forked workflow from (default: 0)
 	ApplicationVersion string // Optional: Application version for the forked workflow (inherits from original if empty)
 	QueueName          string // Optional: Queue to enqueue the forked workflow on (defaults to the internal queue)
+	QueuePartitionKey  string // Optional: Partition key when enqueueing the forked workflow onto a partitioned queue
 }
 
 func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error) {
 	if input.OriginalWorkflowID == "" {
 		return nil, errors.New("original workflow ID cannot be empty")
+	}
+	if input.QueuePartitionKey != "" && input.QueueName == "" {
+		return nil, errors.New("queue partition key requires a queue name")
 	}
 
 	// Create input for system database
@@ -3404,6 +3408,7 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 		startStep:          int(input.StartStep),
 		applicationVersion: input.ApplicationVersion,
 		queueName:          input.QueueName,
+		queuePartitionKey:  input.QueuePartitionKey,
 	}
 
 	// Call system database method
