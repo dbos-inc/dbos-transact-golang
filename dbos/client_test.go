@@ -878,6 +878,15 @@ func TestForkWorkflow(t *testing.T) {
 		assert.Equal(t, nonExistentWorkflowID, dbosErr.DestinationID, "expected DestinationID to match")
 	})
 
+	t.Run("ForkPartitionKeyWithoutQueue", func(t *testing.T) {
+		_, err := client.ForkWorkflow(ForkWorkflowInput{
+			OriginalWorkflowID: "any-workflow-id",
+			QueuePartitionKey:  "partition-1",
+		})
+		require.Error(t, err, "expected error when providing partition key without queue name")
+		assert.Contains(t, err.Error(), "queue partition key requires a queue name")
+	})
+
 	// Verify all queue entries are cleaned up
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after fork workflow tests")
 }
