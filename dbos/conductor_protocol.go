@@ -58,6 +58,9 @@ const (
 	resumeScheduleMessage        messageType = "resume_schedule"
 	backfillScheduleMessage      messageType = "backfill_schedule"
 	triggerScheduleMessage       messageType = "trigger_schedule"
+	getWorkflowEventsMessage     messageType = "get_workflow_events"
+	getWorkflowNotificationsMsg  messageType = "get_workflow_notifications"
+	getWorkflowStreamsMessage    messageType = "get_workflow_streams"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -599,4 +602,58 @@ type triggerScheduleConductorRequest struct {
 type triggerScheduleConductorResponse struct {
 	baseResponse
 	WorkflowID *string `json:"workflow_id"`
+}
+
+// eventOutput is one entry returned by a get_workflow_events response.
+// Value is the workflow event's value decoded from its recorded serialization and re-marshaled as JSON.
+type eventOutput struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// notificationOutput is one entry returned by a get_workflow_notifications response.
+// Topic is nil when the notification was sent without a topic.
+// Message is decoded from its recorded serialization and re-marshaled as JSON.
+type notificationOutput struct {
+	Topic            *string `json:"topic"`
+	Message          string  `json:"message"`
+	CreatedAtEpochMs int64   `json:"created_at_epoch_ms"`
+	Consumed         bool    `json:"consumed"`
+}
+
+// streamEntryOutput is one entry returned by a get_workflow_streams response.
+// Values are grouped by stream key and ordered by write offset; each value is JSON-marshaled.
+type streamEntryOutput struct {
+	Key    string   `json:"key"`
+	Values []string `json:"values"`
+}
+
+type getWorkflowEventsConductorRequest struct {
+	baseMessage
+	WorkflowID string `json:"workflow_id"`
+}
+
+type getWorkflowEventsConductorResponse struct {
+	baseResponse
+	Events []eventOutput `json:"events"`
+}
+
+type getWorkflowNotificationsConductorRequest struct {
+	baseMessage
+	WorkflowID string `json:"workflow_id"`
+}
+
+type getWorkflowNotificationsConductorResponse struct {
+	baseResponse
+	Notifications []notificationOutput `json:"notifications"`
+}
+
+type getWorkflowStreamsConductorRequest struct {
+	baseMessage
+	WorkflowID string `json:"workflow_id"`
+}
+
+type getWorkflowStreamsConductorResponse struct {
+	baseResponse
+	Streams []streamEntryOutput `json:"streams"`
 }

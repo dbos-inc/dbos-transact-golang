@@ -386,6 +386,12 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleBackfillScheduleRequest(data, base.RequestID)
 	case triggerScheduleMessage:
 		return c.handleTriggerScheduleRequest(data, base.RequestID)
+	case getWorkflowEventsMessage:
+		return c.handleGetWorkflowEventsRequest(data, base.RequestID)
+	case getWorkflowNotificationsMsg:
+		return c.handleGetWorkflowNotificationsRequest(data, base.RequestID)
+	case getWorkflowStreamsMessage:
+		return c.handleGetWorkflowStreamsRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
@@ -1272,6 +1278,152 @@ func (c *conductor) handleDeleteWorkflowRequest(data []byte, requestID string) e
 	}
 
 	return c.sendResponse(response, string(deleteWorkflowMessage))
+}
+
+// decodeStoredValueForConductor deserializes a value using its recorded serialization
+// format and re-marshals it as plain JSON so Conductor receives a portable string
+// regardless of the on-disk encoding. Custom non-JSON serializers may not round-trip
+// losslessly for types that don't JSON-encode.
+func (c *conductor) decodeStoredValueForConductor(value, serialization string) (string, error) {
+	decoder, err := resolveDecoder[any](serialization, getCustomSerializerFromCtx(c.dbosCtx))
+	if err != nil {
+		return "", err
+	}
+	decoded, err := decoder.Decode(&value)
+	if err != nil {
+		return "", err
+	}
+	out, err := json.Marshal(decoded)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func (c *conductor) handleGetWorkflowEventsRequest(data []byte, requestID string) error {
+	var req getWorkflowEventsConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse get workflow events request", "error", err)
+		return fmt.Errorf("failed to parse get workflow events request: %w", err)
+	}
+	c.logger.Debug("Handling get workflow events request", "workflow_id", req.WorkflowID, "request_id", requestID)
+
+	resp := getWorkflowEventsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getWorkflowEventsMessage, RequestID: requestID},
+		},
+	}
+
+	records, err := c.dbosCtx.systemDB.getAllEvents(c.dbosCtx, req.WorkflowID)
+	if err != nil {
+		c.logger.Error("Failed to get workflow events", "workflow_id", req.WorkflowID, "error", err)
+		errStr := fmt.Sprintf("failed to get workflow events: %v", err)
+		resp.ErrorMessage = &errStr
+		return c.sendResponse(resp, string(getWorkflowEventsMessage))
+	}
+
+	events := make([]eventOutput, 0, len(records))
+	for _, r := range records {
+		value, err := c.decodeStoredValueForConductor(r.Value, r.Serialization)
+		if err != nil {
+			c.logger.Error("Failed to decode workflow event", "workflow_id", req.WorkflowID, "key", r.Key, "error", err)
+			errStr := fmt.Sprintf("failed to decode event %q: %v", r.Key, err)
+			resp.ErrorMessage = &errStr
+			resp.Events = nil
+			return c.sendResponse(resp, string(getWorkflowEventsMessage))
+		}
+		events = append(events, eventOutput{Key: r.Key, Value: value})
+	}
+	resp.Events = events
+	return c.sendResponse(resp, string(getWorkflowEventsMessage))
+}
+
+func (c *conductor) handleGetWorkflowNotificationsRequest(data []byte, requestID string) error {
+	var req getWorkflowNotificationsConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse get workflow notifications request", "error", err)
+		return fmt.Errorf("failed to parse get workflow notifications request: %w", err)
+	}
+	c.logger.Debug("Handling get workflow notifications request", "workflow_id", req.WorkflowID, "request_id", requestID)
+
+	resp := getWorkflowNotificationsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getWorkflowNotificationsMsg, RequestID: requestID},
+		},
+	}
+
+	records, err := c.dbosCtx.systemDB.getAllNotifications(c.dbosCtx, req.WorkflowID)
+	if err != nil {
+		c.logger.Error("Failed to get workflow notifications", "workflow_id", req.WorkflowID, "error", err)
+		errStr := fmt.Sprintf("failed to get workflow notifications: %v", err)
+		resp.ErrorMessage = &errStr
+		return c.sendResponse(resp, string(getWorkflowNotificationsMsg))
+	}
+
+	notifs := make([]notificationOutput, 0, len(records))
+	for _, r := range records {
+		msg, err := c.decodeStoredValueForConductor(r.Message, r.Serialization)
+		if err != nil {
+			c.logger.Error("Failed to decode notification message", "workflow_id", req.WorkflowID, "error", err)
+			errStr := fmt.Sprintf("failed to decode notification: %v", err)
+			resp.ErrorMessage = &errStr
+			resp.Notifications = nil
+			return c.sendResponse(resp, string(getWorkflowNotificationsMsg))
+		}
+		notifs = append(notifs, notificationOutput{
+			Topic:            r.Topic,
+			Message:          msg,
+			CreatedAtEpochMs: r.CreatedAtEpochMs,
+			Consumed:         r.Consumed,
+		})
+	}
+	resp.Notifications = notifs
+	return c.sendResponse(resp, string(getWorkflowNotificationsMsg))
+}
+
+func (c *conductor) handleGetWorkflowStreamsRequest(data []byte, requestID string) error {
+	var req getWorkflowStreamsConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse get workflow streams request", "error", err)
+		return fmt.Errorf("failed to parse get workflow streams request: %w", err)
+	}
+	c.logger.Debug("Handling get workflow streams request", "workflow_id", req.WorkflowID, "request_id", requestID)
+
+	resp := getWorkflowStreamsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getWorkflowStreamsMessage, RequestID: requestID},
+		},
+	}
+
+	records, err := c.dbosCtx.systemDB.getAllStreamEntries(c.dbosCtx, req.WorkflowID)
+	if err != nil {
+		c.logger.Error("Failed to get workflow streams", "workflow_id", req.WorkflowID, "error", err)
+		errStr := fmt.Sprintf("failed to get workflow streams: %v", err)
+		resp.ErrorMessage = &errStr
+		return c.sendResponse(resp, string(getWorkflowStreamsMessage))
+	}
+
+	// Group consecutive records by key (rows are pre-ordered by (key, offset)).
+	var streams []streamEntryOutput
+	var current *streamEntryOutput
+	for _, r := range records {
+		value, err := c.decodeStoredValueForConductor(r.Value, r.Serialization)
+		if err != nil {
+			c.logger.Error("Failed to decode stream value", "workflow_id", req.WorkflowID, "key", r.Key, "error", err)
+			errStr := fmt.Sprintf("failed to decode stream %q: %v", r.Key, err)
+			resp.ErrorMessage = &errStr
+			resp.Streams = nil
+			return c.sendResponse(resp, string(getWorkflowStreamsMessage))
+		}
+		if current == nil || current.Key != r.Key {
+			streams = append(streams, streamEntryOutput{Key: r.Key, Values: []string{value}})
+			current = &streams[len(streams)-1]
+			continue
+		}
+		current.Values = append(current.Values, value)
+	}
+	resp.Streams = streams
+	return c.sendResponse(resp, string(getWorkflowStreamsMessage))
 }
 
 func (c *conductor) sendResponse(response any, responseType string) error {
