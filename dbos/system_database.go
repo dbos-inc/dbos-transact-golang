@@ -39,7 +39,7 @@ type systemDatabase interface {
 	listWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error)
 	updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error
 	awaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*awaitWorkflowResultOutput, error)
-	cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput) error
+	cancelWorkflows(ctx context.Context, input cancelWorkflowsDBInput) ([]string, error)
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	deleteWorkflows(ctx context.Context, input deleteWorkflowsDBInput) error
 	resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInput) ([]string, error)
@@ -1150,48 +1150,66 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 	return nil
 }
 
-type cancelWorkflowDBInput struct {
-	workflowID string
-	tx         pgx.Tx
+type cancelWorkflowsDBInput struct {
+	workflowIDs []string
+	tx          pgx.Tx
 }
 
-func (s *sysDB) cancelWorkflow(ctx context.Context, input cancelWorkflowDBInput) error {
-	listInput := listWorkflowsDBInput{
-		workflowIDs: []string{input.workflowID},
-		loadInput:   true,
-		loadOutput:  true,
-		tx:          input.tx,
-	}
-	wfs, err := s.listWorkflows(ctx, listInput)
-	if err != nil {
-		return err
-	}
-	if len(wfs) == 0 {
-		return newNonExistentWorkflowError(input.workflowID)
+// cancelWorkflows cancels the given workflows in a single round-trip. Workflows that
+// are already in a terminal state (SUCCESS, ERROR, CANCELLED) are left untouched.
+// Returns the subset of input IDs that existed in workflow_status (including terminal
+// ones, which are considered existing even though they are not updated).
+func (s *sysDB) cancelWorkflows(ctx context.Context, input cancelWorkflowsDBInput) ([]string, error) {
+	if len(input.workflowIDs) == 0 {
+		return nil, nil
 	}
 
-	wf := wfs[0]
-	switch wf.Status {
-	case WorkflowStatusSuccess, WorkflowStatusError, WorkflowStatusCancelled:
-		// Workflow is already in a terminal state, rollback and return
-		return nil
+	schema := pgx.Identifier{s.schema}.Sanitize()
+
+	query := fmt.Sprintf(`WITH existing AS (
+			SELECT workflow_uuid FROM %s.workflow_status WHERE workflow_uuid = ANY($3)
+		), updated AS (
+			UPDATE %s.workflow_status
+			SET status = $1, updated_at = $2, started_at_epoch_ms = NULL,
+			    queue_name = NULL, deduplication_id = NULL
+			WHERE workflow_uuid = ANY($3) AND status NOT IN ($4, $5, $6)
+			RETURNING workflow_uuid
+		)
+		SELECT workflow_uuid FROM existing`, schema, schema)
+
+	args := []any{
+		WorkflowStatusCancelled,
+		time.Now().UnixMilli(),
+		input.workflowIDs,
+		WorkflowStatusSuccess,
+		WorkflowStatusError,
+		WorkflowStatusCancelled,
 	}
 
-	updateStatusQuery := fmt.Sprintf(`UPDATE %s.workflow_status
-						  SET status = $1, updated_at = $2, started_at_epoch_ms = NULL,
-						      queue_name = NULL, deduplication_id = NULL
-						  WHERE workflow_uuid = $3`, pgx.Identifier{s.schema}.Sanitize())
-
+	var rows pgx.Rows
+	var err error
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, updateStatusQuery, WorkflowStatusCancelled, time.Now().UnixMilli(), input.workflowID)
+		rows, err = input.tx.Query(ctx, query, args...)
 	} else {
-		_, err = s.pool.Exec(ctx, updateStatusQuery, WorkflowStatusCancelled, time.Now().UnixMilli(), input.workflowID)
+		rows, err = s.pool.Query(ctx, query, args...)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to update workflow status to CANCELLED: %w", err)
+		return nil, fmt.Errorf("failed to cancel workflows: %w", err)
 	}
+	defer rows.Close()
 
-	return nil
+	found := make([]string, 0, len(input.workflowIDs))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan cancelled workflow id: %w", err)
+		}
+		found = append(found, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read cancelled workflow ids: %w", err)
+	}
+	return found, nil
 }
 
 type deleteWorkflowsDBInput struct {
@@ -1303,13 +1321,16 @@ func (s *sysDB) cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 		return fmt.Errorf("failed to list workflows for cancellation: %w", err)
 	}
 
-	// Cancel each workflow
-	for _, workflow := range workflows {
-		if err := s.cancelWorkflow(ctx, cancelWorkflowDBInput{workflowID: workflow.ID}); err != nil {
-			s.logger.Error("Failed to cancel workflow during cancelAllBefore", "workflowID", workflow.ID, "error", err)
-			// Continue with other workflows even if one fails
-			// If desired we could funnel the errors back the caller (conductor, admin server)
-		}
+	if len(workflows) == 0 {
+		return nil
+	}
+
+	ids := make([]string, len(workflows))
+	for i, workflow := range workflows {
+		ids[i] = workflow.ID
+	}
+	if _, err := s.cancelWorkflows(ctx, cancelWorkflowsDBInput{workflowIDs: ids}); err != nil {
+		return fmt.Errorf("failed to cancel workflows during cancelAllBefore: %w", err)
 	}
 	return nil
 }

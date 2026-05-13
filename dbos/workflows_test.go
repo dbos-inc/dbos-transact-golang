@@ -2075,6 +2075,91 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 	})
 }
 
+func TestCancelWorkflows(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	blockEvent := NewEvent()
+	blockingWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		blockEvent.Wait()
+		return input, nil
+	}
+	RegisterWorkflow(dbosCtx, blockingWorkflow)
+
+	err := Launch(dbosCtx)
+	require.NoError(t, err, "failed to launch DBOS instance")
+
+	startBlockedWorkflows := func(t *testing.T, n int, prefix string) []string {
+		t.Helper()
+		ids := make([]string, n)
+		for i := range ids {
+			h, err := RunWorkflow(dbosCtx, blockingWorkflow, fmt.Sprintf("%s-%d", prefix, i))
+			require.NoError(t, err, "failed to start workflow %d", i)
+			ids[i] = h.GetWorkflowID()
+		}
+		return ids
+	}
+
+	t.Run("CancelWorkflowsBatch", func(t *testing.T) {
+		blockEvent.Clear()
+		defer blockEvent.Set()
+		ids := startBlockedWorkflows(t, 3, "cancel-batch")
+
+		require.NoError(t, CancelWorkflows(dbosCtx, ids), "failed to cancel workflows batch")
+
+		for _, id := range ids {
+			handle, err := RetrieveWorkflow[string](dbosCtx, id)
+			require.NoError(t, err, "failed to retrieve workflow %s", id)
+			status, err := handle.GetStatus()
+			require.NoError(t, err, "failed to get status for workflow %s", id)
+			assert.Equal(t, WorkflowStatusCancelled, status.Status, "workflow %s should be CANCELLED", id)
+			assert.Empty(t, status.QueueName, "workflow %s queue should be cleared", id)
+		}
+	})
+
+	t.Run("CancelWorkflowsSkipsMissingIDs", func(t *testing.T) {
+		blockEvent.Clear()
+		defer blockEvent.Set()
+		ids := startBlockedWorkflows(t, 1, "cancel-mixed")
+
+		missingID := "missing-" + uuid.NewString()
+		require.NoError(t, CancelWorkflows(dbosCtx, []string{missingID, ids[0]}),
+			"CancelWorkflows should not error on missing IDs")
+
+		handle, err := RetrieveWorkflow[string](dbosCtx, ids[0])
+		require.NoError(t, err, "failed to retrieve workflow")
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get status")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status)
+	})
+
+	t.Run("CancelWorkflowsLeavesTerminalUntouched", func(t *testing.T) {
+		blockEvent.Set()
+		h, err := RunWorkflow(dbosCtx, blockingWorkflow, "cancel-terminal")
+		require.NoError(t, err, "failed to start workflow")
+		_, err = h.GetResult()
+		require.NoError(t, err, "workflow should complete successfully")
+
+		require.NoError(t, CancelWorkflows(dbosCtx, []string{h.GetWorkflowID()}),
+			"CancelWorkflows should succeed on already-completed workflow")
+
+		status, err := h.GetStatus()
+		require.NoError(t, err, "failed to get status")
+		assert.Equal(t, WorkflowStatusSuccess, status.Status, "completed workflow should remain SUCCESS")
+	})
+
+	t.Run("CancelWorkflowsEmpty", func(t *testing.T) {
+		require.NoError(t, CancelWorkflows(dbosCtx, nil),
+			"CancelWorkflows with nil slice should be a no-op")
+		require.NoError(t, CancelWorkflows(dbosCtx, []string{}),
+			"CancelWorkflows with empty slice should be a no-op")
+	})
+
+	t.Run("CancelWorkflowsNilContext", func(t *testing.T) {
+		require.Error(t, CancelWorkflows(nil, []string{"id"}),
+			"CancelWorkflows should error on nil context")
+	})
+}
+
 func TestResumeWorkflows(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 

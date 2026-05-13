@@ -379,7 +379,8 @@ type forkWorkflowConductorResponse struct {
 // cancelWorkflowConductorRequest is sent by the conductor to cancel a workflow
 type cancelWorkflowConductorRequest struct {
 	baseMessage
-	WorkflowID string `json:"workflow_id"`
+	WorkflowID  string   `json:"workflow_id"`
+	WorkflowIDs []string `json:"workflow_ids"`
 }
 
 // cancelWorkflowConductorResponse is sent in response to cancel workflow requests
@@ -416,8 +417,9 @@ type existPendingWorkflowsConductorResponse struct {
 // resumeWorkflowConductorRequest is sent by the conductor to resume a workflow
 type resumeWorkflowConductorRequest struct {
 	baseMessage
-	WorkflowID string  `json:"workflow_id"`
-	QueueName  *string `json:"queue_name,omitempty"`
+	WorkflowID  string   `json:"workflow_id"`
+	WorkflowIDs []string `json:"workflow_ids"`
+	QueueName   *string  `json:"queue_name,omitempty"`
 }
 
 // resumeWorkflowConductorResponse is sent in response to resume workflow requests
