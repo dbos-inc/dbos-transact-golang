@@ -2296,8 +2296,8 @@ func (s *sysDB) pollNotifications(ctx context.Context) {
 		destinationID := parts[0]
 		topic := parts[1]
 
-		// Query database to check if notification exists
-		query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.notifications WHERE destination_uuid = $1 AND topic = $2)`, pgx.Identifier{s.schema}.Sanitize())
+		// Query database to check if an unconsumed notification exists
+		query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.notifications WHERE destination_uuid = $1 AND topic = $2 AND consumed = false)`, pgx.Identifier{s.schema}.Sanitize())
 		var exists bool
 		err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 		if err != nil {
@@ -2457,10 +2457,10 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*recvResult, error) 
 		s.workflowNotificationRepollMap.Delete(payload)
 	}()
 
-	// Now check if there is already a message available in the database.
+	// Now check if there is already an unconsumed message available in the database.
 	// If not, we'll wait for a notification and timeout
 	var exists bool
-	query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.notifications WHERE destination_uuid = $1 AND topic = $2)`, pgx.Identifier{s.schema}.Sanitize())
+	query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.notifications WHERE destination_uuid = $1 AND topic = $2 AND consumed = false)`, pgx.Identifier{s.schema}.Sanitize())
 	err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 	if err != nil {
 		cond.L.Unlock()
@@ -2515,25 +2515,28 @@ loop:
 		}
 	}
 
-	// Capture start time before finding and deleting the message
+	// Capture start time before finding and consuming the message
 	startTime := time.Now()
 
-	// Find the oldest message and delete it atomically
+	// Find the oldest unconsumed message and atomically mark it consumed.
+	// Notifications are retained (consumed=true) so they remain visible for observability;
+	// rows are eventually cleaned up by FK cascade when the parent workflow is garbage-collected.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	// Use message_uuid so we delete exactly one row; created_at_epoch_ms can match multiple rows when inserts occur in the same millisecond.
+	// Use message_uuid so we update exactly one row; created_at_epoch_ms can match multiple rows when inserts occur in the same millisecond.
 	query = fmt.Sprintf(`
     WITH oldest_entry AS (
-        SELECT message_uuid, message, serialization
+        SELECT message_uuid
         FROM %s.notifications
-        WHERE destination_uuid = $1 AND topic = $2
+        WHERE destination_uuid = $1 AND topic = $2 AND consumed = false
         ORDER BY created_at_epoch_ms ASC
         LIMIT 1
     )
-    DELETE FROM %s.notifications
+    UPDATE %s.notifications
+    SET consumed = true
     WHERE message_uuid = (SELECT message_uuid FROM oldest_entry)
     RETURNING message, serialization`, pgx.Identifier{s.schema}.Sanitize(), pgx.Identifier{s.schema}.Sanitize())
 
