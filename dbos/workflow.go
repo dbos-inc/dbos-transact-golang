@@ -3982,19 +3982,14 @@ func GetWorkflowSteps(ctx DBOSContext, workflowID string) ([]StepInfo, error) {
 // GetWorkflowAggregatesInput is the input to GetWorkflowAggregates.
 //
 // At least one of the GroupBy* flags must be true, or TimeBucketSize must be > 0.
-// All other fields are optional filters that narrow which workflows are counted.
 type GetWorkflowAggregatesInput struct {
-	// Group-by flags. Each enabled flag adds the corresponding column to the GROUP BY
-	// clause and as a key in the resulting WorkflowAggregateRow.Group map.
 	GroupByStatus             bool
 	GroupByName               bool
 	GroupByQueueName          bool
 	GroupByExecutorID         bool
 	GroupByApplicationVersion bool
 
-	// TimeBucketSize, when non-zero, groups results by created_at time bucket of this size.
-	// The corresponding entry in WorkflowAggregateRow.Group is "time_bucket" and its value is
-	// the bucket start expressed as epoch milliseconds (as a string).
+	// When non-zero, groups results by created_at time bucket of this size.
 	TimeBucketSize time.Duration
 
 	// Filters
@@ -4032,10 +4027,10 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		return RunAsStep(c, func(ctx context.Context) ([]WorkflowAggregateRow, error) {
-			return retryWithResult(ctx, func() ([]WorkflowAggregateRow, error) {
-				return c.systemDB.getWorkflowAggregates(ctx, dbInput)
-			}, withRetrierLogger(c.logger))
+		return runAsTxn(c, func(ctx context.Context, tx pgx.Tx) ([]WorkflowAggregateRow, error) {
+			in := dbInput
+			in.tx = tx
+			return c.systemDB.getWorkflowAggregates(ctx, in)
 		}, WithStepName("DBOS.getWorkflowAggregates"))
 	}
 	return retryWithResult(c, func() ([]WorkflowAggregateRow, error) {

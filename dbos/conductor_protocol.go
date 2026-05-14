@@ -684,16 +684,10 @@ type getWorkflowAggregatesConductorRequest struct {
 	Body getWorkflowAggregatesConductorRequestBody `json:"body"`
 }
 
-// workflowAggregateOutput is one row in a workflow aggregates response.
-// Group keys are grouping column names; values are stringified column values, with nil
-// for grouping columns that were NULL in that row.
-type workflowAggregateOutput struct {
-	Group map[string]*string `json:"group"`
-	Count int64              `json:"count"`
-}
-
 // getWorkflowAggregatesConductorResponse is sent in response to workflow aggregate requests.
+// Output uses WorkflowAggregateRow directly: it has the matching JSON tags and there is no
+// conversion needed between the public Go shape and the wire shape.
 type getWorkflowAggregatesConductorResponse struct {
 	baseResponse
-	Output []workflowAggregateOutput `json:"output"`
+	Output []WorkflowAggregateRow `json:"output"`
 }

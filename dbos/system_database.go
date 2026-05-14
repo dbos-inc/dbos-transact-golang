@@ -1992,8 +1992,8 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 // stringified value, with nil entries for grouping columns that were NULL for that row.
 // Count is the number of workflows in this group.
 type WorkflowAggregateRow struct {
-	Group map[string]*string
-	Count int64
+	Group map[string]*string `json:"group"`
+	Count int64              `json:"count"`
 }
 
 // _DEFAULT_AGGREGATES_LIMIT caps the number of group rows returned by getWorkflowAggregates
@@ -2017,6 +2017,7 @@ type getWorkflowAggregatesDBInput struct {
 	queueName                 []string
 	workflowIDPrefix          []string
 	limit                     int64 // 0 means use _DEFAULT_AGGREGATES_LIMIT
+	tx                        pgx.Tx
 }
 
 func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggregatesDBInput) ([]WorkflowAggregateRow, error) {
@@ -2111,7 +2112,13 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 	}
 	query += fmt.Sprintf(" LIMIT %d", limit)
 
-	rows, err := s.pool.Query(ctx, query, qb.args...)
+	var rows pgx.Rows
+	var err error
+	if input.tx != nil {
+		rows, err = input.tx.Query(ctx, query, qb.args...)
+	} else {
+		rows, err = s.pool.Query(ctx, query, qb.args...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute getWorkflowAggregates query: %w", err)
 	}

@@ -1475,7 +1475,7 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 		baseResponse: baseResponse{
 			baseMessage: baseMessage{Type: getWorkflowAggregatesMessage, RequestID: requestID},
 		},
-		Output: []workflowAggregateOutput{},
+		Output: []WorkflowAggregateRow{},
 	}
 
 	rows, err := c.dbosCtx.GetWorkflowAggregates(c.dbosCtx, input)
@@ -1486,11 +1486,7 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 		return c.sendResponse(resp, string(getWorkflowAggregatesMessage))
 	}
 
-	output := make([]workflowAggregateOutput, len(rows))
-	for i, r := range rows {
-		output[i] = workflowAggregateOutput{Group: r.Group, Count: r.Count}
-	}
-	resp.Output = output
+	resp.Output = rows
 	return c.sendResponse(resp, string(getWorkflowAggregatesMessage))
 }
 
