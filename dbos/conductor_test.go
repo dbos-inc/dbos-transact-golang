@@ -1099,3 +1099,79 @@ func TestConductorScheduleHandlers(t *testing.T) {
 		require.NotNil(t, resp.ErrorMessage)
 	})
 }
+
+// conductorAggregatesWorkflow is a no-op workflow used by TestConductorWorkflowAggregatesHandler.
+func conductorAggregatesWorkflow(_ DBOSContext, in string) (string, error) {
+	return in, nil
+}
+
+func TestConductorWorkflowAggregatesHandler(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+	RegisterWorkflow(dbosCtx, conductorAggregatesWorkflow)
+	require.NoError(t, dbosCtx.Launch())
+
+	// Produce three successful workflows to be counted.
+	for i := 0; i < 3; i++ {
+		h, err := RunWorkflow(dbosCtx, conductorAggregatesWorkflow, fmt.Sprintf("ok-%d", i))
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+	}
+
+	mockServer := newMockWebSocketServer()
+	t.Cleanup(mockServer.shutdown)
+
+	cond, err := newConductor(dbosCtx.(*dbosContext), conductorConfig{
+		url:     mockServer.getURL(),
+		apiKey:  "test-key",
+		appName: "test-app",
+	})
+	require.NoError(t, err)
+	cond.pingInterval = 100 * time.Millisecond
+	cond.pingTimeout = 200 * time.Millisecond
+	cond.reconnectWait = 100 * time.Millisecond
+	cond.launch()
+	t.Cleanup(func() { cond.shutdown(2 * time.Second) })
+	require.True(t, mockServer.waitForConnection(5*time.Second))
+
+	expect := func(t *testing.T, wantType messageType) []byte {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case raw := <-mockServer.messages:
+				var base baseMessage
+				if err := json.Unmarshal(raw, &base); err == nil && base.Type == wantType {
+					return raw
+				}
+				// Drop unrelated traffic (e.g. executor_info on connect).
+			case <-deadline:
+				t.Fatalf("timed out waiting for response of type %s", wantType)
+			}
+		}
+	}
+
+	t.Run("group_by_status", func(t *testing.T) {
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"get_workflow_aggregates","request_id":"agg1","body":{"group_by_status":true}}`)))
+		var resp getWorkflowAggregatesConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, getWorkflowAggregatesMessage), &resp))
+		require.Equal(t, "agg1", resp.RequestID)
+		require.Nil(t, resp.ErrorMessage)
+		require.NotEmpty(t, resp.Output)
+		var successCount int64
+		for _, row := range resp.Output {
+			require.NotNil(t, row.Group["status"])
+			if *row.Group["status"] == string(WorkflowStatusSuccess) {
+				successCount = row.Count
+			}
+		}
+		require.Equal(t, int64(3), successCount)
+	})
+
+	t.Run("no_group_by_returns_error", func(t *testing.T) {
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"get_workflow_aggregates","request_id":"agg2","body":{}}`)))
+		var resp getWorkflowAggregatesConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, getWorkflowAggregatesMessage), &resp))
+		require.NotNil(t, resp.ErrorMessage)
+	})
+}

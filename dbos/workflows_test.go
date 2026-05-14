@@ -6206,3 +6206,214 @@ func TestExportImportWorkflow(t *testing.T) {
 		assert.Equal(t, "Alice-grandchild", forkResult.Tags["grandchild_result"])
 	})
 }
+
+func aggregatesWorkflowSuccess(_ DBOSContext, _ string) (string, error) {
+	return "ok", nil
+}
+
+func aggregatesWorkflowFail(_ DBOSContext, _ string) (string, error) {
+	return "", fmt.Errorf("aggregate-fail")
+}
+
+func TestGetWorkflowAggregates(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	RegisterWorkflow(dbosCtx, aggregatesWorkflowSuccess)
+	RegisterWorkflow(dbosCtx, aggregatesWorkflowFail)
+
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS instance")
+
+	successFQN := runtime.FuncForPC(reflect.ValueOf(aggregatesWorkflowSuccess).Pointer()).Name()
+	failFQN := runtime.FuncForPC(reflect.ValueOf(aggregatesWorkflowFail).Pointer()).Name()
+
+	// Run 3 successful workflows and 2 failing workflows
+	for i := 0; i < 3; i++ {
+		handle, err := RunWorkflow(dbosCtx, aggregatesWorkflowSuccess, fmt.Sprintf("ok-%d", i))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+	}
+	for i := 0; i < 2; i++ {
+		handle, err := RunWorkflow(dbosCtx, aggregatesWorkflowFail, fmt.Sprintf("fail-%d", i))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.Error(t, err)
+	}
+
+	t.Run("GroupByStatus", func(t *testing.T) {
+		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{GroupByStatus: true})
+		require.NoError(t, err)
+		statusCounts := map[string]int64{}
+		for _, r := range rows {
+			require.NotNil(t, r.Group["status"], "status grouping key should be non-nil")
+			statusCounts[*r.Group["status"]] = r.Count
+		}
+		assert.Equal(t, int64(3), statusCounts[string(WorkflowStatusSuccess)])
+		assert.Equal(t, int64(2), statusCounts[string(WorkflowStatusError)])
+	})
+
+	t.Run("GroupByName", func(t *testing.T) {
+		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{GroupByName: true})
+		require.NoError(t, err)
+		nameCounts := map[string]int64{}
+		for _, r := range rows {
+			require.NotNil(t, r.Group["name"])
+			nameCounts[*r.Group["name"]] = r.Count
+		}
+		assert.Equal(t, int64(3), nameCounts[successFQN])
+		assert.Equal(t, int64(2), nameCounts[failFQN])
+	})
+
+	t.Run("GroupByStatusAndName", func(t *testing.T) {
+		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			GroupByStatus: true,
+			GroupByName:   true,
+		})
+		require.NoError(t, err)
+		type key struct {
+			status string
+			name   string
+		}
+		combo := map[key]int64{}
+		for _, r := range rows {
+			require.NotNil(t, r.Group["status"])
+			require.NotNil(t, r.Group["name"])
+			combo[key{status: *r.Group["status"], name: *r.Group["name"]}] = r.Count
+		}
+		assert.Equal(t, int64(3), combo[key{status: string(WorkflowStatusSuccess), name: successFQN}])
+		assert.Equal(t, int64(2), combo[key{status: string(WorkflowStatusError), name: failFQN}])
+	})
+
+	t.Run("FilterByStatus", func(t *testing.T) {
+		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			GroupByName: true,
+			Status:      []WorkflowStatusType{WorkflowStatusSuccess},
+		})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.NotNil(t, rows[0].Group["name"])
+		assert.Equal(t, successFQN, *rows[0].Group["name"])
+		assert.Equal(t, int64(3), rows[0].Count)
+	})
+
+	t.Run("FilterByName", func(t *testing.T) {
+		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			GroupByStatus: true,
+			Name:          []string{failFQN},
+		})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.NotNil(t, rows[0].Group["status"])
+		assert.Equal(t, string(WorkflowStatusError), *rows[0].Group["status"])
+		assert.Equal(t, int64(2), rows[0].Count)
+	})
+
+	t.Run("FilterByWorkflowIDPrefix", func(t *testing.T) {
+		// Run workflows with known prefixes
+		for i := 0; i < 2; i++ {
+			handle, err := RunWorkflow(dbosCtx, aggregatesWorkflowSuccess, fmt.Sprintf("prefix-%d", i),
+				WithWorkflowID(fmt.Sprintf("agg-prefix-%d", i)))
+			require.NoError(t, err)
+			_, err = handle.GetResult()
+			require.NoError(t, err)
+		}
+
+		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			GroupByName:      true,
+			WorkflowIDPrefix: []string{"agg-prefix"},
+		})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.NotNil(t, rows[0].Group["name"])
+		assert.Equal(t, successFQN, *rows[0].Group["name"])
+		assert.Equal(t, int64(2), rows[0].Count)
+
+		// Filter by nonexistent prefix yields no rows
+		rows, err = GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			GroupByStatus:    true,
+			WorkflowIDPrefix: []string{"nonexistent-prefix-"},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, rows)
+	})
+
+	t.Run("NoGroupByErrors", func(t *testing.T) {
+		_, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "at least one group_by")
+	})
+
+	t.Run("NegativeTimeBucketErrors", func(t *testing.T) {
+		_, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			GroupByStatus:  true,
+			TimeBucketSize: -time.Minute,
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("TimeBucketAlone", func(t *testing.T) {
+		oneHour := time.Hour
+		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			TimeBucketSize: oneHour,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, rows)
+		var total int64
+		for _, r := range rows {
+			require.NotNil(t, r.Group["time_bucket"])
+			tb := *r.Group["time_bucket"]
+			// Each bucket value must be a multiple of the bucket size in ms
+			var bucketMs int64
+			_, scanErr := fmt.Sscanf(tb, "%d", &bucketMs)
+			require.NoError(t, scanErr, "expected numeric time_bucket value, got %q", tb)
+			assert.Equal(t, int64(0), bucketMs%oneHour.Milliseconds(),
+				"bucket %d must be a multiple of %d", bucketMs, oneHour.Milliseconds())
+			total += r.Count
+		}
+		// At least 3 + 2 + 2 prefix runs
+		assert.GreaterOrEqual(t, total, int64(7))
+	})
+
+	t.Run("TimeBucketWithGroupByStatus", func(t *testing.T) {
+		oneHour := time.Hour
+		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			GroupByStatus:  true,
+			TimeBucketSize: oneHour,
+		})
+		require.NoError(t, err)
+		var successTotal, errorTotal int64
+		for _, r := range rows {
+			require.NotNil(t, r.Group["status"])
+			require.NotNil(t, r.Group["time_bucket"])
+			switch *r.Group["status"] {
+			case string(WorkflowStatusSuccess):
+				successTotal += r.Count
+			case string(WorkflowStatusError):
+				errorTotal += r.Count
+			}
+		}
+		assert.GreaterOrEqual(t, successTotal, int64(5))
+		assert.Equal(t, int64(2), errorTotal)
+	})
+
+	t.Run("TimeBucketWithStatusFilter", func(t *testing.T) {
+		oneMinute := time.Minute
+		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			TimeBucketSize: oneMinute,
+			Status:         []WorkflowStatusType{WorkflowStatusError},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, rows)
+		var total int64
+		for _, r := range rows {
+			require.NotNil(t, r.Group["time_bucket"])
+			tb := *r.Group["time_bucket"]
+			var bucketMs int64
+			_, scanErr := fmt.Sscanf(tb, "%d", &bucketMs)
+			require.NoError(t, scanErr)
+			assert.Equal(t, int64(0), bucketMs%oneMinute.Milliseconds())
+			total += r.Count
+		}
+		assert.Equal(t, int64(2), total)
+	})
+}

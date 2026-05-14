@@ -55,6 +55,9 @@ type systemDatabase interface {
 	checkOperationExecution(ctx context.Context, input checkOperationExecutionDBInput) (*recordedResult, error)
 	getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]stepInfo, error)
 
+	// Aggregates
+	getWorkflowAggregates(ctx context.Context, input getWorkflowAggregatesDBInput) ([]WorkflowAggregateRow, error)
+
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
 	recv(ctx context.Context, input recvInput) (*recvResult, error)
@@ -1982,6 +1985,153 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 	}
 
 	return steps, nil
+}
+
+// WorkflowAggregateRow is a single row of a workflow aggregate query result.
+// Group maps each grouping column name (e.g. "status", "name", "time_bucket") to its
+// stringified value, with nil entries for grouping columns that were NULL for that row.
+// Count is the number of workflows in this group.
+type WorkflowAggregateRow struct {
+	Group map[string]*string
+	Count int64
+}
+
+// getWorkflowAggregatesDBInput represents the input parameters for getting workflow aggregates.
+type getWorkflowAggregatesDBInput struct {
+	groupByStatus             bool
+	groupByName               bool
+	groupByQueueName          bool
+	groupByExecutorID         bool
+	groupByApplicationVersion bool
+	timeBucketSizeMs          int64 // 0 disables time bucketing
+	status                    []WorkflowStatusType
+	startTime                 time.Time
+	endTime                   time.Time
+	workflowName              []string
+	applicationVersion        []string
+	executorID                []string
+	queueName                 []string
+	workflowIDPrefix          []string
+}
+
+func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggregatesDBInput) ([]WorkflowAggregateRow, error) {
+	if input.timeBucketSizeMs < 0 {
+		return nil, errors.New("timeBucketSizeMs must be > 0")
+	}
+
+	// Build group columns from boolean flags
+	type groupCol struct {
+		name string
+		expr string
+	}
+	var groups []groupCol
+	if input.groupByStatus {
+		groups = append(groups, groupCol{name: "status", expr: "status"})
+	}
+	if input.groupByName {
+		groups = append(groups, groupCol{name: "name", expr: "name"})
+	}
+	if input.groupByQueueName {
+		groups = append(groups, groupCol{name: "queue_name", expr: "queue_name"})
+	}
+	if input.groupByExecutorID {
+		groups = append(groups, groupCol{name: "executor_id", expr: "executor_id"})
+	}
+	if input.groupByApplicationVersion {
+		groups = append(groups, groupCol{name: "application_version", expr: "application_version"})
+	}
+
+	qb := newQueryBuilder()
+
+	if input.timeBucketSizeMs > 0 {
+		qb.argCounter++
+		bucketArg := qb.argCounter
+		qb.args = append(qb.args, input.timeBucketSizeMs)
+		// (CAST(FLOOR(created_at::numeric / $n) AS BIGINT) * $n) AS time_bucket
+		expr := fmt.Sprintf("(CAST(FLOOR(created_at::numeric / $%d) AS BIGINT) * $%d)", bucketArg, bucketArg)
+		groups = append(groups, groupCol{name: "time_bucket", expr: expr})
+	}
+
+	if len(groups) == 0 {
+		return nil, errors.New("at least one group_by flag must be set, or a time bucket size provided")
+	}
+
+	// Apply filters using the query builder
+	if len(input.status) > 0 {
+		qb.addWhereAny("status", input.status)
+	}
+	if !input.startTime.IsZero() {
+		qb.addWhereGreaterEqual("created_at", input.startTime.UnixMilli())
+	}
+	if !input.endTime.IsZero() {
+		qb.addWhereLessEqual("created_at", input.endTime.UnixMilli())
+	}
+	if len(input.workflowName) > 0 {
+		qb.addWhereAny("name", input.workflowName)
+	}
+	if len(input.applicationVersion) > 0 {
+		qb.addWhereAny("application_version", input.applicationVersion)
+	}
+	if len(input.executorID) > 0 {
+		qb.addWhereAny("executor_id", input.executorID)
+	}
+	if len(input.queueName) > 0 {
+		qb.addWhereAny("queue_name", input.queueName)
+	}
+	if len(input.workflowIDPrefix) > 0 {
+		qb.addWhereLikeAny("workflow_uuid", input.workflowIDPrefix, "%")
+	}
+
+	// Build SELECT clause: each group expression aliased to "g0", "g1", ... so the position is stable
+	// regardless of whether the expression is a column or a CAST(...) expression.
+	selectParts := make([]string, 0, len(groups)+1)
+	groupParts := make([]string, 0, len(groups))
+	for i, g := range groups {
+		alias := fmt.Sprintf("g%d", i)
+		selectParts = append(selectParts, fmt.Sprintf("%s AS %s", g.expr, alias))
+		groupParts = append(groupParts, g.expr)
+	}
+	selectParts = append(selectParts, "COUNT(*) AS cnt")
+
+	query := fmt.Sprintf("SELECT %s FROM %s.workflow_status",
+		strings.Join(selectParts, ", "),
+		pgx.Identifier{s.schema}.Sanitize())
+	if len(qb.whereClauses) > 0 {
+		query += " WHERE " + strings.Join(qb.whereClauses, " AND ")
+	}
+	query += " GROUP BY " + strings.Join(groupParts, ", ")
+	query += " LIMIT 10000000"
+
+	rows, err := s.pool.Query(ctx, query, qb.args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute getWorkflowAggregates query: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]WorkflowAggregateRow, 0)
+	for rows.Next() {
+		// Scan each group column as nullable string, plus the count.
+		groupVals := make([]any, len(groups))
+		for i := range groups {
+			var v *string
+			groupVals[i] = &v
+		}
+		var count int64
+		scanArgs := append(append([]any{}, groupVals...), &count)
+		if err := rows.Scan(scanArgs...); err != nil {
+			return nil, fmt.Errorf("failed to scan workflow aggregate row: %w", err)
+		}
+		groupMap := make(map[string]*string, len(groups))
+		for i, g := range groups {
+			groupMap[g.name] = *(groupVals[i].(**string))
+		}
+		results = append(results, WorkflowAggregateRow{Group: groupMap, Count: count})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over workflow aggregate rows: %w", err)
+	}
+
+	return results, nil
 }
 
 type sleepInput struct {

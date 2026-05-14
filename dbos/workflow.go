@@ -3979,6 +3979,101 @@ func GetWorkflowSteps(ctx DBOSContext, workflowID string) ([]StepInfo, error) {
 	return ctx.GetWorkflowSteps(ctx, workflowID)
 }
 
+// GetWorkflowAggregatesInput is the input to GetWorkflowAggregates.
+//
+// At least one of the GroupBy* flags must be true, or TimeBucketSize must be > 0.
+// All other fields are optional filters that narrow which workflows are counted.
+type GetWorkflowAggregatesInput struct {
+	// Group-by flags. Each enabled flag adds the corresponding column to the GROUP BY
+	// clause and as a key in the resulting WorkflowAggregateRow.Group map.
+	GroupByStatus             bool
+	GroupByName               bool
+	GroupByQueueName          bool
+	GroupByExecutorID         bool
+	GroupByApplicationVersion bool
+
+	// TimeBucketSize, when non-zero, groups results by created_at time bucket of this size.
+	// The corresponding entry in WorkflowAggregateRow.Group is "time_bucket" and its value is
+	// the bucket start expressed as epoch milliseconds (as a string).
+	TimeBucketSize time.Duration
+
+	// Filters
+	Status             []WorkflowStatusType
+	StartTime          time.Time
+	EndTime            time.Time
+	Name               []string
+	ApplicationVersion []string
+	ExecutorID         []string
+	QueueName          []string
+	WorkflowIDPrefix   []string
+}
+
+func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error) {
+	if input.TimeBucketSize < 0 {
+		return nil, errors.New("TimeBucketSize must be >= 0")
+	}
+	dbInput := getWorkflowAggregatesDBInput{
+		groupByStatus:             input.GroupByStatus,
+		groupByName:               input.GroupByName,
+		groupByQueueName:          input.GroupByQueueName,
+		groupByExecutorID:         input.GroupByExecutorID,
+		groupByApplicationVersion: input.GroupByApplicationVersion,
+		timeBucketSizeMs:          input.TimeBucketSize.Milliseconds(),
+		status:                    input.Status,
+		startTime:                 input.StartTime,
+		endTime:                   input.EndTime,
+		workflowName:              input.Name,
+		applicationVersion:        input.ApplicationVersion,
+		executorID:                input.ExecutorID,
+		queueName:                 input.QueueName,
+		workflowIDPrefix:          input.WorkflowIDPrefix,
+	}
+
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if isWithinWorkflow {
+		return RunAsStep(c, func(ctx context.Context) ([]WorkflowAggregateRow, error) {
+			return retryWithResult(ctx, func() ([]WorkflowAggregateRow, error) {
+				return c.systemDB.getWorkflowAggregates(ctx, dbInput)
+			}, withRetrierLogger(c.logger))
+		}, WithStepName("DBOS.getWorkflowAggregates"))
+	}
+	return retryWithResult(c, func() ([]WorkflowAggregateRow, error) {
+		return c.systemDB.getWorkflowAggregates(c, dbInput)
+	}, withRetrierLogger(c.logger))
+}
+
+// GetWorkflowAggregates returns aggregate counts of workflows grouped by one or more
+// columns and/or by created_at time bucket.
+//
+// At least one GroupBy* flag in the input must be true, or TimeBucketSize must be > 0.
+// Filter fields (Status, StartTime, EndTime, Name, ApplicationVersion, ExecutorID,
+// QueueName, WorkflowIDPrefix) narrow which workflows are counted before grouping.
+//
+// Returns one WorkflowAggregateRow per non-empty group. Each row's Group map contains an
+// entry per enabled grouping column ("status", "name", "queue_name", "executor_id",
+// "application_version", "time_bucket"). Map values are pointers to allow representing
+// NULL grouping values (e.g. workflows without a queue_name).
+//
+// Example:
+//
+//	rows, err := dbos.GetWorkflowAggregates(ctx, dbos.GetWorkflowAggregatesInput{
+//	    GroupByStatus: true,
+//	    StartTime:     time.Now().Add(-24 * time.Hour),
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	for _, r := range rows {
+//	    log.Printf("status=%s count=%d", *r.Group["status"], r.Count)
+//	}
+func GetWorkflowAggregates(ctx DBOSContext, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.GetWorkflowAggregates(ctx, input)
+}
+
 // listRegisteredWorkflowsOptions holds configuration parameters for listing registered workflows
 type listRegisteredWorkflowsOptions struct {
 	scheduledOnly bool
