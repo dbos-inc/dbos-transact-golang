@@ -2050,11 +2050,17 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 	qb := newQueryBuilder()
 
 	if input.timeBucketSizeMs > 0 {
+		// CockroachDB infers a placeholder's type from its first use and refuses
+		// to reuse the same $n in two contexts with different types (here decimal
+		// for the division, then int for the multiplication). Bind the bucket size
+		// twice so each occurrence gets its own placeholder.
 		qb.argCounter++
-		bucketArg := qb.argCounter
+		divArg := qb.argCounter
 		qb.args = append(qb.args, input.timeBucketSizeMs)
-		// (CAST(FLOOR(created_at::numeric / $n) AS BIGINT) * $n) AS time_bucket
-		expr := fmt.Sprintf("(CAST(FLOOR(created_at::numeric / $%d) AS BIGINT) * $%d)", bucketArg, bucketArg)
+		qb.argCounter++
+		mulArg := qb.argCounter
+		qb.args = append(qb.args, input.timeBucketSizeMs)
+		expr := fmt.Sprintf("(CAST(FLOOR(created_at::numeric / $%d) AS BIGINT) * $%d)", divArg, mulArg)
 		groups = append(groups, groupCol{name: "time_bucket", expr: expr})
 	}
 
