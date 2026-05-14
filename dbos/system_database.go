@@ -1996,6 +1996,10 @@ type WorkflowAggregateRow struct {
 	Count int64
 }
 
+// _DEFAULT_AGGREGATES_LIMIT caps the number of group rows returned by getWorkflowAggregates
+// when the caller does not provide an override.
+const _DEFAULT_AGGREGATES_LIMIT = 10_000_000
+
 // getWorkflowAggregatesDBInput represents the input parameters for getting workflow aggregates.
 type getWorkflowAggregatesDBInput struct {
 	groupByStatus             bool
@@ -2012,6 +2016,7 @@ type getWorkflowAggregatesDBInput struct {
 	executorID                []string
 	queueName                 []string
 	workflowIDPrefix          []string
+	limit                     int64 // 0 means use _DEFAULT_AGGREGATES_LIMIT
 }
 
 func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggregatesDBInput) ([]WorkflowAggregateRow, error) {
@@ -2100,7 +2105,11 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 		query += " WHERE " + strings.Join(qb.whereClauses, " AND ")
 	}
 	query += " GROUP BY " + strings.Join(groupParts, ", ")
-	query += " LIMIT 10000000"
+	limit := input.limit
+	if limit <= 0 {
+		limit = _DEFAULT_AGGREGATES_LIMIT
+	}
+	query += fmt.Sprintf(" LIMIT %d", limit)
 
 	rows, err := s.pool.Query(ctx, query, qb.args...)
 	if err != nil {
