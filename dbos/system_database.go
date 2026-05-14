@@ -102,6 +102,12 @@ type systemDatabase interface {
 	backfillSchedule(ctx context.Context, input backfillScheduleDBInput) ([]string, error)
 	triggerSchedule(ctx context.Context, scheduleName string) (string, error)
 
+	// Application versions
+	createApplicationVersion(ctx context.Context, versionName string) error
+	updateApplicationVersionTimestamp(ctx context.Context, versionName string, newTimestamp int64) error
+	listApplicationVersions(ctx context.Context) ([]VersionInfo, error)
+	getLatestApplicationVersion(ctx context.Context) (*VersionInfo, error)
+
 	// Workflow export/import
 	exportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error)
 	importWorkflow(ctx context.Context, workflows []ExportedWorkflow) error
@@ -3973,6 +3979,18 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 
 	ser := resolveEncoder(ctx)
 
+	// Backfilled workflows always run against the latest registered application
+	// version. If lookup fails (e.g. no versions registered yet) leave it unset.
+	var backfillAppVersion string
+	backfillLatest, err := retryWithResult(ctx, func() (*VersionInfo, error) {
+		return s.getLatestApplicationVersion(ctx)
+	}, withRetrierLogger(s.logger))
+	if err != nil {
+		s.logger.Error("failed to fetch latest application version for schedule backfill", "schedule", input.ScheduleName, "error", err)
+	} else if backfillLatest != nil {
+		backfillAppVersion = backfillLatest.Name
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
@@ -4008,14 +4026,15 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 		}
 
 		status := WorkflowStatus{
-			ID:            workflowID,
-			Status:        WorkflowStatusEnqueued,
-			Name:          schedule.WorkflowName,
-			ClassName:     schedule.WorkflowClassName,
-			QueueName:     queueName,
-			CreatedAt:     now,
-			Input:         encodedInput,
-			Serialization: ser.Name(),
+			ID:                 workflowID,
+			Status:             WorkflowStatusEnqueued,
+			Name:               schedule.WorkflowName,
+			ClassName:          schedule.WorkflowClassName,
+			QueueName:          queueName,
+			CreatedAt:          now,
+			Input:              encodedInput,
+			Serialization:      ser.Name(),
+			ApplicationVersion: backfillAppVersion,
 		}
 		if _, err := s.insertWorkflowStatus(ctx, insertWorkflowStatusDBInput{status: status, tx: tx}); err != nil {
 			return nil, fmt.Errorf("failed to enqueue backfill workflow %s: %w", workflowID, err)
@@ -4079,15 +4098,28 @@ func (s *sysDB) triggerSchedule(ctx context.Context, scheduleName string) (strin
 		return "", fmt.Errorf("failed to encode scheduled workflow input: %w", err)
 	}
 
+	// Triggered scheduled workflows run against the latest registered application
+	// version. If lookup fails (e.g. no versions registered yet) leave it unset.
+	var triggerAppVersion string
+	triggerLatest, err := retryWithResult(ctx, func() (*VersionInfo, error) {
+		return s.getLatestApplicationVersion(ctx)
+	}, withRetrierLogger(s.logger))
+	if err != nil {
+		s.logger.Error("failed to fetch latest application version for schedule trigger", "schedule", scheduleName, "error", err)
+	} else if triggerLatest != nil {
+		triggerAppVersion = triggerLatest.Name
+	}
+
 	status := WorkflowStatus{
-		ID:            workflowID,
-		Status:        WorkflowStatusEnqueued,
-		Name:          schedule.WorkflowName,
-		ClassName:     schedule.WorkflowClassName,
-		QueueName:     queueName,
-		CreatedAt:     now,
-		Input:         encodedInput,
-		Serialization: ser.Name(),
+		ID:                 workflowID,
+		Status:             WorkflowStatusEnqueued,
+		Name:               schedule.WorkflowName,
+		ClassName:          schedule.WorkflowClassName,
+		QueueName:          queueName,
+		CreatedAt:          now,
+		Input:              encodedInput,
+		Serialization:      ser.Name(),
+		ApplicationVersion: triggerAppVersion,
 	}
 
 	if _, err := s.insertWorkflowStatus(ctx, insertWorkflowStatusDBInput{status: status, tx: tx}); err != nil {
@@ -4099,6 +4131,86 @@ func (s *sysDB) triggerSchedule(ctx context.Context, scheduleName string) (strin
 	}
 
 	return workflowID, nil
+}
+
+/*******************************/
+/******* APPLICATION VERSIONS **/
+/*******************************/
+
+// VersionInfo describes a registered application version.
+type VersionInfo struct {
+	ID        string `json:"version_id"`
+	Name      string `json:"version_name"`
+	Timestamp int64  `json:"version_timestamp"` // epoch milliseconds
+	CreatedAt int64  `json:"created_at"`        // epoch milliseconds
+}
+
+func (s *sysDB) createApplicationVersion(ctx context.Context, versionName string) error {
+	query := fmt.Sprintf(`
+		INSERT INTO %s.application_versions (version_id, version_name)
+		VALUES ($1, $2)
+		ON CONFLICT (version_name) DO NOTHING
+	`, pgx.Identifier{s.schema}.Sanitize())
+	if _, err := s.pool.Exec(ctx, query, uuid.New().String(), versionName); err != nil {
+		return fmt.Errorf("failed to create application version: %w", err)
+	}
+	return nil
+}
+
+func (s *sysDB) updateApplicationVersionTimestamp(ctx context.Context, versionName string, newTimestamp int64) error {
+	query := fmt.Sprintf(`
+		UPDATE %s.application_versions
+		SET version_timestamp = $1
+		WHERE version_name = $2
+	`, pgx.Identifier{s.schema}.Sanitize())
+	if _, err := s.pool.Exec(ctx, query, newTimestamp, versionName); err != nil {
+		return fmt.Errorf("failed to update application version timestamp: %w", err)
+	}
+	return nil
+}
+
+func (s *sysDB) listApplicationVersions(ctx context.Context) ([]VersionInfo, error) {
+	query := fmt.Sprintf(`
+		SELECT version_id, version_name, version_timestamp, created_at
+		FROM %s.application_versions
+		ORDER BY version_timestamp DESC
+	`, pgx.Identifier{s.schema}.Sanitize())
+	rows, err := s.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list application versions: %w", err)
+	}
+	defer rows.Close()
+
+	var versions []VersionInfo
+	for rows.Next() {
+		var v VersionInfo
+		if err := rows.Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan application version: %w", err)
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read application versions: %w", err)
+	}
+	return versions, nil
+}
+
+func (s *sysDB) getLatestApplicationVersion(ctx context.Context) (*VersionInfo, error) {
+	query := fmt.Sprintf(`
+		SELECT version_id, version_name, version_timestamp, created_at
+		FROM %s.application_versions
+		ORDER BY version_timestamp DESC
+		LIMIT 1
+	`, pgx.Identifier{s.schema}.Sanitize())
+	var v VersionInfo
+	err := s.pool.QueryRow(ctx, query).Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, newNoApplicationVersionsError()
+		}
+		return nil, fmt.Errorf("failed to get latest application version: %w", err)
+	}
+	return &v, nil
 }
 
 /*******************************/

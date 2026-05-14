@@ -163,7 +163,9 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, input.ScheduledTime.Format(time.RFC3339))
 
 		// Skip if this tick's workflow already exists. Another executor may have enqueued it.
-		existing, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{workflowIDs: []string{wfID}})
+		existing, err := retryWithResult(c, func() ([]WorkflowStatus, error) {
+			return c.systemDB.listWorkflows(c, listWorkflowsDBInput{workflowIDs: []string{wfID}})
+		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to check existing scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
 			return nil, err
@@ -185,10 +187,24 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 			WithQueue(queueName),
 			withWorkflowName(entry.FQN),
 		}
+		// Scheduled workflows always run against the latest registered application version, so a stale executor does not pick them up after a new deploy.
+		latest, err := retryWithResult(c, func() (*VersionInfo, error) {
+			return c.systemDB.getLatestApplicationVersion(c)
+		}, withRetrierLogger(c.logger))
+		if err != nil {
+			c.logger.Error("failed to fetch latest application version for scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
+		} else if latest != nil {
+			opts = append(opts, WithApplicationVersion(latest.Name))
+		}
 		result, runErr := wrappedFn(ctx, encodedInput, ser.Name(), opts...)
 
-		if err := c.systemDB.updateScheduleLastFiredAt(c, scheduleName, time.Now()); err != nil {
-			c.logger.Error("failed to update schedule last fired time", "schedule", scheduleName, "error", err)
+		if err := retry(c, func() error {
+			if err := c.systemDB.updateScheduleLastFiredAt(c, scheduleName, time.Now()); err != nil {
+				c.logger.Error("failed to update schedule last fired time", "schedule", scheduleName, "error", err)
+			}
+			return nil
+		}, withRetrierLogger(c.logger)); err != nil {
+			c.logger.Error("failed to update schedule last fired time after retries", "schedule", scheduleName, "error", err)
 		}
 
 		return result, runErr

@@ -191,6 +191,11 @@ type DBOSContext interface {
 	BackfillSchedule(_ DBOSContext, scheduleName string, start time.Time, end time.Time) ([]string, error)                   // Backfill a schedule, returning the IDs of the enqueued workflows
 	TriggerSchedule(_ DBOSContext, scheduleName string) (WorkflowHandle[any], error)                                         // Trigger a schedule immediately, returning a handle to the enqueued workflow
 
+	// Application versions
+	ListApplicationVersions(_ DBOSContext) ([]VersionInfo, error)         // List all registered application versions, newest first
+	GetLatestApplicationVersion(_ DBOSContext) (*VersionInfo, error)      // Get the latest registered application version
+	SetLatestApplicationVersion(_ DBOSContext, versionName string) error  // Mark the named version as latest by bumping its timestamp to now
+
 	// Alert handling
 	SetAlertHandler(handler AlertHandler) // Register a handler for alerts from DBOS Conductor (must be called before Launch)
 }
@@ -621,6 +626,20 @@ func (c *dbosContext) Launch() error {
 
 	// Start the system database
 	c.systemDB.launch(c)
+
+	// Register the current application version and warn if it is not the latest.
+	if err := retry(c, func() error {
+		return c.systemDB.createApplicationVersion(c, c.applicationVersion)
+	}, withRetrierLogger(c.logger)); err != nil {
+		c.logger.Warn("Failed to register application version", "version", c.applicationVersion, "error", err)
+	} else if latest, err := retryWithResult(c, func() (*VersionInfo, error) {
+		return c.systemDB.getLatestApplicationVersion(c)
+	}, withRetrierLogger(c.logger)); err != nil {
+		c.logger.Warn("Failed to fetch latest application version", "error", err)
+	} else if latest.Name != c.applicationVersion {
+		c.logger.Warn("Current application version is not the latest",
+			"current", c.applicationVersion, "latest", latest.Name)
+	}
 
 	// Start the admin server if enabled
 	if c.config.AdminServer {
