@@ -179,6 +179,44 @@ func TestConfig(t *testing.T) {
 		})
 	})
 
+	t.Run("ConductorExecutorMetadata", func(t *testing.T) {
+		t.Run("AcceptsJSONSerializable", func(t *testing.T) {
+			ctx, err := NewDBOSContext(context.Background(), Config{
+				DatabaseURL: databaseURL,
+				AppName:     "test-conductor-metadata-valid",
+				ConductorExecutorMetadata: map[string]any{
+					"region":   "us-east-1",
+					"instance": 42,
+				},
+			})
+			require.NoError(t, err)
+			defer func() {
+				if ctx != nil {
+					Shutdown(ctx, 1*time.Minute)
+				}
+			}()
+
+			dbosCtx, ok := ctx.(*dbosContext)
+			require.True(t, ok)
+			assert.Equal(t, map[string]any{
+				"region":   "us-east-1",
+				"instance": 42,
+			}, dbosCtx.config.ConductorExecutorMetadata)
+		})
+
+		t.Run("RejectsNonSerializable", func(t *testing.T) {
+			_, err := NewDBOSContext(context.Background(), Config{
+				DatabaseURL: databaseURL,
+				AppName:     "test-conductor-metadata-invalid",
+				ConductorExecutorMetadata: map[string]any{
+					"bad": make(chan int),
+				},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "conductorExecutorMetadata must be JSON-serializable")
+		})
+	})
+
 	t.Run("SystemDBMigration", func(t *testing.T) {
 		t.Setenv("DBOS__APPVERSION", "v1.0.0")
 		t.Setenv("DBOS__APPID", "test-migration")

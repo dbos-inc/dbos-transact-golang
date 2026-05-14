@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,20 +30,21 @@ const (
 // Config holds configuration parameters for initializing a DBOS context.
 // DatabaseURL and AppName are required.
 type Config struct {
-	AppName                  string          // Application name for identification (required)
-	DatabaseURL              string          // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
-	SystemDBPool             *pgxpool.Pool   // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
-	DatabaseSchema           string          // Database schema name (defaults to "dbos")
-	Logger                   *slog.Logger    // Custom logger instance (defaults to a new slog logger)
-	AdminServer              bool            // Enable Transact admin HTTP server (disabled by default)
-	AdminServerPort          int             // Port for the admin HTTP server (default: 3001)
-	ConductorURL             string          // DBOS conductor service URL (optional)
-	ConductorAPIKey          string          // DBOS conductor API key (optional)
-	ApplicationVersion       string          // Application version (optional, overridden by DBOS__APPVERSION env var)
-	ExecutorID               string          // Executor ID (optional, overridden by DBOS__VMID env var)
-	EnablePatching           bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
-	Serializer               Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
-	SchedulerPollingInterval time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
+	AppName                   string          // Application name for identification (required)
+	DatabaseURL               string          // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
+	SystemDBPool              *pgxpool.Pool   // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
+	DatabaseSchema            string          // Database schema name (defaults to "dbos")
+	Logger                    *slog.Logger    // Custom logger instance (defaults to a new slog logger)
+	AdminServer               bool            // Enable Transact admin HTTP server (disabled by default)
+	AdminServerPort           int             // Port for the admin HTTP server (default: 3001)
+	ConductorURL              string          // DBOS conductor service URL (optional)
+	ConductorAPIKey           string          // DBOS conductor API key (optional)
+	ConductorExecutorMetadata map[string]any  // Metadata associated with this executor that may be used to identify it on the Conductor dashboard. Must be JSON-serializable.
+	ApplicationVersion        string          // Application version (optional, overridden by DBOS__APPVERSION env var)
+	ExecutorID                string          // Executor ID (optional, overridden by DBOS__VMID env var)
+	EnablePatching            bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
+	Serializer                Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
+	SchedulerPollingInterval  time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -58,20 +60,27 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 
 	dbosConfig := &Config{
-		DatabaseURL:              inputConfig.DatabaseURL,
-		AppName:                  inputConfig.AppName,
-		DatabaseSchema:           inputConfig.DatabaseSchema,
-		Logger:                   inputConfig.Logger,
-		AdminServer:              inputConfig.AdminServer,
-		AdminServerPort:          inputConfig.AdminServerPort,
-		ConductorURL:             inputConfig.ConductorURL,
-		ConductorAPIKey:          inputConfig.ConductorAPIKey,
-		ApplicationVersion:       inputConfig.ApplicationVersion,
-		ExecutorID:               inputConfig.ExecutorID,
-		SystemDBPool:             inputConfig.SystemDBPool,
-		EnablePatching:           inputConfig.EnablePatching,
-		Serializer:               inputConfig.Serializer,
-		SchedulerPollingInterval: inputConfig.SchedulerPollingInterval,
+		DatabaseURL:               inputConfig.DatabaseURL,
+		AppName:                   inputConfig.AppName,
+		DatabaseSchema:            inputConfig.DatabaseSchema,
+		Logger:                    inputConfig.Logger,
+		AdminServer:               inputConfig.AdminServer,
+		AdminServerPort:           inputConfig.AdminServerPort,
+		ConductorURL:              inputConfig.ConductorURL,
+		ConductorAPIKey:           inputConfig.ConductorAPIKey,
+		ConductorExecutorMetadata: inputConfig.ConductorExecutorMetadata,
+		ApplicationVersion:        inputConfig.ApplicationVersion,
+		ExecutorID:                inputConfig.ExecutorID,
+		SystemDBPool:              inputConfig.SystemDBPool,
+		EnablePatching:            inputConfig.EnablePatching,
+		Serializer:                inputConfig.Serializer,
+		SchedulerPollingInterval:  inputConfig.SchedulerPollingInterval,
+	}
+
+	if dbosConfig.ConductorExecutorMetadata != nil {
+		if _, err := json.Marshal(dbosConfig.ConductorExecutorMetadata); err != nil {
+			return nil, fmt.Errorf("conductorExecutorMetadata must be JSON-serializable: %w", err)
+		}
 	}
 
 	// Load defaults
@@ -583,9 +592,10 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 			config.ConductorURL = fmt.Sprintf("wss://%s/conductor/v1alpha1", dbosDomain)
 		}
 		conductorConfig := conductorConfig{
-			url:     config.ConductorURL,
-			apiKey:  config.ConductorAPIKey,
-			appName: config.AppName,
+			url:              config.ConductorURL,
+			apiKey:           config.ConductorAPIKey,
+			appName:          config.AppName,
+			executorMetadata: config.ConductorExecutorMetadata,
 		}
 		conductor, err := newConductor(initExecutor, conductorConfig)
 		if err != nil {

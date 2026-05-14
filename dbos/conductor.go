@@ -32,9 +32,10 @@ const (
 
 // conductorConfig contains configuration for the conductor
 type conductorConfig struct {
-	url     string
-	apiKey  string
-	appName string
+	url              string
+	apiKey           string
+	appName          string
+	executorMetadata map[string]any
 }
 
 // conductor manages the WebSocket connection to the DBOS conductor service
@@ -54,6 +55,9 @@ type conductor struct {
 	pingInterval  time.Duration
 	pingTimeout   time.Duration
 	reconnectWait time.Duration
+
+	// User-defined metadata for this executor
+	executorMetadata map[string]any
 
 	// pingCancel cancels the ping goroutine context
 	pingCancel context.CancelFunc
@@ -86,12 +90,13 @@ func newConductor(dbosCtx *dbosContext, config conductorConfig) (*conductor, err
 	}
 
 	c := &conductor{
-		dbosCtx:       dbosCtx,
-		url:           wsURL,
-		pingInterval:  _PING_INTERVAL,
-		pingTimeout:   _PING_TIMEOUT,
-		reconnectWait: _INITIAL_RECONNECT_WAIT,
-		logger:        dbosCtx.logger.With("service", "conductor"),
+		dbosCtx:          dbosCtx,
+		url:              wsURL,
+		pingInterval:     _PING_INTERVAL,
+		pingTimeout:      _PING_TIMEOUT,
+		reconnectWait:    _INITIAL_RECONNECT_WAIT,
+		logger:           dbosCtx.logger.With("service", "conductor"),
+		executorMetadata: config.executorMetadata,
 	}
 
 	// Start with needsReconnect set to true so we connect on first run
@@ -424,6 +429,7 @@ func (c *conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 		Hostname:           &hostname,
 		DBOSVersion:        getDBOSVersion(),
 		Language:           "go",
+		ExecutorMetadata:   c.executorMetadata,
 	}
 
 	return c.sendResponse(response, string(executorInfo))

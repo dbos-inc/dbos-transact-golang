@@ -83,11 +83,12 @@ type executorInfoRequest struct {
 // executorInfoResponse is sent in response to executor info requests
 type executorInfoResponse struct {
 	baseResponse
-	ExecutorID         string  `json:"executor_id"`
-	ApplicationVersion string  `json:"application_version"`
-	Hostname           *string `json:"hostname,omitempty"`
-	DBOSVersion        string  `json:"dbos_version"`
-	Language           string  `json:"language"`
+	ExecutorID         string         `json:"executor_id"`
+	ApplicationVersion string         `json:"application_version"`
+	Hostname           *string        `json:"hostname,omitempty"`
+	DBOSVersion        string         `json:"dbos_version"`
+	Language           string         `json:"language"`
+	ExecutorMetadata   map[string]any `json:"executor_metadata,omitempty"`
 }
 
 // listWorkflowsConductorRequestBody contains filter parameters for listing workflows.

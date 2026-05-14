@@ -700,6 +700,82 @@ func TestConductorReconnection(t *testing.T) {
 	})
 }
 
+func TestConductorExecutorInfo(t *testing.T) {
+	runExecutorInfo := func(t *testing.T, metadata map[string]any) executorInfoResponse {
+		t.Helper()
+
+		mockServer := newMockWebSocketServer()
+		t.Cleanup(mockServer.shutdown)
+
+		config := conductorConfig{
+			url:              mockServer.getURL(),
+			apiKey:           "test-key",
+			appName:          "test-app",
+			executorMetadata: metadata,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		t.Cleanup(cancel)
+
+		dbosCtx := &dbosContext{
+			ctx:                ctx,
+			logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
+			applicationVersion: "v-test",
+			executorID:         "executor-test",
+		}
+
+		cond, err := newConductor(dbosCtx, config)
+		require.NoError(t, err)
+		cond.pingInterval = 100 * time.Millisecond
+		cond.pingTimeout = 200 * time.Millisecond
+		cond.reconnectWait = 100 * time.Millisecond
+
+		cond.launch()
+		t.Cleanup(func() { cond.shutdown(2 * time.Second) })
+		require.True(t, mockServer.waitForConnection(5*time.Second), "Should establish connection")
+
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"executor_info","request_id":"req-info-1"}`)))
+
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case raw := <-mockServer.messages:
+				var base baseMessage
+				if err := json.Unmarshal(raw, &base); err == nil && base.Type == executorInfo {
+					var resp executorInfoResponse
+					require.NoError(t, json.Unmarshal(raw, &resp))
+					return resp
+				}
+			case <-deadline:
+				t.Fatal("timed out waiting for executor_info response")
+			}
+		}
+	}
+
+	t.Run("WithMetadata", func(t *testing.T) {
+		resp := runExecutorInfo(t, map[string]any{
+			"region":   "us-east-1",
+			"instance": float64(42),
+		})
+		assert.Equal(t, "req-info-1", resp.RequestID)
+		assert.Equal(t, executorInfo, resp.Type)
+		assert.Equal(t, "executor-test", resp.ExecutorID)
+		assert.Equal(t, "v-test", resp.ApplicationVersion)
+		assert.Equal(t, "go", resp.Language)
+		assert.Equal(t, map[string]any{
+			"region":   "us-east-1",
+			"instance": float64(42),
+		}, resp.ExecutorMetadata)
+	})
+
+	t.Run("WithoutMetadata", func(t *testing.T) {
+		resp := runExecutorInfo(t, nil)
+		assert.Equal(t, "req-info-1", resp.RequestID)
+		assert.Equal(t, "executor-test", resp.ExecutorID)
+		assert.Nil(t, resp.ExecutorMetadata)
+	})
+}
+
 func TestConductorAlertHandler(t *testing.T) {
 	t.Run("WithHandler", func(t *testing.T) {
 		defer goleak.VerifyNone(t)
