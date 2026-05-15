@@ -210,6 +210,12 @@ var migration9SQL string
 //go:embed migrations/10_add_notifications_pkey.sql
 var migration10SQL string
 
+//go:embed migrations/10_check_notifications_pkey_cockroach.sql
+var migration10CheckCockroachSQL string
+
+//go:embed migrations/10_add_notifications_pkey_cockroach.sql
+var migration10AddCockroachSQL string
+
 //go:embed migrations/11_add_serialization_columns.sql
 var migration11SQL string
 
@@ -231,9 +237,67 @@ var migration16SQL string
 //go:embed migrations/17_add_workflow_schedule_queue_name.sql
 var migration17SQL string
 
+//go:embed migrations/18_add_was_forked_from.sql
+var migration18SQL string
+
+//go:embed migrations/19_add_operation_outputs_completed_at_index.sql
+var migration19SQL string
+
+//go:embed migrations/20_set_function_search_path.sql
+var migration20SQL string
+
+//go:embed migrations/21_create_queues_table.sql
+var migration21SQL string
+
+//go:embed migrations/22_drop_forked_from_index.sql
+var migration22SQL string
+
+//go:embed migrations/23_create_partial_forked_from_index.sql
+var migration23SQL string
+
+//go:embed migrations/24_drop_parent_workflow_id_index.sql
+var migration24SQL string
+
+//go:embed migrations/25_create_partial_parent_workflow_id_index.sql
+var migration25SQL string
+
+//go:embed migrations/26_drop_executor_id_index.sql
+var migration26SQL string
+
+//go:embed migrations/27_create_partial_dedup_id_index.sql
+var migration27SQL string
+
+//go:embed migrations/28_drop_dedup_id_constraint.sql
+var migration28SQL string
+
+//go:embed migrations/28_drop_dedup_id_constraint_cockroach.sql
+var migration28CockroachSQL string
+
+//go:embed migrations/29_create_pending_index.sql
+var migration29SQL string
+
+//go:embed migrations/30_create_failed_index.sql
+var migration30SQL string
+
+//go:embed migrations/31_drop_status_index.sql
+var migration31SQL string
+
+//go:embed migrations/32_create_in_flight_index.sql
+var migration32SQL string
+
+//go:embed migrations/33_add_rate_limited.sql
+var migration33SQL string
+
+//go:embed migrations/34_create_rate_limited_index.sql
+var migration34SQL string
+
+//go:embed migrations/35_drop_queue_status_started_index.sql
+var migration35SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
+	online  bool
 }
 
 const (
@@ -258,184 +322,319 @@ const (
 	_DB_RETRY_INTERVAL               = 1 * time.Second
 )
 
-func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCockroach bool) error {
+// returns the CONCURRENTLY keyword for online index DDL.
+func concurrentlyKw(isCockroach bool) string {
+	if isCockroach {
+		return ""
+	}
+	return "CONCURRENTLY"
+}
 
-	// Process the migration SQL with fmt.Sprintf
+// buildMigrations renders the full list of migrations against the target schema.
+func buildMigrations(schema string, isCockroach bool) []migrationFile {
 	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
+
 	migration1SQLProcessed := fmt.Sprintf(migration1SQL,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema,
 		sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
-
-	// If not CockroachDB, merge the listen/notify triggers with the main migration
 	if !isCockroach {
 		migration1ListenNotifySQLProcessed := fmt.Sprintf(migration1ListenNotifySQL,
 			sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
 		migration1SQLProcessed = migration1SQLProcessed + "\n" + migration1ListenNotifySQLProcessed
 	}
 
-	migration2SQLProcessed := fmt.Sprintf(migration2SQL, sanitizedSchema)
+	c := concurrentlyKw(isCockroach)
 
-	migration3SQLProcessed := fmt.Sprintf(migration3SQL, sanitizedSchema)
-
-	migration4SQLProcessed := fmt.Sprintf(migration4SQL, sanitizedSchema, sanitizedSchema)
-
-	migration5SQLProcessed := fmt.Sprintf(migration5SQL, sanitizedSchema)
-
-	migration6SQLProcessed := fmt.Sprintf(migration6SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema)
-
-	migration7SQLProcessed := fmt.Sprintf(migration7SQL, sanitizedSchema)
-
-	migration8SQLProcessed := fmt.Sprintf(migration8SQL, sanitizedSchema, sanitizedSchema)
-
-	migration9SQLProcessed := fmt.Sprintf(migration9SQL, sanitizedSchema)
-
-	migration10SQLProcessed := fmt.Sprintf(migration10SQL, schema, sanitizedSchema)
-
-	migration11SQLProcessed := fmt.Sprintf(migration11SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
-
-	migration12SQLProcessed := fmt.Sprintf(migration12SQL, sanitizedSchema, sanitizedSchema)
-
-	migration13SQLProcessed := fmt.Sprintf(migration13SQL, sanitizedSchema)
-
-	migration14SQLProcessed := fmt.Sprintf(migration14SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
-
-	migration15SQLProcessed := fmt.Sprintf(migration15SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema)
-
-	migration16SQLProcessed := fmt.Sprintf(migration16SQL, sanitizedSchema, sanitizedSchema)
-
-	migration17SQLProcessed := fmt.Sprintf(migration17SQL, sanitizedSchema)
-
-	// Build migrations list with processed SQL
-	migrations := []migrationFile{
-		{version: 1, sql: migration1SQLProcessed},
-		{version: 2, sql: migration2SQLProcessed},
-		{version: 3, sql: migration3SQLProcessed},
-		{version: 4, sql: migration4SQLProcessed},
-		{version: 5, sql: migration5SQLProcessed},
-		{version: 6, sql: migration6SQLProcessed},
-		{version: 7, sql: migration7SQLProcessed},
-		{version: 8, sql: migration8SQLProcessed},
-		{version: 9, sql: migration9SQLProcessed},
-		{version: 10, sql: migration10SQLProcessed},
-		{version: 11, sql: migration11SQLProcessed},
-		{version: 12, sql: migration12SQLProcessed},
-		{version: 13, sql: migration13SQLProcessed},
-		{version: 14, sql: migration14SQLProcessed},
-		{version: 15, sql: migration15SQLProcessed},
-		{version: 16, sql: migration16SQLProcessed},
-		{version: 17, sql: migration17SQLProcessed},
+	// Migration 20 is a Postgres-only function-hardening pass; on CockroachDB
+	// it is a no-op (the version row still advances).
+	migration20SQLProcessed := ""
+	if !isCockroach {
+		migration20SQLProcessed = fmt.Sprintf(migration20SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
 	}
 
-	// Begin transaction for atomic migration execution
+	// Migration 28 drops the legacy uq_workflow_status_queue_name_dedup_id
+	// constraint. CockroachDB exposes it as an index (DROP INDEX ... CASCADE);
+	// Postgres exposes it as a table constraint (ALTER TABLE DROP CONSTRAINT).
+	// This is a fast catalog op, so CONCURRENTLY is not used in either path.
+	migration28File := migration28SQL
+	if isCockroach {
+		migration28File = migration28CockroachSQL
+	}
+	migration28SQLProcessed := fmt.Sprintf(migration28File, sanitizedSchema)
+
+	return []migrationFile{
+		{version: 1, sql: migration1SQLProcessed},
+		{version: 2, sql: fmt.Sprintf(migration2SQL, sanitizedSchema)},
+		{version: 3, sql: fmt.Sprintf(migration3SQL, sanitizedSchema)},
+		{version: 4, sql: fmt.Sprintf(migration4SQL, sanitizedSchema, sanitizedSchema)},
+		{version: 5, sql: fmt.Sprintf(migration5SQL, sanitizedSchema)},
+		{version: 6, sql: fmt.Sprintf(migration6SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema)},
+		{version: 7, sql: fmt.Sprintf(migration7SQL, sanitizedSchema)},
+		{version: 8, sql: fmt.Sprintf(migration8SQL, sanitizedSchema, sanitizedSchema)},
+		{version: 9, sql: fmt.Sprintf(migration9SQL, sanitizedSchema)},
+		{version: 10, sql: fmt.Sprintf(migration10SQL, schema, sanitizedSchema)},
+		{version: 11, sql: fmt.Sprintf(migration11SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)},
+		{version: 12, sql: fmt.Sprintf(migration12SQL, sanitizedSchema, sanitizedSchema)},
+		{version: 13, sql: fmt.Sprintf(migration13SQL, sanitizedSchema)},
+		{version: 14, sql: fmt.Sprintf(migration14SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)},
+		{version: 15, sql: fmt.Sprintf(migration15SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema)},
+		{version: 16, sql: fmt.Sprintf(migration16SQL, sanitizedSchema, sanitizedSchema)},
+		{version: 17, sql: fmt.Sprintf(migration17SQL, sanitizedSchema)},
+		{version: 18, sql: fmt.Sprintf(migration18SQL, sanitizedSchema)},
+		{version: 19, sql: fmt.Sprintf(migration19SQL, sanitizedSchema)},
+		{version: 20, sql: migration20SQLProcessed},
+		{version: 21, sql: fmt.Sprintf(migration21SQL, sanitizedSchema)},
+		{version: 22, sql: fmt.Sprintf(migration22SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 23, sql: fmt.Sprintf(migration23SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 24, sql: fmt.Sprintf(migration24SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 25, sql: fmt.Sprintf(migration25SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 26, sql: fmt.Sprintf(migration26SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 27, sql: fmt.Sprintf(migration27SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 28, sql: migration28SQLProcessed},
+		{version: 29, sql: fmt.Sprintf(migration29SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 30, sql: fmt.Sprintf(migration30SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 31, sql: fmt.Sprintf(migration31SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 32, sql: fmt.Sprintf(migration32SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 33, sql: fmt.Sprintf(migration33SQL, sanitizedSchema)},
+		{version: 34, sql: fmt.Sprintf(migration34SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 35, sql: fmt.Sprintf(migration35SQL, c, sanitizedSchema), online: !isCockroach},
+	}
+}
+
+// shouldMigrate reports whether any migration work remains for the schema.
+// Returns true if the schema is missing, the dbos_migrations table is missing,
+// or the recorded version is behind the latest.
+func shouldMigrate(ctx context.Context, pool *pgxpool.Pool, schema string, isCockroach bool) (bool, error) {
+	var schemaExists bool
+	err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`,
+		schema).Scan(&schemaExists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check if schema %s exists: %v", schema, err)
+	}
+	if !schemaExists {
+		return true, nil
+	}
+
+	var tableExists bool
+	err = pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`,
+		schema, _DBOS_MIGRATION_TABLE).Scan(&tableExists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check if migration table exists: %v", err)
+	}
+	if !tableExists {
+		return true, nil
+	}
+
+	var currentVersion int64
+	q := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
+	err = pool.QueryRow(ctx, q).Scan(&currentVersion)
+	if err != nil && err != pgx.ErrNoRows {
+		return false, fmt.Errorf("failed to get current migration version: %v", err)
+	}
+	migrations := buildMigrations(schema, isCockroach)
+	return currentVersion < migrations[len(migrations)-1].version, nil
+}
+
+// cleanupInvalidIndexes drops indexes left in an INVALID state by a prior
+// failed CREATE INDEX CONCURRENTLY. Such indexes are not used by the planner
+// but block recreating an index of the same name. Must be called before
+// retrying an online migration.
+func cleanupInvalidIndexes(ctx context.Context, pool *pgxpool.Pool, schema string, logger *slog.Logger) error {
+	q := `SELECT i.relname FROM pg_index ix
+	      JOIN pg_class i ON i.oid = ix.indexrelid
+	      JOIN pg_class t ON t.oid = ix.indrelid
+	      JOIN pg_namespace n ON n.oid = t.relnamespace
+	      WHERE NOT ix.indisvalid AND n.nspname = $1`
+	rows, err := pool.Query(ctx, q, schema)
+	if err != nil {
+		return fmt.Errorf("failed to list invalid indexes: %v", err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan invalid index name: %v", err)
+		}
+		names = append(names, name)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to iterate invalid indexes: %v", err)
+	}
+	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
+	for _, name := range names {
+		if logger != nil {
+			logger.Warn("dropping invalid index left by a prior failed migration", "schema", schema, "index", name)
+		}
+		dropQ := fmt.Sprintf(`DROP INDEX CONCURRENTLY IF EXISTS %s.%s`, sanitizedSchema, pgx.Identifier{name}.Sanitize())
+		if _, err := pool.Exec(ctx, dropQ); err != nil {
+			return fmt.Errorf("failed to drop invalid index %s.%s: %v", schema, name, err)
+		}
+	}
+	return nil
+}
+
+func writeMigrationVersion(ctx context.Context, exec interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, schema string, version int64, lastApplied int64) error {
+	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
+	if lastApplied == 0 {
+		insertQuery := fmt.Sprintf("INSERT INTO %s.%s (version) VALUES ($1)", sanitizedSchema, _DBOS_MIGRATION_TABLE)
+		if _, err := exec.Exec(ctx, insertQuery, version); err != nil {
+			return fmt.Errorf("failed to insert migration version %d: %v", version, err)
+		}
+	} else {
+		updateQuery := fmt.Sprintf("UPDATE %s.%s SET version = $1", sanitizedSchema, _DBOS_MIGRATION_TABLE)
+		if _, err := exec.Exec(ctx, updateQuery, version); err != nil {
+			return fmt.Errorf("failed to update migration version to %d: %v", version, err)
+		}
+	}
+	return nil
+}
+
+func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCockroach bool, logger *slog.Logger) error {
+	migrations := buildMigrations(schema, isCockroach)
+	sanitizedSchema := pgx.Identifier{schema}.Sanitize()
+
+	// Schema + migrations table setup in a single short transaction.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-
-	// Check if the schema exists
 	var schemaExists bool
-	checkSchemaQuery := `SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`
-	err = tx.QueryRow(ctx, checkSchemaQuery, schema).Scan(&schemaExists)
-	if err != nil {
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`,
+		schema).Scan(&schemaExists); err != nil {
 		return fmt.Errorf("failed to check if schema %s exists: %v", schema, err)
 	}
-
-	// Create the schema if it doesn't exist
 	if !schemaExists {
-		createSchemaQuery := fmt.Sprintf("CREATE SCHEMA %s", pgx.Identifier{schema}.Sanitize())
-		_, err = tx.Exec(ctx, createSchemaQuery)
-		if err != nil {
+		createSchemaQuery := fmt.Sprintf("CREATE SCHEMA %s", sanitizedSchema)
+		if _, err := tx.Exec(ctx, createSchemaQuery); err != nil {
 			return fmt.Errorf("failed to create schema %s: %v", schema, err)
 		}
 	}
-
-	// Create the migrations table if it doesn't exist
-	checkMigrationTableExistsQuery := `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`
-
 	var migrationTableExists bool
-	err = tx.QueryRow(ctx, checkMigrationTableExistsQuery, schema, _DBOS_MIGRATION_TABLE).Scan(&migrationTableExists)
-	if err != nil {
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`,
+		schema, _DBOS_MIGRATION_TABLE).Scan(&migrationTableExists); err != nil {
 		return fmt.Errorf("failed to check if migration table exists: %v", err)
 	}
 	if !migrationTableExists {
-		createTableQuery := fmt.Sprintf(`CREATE TABLE %s.%s (version BIGINT NOT NULL PRIMARY KEY)`, pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
-		_, err = tx.Exec(ctx, createTableQuery)
-		if err != nil {
+		createTableQuery := fmt.Sprintf(`CREATE TABLE %s.%s (version BIGINT NOT NULL PRIMARY KEY)`,
+			sanitizedSchema, _DBOS_MIGRATION_TABLE)
+		if _, err := tx.Exec(ctx, createTableQuery); err != nil {
 			return fmt.Errorf("failed to create migrations table: %v", err)
 		}
 	}
-
-	// Get current migration version
-	var currentVersion int64 = 0
-	query := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
-	err = tx.QueryRow(ctx, query).Scan(&currentVersion)
-	if err != nil && err != pgx.ErrNoRows {
+	var currentVersion int64
+	q := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", sanitizedSchema, _DBOS_MIGRATION_TABLE)
+	if err := tx.QueryRow(ctx, q).Scan(&currentVersion); err != nil && err != pgx.ErrNoRows {
 		return fmt.Errorf("failed to get current migration version: %v", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit migration setup transaction: %v", err)
+	}
 
-	// Apply migrations starting from the next version
+	// Apply pending migrations one at a time.
+	invalidIndexesCleaned := false
 	for _, migration := range migrations {
 		if migration.version <= currentVersion {
 			continue
 		}
 
-		// Migration 10 uses a DO block with ALTER TABLE, which CockroachDB does not support.
-		// Run the same logic at the application layer.
-		if migration.version == 10 && isCockroach {
-			checkPKQuery := `SELECT 1 FROM pg_constraint c
-		JOIN pg_class cl ON c.conrelid = cl.oid
-		JOIN pg_namespace n ON cl.relnamespace = n.oid
-		WHERE n.nspname = $1
-		  AND cl.relname = 'notifications'
-		  AND c.contype = 'p'`
-			rows, err := tx.Query(ctx, checkPKQuery, schema)
-			if err != nil {
-				return fmt.Errorf("failed to check notifications primary key for migration 10: %v", err)
-			}
-			hasPK := rows.Next()
-			rows.Close()
-			if err := rows.Err(); err != nil {
-				return fmt.Errorf("failed to check notifications primary key for migration 10: %v", err)
-			}
-			if !hasPK {
-				alterQuery := fmt.Sprintf("ALTER TABLE %s.notifications ADD CONSTRAINT notifications_pkey PRIMARY KEY (message_uuid)", pgx.Identifier{schema}.Sanitize())
-				_, err = tx.Exec(ctx, alterQuery)
-				if err != nil {
-					return fmt.Errorf("failed to execute migration 10: %v", err)
+		if migration.online {
+			// Online migrations must run outside a transaction so PostgreSQL will accept CREATE/DROP INDEX CONCURRENTLY.
+			// Before the first online migration, sweep up any indexes left INVALID by a prior crashed run.
+			// The version bump is necessarily a second, non-atomic round-trip. If it fails and must re-run, re-executing the migration has to be safe.
+			if !invalidIndexesCleaned {
+				if err := cleanupInvalidIndexes(ctx, pool, schema, logger); err != nil {
+					return err
 				}
+				invalidIndexesCleaned = true
 			}
-		} else {
-			// Execute the migration SQL
-			_, err = tx.Exec(ctx, migration.sql)
-			if err != nil {
+			if _, err := pool.Exec(ctx, migration.sql); err != nil {
 				return fmt.Errorf("failed to execute migration %d: %v", migration.version, err)
 			}
+			if err := writeMigrationVersion(ctx, pool, schema, migration.version, currentVersion); err != nil {
+				return err
+			}
+			currentVersion = migration.version
+			continue
 		}
 
-		// Update the migration version
-		if currentVersion == 0 {
-			// Insert first migration record
-			insertQuery := fmt.Sprintf("INSERT INTO %s.%s (version) VALUES ($1)", pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
-			_, err = tx.Exec(ctx, insertQuery, migration.version)
-		} else {
-			// Update existing migration record
-			updateQuery := fmt.Sprintf("UPDATE %s.%s SET version = $1", pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
-			_, err = tx.Exec(ctx, updateQuery, migration.version)
+		if err := applyCatalogMigration(ctx, pool, schema, sanitizedSchema, migration, isCockroach, currentVersion); err != nil {
+			return err
 		}
-		if err != nil {
-			return fmt.Errorf("failed to update migration version to %d: %v", migration.version, err)
-		}
-
 		currentVersion = migration.version
 	}
 
-	// Commit the transaction
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit migration transaction: %v", err)
+	return nil
+}
+
+// applyCatalogMigration runs a single non-online migration and its version bump in one transaction.
+func applyCatalogMigration(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	schema, sanitizedSchema string,
+	migration migrationFile,
+	isCockroach bool,
+	currentVersion int64,
+) error {
+	mtx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction for migration %d: %v", migration.version, err)
+	}
+	defer mtx.Rollback(ctx)
+
+	switch {
+	case migration.version == 10 && isCockroach:
+		// CockroachDB does not support the DO block used by the Postgres
+		// migration file; run the equivalent logic at the application layer
+		// inside the same transaction.
+		if err := applyCockroachMigration10(ctx, mtx, schema, sanitizedSchema); err != nil {
+			return err
+		}
+	case strings.TrimSpace(migration.sql) == "":
+		// No-op migration (e.g. migration 20 on CockroachDB). Still advance
+		// the version row so we don't re-evaluate it next time.
+	default:
+		if _, err := mtx.Exec(ctx, migration.sql); err != nil {
+			return fmt.Errorf("failed to execute migration %d: %v", migration.version, err)
+		}
 	}
 
+	if err := writeMigrationVersion(ctx, mtx, schema, migration.version, currentVersion); err != nil {
+		return err
+	}
+	if err := mtx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit migration %d: %v", migration.version, err)
+	}
+	return nil
+}
+
+// applyCockroachMigration10 applies migration 10 on CockroachDB, which does
+// not support the DO block used by the Postgres migration file.
+func applyCockroachMigration10(ctx context.Context, tx pgx.Tx, schema, sanitizedSchema string) error {
+	rows, err := tx.Query(ctx, migration10CheckCockroachSQL, schema)
+	if err != nil {
+		return fmt.Errorf("failed to check notifications primary key for migration 10: %v", err)
+	}
+	hasPK := rows.Next()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to check notifications primary key for migration 10: %v", err)
+	}
+	if !hasPK {
+		alterQuery := fmt.Sprintf(migration10AddCockroachSQL, sanitizedSchema)
+		if _, err := tx.Exec(ctx, alterQuery); err != nil {
+			return fmt.Errorf("failed to execute migration 10: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -540,14 +739,22 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		logger.Info("Detected CockroachDB")
 	}
 
-	// Run migrations
-	if err := retry(ctx, func() error {
-		return runMigrations(ctx, pool, databaseSchema, isCockroach)
-	}, withRetrierLogger(logger)); err != nil {
+	needsMigration, smErr := shouldMigrate(ctx, pool, databaseSchema, isCockroach)
+	if smErr != nil {
 		if customPool == nil {
 			pool.Close()
 		}
-		return nil, fmt.Errorf("failed to run migrations: %v", err)
+		return nil, fmt.Errorf("failed to determine migration status: %v", smErr)
+	}
+	if needsMigration {
+		if err := retry(ctx, func() error {
+			return runMigrations(ctx, pool, databaseSchema, isCockroach, logger)
+		}, withRetrierLogger(logger)); err != nil {
+			if customPool == nil {
+				pool.Close()
+			}
+			return nil, fmt.Errorf("failed to run migrations: %v", err)
+		}
 	}
 
 	// Test the connection
@@ -3336,11 +3543,11 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		// Calculate the cutoff time: current time minus limiter period
 		cutoffTimeMs := time.Now().Add(-input.queue.RateLimit.Period).UnixMilli()
 
-		// Count workflows that have started in the limiter period
 		limiterQuery := fmt.Sprintf(`
 		SELECT COUNT(*)
 		FROM %s.workflow_status
 		WHERE queue_name = $1
+		  AND rate_limited = TRUE
 		  AND status NOT IN ($2, $3)
 		  AND started_at_epoch_ms > $4`, pgx.Identifier{s.schema}.Sanitize())
 
@@ -3443,11 +3650,12 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		queryArgs = append(queryArgs, input.queuePartitionKey)
 	}
 
-	if input.queue.PriorityEnabled {
-		query += ` ORDER BY priority ASC, created_at ASC`
-	} else {
-		query += ` ORDER BY created_at ASC`
-	}
+	// Always order by (priority, created_at) so the planner can satisfy the
+	// dequeue scan from idx_workflow_status_in_flight, which is keyed on
+	// (queue_name, status, priority, created_at). When priority is unused, the
+	// priority column defaults to 0 across rows and the secondary key
+	// (created_at) preserves FIFO ordering.
+	query += ` ORDER BY priority ASC, created_at ASC`
 
 	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
 	// otherwise use NOWAIT to ensure consistent view across processes
@@ -3511,12 +3719,13 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			    application_version = $2,
 			    executor_id = $3,
 			    started_at_epoch_ms = $4,
+			    rate_limited = $5,
 			    workflow_deadline_epoch_ms = CASE
 			        WHEN workflow_timeout_ms IS NOT NULL AND workflow_deadline_epoch_ms IS NULL
 			        THEN (EXTRACT(epoch FROM NOW()) * 1000)::BIGINT + workflow_timeout_ms
 			        ELSE workflow_deadline_epoch_ms
 			    END
-			WHERE workflow_uuid = $5
+			WHERE workflow_uuid = $6
 			RETURNING name, inputs, serialization`, pgx.Identifier{s.schema}.Sanitize())
 
 		var serialization *string
@@ -3525,6 +3734,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			input.applicationVersion,
 			input.executorID,
 			time.Now().UnixMilli(),
+			input.queue.RateLimit != nil,
 			id).Scan(&retWorkflow.name, &retWorkflow.input, &serialization)
 		if err != nil {
 			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
