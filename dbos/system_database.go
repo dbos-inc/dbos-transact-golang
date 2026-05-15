@@ -505,17 +505,16 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %v", err)
 	}
+	defer tx.Rollback(ctx)
 	var schemaExists bool
 	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`,
 		schema).Scan(&schemaExists); err != nil {
-		tx.Rollback(ctx)
 		return fmt.Errorf("failed to check if schema %s exists: %v", schema, err)
 	}
 	if !schemaExists {
 		createSchemaQuery := fmt.Sprintf("CREATE SCHEMA %s", sanitizedSchema)
 		if _, err := tx.Exec(ctx, createSchemaQuery); err != nil {
-			tx.Rollback(ctx)
 			return fmt.Errorf("failed to create schema %s: %v", schema, err)
 		}
 	}
@@ -523,21 +522,18 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`,
 		schema, _DBOS_MIGRATION_TABLE).Scan(&migrationTableExists); err != nil {
-		tx.Rollback(ctx)
 		return fmt.Errorf("failed to check if migration table exists: %v", err)
 	}
 	if !migrationTableExists {
 		createTableQuery := fmt.Sprintf(`CREATE TABLE %s.%s (version BIGINT NOT NULL PRIMARY KEY)`,
 			sanitizedSchema, _DBOS_MIGRATION_TABLE)
 		if _, err := tx.Exec(ctx, createTableQuery); err != nil {
-			tx.Rollback(ctx)
 			return fmt.Errorf("failed to create migrations table: %v", err)
 		}
 	}
 	var currentVersion int64
 	q := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", sanitizedSchema, _DBOS_MIGRATION_TABLE)
 	if err := tx.QueryRow(ctx, q).Scan(&currentVersion); err != nil && err != pgx.ErrNoRows {
-		tx.Rollback(ctx)
 		return fmt.Errorf("failed to get current migration version: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -571,40 +567,53 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 			continue
 		}
 
-		mtx, err := pool.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction for migration %d: %v", migration.version, err)
-		}
-
-		switch {
-		case migration.version == 10 && isCockroach:
-			// CockroachDB does not support the DO block used by the Postgres
-			// migration file; run the equivalent logic at the application
-			// layer inside the same transaction.
-			if err := applyCockroachMigration10(ctx, mtx, schema, sanitizedSchema); err != nil {
-				mtx.Rollback(ctx)
-				return err
-			}
-		case strings.TrimSpace(migration.sql) == "":
-			// No-op migration (e.g. migration 20 on CockroachDB). Still advance
-			// the version row so we don't re-evaluate it next time.
-		default:
-			if _, err := mtx.Exec(ctx, migration.sql); err != nil {
-				mtx.Rollback(ctx)
-				return fmt.Errorf("failed to execute migration %d: %v", migration.version, err)
-			}
-		}
-
-		if err := writeMigrationVersion(ctx, mtx, schema, migration.version, currentVersion); err != nil {
-			mtx.Rollback(ctx)
+		if err := applyCatalogMigration(ctx, pool, schema, sanitizedSchema, migration, isCockroach, currentVersion); err != nil {
 			return err
-		}
-		if err := mtx.Commit(ctx); err != nil {
-			return fmt.Errorf("failed to commit migration %d: %v", migration.version, err)
 		}
 		currentVersion = migration.version
 	}
 
+	return nil
+}
+
+// applyCatalogMigration runs a single non-online migration and its version bump in one transaction.
+func applyCatalogMigration(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	schema, sanitizedSchema string,
+	migration migrationFile,
+	isCockroach bool,
+	currentVersion int64,
+) error {
+	mtx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction for migration %d: %v", migration.version, err)
+	}
+	defer mtx.Rollback(ctx)
+
+	switch {
+	case migration.version == 10 && isCockroach:
+		// CockroachDB does not support the DO block used by the Postgres
+		// migration file; run the equivalent logic at the application layer
+		// inside the same transaction.
+		if err := applyCockroachMigration10(ctx, mtx, schema, sanitizedSchema); err != nil {
+			return err
+		}
+	case strings.TrimSpace(migration.sql) == "":
+		// No-op migration (e.g. migration 20 on CockroachDB). Still advance
+		// the version row so we don't re-evaluate it next time.
+	default:
+		if _, err := mtx.Exec(ctx, migration.sql); err != nil {
+			return fmt.Errorf("failed to execute migration %d: %v", migration.version, err)
+		}
+	}
+
+	if err := writeMigrationVersion(ctx, mtx, schema, migration.version, currentVersion); err != nil {
+		return err
+	}
+	if err := mtx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit migration %d: %v", migration.version, err)
+	}
 	return nil
 }
 
