@@ -4702,3 +4702,54 @@ func TriggerSchedule(ctx DBOSContext, scheduleName string) (WorkflowHandle[any],
 	}
 	return ctx.TriggerSchedule(ctx, scheduleName)
 }
+
+// ListApplicationVersions returns every registered application version ordered
+// by timestamp (newest first).
+func (c *dbosContext) ListApplicationVersions(_ DBOSContext) ([]VersionInfo, error) {
+	return retryWithResult(c, func() ([]VersionInfo, error) {
+		return c.systemDB.listApplicationVersions(c)
+	}, withRetrierLogger(c.logger))
+}
+
+// ListApplicationVersions is the package-level wrapper for DBOSContext.ListApplicationVersions.
+func ListApplicationVersions(ctx DBOSContext) ([]VersionInfo, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.ListApplicationVersions(ctx)
+}
+
+// GetLatestApplicationVersion returns the application version with the most
+// recent timestamp.
+func (c *dbosContext) GetLatestApplicationVersion(_ DBOSContext) (*VersionInfo, error) {
+	return retryWithResult(c, func() (*VersionInfo, error) {
+		return c.systemDB.getLatestApplicationVersion(c)
+	}, withRetrierLogger(c.logger))
+}
+
+// GetLatestApplicationVersion is the package-level wrapper for DBOSContext.GetLatestApplicationVersion.
+func GetLatestApplicationVersion(ctx DBOSContext) (*VersionInfo, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.GetLatestApplicationVersion(ctx)
+}
+
+// SetLatestApplicationVersion marks the named application version as latest by
+// updating its timestamp to the current time.
+func (c *dbosContext) SetLatestApplicationVersion(_ DBOSContext, versionName string) error {
+	if versionName == "" {
+		return errors.New("version_name is required")
+	}
+	return retry(c, func() error {
+		return c.systemDB.updateApplicationVersionTimestamp(c, versionName, time.Now().UnixMilli())
+	}, withRetrierLogger(c.logger))
+}
+
+// SetLatestApplicationVersion is the package-level wrapper for DBOSContext.SetLatestApplicationVersion.
+func SetLatestApplicationVersion(ctx DBOSContext, versionName string) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.SetLatestApplicationVersion(ctx, versionName)
+}

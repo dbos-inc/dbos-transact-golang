@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -1966,5 +1967,86 @@ func TestClientSchedules(t *testing.T) {
 			require.NoError(t, err)
 			require.Nil(t, s, "schedule %s should not have been created", name)
 		}
+	})
+}
+
+func TestClientApplicationVersions(t *testing.T) {
+	t.Run("ListAndGetLatestReflectLaunch", func(t *testing.T) {
+		serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		require.NoError(t, Launch(serverCtx))
+
+		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: getDatabaseURL()})
+		require.NoError(t, err)
+		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+
+		latest, err := c.GetLatestApplicationVersion()
+		require.NoError(t, err)
+		require.NotNil(t, latest)
+		require.Equal(t, serverCtx.GetApplicationVersion(), latest.Name)
+
+		versions, err := c.ListApplicationVersions()
+		require.NoError(t, err)
+		require.Len(t, versions, 1)
+		require.Equal(t, latest.Name, versions[0].Name)
+		require.Equal(t, latest.ID, versions[0].ID)
+	})
+
+	t.Run("SetLatestPromotesOlderVersion", func(t *testing.T) {
+		serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		require.NoError(t, Launch(serverCtx))
+
+		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: getDatabaseURL()})
+		require.NoError(t, err)
+		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+
+		// Seed an older version directly so it sorts before the current one.
+		sysDB := serverCtx.(*dbosContext).systemDB
+		require.NoError(t, sysDB.createApplicationVersion(serverCtx, "older-version"))
+		require.NoError(t, sysDB.updateApplicationVersionTimestamp(serverCtx, "older-version", time.Now().Add(-time.Hour).UnixMilli()))
+
+		latest, err := c.GetLatestApplicationVersion()
+		require.NoError(t, err)
+		require.Equal(t, serverCtx.GetApplicationVersion(), latest.Name)
+
+		require.NoError(t, c.SetLatestApplicationVersion("older-version"))
+
+		latest, err = c.GetLatestApplicationVersion()
+		require.NoError(t, err)
+		require.Equal(t, "older-version", latest.Name)
+
+		versions, err := c.ListApplicationVersions()
+		require.NoError(t, err)
+		require.Len(t, versions, 2)
+		require.Equal(t, "older-version", versions[0].Name)
+	})
+
+	t.Run("GetLatestReturnsErrWhenEmpty", func(t *testing.T) {
+		serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		require.NoError(t, Launch(serverCtx))
+
+		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: getDatabaseURL()})
+		require.NoError(t, err)
+		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+
+		// Launch registers the current version; truncate to simulate empty state.
+		_, err = serverCtx.(*dbosContext).systemDB.(*sysDB).pool.Exec(serverCtx, "TRUNCATE TABLE dbos.application_versions")
+		require.NoError(t, err)
+
+		_, err = c.GetLatestApplicationVersion()
+		require.Error(t, err)
+		var dbosErr *DBOSError
+		require.True(t, errors.As(err, &dbosErr), "expected *DBOSError, got %T: %v", err, err)
+		require.Equal(t, NoApplicationVersions, dbosErr.Code)
+	})
+
+	t.Run("SetLatestRequiresVersionName", func(t *testing.T) {
+		serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		require.NoError(t, Launch(serverCtx))
+
+		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: getDatabaseURL()})
+		require.NoError(t, err)
+		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+
+		require.Error(t, c.SetLatestApplicationVersion(""))
 	})
 }

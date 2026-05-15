@@ -22,6 +22,7 @@ const (
 	QueueDeduplicated                                     // Workflow was deduplicated in the queue
 	PatchingNotEnabled                                    // Patching system is not enabled in the DBOS context configuration
 	TimeoutError                                          // Operation timed out (e.g., recv timeout)
+	NoApplicationVersions                                 // No application versions are registered in the system database
 )
 
 // DBOSError is the unified error type for all DBOS operations.
@@ -211,6 +212,13 @@ func newPatchingNotEnabledError() *DBOSError {
 	return &DBOSError{
 		Message: "Patching system is not enabled. Set EnablePatching to true in the DBOS context configuration to use Patch and DeprecatePatch",
 		Code:    PatchingNotEnabled,
+	}
+}
+
+func newNoApplicationVersionsError() *DBOSError {
+	return &DBOSError{
+		Message: "No application versions are registered",
+		Code:    NoApplicationVersions,
 	}
 }
 

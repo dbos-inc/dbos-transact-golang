@@ -52,6 +52,11 @@ type Client interface {
 	BackfillSchedule(scheduleName string, start, end time.Time) ([]string, error)
 	TriggerSchedule(scheduleName string) (WorkflowHandle[any], error)
 
+	// Application version management
+	ListApplicationVersions() ([]VersionInfo, error)
+	GetLatestApplicationVersion() (*VersionInfo, error)
+	SetLatestApplicationVersion(versionName string) error
+
 	Shutdown(timeout time.Duration) // Simply close the system DB connection pool
 }
 
@@ -757,6 +762,24 @@ func (c *client) BackfillSchedule(scheduleName string, start, end time.Time) ([]
 // to the enqueued workflow.
 func (c *client) TriggerSchedule(scheduleName string) (WorkflowHandle[any], error) {
 	return c.dbosCtx.TriggerSchedule(c.dbosCtx, scheduleName)
+}
+
+// ListApplicationVersions returns every registered application version ordered
+// by timestamp (newest first).
+func (c *client) ListApplicationVersions() ([]VersionInfo, error) {
+	return c.dbosCtx.ListApplicationVersions(c.dbosCtx)
+}
+
+// GetLatestApplicationVersion returns the application version with the most
+// recent timestamp.
+func (c *client) GetLatestApplicationVersion() (*VersionInfo, error) {
+	return c.dbosCtx.GetLatestApplicationVersion(c.dbosCtx)
+}
+
+// SetLatestApplicationVersion marks the named application version as latest by
+// updating its timestamp to the current time.
+func (c *client) SetLatestApplicationVersion(versionName string) error {
+	return c.dbosCtx.SetLatestApplicationVersion(c.dbosCtx, versionName)
 }
 
 // Shutdown gracefully shuts down the client and closes the system database connection.

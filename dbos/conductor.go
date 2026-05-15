@@ -399,6 +399,10 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleGetWorkflowStreamsRequest(data, base.RequestID)
 	case getWorkflowAggregatesMessage:
 		return c.handleGetWorkflowAggregatesRequest(data, base.RequestID)
+	case listAppVersionsMessage:
+		return c.handleListApplicationVersionsRequest(data, base.RequestID)
+	case setLatestAppVersionMessage:
+		return c.handleSetLatestApplicationVersionRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
@@ -1781,4 +1785,64 @@ func (c *conductor) handleTriggerScheduleRequest(data []byte, requestID string) 
 		WorkflowID: workflowID,
 	}
 	return c.sendResponse(resp, string(triggerScheduleMessage))
+}
+
+func (c *conductor) handleListApplicationVersionsRequest(data []byte, requestID string) error {
+	var req listApplicationVersionsConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse list application versions request", "error", err)
+		return fmt.Errorf("failed to parse list application versions request: %w", err)
+	}
+
+	var errorMsg *string
+	output := []applicationVersionOutput{}
+	versions, err := retryWithResult(c.dbosCtx, func() ([]VersionInfo, error) {
+		return c.dbosCtx.systemDB.listApplicationVersions(c.dbosCtx)
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		c.logger.Error("Failed to list application versions", "error", err)
+		msg := fmt.Sprintf("failed to list application versions: %v", err)
+		errorMsg = &msg
+	} else {
+		for _, v := range versions {
+			output = append(output, formatApplicationVersionOutput(v))
+		}
+	}
+
+	resp := listApplicationVersionsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: listAppVersionsMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		Output: output,
+	}
+	return c.sendResponse(resp, string(listAppVersionsMessage))
+}
+
+func (c *conductor) handleSetLatestApplicationVersionRequest(data []byte, requestID string) error {
+	var req setLatestApplicationVersionConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse set latest application version request", "error", err)
+		return fmt.Errorf("failed to parse set latest application version request: %w", err)
+	}
+
+	success := true
+	var errorMsg *string
+	if err := retry(c.dbosCtx, func() error {
+		return c.dbosCtx.systemDB.updateApplicationVersionTimestamp(c.dbosCtx, req.VersionName, time.Now().UnixMilli())
+	}, withRetrierLogger(c.logger)); err != nil {
+		c.logger.Error("Failed to set latest application version", "version_name", req.VersionName, "error", err)
+		msg := fmt.Sprintf("failed to set latest application version '%s': %v", req.VersionName, err)
+		errorMsg = &msg
+		success = false
+	}
+
+	resp := setLatestApplicationVersionConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: setLatestAppVersionMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		Success: success,
+	}
+	return c.sendResponse(resp, string(setLatestAppVersionMessage))
 }

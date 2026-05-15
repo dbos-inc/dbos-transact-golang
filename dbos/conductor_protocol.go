@@ -62,6 +62,8 @@ const (
 	getWorkflowNotificationsMsg  messageType = "get_workflow_notifications"
 	getWorkflowStreamsMessage    messageType = "get_workflow_streams"
 	getWorkflowAggregatesMessage messageType = "get_workflow_aggregates"
+	listAppVersionsMessage       messageType = "list_application_versions"
+	setLatestAppVersionMessage   messageType = "set_latest_application_version"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -690,4 +692,45 @@ type getWorkflowAggregatesConductorRequest struct {
 type getWorkflowAggregatesConductorResponse struct {
 	baseResponse
 	Output []WorkflowAggregateRow `json:"output"`
+}
+
+// applicationVersionOutput is the wire shape for a single application version
+// returned to the conductor.
+type applicationVersionOutput struct {
+	ID        string `json:"version_id"`
+	Name      string `json:"version_name"`
+	Timestamp int64  `json:"version_timestamp"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+func formatApplicationVersionOutput(v VersionInfo) applicationVersionOutput {
+	return applicationVersionOutput{
+		ID:        v.ID,
+		Name:      v.Name,
+		Timestamp: v.Timestamp,
+		CreatedAt: v.CreatedAt,
+	}
+}
+
+// listApplicationVersionsConductorRequest is sent by the conductor to list registered application versions.
+type listApplicationVersionsConductorRequest struct {
+	baseMessage
+}
+
+// listApplicationVersionsConductorResponse is sent in response to list application version requests.
+type listApplicationVersionsConductorResponse struct {
+	baseResponse
+	Output []applicationVersionOutput `json:"output"`
+}
+
+// setLatestApplicationVersionConductorRequest is sent by the conductor to mark a version as latest.
+type setLatestApplicationVersionConductorRequest struct {
+	baseMessage
+	VersionName string `json:"version_name"`
+}
+
+// setLatestApplicationVersionConductorResponse is sent in response to set-latest requests.
+type setLatestApplicationVersionConductorResponse struct {
+	baseResponse
+	Success bool `json:"success"`
 }
