@@ -398,8 +398,7 @@ func buildMigrations(schema string, isCockroach bool) []migrationFile {
 
 // shouldMigrate reports whether any migration work remains for the schema.
 // Returns true if the schema is missing, the dbos_migrations table is missing,
-// or the recorded version is behind the latest. Callers use this to skip the
-// full migration pipeline (including any locking) on hot startup paths.
+// or the recorded version is behind the latest.
 func shouldMigrate(ctx context.Context, pool *pgxpool.Pool, schema string, isCockroach bool) (bool, error) {
 	var schemaExists bool
 	err := pool.QueryRow(ctx,
@@ -733,9 +732,6 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		logger.Info("Detected CockroachDB")
 	}
 
-	// Skip the migration pipeline entirely if the schema is already at the
-	// latest version. Saves the round-trips of running every migration's
-	// IF [NOT] EXISTS check on every cold start.
 	needsMigration, smErr := shouldMigrate(ctx, pool, databaseSchema, isCockroach)
 	if smErr != nil {
 		if customPool == nil {
@@ -3540,10 +3536,6 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		// Calculate the cutoff time: current time minus limiter period
 		cutoffTimeMs := time.Now().Add(-input.queue.RateLimit.Period).UnixMilli()
 
-		// Count workflows that have started in the limiter period. Filtering on
-		// rate_limited = TRUE lets the query use idx_workflow_status_rate_limited,
-		// which is maintained only for workflows actually dequeued under a rate
-		// limiter (see the UPDATE further down in this function that sets it).
 		limiterQuery := fmt.Sprintf(`
 		SELECT COUNT(*)
 		FROM %s.workflow_status
@@ -3713,10 +3705,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			id: id,
 		}
 
-		// Update workflow status to PENDING and return name and inputs. Mark
-		// rate_limited based on whether this queue has a rate limiter so the
-		// idx_workflow_status_rate_limited partial index only carries rows that
-		// the limiter query will ever look at.
+		// Update workflow status to PENDING and return name and inputs
 		updateQuery := fmt.Sprintf(`
 			UPDATE %s.workflow_status
 			SET status = $1,
