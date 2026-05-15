@@ -95,27 +95,25 @@ func TestVersionNotBumpedOnMigrationFailure(t *testing.T) {
 	ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 	pool := poolFromContext(t, ctx)
 	bg := context.Background()
+	migs := buildMigrations("dbos", false)
+	latest := migs[len(migs)-1].version
 
-	// Rewind so migration 32 (create in_flight index) is pending again.
-	const rewindTo = int64(31)
+	const rewindTo = int64(20)
 	_, err := pool.Exec(bg, "UPDATE dbos.dbos_migrations SET version = $1", rewindTo)
 	require.NoError(t, err)
 
-	// Swap migration 32's body with invalid SQL and re-run. The runner must
-	// raise and leave the version unchanged.
-	migrations := buildMigrations("dbos", false)
-	require.Equal(t, int64(32), migrations[31].version)
-	migrations[31].sql = "THIS IS NOT VALID SQL"
-	latest := migrations[len(migrations)-1].version
-
-	err = applyMigrationsForTest(bg, pool, "dbos", migrations, rewindTo, slog.Default())
-	require.Error(t, err)
+	err = runMigrations(bg, pool, "dbos", false, slog.Default())
+	require.Error(t, err, "migration 21 should fail because dbos.queues already exists")
+	assert.Contains(t, err.Error(), "already exists")
 
 	var version int64
 	require.NoError(t, pool.QueryRow(bg, "SELECT version FROM dbos.dbos_migrations").Scan(&version))
-	assert.Equal(t, rewindTo, version, "version should not have advanced past 31")
+	assert.Equal(t, rewindTo, version, "version should still be 20 (migration 21 failed inside its tx)")
 
-	// Re-run with real migrations: IF NOT EXISTS guards make 32+ idempotent.
+	// Clear the conflict and re-run: the catalog tx now commits and the
+	// later online migrations idempotently re-apply.
+	_, err = pool.Exec(bg, "DROP TABLE dbos.queues")
+	require.NoError(t, err)
 	require.NoError(t, runMigrations(bg, pool, "dbos", false, slog.Default()))
 	require.NoError(t, pool.QueryRow(bg, "SELECT version FROM dbos.dbos_migrations").Scan(&version))
 	assert.Equal(t, latest, version)
@@ -170,56 +168,3 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 	require.NoError(t, pool.QueryRow(bg, "SELECT version FROM dbos.dbos_migrations").Scan(&version))
 	assert.Equal(t, latest, version)
 }
-
-// applyMigrationsForTest is a minimal wrapper that runs only the
-// pending-migration loop of runMigrations against a pre-rendered migration
-// list. Used by tests that need to inject a failing migration body without
-// rebuilding the whole runner.
-func applyMigrationsForTest(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	schema string,
-	migrations []migrationFile,
-	currentVersion int64,
-	logger *slog.Logger,
-) error {
-	invalidCleaned := false
-	for _, migration := range migrations {
-		if migration.version <= currentVersion {
-			continue
-		}
-		if migration.online {
-			if !invalidCleaned {
-				if err := cleanupInvalidIndexes(ctx, pool, schema, logger); err != nil {
-					return err
-				}
-				invalidCleaned = true
-			}
-			if _, err := pool.Exec(ctx, migration.sql); err != nil {
-				return fmt.Errorf("failed to execute migration %d: %v", migration.version, err)
-			}
-			if err := writeMigrationVersion(ctx, pool, schema, migration.version, currentVersion); err != nil {
-				return err
-			}
-		} else {
-			mtx, err := pool.Begin(ctx)
-			if err != nil {
-				return err
-			}
-			if _, err := mtx.Exec(ctx, migration.sql); err != nil {
-				mtx.Rollback(ctx)
-				return fmt.Errorf("failed to execute migration %d: %v", migration.version, err)
-			}
-			if err := writeMigrationVersion(ctx, mtx, schema, migration.version, currentVersion); err != nil {
-				mtx.Rollback(ctx)
-				return err
-			}
-			if err := mtx.Commit(ctx); err != nil {
-				return err
-			}
-		}
-		currentVersion = migration.version
-	}
-	return nil
-}
-

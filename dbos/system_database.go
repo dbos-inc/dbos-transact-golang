@@ -210,6 +210,12 @@ var migration9SQL string
 //go:embed migrations/10_add_notifications_pkey.sql
 var migration10SQL string
 
+//go:embed migrations/10_check_notifications_pkey_cockroach.sql
+var migration10CheckCockroachSQL string
+
+//go:embed migrations/10_add_notifications_pkey_cockroach.sql
+var migration10AddCockroachSQL string
+
 //go:embed migrations/11_add_serialization_columns.sql
 var migration11SQL string
 
@@ -603,17 +609,9 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 }
 
 // applyCockroachMigration10 applies migration 10 on CockroachDB, which does
-// not support the DO block used by the Postgres migration file. Runs inside
-// the caller's transaction so the version bump and the schema change commit
-// together.
+// not support the DO block used by the Postgres migration file.
 func applyCockroachMigration10(ctx context.Context, tx pgx.Tx, schema, sanitizedSchema string) error {
-	checkPKQuery := `SELECT 1 FROM pg_constraint c
-	JOIN pg_class cl ON c.conrelid = cl.oid
-	JOIN pg_namespace n ON cl.relnamespace = n.oid
-	WHERE n.nspname = $1
-	  AND cl.relname = 'notifications'
-	  AND c.contype = 'p'`
-	rows, err := tx.Query(ctx, checkPKQuery, schema)
+	rows, err := tx.Query(ctx, migration10CheckCockroachSQL, schema)
 	if err != nil {
 		return fmt.Errorf("failed to check notifications primary key for migration 10: %v", err)
 	}
@@ -623,7 +621,7 @@ func applyCockroachMigration10(ctx context.Context, tx pgx.Tx, schema, sanitized
 		return fmt.Errorf("failed to check notifications primary key for migration 10: %v", err)
 	}
 	if !hasPK {
-		alterQuery := fmt.Sprintf("ALTER TABLE %s.notifications ADD CONSTRAINT notifications_pkey PRIMARY KEY (message_uuid)", sanitizedSchema)
+		alterQuery := fmt.Sprintf(migration10AddCockroachSQL, sanitizedSchema)
 		if _, err := tx.Exec(ctx, alterQuery); err != nil {
 			return fmt.Errorf("failed to execute migration 10: %v", err)
 		}
