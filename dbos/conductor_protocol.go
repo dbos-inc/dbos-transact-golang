@@ -61,6 +61,7 @@ const (
 	getWorkflowEventsMessage     messageType = "get_workflow_events"
 	getWorkflowNotificationsMsg  messageType = "get_workflow_notifications"
 	getWorkflowStreamsMessage    messageType = "get_workflow_streams"
+	getWorkflowAggregatesMessage messageType = "get_workflow_aggregates"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -657,4 +658,36 @@ type getWorkflowStreamsConductorRequest struct {
 type getWorkflowStreamsConductorResponse struct {
 	baseResponse
 	Streams []streamEntryOutput `json:"streams"`
+}
+
+// getWorkflowAggregatesConductorRequestBody contains the workflow aggregate query parameters.
+type getWorkflowAggregatesConductorRequestBody struct {
+	GroupByStatus             bool         `json:"group_by_status"`
+	GroupByName               bool         `json:"group_by_name"`
+	GroupByQueueName          bool         `json:"group_by_queue_name"`
+	GroupByExecutorID         bool         `json:"group_by_executor_id"`
+	GroupByApplicationVersion bool         `json:"group_by_application_version"`
+	TimeBucketSizeMs          *int64       `json:"time_bucket_size_ms,omitempty"`
+	Status                    stringOrList `json:"status,omitempty"`
+	StartTime                 *time.Time   `json:"start_time,omitempty"` // ISO 8601
+	EndTime                   *time.Time   `json:"end_time,omitempty"`   // ISO 8601
+	Name                      stringOrList `json:"name,omitempty"`
+	AppVersion                stringOrList `json:"app_version,omitempty"`
+	ExecutorID                stringOrList `json:"executor_id,omitempty"`
+	QueueName                 stringOrList `json:"queue_name,omitempty"`
+	WorkflowIDPrefix          stringOrList `json:"workflow_id_prefix,omitempty"`
+}
+
+// getWorkflowAggregatesConductorRequest is sent by the conductor to fetch workflow aggregates.
+type getWorkflowAggregatesConductorRequest struct {
+	baseMessage
+	Body getWorkflowAggregatesConductorRequestBody `json:"body"`
+}
+
+// getWorkflowAggregatesConductorResponse is sent in response to workflow aggregate requests.
+// Output uses WorkflowAggregateRow directly: it has the matching JSON tags and there is no
+// conversion needed between the public Go shape and the wire shape.
+type getWorkflowAggregatesConductorResponse struct {
+	baseResponse
+	Output []WorkflowAggregateRow `json:"output"`
 }

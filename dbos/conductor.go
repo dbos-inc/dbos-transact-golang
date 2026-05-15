@@ -397,6 +397,8 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleGetWorkflowNotificationsRequest(data, base.RequestID)
 	case getWorkflowStreamsMessage:
 		return c.handleGetWorkflowStreamsRequest(data, base.RequestID)
+	case getWorkflowAggregatesMessage:
+		return c.handleGetWorkflowAggregatesRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
@@ -1430,6 +1432,62 @@ func (c *conductor) handleGetWorkflowStreamsRequest(data []byte, requestID strin
 	}
 	resp.Streams = streams
 	return c.sendResponse(resp, string(getWorkflowStreamsMessage))
+}
+
+func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID string) error {
+	var req getWorkflowAggregatesConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse get workflow aggregates request", "error", err)
+		return fmt.Errorf("failed to parse get workflow aggregates request: %w", err)
+	}
+	c.logger.Debug("Handling get workflow aggregates request", "request_id", requestID)
+
+	input := GetWorkflowAggregatesInput{
+		GroupByStatus:             req.Body.GroupByStatus,
+		GroupByName:               req.Body.GroupByName,
+		GroupByQueueName:          req.Body.GroupByQueueName,
+		GroupByExecutorID:         req.Body.GroupByExecutorID,
+		GroupByApplicationVersion: req.Body.GroupByApplicationVersion,
+		Name:                      req.Body.Name.toSlice(),
+		ApplicationVersion:        req.Body.AppVersion.toSlice(),
+		ExecutorID:                req.Body.ExecutorID.toSlice(),
+		QueueName:                 req.Body.QueueName.toSlice(),
+		WorkflowIDPrefix:          req.Body.WorkflowIDPrefix.toSlice(),
+	}
+	if req.Body.TimeBucketSizeMs != nil {
+		input.TimeBucketSize = time.Duration(*req.Body.TimeBucketSizeMs) * time.Millisecond
+	}
+	if len(req.Body.Status) > 0 {
+		statuses := make([]WorkflowStatusType, len(req.Body.Status))
+		for i, s := range req.Body.Status {
+			statuses[i] = WorkflowStatusType(s)
+		}
+		input.Status = statuses
+	}
+	if req.Body.StartTime != nil {
+		input.StartTime = *req.Body.StartTime
+	}
+	if req.Body.EndTime != nil {
+		input.EndTime = *req.Body.EndTime
+	}
+
+	resp := getWorkflowAggregatesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getWorkflowAggregatesMessage, RequestID: requestID},
+		},
+		Output: []WorkflowAggregateRow{},
+	}
+
+	rows, err := c.dbosCtx.GetWorkflowAggregates(c.dbosCtx, input)
+	if err != nil {
+		c.logger.Error("Failed to get workflow aggregates", "error", err)
+		errStr := fmt.Sprintf("failed to get workflow aggregates: %v", err)
+		resp.ErrorMessage = &errStr
+		return c.sendResponse(resp, string(getWorkflowAggregatesMessage))
+	}
+
+	resp.Output = rows
+	return c.sendResponse(resp, string(getWorkflowAggregatesMessage))
 }
 
 func (c *conductor) sendResponse(response any, responseType string) error {

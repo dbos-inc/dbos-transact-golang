@@ -67,3 +67,44 @@ func TestListWorkflowsConductorRequestBody_StringOrListFields(t *testing.T) {
 		assert.Equal(t, []string{"p1", "p2"}, req.Body.ParentWorkflowID.toSlice())
 	})
 }
+
+func TestGetWorkflowAggregatesConductorRequestBody_Unmarshal(t *testing.T) {
+	t.Run("all group_by flags and a time bucket", func(t *testing.T) {
+		var req getWorkflowAggregatesConductorRequest
+		err := json.Unmarshal([]byte(`{
+			"type":"get_workflow_aggregates",
+			"request_id":"r1",
+			"body":{
+				"group_by_status":true,
+				"group_by_name":true,
+				"group_by_queue_name":true,
+				"group_by_executor_id":true,
+				"group_by_application_version":true,
+				"time_bucket_size_ms":3600000
+			}
+		}`), &req)
+		require.NoError(t, err)
+		assert.True(t, req.Body.GroupByStatus)
+		assert.True(t, req.Body.GroupByName)
+		assert.True(t, req.Body.GroupByQueueName)
+		assert.True(t, req.Body.GroupByExecutorID)
+		assert.True(t, req.Body.GroupByApplicationVersion)
+		require.NotNil(t, req.Body.TimeBucketSizeMs)
+		assert.Equal(t, int64(3_600_000), *req.Body.TimeBucketSizeMs)
+	})
+
+	t.Run("status as single string", func(t *testing.T) {
+		var req getWorkflowAggregatesConductorRequest
+		err := json.Unmarshal([]byte(`{"type":"get_workflow_aggregates","request_id":"r","body":{"group_by_status":true,"status":"SUCCESS"}}`), &req)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"SUCCESS"}, req.Body.Status.toSlice())
+	})
+
+	t.Run("name and app_version as arrays", func(t *testing.T) {
+		var req getWorkflowAggregatesConductorRequest
+		err := json.Unmarshal([]byte(`{"type":"get_workflow_aggregates","request_id":"r","body":{"group_by_name":true,"name":["wf1","wf2"],"app_version":["v1"]}}`), &req)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"wf1", "wf2"}, req.Body.Name.toSlice())
+		assert.Equal(t, []string{"v1"}, req.Body.AppVersion.toSlice())
+	})
+}
