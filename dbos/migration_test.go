@@ -127,6 +127,16 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 	pool := poolFromContext(t, ctx)
 	bg := context.Background()
 
+	// Postgres-only: CRDB blocks direct pg_index mutation, and its migrations
+	// are not online so cleanupInvalidIndexes is never invoked on CRDB.
+	conn, err := pool.Acquire(bg)
+	require.NoError(t, err)
+	if isCockroachDB(bg, conn.Conn()) {
+		conn.Release()
+		t.Skip("invalid-index recovery is Postgres-only")
+	}
+	conn.Release()
+
 	const targetIndex = "idx_workflow_status_in_flight"
 	const rewindTo = int64(31) // migration 32 builds the target index
 	migs := buildMigrations("dbos", false)
@@ -135,7 +145,7 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 	// Drop the valid index, then plant an invalid one of the same name.
 	// Flipping pg_index.indisvalid mimics what Postgres leaves behind when
 	// CREATE INDEX CONCURRENTLY aborts mid-build.
-	_, err := pool.Exec(bg, fmt.Sprintf(`DROP INDEX IF EXISTS dbos.%q`, targetIndex))
+	_, err = pool.Exec(bg, fmt.Sprintf(`DROP INDEX IF EXISTS dbos.%q`, targetIndex))
 	require.NoError(t, err)
 	_, err = pool.Exec(bg, fmt.Sprintf(
 		`CREATE INDEX %q ON dbos.workflow_status (queue_name, status, priority, created_at) WHERE status IN ('ENQUEUED', 'PENDING')`,
