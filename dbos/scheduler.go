@@ -199,10 +199,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 		result, runErr := wrappedFn(ctx, encodedInput, ser.Name(), opts...)
 
 		if err := retry(c, func() error {
-			if err := c.systemDB.updateScheduleLastFiredAt(c, scheduleName, time.Now()); err != nil {
-				c.logger.Error("failed to update schedule last fired time", "schedule", scheduleName, "error", err)
-			}
-			return nil
+			return c.systemDB.updateScheduleLastFiredAt(c, scheduleName, time.Now())
 		}, withRetrierLogger(c.logger)); err != nil {
 			c.logger.Error("failed to update schedule last fired time after retries", "schedule", scheduleName, "error", err)
 		}
