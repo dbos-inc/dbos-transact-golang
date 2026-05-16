@@ -2040,10 +2040,8 @@ func TestClientApplicationVersions(t *testing.T) {
 		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
 		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
-
-		// Launch registers the current version; clear the table to simulate empty state.
-		s := serverCtx.(*dbosContext).systemDB.(*sysDB)
-		_, err = s.pool.Exec(serverCtx, fmt.Sprintf("DELETE FROM %sapplication_versions", s.dialect.SchemaPrefix(s.schema)))
+		// Launch registers the current version; truncate to simulate empty state.
+		_, err = serverCtx.(*dbosContext).systemDB.(*sysDB).pool.Exec(serverCtx, "TRUNCATE TABLE dbos.application_versions")
 		require.NoError(t, err)
 
 		_, err = c.GetLatestApplicationVersion()

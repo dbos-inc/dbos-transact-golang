@@ -203,9 +203,9 @@ type DBOSContext interface {
 	TriggerSchedule(_ DBOSContext, scheduleName string) (WorkflowHandle[any], error)                                         // Trigger a schedule immediately, returning a handle to the enqueued workflow
 
 	// Application versions
-	ListApplicationVersions(_ DBOSContext) ([]VersionInfo, error)        // List all registered application versions, newest first
-	GetLatestApplicationVersion(_ DBOSContext) (*VersionInfo, error)     // Get the latest registered application version
-	SetLatestApplicationVersion(_ DBOSContext, versionName string) error // Mark the named version as latest by bumping its timestamp to now
+	ListApplicationVersions(_ DBOSContext) ([]VersionInfo, error)         // List all registered application versions, newest first
+	GetLatestApplicationVersion(_ DBOSContext) (*VersionInfo, error)      // Get the latest registered application version
+	SetLatestApplicationVersion(_ DBOSContext, versionName string) error  // Mark the named version as latest by bumping its timestamp to now
 
 	// Alert handling
 	SetAlertHandler(handler AlertHandler) // Register a handler for alerts from DBOS Conductor (must be called before Launch)

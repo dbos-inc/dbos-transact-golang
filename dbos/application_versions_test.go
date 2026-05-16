@@ -71,8 +71,7 @@ func TestApplicationVersions(t *testing.T) {
 		// Launch registers the current version; clear the table to simulate empty state.
 		require.NoError(t, dbosCtx.Launch())
 		c := dbosCtx.(*dbosContext)
-		s := c.systemDB.(*sysDB)
-		_, err := s.pool.Exec(c, fmt.Sprintf("DELETE FROM %sapplication_versions", s.dialect.SchemaPrefix(s.schema)))
+		_, err := c.systemDB.(*sysDB).pool.Exec(c, "TRUNCATE TABLE dbos.application_versions")
 		require.NoError(t, err)
 
 		_, err = GetLatestApplicationVersion(dbosCtx)
