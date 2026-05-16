@@ -87,7 +87,7 @@ func openSQLitePool(ctx context.Context, databaseURL string) (*sql.DB, error) {
 		}
 		// Skip directory creation if the path is empty or only a name.
 		if dir := filepath.Dir(path); dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
+			if err := os.MkdirAll(dir, 0o750); err != nil {
 				return nil, fmt.Errorf("failed to create sqlite parent dir %q: %v", dir, err)
 			}
 		}

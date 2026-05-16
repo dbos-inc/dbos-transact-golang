@@ -1470,12 +1470,17 @@ func (s *sysDB) cancelWorkflows(ctx context.Context, input cancelWorkflowsDBInpu
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("failed to scan cancelled workflow id: %w", err)
+				scanErr := fmt.Errorf("failed to scan cancelled workflow id: %w", err)
+				if cerr := rows.Close(); cerr != nil {
+					return nil, errors.Join(scanErr, fmt.Errorf("close rows: %w", cerr))
+				}
+				return nil, scanErr
 			}
 			found = append(found, id)
 		}
-		rows.Close()
+		if cerr := rows.Close(); cerr != nil {
+			return nil, fmt.Errorf("failed to close cancelled workflow rows: %w", cerr)
+		}
 		if err := rows.Err(); err != nil {
 			return nil, fmt.Errorf("failed to read cancelled workflow ids: %w", err)
 		}
@@ -1794,12 +1799,17 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("failed to scan resumed workflow id: %w", err)
+				scanErr := fmt.Errorf("failed to scan resumed workflow id: %w", err)
+				if cerr := rows.Close(); cerr != nil {
+					return nil, errors.Join(scanErr, fmt.Errorf("close rows: %w", cerr))
+				}
+				return nil, scanErr
 			}
 			found = append(found, id)
 		}
-		rows.Close()
+		if cerr := rows.Close(); cerr != nil {
+			return nil, fmt.Errorf("failed to close resumed workflow rows: %w", cerr)
+		}
 		if err := rows.Err(); err != nil {
 			return nil, fmt.Errorf("failed to read resumed workflow ids: %w", err)
 		}
@@ -5100,8 +5110,11 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			var opOutput, opError, opChildWfID *string
 			var opStartedAt, opCompletedAt *int64
 			if err := outputRows.Scan(&opWfUUID, &opFuncID, &opFuncName, &opOutput, &opError, &opChildWfID, &opStartedAt, &opCompletedAt); err != nil {
-				outputRows.Close()
-				return nil, fmt.Errorf("failed to scan operation_outputs row for %s: %w", wfID, err)
+				scanErr := fmt.Errorf("failed to scan operation_outputs row for %s: %w", wfID, err)
+				if cerr := outputRows.Close(); cerr != nil {
+					return nil, errors.Join(scanErr, fmt.Errorf("close operation_outputs rows: %w", cerr))
+				}
+				return nil, scanErr
 			}
 			operationOutputs = append(operationOutputs, map[string]any{
 				"workflow_uuid":         opWfUUID,
@@ -5114,7 +5127,9 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 				"completed_at_epoch_ms": opCompletedAt,
 			})
 		}
-		outputRows.Close()
+		if cerr := outputRows.Close(); cerr != nil {
+			return nil, fmt.Errorf("failed to close operation_outputs rows for %s: %w", wfID, cerr)
+		}
 		if err := outputRows.Err(); err != nil {
 			return nil, fmt.Errorf("error iterating operation_outputs for %s: %w", wfID, err)
 		}
@@ -5131,8 +5146,11 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 		for eventRows.Next() {
 			var evWfUUID, evKey, evValue *string
 			if err := eventRows.Scan(&evWfUUID, &evKey, &evValue); err != nil {
-				eventRows.Close()
-				return nil, fmt.Errorf("failed to scan workflow_events row for %s: %w", wfID, err)
+				scanErr := fmt.Errorf("failed to scan workflow_events row for %s: %w", wfID, err)
+				if cerr := eventRows.Close(); cerr != nil {
+					return nil, errors.Join(scanErr, fmt.Errorf("close workflow_events rows: %w", cerr))
+				}
+				return nil, scanErr
 			}
 			workflowEvents = append(workflowEvents, map[string]any{
 				"workflow_uuid": evWfUUID,
@@ -5140,7 +5158,9 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 				"value":         evValue,
 			})
 		}
-		eventRows.Close()
+		if cerr := eventRows.Close(); cerr != nil {
+			return nil, fmt.Errorf("failed to close workflow_events rows for %s: %w", wfID, cerr)
+		}
 		if err := eventRows.Err(); err != nil {
 			return nil, fmt.Errorf("error iterating workflow_events for %s: %w", wfID, err)
 		}
@@ -5158,8 +5178,11 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			var hWfUUID, hKey, hValue *string
 			var hFuncID *int
 			if err := historyRows.Scan(&hWfUUID, &hFuncID, &hKey, &hValue); err != nil {
-				historyRows.Close()
-				return nil, fmt.Errorf("failed to scan workflow_events_history row for %s: %w", wfID, err)
+				scanErr := fmt.Errorf("failed to scan workflow_events_history row for %s: %w", wfID, err)
+				if cerr := historyRows.Close(); cerr != nil {
+					return nil, errors.Join(scanErr, fmt.Errorf("close workflow_events_history rows: %w", cerr))
+				}
+				return nil, scanErr
 			}
 			workflowEventsHistory = append(workflowEventsHistory, map[string]any{
 				"workflow_uuid": hWfUUID,
@@ -5168,7 +5191,9 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 				"value":         hValue,
 			})
 		}
-		historyRows.Close()
+		if cerr := historyRows.Close(); cerr != nil {
+			return nil, fmt.Errorf("failed to close workflow_events_history rows for %s: %w", wfID, cerr)
+		}
 		if err := historyRows.Err(); err != nil {
 			return nil, fmt.Errorf("error iterating workflow_events_history for %s: %w", wfID, err)
 		}
@@ -5186,8 +5211,11 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			var sWfUUID, sKey, sValue *string
 			var sOffset, sFuncID *int
 			if err := streamRows.Scan(&sWfUUID, &sKey, &sValue, &sOffset, &sFuncID); err != nil {
-				streamRows.Close()
-				return nil, fmt.Errorf("failed to scan streams row for %s: %w", wfID, err)
+				scanErr := fmt.Errorf("failed to scan streams row for %s: %w", wfID, err)
+				if cerr := streamRows.Close(); cerr != nil {
+					return nil, errors.Join(scanErr, fmt.Errorf("close streams rows: %w", cerr))
+				}
+				return nil, scanErr
 			}
 			streams = append(streams, map[string]any{
 				"workflow_uuid": sWfUUID,
@@ -5197,7 +5225,9 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 				"function_id":   sFuncID,
 			})
 		}
-		streamRows.Close()
+		if cerr := streamRows.Close(); cerr != nil {
+			return nil, fmt.Errorf("failed to close streams rows for %s: %w", wfID, cerr)
+		}
 		if err := streamRows.Err(); err != nil {
 			return nil, fmt.Errorf("error iterating streams for %s: %w", wfID, err)
 		}
