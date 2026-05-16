@@ -4104,16 +4104,31 @@ func TestConcurrentWorkflows(t *testing.T) {
 		senderResults := make(chan string, numPairs)
 		errors := make(chan error, numPairs*2)
 
-		// Phase 1: start all receivers synchronously so their workflow_status
-		// rows exist before any sender does its Send-target lookup. On sqlite
-		// this is required (single writer); on pg it just removes a race.
+		// Phase 1: register all receivers in parallel so their workflow_status
+		// rows exist before any sender does its Send-target lookup. Sequential
+		// registration would let early receivers' 10s Recv timer expire before
+		// later receivers were even registered (and before phase 2 launches
+		// senders), causing every receiver to time out.
 		receiverHandles := make([]WorkflowHandle[string], numPairs)
+		regErrs := make([]error, numPairs)
+		var regWg sync.WaitGroup
+		regWg.Add(numPairs)
 		for i := range numPairs {
-			handle, err := RunWorkflow(dbosCtx, sendRecvReceiverWorkflow, i, WithWorkflowID(fmt.Sprintf("send-recv-receiver-%d", i)))
+			go func(pairID int) {
+				defer regWg.Done()
+				h, err := RunWorkflow(dbosCtx, sendRecvReceiverWorkflow, pairID, WithWorkflowID(fmt.Sprintf("send-recv-receiver-%d", pairID)))
+				if err != nil {
+					regErrs[pairID] = err
+					return
+				}
+				receiverHandles[pairID] = h
+			}(i)
+		}
+		regWg.Wait()
+		for i, err := range regErrs {
 			if err != nil {
 				t.Fatalf("failed to start receiver workflow %d: %v", i, err)
 			}
-			receiverHandles[i] = handle
 		}
 
 		wg.Add(numPairs * 2)
