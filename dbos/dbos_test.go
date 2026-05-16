@@ -1135,6 +1135,10 @@ func TestDetectDialect(t *testing.T) {
 		{"kv-quoted-spaces", "host=localhost user='postgres' application_name='dbos worker'", DialectPostgres, ""},
 		{"kv-user-first", "user='postgres' password='x' database=dbos host=localhost", DialectPostgres, ""},
 		{"kv-host-first", "host=localhost port=5432 dbname=dbos", DialectPostgres, ""},
+		// libpq KV DSN with characters that look like url.Parse escape sequences
+		// in quoted values (#$%&!). url.Parse would reject "%&!"; we must detect
+		// the KV form first.
+		{"kv-quoted-funny-chars", "user='User Name-123@acme.com#$%&!' password='a!b@c$d()e*_,/:;=?@ff[]22' database=dbos host=localhost port=5432 sslmode=disable", DialectPostgres, ""},
 
 		// Failure paths.
 		{"empty", "", "", "empty"},

@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 

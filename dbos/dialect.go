@@ -121,6 +121,13 @@ func detectDialect(rawURL string) (DialectName, error) {
 	if rawURL == "" {
 		return "", fmt.Errorf("database URL is empty")
 	}
+	// libpq key=value DSNs (e.g. "user='User Name#$%&!' host=localhost ...")
+	// can contain characters that url.Parse rejects as invalid URL escapes.
+	// Detect this form before falling through to url.Parse so DSNs with funny
+	// characters in quoted values still route to Postgres.
+	if looksLikePostgresKVDSN(rawURL) {
+		return DialectPostgres, nil
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid database URL: %v", err)
@@ -131,14 +138,6 @@ func detectDialect(rawURL string) (DialectName, error) {
 	case "postgres", "postgresql":
 		return DialectPostgres, nil
 	case "":
-		// pgx also accepts a libpq-style key=value DSN (e.g.
-		// "user='postgres' host=localhost dbname=app"). url.Parse returns an
-		// empty scheme for these. Treat any string starting with one of the
-		// canonical pg keyword prefixes as Postgres so existing users of the
-		// key-value format keep working.
-		if looksLikePostgresKVDSN(rawURL) {
-			return DialectPostgres, nil
-		}
 		return "", fmt.Errorf("database URL has no scheme: %q", rawURL)
 	default:
 		return "", fmt.Errorf("unsupported database scheme %q (want sqlite: or postgres:)", u.Scheme)
