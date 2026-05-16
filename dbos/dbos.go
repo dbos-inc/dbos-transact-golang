@@ -3,6 +3,7 @@ package dbos
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -31,8 +32,9 @@ const (
 // DatabaseURL and AppName are required.
 type Config struct {
 	AppName                   string          // Application name for identification (required)
-	DatabaseURL               string          // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
-	SystemDBPool              *pgxpool.Pool   // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
+	DatabaseURL               string          // DatabaseURL is the system-database connection string. Exactly one of DatabaseURL, SystemDBPool, or SqliteSystemDB must be set.
+	SystemDBPool              *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SqliteSystemDB.
+	SqliteSystemDB            *sql.DB         // SqliteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
 	DatabaseSchema            string          // Database schema name (defaults to "dbos")
 	Logger                    *slog.Logger    // Custom logger instance (defaults to a new slog logger)
 	AdminServer               bool            // Enable Transact admin HTTP server (disabled by default)
@@ -49,11 +51,19 @@ type Config struct {
 
 func processConfig(inputConfig *Config) (*Config, error) {
 	// First check required fields
-	if len(inputConfig.DatabaseURL) == 0 && inputConfig.SystemDBPool == nil {
-		return nil, fmt.Errorf("either databaseURL or systemDBPool must be provided")
+	if len(inputConfig.DatabaseURL) == 0 && inputConfig.SystemDBPool == nil && inputConfig.SqliteSystemDB == nil {
+		return nil, fmt.Errorf("one of databaseURL, systemDBPool, or sqliteSystemDB must be provided")
+	}
+	if inputConfig.SystemDBPool != nil && inputConfig.SqliteSystemDB != nil {
+		return nil, fmt.Errorf("systemDBPool and sqliteSystemDB are mutually exclusive")
 	}
 	if len(inputConfig.AppName) == 0 {
 		return nil, fmt.Errorf("missing required config field: appName")
+	}
+	if inputConfig.SystemDBPool == nil && inputConfig.SqliteSystemDB == nil {
+		if _, err := detectDialect(inputConfig.DatabaseURL); err != nil {
+			return nil, err
+		}
 	}
 	if inputConfig.AdminServerPort == 0 {
 		inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
@@ -72,6 +82,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ApplicationVersion:        inputConfig.ApplicationVersion,
 		ExecutorID:                inputConfig.ExecutorID,
 		SystemDBPool:              inputConfig.SystemDBPool,
+		SqliteSystemDB:            inputConfig.SqliteSystemDB,
 		EnablePatching:            inputConfig.EnablePatching,
 		Serializer:                inputConfig.Serializer,
 		SchedulerPollingInterval:  inputConfig.SchedulerPollingInterval,
@@ -192,9 +203,9 @@ type DBOSContext interface {
 	TriggerSchedule(_ DBOSContext, scheduleName string) (WorkflowHandle[any], error)                                         // Trigger a schedule immediately, returning a handle to the enqueued workflow
 
 	// Application versions
-	ListApplicationVersions(_ DBOSContext) ([]VersionInfo, error)         // List all registered application versions, newest first
-	GetLatestApplicationVersion(_ DBOSContext) (*VersionInfo, error)      // Get the latest registered application version
-	SetLatestApplicationVersion(_ DBOSContext, versionName string) error  // Mark the named version as latest by bumping its timestamp to now
+	ListApplicationVersions(_ DBOSContext) ([]VersionInfo, error)        // List all registered application versions, newest first
+	GetLatestApplicationVersion(_ DBOSContext) (*VersionInfo, error)     // Get the latest registered application version
+	SetLatestApplicationVersion(_ DBOSContext, versionName string) error // Mark the named version as latest by bumping its timestamp to now
 
 	// Alert handling
 	SetAlertHandler(handler AlertHandler) // Register a handler for alerts from DBOS Conductor (must be called before Launch)
@@ -566,6 +577,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 		databaseURL:     config.DatabaseURL,
 		databaseSchema:  config.DatabaseSchema,
 		customPool:      config.SystemDBPool,
+		customSqliteDB:  config.SqliteSystemDB,
 		logger:          initExecutor.logger,
 		applicationName: config.AppName,
 	}

@@ -18,7 +18,7 @@ func TestLogger(t *testing.T) {
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck.func1"),
 	)
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 
 	t.Run("Default logger", func(t *testing.T) {
 		dbosCtx, err := NewDBOSContext(context.Background(), Config{

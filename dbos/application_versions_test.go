@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -67,10 +68,11 @@ func TestApplicationVersions(t *testing.T) {
 
 	t.Run("GetLatestReturnsErrWhenEmpty", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true})
-		// Launch registers the current version; truncate to simulate empty state.
+		// Launch registers the current version; clear the table to simulate empty state.
 		require.NoError(t, dbosCtx.Launch())
 		c := dbosCtx.(*dbosContext)
-		_, err := c.systemDB.(*sysDB).pool.Exec(c, "TRUNCATE TABLE dbos.application_versions")
+		s := c.systemDB.(*sysDB)
+		_, err := s.pool.Exec(c, fmt.Sprintf("DELETE FROM %sapplication_versions", s.dialect.SchemaPrefix(s.schema)))
 		require.NoError(t, err)
 
 		_, err = GetLatestApplicationVersion(dbosCtx)

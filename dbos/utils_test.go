@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -26,9 +27,42 @@ func getDatabaseURL() string {
 	return databaseURL
 }
 
+func useSqliteBackend() bool {
+	return os.Getenv("DBOS_TEST_BACKEND") == "sqlite"
+}
+
+func skipIfSqlite(t *testing.T, reason string) {
+	t.Helper()
+	if useSqliteBackend() {
+		t.Skipf("skipping on sqlite backend: %s", reason)
+	}
+}
+
+var testDBURLs sync.Map // *testing.T -> string; ensures setupDBOS and follow-up callers (e.g. NewClient) share the same sqlite file.
+
+func backendDatabaseURL(t *testing.T) string {
+	t.Helper()
+	if v, ok := testDBURLs.Load(t); ok {
+		return v.(string)
+	}
+	var url string
+	if useSqliteBackend() {
+		url = "sqlite:" + filepath.Join(t.TempDir(), "dbos.db")
+	} else {
+		url = getDatabaseURL()
+	}
+	testDBURLs.Store(t, url)
+	t.Cleanup(func() { testDBURLs.Delete(t) })
+	return url
+}
+
 /* Test database reset */
 func resetTestDatabase(t *testing.T, databaseURL string) {
 	t.Helper()
+
+	if useSqliteBackend() {
+		return
+	}
 
 	// Clean up the test database
 	parsedURL, err := pgx.ParseConfig(databaseURL)
@@ -60,8 +94,11 @@ type setupDBOSOptions struct {
 func setupDBOS(t *testing.T, opts setupDBOSOptions) DBOSContext {
 	t.Helper()
 
-	databaseURL := getDatabaseURL()
-	if opts.dropDB {
+	if opts.dropDB && useSqliteBackend() {
+		testDBURLs.Delete(t)
+	}
+	databaseURL := backendDatabaseURL(t)
+	if opts.dropDB && !useSqliteBackend() {
 		resetTestDatabase(t, databaseURL)
 	}
 
@@ -90,6 +127,11 @@ func setupDBOS(t *testing.T, opts setupDBOSOptions) DBOSContext {
 				goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
 				goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
 				goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck.func1"),
+				// database/sql's connectionOpener/connectionCleaner exit after
+				// Close but slightly after goleak's check fires. Ignored under
+				// the sqlite backend.
+				goleak.IgnoreAnyFunction("database/sql.(*DB).connectionOpener"),
+				goleak.IgnoreAnyFunction("database/sql.(*DB).connectionCleaner"),
 			)
 		}
 	})
@@ -138,9 +180,9 @@ func setWorkflowStatusPending(t *testing.T, dbosCtx DBOSContext, workflowID stri
 	require.True(t, ok, "expected DBOSContext to be *dbosContext")
 	sysDB, ok := c.systemDB.(*sysDB)
 	require.True(t, ok, "expected systemDB to be *sysDB")
-	updateQuery := fmt.Sprintf(`UPDATE %s.workflow_status
+	updateQuery := sysDB.dialect.RewriteQuery(fmt.Sprintf(`UPDATE %sworkflow_status
 		SET status = $1, output = NULL, error = NULL, started_at_epoch_ms = NULL, updated_at = $2
-		WHERE workflow_uuid = $3`, pgx.Identifier{sysDB.schema}.Sanitize())
+		WHERE workflow_uuid = $3`, sysDB.dialect.SchemaPrefix(sysDB.schema)))
 	_, err := sysDB.pool.Exec(context.Background(), updateQuery,
 		WorkflowStatusPending, time.Now().UnixMilli(), workflowID)
 	require.NoError(t, err, "failed to set workflow status to PENDING")
@@ -149,27 +191,27 @@ func setWorkflowStatusPending(t *testing.T, dbosCtx DBOSContext, workflowID stri
 func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 	maxTries := 10
 	success := false
+	exec, ok := ctx.(*dbosContext)
+	if !ok {
+		fmt.Println("Expected ctx to be of type *dbosContext in queueEntriesAreCleanedUp")
+		return false
+	}
+	sdb := exec.systemDB.(*sysDB)
 	for range maxTries {
-		// Begin transaction
-		exec, ok := ctx.(*dbosContext)
-		if !ok {
-			fmt.Println("Expected ctx to be of type *dbosContext in queueEntriesAreCleanedUp")
-			return false
-		}
-		tx, err := exec.systemDB.(*sysDB).pool.Begin(ctx)
+		tx, err := sdb.pool.BeginTx(ctx, TxOptions{})
 		if err != nil {
 			return false
 		}
 
-		query := fmt.Sprintf(`SELECT COUNT(*)
-				  FROM %s.workflow_status
+		query := sdb.dialect.RewriteQuery(fmt.Sprintf(`SELECT COUNT(*)
+				  FROM %sworkflow_status
 				  WHERE queue_name IS NOT NULL
 					AND queue_name != $1
-					AND status IN ('ENQUEUED', 'PENDING')`, pgx.Identifier{exec.systemDB.(*sysDB).schema}.Sanitize())
+					AND status IN ('ENQUEUED', 'PENDING')`, sdb.dialect.SchemaPrefix(sdb.schema)))
 
 		var count int
 		err = tx.QueryRow(ctx, query, _DBOS_INTERNAL_QUEUE_NAME).Scan(&count)
-		tx.Rollback(ctx) // Clean up transaction
+		tx.Rollback(ctx)
 
 		if err != nil {
 			return false
@@ -182,6 +224,5 @@ func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 
 		time.Sleep(1 * time.Second)
 	}
-
 	return success
 }

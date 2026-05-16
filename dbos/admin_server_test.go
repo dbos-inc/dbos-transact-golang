@@ -31,9 +31,9 @@ func TestAdminServer(t *testing.T) {
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck.func1"),
 	)
-	databaseURL := getDatabaseURL()
 
 	t.Run("Admin server is not started by default", func(t *testing.T) {
+		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
@@ -64,6 +64,7 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("Admin server endpoints", func(t *testing.T) {
+		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
 		// Launch DBOS with admin server once for all endpoint tests
 		ctx, err := NewDBOSContext(context.Background(), Config{
@@ -229,6 +230,7 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("List workflows input/output values", func(t *testing.T) {
+		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,
@@ -376,6 +378,7 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("List endpoints time filtering", func(t *testing.T) {
+		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,
@@ -556,6 +559,7 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("ListQueuedWorkflows", func(t *testing.T) {
+		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,
@@ -742,6 +746,7 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("ListQueuedWorkflowsWithAdvancedFeatures", func(t *testing.T) {
+		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,
@@ -851,6 +856,7 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("WorkflowSteps", func(t *testing.T) {
+		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
@@ -1006,6 +1012,7 @@ func TestAdminServer(t *testing.T) {
 	})
 
 	t.Run("TestDeactivate", func(t *testing.T) {
+		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewDBOSContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,

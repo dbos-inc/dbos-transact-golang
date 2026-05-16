@@ -2,16 +2,18 @@ package dbos
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,7 +80,7 @@ func TestClientEnqueue(t *testing.T) {
 	require.NoError(t, err)
 
 	// Setup client - this will enqueue tasks
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	config := ClientConfig{
 		DatabaseURL: databaseURL,
 	}
@@ -408,7 +410,7 @@ func TestCancelResume(t *testing.T) {
 	require.NoError(t, err)
 
 	// Setup client - this will enqueue tasks
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	config := ClientConfig{
 		DatabaseURL: databaseURL,
 	}
@@ -595,7 +597,7 @@ func TestDeleteWorkflow(t *testing.T) {
 	err := Launch(serverCtx)
 	require.NoError(t, err)
 
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -728,7 +730,7 @@ func TestForkWorkflow(t *testing.T) {
 	require.NoError(t, err)
 
 	// Setup client
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	config := ClientConfig{
 		DatabaseURL: databaseURL,
 	}
@@ -816,7 +818,7 @@ func TestForkWorkflow(t *testing.T) {
 			require.True(t, ok, "expected sysDB")
 
 			// Query all events from workflow_events_history
-			query := fmt.Sprintf(`SELECT function_id, key, value FROM %s.workflow_events_history WHERE workflow_uuid = $1 ORDER BY function_id, key`, pgx.Identifier{sysDB.schema}.Sanitize())
+			query := sysDB.renderSQL(`SELECT function_id, key, value FROM %sworkflow_events_history WHERE workflow_uuid = $1 ORDER BY function_id, key`, sysDB.dialect.SchemaPrefix(sysDB.schema))
 			rows, err := sysDB.pool.Query(context.Background(), query, forkedWorkflowID)
 			require.NoError(t, err, "failed to query workflow_events_history for forked workflow at step %d", startStep)
 			defer rows.Close()
@@ -893,11 +895,16 @@ func TestForkWorkflow(t *testing.T) {
 }
 
 func TestListWorkflows(t *testing.T) {
-	// Setup server context with custom schema
-	databaseURL := getDatabaseURL()
+	// Setup server context. On pg we also exercise a non-default schema; on
+	// sqlite there is no per-schema isolation so the default is used. The
+	// filtering assertions below are schema-agnostic.
+	databaseURL := backendDatabaseURL(t)
 	resetTestDatabase(t, databaseURL)
 
 	customSchema := "dbos_list_test"
+	if useSqliteBackend() {
+		customSchema = ""
+	}
 	serverCtx, err := NewDBOSContext(context.Background(), Config{
 		DatabaseURL:    databaseURL,
 		AppName:        "test-list-workflows",
@@ -1265,7 +1272,7 @@ func TestGetWorkflowSteps(t *testing.T) {
 	require.NoError(t, err)
 
 	// Setup client
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	config := ClientConfig{
 		DatabaseURL: databaseURL,
 	}
@@ -1354,7 +1361,7 @@ func TestClientReadStream(t *testing.T) {
 	require.NoError(t, err)
 
 	// Setup client
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	config := ClientConfig{
 		DatabaseURL: databaseURL,
 	}
@@ -1429,7 +1436,7 @@ func TestDebouncerClient(t *testing.T) {
 	require.NoError(t, err)
 
 	// Setup client
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	config := ClientConfig{
 		DatabaseURL: databaseURL,
 	}
@@ -1461,16 +1468,22 @@ func TestDebouncerClient(t *testing.T) {
 	})
 
 	t.Run("TestMultipleCallsPushBackAndLatestInput", func(t *testing.T) {
+		// CockroachDB has longer notification latency due to polling. Only pg
+		// backends expose a *pgxpool.Pool we can sniff; sqlite is never CRDB.
+		isCockroach := false
+		if pgxPool := PgxPool(serverCtx.(*dbosContext).systemDB.(*sysDB).pool); pgxPool != nil {
+			conn, err := pgxPool.Acquire(serverCtx)
+			require.NoError(t, err)
+			defer conn.Release()
+			isCockroach = isCockroachDB(context.Background(), conn.Conn())
+		}
 
-		pool := serverCtx.(*dbosContext).systemDB.(*sysDB).pool
-		conn, err := pool.Acquire(serverCtx)
-		require.NoError(t, err)
-		defer conn.Release()
-		isCockroachDB := isCockroachDB(context.Background(), conn.Conn())
-
-		// CockroachDB has longer notification latency due to polling
 		var delay time.Duration
-		if isCockroachDB {
+		if isCockroach || useSqliteBackend() {
+			// CRDB and sqlite both use polling for notifications. Each Debounce
+			// call's GetEvent ACK can take >200ms, so the debouncer expires
+			// before the next call arrives. Bump the delay so the debouncer
+			// stays alive across all 5 calls.
 			delay = 2000 * time.Millisecond
 		} else {
 			delay = 200 * time.Millisecond
@@ -1623,7 +1636,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	require.NoError(t, err)
 
 	// Setup client
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	config := ClientConfig{
 		DatabaseURL: databaseURL,
 	}
@@ -1706,7 +1719,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 	require.NoError(t, err)
 
 	// Setup client
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	config := ClientConfig{DatabaseURL: databaseURL}
 	client, err := NewClient(context.Background(), config)
 	require.NoError(t, err)
@@ -1836,7 +1849,7 @@ func TestClientSchedules(t *testing.T) {
 	RegisterWorkflow(serverCtx, testWorkflowForSchedule)
 	require.NoError(t, Launch(serverCtx))
 
-	c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: getDatabaseURL()})
+	c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
 	t.Cleanup(func() { c.Shutdown(30 * time.Second) })
 
@@ -1975,7 +1988,7 @@ func TestClientApplicationVersions(t *testing.T) {
 		serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 		require.NoError(t, Launch(serverCtx))
 
-		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: getDatabaseURL()})
+		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
 		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
 
@@ -1995,7 +2008,7 @@ func TestClientApplicationVersions(t *testing.T) {
 		serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 		require.NoError(t, Launch(serverCtx))
 
-		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: getDatabaseURL()})
+		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
 		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
 
@@ -2024,12 +2037,13 @@ func TestClientApplicationVersions(t *testing.T) {
 		serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 		require.NoError(t, Launch(serverCtx))
 
-		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: getDatabaseURL()})
+		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
 		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
 
-		// Launch registers the current version; truncate to simulate empty state.
-		_, err = serverCtx.(*dbosContext).systemDB.(*sysDB).pool.Exec(serverCtx, "TRUNCATE TABLE dbos.application_versions")
+		// Launch registers the current version; clear the table to simulate empty state.
+		s := serverCtx.(*dbosContext).systemDB.(*sysDB)
+		_, err = s.pool.Exec(serverCtx, fmt.Sprintf("DELETE FROM %sapplication_versions", s.dialect.SchemaPrefix(s.schema)))
 		require.NoError(t, err)
 
 		_, err = c.GetLatestApplicationVersion()
@@ -2043,10 +2057,110 @@ func TestClientApplicationVersions(t *testing.T) {
 		serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 		require.NoError(t, Launch(serverCtx))
 
-		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: getDatabaseURL()})
+		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
 		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
 
 		require.Error(t, c.SetLatestApplicationVersion(""))
 	})
+}
+
+// TestClientCustomSqliteDB verifies that NewClient accepts a caller-provided
+// *sql.DB sqlite handle via ClientConfig.SqliteSystemDB, mirroring the
+// SystemDBPool path for pg/CRDB.
+func TestClientCustomSqliteDB(t *testing.T) {
+	if !useSqliteBackend() {
+		t.Skip("sqlite-only: exercises ClientConfig.SqliteSystemDB")
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "dbos.db")
+	serverDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	serverCtx, err := NewDBOSContext(context.Background(), Config{
+		AppName:        "test-client-custom-sqlite-db",
+		SqliteSystemDB: serverDB,
+	})
+	require.NoError(t, err)
+
+	queue := NewWorkflowQueue(serverCtx, "client-custom-sqlite-queue")
+
+	type wfInput struct{ Input string }
+	wf := func(ctx DBOSContext, in wfInput) (string, error) {
+		return "processed: " + in.Input, nil
+	}
+	RegisterWorkflow(serverCtx, wf, WithWorkflowName("CustomSqliteClientWorkflow"))
+
+	require.NoError(t, Launch(serverCtx))
+	t.Cleanup(func() { Shutdown(serverCtx, 10*time.Second) })
+
+	clientDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+
+	c, err := NewClient(context.Background(), ClientConfig{SqliteSystemDB: clientDB})
+	require.NoError(t, err)
+	t.Cleanup(func() { c.Shutdown(10 * time.Second) })
+
+	clientImpl, ok := c.(*client)
+	require.True(t, ok)
+	dbosCtx, ok := clientImpl.dbosCtx.(*dbosContext)
+	require.True(t, ok)
+	sysDB, ok := dbosCtx.systemDB.(*sysDB)
+	require.True(t, ok)
+	assert.Same(t, clientDB, SQLDB(sysDB.pool), "client should use the caller's sqlite *sql.DB")
+	require.Equal(t, DialectSQLite, sysDB.dialect.Name())
+
+	handle, err := Enqueue[wfInput, string](c, queue.Name, "CustomSqliteClientWorkflow",
+		wfInput{Input: "hello"},
+		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+	require.NoError(t, err)
+
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "processed: hello", result)
+}
+
+// TestClientCustomPool is the pg-side counterpart to TestClientCustomSqliteDB:
+// it verifies NewClient accepts a caller-provided *pgxpool.Pool via
+// ClientConfig.SystemDBPool and that an enqueued workflow round-trips.
+func TestClientCustomPool(t *testing.T) {
+	skipIfSqlite(t, "pg-only: exercises ClientConfig.SystemDBPool")
+
+	// setupDBOS handles dbos-database bootstrap and schema migrations; the
+	// server uses the standard URL-based config.
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	queue := NewWorkflowQueue(serverCtx, "client-custom-pool-queue")
+
+	type wfInput struct{ Input string }
+	wf := func(ctx DBOSContext, in wfInput) (string, error) {
+		return "processed: " + in.Input, nil
+	}
+	RegisterWorkflow(serverCtx, wf, WithWorkflowName("CustomPoolClientWorkflow"))
+	require.NoError(t, Launch(serverCtx))
+
+	clientPoolConfig, err := pgxpool.ParseConfig(getDatabaseURL())
+	require.NoError(t, err)
+	clientPool, err := pgxpool.NewWithConfig(context.Background(), clientPoolConfig)
+	require.NoError(t, err)
+
+	c, err := NewClient(context.Background(), ClientConfig{SystemDBPool: clientPool})
+	require.NoError(t, err)
+	t.Cleanup(func() { c.Shutdown(10 * time.Second) })
+
+	clientImpl, ok := c.(*client)
+	require.True(t, ok)
+	dbosCtx, ok := clientImpl.dbosCtx.(*dbosContext)
+	require.True(t, ok)
+	sysDB, ok := dbosCtx.systemDB.(*sysDB)
+	require.True(t, ok)
+	assert.Same(t, clientPool, PgxPool(sysDB.pool), "client should use the caller's *pgxpool.Pool")
+	require.Equal(t, DialectPostgres, sysDB.dialect.Name())
+
+	handle, err := Enqueue[wfInput, string](c, queue.Name, "CustomPoolClientWorkflow",
+		wfInput{Input: "hello"},
+		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+	require.NoError(t, err)
+
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "processed: hello", result)
 }

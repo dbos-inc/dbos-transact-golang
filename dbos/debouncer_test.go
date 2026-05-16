@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -267,7 +266,7 @@ func TestDebouncer(t *testing.T) {
 		sysDBInstance, ok := dbosCtxInstance.systemDB.(*sysDB)
 		require.True(t, ok, "expected sysDB instance")
 
-		query := fmt.Sprintf(`SELECT workflow_uuid FROM %s.operation_outputs WHERE child_workflow_id = $1 LIMIT 1`, pgx.Identifier{sysDBInstance.schema}.Sanitize())
+		query := sysDBInstance.renderSQL(`SELECT workflow_uuid FROM %soperation_outputs WHERE child_workflow_id = $1 LIMIT 1`, sysDBInstance.dialect.SchemaPrefix(sysDBInstance.schema))
 		var debouncerWorkflowID string
 		err = sysDBInstance.pool.QueryRow(context.Background(), query, handle1.GetWorkflowID()).Scan(&debouncerWorkflowID)
 		require.NoError(t, err, "failed to find debouncer workflow in operation_outputs")

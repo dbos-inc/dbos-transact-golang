@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -78,9 +79,10 @@ func jsonArray(values ...any) ([]string, error) {
 }
 
 func TestPgsqlClient(t *testing.T) {
+	skipIfSqlite(t, "exercises pg/CRDB plpgsql stored functions; sqlite has none")
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	pool := serverCtx.(*dbosContext).systemDB.(*sysDB).pool
+	pool := PgxPool(serverCtx.(*dbosContext).systemDB.(*sysDB).pool)
 	schema := serverCtx.(*dbosContext).systemDB.(*sysDB).schema
 
 	queue := NewWorkflowQueue(serverCtx, "pgsql-test-queue")
@@ -272,7 +274,7 @@ func TestPgsqlClient(t *testing.T) {
 		require.Error(t, err)
 		pgErr := &pgconn.PgError{}
 		require.ErrorAs(t, err, &pgErr, "expected pgconn.PgError, got %T: %v", err, err)
-		assert.Equal(t, _PG_ERROR_UNIQUE_VIOLATION, pgErr.Code)
+		assert.Equal(t, pgerrcode.UniqueViolation, pgErr.Code)
 		assert.Equal(t, "DBOS queue duplicated", pgErr.Message)
 		assert.Contains(t, pgErr.Detail, fmt.Sprintf("Workflow %s with queue %s and deduplication ID %s already exists", wfID2, queue.Name, dedupID))
 

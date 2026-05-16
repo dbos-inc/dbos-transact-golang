@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -198,7 +197,8 @@ func testAllSerializationPaths[T any](
 
 			// Query the database directly to check for the marker
 			ctx := context.Background()
-			query := fmt.Sprintf(`SELECT inputs, output FROM %s.workflow_status WHERE workflow_uuid = $1`, pgx.Identifier{sysDB.schema}.Sanitize())
+			schemaPrefix := sysDB.dialect.SchemaPrefix(sysDB.schema)
+			query := sysDB.renderSQL(`SELECT inputs, output FROM %sworkflow_status WHERE workflow_uuid = $1`, schemaPrefix)
 
 			var inputString, outputString *string
 			err := sysDB.pool.QueryRow(ctx, query, workflowID).Scan(&inputString, &outputString)
@@ -212,7 +212,7 @@ func testAllSerializationPaths[T any](
 			assert.Equal(t, nilMarker, *outputString, "output should be the nil marker")
 
 			// Also check the step output in operation_outputs
-			stepQuery := fmt.Sprintf(`SELECT output FROM %s.operation_outputs WHERE workflow_uuid = $1 ORDER BY function_id LIMIT 1`, pgx.Identifier{sysDB.schema}.Sanitize())
+			stepQuery := sysDB.renderSQL(`SELECT output FROM %soperation_outputs WHERE workflow_uuid = $1 ORDER BY function_id LIMIT 1`, schemaPrefix)
 			var stepOutputString *string
 			err = sysDB.pool.QueryRow(ctx, stepQuery, workflowID).Scan(&stepOutputString)
 			require.NoError(t, err, "failed to query step output")
@@ -1221,7 +1221,7 @@ func TestClientCustomSerializer(t *testing.T) {
 	defer Shutdown(serverCtx, 10*time.Second)
 
 	// Create client with the same custom serializer
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	client, err := NewClient(context.Background(), ClientConfig{
 		DatabaseURL: databaseURL,
 		Serializer:  customSer,
@@ -1545,12 +1545,12 @@ func TestPortableInterop(t *testing.T) {
 		t.Helper()
 		c := executor.(*dbosContext)
 		sysDB := c.systemDB.(*sysDB)
-		insertQuery := fmt.Sprintf(`INSERT INTO %s.workflow_status (
+		insertQuery := sysDB.renderSQL(`INSERT INTO %sworkflow_status (
 			workflow_uuid, status, name, inputs, serialization, queue_name,
 			created_at, updated_at, recovery_attempts, executor_id, priority,
 			application_version, application_id, authenticated_user, assumed_role, authenticated_roles
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+			sysDB.dialect.SchemaPrefix(sysDB.schema))
 		now := time.Now().UnixMilli()
 		_, err := sysDB.pool.Exec(context.Background(), insertQuery,
 			workflowID, status, "interop_workflow", goldenInputsJSON, PortableSerializerName, queueName,
@@ -1632,7 +1632,7 @@ func TestPortableInterop(t *testing.T) {
 	// 3. Client enqueue path: Go client with PortableWorkflowArgs.
 	t.Run("ClientEnqueuePortable", func(t *testing.T) {
 		client, err := NewClient(context.Background(), ClientConfig{
-			DatabaseURL: getDatabaseURL(),
+			DatabaseURL: executor.(*dbosContext).config.DatabaseURL,
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { client.Shutdown(5 * time.Second) })
@@ -1649,8 +1649,8 @@ func TestPortableInterop(t *testing.T) {
 		c := executor.(*dbosContext)
 		sysDB := c.systemDB.(*sysDB)
 		var storedInputs, storedSerialization string
-		selectQuery := fmt.Sprintf(`SELECT inputs, serialization FROM %s.workflow_status WHERE workflow_uuid = $1`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		selectQuery := sysDB.renderSQL(`SELECT inputs, serialization FROM %sworkflow_status WHERE workflow_uuid = $1`,
+			sysDB.dialect.SchemaPrefix(sysDB.schema))
 		err = sysDB.pool.QueryRow(context.Background(), selectQuery, handle.GetWorkflowID()).Scan(&storedInputs, &storedSerialization)
 		require.NoError(t, err)
 		assert.Equal(t, PortableSerializerName, storedSerialization)
@@ -1678,12 +1678,12 @@ func TestPortableInterop(t *testing.T) {
 
 		c := executor.(*dbosContext)
 		sysDB := c.systemDB.(*sysDB)
-		insertQuery := fmt.Sprintf(`INSERT INTO %s.workflow_status (
+		insertQuery := sysDB.renderSQL(`INSERT INTO %sworkflow_status (
 			workflow_uuid, status, name, inputs, serialization, queue_name,
 			created_at, updated_at, recovery_attempts, executor_id, priority,
 			application_version, application_id, authenticated_user, assumed_role, authenticated_roles
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+			sysDB.dialect.SchemaPrefix(sysDB.schema))
 		now := time.Now().UnixMilli()
 		_, err := sysDB.pool.Exec(context.Background(), insertQuery,
 			workflowID, string(WorkflowStatusEnqueued), "interop_workflow", badInputsJSON, PortableSerializerName, &queueName,
@@ -1722,8 +1722,8 @@ func TestPortablePerOperationOptions(t *testing.T) {
 	recvStepSerialization := func(t *testing.T, workflowID string) string {
 		t.Helper()
 		var ser string
-		q := fmt.Sprintf(`SELECT serialization FROM %s.operation_outputs WHERE workflow_uuid = $1 AND function_name = 'DBOS.recv' ORDER BY function_id ASC LIMIT 1`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		q := sysDB.renderSQL(`SELECT serialization FROM %soperation_outputs WHERE workflow_uuid = $1 AND function_name = 'DBOS.recv' ORDER BY function_id ASC LIMIT 1`,
+			sysDB.dialect.SchemaPrefix(sysDB.schema))
 		require.NoError(t, sysDB.pool.QueryRow(context.Background(), q, workflowID).Scan(&ser))
 		return ser
 	}
@@ -1732,8 +1732,8 @@ func TestPortablePerOperationOptions(t *testing.T) {
 	eventSerialization := func(t *testing.T, workflowID, key string) string {
 		t.Helper()
 		var ser string
-		q := fmt.Sprintf(`SELECT serialization FROM %s.workflow_events WHERE workflow_uuid = $1 AND key = $2`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		q := sysDB.renderSQL(`SELECT serialization FROM %sworkflow_events WHERE workflow_uuid = $1 AND key = $2`,
+			sysDB.dialect.SchemaPrefix(sysDB.schema))
 		require.NoError(t, sysDB.pool.QueryRow(context.Background(), q, workflowID, key).Scan(&ser))
 		return ser
 	}
@@ -1742,8 +1742,8 @@ func TestPortablePerOperationOptions(t *testing.T) {
 	streamSerialization := func(t *testing.T, workflowID, key string) string {
 		t.Helper()
 		var ser string
-		q := fmt.Sprintf(`SELECT serialization FROM %s.streams WHERE workflow_uuid = $1 AND key = $2 AND value != $3 ORDER BY "offset" LIMIT 1`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		q := sysDB.renderSQL(`SELECT serialization FROM %sstreams WHERE workflow_uuid = $1 AND key = $2 AND value != $3 ORDER BY "offset" LIMIT 1`,
+			sysDB.dialect.SchemaPrefix(sysDB.schema))
 		require.NoError(t, sysDB.pool.QueryRow(context.Background(), q, workflowID, key, _DBOS_STREAM_CLOSED_SENTINEL).Scan(&ser))
 		return ser
 	}
@@ -1941,8 +1941,8 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	readStoredInputs := func(t *testing.T, workflowID string) (string, string) {
 		t.Helper()
 		var storedInputs, storedSerialization string
-		q := fmt.Sprintf(`SELECT inputs, serialization FROM %s.workflow_status WHERE workflow_uuid = $1`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		q := sysDB.renderSQL(`SELECT inputs, serialization FROM %sworkflow_status WHERE workflow_uuid = $1`,
+			sysDB.dialect.SchemaPrefix(sysDB.schema))
 		err := sysDB.pool.QueryRow(context.Background(), q, workflowID).Scan(&storedInputs, &storedSerialization)
 		require.NoError(t, err)
 		return storedInputs, storedSerialization
@@ -1951,13 +1951,12 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	// Helper: flip a completed workflow back to PENDING for recovery.
 	resetToPending := func(t *testing.T, workflowID string) {
 		t.Helper()
-		q := fmt.Sprintf(`UPDATE %s.workflow_status SET status = $1, output = NULL, error = NULL WHERE workflow_uuid = $2`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		schemaPrefix := sysDB.dialect.SchemaPrefix(sysDB.schema)
+		q := sysDB.renderSQL(`UPDATE %sworkflow_status SET status = $1, output = NULL, error = NULL WHERE workflow_uuid = $2`, schemaPrefix)
 		_, err := sysDB.pool.Exec(context.Background(), q, string(WorkflowStatusPending), workflowID)
 		require.NoError(t, err)
 		// Also clear operation outputs so the workflow re-executes its steps.
-		dq := fmt.Sprintf(`DELETE FROM %s.operation_outputs WHERE workflow_uuid = $1`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		dq := sysDB.renderSQL(`DELETE FROM %soperation_outputs WHERE workflow_uuid = $1`, schemaPrefix)
 		_, err = sysDB.pool.Exec(context.Background(), dq, workflowID)
 		require.NoError(t, err)
 	}
@@ -2132,14 +2131,13 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 
 		// Verify operation_outputs exist for this workflow.
 		var stepCount int
-		countQ := fmt.Sprintf(`SELECT count(*) FROM %s.operation_outputs WHERE workflow_uuid = $1`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		schemaPrefix := sysDB.dialect.SchemaPrefix(sysDB.schema)
+		countQ := sysDB.renderSQL(`SELECT count(*) FROM %soperation_outputs WHERE workflow_uuid = $1`, schemaPrefix)
 		require.NoError(t, sysDB.pool.QueryRow(context.Background(), countQ, workflowID).Scan(&stepCount))
 		require.Greater(t, stepCount, 0, "expected operation_outputs rows from first execution")
 
 		// Reset to PENDING but KEEP operation_outputs — steps will be replayed from DB.
-		resetQ := fmt.Sprintf(`UPDATE %s.workflow_status SET status = $1, output = NULL, error = NULL WHERE workflow_uuid = $2`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		resetQ := sysDB.renderSQL(`UPDATE %sworkflow_status SET status = $1, output = NULL, error = NULL WHERE workflow_uuid = $2`, schemaPrefix)
 		_, err = sysDB.pool.Exec(context.Background(), resetQ, string(WorkflowStatusPending), workflowID)
 		require.NoError(t, err)
 
@@ -2213,8 +2211,8 @@ func TestPortableWorkflowError(t *testing.T) {
 	readStoredError := func(t *testing.T, workflowID string) string {
 		t.Helper()
 		var storedError *string
-		q := fmt.Sprintf(`SELECT error FROM %s.workflow_status WHERE workflow_uuid = $1`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		q := sysDB.renderSQL(`SELECT error FROM %sworkflow_status WHERE workflow_uuid = $1`,
+			sysDB.dialect.SchemaPrefix(sysDB.schema))
 		require.NoError(t, sysDB.pool.QueryRow(context.Background(), q, workflowID).Scan(&storedError))
 		require.NotNil(t, storedError)
 		return *storedError
@@ -2223,8 +2221,8 @@ func TestPortableWorkflowError(t *testing.T) {
 	readStoredStepError := func(t *testing.T, workflowID string, stepID int) string {
 		t.Helper()
 		var storedError *string
-		q := fmt.Sprintf(`SELECT error FROM %s.operation_outputs WHERE workflow_uuid = $1 AND function_id = $2`,
-			pgx.Identifier{sysDB.schema}.Sanitize())
+		q := sysDB.renderSQL(`SELECT error FROM %soperation_outputs WHERE workflow_uuid = $1 AND function_id = $2`,
+			sysDB.dialect.SchemaPrefix(sysDB.schema))
 		require.NoError(t, sysDB.pool.QueryRow(context.Background(), q, workflowID, stepID).Scan(&storedError))
 		require.NotNil(t, storedError)
 		return *storedError
