@@ -175,6 +175,7 @@ type DBOSContext interface {
 	WithoutCancel(_ DBOSContext) DBOSContext                                            // Returns a copy that is not canceled when the parent is canceled
 	WithTimeout(_ DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) // Returns a copy that is canceled after the timeout
 	WithValue(key, val any) DBOSContext                                                 // Returns a copy of the DBOS context with the given key-value pair
+	WithCancel() (DBOSContext, context.CancelFunc)                                      // Returns a copy that can be manually canceled
 	WithCancelCause() (DBOSContext, context.CancelCauseFunc)                            // Returns a copy of the DBOS context that can be canceled with a cause
 
 	// Queue configuration
@@ -395,6 +396,37 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 		return nil
 	}
 	return ctx.WithoutCancel(ctx)
+}
+
+func (c *dbosContext) WithCancel() (DBOSContext, context.CancelFunc) {
+	launched := c.launched.Load()
+	newCtx, cancelFunc := context.WithCancel(c.ctx)
+	childCtx := &dbosContext{
+		ctx:                     newCtx,
+		logger:                  c.logger,
+		systemDB:                c.systemDB,
+		workflowsWg:             c.workflowsWg,
+		workflowRegistry:        c.workflowRegistry,
+		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
+		activeWorkflowIDs:       c.activeWorkflowIDs,
+		applicationVersion:      c.applicationVersion,
+		executorID:              c.executorID,
+		applicationID:           c.applicationID,
+		queueRunner:             c.queueRunner,
+		serializer:              c.serializer,
+	}
+	childCtx.launched.Store(launched)
+	return childCtx, cancelFunc
+}
+
+// WithCancel returns a copy of the DBOS context that can be manually canceled.
+// The returned CancelFunc must be called when the derived context is no longer needed,
+// to release resources associated with it.
+func WithCancel(ctx DBOSContext) (DBOSContext, context.CancelFunc) {
+	if ctx == nil {
+		return nil, func() {}
+	}
+	return ctx.WithCancel()
 }
 
 func (c *dbosContext) WithCancelCause() (DBOSContext, context.CancelCauseFunc) {
