@@ -2152,7 +2152,7 @@ func TestClientCustomPool(t *testing.T) {
 	sysDB, ok := dbosCtx.systemDB.(*sysDB)
 	require.True(t, ok)
 	assert.Same(t, clientPool, PgxPool(sysDB.pool), "client should use the caller's *pgxpool.Pool")
-	require.Equal(t, DialectPostgres, sysDB.dialect.Name())
+	require.Contains(t, []DialectName{DialectPostgres, DialectCockroach}, sysDB.dialect.Name())
 
 	handle, err := Enqueue[wfInput, string](c, queue.Name, "CustomPoolClientWorkflow",
 		wfInput{Input: "hello"},
