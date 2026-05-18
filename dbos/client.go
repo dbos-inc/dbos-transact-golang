@@ -546,42 +546,56 @@ func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-ch
 	}
 
 	typedCh := make(chan StreamValue[R], 1)
+	dbosCtx := c.(*client).dbosCtx
 
 	go func() {
 		defer close(typedCh)
 
-		customSer := c.(*client).dbosCtx.(*dbosContext).serializer
+		// send delivers v to ch, returning false if the client context is cancelled first.
+		// This prevents the goroutine from leaking even after the client is closed.
+		send := func(v StreamValue[R]) bool {
+			select {
+			case typedCh <- v:
+				return true
+			case <-dbosCtx.Done():
+				return false
+			}
+		}
+
+		customSer := dbosCtx.(*dbosContext).serializer
 
 		for streamValue := range anyCh {
 			if streamValue.Err != nil {
-				typedCh <- StreamValue[R]{Err: streamValue.Err}
+				send(StreamValue[R]{Err: streamValue.Err})
 				return
 			}
 
 			if streamValue.Closed {
-				typedCh <- StreamValue[R]{Closed: true}
+				send(StreamValue[R]{Closed: true})
 				return
 			}
 
 			entry, ok := streamValue.Value.(streamEntryWithSerialization)
 			if !ok {
-				typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", streamValue.Value)}
+				send(StreamValue[R]{Err: fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", streamValue.Value)})
 				return
 			}
 
 			decoder, resolveErr := resolveDecoder[R](entry.serialization, customSer)
 			if resolveErr != nil {
-				typedCh <- StreamValue[R]{Err: resolveErr}
+				send(StreamValue[R]{Err: resolveErr})
 				return
 			}
 
 			decodedValue, decodeErr := decoder.Decode(&entry.value)
 			if decodeErr != nil {
-				typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
+				send(StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)})
 				return
 			}
 
-			typedCh <- StreamValue[R]{Value: decodedValue}
+			if !send(StreamValue[R]{Value: decodedValue}) {
+				return
+			}
 		}
 	}()
 
