@@ -3895,9 +3895,8 @@ func TestWorkflowTimeout(t *testing.T) {
 		recoveredHandle := recoveredHandles[0]
 		assert.Equal(t, handle.GetWorkflowID(), recoveredHandle.GetWorkflowID(), "expected recovered handle to have same ID")
 
-		// Wait for the workflow to complete and check the result. Should be AwaitedWorkflowCancelled
-		recoveredResult, err := recoveredHandle.GetResult()
-		assert.Equal(t, "", recoveredResult, "expected result to be an empty string")
+		// Wait for the workflow to complete. Should return an AwaitedWorkflowCancelled error.
+		_, err = recoveredHandle.GetResult()
 		// Check the error type
 		dbosErr, ok := err.(*DBOSError)
 		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
