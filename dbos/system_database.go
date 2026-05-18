@@ -1880,19 +1880,24 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		return "", fmt.Errorf("startStep must be >= 0, got %d", input.startStep)
 	}
 
-	// When no transaction is provided, run queries on the pool directly (no transaction).
-	execCtx := func(ctx context.Context, sql string, args ...any) (Result, error) {
-		if input.tx != nil {
-			return input.tx.Exec(ctx, sql, args...)
+	tx := input.tx
+	ownTx := tx == nil
+	if ownTx {
+		var err error
+		tx, err = s.pool.BeginTx(ctx, TxOptions{})
+		if err != nil {
+			return "", fmt.Errorf("failed to begin fork transaction: %w", err)
 		}
-		return s.pool.Exec(ctx, sql, args...)
+		defer tx.Rollback(ctx)
 	}
+	execCtx := tx.Exec
 
-	// Get the original workflow status
+	// Get the original workflow status. Use the same tx so the read sees the
+	// pre-fork state consistently with the writes below.
 	listInput := listWorkflowsDBInput{
 		workflowIDs: []string{input.originalWorkflowID},
 		loadInput:   true,
-		tx:          input.tx,
+		tx:          tx,
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
 	if err != nil {
@@ -2025,6 +2030,11 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		}
 	}
 
+	if ownTx {
+		if err := tx.Commit(ctx); err != nil {
+			return "", fmt.Errorf("failed to commit fork transaction: %w", err)
+		}
+	}
 	return forkedWorkflowID, nil
 }
 
