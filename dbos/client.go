@@ -40,6 +40,7 @@ type Client interface {
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
 	ClientReadStream(workflowID string, key string) ([]any, bool, error)
 	ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error)
+	ClientReadStreamSnapshot(workflowID string, key string, fromOffset int) ([]any, bool, error)
 
 	// Schedule management
 	CreateSchedule(input ClientScheduleInput) error
@@ -509,6 +510,52 @@ func ClientReadStream[R any](c Client, workflowID string, key string) ([]R, bool
 // Returns a channel that will receive StreamValue items as they're read.
 func (c *client) ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error) {
 	return c.dbosCtx.ReadStreamAsync(c.dbosCtx, workflowID, key)
+}
+
+// ClientReadStreamSnapshot reads currently available stream entries starting from fromOffset and returns immediately.
+func (c *client) ClientReadStreamSnapshot(workflowID string, key string, fromOffset int) ([]any, bool, error) {
+	return c.dbosCtx.ReadStreamSnapshot(c.dbosCtx, workflowID, key, fromOffset)
+}
+
+// ClientReadStreamSnapshot reads currently available stream entries from fromOffset with type safety.
+// Returns immediately without polling.
+//
+// Example:
+//
+//	values, closed, err := dbos.ClientReadStreamSnapshot[string](client, "workflow-id", "my-stream", 0)
+//	if err != nil {
+//	    return err
+//	}
+//	for _, value := range values {
+//	    log.Printf("Stream value: %s", value)
+//	}
+func ClientReadStreamSnapshot[R any](c Client, workflowID string, key string, fromOffset int) ([]R, bool, error) {
+	if c == nil {
+		return nil, false, errors.New("client cannot be nil")
+	}
+	values, closed, err := c.ClientReadStreamSnapshot(workflowID, key, fromOffset)
+	if err != nil {
+		return nil, false, err
+	}
+
+	customSer := c.(*client).dbosCtx.(*dbosContext).serializer
+	typedValues := make([]R, len(values))
+	for i, val := range values {
+		entry, ok := val.(streamEntryWithSerialization)
+		if !ok {
+			return nil, false, fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", val)
+		}
+		decoder, resolveErr := resolveDecoder[R](entry.serialization, customSer)
+		if resolveErr != nil {
+			return nil, false, resolveErr
+		}
+		decodedValue, decodeErr := decoder.Decode(&entry.value)
+		if decodeErr != nil {
+			return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
+		}
+		typedValues[i] = decodedValue
+	}
+	return typedValues, closed, nil
 }
 
 // ClientReadStreamAsync reads values from a durable stream asynchronously with type safety.

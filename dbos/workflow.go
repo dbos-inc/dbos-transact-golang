@@ -1229,12 +1229,11 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			_, loaded = c.activeWorkflowIDs.Load(workflowID)
 		}
 
-		shouldSkip :=
-			len(params.QueueName) > 0 || // We are enqueueing OR
-				insertStatusResult.status == WorkflowStatusSuccess || // workflow is in a terminal state (success) OR
-				insertStatusResult.status == WorkflowStatusError || // workflow is in a terminal state (error) OR
-				(!params.isDequeue && !params.isRecovery && insertStatusResult.ownerXID != ownerXID) || // another executor, not us dequeueing or being instructed to recover, is already owning the workflow OR
-				loaded // this executor is already running the workflow
+		shouldSkip := len(params.QueueName) > 0 || // We are enqueueing OR
+			insertStatusResult.status == WorkflowStatusSuccess || // workflow is in a terminal state (success) OR
+			insertStatusResult.status == WorkflowStatusError || // workflow is in a terminal state (error) OR
+			(!params.isDequeue && !params.isRecovery && insertStatusResult.ownerXID != ownerXID) || // another executor, not us dequeueing or being instructed to recover, is already owning the workflow OR
+			loaded // this executor is already running the workflow
 
 		if shouldSkip {
 			// Commit the transaction to update the number of attempts and/or enact the enqueue
@@ -2516,7 +2515,6 @@ func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamVal
 				entries, closed, retryErr = c.systemDB.readStream(c, input)
 				return retryErr
 			}, withRetrierLogger(c.logger))
-
 			if err != nil {
 				send(StreamValue[any]{Err: err})
 				return
@@ -2551,7 +2549,6 @@ func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamVal
 				}
 				return workflows[0].Status, nil
 			}, withRetrierLogger(c.logger))
-
 			if err != nil {
 				send(StreamValue[any]{Err: err})
 				return
@@ -2583,6 +2580,80 @@ func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamVal
 type streamEntryWithSerialization struct {
 	value         string
 	serialization string
+}
+
+func (c *dbosContext) ReadStreamSnapshot(_ DBOSContext, workflowID string, key string, fromOffset int) ([]any, bool, error) {
+	input := readStreamDBInput{
+		WorkflowID: workflowID,
+		Key:        key,
+		FromOffset: fromOffset,
+	}
+	var entries []streamEntry
+	var closed bool
+	err := retry(c, func() error {
+		var retryErr error
+		entries, closed, retryErr = c.systemDB.readStream(c, input)
+		return retryErr
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, false, err
+	}
+	values := make([]any, len(entries))
+	for i, e := range entries {
+		values[i] = streamEntryWithSerialization{value: e.Value, serialization: e.Serialization}
+	}
+	return values, closed, nil
+}
+
+// ReadStreamSnapshot reads all stream entries currently available starting from fromOffset and returns immediately.
+// Unlike ReadStream, it does not poll or wait for the workflow to complete.
+//
+// Example:
+//
+//	values, closed, err := dbos.ReadStreamSnapshot[string](ctx, "workflow-id", "my-stream", 0)
+//	if err != nil {
+//	    return err
+//	}
+//	for _, value := range values {
+//	    log.Printf("Stream value: %s", value)
+//	}
+func ReadStreamSnapshot[R any](ctx DBOSContext, workflowID string, key string, fromOffset int) ([]R, bool, error) {
+	if ctx == nil {
+		return nil, false, errors.New("ctx cannot be nil")
+	}
+	values, closed, err := ctx.ReadStreamSnapshot(ctx, workflowID, key, fromOffset)
+	if err != nil {
+		return nil, false, err
+	}
+
+	typedValues := make([]R, len(values))
+	if _, ok := ctx.(*dbosContext); ok {
+		customSer := getCustomSerializerFromCtx(ctx)
+		for i, val := range values {
+			entry, ok := val.(streamEntryWithSerialization)
+			if !ok {
+				return nil, false, fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", val)
+			}
+			decoder, resolveErr := resolveDecoder[R](entry.serialization, customSer)
+			if resolveErr != nil {
+				return nil, false, resolveErr
+			}
+			decodedValue, decodeErr := decoder.Decode(&entry.value)
+			if decodeErr != nil {
+				return nil, false, fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)
+			}
+			typedValues[i] = decodedValue
+		}
+	} else {
+		for i, val := range values {
+			typedVal, ok := val.(R)
+			if !ok {
+				return nil, false, fmt.Errorf("stream value is not %T, got %T", *new(R), val)
+			}
+			typedValues[i] = typedVal
+		}
+	}
+	return typedValues, closed, nil
 }
 
 func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) ([]any, bool, error) {
