@@ -5862,6 +5862,55 @@ func TestStreams(t *testing.T) {
 		require.NoError(t, err, "failed to get result from forked workflow")
 	})
 
+	t.Run("GoroutineLeakOnContextCancel", func(t *testing.T) {
+		// Verifies that the readStream goroutine exits when the consumer's context is
+		// cancelled, even if the consumer stops reading from the channel.
+		// goleak (via checkLeaks:true on this test) will fail if the goroutine leaks.
+		streamBlockEvent = NewEvent()    // not set — workflow blocks after initial writes
+		streamStartedEvent = NewEvent() // signals that initial writes are done
+
+		streamKey := "test-stream-leak"
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"value1", "value2", "value3"},
+			Close:     false,
+		})
+		require.NoError(t, err)
+
+		// Wait until the workflow has written its values and is blocked
+		streamStartedEvent.Wait()
+
+		cancelCtx, cancel := WithCancelCause(dbosCtx)
+		defer cancel(nil)
+
+		ch, err := ReadStreamAsync[string](cancelCtx, writerHandle.GetWorkflowID(), streamKey)
+		require.NoError(t, err)
+
+		// Read one value to confirm the stream is working
+		streamValue := <-ch
+		require.NoError(t, streamValue.Err)
+		require.Equal(t, "value1", streamValue.Value)
+
+		// Cancel the context and abandon the channel — the goroutine must exit on its own
+		cancel(nil)
+
+		// Verify the channel closes within a reasonable time (goroutine unblocked)
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("readStream goroutine did not exit after context cancellation")
+		}
+
+		// Unblock and complete the workflow for clean test teardown
+		streamBlockEvent.Set()
+		_, err = writerHandle.GetResult()
+		require.NoError(t, err)
+	})
+
 	t.Run("AsyncErrorHandling", func(t *testing.T) {
 		// Test reading from non-existent workflow
 		nonExistentWorkflowID := uuid.NewString()
