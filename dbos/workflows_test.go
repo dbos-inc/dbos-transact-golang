@@ -5911,6 +5911,88 @@ func TestStreams(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("ReadStreamSnapshot", func(t *testing.T) {
+		streamBlockEvent = NewEvent()    // not set — workflow blocks after initial writes
+		streamStartedEvent = NewEvent()
+
+		streamKey := "test-stream-snapshot"
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"value1", "value2", "value3"},
+			Close:     false,
+		})
+		require.NoError(t, err)
+
+		// Wait until the workflow has written its values and is blocked
+		streamStartedEvent.Wait()
+
+		// Snapshot at offset 0 — returns all written entries immediately
+		values, closed, err := ReadStreamSnapshot[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, 0)
+		require.NoError(t, err)
+		require.False(t, closed, "stream should not be closed while workflow is blocked")
+		require.Equal(t, []string{"value1", "value2", "value3"}, values)
+
+		// Snapshot at offset 1 — returns only the tail
+		values, closed, err = ReadStreamSnapshot[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, 1)
+		require.NoError(t, err)
+		require.False(t, closed)
+		require.Equal(t, []string{"value2", "value3"}, values)
+
+		// Snapshot past the end — returns empty, not closed
+		values, closed, err = ReadStreamSnapshot[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, 99)
+		require.NoError(t, err)
+		require.False(t, closed)
+		require.Empty(t, values)
+
+		// Unblock workflow and let it complete (no close)
+		streamBlockEvent.Set()
+		_, err = writerHandle.GetResult()
+		require.NoError(t, err)
+
+		// Snapshot after workflow completes — still returns entries, closed: false (no sentinel written)
+		values, closed, err = ReadStreamSnapshot[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, 0)
+		require.NoError(t, err)
+		require.False(t, closed)
+		// step-value was written inside RunAsStep before workflow finished
+		require.Equal(t, []string{"value1", "value2", "value3", "step-value"}, values)
+	})
+
+	t.Run("ReadStreamSnapshotClosed", func(t *testing.T) {
+		streamBlockEvent = NewEvent()
+		streamBlockEvent.Set() // unblocked — workflow runs to completion and closes the stream
+		streamStartedEvent = nil
+
+		streamKey := "test-stream-snapshot-closed"
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"a", "b"},
+			Close:     true,
+		})
+		require.NoError(t, err)
+		_, err = writerHandle.GetResult()
+		require.Error(t, err) // write-after-close error expected
+
+		// Snapshot returns entries and closed: true when sentinel is present
+		values, closed, err := ReadStreamSnapshot[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, 0)
+		require.NoError(t, err)
+		require.True(t, closed)
+		require.Equal(t, []string{"a", "b", "step-value"}, values)
+
+		// Snapshot at offset 2 still shows closed
+		values, closed, err = ReadStreamSnapshot[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, 2)
+		require.NoError(t, err)
+		require.True(t, closed)
+		require.Equal(t, []string{"step-value"}, values)
+	})
+
 	t.Run("AsyncErrorHandling", func(t *testing.T) {
 		// Test reading from non-existent workflow
 		nonExistentWorkflowID := uuid.NewString()
