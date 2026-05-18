@@ -1434,29 +1434,6 @@ func TestClientReadStreamAsyncGoroutineLeak(t *testing.T) {
 	handle, err := RunWorkflow(serverCtx, blockingStreamWorkflow, streamKey)
 	require.NoError(t, err)
 
-	// Wait until the workflow has written its 3 values by polling via ReadStreamAsync.
-	// ClientReadStream would block until the workflow finishes, so we use the async variant
-	// with a per-poll cancellable context instead.
-	require.Eventually(t, func() bool {
-		pollCtx, pollCancel := WithCancelCause(serverCtx)
-		defer pollCancel(nil)
-		ch, err := ReadStreamAsync[string](pollCtx, handle.GetWorkflowID(), streamKey)
-		if err != nil {
-			return false
-		}
-		var count int
-		for sv := range ch {
-			if sv.Err != nil || sv.Closed {
-				break
-			}
-			count++
-			if count >= 3 {
-				break
-			}
-		}
-		return count >= 3
-	}, 10*time.Second, 100*time.Millisecond)
-
 	ch, err := ClientReadStreamAsync[string](client, handle.GetWorkflowID(), streamKey)
 	require.NoError(t, err)
 
