@@ -176,6 +176,27 @@ func WithEnqueueDelay(delay time.Duration) EnqueueOption {
 	}
 }
 
+// WithEnqueueAuthenticatedUser sets the authenticated user for the enqueued workflow.
+func WithEnqueueAuthenticatedUser(user string) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.authenticatedUser = user
+	}
+}
+
+// WithEnqueueAssumedRole sets the assumed role for the enqueued workflow.
+func WithEnqueueAssumedRole(role string) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.assumedRole = role
+	}
+}
+
+// WithEnqueueAuthenticatedRoles sets the authenticated roles for the enqueued workflow.
+func WithEnqueueAuthenticatedRoles(roles []string) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.authenticatedRoles = roles
+	}
+}
+
 type enqueueOptions struct {
 	workflowName       string
 	workflowID         string
@@ -188,6 +209,9 @@ type enqueueOptions struct {
 	className          string
 	configName         *string
 	delayDuration      time.Duration
+	authenticatedUser  string
+	assumedRole        string
+	authenticatedRoles []string
 }
 
 // EnqueueWorkflow enqueues a workflow to a named queue for deferred execution.
@@ -282,6 +306,9 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		ConfigName:         params.configName,
 		Serialization:      serialization,
 		DelayUntil:         delayUntil,
+		AuthenticatedUser:  params.authenticatedUser,
+		AssumedRole:        params.assumedRole,
+		AuthenticatedRoles: params.authenticatedRoles,
 	}
 
 	uncancellableCtx := WithoutCancel(dbosCtx)
