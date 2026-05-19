@@ -1408,6 +1408,52 @@ func TestClientReadStream(t *testing.T) {
 	}
 }
 
+func TestClientReadStreamSnapshot(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
+
+	blockCh := make(chan struct{})
+	startedCh := make(chan struct{})
+
+	blockingStreamWorkflow := func(ctx DBOSContext, streamKey string) (string, error) {
+		for _, v := range []string{"value1", "value2", "value3"} {
+			if err := WriteStream(ctx, streamKey, v); err != nil {
+				return "", err
+			}
+		}
+		close(startedCh)
+		<-blockCh
+		return "done", nil
+	}
+	RegisterWorkflow(serverCtx, blockingStreamWorkflow, WithWorkflowName("BlockingStreamWorkflowSnapshot"))
+	require.NoError(t, Launch(serverCtx))
+
+	databaseURL := getDatabaseURL()
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+
+	streamKey := "test-client-snapshot-stream"
+	handle, err := RunWorkflow(serverCtx, blockingStreamWorkflow, streamKey)
+	require.NoError(t, err)
+	<-startedCh
+
+	// Snapshot at offset 0 returns all written entries immediately
+	values, closed, err := ClientReadStream[string](client, handle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(0))
+	require.NoError(t, err)
+	require.False(t, closed)
+	require.Equal(t, []string{"value1", "value2", "value3"}, values)
+
+	// Snapshot at offset 1 returns only the tail
+	values, closed, err = ClientReadStream[string](client, handle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(1))
+	require.NoError(t, err)
+	require.False(t, closed)
+	require.Equal(t, []string{"value2", "value3"}, values)
+
+	close(blockCh)
+	_, err = handle.GetResult()
+	require.NoError(t, err)
+}
+
 func TestClientReadStreamAsyncGoroutineLeak(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 

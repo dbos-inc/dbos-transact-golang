@@ -5709,30 +5709,10 @@ func TestStreams(t *testing.T) {
 				require.NoError(t, err, "failed to fork workflow")
 
 				// Verify forked workflow has stream entries up to step 2 (stream history copied)
-				// Query database directly to avoid blocking (ReadStream would block)
-				dbosCtxInternal, ok := dbosCtx.(*dbosContext)
-				require.True(t, ok, "expected dbosContext")
-				sysDB, ok := dbosCtxInternal.systemDB.(*sysDB)
-				require.True(t, ok, "expected sysDB")
-
-				entries, closed, err := sysDB.readStream(context.Background(), readStreamDBInput{
-					WorkflowID: forkHandle.GetWorkflowID(),
-					Key:        streamKey,
-					FromOffset: 0,
-				})
-				require.NoError(t, err, "failed to read stream from database")
+				values, closed, err := ReadStream[string](dbosCtx, forkHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(0))
+				require.NoError(t, err, "failed to read stream snapshot")
 				require.False(t, closed, "expected stream not to be closed")
-				require.Len(t, entries, 2, "expected 2 stream entries in forked workflow")
-
-				// Decode base64-encoded JSON values from database
-				serializer := newJSONSerializer[string]()
-				decodedValue1, err := serializer.Decode(&entries[0].Value)
-				require.NoError(t, err, "failed to decode first stream entry")
-				require.Equal(t, "value1", decodedValue1, "expected first entry to be value1")
-
-				decodedValue2, err := serializer.Decode(&entries[1].Value)
-				require.NoError(t, err, "failed to decode second stream entry")
-				require.Equal(t, "value2", decodedValue2, "expected second entry to be value2")
+				require.Equal(t, []string{"value1", "value2"}, values, "expected 2 stream entries in forked workflow")
 
 				// Now unblock both workflows to let them complete
 				streamBlockEvent.Set()
@@ -5829,30 +5809,10 @@ func TestStreams(t *testing.T) {
 		require.NoError(t, err, "failed to fork workflow")
 
 		// Verify forked workflow has stream entries up to step 2 (stream history copied)
-		// Query database directly to avoid blocking (ReadStream would block)
-		dbosCtxInternal, ok := dbosCtx.(*dbosContext)
-		require.True(t, ok, "expected dbosContext")
-		sysDB, ok := dbosCtxInternal.systemDB.(*sysDB)
-		require.True(t, ok, "expected sysDB")
-
-		entries, closed, err := sysDB.readStream(context.Background(), readStreamDBInput{
-			WorkflowID: forkHandle.GetWorkflowID(),
-			Key:        streamKey,
-			FromOffset: 0,
-		})
-		require.NoError(t, err, "failed to read stream from database")
+		values, closed, err := ReadStream[string](dbosCtx, forkHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(0))
+		require.NoError(t, err, "failed to read stream snapshot")
 		require.False(t, closed, "expected stream not to be closed")
-		require.Len(t, entries, 2, "expected 2 stream entries in forked workflow")
-
-		// Decode base64-encoded JSON values from database
-		serializer := newJSONSerializer[string]()
-		decodedValue1, err := serializer.Decode(&entries[0].Value)
-		require.NoError(t, err, "failed to decode first stream entry")
-		require.Equal(t, "value1", decodedValue1, "expected first entry to be value1")
-
-		decodedValue2, err := serializer.Decode(&entries[1].Value)
-		require.NoError(t, err, "failed to decode second stream entry")
-		require.Equal(t, "value2", decodedValue2, "expected second entry to be value2")
+		require.Equal(t, []string{"value1", "value2"}, values, "expected 2 stream entries in forked workflow")
 
 		// Now unblock both workflows to let them complete
 		streamBlockEvent.Set()
@@ -5909,6 +5869,85 @@ func TestStreams(t *testing.T) {
 		streamBlockEvent.Set()
 		_, err = writerHandle.GetResult()
 		require.NoError(t, err)
+	})
+
+	t.Run("Snapshot", func(t *testing.T) {
+		streamBlockEvent = NewEvent()    // not set — workflow blocks after initial writes
+		streamStartedEvent = NewEvent()
+
+		streamKey := "test-stream-snapshot"
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"value1", "value2", "value3"},
+			Close:     false,
+		})
+		require.NoError(t, err)
+		streamStartedEvent.Wait()
+
+		// All entries from offset 0, workflow still running — not closed
+		values, closed, err := ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(0))
+		require.NoError(t, err)
+		require.False(t, closed)
+		require.Equal(t, []string{"value1", "value2", "value3"}, values)
+
+		// Tail from offset 1
+		values, closed, err = ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(1))
+		require.NoError(t, err)
+		require.False(t, closed)
+		require.Equal(t, []string{"value2", "value3"}, values)
+
+		// Past end — empty, not closed
+		values, closed, err = ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(99))
+		require.NoError(t, err)
+		require.False(t, closed)
+		require.Empty(t, values)
+
+		// Unblock and complete
+		streamBlockEvent.Set()
+		_, err = writerHandle.GetResult()
+		require.NoError(t, err)
+
+		// After workflow completes, step-value is present; stream not closed (no sentinel)
+		values, closed, err = ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(0))
+		require.NoError(t, err)
+		require.False(t, closed)
+		require.Equal(t, []string{"value1", "value2", "value3", "step-value"}, values)
+	})
+
+	t.Run("SnapshotClosed", func(t *testing.T) {
+		streamBlockEvent = NewEvent()
+		streamBlockEvent.Set()      // unblocked — workflow runs to completion and closes stream
+		streamStartedEvent = nil
+
+		streamKey := "test-stream-snapshot-closed"
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"a", "b"},
+			Close:     true,
+		})
+		require.NoError(t, err)
+		_, err = writerHandle.GetResult()
+		require.Error(t, err) // write-after-close expected
+
+		// Snapshot returns entries and closed: true when sentinel is present
+		values, closed, err := ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(0))
+		require.NoError(t, err)
+		require.True(t, closed)
+		require.Equal(t, []string{"a", "b", "step-value"}, values)
+
+		// Snapshot at offset 2 still shows closed
+		values, closed, err = ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(2))
+		require.NoError(t, err)
+		require.True(t, closed)
+		require.Equal(t, []string{"step-value"}, values)
 	})
 
 	t.Run("AsyncErrorHandling", func(t *testing.T) {

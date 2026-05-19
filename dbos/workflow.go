@@ -2427,6 +2427,24 @@ type writeStreamOptions struct {
 // WriteStreamOption is a functional option for configuring a WriteStream call.
 type WriteStreamOption func(*writeStreamOptions)
 
+type readStreamConfig struct {
+	snapshot   bool
+	fromOffset int
+}
+
+// ReadStreamOption is a functional option for configuring a ReadStream call.
+type ReadStreamOption func(*readStreamConfig)
+
+// WithReadStreamSnapshot configures ReadStream to return immediately with currently
+// available entries starting from fromOffset, without polling or waiting for the
+// workflow to complete.
+func WithReadStreamSnapshot(fromOffset int) ReadStreamOption {
+	return func(c *readStreamConfig) {
+		c.snapshot = true
+		c.fromOffset = fromOffset
+	}
+}
+
 // WithPortableWriteStream configures WriteStream to use the portable JSON serializer,
 // enabling cross-language interoperability regardless of the workflow's serializer.
 func WithPortableWriteStream() WriteStreamOption {
@@ -2585,7 +2603,35 @@ type streamEntryWithSerialization struct {
 	serialization string
 }
 
-func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) ([]any, bool, error) {
+func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error) {
+	cfg := &readStreamConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	if cfg.snapshot {
+		input := readStreamDBInput{
+			WorkflowID: workflowID,
+			Key:        key,
+			FromOffset: cfg.fromOffset,
+		}
+		var entries []streamEntry
+		var closed bool
+		err := retry(c, func() error {
+			var retryErr error
+			entries, closed, retryErr = c.systemDB.readStream(c, input)
+			return retryErr
+		}, withRetrierLogger(c.logger))
+		if err != nil {
+			return nil, false, err
+		}
+		values := make([]any, len(entries))
+		for i, e := range entries {
+			values[i] = streamEntryWithSerialization{value: e.Value, serialization: e.Serialization}
+		}
+		return values, closed, nil
+	}
+
 	var allValues []any
 	closed := false
 
@@ -2601,7 +2647,6 @@ func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) (
 			break
 		}
 
-		// Collect the value
 		allValues = append(allValues, streamValue.Value)
 	}
 
@@ -2609,25 +2654,23 @@ func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) (
 }
 
 // ReadStream reads values from a durable stream.
-// This method blocks until the stream is closed or an error occurs.
-// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
+// By default this blocks until the stream is closed or the workflow becomes inactive.
+// Pass WithReadStreamSnapshot(fromOffset) to return immediately with currently available entries.
 //
 // Returns the values, whether the stream is closed, and any error.
 //
-// Example:
+// Example (blocking):
 //
 //	values, closed, err := dbos.ReadStream[string](ctx, "workflow-id", "my-stream")
-//	if err != nil {
-//	    return err
-//	}
-//	for _, value := range values {
-//	    log.Printf("Stream value: %s", value)
-//	}
-func ReadStream[R any](ctx DBOSContext, workflowID string, key string) ([]R, bool, error) {
+//
+// Example (snapshot):
+//
+//	values, closed, err := dbos.ReadStream[string](ctx, "workflow-id", "my-stream", dbos.WithReadStreamSnapshot(0))
+func ReadStream[R any](ctx DBOSContext, workflowID string, key string, opts ...ReadStreamOption) ([]R, bool, error) {
 	if ctx == nil {
 		return nil, false, errors.New("ctx cannot be nil")
 	}
-	values, closed, err := ctx.ReadStream(ctx, workflowID, key)
+	values, closed, err := ctx.ReadStream(ctx, workflowID, key, opts...)
 	if err != nil {
 		return nil, false, err
 	}
