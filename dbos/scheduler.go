@@ -214,7 +214,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 func (c *dbosContext) addDBScheduleToScheduler(schedule WorkflowSchedule) {
 	fn, err := c.buildDBScheduleFunc(schedule)
 	if err != nil {
-		c.logger.Error("failed to get workflow for schedule", "schedule", schedule.ScheduleName, "error", err)
+		c.logger.Debug("failed to get workflow for schedule", "schedule", schedule.ScheduleName, "error", err)
 		return
 	}
 
