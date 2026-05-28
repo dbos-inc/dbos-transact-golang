@@ -1432,7 +1432,7 @@ func TestClientReadStreamAsyncGoroutineLeak(t *testing.T) {
 	RegisterWorkflow(serverCtx, blockingStreamWorkflow, WithWorkflowName("BlockingStreamWorkflow"))
 	require.NoError(t, Launch(serverCtx))
 
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL})
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
