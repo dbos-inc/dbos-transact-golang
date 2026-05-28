@@ -2,8 +2,10 @@ package dbos
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,8 +22,12 @@ func TestConfig(t *testing.T) {
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck.func1"),
+		// database/sql's connectionOpener/connectionCleaner exit just after
+		// Close, sometimes after goleak's check fires under the sqlite backend.
+		goleak.IgnoreAnyFunction("database/sql.(*DB).connectionOpener"),
+		goleak.IgnoreAnyFunction("database/sql.(*DB).connectionCleaner"),
 	)
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 
 	t.Run("CreatesDBOSContext", func(t *testing.T) {
 		t.Setenv("DBOS__APPVERSION", "v1.0.0")
@@ -82,7 +88,7 @@ func TestConfig(t *testing.T) {
 
 		assert.Equal(t, InitializationError, dbosErr.Code)
 
-		expectedMsg := "Error initializing DBOS Transact: either databaseURL or systemDBPool must be provided"
+		expectedMsg := "Error initializing DBOS Transact: one of databaseURL, systemDBPool, or sqliteSystemDB must be provided"
 		assert.Equal(t, expectedMsg, dbosErr.Message)
 	})
 
@@ -218,6 +224,7 @@ func TestConfig(t *testing.T) {
 	})
 
 	t.Run("SystemDBMigration", func(t *testing.T) {
+		skipIfSqlite(t, "queries pg information_schema; TestSQLiteFoundation covers the sqlite migration path")
 		t.Setenv("DBOS__APPVERSION", "v1.0.0")
 		t.Setenv("DBOS__APPID", "test-migration")
 		t.Setenv("DBOS__VMID", "test-executor-id")
@@ -319,6 +326,7 @@ func TestConfig(t *testing.T) {
 	})
 
 	t.Run("KeyValueFormatConnectionString", func(t *testing.T) {
+		skipIfSqlite(t, "libpq key=value DSN form is pg-specific")
 		t.Setenv("DBOS__APPVERSION", "v1.0.0")
 		t.Setenv("DBOS__APPID", "test-keyvalue-format")
 		t.Setenv("DBOS__VMID", "test-executor-id")
@@ -407,7 +415,7 @@ func TestConfig(t *testing.T) {
 			assert.True(t, exists)
 
 			// Verify masking works
-			poolConnStr := sysDB.pool.Config().ConnString()
+			poolConnStr := PgxPool(sysDB.pool).Config().ConnString()
 			maskedConnStr, err := maskPassword(poolConnStr)
 			require.NoError(t, err)
 			if actualPassword == "" {
@@ -423,7 +431,7 @@ func TestConfig(t *testing.T) {
 }
 
 func TestContext(t *testing.T) {
-	databaseURL := getDatabaseURL()
+	databaseURL := backendDatabaseURL(t)
 
 	t.Run("PreservesContextValues", func(t *testing.T) {
 		// Define test keys and values
@@ -501,6 +509,7 @@ func TestContext(t *testing.T) {
 }
 
 func TestCustomSystemDBSchema(t *testing.T) {
+	skipIfSqlite(t, "queries pg information_schema; sqlite has no per-schema isolation")
 	defer goleak.VerifyNone(t,
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
@@ -720,6 +729,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 }
 
 func TestCustomPool(t *testing.T) {
+	skipIfSqlite(t, "test *pgxpool.Pool only")
 	defer goleak.VerifyNone(t,
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
@@ -798,12 +808,12 @@ func TestCustomPool(t *testing.T) {
 
 		sysDB, ok := dbosCtx.systemDB.(*sysDB)
 		require.True(t, ok)
-		assert.Same(t, pool, sysDB.pool, "The pool in dbosContext should be the same as the custom pool provided")
+		assert.Same(t, pool, PgxPool(sysDB.pool), "The pool in dbosContext should be the same as the custom pool provided")
 
-		stats := sysDB.pool.Stat()
+		stats := PgxPool(sysDB.pool).Stat()
 		assert.Equal(t, int32(10), stats.MaxConns(), "MaxConns should match custom pool config")
 
-		sysdbConfig := sysDB.pool.Config()
+		sysdbConfig := PgxPool(sysDB.pool).Config()
 		assert.Equal(t, int32(10), sysdbConfig.MaxConns)
 		assert.Equal(t, int32(5), sysdbConfig.MinConns)
 		assert.Equal(t, 2*time.Hour, sysdbConfig.MaxConnLifetime)
@@ -949,7 +959,7 @@ func TestCustomPool(t *testing.T) {
 		systemDB.launch(ctx)
 
 		require.Eventually(t, func() bool {
-			conn, err := systemDB.(*sysDB).pool.Acquire(ctx)
+			conn, err := PgxPool(systemDB.(*sysDB).pool).Acquire(ctx)
 			require.NoError(t, err)
 			defer conn.Release()
 			err = conn.Ping(ctx)
@@ -961,6 +971,642 @@ func TestCustomPool(t *testing.T) {
 		cancel() // Cancel context
 		shutdownTimeout := 2 * time.Second
 		systemDB.shutdown(ctx, shutdownTimeout)
+		assert.False(t, systemDB.(*sysDB).launched)
+	})
+}
+
+// -----------------------------------------------------------------------------
+// SQLite-specific suite. These tests construct sqlite handles directly so they
+// run on every test invocation, regardless of DBOS_TEST_BACKEND. They cover
+// the sqlite-only paths (DSN parsing, migration application, UDFs/PRAGMAs,
+// dialect error classification) that the cross-backend tests above can't
+// reach via the high-level API.
+// -----------------------------------------------------------------------------
+
+// TestSQLiteFoundation verifies the SQLite path of newSystemDatabase: URL
+// dispatch, migration application, UDF availability, pragma settings.
+func TestSQLiteFoundation(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "dbos.db")
+	url := "sqlite:" + dbPath
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	sd, err := newSystemDatabase(context.Background(), newSystemDatabaseInput{
+		databaseURL:    url,
+		databaseSchema: "dbos",
+		logger:         logger,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { sd.shutdown(context.Background(), 0) })
+
+	s, ok := sd.(*sysDB)
+	require.True(t, ok, "expected *sysDB concrete type")
+	require.Nil(t, PgxPool(s.pool), "pg pool should be nil for sqlite")
+	require.NotNil(t, SQLDB(s.pool), "sqlite handle should be non-nil")
+	require.Equal(t, DialectSQLite, s.dialect.Name())
+
+	// Migrations table should be at the latest version.
+	migs := buildSqliteMigrations()
+	latest := migs[len(migs)-1].version
+	var got int64
+	require.NoError(t, SQLDB(s.pool).QueryRow(`SELECT version FROM dbos_migrations`).Scan(&got))
+	assert.Equal(t, latest, got)
+
+	// Re-opening the same file is a no-op (migrations already applied).
+	sd2, err := newSystemDatabase(context.Background(), newSystemDatabaseInput{
+		databaseURL:    url,
+		databaseSchema: "dbos",
+		logger:         logger,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { sd2.shutdown(context.Background(), 0) })
+
+	s2 := sd2.(*sysDB)
+	require.NoError(t, SQLDB(s2.pool).QueryRow(`SELECT version FROM dbos_migrations`).Scan(&got))
+	assert.Equal(t, latest, got, "version should remain at latest on re-open")
+
+	// PRAGMAs we set should stick.
+	var jm string
+	require.NoError(t, SQLDB(s2.pool).QueryRow(`PRAGMA journal_mode`).Scan(&jm))
+	assert.Equal(t, "wal", jm, "WAL journal mode should be enabled")
+
+	var fk int
+	require.NoError(t, SQLDB(s2.pool).QueryRow(`PRAGMA foreign_keys`).Scan(&fk))
+	assert.Equal(t, 1, fk, "foreign_keys pragma should be on")
+
+	// Core schema should exist.
+	for _, table := range []string{
+		"workflow_status", "operation_outputs", "notifications",
+		"workflow_events", "workflow_events_history", "streams",
+		"event_dispatch_kv", "workflow_schedules", "application_versions", "queues",
+	} {
+		var name string
+		err := SQLDB(s2.pool).QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
+		assert.NoErrorf(t, err, "table %q missing after migrations", table)
+	}
+}
+
+// TestSQLiteURLParsing checks the DSN extraction for common URL forms.
+func TestSQLiteURLParsing(t *testing.T) {
+	cases := []struct {
+		url, want string
+	}{
+		// Hierarchical absolute paths: u.Path land
+		{"sqlite:/tmp/x.db", "/tmp/x.db"},
+		{"sqlite:///tmp/x.db", "/tmp/x.db"},
+		// Opaque forms: u.Opaque land
+		{"sqlite::memory:", ":memory:"},
+		{"sqlite:relative.db", "relative.db"},
+		// sqlite3: scheme is accepted too
+		{"sqlite3:relative.db", "relative.db"},
+		// Modernc URI-mode flags embedded inside a sqlite: URL; the inner
+		// file: URI is preserved verbatim and the query string is re-appended.
+		{"sqlite:file:/abs/x.db?_pragma=foreign_keys(1)", "file:/abs/x.db?_pragma=foreign_keys(1)"},
+		// Fragment is preserved verbatim.
+		{"sqlite:/tmp/x.db#vfs=unix", "/tmp/x.db#vfs=unix"},
+		{"sqlite:relative.db#fragment", "relative.db#fragment"},
+		// Fragment combines with a query string in the obvious order: path
+		// then ?query then #fragment.
+		{"sqlite:file:/abs/x.db?_pragma=foreign_keys(1)#tag", "file:/abs/x.db?_pragma=foreign_keys(1)#tag"},
+	}
+	for _, c := range cases {
+		got, err := sqliteDSN(c.url)
+		require.NoErrorf(t, err, "sqliteDSN(%q)", c.url)
+		assert.Equalf(t, c.want, got, "sqliteDSN(%q)", c.url)
+	}
+
+	bads := []struct {
+		url    string
+		errMsg string
+	}{
+		{"postgres://x", "not a sqlite URL"},
+		{"sqlite:", "has no path"},
+		{"sqlite://", "has no path"},
+		{"sqlite://host/path", "host component"},
+	}
+	for _, b := range bads {
+		_, err := sqliteDSN(b.url)
+		require.Errorf(t, err, "sqliteDSN(%q) should error", b.url)
+		assert.Containsf(t, err.Error(), b.errMsg, "sqliteDSN(%q)", b.url)
+	}
+}
+
+// TestDetectDialect covers scheme → dialect mapping including the libpq
+// key=value DSN heuristic and error paths. Pure parsing, no DB connection.
+func TestDetectDialect(t *testing.T) {
+	cases := []struct {
+		name   string
+		url    string
+		want   DialectName
+		errMsg string // substring; empty means no error
+	}{
+		// sqlite forms
+		{"sqlite-abs-single-slash", "sqlite:/tmp/x.db", DialectSQLite, ""},
+		{"sqlite-abs-triple-slash", "sqlite:///tmp/x.db", DialectSQLite, ""},
+		{"sqlite-memory", "sqlite::memory:", DialectSQLite, ""},
+		{"sqlite3-scheme", "sqlite3:relative.db", DialectSQLite, ""},
+		{"sqlite-uppercase-scheme", "SQLITE:/tmp/x.db", DialectSQLite, ""},
+		// modernc URI-mode flags embedded inside a sqlite: URL — outer scheme
+		// wins despite the inner file: token.
+		{"sqlite-modernc-uri-mode", "sqlite:file:/abs/x.db?_pragma=foreign_keys(1)", DialectSQLite, ""},
+		// sqlite URL with fragment.
+		{"sqlite-with-fragment", "sqlite:/tmp/x.db#vfs=unix", DialectSQLite, ""},
+
+		// postgres / postgresql URLs
+		{"pg-url", "postgres://u:p@h:5432/d", DialectPostgres, ""},
+		{"postgresql-url", "postgresql://u:p@h/d", DialectPostgres, ""},
+		// CRDB Cloud–style URL with sslmode and options query params.
+		{"crdb-cloud-style", "postgresql://u:p@h:26257/d?sslmode=verify-full&options=--cluster%3Dfoo-1234", DialectPostgres, ""},
+		// IPv6 host literal.
+		{"pg-ipv6-host", "postgres://[::1]:5432/dbos", DialectPostgres, ""},
+		// Bare host, no path.
+		{"pg-bare-host", "postgres://localhost", DialectPostgres, ""},
+		// Unix-socket form (host carried in query string, empty authority).
+		{"pg-unix-socket", "postgres:///dbos?host=/var/run/postgresql", DialectPostgres, ""},
+		// Percent-encoded special char in password.
+		{"pg-percent-encoded-pw", "postgres://u:p%40ss@h/d", DialectPostgres, ""},
+		// postgresql: scheme with KV-looking userinfo — scheme wins over the
+		// KV-DSN heuristic (which only applies when scheme is empty).
+		{"postgresql-with-kv-shaped-userinfo", "postgresql://user=foo:5432/db", DialectPostgres, ""},
+		// Empty body after scheme — still a recognised scheme.
+		{"pg-empty-body", "postgres://", DialectPostgres, ""},
+
+		// libpq key=value DSN — accepted as Postgres.
+		{"kv-quoted-spaces", "host=localhost user='postgres' application_name='dbos worker'", DialectPostgres, ""},
+		{"kv-user-first", "user='postgres' password='x' database=dbos host=localhost", DialectPostgres, ""},
+		{"kv-host-first", "host=localhost port=5432 dbname=dbos", DialectPostgres, ""},
+		// libpq KV DSN with characters that look like url.Parse escape sequences
+		// in quoted values (#$%&!). url.Parse would reject "%&!"; we must detect
+		// the KV form first.
+		{"kv-quoted-funny-chars", "user='User Name-123@acme.com#$%&!' password='a!b@c$d()e*_,/:;=?@ff[]22' database=dbos host=localhost port=5432 sslmode=disable", DialectPostgres, ""},
+
+		// Failure paths.
+		{"empty", "", "", "empty"},
+		{"unsupported-file-scheme", "file:/abs/x.db", "", "unsupported database scheme"},
+		{"postgres-typo", "postgress://typo", "", "unsupported database scheme"},
+		{"mysql", "mysql://h/d", "", "unsupported database scheme"},
+		{"no-scheme-plain-string", "justastring", "", "no scheme"},
+		// KV-shaped but doesn't start with a canonical pg keyword: must not be
+		// mistakenly routed to pg.
+		{"kv-with-non-canonical-prefix", "foo=bar host=localhost", "", "no scheme"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := detectDialect(c.url)
+			if c.errMsg == "" {
+				require.NoErrorf(t, err, "detectDialect(%q)", c.url)
+				assert.Equalf(t, c.want, got, "detectDialect(%q)", c.url)
+			} else {
+				require.Errorf(t, err, "detectDialect(%q) should error", c.url)
+				assert.Containsf(t, err.Error(), c.errMsg, "detectDialect(%q) error message", c.url)
+			}
+		})
+	}
+}
+
+// TestPostgresConnectionStringForms derives DSN variants from the live
+// DBOS_SYSTEM_DATABASE_URL (or default getDatabaseURL()) and confirms each
+// variant survives parse → pool → Ping. Detection alone is unit-tested by
+// TestDetectDialect; this guards the integration claim that we accept these
+// DSN shapes against the actual pgx parser and a live server.
+func TestPostgresConnectionStringForms(t *testing.T) {
+	skipIfSqlite(t, "Postgres-only DSN forms")
+	canonical := getDatabaseURL()
+
+	// Extract connection params from the canonical URL via pgx, then rebuild
+	// equivalent DSNs in alternative shapes. This avoids hard-coding host/port
+	// and lets the test follow whatever env the rest of the suite uses.
+	cfg, err := pgxpool.ParseConfig(canonical)
+	require.NoError(t, err, "parse canonical URL")
+	host := cfg.ConnConfig.Host
+	port := cfg.ConnConfig.Port
+	user := cfg.ConnConfig.User
+	password := cfg.ConnConfig.Password
+	dbname := cfg.ConnConfig.Database
+
+	// postgresql:// equivalent of the canonical postgres:// URL.
+	postgresqlScheme := strings.Replace(canonical, "postgres://", "postgresql://", 1)
+
+	// libpq key=value forms — both unquoted and single-quoted variants. pgx
+	// supports either. Password is quoted to tolerate special characters.
+	kvUnquoted := fmt.Sprintf(
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+		host, port, user, password, dbname,
+	)
+	kvQuoted := fmt.Sprintf(
+		"host='%s' port=%d user='%s' password='%s' dbname='%s' sslmode=disable",
+		host, port, user, password, dbname,
+	)
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"postgres-url-canonical", canonical},
+		{"postgresql-scheme", postgresqlScheme},
+		{"kv-dsn-unquoted", kvUnquoted},
+		{"kv-dsn-quoted", kvQuoted},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := detectDialect(c.url)
+			require.NoErrorf(t, err, "detectDialect(%q)", c.url)
+			assert.Equal(t, DialectPostgres, got)
+
+			pool, err := pgxpool.New(context.Background(), c.url)
+			require.NoErrorf(t, err, "pgxpool.New(%q)", c.url)
+			t.Cleanup(pool.Close)
+			require.NoErrorf(t, pool.Ping(context.Background()), "Ping(%q)", c.url)
+		})
+	}
+}
+
+// TestSQLiteConnectionStringForms opens an actual database connection through
+// each supported sqlite: URL form, verifying the parse → DSN → driver chain.
+// Pure URL extraction is covered by TestSQLiteURLParsing; this confirms each
+// form actually opens and round-trips data.
+func TestSQLiteConnectionStringForms(t *testing.T) {
+	dir := t.TempDir()
+	abs := filepath.Join(dir, "dbos.db")
+	// Separate path for the fragment case: modernc treats the DSN as a literal
+	// file path when it doesn't start with "file:", so "/p/dbos.db#frag" would
+	// create a file literally named "dbos.db#frag" — colliding with abs above
+	// if reused.
+	absFrag := filepath.Join(dir, "frag.db")
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"sqlite-abs-single-slash", "sqlite:" + abs},
+		{"sqlite-abs-triple-slash", "sqlite://" + abs},
+		// Memory-backed DB: ":memory:" creates a private in-memory database
+		// for the lifetime of the connection. Used by tests that want full
+		// isolation without touching the filesystem.
+		{"sqlite-memory", "sqlite::memory:"},
+		{"sqlite3-scheme-abs", "sqlite3:" + abs},
+		// modernc URI-mode flags inside a sqlite: URL. The inner file: URI is
+		// passed verbatim to the driver, which supports the _pragma query arg.
+		{"sqlite-modernc-uri-mode", "sqlite:file:" + abs + "?_pragma=foreign_keys(1)"},
+		// Uppercase scheme: detectDialect lowercases before matching, and
+		// sqliteDSN does the same, so the open path is identical to the
+		// canonical sqlite: form.
+		{"sqlite-uppercase-scheme", "SQLITE:" + abs},
+		// Fragment is carried through sqliteDSN verbatim. modernc doesn't parse
+		// fragments for non-file: DSNs, so it ends up as part of the filename.
+		// This confirms the chain doesn't reject the URL outright.
+		{"sqlite-with-fragment", "sqlite:" + absFrag + "#vfs=unix"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := detectDialect(c.url)
+			require.NoErrorf(t, err, "detectDialect(%q)", c.url)
+			assert.Equal(t, DialectSQLite, got)
+
+			dsn, err := sqliteDSN(c.url)
+			require.NoErrorf(t, err, "sqliteDSN(%q)", c.url)
+
+			db, err := sql.Open("sqlite", dsn)
+			require.NoErrorf(t, err, "sql.Open(%q → %q)", c.url, dsn)
+			t.Cleanup(func() { _ = db.Close() })
+			require.NoErrorf(t, db.Ping(), "Ping(%q → %q)", c.url, dsn)
+
+			// Round-trip a row: confirms the driver is fully functional, not
+			// just that Ping reports OK. Each subtest uses its own table name
+			// so file-backed runs don't see each other's writes.
+			tbl := "rt_" + strings.ReplaceAll(c.name, "-", "_")
+			_, err = db.Exec(fmt.Sprintf(`CREATE TABLE %s (k INTEGER PRIMARY KEY, v TEXT)`, tbl))
+			require.NoError(t, err)
+			_, err = db.Exec(fmt.Sprintf(`INSERT INTO %s (k, v) VALUES (1, 'hello')`, tbl))
+			require.NoError(t, err)
+			var v string
+			require.NoError(t, db.QueryRow(fmt.Sprintf(`SELECT v FROM %s WHERE k = 1`, tbl)).Scan(&v))
+			assert.Equal(t, "hello", v)
+		})
+	}
+
+	// Relative path: modernc resolves it against the process CWD. t.Chdir
+	// scopes the directory change to this subtest so the relative.db ends up
+	// inside the tempdir (auto-cleaned at test end) and other tests are
+	// unaffected.
+	t.Run("sqlite3-relative-path", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		const url = "sqlite3:relative.db"
+
+		got, err := detectDialect(url)
+		require.NoError(t, err)
+		assert.Equal(t, DialectSQLite, got)
+
+		dsn, err := sqliteDSN(url)
+		require.NoError(t, err)
+		assert.Equal(t, "relative.db", dsn)
+
+		db, err := sql.Open("sqlite", dsn)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		require.NoError(t, db.Ping())
+
+		_, err = db.Exec(`CREATE TABLE rt_relative (k INTEGER PRIMARY KEY, v TEXT)`)
+		require.NoError(t, err)
+		_, err = db.Exec(`INSERT INTO rt_relative (k, v) VALUES (1, 'rel')`)
+		require.NoError(t, err)
+		var v string
+		require.NoError(t, db.QueryRow(`SELECT v FROM rt_relative WHERE k = 1`).Scan(&v))
+		assert.Equal(t, "rel", v)
+	})
+}
+
+// TestSQLiteMemoryBackedFile confirms that a sqlite::memory: URL really gives
+// us a memory-backed database (no file on disk) and that the data lives only
+// for the lifetime of the connection.
+func TestSQLiteMemoryBackedFile(t *testing.T) {
+	const url = "sqlite::memory:"
+
+	got, err := detectDialect(url)
+	require.NoError(t, err)
+	assert.Equal(t, DialectSQLite, got)
+
+	dsn, err := sqliteDSN(url)
+	require.NoError(t, err)
+	assert.Equal(t, ":memory:", dsn)
+
+	db, err := sql.Open("sqlite", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	require.NoError(t, db.Ping())
+
+	// Force a single connection so the in-memory DB persists across statements
+	// in this test (each new conn to ":memory:" gets its own private DB).
+	db.SetMaxOpenConns(1)
+
+	_, err = db.Exec(`CREATE TABLE t (k INTEGER PRIMARY KEY, v TEXT)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO t (k, v) VALUES (1, 'memory-backed')`)
+	require.NoError(t, err)
+
+	var v string
+	require.NoError(t, db.QueryRow(`SELECT v FROM t WHERE k = 1`).Scan(&v))
+	assert.Equal(t, "memory-backed", v)
+
+	// SQLite exposes the backing storage via PRAGMA database_list. For an
+	// in-memory DB the file column is empty — that's the actual signal that
+	// the data lives in memory, not on disk.
+	rows, err := db.Query(`PRAGMA database_list`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var sawMain bool
+	for rows.Next() {
+		var seq int
+		var name, file string
+		require.NoError(t, rows.Scan(&seq, &name, &file))
+		if name == "main" {
+			sawMain = true
+			assert.Empty(t, file, "main DB file path should be empty for :memory:")
+		}
+	}
+	require.NoError(t, rows.Err())
+	require.True(t, sawMain, "expected a 'main' entry in PRAGMA database_list")
+}
+
+// TestSQLiteDialectClassification sanity-checks the sqlite error helpers
+// against real driver errors. Uses the live driver (not regex on strings).
+func TestSQLiteDialectClassification(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	_, err = db.ExecContext(ctx, `CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT UNIQUE);
+		CREATE TABLE child (parent_id INTEGER REFERENCES t(id)); PRAGMA foreign_keys = ON;`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `INSERT INTO t VALUES (1, 'x')`)
+	require.NoError(t, err)
+
+	// Unique violation.
+	_, err = db.ExecContext(ctx, `INSERT INTO t VALUES (2, 'x')`)
+	require.Error(t, err)
+	assert.True(t, sqliteDialect{}.IsUniqueViolation(err), "expected unique-violation: %v", err)
+
+	// Foreign key enforcement on :memory: is per-connection; the PRAGMA above
+	// only sticks on the conn that executed it. Skip if not enforced here.
+	_, err = db.ExecContext(ctx, `INSERT INTO child VALUES (999)`)
+	if err == nil {
+		t.Log("foreign_keys not enforced on this connection; skipping FK assertion")
+	} else {
+		assert.True(t, sqliteDialect{}.IsForeignKeyViolation(err), "expected fk-violation: %v", err)
+	}
+}
+
+// TestNewDBOSContextSQLiteRoundtrip exercises the user-facing Config path with
+// a sqlite: URL. NewDBOSContext + Shutdown should succeed.
+func TestNewDBOSContextSQLiteRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "dbos.db")
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	ctx, err := NewDBOSContext(context.Background(), Config{
+		AppName:     "test-sqlite",
+		DatabaseURL: "sqlite:" + dbPath,
+		Logger:      logger,
+	})
+	require.NoError(t, err, "NewDBOSContext with sqlite URL should succeed")
+	ctx.Shutdown(0)
+}
+
+// TestNewDBOSContextRejectsUnknownScheme verifies up-front URL validation
+// fires for unsupported / mistyped schemes (backend-agnostic).
+func TestNewDBOSContextRejectsUnknownScheme(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelError}))
+	cases := []string{
+		"mysql://h/d",
+		"postgress://typo",
+		"justastring",
+	}
+	for _, bad := range cases {
+		_, err := NewDBOSContext(context.Background(), Config{
+			AppName:     "test",
+			DatabaseURL: bad,
+			Logger:      logger,
+		})
+		assert.Errorf(t, err, "expected NewDBOSContext to reject %q", bad)
+	}
+}
+
+// testWriter is a slog-compatible writer that forwards to t.Log.
+type testWriter struct{ t *testing.T }
+
+func (w testWriter) Write(b []byte) (int, error) {
+	w.t.Log(string(b))
+	return len(b), nil
+}
+
+// TestCustomSqlitePool mirrors TestCustomPool for the SqliteSystemDB config
+// field: caller-supplied *sql.DB instead of *pgxpool.Pool. Always runs (does
+// not depend on DBOS_TEST_BACKEND) because every subtest constructs its own
+// sqlite handle.
+func TestCustomSqlitePool(t *testing.T) {
+	defer goleak.VerifyNone(t,
+		goleak.IgnoreAnyFunction("database/sql.(*DB).connectionOpener"),
+		goleak.IgnoreAnyFunction("database/sql.(*DB).connectionCleaner"),
+		// MutuallyExclusivePools spins up a pgxpool just to exercise validation;
+		// its background goroutines may outlive pool.Close().
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck"),
+		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).triggerHealthCheck.func1"),
+	)
+
+	type customPoolWorkflowInput struct {
+		PartnerWorkflowID string
+		Message           string
+	}
+
+	sendGetEventWorkflowCustom := func(ctx DBOSContext, input customPoolWorkflowInput) (string, error) {
+		if err := Send(ctx, input.PartnerWorkflowID, input.Message, "sqlite-custom-pool-topic"); err != nil {
+			return "", err
+		}
+		return GetEvent[string](ctx, input.PartnerWorkflowID, "sqlite-custom-response-key", 5*time.Hour)
+	}
+	recvSetEventWorkflowCustom := func(ctx DBOSContext, input customPoolWorkflowInput) (string, error) {
+		msg, err := Recv[string](ctx, "sqlite-custom-pool-topic", 5*time.Hour)
+		if err != nil {
+			return "", err
+		}
+		time.Sleep(100 * time.Millisecond)
+		if err := SetEvent(ctx, "sqlite-custom-response-key", "response-from-sqlite-custom-pool"); err != nil {
+			return "", err
+		}
+		return msg, nil
+	}
+
+	t.Run("CustomSqliteDB", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "dbos.db")
+		db, err := sql.Open("sqlite", dbPath)
+		require.NoError(t, err)
+		db.SetMaxOpenConns(8)
+		db.SetMaxIdleConns(4)
+		db.SetConnMaxLifetime(time.Hour)
+
+		config := Config{
+			AppName:        "test-custom-sqlite-db",
+			SqliteSystemDB: db,
+		}
+		customdbosContext, err := NewDBOSContext(context.Background(), config)
+		require.NoError(t, err)
+		require.NotNil(t, customdbosContext)
+
+		dbosCtx, ok := customdbosContext.(*dbosContext)
+		require.True(t, ok)
+		defer Shutdown(dbosCtx, 10*time.Second)
+
+		sysDB, ok := dbosCtx.systemDB.(*sysDB)
+		require.True(t, ok)
+		assert.Same(t, db, SQLDB(sysDB.pool), "sysDB should use the caller's *sql.DB instance")
+		require.Equal(t, DialectSQLite, sysDB.dialect.Name())
+
+		RegisterWorkflow(customdbosContext, sendGetEventWorkflowCustom)
+		RegisterWorkflow(customdbosContext, recvSetEventWorkflowCustom)
+		require.NoError(t, Launch(customdbosContext))
+
+		workflowAID := uuid.NewString()
+		workflowBID := uuid.NewString()
+
+		handleB, err := RunWorkflow(customdbosContext, recvSetEventWorkflowCustom, customPoolWorkflowInput{
+			PartnerWorkflowID: workflowAID,
+			Message:           "sqlite-custom-pool-message-from-b",
+		}, WithWorkflowID(workflowBID))
+		require.NoError(t, err)
+
+		time.Sleep(100 * time.Millisecond)
+
+		handleA, err := RunWorkflow(customdbosContext, sendGetEventWorkflowCustom, customPoolWorkflowInput{
+			PartnerWorkflowID: workflowBID,
+			Message:           "sqlite-custom-pool-message-from-a",
+		}, WithWorkflowID(workflowAID))
+		require.NoError(t, err)
+
+		resultA, err := handleA.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "response-from-sqlite-custom-pool", resultA)
+
+		resultB, err := handleB.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "sqlite-custom-pool-message-from-a", resultB)
+	})
+
+	t.Run("CustomSqliteDBTakesPrecedence", func(t *testing.T) {
+		// An invalid DatabaseURL is ignored when SqliteSystemDB is set.
+		dbPath := filepath.Join(t.TempDir(), "dbos.db")
+		db, err := sql.Open("sqlite", dbPath)
+		require.NoError(t, err)
+
+		config := Config{
+			DatabaseURL:    "postgres://invalid:invalid@localhost:5432/invaliddb",
+			AppName:        "test-sqlite-pool-precedence",
+			SqliteSystemDB: db,
+		}
+		dbosCtx, err := NewDBOSContext(context.Background(), config)
+		require.NoError(t, err)
+		require.NotNil(t, dbosCtx)
+		defer Shutdown(dbosCtx, 5*time.Second)
+
+		sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		require.True(t, ok)
+		assert.Equal(t, DialectSQLite, sysDB.dialect.Name(), "sqlite custom DB should win over postgres URL")
+	})
+
+	t.Run("MutuallyExclusivePools", func(t *testing.T) {
+		// Setting both SystemDBPool and SqliteSystemDB must be rejected by
+		// processConfig before any connection attempt.
+		dbPath := filepath.Join(t.TempDir(), "dbos.db")
+		db, err := sql.Open("sqlite", dbPath)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// pgxpool.NewWithConfig with MinConns=0 does not dial up-front; this
+		// gives us a non-nil *pgxpool.Pool without requiring a live pg server.
+		poolConfig, err := pgxpool.ParseConfig("postgres://localhost:5432/dbos?sslmode=disable")
+		require.NoError(t, err)
+		poolConfig.MinConns = 0
+		pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
+		require.NoError(t, err)
+		defer pool.Close()
+
+		_, err = NewDBOSContext(context.Background(), Config{
+			AppName:        "test-mutually-exclusive",
+			SystemDBPool:   pool,
+			SqliteSystemDB: db,
+		})
+		require.Error(t, err)
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected DBOSError, got %T", err)
+		assert.Contains(t, dbosErr.Message, "mutually exclusive")
+	})
+
+	t.Run("DirectSqliteSystemDatabase", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+		dbPath := filepath.Join(t.TempDir(), "dbos.db")
+		customDB, err := sql.Open("sqlite", dbPath)
+		require.NoError(t, err)
+		defer customDB.Close()
+
+		systemDB, err := newSystemDatabase(ctx, newSystemDatabaseInput{
+			databaseSchema: "dbos",
+			customSqliteDB: customDB,
+			logger:         logger,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, systemDB)
+
+		systemDB.launch(ctx)
+
+		require.Eventually(t, func() bool {
+			return SQLDB(systemDB.(*sysDB).pool).PingContext(ctx) == nil
+		}, 5*time.Second, 100*time.Millisecond, "system database should be reachable")
+
+		cancel()
+		systemDB.shutdown(ctx, 2*time.Second)
 		assert.False(t, systemDB.(*sysDB).launched)
 	})
 }

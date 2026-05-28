@@ -19,12 +19,13 @@ func poolFromContext(t *testing.T, ctx DBOSContext) *pgxpool.Pool {
 	require.True(t, ok)
 	s, ok := c.systemDB.(*sysDB)
 	require.True(t, ok)
-	return s.pool
+	return PgxPool(s.pool)
 }
 
 // TestShouldMigrate verifies the early-exit predicate used to skip the full
 // migration pipeline when the schema is already at the latest version.
 func TestShouldMigrate(t *testing.T) {
+	skipIfSqlite(t, "pg migration pipeline; sqlite uses runSqliteMigrations")
 	ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 	pool := poolFromContext(t, ctx)
 	bg := context.Background()
@@ -68,6 +69,7 @@ func TestShouldMigrate(t *testing.T) {
 // migration must include IF [NOT] EXISTS guards so that re-running them
 // against an already-migrated schema succeeds.
 func TestOnlineMigrationsAreIdempotent(t *testing.T) {
+	skipIfSqlite(t, "pg online-migration semantics; sqlite migrations are all inline")
 	ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 	pool := poolFromContext(t, ctx)
 	bg := context.Background()
@@ -92,6 +94,7 @@ func TestOnlineMigrationsAreIdempotent(t *testing.T) {
 // fails mid-run, the dbos_migrations version counter stays at the prior value
 // so the runner re-attempts it on next start.
 func TestVersionNotBumpedOnMigrationFailure(t *testing.T) {
+	skipIfSqlite(t, "pg-only migration failure semantics")
 	ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 	pool := poolFromContext(t, ctx)
 	bg := context.Background()
@@ -123,6 +126,7 @@ func TestVersionNotBumpedOnMigrationFailure(t *testing.T) {
 // that crashed mid-build (leaving an INVALID index) and verifies the runner
 // cleans it up and re-runs the migration on the next start.
 func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
+	skipIfSqlite(t, "pg invalid-index recovery is pg-only")
 	ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 	pool := poolFromContext(t, ctx)
 	bg := context.Background()

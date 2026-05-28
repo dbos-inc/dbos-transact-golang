@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,8 +15,9 @@ import (
 )
 
 type ClientConfig struct {
-	DatabaseURL    string          // DatabaseURL is a PostgreSQL connection string. Either this or SystemDBPool is required.
-	SystemDBPool   *pgxpool.Pool   // SystemDBPool is a custom System Database Pool. It's optional and takes precedence over DatabaseURL if both are provided.
+	DatabaseURL    string          // DatabaseURL is the system-database connection string. Exactly one of DatabaseURL, SystemDBPool, or SqliteSystemDB must be set.
+	SystemDBPool   *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SqliteSystemDB.
+	SqliteSystemDB *sql.DB         // SqliteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
 	DatabaseSchema string          // Database schema name (defaults to "dbos")
 	Logger         *slog.Logger    // Optional custom logger
 	Serializer     Serializer[any] // Optional custom serializer (defaults to JSON)
@@ -83,6 +85,7 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 		AppName:        "dbos-client",
 		Logger:         config.Logger,
 		SystemDBPool:   config.SystemDBPool,
+		SqliteSystemDB: config.SqliteSystemDB,
 		Serializer:     config.Serializer,
 	})
 	if err != nil {
@@ -283,7 +286,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 
 	uncancellableCtx := WithoutCancel(dbosCtx)
 
-	tx, err := dbosCtx.systemDB.(*sysDB).pool.Begin(uncancellableCtx)
+	tx, err := dbosCtx.systemDB.(*sysDB).pool.BeginTx(uncancellableCtx, TxOptions{})
 	if err != nil {
 		return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %v", err))
 	}
@@ -692,7 +695,7 @@ func (c *client) ApplySchedules(schedules []ClientScheduleInput) error {
 		return errors.New("invalid DBOS context")
 	}
 
-	tx, err := dbosCtx.systemDB.(*sysDB).pool.Begin(dbosCtx)
+	tx, err := dbosCtx.systemDB.(*sysDB).pool.BeginTx(dbosCtx, TxOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
