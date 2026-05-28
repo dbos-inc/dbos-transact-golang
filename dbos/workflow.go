@@ -2487,6 +2487,17 @@ func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamVal
 	go func() {
 		defer close(ch)
 
+		// send delivers v to ch, returning false if the context is cancelled first.
+		// This prevents the goroutine from leaking when the consumer stops reading.
+		send := func(v StreamValue[any]) bool {
+			select {
+			case ch <- v:
+				return true
+			case <-c.Done():
+				return false
+			}
+		}
+
 		var currentOffset int
 		closed := false
 
@@ -2507,19 +2518,21 @@ func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamVal
 			}, withRetrierLogger(c.logger))
 
 			if err != nil {
-				ch <- StreamValue[any]{Err: err}
+				send(StreamValue[any]{Err: err})
 				return
 			}
 
 			// Send each entry value to the channel
 			for _, entry := range entries {
-				ch <- StreamValue[any]{Value: streamEntryWithSerialization{value: entry.Value, serialization: entry.Serialization}}
+				if !send(StreamValue[any]{Value: streamEntryWithSerialization{value: entry.Value, serialization: entry.Serialization}}) {
+					return
+				}
 				currentOffset = entry.Offset + 1 // Next offset to read from
 			}
 
 			// If stream is closed (sentinel found), send final message and stop
 			if closed {
-				ch <- StreamValue[any]{Closed: true}
+				send(StreamValue[any]{Closed: true})
 				return
 			}
 
@@ -2540,13 +2553,13 @@ func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamVal
 			}, withRetrierLogger(c.logger))
 
 			if err != nil {
-				ch <- StreamValue[any]{Err: err}
+				send(StreamValue[any]{Err: err})
 				return
 			}
 
 			// If workflow is inactive, send final message with Closed: true (BUG FIX)
 			if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
-				ch <- StreamValue[any]{Closed: true}
+				send(StreamValue[any]{Closed: true})
 				return
 			}
 
@@ -2554,7 +2567,7 @@ func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamVal
 			if len(entries) == 0 {
 				select {
 				case <-c.Done():
-					ch <- StreamValue[any]{Err: c.Err()}
+					send(StreamValue[any]{Err: c.Err()})
 					return
 				case <-time.After(_DB_RETRY_INTERVAL):
 					// Continue loop to read again
@@ -2699,47 +2712,60 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 	go func() {
 		defer close(typedCh)
 
+		send := func(v StreamValue[R]) bool {
+			select {
+			case typedCh <- v:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
 		customSer := getCustomSerializerFromCtx(ctx)
 
 		for streamValue := range anyCh {
 			if streamValue.Err != nil {
-				typedCh <- StreamValue[R]{Err: streamValue.Err}
+				send(StreamValue[R]{Err: streamValue.Err})
 				return
 			}
 
 			if streamValue.Closed {
-				typedCh <- StreamValue[R]{Closed: true}
+				send(StreamValue[R]{Closed: true})
 				return
 			}
 
 			if isReal {
 				entry, ok := streamValue.Value.(streamEntryWithSerialization)
 				if !ok {
-					typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", streamValue.Value)}
+					send(StreamValue[R]{Err: fmt.Errorf("stream value is not streamEntryWithSerialization, got %T", streamValue.Value)})
 					return
 				}
 
 				asyncDecoder, resolveErr := resolveDecoder[R](entry.serialization, customSer)
 				if resolveErr != nil {
-					typedCh <- StreamValue[R]{Err: resolveErr}
+					send(StreamValue[R]{Err: resolveErr})
 					return
 				}
 
 				decodedValue, decodeErr := asyncDecoder.Decode(&entry.value)
 				if decodeErr != nil {
-					typedCh <- StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)}
+					send(StreamValue[R]{Err: fmt.Errorf("decoding stream value to type %T: %w", *new(R), decodeErr)})
 					return
 				}
 
-				typedCh <- StreamValue[R]{Value: decodedValue}
+				if !send(StreamValue[R]{Value: decodedValue}) {
+					return
+				}
 			} else {
 				// Fallback for testing/mocking scenarios
 				typedVal, ok := streamValue.Value.(R)
 				if !ok {
-					typedCh <- StreamValue[R]{Err: fmt.Errorf("stream value is not %T, got %T", *new(R), streamValue.Value)}
+					send(StreamValue[R]{Err: fmt.Errorf("stream value is not %T, got %T", *new(R), streamValue.Value)})
 					return
 				}
-				typedCh <- StreamValue[R]{Value: typedVal}
+				if !send(StreamValue[R]{Value: typedVal}) {
+					return
+				}
 			}
 		}
 	}()

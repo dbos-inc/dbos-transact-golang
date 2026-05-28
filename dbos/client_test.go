@@ -1415,6 +1415,44 @@ func TestClientReadStream(t *testing.T) {
 	}
 }
 
+func TestClientReadStreamAsyncGoroutineLeak(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
+
+	// Workflow that writes values then blocks waiting for a message, keeping it PENDING
+	blockingStreamWorkflow := func(ctx DBOSContext, streamKey string) (string, error) {
+		for _, v := range []string{"value1", "value2", "value3"} {
+			if err := WriteStream(ctx, streamKey, v); err != nil {
+				return "", err
+			}
+		}
+		// Block until a message arrives (long timeout keeps workflow PENDING)
+		Recv[string](ctx, "unblock", 10*time.Minute) //nolint:errcheck
+		return "done", nil
+	}
+	RegisterWorkflow(serverCtx, blockingStreamWorkflow, WithWorkflowName("BlockingStreamWorkflow"))
+	require.NoError(t, Launch(serverCtx))
+
+	databaseURL := getDatabaseURL()
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+
+	streamKey := "test-client-leak-stream"
+	handle, err := RunWorkflow(serverCtx, blockingStreamWorkflow, streamKey)
+	require.NoError(t, err)
+
+	ch, err := ClientReadStreamAsync[string](client, handle.GetWorkflowID(), streamKey)
+	require.NoError(t, err)
+
+	// Read one value then abandon the channel — goroutine must exit on client shutdown
+	streamValue := <-ch
+	require.NoError(t, streamValue.Err)
+	require.Equal(t, "value1", streamValue.Value)
+
+	// Cancel the workflow so it doesn't keep running after the test
+	require.NoError(t, CancelWorkflow(serverCtx, handle.GetWorkflowID()))
+}
+
 // TestDebouncerClient tests the DebouncerClient functionality using a Client interface
 func TestDebouncerClient(t *testing.T) {
 	// Setup server context - this will process tasks
