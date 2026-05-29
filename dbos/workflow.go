@@ -2479,9 +2479,26 @@ func WriteStream[P any](ctx DBOSContext, key string, value P, opts ...WriteStrea
 	return ctx.WriteStream(ctx, key, value, opts...)
 }
 
+type ReadStreamOption func(*readStreamOptions)
+
+type readStreamOptions struct {
+	snapshot   bool
+	fromOffset int
+}
+
+// WithSnapshot makes a stream read return as soon as all currently-available
+// values have been drained, instead of blocking until the stream is closed or
+// the workflow becomes inactive. fromOffset sets the base offset to read from.
+func WithSnapshot(fromOffset int) ReadStreamOption {
+	return func(o *readStreamOptions) {
+		o.snapshot = true
+		o.fromOffset = fromOffset
+	}
+}
+
 // readStream runs the read stream polling logic in a goroutine
 // and sends values through a channel as they're read
-func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamValue[any] {
+func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, fromOffset int) <-chan StreamValue[any] {
 	ch := make(chan StreamValue[any], 1) // Buffered to allow non-blocking sends
 
 	go func() {
@@ -2498,7 +2515,7 @@ func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamVal
 			}
 		}
 
-		var currentOffset int
+		currentOffset := fromOffset
 		closed := false
 
 		// Continue reading until workflow is inactive or stream is closed
@@ -2533,6 +2550,12 @@ func (c *dbosContext) readStream(workflowID string, key string) <-chan StreamVal
 			// If stream is closed (sentinel found), send final message and stop
 			if closed {
 				send(StreamValue[any]{Closed: true})
+				return
+			}
+
+			// Snapshot mode: all currently-available values have been drained,
+			// so stop here instead of polling for more.
+			if snapshot {
 				return
 			}
 
@@ -2585,11 +2608,16 @@ type streamEntryWithSerialization struct {
 	serialization string
 }
 
-func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) ([]any, bool, error) {
+func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error) {
+	var o readStreamOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	var allValues []any
 	closed := false
 
-	ch := c.readStream(workflowID, key)
+	ch := c.readStream(workflowID, key, o.snapshot, o.fromOffset)
 
 	for streamValue := range ch {
 		if streamValue.Err != nil {
@@ -2623,11 +2651,11 @@ func (c *dbosContext) ReadStream(_ DBOSContext, workflowID string, key string) (
 //	for _, value := range values {
 //	    log.Printf("Stream value: %s", value)
 //	}
-func ReadStream[R any](ctx DBOSContext, workflowID string, key string) ([]R, bool, error) {
+func ReadStream[R any](ctx DBOSContext, workflowID string, key string, opts ...ReadStreamOption) ([]R, bool, error) {
 	if ctx == nil {
 		return nil, false, errors.New("ctx cannot be nil")
 	}
-	values, closed, err := ctx.ReadStream(ctx, workflowID, key)
+	values, closed, err := ctx.ReadStream(ctx, workflowID, key, opts...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2667,8 +2695,12 @@ func ReadStream[R any](ctx DBOSContext, workflowID string, key string) ([]R, boo
 
 // ReadStreamAsync reads values from a durable stream asynchronously.
 // Returns a channel that will receive StreamValue items as they're read.
-func (c *dbosContext) ReadStreamAsync(_ DBOSContext, workflowID string, key string) (<-chan StreamValue[any], error) {
-	return c.readStream(workflowID, key), nil
+func (c *dbosContext) ReadStreamAsync(_ DBOSContext, workflowID string, key string, opts ...ReadStreamOption) (<-chan StreamValue[any], error) {
+	var o readStreamOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return c.readStream(workflowID, key, o.snapshot, o.fromOffset), nil
 }
 
 // ReadStreamAsync reads values from a durable stream asynchronously.
@@ -2695,12 +2727,12 @@ func (c *dbosContext) ReadStreamAsync(_ DBOSContext, workflowID string, key stri
 //	    }
 //	    log.Printf("Received value: %s", streamValue.Value)
 //	}
-func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-chan StreamValue[R], error) {
+func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string, opts ...ReadStreamOption) (<-chan StreamValue[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 
-	anyCh, err := ctx.ReadStreamAsync(ctx, workflowID, key)
+	anyCh, err := ctx.ReadStreamAsync(ctx, workflowID, key, opts...)
 	if err != nil {
 		return nil, err
 	}

@@ -40,8 +40,8 @@ type Client interface {
 	ResumeWorkflows(workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
-	ClientReadStream(workflowID string, key string) ([]any, bool, error)
-	ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error)
+	ClientReadStream(workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error)
+	ClientReadStreamAsync(workflowID string, key string, opts ...ReadStreamOption) (<-chan StreamValue[any], error)
 
 	// Schedule management
 	CreateSchedule(input ClientScheduleInput) error
@@ -485,8 +485,8 @@ func (c *client) GetWorkflowSteps(workflowID string) ([]StepInfo, error) {
 //   - The stream is closed (sentinel value is found)
 //
 // Returns the values, whether the stream is closed, and any error.
-func (c *client) ClientReadStream(workflowID string, key string) ([]any, bool, error) {
-	return c.dbosCtx.ReadStream(c.dbosCtx, workflowID, key)
+func (c *client) ClientReadStream(workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error) {
+	return c.dbosCtx.ReadStream(c.dbosCtx, workflowID, key, opts...)
 }
 
 // ClientReadStream reads values from a durable stream with type safety.
@@ -504,11 +504,11 @@ func (c *client) ClientReadStream(workflowID string, key string) ([]any, bool, e
 //	for _, value := range values {
 //	    log.Printf("Stream value: %s", value)
 //	}
-func ClientReadStream[R any](c Client, workflowID string, key string) ([]R, bool, error) {
+func ClientReadStream[R any](c Client, workflowID string, key string, opts ...ReadStreamOption) ([]R, bool, error) {
 	if c == nil {
 		return nil, false, errors.New("client cannot be nil")
 	}
-	values, closed, err := c.ClientReadStream(workflowID, key)
+	values, closed, err := c.ClientReadStream(workflowID, key, opts...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -537,8 +537,8 @@ func ClientReadStream[R any](c Client, workflowID string, key string) ([]R, bool
 
 // ClientReadStreamAsync reads values from a durable stream asynchronously.
 // Returns a channel that will receive StreamValue items as they're read.
-func (c *client) ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error) {
-	return c.dbosCtx.ReadStreamAsync(c.dbosCtx, workflowID, key)
+func (c *client) ClientReadStreamAsync(workflowID string, key string, opts ...ReadStreamOption) (<-chan StreamValue[any], error) {
+	return c.dbosCtx.ReadStreamAsync(c.dbosCtx, workflowID, key, opts...)
 }
 
 // ClientReadStreamAsync reads values from a durable stream asynchronously with type safety.
@@ -565,12 +565,12 @@ func (c *client) ClientReadStreamAsync(workflowID string, key string) (<-chan St
 //	    }
 //	    log.Printf("Received value: %s", streamValue.Value)
 //	}
-func ClientReadStreamAsync[R any](c Client, workflowID string, key string) (<-chan StreamValue[R], error) {
+func ClientReadStreamAsync[R any](c Client, workflowID string, key string, opts ...ReadStreamOption) (<-chan StreamValue[R], error) {
 	if c == nil {
 		return nil, errors.New("client cannot be nil")
 	}
 
-	anyCh, err := c.ClientReadStreamAsync(workflowID, key)
+	anyCh, err := c.ClientReadStreamAsync(workflowID, key, opts...)
 	if err != nil {
 		return nil, err
 	}

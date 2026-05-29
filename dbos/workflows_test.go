@@ -5949,6 +5949,48 @@ func TestStreams(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("Snapshot", func(t *testing.T) {
+		// A snapshot read drains all currently-available values and returns
+		// immediately, even while the writer workflow is still active (PENDING) —
+		// where a normal read would block until the workflow becomes inactive.
+		streamBlockEvent = NewEvent()   // not set — workflow blocks after initial writes
+		streamStartedEvent = NewEvent() // signals that initial writes are done
+
+		streamKey := "test-stream-snapshot"
+		writerHandle, err := RunWorkflow(dbosCtx, writeStreamWorkflow, struct {
+			StreamKey string
+			Values    []string
+			Close     bool
+		}{
+			StreamKey: streamKey,
+			Values:    []string{"value1", "value2", "value3"},
+			Close:     false,
+		})
+		require.NoError(t, err)
+
+		// Wait until the workflow has written its values and is blocked (still PENDING)
+		streamStartedEvent.Wait()
+
+		// Sync snapshot from the beginning: returns available values, reports not closed
+		values, closed, err := ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithSnapshot(0))
+		require.NoError(t, err)
+		require.False(t, closed, "snapshot of an active workflow should report not closed")
+		require.Equal(t, []string{"value1", "value2", "value3"}, values)
+
+		// Async snapshot honoring a base offset: skips the first two entries
+		ch, err := ReadStreamAsync[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithSnapshot(2))
+		require.NoError(t, err)
+		values, closed, err = collectStreamValues(ch)
+		require.NoError(t, err)
+		require.False(t, closed)
+		require.Equal(t, []string{"value3"}, values)
+
+		// Unblock and complete the workflow for clean teardown
+		streamBlockEvent.Set()
+		_, err = writerHandle.GetResult()
+		require.NoError(t, err)
+	})
+
 	t.Run("AsyncErrorHandling", func(t *testing.T) {
 		// Test reading from non-existent workflow
 		nonExistentWorkflowID := uuid.NewString()

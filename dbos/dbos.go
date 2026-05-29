@@ -153,8 +153,8 @@ type DBOSContext interface {
 	GetEvent(_ DBOSContext, targetWorkflowID string, key string, timeout time.Duration) (any, error)            // Get a key-value event from a target workflow
 	WriteStream(_ DBOSContext, key string, value any, opts ...WriteStreamOption) error                          // Write a value to a durable stream
 	CloseStream(_ DBOSContext, key string) error                                                                // Close a durable stream
-	ReadStream(_ DBOSContext, workflowID string, key string) ([]any, bool, error)                               // Read values from a durable stream (blocks until workflow inactive or stream closed)
-	ReadStreamAsync(_ DBOSContext, workflowID string, key string) (<-chan StreamValue[any], error)              // Read values from a durable stream asynchronously
+	ReadStream(_ DBOSContext, workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error)                 // Read values from a durable stream (blocks until workflow inactive or stream closed; WithSnapshot drains available values and returns)
+	ReadStreamAsync(_ DBOSContext, workflowID string, key string, opts ...ReadStreamOption) (<-chan StreamValue[any], error) // Read values from a durable stream asynchronously
 	Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error)                                         // Durable sleep that survives workflow recovery
 	Patch(_ DBOSContext, patchName string) (bool, error)                                                        // Check if workflow should use patched code
 	DeprecatePatch(_ DBOSContext, patchName string) error                                                       // Deprecate a patch
