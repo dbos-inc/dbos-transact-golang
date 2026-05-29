@@ -344,6 +344,27 @@ func TestClientEnqueue(t *testing.T) {
 		assert.Contains(t, err.Error(), "workflow name is required", "expected error message to contain 'workflow name is required'")
 	})
 
+	t.Run("EnqueueWithAuthOptions", func(t *testing.T) {
+		wfID := "client-auth-options-wf"
+		handle, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+			WithEnqueueWorkflowID(wfID),
+			WithEnqueueAuthenticatedUser("test-user"),
+			WithEnqueueAssumedRole("test-role"),
+			WithEnqueueAuthenticatedRoles([]string{"role1", "role2"}),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+
+		assert.Equal(t, "test-user", status.AuthenticatedUser)
+		assert.Equal(t, "test-role", status.AssumedRole)
+		assert.Equal(t, []string{"role1", "role2"}, status.AuthenticatedRoles)
+
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+	})
+
 	// Verify all queue entries are cleaned up
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after client tests")
 }
