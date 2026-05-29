@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/volume"
@@ -89,18 +91,38 @@ func startDockerPostgres() error {
 
 	for _, c := range containers {
 		for _, name := range c.Names {
-			if name == "/"+containerName {
-				if c.State == "running" {
-					logger.Info("Container is already running", "container", containerName)
-					return nil
-				} else if c.State == "exited" {
-					// Start the existing container
-					if err := cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
-						return fmt.Errorf("failed to start existing container: %w", err)
-					}
+			if name != "/"+containerName {
+				continue
+			}
+			switch c.State {
+			case "running":
+				logger.Info("Container is already running", "container", containerName)
+				return nil
+			case "exited":
+				// Start the existing container. With AutoRemove=true the
+				// daemon may have already begun removal. Fall through to
+				// the create path after waiting for the removal to finish.
+				err := cli.ContainerStart(ctx, c.ID, container.StartOptions{})
+				if err == nil {
 					logger.Info("Container was stopped and has been restarted", "container", containerName)
 					return waitForPostgres()
 				}
+				if !isMarkedForRemovalErr(err) {
+					return fmt.Errorf("failed to start existing container: %w", err)
+				}
+				logger.Info("Existing container is being removed; waiting before recreating", "container", containerName)
+				if waitErr := waitForContainerRemoved(ctx, cli, c.ID); waitErr != nil {
+					return fmt.Errorf("failed waiting for container removal: %w", waitErr)
+				}
+			case "removing", "dead":
+				// Transitional states triggered by AutoRemove. Wait for the
+				// container to disappear so we can recreate it cleanly.
+				logger.Info("Existing container is being removed; waiting before recreating", "container", containerName, "state", c.State)
+				if waitErr := waitForContainerRemoved(ctx, cli, c.ID); waitErr != nil {
+					return fmt.Errorf("failed waiting for container removal: %w", waitErr)
+				}
+			default:
+				return fmt.Errorf("container %s is in unexpected state %q", containerName, c.State)
 			}
 		}
 	}
@@ -207,24 +229,58 @@ func stopDockerPostgres() error {
 
 	for _, c := range containers {
 		for _, name := range c.Names {
-			if name == "/"+containerName {
-				if c.State == "running" {
-					// Stop the container
-					if err := cli.ContainerStop(ctx, c.ID, container.StopOptions{}); err != nil {
-						return fmt.Errorf("failed to stop container: %w", err)
-					}
-					logger.Info("Successfully stopped Docker Postgres container", "container", containerName)
-					return nil
-				} else {
-					logger.Info("Container exists but is not running", "container", containerName)
-					return nil
+			if name != "/"+containerName {
+				continue
+			}
+			if c.State == "running" {
+				if err := cli.ContainerStop(ctx, c.ID, container.StopOptions{}); err != nil {
+					return fmt.Errorf("failed to stop container: %w", err)
+				}
+				// AutoRemove=true: wait for the daemon to finish removing the
+				// container so that a subsequent start sees a clean slate.
+				if err := waitForContainerRemoved(ctx, cli, c.ID); err != nil {
+					return fmt.Errorf("failed waiting for container removal: %w", err)
+				}
+				logger.Info("Successfully stopped Docker Postgres container", "container", containerName)
+				return nil
+			}
+			// Not running. If the container is being removed, wait for that
+			// to settle before returning so callers can immediately recreate.
+			if c.State == "removing" || c.State == "dead" {
+				if err := waitForContainerRemoved(ctx, cli, c.ID); err != nil {
+					return fmt.Errorf("failed waiting for container removal: %w", err)
 				}
 			}
+			logger.Info("Container exists but is not running", "container", containerName)
+			return nil
 		}
 	}
 
 	logger.Info("Container does not exist", "container", containerName)
 	return nil
+}
+
+func waitForContainerRemoved(ctx context.Context, cli *client.Client, containerID string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	statusCh, errCh := cli.ContainerWait(waitCtx, containerID, container.WaitConditionRemoved)
+	select {
+	case <-statusCh:
+		return nil
+	case err := <-errCh:
+		// Already gone is success.
+		if err == nil || cerrdefs.IsNotFound(err) {
+			return nil
+		}
+		return err
+	case <-waitCtx.Done():
+		return waitCtx.Err()
+	}
+}
+
+func isMarkedForRemovalErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "marked for removal")
 }
 
 func waitForPostgres() error {
