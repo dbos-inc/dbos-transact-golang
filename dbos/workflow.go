@@ -1403,13 +1403,13 @@ type txn[R any] func(ctx context.Context, tx Tx) (R, error)
 
 // stepOptions holds the configuration for step execution using functional options pattern.
 type stepOptions struct {
-	maxRetries         int             // Maximum number of retry attempts (0 = no retries)
-	backoffFactor      float64         // Exponential backoff multiplier between retries (default: 2.0)
-	baseInterval       time.Duration   // Initial delay between retries (default: 100ms)
-	maxInterval        time.Duration   // Maximum delay between retries (default: 5s)
-	stepName           string          // Custom name for the step (defaults to function name)
-	preGeneratedStepID *int            // Pre generated stepID
-	txIsoLevel         *IsoLevel // Transaction isolation level for runAsTxn (nil = ReadCommitted)
+	maxRetries         int           // Maximum number of retry attempts (0 = no retries)
+	backoffFactor      float64       // Exponential backoff multiplier between retries (default: 2.0)
+	baseInterval       time.Duration // Initial delay between retries (default: 100ms)
+	maxInterval        time.Duration // Maximum delay between retries (default: 5s)
+	stepName           string        // Custom name for the step (defaults to function name)
+	preGeneratedStepID *int          // Pre generated stepID
+	txIsoLevel         *IsoLevel     // Transaction isolation level for runAsTxn (nil = ReadCommitted)
 }
 
 // setDefaults applies default values to stepOptions
@@ -2486,10 +2486,10 @@ type readStreamOptions struct {
 	fromOffset int
 }
 
-// WithSnapshot makes a stream read return as soon as all currently-available
+// WithReadStreamSnapshot makes a stream read return as soon as all currently-available
 // values have been drained, instead of blocking until the stream is closed or
 // the workflow becomes inactive. fromOffset sets the base offset to read from.
-func WithSnapshot(fromOffset int) ReadStreamOption {
+func WithReadStreamSnapshot(fromOffset int) ReadStreamOption {
 	return func(o *readStreamOptions) {
 		o.snapshot = true
 		o.fromOffset = fromOffset
