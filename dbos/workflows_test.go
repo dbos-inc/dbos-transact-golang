@@ -5977,10 +5977,8 @@ func TestStreams(t *testing.T) {
 		require.False(t, closed, "snapshot of an active workflow should report not closed")
 		require.Equal(t, []string{"value1", "value2", "value3"}, values)
 
-		// Async snapshot honoring a base offset: skips the first two entries
-		ch, err := ReadStreamAsync[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(2))
-		require.NoError(t, err)
-		values, closed, err = collectStreamValues(ch)
+		// Snapshot honoring a base offset: skips the first two entries
+		values, closed, err = ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(2))
 		require.NoError(t, err)
 		require.False(t, closed)
 		require.Equal(t, []string{"value3"}, values)

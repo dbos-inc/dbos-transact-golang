@@ -2695,12 +2695,8 @@ func ReadStream[R any](ctx DBOSContext, workflowID string, key string, opts ...R
 
 // ReadStreamAsync reads values from a durable stream asynchronously.
 // Returns a channel that will receive StreamValue items as they're read.
-func (c *dbosContext) ReadStreamAsync(_ DBOSContext, workflowID string, key string, opts ...ReadStreamOption) (<-chan StreamValue[any], error) {
-	var o readStreamOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
-	return c.readStream(workflowID, key, o.snapshot, o.fromOffset), nil
+func (c *dbosContext) ReadStreamAsync(_ DBOSContext, workflowID string, key string) (<-chan StreamValue[any], error) {
+	return c.readStream(workflowID, key, false, 0), nil
 }
 
 // ReadStreamAsync reads values from a durable stream asynchronously.
@@ -2727,12 +2723,12 @@ func (c *dbosContext) ReadStreamAsync(_ DBOSContext, workflowID string, key stri
 //	    }
 //	    log.Printf("Received value: %s", streamValue.Value)
 //	}
-func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string, opts ...ReadStreamOption) (<-chan StreamValue[R], error) {
+func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-chan StreamValue[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 
-	anyCh, err := ctx.ReadStreamAsync(ctx, workflowID, key, opts...)
+	anyCh, err := ctx.ReadStreamAsync(ctx, workflowID, key)
 	if err != nil {
 		return nil, err
 	}
