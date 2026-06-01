@@ -41,7 +41,7 @@ type Client interface {
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
 	ClientReadStream(workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error)
-	ClientReadStreamAsync(workflowID string, key string, opts ...ReadStreamOption) (<-chan StreamValue[any], error)
+	ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error)
 
 	// Schedule management
 	CreateSchedule(input ClientScheduleInput) error
