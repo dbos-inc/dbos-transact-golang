@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -152,18 +153,40 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// Use the DBOS CLI to start postgres
-func startPostgres(t *testing.T, cliPath string) {
+func startPostgres(cliPath string) error {
 	cmd := exec.Command(cliPath, "postgres", "start")
 	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, "Failed to start postgres: %s", string(output))
+	if err != nil {
+		return fmt.Errorf("postgres start failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
 }
 
-// Use the DBOS CLI to stop postgres
-func stopPostgres(t *testing.T, cliPath string) {
+// Use the DBOS CLI to stop postgres.
+func stopPostgres(cliPath string) error {
 	cmd := exec.Command(cliPath, "postgres", "stop")
 	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, "Failed to stop postgres: %s", string(output))
+	if err != nil {
+		return fmt.Errorf("postgres stop failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+func retryCLI(t *testing.T, label string, op func() error, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		lastErr = op()
+		if lastErr == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			require.NoError(t, lastErr, "Failed to %s after %s", label, timeout)
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // PostgresChaosMonkey starts a goroutine that randomly stops and starts PostgreSQL
@@ -175,14 +198,18 @@ func PostgresChaosMonkey(t *testing.T, ctx context.Context, wg *sync.WaitGroup) 
 		defer wg.Done()
 		defer t.Logf("Chaos Monkey: Exiting")
 
+		ensureUp := func() {
+			retryCLI(t, "start postgres", func() error { return startPostgres(cliPath) }, 60*time.Second)
+		}
+		ensureDown := func() {
+			retryCLI(t, "stop postgres", func() error { return stopPostgres(cliPath) }, 60*time.Second)
+		}
+
 		for {
 			// Check for context cancellation first
 			select {
 			case <-ctx.Done():
-				require.Eventually(t, func() bool {
-					startPostgres(t, cliPath)
-					return true
-				}, 5*time.Second, 100*time.Millisecond)
+				ensureUp()
 				return
 			default:
 			}
@@ -191,27 +218,17 @@ func PostgresChaosMonkey(t *testing.T, ctx context.Context, wg *sync.WaitGroup) 
 			downTime := time.Duration(rand.Float64()*2) * time.Second
 
 			// Stop PostgreSQL
-			require.Eventually(t, func() bool {
-				stopPostgres(t, cliPath)
-				return true
-			}, 5*time.Second, 100*time.Millisecond)
+			ensureDown()
 			t.Logf("🐒 Chaos Monkey: Stopped PostgreSQL")
 
 			// Sleep for random down time
 			select {
 			case <-time.After(downTime):
 				// Start PostgreSQL again
-				require.Eventually(t, func() bool {
-					startPostgres(t, cliPath)
-					return true
-				}, 5*time.Second, 100*time.Millisecond)
+				ensureUp()
 				t.Logf("🐒 Chaos Monkey: Starting PostgreSQL")
 			case <-ctx.Done():
-				// Ensure PostgreSQL is started before exiting
-				require.Eventually(t, func() bool {
-					startPostgres(t, cliPath)
-					return true
-				}, 5*time.Second, 100*time.Millisecond)
+				ensureUp()
 				return
 			}
 
