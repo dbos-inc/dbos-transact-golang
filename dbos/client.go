@@ -40,7 +40,7 @@ type Client interface {
 	ResumeWorkflows(workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
 	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
-	ClientReadStream(workflowID string, key string) ([]any, bool, error)
+	ClientReadStream(workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error)
 	ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error)
 
 	// Schedule management
@@ -485,8 +485,8 @@ func (c *client) GetWorkflowSteps(workflowID string) ([]StepInfo, error) {
 //   - The stream is closed (sentinel value is found)
 //
 // Returns the values, whether the stream is closed, and any error.
-func (c *client) ClientReadStream(workflowID string, key string) ([]any, bool, error) {
-	return c.dbosCtx.ReadStream(c.dbosCtx, workflowID, key)
+func (c *client) ClientReadStream(workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error) {
+	return c.dbosCtx.ReadStream(c.dbosCtx, workflowID, key, opts...)
 }
 
 // ClientReadStream reads values from a durable stream with type safety.
@@ -504,11 +504,11 @@ func (c *client) ClientReadStream(workflowID string, key string) ([]any, bool, e
 //	for _, value := range values {
 //	    log.Printf("Stream value: %s", value)
 //	}
-func ClientReadStream[R any](c Client, workflowID string, key string) ([]R, bool, error) {
+func ClientReadStream[R any](c Client, workflowID string, key string, opts ...ReadStreamOption) ([]R, bool, error) {
 	if c == nil {
 		return nil, false, errors.New("client cannot be nil")
 	}
-	values, closed, err := c.ClientReadStream(workflowID, key)
+	values, closed, err := c.ClientReadStream(workflowID, key, opts...)
 	if err != nil {
 		return nil, false, err
 	}
