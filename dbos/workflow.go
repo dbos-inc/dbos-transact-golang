@@ -2723,12 +2723,12 @@ func (c *dbosContext) ReadStreamAsync(_ DBOSContext, workflowID string, key stri
 //	    }
 //	    log.Printf("Received value: %s", streamValue.Value)
 //	}
-func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string, opts ...ReadStreamOption) (<-chan StreamValue[R], error) {
+func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-chan StreamValue[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 
-	anyCh, err := ctx.ReadStreamAsync(ctx, workflowID, key, opts...)
+	anyCh, err := ctx.ReadStreamAsync(ctx, workflowID, key)
 	if err != nil {
 		return nil, err
 	}
