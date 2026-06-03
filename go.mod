@@ -2,7 +2,7 @@ module github.com/dbos-inc/dbos-transact-golang
 
 go 1.25.0
 
-toolchain go1.25.10
+toolchain go1.25.11
 
 require (
 	github.com/docker/docker v28.5.2+incompatible
