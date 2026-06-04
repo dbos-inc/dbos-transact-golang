@@ -357,6 +357,7 @@ func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue WorkflowQueue, p
 			executorID:         ctx.executorID,
 			applicationVersion: ctx.applicationVersion,
 			queuePartitionKey:  partitionKey,
+			localRunningCount:  ctx.countActiveWorkflowsForQueue(queue.Name, partitionKey),
 		})
 	}, withRetrierLogger(qr.logger))
 

@@ -727,6 +727,27 @@ type Workflow[P any, R any] func(ctx DBOSContext, input P) (R, error)
 // WorkflowFunc represents a type-erased workflow function used internally.
 type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
 
+type activeWorkflowEntry struct {
+	queueName         string
+	queuePartitionKey string
+}
+
+func (c *dbosContext) countActiveWorkflowsForQueue(queueName, queuePartitionKey string) int {
+	if c.activeWorkflowIDs == nil {
+		return 0
+	}
+	count := 0
+	c.activeWorkflowIDs.Range(func(_, value any) bool {
+		if entry, ok := value.(activeWorkflowEntry); ok {
+			if entry.queueName == queueName && entry.queuePartitionKey == queuePartitionKey {
+				count++
+			}
+		}
+		return true
+	})
+	return count
+}
+
 type workflowOptions struct {
 	WorkflowName        string
 	WorkflowID          string
@@ -1302,7 +1323,14 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		defer c.workflowsWg.Done()
 
 		if c.activeWorkflowIDs != nil {
-			_, loaded := c.activeWorkflowIDs.LoadOrStore(workflowID, struct{}{})
+			entry := activeWorkflowEntry{}
+			if insertStatusResult.queueName != nil {
+				entry.queueName = *insertStatusResult.queueName
+			}
+			if insertStatusResult.queuePartitionKey != nil {
+				entry.queuePartitionKey = *insertStatusResult.queuePartitionKey
+			}
+			_, loaded := c.activeWorkflowIDs.LoadOrStore(workflowID, entry)
 			if loaded { // This should never happen, but if it does, we need to log it
 				c.logger.Error("UNREACHABLE: workflow already running on this context", "workflow_id", workflowID)
 			}

@@ -240,7 +240,7 @@ type dbosContext struct {
 	workflowRegistry        *sync.Map // map[string]WorkflowRegistryEntry
 	workflowCustomNametoFQN *sync.Map // Maps fully qualified workflow names to custom names. Usefor when client enqueues a workflow by name because registry is indexed by FQN.
 
-	// Set of workflow IDs currently running on this context (key = workflow ID, value = struct{}{})
+	// Set of workflow IDs currently running on this context (key = workflow ID, value = activeWorkflowEntry)
 	activeWorkflowIDs *sync.Map
 
 	// Workflow scheduler
