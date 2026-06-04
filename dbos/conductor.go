@@ -715,6 +715,18 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	if req.Body.EndTime != nil {
 		opts = append(opts, WithEndTime(*req.Body.EndTime))
 	}
+	if req.Body.CompletedAfter != nil {
+		opts = append(opts, WithCompletedAfter(*req.Body.CompletedAfter))
+	}
+	if req.Body.CompletedBefore != nil {
+		opts = append(opts, WithCompletedBefore(*req.Body.CompletedBefore))
+	}
+	if req.Body.DequeuedAfter != nil {
+		opts = append(opts, WithDequeuedAfter(*req.Body.DequeuedAfter))
+	}
+	if req.Body.DequeuedBefore != nil {
+		opts = append(opts, WithDequeuedBefore(*req.Body.DequeuedBefore))
+	}
 	if len(req.Body.Status) > 0 {
 		statuses := make([]WorkflowStatusType, len(req.Body.Status))
 		for i, s := range req.Body.Status {
@@ -727,6 +739,12 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	}
 	if len(req.Body.ParentWorkflowID) > 0 {
 		opts = append(opts, WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
+	}
+	if req.Body.WasForkedFrom != nil {
+		opts = append(opts, WithWasForkedFrom(*req.Body.WasForkedFrom))
+	}
+	if req.Body.HasParent != nil {
+		opts = append(opts, WithHasParent(*req.Body.HasParent))
 	}
 	if len(req.Body.QueueName) > 0 {
 		opts = append(opts, WithQueueName(req.Body.QueueName.toSlice()...))
@@ -824,6 +842,18 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	if req.Body.EndTime != nil {
 		opts = append(opts, WithEndTime(*req.Body.EndTime))
 	}
+	if req.Body.CompletedAfter != nil {
+		opts = append(opts, WithCompletedAfter(*req.Body.CompletedAfter))
+	}
+	if req.Body.CompletedBefore != nil {
+		opts = append(opts, WithCompletedBefore(*req.Body.CompletedBefore))
+	}
+	if req.Body.DequeuedAfter != nil {
+		opts = append(opts, WithDequeuedAfter(*req.Body.DequeuedAfter))
+	}
+	if req.Body.DequeuedBefore != nil {
+		opts = append(opts, WithDequeuedBefore(*req.Body.DequeuedBefore))
+	}
 	if len(req.Body.QueueName) > 0 {
 		opts = append(opts, WithQueueName(req.Body.QueueName.toSlice()...))
 	}
@@ -833,8 +863,17 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	if len(req.Body.WorkflowIDPrefix) > 0 {
 		opts = append(opts, WithWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
 	}
+	if len(req.Body.ForkedFrom) > 0 {
+		opts = append(opts, WithForkedFrom(req.Body.ForkedFrom.toSlice()...))
+	}
 	if len(req.Body.ParentWorkflowID) > 0 {
 		opts = append(opts, WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
+	}
+	if req.Body.WasForkedFrom != nil {
+		opts = append(opts, WithWasForkedFrom(*req.Body.WasForkedFrom))
+	}
+	if req.Body.HasParent != nil {
+		opts = append(opts, WithHasParent(*req.Body.HasParent))
 	}
 	if len(req.Body.AuthenticatedUser) > 0 {
 		opts = append(opts, WithUser(req.Body.AuthenticatedUser.toSlice()...))

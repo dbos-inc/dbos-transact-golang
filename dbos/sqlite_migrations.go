@@ -110,6 +110,12 @@ var sqliteMigration34SQL string
 //go:embed migrations/sqlite/35_drop_queue_status_started_index.sql
 var sqliteMigration35SQL string
 
+//go:embed migrations/sqlite/36_add_completed_at.sql
+var sqliteMigration36SQL string
+
+//go:embed migrations/sqlite/37_create_started_at_index.sql
+var sqliteMigration37SQL string
+
 // buildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, and
 // 20 have no SQLite counterpart and are omitted.
@@ -147,6 +153,8 @@ func buildSqliteMigrations() []migrationFile {
 		{version: 33, sql: sqliteMigration33SQL},
 		{version: 34, sql: sqliteMigration34SQL},
 		{version: 35, sql: sqliteMigration35SQL},
+		{version: 36, sql: sqliteMigration36SQL},
+		{version: 37, sql: sqliteMigration37SQL},
 	}
 }
 
