@@ -53,9 +53,7 @@ func (e *Event) Set() {
 }
 
 func isCockroachDB(ctx context.Context, conn *pgx.Conn) bool {
-	var version string
-	err := conn.QueryRow(ctx, "SHOW CLUSTER SETTING version").Scan(&version)
-	return err == nil
+	return conn.PgConn().ParameterStatus("crdb_version") != ""
 }
 
 // dropDatabaseIfExists drops a database in a way that works with both PostgreSQL and CockroachDB.
