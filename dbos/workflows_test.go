@@ -1422,6 +1422,32 @@ func TestChildWorkflow(t *testing.T) {
 		childStatus, err := childHandle.GetStatus()
 		require.NoError(t, err, "failed to get child workflow status")
 		require.Equal(t, parentID, childStatus.ParentWorkflowID, "child workflow ParentWorkflowID should be parent's ID")
+
+		// CompletedAt is populated once these workflows reach a terminal state.
+		require.False(t, grandParentStatus.CompletedAt.IsZero(), "completed grandparent should have CompletedAt set")
+		require.False(t, childStatus.CompletedAt.IsZero(), "completed child should have CompletedAt set")
+
+		// WithHasParent filters on the presence of a parent workflow.
+		withParent, err := ListWorkflows(dbosCtx, WithHasParent(true))
+		require.NoError(t, err)
+		hasParentIDs := make(map[string]bool)
+		for _, wf := range withParent {
+			require.NotEmpty(t, wf.ParentWorkflowID, "WithHasParent(true) must only return workflows with a parent")
+			hasParentIDs[wf.ID] = true
+		}
+		assert.True(t, hasParentIDs[parentID], "parent workflow should be returned by WithHasParent(true)")
+		assert.True(t, hasParentIDs[childID], "child workflow should be returned by WithHasParent(true)")
+		assert.False(t, hasParentIDs[grandParentID], "top-level grandparent must not be returned by WithHasParent(true)")
+
+		withoutParent, err := ListWorkflows(dbosCtx, WithHasParent(false))
+		require.NoError(t, err)
+		noParentIDs := make(map[string]bool)
+		for _, wf := range withoutParent {
+			require.Empty(t, wf.ParentWorkflowID, "WithHasParent(false) must only return workflows without a parent")
+			noParentIDs[wf.ID] = true
+		}
+		assert.True(t, noParentIDs[grandParentID], "grandparent should be returned by WithHasParent(false)")
+		assert.False(t, noParentIDs[childID], "child workflow must be excluded by WithHasParent(false)")
 	})
 
 	t.Run("ChildWorkflowWithCustomID", func(t *testing.T) {

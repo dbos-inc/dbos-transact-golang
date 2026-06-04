@@ -180,6 +180,7 @@ func TestWorkflowQueues(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
+		before := time.Now()
 		handle, err := RunWorkflow(dbosCtx, queueWorkflow, "test-input", WithQueue(queue.Name))
 		require.NoError(t, err)
 
@@ -195,6 +196,28 @@ func TestWorkflowQueues(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, steps, 1)
 		assert.Equal(t, 0, steps[0].StepID)
+
+		// Dequeue time filters: an enqueued workflow gets started_at set when it
+		// is dequeued, so WithDequeuedAfter/Before should bracket it.
+		wfID := handle.GetWorkflowID()
+		after := time.Now()
+		listed, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{wfID}))
+		require.NoError(t, err)
+		require.Len(t, listed, 1)
+		require.False(t, listed[0].StartedAt.IsZero(), "dequeued workflow should have StartedAt set")
+
+		inRange, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{wfID}), WithDequeuedAfter(before.Add(-time.Second)))
+		require.NoError(t, err)
+		assert.Len(t, inRange, 1, "WithDequeuedAfter before enqueue should include the workflow")
+		afterEmpty, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{wfID}), WithDequeuedAfter(after.Add(time.Hour)))
+		require.NoError(t, err)
+		assert.Len(t, afterEmpty, 0, "WithDequeuedAfter in the future should exclude the workflow")
+		beforeRange, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{wfID}), WithDequeuedBefore(after.Add(time.Second)))
+		require.NoError(t, err)
+		assert.Len(t, beforeRange, 1, "WithDequeuedBefore after completion should include the workflow")
+		beforeEmpty, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{wfID}), WithDequeuedBefore(before.Add(-time.Hour)))
+		require.NoError(t, err)
+		assert.Len(t, beforeEmpty, 0, "WithDequeuedBefore in the past should exclude the workflow")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
