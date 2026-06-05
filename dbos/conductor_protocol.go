@@ -99,12 +99,18 @@ type listWorkflowsConductorRequestBody struct {
 	WorkflowUUIDs      []string     `json:"workflow_uuids,omitempty"`
 	WorkflowName       stringOrList `json:"workflow_name,omitempty"`
 	AuthenticatedUser  stringOrList `json:"authenticated_user,omitempty"`
-	StartTime          *time.Time   `json:"start_time,omitempty"` // ISO 8601
-	EndTime            *time.Time   `json:"end_time,omitempty"`   // ISO 8601
+	StartTime          *time.Time   `json:"start_time,omitempty"`       // ISO 8601
+	EndTime            *time.Time   `json:"end_time,omitempty"`         // ISO 8601
+	CompletedAfter     *time.Time   `json:"completed_after,omitempty"`  // ISO 8601
+	CompletedBefore    *time.Time   `json:"completed_before,omitempty"` // ISO 8601
+	DequeuedAfter      *time.Time   `json:"dequeued_after,omitempty"`   // ISO 8601
+	DequeuedBefore     *time.Time   `json:"dequeued_before,omitempty"`  // ISO 8601
 	Status             stringOrList `json:"status,omitempty"`
 	ApplicationVersion stringOrList `json:"application_version,omitempty"`
 	ForkedFrom         stringOrList `json:"forked_from,omitempty"`
 	ParentWorkflowID   stringOrList `json:"parent_workflow_id,omitempty"`
+	WasForkedFrom      *bool        `json:"was_forked_from,omitempty"`
+	HasParent          *bool        `json:"has_parent,omitempty"`
 	QueueName          stringOrList `json:"queue_name,omitempty"`
 	Limit              *int         `json:"limit,omitempty"`
 	Offset             *int         `json:"offset,omitempty"`
@@ -146,9 +152,11 @@ type listWorkflowsConductorResponseBody struct {
 	Priority                *string `json:"Priority,omitempty"`
 	QueuePartitionKey       *string `json:"QueuePartitionKey,omitempty"`
 	ForkedFrom              *string `json:"ForkedFrom,omitempty"`
+	WasForkedFrom           *bool   `json:"WasForkedFrom,omitempty"`
 	ParentWorkflowID        *string `json:"ParentWorkflowID,omitempty"`
 	DequeuedAt              *string `json:"DequeuedAt,omitempty"`
 	DelayUntilEpochMS       *string `json:"DelayUntilEpochMS,omitempty"`
+	CompletedAt             *string `json:"CompletedAt,omitempty"`
 }
 
 // listWorkflowsConductorResponse is sent in response to list workflows requests
@@ -266,6 +274,10 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 		output.ForkedFrom = &wf.ForkedFrom
 	}
 
+	// Copy was_forked_from
+	wasForkedFrom := wf.WasForkedFrom
+	output.WasForkedFrom = &wasForkedFrom
+
 	// Copy parent workflow ID
 	if wf.ParentWorkflowID != "" {
 		output.ParentWorkflowID = &wf.ParentWorkflowID
@@ -282,6 +294,12 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 	if !wf.DelayUntil.IsZero() {
 		delayStr := strconv.FormatInt(wf.DelayUntil.UnixMilli(), 10)
 		output.DelayUntilEpochMS = &delayStr
+	}
+
+	// Convert completed_at to epoch milliseconds string
+	if !wf.CompletedAt.IsZero() {
+		completedStr := strconv.FormatInt(wf.CompletedAt.UnixMilli(), 10)
+		output.CompletedAt = &completedStr
 	}
 
 	return output

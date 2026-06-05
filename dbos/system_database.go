@@ -295,6 +295,12 @@ var migration34SQL string
 //go:embed migrations/35_drop_queue_status_started_index.sql
 var migration35SQL string
 
+//go:embed migrations/36_add_completed_at.sql
+var migration36SQL string
+
+//go:embed migrations/37_create_started_at_index.sql
+var migration37SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -396,6 +402,8 @@ func buildMigrations(schema string, isCockroach bool) []migrationFile {
 		{version: 33, sql: fmt.Sprintf(migration33SQL, sanitizedSchema)},
 		{version: 34, sql: fmt.Sprintf(migration34SQL, c, sanitizedSchema), online: !isCockroach},
 		{version: 35, sql: fmt.Sprintf(migration35SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 36, sql: fmt.Sprintf(migration36SQL, sanitizedSchema, sanitizedSchema)},
+		{version: 37, sql: fmt.Sprintf(migration37SQL, c, sanitizedSchema), online: !isCockroach},
 	}
 }
 
@@ -1119,6 +1127,12 @@ type listWorkflowsDBInput struct {
 	forkedFrom         []string
 	parentWorkflowID   []string
 	deduplicationID    []string
+	completedAfter     time.Time
+	completedBefore    time.Time
+	dequeuedAfter      time.Time
+	dequeuedBefore     time.Time
+	wasForkedFrom      *bool
+	hasParent          *bool
 	limit              *int
 	offset             *int
 	sortDesc           bool
@@ -1137,7 +1151,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		"executor_id", "created_at", "updated_at", "application_version", "application_id",
 		"recovery_attempts", "queue_name", "workflow_timeout_ms", "workflow_deadline_epoch_ms", "started_at_epoch_ms",
 		"deduplication_id", "priority", "queue_partition_key", "forked_from", "parent_workflow_id",
-		"serialization", "delay_until_epoch_ms",
+		"serialization", "delay_until_epoch_ms", "was_forked_from", "completed_at",
 	}
 
 	if input.loadOutput {
@@ -1191,6 +1205,30 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 	}
 	if len(input.deduplicationID) > 0 {
 		qb.addWhereAny("deduplication_id", input.deduplicationID)
+	}
+	if !input.completedAfter.IsZero() {
+		qb.addWhereGreaterEqual("completed_at", input.completedAfter.UnixMilli())
+	}
+	if !input.completedBefore.IsZero() {
+		qb.addWhereLessEqual("completed_at", input.completedBefore.UnixMilli())
+	}
+	// dequeued_after/before filter on started_at_epoch_ms: that column records
+	// when a workflow was dequeued and began executing.
+	if !input.dequeuedAfter.IsZero() {
+		qb.addWhereGreaterEqual("started_at_epoch_ms", input.dequeuedAfter.UnixMilli())
+	}
+	if !input.dequeuedBefore.IsZero() {
+		qb.addWhereLessEqual("started_at_epoch_ms", input.dequeuedBefore.UnixMilli())
+	}
+	if input.wasForkedFrom != nil {
+		qb.addWhere("was_forked_from", *input.wasForkedFrom)
+	}
+	if input.hasParent != nil {
+		if *input.hasParent {
+			qb.addWhereIsNotNull("parent_workflow_id")
+		} else {
+			qb.addWhereIsNull("parent_workflow_id")
+		}
 	}
 
 	// Build complete query
@@ -1257,6 +1295,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var assumedRole *string
 		var applicationID *string
 		var delayUntilEpochMs *int64
+		var completedAtMs *int64
 
 		// Build scan arguments dynamically based on loaded columns.
 		scanArgs := []any{
@@ -1265,7 +1304,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			&updatedAtMs, &applicationVersion, &applicationID,
 			&wf.Attempts, &queueName, &timeoutMs,
 			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey, &forkedFrom, &parentWorkflowID,
-			&serialization, &delayUntilEpochMs,
+			&serialization, &delayUntilEpochMs, &wf.WasForkedFrom, &completedAtMs,
 		}
 
 		if input.loadOutput {
@@ -1352,6 +1391,11 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			wf.DelayUntil = time.Unix(0, *delayUntilEpochMs*int64(time.Millisecond))
 		}
 
+		// Convert completed_at milliseconds to time.Time
+		if completedAtMs != nil {
+			wf.CompletedAt = time.Unix(0, *completedAtMs*int64(time.Millisecond))
+		}
+
 		// Handle output and error only if loadOutput is true
 		if input.loadOutput {
 			// Convert error string to error type if present
@@ -1390,7 +1434,7 @@ type updateWorkflowOutcomeDBInput struct {
 // Note that transitions from CANCELLED to SUCCESS or ERROR are forbidden
 func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error {
 	query := s.renderSQL(`UPDATE %sworkflow_status
-			  SET status = $1, output = $2, error = $3, updated_at = $4, deduplication_id = NULL
+			  SET status = $1, output = $2, error = $3, updated_at = $4, completed_at = $4, deduplication_id = NULL
 			  WHERE workflow_uuid = $5 AND NOT (status = $6 AND CAST($1 AS TEXT) IN ($7, $8))`, s.dialect.SchemaPrefix(s.schema))
 
 	// input.output is already a *string from the database layer
@@ -1433,7 +1477,7 @@ func (s *sysDB) cancelWorkflows(ctx context.Context, input cancelWorkflowsDBInpu
 	// Needs repeatable read. Reuse the caller's tx when supplied.
 	if !s.dialect.SupportsDataModifyingCTE() {
 		updateQuery := s.renderSQL(`UPDATE %sworkflow_status
-			SET status = $1, updated_at = $2, started_at_epoch_ms = NULL,
+			SET status = $1, updated_at = $2, completed_at = $2, started_at_epoch_ms = NULL,
 			    queue_name = NULL, deduplication_id = NULL
 			WHERE %s AND status NOT IN ($4, $5, $6)`, schemaPrefix, anyClause)
 		selectAnyClause := dialectAnyClause(s.dialect, "workflow_uuid", 1)
@@ -1498,7 +1542,7 @@ func (s *sysDB) cancelWorkflows(ctx context.Context, input cancelWorkflowsDBInpu
 			SELECT workflow_uuid FROM %sworkflow_status WHERE %s
 		), updated AS (
 			UPDATE %sworkflow_status
-			SET status = $1, updated_at = $2, started_at_epoch_ms = NULL,
+			SET status = $1, updated_at = $2, completed_at = $2, started_at_epoch_ms = NULL,
 			    queue_name = NULL, deduplication_id = NULL
 			WHERE %s AND status NOT IN ($4, $5, $6)
 			RETURNING workflow_uuid
@@ -1771,7 +1815,7 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 		updateQuery := s.renderSQL(`UPDATE %sworkflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
 			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
-			    started_at_epoch_ms = NULL, updated_at = $4
+			    started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL
 			WHERE %s AND status NOT IN ($6, $7)`, schemaPrefix, anyClause)
 		selectAnyClause := dialectAnyClause(s.dialect, "workflow_uuid", 1)
 		selectQuery := s.renderSQL(`SELECT workflow_uuid FROM %sworkflow_status WHERE %s`, schemaPrefix, selectAnyClause)
@@ -1829,7 +1873,7 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 			UPDATE %sworkflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
 			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
-			    started_at_epoch_ms = NULL, updated_at = $4
+			    started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL
 			WHERE %s AND status NOT IN ($6, $7)
 			RETURNING workflow_uuid
 		)
@@ -1974,6 +2018,12 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 
 	if err != nil {
 		return "", fmt.Errorf("failed to insert forked workflow status: %w", err)
+	}
+
+	// Mark the original workflow as having been forked from.
+	markForkedQuery := s.renderSQL(`UPDATE %sworkflow_status SET was_forked_from = TRUE WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
+	if _, err = execCtx(ctx, markForkedQuery, input.originalWorkflowID); err != nil {
+		return "", fmt.Errorf("failed to mark original workflow as forked: %w", err)
 	}
 
 	// If startStep > 0, copy the original workflow's outputs into the forked workflow
@@ -4719,6 +4769,10 @@ func (qb *queryBuilder) addWhere(column string, value any) {
 
 func (qb *queryBuilder) addWhereIsNotNull(column string) {
 	qb.whereClauses = append(qb.whereClauses, fmt.Sprintf("%s IS NOT NULL", column))
+}
+
+func (qb *queryBuilder) addWhereIsNull(column string) {
+	qb.whereClauses = append(qb.whereClauses, fmt.Sprintf("%s IS NULL", column))
 }
 
 func (qb *queryBuilder) addWhereLike(column string, value any) {

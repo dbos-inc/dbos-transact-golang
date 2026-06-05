@@ -881,6 +881,29 @@ func TestForkWorkflow(t *testing.T) {
 		}
 
 		t.Logf("Final counters after all forks - steps:%d, child1:%d, child2:%d", stepCount1, child1Count, child2Count)
+
+		// Verify the original workflow is marked as having been forked from
+		originalStatus, err := client.ListWorkflows(WithWorkflowIDs([]string{originalWorkflowID}))
+		require.NoError(t, err, "failed to list original workflow")
+		require.Len(t, originalStatus, 1)
+		assert.True(t, originalStatus[0].WasForkedFrom, "original workflow should be marked was_forked_from")
+
+		// WithWasForkedFrom(true) returns the original; WithWasForkedFrom(false) excludes it
+		forkedFromTrue, err := client.ListWorkflows(WithWasForkedFrom(true))
+		require.NoError(t, err)
+		foundOriginal := false
+		for _, wf := range forkedFromTrue {
+			assert.True(t, wf.WasForkedFrom, "WithWasForkedFrom(true) must only return forked-from workflows")
+			if wf.ID == originalWorkflowID {
+				foundOriginal = true
+			}
+		}
+		assert.True(t, foundOriginal, "expected original workflow in WithWasForkedFrom(true) results")
+		forkedFromFalse, err := client.ListWorkflows(WithWasForkedFrom(false))
+		require.NoError(t, err)
+		for _, wf := range forkedFromFalse {
+			assert.NotEqual(t, originalWorkflowID, wf.ID, "WithWasForkedFrom(false) must exclude forked-from workflows")
+		}
 	})
 
 	t.Run("ForkNonExistentWorkflow", func(t *testing.T) {
@@ -1262,6 +1285,44 @@ func TestListWorkflows(t *testing.T) {
 		nonexistent, err := client.ListWorkflows(WithParentWorkflowID("nonexistent-parent-id"))
 		require.NoError(t, err)
 		assert.Len(t, nonexistent, 0)
+
+		// Test 15: Filter by presence of a parent workflow
+		withParent, err := client.ListWorkflows(WithHasParent(true))
+		require.NoError(t, err, "failed to list workflows with a parent")
+		foundChild := false
+		for _, wf := range withParent {
+			assert.NotEmpty(t, wf.ParentWorkflowID, "WithHasParent(true) must only return workflows with a parent")
+			if wf.ID == expectedChildID {
+				foundChild = true
+			}
+		}
+		assert.True(t, foundChild, "expected child workflow in WithHasParent(true) results")
+		withoutParent, err := client.ListWorkflows(WithHasParent(false))
+		require.NoError(t, err, "failed to list workflows without a parent")
+		for _, wf := range withoutParent {
+			assert.Empty(t, wf.ParentWorkflowID, "WithHasParent(false) must only return workflows without a parent")
+		}
+
+		// Test 16: completed_at is populated for terminal workflows and supports range filters
+		completedChild, err := client.ListWorkflows(WithWorkflowIDs([]string{expectedChildID}))
+		require.NoError(t, err)
+		require.Len(t, completedChild, 1)
+		require.False(t, completedChild[0].CompletedAt.IsZero(), "completed workflow should have CompletedAt set")
+		afterStart, err := client.ListWorkflows(WithParentWorkflowID(parentID), WithCompletedAfter(testStartTime))
+		require.NoError(t, err)
+		assert.Len(t, afterStart, 1, "child completed after test start should be returned")
+		beforeStart, err := client.ListWorkflows(WithParentWorkflowID(parentID), WithCompletedBefore(testStartTime))
+		require.NoError(t, err)
+		assert.Len(t, beforeStart, 0, "no child completed before test start")
+
+		// Test 17: dequeued_after/before filter on started_at (the parent was
+		// enqueued, so it has a started_at; direct child workflows do not).
+		dequeuedAfter, err := client.ListWorkflows(WithWorkflowIDs([]string{parentID}), WithDequeuedAfter(testStartTime))
+		require.NoError(t, err)
+		assert.Len(t, dequeuedAfter, 1, "parent dequeued after test start should be returned")
+		dequeuedBefore, err := client.ListWorkflows(WithWorkflowIDs([]string{parentID}), WithDequeuedBefore(testStartTime))
+		require.NoError(t, err)
+		assert.Len(t, dequeuedBefore, 0, "parent not dequeued before test start")
 	})
 	// Verify all queue entries are cleaned up
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after list workflows tests")

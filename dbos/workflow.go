@@ -58,7 +58,9 @@ type WorkflowStatus struct {
 	Priority           int                `json:"priority,omitempty"`            // Queue execution priority (lower numbers have higher priority)
 	QueuePartitionKey  string             `json:"queue_partition_key,omitempty"` // Queue partition key for partitioned queues
 	ForkedFrom         string             `json:"forked_from,omitempty"`         // ID of the original workflow if this is a fork
+	WasForkedFrom      bool               `json:"was_forked_from,omitempty"`     // Whether this workflow has been forked from
 	ParentWorkflowID   string             `json:"parent_workflow_id,omitempty"`  // ID of the parent workflow if this is a child
+	CompletedAt        time.Time          `json:"completed_at,omitempty"`        // When the workflow reached a terminal state (SUCCESS, ERROR, or CANCELLED)
 	ClassName          string             `json:"class_name,omitempty"`          // Class/namespace name for cross-language dispatch
 	ConfigName         *string            `json:"config_name,omitempty"`         // Instance/config name for cross-language dispatch (nil = unset, pointer to "" = explicit empty)
 	Serialization      string             `json:"serialization,omitempty"`       // Serialization format used for inputs/outputs (e.g., "DBOS_JSON", "portable_json")
@@ -3628,6 +3630,12 @@ type listWorkflowsOptions struct {
 	forkedFrom       []string
 	parentWorkflowID []string
 	deduplicationID  []string
+	completedAfter   time.Time
+	completedBefore  time.Time
+	dequeuedAfter    time.Time
+	dequeuedBefore   time.Time
+	wasForkedFrom    *bool
+	hasParent        *bool
 }
 
 // ListWorkflowsOption is a functional option for configuring workflow listing parameters.
@@ -3767,6 +3775,48 @@ func WithFilterDeduplicationID(deduplicationID ...string) ListWorkflowsOption {
 	}
 }
 
+// WithCompletedAfter filters workflows that reached a terminal state at or after the specified time.
+func WithCompletedAfter(completedAfter time.Time) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.completedAfter = completedAfter
+	}
+}
+
+// WithCompletedBefore filters workflows that reached a terminal state at or before the specified time.
+func WithCompletedBefore(completedBefore time.Time) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.completedBefore = completedBefore
+	}
+}
+
+// WithDequeuedAfter filters workflows that started executing at or after the specified time.
+func WithDequeuedAfter(dequeuedAfter time.Time) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.dequeuedAfter = dequeuedAfter
+	}
+}
+
+// WithDequeuedBefore filters workflows that started executing at or before the specified time.
+func WithDequeuedBefore(dequeuedBefore time.Time) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.dequeuedBefore = dequeuedBefore
+	}
+}
+
+// WithWasForkedFrom filters workflows by whether they have been forked from (true) or not (false).
+func WithWasForkedFrom(wasForkedFrom bool) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.wasForkedFrom = &wasForkedFrom
+	}
+}
+
+// WithHasParent filters workflows by whether they have a parent workflow (true) or not (false).
+func WithHasParent(hasParent bool) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.hasParent = &hasParent
+	}
+}
+
 func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
 	// Initialize parameters with defaults
 	loadInput := true
@@ -3811,6 +3861,12 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		forkedFrom:         params.forkedFrom,
 		parentWorkflowID:   params.parentWorkflowID,
 		deduplicationID:    params.deduplicationID,
+		completedAfter:     params.completedAfter,
+		completedBefore:    params.completedBefore,
+		dequeuedAfter:      params.dequeuedAfter,
+		dequeuedBefore:     params.dequeuedBefore,
+		wasForkedFrom:      params.wasForkedFrom,
+		hasParent:          params.hasParent,
 	}
 
 	// Call the context method to list workflows
