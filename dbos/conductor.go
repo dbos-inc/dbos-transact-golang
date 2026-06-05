@@ -927,7 +927,7 @@ func (c *conductor) handleListStepsRequest(data []byte, requestID string) error 
 	c.logger.Debug("Handling list steps request", "request", req)
 
 	// Get workflow steps using the public GetWorkflowSteps method
-	steps, err := GetWorkflowSteps(c.dbosCtx, req.WorkflowID)
+	steps, err := GetWorkflowSteps(c.dbosCtx, req.WorkflowID, WithStepsLoadOutput(req.LoadOutput))
 	if err != nil {
 		c.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflow steps: %v", err)
@@ -975,7 +975,10 @@ func (c *conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 	}
 	c.logger.Debug("Handling get workflow request", "workflow_id", req.WorkflowID)
 
-	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, WithWorkflowIDs([]string{req.WorkflowID}))
+	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx,
+		WithWorkflowIDs([]string{req.WorkflowID}),
+		WithLoadInput(req.LoadInput),
+		WithLoadOutput(req.LoadOutput))
 	if err != nil {
 		c.logger.Error("Failed to get workflow", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to get workflow: %v", err)

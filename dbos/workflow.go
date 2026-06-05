@@ -4082,12 +4082,30 @@ type StepInfo struct {
 	CompletedAt     time.Time // When the step execution completed
 }
 
-func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]StepInfo, error) {
-	var loadOutput bool
-	if c.launched.Load() {
-		loadOutput = true
-	} else {
-		loadOutput = false
+// getWorkflowStepsOptions holds optional parameters for GetWorkflowSteps.
+type getWorkflowStepsOptions struct {
+	loadOutput *bool
+}
+
+// GetWorkflowStepsOption is a functional option for GetWorkflowSteps.
+type GetWorkflowStepsOption func(*getWorkflowStepsOptions)
+
+// WithStepsLoadOutput controls whether to load step output data.
+// When unset, output is loaded only if the DBOS context has been launched.
+func WithStepsLoadOutput(loadOutput bool) GetWorkflowStepsOption {
+	return func(o *getWorkflowStepsOptions) {
+		o.loadOutput = &loadOutput
+	}
+}
+
+func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string, opts ...GetWorkflowStepsOption) ([]StepInfo, error) {
+	options := getWorkflowStepsOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	loadOutput := c.launched.Load()
+	if options.loadOutput != nil {
+		loadOutput = *options.loadOutput
 	}
 	getWorkflowStepsInput := getWorkflowStepsInput{
 		workflowID: workflowID,
@@ -4180,11 +4198,11 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string) ([]Step
 //	for _, step := range steps {
 //	    log.Printf("Step %d: %s", step.StepID, step.StepName)
 //	}
-func GetWorkflowSteps(ctx DBOSContext, workflowID string) ([]StepInfo, error) {
+func GetWorkflowSteps(ctx DBOSContext, workflowID string, opts ...GetWorkflowStepsOption) ([]StepInfo, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
-	return ctx.GetWorkflowSteps(ctx, workflowID)
+	return ctx.GetWorkflowSteps(ctx, workflowID, opts...)
 }
 
 // GetWorkflowAggregatesInput is the input to GetWorkflowAggregates.

@@ -1175,3 +1175,106 @@ func TestConductorWorkflowAggregatesHandler(t *testing.T) {
 		require.NotNil(t, resp.ErrorMessage)
 	})
 }
+
+// conductorPrivateModeStep is a step used by TestConductorPrivateMode.
+func conductorPrivateModeStep(_ context.Context, in string) (string, error) {
+	return "step-" + in, nil
+}
+
+// conductorPrivateModeWorkflow runs a single step and returns its output.
+func conductorPrivateModeWorkflow(ctx DBOSContext, in string) (string, error) {
+	return RunAsStep(ctx, func(c context.Context) (string, error) {
+		return conductorPrivateModeStep(c, in)
+	})
+}
+
+// TestConductorPrivateMode verifies that the conductor's load_input/load_output
+// flags ("private mode") control whether workflow and step input/output are
+// returned by the get_workflow and list_steps handlers.
+func TestConductorPrivateMode(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+	RegisterWorkflow(dbosCtx, conductorPrivateModeWorkflow)
+	require.NoError(t, dbosCtx.Launch())
+
+	h, err := RunWorkflow(dbosCtx, conductorPrivateModeWorkflow, "secret")
+	require.NoError(t, err)
+	_, err = h.GetResult()
+	require.NoError(t, err)
+	wfID := h.GetWorkflowID()
+
+	mockServer := newMockWebSocketServer()
+	t.Cleanup(mockServer.shutdown)
+
+	cond, err := newConductor(dbosCtx.(*dbosContext), conductorConfig{
+		url:     mockServer.getURL(),
+		apiKey:  "test-key",
+		appName: "test-app",
+	})
+	require.NoError(t, err)
+	cond.pingInterval = 100 * time.Millisecond
+	cond.pingTimeout = 200 * time.Millisecond
+	cond.reconnectWait = 100 * time.Millisecond
+	cond.launch()
+	t.Cleanup(func() { cond.shutdown(2 * time.Second) })
+	require.True(t, mockServer.waitForConnection(5*time.Second))
+
+	expect := func(t *testing.T, wantType messageType) []byte {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case raw := <-mockServer.messages:
+				var base baseMessage
+				if err := json.Unmarshal(raw, &base); err == nil && base.Type == wantType {
+					return raw
+				}
+			case <-deadline:
+				t.Fatalf("timed out waiting for response of type %s", wantType)
+			}
+		}
+	}
+
+	t.Run("get_workflow_loads_io", func(t *testing.T) {
+		msg := fmt.Sprintf(`{"type":"get_workflow","request_id":"g1","workflow_id":%q,"load_input":true,"load_output":true}`, wfID)
+		require.NoError(t, mockServer.sendTextMessage([]byte(msg)))
+		var resp getWorkflowConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, getWorkflowMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.NotNil(t, resp.Output)
+		require.NotNil(t, resp.Output.Input)
+		require.NotNil(t, resp.Output.Output)
+	})
+
+	t.Run("get_workflow_private", func(t *testing.T) {
+		msg := fmt.Sprintf(`{"type":"get_workflow","request_id":"g2","workflow_id":%q,"load_input":false,"load_output":false}`, wfID)
+		require.NoError(t, mockServer.sendTextMessage([]byte(msg)))
+		var resp getWorkflowConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, getWorkflowMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.NotNil(t, resp.Output)
+		require.Nil(t, resp.Output.Input)
+		require.Nil(t, resp.Output.Output)
+	})
+
+	t.Run("list_steps_loads_output", func(t *testing.T) {
+		msg := fmt.Sprintf(`{"type":"list_steps","request_id":"s1","workflow_id":%q,"load_output":true}`, wfID)
+		require.NoError(t, mockServer.sendTextMessage([]byte(msg)))
+		var resp listStepsConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, listStepsMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.NotNil(t, resp.Output)
+		require.NotEmpty(t, *resp.Output)
+		require.NotNil(t, (*resp.Output)[0].Output)
+	})
+
+	t.Run("list_steps_private", func(t *testing.T) {
+		msg := fmt.Sprintf(`{"type":"list_steps","request_id":"s2","workflow_id":%q,"load_output":false}`, wfID)
+		require.NoError(t, mockServer.sendTextMessage([]byte(msg)))
+		var resp listStepsConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, listStepsMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.NotNil(t, resp.Output)
+		require.NotEmpty(t, *resp.Output)
+		require.Nil(t, (*resp.Output)[0].Output)
+	})
+}
