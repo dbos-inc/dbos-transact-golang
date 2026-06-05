@@ -45,6 +45,8 @@ type systemDatabase interface {
 	resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInput) ([]string, error)
 	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error)
 
+	getDeduplicatedWorkflow(ctx context.Context, queueName, deduplicationID string) (*string, error)
+
 	// Child workflows
 	getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error)
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
@@ -2256,6 +2258,25 @@ func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, funct
 	}
 
 	return childWorkflowID, nil
+}
+
+// getDeduplicatedWorkflow returns the ID of the workflow currently holding the
+// deduplication slot for (queueName, deduplicationID), or nil if the slot is free.
+func (s *sysDB) getDeduplicatedWorkflow(ctx context.Context, queueName, deduplicationID string) (*string, error) {
+	query := s.renderSQL(`SELECT workflow_uuid
+              FROM %sworkflow_status
+              WHERE queue_name = $1 AND deduplication_id = $2`, s.dialect.SchemaPrefix(s.schema))
+
+	var workflowID *string
+	err := s.pool.QueryRow(ctx, query, queueName, deduplicationID).Scan(&workflowID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get deduplicated workflow: %w", err)
+	}
+
+	return workflowID, nil
 }
 
 /*******************************/

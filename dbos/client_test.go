@@ -273,6 +273,48 @@ func TestClientEnqueue(t *testing.T) {
 		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after deduplication test")
 	})
 
+	t.Run("EnqueueWithDedupReturnExisting", func(t *testing.T) {
+		dedupID := "client-return-existing-dedup-id"
+
+		// First enqueue holds the dedup slot (BlockingWorkflow stays running)
+		handle1, err := Enqueue[string, string](client, queue.Name, "BlockingWorkflow", "first",
+			WithEnqueueDeduplicationID(dedupID),
+			WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err, "failed to enqueue first workflow")
+
+		// Second enqueue with the same dedup ID returns a handle to the existing workflow instead of erroring
+		handle2, err := Enqueue[string, string](client, queue.Name, "BlockingWorkflow", "second",
+			WithEnqueueDeduplicationID(dedupID),
+			WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err, "expected return-existing policy to not error on collision")
+		assert.Equal(t, handle1.GetWorkflowID(), handle2.GetWorkflowID(), "expected handle2 to point to the existing workflow")
+
+		// Free the slot: cancel the blocking workflow and wait for it to reach a terminal state
+		require.NoError(t, client.CancelWorkflow(handle1.GetWorkflowID()))
+		_, _ = handle1.GetResult() // returns a cancellation error; we only need it terminal so the dedup slot clears
+
+		// With the slot cleared, a new enqueue starts a fresh workflow with a different ID
+		handle3, err := Enqueue[string, string](client, queue.Name, "BlockingWorkflow", "third",
+			WithEnqueueDeduplicationID(dedupID),
+			WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.NoError(t, err, "failed to enqueue after the dedup slot cleared")
+		assert.NotEqual(t, handle1.GetWorkflowID(), handle3.GetWorkflowID(), "expected a fresh workflow after the slot cleared")
+
+		// Clean up the second blocking workflow
+		require.NoError(t, client.CancelWorkflow(handle3.GetWorkflowID()))
+	})
+
+	t.Run("EnqueueWithDedupReturnExistingMissingID", func(t *testing.T) {
+		_, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "x"},
+			WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting),
+			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+		require.Error(t, err, "expected error when deduplication ID is missing")
+		assert.Contains(t, err.Error(), "requires a deduplication ID")
+	})
+
 	t.Run("EnqueueToPartitionedQueue", func(t *testing.T) {
 		// Enqueue a workflow to a partitioned queue with a partition key
 		handle, err := Enqueue[string, string](client, partitionedQueue.Name, "PartitionedWorkflow", "test-input",

@@ -109,6 +109,21 @@ func TestWorkflowQueues(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, testWorkflow)
 
+	// Parent workflow that spawns a singleton child via the return-existing policy.
+	// Multiple parents using the same dedup ID must all attach to the same child.
+	const parentSingletonDedupID = "parent_singleton_child_dedup"
+	parentSpawnsSingletonChild := func(ctx DBOSContext, childInput string) (string, error) {
+		h, err := RunWorkflow(ctx, childWorkflow, childInput,
+			WithQueue(dedupQueue.Name),
+			WithDeduplicationID(parentSingletonDedupID),
+			WithDeduplicationPolicy(DeduplicationPolicyReturnExisting))
+		if err != nil {
+			return "", fmt.Errorf("failed to spawn singleton child: %v", err)
+		}
+		return h.GetResult()
+	}
+	RegisterWorkflow(dbosCtx, parentSpawnsSingletonChild)
+
 	// Create workflow with child that can call the main workflow
 	queueWorkflowWithChild := func(ctx DBOSContext, input string) (string, error) {
 		// Start a child workflow
@@ -469,9 +484,10 @@ func TestWorkflowQueues(t *testing.T) {
 		nodedupHandle2, err := RunWorkflow(dbosCtx, testWorkflow, "mno", WithQueue(dedupQueue.Name), WithWorkflowID(wfid))
 		require.NoError(t, err, "failed to enqueue workflow with same workflow ID")
 
-		// Enqueue the same workflow with the same deduplication ID should raise an exception
+		// Enqueue the same workflow with the same deduplication ID should raise an exception.
+		// Pass DeduplicationPolicyReject explicitly to confirm it matches the default behavior.
 		wfid2 := uuid.NewString()
-		_, err = RunWorkflow(dbosCtx, testWorkflow, "def", WithQueue(dedupQueue.Name), WithWorkflowID(wfid2), WithDeduplicationID(dedupID))
+		_, err = RunWorkflow(dbosCtx, testWorkflow, "def", WithQueue(dedupQueue.Name), WithWorkflowID(wfid2), WithDeduplicationID(dedupID), WithDeduplicationPolicy(DeduplicationPolicyReject))
 		require.Error(t, err, "expected error when enqueueing workflow with same deduplication ID")
 
 		// Check that it's the correct error type and message
@@ -545,6 +561,107 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Equal(t, "restarted-c-p", result2, "expected re-enqueued workflow to complete with correct result")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after cancel-and-restart test")
+	})
+
+	t.Run("QueueDeduplicationReturnExisting", func(t *testing.T) {
+		// With DeduplicationPolicyReturnExisting, a collision returns a handle to the existing
+		// workflow instead of erroring (singleton semantics).
+		workflowEvent := NewEvent()
+		dedupWorkflowEvent = workflowEvent
+		defer func() {
+			dedupWorkflowEvent = nil
+		}()
+
+		dedupID := "return_existing_dedup_id"
+		wfid1 := uuid.NewString()
+		handle1, err := RunWorkflow(dbosCtx, testWorkflow, "first", WithQueue(dedupQueue.Name), WithWorkflowID(wfid1), WithDeduplicationID(dedupID), WithDeduplicationPolicy(DeduplicationPolicyReturnExisting))
+		require.NoError(t, err, "failed to enqueue first workflow")
+
+		// Second enqueue with the same dedup ID returns a handle to the existing workflow instead of erroring
+		handle2, err := RunWorkflow(dbosCtx, testWorkflow, "second", WithQueue(dedupQueue.Name), WithDeduplicationID(dedupID), WithDeduplicationPolicy(DeduplicationPolicyReturnExisting))
+		require.NoError(t, err, "expected return-existing policy to not error on collision")
+		assert.Equal(t, wfid1, handle2.GetWorkflowID(), "expected handle2 to point to the existing workflow")
+
+		// Unblock and verify both handles resolve to the first workflow's result; the second input is discarded
+		workflowEvent.Set()
+		result1, err := handle1.GetResult()
+		require.NoError(t, err, "failed to get result from first workflow")
+		assert.Equal(t, "first-c-p", result1)
+		result2, err := handle2.GetResult()
+		require.NoError(t, err, "failed to get result from existing-handle workflow")
+		assert.Equal(t, "first-c-p", result2)
+
+		// After the slot clears on completion, a new enqueue starts a fresh workflow
+		wfid3 := uuid.NewString()
+		handle3, err := RunWorkflow(dbosCtx, testWorkflow, "third", WithQueue(dedupQueue.Name), WithWorkflowID(wfid3), WithDeduplicationID(dedupID), WithDeduplicationPolicy(DeduplicationPolicyReturnExisting))
+		require.NoError(t, err, "failed to enqueue after slot cleared")
+		assert.Equal(t, wfid3, handle3.GetWorkflowID(), "expected a fresh workflow after the dedup slot cleared")
+		result3, err := handle3.GetResult()
+		require.NoError(t, err, "failed to get result from fresh workflow")
+		assert.Equal(t, "third-c-p", result3)
+
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after return-existing test")
+	})
+
+	t.Run("QueueDeduplicationReturnExistingMultiParent", func(t *testing.T) {
+		// Two parent workflows each spawn a singleton child with the same dedup ID + return-existing.
+		// Both must attach to the same child, return that child's output (not their own input), and
+		// record the attach in their operation outputs so replay resolves to the same child.
+		workflowEvent := NewEvent()
+		dedupWorkflowEvent = workflowEvent
+		defer func() {
+			dedupWorkflowEvent = nil
+		}()
+
+		// A directly-enqueued child holds the dedup slot
+		firstChild, err := RunWorkflow(dbosCtx, childWorkflow, "first", WithQueue(dedupQueue.Name), WithDeduplicationID(parentSingletonDedupID), WithDeduplicationPolicy(DeduplicationPolicyReturnExisting))
+		require.NoError(t, err, "failed to enqueue first child")
+		childID := firstChild.GetWorkflowID()
+
+		// Two parents each spawn a singleton child with the same dedup ID; both attach to firstChild
+		parentA, err := RunWorkflow(dbosCtx, parentSpawnsSingletonChild, "second")
+		require.NoError(t, err, "failed to start parent A")
+		parentB, err := RunWorkflow(dbosCtx, parentSpawnsSingletonChild, "third")
+		require.NoError(t, err, "failed to start parent B")
+
+		// Unblock the child; everyone resolves to the child's output regardless of the parents' inputs
+		workflowEvent.Set()
+		childResult, err := firstChild.GetResult()
+		require.NoError(t, err, "failed to get result from first child")
+		assert.Equal(t, "first-c", childResult)
+		resultA, err := parentA.GetResult()
+		require.NoError(t, err, "failed to get result from parent A")
+		assert.Equal(t, "first-c", resultA, "parent A should return the existing child's output")
+		resultB, err := parentB.GetResult()
+		require.NoError(t, err, "failed to get result from parent B")
+		assert.Equal(t, "first-c", resultB, "parent B should return the existing child's output")
+
+		// Each parent recorded the attach: the spawn step (step 0) maps to the shared child workflow ID
+		for _, p := range []WorkflowHandle[string]{parentA, parentB} {
+			steps, err := GetWorkflowSteps(dbosCtx, p.GetWorkflowID())
+			require.NoError(t, err, "failed to get steps for parent %s", p.GetWorkflowID())
+			attachedAtStep0 := false
+			for _, s := range steps {
+				if s.ChildWorkflowID == childID && s.StepID == 0 {
+					attachedAtStep0 = true
+				}
+			}
+			assert.True(t, attachedAtStep0, "parent %s should record a step-0 attach to the shared child %s", p.GetWorkflowID(), childID)
+		}
+
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after multi-parent test")
+	})
+
+	t.Run("ReturnExistingValidation", func(t *testing.T) {
+		// Missing queue name
+		_, err := RunWorkflow(dbosCtx, testWorkflow, "x", WithDeduplicationID("id"), WithDeduplicationPolicy(DeduplicationPolicyReturnExisting))
+		require.Error(t, err, "expected error when queue name is missing")
+		assert.Contains(t, err.Error(), "requires a queue name")
+
+		// Missing deduplication ID
+		_, err = RunWorkflow(dbosCtx, testWorkflow, "x", WithQueue(dedupQueue.Name), WithDeduplicationPolicy(DeduplicationPolicyReturnExisting))
+		require.Error(t, err, "expected error when deduplication ID is missing")
+		assert.Contains(t, err.Error(), "requires a deduplication ID")
 	})
 
 	t.Run("NonExistingQueue", func(t *testing.T) {
