@@ -341,7 +341,9 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		}
 		_, err = dbosCtx.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
-			tx.Rollback(uncancellableCtx)
+			if rbErr := tx.Rollback(uncancellableCtx); rbErr != nil {
+				dbosCtx.logger.Warn("failed to roll back transaction", "error", rbErr, "workflow_id", workflowID)
+			}
 			if returnExisting && errors.Is(err, &DBOSError{Code: QueueDeduplicated}) {
 				existingID, lookupErr := dbosCtx.systemDB.getDeduplicatedWorkflow(uncancellableCtx, queueName, params.deduplicationID)
 				if lookupErr != nil {
@@ -350,7 +352,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 				if existingID != nil {
 					return newWorkflowPollingHandle[any](uncancellableCtx, *existingID), nil
 				}
-				// Try again if the deduplication record was not found. Means that the dedup slot was returned.
+				// Try again if the deduplication record was not found. Means that the dedup slot was freed.
 				continue
 			}
 			dbosCtx.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
@@ -358,7 +360,9 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		}
 
 		if err := tx.Commit(uncancellableCtx); err != nil {
-			tx.Rollback(uncancellableCtx)
+			if rbErr := tx.Rollback(uncancellableCtx); rbErr != nil {
+				dbosCtx.logger.Warn("failed to roll back transaction", "error", rbErr, "workflow_id", workflowID)
+			}
 			return nil, fmt.Errorf("failed to commit transaction: %w", err)
 		}
 
