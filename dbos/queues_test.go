@@ -624,6 +624,23 @@ func TestWorkflowQueues(t *testing.T) {
 		parentB, err := RunWorkflow(dbosCtx, parentSpawnsSingletonChild, "third")
 		require.NoError(t, err, "failed to start parent B")
 
+		// Both parents must attach to the still-running firstChild before we release it.
+		attachedToChild := func(parentID string) bool {
+			steps, err := GetWorkflowSteps(dbosCtx, parentID)
+			if err != nil {
+				return false
+			}
+			for _, s := range steps {
+				if s.ChildWorkflowID == childID && s.StepID == 0 {
+					return true
+				}
+			}
+			return false
+		}
+		require.Eventually(t, func() bool {
+			return attachedToChild(parentA.GetWorkflowID()) && attachedToChild(parentB.GetWorkflowID())
+		}, 10*time.Second, 5*time.Millisecond, "both parents should attach to the shared child before it is released")
+
 		// Unblock the child; everyone resolves to the child's output regardless of the parents' inputs
 		workflowEvent.Set()
 		childResult, err := firstChild.GetResult()
