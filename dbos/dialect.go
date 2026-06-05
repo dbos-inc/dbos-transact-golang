@@ -70,6 +70,11 @@ type Dialect interface {
 	// RepeatableRead; SQLite returns Default (the IMMEDIATE BEGIN handles it).
 	SnapshotIsolation() IsoLevel
 
+	// QueueDequeueIsolation returns the IsoLevel for the queue dequeue
+	// transaction. snapshot=true requests snapshot semantics
+	// snapshot=false allows the lighter read-committed path.
+	QueueDequeueIsolation(snapshot bool) IsoLevel
+
 	// SupportsListenNotify reports whether the dialect supports
 	// LISTEN/NOTIFY. False for CockroachDB and SQLite, which both fall back
 	// to the polling-based notification loop.
@@ -171,10 +176,16 @@ func (postgresDialect) Name() DialectName { return DialectPostgres }
 func (postgresDialect) SchemaPrefix(schema string) string {
 	return pgx.Identifier{schema}.Sanitize() + "."
 }
-func (postgresDialect) RewriteQuery(q string) string   { return q }
-func (postgresDialect) LockSkipLocked() string         { return "FOR UPDATE SKIP LOCKED" }
-func (postgresDialect) LockNoWait() string             { return "FOR UPDATE NOWAIT" }
-func (postgresDialect) SnapshotIsolation() IsoLevel    { return IsoLevelRepeatableRead }
+func (postgresDialect) RewriteQuery(q string) string { return q }
+func (postgresDialect) LockSkipLocked() string       { return "FOR UPDATE SKIP LOCKED" }
+func (postgresDialect) LockNoWait() string           { return "FOR UPDATE NOWAIT" }
+func (postgresDialect) SnapshotIsolation() IsoLevel  { return IsoLevelRepeatableRead }
+func (postgresDialect) QueueDequeueIsolation(snapshot bool) IsoLevel {
+	if snapshot {
+		return IsoLevelRepeatableRead
+	}
+	return IsoLevelReadCommitted
+}
 func (postgresDialect) SupportsListenNotify() bool     { return true }
 func (postgresDialect) SupportsArrayParameters() bool  { return true }
 func (postgresDialect) SupportsDataModifyingCTE() bool { return true }
@@ -282,12 +293,13 @@ func (sqliteDialect) RewriteQuery(q string) string {
 	return sqlitePlaceholderRe.ReplaceAllString(q, "?$1")
 }
 
-func (sqliteDialect) LockSkipLocked() string         { return "" }
-func (sqliteDialect) LockNoWait() string             { return "" }
-func (sqliteDialect) SnapshotIsolation() IsoLevel    { return IsoLevelDefault }
-func (sqliteDialect) SupportsListenNotify() bool     { return false }
-func (sqliteDialect) SupportsArrayParameters() bool  { return false }
-func (sqliteDialect) SupportsDataModifyingCTE() bool { return false }
+func (sqliteDialect) LockSkipLocked() string                { return "" }
+func (sqliteDialect) LockNoWait() string                    { return "" }
+func (sqliteDialect) SnapshotIsolation() IsoLevel           { return IsoLevelDefault }
+func (sqliteDialect) QueueDequeueIsolation(_ bool) IsoLevel { return IsoLevelDefault }
+func (sqliteDialect) SupportsListenNotify() bool            { return false }
+func (sqliteDialect) SupportsArrayParameters() bool         { return false }
+func (sqliteDialect) SupportsDataModifyingCTE() bool        { return false }
 
 // Classify sqlite errors via modernc's typed *sqlite.Error and the extended
 // result code constants in modernc.org/sqlite/lib. The Code() return is the

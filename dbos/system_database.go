@@ -868,13 +868,14 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 /*******************************/
 
 type insertWorkflowResult struct {
-	attempts         int
-	status           WorkflowStatusType
-	name             string
-	queueName        *string
-	timeout          time.Duration
-	workflowDeadline time.Time
-	ownerXID         string
+	attempts          int
+	status            WorkflowStatusType
+	name              string
+	queueName         *string
+	queuePartitionKey *string
+	timeout           time.Duration
+	workflowDeadline  time.Time
+	ownerXID          string
 }
 
 type insertWorkflowStatusDBInput struct {
@@ -983,7 +984,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
                 WHEN EXCLUDED.status IN ($26, $27) THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
-        RETURNING recovery_attempts, status, name, queue_name, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema))
+        RETURNING recovery_attempts, status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema))
 
 	var result insertWorkflowResult
 	var timeoutMSResult *int64
@@ -1035,6 +1036,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		&result.status,
 		&result.name,
 		&result.queueName,
+		&result.queuePartitionKey,
 		&timeoutMSResult,
 		&workflowDeadlineEpochMS,
 		&ownerXIDReturn,
@@ -3717,10 +3719,14 @@ type dequeueWorkflowsInput struct {
 	executorID         string
 	applicationVersion string
 	queuePartitionKey  string
+	localRunningCount  int
 }
 
 func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error) {
-	tx, err := s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
+	// Snapshot isolation is only required for global concurrency or rate limiting.
+	// Otherwise read committed suffices: worker concurrency is enforced in-memory.
+	snapshot := input.queue.GlobalConcurrency != nil || input.queue.RateLimit != nil
+	tx, err := s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.QueueDequeueIsolation(snapshot)})
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -3760,9 +3766,17 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	// Calculate max_tasks based on concurrency limits
 	maxTasks := input.queue.MaxTasksPerIteration
 
-	if input.queue.WorkerConcurrency != nil || input.queue.GlobalConcurrency != nil {
+	if input.queue.WorkerConcurrency != nil {
+		workerConcurrency := *input.queue.WorkerConcurrency
+		if input.localRunningCount > workerConcurrency {
+			s.logger.Warn("Local running workflows on queue exceeds worker concurrency limit", "local_running", input.localRunningCount, "queue_name", input.queue.Name, "concurrency_limit", workerConcurrency)
+		}
+		maxTasks = max(workerConcurrency-input.localRunningCount, 0)
+	}
+
+	if input.queue.GlobalConcurrency != nil {
 		pendingQuery := s.renderSQL(`
-			SELECT executor_id, COUNT(*) as task_count
+			SELECT COUNT(*)
 			FROM %sworkflow_status
 			WHERE queue_name = $1 AND status = $2`, schemaPrefix)
 
@@ -3771,49 +3785,19 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			pendingQuery += ` AND queue_partition_key = $3`
 			pendingArgs = append(pendingArgs, input.queuePartitionKey)
 		}
-		pendingQuery += ` GROUP BY executor_id`
 
-		rows, err := tx.Query(ctx, s.dialect.RewriteQuery(pendingQuery), pendingArgs...)
-		if err != nil {
+		var globalCount int
+		if err := tx.QueryRow(ctx, s.dialect.RewriteQuery(pendingQuery), pendingArgs...).Scan(&globalCount); err != nil {
 			return nil, fmt.Errorf("failed to query pending workflows: %w", err)
 		}
-		defer rows.Close()
 
-		pendingWorkflowsDict := make(map[string]int)
-		for rows.Next() {
-			var executorIDRow string
-			var taskCount int
-			if err := rows.Scan(&executorIDRow, &taskCount); err != nil {
-				return nil, fmt.Errorf("failed to scan pending workflow row: %w", err)
-			}
-			pendingWorkflowsDict[executorIDRow] = taskCount
+		concurrency := *input.queue.GlobalConcurrency
+		if globalCount > concurrency {
+			s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalCount, "queue_name", input.queue.Name, "concurrency_limit", concurrency)
 		}
-
-		localPendingWorkflows := pendingWorkflowsDict[input.executorID]
-
-		if input.queue.WorkerConcurrency != nil {
-			workerConcurrency := *input.queue.WorkerConcurrency
-			if localPendingWorkflows > workerConcurrency {
-				s.logger.Warn("Local pending workflows on queue exceeds worker concurrency limit", "local_pending", localPendingWorkflows, "queue_name", input.queue.Name, "concurrency_limit", workerConcurrency)
-			}
-			availableWorkerTasks := max(workerConcurrency-localPendingWorkflows, 0)
-			maxTasks = availableWorkerTasks
-		}
-
-		if input.queue.GlobalConcurrency != nil {
-			globalPendingWorkflows := 0
-			for _, count := range pendingWorkflowsDict {
-				globalPendingWorkflows += count
-			}
-
-			concurrency := *input.queue.GlobalConcurrency
-			if globalPendingWorkflows > concurrency {
-				s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalPendingWorkflows, "queue_name", input.queue.Name, "concurrency_limit", concurrency)
-			}
-			availableTasks := max(concurrency-globalPendingWorkflows, 0)
-			if availableTasks < maxTasks {
-				maxTasks = availableTasks
-			}
+		availableTasks := max(concurrency-globalCount, 0)
+		if availableTasks < maxTasks {
+			maxTasks = availableTasks
 		}
 	}
 
@@ -3893,7 +3877,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 		        THEN $4 + workflow_timeout_ms
 		        ELSE workflow_deadline_epoch_ms
 		    END
-		WHERE workflow_uuid = $6
+		WHERE workflow_uuid = $6 AND status = $7
 		RETURNING name, inputs, serialization`, schemaPrefix)
 
 	var retWorkflows []dequeuedWorkflow
@@ -3912,8 +3896,12 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 			input.executorID,
 			time.Now().UnixMilli(),
 			input.queue.RateLimit != nil,
-			id).Scan(&retWorkflow.name, &retWorkflow.input, &serialization)
+			id,
+			WorkflowStatusEnqueued).Scan(&retWorkflow.name, &retWorkflow.input, &serialization)
 		if err != nil {
+			if err == pgx.ErrNoRows {
+				continue
+			}
 			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
 		}
 		if serialization != nil {
