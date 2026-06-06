@@ -51,10 +51,15 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 			continue
 		}
 
-		// Convert workflow parameters to options
+		// Convert workflow parameters to options.
+		// Auth identity is re-attached so child workflows spawned during
+		// recovery inherit the same identity as the original run.
 		opts := []WorkflowOption{
 			WithWorkflowID(workflow.ID),
 			withIsRecovery(),
+			WithAuthenticatedUser(workflow.AuthenticatedUser),
+			WithAssumedRole(workflow.AssumedRole),
+			WithAuthenticatedRoles(workflow.AuthenticatedRoles),
 		}
 		// Create a workflow context from the executor context
 		// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
