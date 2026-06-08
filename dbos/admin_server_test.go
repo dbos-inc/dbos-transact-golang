@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -403,159 +402,55 @@ func TestAdminServer(t *testing.T) {
 			}
 		}()
 
-		client := &http.Client{Timeout: 5 * time.Second}
-		endpoint := fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_WORKFLOWS_PATTERN, "POST /"))
+		client, err := NewAdminClient(fmt.Sprintf("http://localhost:%d", _DEFAULT_ADMIN_SERVER_PORT))
+		require.NoError(t, err)
 
-		// Create first workflow
-		handle1, err := RunWorkflow(ctx, testWorkflow, "workflow1")
-		require.NoError(t, err, "Failed to create first workflow")
-		workflowID1 := handle1.GetWorkflowID()
-
-		// Wait for first workflow to complete
-		result1, err := handle1.GetResult()
-		require.NoError(t, err, "Failed to get first workflow result")
-		assert.Equal(t, "result-workflow1", result1)
-
-		// Record time between workflows
-		timeBetween := time.Now()
-		time.Sleep(500 * time.Millisecond)
-
-		// Create second workflow
-		handle2, err := RunWorkflow(ctx, testWorkflow, "workflow2")
-		require.NoError(t, err, "Failed to create second workflow")
-		result2, err := handle2.GetResult()
-		require.NoError(t, err, "Failed to get second workflow result")
-		assert.Equal(t, "result-workflow2", result2)
-		workflowID2 := handle2.GetWorkflowID()
-
-		// Test 1: Query with start_time before timeBetween (should get both workflows)
-		reqBody1 := map[string]any{
-			"start_time": timeBetween.Add(-2 * time.Second).Format(time.RFC3339Nano),
-			"limit":      10,
+		workflowIDs := make([]string, 5)
+		for i := range workflowIDs {
+			input := fmt.Sprintf("workflow-%d", i)
+			handle, err := RunWorkflow(ctx, testWorkflow, input)
+			require.NoError(t, err)
+			result, err := handle.GetResult()
+			require.NoError(t, err)
+			assert.Equal(t, "result-"+input, result)
+			workflowIDs[i] = handle.GetWorkflowID()
+			if i < len(workflowIDs)-1 {
+				time.Sleep(2 * time.Millisecond)
+			}
 		}
-		req1, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody1)))
-		require.NoError(t, err, "Failed to create request 1")
-		req1.Header.Set("Content-Type", "application/json")
 
-		resp1, err := client.Do(req1)
-		require.NoError(t, err, "Failed to make request 1")
-		defer resp1.Body.Close()
+		allWorkflows, err := client.ListWorkflows(context.Background(), AdminListWorkflowsRequest{
+			WorkflowUUIDs: workflowIDs,
+		})
+		require.NoError(t, err)
+		require.Len(t, allWorkflows, len(workflowIDs))
 
-		assert.Equal(t, http.StatusOK, resp1.StatusCode)
-
-		var workflows1 []map[string]any
-		err = json.NewDecoder(resp1.Body).Decode(&workflows1)
-		require.NoError(t, err, "Failed to decode workflows response 1")
-
-		// Should have exactly 2 workflows that we just created
-		assert.Equal(t, 2, len(workflows1), "Expected exactly 2 workflows with start_time before timeBetween")
-
-		// Verify timestamps are epoch-millisecond strings (matches the DBOS console schema)
-		timeBetweenMillis := timeBetween.UnixMilli()
-		parseCreatedAt := func(wf map[string]any) int64 {
-			s, ok := wf["CreatedAt"].(string)
-			require.True(t, ok, "CreatedAt should be a string, got %T", wf["CreatedAt"])
-			ms, err := strconv.ParseInt(s, 10, 64)
-			require.NoError(t, err, "CreatedAt should parse as int64")
-			return ms
+		for i := 1; i < len(allWorkflows); i++ {
+			require.Less(t, allWorkflows[i-1].CreatedAt, allWorkflows[i].CreatedAt)
 		}
-		for _, wf := range workflows1 {
-			parseCreatedAt(wf)
+
+		thirdCreatedAt := allWorkflows[2].CreatedAt.Time()
+		afterThird := thirdCreatedAt.Add(time.Millisecond)
+
+		firstThree, err := client.ListWorkflows(context.Background(), AdminListWorkflowsRequest{
+			WorkflowUUIDs: workflowIDs,
+			EndTime:       &thirdCreatedAt,
+		})
+		require.NoError(t, err)
+		require.Len(t, firstThree, 3)
+
+		lastTwo, err := client.ListWorkflows(context.Background(), AdminListWorkflowsRequest{
+			WorkflowUUIDs: workflowIDs,
+			StartTime:     &afterThird,
+		})
+		require.NoError(t, err)
+		require.Len(t, lastTwo, 2)
+
+		filteredIDs := make([]string, 0, len(workflowIDs))
+		for _, workflow := range append(firstThree, lastTwo...) {
+			filteredIDs = append(filteredIDs, workflow.WorkflowUUID)
 		}
-		// Verify the timestamp is around timeBetween (within 2 seconds before or after)
-		assert.Less(t, parseCreatedAt(workflows1[0]), timeBetweenMillis, "first workflow CreatedAt should be before timeBetween")
-		assert.Greater(t, parseCreatedAt(workflows1[1]), timeBetweenMillis, "second workflow CreatedAt should be before timeBetween")
-
-		// Verify both workflow IDs are present
-		foundIDs1 := make(map[string]bool)
-		for _, wf := range workflows1 {
-			id, ok := wf["WorkflowUUID"].(string)
-			require.True(t, ok, "WorkflowUUID should be a string")
-			foundIDs1[id] = true
-		}
-		assert.True(t, foundIDs1[workflowID1], "Expected to find first workflow ID in results")
-		assert.True(t, foundIDs1[workflowID2], "Expected to find second workflow ID in results")
-
-		// Test 2: Query with start_time after timeBetween (should get only second workflow)
-		reqBody2 := map[string]any{
-			"start_time": timeBetween.Format(time.RFC3339Nano),
-			"limit":      10,
-		}
-		req2, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody2)))
-		require.NoError(t, err, "Failed to create request 2")
-		req2.Header.Set("Content-Type", "application/json")
-
-		resp2, err := client.Do(req2)
-		require.NoError(t, err, "Failed to make request 2")
-		defer resp2.Body.Close()
-
-		assert.Equal(t, http.StatusOK, resp2.StatusCode)
-
-		var workflows2 []map[string]any
-		err = json.NewDecoder(resp2.Body).Decode(&workflows2)
-		require.NoError(t, err, "Failed to decode workflows response 2")
-
-		// Should have exactly 1 workflow (the second one)
-		assert.Equal(t, 1, len(workflows2), "Expected exactly 1 workflow with start_time after timeBetween")
-
-		// Verify it's the second workflow
-		id2, ok := workflows2[0]["WorkflowUUID"].(string)
-		require.True(t, ok, "WorkflowUUID should be a string")
-		assert.Equal(t, workflowID2, id2, "Expected second workflow ID in results")
-
-		// Also test end_time filter
-		reqBody3 := map[string]any{
-			"end_time": timeBetween.Format(time.RFC3339Nano),
-			"limit":    10,
-		}
-		req3, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBody3)))
-		require.NoError(t, err, "Failed to create request 3")
-		req3.Header.Set("Content-Type", "application/json")
-
-		resp3, err := client.Do(req3)
-		require.NoError(t, err, "Failed to make request 3")
-		defer resp3.Body.Close()
-
-		assert.Equal(t, http.StatusOK, resp3.StatusCode)
-
-		var workflows3 []map[string]any
-		err = json.NewDecoder(resp3.Body).Decode(&workflows3)
-		require.NoError(t, err, "Failed to decode workflows response 3")
-
-		// Should have exactly 1 workflow (the first one)
-		assert.Equal(t, 1, len(workflows3), "Expected exactly 1 workflow with end_time before timeBetween")
-
-		// Verify it's the first workflow
-		id3, ok := workflows3[0]["WorkflowUUID"].(string)
-		require.True(t, ok, "WorkflowUUID should be a string")
-		assert.Equal(t, workflowID1, id3, "Expected first workflow ID in results")
-
-		// Test 4: Query with empty body (should return all workflows)
-		req4, err := http.NewRequest(http.MethodPost, endpoint, nil)
-		require.NoError(t, err, "Failed to create request 4")
-
-		resp4, err := client.Do(req4)
-		require.NoError(t, err, "Failed to make request 4")
-		defer resp4.Body.Close()
-
-		assert.Equal(t, http.StatusOK, resp4.StatusCode)
-
-		var workflows4 []map[string]any
-		err = json.NewDecoder(resp4.Body).Decode(&workflows4)
-		require.NoError(t, err, "Failed to decode workflows response 4")
-
-		// Should have exactly 2 workflows (both that we created)
-		assert.Equal(t, 2, len(workflows4), "Expected exactly 2 workflows with empty body")
-
-		// Verify both workflow IDs are present
-		foundIDs4 := make(map[string]bool)
-		for _, wf := range workflows4 {
-			id, ok := wf["WorkflowUUID"].(string)
-			require.True(t, ok, "WorkflowUUID should be a string")
-			foundIDs4[id] = true
-		}
-		assert.True(t, foundIDs4[workflowID1], "Expected to find first workflow ID in empty body results")
-		assert.True(t, foundIDs4[workflowID2], "Expected to find second workflow ID in empty body results")
+		assert.ElementsMatch(t, workflowIDs, filteredIDs)
 	})
 
 	t.Run("ListQueuedWorkflows", func(t *testing.T) {
