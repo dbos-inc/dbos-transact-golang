@@ -309,6 +309,7 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 type listStepsConductorRequest struct {
 	baseMessage
 	WorkflowID string `json:"workflow_id"`
+	LoadOutput bool   `json:"load_output"`
 }
 
 // workflowStepsConductorResponseBody represents a single workflow step in the list response
@@ -371,6 +372,8 @@ func formatWorkflowStepsResponseBody(step StepInfo) workflowStepsConductorRespon
 type getWorkflowConductorRequest struct {
 	baseMessage
 	WorkflowID string `json:"workflow_id"`
+	LoadInput  bool   `json:"load_input"`
+	LoadOutput bool   `json:"load_output"`
 }
 
 // getWorkflowConductorResponse is sent in response to get workflow requests
