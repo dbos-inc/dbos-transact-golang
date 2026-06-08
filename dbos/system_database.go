@@ -59,6 +59,7 @@ type systemDatabase interface {
 
 	// Aggregates
 	getWorkflowAggregates(ctx context.Context, input getWorkflowAggregatesDBInput) ([]WorkflowAggregateRow, error)
+	getStepAggregates(ctx context.Context, input getStepAggregatesDBInput) ([]StepAggregateRow, error)
 
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
@@ -2625,6 +2626,189 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating over workflow aggregate rows: %w", err)
+	}
+
+	return results, nil
+}
+
+// StepAggregateRow is a single row of a step aggregate query result.
+// Group maps each grouping column name (e.g. "function_name", "status", "time_bucket") to its
+// stringified value, with nil entries for grouping columns that were NULL for that row.
+// Count and MaxDurationMs are pointers because the caller selects which aggregates to compute;
+// an unselected aggregate is nil (serialized as null, matching the other SDKs).
+type StepAggregateRow struct {
+	Group         map[string]*string `json:"group"`
+	Count         *int64             `json:"count"`
+	MaxDurationMs *int64             `json:"max_duration_ms"`
+}
+
+// getStepAggregatesDBInput represents the input parameters for getting step aggregates.
+type getStepAggregatesDBInput struct {
+	groupByFunctionName bool
+	groupByStatus       bool
+	selectCount         bool
+	selectMaxDurationMs bool
+	timeBucketSizeMs    int64 // 0 disables time bucketing
+	status              []string
+	functionName        []string
+	workflowIDPrefix    []string
+	completedAfter      time.Time
+	completedBefore     time.Time
+	limit               int64 // 0 means use _DEFAULT_AGGREGATES_LIMIT
+	tx                  Tx
+}
+
+// statusExpr derives a step's status from operation_outputs: rows with a NULL error are
+// SUCCESS, otherwise ERROR. operation_outputs has no explicit status column.
+const stepStatusExpr = "(CASE WHEN error IS NULL THEN 'SUCCESS' ELSE 'ERROR' END)"
+
+func (s *sysDB) getStepAggregates(ctx context.Context, input getStepAggregatesDBInput) ([]StepAggregateRow, error) {
+	if input.timeBucketSizeMs < 0 {
+		return nil, errors.New("timeBucketSizeMs must be > 0")
+	}
+
+	type groupCol struct {
+		name string
+		expr string
+	}
+	var groups []groupCol
+	if input.groupByFunctionName {
+		groups = append(groups, groupCol{name: "function_name", expr: "function_name"})
+	}
+	if input.groupByStatus {
+		groups = append(groups, groupCol{name: "status", expr: stepStatusExpr})
+	}
+
+	qb := newQueryBuilder(s.dialect)
+
+	if input.timeBucketSizeMs > 0 {
+		// Bucket on completed_at_epoch_ms, the indexed timestamp on this table.
+		// Bind the bucket size twice: see getWorkflowAggregates for why CockroachDB
+		// requires a distinct placeholder per type context.
+		qb.argCounter++
+		divArg := qb.argCounter
+		qb.args = append(qb.args, input.timeBucketSizeMs)
+		qb.argCounter++
+		mulArg := qb.argCounter
+		qb.args = append(qb.args, input.timeBucketSizeMs)
+		var expr string
+		if s.dialect.SupportsArrayParameters() {
+			expr = fmt.Sprintf("(CAST(FLOOR(completed_at_epoch_ms::numeric / $%d) AS BIGINT) * $%d)", divArg, mulArg)
+		} else {
+			expr = fmt.Sprintf("((completed_at_epoch_ms / $%d) * $%d)", divArg, mulArg)
+		}
+		groups = append(groups, groupCol{name: "time_bucket", expr: expr})
+	}
+
+	if len(groups) == 0 {
+		return nil, errors.New("at least one group_by flag must be set, or a time bucket size provided")
+	}
+
+	// Build select aggregates. MAX ignores NULLs, so rows without start/complete
+	// timestamps (child-workflow and getResult markers) drop out of the duration max.
+	type selectCol struct {
+		name string
+		expr string
+	}
+	var selects []selectCol
+	if input.selectCount {
+		selects = append(selects, selectCol{name: "count", expr: "COUNT(*)"})
+	}
+	if input.selectMaxDurationMs {
+		selects = append(selects, selectCol{name: "max_duration_ms", expr: "MAX(completed_at_epoch_ms - started_at_epoch_ms)"})
+	}
+	if len(selects) == 0 {
+		return nil, errors.New("at least one select_ flag must be set")
+	}
+
+	// Apply filters
+	if len(input.status) > 0 {
+		qb.addWhereAny(stepStatusExpr, input.status)
+	}
+	if len(input.functionName) > 0 {
+		qb.addWhereAny("function_name", input.functionName)
+	}
+	if len(input.workflowIDPrefix) > 0 {
+		qb.addWhereLikeAny("workflow_uuid", input.workflowIDPrefix, "%")
+	}
+	if !input.completedAfter.IsZero() {
+		qb.addWhereGreaterEqual("completed_at_epoch_ms", input.completedAfter.UnixMilli())
+	}
+	if !input.completedBefore.IsZero() {
+		qb.addWhereLessEqual("completed_at_epoch_ms", input.completedBefore.UnixMilli())
+	}
+
+	// Build SELECT clause: group expressions aliased to "g0", "g1", ... so position is stable.
+	selectParts := make([]string, 0, len(groups)+len(selects))
+	groupParts := make([]string, 0, len(groups))
+	for i, g := range groups {
+		alias := fmt.Sprintf("g%d", i)
+		selectParts = append(selectParts, fmt.Sprintf("%s AS %s", g.expr, alias))
+		groupParts = append(groupParts, g.expr)
+	}
+	for i, sel := range selects {
+		selectParts = append(selectParts, fmt.Sprintf("%s AS s%d", sel.expr, i))
+	}
+
+	query := fmt.Sprintf("SELECT %s FROM %soperation_outputs",
+		strings.Join(selectParts, ", "),
+		s.dialect.SchemaPrefix(s.schema))
+	if len(qb.whereClauses) > 0 {
+		query += " WHERE " + strings.Join(qb.whereClauses, " AND ")
+	}
+	query += " GROUP BY " + strings.Join(groupParts, ", ")
+	limit := input.limit
+	if limit <= 0 {
+		limit = _DEFAULT_AGGREGATES_LIMIT
+	}
+	query += fmt.Sprintf(" LIMIT %d", limit)
+
+	var rows Rows
+	var err error
+	if input.tx != nil {
+		rows, err = input.tx.Query(ctx, query, qb.args...)
+	} else {
+		rows, err = s.pool.Query(ctx, query, qb.args...)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute getStepAggregates query: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]StepAggregateRow, 0)
+	for rows.Next() {
+		groupVals := make([]any, len(groups))
+		for i := range groups {
+			var v *string
+			groupVals[i] = &v
+		}
+		selectVals := make([]any, len(selects))
+		for i := range selects {
+			var v *int64
+			selectVals[i] = &v
+		}
+		scanArgs := append(append([]any{}, groupVals...), selectVals...)
+		if err := rows.Scan(scanArgs...); err != nil {
+			return nil, fmt.Errorf("failed to scan step aggregate row: %w", err)
+		}
+		groupMap := make(map[string]*string, len(groups))
+		for i, g := range groups {
+			groupMap[g.name] = *(groupVals[i].(**string))
+		}
+		row := StepAggregateRow{Group: groupMap}
+		for i, sel := range selects {
+			val := *(selectVals[i].(**int64))
+			switch sel.name {
+			case "count":
+				row.Count = val
+			case "max_duration_ms":
+				row.MaxDurationMs = val
+			}
+		}
+		results = append(results, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over step aggregate rows: %w", err)
 	}
 
 	return results, nil

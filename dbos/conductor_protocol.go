@@ -62,6 +62,7 @@ const (
 	getWorkflowNotificationsMsg  messageType = "get_workflow_notifications"
 	getWorkflowStreamsMessage    messageType = "get_workflow_streams"
 	getWorkflowAggregatesMessage messageType = "get_workflow_aggregates"
+	getStepAggregatesMessage     messageType = "get_step_aggregates"
 	listAppVersionsMessage       messageType = "list_application_versions"
 	setLatestAppVersionMessage   messageType = "set_latest_application_version"
 )
@@ -713,6 +714,34 @@ type getWorkflowAggregatesConductorRequest struct {
 type getWorkflowAggregatesConductorResponse struct {
 	baseResponse
 	Output []WorkflowAggregateRow `json:"output"`
+}
+
+// getStepAggregatesConductorRequestBody contains the step aggregate query parameters.
+type getStepAggregatesConductorRequestBody struct {
+	GroupByFunctionName bool         `json:"group_by_function_name"`
+	GroupByStatus       bool         `json:"group_by_status"`
+	SelectCount         bool         `json:"select_count"`
+	SelectMaxDurationMs bool         `json:"select_max_duration_ms"`
+	TimeBucketSizeMs    *int64       `json:"time_bucket_size_ms,omitempty"`
+	Status              stringOrList `json:"status,omitempty"`
+	FunctionName        stringOrList `json:"function_name,omitempty"`
+	WorkflowIDPrefix    stringOrList `json:"workflow_id_prefix,omitempty"`
+	CompletedAfter      *time.Time   `json:"completed_after,omitempty"`  // ISO 8601
+	CompletedBefore     *time.Time   `json:"completed_before,omitempty"` // ISO 8601
+}
+
+// getStepAggregatesConductorRequest is sent by the conductor to fetch step aggregates.
+type getStepAggregatesConductorRequest struct {
+	baseMessage
+	Body getStepAggregatesConductorRequestBody `json:"body"`
+}
+
+// getStepAggregatesConductorResponse is sent in response to step aggregate requests.
+// Output uses StepAggregateRow directly: it has the matching JSON tags and there is no
+// conversion needed between the public Go shape and the wire shape.
+type getStepAggregatesConductorResponse struct {
+	baseResponse
+	Output []StepAggregateRow `json:"output"`
 }
 
 // applicationVersionOutput is the wire shape for a single application version
