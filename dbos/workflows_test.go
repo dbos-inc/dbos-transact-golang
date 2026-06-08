@@ -6570,3 +6570,194 @@ func TestGetWorkflowAggregates(t *testing.T) {
 		assert.Equal(t, int64(2), total)
 	})
 }
+
+func stepAggOK(_ context.Context) (string, error) { return "ok", nil }
+
+func stepAggBad(_ context.Context) (string, error) { return "", errors.New("boom") }
+
+// stepAggregatesWorkflow runs two successful steps (aggStepOK) and one failing step
+// (aggStepBad, whose error is caught) so the operation_outputs table holds a known mix
+// of SUCCESS and ERROR steps.
+func stepAggregatesWorkflow(ctx DBOSContext, _ string) (string, error) {
+	if _, err := RunAsStep(ctx, stepAggOK, WithStepName("aggStepOK")); err != nil {
+		return "", err
+	}
+	if _, err := RunAsStep(ctx, stepAggOK, WithStepName("aggStepOK")); err != nil {
+		return "", err
+	}
+	_, _ = RunAsStep(ctx, stepAggBad, WithStepName("aggStepBad"))
+	return "done", nil
+}
+
+func TestGetStepAggregates(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	RegisterWorkflow(dbosCtx, stepAggregatesWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS instance")
+
+	// Run 3 workflows: 6 aggStepOK (SUCCESS), 3 aggStepBad (ERROR).
+	for i := 0; i < 3; i++ {
+		handle, err := RunWorkflow(dbosCtx, stepAggregatesWorkflow, fmt.Sprintf("in-%d", i))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+	}
+
+	t.Run("GroupByFunctionName", func(t *testing.T) {
+		rows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+			GroupByFunctionName: true,
+			SelectCount:         true,
+		})
+		require.NoError(t, err)
+		counts := map[string]int64{}
+		for _, r := range rows {
+			require.NotNil(t, r.Group["function_name"])
+			require.NotNil(t, r.Count)
+			counts[*r.Group["function_name"]] = *r.Count
+		}
+		assert.Equal(t, int64(6), counts["aggStepOK"])
+		assert.Equal(t, int64(3), counts["aggStepBad"])
+	})
+
+	t.Run("GroupByStatus", func(t *testing.T) {
+		rows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+			GroupByStatus: true,
+			SelectCount:   true,
+		})
+		require.NoError(t, err)
+		counts := map[string]int64{}
+		for _, r := range rows {
+			require.NotNil(t, r.Group["status"])
+			require.NotNil(t, r.Count)
+			counts[*r.Group["status"]] = *r.Count
+		}
+		assert.Equal(t, int64(6), counts["SUCCESS"])
+		assert.Equal(t, int64(3), counts["ERROR"])
+	})
+
+	t.Run("FilterByFunctionName", func(t *testing.T) {
+		rows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+			GroupByStatus: true,
+			SelectCount:   true,
+			FunctionName:  []string{"aggStepBad"},
+		})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.NotNil(t, rows[0].Group["status"])
+		assert.Equal(t, "ERROR", *rows[0].Group["status"])
+		require.NotNil(t, rows[0].Count)
+		assert.Equal(t, int64(3), *rows[0].Count)
+	})
+
+	t.Run("FilterByStatus", func(t *testing.T) {
+		rows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+			GroupByFunctionName: true,
+			SelectCount:         true,
+			Status:              []string{"SUCCESS"},
+		})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.NotNil(t, rows[0].Group["function_name"])
+		assert.Equal(t, "aggStepOK", *rows[0].Group["function_name"])
+		require.NotNil(t, rows[0].Count)
+		assert.Equal(t, int64(6), *rows[0].Count)
+	})
+
+	t.Run("SelectMaxDuration", func(t *testing.T) {
+		rows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+			GroupByFunctionName: true,
+			SelectMaxDurationMs: true,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, rows)
+		for _, r := range rows {
+			assert.Nil(t, r.Count, "count should not be selected")
+			require.NotNil(t, r.MaxDurationMs, "max_duration_ms should be selected")
+			assert.GreaterOrEqual(t, *r.MaxDurationMs, int64(0))
+		}
+	})
+
+	t.Run("NoGroupByReturnsError", func(t *testing.T) {
+		_, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{SelectCount: true})
+		require.Error(t, err)
+	})
+
+	t.Run("NoSelectReturnsError", func(t *testing.T) {
+		_, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{GroupByFunctionName: true})
+		require.Error(t, err)
+	})
+}
+
+// conductorStepAggWorkflow runs a single named step for the conductor handler test.
+func conductorStepAggWorkflow(ctx DBOSContext, _ string) (string, error) {
+	return RunAsStep(ctx, stepAggOK, WithStepName("condAggStep"))
+}
+
+func TestConductorStepAggregatesHandler(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+	RegisterWorkflow(dbosCtx, conductorStepAggWorkflow)
+	require.NoError(t, dbosCtx.Launch())
+
+	for i := 0; i < 3; i++ {
+		h, err := RunWorkflow(dbosCtx, conductorStepAggWorkflow, fmt.Sprintf("ok-%d", i))
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+	}
+
+	mockServer := newMockWebSocketServer()
+	t.Cleanup(mockServer.shutdown)
+
+	cond, err := newConductor(dbosCtx.(*dbosContext), conductorConfig{
+		url:     mockServer.getURL(),
+		apiKey:  "test-key",
+		appName: "test-app",
+	})
+	require.NoError(t, err)
+	cond.pingInterval = 100 * time.Millisecond
+	cond.pingTimeout = 200 * time.Millisecond
+	cond.reconnectWait = 100 * time.Millisecond
+	cond.launch()
+	t.Cleanup(func() { cond.shutdown(2 * time.Second) })
+	require.True(t, mockServer.waitForConnection(5*time.Second))
+
+	expect := func(t *testing.T, wantType messageType) []byte {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case raw := <-mockServer.messages:
+				var base baseMessage
+				if err := json.Unmarshal(raw, &base); err == nil && base.Type == wantType {
+					return raw
+				}
+			case <-deadline:
+				t.Fatalf("timed out waiting for response of type %s", wantType)
+			}
+		}
+	}
+
+	t.Run("get_step_aggregates", func(t *testing.T) {
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"get_step_aggregates","request_id":"sa1","body":{"group_by_function_name":true,"select_count":true}}`)))
+		var resp getStepAggregatesConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, getStepAggregatesMessage), &resp))
+		require.Equal(t, "sa1", resp.RequestID)
+		require.Nil(t, resp.ErrorMessage)
+		var stepCount int64
+		for _, r := range resp.Output {
+			require.NotNil(t, r.Group["function_name"])
+			if *r.Group["function_name"] == "condAggStep" {
+				require.NotNil(t, r.Count)
+				stepCount = *r.Count
+			}
+		}
+		require.Equal(t, int64(3), stepCount)
+	})
+
+	t.Run("get_step_aggregates_no_group_errors", func(t *testing.T) {
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"get_step_aggregates","request_id":"sa2","body":{"select_count":true}}`)))
+		var resp getStepAggregatesConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, getStepAggregatesMessage), &resp))
+		require.NotNil(t, resp.ErrorMessage)
+	})
+}
