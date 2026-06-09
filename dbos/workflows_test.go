@@ -6570,3 +6570,120 @@ func TestGetWorkflowAggregates(t *testing.T) {
 		assert.Equal(t, int64(2), total)
 	})
 }
+
+func stepAggOK(_ context.Context) (string, error) { return "ok", nil }
+
+func stepAggBad(_ context.Context) (string, error) { return "", errors.New("boom") }
+
+// stepAggregatesWorkflow runs two successful steps (aggStepOK) and one failing step
+// (aggStepBad, whose error is caught) so the operation_outputs table holds a known mix
+// of SUCCESS and ERROR steps.
+func stepAggregatesWorkflow(ctx DBOSContext, _ string) (string, error) {
+	if _, err := RunAsStep(ctx, stepAggOK, WithStepName("aggStepOK")); err != nil {
+		return "", err
+	}
+	if _, err := RunAsStep(ctx, stepAggOK, WithStepName("aggStepOK")); err != nil {
+		return "", err
+	}
+	_, _ = RunAsStep(ctx, stepAggBad, WithStepName("aggStepBad"))
+	return "done", nil
+}
+
+func TestGetStepAggregates(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	RegisterWorkflow(dbosCtx, stepAggregatesWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS instance")
+
+	// Run 3 workflows: 6 aggStepOK (SUCCESS), 3 aggStepBad (ERROR).
+	for i := 0; i < 3; i++ {
+		handle, err := RunWorkflow(dbosCtx, stepAggregatesWorkflow, fmt.Sprintf("in-%d", i))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+	}
+
+	t.Run("GroupByFunctionName", func(t *testing.T) {
+		rows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+			GroupByFunctionName: true,
+			SelectCount:         true,
+		})
+		require.NoError(t, err)
+		counts := map[string]int64{}
+		for _, r := range rows {
+			require.NotNil(t, r.Group["function_name"])
+			require.NotNil(t, r.Count)
+			counts[*r.Group["function_name"]] = *r.Count
+		}
+		assert.Equal(t, int64(6), counts["aggStepOK"])
+		assert.Equal(t, int64(3), counts["aggStepBad"])
+	})
+
+	t.Run("GroupByStatus", func(t *testing.T) {
+		rows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+			GroupByStatus: true,
+			SelectCount:   true,
+		})
+		require.NoError(t, err)
+		counts := map[string]int64{}
+		for _, r := range rows {
+			require.NotNil(t, r.Group["status"])
+			require.NotNil(t, r.Count)
+			counts[*r.Group["status"]] = *r.Count
+		}
+		assert.Equal(t, int64(6), counts["SUCCESS"])
+		assert.Equal(t, int64(3), counts["ERROR"])
+	})
+
+	t.Run("FilterByFunctionName", func(t *testing.T) {
+		rows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+			GroupByStatus: true,
+			SelectCount:   true,
+			FunctionName:  []string{"aggStepBad"},
+		})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.NotNil(t, rows[0].Group["status"])
+		assert.Equal(t, "ERROR", *rows[0].Group["status"])
+		require.NotNil(t, rows[0].Count)
+		assert.Equal(t, int64(3), *rows[0].Count)
+	})
+
+	t.Run("FilterByStatus", func(t *testing.T) {
+		rows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+			GroupByFunctionName: true,
+			SelectCount:         true,
+			Status:              []string{"SUCCESS"},
+		})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.NotNil(t, rows[0].Group["function_name"])
+		assert.Equal(t, "aggStepOK", *rows[0].Group["function_name"])
+		require.NotNil(t, rows[0].Count)
+		assert.Equal(t, int64(6), *rows[0].Count)
+	})
+
+	t.Run("SelectMaxDuration", func(t *testing.T) {
+		rows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+			GroupByFunctionName: true,
+			SelectMaxDurationMs: true,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, rows)
+		for _, r := range rows {
+			assert.Nil(t, r.Count, "count should not be selected")
+			require.NotNil(t, r.MaxDurationMs, "max_duration_ms should be selected")
+			assert.GreaterOrEqual(t, *r.MaxDurationMs, int64(0))
+		}
+	})
+
+	t.Run("NoGroupByReturnsError", func(t *testing.T) {
+		_, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{SelectCount: true})
+		require.Error(t, err)
+	})
+
+	t.Run("NoSelectReturnsError", func(t *testing.T) {
+		_, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{GroupByFunctionName: true})
+		require.Error(t, err)
+	})
+}

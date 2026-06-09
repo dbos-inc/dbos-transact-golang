@@ -4295,6 +4295,76 @@ func GetWorkflowAggregates(ctx DBOSContext, input GetWorkflowAggregatesInput) ([
 	return ctx.GetWorkflowAggregates(ctx, input)
 }
 
+// GetStepAggregatesInput is the input to GetStepAggregates.
+//
+// At least one of the GroupBy* flags must be true, or TimeBucketSize must be > 0.
+// At least one of the Select* flags must be true.
+type GetStepAggregatesInput struct {
+	GroupByFunctionName bool
+	GroupByStatus       bool
+
+	SelectCount         bool
+	SelectMaxDurationMs bool
+
+	// When non-zero, groups results by completed_at time bucket of this size.
+	TimeBucketSize time.Duration
+
+	// Filters
+	Status           []string
+	FunctionName     []string
+	WorkflowIDPrefix []string
+	CompletedAfter   time.Time
+	CompletedBefore  time.Time
+}
+
+func (c *dbosContext) GetStepAggregates(_ DBOSContext, input GetStepAggregatesInput) ([]StepAggregateRow, error) {
+	if input.TimeBucketSize < 0 {
+		return nil, errors.New("TimeBucketSize must be >= 0")
+	}
+	dbInput := getStepAggregatesDBInput{
+		groupByFunctionName: input.GroupByFunctionName,
+		groupByStatus:       input.GroupByStatus,
+		selectCount:         input.SelectCount,
+		selectMaxDurationMs: input.SelectMaxDurationMs,
+		timeBucketSizeMs:    input.TimeBucketSize.Milliseconds(),
+		status:              input.Status,
+		functionName:        input.FunctionName,
+		workflowIDPrefix:    input.WorkflowIDPrefix,
+		completedAfter:      input.CompletedAfter,
+		completedBefore:     input.CompletedBefore,
+	}
+
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	if isWithinWorkflow {
+		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]StepAggregateRow, error) {
+			in := dbInput
+			in.tx = tx
+			return c.systemDB.getStepAggregates(ctx, in)
+		}, WithStepName("DBOS.getStepAggregates"))
+	}
+	return retryWithResult(c, func() ([]StepAggregateRow, error) {
+		return c.systemDB.getStepAggregates(c, dbInput)
+	}, withRetrierLogger(c.logger))
+}
+
+// GetStepAggregates returns aggregate counts and/or max durations of steps grouped by
+// function name and/or derived status, optionally bucketed by completed_at time.
+//
+// At least one GroupBy* flag must be true, or TimeBucketSize must be > 0. At least one
+// Select* flag must be true. Step status is derived from operation_outputs: steps with no
+// recorded error are "SUCCESS", otherwise "ERROR".
+//
+// Returns one StepAggregateRow per non-empty group. Each row's Group map contains an entry
+// per enabled grouping column ("function_name", "status", "time_bucket"). Count and
+// MaxDurationMs are populated only for the corresponding enabled Select* flag.
+func GetStepAggregates(ctx DBOSContext, input GetStepAggregatesInput) ([]StepAggregateRow, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.GetStepAggregates(ctx, input)
+}
+
 // listRegisteredWorkflowsOptions holds configuration parameters for listing registered workflows
 type listRegisteredWorkflowsOptions struct {
 	scheduledOnly bool
