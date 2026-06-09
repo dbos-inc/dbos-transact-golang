@@ -1521,13 +1521,14 @@ type txn[R any] func(ctx context.Context, tx Tx) (R, error)
 
 // stepOptions holds the configuration for step execution using functional options pattern.
 type stepOptions struct {
-	maxRetries         int           // Maximum number of retry attempts (0 = no retries)
-	backoffFactor      float64       // Exponential backoff multiplier between retries (default: 2.0)
-	baseInterval       time.Duration // Initial delay between retries (default: 100ms)
-	maxInterval        time.Duration // Maximum delay between retries (default: 5s)
-	stepName           string        // Custom name for the step (defaults to function name)
-	preGeneratedStepID *int          // Pre generated stepID
-	txIsoLevel         *IsoLevel     // Transaction isolation level for runAsTxn (nil = ReadCommitted)
+	maxRetries         int              // Maximum number of retry attempts (0 = no retries)
+	backoffFactor      float64          // Exponential backoff multiplier between retries (default: 2.0)
+	baseInterval       time.Duration    // Initial delay between retries (default: 100ms)
+	maxInterval        time.Duration    // Maximum delay between retries (default: 5s)
+	stepName           string           // Custom name for the step (defaults to function name)
+	preGeneratedStepID *int             // Pre generated stepID
+	txIsoLevel         *IsoLevel        // Transaction isolation level for runAsTxn (nil = ReadCommitted)
+	retryPredicate     func(error) bool // Optional predicate: nil = retry all errors up to maxRetries
 }
 
 // setDefaults applies default values to stepOptions
@@ -1586,6 +1587,32 @@ func WithBaseInterval(interval time.Duration) StepOption {
 func WithMaxInterval(interval time.Duration) StepOption {
 	return func(opts *stepOptions) {
 		opts.maxInterval = interval
+	}
+}
+
+// WithRetryPredicate sets a function to decide whether a step error is retryable.
+// If the predicate returns false for an error, the step stops retrying immediately
+// and returns that error even if maxRetries has not been reached.
+// If not set (nil), all errors are retried up to maxRetries (default behaviour).
+//
+// The predicate is evaluated before the backoff delay, so a non-retryable error
+// exits immediately without waiting.
+//
+// Example : only retry HTTP 5xx errors, not 4xx client errors:
+//
+//	dbos.RunAsStep(ctx, callPaymentAPI,
+//	    dbos.WithStepMaxRetries(3),
+//	    dbos.WithRetryPredicate(func(err error) bool {
+//	        var apiErr *APIError
+//	        if errors.As(err, &apiErr) {
+//	            return apiErr.StatusCode >= 500
+//	        }
+//	        return true
+//	    }),
+//	)
+func WithRetryPredicate(fn func(error) bool) StepOption {
+	return func(opts *stepOptions) {
+		opts.retryPredicate = fn
 	}
 }
 
@@ -1706,6 +1733,10 @@ func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptio
 	var joinedErrors error
 	joinedErrors = errors.Join(joinedErrors, stepError)
 	for retry := 1; retry <= stepOpts.maxRetries; retry++ {
+		// Check predicate before sleeping, exit immediately on non-retryable errors.
+		if stepOpts.retryPredicate != nil && !stepOpts.retryPredicate(stepError) {
+			return stepOutput, stepError
+		}
 		delay := stepOpts.baseInterval
 		if retry > 1 {
 			exponentialDelay := float64(stepOpts.baseInterval) * math.Pow(stepOpts.backoffFactor, float64(retry-1))
@@ -1747,6 +1778,9 @@ func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptio
 //   - WithBackoffFactor: Exponential backoff multiplier (default: 2.0)
 //   - WithBaseInterval: Initial delay between retries (default: 100ms)
 //   - WithMaxInterval: Maximum delay between retries (default: 5s)
+//   - WithRetryPredicate: Function called before each retry to decide whether the error is retryable.
+//     If it returns false the step stops retrying immediately, even if maxRetries has not been reached.
+//     If not set, all errors are retried up to maxRetries (default behaviour).
 //
 // Example:
 //
