@@ -73,6 +73,10 @@ type workflowState struct {
 	stepID             int
 	isWithinStep       bool
 	isPortableWorkflow bool
+	// auth identity carried so child workflows can inherit it automatically
+	authenticatedUser  string
+	assumedRole        string
+	authenticatedRoles []string
 }
 
 // nextStepID returns the next step ID and increments the counter
@@ -1110,6 +1114,17 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	if isChildWorkflow {
 		// Advance step ID if we are a child workflow
 		parentWorkflowState.nextStepID()
+
+		// Propagate parent auth identity to child unless caller explicitlyoverrode  it
+		if params.AuthenticatedUser == "" {
+			params.AuthenticatedUser = parentWorkflowState.authenticatedUser
+		}
+		if params.AssumedRole == "" {
+			params.AssumedRole = parentWorkflowState.assumedRole
+		}
+		if len(params.AuthenticatedRoles) == 0 {
+			params.AuthenticatedRoles = parentWorkflowState.authenticatedRoles
+		}
 	}
 
 	// Generate an ID for the workflow if not provided
@@ -1357,6 +1372,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		workflowID:         workflowID,
 		stepID:             -1, // Steps are O-indexed
 		isPortableWorkflow: params.isPortableWorkflow,
+		authenticatedUser:  params.AuthenticatedUser,
+		assumedRole:        params.AssumedRole,
+		authenticatedRoles: params.AuthenticatedRoles,
 	}
 	workflowCtx := WithValue(c, workflowStateKey, wfState)
 
