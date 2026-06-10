@@ -633,10 +633,25 @@ func resolveWorkflowFunctionName[P any, R any](fn Workflow[P, R]) string {
 // RegisterWorkflow registers a function as a durable workflow that can be executed and recovered.
 // The function is registered with type safety - P represents the input type and R the return type.
 //
+// Workflows are identified by a name derived from the function's code pointer, so each
+// registered function value must have a unique name. Registrable:
+//   - Top-level named functions: the recommended form. Each has a unique name.
+//   - Generic function instantiations: type parameters are automatically appended to the name,
+//     so distinct instantiations are distinct workflows.
+//   - Method values bound to a configured instance (e.g. inst.Run), registered with
+//     WithInstance: the instance's config name qualifies the workflow name, so each
+//     instance registers its own workflow. Run these with WithRunInstance.
+//   - A closure or method value, at most ONE per source expression: all values built
+//     from the same func literal or method (e.g. a.Run and b.Run, or closures from one
+//     factory) share a name. Registering a second one panics with
+//     ConflictingRegistrationError; use WithInstance (methods) or distinct top-level
+//     functions (closures) instead.
+//
 // Registration options include:
 //   - WithMaxRetries: Set maximum retry attempts for workflow recovery
 //   - WithSchedule: Register as a scheduled workflow with cron syntax
-//   - WithWorkflowName:: Set a custom name for the workflow
+//   - WithWorkflowName: Set a custom name for the workflow
+//   - WithInstance: Register a method bound to a named instance
 //
 // Scheduled workflows receive a time.Time as input representing the scheduled execution time.
 //
