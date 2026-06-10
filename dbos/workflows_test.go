@@ -559,6 +559,14 @@ func TestConfiguredInstanceWorkflows(t *testing.T) {
 		require.NoError(t, err, "failed to get direct result for instance %q", inst.channel)
 		require.Equal(t, inst.channel+": hi", direct, "direct execution ran the wrong instance")
 
+		// The record stores the unqualified workflow name plus the instance class and config names
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get status for instance %q", inst.channel)
+		require.Equal(t, resolveWorkflowFunctionName(inst.Send), status.Name)
+		require.Equal(t, "configuredNotifier", status.ClassName)
+		require.NotNil(t, status.ConfigName, "config name not recorded")
+		require.Equal(t, inst.channel, *status.ConfigName)
+
 		setWorkflowStatusPending(t, dbosCtx, workflowID)
 		recovered, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.NoError(t, err, "failed to recover pending workflows")

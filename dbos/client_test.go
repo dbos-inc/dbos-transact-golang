@@ -75,6 +75,12 @@ func TestClientEnqueue(t *testing.T) {
 	}
 	RegisterWorkflow(serverCtx, partitionedWorkflow, WithWorkflowName("PartitionedWorkflow"))
 
+	// Two configured instances of the same workflow method, sharing a custom name (for the config name test)
+	slackNotifier := &configuredNotifier{channel: "slack"}
+	emailNotifier := &configuredNotifier{channel: "email"}
+	RegisterWorkflow(serverCtx, slackNotifier.Send, WithWorkflowName("NotifierWorkflow"), WithInstance(slackNotifier))
+	RegisterWorkflow(serverCtx, emailNotifier.Send, WithWorkflowName("NotifierWorkflow"), WithInstance(emailNotifier))
+
 	// Launch the server context to start processing tasks
 	err := Launch(serverCtx)
 	require.NoError(t, err)
@@ -90,6 +96,27 @@ func TestClientEnqueue(t *testing.T) {
 		if client != nil {
 			client.Shutdown(30 * time.Second)
 		}
+	})
+
+	t.Run("EnqueueToConfiguredInstance", func(t *testing.T) {
+		// The config name routes the workflow to the matching registered instance
+		for _, inst := range []*configuredNotifier{slackNotifier, emailNotifier} {
+			handle, err := Enqueue[string, string](client, queue.Name, "NotifierWorkflow", "hi",
+				WithEnqueueConfigName(inst.channel),
+				WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+			require.NoError(t, err)
+
+			result, err := handle.GetResult()
+			require.NoError(t, err)
+			assert.Equal(t, inst.channel+": hi", result, "workflow ran on the wrong instance")
+
+			status, err := handle.GetStatus()
+			require.NoError(t, err)
+			assert.Equal(t, "NotifierWorkflow", status.Name)
+			require.NotNil(t, status.ConfigName, "config name not recorded")
+			assert.Equal(t, inst.channel, *status.ConfigName)
+		}
+		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up")
 	})
 
 	t.Run("EnqueueAndGetResult", func(t *testing.T) {

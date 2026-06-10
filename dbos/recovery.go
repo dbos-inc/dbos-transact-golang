@@ -34,7 +34,12 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 			continue
 		}
 
-		wfName, ok := ctx.workflowCustomNametoFQN.Load(workflow.Name)
+		// Configured instance workflows are registered under a name qualified with their config name.
+		lookupName := workflow.Name
+		if workflow.ConfigName != nil && *workflow.ConfigName != "" {
+			lookupName = instanceQualifiedName(workflow.Name, *workflow.ConfigName)
+		}
+		wfName, ok := ctx.workflowCustomNametoFQN.Load(lookupName)
 		if !ok {
 			ctx.logger.Error("Workflow not found in registry", "workflow_name", workflow.Name)
 			continue

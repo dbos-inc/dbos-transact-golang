@@ -458,11 +458,13 @@ type WorkflowRegistryEntry struct {
 	workflowFn      WorkflowFunc // Type-erased registered function taking a raw (non-encoded) input. Used by RunWorkflow for direct execution.
 	MaxRetries      int
 	Name            string
-	FQN             string // Fully qualified name of the workflow function
+	FQN             string // Fully qualified name of the workflow function. For configured instances, qualified with the config name.
 	CronSchedule    string // Empty string for non-scheduled workflows
+	ClassName       string // Receiver type name for configured instance workflows
+	ConfigName      string // Config name for configured instance workflows
 }
 
-func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFunc, workflowFn WorkflowFunc, maxRetries int, customName string) {
+func registerWorkflow(ctx DBOSContext, entry WorkflowRegistryEntry) {
 	// Skip if we don't have a concrete dbosContext
 	c, ok := ctx.(*dbosContext)
 	if !ok {
@@ -474,29 +476,27 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFun
 	}
 
 	// Check if workflow already exists and store atomically using LoadOrStore
-	entry := WorkflowRegistryEntry{
-		wrappedFunction: fn,
-		workflowFn:      workflowFn,
-		FQN:             workflowFQN,
-		MaxRetries:      maxRetries,
-		Name:            customName,
-		CronSchedule:    "",
-	}
-
-	if _, exists := c.workflowRegistry.LoadOrStore(workflowFQN, entry); exists {
-		c.logger.Error("workflow function already registered", "fqn", workflowFQN)
-		panic(newConflictingRegistrationError(workflowFQN))
+	if _, exists := c.workflowRegistry.LoadOrStore(entry.FQN, entry); exists {
+		c.logger.Error("workflow function already registered", "fqn", entry.FQN)
+		panic(newConflictingRegistrationError(entry.FQN))
 	}
 
 	// We need to get a mapping from custom name to FQN for registry lookups that might not know the FQN (queue, recovery)
 	// We also panic if we found the name was already registered (this could happen if registering two different workflows under the same custom name)
-	if len(customName) > 0 {
-		if _, exists := c.workflowCustomNametoFQN.LoadOrStore(customName, workflowFQN); exists {
-			c.logger.Error("workflow function already registered", "custom_name", customName)
-			panic(newConflictingRegistrationError(customName))
+	// Configured instance workflows are keyed by name + "/" + config name, matching the lookup key
+	// queue and recovery rebuild from the recorded (name, config_name) pair. The same workflow
+	// name can thus be shared by many instances, like in the other Transact SDKs.
+	if len(entry.Name) > 0 {
+		lookupName := entry.Name
+		if len(entry.ConfigName) > 0 {
+			lookupName = instanceQualifiedName(entry.Name, entry.ConfigName)
+		}
+		if _, exists := c.workflowCustomNametoFQN.LoadOrStore(lookupName, entry.FQN); exists {
+			c.logger.Error("workflow function already registered", "custom_name", lookupName)
+			panic(newConflictingRegistrationError(lookupName))
 		}
 	} else {
-		c.workflowCustomNametoFQN.Store(workflowFQN, workflowFQN) // Store the FQN as the custom name if none was provided
+		c.workflowCustomNametoFQN.Store(entry.FQN, entry.FQN) // Store the FQN as the custom name if none was provided
 	}
 }
 
@@ -551,8 +551,8 @@ type ConfiguredInstance interface {
 }
 
 // instanceQualifiedName returns the per-instance registry key for a workflow method.
-func instanceQualifiedName(fqn string, inst ConfiguredInstance) string {
-	return fqn + "/" + inst.ConfigName()
+func instanceQualifiedName(name, configName string) string {
+	return name + "/" + configName
 }
 
 type workflowRegistrationOptions struct {
@@ -691,12 +691,19 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	fqn := resolveWorkflowFunctionName(fn)
 
 	// Method values bound to different receivers share an FQN: qualify the registry key
-	// with the instance config name so each instance registers its own entry.
+	// with the instance config name so each instance registers its own entry. The recorded
+	// workflow name stays unqualified; the config name is durably recorded alongside it.
+	var className, configName string
 	if registrationParams.instance != nil {
-		if registrationParams.instance.ConfigName() == "" {
+		configName = registrationParams.instance.ConfigName()
+		if configName == "" {
 			panic(fmt.Sprintf("configured instance for workflow %s must have a non-empty config name", fqn))
 		}
-		fqn = instanceQualifiedName(fqn, registrationParams.instance)
+		className = reflect.Indirect(reflect.ValueOf(registrationParams.instance)).Type().Name()
+		if registrationParams.name == "" {
+			registrationParams.name = fqn
+		}
+		fqn = instanceQualifiedName(fqn, configName)
 	}
 
 	// Register a type-erased version of the durable workflow for recovery and queue runner
@@ -751,7 +758,15 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		return fn(ctx, typedInput)
 	})
 
-	registerWorkflow(ctx, fqn, typeErasedWrapper, registeredWorkflow, registrationParams.maxRetries, registrationParams.name)
+	registerWorkflow(ctx, WorkflowRegistryEntry{
+		wrappedFunction: typeErasedWrapper,
+		workflowFn:      registeredWorkflow,
+		FQN:             fqn,
+		MaxRetries:      registrationParams.maxRetries,
+		Name:            registrationParams.name,
+		ClassName:       className,
+		ConfigName:      configName,
+	})
 
 	// If this is a scheduled workflow, register a cron job
 	if registrationParams.cronSchedule != "" {
@@ -1024,7 +1039,7 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 		opt(&providedOpts)
 	}
 	if providedOpts.runInstance != nil {
-		fqn = instanceQualifiedName(fqn, providedOpts.runInstance)
+		fqn = instanceQualifiedName(fqn, providedOpts.runInstance.ConfigName())
 	}
 
 	// Add the fn name to the options so we can communicate it with DBOSContext.RunWorkflow
@@ -1315,8 +1330,15 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		}
 	}
 
+	var configName *string
+	if registeredWorkflow.ConfigName != "" {
+		configName = &registeredWorkflow.ConfigName
+	}
+
 	workflowStatus := WorkflowStatus{
 		Name:               params.WorkflowName,
+		ClassName:          registeredWorkflow.ClassName,
+		ConfigName:         configName,
 		ApplicationVersion: params.ApplicationVersion,
 		ExecutorID:         c.GetExecutorID(),
 		Status:             status,
