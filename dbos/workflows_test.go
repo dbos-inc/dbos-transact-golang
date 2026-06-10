@@ -583,6 +583,71 @@ func TestConfiguredInstanceWorkflows(t *testing.T) {
 	require.Error(t, err, "running an instance method without WithRunInstance should fail")
 }
 
+// notifier is implemented by configuredNotifier and loudNotifier. Method values taken
+// through an interface share a single FQN across all implementations and instances.
+type notifier interface {
+	ConfiguredInstance
+	Send(ctx DBOSContext, msg string) (string, error)
+}
+
+type loudNotifier struct {
+	channel string
+}
+
+func (n *loudNotifier) ConfigName() string { return n.channel }
+
+func (n *loudNotifier) Send(ctx DBOSContext, msg string) (string, error) {
+	return strings.ToUpper(n.channel + ": " + msg), nil
+}
+
+// TestConfiguredInstanceInterfaceWorkflows verifies WithInstance disambiguates method values
+// taken through an interface: two different implementations behind the same interface FQN each
+// run on their own concrete receiver, on the direct path and on recovery.
+func TestConfiguredInstanceInterfaceWorkflows(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	var quiet notifier = &configuredNotifier{channel: "quiet"}
+	var loud notifier = &loudNotifier{channel: "loud"}
+	require.Equal(t, resolveWorkflowFunctionName(quiet.Send), resolveWorkflowFunctionName(loud.Send),
+		"precondition: interface method values should share an FQN across implementations")
+
+	RegisterWorkflow(dbosCtx, quiet.Send, WithInstance(quiet))
+	RegisterWorkflow(dbosCtx, loud.Send, WithInstance(loud))
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	for _, tc := range []struct {
+		inst      notifier
+		expected  string
+		className string
+	}{
+		{quiet, "quiet: hi", "configuredNotifier"},
+		{loud, "LOUD: HI", "loudNotifier"},
+	} {
+		workflowID := uuid.NewString()
+
+		handle, err := RunWorkflow(dbosCtx, tc.inst.Send, "hi", WithWorkflowID(workflowID), WithRunInstance(tc.inst))
+		require.NoError(t, err, "failed to run workflow on instance %q", tc.inst.ConfigName())
+		direct, err := handle.GetResult()
+		require.NoError(t, err, "failed to get direct result for instance %q", tc.inst.ConfigName())
+		require.Equal(t, tc.expected, direct, "direct execution ran the wrong implementation or instance")
+
+		// The recorded class name is the concrete implementation, not the interface
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get status for instance %q", tc.inst.ConfigName())
+		require.Equal(t, tc.className, status.ClassName)
+		require.NotNil(t, status.ConfigName, "config name not recorded")
+		require.Equal(t, tc.inst.ConfigName(), *status.ConfigName)
+
+		setWorkflowStatusPending(t, dbosCtx, workflowID)
+		recovered, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		require.Len(t, recovered, 1, "expected 1 recovered handle")
+		recResult, err := recovered[0].GetResult()
+		require.NoError(t, err, "failed to get recovered result for instance %q", tc.inst.ConfigName())
+		require.Equal(t, direct, recResult, "recovery ran a different implementation than direct execution")
+	}
+}
+
 func stepWithinAStep(ctx context.Context) (string, error) {
 	return simpleStep(ctx)
 }
