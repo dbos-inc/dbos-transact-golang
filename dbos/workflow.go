@@ -455,13 +455,14 @@ type wrappedWorkflowFunc func(ctx DBOSContext, input any, inputSerialization str
 
 type WorkflowRegistryEntry struct {
 	wrappedFunction wrappedWorkflowFunc
+	workflowFn      WorkflowFunc // Type-erased registered function taking a raw (non-encoded) input. Used by RunWorkflow for direct execution.
 	MaxRetries      int
 	Name            string
 	FQN             string // Fully qualified name of the workflow function
 	CronSchedule    string // Empty string for non-scheduled workflows
 }
 
-func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFunc, maxRetries int, customName string) {
+func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFunc, workflowFn WorkflowFunc, maxRetries int, customName string) {
 	// Skip if we don't have a concrete dbosContext
 	c, ok := ctx.(*dbosContext)
 	if !ok {
@@ -475,6 +476,7 @@ func registerWorkflow(ctx DBOSContext, workflowFQN string, fn wrappedWorkflowFun
 	// Check if workflow already exists and store atomically using LoadOrStore
 	entry := WorkflowRegistryEntry{
 		wrappedFunction: fn,
+		workflowFn:      workflowFn,
 		FQN:             workflowFQN,
 		MaxRetries:      maxRetries,
 		Name:            customName,
@@ -539,10 +541,25 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowFQN, customName string, 
 	c.logger.Info("Registered scheduled workflow", "fqn", workflowFQN, "customName", customName, "cron_schedule", cronSchedule)
 }
 
+// ConfiguredInstance is implemented by objects whose methods are registered as workflows.
+// ConfigName must return a stable, unique name for the instance: it disambiguates method
+// values bound to different receivers (which share a function name) and is durably recorded
+// so recovery runs the workflow on the correct instance. Instances must be registered with
+// the same config name on every process start, before Launch.
+type ConfiguredInstance interface {
+	ConfigName() string
+}
+
+// instanceQualifiedName returns the per-instance registry key for a workflow method.
+func instanceQualifiedName(fqn string, inst ConfiguredInstance) string {
+	return fqn + "/" + inst.ConfigName()
+}
+
 type workflowRegistrationOptions struct {
 	cronSchedule string
 	maxRetries   int
 	name         string
+	instance     ConfiguredInstance
 }
 
 type WorkflowRegistrationOption func(*workflowRegistrationOptions)
@@ -577,6 +594,20 @@ func WithSchedule(schedule string) WorkflowRegistrationOption {
 func WithWorkflowName(name string) WorkflowRegistrationOption {
 	return func(p *workflowRegistrationOptions) {
 		p.name = name
+	}
+}
+
+// WithInstance registers a workflow method bound to a specific configured instance.
+// Method values bound to different receivers (e.g. a.Run and b.Run) share a function
+// name, so each instance's method must be registered under a per-instance key:
+//
+//	dbos.RegisterWorkflow(ctx, slack.Send, dbos.WithInstance(slack))
+//	dbos.RegisterWorkflow(ctx, email.Send, dbos.WithInstance(email))
+//
+// Run the workflow with the matching dbos.WithRunInstance option.
+func WithInstance(instance ConfiguredInstance) WorkflowRegistrationOption {
+	return func(p *workflowRegistrationOptions) {
+		p.instance = instance
 	}
 }
 
@@ -644,6 +675,15 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 
 	fqn := resolveWorkflowFunctionName(fn)
 
+	// Method values bound to different receivers share an FQN: qualify the registry key
+	// with the instance config name so each instance registers its own entry.
+	if registrationParams.instance != nil {
+		if registrationParams.instance.ConfigName() == "" {
+			panic(fmt.Sprintf("configured instance for workflow %s must have a non-empty config name", fqn))
+		}
+		fqn = instanceQualifiedName(fqn, registrationParams.instance)
+	}
+
 	// Register a type-erased version of the durable workflow for recovery and queue runner
 	// Input will always come, encoded, from the database, so we decode it into the target type (captured by this wrapped closure)
 	// inputSerialization is the DB-stored serialization format for the encoded input.
@@ -686,7 +726,17 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		}
 		return newWorkflowPollingHandle[any](ctx, handle.GetWorkflowID()), nil // this is only used by recovery -- the queue runner dismisses it
 	})
-	registerWorkflow(ctx, fqn, typeErasedWrapper, registrationParams.maxRetries, registrationParams.name)
+
+	// Wrapper for direct calls in RunWorkflow
+	registeredWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
+		typedInput, ok := input.(P)
+		if !ok {
+			return nil, newWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", *new(P)), fmt.Sprintf("%T", input))
+		}
+		return fn(ctx, typedInput)
+	})
+
+	registerWorkflow(ctx, fqn, typeErasedWrapper, registeredWorkflow, registrationParams.maxRetries, registrationParams.name)
 
 	// If this is a scheduled workflow, register a cron job
 	if registrationParams.cronSchedule != "" {
@@ -784,6 +834,7 @@ type workflowOptions struct {
 	isDequeue           bool
 	isRecovery          bool
 	isPortableWorkflow  bool
+	runInstance         ConfiguredInstance
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
@@ -793,6 +844,17 @@ type WorkflowOption func(*workflowOptions)
 func WithWorkflowID(id string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.WorkflowID = id
+	}
+}
+
+// WithRunInstance runs a workflow method registered with dbos.WithInstance. The instance's
+// config name selects the per-instance registration, so the workflow executes on (and
+// recovers to) the correct instance:
+//
+//	handle, err := dbos.RunWorkflow(ctx, slack.Send, input, dbos.WithRunInstance(slack))
+func WithRunInstance(instance ConfiguredInstance) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.runInstance = instance
 	}
 }
 
@@ -938,12 +1000,32 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 		return nil, fmt.Errorf("ctx cannot be nil")
 	}
 
-	// Add the fn name to the options so we can communicate it with DBOSContext.RunWorkflow
-	opts = append(opts, withWorkflowName(resolveWorkflowFunctionName(fn)))
+	fqn := resolveWorkflowFunctionName(fn)
 
+	// If a configured instance was provided, qualify the name with its config name to
+	// select the per-instance registration (see WithInstance).
+	var providedOpts workflowOptions
+	for _, opt := range opts {
+		opt(&providedOpts)
+	}
+	if providedOpts.runInstance != nil {
+		fqn = instanceQualifiedName(fqn, providedOpts.runInstance)
+	}
+
+	// Add the fn name to the options so we can communicate it with DBOSContext.RunWorkflow
+	opts = append(opts, withWorkflowName(fqn))
+
+	// Execute the registered function (fallback on provided function for mocked contexts)
 	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
 		return fn(ctx, input.(P))
 	})
+	if c, ok := ctx.(*dbosContext); ok {
+		if entryAny, exists := c.workflowRegistry.Load(fqn); exists {
+			if entry, ok := entryAny.(WorkflowRegistryEntry); ok && entry.workflowFn != nil {
+				typedErasedWorkflow = entry.workflowFn
+			}
+		}
+	}
 
 	handle, err := ctx.RunWorkflow(ctx, typedErasedWorkflow, input, opts...)
 	if err != nil {
