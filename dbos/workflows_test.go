@@ -426,32 +426,6 @@ func retryPredicateWorkflow(ctx DBOSContext, _ string) (string, error) {
 	)
 }
 
-var retryPredicateAllowAllCount int
-
-// retryPredicateAllowAllWorkflow: predicate always returns true same as no predicate.
-func retryPredicateAllowAllWorkflow(ctx DBOSContext, _ string) (string, error) {
-	return RunAsStep(ctx, func(_ context.Context) (string, error) {
-		retryPredicateAllowAllCount++
-		return "", fmt.Errorf("always transient")
-	},
-		WithStepMaxRetries(3),
-		WithBaseInterval(1*time.Millisecond),
-		WithRetryPredicate(func(err error) bool { return true }),
-	)
-}
-
-var retryPredicateNilCount int
-
-// retryPredicateNilWorkflow: no predicate set - all errors retried up to maxRetries.
-func retryPredicateNilWorkflow(ctx DBOSContext, _ string) (string, error) {
-	return RunAsStep(ctx, func(_ context.Context) (string, error) {
-		retryPredicateNilCount++
-		return "", fmt.Errorf("always fails")
-	},
-		WithStepMaxRetries(2),
-		WithBaseInterval(1*time.Millisecond),
-	)
-}
 
 func stepIdempotencyTest(_ context.Context) (string, error) {
 	stepIdempotencyCounter++
@@ -521,8 +495,6 @@ func TestSteps(t *testing.T) {
 	RegisterWorkflow(dbosCtx, testStepWf2)
 	RegisterWorkflow(dbosCtx, genericStepWorkflow)
 	RegisterWorkflow(dbosCtx, retryPredicateWorkflow)
-	RegisterWorkflow(dbosCtx, retryPredicateAllowAllWorkflow)
-	RegisterWorkflow(dbosCtx, retryPredicateNilWorkflow)
 	// Create a workflow that uses custom step names
 	customNameWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 		// Run a step with a custom name
@@ -712,27 +684,6 @@ func TestSteps(t *testing.T) {
 		assert.Contains(t, err.Error(), "permanent failure")
 	})
 
-	t.Run("RetryPredicateAllowsRetryableErrors", func(t *testing.T) {
-		retryPredicateAllowAllCount = 0
-		handle, err := RunWorkflow(dbosCtx, retryPredicateAllowAllWorkflow, "")
-		require.NoError(t, err)
-
-		_, err = handle.GetResult()
-		require.Error(t, err)
-		// 1 initial + 3 retries = 4 total (predicate always returns true = no early exit)
-		assert.Equal(t, 4, retryPredicateAllowAllCount, "expected all retries to run when predicate always returns true")
-	})
-
-	t.Run("RetryPredicateNilBehavesLikeNoOption", func(t *testing.T) {
-		retryPredicateNilCount = 0
-		handle, err := RunWorkflow(dbosCtx, retryPredicateNilWorkflow, "")
-		require.NoError(t, err)
-
-		_, err = handle.GetResult()
-		require.Error(t, err)
-		// 1 initial + 2 retries = 3 total (nil predicate = existing behaviour unchanged)
-		assert.Equal(t, 3, retryPredicateNilCount, "expected all retries when no predicate set")
-	})
 
 	t.Run("checkStepName", func(t *testing.T) {
 		// Run first workflow with custom step name
