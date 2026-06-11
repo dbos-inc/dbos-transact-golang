@@ -103,6 +103,7 @@ func TestClientEnqueue(t *testing.T) {
 		for _, inst := range []*configuredNotifier{slackNotifier, emailNotifier} {
 			handle, err := Enqueue[string, string](client, queue.Name, "NotifierWorkflow", "hi",
 				WithEnqueueConfigName(inst.channel),
+				WithEnqueueClassName("interop"),
 				WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			require.NoError(t, err)
 
@@ -115,6 +116,7 @@ func TestClientEnqueue(t *testing.T) {
 			assert.Equal(t, "NotifierWorkflow", status.Name)
 			require.NotNil(t, status.ConfigName, "config name not recorded")
 			assert.Equal(t, inst.channel, *status.ConfigName)
+			assert.Equal(t, "interop", status.ClassName, "enqueuer-provided class name not preserved")
 		}
 		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up")
 	})

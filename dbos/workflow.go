@@ -788,7 +788,7 @@ func (c *dbosContext) resolveWorkflowName(workflowFn any) (string, error) {
 	fqn := runtime.FuncForPC(reflect.ValueOf(workflowFn).Pointer()).Name()
 	value, ok := c.workflowRegistry.Load(fqn)
 	if !ok {
-		return "", fmt.Errorf("workflow function not registered: %s", fqn)
+		return "", fmt.Errorf("workflow function not registered: %s (note: configured instances are not supported with scheduled workflows)", fqn)
 	}
 	entry := value.(WorkflowRegistryEntry)
 	if entry.Name != "" {
