@@ -167,8 +167,9 @@ func WithEnqueueClassName(className string) EnqueueOption {
 }
 
 // WithEnqueueConfigName sets the config/instance name for the enqueued workflow.
-// This is required when enqueueing to Python, TypeScript, or Java targets that
-// register workflows on class instances (e.g. DBOSConfiguredInstance / ConfiguredInstance).
+// This is required when enqueueing to a workflow registered on a configured instance:
+// a Go workflow registered with WithInstance, or a Python/TypeScript/Java class
+// instance workflow (e.g. DBOSConfiguredInstance / ConfiguredInstance).
 // Pass an empty string ("") to target the default (unnamed) instance.
 func WithEnqueueConfigName(configName string) EnqueueOption {
 	return func(opts *enqueueOptions) {

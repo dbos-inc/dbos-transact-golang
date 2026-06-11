@@ -296,8 +296,13 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 				queueLogger.Debug("Dequeued workflows from queue", "workflows", len(dequeuedWorkflows))
 			}
 			for _, workflow := range dequeuedWorkflows {
-				// Find the workflow in the registry
-				wfName, ok := ctx.workflowCustomNametoFQN.Load(workflow.name)
+				// Find the workflow in the registry. Configured instance workflows are
+				// registered under a name qualified with their config name.
+				lookupName := workflow.name
+				if workflow.configName != nil && *workflow.configName != "" {
+					lookupName = instanceQualifiedName(workflow.name, *workflow.configName)
+				}
+				wfName, ok := ctx.workflowCustomNametoFQN.Load(lookupName)
 				if !ok {
 					queueLogger.Error("Workflow not found in registry", "workflow_name", workflow.name)
 					continue

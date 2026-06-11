@@ -385,6 +385,269 @@ func TestWorkflowsRegistration(t *testing.T) {
 	})
 }
 
+// The types and factories below each produce TWO workflow function values that
+// share a fully-qualified name (FQN) under resolveWorkflowFunctionName, even
+// though each carries different captured state. The FQN is derived from the
+// entry program counter via runtime.FuncForPC; the receiver/closure data is
+// lost. These are the five FQN-collision cases from the issue.
+
+// Case 1: value-receiver method values -> "...fqnCollidingValueHolder.Run-fm".
+type fqnCollidingValueHolder struct {
+	label string
+}
+
+func (h fqnCollidingValueHolder) Run(ctx DBOSContext, input string) (string, error) {
+	return h.label, nil
+}
+
+// Case 2: pointer-receiver method values -> "...(*fqnCollidingPtrHolder).Run-fm".
+type fqnCollidingPtrHolder struct {
+	label string
+}
+
+func (h *fqnCollidingPtrHolder) Run(ctx DBOSContext, input string) (string, error) {
+	return h.label, nil
+}
+
+// Case 3: interface method values -> "...fqnCollidingSpeaker.Run-fm" (named for
+// the interface method, independent of the concrete type behind it).
+type fqnCollidingSpeaker interface {
+	Run(ctx DBOSContext, input string) (string, error)
+}
+
+// Case 4: closures from a single literal evaluated multiple times (loop) ->
+// "...fqnCollidingLoopClosures.func1".
+func fqnCollidingLoopClosures(labels ...string) []Workflow[string, string] {
+	fns := make([]Workflow[string, string], 0, len(labels))
+	for _, label := range labels {
+		fns = append(fns, func(ctx DBOSContext, input string) (string, error) {
+			return label, nil
+		})
+	}
+	return fns
+}
+
+// Case 5: factory closures. The factory is kept un-inlined so every call shares
+// "...fqnCollidingFactory.func1". Without go:noinline the compiler may inline the
+// factory per call site, yielding distinct func1/func2 names (no collision).
+//
+//go:noinline
+func fqnCollidingFactory(label string) Workflow[string, string] {
+	return func(ctx DBOSContext, input string) (string, error) {
+		return label, nil
+	}
+}
+
+// TestRunWorkflowProvidedVsRegisteredDivergence reproduces the bug where
+// RunWorkflow directly executes the *provided* function value, while queue and
+// recovery execution run the *registered* function looked up by FQN. When two
+// distinct function values share an FQN, the same workflow ID produces different
+// results depending on the execution path (direct vs recovery), causing
+// nondeterminism. Each subtest exercises one FQN-collision case from the issue.
+func TestRunWorkflowProvidedVsRegisteredDivergence(t *testing.T) {
+	loopClosures := fqnCollidingLoopClosures("registered", "provided")
+
+	cases := []struct {
+		name         string
+		registeredWf Workflow[string, string]
+		providedWf   Workflow[string, string]
+	}{
+		{
+			name:         "value receiver method values",
+			registeredWf: fqnCollidingValueHolder{label: "registered"}.Run,
+			providedWf:   fqnCollidingValueHolder{label: "provided"}.Run,
+		},
+		{
+			name:         "pointer receiver method values",
+			registeredWf: (&fqnCollidingPtrHolder{label: "registered"}).Run,
+			providedWf:   (&fqnCollidingPtrHolder{label: "provided"}).Run,
+		},
+		{
+			name:         "interface method values",
+			registeredWf: fqnCollidingSpeaker(fqnCollidingValueHolder{label: "registered"}).Run,
+			providedWf:   fqnCollidingSpeaker(fqnCollidingValueHolder{label: "provided"}).Run,
+		},
+		{
+			name:         "loop closures from one literal",
+			registeredWf: loopClosures[0],
+			providedWf:   loopClosures[1],
+		},
+		{
+			name:         "factory closures (not inlined)",
+			registeredWf: fqnCollidingFactory("registered"),
+			providedWf:   fqnCollidingFactory("provided"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Precondition: the two values must share an FQN, otherwise the
+			// registry entry for registeredWf would not be the one resolved for
+			// providedWf and the bug would not be exercised.
+			require.Equal(t,
+				resolveWorkflowFunctionName(tc.registeredWf),
+				resolveWorkflowFunctionName(tc.providedWf),
+				"the two function values must share an FQN to exercise the bug")
+
+			dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+			RegisterWorkflow(dbosCtx, tc.registeredWf)
+			require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+			workflowID := uuid.NewString()
+
+			// Direct execution path: RunWorkflow runs the provided fn.
+			handle, err := RunWorkflow(dbosCtx, tc.providedWf, "input", WithWorkflowID(workflowID))
+			require.NoError(t, err, "failed to run workflow")
+			result1, err := handle.GetResult()
+			require.NoError(t, err, "failed to get result from direct execution")
+
+			// Recovery path: resolves the function from the registry by FQN and
+			// runs the registered wrapped function.
+			setWorkflowStatusPending(t, dbosCtx, workflowID)
+			recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+			require.NoError(t, err, "failed to recover pending workflows")
+			require.Len(t, recoveredHandles, 1, "expected 1 recovered handle")
+			require.Equal(t, workflowID, recoveredHandles[0].GetWorkflowID())
+			result2, err := recoveredHandles[0].GetResult()
+			require.NoError(t, err, "failed to get result from recovered execution")
+
+			// Invariant: the same workflow ID must produce the same result
+			// regardless of execution path. Under the bug, direct execution runs
+			// the provided body ("provided") while recovery runs the registered
+			// body ("registered") -> nondeterminism. After the fix, both run the
+			// registered body.
+			require.Equal(t, result1, result2,
+				"recovery returned a different result than direct execution for the same workflow ID (nondeterminism): direct=%q recovered=%q",
+				result1, result2)
+		})
+	}
+}
+
+// configuredNotifier is a workflow holder whose method is registered once per instance
+// via WithInstance, distinguishing receivers that would otherwise share an FQN.
+type configuredNotifier struct {
+	channel string
+}
+
+func (n *configuredNotifier) ConfigName() string { return n.channel }
+
+func (n *configuredNotifier) Send(ctx DBOSContext, msg string) (string, error) {
+	return n.channel + ": " + msg, nil
+}
+
+// TestConfiguredInstanceWorkflows verifies that two instances of the same workflow method,
+// registered with WithInstance and run with WithRunInstance, each execute on their own
+// receiver -- on the direct path and on recovery -- and that running without
+// WithRunInstance fails loudly instead of silently using another instance.
+func TestConfiguredInstanceWorkflows(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	slack := &configuredNotifier{channel: "slack"}
+	email := &configuredNotifier{channel: "email"}
+
+	RegisterWorkflow(dbosCtx, slack.Send, WithInstance(slack))
+	RegisterWorkflow(dbosCtx, email.Send, WithInstance(email))
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	for _, inst := range []*configuredNotifier{slack, email} {
+		workflowID := uuid.NewString()
+
+		handle, err := RunWorkflow(dbosCtx, inst.Send, "hi", WithWorkflowID(workflowID), WithRunInstance(inst))
+		require.NoError(t, err, "failed to run workflow on instance %q", inst.channel)
+		direct, err := handle.GetResult()
+		require.NoError(t, err, "failed to get direct result for instance %q", inst.channel)
+		require.Equal(t, inst.channel+": hi", direct, "direct execution ran the wrong instance")
+
+		// The record stores the unqualified workflow name plus the instance class and config names
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get status for instance %q", inst.channel)
+		require.Equal(t, resolveWorkflowFunctionName(inst.Send), status.Name)
+		require.Equal(t, "configuredNotifier", status.ClassName)
+		require.NotNil(t, status.ConfigName, "config name not recorded")
+		require.Equal(t, inst.channel, *status.ConfigName)
+
+		setWorkflowStatusPending(t, dbosCtx, workflowID)
+		recovered, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		require.Len(t, recovered, 1, "expected 1 recovered handle")
+		require.Equal(t, workflowID, recovered[0].GetWorkflowID())
+		recResult, err := recovered[0].GetResult()
+		require.NoError(t, err, "failed to get recovered result for instance %q", inst.channel)
+		require.Equal(t, direct, recResult, "recovery ran a different instance than direct execution")
+	}
+
+	// Without WithRunInstance the bare (colliding) FQN was never registered: fail loudly
+	// rather than silently running some other instance.
+	_, err := RunWorkflow(dbosCtx, slack.Send, "hi")
+	require.Error(t, err, "running an instance method without WithRunInstance should fail")
+}
+
+// notifier is implemented by configuredNotifier and loudNotifier. Method values taken
+// through an interface share a single FQN across all implementations and instances.
+type notifier interface {
+	ConfiguredInstance
+	Send(ctx DBOSContext, msg string) (string, error)
+}
+
+type loudNotifier struct {
+	channel string
+}
+
+func (n *loudNotifier) ConfigName() string { return n.channel }
+
+func (n *loudNotifier) Send(ctx DBOSContext, msg string) (string, error) {
+	return strings.ToUpper(n.channel + ": " + msg), nil
+}
+
+// TestConfiguredInstanceInterfaceWorkflows verifies WithInstance disambiguates method values
+// taken through an interface: two different implementations behind the same interface FQN each
+// run on their own concrete receiver, on the direct path and on recovery.
+func TestConfiguredInstanceInterfaceWorkflows(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	var quiet notifier = &configuredNotifier{channel: "quiet"}
+	var loud notifier = &loudNotifier{channel: "loud"}
+	require.Equal(t, resolveWorkflowFunctionName(quiet.Send), resolveWorkflowFunctionName(loud.Send),
+		"precondition: interface method values should share an FQN across implementations")
+
+	RegisterWorkflow(dbosCtx, quiet.Send, WithInstance(quiet))
+	RegisterWorkflow(dbosCtx, loud.Send, WithInstance(loud))
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	for _, tc := range []struct {
+		inst      notifier
+		expected  string
+		className string
+	}{
+		{quiet, "quiet: hi", "configuredNotifier"},
+		{loud, "LOUD: HI", "loudNotifier"},
+	} {
+		workflowID := uuid.NewString()
+
+		handle, err := RunWorkflow(dbosCtx, tc.inst.Send, "hi", WithWorkflowID(workflowID), WithRunInstance(tc.inst))
+		require.NoError(t, err, "failed to run workflow on instance %q", tc.inst.ConfigName())
+		direct, err := handle.GetResult()
+		require.NoError(t, err, "failed to get direct result for instance %q", tc.inst.ConfigName())
+		require.Equal(t, tc.expected, direct, "direct execution ran the wrong implementation or instance")
+
+		// The recorded class name is the concrete implementation, not the interface
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get status for instance %q", tc.inst.ConfigName())
+		require.Equal(t, tc.className, status.ClassName)
+		require.NotNil(t, status.ConfigName, "config name not recorded")
+		require.Equal(t, tc.inst.ConfigName(), *status.ConfigName)
+
+		setWorkflowStatusPending(t, dbosCtx, workflowID)
+		recovered, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		require.Len(t, recovered, 1, "expected 1 recovered handle")
+		recResult, err := recovered[0].GetResult()
+		require.NoError(t, err, "failed to get recovered result for instance %q", tc.inst.ConfigName())
+		require.Equal(t, direct, recResult, "recovery ran a different implementation than direct execution")
+	}
+}
+
 func stepWithinAStep(ctx context.Context) (string, error) {
 	return simpleStep(ctx)
 }

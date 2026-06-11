@@ -391,3 +391,40 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 	assert.Equal(t, expectedAuthenticatedRoles, workflow.AuthenticatedRoles, "authenticated roles should match")
 	assert.Equal(t, WorkflowStatusSuccess, workflow.Status, "workflow should have succeeded")
 }
+
+// TestDebouncerConfiguredInstance verifies a debouncer can target a workflow method
+// registered on a configured instance via WithDebouncerInstance, and that each
+// debouncer runs the target on its own instance.
+func TestDebouncerConfiguredInstance(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	internalQueue := dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
+	internalQueue.basePollingInterval = 10 * time.Millisecond
+	dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME] = internalQueue
+
+	slack := &configuredNotifier{channel: "slack"}
+	email := &configuredNotifier{channel: "email"}
+	RegisterWorkflow(dbosCtx, slack.Send, WithInstance(slack))
+	RegisterWorkflow(dbosCtx, email.Send, WithInstance(email))
+
+	// Without the instance, the bare (colliding) FQN was never registered: fail loudly
+	require.Panics(t, func() { NewDebouncer(dbosCtx, slack.Send) },
+		"creating a debouncer for an instance method without WithDebouncerInstance should panic")
+
+	slackDebouncer := NewDebouncer(dbosCtx, slack.Send, WithDebouncerInstance(slack))
+	emailDebouncer := NewDebouncer(dbosCtx, email.Send, WithDebouncerInstance(email))
+
+	require.NoError(t, Launch(dbosCtx))
+
+	handle, err := slackDebouncer.Debounce(dbosCtx, "slack-key", 100*time.Millisecond, "hi")
+	require.NoError(t, err, "failed to debounce on the slack instance")
+	result, err := handle.GetResult()
+	require.NoError(t, err, "failed to get result from the slack instance")
+	assert.Equal(t, "slack: hi", result, "debounced workflow should run on the slack instance")
+
+	handle, err = emailDebouncer.Debounce(dbosCtx, "email-key", 100*time.Millisecond, "hi")
+	require.NoError(t, err, "failed to debounce on the email instance")
+	result, err = handle.GetResult()
+	require.NoError(t, err, "failed to get result from the email instance")
+	assert.Equal(t, "email: hi", result, "debounced workflow should run on the email instance")
+}

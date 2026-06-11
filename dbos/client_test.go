@@ -75,6 +75,12 @@ func TestClientEnqueue(t *testing.T) {
 	}
 	RegisterWorkflow(serverCtx, partitionedWorkflow, WithWorkflowName("PartitionedWorkflow"))
 
+	// Two configured instances of the same workflow method, sharing a custom name (for the config name test)
+	slackNotifier := &configuredNotifier{channel: "slack"}
+	emailNotifier := &configuredNotifier{channel: "email"}
+	RegisterWorkflow(serverCtx, slackNotifier.Send, WithWorkflowName("NotifierWorkflow"), WithInstance(slackNotifier))
+	RegisterWorkflow(serverCtx, emailNotifier.Send, WithWorkflowName("NotifierWorkflow"), WithInstance(emailNotifier))
+
 	// Launch the server context to start processing tasks
 	err := Launch(serverCtx)
 	require.NoError(t, err)
@@ -90,6 +96,29 @@ func TestClientEnqueue(t *testing.T) {
 		if client != nil {
 			client.Shutdown(30 * time.Second)
 		}
+	})
+
+	t.Run("EnqueueToConfiguredInstance", func(t *testing.T) {
+		// The config name routes the workflow to the matching registered instance
+		for _, inst := range []*configuredNotifier{slackNotifier, emailNotifier} {
+			handle, err := Enqueue[string, string](client, queue.Name, "NotifierWorkflow", "hi",
+				WithEnqueueConfigName(inst.channel),
+				WithEnqueueClassName("interop"),
+				WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+			require.NoError(t, err)
+
+			result, err := handle.GetResult()
+			require.NoError(t, err)
+			assert.Equal(t, inst.channel+": hi", result, "workflow ran on the wrong instance")
+
+			status, err := handle.GetStatus()
+			require.NoError(t, err)
+			assert.Equal(t, "NotifierWorkflow", status.Name)
+			require.NotNil(t, status.ConfigName, "config name not recorded")
+			assert.Equal(t, inst.channel, *status.ConfigName)
+			assert.Equal(t, "interop", status.ClassName, "enqueuer-provided class name not preserved")
+		}
+		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up")
 	})
 
 	t.Run("EnqueueAndGetResult", func(t *testing.T) {
@@ -1778,6 +1807,54 @@ func TestDebouncerClient(t *testing.T) {
 		require.NoError(t, err, "failed to get result from first handle")
 		assert.Equal(t, "independent-1", result1, "first handle should get its own input")
 	})
+}
+
+// TestDebouncerClientConfiguredInstance verifies that a client-side debouncer targets the
+// workflow registration bound to a specific configured instance via WithDebouncerConfigName.
+func TestDebouncerClientConfiguredInstance(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// Set internal queue polling interval to 10ms for faster tests
+	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
+	internalQueue.basePollingInterval = 10 * time.Millisecond
+	serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME] = internalQueue
+
+	// Two configured instances of the same workflow method, sharing a custom name
+	slackNotifier := &configuredNotifier{channel: "slack"}
+	emailNotifier := &configuredNotifier{channel: "email"}
+	RegisterWorkflow(serverCtx, slackNotifier.Send, WithWorkflowName("NotifierWorkflow"), WithInstance(slackNotifier))
+	RegisterWorkflow(serverCtx, emailNotifier.Send, WithWorkflowName("NotifierWorkflow"), WithInstance(emailNotifier))
+
+	err := Launch(serverCtx)
+	require.NoError(t, err)
+
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
+
+	// The config name routes the debounced workflow to the matching registered instance
+	for _, inst := range []*configuredNotifier{slackNotifier, emailNotifier} {
+		debouncer := NewDebouncerClient[string, string]("NotifierWorkflow", client,
+			WithDebouncerTimeout(10*time.Second),
+			WithDebouncerConfigName(inst.channel))
+
+		handle, err := debouncer.Debounce("instance-key-"+inst.channel, 100*time.Millisecond, "hi")
+		require.NoError(t, err, "failed to debounce on instance %q", inst.channel)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result for instance %q", inst.channel)
+		assert.Equal(t, inst.channel+": hi", result, "debounced workflow ran on the wrong instance")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, "NotifierWorkflow", status.Name)
+		require.NotNil(t, status.ConfigName, "config name not recorded")
+		assert.Equal(t, inst.channel, *status.ConfigName)
+	}
 }
 
 func TestDebouncerClientWorkflowOptions(t *testing.T) {
