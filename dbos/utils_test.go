@@ -56,7 +56,12 @@ func backendDatabaseURL(t *testing.T) string {
 	return url
 }
 
-/* Test database reset */
+/* Test database reset.
+Deletes rows from dbos-managed tables instead of dropping the database, which
+is much cheaper — especially on CockroachDB where every DDL is an async
+schema-change job. Falls back to a real drop when any dbos schema is not at
+the latest migration version (e.g. after a schema-mutating migration test or
+a branch switch). */
 func resetTestDatabase(t *testing.T, databaseURL string) {
 	t.Helper()
 
@@ -64,7 +69,95 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 		return
 	}
 
-	// Clean up the test database
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		// Database likely does not exist yet; NewDBOSContext will create it.
+		return
+	}
+	defer conn.Close(ctx)
+
+	if !cleanDatabaseRows(ctx, conn) {
+		conn.Close(ctx)
+		dropTestDatabase(t, databaseURL)
+	}
+}
+
+// cleanDatabaseRows empties every dbos-managed schema in the connected
+// database. Returns false when the database cannot be safely reused and must
+// be dropped instead.
+func cleanDatabaseRows(ctx context.Context, conn *pgx.Conn) bool {
+	migrations := buildMigrations(_DEFAULT_SYSTEM_DB_SCHEMA, isCockroachDB(ctx, conn))
+	latestVersion := migrations[len(migrations)-1].version
+
+	rows, err := conn.Query(ctx,
+		`SELECT DISTINCT table_schema FROM information_schema.tables WHERE table_name IN ('workflow_status', $1)`,
+		_DBOS_MIGRATION_TABLE)
+	if err != nil {
+		return false
+	}
+	var schemas []string
+	for rows.Next() {
+		var schema string
+		if err := rows.Scan(&schema); err != nil {
+			rows.Close()
+			return false
+		}
+		schemas = append(schemas, schema)
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		return false
+	}
+
+	for _, schema := range schemas {
+		var version int64
+		q := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
+		if err := conn.QueryRow(ctx, q).Scan(&version); err != nil || version != latestVersion {
+			return false
+		}
+	}
+
+	for _, schema := range schemas {
+		sanitizedSchema := pgx.Identifier{schema}.Sanitize()
+		// workflow_status first: its ON DELETE CASCADE empties the FK children.
+		if _, err := conn.Exec(ctx, fmt.Sprintf("DELETE FROM %s.workflow_status", sanitizedSchema)); err != nil {
+			return false
+		}
+		tableRows, err := conn.Query(ctx,
+			`SELECT table_name FROM information_schema.tables
+			 WHERE table_schema = $1 AND table_type = 'BASE TABLE' AND table_name NOT IN ('workflow_status', $2)`,
+			schema, _DBOS_MIGRATION_TABLE)
+		if err != nil {
+			return false
+		}
+		var tables []string
+		for tableRows.Next() {
+			var table string
+			if err := tableRows.Scan(&table); err != nil {
+				tableRows.Close()
+				return false
+			}
+			tables = append(tables, table)
+		}
+		tableRows.Close()
+		if tableRows.Err() != nil {
+			return false
+		}
+		for _, table := range tables {
+			q := fmt.Sprintf("DELETE FROM %s.%s", sanitizedSchema, pgx.Identifier{table}.Sanitize())
+			if _, err := conn.Exec(ctx, q); err != nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// dropTestDatabase drops the test database entirely.
+func dropTestDatabase(t *testing.T, databaseURL string) {
+	t.Helper()
+
 	parsedURL, err := pgx.ParseConfig(databaseURL)
 	require.NoError(t, err)
 
