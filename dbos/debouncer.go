@@ -46,14 +46,48 @@ type Debouncer[P any, R any] struct {
 }
 
 // DebouncerOption is a functional option for configuring debouncer creation parameters.
-type DebouncerOption func(*time.Duration)
+type DebouncerOption func(*debouncerOptions)
+
+type debouncerOptions struct {
+	timeout    time.Duration
+	instance   ConfiguredInstance
+	configName string
+}
 
 // WithDebouncerTimeout sets the maximum time before starting the workflow.
 // If timeout is zero (the default), there is no maximum time limit.
 func WithDebouncerTimeout(timeout time.Duration) DebouncerOption {
-	return func(t *time.Duration) {
-		*t = timeout
+	return func(o *debouncerOptions) {
+		o.timeout = timeout
 	}
+}
+
+// WithDebouncerInstance targets the workflow registration bound to the given configured
+// instance (see WithInstance). Required when the debounced workflow is a method of a
+// configured instance:
+//
+//	debouncer := dbos.NewDebouncer(ctx, slack.Send, dbos.WithDebouncerInstance(slack))
+func WithDebouncerInstance(instance ConfiguredInstance) DebouncerOption {
+	return func(o *debouncerOptions) {
+		o.instance = instance
+	}
+}
+
+// WithDebouncerConfigName targets the workflow registration bound to the configured
+// instance with the given config name. Use with NewDebouncerClient, where the instance
+// object itself is not available.
+func WithDebouncerConfigName(configName string) DebouncerOption {
+	return func(o *debouncerOptions) {
+		o.configName = configName
+	}
+}
+
+// resolveConfigName returns the config name from the instance, if set, else the raw config name.
+func (o *debouncerOptions) resolveConfigName() string {
+	if o.instance != nil {
+		return o.instance.ConfigName()
+	}
+	return o.configName
 }
 
 // NewDebouncer creates a new debouncer for the specified workflow.
@@ -63,6 +97,7 @@ func WithDebouncerTimeout(timeout time.Duration) DebouncerOption {
 //   - workflow: The workflow function to debounce (must be registered)
 //   - opts: Optional functional options for configuring the debouncer:
 //   - WithDebouncerTimeout: Maximum time before starting the workflow (0 = no timeout) [optional]
+//   - WithDebouncerInstance: The configured instance the workflow method is bound to [required for instance methods]
 //
 // Returns a pointer to a Debouncer instance that can be used to call Debounce.
 //
@@ -82,9 +117,9 @@ func NewDebouncer[P any, R any](
 	workflow Workflow[P, R],
 	opts ...DebouncerOption,
 ) *Debouncer[P, R] {
-	timeout := time.Duration(0) // Default: no timeout
+	options := debouncerOptions{}
 	for _, opt := range opts {
-		opt(&timeout)
+		opt(&options)
 	}
 
 	dbosCtx, ok := ctx.(*dbosContext)
@@ -98,8 +133,12 @@ func NewDebouncer[P any, R any](
 		panic(newInitializationError("cannot create debouncer after DBOS has launched"))
 	}
 
-	// Get the fully qualified name of the workflow function using reflection
+	// Get the fully qualified name of the workflow function using reflection.
+	// Configured instance workflows are registered under a name qualified with their config name.
 	fqn := resolveWorkflowFunctionName(workflow)
+	if configName := options.resolveConfigName(); configName != "" {
+		fqn = instanceQualifiedName(fqn, configName)
+	}
 
 	dbosCtx.logger.Debug("Creating new debouncer", "workflow_fqn", fqn)
 
@@ -117,7 +156,7 @@ func NewDebouncer[P any, R any](
 
 	return &Debouncer[P, R]{
 		WorkflowFQN:          fqn,
-		Timeout:              timeout,
+		Timeout:              options.timeout,
 		internalDebouncerFQN: internalDebouncerFQN,
 	}
 }
@@ -239,6 +278,7 @@ type DebouncerClient[P any, R any] struct {
 //   - client: The DBOS client to use for operations
 //   - opts: Optional functional options for configuring the debouncer:
 //   - WithDebouncerTimeout: Maximum time before starting the workflow (0 = no timeout) [optional]
+//   - WithDebouncerConfigName: Config name of the configured instance the workflow is bound to [required for instance methods]
 //
 // Returns a pointer to a DebouncerClient instance that can be used to call Debounce.
 func NewDebouncerClient[P any, R any](
@@ -246,15 +286,20 @@ func NewDebouncerClient[P any, R any](
 	client Client,
 	opts ...DebouncerOption,
 ) *DebouncerClient[P, R] {
-	timeout := time.Duration(0) // Default: no timeout
+	options := debouncerOptions{}
 	for _, opt := range opts {
-		opt(&timeout)
+		opt(&options)
+	}
+
+	// Configured instance workflows are registered under a name qualified with their config name.
+	if configName := options.resolveConfigName(); configName != "" {
+		workflowName = instanceQualifiedName(workflowName, configName)
 	}
 
 	return &DebouncerClient[P, R]{
 		WorkflowName: workflowName,
 		Client:       client,
-		Timeout:      timeout,
+		Timeout:      options.timeout,
 		// Use the any,any internal debouncer workflow FQN because that's all the server knows
 		internalDebouncerFQN: resolveWorkflowFunctionName(internalDebouncerWF[any, any]),
 	}
