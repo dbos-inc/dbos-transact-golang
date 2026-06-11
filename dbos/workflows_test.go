@@ -668,6 +668,28 @@ func stepRetryAlwaysFailsStep(_ context.Context) (string, error) {
 
 var stepIdempotencyCounter int
 
+// --- retry predicate test helpers ---
+
+var retryPredicateAttemptCount int
+
+// retryPredicateWorkflow: stops on "permanent" errors, retries transient ones.
+func retryPredicateWorkflow(ctx DBOSContext, _ string) (string, error) {
+	return RunAsStep(ctx, func(_ context.Context) (string, error) {
+		retryPredicateAttemptCount++
+		if retryPredicateAttemptCount == 2 {
+			return "", fmt.Errorf("permanent failure")
+		}
+		return "", fmt.Errorf("transient failure")
+	},
+		WithStepMaxRetries(5),
+		WithBaseInterval(1*time.Millisecond),
+		WithRetryPredicate(func(err error) bool {
+			return !strings.Contains(err.Error(), "permanent")
+		}),
+	)
+}
+
+
 func stepIdempotencyTest(_ context.Context) (string, error) {
 	stepIdempotencyCounter++
 	return "", nil
@@ -735,6 +757,7 @@ func TestSteps(t *testing.T) {
 	RegisterWorkflow(dbosCtx, testStepWf1)
 	RegisterWorkflow(dbosCtx, testStepWf2)
 	RegisterWorkflow(dbosCtx, genericStepWorkflow)
+	RegisterWorkflow(dbosCtx, retryPredicateWorkflow)
 	// Create a workflow that uses custom step names
 	customNameWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 		// Run a step with a custom name
@@ -911,6 +934,19 @@ func TestSteps(t *testing.T) {
 		// Verify the idempotency step was executed only once
 		assert.Equal(t, 1, stepIdempotencyCounter, "expected idempotency step to be executed only once")
 	})
+
+	t.Run("RetryPredicateStopsOnNonRetryableError", func(t *testing.T) {
+		retryPredicateAttemptCount = 0
+		handle, err := RunWorkflow(dbosCtx, retryPredicateWorkflow, "")
+		require.NoError(t, err)
+
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected error from non-retryable failure")
+		// attempt 1 = transient (retried), attempt 2 = permanent (predicate returns false - stop)
+		assert.Equal(t, 2, retryPredicateAttemptCount, "expected exactly 2 attempts before predicate stopped retrying")
+		assert.Contains(t, err.Error(), "permanent failure")
+	})
+
 
 	t.Run("checkStepName", func(t *testing.T) {
 		// Run first workflow with custom step name
@@ -6347,7 +6383,7 @@ func TestStreams(t *testing.T) {
 		// Verifies that the readStream goroutine exits when the consumer's context is
 		// cancelled, even if the consumer stops reading from the channel.
 		// goleak (via checkLeaks:true on this test) will fail if the goroutine leaks.
-		streamBlockEvent = NewEvent()    // not set — workflow blocks after initial writes
+		streamBlockEvent = NewEvent()   // not set — workflow blocks after initial writes
 		streamStartedEvent = NewEvent() // signals that initial writes are done
 
 		streamKey := "test-stream-leak"
