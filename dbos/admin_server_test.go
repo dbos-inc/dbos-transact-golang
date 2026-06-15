@@ -198,6 +198,20 @@ func TestAdminServer(t *testing.T) {
 				endpoint:       fmt.Sprintf("http://localhost:%d/workflow/non-existent-workflow-id", _DEFAULT_ADMIN_SERVER_PORT),
 				expectedStatus: http.StatusNotFound,
 			},
+			{
+				name:           "Conductor endpoint responds correctly",
+				method:         "GET",
+				endpoint:       fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_CONDUCTOR_PATTERN, "GET /")),
+				expectedStatus: http.StatusOK,
+				validateResp: func(t *testing.T, resp *http.Response) {
+					var body struct {
+						Status bool `json:"status"`
+					}
+					err := json.NewDecoder(resp.Body).Decode(&body)
+					require.NoError(t, err, "Failed to decode conductor response")
+					assert.True(t, body.Status, "Expected conductor status to be true")
+				},
+			},
 		}
 
 		for _, tt := range tests {

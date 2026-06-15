@@ -632,8 +632,23 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	// This allows a client to debounce workflow and the server side to run them, even without knowing the actual workflow types
 	RegisterWorkflow(initExecutor, internalDebouncerWF[any, any])
 
-	// Initialize conductor if API key is provided
-	if config.ConductorAPIKey != "" {
+	// Initialize conductor. In DBOS Cloud, connect to Conductor for observability
+	// using the cloud-provided environment variables. Otherwise, connect if a
+	// Conductor API key was configured.
+	var conductorCfg *conductorConfig
+	if os.Getenv("DBOS__CLOUD") == "true" {
+		cloudAppName := os.Getenv("DBOS__CONDUCTOR_APP_NAME")
+		cloudConductorKey := os.Getenv("DBOS__CONDUCTOR_KEY")
+		cloudConductorURL := os.Getenv("DBOS__CONDUCTOR_URL")
+		if cloudAppName != "" && cloudConductorKey != "" && cloudConductorURL != "" {
+			conductorCfg = &conductorConfig{
+				url:              cloudConductorURL,
+				apiKey:           cloudConductorKey,
+				appName:          cloudAppName,
+				executorMetadata: config.ConductorExecutorMetadata,
+			}
+		}
+	} else if config.ConductorAPIKey != "" {
 		initExecutor.executorID = uuid.NewString()
 		if config.ConductorURL == "" {
 			dbosDomain := os.Getenv("DBOS_DOMAIN")
@@ -642,13 +657,16 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 			}
 			config.ConductorURL = fmt.Sprintf("wss://%s/conductor/v1alpha1", dbosDomain)
 		}
-		conductorConfig := conductorConfig{
+		conductorCfg = &conductorConfig{
 			url:              config.ConductorURL,
 			apiKey:           config.ConductorAPIKey,
 			appName:          config.AppName,
 			executorMetadata: config.ConductorExecutorMetadata,
 		}
-		conductor, err := newConductor(initExecutor, conductorConfig)
+	}
+
+	if conductorCfg != nil {
+		conductor, err := newConductor(initExecutor, *conductorCfg)
 		if err != nil {
 			return nil, newInitializationError(fmt.Sprintf("failed to initialize conductor: %v", err))
 		}

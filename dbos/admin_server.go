@@ -27,6 +27,7 @@ const (
 	_WORKFLOW_CANCEL_PATTERN          = "POST /workflows/{id}/cancel"
 	_WORKFLOW_RESUME_PATTERN          = "POST /workflows/{id}/resume"
 	_WORKFLOW_FORK_PATTERN            = "POST /workflows/{id}/fork"
+	_CONDUCTOR_PATTERN                = "GET /conductor"
 
 	_ADMIN_SERVER_READ_HEADER_TIMEOUT = 5 * time.Second
 )
@@ -241,6 +242,15 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("deactivated")); err != nil {
 			ctx.logger.Error("Error writing deactivate response", "error", err)
+		}
+	})
+
+	ctx.logger.Debug("Registering admin server endpoint", "pattern", _CONDUCTOR_PATTERN)
+	mux.HandleFunc(_CONDUCTOR_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{"status":true}`)); err != nil {
+			ctx.logger.Error("Error writing conductor response", "error", err)
 		}
 	})
 
