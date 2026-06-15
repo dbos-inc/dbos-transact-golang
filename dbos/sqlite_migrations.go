@@ -11,7 +11,7 @@ import (
 )
 
 // SQLite migration numbering mirrors pg numbering (matching Python's
-// sqlite_migrations list). pg migrations 10, 14, and 20 have no SQLite
+// sqlite_migrations list). pg migrations 10, 14, 20, 38, and 39 have no SQLite
 // counterpart, so those version numbers are skipped rather than renumbered.
 
 //go:embed migrations/sqlite/1_initial_dbos_schema.sql
@@ -116,9 +116,15 @@ var sqliteMigration36SQL string
 //go:embed migrations/sqlite/37_create_started_at_index.sql
 var sqliteMigration37SQL string
 
+// pg migrations 38 and 39 (plpgsql functions/triggers) have no SQLite
+// counterpart and are omitted.
+
+//go:embed migrations/sqlite/40_add_attributes.sql
+var sqliteMigration40SQL string
+
 // buildSqliteMigrations returns the SQLite migration list. Versions mirror pg
-// numbering (matching Python's sqlite_migrations); pg migrations 10, 14, and
-// 20 have no SQLite counterpart and are omitted.
+// numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
+// 38, and 39 have no SQLite counterpart and are omitted.
 func buildSqliteMigrations() []migrationFile {
 	return []migrationFile{
 		{version: 1, sql: sqliteMigration1SQL},
@@ -155,6 +161,7 @@ func buildSqliteMigrations() []migrationFile {
 		{version: 35, sql: sqliteMigration35SQL},
 		{version: 36, sql: sqliteMigration36SQL},
 		{version: 37, sql: sqliteMigration37SQL},
+		{version: 40, sql: sqliteMigration40SQL},
 	}
 }
 
