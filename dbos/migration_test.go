@@ -22,6 +22,17 @@ func poolFromContext(t *testing.T, ctx DBOSContext) *pgxpool.Pool {
 	return PgxPool(s.pool)
 }
 
+// detectCockroach reports whether the pool is connected to CockroachDB, so
+// migration tests build and run the same SQL variant the production runner
+// selects (some migrations, e.g. 38, emit Postgres-only DDL otherwise).
+func detectCockroach(t *testing.T, pool *pgxpool.Pool) bool {
+	t.Helper()
+	conn, err := pool.Acquire(context.Background())
+	require.NoError(t, err)
+	defer conn.Release()
+	return isCockroachDB(context.Background(), conn.Conn())
+}
+
 // TestShouldMigrate verifies the early-exit predicate used to skip the full
 // migration pipeline when the schema is already at the latest version.
 func TestShouldMigrate(t *testing.T) {
@@ -73,17 +84,18 @@ func TestOnlineMigrationsAreIdempotent(t *testing.T) {
 	ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 	pool := poolFromContext(t, ctx)
 	bg := context.Background()
+	isCockroach := detectCockroach(t, pool)
 
 	// First online migration is version 22 (drop forked_from index).
 	const rewindTo = int64(21)
-	migs := buildMigrations("dbos", false)
+	migs := buildMigrations("dbos", isCockroach)
 	latest := migs[len(migs)-1].version
 
 	_, err := pool.Exec(bg, "UPDATE dbos.dbos_migrations SET version = $1", rewindTo)
 	require.NoError(t, err)
 
 	logger := slog.Default()
-	require.NoError(t, runMigrations(bg, pool, "dbos", false, logger))
+	require.NoError(t, runMigrations(bg, pool, "dbos", isCockroach, logger))
 
 	var version int64
 	require.NoError(t, pool.QueryRow(bg, "SELECT version FROM dbos.dbos_migrations").Scan(&version))
@@ -98,14 +110,15 @@ func TestVersionNotBumpedOnMigrationFailure(t *testing.T) {
 	ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 	pool := poolFromContext(t, ctx)
 	bg := context.Background()
-	migs := buildMigrations("dbos", false)
+	isCockroach := detectCockroach(t, pool)
+	migs := buildMigrations("dbos", isCockroach)
 	latest := migs[len(migs)-1].version
 
 	const rewindTo = int64(20)
 	_, err := pool.Exec(bg, "UPDATE dbos.dbos_migrations SET version = $1", rewindTo)
 	require.NoError(t, err)
 
-	err = runMigrations(bg, pool, "dbos", false, slog.Default())
+	err = runMigrations(bg, pool, "dbos", isCockroach, slog.Default())
 	require.Error(t, err, "migration 21 should fail because dbos.queues already exists")
 	assert.Contains(t, err.Error(), "already exists")
 
@@ -117,7 +130,7 @@ func TestVersionNotBumpedOnMigrationFailure(t *testing.T) {
 	// later online migrations idempotently re-apply.
 	_, err = pool.Exec(bg, "DROP TABLE dbos.queues")
 	require.NoError(t, err)
-	require.NoError(t, runMigrations(bg, pool, "dbos", false, slog.Default()))
+	require.NoError(t, runMigrations(bg, pool, "dbos", isCockroach, slog.Default()))
 	require.NoError(t, pool.QueryRow(bg, "SELECT version FROM dbos.dbos_migrations").Scan(&version))
 	assert.Equal(t, latest, version)
 }
