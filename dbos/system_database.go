@@ -304,6 +304,18 @@ var migration36SQL string
 //go:embed migrations/37_create_started_at_index.sql
 var migration37SQL string
 
+//go:embed migrations/38_update_enqueue_workflow.sql
+var migration38SQL string
+
+//go:embed migrations/38_set_enqueue_workflow_search_path.sql
+var migration38SearchPathSQL string
+
+//go:embed migrations/39_create_streams_trigger.sql
+var migration39SQL string
+
+//go:embed migrations/40_add_attributes.sql
+var migration40SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -369,6 +381,24 @@ func buildMigrations(schema string, isCockroach bool) []migrationFile {
 	}
 	migration28SQLProcessed := fmt.Sprintf(migration28File, sanitizedSchema)
 
+	// Migration 38 replaces enqueue_workflow with a signature adding
+	// authenticated_user, authenticated_roles, and delay_until_epoch_ms. The
+	// DROP/CREATE base runs everywhere; the trailing search_path hardening is
+	// Postgres-only (CockroachDB rejects ALTER FUNCTION ... SET).
+	migration38SQLProcessed := fmt.Sprintf(migration38SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+	if !isCockroach {
+		migration38SQLProcessed = migration38SQLProcessed + "\n" + fmt.Sprintf(migration38SearchPathSQL, sanitizedSchema)
+	}
+
+	// Migration 39 installs the streams notification trigger. Gated on
+	// LISTEN/NOTIFY support, mirroring the migration 1 triggers; on CockroachDB
+	// it is a no-op (the version row still advances).
+	migration39SQLProcessed := ""
+	if !isCockroach {
+		migration39SQLProcessed = fmt.Sprintf(migration39SQL,
+			sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+	}
+
 	return []migrationFile{
 		{version: 1, sql: migration1SQLProcessed},
 		{version: 2, sql: fmt.Sprintf(migration2SQL, sanitizedSchema)},
@@ -407,6 +437,9 @@ func buildMigrations(schema string, isCockroach bool) []migrationFile {
 		{version: 35, sql: fmt.Sprintf(migration35SQL, c, sanitizedSchema), online: !isCockroach},
 		{version: 36, sql: fmt.Sprintf(migration36SQL, sanitizedSchema, sanitizedSchema)},
 		{version: 37, sql: fmt.Sprintf(migration37SQL, c, sanitizedSchema), online: !isCockroach},
+		{version: 38, sql: migration38SQLProcessed},
+		{version: 39, sql: migration39SQLProcessed},
+		{version: 40, sql: fmt.Sprintf(migration40SQL, sanitizedSchema, sanitizedSchema)},
 	}
 }
 
