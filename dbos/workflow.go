@@ -1580,10 +1580,18 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			}
 
 			// If the afterFunc has started, the workflow was cancelled and the status should be set to cancelled
-			if stopFunc != nil && !stopFunc() {
-				c.logger.Info("Workflow was cancelled. Waiting for cancel function to complete", "workflow_id", workflowID)
-				<-cancelFuncCompleted // Wait for the cancel function to complete
-				status = WorkflowStatusCancelled
+			// Also handle the race between the AfterFunc firing and the workflow returning with a context cancellation.
+			if stopFunc != nil {
+				if !stopFunc() {
+					// AfterFunc fired => context is cancelled. Wait for the DB cancel to finish.
+					c.logger.Info("Workflow was cancelled. Waiting for cancel function to complete", "workflow_id", workflowID)
+					<-cancelFuncCompleted
+					status = WorkflowStatusCancelled
+				} else if workflowCtx.Err() != nil {
+					// We stopped the AfterFunc, but lost the race: the context was already
+					// cancelled by the time the workflow returned.
+					status = WorkflowStatusCancelled
+				}
 			}
 
 			// Serialize the output before recording
