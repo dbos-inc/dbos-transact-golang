@@ -36,21 +36,16 @@ func queueStep(_ context.Context, input string) (string, error) {
 func TestWorkflowQueues(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	queue := NewWorkflowQueue(dbosCtx, "test-queue",
-		WithQueueBasePollingInterval(50*time.Millisecond),
-		WithQueueMaxPollingInterval(500*time.Millisecond))
-	dlqEnqueueQueue := NewWorkflowQueue(dbosCtx, "test-successive-enqueue-queue",
-		WithQueueBasePollingInterval(50*time.Millisecond),
-		WithQueueMaxPollingInterval(500*time.Millisecond))
-	conflictQueue1 := NewWorkflowQueue(dbosCtx, "conflict-queue-1",
-		WithQueueBasePollingInterval(50*time.Millisecond),
-		WithQueueMaxPollingInterval(500*time.Millisecond))
-	conflictQueue2 := NewWorkflowQueue(dbosCtx, "conflict-queue-2",
-		WithQueueBasePollingInterval(50*time.Millisecond),
-		WithQueueMaxPollingInterval(500*time.Millisecond))
-	dedupQueue := NewWorkflowQueue(dbosCtx, "test-dedup-queue",
-		WithQueueBasePollingInterval(50*time.Millisecond),
-		WithQueueMaxPollingInterval(500*time.Millisecond))
+	// Database-backed queues are registered after Launch (below). Declare the
+	// handles up front so the workflow closures registered before launch can
+	// reference their names; they are assigned before any closure runs.
+	var (
+		queue           *WorkflowQueue
+		dlqEnqueueQueue *WorkflowQueue
+		conflictQueue1  *WorkflowQueue
+		conflictQueue2  *WorkflowQueue
+		dedupQueue      *WorkflowQueue
+	)
 
 	dlqStartEvent := NewEvent()
 	dlqCompleteEvent := NewEvent()
@@ -192,6 +187,18 @@ func TestWorkflowQueues(t *testing.T) {
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
 
 	err := Launch(dbosCtx)
+	require.NoError(t, err)
+
+	// Register the database-backed queues now that DBOS has launched.
+	queue, err = RegisterQueue(dbosCtx, "test-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
+	dlqEnqueueQueue, err = RegisterQueue(dbosCtx, "test-successive-enqueue-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
+	conflictQueue1, err = RegisterQueue(dbosCtx, "conflict-queue-1", WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
+	conflictQueue2, err = RegisterQueue(dbosCtx, "conflict-queue-2", WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
+	dedupQueue, err = RegisterQueue(dbosCtx, "test-dedup-queue", WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
@@ -701,47 +708,40 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
 	})
 
-	t.Run("ListRegisteredQueues", func(t *testing.T) {
-		// Get all registered queues
-		registeredQueues, err := ListRegisteredQueues(dbosCtx)
-		require.NoError(t, err, "failed to list registered queues")
+	t.Run("ListQueues", func(t *testing.T) {
+		// The test queues are database-backed, so they appear in ListQueues (not
+		// ListRegisteredQueues, which lists only in-memory queues). The internal
+		// queue is in-memory and therefore not included here.
+		dbQueues, err := ListQueues(dbosCtx)
+		require.NoError(t, err, "failed to list database-backed queues")
 
-		// Create a map of expected queue names for easy lookup
 		expectedQueueNames := map[string]bool{
-			queue.Name:                true,
-			dlqEnqueueQueue.Name:      true,
-			conflictQueue1.Name:       true,
-			conflictQueue2.Name:       true,
-			dedupQueue.Name:           true,
-			_DBOS_INTERNAL_QUEUE_NAME: true, // Internal queue is always registered
+			queue.Name:           true,
+			dlqEnqueueQueue.Name: true,
+			conflictQueue1.Name:  true,
+			conflictQueue2.Name:  true,
+			dedupQueue.Name:      true,
 		}
 
-		// Verify we got the expected number of queues
-		assert.Equal(t, len(expectedQueueNames), len(registeredQueues), "expected %d registered queues, got %d", len(expectedQueueNames), len(registeredQueues))
+		assert.Equal(t, len(expectedQueueNames), len(dbQueues), "expected %d database-backed queues, got %d", len(expectedQueueNames), len(dbQueues))
 
-		// Verify all expected queues are present
 		actualQueueNames := make(map[string]bool)
-		for _, q := range registeredQueues {
+		for _, q := range dbQueues {
 			actualQueueNames[q.Name] = true
-			// Verify the queue exists in our expected list
 			assert.True(t, expectedQueueNames[q.Name], "unexpected queue found: %s", q.Name)
 		}
-
-		// Verify all expected queues are in the result
 		for queueName := range expectedQueueNames {
-			assert.True(t, actualQueueNames[queueName], "expected queue %s not found in registered queues", queueName)
+			assert.True(t, actualQueueNames[queueName], "expected queue %s not found in database-backed queues", queueName)
 		}
 
 		// Verify specific queue properties for known queues
-		for _, q := range registeredQueues {
+		for _, q := range dbQueues {
 			switch q.Name {
 			case queue.Name:
-				// Verify default queue properties
 				assert.Nil(t, q.WorkerConcurrency, "expected queue to have nil WorkerConcurrency")
 				assert.Nil(t, q.GlobalConcurrency, "expected queue to have nil GlobalConcurrency")
 				assert.False(t, q.PriorityEnabled, "expected queue to have PriorityEnabled=false")
 			case dedupQueue.Name:
-				// Verify dedup queue properties
 				assert.Nil(t, q.WorkerConcurrency, "expected dedup queue to have nil WorkerConcurrency")
 			}
 		}
@@ -751,7 +751,7 @@ func TestWorkflowQueues(t *testing.T) {
 func TestQueueRecovery(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	recoveryQueue := NewWorkflowQueue(dbosCtx, "recovery-queue")
+	var recoveryQueue *WorkflowQueue // database-backed; registered after Launch
 	var recoveryStepCounter int64
 
 	recoveryStepWorkflowFunc := func(ctx DBOSContext, i int) (int, error) {
@@ -784,6 +784,9 @@ func TestQueueRecovery(t *testing.T) {
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
+
+	recoveryQueue, err = RegisterQueue(dbosCtx, "recovery-queue")
+	require.NoError(t, err)
 
 	queuedSteps := 5
 	wfid := uuid.NewString()
@@ -882,7 +885,7 @@ func TestQueueRecovery(t *testing.T) {
 func TestGlobalConcurrency(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	globalConcurrencyQueue := NewWorkflowQueue(dbosCtx, "test-global-concurrency-queue", WithGlobalConcurrency(1))
+	var globalConcurrencyQueue *WorkflowQueue // database-backed; registered after Launch
 	workflowEvent1 := NewEvent()
 	workflowEvent2 := NewEvent()
 	workflowDoneEvent := NewEvent()
@@ -902,6 +905,9 @@ func TestGlobalConcurrency(t *testing.T) {
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
+
+	globalConcurrencyQueue, err = RegisterQueue(dbosCtx, "test-global-concurrency-queue", WithGlobalConcurrency(1))
+	require.NoError(t, err)
 
 	// Enqueue two workflows
 	handle1, err := RunWorkflow(dbosCtx, globalConcurrencyWorkflowFunc, "workflow1", WithQueue(globalConcurrencyQueue.Name))
@@ -947,8 +953,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	assert.Equal(t, "worker1", dbosCtx1.GetExecutorID(), "expected first executor ID to be 'worker1'")
 	assert.Equal(t, "worker2", dbosCtx2.GetExecutorID(), "expected second executor ID to be 'worker2'")
 
-	workerConcurrencyQueue := NewWorkflowQueue(dbosCtx1, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
-	NewWorkflowQueue(dbosCtx2, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
+	var workerConcurrencyQueue *WorkflowQueue // database-backed; registered after Launch
 	startEvents := []*Event{
 		NewEvent(),
 		NewEvent(),
@@ -1003,6 +1008,13 @@ func TestWorkerConcurrency(t *testing.T) {
 
 	err = Launch(dbosCtx2)
 	require.NoError(t, err, "failed to launch DBOS instance")
+
+	// Register the shared database-backed queue from both executors (the second
+	// upserts the same configuration).
+	workerConcurrencyQueue, err = RegisterQueue(dbosCtx1, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
+	require.NoError(t, err)
+	_, err = RegisterQueue(dbosCtx2, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
+	require.NoError(t, err)
 
 	// First enqueue four blocking workflows
 	handle1, err := RunWorkflow(dbosCtx1, blockingWfFunc, 0, WithQueue(workerConcurrencyQueue.Name), WithWorkflowID("worker-cc-wf-1"))
@@ -1060,13 +1072,14 @@ func rateLimiterTestWorkflow(ctx DBOSContext, _ string) (time.Time, error) {
 func TestQueueRateLimiter(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	rateLimiterQueue := NewWorkflowQueue(dbosCtx, "test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: time.Duration(1800 * time.Millisecond)}))
-
 	// Create workflow with dbosContext
 	RegisterWorkflow(dbosCtx, rateLimiterTestWorkflow)
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
+
+	rateLimiterQueue, err := RegisterQueue(dbosCtx, "test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: time.Duration(1800 * time.Millisecond)}))
+	require.NoError(t, err)
 
 	limit := 5
 	periodSeconds := 1.8
@@ -1143,7 +1156,7 @@ func TestQueueRateLimiter(t *testing.T) {
 func TestQueueTimeouts(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	timeoutQueue := NewWorkflowQueue(dbosCtx, "timeout-queue")
+	var timeoutQueue *WorkflowQueue // database-backed; registered after Launch
 
 	queuedWaitForCancelWorkflow := func(ctx DBOSContext, _ string) (string, error) {
 		// This workflow will wait indefinitely until it is cancelled
@@ -1196,7 +1209,7 @@ func TestQueueTimeouts(t *testing.T) {
 	RegisterWorkflow(dbosCtx, detachedWorkflow)
 	RegisterWorkflow(dbosCtx, enqueuedWorkflowEnqueuesADetachedWorkflow)
 
-	timeoutOnDequeueQueue := NewWorkflowQueue(dbosCtx, "timeout-on-dequeue-queue", WithGlobalConcurrency(1))
+	var timeoutOnDequeueQueue *WorkflowQueue // database-backed; registered after Launch
 	blockingEvent := NewEvent()
 	blockingWorkflow := func(ctx DBOSContext, _ string) (string, error) {
 		blockingEvent.Wait()
@@ -1209,6 +1222,11 @@ func TestQueueTimeouts(t *testing.T) {
 	RegisterWorkflow(dbosCtx, fastWorkflow)
 
 	Launch(dbosCtx)
+
+	timeoutQueue, err := RegisterQueue(dbosCtx, "timeout-queue")
+	require.NoError(t, err)
+	timeoutOnDequeueQueue, err = RegisterQueue(dbosCtx, "timeout-on-dequeue-queue", WithGlobalConcurrency(1))
+	require.NoError(t, err)
 
 	t.Run("EnqueueWorkflowTimeout", func(t *testing.T) {
 		// Start a workflow that will wait indefinitely
@@ -1365,9 +1383,9 @@ func TestQueueTimeouts(t *testing.T) {
 func TestPriorityQueue(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	// Create priority-enabled queue with max concurrency of 1
-	priorityQueue := NewWorkflowQueue(dbosCtx, "test_queue_priority", WithGlobalConcurrency(1), WithPriorityEnabled())
-	childQueue := NewWorkflowQueue(dbosCtx, "test_queue_child")
+	// Priority-enabled queue with max concurrency of 1, plus a child queue.
+	// Database-backed; registered after Launch.
+	var priorityQueue, childQueue *WorkflowQueue
 
 	workflowEvent := NewEvent()
 	var wfPriorityList []int
@@ -1398,6 +1416,11 @@ func TestPriorityQueue(t *testing.T) {
 	RegisterWorkflow(dbosCtx, testWorkflow)
 
 	err := Launch(dbosCtx)
+	require.NoError(t, err)
+
+	priorityQueue, err = RegisterQueue(dbosCtx, "test_queue_priority", WithGlobalConcurrency(1), WithPriorityEnabled())
+	require.NoError(t, err)
+	childQueue, err = RegisterQueue(dbosCtx, "test_queue_child")
 	require.NoError(t, err)
 
 	var wfHandles []WorkflowHandle[int]
@@ -1477,12 +1500,14 @@ func TestListQueuedWorkflows(t *testing.T) {
 	RegisterWorkflow(dbosCtx, testWorkflow)
 	RegisterWorkflow(dbosCtx, blockingWorkflow)
 
-	// Create queue for testing
-	testQueue1 := NewWorkflowQueue(dbosCtx, "list-test-queue", WithGlobalConcurrency(1))
-	testQueue2 := NewWorkflowQueue(dbosCtx, "list-test-queue2", WithGlobalConcurrency(1))
-
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
+
+	// Create database-backed queues for testing
+	testQueue1, err := RegisterQueue(dbosCtx, "list-test-queue", WithGlobalConcurrency(1))
+	require.NoError(t, err)
+	testQueue2, err := RegisterQueue(dbosCtx, "list-test-queue2", WithGlobalConcurrency(1))
+	require.NoError(t, err)
 
 	t.Run("WithQueuesOnly", func(t *testing.T) {
 		blockEvent.Clear()
@@ -1596,9 +1621,6 @@ func TestPartitionedQueues(t *testing.T) {
 	t.Run("PartitionKeyOnNonPartitionedQueue", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-		// Create a non-partitioned queue
-		nonPartitionedQueue := NewWorkflowQueue(dbosCtx, "non-partitioned-queue")
-
 		// Register a simple workflow
 		simpleWorkflow := func(ctx DBOSContext, input string) (string, error) {
 			return input, nil
@@ -1607,6 +1629,10 @@ func TestPartitionedQueues(t *testing.T) {
 
 		err := Launch(dbosCtx)
 		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Create a non-partitioned database-backed queue
+		nonPartitionedQueue, err := RegisterQueue(dbosCtx, "non-partitioned-queue")
+		require.NoError(t, err)
 
 		// Attempt to enqueue with a partition key on a non-partitioned queue
 		// This should return an error
@@ -1630,9 +1656,6 @@ func TestPartitionedQueues(t *testing.T) {
 	t.Run("PartitionedQueueWithoutPartitionKey", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-		// Create a partitioned queue
-		partitionedQueue := NewWorkflowQueue(dbosCtx, "partitioned-queue-required", WithPartitionQueue())
-
 		// Register a simple workflow
 		simpleWorkflow := func(ctx DBOSContext, input string) (string, error) {
 			return input, nil
@@ -1641,6 +1664,10 @@ func TestPartitionedQueues(t *testing.T) {
 
 		err := Launch(dbosCtx)
 		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Create a partitioned database-backed queue
+		partitionedQueue, err := RegisterQueue(dbosCtx, "partitioned-queue-required", WithPartitionQueue())
+		require.NoError(t, err)
 
 		// Attempt to enqueue to a partitioned queue without a partition key
 		// This should return an error
@@ -1664,9 +1691,6 @@ func TestPartitionedQueues(t *testing.T) {
 	t.Run("PartitionKeyWithDeduplicationID", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-		// Create a partitioned queue
-		partitionedQueue := NewWorkflowQueue(dbosCtx, "partitioned-queue-test", WithPartitionQueue())
-
 		// Register a simple workflow
 		simpleWorkflow := func(ctx DBOSContext, input string) (string, error) {
 			return input, nil
@@ -1675,6 +1699,10 @@ func TestPartitionedQueues(t *testing.T) {
 
 		err := Launch(dbosCtx)
 		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Create a partitioned database-backed queue
+		partitionedQueue, err := RegisterQueue(dbosCtx, "partitioned-queue-test", WithPartitionQueue())
+		require.NoError(t, err)
 
 		// Attempt to enqueue with both partition key and deduplication ID
 		// This should return an error
@@ -1698,9 +1726,6 @@ func TestPartitionedQueues(t *testing.T) {
 	t.Run("Dequeue", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-		// Create a partitioned queue with concurrency limit of 1 per partition
-		partitionedQueue := NewWorkflowQueue(dbosCtx, "partitioned-queue", WithPartitionQueue(), WithGlobalConcurrency(1))
-
 		// Create events for blocking workflow on partition 1
 		partition1StartEvent := NewEvent()
 		partition1BlockEvent := NewEvent()
@@ -1722,6 +1747,10 @@ func TestPartitionedQueues(t *testing.T) {
 
 		err := Launch(dbosCtx)
 		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// Create a partitioned database-backed queue with concurrency limit of 1 per partition
+		partitionedQueue, err := RegisterQueue(dbosCtx, "partitioned-queue", WithPartitionQueue(), WithGlobalConcurrency(1))
+		require.NoError(t, err)
 
 		// Enqueue a blocking workflow on partition 1
 		handleP1Blocked, err := RunWorkflow(dbosCtx, blockingWorkflowP1, "blocked", WithQueue(partitionedQueue.Name), WithQueuePartitionKey("partition-1"))
@@ -1783,27 +1812,32 @@ func TestNewQueueRunner(t *testing.T) {
 
 func TestQueuePollingIntervals(t *testing.T) {
 	t.Run("queue uses default intervals when not specified", func(t *testing.T) {
-		ctx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: false})
+		require.NoError(t, Launch(ctx))
 
-		queue := NewWorkflowQueue(ctx, "test-queue")
-		// Intervals are resolved during creation, so defaults should be applied
+		queue, err := RegisterQueue(ctx, "polling-default-queue")
+		require.NoError(t, err)
 		require.Equal(t, _DEFAULT_BASE_POLLING_INTERVAL, queue.basePollingInterval)
 		require.Equal(t, _DEFAULT_MAX_POLLING_INTERVAL, queue.maxPollingInterval)
 	})
 
-	t.Run("queue uses custom intervals when specified", func(t *testing.T) {
-		ctx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
+	t.Run("base polling interval round-trips through the database", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: false})
+		require.NoError(t, Launch(ctx))
 
 		basePollingInterval := 2 * time.Second
-		maxPollingInterval := 60 * time.Second
-
-		queue := NewWorkflowQueue(ctx, "test-queue",
-			WithQueueBasePollingInterval(basePollingInterval),
-			WithQueueMaxPollingInterval(maxPollingInterval),
-		)
-
+		// Database-backed queues persist only the base polling interval. The max is
+		// derived as max(base, default max); WithQueueMaxPollingInterval is not
+		// persisted, so it is intentionally not used here.
+		queue, err := RegisterQueue(ctx, "polling-custom-queue", WithQueueBasePollingInterval(basePollingInterval))
+		require.NoError(t, err)
 		require.Equal(t, basePollingInterval, queue.basePollingInterval)
-		require.Equal(t, maxPollingInterval, queue.maxPollingInterval)
+		require.Equal(t, max(basePollingInterval, _DEFAULT_MAX_POLLING_INTERVAL), queue.maxPollingInterval)
+
+		// Re-reading from the database returns the same base interval.
+		reloaded, err := RetrieveQueue(ctx, "polling-custom-queue")
+		require.NoError(t, err)
+		require.Equal(t, basePollingInterval, reloaded.basePollingInterval)
 	})
 }
 
@@ -2023,27 +2057,80 @@ func TestListenQueues(t *testing.T) {
 		err := Launch(dbosCtx)
 		require.NoError(t, err, "failed to launch DBOS instance")
 
-		// Attempting to call ListenQueues after Launch should panic
+		// Attempting to listen to an in-memory queue after Launch should panic
 		defer func() {
 			r := recover()
 			assert.NotNil(t, r, "expected panic from ListenQueues after launch but got none")
-			assert.Contains(t, fmt.Sprintf("%v", r), "Cannot call ListenQueues after DBOS has launched", "expected panic message to contain specific text")
+			assert.Contains(t, fmt.Sprintf("%v", r), "Cannot call ListenQueues for an in-memory queue after DBOS has launched", "expected panic message to contain specific text")
 		}()
 
 		ListenQueues(dbosCtx, queue1, queue2)
 		t.Error("expected panic from ListenQueues after launch, but none occurred")
 	})
+
+	t.Run("ListenToDatabaseBackedQueueByName", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		RegisterWorkflow(dbosCtx, queueWorkflow)
+
+		// Listen to a database-backed queue by name before launch, even though the
+		// queue does not exist yet. A bare WorkflowQueue with only a Name is enough —
+		// listening is by name.
+		ListenQueues(dbosCtx, WorkflowQueue{Name: "listened-db-queue"})
+		require.NoError(t, Launch(dbosCtx))
+
+		// Register both the listened queue and an unlistened one after launch.
+		_, err := RegisterQueue(dbosCtx, "listened-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+		require.NoError(t, err)
+		_, err = RegisterQueue(dbosCtx, "unlistened-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+		require.NoError(t, err)
+
+		// The listened queue dispatches.
+		h1, err := RunWorkflow(dbosCtx, queueWorkflow, "a", WithQueue("listened-db-queue"))
+		require.NoError(t, err)
+		r1, err := h1.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "a", r1)
+
+		// The unlistened queue does not: its workflow stays ENQUEUED.
+		h2, err := RunWorkflow(dbosCtx, queueWorkflow, "b", WithQueue("unlistened-db-queue"))
+		require.NoError(t, err)
+		time.Sleep(2 * time.Second)
+		st2, err := h2.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, WorkflowStatusEnqueued, st2.Status)
+	})
+
+	t.Run("DynamicallyChangeListenSetForDatabaseBackedQueue", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		RegisterWorkflow(dbosCtx, queueWorkflow)
+
+		// A filter is active from launch (a name that never resolves), so the dynamic
+		// queue is initially excluded.
+		ListenQueues(dbosCtx, WorkflowQueue{Name: "placeholder"})
+		require.NoError(t, Launch(dbosCtx))
+
+		_, err := RegisterQueue(dbosCtx, "dynamic-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+		require.NoError(t, err)
+		h, err := RunWorkflow(dbosCtx, queueWorkflow, "c", WithQueue("dynamic-db-queue"))
+		require.NoError(t, err)
+
+		// Not listened yet: stays ENQUEUED.
+		time.Sleep(1500 * time.Millisecond)
+		st, err := h.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, WorkflowStatusEnqueued, st.Status)
+
+		// Add the database-backed queue to the listen set after launch; the supervisor
+		// picks it up on its next reconcile tick and the workflow completes.
+		ListenQueues(dbosCtx, WorkflowQueue{Name: "dynamic-db-queue"})
+		r, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "c", r)
+	})
 }
 
 func TestDelayedExecution(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
-
-	delayQueue := NewWorkflowQueue(dbosCtx, "test-delay-queue",
-		WithQueueBasePollingInterval(50*time.Millisecond),
-		WithQueueMaxPollingInterval(500*time.Millisecond))
-	dedupDelayQueue := NewWorkflowQueue(dbosCtx, "test-delay-dedup-queue",
-		WithQueueBasePollingInterval(50*time.Millisecond),
-		WithQueueMaxPollingInterval(500*time.Millisecond))
 
 	delayWorkflow := func(ctx DBOSContext, _ string) (string, error) {
 		return "done", nil
@@ -2053,6 +2140,11 @@ func TestDelayedExecution(t *testing.T) {
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
+
+	delayQueue, err := RegisterQueue(dbosCtx, "test-delay-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
+	dedupDelayQueue, err := RegisterQueue(dbosCtx, "test-delay-dedup-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
 
 	t.Run("BasicDelay", func(t *testing.T) {
 		delayDuration := 2 * time.Second
@@ -2225,4 +2317,131 @@ func TestDelayedExecution(t *testing.T) {
 		require.Error(t, err, "expected error when using delay without queue")
 		assert.Contains(t, err.Error(), "delay provided but queue name is missing")
 	})
+}
+
+func TestDatabaseBackedQueues(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	RegisterWorkflow(dbosCtx, queueWorkflow)
+
+	// Database-backed queues are registered after launch, unlike the in-memory
+	// NewWorkflowQueue path.
+	require.NoError(t, Launch(dbosCtx))
+
+	// Create, get, list, update (upsert) and dispatch are exercised by the
+	// migrated mechanics tests, ConflictPolicies, and the Mixed test. Delete is
+	// only covered here.
+	t.Run("DeleteQueue", func(t *testing.T) {
+		_, err := RegisterQueue(dbosCtx, "ephemeral-queue")
+		require.NoError(t, err)
+		require.NoError(t, DeleteQueue(dbosCtx, "ephemeral-queue"))
+
+		// After deletion the queue is gone (RetrieveQueue returns nil).
+		got, err := RetrieveQueue(dbosCtx, "ephemeral-queue")
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
+	t.Run("ConflictPolicies", func(t *testing.T) {
+		_, err := RegisterQueue(dbosCtx, "conflict-q", WithGlobalConcurrency(1))
+		require.NoError(t, err)
+
+		// never_update leaves the existing configuration unchanged.
+		_, err = RegisterQueue(dbosCtx, "conflict-q", WithGlobalConcurrency(99), WithQueueOnConflict(QueueConflictNeverUpdate))
+		require.NoError(t, err)
+		got, err := RetrieveQueue(dbosCtx, "conflict-q")
+		require.NoError(t, err)
+		require.Equal(t, 1, *got.GlobalConcurrency)
+
+		// always_update overwrites it.
+		_, err = RegisterQueue(dbosCtx, "conflict-q", WithGlobalConcurrency(42), WithQueueOnConflict(QueueConflictAlwaysUpdate))
+		require.NoError(t, err)
+		got, err = RetrieveQueue(dbosCtx, "conflict-q")
+		require.NoError(t, err)
+		require.Equal(t, 42, *got.GlobalConcurrency)
+
+		// update_if_latest_version (the default) updates while this process runs the
+		// latest registered application version.
+		_, err = RegisterQueue(dbosCtx, "conflict-q", WithGlobalConcurrency(7))
+		require.NoError(t, err)
+		got, err = RetrieveQueue(dbosCtx, "conflict-q")
+		require.NoError(t, err)
+		require.Equal(t, 7, *got.GlobalConcurrency)
+
+		// ...but not once a newer application version is the latest (rolling deploy).
+		sysdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		require.NoError(t, sysdb.createApplicationVersion(context.Background(), "v-newer"))
+		require.NoError(t, sysdb.updateApplicationVersionTimestamp(context.Background(), "v-newer", time.Now().Add(time.Hour).UnixMilli()))
+		_, err = RegisterQueue(dbosCtx, "conflict-q", WithGlobalConcurrency(1000))
+		require.NoError(t, err)
+		got, err = RetrieveQueue(dbosCtx, "conflict-q")
+		require.NoError(t, err)
+		require.Equal(t, 7, *got.GlobalConcurrency, "default policy must not overwrite when a newer version is latest")
+	})
+
+	t.Run("ValidationRejectsBadConcurrency", func(t *testing.T) {
+		_, err := RegisterQueue(dbosCtx, "bad-queue",
+			WithGlobalConcurrency(1), WithWorkerConcurrency(5))
+		require.Error(t, err)
+	})
+
+	t.Run("RejectsCollisionWithInMemoryQueue", func(t *testing.T) {
+		// The internal queue is an in-memory queue; registering a database-backed
+		// queue with the same name must be rejected, and nothing persisted.
+		_, err := RegisterQueue(dbosCtx, _DBOS_INTERNAL_QUEUE_NAME)
+		require.Error(t, err)
+		got, err := RetrieveQueue(dbosCtx, _DBOS_INTERNAL_QUEUE_NAME)
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+}
+
+// TestMixedInMemoryAndDatabaseBackedQueues verifies that an in-memory queue and a
+// database-backed queue coexist in the same process: both dispatch their work, and
+// the two listing APIs report disjoint sets.
+func TestMixedInMemoryAndDatabaseBackedQueues(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	RegisterWorkflow(dbosCtx, queueWorkflow)
+
+	// An in-memory queue registered before launch (the deprecated path).
+	inMemQueue := NewWorkflowQueue(dbosCtx, "mixed-in-memory-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+
+	require.NoError(t, Launch(dbosCtx))
+
+	// A database-backed queue registered after launch.
+	dbQueue, err := RegisterQueue(dbosCtx, "mixed-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
+
+	// Both dispatch their enqueued workflows.
+	hInMem, err := RunWorkflow(dbosCtx, queueWorkflow, "from-in-memory", WithQueue(inMemQueue.Name))
+	require.NoError(t, err)
+	hDB, err := RunWorkflow(dbosCtx, queueWorkflow, "from-db", WithQueue(dbQueue.Name))
+	require.NoError(t, err)
+
+	rInMem, err := hInMem.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "from-in-memory", rInMem)
+	rDB, err := hDB.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "from-db", rDB)
+
+	// ListRegisteredQueues reports only in-memory queues; ListQueues only
+	// database-backed ones.
+	inMemList, err := ListRegisteredQueues(dbosCtx)
+	require.NoError(t, err)
+	inMemNames := map[string]bool{}
+	for _, q := range inMemList {
+		inMemNames[q.Name] = true
+	}
+	require.True(t, inMemNames["mixed-in-memory-queue"])
+	require.False(t, inMemNames["mixed-db-queue"])
+
+	dbList, err := ListQueues(dbosCtx)
+	require.NoError(t, err)
+	dbNames := map[string]bool{}
+	for _, q := range dbList {
+		dbNames[q.Name] = true
+	}
+	require.True(t, dbNames["mixed-db-queue"])
+	require.False(t, dbNames["mixed-in-memory-queue"])
 }

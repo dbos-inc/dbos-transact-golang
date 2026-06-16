@@ -1198,6 +1198,20 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	if len(params.QueueName) > 0 {
 		queue := c.queueRunner.getQueue(params.QueueName)
 		if queue == nil {
+			// Not in the in-memory registry; it may be a database-backed queue
+			// registered via RegisterQueue (possibly by another process).
+			dbQueue, err := retryWithResult(c, func() (*WorkflowQueue, error) {
+				return c.systemDB.getQueue(WithoutCancel(c), params.QueueName)
+			}, withRetrierLogger(c.logger))
+			if err != nil {
+				c.logger.Error("failed to look up queue", "workflow_name", params.WorkflowName, "queue_name", params.QueueName, "error", err)
+				return nil, newWorkflowExecutionError("", fmt.Errorf("failed to look up queue %s: %w", params.QueueName, err))
+			}
+			if dbQueue != nil {
+				queue = dbQueue
+			}
+		}
+		if queue == nil {
 			c.logger.Error("queue does not exist", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
 			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s does not exist", params.QueueName))
 		}
@@ -1258,7 +1272,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := retryWithResult(uncancellableCtx, func() (*string, error) {
+		childWorkflowID, err := retryWithResult(c, func() (*string, error) {
 			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		}, withRetrierLogger(c.logger))
 		if err != nil {
@@ -1408,7 +1422,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				stepID:           parentWorkflowState.stepID,
 				tx:               tx,
 			}
-			err = retry(uncancellableCtx, func() error {
+			err = retry(c, func() error {
 				return c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
 			}, withRetrierLogger(c.logger))
 			if err != nil {
@@ -1457,7 +1471,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		if !returnExisting || !errors.Is(err, &DBOSError{Code: QueueDeduplicated}) {
 			return nil, err
 		}
-		existingID, lookupErr := retryWithResult(uncancellableCtx, func() (*string, error) {
+		existingID, lookupErr := retryWithResult(c, func() (*string, error) {
 			return c.systemDB.getDeduplicatedWorkflow(uncancellableCtx, params.QueueName, params.DeduplicationID)
 		}, withRetrierLogger(c.logger))
 		if lookupErr != nil {
@@ -4605,29 +4619,33 @@ func ListRegisteredQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
 }
 
 func (c *dbosContext) ListenQueues(_ DBOSContext, queues ...WorkflowQueue) {
-	if c.launched.Load() {
-		panic("Cannot call ListenQueues after DBOS has launched")
-	}
-
-	// Set listen to true for each provided queue
+	launched := c.launched.Load()
+	c.queueRunner.listenMu.Lock()
+	defer c.queueRunner.listenMu.Unlock()
 	for _, queue := range queues {
-		if registeredQueue, exists := c.queueRunner.workflowQueueRegistry[queue.Name]; exists {
-			registeredQueue.listen = true
-			c.queueRunner.workflowQueueRegistry[queue.Name] = registeredQueue
-		} else {
-			c.logger.Warn("Queue not found in registry when calling ListenQueues. Did you create it with NewWorkflowQueue?", "queue_name", queue.Name)
+		// In-memory queues are fixed at launch, so listening to one after launch is rejected
+		if _, inMemory := c.queueRunner.workflowQueueRegistry[queue.Name]; launched && inMemory {
+			panic("Cannot call ListenQueues for an in-memory queue after DBOS has launched")
 		}
+		c.queueRunner.listenedQueues[queue.Name] = true
 	}
 }
 
 // ListenQueues configures which queues the current DBOS process should listen to.
-// By default, all registered queues are listened to. When ListenQueues is called,
-// only the specified queues (and the internal DBOS queue) will be listened to.
-// This allows multiple DBOS processes to share the same queue registry but listen
-// to different subsets of queues.
+// By default, all queues (in-memory and database-backed) are listened to. Once
+// ListenQueues has been called, only the named queues (and the internal DBOS
+// queue) are listened to. This lets multiple DBOS processes share the same queue
+// registry but listen to different subsets.
 //
-// ListenQueues can only be called before DBOS has been launched. Calling it after
-// Launch will result in a panic.
+// A queue is identified by name, so a database-backed queue can be listened to by
+// passing a WorkflowQueue with its Name set (or a handle from RetrieveQueue),
+// even before the queue exists in the database — the supervisor resolves names
+// against the database on each reconcile tick.
+//
+// In-memory queues (created with NewWorkflowQueue) must be listened to before
+// Launch; passing one after Launch panics. Database-backed queue names may be
+// added to the listen set at any time, including after Launch, allowing the
+// listen set to change dynamically for database-backed queues.
 //
 // Example:
 //
@@ -4639,6 +4657,9 @@ func (c *dbosContext) ListenQueues(_ DBOSContext, queues ...WorkflowQueue) {
 //	dbos.ListenQueues(ctx, queue1, queue2)
 //
 //	dbos.Launch(ctx)
+//
+//	// After launch, also listen to a database-backed queue by name.
+//	dbos.ListenQueues(ctx, dbos.WorkflowQueue{Name: "db-queue"})
 func ListenQueues(ctx DBOSContext, queues ...WorkflowQueue) {
 	if ctx == nil {
 		panic("ctx cannot be nil")

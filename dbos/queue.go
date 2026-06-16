@@ -2,6 +2,8 @@ package dbos
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"sync"
@@ -35,10 +37,27 @@ type WorkflowQueue struct {
 	RateLimit            *RateLimiter  `json:"rateLimit,omitempty"`         // Rate limiting configuration
 	MaxTasksPerIteration int           `json:"maxTasksPerIteration"`        // Max workflows to dequeue per iteration
 	PartitionQueue       bool          `json:"partitionQueue,omitempty"`    // Enable partitioned queue mode
-	listen               bool          // Whether this queue should be listened to by the current process
 	basePollingInterval  time.Duration // Base polling interval (minimum, never poll faster)
 	maxPollingInterval   time.Duration // Maximum polling interval (never poll slower)
+
+	databaseBacked bool                    // Whether this queue's config lives in the queues table
+	onConflict     QueueConflictResolution // Registration conflict policy
 }
+
+// QueueConflictResolution controls how RegisterQueue behaves when a queue with
+// the same name already exists in the system database.
+type QueueConflictResolution string
+
+const (
+	// QueueConflictUpdateIfLatestVersion overwrites the existing row only when the
+	// running application version is the latest registered version. This is the
+	// default and is safe for rolling deployments.
+	QueueConflictUpdateIfLatestVersion QueueConflictResolution = "update_if_latest_version"
+	// QueueConflictAlwaysUpdate always overwrites the existing row.
+	QueueConflictAlwaysUpdate QueueConflictResolution = "always_update"
+	// QueueConflictNeverUpdate leaves an existing row unchanged.
+	QueueConflictNeverUpdate QueueConflictResolution = "never_update"
+)
 
 // QueueOption is a functional option for configuring a workflow queue
 type QueueOption func(*WorkflowQueue)
@@ -111,6 +130,14 @@ func WithQueueMaxPollingInterval(interval time.Duration) QueueOption {
 	}
 }
 
+// WithQueueOnConflict sets the conflict resolution policy used by RegisterQueue
+// when a queue with the same name already exists in the system database.
+func WithQueueOnConflict(policy QueueConflictResolution) QueueOption {
+	return func(q *WorkflowQueue) {
+		q.onConflict = policy
+	}
+}
+
 // NewWorkflowQueue creates a new workflow queue with the specified name and configuration options.
 // The queue must be created before workflows can be enqueued to it using the WithQueue option in RunWorkflow.
 // Queues provide controlled execution with support for concurrency limits, priority scheduling, rate limiting, and polling intervals.
@@ -130,6 +157,11 @@ func WithQueueMaxPollingInterval(interval time.Duration) QueueOption {
 //
 //	// Enqueue workflows to this queue:
 //	handle, err := dbos.RunWorkflow(ctx, SendEmailWorkflow, emailData, dbos.WithQueue("email-queue"))
+//
+// Deprecated: Use RegisterQueue, which persists the queue configuration in the
+// system database. Database-backed queues can be registered after launch and
+// are discovered across processes. NewWorkflowQueue remains for backward
+// compatibility with the in-memory queue registry.
 func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) WorkflowQueue {
 	ctx, ok := dbosCtx.(*dbosContext)
 	if !ok {
@@ -166,6 +198,144 @@ func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) 
 	return q
 }
 
+// validateQueueConfig validates a queue's configuration, returning an error on
+// invalid input. Mirrors the cross-language validation rules.
+func validateQueueConfig(q *WorkflowQueue) error {
+	if q.WorkerConcurrency != nil && q.GlobalConcurrency != nil && *q.WorkerConcurrency > *q.GlobalConcurrency {
+		return fmt.Errorf("queue %s: concurrency must be greater than or equal to worker_concurrency", q.Name)
+	}
+	if q.basePollingInterval <= 0 {
+		return fmt.Errorf("queue %s: polling interval must be positive", q.Name)
+	}
+	return nil
+}
+
+// RegisterQueue registers a queue and persists its configuration in the system
+// database. Its configuration is periodically reloaded by the queue runner
+// so changes take effect without a restart.
+//
+// The returned Queue reflects the persisted configuration. Use WithQueueOnConflict
+// to control what happens when a queue with the same name already exists.
+//
+// Example:
+//
+//	q, err := dbos.RegisterQueue(ctx, "email-queue",
+//	    dbos.WithWorkerConcurrency(5),
+//	    dbos.WithPriorityEnabled(),
+//	)
+func RegisterQueue(ctx DBOSContext, name string, options ...QueueOption) (*WorkflowQueue, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.RegisterQueue(ctx, name, options...)
+}
+
+func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...QueueOption) (*WorkflowQueue, error) {
+	if _, inMemory := c.queueRunner.workflowQueueRegistry[name]; inMemory {
+		err := fmt.Errorf("cannot register database-backed queue %q: an in-memory queue with that name already exists", name)
+		c.logger.Error("queue name conflict", "queue_name", name, "error", err)
+		return nil, err
+	}
+
+	q := WorkflowQueue{
+		Name:                 name,
+		MaxTasksPerIteration: _DEFAULT_MAX_TASKS_PER_ITERATION,
+		basePollingInterval:  _DEFAULT_BASE_POLLING_INTERVAL,
+		maxPollingInterval:   _DEFAULT_MAX_POLLING_INTERVAL,
+		onConflict:           QueueConflictUpdateIfLatestVersion,
+		databaseBacked:       true,
+	}
+	for _, option := range options {
+		option(&q)
+	}
+	if err := validateQueueConfig(&q); err != nil {
+		return nil, err
+	}
+
+	// Resolve the conflict policy into whether an existing row should be overwritten.
+	var updateExisting bool
+	switch q.onConflict {
+	case QueueConflictAlwaysUpdate:
+		updateExisting = true
+	case QueueConflictNeverUpdate:
+		updateExisting = false
+	default: // QueueConflictUpdateIfLatestVersion
+		latest, err := retryWithResult(c, func() (*VersionInfo, error) {
+			return c.systemDB.getLatestApplicationVersion(c)
+		}, withRetrierLogger(c.logger))
+		if err != nil {
+			// No registered versions yet: treat this process as the latest.
+			updateExisting = true
+		} else {
+			updateExisting = latest.Name == c.applicationVersion
+		}
+	}
+
+	inserted, err := retryWithResult(c, func() (bool, error) {
+		return c.systemDB.upsertQueue(c, upsertQueueDBInput{queue: q, updateExisting: updateExisting})
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, err
+	}
+	persisted, err := retryWithResult(c, func() (*WorkflowQueue, error) {
+		return c.systemDB.getQueue(c, name)
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, err
+	}
+	if persisted == nil {
+		return nil, fmt.Errorf("queue %s missing from database after upsert", name)
+	}
+	if inserted {
+		c.logger.Info("Registered database-backed queue", "queue_name", name)
+	}
+	return persisted, nil
+}
+
+// RetrieveQueue returns the queue with the given name, or nil if
+// no such queue has been registered.
+func RetrieveQueue(ctx DBOSContext, name string) (*WorkflowQueue, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.RetrieveQueue(ctx, name)
+}
+
+func (c *dbosContext) RetrieveQueue(_ DBOSContext, name string) (*WorkflowQueue, error) {
+	// getQueue returns nil when the queue does not exist, which is the desired result.
+	return retryWithResult(c, func() (*WorkflowQueue, error) {
+		return c.systemDB.getQueue(c, name)
+	}, withRetrierLogger(c.logger))
+}
+
+// ListQueues returns all queues registered in the system database.
+func ListQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	return ctx.ListQueues(ctx)
+}
+
+func (c *dbosContext) ListQueues(_ DBOSContext) ([]WorkflowQueue, error) {
+	return retryWithResult(c, func() ([]WorkflowQueue, error) {
+		return c.systemDB.listQueues(c)
+	}, withRetrierLogger(c.logger))
+}
+
+// DeleteQueue removes a queue. Workflows still enqueued on it become unrecoverable.
+func DeleteQueue(ctx DBOSContext, name string) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.DeleteQueue(ctx, name)
+}
+
+func (c *dbosContext) DeleteQueue(_ DBOSContext, name string) error {
+	return retry(c, func() error {
+		return c.systemDB.deleteQueue(c, name)
+	}, withRetrierLogger(c.logger))
+}
+
 type queueRunner struct {
 	logger *slog.Logger
 
@@ -177,6 +347,10 @@ type queueRunner struct {
 
 	// Queue registry
 	workflowQueueRegistry map[string]WorkflowQueue
+
+	// listenedQueues is the explicit set of queue names this process listens to.
+	listenMu       sync.Mutex
+	listenedQueues map[string]bool
 
 	// WaitGroup to track all queue goroutines
 	queueGoroutinesWg sync.WaitGroup
@@ -192,6 +366,7 @@ func newQueueRunner(logger *slog.Logger) *queueRunner {
 		jitterMin:             0.95,
 		jitterMax:             1.05,
 		workflowQueueRegistry: make(map[string]WorkflowQueue),
+		listenedQueues:        make(map[string]bool),
 		completionChan:        make(chan struct{}, 1),
 		logger:                logger.With("service", "queue_runner"),
 	}
@@ -214,50 +389,134 @@ func (qr *queueRunner) getQueue(queueName string) *WorkflowQueue {
 	return nil
 }
 
-// run starts a goroutine for each registered queue to handle polling independently.
+// run supervises queue workers. On each reconcile tick it rebuilds the set of
+// queues to listen to (the in-memory registry plus database-backed queues from
+// the queues table), starts a worker goroutine for any queue that lacks a live
+// one, and transitions delayed workflows centrally. This lets database-backed
+// queues registered after launch be picked up without a restart. run blocks
+// until the context is cancelled, then waits for all workers to stop.
 func (qr *queueRunner) run(ctx *dbosContext) {
-	// Build map of queues to listen to
-	queuesToListenMap := make(map[string]WorkflowQueue)
-	for _, queue := range qr.workflowQueueRegistry {
-		if queue.listen {
-			queuesToListenMap[queue.Name] = queue
+	defer func() {
+		// Workers stop on context cancellation; wait for them before signalling.
+		qr.queueGoroutinesWg.Wait()
+		qr.logger.Debug("All queue goroutines completed")
+		qr.completionChan <- struct{}{}
+	}()
+
+	// Track a done channel per running worker so we can tell whether a worker has
+	// exited (e.g. because its database-backed queue was deleted) and respawn it
+	// if the queue reappears.
+	workerDone := make(map[string]chan struct{})
+
+	const reconcileInterval = 1 * time.Second
+	for ctx.Err() == nil { // While ctx is not cancelled
+		// Transition any DELAYED workflows whose delay has expired to ENQUEUED.
+		if err := retry(ctx, func() error {
+			return ctx.systemDB.transitionDelayedWorkflows(ctx)
+		}, withRetrierLogger(qr.logger)); err != nil {
+			qr.logger.Warn("Exception transitioning delayed workflows", "error", err)
+		}
+
+		// Rebuild the listen set each tick so database-backed queues added to it
+		// via ListenQueues after launch take effect dynamically.
+		for name, queue := range qr.queuesToListen(ctx) {
+			if done, exists := workerDone[name]; exists {
+				select {
+				case <-done: // worker exited; go to respawn
+				default:
+					continue // still running
+				}
+			}
+			done := make(chan struct{})
+			workerDone[name] = done
+			qr.queueGoroutinesWg.Add(1)
+			go func(q WorkflowQueue, done chan struct{}) {
+				defer qr.queueGoroutinesWg.Done()
+				defer close(done)
+				qr.runQueue(ctx, q)
+			}(queue, done)
+		}
+
+		select {
+		case <-ctx.Done():
+		case <-time.After(reconcileInterval):
+		}
+	}
+	qr.logger.Debug("Queue supervisor stopping due to context cancellation", "cause", context.Cause(ctx))
+}
+
+// queuesToListen builds the set of queues this process should run workers for,
+// combining the in-memory registry with database-backed queues and applying the
+// listen filter set by ListenQueues. An empty listen set means listen to every
+// queue. The internal queue is always included.
+func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]WorkflowQueue {
+	// Snapshot the listen set; ListenQueues may mutate it concurrently after launch.
+	qr.listenMu.Lock()
+	listen := make(map[string]bool, len(qr.listenedQueues))
+	for name := range qr.listenedQueues {
+		listen[name] = true
+	}
+	qr.listenMu.Unlock()
+	hasListenFilter := len(listen) > 0
+
+	current := make(map[string]WorkflowQueue)
+
+	for name, queue := range qr.workflowQueueRegistry {
+		if hasListenFilter && !listen[name] && name != _DBOS_INTERNAL_QUEUE_NAME {
+			continue
+		}
+		current[name] = queue
+	}
+
+	dbQueues, err := retryWithResult(ctx, func() ([]WorkflowQueue, error) {
+		return ctx.systemDB.listQueues(ctx)
+	}, withRetrierLogger(qr.logger))
+	if err != nil {
+		qr.logger.Warn("Exception listing database-backed queues", "error", err)
+	} else {
+		for _, queue := range dbQueues {
+			if hasListenFilter && !listen[queue.Name] {
+				continue
+			}
+			current[queue.Name] = queue
 		}
 	}
 
-	// If no queues have listen set to true, listen to all queues (default behavior)
-	// Else, add the internal queue to the map
-	if len(queuesToListenMap) == 0 {
-		queuesToListenMap = qr.workflowQueueRegistry
-	} else {
-		queuesToListenMap[_DBOS_INTERNAL_QUEUE_NAME] = qr.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
+	if internal, ok := qr.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]; ok {
+		current[_DBOS_INTERNAL_QUEUE_NAME] = internal
 	}
 
-	for _, queue := range queuesToListenMap {
-		qr.queueGoroutinesWg.Add(1)
-		go qr.runQueue(ctx, queue)
-	}
-
-	// Wait for all queue goroutines to complete
-	qr.queueGoroutinesWg.Wait()
-	qr.logger.Debug("All queue goroutines completed")
-	qr.completionChan <- struct{}{}
+	return current
 }
 
 func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
-	defer qr.queueGoroutinesWg.Done()
-
 	queueLogger := qr.logger.With("queue_name", queue.Name)
 	// Current polling interval starts at the base interval and adjusts based on errors
 	currentPollingInterval := queue.basePollingInterval
 
 	for {
+		// Reload database-backed queue configuration each iteration so runtime
+		// changes (concurrency, rate limits, polling cadence) take effect without
+		// a restart. If the row was deleted, stop the worker; the supervisor will
+		// no longer list it.
+		if queue.databaseBacked {
+			fresh, err := retryWithResult(ctx, func() (*WorkflowQueue, error) {
+				return ctx.systemDB.getQueue(ctx, queue.Name)
+			}, withRetrierLogger(queueLogger))
+			if err != nil {
+				queueLogger.Warn("Failed to reload queue configuration from database", "error", err)
+			} else if fresh == nil {
+				queueLogger.Info("Queue no longer exists in database, stopping worker")
+				return
+			} else {
+				queue = *fresh
+				// Keep the current polling interval within the (possibly updated) bounds.
+				currentPollingInterval = max(queue.basePollingInterval, min(currentPollingInterval, queue.maxPollingInterval))
+			}
+		}
+
 		hasBackoffError := false
 		skipDequeue := false
-
-		// Transition any DELAYED workflows whose delay has expired to ENQUEUED.
-		if err := ctx.systemDB.transitionDelayedWorkflows(ctx); err != nil {
-			queueLogger.Warn("Exception transitioning delayed workflows", "error", err)
-		}
 
 		// Build list of partition keys to dequeue from
 		// Default to empty string for non-partitioned queues
