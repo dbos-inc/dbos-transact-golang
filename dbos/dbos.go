@@ -174,7 +174,8 @@ type DBOSContext interface {
 	GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error)            // Aggregate counts of workflows by one or more grouping columns
 	GetStepAggregates(_ DBOSContext, input GetStepAggregatesInput) ([]StepAggregateRow, error)                        // Aggregate counts/durations of steps by function name and/or status
 	ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error)    // List registered workflows with filtering options
-	ListRegisteredQueues(_ DBOSContext) ([]WorkflowQueue, error)                                                      // List all registered workflow queues
+	// Deprecated: in-memory queues are deprecated; use ListQueues for database-backed queues.
+	ListRegisteredQueues(_ DBOSContext) ([]WorkflowQueue, error)
 	DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts ...DeleteWorkflowOption) error                          // Delete workflows and all their associated data
 
 	// Accessors
@@ -526,7 +527,9 @@ func (c *dbosContext) GetApplicationID() string {
 	return c.applicationID
 }
 
-// ListRegisteredQueues returns all registered workflow queues.
+// ListRegisteredQueues returns all queues in the in-memory registry.
+//
+// Deprecated: in-memory queues are deprecated; use ListQueues for database-backed queues.
 func (c *dbosContext) ListRegisteredQueues(_ DBOSContext) ([]WorkflowQueue, error) {
 	if c.queueRunner == nil {
 		return []WorkflowQueue{}, nil

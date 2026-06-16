@@ -405,6 +405,10 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleListApplicationVersionsRequest(data, base.RequestID)
 	case setLatestAppVersionMessage:
 		return c.handleSetLatestApplicationVersionRequest(data, base.RequestID)
+	case listQueuesMessage:
+		return c.handleListQueuesRequest(data, base.RequestID)
+	case getQueueMessage:
+		return c.handleGetQueueRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
@@ -1935,4 +1939,64 @@ func (c *conductor) handleSetLatestApplicationVersionRequest(data []byte, reques
 		Success: success,
 	}
 	return c.sendResponse(resp, string(setLatestAppVersionMessage))
+}
+
+func (c *conductor) handleListQueuesRequest(data []byte, requestID string) error {
+	var req listQueuesConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse list queues request", "error", err)
+		return fmt.Errorf("failed to parse list queues request: %w", err)
+	}
+
+	queues, err := c.dbosCtx.ListQueues(c.dbosCtx)
+	output := []queueConductorOutput{}
+	var errorMsg *string
+	if err != nil {
+		c.logger.Error("Failed to list queues", "error", err)
+		msg := fmt.Sprintf("failed to list queues: %v", err)
+		errorMsg = &msg
+	} else {
+		output = make([]queueConductorOutput, len(queues))
+		for i := range queues {
+			output[i] = toQueueConductorOutput(queues[i])
+		}
+	}
+
+	resp := listQueuesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: listQueuesMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		Output: output,
+	}
+	return c.sendResponse(resp, string(listQueuesMessage))
+}
+
+func (c *conductor) handleGetQueueRequest(data []byte, requestID string) error {
+	var req getQueueConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse get queue request", "error", err)
+		return fmt.Errorf("failed to parse get queue request: %w", err)
+	}
+
+	queue, err := c.dbosCtx.RetrieveQueue(c.dbosCtx, req.Name)
+	var errorMsg *string
+	var output *queueConductorOutput
+	if err != nil {
+		c.logger.Error("Failed to get queue", "queue_name", req.Name, "error", err)
+		msg := fmt.Sprintf("failed to get queue '%s': %v", req.Name, err)
+		errorMsg = &msg
+	} else if queue != nil {
+		o := toQueueConductorOutput(*queue)
+		output = &o
+	}
+
+	resp := getQueueConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: getQueueMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		Output: output,
+	}
+	return c.sendResponse(resp, string(getQueueMessage))
 }

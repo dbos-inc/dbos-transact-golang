@@ -1100,6 +1100,108 @@ func TestConductorScheduleHandlers(t *testing.T) {
 	})
 }
 
+func TestConductorQueueHandlers(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+	require.NoError(t, dbosCtx.Launch())
+
+	// Database-backed queues must be registered after Launch.
+	const plainQueue = "cond-queue-plain"
+	const fullQueue = "cond-queue-full"
+	_, err := RegisterQueue(dbosCtx, plainQueue)
+	require.NoError(t, err)
+	_, err = RegisterQueue(dbosCtx, fullQueue,
+		WithGlobalConcurrency(10),
+		WithWorkerConcurrency(5),
+		WithRateLimiter(&RateLimiter{Limit: 100, Period: 30 * time.Second}),
+		WithPriorityEnabled(),
+		WithPartitionQueue(),
+		WithQueueBasePollingInterval(2*time.Second),
+	)
+	require.NoError(t, err)
+
+	mockServer := newMockWebSocketServer()
+	t.Cleanup(mockServer.shutdown)
+
+	cond, err := newConductor(dbosCtx.(*dbosContext), conductorConfig{
+		url:     mockServer.getURL(),
+		apiKey:  "test-key",
+		appName: "test-app",
+	})
+	require.NoError(t, err)
+	cond.pingInterval = 100 * time.Millisecond
+	cond.pingTimeout = 200 * time.Millisecond
+	cond.reconnectWait = 100 * time.Millisecond
+	cond.launch()
+	t.Cleanup(func() { cond.shutdown(2 * time.Second) })
+	require.True(t, mockServer.waitForConnection(5*time.Second))
+
+	expect := func(t *testing.T, wantType messageType) []byte {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case raw := <-mockServer.messages:
+				var base baseMessage
+				if err := json.Unmarshal(raw, &base); err == nil && base.Type == wantType {
+					return raw
+				}
+			case <-deadline:
+				t.Fatalf("timed out waiting for response of type %s", wantType)
+			}
+		}
+	}
+
+	t.Run("list_queues", func(t *testing.T) {
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"list_queues","request_id":"q1"}`)))
+		var resp listQueuesConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, listQueuesMessage), &resp))
+		require.Equal(t, "q1", resp.RequestID)
+		require.Nil(t, resp.ErrorMessage)
+
+		byName := map[string]queueConductorOutput{}
+		for _, q := range resp.Output {
+			byName[q.Name] = q
+		}
+		// Only database-backed queues appear; the internal queue is in-memory.
+		require.Contains(t, byName, plainQueue)
+		require.Contains(t, byName, fullQueue)
+
+		full := byName[fullQueue]
+		require.NotNil(t, full.Concurrency)
+		require.Equal(t, 10, *full.Concurrency)
+		require.NotNil(t, full.WorkerConcurrency)
+		require.Equal(t, 5, *full.WorkerConcurrency)
+		require.NotNil(t, full.RateLimitMax)
+		require.Equal(t, 100, *full.RateLimitMax)
+		require.NotNil(t, full.RateLimitPeriodSec)
+		require.Equal(t, 30.0, *full.RateLimitPeriodSec)
+		require.True(t, full.PriorityEnabled)
+		require.True(t, full.PartitionQueue)
+		require.Equal(t, 2.0, full.PollingIntervalSec)
+	})
+
+	t.Run("get_queue", func(t *testing.T) {
+		req := fmt.Sprintf(`{"type":"get_queue","request_id":"q2","name":%q}`, plainQueue)
+		require.NoError(t, mockServer.sendTextMessage([]byte(req)))
+		var resp getQueueConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, getQueueMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.NotNil(t, resp.Output)
+		require.Equal(t, plainQueue, resp.Output.Name)
+		require.Nil(t, resp.Output.Concurrency)
+		require.Nil(t, resp.Output.RateLimitMax)
+		require.False(t, resp.Output.PriorityEnabled)
+	})
+
+	t.Run("get_queue_missing", func(t *testing.T) {
+		require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"get_queue","request_id":"q3","name":"does-not-exist"}`)))
+		var resp getQueueConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, getQueueMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.Nil(t, resp.Output)
+	})
+}
+
 // conductorAggregatesWorkflow is a no-op workflow used by TestConductorWorkflowAggregatesHandler.
 func conductorAggregatesWorkflow(_ DBOSContext, in string) (string, error) {
 	return in, nil

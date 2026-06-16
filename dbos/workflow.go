@@ -4603,14 +4603,10 @@ func ListRegisteredWorkflows(ctx DBOSContext, opts ...ListRegisteredWorkflowsOpt
 	return ctx.ListRegisteredWorkflows(ctx, opts...)
 }
 
-// ListRegisteredQueues returns all registered workflow queues.
+// ListRegisteredQueues returns all queues in the in-memory registry.
 //
-// Example:
-//
-//	queues := dbos.ListRegisteredQueues(ctx)
-//	for _, queue := range queues {
-//	    log.Printf("Queue: %s", queue.Name)
-//	}
+// Deprecated: in-memory queues are deprecated. Use [ListQueues] to list
+// database-backed queues registered with [RegisterQueue].
 func ListRegisteredQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
 	if ctx == nil {
 		return []WorkflowQueue{}, errors.New("ctx cannot be nil")
@@ -4632,34 +4628,27 @@ func (c *dbosContext) ListenQueues(_ DBOSContext, queues ...WorkflowQueue) {
 }
 
 // ListenQueues configures which queues the current DBOS process should listen to.
-// By default, all queues (in-memory and database-backed) are listened to. Once
-// ListenQueues has been called, only the named queues (and the internal DBOS
-// queue) are listened to. This lets multiple DBOS processes share the same queue
-// registry but listen to different subsets.
+// By default, all registered queues are listened to. Once ListenQueues has been
+// called, only the named queues (and the internal DBOS queue) are listened to.
+// This lets multiple DBOS processes share the same queues but listen to different
+// subsets.
 //
 // A queue is identified by name, so a database-backed queue can be listened to by
 // passing a WorkflowQueue with its Name set (or a handle from RetrieveQueue),
 // even before the queue exists in the database — the supervisor resolves names
-// against the database on each reconcile tick.
-//
-// In-memory queues (created with NewWorkflowQueue) must be listened to before
-// Launch; passing one after Launch panics. Database-backed queue names may be
+// against the database on each reconcile tick. Database-backed queue names may be
 // added to the listen set at any time, including after Launch, allowing the
-// listen set to change dynamically for database-backed queues.
+// listen set to change dynamically.
 //
 // Example:
 //
-//	queue1 := dbos.NewWorkflowQueue(ctx, "queue-1")
-//	queue2 := dbos.NewWorkflowQueue(ctx, "queue-2")
-//	queue3 := dbos.NewWorkflowQueue(ctx, "queue-3")
+//	dbos.RegisterQueue(ctx, "queue-1")
+//	dbos.RegisterQueue(ctx, "queue-2")
 //
-//	// Only listen to queue1 and queue2
-//	dbos.ListenQueues(ctx, queue1, queue2)
-//
-//	dbos.Launch(ctx)
-//
-//	// After launch, also listen to a database-backed queue by name.
-//	dbos.ListenQueues(ctx, dbos.WorkflowQueue{Name: "db-queue"})
+//	// Only listen to queue-1 and queue-2.
+//	dbos.ListenQueues(ctx,
+//	    dbos.WorkflowQueue{Name: "queue-1"},
+//	    dbos.WorkflowQueue{Name: "queue-2"})
 func ListenQueues(ctx DBOSContext, queues ...WorkflowQueue) {
 	if ctx == nil {
 		panic("ctx cannot be nil")

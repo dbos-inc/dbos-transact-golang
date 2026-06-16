@@ -139,29 +139,10 @@ func WithQueueOnConflict(policy QueueConflictResolution) QueueOption {
 }
 
 // NewWorkflowQueue creates a new workflow queue with the specified name and configuration options.
-// The queue must be created before workflows can be enqueued to it using the WithQueue option in RunWorkflow.
-// Queues provide controlled execution with support for concurrency limits, priority scheduling, rate limiting, and polling intervals.
 //
-// Example:
-//
-//	queue := dbos.NewWorkflowQueue(ctx, "email-queue",
-//	    dbos.WithWorkerConcurrency(5),
-//	    dbos.WithRateLimiter(&dbos.RateLimiter{
-//	        Limit:  100,
-//	        Period: 60 * time.Second, // 100 workflows per minute
-//	    }),
-//	    dbos.WithPriorityEnabled(),
-//	    dbos.WithQueueBasePollingInterval(1 * time.Second),
-//	    dbos.WithQueueMaxPollingInterval(60 * time.Second),
-//	)
-//
-//	// Enqueue workflows to this queue:
-//	handle, err := dbos.RunWorkflow(ctx, SendEmailWorkflow, emailData, dbos.WithQueue("email-queue"))
-//
-// Deprecated: Use RegisterQueue, which persists the queue configuration in the
-// system database. Database-backed queues can be registered after launch and
-// are discovered across processes. NewWorkflowQueue remains for backward
-// compatibility with the in-memory queue registry.
+// Deprecated: Use [RegisterQueue], which persists the queue configuration in the
+// system database. Database-backed queues can be registered after launch and are
+// discovered across processes.
 func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) WorkflowQueue {
 	ctx, ok := dbosCtx.(*dbosContext)
 	if !ok {
