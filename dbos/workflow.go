@@ -1194,22 +1194,19 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		}
 	}
 
-	// Validate queue exists if provided
+	// Validate queue configuration if provided and if in-memory queue.
 	if len(params.QueueName) > 0 {
-		queue := c.queueRunner.getQueue(params.QueueName)
-		if queue == nil {
-			c.logger.Error("queue does not exist", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s does not exist", params.QueueName))
-		}
-		// If queue has partitions enabled, partition key must be provided
-		if queue.PartitionQueue && len(params.QueuePartitionKey) == 0 {
-			c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
-		}
-		// If partition key is provided, queue must have partitions enabled
-		if len(params.QueuePartitionKey) > 0 && !queue.PartitionQueue {
-			c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
+		if queue := c.queueRunner.getQueue(params.QueueName); queue != nil {
+			// If queue has partitions enabled, partition key must be provided
+			if queue.PartitionQueue && len(params.QueuePartitionKey) == 0 {
+				c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+				return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
+			}
+			// If partition key is provided, queue must have partitions enabled
+			if len(params.QueuePartitionKey) > 0 && !queue.PartitionQueue {
+				c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+				return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
+			}
 		}
 	}
 
