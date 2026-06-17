@@ -2441,6 +2441,8 @@ type stepInfo struct {
 type getWorkflowStepsInput struct {
 	workflowID string
 	loadOutput bool
+	limit      *int
+	offset     *int
 }
 
 func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]stepInfo, error) {
@@ -2449,7 +2451,17 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 			  WHERE workflow_uuid = $1
 			  ORDER BY function_id ASC`, s.dialect.SchemaPrefix(s.schema))
 
-	rows, err := s.pool.Query(ctx, query, input.workflowID)
+	args := []any{input.workflowID}
+	if input.limit != nil {
+		args = append(args, *input.limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
+	}
+	if input.offset != nil {
+		args = append(args, *input.offset)
+		query += fmt.Sprintf(" OFFSET $%d", len(args))
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query workflow steps: %w", err)
 	}

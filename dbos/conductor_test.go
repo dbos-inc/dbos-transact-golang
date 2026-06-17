@@ -1454,3 +1454,91 @@ func TestConductorPrivateMode(t *testing.T) {
 		require.Nil(t, (*resp.Output)[0].Output)
 	})
 }
+
+// conductorPaginationWorkflow runs five named steps so list_steps pagination
+// can be exercised against a stable, ordered set of function IDs (0..4).
+func conductorPaginationWorkflow(ctx DBOSContext, _ string) (string, error) {
+	for i := 0; i < 5; i++ {
+		_, err := RunAsStep(ctx, func(c context.Context) (string, error) {
+			return "ok", nil
+		}, WithStepName(fmt.Sprintf("step_%d", i)))
+		if err != nil {
+			return "", err
+		}
+	}
+	return "done", nil
+}
+
+// TestConductorListStepsPagination verifies that the conductor's list_steps
+// limit/offset are honored by the SDK handler, ordered by function ID ascending.
+func TestConductorListStepsPagination(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+	RegisterWorkflow(dbosCtx, conductorPaginationWorkflow)
+	require.NoError(t, dbosCtx.Launch())
+
+	h, err := RunWorkflow(dbosCtx, conductorPaginationWorkflow, "")
+	require.NoError(t, err)
+	_, err = h.GetResult()
+	require.NoError(t, err)
+	wfID := h.GetWorkflowID()
+
+	mockServer := newMockWebSocketServer()
+	t.Cleanup(mockServer.shutdown)
+
+	cond, err := newConductor(dbosCtx.(*dbosContext), conductorConfig{
+		url:     mockServer.getURL(),
+		apiKey:  "test-key",
+		appName: "test-app",
+	})
+	require.NoError(t, err)
+	cond.pingInterval = 100 * time.Millisecond
+	cond.pingTimeout = 200 * time.Millisecond
+	cond.reconnectWait = 100 * time.Millisecond
+	cond.launch()
+	t.Cleanup(func() { cond.shutdown(2 * time.Second) })
+	require.True(t, mockServer.waitForConnection(5*time.Second))
+
+	expect := func(t *testing.T, wantType messageType) []byte {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case raw := <-mockServer.messages:
+				var base baseMessage
+				if err := json.Unmarshal(raw, &base); err == nil && base.Type == wantType {
+					return raw
+				}
+			case <-deadline:
+				t.Fatalf("timed out waiting for response of type %s", wantType)
+			}
+		}
+	}
+
+	listSteps := func(t *testing.T, requestID, pagination string) []int {
+		t.Helper()
+		msg := fmt.Sprintf(`{"type":"list_steps","request_id":%q,"workflow_id":%q%s}`, requestID, wfID, pagination)
+		require.NoError(t, mockServer.sendTextMessage([]byte(msg)))
+		var resp listStepsConductorResponse
+		require.NoError(t, json.Unmarshal(expect(t, listStepsMessage), &resp))
+		require.Nil(t, resp.ErrorMessage)
+		require.NotNil(t, resp.Output)
+		ids := make([]int, len(*resp.Output))
+		for i, step := range *resp.Output {
+			ids[i] = step.FunctionID
+		}
+		return ids
+	}
+
+	t.Run("no_pagination", func(t *testing.T) {
+		require.Equal(t, []int{0, 1, 2, 3, 4}, listSteps(t, "p1", ""))
+	})
+	t.Run("limit", func(t *testing.T) {
+		require.Equal(t, []int{0, 1}, listSteps(t, "p2", `,"limit":2`))
+	})
+	t.Run("limit_offset", func(t *testing.T) {
+		require.Equal(t, []int{1, 2}, listSteps(t, "p3", `,"limit":2,"offset":1`))
+	})
+	t.Run("offset_only", func(t *testing.T) {
+		require.Equal(t, []int{3, 4}, listSteps(t, "p4", `,"offset":3`))
+	})
+}

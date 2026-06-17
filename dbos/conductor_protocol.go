@@ -313,6 +313,8 @@ type listStepsConductorRequest struct {
 	baseMessage
 	WorkflowID string `json:"workflow_id"`
 	LoadOutput bool   `json:"load_output"`
+	Limit      *int   `json:"limit,omitempty"`
+	Offset     *int   `json:"offset,omitempty"`
 }
 
 // workflowStepsConductorResponseBody represents a single workflow step in the list response

@@ -933,7 +933,14 @@ func (c *conductor) handleListStepsRequest(data []byte, requestID string) error 
 	c.logger.Debug("Handling list steps request", "request", req)
 
 	// Get workflow steps using the public GetWorkflowSteps method
-	steps, err := GetWorkflowSteps(c.dbosCtx, req.WorkflowID, WithStepsLoadOutput(req.LoadOutput))
+	stepOpts := []GetWorkflowStepsOption{WithStepsLoadOutput(req.LoadOutput)}
+	if req.Limit != nil {
+		stepOpts = append(stepOpts, WithStepsLimit(*req.Limit))
+	}
+	if req.Offset != nil {
+		stepOpts = append(stepOpts, WithStepsOffset(*req.Offset))
+	}
+	steps, err := GetWorkflowSteps(c.dbosCtx, req.WorkflowID, stepOpts...)
 	if err != nil {
 		c.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflow steps: %v", err)
