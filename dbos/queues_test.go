@@ -2385,6 +2385,26 @@ func TestDatabaseBackedQueues(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("ValidationRejectsBadRateLimiter", func(t *testing.T) {
+		// A non-positive limit is rejected and nothing is persisted.
+		_, err := RegisterQueue(dbosCtx, "bad-rate-limit-queue",
+			WithRateLimiter(&RateLimiter{Limit: 0, Period: time.Second}))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "rate limiter limit must be positive")
+		got, err := RetrieveQueue(dbosCtx, "bad-rate-limit-queue")
+		require.NoError(t, err)
+		require.Nil(t, got)
+
+		// A non-positive period is rejected too.
+		_, err = RegisterQueue(dbosCtx, "bad-rate-period-queue",
+			WithRateLimiter(&RateLimiter{Limit: 5, Period: 0}))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "rate limiter period must be positive")
+		got, err = RetrieveQueue(dbosCtx, "bad-rate-period-queue")
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
 	t.Run("RejectsCollisionWithInMemoryQueue", func(t *testing.T) {
 		// The internal queue is an in-memory queue; registering a database-backed
 		// queue with the same name must be rejected, and nothing persisted.

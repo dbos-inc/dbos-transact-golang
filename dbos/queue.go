@@ -188,6 +188,14 @@ func validateQueueConfig(q *WorkflowQueue) error {
 	if q.basePollingInterval <= 0 {
 		return fmt.Errorf("queue %s: polling interval must be positive", q.Name)
 	}
+	if q.RateLimit != nil {
+		if q.RateLimit.Limit <= 0 {
+			return fmt.Errorf("queue %s: rate limiter limit must be positive", q.Name)
+		}
+		if q.RateLimit.Period <= 0 {
+			return fmt.Errorf("queue %s: rate limiter period must be positive", q.Name)
+		}
+	}
 	return nil
 }
 
