@@ -2526,10 +2526,16 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 // WorkflowAggregateRow is a single row of a workflow aggregate query result.
 // Group maps each grouping column name (e.g. "status", "name", "time_bucket") to its
 // stringified value, with nil entries for grouping columns that were NULL for that row.
-// Count is the number of workflows in this group.
+// Count, MinCreatedAt, MaxQueueWaitMs and MaxTotalLatencyMs are pointers because the caller
+// selects which aggregates to compute; an unselected aggregate is nil (serialized as null,
+// matching the other SDKs). MinCreatedAt is an epoch-ms timestamp; the latency fields are
+// in milliseconds.
 type WorkflowAggregateRow struct {
-	Group map[string]*string `json:"group"`
-	Count int64              `json:"count"`
+	Group             map[string]*string `json:"group"`
+	Count             *int64             `json:"count"`
+	MinCreatedAt      *int64             `json:"min_created_at"`
+	MaxQueueWaitMs    *int64             `json:"max_queue_wait_ms"`
+	MaxTotalLatencyMs *int64             `json:"max_total_latency_ms"`
 }
 
 // _DEFAULT_AGGREGATES_LIMIT caps the number of group rows returned by getWorkflowAggregates
@@ -2543,10 +2549,18 @@ type getWorkflowAggregatesDBInput struct {
 	groupByQueueName          bool
 	groupByExecutorID         bool
 	groupByApplicationVersion bool
+	selectCount               bool
+	selectMinCreatedAt        bool
+	selectMaxQueueWaitMs      bool
+	selectMaxTotalLatencyMs   bool
 	timeBucketSizeMs          int64 // 0 disables time bucketing
 	status                    []WorkflowStatusType
 	startTime                 time.Time
 	endTime                   time.Time
+	completedAfter            time.Time
+	completedBefore           time.Time
+	dequeuedAfter             time.Time
+	dequeuedBefore            time.Time
 	workflowName              []string
 	applicationVersion        []string
 	executorID                []string
@@ -2637,17 +2651,56 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 	if len(input.workflowIDPrefix) > 0 {
 		qb.addWhereLikeAny("workflow_uuid", input.workflowIDPrefix, "%")
 	}
+	// completed_after/before filter on completed_at; dequeued_after/before on
+	// started_at_epoch_ms (the dequeue timestamp). Both are epoch-ms columns.
+	if !input.completedAfter.IsZero() {
+		qb.addWhereGreaterEqual("completed_at", input.completedAfter.UnixMilli())
+	}
+	if !input.completedBefore.IsZero() {
+		qb.addWhereLessEqual("completed_at", input.completedBefore.UnixMilli())
+	}
+	if !input.dequeuedAfter.IsZero() {
+		qb.addWhereGreaterEqual("started_at_epoch_ms", input.dequeuedAfter.UnixMilli())
+	}
+	if !input.dequeuedBefore.IsZero() {
+		qb.addWhereLessEqual("started_at_epoch_ms", input.dequeuedBefore.UnixMilli())
+	}
+
+	// Build select aggregates. MAX/MIN ignore NULLs, so workflows missing a
+	// started_at_epoch_ms or completed_at drop out of the queue-wait / latency maxima.
+	type selectCol struct {
+		name string
+		expr string
+	}
+	var selects []selectCol
+	if input.selectCount {
+		selects = append(selects, selectCol{name: "count", expr: "COUNT(*)"})
+	}
+	if input.selectMinCreatedAt {
+		selects = append(selects, selectCol{name: "min_created_at", expr: "MIN(created_at)"})
+	}
+	if input.selectMaxQueueWaitMs {
+		selects = append(selects, selectCol{name: "max_queue_wait_ms", expr: "MAX(started_at_epoch_ms - created_at)"})
+	}
+	if input.selectMaxTotalLatencyMs {
+		selects = append(selects, selectCol{name: "max_total_latency_ms", expr: "MAX(completed_at - created_at)"})
+	}
+	if len(selects) == 0 {
+		return nil, errors.New("at least one select_ flag must be set")
+	}
 
 	// Build SELECT clause: each group expression aliased to "g0", "g1", ... so the position is stable
 	// regardless of whether the expression is a column or a CAST(...) expression.
-	selectParts := make([]string, 0, len(groups)+1)
+	selectParts := make([]string, 0, len(groups)+len(selects))
 	groupParts := make([]string, 0, len(groups))
 	for i, g := range groups {
 		alias := fmt.Sprintf("g%d", i)
 		selectParts = append(selectParts, fmt.Sprintf("%s AS %s", g.expr, alias))
 		groupParts = append(groupParts, g.expr)
 	}
-	selectParts = append(selectParts, "COUNT(*) AS cnt")
+	for i, sel := range selects {
+		selectParts = append(selectParts, fmt.Sprintf("%s AS s%d", sel.expr, i))
+	}
 
 	query := fmt.Sprintf("SELECT %s FROM %sworkflow_status",
 		strings.Join(selectParts, ", "),
@@ -2676,14 +2729,18 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 
 	results := make([]WorkflowAggregateRow, 0)
 	for rows.Next() {
-		// Scan each group column as nullable string, plus the count.
+		// Scan each group column as nullable string, plus each selected aggregate as nullable int64.
 		groupVals := make([]any, len(groups))
 		for i := range groups {
 			var v *string
 			groupVals[i] = &v
 		}
-		var count int64
-		scanArgs := append(append([]any{}, groupVals...), &count)
+		selectVals := make([]any, len(selects))
+		for i := range selects {
+			var v *int64
+			selectVals[i] = &v
+		}
+		scanArgs := append(append([]any{}, groupVals...), selectVals...)
 		if err := rows.Scan(scanArgs...); err != nil {
 			return nil, fmt.Errorf("failed to scan workflow aggregate row: %w", err)
 		}
@@ -2691,7 +2748,21 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 		for i, g := range groups {
 			groupMap[g.name] = *(groupVals[i].(**string))
 		}
-		results = append(results, WorkflowAggregateRow{Group: groupMap, Count: count})
+		row := WorkflowAggregateRow{Group: groupMap}
+		for i, sel := range selects {
+			val := *(selectVals[i].(**int64))
+			switch sel.name {
+			case "count":
+				row.Count = val
+			case "min_created_at":
+				row.MinCreatedAt = val
+			case "max_queue_wait_ms":
+				row.MaxQueueWaitMs = val
+			case "max_total_latency_ms":
+				row.MaxTotalLatencyMs = val
+			}
+		}
+		results = append(results, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating over workflow aggregate rows: %w", err)

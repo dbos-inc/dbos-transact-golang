@@ -747,10 +747,18 @@ type getWorkflowAggregatesConductorRequestBody struct {
 	GroupByQueueName          bool         `json:"group_by_queue_name"`
 	GroupByExecutorID         bool         `json:"group_by_executor_id"`
 	GroupByApplicationVersion bool         `json:"group_by_application_version"`
+	SelectCount               bool         `json:"select_count"`
+	SelectMinCreatedAt        bool         `json:"select_min_created_at"`
+	SelectMaxQueueWaitMs      bool         `json:"select_max_queue_wait_ms"`
+	SelectMaxTotalLatencyMs   bool         `json:"select_max_total_latency_ms"`
 	TimeBucketSizeMs          *int64       `json:"time_bucket_size_ms,omitempty"`
 	Status                    stringOrList `json:"status,omitempty"`
-	StartTime                 *time.Time   `json:"start_time,omitempty"` // ISO 8601
-	EndTime                   *time.Time   `json:"end_time,omitempty"`   // ISO 8601
+	StartTime                 *time.Time   `json:"start_time,omitempty"`       // ISO 8601
+	EndTime                   *time.Time   `json:"end_time,omitempty"`         // ISO 8601
+	CompletedAfter            *time.Time   `json:"completed_after,omitempty"`  // ISO 8601
+	CompletedBefore           *time.Time   `json:"completed_before,omitempty"` // ISO 8601
+	DequeuedAfter             *time.Time   `json:"dequeued_after,omitempty"`   // ISO 8601
+	DequeuedBefore            *time.Time   `json:"dequeued_before,omitempty"`  // ISO 8601
 	Name                      stringOrList `json:"name,omitempty"`
 	AppVersion                stringOrList `json:"app_version,omitempty"`
 	ExecutorID                stringOrList `json:"executor_id,omitempty"`
