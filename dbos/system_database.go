@@ -1294,6 +1294,8 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		qb.argCounter++
 		query += fmt.Sprintf(" LIMIT $%d", qb.argCounter)
 		qb.args = append(qb.args, *input.limit)
+	} else if input.offset != nil {
+		query += dialectNoLimitClause(s.dialect)
 	}
 
 	if input.offset != nil {
@@ -2455,6 +2457,8 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 	if input.limit != nil {
 		args = append(args, *input.limit)
 		query += fmt.Sprintf(" LIMIT $%d", len(args))
+	} else if input.offset != nil {
+		query += dialectNoLimitClause(s.dialect)
 	}
 	if input.offset != nil {
 		args = append(args, *input.offset)

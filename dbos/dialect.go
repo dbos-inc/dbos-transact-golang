@@ -365,6 +365,16 @@ func dialectLikeAnyClause(d Dialect, column string, placeholderIdx int) string {
 	return fmt.Sprintf("EXISTS (SELECT 1 FROM json_each($%d) WHERE %s LIKE value)", placeholderIdx, column)
 }
 
+// dialectNoLimitClause returns the LIMIT clause that must precede an OFFSET when
+// no row limit was requested. SQLite rejects a bare OFFSET and uses -1 as its
+// "no limit" sentinel; Postgres accepts a bare OFFSET and so needs nothing.
+func dialectNoLimitClause(d Dialect) string {
+	if d.Name() == DialectSQLite {
+		return " LIMIT -1"
+	}
+	return ""
+}
+
 func encodeArrayParam(d Dialect, slice any) (any, error) {
 	if d.SupportsArrayParameters() {
 		return slice, nil
