@@ -1295,10 +1295,16 @@ func TestQueueTimeouts(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 
-		// Wait for the child workflow status to become cancelled
+		// Wait for the child workflow status to become cancelled. The child is
+		// enqueued by the parent only once the parent has been dequeued and run, so
+		// it may not exist yet on the first polls: treat a missing child as the
+		// condition not being met rather than a hard failure (a require here would
+		// kill the polling goroutine on the first transient miss).
 		require.Eventually(t, func() bool {
 			childHandle, err := RetrieveWorkflow[string](dbosCtx, childWorkflowID)
-			require.NoError(t, err, "failed to retrieve child workflow")
+			if err != nil {
+				return false
+			}
 
 			status, err := childHandle.GetStatus()
 			if err != nil {
