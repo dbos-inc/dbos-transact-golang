@@ -2445,3 +2445,74 @@ func TestMixedInMemoryAndDatabaseBackedQueues(t *testing.T) {
 	require.True(t, dbNames["mixed-db-queue"])
 	require.False(t, dbNames["mixed-in-memory-queue"])
 }
+
+// TestDatabaseBackedQueueConfigReload verifies that a running queue worker picks
+// up configuration changes persisted to the database (via a subsequent
+// RegisterQueue upsert) without a restart. It raises the global concurrency of a
+// live queue and asserts that a workflow which was held back by the old limit
+// then starts running.
+func TestDatabaseBackedQueueConfigReload(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	startA := NewEvent()
+	startB := NewEvent()
+	release := NewEvent()
+	reloadWorkflow := func(_ DBOSContext, input string) (string, error) {
+		switch input {
+		case "a":
+			startA.Set()
+		case "b":
+			startB.Set()
+		}
+		release.Wait()
+		return input, nil
+	}
+	RegisterWorkflow(dbosCtx, reloadWorkflow)
+
+	require.NoError(t, Launch(dbosCtx))
+
+	// Register with a global concurrency of 1.
+	q, err := RegisterQueue(dbosCtx, "reload-queue", WithGlobalConcurrency(1), WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
+	require.NotNil(t, q.GlobalConcurrency)
+	require.Equal(t, 1, *q.GlobalConcurrency)
+
+	hA, err := RunWorkflow(dbosCtx, reloadWorkflow, "a", WithQueue(q.Name))
+	require.NoError(t, err)
+	hB, err := RunWorkflow(dbosCtx, reloadWorkflow, "b", WithQueue(q.Name))
+	require.NoError(t, err)
+
+	// Under concurrency 1, "a" runs and "b" stays ENQUEUED behind it.
+	startA.Wait()
+	time.Sleep(1500 * time.Millisecond) // let the runner poll a few times
+	stB, err := hB.GetStatus()
+	require.NoError(t, err)
+	require.Equal(t, WorkflowStatusEnqueued, stB.Status, "expected b to stay enqueued while a holds the only concurrency slot")
+
+	// Raise the global concurrency to 2 at runtime. The live worker must reload
+	// the new limit from the database (republished by the supervisor) without a
+	// restart, after which "b" gets a slot and starts running.
+	updated, err := RegisterQueue(dbosCtx, "reload-queue",
+		WithGlobalConcurrency(2),
+		WithQueueBasePollingInterval(50*time.Millisecond),
+		WithQueueOnConflict(QueueConflictAlwaysUpdate))
+	require.NoError(t, err)
+	require.NotNil(t, updated.GlobalConcurrency)
+	require.Equal(t, 2, *updated.GlobalConcurrency)
+
+	require.Eventually(t, func() bool {
+		st, err := hB.GetStatus()
+		return err == nil && st.Status == WorkflowStatusPending
+	}, 5*time.Second, 50*time.Millisecond, "expected b to start running after the concurrency limit was raised at runtime")
+
+	// Release both and confirm they complete.
+	release.Set()
+	rA, err := hA.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "a", rA)
+	rB, err := hB.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "b", rB)
+
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up")
+}

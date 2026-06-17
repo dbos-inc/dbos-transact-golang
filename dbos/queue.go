@@ -338,6 +338,14 @@ type queueRunner struct {
 	listenMu       sync.Mutex
 	listenedQueues map[string]bool
 
+	// currentQueues holds the latest reconciled set of queues this process runs
+	// workers for (the in-memory registry plus database-backed queues, filtered by
+	// the listen set). The supervisor rebuilds it once per reconcile tick by
+	// replacing the reference, never mutating in place; workers read their
+	// configuration from it.
+	currentMu     sync.RWMutex
+	currentQueues map[string]WorkflowQueue
+
 	// WaitGroup to track all queue goroutines
 	queueGoroutinesWg sync.WaitGroup
 
@@ -353,6 +361,7 @@ func newQueueRunner(logger *slog.Logger) *queueRunner {
 		jitterMax:             1.05,
 		workflowQueueRegistry: make(map[string]WorkflowQueue),
 		listenedQueues:        make(map[string]bool),
+		currentQueues:         make(map[string]WorkflowQueue),
 		completionChan:        make(chan struct{}, 1),
 		logger:                logger.With("service", "queue_runner"),
 	}
@@ -431,10 +440,11 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 	qr.logger.Debug("Queue supervisor stopping due to context cancellation", "cause", context.Cause(ctx))
 }
 
-// queuesToListen builds the set of queues this process should run workers for,
-// combining the in-memory registry with database-backed queues and applying the
-// listen filter set by ListenQueues. An empty listen set means listen to every
-// queue. The internal queue is always included.
+// queuesToListen rebuilds and publishes the set of queues (qr.currentQueues) this process should
+// run workers for, combining the in-memory registry with database-backed queues
+// (from a single listQueues call) and applying the listen filter set by
+// ListenQueues. An empty listen set means listen to every queue. The internal
+// queue is always included.
 func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]WorkflowQueue {
 	// Snapshot the listen set; ListenQueues may mutate it concurrently after launch.
 	qr.listenMu.Lock()
@@ -447,6 +457,7 @@ func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]WorkflowQueue
 
 	current := make(map[string]WorkflowQueue)
 
+	// In-memory queues are always available
 	for name, queue := range qr.workflowQueueRegistry {
 		if hasListenFilter && !listen[name] && name != _DBOS_INTERNAL_QUEUE_NAME {
 			continue
@@ -458,7 +469,14 @@ func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]WorkflowQueue
 		return ctx.systemDB.listQueues(ctx)
 	}, withRetrierLogger(qr.logger))
 	if err != nil {
+		// Return a snapshot of the current set in case of transient errors
 		qr.logger.Warn("Exception listing database-backed queues", "error", err)
+		for name, queue := range qr.snapshotCurrentQueues() {
+			if !queue.databaseBacked || (hasListenFilter && !listen[name]) {
+				continue
+			}
+			current[name] = queue
+		}
 	} else {
 		for _, queue := range dbQueues {
 			if hasListenFilter && !listen[queue.Name] {
@@ -472,7 +490,29 @@ func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]WorkflowQueue
 		current[_DBOS_INTERNAL_QUEUE_NAME] = internal
 	}
 
+	// Publish new set of queues
+	qr.currentMu.Lock()
+	qr.currentQueues = current
+	qr.currentMu.Unlock()
+
 	return current
+}
+
+// snapshotCurrentQueues returns the most recently published set of queues this
+// process runs workers for. The returned map must not be mutated.
+func (qr *queueRunner) snapshotCurrentQueues() map[string]WorkflowQueue {
+	qr.currentMu.RLock()
+	defer qr.currentMu.RUnlock()
+	return qr.currentQueues
+}
+
+// currentQueueConfig returns the latest published configuration for a queue and
+// whether it is still in the reconciled set (i.e. still exists and is listened).
+func (qr *queueRunner) currentQueueConfig(name string) (WorkflowQueue, bool) {
+	qr.currentMu.RLock()
+	defer qr.currentMu.RUnlock()
+	q, ok := qr.currentQueues[name]
+	return q, ok
 }
 
 func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
@@ -482,23 +522,18 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 
 	for {
 		// Reload database-backed queue configuration each iteration so runtime
-		// changes (concurrency, rate limits, polling cadence) take effect without
-		// a restart. If the row was deleted, stop the worker; the supervisor will
-		// no longer list it.
+		// changes (concurrency, rate limits, polling cadence) take effect.
+		// If the queue is gone from the set (deleted or no longer listened), stop
+		// the worker; the supervisor respawns it should it reappear.
 		if queue.databaseBacked {
-			fresh, err := retryWithResult(ctx, func() (*WorkflowQueue, error) {
-				return ctx.systemDB.getQueue(ctx, queue.Name)
-			}, withRetrierLogger(queueLogger))
-			if err != nil {
-				queueLogger.Warn("Failed to reload queue configuration from database", "error", err)
-			} else if fresh == nil {
-				queueLogger.Info("Queue no longer exists in database, stopping worker")
+			fresh, ok := qr.currentQueueConfig(queue.Name)
+			if !ok {
+				queueLogger.Info("Queue no longer present in the reconciled set, stopping worker")
 				return
-			} else {
-				queue = *fresh
-				// Keep the current polling interval within the (possibly updated) bounds.
-				currentPollingInterval = max(queue.basePollingInterval, min(currentPollingInterval, queue.maxPollingInterval))
 			}
+			queue = fresh
+			// Keep the current polling interval within the (possibly updated) bounds.
+			currentPollingInterval = max(queue.basePollingInterval, min(currentPollingInterval, queue.maxPollingInterval))
 		}
 
 		hasBackoffError := false
