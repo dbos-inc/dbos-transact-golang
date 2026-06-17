@@ -4261,6 +4261,8 @@ type StepInfo struct {
 // getWorkflowStepsOptions holds optional parameters for GetWorkflowSteps.
 type getWorkflowStepsOptions struct {
 	loadOutput *bool
+	limit      *int
+	offset     *int
 }
 
 // GetWorkflowStepsOption is a functional option for GetWorkflowSteps.
@@ -4271,6 +4273,20 @@ type GetWorkflowStepsOption func(*getWorkflowStepsOptions)
 func WithStepsLoadOutput(loadOutput bool) GetWorkflowStepsOption {
 	return func(o *getWorkflowStepsOptions) {
 		o.loadOutput = &loadOutput
+	}
+}
+
+// WithStepsLimit limits the number of steps returned, ordered by function ID ascending.
+func WithStepsLimit(limit int) GetWorkflowStepsOption {
+	return func(o *getWorkflowStepsOptions) {
+		o.limit = &limit
+	}
+}
+
+// WithStepsOffset skips the given number of steps before returning results.
+func WithStepsOffset(offset int) GetWorkflowStepsOption {
+	return func(o *getWorkflowStepsOptions) {
+		o.offset = &offset
 	}
 }
 
@@ -4286,6 +4302,8 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string, opts ..
 	getWorkflowStepsInput := getWorkflowStepsInput{
 		workflowID: workflowID,
 		loadOutput: loadOutput,
+		limit:      options.limit,
+		offset:     options.offset,
 	}
 
 	var steps []stepInfo
