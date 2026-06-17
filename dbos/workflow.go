@@ -1194,22 +1194,19 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		}
 	}
 
-	// Validate queue exists if provided
+	// Validate queue configuration if provided and if in-memory queue.
 	if len(params.QueueName) > 0 {
-		queue := c.queueRunner.getQueue(params.QueueName)
-		if queue == nil {
-			c.logger.Error("queue does not exist", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s does not exist", params.QueueName))
-		}
-		// If queue has partitions enabled, partition key must be provided
-		if queue.PartitionQueue && len(params.QueuePartitionKey) == 0 {
-			c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
-		}
-		// If partition key is provided, queue must have partitions enabled
-		if len(params.QueuePartitionKey) > 0 && !queue.PartitionQueue {
-			c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
+		if queue := c.queueRunner.getQueue(params.QueueName); queue != nil {
+			// If queue has partitions enabled, partition key must be provided
+			if queue.PartitionQueue && len(params.QueuePartitionKey) == 0 {
+				c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+				return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
+			}
+			// If partition key is provided, queue must have partitions enabled
+			if len(params.QueuePartitionKey) > 0 && !queue.PartitionQueue {
+				c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+				return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
+			}
 		}
 	}
 
@@ -1258,7 +1255,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := retryWithResult(uncancellableCtx, func() (*string, error) {
+		childWorkflowID, err := retryWithResult(c, func() (*string, error) {
 			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		}, withRetrierLogger(c.logger))
 		if err != nil {
@@ -1408,7 +1405,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				stepID:           parentWorkflowState.stepID,
 				tx:               tx,
 			}
-			err = retry(uncancellableCtx, func() error {
+			err = retry(c, func() error {
 				return c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
 			}, withRetrierLogger(c.logger))
 			if err != nil {
@@ -1457,7 +1454,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		if !returnExisting || !errors.Is(err, &DBOSError{Code: QueueDeduplicated}) {
 			return nil, err
 		}
-		existingID, lookupErr := retryWithResult(uncancellableCtx, func() (*string, error) {
+		existingID, lookupErr := retryWithResult(c, func() (*string, error) {
 			return c.systemDB.getDeduplicatedWorkflow(uncancellableCtx, params.QueueName, params.DeduplicationID)
 		}, withRetrierLogger(c.logger))
 		if lookupErr != nil {
@@ -4589,14 +4586,10 @@ func ListRegisteredWorkflows(ctx DBOSContext, opts ...ListRegisteredWorkflowsOpt
 	return ctx.ListRegisteredWorkflows(ctx, opts...)
 }
 
-// ListRegisteredQueues returns all registered workflow queues.
+// ListRegisteredQueues returns all queues in the in-memory registry.
 //
-// Example:
-//
-//	queues := dbos.ListRegisteredQueues(ctx)
-//	for _, queue := range queues {
-//	    log.Printf("Queue: %s", queue.Name)
-//	}
+// Deprecated: in-memory queues are deprecated. Use [ListQueues] to list
+// database-backed queues registered with [RegisterQueue].
 func ListRegisteredQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
 	if ctx == nil {
 		return []WorkflowQueue{}, errors.New("ctx cannot be nil")
@@ -4605,40 +4598,40 @@ func ListRegisteredQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
 }
 
 func (c *dbosContext) ListenQueues(_ DBOSContext, queues ...WorkflowQueue) {
-	if c.launched.Load() {
-		panic("Cannot call ListenQueues after DBOS has launched")
-	}
-
-	// Set listen to true for each provided queue
+	launched := c.launched.Load()
+	c.queueRunner.listenMu.Lock()
+	defer c.queueRunner.listenMu.Unlock()
 	for _, queue := range queues {
-		if registeredQueue, exists := c.queueRunner.workflowQueueRegistry[queue.Name]; exists {
-			registeredQueue.listen = true
-			c.queueRunner.workflowQueueRegistry[queue.Name] = registeredQueue
-		} else {
-			c.logger.Warn("Queue not found in registry when calling ListenQueues. Did you create it with NewWorkflowQueue?", "queue_name", queue.Name)
+		// In-memory queues are fixed at launch, so listening to one after launch is rejected
+		if _, inMemory := c.queueRunner.workflowQueueRegistry[queue.Name]; launched && inMemory {
+			panic("Cannot call ListenQueues for an in-memory queue after DBOS has launched")
 		}
+		c.queueRunner.listenedQueues[queue.Name] = true
 	}
 }
 
 // ListenQueues configures which queues the current DBOS process should listen to.
-// By default, all registered queues are listened to. When ListenQueues is called,
-// only the specified queues (and the internal DBOS queue) will be listened to.
-// This allows multiple DBOS processes to share the same queue registry but listen
-// to different subsets of queues.
+// By default, all registered queues are listened to. Once ListenQueues has been
+// called, only the named queues (and the internal DBOS queue) are listened to.
+// This lets multiple DBOS processes share the same queues but listen to different
+// subsets.
 //
-// ListenQueues can only be called before DBOS has been launched. Calling it after
-// Launch will result in a panic.
+// A queue is identified by name, so a database-backed queue can be listened to by
+// passing a WorkflowQueue with its Name set (or a handle from RetrieveQueue),
+// even before the queue exists in the database — the supervisor resolves names
+// against the database on each reconcile tick. Database-backed queue names may be
+// added to the listen set at any time, including after Launch, allowing the
+// listen set to change dynamically.
 //
 // Example:
 //
-//	queue1 := dbos.NewWorkflowQueue(ctx, "queue-1")
-//	queue2 := dbos.NewWorkflowQueue(ctx, "queue-2")
-//	queue3 := dbos.NewWorkflowQueue(ctx, "queue-3")
+//	dbos.RegisterQueue(ctx, "queue-1")
+//	dbos.RegisterQueue(ctx, "queue-2")
 //
-//	// Only listen to queue1 and queue2
-//	dbos.ListenQueues(ctx, queue1, queue2)
-//
-//	dbos.Launch(ctx)
+//	// Only listen to queue-1 and queue-2.
+//	dbos.ListenQueues(ctx,
+//	    dbos.WorkflowQueue{Name: "queue-1"},
+//	    dbos.WorkflowQueue{Name: "queue-2"})
 func ListenQueues(ctx DBOSContext, queues ...WorkflowQueue) {
 	if ctx == nil {
 		panic("ctx cannot be nil")

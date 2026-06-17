@@ -65,6 +65,8 @@ const (
 	getStepAggregatesMessage     messageType = "get_step_aggregates"
 	listAppVersionsMessage       messageType = "list_application_versions"
 	setLatestAppVersionMessage   messageType = "set_latest_application_version"
+	listQueuesMessage            messageType = "list_queues"
+	getQueueMessage              messageType = "get_queue"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -628,6 +630,58 @@ type triggerScheduleConductorRequest struct {
 type triggerScheduleConductorResponse struct {
 	baseResponse
 	WorkflowID *string `json:"workflow_id"`
+}
+
+// queueConductorOutput is the wire shape of a database-backed queue sent to the conductor.
+type queueConductorOutput struct {
+	Name               string   `json:"name"`
+	Concurrency        *int     `json:"concurrency"`
+	WorkerConcurrency  *int     `json:"worker_concurrency"`
+	RateLimitMax       *int     `json:"rate_limit_max"`
+	RateLimitPeriodSec *float64 `json:"rate_limit_period_sec"`
+	PriorityEnabled    bool     `json:"priority_enabled"`
+	PartitionQueue     bool     `json:"partition_queue"`
+	PollingIntervalSec float64  `json:"polling_interval_sec"`
+}
+
+// toQueueConductorOutput renders a WorkflowQueue into its conductor wire shape.
+func toQueueConductorOutput(q Queue) queueConductorOutput {
+	out := queueConductorOutput{
+		Name:              q.GetName(),
+		Concurrency:       q.GetGlobalConcurrency(),
+		WorkerConcurrency: q.GetWorkerConcurrency(),
+		PriorityEnabled:   q.GetPriorityEnabled(),
+		PartitionQueue:    q.GetPartitionQueue(),
+	}
+	if wq, ok := q.(*WorkflowQueue); ok {
+		out.PollingIntervalSec = wq.basePollingInterval.Seconds()
+	}
+	if rl := q.GetRateLimit(); rl != nil {
+		limit := rl.Limit
+		period := rl.Period.Seconds()
+		out.RateLimitMax = &limit
+		out.RateLimitPeriodSec = &period
+	}
+	return out
+}
+
+type listQueuesConductorRequest struct {
+	baseMessage
+}
+
+type listQueuesConductorResponse struct {
+	baseResponse
+	Output []queueConductorOutput `json:"output"`
+}
+
+type getQueueConductorRequest struct {
+	baseMessage
+	Name string `json:"name"`
+}
+
+type getQueueConductorResponse struct {
+	baseResponse
+	Output *queueConductorOutput `json:"output"`
 }
 
 // eventOutput is one entry returned by a get_workflow_events response.
