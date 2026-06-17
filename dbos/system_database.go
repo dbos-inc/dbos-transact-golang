@@ -4474,9 +4474,9 @@ func (s *sysDB) updateQueueRow(ctx context.Context, db Querier, q WorkflowQueue)
 // updateQueueConfig applies a single configuration change to a database-backed
 // queue within one transaction: it reads the current row, passes it to mutate
 // (which applies and validates the change against the freshly-read values),
-// persists the row, and returns the updated queue.
+// persists the row, and returns the updated queue. Run with snapshot isolation.
 func (s *sysDB) updateQueueConfig(ctx context.Context, name string, mutate func(*WorkflowQueue) error) (*WorkflowQueue, error) {
-	tx, err := s.pool.BeginTx(ctx, TxOptions{})
+	tx, err := s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}

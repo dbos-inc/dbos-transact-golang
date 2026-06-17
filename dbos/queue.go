@@ -120,7 +120,7 @@ func (q *WorkflowQueue) applyConfigChange(ctx DBOSContext, mutate func(*Workflow
 			mutate(fresh)
 			return validateQueueConfig(fresh)
 		})
-	}, withRetrierLogger(c.logger))
+	}, withRetrierLogger(c.logger), withRetryCondition(isRetryableTransaction))
 	if err != nil {
 		return err
 	}
