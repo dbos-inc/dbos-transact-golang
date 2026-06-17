@@ -101,8 +101,22 @@ func (q *WorkflowQueue) SetPriorityEnabled(ctx DBOSContext, value bool) error {
 }
 
 // SetPartitionQueue toggles partitioned queue mode.
+//
+// Switching an existing queue from unpartitioned to partitioned abandons any
+// workflows already enqueued on it: they were enqueued without a partition key,
+// and a partitioned queue only dequeues from its partitions, so they will never
+// be dequeued.
 func (q *WorkflowQueue) SetPartitionQueue(ctx DBOSContext, value bool) error {
-	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.PartitionQueue = value })
+	wasUnpartitioned := !q.PartitionQueue
+	if err := q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.PartitionQueue = value }); err != nil {
+		return err
+	}
+	if value && wasUnpartitioned {
+		if c, ok := ctx.(*dbosContext); ok {
+			c.logger.Warn("Switched queue to partitioned mode; workflows already enqueued without a partition key will be abandoned and never dequeued", "queue_name", q.Name)
+		}
+	}
+	return nil
 }
 
 // SetPollingInterval updates the queue's base polling interval: the cadence at
