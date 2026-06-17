@@ -19,6 +19,39 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// registerWFQ / retrieveWFQ / listWFQ are test helpers that call the public
+// queue API (which returns the Queue interface) and unwrap the concrete
+// *WorkflowQueue, so existing tests can keep reading struct fields directly.
+func registerWFQ(ctx DBOSContext, name string, options ...QueueOption) (*WorkflowQueue, error) {
+	q, err := RegisterQueue(ctx, name, options...)
+	if err != nil {
+		return nil, err
+	}
+	return q.(*WorkflowQueue), nil
+}
+
+func intPtr(i int) *int { return &i }
+
+func retrieveWFQ(ctx DBOSContext, name string) (*WorkflowQueue, error) {
+	q, err := RetrieveQueue(ctx, name)
+	if err != nil || q == nil {
+		return nil, err
+	}
+	return q.(*WorkflowQueue), nil
+}
+
+func listWFQ(ctx DBOSContext) ([]WorkflowQueue, error) {
+	qs, err := ListQueues(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]WorkflowQueue, len(qs))
+	for i, q := range qs {
+		out[i] = *q.(*WorkflowQueue)
+	}
+	return out, nil
+}
+
 func queueWorkflow(ctx DBOSContext, input string) (string, error) {
 	step1, err := RunAsStep(ctx, func(context context.Context) (string, error) {
 		return queueStep(context, input)
@@ -190,15 +223,15 @@ func TestWorkflowQueues(t *testing.T) {
 	require.NoError(t, err)
 
 	// Register the database-backed queues now that DBOS has launched.
-	queue, err = RegisterQueue(dbosCtx, "test-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	queue, err = registerWFQ(dbosCtx, "test-queue", WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
-	dlqEnqueueQueue, err = RegisterQueue(dbosCtx, "test-successive-enqueue-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	dlqEnqueueQueue, err = registerWFQ(dbosCtx, "test-successive-enqueue-queue", WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
-	conflictQueue1, err = RegisterQueue(dbosCtx, "conflict-queue-1", WithQueueBasePollingInterval(50*time.Millisecond))
+	conflictQueue1, err = registerWFQ(dbosCtx, "conflict-queue-1", WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
-	conflictQueue2, err = RegisterQueue(dbosCtx, "conflict-queue-2", WithQueueBasePollingInterval(50*time.Millisecond))
+	conflictQueue2, err = registerWFQ(dbosCtx, "conflict-queue-2", WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
-	dedupQueue, err = RegisterQueue(dbosCtx, "test-dedup-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	dedupQueue, err = registerWFQ(dbosCtx, "test-dedup-queue", WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
 
 	t.Run("EnqueueWorkflow", func(t *testing.T) {
@@ -712,7 +745,7 @@ func TestWorkflowQueues(t *testing.T) {
 		// The test queues are database-backed, so they appear in ListQueues (not
 		// ListRegisteredQueues, which lists only in-memory queues). The internal
 		// queue is in-memory and therefore not included here.
-		dbQueues, err := ListQueues(dbosCtx)
+		dbQueues, err := listWFQ(dbosCtx)
 		require.NoError(t, err, "failed to list database-backed queues")
 
 		expectedQueueNames := map[string]bool{
@@ -785,7 +818,7 @@ func TestQueueRecovery(t *testing.T) {
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
-	recoveryQueue, err = RegisterQueue(dbosCtx, "recovery-queue")
+	recoveryQueue, err = registerWFQ(dbosCtx, "recovery-queue")
 	require.NoError(t, err)
 
 	queuedSteps := 5
@@ -906,7 +939,7 @@ func TestGlobalConcurrency(t *testing.T) {
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
-	globalConcurrencyQueue, err = RegisterQueue(dbosCtx, "test-global-concurrency-queue", WithGlobalConcurrency(1))
+	globalConcurrencyQueue, err = registerWFQ(dbosCtx, "test-global-concurrency-queue", WithGlobalConcurrency(1))
 	require.NoError(t, err)
 
 	// Enqueue two workflows
@@ -1011,9 +1044,9 @@ func TestWorkerConcurrency(t *testing.T) {
 
 	// Register the shared database-backed queue from both executors (the second
 	// upserts the same configuration).
-	workerConcurrencyQueue, err = RegisterQueue(dbosCtx1, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
+	workerConcurrencyQueue, err = registerWFQ(dbosCtx1, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
 	require.NoError(t, err)
-	_, err = RegisterQueue(dbosCtx2, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
+	_, err = registerWFQ(dbosCtx2, "test-worker-concurrency-queue", WithWorkerConcurrency(1))
 	require.NoError(t, err)
 
 	// First enqueue four blocking workflows
@@ -1078,7 +1111,7 @@ func TestQueueRateLimiter(t *testing.T) {
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
-	rateLimiterQueue, err := RegisterQueue(dbosCtx, "test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: time.Duration(1800 * time.Millisecond)}))
+	rateLimiterQueue, err := registerWFQ(dbosCtx, "test-rate-limiter-queue", WithRateLimiter(&RateLimiter{Limit: 5, Period: time.Duration(1800 * time.Millisecond)}))
 	require.NoError(t, err)
 
 	limit := 5
@@ -1223,9 +1256,9 @@ func TestQueueTimeouts(t *testing.T) {
 
 	Launch(dbosCtx)
 
-	timeoutQueue, err := RegisterQueue(dbosCtx, "timeout-queue")
+	timeoutQueue, err := registerWFQ(dbosCtx, "timeout-queue")
 	require.NoError(t, err)
-	timeoutOnDequeueQueue, err = RegisterQueue(dbosCtx, "timeout-on-dequeue-queue", WithGlobalConcurrency(1))
+	timeoutOnDequeueQueue, err = registerWFQ(dbosCtx, "timeout-on-dequeue-queue", WithGlobalConcurrency(1))
 	require.NoError(t, err)
 
 	t.Run("EnqueueWorkflowTimeout", func(t *testing.T) {
@@ -1418,9 +1451,9 @@ func TestPriorityQueue(t *testing.T) {
 	err := Launch(dbosCtx)
 	require.NoError(t, err)
 
-	priorityQueue, err = RegisterQueue(dbosCtx, "test_queue_priority", WithGlobalConcurrency(1), WithPriorityEnabled())
+	priorityQueue, err = registerWFQ(dbosCtx, "test_queue_priority", WithGlobalConcurrency(1), WithPriorityEnabled())
 	require.NoError(t, err)
-	childQueue, err = RegisterQueue(dbosCtx, "test_queue_child")
+	childQueue, err = registerWFQ(dbosCtx, "test_queue_child")
 	require.NoError(t, err)
 
 	var wfHandles []WorkflowHandle[int]
@@ -1504,9 +1537,9 @@ func TestListQueuedWorkflows(t *testing.T) {
 	require.NoError(t, err, "failed to launch DBOS")
 
 	// Create database-backed queues for testing
-	testQueue1, err := RegisterQueue(dbosCtx, "list-test-queue", WithGlobalConcurrency(1))
+	testQueue1, err := registerWFQ(dbosCtx, "list-test-queue", WithGlobalConcurrency(1))
 	require.NoError(t, err)
-	testQueue2, err := RegisterQueue(dbosCtx, "list-test-queue2", WithGlobalConcurrency(1))
+	testQueue2, err := registerWFQ(dbosCtx, "list-test-queue2", WithGlobalConcurrency(1))
 	require.NoError(t, err)
 
 	t.Run("WithQueuesOnly", func(t *testing.T) {
@@ -1631,7 +1664,7 @@ func TestPartitionedQueues(t *testing.T) {
 		require.NoError(t, err, "failed to launch DBOS instance")
 
 		// Create a non-partitioned database-backed queue
-		nonPartitionedQueue, err := RegisterQueue(dbosCtx, "non-partitioned-queue")
+		nonPartitionedQueue, err := registerWFQ(dbosCtx, "non-partitioned-queue")
 		require.NoError(t, err)
 
 		// Attempt to enqueue with a partition key on a non-partitioned queue
@@ -1666,7 +1699,7 @@ func TestPartitionedQueues(t *testing.T) {
 		require.NoError(t, err, "failed to launch DBOS instance")
 
 		// Create a partitioned database-backed queue
-		partitionedQueue, err := RegisterQueue(dbosCtx, "partitioned-queue-required", WithPartitionQueue())
+		partitionedQueue, err := registerWFQ(dbosCtx, "partitioned-queue-required", WithPartitionQueue())
 		require.NoError(t, err)
 
 		// Attempt to enqueue to a partitioned queue without a partition key
@@ -1701,7 +1734,7 @@ func TestPartitionedQueues(t *testing.T) {
 		require.NoError(t, err, "failed to launch DBOS instance")
 
 		// Create a partitioned database-backed queue
-		partitionedQueue, err := RegisterQueue(dbosCtx, "partitioned-queue-test", WithPartitionQueue())
+		partitionedQueue, err := registerWFQ(dbosCtx, "partitioned-queue-test", WithPartitionQueue())
 		require.NoError(t, err)
 
 		// Attempt to enqueue with both partition key and deduplication ID
@@ -1749,7 +1782,7 @@ func TestPartitionedQueues(t *testing.T) {
 		require.NoError(t, err, "failed to launch DBOS instance")
 
 		// Create a partitioned database-backed queue with concurrency limit of 1 per partition
-		partitionedQueue, err := RegisterQueue(dbosCtx, "partitioned-queue", WithPartitionQueue(), WithGlobalConcurrency(1))
+		partitionedQueue, err := registerWFQ(dbosCtx, "partitioned-queue", WithPartitionQueue(), WithGlobalConcurrency(1))
 		require.NoError(t, err)
 
 		// Enqueue a blocking workflow on partition 1
@@ -1815,7 +1848,7 @@ func TestQueuePollingIntervals(t *testing.T) {
 		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: false})
 		require.NoError(t, Launch(ctx))
 
-		queue, err := RegisterQueue(ctx, "polling-default-queue")
+		queue, err := registerWFQ(ctx, "polling-default-queue")
 		require.NoError(t, err)
 		require.Equal(t, _DEFAULT_BASE_POLLING_INTERVAL, queue.basePollingInterval)
 		require.Equal(t, _DEFAULT_MAX_POLLING_INTERVAL, queue.maxPollingInterval)
@@ -1829,13 +1862,13 @@ func TestQueuePollingIntervals(t *testing.T) {
 		// Database-backed queues persist only the base polling interval. The max is
 		// derived as max(base, default max); WithQueueMaxPollingInterval is not
 		// persisted, so it is intentionally not used here.
-		queue, err := RegisterQueue(ctx, "polling-custom-queue", WithQueueBasePollingInterval(basePollingInterval))
+		queue, err := registerWFQ(ctx, "polling-custom-queue", WithQueueBasePollingInterval(basePollingInterval))
 		require.NoError(t, err)
 		require.Equal(t, basePollingInterval, queue.basePollingInterval)
 		require.Equal(t, max(basePollingInterval, _DEFAULT_MAX_POLLING_INTERVAL), queue.maxPollingInterval)
 
 		// Re-reading from the database returns the same base interval.
-		reloaded, err := RetrieveQueue(ctx, "polling-custom-queue")
+		reloaded, err := retrieveWFQ(ctx, "polling-custom-queue")
 		require.NoError(t, err)
 		require.Equal(t, basePollingInterval, reloaded.basePollingInterval)
 	})
@@ -2079,9 +2112,9 @@ func TestListenQueues(t *testing.T) {
 		require.NoError(t, Launch(dbosCtx))
 
 		// Register both the listened queue and an unlistened one after launch.
-		_, err := RegisterQueue(dbosCtx, "listened-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+		_, err := registerWFQ(dbosCtx, "listened-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
 		require.NoError(t, err)
-		_, err = RegisterQueue(dbosCtx, "unlistened-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+		_, err = registerWFQ(dbosCtx, "unlistened-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
 		require.NoError(t, err)
 
 		// The listened queue dispatches.
@@ -2109,7 +2142,7 @@ func TestListenQueues(t *testing.T) {
 		ListenQueues(dbosCtx, WorkflowQueue{Name: "placeholder"})
 		require.NoError(t, Launch(dbosCtx))
 
-		_, err := RegisterQueue(dbosCtx, "dynamic-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+		_, err := registerWFQ(dbosCtx, "dynamic-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
 		require.NoError(t, err)
 		h, err := RunWorkflow(dbosCtx, queueWorkflow, "c", WithQueue("dynamic-db-queue"))
 		require.NoError(t, err)
@@ -2141,9 +2174,9 @@ func TestDelayedExecution(t *testing.T) {
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
 
-	delayQueue, err := RegisterQueue(dbosCtx, "test-delay-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	delayQueue, err := registerWFQ(dbosCtx, "test-delay-queue", WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
-	dedupDelayQueue, err := RegisterQueue(dbosCtx, "test-delay-dedup-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	dedupDelayQueue, err := registerWFQ(dbosCtx, "test-delay-dedup-queue", WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
 
 	t.Run("BasicDelay", func(t *testing.T) {
@@ -2332,39 +2365,39 @@ func TestDatabaseBackedQueues(t *testing.T) {
 	// migrated mechanics tests, ConflictPolicies, and the Mixed test. Delete is
 	// only covered here.
 	t.Run("DeleteQueue", func(t *testing.T) {
-		_, err := RegisterQueue(dbosCtx, "ephemeral-queue")
+		_, err := registerWFQ(dbosCtx, "ephemeral-queue")
 		require.NoError(t, err)
 		require.NoError(t, DeleteQueue(dbosCtx, "ephemeral-queue"))
 
 		// After deletion the queue is gone (RetrieveQueue returns nil).
-		got, err := RetrieveQueue(dbosCtx, "ephemeral-queue")
+		got, err := retrieveWFQ(dbosCtx, "ephemeral-queue")
 		require.NoError(t, err)
 		require.Nil(t, got)
 	})
 
 	t.Run("ConflictPolicies", func(t *testing.T) {
-		_, err := RegisterQueue(dbosCtx, "conflict-q", WithGlobalConcurrency(1))
+		_, err := registerWFQ(dbosCtx, "conflict-q", WithGlobalConcurrency(1))
 		require.NoError(t, err)
 
 		// never_update leaves the existing configuration unchanged.
-		_, err = RegisterQueue(dbosCtx, "conflict-q", WithGlobalConcurrency(99), WithQueueOnConflict(QueueConflictNeverUpdate))
+		_, err = registerWFQ(dbosCtx, "conflict-q", WithGlobalConcurrency(99), WithQueueOnConflict(QueueConflictNeverUpdate))
 		require.NoError(t, err)
-		got, err := RetrieveQueue(dbosCtx, "conflict-q")
+		got, err := retrieveWFQ(dbosCtx, "conflict-q")
 		require.NoError(t, err)
 		require.Equal(t, 1, *got.GlobalConcurrency)
 
 		// always_update overwrites it.
-		_, err = RegisterQueue(dbosCtx, "conflict-q", WithGlobalConcurrency(42), WithQueueOnConflict(QueueConflictAlwaysUpdate))
+		_, err = registerWFQ(dbosCtx, "conflict-q", WithGlobalConcurrency(42), WithQueueOnConflict(QueueConflictAlwaysUpdate))
 		require.NoError(t, err)
-		got, err = RetrieveQueue(dbosCtx, "conflict-q")
+		got, err = retrieveWFQ(dbosCtx, "conflict-q")
 		require.NoError(t, err)
 		require.Equal(t, 42, *got.GlobalConcurrency)
 
 		// update_if_latest_version (the default) updates while this process runs the
 		// latest registered application version.
-		_, err = RegisterQueue(dbosCtx, "conflict-q", WithGlobalConcurrency(7))
+		_, err = registerWFQ(dbosCtx, "conflict-q", WithGlobalConcurrency(7))
 		require.NoError(t, err)
-		got, err = RetrieveQueue(dbosCtx, "conflict-q")
+		got, err = retrieveWFQ(dbosCtx, "conflict-q")
 		require.NoError(t, err)
 		require.Equal(t, 7, *got.GlobalConcurrency)
 
@@ -2372,35 +2405,35 @@ func TestDatabaseBackedQueues(t *testing.T) {
 		sysdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
 		require.NoError(t, sysdb.createApplicationVersion(context.Background(), "v-newer"))
 		require.NoError(t, sysdb.updateApplicationVersionTimestamp(context.Background(), "v-newer", time.Now().Add(time.Hour).UnixMilli()))
-		_, err = RegisterQueue(dbosCtx, "conflict-q", WithGlobalConcurrency(1000))
+		_, err = registerWFQ(dbosCtx, "conflict-q", WithGlobalConcurrency(1000))
 		require.NoError(t, err)
-		got, err = RetrieveQueue(dbosCtx, "conflict-q")
+		got, err = retrieveWFQ(dbosCtx, "conflict-q")
 		require.NoError(t, err)
 		require.Equal(t, 7, *got.GlobalConcurrency, "default policy must not overwrite when a newer version is latest")
 	})
 
 	t.Run("ValidationRejectsBadConcurrency", func(t *testing.T) {
-		_, err := RegisterQueue(dbosCtx, "bad-queue",
+		_, err := registerWFQ(dbosCtx, "bad-queue",
 			WithGlobalConcurrency(1), WithWorkerConcurrency(5))
 		require.Error(t, err)
 	})
 
 	t.Run("ValidationRejectsBadRateLimiter", func(t *testing.T) {
 		// A non-positive limit is rejected and nothing is persisted.
-		_, err := RegisterQueue(dbosCtx, "bad-rate-limit-queue",
+		_, err := registerWFQ(dbosCtx, "bad-rate-limit-queue",
 			WithRateLimiter(&RateLimiter{Limit: 0, Period: time.Second}))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "rate limiter limit must be positive")
-		got, err := RetrieveQueue(dbosCtx, "bad-rate-limit-queue")
+		got, err := retrieveWFQ(dbosCtx, "bad-rate-limit-queue")
 		require.NoError(t, err)
 		require.Nil(t, got)
 
 		// A non-positive period is rejected too.
-		_, err = RegisterQueue(dbosCtx, "bad-rate-period-queue",
+		_, err = registerWFQ(dbosCtx, "bad-rate-period-queue",
 			WithRateLimiter(&RateLimiter{Limit: 5, Period: 0}))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "rate limiter period must be positive")
-		got, err = RetrieveQueue(dbosCtx, "bad-rate-period-queue")
+		got, err = retrieveWFQ(dbosCtx, "bad-rate-period-queue")
 		require.NoError(t, err)
 		require.Nil(t, got)
 	})
@@ -2408,9 +2441,9 @@ func TestDatabaseBackedQueues(t *testing.T) {
 	t.Run("RejectsCollisionWithInMemoryQueue", func(t *testing.T) {
 		// The internal queue is an in-memory queue; registering a database-backed
 		// queue with the same name must be rejected, and nothing persisted.
-		_, err := RegisterQueue(dbosCtx, _DBOS_INTERNAL_QUEUE_NAME)
+		_, err := registerWFQ(dbosCtx, _DBOS_INTERNAL_QUEUE_NAME)
 		require.Error(t, err)
-		got, err := RetrieveQueue(dbosCtx, _DBOS_INTERNAL_QUEUE_NAME)
+		got, err := retrieveWFQ(dbosCtx, _DBOS_INTERNAL_QUEUE_NAME)
 		require.NoError(t, err)
 		require.Nil(t, got)
 	})
@@ -2429,7 +2462,7 @@ func TestMixedInMemoryAndDatabaseBackedQueues(t *testing.T) {
 	require.NoError(t, Launch(dbosCtx))
 
 	// A database-backed queue registered after launch.
-	dbQueue, err := RegisterQueue(dbosCtx, "mixed-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	dbQueue, err := registerWFQ(dbosCtx, "mixed-db-queue", WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
 
 	// Both dispatch their enqueued workflows.
@@ -2456,7 +2489,7 @@ func TestMixedInMemoryAndDatabaseBackedQueues(t *testing.T) {
 	require.True(t, inMemNames["mixed-in-memory-queue"])
 	require.False(t, inMemNames["mixed-db-queue"])
 
-	dbList, err := ListQueues(dbosCtx)
+	dbList, err := listWFQ(dbosCtx)
 	require.NoError(t, err)
 	dbNames := map[string]bool{}
 	for _, q := range dbList {
@@ -2467,10 +2500,13 @@ func TestMixedInMemoryAndDatabaseBackedQueues(t *testing.T) {
 }
 
 // TestDatabaseBackedQueueConfigReload verifies that a running queue worker picks
-// up configuration changes persisted to the database (via a subsequent
-// RegisterQueue upsert) without a restart. It raises the global concurrency of a
-// live queue and asserts that a workflow which was held back by the old limit
-// then starts running.
+// up configuration changes persisted to the database without a restart. The
+// first half raises the global concurrency of a live queue via a RegisterQueue
+// upsert and asserts that a workflow which was held back by the old limit then
+// starts running. The second half exercises the Queue interface setters: it
+// updates several properties and checks both the handle and the persisted row
+// reflect them, then drops worker concurrency to 1 and confirms the live worker
+// runs only one workflow at a time.
 func TestDatabaseBackedQueueConfigReload(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
@@ -2489,10 +2525,30 @@ func TestDatabaseBackedQueueConfigReload(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, reloadWorkflow)
 
+	// A second workflow used by the setter behavior check below: it records the
+	// peak number of concurrently running invocations.
+	var wcActive, wcMax atomic.Int64
+	wcStarted := make(chan struct{}, 8)
+	releaseWC := NewEvent()
+	wcWorkflow := func(_ DBOSContext, input string) (string, error) {
+		n := wcActive.Add(1)
+		for {
+			m := wcMax.Load()
+			if n <= m || wcMax.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		wcStarted <- struct{}{}
+		releaseWC.Wait()
+		wcActive.Add(-1)
+		return input, nil
+	}
+	RegisterWorkflow(dbosCtx, wcWorkflow)
+
 	require.NoError(t, Launch(dbosCtx))
 
 	// Register with a global concurrency of 1.
-	q, err := RegisterQueue(dbosCtx, "reload-queue", WithGlobalConcurrency(1), WithQueueBasePollingInterval(50*time.Millisecond))
+	q, err := registerWFQ(dbosCtx, "reload-queue", WithGlobalConcurrency(1), WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
 	require.NotNil(t, q.GlobalConcurrency)
 	require.Equal(t, 1, *q.GlobalConcurrency)
@@ -2512,7 +2568,7 @@ func TestDatabaseBackedQueueConfigReload(t *testing.T) {
 	// Raise the global concurrency to 2 at runtime. The live worker must reload
 	// the new limit from the database (republished by the supervisor) without a
 	// restart, after which "b" gets a slot and starts running.
-	updated, err := RegisterQueue(dbosCtx, "reload-queue",
+	updated, err := registerWFQ(dbosCtx, "reload-queue",
 		WithGlobalConcurrency(2),
 		WithQueueBasePollingInterval(50*time.Millisecond),
 		WithQueueOnConflict(QueueConflictAlwaysUpdate))
@@ -2533,6 +2589,55 @@ func TestDatabaseBackedQueueConfigReload(t *testing.T) {
 	rB, err := hB.GetResult()
 	require.NoError(t, err)
 	require.Equal(t, "b", rB)
+
+	// --- Dynamic setters via the Queue interface ---
+	// Global concurrency is 2 at this point. Update several properties and check
+	// the handle's getters and the persisted row both reflect the changes.
+	var qi Queue = q
+	require.NoError(t, qi.SetWorkerConcurrency(dbosCtx, intPtr(2)))
+	require.NoError(t, qi.SetPriorityEnabled(dbosCtx, true))
+	require.NoError(t, qi.SetRateLimit(dbosCtx, &RateLimiter{Limit: 50, Period: time.Second}))
+
+	require.NotNil(t, qi.GetWorkerConcurrency())
+	require.Equal(t, 2, *qi.GetWorkerConcurrency())
+	require.True(t, qi.GetPriorityEnabled())
+
+	persisted, err := retrieveWFQ(dbosCtx, "reload-queue")
+	require.NoError(t, err)
+	require.NotNil(t, persisted.WorkerConcurrency)
+	require.Equal(t, 2, *persisted.WorkerConcurrency)
+	require.True(t, persisted.PriorityEnabled)
+	require.NotNil(t, persisted.RateLimit)
+	require.Equal(t, 50, persisted.RateLimit.Limit)
+
+	// Cross-field validation runs against the freshly persisted values: worker
+	// concurrency may not exceed the global concurrency (2).
+	require.Error(t, qi.SetWorkerConcurrency(dbosCtx, intPtr(3)),
+		"expected worker concurrency above global concurrency to be rejected")
+
+	// --- Behavior change: drop worker concurrency to 1 ---
+	require.NoError(t, qi.SetWorkerConcurrency(dbosCtx, intPtr(1)))
+	// Let the supervisor republish the new config (reconcile tick ~1s) before
+	// enqueuing, so the worker dequeues under worker_concurrency=1.
+	time.Sleep(1500 * time.Millisecond)
+
+	hX, err := RunWorkflow(dbosCtx, wcWorkflow, "x", WithQueue("reload-queue"))
+	require.NoError(t, err)
+	hY, err := RunWorkflow(dbosCtx, wcWorkflow, "y", WithQueue("reload-queue"))
+	require.NoError(t, err)
+
+	// Exactly one starts; the other waits for the single worker slot. The live
+	// worker reloads worker_concurrency=1 from the database on its next poll.
+	<-wcStarted
+	time.Sleep(1500 * time.Millisecond)
+	require.Equal(t, int64(1), wcActive.Load(), "expected only one workflow to run with worker concurrency 1")
+
+	releaseWC.Set()
+	_, err = hX.GetResult()
+	require.NoError(t, err)
+	_, err = hY.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), wcMax.Load(), "peak observed concurrency should be 1")
 
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up")
 }
@@ -2562,7 +2667,7 @@ func TestDatabaseBackedQueueRespawnAfterDelete(t *testing.T) {
 	// Global concurrency of 1: a single blocking workflow holds the only slot,
 	// keeping the target workflow ENQUEUED (undispatched) throughout the
 	// delete/re-register cycle regardless of worker liveness.
-	_, err := RegisterQueue(dbosCtx, queueName, WithGlobalConcurrency(1), WithQueueBasePollingInterval(50*time.Millisecond))
+	_, err := registerWFQ(dbosCtx, queueName, WithGlobalConcurrency(1), WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
 
 	// Occupy the only concurrency slot.
@@ -2582,7 +2687,7 @@ func TestDatabaseBackedQueueRespawnAfterDelete(t *testing.T) {
 	// worker stops; the target's workflow_status row is untouched.
 	require.NoError(t, DeleteQueue(dbosCtx, queueName))
 	require.Eventually(t, func() bool {
-		q, err := RetrieveQueue(dbosCtx, queueName)
+		q, err := retrieveWFQ(dbosCtx, queueName)
 		return err == nil && q == nil
 	}, 3*time.Second, 50*time.Millisecond, "queue should be deleted")
 
@@ -2594,7 +2699,7 @@ func TestDatabaseBackedQueueRespawnAfterDelete(t *testing.T) {
 	require.Equal(t, WorkflowStatusEnqueued, stTarget.Status, "target should remain enqueued while the queue is gone")
 
 	// Re-register the queue under the same name; the supervisor respawns a worker.
-	_, err = RegisterQueue(dbosCtx, queueName, WithGlobalConcurrency(1), WithQueueBasePollingInterval(50*time.Millisecond))
+	_, err = registerWFQ(dbosCtx, queueName, WithGlobalConcurrency(1), WithQueueBasePollingInterval(50*time.Millisecond))
 	require.NoError(t, err)
 
 	// Free the slot. The respawned worker must dequeue the previously-enqueued

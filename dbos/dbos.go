@@ -176,7 +176,7 @@ type DBOSContext interface {
 	ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error)    // List registered workflows with filtering options
 	// Deprecated: in-memory queues are deprecated; use ListQueues for database-backed queues.
 	ListRegisteredQueues(_ DBOSContext) ([]WorkflowQueue, error)
-	DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts ...DeleteWorkflowOption) error                          // Delete workflows and all their associated data
+	DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts ...DeleteWorkflowOption) error // Delete workflows and all their associated data
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -192,11 +192,11 @@ type DBOSContext interface {
 	WithCancelCause() (DBOSContext, context.CancelCauseFunc)                            // Returns a copy of the DBOS context that can be canceled with a cause
 
 	// Queue configuration
-	ListenQueues(_ DBOSContext, queues ...WorkflowQueue)                                      // Configure which queues this process should listen to
-	RegisterQueue(_ DBOSContext, name string, options ...QueueOption) (*WorkflowQueue, error) // Register and persist a database-backed queue
-	RetrieveQueue(_ DBOSContext, name string) (*WorkflowQueue, error)                         // Retrieve a database-backed queue by name (nil if absent)
-	ListQueues(_ DBOSContext) ([]WorkflowQueue, error)                                        // List all database-backed queues
-	DeleteQueue(_ DBOSContext, name string) error                                             // Delete a database-backed queue
+	ListenQueues(_ DBOSContext, queues ...WorkflowQueue)                             // Configure which queues this process should listen to
+	RegisterQueue(_ DBOSContext, name string, options ...QueueOption) (Queue, error) // Register and persist a database-backed queue
+	RetrieveQueue(_ DBOSContext, name string) (Queue, error)                         // Retrieve a database-backed queue by name (nil if absent)
+	ListQueues(_ DBOSContext) ([]Queue, error)                                       // List all database-backed queues
+	DeleteQueue(_ DBOSContext, name string) error                                    // Delete a database-backed queue
 
 	// Schedule management
 	CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, input CreateScheduleRequest, opts ...CreateScheduleOption) error // Create a new schedule

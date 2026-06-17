@@ -94,6 +94,7 @@ type systemDatabase interface {
 	getQueue(ctx context.Context, name string) (*WorkflowQueue, error) // returns nil if the queue does not exist
 	listQueues(ctx context.Context) ([]WorkflowQueue, error)
 	upsertQueue(ctx context.Context, input upsertQueueDBInput) (bool, error)
+	updateQueueConfig(ctx context.Context, name string, mutate func(*WorkflowQueue) error) (*WorkflowQueue, error)
 	deleteQueue(ctx context.Context, name string) error
 
 	// Garbage collection
@@ -4333,8 +4334,12 @@ func scanQueueRow(row Row) (*WorkflowQueue, error) {
 // getQueue returns the database-backed queue with the given name, or nil (with a
 // nil error) when no such queue exists.
 func (s *sysDB) getQueue(ctx context.Context, name string) (*WorkflowQueue, error) {
+	return s.getQueueRow(ctx, s.pool, name)
+}
+
+func (s *sysDB) getQueueRow(ctx context.Context, db Querier, name string) (*WorkflowQueue, error) {
 	query := s.renderSQL(`SELECT `+_QUEUE_SELECT_COLUMNS+` FROM %squeues WHERE name = $1`, s.dialect.SchemaPrefix(s.schema))
-	q, err := scanQueueRow(s.pool.QueryRow(ctx, s.dialect.RewriteQuery(query), name))
+	q, err := scanQueueRow(db.QueryRow(ctx, s.dialect.RewriteQuery(query), name))
 	if err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return nil, nil
@@ -4419,13 +4424,8 @@ func (s *sysDB) upsertQueue(ctx context.Context, input upsertQueueDBInput) (bool
 	inserted := affected > 0
 
 	if !inserted && input.updateExisting {
-		updateQuery := s.renderSQL(`UPDATE %squeues SET
-			concurrency = $2, worker_concurrency = $3, rate_limit_max = $4, rate_limit_period_sec = $5,
-			priority_enabled = $6, partition_queue = $7, polling_interval_sec = $8, updated_at = $9
-			WHERE name = $1`, schemaPrefix)
-		if _, err := tx.Exec(ctx, s.dialect.RewriteQuery(updateQuery),
-			q.Name, q.GlobalConcurrency, q.WorkerConcurrency, rateLimitMax, rateLimitPeriodSec, q.PriorityEnabled, q.PartitionQueue, pollingSec, nowMs); err != nil {
-			return false, fmt.Errorf("failed to update queue %s: %w", q.Name, err)
+		if err := s.updateQueueRow(ctx, tx, q); err != nil {
+			return false, err
 		}
 	}
 
@@ -4433,6 +4433,72 @@ func (s *sysDB) upsertQueue(ctx context.Context, input upsertQueueDBInput) (bool
 		return false, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return inserted, nil
+}
+
+func (s *sysDB) updateQueueQuery(schemaPrefix string) string {
+	return s.renderSQL(`UPDATE %squeues SET
+		concurrency = $2, worker_concurrency = $3, rate_limit_max = $4, rate_limit_period_sec = $5,
+		priority_enabled = $6, partition_queue = $7, polling_interval_sec = $8, updated_at = $9
+		WHERE name = $1`, schemaPrefix)
+}
+
+// updateQueueRow overwrites the configuration columns of an existing queue row
+// using the given Querier (a pool or a transaction). It returns an error if no
+// row with the queue's name exists.
+func (s *sysDB) updateQueueRow(ctx context.Context, db Querier, q WorkflowQueue) error {
+	var rateLimitMax *int
+	var rateLimitPeriodSec *float64
+	if q.RateLimit != nil {
+		rateLimitMax = &q.RateLimit.Limit
+		sec := q.RateLimit.Period.Seconds()
+		rateLimitPeriodSec = &sec
+	}
+	pollingSec := q.basePollingInterval.Seconds()
+	if pollingSec <= 0 {
+		pollingSec = _DEFAULT_BASE_POLLING_INTERVAL.Seconds()
+	}
+	nowMs := time.Now().UnixMilli()
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+
+	res, err := db.Exec(ctx, s.dialect.RewriteQuery(s.updateQueueQuery(schemaPrefix)),
+		q.Name, q.GlobalConcurrency, q.WorkerConcurrency, rateLimitMax, rateLimitPeriodSec, q.PriorityEnabled, q.PartitionQueue, pollingSec, nowMs)
+	if err != nil {
+		return fmt.Errorf("failed to update queue %s: %w", q.Name, err)
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		return fmt.Errorf("queue %s does not exist", q.Name)
+	}
+	return nil
+}
+
+// updateQueueConfig applies a single configuration change to a database-backed
+// queue within one transaction: it reads the current row, passes it to mutate
+// (which applies and validates the change against the freshly-read values),
+// persists the row, and returns the updated queue.
+func (s *sysDB) updateQueueConfig(ctx context.Context, name string, mutate func(*WorkflowQueue) error) (*WorkflowQueue, error) {
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	q, err := s.getQueueRow(ctx, tx, name)
+	if err != nil {
+		return nil, err
+	}
+	if q == nil {
+		return nil, fmt.Errorf("queue %s no longer exists", name)
+	}
+	if err := mutate(q); err != nil {
+		return nil, err
+	}
+	if err := s.updateQueueRow(ctx, tx, *q); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return q, nil
 }
 
 /*******************************/

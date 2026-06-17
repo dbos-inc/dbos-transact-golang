@@ -645,18 +645,20 @@ type queueConductorOutput struct {
 }
 
 // toQueueConductorOutput renders a WorkflowQueue into its conductor wire shape.
-func toQueueConductorOutput(q WorkflowQueue) queueConductorOutput {
+func toQueueConductorOutput(q Queue) queueConductorOutput {
 	out := queueConductorOutput{
-		Name:               q.Name,
-		Concurrency:        q.GlobalConcurrency,
-		WorkerConcurrency:  q.WorkerConcurrency,
-		PriorityEnabled:    q.PriorityEnabled,
-		PartitionQueue:     q.PartitionQueue,
-		PollingIntervalSec: q.basePollingInterval.Seconds(),
+		Name:              q.GetName(),
+		Concurrency:       q.GetGlobalConcurrency(),
+		WorkerConcurrency: q.GetWorkerConcurrency(),
+		PriorityEnabled:   q.GetPriorityEnabled(),
+		PartitionQueue:    q.GetPartitionQueue(),
 	}
-	if q.RateLimit != nil {
-		limit := q.RateLimit.Limit
-		period := q.RateLimit.Period.Seconds()
+	if wq, ok := q.(*WorkflowQueue); ok {
+		out.PollingIntervalSec = wq.basePollingInterval.Seconds()
+	}
+	if rl := q.GetRateLimit(); rl != nil {
+		limit := rl.Limit
+		period := rl.Period.Seconds()
 		out.RateLimitMax = &limit
 		out.RateLimitPeriodSec = &period
 	}

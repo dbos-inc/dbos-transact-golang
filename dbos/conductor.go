@@ -1987,7 +1987,7 @@ func (c *conductor) handleGetQueueRequest(data []byte, requestID string) error {
 		msg := fmt.Sprintf("failed to get queue '%s': %v", req.Name, err)
 		errorMsg = &msg
 	} else if queue != nil {
-		o := toQueueConductorOutput(*queue)
+		o := toQueueConductorOutput(queue)
 		output = &o
 	}
 

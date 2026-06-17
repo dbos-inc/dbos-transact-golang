@@ -44,6 +44,90 @@ type WorkflowQueue struct {
 	onConflict     QueueConflictResolution // Registration conflict policy
 }
 
+// Queue is a handle to a registered workflow queue. It is returned by
+// [RegisterQueue], [RetrieveQueue] and [ListQueues].
+//
+// Database-backed queues (registered via [RegisterQueue]) can have their
+// configuration updated at runtime through the Set* methods, which persist the
+// change to the queues table; live workers pick it up on their next reconcile
+// without a restart. The Set* methods return an error for in-memory queues.
+type Queue interface {
+	GetName() string
+	GetGlobalConcurrency() *int
+	GetWorkerConcurrency() *int
+	GetRateLimit() *RateLimiter
+	GetPriorityEnabled() bool
+	GetPartitionQueue() bool
+
+	SetGlobalConcurrency(ctx DBOSContext, value *int) error
+	SetWorkerConcurrency(ctx DBOSContext, value *int) error
+	SetRateLimit(ctx DBOSContext, value *RateLimiter) error
+	SetPriorityEnabled(ctx DBOSContext, value bool) error
+	SetPartitionQueue(ctx DBOSContext, value bool) error
+}
+
+// Compile-time check that *WorkflowQueue satisfies the Queue interface.
+var _ Queue = (*WorkflowQueue)(nil)
+
+func (q *WorkflowQueue) GetName() string            { return q.Name }
+func (q *WorkflowQueue) GetGlobalConcurrency() *int { return q.GlobalConcurrency }
+func (q *WorkflowQueue) GetWorkerConcurrency() *int { return q.WorkerConcurrency }
+func (q *WorkflowQueue) GetRateLimit() *RateLimiter { return q.RateLimit }
+func (q *WorkflowQueue) GetPriorityEnabled() bool   { return q.PriorityEnabled }
+func (q *WorkflowQueue) GetPartitionQueue() bool    { return q.PartitionQueue }
+
+// SetGlobalConcurrency updates the queue's global concurrency limit. Pass nil to clear it.
+func (q *WorkflowQueue) SetGlobalConcurrency(ctx DBOSContext, value *int) error {
+	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.GlobalConcurrency = value })
+}
+
+// SetWorkerConcurrency updates the queue's per-executor concurrency limit. Pass nil to clear it.
+func (q *WorkflowQueue) SetWorkerConcurrency(ctx DBOSContext, value *int) error {
+	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.WorkerConcurrency = value })
+}
+
+// SetRateLimit updates the queue's rate limiter. Pass nil to clear it.
+func (q *WorkflowQueue) SetRateLimit(ctx DBOSContext, value *RateLimiter) error {
+	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.RateLimit = value })
+}
+
+// SetPriorityEnabled toggles priority-based scheduling for the queue.
+func (q *WorkflowQueue) SetPriorityEnabled(ctx DBOSContext, value bool) error {
+	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.PriorityEnabled = value })
+}
+
+// SetPartitionQueue toggles partitioned queue mode.
+func (q *WorkflowQueue) SetPartitionQueue(ctx DBOSContext, value bool) error {
+	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.PartitionQueue = value })
+}
+
+// applyConfigChange persists a single configuration change for a database-backed
+// queue. The read-modify-write runs in one transaction (see
+// systemDatabase.updateQueueConfig): the latest persisted row is read, mutate
+// applies the change, cross-field validation runs against the fresh values, and
+// the row is written. On success the change is reflected on the receiver so its
+// getters return the updated value.
+func (q *WorkflowQueue) applyConfigChange(ctx DBOSContext, mutate func(*WorkflowQueue)) error {
+	if !q.databaseBacked {
+		return fmt.Errorf("queue %s: configuration can only be updated on database-backed queues registered via RegisterQueue", q.Name)
+	}
+	c, ok := ctx.(*dbosContext)
+	if !ok {
+		return errors.New("invalid DBOS context")
+	}
+	_, err := retryWithResult(c, func() (*WorkflowQueue, error) {
+		return c.systemDB.updateQueueConfig(c, q.Name, func(fresh *WorkflowQueue) error {
+			mutate(fresh)
+			return validateQueueConfig(fresh)
+		})
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return err
+	}
+	mutate(q)
+	return nil
+}
+
 // QueueConflictResolution controls how RegisterQueue behaves when a queue with
 // the same name already exists in the system database.
 type QueueConflictResolution string
@@ -212,14 +296,14 @@ func validateQueueConfig(q *WorkflowQueue) error {
 //	    dbos.WithWorkerConcurrency(5),
 //	    dbos.WithPriorityEnabled(),
 //	)
-func RegisterQueue(ctx DBOSContext, name string, options ...QueueOption) (*WorkflowQueue, error) {
+func RegisterQueue(ctx DBOSContext, name string, options ...QueueOption) (Queue, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.RegisterQueue(ctx, name, options...)
 }
 
-func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...QueueOption) (*WorkflowQueue, error) {
+func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...QueueOption) (Queue, error) {
 	if _, inMemory := c.queueRunner.workflowQueueRegistry[name]; inMemory {
 		err := fmt.Errorf("cannot register database-backed queue %q: an in-memory queue with that name already exists", name)
 		c.logger.Error("queue name conflict", "queue_name", name, "error", err)
@@ -288,32 +372,48 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 
 // RetrieveQueue returns the queue with the given name, or nil if
 // no such queue has been registered.
-func RetrieveQueue(ctx DBOSContext, name string) (*WorkflowQueue, error) {
+func RetrieveQueue(ctx DBOSContext, name string) (Queue, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.RetrieveQueue(ctx, name)
 }
 
-func (c *dbosContext) RetrieveQueue(_ DBOSContext, name string) (*WorkflowQueue, error) {
-	// getQueue returns nil when the queue does not exist, which is the desired result.
-	return retryWithResult(c, func() (*WorkflowQueue, error) {
+func (c *dbosContext) RetrieveQueue(_ DBOSContext, name string) (Queue, error) {
+	q, err := retryWithResult(c, func() (*WorkflowQueue, error) {
 		return c.systemDB.getQueue(c, name)
 	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, err
+	}
+	if q == nil {
+		// Return an untyped nil interface so callers' nil checks behave as expected.
+		return nil, nil
+	}
+	return q, nil
 }
 
 // ListQueues returns all queues registered in the system database.
-func ListQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
+func ListQueues(ctx DBOSContext) ([]Queue, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.ListQueues(ctx)
 }
 
-func (c *dbosContext) ListQueues(_ DBOSContext) ([]WorkflowQueue, error) {
-	return retryWithResult(c, func() ([]WorkflowQueue, error) {
+func (c *dbosContext) ListQueues(_ DBOSContext) ([]Queue, error) {
+	queues, err := retryWithResult(c, func() ([]WorkflowQueue, error) {
 		return c.systemDB.listQueues(c)
 	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Queue, len(queues))
+	for i := range queues {
+		q := queues[i]
+		result[i] = &q
+	}
+	return result, nil
 }
 
 // DeleteQueue removes a queue. Workflows still enqueued on it become unrecoverable.
