@@ -416,7 +416,6 @@ func (c *dbosContext) ListQueues(_ DBOSContext) ([]Queue, error) {
 	return result, nil
 }
 
-// DeleteQueue removes a queue. Workflows still enqueued on it become unrecoverable.
 func DeleteQueue(ctx DBOSContext, name string) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
@@ -592,10 +591,6 @@ func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]WorkflowQueue
 			}
 			current[queue.Name] = queue
 		}
-	}
-
-	if internal, ok := qr.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]; ok {
-		current[_DBOS_INTERNAL_QUEUE_NAME] = internal
 	}
 
 	// Publish new set of queues
