@@ -244,10 +244,15 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 		latest, err := retryWithResult(c, func() (*VersionInfo, error) {
 			return c.systemDB.getLatestApplicationVersion(c)
 		}, withRetrierLogger(c.logger))
-		if err != nil {
-			// No registered versions yet: treat this process as the latest.
+		switch {
+		case errors.Is(err, &DBOSError{Code: NoApplicationVersions}):
+			// No registered versions yet: this process is the first, hence the latest.
 			updateExisting = true
-		} else {
+		case err != nil:
+			// Don't silently overwrite on an unknown failure.
+			c.logger.Error("failed to look up latest application version", "queue_name", name, "error", err)
+			return nil, fmt.Errorf("failed to look up latest application version for queue %s: %w", name, err)
+		default:
 			updateExisting = latest.Name == c.applicationVersion
 		}
 	}
