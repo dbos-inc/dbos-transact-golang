@@ -58,12 +58,14 @@ type Queue interface {
 	GetRateLimit() *RateLimiter
 	GetPriorityEnabled() bool
 	GetPartitionQueue() bool
+	GetPollingInterval() time.Duration
 
 	SetGlobalConcurrency(ctx DBOSContext, value *int) error
 	SetWorkerConcurrency(ctx DBOSContext, value *int) error
 	SetRateLimit(ctx DBOSContext, value *RateLimiter) error
 	SetPriorityEnabled(ctx DBOSContext, value bool) error
 	SetPartitionQueue(ctx DBOSContext, value bool) error
+	SetPollingInterval(ctx DBOSContext, value time.Duration) error
 }
 
 // Compile-time check that *WorkflowQueue satisfies the Queue interface.
@@ -75,6 +77,8 @@ func (q *WorkflowQueue) GetWorkerConcurrency() *int { return q.WorkerConcurrency
 func (q *WorkflowQueue) GetRateLimit() *RateLimiter { return q.RateLimit }
 func (q *WorkflowQueue) GetPriorityEnabled() bool   { return q.PriorityEnabled }
 func (q *WorkflowQueue) GetPartitionQueue() bool    { return q.PartitionQueue }
+
+func (q *WorkflowQueue) GetPollingInterval() time.Duration { return q.basePollingInterval }
 
 // SetGlobalConcurrency updates the queue's global concurrency limit. Pass nil to clear it.
 func (q *WorkflowQueue) SetGlobalConcurrency(ctx DBOSContext, value *int) error {
@@ -99,6 +103,15 @@ func (q *WorkflowQueue) SetPriorityEnabled(ctx DBOSContext, value bool) error {
 // SetPartitionQueue toggles partitioned queue mode.
 func (q *WorkflowQueue) SetPartitionQueue(ctx DBOSContext, value bool) error {
 	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.PartitionQueue = value })
+}
+
+// SetPollingInterval updates the queue's base polling interval: the cadence at
+// which workers poll for new work and the floor that backoff scales back to.
+// This does not reset a worker currently backed off above the base; the change
+// takes effect immediately only when it raises the floor above the current
+// interval, otherwise as the worker scales back down on successful iterations.
+func (q *WorkflowQueue) SetPollingInterval(ctx DBOSContext, value time.Duration) error {
+	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.basePollingInterval = value })
 }
 
 // applyConfigChange persists a single configuration change for a database-backed
@@ -320,6 +333,13 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 	}
 	for _, option := range options {
 		option(&q)
+	}
+	// The maximum polling interval is a worker-local backoff ceiling that is not
+	// persisted for database-backed queues (the worker derives it from the base
+	// interval). Ignore an explicit WithQueueMaxPollingInterval override and warn.
+	if q.maxPollingInterval != _DEFAULT_MAX_POLLING_INTERVAL {
+		c.logger.Warn("WithQueueMaxPollingInterval is ignored for database-backed queues; the maximum polling interval is derived from the base polling interval", "queue_name", name)
+		q.maxPollingInterval = _DEFAULT_MAX_POLLING_INTERVAL
 	}
 	if err := validateQueueConfig(&q); err != nil {
 		return nil, err
@@ -634,6 +654,10 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 				queueLogger.Info("Queue no longer present in the reconciled set, stopping worker")
 				return
 			}
+			// maxPollingInterval is a worker-local backoff ceiling that is not
+			// persisted in the queues table, so the reloaded config leaves it unset.
+			// Derive it from the (possibly updated) base interval here.
+			fresh.maxPollingInterval = max(fresh.basePollingInterval, _DEFAULT_MAX_POLLING_INTERVAL)
 			queue = fresh
 			// Keep the current polling interval within the (possibly updated) bounds.
 			currentPollingInterval = max(queue.basePollingInterval, min(currentPollingInterval, queue.maxPollingInterval))

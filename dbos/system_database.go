@@ -4327,7 +4327,6 @@ func scanQueueRow(row Row) (*WorkflowQueue, error) {
 		base = _DEFAULT_BASE_POLLING_INTERVAL
 	}
 	q.basePollingInterval = base
-	q.maxPollingInterval = max(base, _DEFAULT_MAX_POLLING_INTERVAL)
 	return q, nil
 }
 

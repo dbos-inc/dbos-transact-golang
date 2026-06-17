@@ -1767,26 +1767,60 @@ func TestQueuePollingIntervals(t *testing.T) {
 		queue, err := registerWFQ(ctx, "polling-default-queue")
 		require.NoError(t, err)
 		require.Equal(t, _DEFAULT_BASE_POLLING_INTERVAL, queue.basePollingInterval)
-		require.Equal(t, _DEFAULT_MAX_POLLING_INTERVAL, queue.maxPollingInterval)
+		// maxPollingInterval is not persisted: the DB-backed handle leaves it unset
+		// and the queue worker derives the backoff ceiling from the base at runtime.
+		require.Zero(t, queue.maxPollingInterval)
 	})
 
-	t.Run("base polling interval round-trips through the database", func(t *testing.T) {
+	t.Run("base polling interval round-trips; max is worker-derived and not persisted", func(t *testing.T) {
 		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: false})
 		require.NoError(t, Launch(ctx))
 
 		basePollingInterval := 2 * time.Second
-		// Database-backed queues persist only the base polling interval. The max is
-		// derived as max(base, default max); WithQueueMaxPollingInterval is not
-		// persisted, so it is intentionally not used here.
-		queue, err := registerWFQ(ctx, "polling-custom-queue", WithQueueBasePollingInterval(basePollingInterval))
+		// Database-backed queues persist only the base polling interval. The max
+		// polling interval is a worker-local backoff ceiling the queue worker derives
+		// from the base at runtime, so RegisterQueue ignores WithQueueMaxPollingInterval
+		// (logging a warning) and it never surfaces on the handle.
+		queue, err := registerWFQ(ctx, "polling-custom-queue",
+			WithQueueBasePollingInterval(basePollingInterval),
+			WithQueueMaxPollingInterval(5*time.Second))
 		require.NoError(t, err)
 		require.Equal(t, basePollingInterval, queue.basePollingInterval)
-		require.Equal(t, max(basePollingInterval, _DEFAULT_MAX_POLLING_INTERVAL), queue.maxPollingInterval)
+		require.Zero(t, queue.maxPollingInterval)
 
-		// Re-reading from the database returns the same base interval.
+		// Re-reading from the database returns the same base interval and no max.
 		reloaded, err := retrieveWFQ(ctx, "polling-custom-queue")
 		require.NoError(t, err)
 		require.Equal(t, basePollingInterval, reloaded.basePollingInterval)
+		require.Zero(t, reloaded.maxPollingInterval)
+	})
+
+	t.Run("SetPollingInterval updates the base interval at runtime", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: false})
+
+		// In-memory queues must be created before launch (the deprecated path).
+		inMem := NewWorkflowQueue(ctx, "polling-in-mem-queue")
+		require.NoError(t, Launch(ctx))
+
+		q, err := registerWFQ(ctx, "polling-setter-queue", WithQueueBasePollingInterval(time.Second))
+		require.NoError(t, err)
+
+		var qi Queue = q
+		require.NoError(t, qi.SetPollingInterval(ctx, 250*time.Millisecond))
+		require.Equal(t, 250*time.Millisecond, qi.GetPollingInterval())
+
+		// The change is persisted and visible on a fresh reload.
+		persisted, err := retrieveWFQ(ctx, "polling-setter-queue")
+		require.NoError(t, err)
+		require.Equal(t, 250*time.Millisecond, persisted.basePollingInterval)
+
+		// A non-positive interval is rejected by config validation, leaving the
+		// previous value in place.
+		require.Error(t, qi.SetPollingInterval(ctx, 0))
+		require.Equal(t, 250*time.Millisecond, qi.GetPollingInterval())
+
+		// Setters only apply to database-backed queues.
+		require.Error(t, inMem.SetPollingInterval(ctx, time.Second))
 	})
 }
 
@@ -2513,10 +2547,12 @@ func TestDatabaseBackedQueueConfigReload(t *testing.T) {
 	require.NoError(t, qi.SetWorkerConcurrency(dbosCtx, intPtr(2)))
 	require.NoError(t, qi.SetPriorityEnabled(dbosCtx, true))
 	require.NoError(t, qi.SetRateLimit(dbosCtx, &RateLimiter{Limit: 50, Period: time.Second}))
+	require.NoError(t, qi.SetPollingInterval(dbosCtx, 250*time.Millisecond))
 
 	require.NotNil(t, qi.GetWorkerConcurrency())
 	require.Equal(t, 2, *qi.GetWorkerConcurrency())
 	require.True(t, qi.GetPriorityEnabled())
+	require.Equal(t, 250*time.Millisecond, qi.GetPollingInterval())
 
 	persisted, err := retrieveWFQ(dbosCtx, "reload-queue")
 	require.NoError(t, err)
@@ -2525,6 +2561,7 @@ func TestDatabaseBackedQueueConfigReload(t *testing.T) {
 	require.True(t, persisted.PriorityEnabled)
 	require.NotNil(t, persisted.RateLimit)
 	require.Equal(t, 50, persisted.RateLimit.Limit)
+	require.Equal(t, 250*time.Millisecond, persisted.basePollingInterval)
 
 	// Cross-field validation runs against the freshly persisted values: worker
 	// concurrency may not exceed the global concurrency (2).
