@@ -1198,20 +1198,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	if len(params.QueueName) > 0 {
 		queue := c.queueRunner.getQueue(params.QueueName)
 		if queue == nil {
-			// Not in the in-memory registry; it may be a database-backed queue
-			// registered via RegisterQueue (possibly by another process).
-			dbQueue, err := retryWithResult(c, func() (*WorkflowQueue, error) {
-				return c.systemDB.getQueue(WithoutCancel(c), params.QueueName)
-			}, withRetrierLogger(c.logger))
-			if err != nil {
-				c.logger.Error("failed to look up queue", "workflow_name", params.WorkflowName, "queue_name", params.QueueName, "error", err)
-				return nil, newWorkflowExecutionError("", fmt.Errorf("failed to look up queue %s: %w", params.QueueName, err))
-			}
-			if dbQueue != nil {
-				queue = dbQueue
-			}
-		}
-		if queue == nil {
 			c.logger.Error("queue does not exist", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
 			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s does not exist", params.QueueName))
 		}
