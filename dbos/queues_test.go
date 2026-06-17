@@ -2516,3 +2516,77 @@ func TestDatabaseBackedQueueConfigReload(t *testing.T) {
 
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up")
 }
+
+// TestDatabaseBackedQueueRespawnAfterDelete verifies that deleting a queue stops
+// its worker, re-registering it under the same name respawns the worker, and a
+// workflow that was left ENQUEUED across the delete is then dequeued and run.
+// This works because dequeue matches by queue name, so the new queue row (with a
+// fresh queue_id) still picks up the orphaned workflow.
+func TestDatabaseBackedQueueRespawnAfterDelete(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	blockerStarted := NewEvent()
+	releaseBlocker := NewEvent()
+	respawnWorkflow := func(_ DBOSContext, input string) (string, error) {
+		if input == "blocker" {
+			blockerStarted.Set()
+			releaseBlocker.Wait()
+		}
+		return input, nil
+	}
+	RegisterWorkflow(dbosCtx, respawnWorkflow)
+
+	require.NoError(t, Launch(dbosCtx))
+
+	const queueName = "respawn-queue"
+	// Global concurrency of 1: a single blocking workflow holds the only slot,
+	// keeping the target workflow ENQUEUED (undispatched) throughout the
+	// delete/re-register cycle regardless of worker liveness.
+	_, err := RegisterQueue(dbosCtx, queueName, WithGlobalConcurrency(1), WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
+
+	// Occupy the only concurrency slot.
+	hBlocker, err := RunWorkflow(dbosCtx, respawnWorkflow, "blocker", WithQueue(queueName))
+	require.NoError(t, err)
+	blockerStarted.Wait()
+
+	// Enqueue the target; it stays ENQUEUED behind the blocker.
+	hTarget, err := RunWorkflow(dbosCtx, respawnWorkflow, "target", WithQueue(queueName))
+	require.NoError(t, err)
+	time.Sleep(1 * time.Second)
+	stTarget, err := hTarget.GetStatus()
+	require.NoError(t, err)
+	require.Equal(t, WorkflowStatusEnqueued, stTarget.Status, "target should be enqueued behind the blocker")
+
+	// Delete the queue. The supervisor drops it on its next reconcile and the
+	// worker stops; the target's workflow_status row is untouched.
+	require.NoError(t, DeleteQueue(dbosCtx, queueName))
+	require.Eventually(t, func() bool {
+		q, err := RetrieveQueue(dbosCtx, queueName)
+		return err == nil && q == nil
+	}, 3*time.Second, 50*time.Millisecond, "queue should be deleted")
+
+	// Wait long enough for the worker to observe the deletion and stop, then
+	// confirm the target is still enqueued (the delete did not orphan it).
+	time.Sleep(1500 * time.Millisecond)
+	stTarget, err = hTarget.GetStatus()
+	require.NoError(t, err)
+	require.Equal(t, WorkflowStatusEnqueued, stTarget.Status, "target should remain enqueued while the queue is gone")
+
+	// Re-register the queue under the same name; the supervisor respawns a worker.
+	_, err = RegisterQueue(dbosCtx, queueName, WithGlobalConcurrency(1), WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
+
+	// Free the slot. The respawned worker must dequeue the previously-enqueued
+	// target and run it to completion.
+	releaseBlocker.Set()
+	rBlocker, err := hBlocker.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "blocker", rBlocker)
+
+	rTarget, err := hTarget.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "target", rTarget)
+
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up")
+}
