@@ -5598,24 +5598,16 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 // It uses the non-generic retry function under the hood
 func retryWithResult[T any](ctx context.Context, fn func() (T, error), options ...retryOption) (T, error) {
 	var result T
-	var capturedErr error
 
-	// Wrap the generic function to work with the non-generic retry
 	wrappedFn := func() error {
 		var err error
 		result, err = fn()
-		capturedErr = err
 		return err
 	}
 
-	// Use the non-generic retry function
-	err := retry(ctx, wrappedFn, options...)
-
-	// Return the last result and error
-	if err != nil {
-		return result, capturedErr
-	}
-	return result, nil
+	// Return retry's error directly: it is the final fn() error, or ctx.Err()
+	// when the context is cancelled during a backoff wait.
+	return result, retry(ctx, wrappedFn, options...)
 }
 
 func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error) {
