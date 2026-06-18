@@ -56,12 +56,15 @@ func backendDatabaseURL(t *testing.T) string {
 	return url
 }
 
-/* Test database reset.
+/*
+	Test database reset.
+
 Deletes rows from dbos-managed tables instead of dropping the database, which
 is much cheaper — especially on CockroachDB where every DDL is an async
 schema-change job. Falls back to a real drop when any dbos schema is not at
 the latest migration version (e.g. after a schema-mutating migration test or
-a branch switch). */
+a branch switch).
+*/
 func resetTestDatabase(t *testing.T, databaseURL string) {
 	t.Helper()
 

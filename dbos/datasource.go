@@ -3,8 +3,12 @@ package dbos
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
+	"runtime"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -148,6 +152,7 @@ func (ds *DataSource) completionTableStatements() []string {
 	step_id INTEGER NOT NULL,
 	output TEXT,
 	error TEXT,
+	serialization TEXT,
 	created_at INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (workflow_id, step_id)
 )`, table)}
@@ -159,6 +164,7 @@ func (ds *DataSource) completionTableStatements() []string {
 	step_id INT NOT NULL,
 	output TEXT,
 	error TEXT,
+	serialization TEXT,
 	created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())*1000)::bigint,
 	PRIMARY KEY (workflow_id, step_id)
 )`, table),
@@ -222,4 +228,247 @@ func (c *dbosContext) launchDataSources(ctx context.Context) error {
 		c.logger.Debug("Initialized data source", "data_source", ds.name, "dialect", ds.dialect.Name())
 	}
 	return nil
+}
+
+// completionRecord is a row from the transaction_completion table. Only the
+// success case stores output (error stays nil); the error column exists for
+// cross-SDK schema parity but the Go implementation records failures in the
+// system database's operation_outputs instead.
+type completionRecord struct {
+	output        *string
+	errStr        *string
+	serialization string
+}
+
+// checkCompletion reads the durability row for (workflowID, stepID), or returns
+// (nil, nil) when none exists.
+func (ds *DataSource) checkCompletion(ctx context.Context, q Querier, workflowID string, stepID int) (*completionRecord, error) {
+	query := ds.dialect.RewriteQuery(fmt.Sprintf(
+		`SELECT output, error, serialization FROM %s WHERE workflow_id = $1 AND step_id = $2`, ds.qualifiedCompletionTable()))
+	var (
+		rec           completionRecord
+		serialization *string
+	)
+	if err := q.QueryRow(ctx, query, workflowID, stepID).Scan(&rec.output, &rec.errStr, &serialization); err != nil {
+		if errors.Is(err, ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if serialization != nil {
+		rec.serialization = *serialization
+	}
+	return &rec, nil
+}
+
+// recordCompletion writes the durability row for (workflowID, stepID).
+// A duplicate row surfaces as a workflow-conflict error.
+func (ds *DataSource) recordCompletion(ctx context.Context, q Querier, workflowID string, stepID int, output, errStr *string, serialization string) error {
+	query := ds.dialect.RewriteQuery(fmt.Sprintf(
+		`INSERT INTO %s (workflow_id, step_id, output, error, serialization, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+		ds.qualifiedCompletionTable()))
+	if _, err := q.Exec(ctx, query, workflowID, stepID, output, errStr, serialization, time.Now().UnixMilli()); err != nil {
+		if ds.dialect.IsUniqueViolation(err) {
+			return newWorkflowConflictIDError(workflowID)
+		}
+		return err
+	}
+	return nil
+}
+
+// RunAsTransaction durably executes fn as a transaction against the data source
+// ds. fn receives a portable Tx; within it the application can write its own
+// tables and DBOS atomically records a durability row, so the step runs
+// exactly once even across crashes and recovery.
+//
+// It must be called from within a workflow. Standard StepOptions apply
+// (WithStepName, WithStepMaxRetries, retry predicate, WithStepTxIsolation).
+//
+// A mock DBOSContext is supported for testing: the call dispatches through the
+// context's RunAsTransaction method, so a mock can intercept it, just like
+// RunAsStep. convertStepResult handles the mock-returned result.
+//
+// Example:
+//
+//	n, err := dbos.RunAsTransaction(ctx, ds, func(ctx context.Context, tx dbos.Tx) (int64, error) {
+//	    res, err := tx.Exec(ctx, "INSERT INTO orders(item) VALUES ($1)", item)
+//	    if err != nil {
+//	        return 0, err
+//	    }
+//	    return res.RowsAffected()
+//	})
+func RunAsTransaction[R any](ctx DBOSContext, ds *DataSource, fn txn[R], opts ...StepOption) (R, error) {
+	if ctx == nil {
+		return *new(R), newStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
+	}
+	if ds == nil {
+		return *new(R), newStepExecutionError("", "", fmt.Errorf("data source cannot be nil"))
+	}
+	if fn == nil {
+		return *new(R), newStepExecutionError("", "", fmt.Errorf("transaction function cannot be nil"))
+	}
+
+	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	opts = append(opts, WithStepName(stepName))
+
+	typeErasedFn := TxnFunc(func(ctx context.Context, tx Tx) (any, error) { return fn(ctx, tx) })
+
+	result, err := ctx.RunAsTransaction(ctx, ds, typeErasedFn, opts...)
+	if result == nil {
+		return *new(R), err
+	}
+	typedResult, convertErr := convertStepResult[R](ctx, result)
+	if convertErr != nil {
+		return *new(R), convertErr
+	}
+	return typedResult, err
+}
+
+// RunAsTransaction splits durability across two databases: txn1 (the user pool) atomically
+// commits the application writes plus a transaction_completion row; txn2 (the
+// system pool) checkpoints operation_outputs. Recovery checks operation_outputs
+// first (layer 1) then transaction_completion (layer 2), replaying the stored
+// output without re-running fn when the user transaction already committed.
+//
+// This is the concrete DBOSContext.RunAsTransaction; the generic RunAsTransaction
+// wrapper type-erases fn and dispatches here (or to a mock implementation).
+func (c *dbosContext) RunAsTransaction(_ DBOSContext, ds *DataSource, fn TxnFunc, opts ...StepOption) (any, error) {
+	prep, err := prepareStepExecution(c, opts)
+	if err != nil {
+		return nil, err
+	}
+	if fn == nil {
+		return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("transaction function cannot be nil"))
+	}
+	if prep.IsWithinStep {
+		return fn(c, nil)
+	}
+
+	uncancellableCtx := WithoutCancel(c)
+	stepState := prep.StepState
+	stepOpts := prep.StepOpts
+	stepCtx := WithValue(c, workflowStateKey, stepState)
+	ser := resolveEncoder(c)
+
+	// checkpoint writes the step outcome into the system database (txn2). The
+	// user transaction has already committed durably, so this is retried hard.
+	checkpoint := func(encodedOutput, serializedErr *string, serialization string, startedAt time.Time) error {
+		dbInput := recordOperationResultDBInput{
+			workflowID:    stepState.workflowID,
+			stepName:      stepOpts.stepName,
+			stepID:        stepState.stepID,
+			output:        encodedOutput,
+			errStr:        serializedErr,
+			startedAt:     startedAt,
+			completedAt:   time.Now(),
+			serialization: serialization,
+		}
+		return retry(c, func() error {
+			return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+		}, withRetrierLogger(c.logger))
+	}
+
+	// Layer 1: already checkpointed in the system database? Replay it.
+	recordedOutput, err := retryWithResult(c, func() (*recordedResult, error) {
+		return c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
+			workflowID: stepState.workflowID,
+			stepID:     stepState.stepID,
+			stepName:   stepOpts.stepName,
+		})
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
+	}
+	if recordedOutput != nil {
+		return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization},
+			deserializeWorkflowError(recordedOutput.errStr, recordedOutput.serialization)
+	}
+
+	// Layer 2: did the user transaction commit on a previous run (crash window
+	// between txn1 and txn2)? Replay the stored output and apply txn2 without
+	// re-running fn.
+	completion, err := retryWithResult(c, func() (*completionRecord, error) {
+		return ds.checkCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID)
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking transaction completion: %w", err))
+	}
+	if completion != nil {
+		// Replay with the codec the row was written with, not the current one.
+		replaySer := completion.serialization
+		if replaySer == "" {
+			replaySer = ser.Name()
+		}
+		if cerr := checkpoint(completion.output, completion.errStr, replaySer, time.Now()); cerr != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, cerr)
+		}
+		return stepCheckpointedOutcome{value: completion.output, serialization: replaySer},
+			deserializeWorkflowError(completion.errStr, replaySer)
+	}
+
+	// Fresh execution.
+	txOpts := TxOptions{IsoLevel: IsoLevelReadCommitted}
+	if stepOpts.txIsoLevel != nil {
+		txOpts.IsoLevel = *stepOpts.txIsoLevel
+	}
+	stepStartTime := time.Now()
+
+	// runTxnOnce is one fresh-transaction attempt against the user database: run
+	// fn, record the completion row, and commit — all atomic. A fresh tx is
+	// begun on every (retried) call so a closed/aborted tx never leaks.
+	runTxnOnce := func() (any, error) {
+		tx, err := ds.pool.BeginTx(uncancellableCtx, txOpts)
+		if err != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		defer tx.Rollback(uncancellableCtx)
+
+		output, txErr := fn(stepCtx, tx)
+		if txErr != nil {
+			return nil, txErr
+		}
+
+		encoded, serErr := ser.Encode(output)
+		if serErr != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize transaction output: %w", serErr))
+		}
+		if recErr := ds.recordCompletion(uncancellableCtx, tx, stepState.workflowID, stepState.stepID, encoded, nil, ser.Name()); recErr != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("recording transaction completion: %w", recErr))
+		}
+		if cmErr := tx.Commit(uncancellableCtx); cmErr != nil {
+			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", cmErr))
+		}
+		return output, nil
+	}
+
+	// INNER: absorb infrastructure errors (dropped connections, closed tx) and
+	// transaction conflicts (serialization/deadlock), retrying with a fresh tx
+	// indefinitely. Application errors are non-retryable here and pass straight
+	// through to the user retry policy below — so connection retries never burn
+	// the user's maxRetries budget (no compounding).
+	runTxnResilient := func() (any, error) {
+		return retryWithResult(c, runTxnOnce, withRetrierLogger(c.logger), withRetryCondition(ds.dialect.IsRetryableTransaction))
+	}
+
+	// OUTER: the user-facing step retry policy (maxRetries + predicate).
+	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, runTxnResilient)
+
+	// txn2: checkpoint the outcome into the system database.
+	encodedStepOutput, serErr := ser.Encode(stepOutput)
+	if serErr != nil {
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize transaction output: %w", serErr))
+	}
+	var serializedErr *string
+	if stepError != nil {
+		s := serializeWorkflowError(stepError, ser.Name())
+		serializedErr = &s
+	}
+	if cerr := checkpoint(encodedStepOutput, serializedErr, ser.Name(), stepStartTime); cerr != nil {
+		if stepError != nil {
+			cerr = errors.Join(cerr, stepError)
+		}
+		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, cerr)
+	}
+
+	return stepOutput, stepError
 }

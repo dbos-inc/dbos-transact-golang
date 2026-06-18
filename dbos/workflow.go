@@ -1636,9 +1636,8 @@ type StepFunc func(ctx context.Context) (any, error)
 // Step represents a type-safe step function with a specific output type R.
 type Step[R any] func(ctx context.Context) (R, error)
 
-// txnFunc represents a type-erased step function that receives a transaction.
-// Used internally by runAsTxn when the step body and checkpoint share one transaction.
-type txnFunc func(ctx context.Context, tx Tx) (any, error)
+// TxnFunc is a type-erased transaction function that receives a portable Tx.
+type TxnFunc func(ctx context.Context, tx Tx) (any, error)
 
 // txn represents a type-safe step function with output type R that receives a transaction.
 type txn[R any] func(ctx context.Context, tx Tx) (R, error)
@@ -2035,7 +2034,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 
 // runAsTxn executes a step function that receives a transaction when run on its own.
 // The step body and checkpoint share one transaction, so system DB writes and recordOperationResult commit together.
-// Like RunAsStep but uses txn[R] / txnFunc; transaction is begun and committed inside this function.
+// Like RunAsStep but uses txn[R] / TxnFunc; transaction is begun and committed inside this function.
 func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
@@ -2053,7 +2052,7 @@ func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) 
 	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	opts = append(opts, WithStepName(stepName))
 
-	typeErasedFn := txnFunc(func(ctx context.Context, tx Tx) (any, error) { return fn(ctx, tx) })
+	typeErasedFn := TxnFunc(func(ctx context.Context, tx Tx) (any, error) { return fn(ctx, tx) })
 
 	result, err := c.runAsTxn(ctx, typeErasedFn, opts...)
 	if result == nil {
@@ -2066,7 +2065,7 @@ func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) 
 	return typedResult, err
 }
 
-func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (any, error) {
+func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (any, error) {
 	prep, err := prepareStepExecution(c, opts)
 	if err != nil {
 		return nil, err
