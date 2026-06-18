@@ -104,6 +104,14 @@ type Dialect interface {
 	// signature matches retryConfig.retryConditionChain so a method value can
 	// be inserted into the chain directly.
 	IsRetryable(err error, logger *slog.Logger) bool
+
+	// IsRetryableTransaction reports whether err is a transaction-level conflict
+	// (serialization failure / deadlock / write-lock contention) that must be
+	// retried by restarting the ENTIRE transaction with a fresh tx. This is
+	// distinct from IsRetryable (transient connection-level errors) and is opted
+	// in per call site via withRetryCondition. Same signature as IsRetryable so a
+	// method value drops into the retry condition chain directly.
+	IsRetryableTransaction(err error, logger *slog.Logger) bool
 }
 
 // detectDialect identifies the backend from a DBOS database URL by parsing
@@ -210,9 +218,8 @@ func (postgresDialect) IsForeignKeyViolation(err error) bool {
 // IsRetryable matches transient pg/CRDB driver errors that can be safely
 // retried: closed transaction handles, connection-level SQLSTATEs, pgx
 // connect failures, EOF/closed-conn strings, and net.Error. Serialization /
-// lock-not-available SQLSTATEs are intentionally excluded — those require
-// retrying the entire transaction and are opted in per call site via
-// isRetryableTransaction.
+// deadlock SQLSTATEs are intentionally excluded — those require retrying the
+// entire transaction and are opted in per call site via IsRetryableTransaction.
 func (postgresDialect) IsRetryable(err error, logger *slog.Logger) bool {
 	if err == nil {
 		return false
@@ -248,6 +255,20 @@ func (postgresDialect) IsRetryable(err error, logger *slog.Logger) bool {
 	}
 	var nerr net.Error
 	return errors.As(err, &nerr)
+}
+
+// IsRetryableTransaction matches pg/CRDB transaction-level conflicts that
+// require restarting the whole transaction with a fresh tx: 40001
+// serialization_failure (MVCC conflict) and 40P01 deadlock_detected.
+func (postgresDialect) IsRetryableTransaction(err error, logger *slog.Logger) bool {
+	switch pgErrCode(err) {
+	case pgerrcode.SerializationFailure, pgerrcode.DeadlockDetected:
+		if logger != nil {
+			logger.Warn("Retrying transaction-level conflict, requires a new transaction object", "error", err)
+		}
+		return true
+	}
+	return false
 }
 
 /* ---------------------------------------------------------------------------
@@ -345,6 +366,16 @@ func (sqliteDialect) IsRetryable(err error, logger *slog.Logger) bool {
 		return true
 	}
 	return false
+}
+
+// IsRetryableTransaction is identical to IsRetryable for SQLite: a busy/locked
+// writer (SQLITE_BUSY / SQLITE_LOCKED) is both the transient and the
+// transaction-conflict condition, and both are resolved the same way — retry
+// with a fresh tx. The two methods stay distinct on the Dialect interface
+// (pg/CRDB separate connection-level errors from serialization/deadlock
+// conflicts) but collapse to the same check here.
+func (d sqliteDialect) IsRetryableTransaction(err error, logger *slog.Logger) bool {
+	return d.IsRetryable(err, logger)
 }
 
 /* ---------------------------------------------------------------------------

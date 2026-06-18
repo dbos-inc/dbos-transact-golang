@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -5466,19 +5465,6 @@ func maskPasswordInKeyValueFormat(connStr string) string {
 /*******************************/
 /******* RETRIER ********/
 /*******************************/
-
-// isRetryableTransaction returns true for PG error 40001 (SerializationFailure).
-// Useful for CockroachDB transaction retries
-func isRetryableTransaction(err error, _ *slog.Logger) bool {
-	if err == nil {
-		return false
-	}
-	var pgerr *pgconn.PgError
-	if errors.As(err, &pgerr) && pgerr.Code == pgerrcode.SerializationFailure {
-		return true
-	}
-	return false
-}
 
 // retryConfig holds the configuration for a retry operation
 type retryConfig struct {

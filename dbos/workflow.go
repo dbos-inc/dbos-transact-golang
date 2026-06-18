@@ -2483,7 +2483,7 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 	}
 	recvRetryOpts := []retryOption{withRetrierLogger(c.logger)}
 	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
-		recvRetryOpts = append(recvRetryOpts, withRetryCondition(isRetryableTransaction))
+		recvRetryOpts = append(recvRetryOpts, withRetryCondition(cockroachDialect{}.IsRetryableTransaction))
 	}
 	return retryWithResult(c, func() (*recvResult, error) {
 		return c.systemDB.recv(c, input)
