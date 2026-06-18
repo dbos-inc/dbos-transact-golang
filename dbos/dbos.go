@@ -266,6 +266,11 @@ type dbosContext struct {
 
 	// Alert handler
 	alertHandler AlertHandler
+
+	// Registered user-provided data sources (transactions). Populated before
+	// Launch; each one's transaction_completion table is created during Launch.
+	dataSourcesMu sync.Mutex
+	dataSources   []*DataSource
 }
 
 // SetAlertHandler registers a handler function for alerts received from DBOS Conductor.
@@ -709,6 +714,12 @@ func (c *dbosContext) Launch() error {
 	} else if latest.Name != c.applicationVersion {
 		c.logger.Warn("Current application version is not the latest",
 			"current", c.applicationVersion, "latest", latest.Name)
+	}
+
+	// Create the transaction_completion table for every registered data source
+	// before any workflow recovery (recovery may re-run transactions).
+	if err := c.launchDataSources(c); err != nil {
+		return newInitializationError(fmt.Sprintf("failed to initialize data sources: %v", err))
 	}
 
 	// Start the admin server if enabled
