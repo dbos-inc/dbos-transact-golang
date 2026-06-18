@@ -1501,17 +1501,42 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 	}
 	c.logger.Debug("Handling get workflow aggregates request", "request_id", requestID)
 
+	resp := getWorkflowAggregatesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getWorkflowAggregatesMessage, RequestID: requestID},
+		},
+		Output: []WorkflowAggregateRow{},
+	}
+
+	// An explicitly-provided time_bucket_size_ms must be > 0 (parity with the other SDKs);
+	// a nil value means "no bucketing". The public API can't distinguish the two, so reject here.
+	if req.Body.TimeBucketSizeMs != nil && *req.Body.TimeBucketSizeMs <= 0 {
+		errStr := "time_bucket_size_ms must be > 0"
+		resp.ErrorMessage = &errStr
+		return c.sendResponse(resp, string(getWorkflowAggregatesMessage))
+	}
+
 	input := GetWorkflowAggregatesInput{
 		GroupByStatus:             req.Body.GroupByStatus,
 		GroupByName:               req.Body.GroupByName,
 		GroupByQueueName:          req.Body.GroupByQueueName,
 		GroupByExecutorID:         req.Body.GroupByExecutorID,
 		GroupByApplicationVersion: req.Body.GroupByApplicationVersion,
+		SelectCount:               req.Body.SelectCount,
+		SelectMinCreatedAt:        req.Body.SelectMinCreatedAt,
+		SelectMaxQueueWaitMs:      req.Body.SelectMaxQueueWaitMs,
+		SelectMaxTotalLatencyMs:   req.Body.SelectMaxTotalLatencyMs,
 		Name:                      req.Body.Name.toSlice(),
 		ApplicationVersion:        req.Body.AppVersion.toSlice(),
 		ExecutorID:                req.Body.ExecutorID.toSlice(),
 		QueueName:                 req.Body.QueueName.toSlice(),
 		WorkflowIDPrefix:          req.Body.WorkflowIDPrefix.toSlice(),
+	}
+	// Default to count when nothing is selected: the admin aggregates API omits select
+	// flags when it only wants counts (e.g. grouping by time_bucket alone), and forwards
+	// the body verbatim. Without this the query would error "at least one select_ flag".
+	if !input.SelectCount && !input.SelectMinCreatedAt && !input.SelectMaxQueueWaitMs && !input.SelectMaxTotalLatencyMs {
+		input.SelectCount = true
 	}
 	if req.Body.TimeBucketSizeMs != nil {
 		input.TimeBucketSize = time.Duration(*req.Body.TimeBucketSizeMs) * time.Millisecond
@@ -1529,12 +1554,17 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 	if req.Body.EndTime != nil {
 		input.EndTime = *req.Body.EndTime
 	}
-
-	resp := getWorkflowAggregatesConductorResponse{
-		baseResponse: baseResponse{
-			baseMessage: baseMessage{Type: getWorkflowAggregatesMessage, RequestID: requestID},
-		},
-		Output: []WorkflowAggregateRow{},
+	if req.Body.CompletedAfter != nil {
+		input.CompletedAfter = *req.Body.CompletedAfter
+	}
+	if req.Body.CompletedBefore != nil {
+		input.CompletedBefore = *req.Body.CompletedBefore
+	}
+	if req.Body.DequeuedAfter != nil {
+		input.DequeuedAfter = *req.Body.DequeuedAfter
+	}
+	if req.Body.DequeuedBefore != nil {
+		input.DequeuedBefore = *req.Body.DequeuedBefore
 	}
 
 	rows, err := c.dbosCtx.GetWorkflowAggregates(c.dbosCtx, input)
@@ -1557,6 +1587,20 @@ func (c *conductor) handleGetStepAggregatesRequest(data []byte, requestID string
 	}
 	c.logger.Debug("Handling get step aggregates request", "request_id", requestID)
 
+	resp := getStepAggregatesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getStepAggregatesMessage, RequestID: requestID},
+		},
+		Output: []StepAggregateRow{},
+	}
+
+	// An explicitly-provided time_bucket_size_ms must be > 0 (parity with the other SDKs).
+	if req.Body.TimeBucketSizeMs != nil && *req.Body.TimeBucketSizeMs <= 0 {
+		errStr := "time_bucket_size_ms must be > 0"
+		resp.ErrorMessage = &errStr
+		return c.sendResponse(resp, string(getStepAggregatesMessage))
+	}
+
 	input := GetStepAggregatesInput{
 		GroupByFunctionName: req.Body.GroupByFunctionName,
 		GroupByStatus:       req.Body.GroupByStatus,
@@ -1566,6 +1610,12 @@ func (c *conductor) handleGetStepAggregatesRequest(data []byte, requestID string
 		FunctionName:        req.Body.FunctionName.toSlice(),
 		WorkflowIDPrefix:    req.Body.WorkflowIDPrefix.toSlice(),
 	}
+	// Default to count when nothing is selected: the admin aggregates API omits select
+	// flags when it only wants counts, and forwards the body verbatim. Without this the
+	// query would error "at least one select_ flag".
+	if !input.SelectCount && !input.SelectMaxDurationMs {
+		input.SelectCount = true
+	}
 	if req.Body.TimeBucketSizeMs != nil {
 		input.TimeBucketSize = time.Duration(*req.Body.TimeBucketSizeMs) * time.Millisecond
 	}
@@ -1574,13 +1624,6 @@ func (c *conductor) handleGetStepAggregatesRequest(data []byte, requestID string
 	}
 	if req.Body.CompletedBefore != nil {
 		input.CompletedBefore = *req.Body.CompletedBefore
-	}
-
-	resp := getStepAggregatesConductorResponse{
-		baseResponse: baseResponse{
-			baseMessage: baseMessage{Type: getStepAggregatesMessage, RequestID: requestID},
-		},
-		Output: []StepAggregateRow{},
 	}
 
 	rows, err := c.dbosCtx.GetStepAggregates(c.dbosCtx, input)

@@ -1,6 +1,10 @@
 package dbos
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
 	"testing"
 	"time"
 )
@@ -48,4 +52,50 @@ func TestBackoffWithJitter(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRetryWithResultContextError guards the contract that retryWithResult
+// surfaces the context error (so callers can detect it via errors.Is) when the
+// context is cancelled while a retryable operation is in flight.
+func TestRetryWithResultContextError(t *testing.T) {
+	// A retryable error mirroring what the DB layer wraps an in-flight network
+	// failure as (postgresDialect.IsRetryable treats io.EOF as retryable).
+	retryableErr := fmt.Errorf("failed to query workflow status: %w", io.EOF)
+
+	t.Run("CanceledDuringBackoff", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := retryWithResult(ctx, func() (int, error) {
+			return 0, retryableErr
+		})
+
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got: %v", err)
+		}
+	})
+
+	t.Run("DeadlineExceededDuringBackoff", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+		defer cancel()
+
+		_, err := retryWithResult(ctx, func() (int, error) {
+			return 0, retryableErr
+		})
+
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("expected context.DeadlineExceeded, got: %v", err)
+		}
+	})
+
+	t.Run("NonRetryableErrorPreserved", func(t *testing.T) {
+		sentinel := errors.New("boom")
+		_, err := retryWithResult(context.Background(), func() (int, error) {
+			return 0, sentinel
+		})
+
+		if !errors.Is(err, sentinel) {
+			t.Errorf("expected the original error to be preserved, got: %v", err)
+		}
+	})
 }

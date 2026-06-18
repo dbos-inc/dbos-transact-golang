@@ -2483,7 +2483,7 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 	}
 	recvRetryOpts := []retryOption{withRetrierLogger(c.logger)}
 	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
-		recvRetryOpts = append(recvRetryOpts, withRetryCondition(isRetryableTransaction))
+		recvRetryOpts = append(recvRetryOpts, withRetryCondition(cockroachDialect{}.IsRetryableTransaction))
 	}
 	return retryWithResult(c, func() (*recvResult, error) {
 		return c.systemDB.recv(c, input)
@@ -4409,6 +4409,13 @@ type GetWorkflowAggregatesInput struct {
 	GroupByExecutorID         bool
 	GroupByApplicationVersion bool
 
+	// Select* flags choose which aggregates to compute. At least one must be true.
+	// MinCreatedAt is an epoch-ms timestamp; the latency fields are in milliseconds.
+	SelectCount             bool
+	SelectMinCreatedAt      bool
+	SelectMaxQueueWaitMs    bool
+	SelectMaxTotalLatencyMs bool
+
 	// When non-zero, groups results by created_at time bucket of this size.
 	TimeBucketSize time.Duration
 
@@ -4416,6 +4423,10 @@ type GetWorkflowAggregatesInput struct {
 	Status             []WorkflowStatusType
 	StartTime          time.Time
 	EndTime            time.Time
+	CompletedAfter     time.Time
+	CompletedBefore    time.Time
+	DequeuedAfter      time.Time
+	DequeuedBefore     time.Time
 	Name               []string
 	ApplicationVersion []string
 	ExecutorID         []string
@@ -4433,10 +4444,18 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 		groupByQueueName:          input.GroupByQueueName,
 		groupByExecutorID:         input.GroupByExecutorID,
 		groupByApplicationVersion: input.GroupByApplicationVersion,
+		selectCount:               input.SelectCount,
+		selectMinCreatedAt:        input.SelectMinCreatedAt,
+		selectMaxQueueWaitMs:      input.SelectMaxQueueWaitMs,
+		selectMaxTotalLatencyMs:   input.SelectMaxTotalLatencyMs,
 		timeBucketSizeMs:          input.TimeBucketSize.Milliseconds(),
 		status:                    input.Status,
 		startTime:                 input.StartTime,
 		endTime:                   input.EndTime,
+		completedAfter:            input.CompletedAfter,
+		completedBefore:           input.CompletedBefore,
+		dequeuedAfter:             input.DequeuedAfter,
+		dequeuedBefore:            input.DequeuedBefore,
 		workflowName:              input.Name,
 		applicationVersion:        input.ApplicationVersion,
 		executorID:                input.ExecutorID,
@@ -4465,22 +4484,25 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 // Filter fields (Status, StartTime, EndTime, Name, ApplicationVersion, ExecutorID,
 // QueueName, WorkflowIDPrefix) narrow which workflows are counted before grouping.
 //
-// Returns one WorkflowAggregateRow per non-empty group. Each row's Group map contains an
-// entry per enabled grouping column ("status", "name", "queue_name", "executor_id",
-// "application_version", "time_bucket"). Map values are pointers to allow representing
-// NULL grouping values (e.g. workflows without a queue_name).
+// At least one Select* flag must be true. Returns one WorkflowAggregateRow per non-empty
+// group. Each row's Group map contains an entry per enabled grouping column ("status",
+// "name", "queue_name", "executor_id", "application_version", "time_bucket"). Map values are
+// pointers to allow representing NULL grouping values (e.g. workflows without a queue_name).
+// Count, MinCreatedAt, MaxQueueWaitMs and MaxTotalLatencyMs are populated only for the
+// corresponding enabled Select* flag; the rest are nil.
 //
 // Example:
 //
 //	rows, err := dbos.GetWorkflowAggregates(ctx, dbos.GetWorkflowAggregatesInput{
 //	    GroupByStatus: true,
+//	    SelectCount:   true,
 //	    StartTime:     time.Now().Add(-24 * time.Hour),
 //	})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //	for _, r := range rows {
-//	    log.Printf("status=%s count=%d", *r.Group["status"], r.Count)
+//	    log.Printf("status=%s count=%d", *r.Group["status"], *r.Count)
 //	}
 func GetWorkflowAggregates(ctx DBOSContext, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error) {
 	if ctx == nil {

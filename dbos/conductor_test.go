@@ -1264,7 +1264,8 @@ func TestConductorWorkflowAggregatesHandler(t *testing.T) {
 		for _, row := range resp.Output {
 			require.NotNil(t, row.Group["status"])
 			if *row.Group["status"] == string(WorkflowStatusSuccess) {
-				successCount = row.Count
+				require.NotNil(t, row.Count)
+				successCount = *row.Count
 			}
 		}
 		require.Equal(t, int64(3), successCount)
