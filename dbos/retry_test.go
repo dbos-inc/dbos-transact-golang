@@ -44,7 +44,9 @@ var backoffWithJitterTestcases = []struct {
 func TestBackoffWithJitter(t *testing.T) {
 	for _, testcase := range backoffWithJitterTestcases {
 		t.Run(testcase.name, func(t *testing.T) {
-			got := backoffWithJitter(testcase.retryAttempt)
+			// delayFor is 1-based; the listener loop counts attempts from 0 and
+			// passes retryAttempt+1, so mirror that here.
+			got := connectionRetryBackoff.delayFor(testcase.retryAttempt + 1)
 
 			if got < testcase.wantMin || got > testcase.wantMax {
 				t.Errorf("Should be between %v and %v, got=%v, attempt=%v",

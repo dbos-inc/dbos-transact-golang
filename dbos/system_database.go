@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
-	"math/rand"
 	"net/url"
 	"reflect"
 	"regexp"
@@ -339,11 +337,10 @@ const (
 	_DBOS_STREAM_CLOSED_SENTINEL = "__DBOS_STREAM_CLOSED__"
 
 	// Database retry timeouts
-	_DB_CONNECTION_RETRY_BASE_DELAY  = 1 * time.Second
-	_DB_CONNECTION_RETRY_FACTOR      = 2
-	_DB_CONNECTION_RETRY_MAX_RETRIES = 10
-	_DB_CONNECTION_MAX_DELAY         = 120 * time.Second
-	_DB_RETRY_INTERVAL               = 1 * time.Second
+	_DB_CONNECTION_RETRY_BASE_DELAY = 1 * time.Second
+	_DB_CONNECTION_RETRY_FACTOR     = 2
+	_DB_CONNECTION_MAX_DELAY        = 120 * time.Second
+	_DB_RETRY_INTERVAL              = 1 * time.Second
 )
 
 // returns the CONCURRENTLY keyword for online index DDL.
@@ -3185,7 +3182,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 						break
 					}
 					s.logger.Debug("failed to re-acquire connection for notification listener", "error", err)
-					time.Sleep(backoffWithJitter(retryAttempt))
+					time.Sleep(connectionRetryBackoff.delayFor(retryAttempt + 1))
 					retryAttempt++
 				}
 				// The connection is re-aquired. Signal to all waiters they should poll the database for a potentially missed value.
@@ -3203,7 +3200,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			}
 			// Other transient errors. Backoff and continue on same conn
 			s.logger.Error("Error waiting for notification", "error", err)
-			time.Sleep(backoffWithJitter(retryAttempt))
+			time.Sleep(connectionRetryBackoff.delayFor(retryAttempt + 1))
 			retryAttempt++
 			continue
 		}
@@ -5409,20 +5406,6 @@ func (qb *queryBuilder) addWhereLessEqual(column string, value any) {
 	qb.args = append(qb.args, value)
 }
 
-func backoffWithJitter(retryAttempt int) time.Duration {
-	exp := float64(_DB_CONNECTION_RETRY_BASE_DELAY) * math.Pow(_DB_CONNECTION_RETRY_FACTOR, float64(retryAttempt))
-	// cap backoff to max number of retries, then do a fixed time delay
-	// expected retryAttempt to initially be 0, so >= used
-	// cap delay to maximum of _DB_CONNECTION_MAX_DELAY milliseconds
-	if retryAttempt >= _DB_CONNECTION_RETRY_MAX_RETRIES || exp > float64(_DB_CONNECTION_MAX_DELAY) {
-		exp = float64(_DB_CONNECTION_MAX_DELAY)
-	}
-
-	// want randomization between +-25% of exp
-	jitter := 0.75 + rand.Float64()*0.5 // #nosec G404 -- trivial use of math/rand
-	return time.Duration(exp * jitter)
-}
-
 // maskPassword replaces the password in a database URL with asterisks
 func maskPassword(dbURL string) (string, error) {
 	parsedURL, err := url.Parse(dbURL)
@@ -5516,68 +5499,55 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 		opt(config)
 	}
 
-	var lastErr error
-	delay := config.baseDelay
-	attempt := 0
+	sched := backoffSchedule{
+		base:      config.baseDelay,
+		max:       config.maxDelay,
+		factor:    config.backoffFactor,
+		jitterMin: config.jitterMin,
+		jitterMax: config.jitterMax,
+	}
 
-	for {
-		lastErr = fn()
-
-		// Success and rollback case
-		if lastErr == nil {
-			return nil
-		}
-
-		// Check if error is retryable (any condition in the chain returns true)
+	// decide: retryable if any chain condition matches, until the (optional)
+	// maxRetries budget is spent. runs is the number of completed runs, so
+	// runs > maxRetries means the last allowed run has just failed.
+	decide := func(err error, runs int) (bool, error) {
 		retryable := false
 		for _, cond := range config.retryConditionChain {
-			if cond(lastErr, config.logger) {
+			if cond(err, config.logger) {
 				retryable = true
 				break
 			}
 		}
 		if !retryable {
 			if config.logger != nil {
-				config.logger.Debug("Non-retryable error encountered", "error", lastErr)
+				config.logger.Debug("Non-retryable error encountered", "error", err)
 			}
-			return lastErr
+			return false, err
 		}
-
-		// Check if we should continue retrying
-		// If maxRetries is -1, retry indefinitely
-		if config.maxRetries >= 0 && attempt >= config.maxRetries {
-			return lastErr
+		if config.maxRetries >= 0 && runs > config.maxRetries {
+			return false, err
 		}
+		return true, nil
+	}
 
-		// Log retry attempt if logger is provided
+	onRetry := func(err error, runs int, delay time.Duration) {
 		if config.logger != nil {
 			config.logger.Debug("Retrying operation",
-				"attempt", attempt+1,
+				"attempt", runs,
 				"max_retries", config.maxRetries,
 				"delay", delay,
-				"error", lastErr)
+				"error", err)
 		}
-
-		// Apply jitter to the delay
-		jitterRange := config.jitterMax - config.jitterMin
-		jitterFactor := config.jitterMin + rand.Float64()*jitterRange // #nosec G404 -- trivial use of math/rand
-		jitteredDelay := time.Duration(float64(delay) * jitterFactor)
-
-		// Wait before retrying with context cancellation support
-		select {
-		case <-time.After(jitteredDelay):
-		case <-ctx.Done():
-			if config.logger != nil {
-				config.logger.Debug("Retry operation cancelled", "error", ctx.Err())
-			}
-			return ctx.Err()
-		}
-
-		// Calculate next delay with exponential backoff
-		delay = min(time.Duration(float64(delay)*config.backoffFactor), config.maxDelay)
-
-		attempt++
 	}
+
+	onCancel := func() error {
+		if config.logger != nil {
+			config.logger.Debug("Retry operation cancelled", "error", ctx.Err())
+		}
+		return ctx.Err()
+	}
+
+	return retryLoop(ctx, sched, fn, decide, onRetry, onCancel)
 }
 
 // retryWithResult executes a function that returns a value with retry logic

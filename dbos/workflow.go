@@ -1850,37 +1850,43 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 
 // executeStepWithRetry runs runOnce (the step body) and retries with backoff on error when maxRetries > 0.
 func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptions, runOnce func() (any, error)) (stepOutput any, stepError error) {
-	stepOutput, stepError = runOnce()
-	if stepError == nil || stepOpts.maxRetries <= 0 {
-		return stepOutput, stepError
+	work := func() error {
+		stepOutput, stepError = runOnce()
+		return stepError
+	}
+	sched := backoffSchedule{
+		base:      stepOpts.baseInterval,
+		max:       stepOpts.maxInterval,
+		factor:    stepOpts.backoffFactor,
+		jitterMin: 0.95,
+		jitterMax: 1.05,
 	}
 	var joinedErrors error
-	joinedErrors = errors.Join(joinedErrors, stepError)
-	for retry := 1; retry <= stepOpts.maxRetries; retry++ {
-		// Check predicate before sleeping, exit immediately on non-retryable errors.
-		if stepOpts.retryPredicate != nil && !stepOpts.retryPredicate(stepError) {
-			return stepOutput, stepError
+	// decide: runs is the number of completed runs (>=1). runs > maxRetries means
+	// the last allowed run just failed. With maxRetries <= 0 the very first run is
+	// terminal, returning the raw error (no wrapping). The predicate gates the
+	// NEXT retry and is not consulted once the budget is exhausted.
+	decide := func(err error, runs int) (bool, error) {
+		joinedErrors = errors.Join(joinedErrors, err)
+		if runs > stepOpts.maxRetries {
+			if stepOpts.maxRetries <= 0 {
+				return false, err
+			}
+			return false, newMaxStepRetriesExceededError(workflowID, stepOpts.stepName, stepOpts.maxRetries, joinedErrors)
 		}
-		delay := stepOpts.baseInterval
-		if retry > 1 {
-			exponentialDelay := float64(stepOpts.baseInterval) * math.Pow(stepOpts.backoffFactor, float64(retry-1))
-			delay = time.Duration(math.Min(exponentialDelay, float64(stepOpts.maxInterval)))
+		if stepOpts.retryPredicate != nil && !stepOpts.retryPredicate(err) {
+			return false, err
 		}
-		c.logger.Error("step failed, retrying", "step_name", stepOpts.stepName, "retry", retry, "max_retries", stepOpts.maxRetries, "delay", delay, "error", stepError)
-		select {
-		case <-c.Done():
-			return nil, newStepExecutionError(workflowID, stepOpts.stepName, fmt.Errorf("context cancelled during retry: %w", c.Err()))
-		case <-time.After(delay):
-		}
-		stepOutput, stepError = runOnce()
-		if stepError == nil {
-			return stepOutput, stepError
-		}
-		joinedErrors = errors.Join(joinedErrors, stepError)
-		if retry == stepOpts.maxRetries {
-			stepError = newMaxStepRetriesExceededError(workflowID, stepOpts.stepName, stepOpts.maxRetries, joinedErrors)
-			break
-		}
+		return true, nil
+	}
+	onRetry := func(err error, runs int, delay time.Duration) {
+		c.logger.Error("step failed, retrying", "step_name", stepOpts.stepName, "retry", runs, "max_retries", stepOpts.maxRetries, "delay", delay, "error", err)
+	}
+	onCancel := func() error {
+		return newStepExecutionError(workflowID, stepOpts.stepName, fmt.Errorf("context cancelled during retry: %w", c.Err()))
+	}
+	if err := retryLoop(c, sched, work, decide, onRetry, onCancel); err != nil {
+		stepError = err
 	}
 	return stepOutput, stepError
 }
