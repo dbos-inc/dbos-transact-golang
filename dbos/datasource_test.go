@@ -113,6 +113,17 @@ func (u *userBackend) queryString(t *testing.T, query string, args ...any) strin
 	return s
 }
 
+// completionCells returns the output and error columns of the durability row for
+// (workflowID, stepID). Both are nullable: a success row has output set and error
+// nil; a failure row has the reverse.
+func (u *userBackend) completionCells(t *testing.T, wfID string, stepID int) (output, errStr *string) {
+	t.Helper()
+	require.NoError(t, u.pool.QueryRow(context.Background(),
+		u.rw(fmt.Sprintf(`SELECT output, error FROM %s WHERE workflow_id = $1 AND step_id = $2`, u.completionTable())),
+		wfID, stepID).Scan(&output, &errStr))
+	return output, errStr
+}
+
 // completionTableExists reports whether the transaction_completion table exists.
 func (u *userBackend) completionTableExists(t *testing.T) bool {
 	t.Helper()
@@ -659,39 +670,74 @@ func TestRunAsTransaction(t *testing.T) {
 		require.Equal(t, 1, ub.countRows(t, fmt.Sprintf(`SELECT count(*) FROM %s`, ub.completionTable())))
 	})
 
-	// A within-step transaction whose fn errors must roll back its application
-	// write, exactly like a top-level transaction.
-	t.Run("WithinStepRollsBackOnError", func(t *testing.T) {
+	// A transaction whose fn errors rolls back its application write in either
+	// nesting position, but durability differs by position:
+	//   - top-level: the failure is recorded in BOTH durability tables — the user
+	//     DB transaction_completion (error set, output null) and the system DB
+	//     operation_outputs.
+	//   - within a RunAsStep: the enclosing step owns durability, so the
+	//     transaction records no row of its own in either table.
+	t.Run("RollsBackOnError", func(t *testing.T) {
 		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 		ub := openUserBackend(t)
 		ds := ub.register(t, ctx, "app")
 
+		const wantErr = "permanent app failure"
 		wf := func(dctx DBOSContext, _ string) (string, error) {
-			return RunAsStep(dctx, func(c context.Context) (string, error) {
-				_, err := RunAsTransaction(c.(DBOSContext), ds, func(c context.Context, tx Tx) (string, error) {
-					if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "rollback"); err != nil {
+			// Step 0: a within-step transaction that errors. It rolls back and,
+			// because the enclosing step owns durability, records nothing itself.
+			if _, err := RunAsStep(dctx, func(c context.Context) (string, error) {
+				_, terr := RunAsTransaction(c.(DBOSContext), ds, func(c context.Context, tx Tx) (string, error) {
+					if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_step", "rollback"); err != nil {
 						return "", err
 					}
-					return "", errors.New("boom")
+					return "", errors.New("within-step boom")
 				})
-				if err != nil {
-					return "handled", nil
+				if terr == nil {
+					return "", errors.New("expected within-step transaction to fail")
 				}
-				return "unexpected", nil
+				return "handled", nil
+			}); err != nil {
+				return "", err
+			}
+			// Step 1: a top-level transaction that errors. It rolls back too, but
+			// the failure is recorded in both durability tables.
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_top", "rollback"); err != nil {
+					return "", err
+				}
+				return "", errors.New(wantErr)
 			})
 		}
 		RegisterWorkflow(ctx, wf)
 		require.NoError(t, Launch(ctx))
 		ub.createAppTable(t)
 
-		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(uuid.NewString()))
+		wfID := uuid.NewString()
+		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
 		require.NoError(t, err)
-		res, err := h.GetResult()
-		require.NoError(t, err)
-		require.Equal(t, "handled", res)
+		_, err = h.GetResult()
+		require.ErrorContains(t, err, wantErr)
 
-		// The failed transaction rolled back its application write.
+		// Both transactions rolled back their application writes.
 		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv`))
+
+		// User DB: only the top-level transaction wrote a row — a failure row at
+		// step 1 (the within-step transaction recorded nothing): error set, output null.
+		require.Equal(t, 1, ub.countRows(t, fmt.Sprintf(`SELECT count(*) FROM %s`, ub.completionTable())))
+		output, errStr := ub.completionCells(t, wfID, 1)
+		require.Nil(t, output)
+		require.NotNil(t, errStr)
+		require.Contains(t, *errStr, wantErr)
+
+		// System DB: the RunAsStep (step 0) succeeded; the top-level transaction
+		// (step 1) is checkpointed with the error.
+		steps, err := GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 2)
+		require.Nil(t, steps[0].Error)
+		require.NotNil(t, steps[1].Error)
+		require.Contains(t, steps[1].Error.Error(), wantErr)
 	})
 
 	// RunAsTransaction must be called from within a workflow: invoked at top level

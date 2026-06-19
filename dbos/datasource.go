@@ -265,10 +265,10 @@ func (ds *DataSource) ensureCompletionTable(ctx context.Context) error {
 	return nil
 }
 
-// completionRecord is a row from the transaction_completion table. Only the
-// success case stores output (error stays nil); the error column exists for
-// cross-SDK schema parity but the Go implementation records failures in the
-// system database's operation_outputs instead.
+// completionRecord is a row from the transaction_completion table. A success row
+// stores output (error nil); a permanently failed transaction stores a serialized
+// error (output nil) written in a standalone insert after fn's transaction rolls
+// back. Failures are also checkpointed in the system database's operation_outputs.
 type completionRecord struct {
 	output        *string
 	errStr        *string
@@ -537,6 +537,20 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 		s := serializeWorkflowError(stepError, ser.Name())
 		serializedErr = &s
 	}
+
+	// Mirror the failure into the user database so the user's own database is self-describing.
+	// fn's transaction rolled back, so this is a standalone insert on the pool,
+	// written before the system-DB checkpoint to keep the layer-1-then-layer-2 recovery order.
+	// Best-effort.
+	if serializedErr != nil {
+		if recErr := retry(c, func() error {
+			return ds.recordCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID, nil, serializedErr, ser.Name())
+		}, withRetrierLogger(c.logger)); recErr != nil {
+			ds.logger.Warn("Failed to record transaction failure in the user database; the system database remains the source of truth",
+				"workflow_id", stepState.workflowID, "step_id", stepState.stepID, "error", recErr)
+		}
+	}
+
 	if cerr := checkpoint(encodedStepOutput, serializedErr, ser.Name(), stepStartTime); cerr != nil {
 		if stepError != nil {
 			cerr = errors.Join(cerr, stepError)
