@@ -618,162 +618,167 @@ func setupSharedDBOS(t *testing.T) (DBOSContext, *DataSource, *userBackend) {
 	return ctx, ds, ub
 }
 
-// When a data source shares the system database's pool, RunAsTransaction must
-// collapse onto the single-transaction path: no transaction_completion table is
-// created, and the application write commits atomically with the
-// operation_outputs checkpoint (recovery then replays from layer 1 alone).
+// RunAsTransaction on a data source that shares the system database's pool: the
+// same-database optimization collapses onto the single-transaction path. Each
+// subtest gets its own shared-pool DBOS context via setupSharedDBOS.
 func TestRunAsTransactionSharedSystemDB(t *testing.T) {
-	ctx, ds, ub := setupSharedDBOS(t)
+	// The base case: RunAsTransaction collapses onto the single-transaction path —
+	// no transaction_completion table is created, and the application write commits
+	// atomically with the operation_outputs checkpoint (recovery then replays from
+	// layer 1 alone).
+	t.Run("HappyPath", func(t *testing.T) {
+		ctx, ds, ub := setupSharedDBOS(t)
 
-	var runs atomic.Int32
-	wf := func(dctx DBOSContext, item string) (int64, error) {
-		return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
-			runs.Add(1)
-			if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", item); err != nil {
-				return 0, err
-			}
-			return 99, nil
-		})
-	}
-	RegisterWorkflow(ctx, wf)
-	require.NoError(t, Launch(ctx))
-	ub.createAppTable(t)
+		var runs atomic.Int32
+		wf := func(dctx DBOSContext, item string) (int64, error) {
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
+				runs.Add(1)
+				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", item); err != nil {
+					return 0, err
+				}
+				return 99, nil
+			})
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
 
-	// The optimization is detected at NewDataSource and skips the durability table.
-	require.True(t, ds.sameAsSystemDB)
-	require.False(t, ub.completionTableExists(t))
+		// The optimization is detected at NewDataSource and skips the durability table.
+		require.True(t, ds.sameAsSystemDB)
+		require.False(t, ub.completionTableExists(t))
 
-	wfID := uuid.NewString()
-	h, err := RunWorkflow(ctx, wf, "hello", WithWorkflowID(wfID))
-	require.NoError(t, err)
-	res, err := h.GetResult()
-	require.NoError(t, err)
-	require.Equal(t, int64(99), res)
-	require.Equal(t, int32(1), runs.Load())
+		wfID := uuid.NewString()
+		h, err := RunWorkflow(ctx, wf, "hello", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		res, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, int64(99), res)
+		require.Equal(t, int32(1), runs.Load())
 
-	// Application write committed, and the step checkpointed to operation_outputs
-	// in the same transaction.
-	require.Equal(t, "hello", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k1'`))
-	steps, err := GetWorkflowSteps(ctx, wfID)
-	require.NoError(t, err)
-	require.Len(t, steps, 1)
-	require.Equal(t, 0, steps[0].StepID)
+		// Application write committed, and the step checkpointed to operation_outputs
+		// in the same transaction.
+		require.Equal(t, "hello", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k1'`))
+		steps, err := GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		require.Equal(t, 0, steps[0].StepID)
 
-	// Recovery replays from operation_outputs (layer 1) without re-running fn.
-	setWorkflowStatusPending(t, ctx, wfID)
-	handles, err := recoverPendingWorkflows(ctx.(*dbosContext), []string{"local"})
-	require.NoError(t, err)
-	require.Len(t, handles, 1)
-	rres, err := handles[0].GetResult()
-	require.NoError(t, err)
-	require.EqualValues(t, 99, rres)
-	require.Equal(t, int32(1), runs.Load())
-	require.Equal(t, 1, ub.countRows(t, `SELECT count(*) FROM kv`))
-}
+		// Recovery replays from operation_outputs (layer 1) without re-running fn.
+		setWorkflowStatusPending(t, ctx, wfID)
+		handles, err := recoverPendingWorkflows(ctx.(*dbosContext), []string{"local"})
+		require.NoError(t, err)
+		require.Len(t, handles, 1)
+		rres, err := handles[0].GetResult()
+		require.NoError(t, err)
+		require.EqualValues(t, 99, rres)
+		require.Equal(t, int32(1), runs.Load())
+		require.Equal(t, 1, ub.countRows(t, `SELECT count(*) FROM kv`))
+	})
 
-// When a shared-pool data source's RunAsTransaction is invoked inside an
-// enclosing step, the call routes through runAsTxn's within-step path: it must
-// still give the user fn a real transaction (on the shared pool) and manage
-// commit/rollback, while recording no durability row of its own. Runs on every
-// backend — the enclosing step holds no transaction, so the within-step
-// transaction is the only writer (no SQLite single-writer contention).
-func TestRunAsTransactionSharedSystemDBWithinStep(t *testing.T) {
-	ctx, ds, ub := setupSharedDBOS(t)
+	// When a shared-pool data source's RunAsTransaction is invoked inside an
+	// enclosing step, the call routes through runAsTxn's within-step path: it must
+	// still give the user fn a real transaction (on the shared pool) and manage
+	// commit/rollback, while recording no durability row of its own. Runs on every
+	// backend — the enclosing step holds no transaction, so the within-step
+	// transaction is the only writer (no SQLite single-writer contention).
+	t.Run("WithinStep", func(t *testing.T) {
+		ctx, ds, ub := setupSharedDBOS(t)
 
-	var txRuns atomic.Int32
-	wf := func(dctx DBOSContext, _ string) (string, error) {
-		return RunAsStep(dctx, func(c context.Context) (string, error) {
-			return RunAsTransaction(c.(DBOSContext), ds, func(c context.Context, tx Tx) (string, error) {
-				txRuns.Add(1)
-				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "inner"); err != nil {
+		var txRuns atomic.Int32
+		wf := func(dctx DBOSContext, _ string) (string, error) {
+			return RunAsStep(dctx, func(c context.Context) (string, error) {
+				return RunAsTransaction(c.(DBOSContext), ds, func(c context.Context, tx Tx) (string, error) {
+					txRuns.Add(1)
+					if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "inner"); err != nil {
+						return "", err
+					}
+					return "ok", nil
+				})
+			})
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+		require.True(t, ds.sameAsSystemDB)
+
+		wfID := uuid.NewString()
+		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		res, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "ok", res)
+		require.Equal(t, int32(1), txRuns.Load())
+
+		// The within-step transaction committed the application write on the shared pool.
+		require.Equal(t, "inner", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k1'`))
+
+		// Only the enclosing RunAsStep is durable; the within-step transaction recorded none.
+		steps, err := GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+	})
+
+	// A transaction nested inside another transaction is rejected on the shared-pool
+	// path too. The guard runs before the same-database optimization, so the inner
+	// never reaches runAsTxn to open a second connection on the shared pool (which
+	// would deadlock SQLite's single writer). Runs on every backend.
+	t.Run("RejectsNested", func(t *testing.T) {
+		ctx, ds, ub := setupSharedDBOS(t)
+
+		wf := func(dctx DBOSContext, _ string) (string, error) {
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_outer", "outer"); err != nil {
 					return "", err
 				}
-				return "ok", nil
+				_, nerr := RunAsTransaction(c.(DBOSContext), ds, func(c context.Context, tx Tx) (string, error) {
+					_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_inner", "inner")
+					return "", e
+				})
+				if nerr != nil {
+					return nerr.Error(), nil
+				}
+				return "unexpected", nil
 			})
-		})
-	}
-	RegisterWorkflow(ctx, wf)
-	require.NoError(t, Launch(ctx))
-	ub.createAppTable(t)
-	require.True(t, ds.sameAsSystemDB)
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+		require.True(t, ds.sameAsSystemDB)
 
-	wfID := uuid.NewString()
-	h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
-	require.NoError(t, err)
-	res, err := h.GetResult()
-	require.NoError(t, err)
-	require.Equal(t, "ok", res)
-	require.Equal(t, int32(1), txRuns.Load())
+		wfID := uuid.NewString()
+		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		res, err := h.GetResult()
+		require.NoError(t, err)
+		require.Contains(t, res, "cannot call RunAsTransaction within a transaction")
 
-	// The within-step transaction committed the application write on the shared pool.
-	require.Equal(t, "inner", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k1'`))
+		// The outer transaction committed; the rejected inner never wrote.
+		require.Equal(t, "outer", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k_outer'`))
+		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv WHERE k = 'k_inner'`))
 
-	// Only the enclosing RunAsStep is durable; the within-step transaction recorded none.
-	steps, err := GetWorkflowSteps(ctx, wfID)
-	require.NoError(t, err)
-	require.Len(t, steps, 1)
-}
-
-// A transaction nested inside another transaction is rejected on the shared-pool
-// path too. The guard runs before the same-database optimization, so the inner
-// never reaches runAsTxn to open a second connection on the shared pool (which
-// would deadlock SQLite's single writer). Runs on every backend.
-func TestRunAsTransactionSharedSystemDBRejectsNested(t *testing.T) {
-	ctx, ds, ub := setupSharedDBOS(t)
-
-	wf := func(dctx DBOSContext, _ string) (string, error) {
-		return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
-			if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_outer", "outer"); err != nil {
-				return "", err
-			}
-			_, nerr := RunAsTransaction(c.(DBOSContext), ds, func(c context.Context, tx Tx) (string, error) {
-				_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_inner", "inner")
-				return "", e
-			})
-			if nerr != nil {
-				return nerr.Error(), nil
-			}
-			return "unexpected", nil
-		})
-	}
-	RegisterWorkflow(ctx, wf)
-	require.NoError(t, Launch(ctx))
-	ub.createAppTable(t)
-	require.True(t, ds.sameAsSystemDB)
-
-	wfID := uuid.NewString()
-	h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
-	require.NoError(t, err)
-	res, err := h.GetResult()
-	require.NoError(t, err)
-	require.Contains(t, res, "cannot call RunAsTransaction within a transaction")
-
-	// The outer transaction committed; the rejected inner never wrote.
-	require.Equal(t, "outer", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k_outer'`))
-	require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv WHERE k = 'k_inner'`))
-
-	// Just the one durable step (the outer transaction).
-	steps, err := GetWorkflowSteps(ctx, wfID)
-	require.NoError(t, err)
-	require.Len(t, steps, 1)
-}
-
-// On the shared-pool path too, RunAsTransaction must be called from within a
-// workflow. The same-database optimization routes to runAsTxn, which reaches
-// prepareStepExecution and returns the same error when no workflow state is in
-// the context. Runs on every backend.
-func TestRunAsTransactionSharedSystemDBOutsideWorkflow(t *testing.T) {
-	ctx, ds, ub := setupSharedDBOS(t)
-	require.NoError(t, Launch(ctx))
-	ub.createAppTable(t)
-	require.True(t, ds.sameAsSystemDB)
-
-	_, err := RunAsTransaction(ctx, ds, func(c context.Context, tx Tx) (string, error) {
-		_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "v1")
-		return "unexpected", e
+		// Just the one durable step (the outer transaction).
+		steps, err := GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
 	})
-	require.ErrorContains(t, err, "workflow state not found in context")
 
-	// fn never ran, so nothing was written.
-	require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv`))
+	// On the shared-pool path too, RunAsTransaction must be called from within a
+	// workflow. The same-database optimization routes to runAsTxn, which reaches
+	// prepareStepExecution and returns the same error when no workflow state is in
+	// the context. Runs on every backend.
+	t.Run("OutsideWorkflow", func(t *testing.T) {
+		ctx, ds, ub := setupSharedDBOS(t)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+		require.True(t, ds.sameAsSystemDB)
+
+		_, err := RunAsTransaction(ctx, ds, func(c context.Context, tx Tx) (string, error) {
+			_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "v1")
+			return "unexpected", e
+		})
+		require.ErrorContains(t, err, "workflow state not found in context")
+
+		// fn never ran, so nothing was written.
+		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv`))
+	})
 }
