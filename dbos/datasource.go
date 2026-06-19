@@ -347,7 +347,19 @@ func RunAsTransaction[R any](ctx DBOSContext, ds *DataSource, fn txn[R], opts ..
 //
 // When the data source shares the system database's pool, the call collapses onto runAsTxn.
 func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn TxnFunc, opts ...StepOption) (any, error) {
+	// Reject a transaction nested inside another transaction.
+	// (A transaction nested inside a plain RunAsStep is fine)
+	if ws, ok := c.Value(workflowStateKey).(*workflowState); ok && ws != nil && ws.isWithinTransaction {
+		stepOpts := &stepOptions{}
+		for _, opt := range opts {
+			opt(stepOpts)
+		}
+		return nil, newStepExecutionError(ws.workflowID, stepOpts.stepName, fmt.Errorf("cannot call RunAsTransaction within a transaction"))
+	}
+
 	if ds.sameAsSystemDB {
+		// runAsTxn manages a transaction for the user function.
+		// reuse our internal path used for all DBOS "special" steps (e.g., setEvent)
 		return c.runAsTxn(dbosCtx, fn, opts...)
 	}
 
@@ -358,12 +370,33 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	if fn == nil {
 		return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("transaction function cannot be nil"))
 	}
+
 	if prep.IsWithinStep {
-		return fn(c, nil)
+		// Invoked inside an enclosing step: open a real transaction on the user
+		// pool and manage its commit/rollback, but record no durability row.
+		txOpts := TxOptions{IsoLevel: IsoLevelReadCommitted}
+		if prep.StepOpts.txIsoLevel != nil {
+			txOpts.IsoLevel = *prep.StepOpts.txIsoLevel
+		}
+		uncancellableCtx := WithoutCancel(c)
+		tx, err := ds.pool.BeginTx(uncancellableCtx, txOpts)
+		if err != nil {
+			return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		defer tx.Rollback(uncancellableCtx)
+		output, err := fn(withinTransactionContext(c), tx)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
+		}
+		return output, nil
 	}
 
 	uncancellableCtx := WithoutCancel(c)
 	stepState := prep.StepState
+	stepState.isWithinTransaction = true
 	stepOpts := prep.StepOpts
 	stepCtx := WithValue(c, workflowStateKey, stepState)
 	ser := resolveEncoder(c)

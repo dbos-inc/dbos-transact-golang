@@ -69,10 +69,11 @@ type WorkflowStatus struct {
 
 // workflowState holds the runtime state for a workflow execution
 type workflowState struct {
-	workflowID         string
-	stepID             int
-	isWithinStep       bool
-	isPortableWorkflow bool
+	workflowID          string
+	stepID              int
+	isWithinStep        bool
+	isWithinTransaction bool
+	isPortableWorkflow  bool
 	// auth identity carried so child workflows can inherit it automatically
 	authenticatedUser  string
 	assumedRole        string
@@ -2065,6 +2066,18 @@ func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) 
 	return typedResult, err
 }
 
+// withinTransactionContext returns a child context whose workflow state is
+// flagged as executing inside a data source transaction.
+func withinTransactionContext(c *dbosContext) DBOSContext {
+	var state workflowState
+	if existing, ok := c.Value(workflowStateKey).(*workflowState); ok && existing != nil {
+		state = *existing
+	}
+	state.isWithinStep = true
+	state.isWithinTransaction = true
+	return WithValue(c, workflowStateKey, &state)
+}
+
 func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (any, error) {
 	prep, err := prepareStepExecution(c, opts)
 	if err != nil {
@@ -2074,11 +2087,32 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 		return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("step function cannot be nil"))
 	}
 	if prep.IsWithinStep {
-		return fn(c, nil)
+		// Invoked inside an enclosing step: open a real transaction on the system
+		// database pool and manage its commit/rollback, but record no durability
+		// row — the enclosing step owns the durability boundary.
+		txOpts := TxOptions{IsoLevel: IsoLevelReadCommitted}
+		if prep.StepOpts.txIsoLevel != nil {
+			txOpts.IsoLevel = *prep.StepOpts.txIsoLevel
+		}
+		uncancellableCtx := WithoutCancel(c)
+		tx, err := c.systemDB.(*sysDB).pool.BeginTx(uncancellableCtx, txOpts)
+		if err != nil {
+			return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		defer tx.Rollback(uncancellableCtx)
+		output, err := fn(withinTransactionContext(c), tx)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
+		}
+		return output, nil
 	}
 
 	uncancellableCtx := WithoutCancel(c)
 	stepState := prep.StepState
+	stepState.isWithinTransaction = true
 	stepOpts := prep.StepOpts
 	pool := c.systemDB.(*sysDB).pool
 	stepCtx := WithValue(c, workflowStateKey, stepState)
