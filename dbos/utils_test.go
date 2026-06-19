@@ -38,6 +38,19 @@ func skipIfSqlite(t *testing.T, reason string) {
 	}
 }
 
+func skipIfCockroach(t *testing.T, reason string) {
+	t.Helper()
+	if useSqliteBackend() {
+		return // sqlite is never CRDB
+	}
+	conn, err := pgx.Connect(context.Background(), getDatabaseURL())
+	require.NoError(t, err)
+	defer conn.Close(context.Background())
+	if isCockroachDB(context.Background(), conn) {
+		t.Skipf("skipping on CockroachDB: %s", reason)
+	}
+}
+
 var testDBURLs sync.Map // *testing.T -> string; ensures setupDBOS and follow-up callers (e.g. NewClient) share the same sqlite file.
 
 func backendDatabaseURL(t *testing.T) string {

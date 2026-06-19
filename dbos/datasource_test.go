@@ -255,6 +255,7 @@ func TestNewDataSource(t *testing.T) {
 // with only DML grants works end to end (the pre-check skips all DDL).
 func TestNewDataSourceNoDDLPrivileges(t *testing.T) {
 	skipIfSqlite(t, "Postgres role privileges; SQLite has no roles")
+	skipIfCockroach(t, "insecure-mode CRDB rejects password login roles; no SUPERUSER attribute")
 
 	const role = "dbos_noddl_role"
 	const rolePw = "noddl_pw"
