@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"reflect"
 	"runtime"
 	"time"
@@ -32,7 +31,6 @@ type DataSource struct {
 	pool    Pool
 	dialect Dialect
 	schema  string
-	logger  *slog.Logger
 
 	// sameAsSystemDB is set when this data source's pool is the very same engine
 	// handle as the DBOS system database.
@@ -124,7 +122,6 @@ func NewDataSource[E Engine](ctx DBOSContext, engine E, opts ...DataSourceOption
 		pool:    pool,
 		dialect: dialect,
 		schema:  options.schema,
-		logger:  c.logger.With("service", "datasource", "data_source", options.name),
 	}
 
 	// A data source whose pool is the very same engine as the system database
@@ -133,7 +130,7 @@ func NewDataSource[E Engine](ctx DBOSContext, engine E, opts ...DataSourceOption
 	// creation entirely.
 	if sameEngine(ds.pool, c.systemDB.(*sysDB).pool) {
 		ds.sameAsSystemDB = true
-		ds.logger.Debug("Data source shares the system database; using single-transaction durability")
+		c.logger.Debug("Data source shares the system database; using single-transaction durability", "datasource", ds.name)
 		return ds, nil
 	}
 
@@ -144,7 +141,7 @@ func NewDataSource[E Engine](ctx DBOSContext, engine E, opts ...DataSourceOption
 		return nil, fmt.Errorf("data source %q: %w", ds.name, err)
 	}
 
-	ds.logger.Debug("Created data source", "dialect", ds.dialect.Name(), "schema", ds.schema)
+	c.logger.Debug("Created data source", "datasource", ds.name, "dialect", ds.dialect.Name(), "schema", ds.schema)
 	return ds, nil
 }
 
@@ -189,25 +186,25 @@ func (ds *DataSource) completionTableStatements() []string {
 // postgresDialect for everything a data source needs, so this only keeps the
 // dialect Name accurate (for logs) and future-proofs any later divergence.
 // No-op for *sql.DB (SQLite), whose dialect is already final.
-func (ds *DataSource) resolveDialect(ctx context.Context) error {
+func (ds *DataSource) resolveDialect(c *dbosContext) error {
 	pgxPool := PgxPool(ds.pool)
 	if pgxPool == nil {
 		return nil
 	}
-	crdb, err := retryWithResult(ctx, func() (bool, error) {
-		conn, err := pgxPool.Acquire(ctx)
+	crdb, err := retryWithResult(c, func() (bool, error) {
+		conn, err := pgxPool.Acquire(c)
 		if err != nil {
 			return false, err
 		}
 		defer conn.Release()
-		return isCockroachDB(ctx, conn.Conn()), nil
-	}, withRetrierLogger(ds.logger))
+		return isCockroachDB(c, conn.Conn()), nil
+	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return err
 	}
 	if crdb {
 		ds.dialect = cockroachDialect{}
-		ds.logger.Debug("Detected CockroachDB data source")
+		c.logger.Debug("Detected CockroachDB data source", "datasource", ds.name)
 	}
 	return nil
 }
@@ -216,11 +213,11 @@ func (ds *DataSource) resolveDialect(ctx context.Context) error {
 // already exists in the user's database. When it does, ensureCompletionTable
 // skips all DDL — so a least-privilege role with only DML rights works against a
 // table that was pre-created (e.g. in the application's own migrations).
-func (ds *DataSource) completionTableInstalled(ctx context.Context) (bool, error) {
-	return retryWithResult(ctx, func() (bool, error) {
+func (ds *DataSource) completionTableInstalled(c *dbosContext) (bool, error) {
+	return retryWithResult(c, func() (bool, error) {
 		if ds.dialect.Name() == DialectSQLite {
 			var name string
-			err := ds.pool.QueryRow(ctx,
+			err := ds.pool.QueryRow(c,
 				`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`,
 				transactionCompletionTable).Scan(&name)
 			if errors.Is(err, ErrNoRows) {
@@ -229,11 +226,11 @@ func (ds *DataSource) completionTableInstalled(ctx context.Context) (bool, error
 			return err == nil, err
 		}
 		var exists bool
-		err := ds.pool.QueryRow(ctx,
+		err := ds.pool.QueryRow(c,
 			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`,
 			ds.schema, transactionCompletionTable).Scan(&exists)
 		return exists, err
-	}, withRetrierLogger(ds.logger))
+	}, withRetrierLogger(c.logger))
 }
 
 // ensureCompletionTable creates the transaction_completion table in the user's
@@ -241,21 +238,21 @@ func (ds *DataSource) completionTableInstalled(ctx context.Context) (bool, error
 // a role with only DML privileges works against a pre-provisioned table; only a
 // missing table triggers the CREATE SCHEMA / CREATE TABLE DDL.
 // A failed create returns an actionable error pointing the user at their own database migrations.
-func (ds *DataSource) ensureCompletionTable(ctx context.Context) error {
-	installed, err := ds.completionTableInstalled(ctx)
+func (ds *DataSource) ensureCompletionTable(c *dbosContext) error {
+	installed, err := ds.completionTableInstalled(c)
 	if err != nil {
 		return fmt.Errorf("checking for the %s table: %w", ds.qualifiedCompletionTable(), err)
 	}
 	if installed {
-		ds.logger.Debug("transaction_completion table already present; skipping creation")
+		c.logger.Debug("transaction_completion table already present; skipping creation", "datasource", ds.name)
 		return nil
 	}
 	for _, stmt := range ds.completionTableStatements() {
 		query := stmt
-		if err := retry(ctx, func() error {
-			_, execErr := ds.pool.Exec(ctx, query)
+		if err := retry(c, func() error {
+			_, execErr := ds.pool.Exec(c, query)
 			return execErr
-		}, withRetrierLogger(ds.logger)); err != nil {
+		}, withRetrierLogger(c.logger)); err != nil {
 			return fmt.Errorf("the %s table does not exist and could not be created: %w; "+
 				"create it ahead of time in your application's database migrations "+
 				"or ensure the connecting role has CREATE privileges on the database and schema",
@@ -268,7 +265,7 @@ func (ds *DataSource) ensureCompletionTable(ctx context.Context) error {
 // completionRecord is a row from the transaction_completion table. A success row
 // stores output (error nil); a permanently failed transaction stores a serialized
 // error (output nil) written in a standalone insert after fn's transaction rolls
-// back. Failures are also checkpointed in the system database's operation_outputs.
+// back. Failures are also checkpointed (best effort) in the system database's operation_outputs.
 type completionRecord struct {
 	output        *string
 	errStr        *string
@@ -319,10 +316,6 @@ func (ds *DataSource) recordCompletion(ctx context.Context, q Querier, workflowI
 // It must be called from within a workflow. Standard StepOptions apply
 // (WithStepName, WithStepMaxRetries, retry predicate, WithStepTxIsolation).
 //
-// A mock DBOSContext is supported for testing: the call dispatches through the
-// context's RunAsTransaction method, so a mock can intercept it, just like
-// RunAsStep. convertStepResult handles the mock-returned result.
-//
 // Example:
 //
 //	n, err := dbos.RunAsTransaction(ctx, ds, func(ctx context.Context, tx dbos.Tx) (int64, error) {
@@ -332,7 +325,7 @@ func (ds *DataSource) recordCompletion(ctx context.Context, q Querier, workflowI
 //	    }
 //	    return res.RowsAffected()
 //	})
-func RunAsTransaction[R any](ctx DBOSContext, ds *DataSource, fn txn[R], opts ...StepOption) (R, error) {
+func RunAsTransaction[R any](ctx DBOSContext, ds *DataSource, fn Txn[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
 	}
@@ -548,8 +541,8 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 		if recErr := retry(c, func() error {
 			return ds.recordCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID, nil, serializedErr, ser.Name())
 		}, withRetrierLogger(c.logger)); recErr != nil {
-			ds.logger.Warn("Failed to record transaction failure in the user database; the system database remains the source of truth",
-				"workflow_id", stepState.workflowID, "step_id", stepState.stepID, "error", recErr)
+			c.logger.Warn("Failed to record transaction failure in the user database; the system database remains the source of truth",
+				"datasource", ds.name, "workflow_id", stepState.workflowID, "step_id", stepState.stepID, "error", recErr)
 		}
 	}
 

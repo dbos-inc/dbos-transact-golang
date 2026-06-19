@@ -1640,8 +1640,8 @@ type Step[R any] func(ctx context.Context) (R, error)
 // TxnFunc is a type-erased transaction function that receives a portable Tx.
 type TxnFunc func(ctx context.Context, tx Tx) (any, error)
 
-// txn represents a type-safe step function with output type R that receives a transaction.
-type txn[R any] func(ctx context.Context, tx Tx) (R, error)
+// Txn represents a type-safe step function with output type R that receives a transaction.
+type Txn[R any] func(ctx context.Context, tx Tx) (R, error)
 
 // stepOptions holds the configuration for step execution using functional options pattern.
 type stepOptions struct {
@@ -2036,7 +2036,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 // runAsTxn executes a step function that receives a transaction when run on its own.
 // The step body and checkpoint share one transaction, so system DB writes and recordOperationResult commit together.
 // Like RunAsStep but uses txn[R] / TxnFunc; transaction is begun and committed inside this function.
-func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) {
+func runAsTxn[R any](ctx DBOSContext, fn Txn[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
 	}

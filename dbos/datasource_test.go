@@ -237,12 +237,13 @@ func TestNewDataSource(t *testing.T) {
 		ub.dropCompletionTable(t)
 
 		ds := ub.register(t, ctx, "app") // creates the table
-		installed, err := ds.completionTableInstalled(context.Background())
+		dctx := ctx.(*dbosContext)
+		installed, err := ds.completionTableInstalled(dctx)
 		require.NoError(t, err)
 		require.True(t, installed)
 
 		ub.dropCompletionTable(t)
-		installed, err = ds.completionTableInstalled(context.Background())
+		installed, err = ds.completionTableInstalled(dctx)
 		require.NoError(t, err)
 		require.False(t, installed)
 	})
@@ -550,7 +551,7 @@ func TestRunAsTransaction(t *testing.T) {
 		ub := openUserBackend(t)
 		ds := ub.register(t, ctx, "app")
 
-		insert := func(k string) txn[int64] {
+		insert := func(k string) Txn[int64] {
 			return func(c context.Context, tx Tx) (int64, error) {
 				_, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), k, "v")
 				return 0, err
