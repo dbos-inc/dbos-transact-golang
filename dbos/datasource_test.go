@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -365,4 +366,104 @@ func TestRunAsTransaction(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
 	})
+}
+
+// setupSharedDBOS builds a DBOS context whose system-database pool is ALSO the
+// engine handed to RegisterDataSource, so the data source and the system DB
+// share one pool. This is the single-transaction path: no transaction_completion
+// table, application writes and the operation_outputs checkpoint commit together.
+// Returns the context, the registered data source, and a userBackend over the
+// shared pool for assertions. The context is unlaunched (caller registers
+// workflows then calls Launch).
+func setupSharedDBOS(t *testing.T) (DBOSContext, *DataSource, *userBackend) {
+	t.Helper()
+	var (
+		config Config
+		ub     *userBackend
+	)
+	if useSqliteBackend() {
+		// Open the shared handle with DBOS's recommended pragmas (busy_timeout,
+		// WAL, immediate txlock) so the data source's DDL/writes coexist with the
+		// system DB's background loops on one *sql.DB without SQLITE_BUSY.
+		path := filepath.Join(t.TempDir(), "shared.db")
+		db, err := openSQLitePool(context.Background(), "sqlite:"+path)
+		require.NoError(t, err)
+		config = Config{AppName: "test-app", SqliteSystemDB: db}
+		ub = &userBackend{pool: newSQLPool(db), dialect: sqliteDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
+	} else {
+		url := getDatabaseURL()
+		resetTestDatabase(t, url)
+		cfg, err := pgxpool.ParseConfig(url)
+		require.NoError(t, err)
+		pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+		require.NoError(t, err)
+		config = Config{AppName: "test-app", SystemDBPool: pool}
+		ub = &userBackend{pool: newPgxPool(pool), dialect: postgresDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
+	}
+
+	ctx, err := NewDBOSContext(context.Background(), config)
+	require.NoError(t, err)
+	// Shutdown owns the shared pool (sysDB.shutdown closes it); don't close it
+	// separately here.
+	t.Cleanup(func() { Shutdown(ctx, 30*time.Second) })
+
+	// A leftover completion table from a prior two-table test (reset clears rows,
+	// not tables) would mask the optimization. Start clean.
+	ub.dropCompletionTable(t)
+
+	ds := ub.register(t, ctx, "app")
+	return ctx, ds, ub
+}
+
+// When a data source shares the system database's pool, RunAsTransaction must
+// collapse onto the single-transaction path: no transaction_completion table is
+// created, and the application write commits atomically with the
+// operation_outputs checkpoint (recovery then replays from layer 1 alone).
+func TestRunAsTransactionSharedSystemDB(t *testing.T) {
+	ctx, ds, ub := setupSharedDBOS(t)
+
+	var runs atomic.Int32
+	wf := func(dctx DBOSContext, item string) (int64, error) {
+		return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
+			runs.Add(1)
+			if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", item); err != nil {
+				return 0, err
+			}
+			return 99, nil
+		})
+	}
+	RegisterWorkflow(ctx, wf)
+	require.NoError(t, Launch(ctx))
+	ub.createAppTable(t)
+
+	// The optimization is detected at Launch and skips the durability table.
+	require.True(t, ds.sameAsSystemDB)
+	require.False(t, ub.completionTableExists(t))
+
+	wfID := uuid.NewString()
+	h, err := RunWorkflow(ctx, wf, "hello", WithWorkflowID(wfID))
+	require.NoError(t, err)
+	res, err := h.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, int64(99), res)
+	require.Equal(t, int32(1), runs.Load())
+
+	// Application write committed, and the step checkpointed to operation_outputs
+	// in the same transaction.
+	require.Equal(t, "hello", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k1'`))
+	steps, err := GetWorkflowSteps(ctx, wfID)
+	require.NoError(t, err)
+	require.Len(t, steps, 1)
+	require.Equal(t, 0, steps[0].StepID)
+
+	// Recovery replays from operation_outputs (layer 1) without re-running fn.
+	setWorkflowStatusPending(t, ctx, wfID)
+	handles, err := recoverPendingWorkflows(ctx.(*dbosContext), []string{"local"})
+	require.NoError(t, err)
+	require.Len(t, handles, 1)
+	rres, err := handles[0].GetResult()
+	require.NoError(t, err)
+	require.EqualValues(t, 99, rres)
+	require.Equal(t, int32(1), runs.Load())
+	require.Equal(t, 1, ub.countRows(t, `SELECT count(*) FROM kv`))
 }

@@ -31,6 +31,10 @@ type DataSource struct {
 	dialect Dialect
 	schema  string
 	logger  *slog.Logger
+
+	// sameAsSystemDB is set at Launch when this data source's pool is the very
+	// same engine handle as the DBOS system database.
+	sameAsSystemDB bool
 }
 
 // Name returns the data source's name, as given to RegisterDataSource.
@@ -214,11 +218,19 @@ func (ds *DataSource) createCompletionTable(ctx context.Context) error {
 	return nil
 }
 
-// launchDataSources creates the durability table for every registered data source.
+// launchDataSources prepares every registered data source. A data source that
+// shares the system database's pool needs no durability table. Every
+// other data source gets its transaction_completion table created here.
 func (c *dbosContext) launchDataSources(ctx context.Context) error {
 	c.dataSourcesMu.Lock()
 	defer c.dataSourcesMu.Unlock()
+	sysPool := c.systemDB.(*sysDB).pool
 	for _, ds := range c.dataSources {
+		if sameEngine(ds.pool, sysPool) {
+			ds.sameAsSystemDB = true
+			c.logger.Debug("Data source shares the system database; using single-transaction durability", "data_source", ds.name)
+			continue
+		}
 		if err := ds.resolveDialect(ctx); err != nil {
 			return fmt.Errorf("data source %q: %w", ds.name, err)
 		}
@@ -332,7 +344,13 @@ func RunAsTransaction[R any](ctx DBOSContext, ds *DataSource, fn txn[R], opts ..
 //
 // This is the concrete DBOSContext.RunAsTransaction; the generic RunAsTransaction
 // wrapper type-erases fn and dispatches here (or to a mock implementation).
-func (c *dbosContext) RunAsTransaction(_ DBOSContext, ds *DataSource, fn TxnFunc, opts ...StepOption) (any, error) {
+//
+// When the data source shares the system database's pool, the call collapses onto runAsTxn.
+func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn TxnFunc, opts ...StepOption) (any, error) {
+	if ds.sameAsSystemDB {
+		return c.runAsTxn(dbosCtx, fn, opts...)
+	}
+
 	prep, err := prepareStepExecution(c, opts)
 	if err != nil {
 		return nil, err
