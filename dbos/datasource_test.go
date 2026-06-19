@@ -46,14 +46,24 @@ func openUserBackend(t *testing.T) *userBackend {
 	return &userBackend{pool: newPgxPool(pool), dialect: postgresDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 }
 
-// register registers this backend's engine as a data source. The two concrete
-// branches instantiate the generic RegisterDataSource with the real engine type.
+// register creates a data source over this backend's engine, naming it via
+// WithDataSourceName. The two concrete branches instantiate the generic
+// NewDataSource with the real engine type. NewDataSource creates the completion
+// table eagerly, so any failure is surfaced here.
 func (u *userBackend) register(t *testing.T, ctx DBOSContext, name string, opts ...DataSourceOption) *DataSource {
 	t.Helper()
+	opts = append(opts, WithDataSourceName(name))
+	var (
+		ds  *DataSource
+		err error
+	)
 	if db := SQLDB(u.pool); db != nil {
-		return RegisterDataSource(ctx, name, db, opts...)
+		ds, err = NewDataSource(ctx, db, opts...)
+	} else {
+		ds, err = NewDataSource(ctx, PgxPool(u.pool), opts...)
 	}
-	return RegisterDataSource(ctx, name, PgxPool(u.pool), opts...)
+	require.NoError(t, err)
+	return ds
 }
 
 // dropCompletionTable removes the transaction_completion table for a clean
@@ -124,79 +134,87 @@ func (u *userBackend) completionTableExists(t *testing.T) bool {
 	return exists
 }
 
-func TestRegisterDataSource(t *testing.T) {
-	t.Run("CreatesCompletionTableAtLaunch", func(t *testing.T) {
+func TestNewDataSource(t *testing.T) {
+	t.Run("CreatesCompletionTableEagerly", func(t *testing.T) {
 		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 		ub := openUserBackend(t)
 		ub.dropCompletionTable(t)
+
+		// Table must not exist until NewDataSource creates it.
+		require.False(t, ub.completionTableExists(t))
 
 		ds := ub.register(t, ctx, "app")
 		require.NotNil(t, ds)
 		require.Equal(t, "app", ds.Name())
 
-		// Table must not exist until Launch creates it.
-		require.False(t, ub.completionTableExists(t))
-
-		require.NoError(t, Launch(ctx))
-
+		// Created eagerly at NewDataSource time, before Launch.
 		require.True(t, ub.completionTableExists(t))
 	})
 
 	// A schema name full of characters that must be quoted to be a valid SQL
-	// identifier (uppercase, digits, '@', '-') must survive registration and the
-	// CREATE SCHEMA / CREATE TABLE at Launch — exercising pgx.Identifier escaping
-	// end to end. No-op schema on SQLite, so this just confirms the table still
-	// lands there too.
+	// identifier (uppercase, digits, '@', '-') must survive the CREATE SCHEMA /
+	// CREATE TABLE that NewDataSource runs — exercising pgx.Identifier escaping end
+	// to end. No-op schema on SQLite, so this just confirms the table still lands.
 	t.Run("CreatesCompletionTableInFunkySchema", func(t *testing.T) {
 		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 		ub := openUserBackend(t)
 		ub.schema = "F8nny_sCHem@-n@m3"
 		ub.dropCompletionTable(t)
 
-		ds := ub.register(t, ctx, "app", WithDataSourceSchema(ub.schema))
-		require.NotNil(t, ds)
-
 		require.False(t, ub.completionTableExists(t))
 
-		require.NoError(t, Launch(ctx))
+		ds := ub.register(t, ctx, "app", WithDataSourceSchema(ub.schema))
+		require.NotNil(t, ds)
 
 		require.True(t, ub.completionTableExists(t))
 	})
 
-	t.Run("PanicsOnEmptyName", func(t *testing.T) {
-		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
-		ub := openUserBackend(t)
-
-		require.Panics(t, func() { _ = ub.register(t, ctx, "") })
-	})
-
-	t.Run("PanicsOnDuplicateName", func(t *testing.T) {
-		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
-		ub := openUserBackend(t)
-
-		require.NotNil(t, ub.register(t, ctx, "app"))
-		require.Panics(t, func() { _ = ub.register(t, ctx, "app") })
-	})
-
-	// A typed nil pointer satisfies the Engine constraint, so it reaches the
-	// per-case nil check. (An untyped nil won't compile — type inference fails.)
-	t.Run("PanicsOnTypedNilEngine", func(t *testing.T) {
-		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
-		if useSqliteBackend() {
-			var nilDB *sql.DB
-			require.Panics(t, func() { _ = RegisterDataSource(ctx, "app", nilDB) })
-		} else {
-			var nilPool *pgxpool.Pool
-			require.Panics(t, func() { _ = RegisterDataSource(ctx, "app", nilPool) })
-		}
-	})
-
-	t.Run("PanicsOnRegistrationAfterLaunch", func(t *testing.T) {
+	// Dynamic creation: a data source may be created after Launch, and its
+	// completion table is still created on the spot.
+	t.Run("CreatesAfterLaunch", func(t *testing.T) {
 		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 		require.NoError(t, Launch(ctx))
 
 		ub := openUserBackend(t)
-		require.Panics(t, func() { _ = ub.register(t, ctx, "app") })
+		ub.dropCompletionTable(t)
+		require.False(t, ub.completionTableExists(t))
+
+		ds := ub.register(t, ctx, "app")
+		require.NotNil(t, ds)
+		require.True(t, ub.completionTableExists(t))
+	})
+
+	t.Run("DefaultsName", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ub.dropCompletionTable(t)
+
+		var (
+			ds  *DataSource
+			err error
+		)
+		if db := SQLDB(ub.pool); db != nil {
+			ds, err = NewDataSource(ctx, db)
+		} else {
+			ds, err = NewDataSource(ctx, PgxPool(ub.pool))
+		}
+		require.NoError(t, err)
+		require.Equal(t, defaultDataSourceName, ds.Name())
+	})
+
+	// A typed nil pointer satisfies the Engine constraint, so it reaches the
+	// per-case nil check. (An untyped nil won't compile — type inference fails.)
+	t.Run("ErrorsOnTypedNilEngine", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		if useSqliteBackend() {
+			var nilDB *sql.DB
+			_, err := NewDataSource(ctx, nilDB)
+			require.Error(t, err)
+		} else {
+			var nilPool *pgxpool.Pool
+			_, err := NewDataSource(ctx, nilPool)
+			require.Error(t, err)
+		}
 	})
 }
 
@@ -600,7 +618,7 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 	require.NoError(t, Launch(ctx))
 	ub.createAppTable(t)
 
-	// The optimization is detected at Launch and skips the durability table.
+	// The optimization is detected at NewDataSource and skips the durability table.
 	require.True(t, ds.sameAsSystemDB)
 	require.False(t, ub.completionTableExists(t))
 

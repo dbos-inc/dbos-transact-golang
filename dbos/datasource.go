@@ -23,8 +23,10 @@ import (
 
 const transactionCompletionTable = "transaction_completion"
 
-// DataSource is a handle to a user-provided database engine registered with
-// DBOS. It is returned by RegisterDataSource and passed to RunAsTransaction.
+const defaultDataSourceName = "datasource"
+
+// DataSource is a handle to a user-provided database engine. It is returned by
+// NewDataSource and passed to RunAsTransaction.
 type DataSource struct {
 	name    string
 	pool    Pool
@@ -32,20 +34,27 @@ type DataSource struct {
 	schema  string
 	logger  *slog.Logger
 
-	// sameAsSystemDB is set at Launch when this data source's pool is the very
-	// same engine handle as the DBOS system database.
+	// sameAsSystemDB is set when this data source's pool is the very same engine
+	// handle as the DBOS system database.
 	sameAsSystemDB bool
 }
 
-// Name returns the data source's name, as given to RegisterDataSource.
+// Name returns the data source's name (WithDataSourceName, default "datasource").
 func (ds *DataSource) Name() string { return ds.name }
 
 type dataSourceOptions struct {
+	name   string
 	schema string
 }
 
-// DataSourceOption configures a data source at registration time.
+// DataSourceOption configures a data source.
 type DataSourceOption func(*dataSourceOptions)
+
+// WithDataSourceName sets the data source's name (default "datasource"). It is
+// used only in logs and error messages; names need not be unique.
+func WithDataSourceName(name string) DataSourceOption {
+	return func(o *dataSourceOptions) { o.name = name }
+}
 
 // WithDataSourceSchema overrides the schema that holds the transaction_completion
 // table (default "dbos"). Ignored by SQLite, which has no schemas.
@@ -55,50 +64,42 @@ func WithDataSourceSchema(schema string) DataSourceOption {
 
 // Engine is the set of database engine types that can back a DataSource:
 // *pgxpool.Pool (Postgres/CockroachDB) or *sql.DB (SQLite). It is a generic
-// constraint, not an ordinary type, so RegisterDataSource rejects any other
+// constraint, not an ordinary type, so NewDataSource rejects any other
 // engine type at compile time rather than at runtime.
 type Engine interface {
 	*pgxpool.Pool | *sql.DB
 }
 
-// RegisterDataSource registers a user-provided database engine under a unique
-// name so its transactions can be made durable via RunAsTransaction. The engine
-// type is constrained to *pgxpool.Pool (Postgres/CockroachDB) or *sql.DB
-// (SQLite). It must be called before Launch; the transaction_completion table
-// is created during Launch.
+// NewDataSource builds a durable data source over a user-provided database engine
+// so its transactions can be made durable via RunAsTransaction. The engine type
+// is constrained to *pgxpool.Pool (Postgres/CockroachDB) or *sql.DB (SQLite).
 //
-// All misuse — a nil engine, an empty or already-registered name, or
-// registering after Launch — panics, consistent with RegisterWorkflow.
-//
+// The returned handle is ready to use immediately: NewDataSource detects whether
+// the engine is the DBOS system database, resolves the dialect (CockroachDB), and
+// creates the transaction_completion table if it does not already exist. It may
+// be called at any time, before or after Launch.
+
 // Example:
 //
 //	pool, _ := pgxpool.New(ctx, appDatabaseURL)
-//	ds := dbos.RegisterDataSource(ctx, "app", pool)
-func RegisterDataSource[E Engine](ctx DBOSContext, name string, engine E, opts ...DataSourceOption) *DataSource {
+//	ds, err := dbos.NewDataSource(ctx, pool, dbos.WithDataSourceName("app"))
+func NewDataSource[E Engine](ctx DBOSContext, engine E, opts ...DataSourceOption) (*DataSource, error) {
 	if ctx == nil {
-		panic("ctx cannot be nil")
+		return nil, errors.New("ctx cannot be nil")
 	}
 	c, ok := ctx.(*dbosContext)
 	if !ok {
-		panic("RegisterDataSource requires a concrete DBOS context")
-	}
-	if c.launched.Load() {
-		panic("cannot register a data source after DBOS has launched")
-	}
-	if name == "" {
-		panic("data source name cannot be empty")
+		return nil, errors.New("NewDataSource requires a concrete DBOS context")
 	}
 
-	options := dataSourceOptions{schema: _DEFAULT_SYSTEM_DB_SCHEMA}
+	options := dataSourceOptions{name: defaultDataSourceName, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 	for _, opt := range opts {
 		opt(&options)
 	}
+	if options.name == "" {
+		options.name = defaultDataSourceName
+	}
 
-	// The constraint makes the switch exhaustive. A typed nil pointer still
-	// satisfies the constraint, so each case re-checks the concrete value.
-	// pgx pools default to the Postgres dialect; CockroachDB is detected at
-	// Launch (postgresDialect is wire-compatible with CRDB for everything a
-	// data source uses, so this default is already correct).
 	var (
 		pool    Pool
 		dialect Dialect
@@ -106,37 +107,45 @@ func RegisterDataSource[E Engine](ctx DBOSContext, name string, engine E, opts .
 	switch e := any(engine).(type) {
 	case *pgxpool.Pool:
 		if e == nil {
-			panic("data source engine (*pgxpool.Pool) is nil")
+			return nil, errors.New("data source engine (*pgxpool.Pool) is nil")
 		}
 		pool = newPgxPool(e)
-		dialect = postgresDialect{} // resolve CRDB at launch time
+		dialect = postgresDialect{} // resolve CRDB below
 	case *sql.DB:
 		if e == nil {
-			panic("data source engine (*sql.DB) is nil")
+			return nil, errors.New("data source engine (*sql.DB) is nil")
 		}
 		pool = newSQLPool(e)
 		dialect = sqliteDialect{}
 	}
 
 	ds := &DataSource{
-		name:    name,
+		name:    options.name,
 		pool:    pool,
 		dialect: dialect,
 		schema:  options.schema,
-		logger:  c.logger.With("service", "datasource", "data_source", name),
+		logger:  c.logger.With("service", "datasource", "data_source", options.name),
 	}
 
-	c.dataSourcesMu.Lock()
-	defer c.dataSourcesMu.Unlock()
-	for _, existing := range c.dataSources {
-		if existing.name == name {
-			panic(fmt.Sprintf("a data source named %q is already registered", name))
-		}
+	// A data source whose pool is the very same engine as the system database
+	// needs no durability table: RunAsTransaction collapses onto the single
+	// system transaction (runAsTxn), so skip dialect resolution and table
+	// creation entirely.
+	if sameEngine(ds.pool, c.systemDB.(*sysDB).pool) {
+		ds.sameAsSystemDB = true
+		ds.logger.Debug("Data source shares the system database; using single-transaction durability")
+		return ds, nil
 	}
-	c.dataSources = append(c.dataSources, ds)
 
-	c.logger.Debug("Registered data source", "data_source", name, "dialect", dialect.Name(), "schema", ds.schema)
-	return ds
+	if err := ds.resolveDialect(c); err != nil {
+		return nil, fmt.Errorf("data source %q: %w", ds.name, err)
+	}
+	if err := ds.createCompletionTable(c); err != nil {
+		return nil, fmt.Errorf("data source %q: %w", ds.name, err)
+	}
+
+	ds.logger.Debug("Created data source", "dialect", ds.dialect.Name(), "schema", ds.schema)
+	return ds, nil
 }
 
 // qualifiedCompletionTable returns the schema-qualified transaction_completion
@@ -214,30 +223,6 @@ func (ds *DataSource) createCompletionTable(ctx context.Context) error {
 		}, withRetrierLogger(ds.logger)); err != nil {
 			return fmt.Errorf("creating %s table: %w", transactionCompletionTable, err)
 		}
-	}
-	return nil
-}
-
-// launchDataSources prepares every registered data source. A data source that
-// shares the system database's pool needs no durability table. Every
-// other data source gets its transaction_completion table created here.
-func (c *dbosContext) launchDataSources(ctx context.Context) error {
-	c.dataSourcesMu.Lock()
-	defer c.dataSourcesMu.Unlock()
-	sysPool := c.systemDB.(*sysDB).pool
-	for _, ds := range c.dataSources {
-		if sameEngine(ds.pool, sysPool) {
-			ds.sameAsSystemDB = true
-			c.logger.Debug("Data source shares the system database; using single-transaction durability", "data_source", ds.name)
-			continue
-		}
-		if err := ds.resolveDialect(ctx); err != nil {
-			return fmt.Errorf("data source %q: %w", ds.name, err)
-		}
-		if err := ds.createCompletionTable(ctx); err != nil {
-			return fmt.Errorf("data source %q: %w", ds.name, err)
-		}
-		c.logger.Debug("Initialized data source", "data_source", ds.name, "dialect", ds.dialect.Name())
 	}
 	return nil
 }
