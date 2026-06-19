@@ -366,6 +366,63 @@ func TestRunAsTransaction(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
 	})
+
+	// Transactions and plain steps draw from the same per-workflow step counter.
+	// Interleaving them (txn, step, txn, step) must assign sequential IDs 0..3 in
+	// call order, with the transactions landing at 0 and 2.
+	t.Run("InterleavedStepIDs", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ds := ub.register(t, ctx, "app")
+
+		insert := func(k string) txn[int64] {
+			return func(c context.Context, tx Tx) (int64, error) {
+				_, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), k, "v")
+				return 0, err
+			}
+		}
+		wf := func(dctx DBOSContext, _ string) (string, error) {
+			if _, err := RunAsTransaction(dctx, ds, insert("a")); err != nil { // step 0
+				return "", err
+			}
+			if _, err := RunAsStep(dctx, func(context.Context) (string, error) { return "s1", nil }); err != nil { // step 1
+				return "", err
+			}
+			if _, err := RunAsTransaction(dctx, ds, insert("b")); err != nil { // step 2
+				return "", err
+			}
+			if _, err := RunAsStep(dctx, func(context.Context) (string, error) { return "s2", nil }); err != nil { // step 3
+				return "", err
+			}
+			return "done", nil
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+
+		wfID := uuid.NewString()
+		handle, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		res, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "done", res)
+
+		// All four operations share one counter: sequential IDs 0..3 in order.
+		steps, err := GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		ids := make([]int, len(steps))
+		for i, s := range steps {
+			ids[i] = s.StepID
+		}
+		require.Equal(t, []int{0, 1, 2, 3}, ids)
+
+		// Only the two transactions wrote durability rows, at positions 0 and 2.
+		require.Equal(t, 2, ub.countRows(t, fmt.Sprintf(`SELECT count(*) FROM %s`, ub.completionTable())))
+		require.Equal(t, 1, ub.countRows(t,
+			fmt.Sprintf(`SELECT count(*) FROM %s WHERE step_id = 0`, ub.completionTable())))
+		require.Equal(t, 1, ub.countRows(t,
+			fmt.Sprintf(`SELECT count(*) FROM %s WHERE step_id = 2`, ub.completionTable())))
+	})
 }
 
 // setupSharedDBOS builds a DBOS context whose system-database pool is ALSO the
