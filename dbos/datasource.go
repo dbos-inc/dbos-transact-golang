@@ -78,7 +78,7 @@ type Engine interface {
 // the engine is the DBOS system database, resolves the dialect (CockroachDB), and
 // creates the transaction_completion table if it does not already exist. It may
 // be called at any time, before or after Launch.
-
+//
 // Example:
 //
 //	pool, _ := pgxpool.New(ctx, appDatabaseURL)
@@ -424,6 +424,8 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	stepCtx := WithValue(c, workflowStateKey, stepState)
 	ser := resolveEncoder(c)
 
+	stepStartTime := time.Now()
+
 	// checkpoint writes the step outcome into the system database (txn2). The
 	// user transaction has already committed durably, so this is retried hard.
 	checkpoint := func(encodedOutput, serializedErr *string, serialization string, startedAt time.Time) error {
@@ -473,7 +475,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 		if replaySer == "" {
 			replaySer = ser.Name()
 		}
-		if cerr := checkpoint(completion.output, completion.errStr, replaySer, time.Now()); cerr != nil {
+		if cerr := checkpoint(completion.output, completion.errStr, replaySer, stepStartTime); cerr != nil {
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, cerr)
 		}
 		return stepCheckpointedOutcome{value: completion.output, serialization: replaySer},
@@ -485,7 +487,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	if stepOpts.txIsoLevel != nil {
 		txOpts.IsoLevel = *stepOpts.txIsoLevel
 	}
-	stepStartTime := time.Now()
+	stepStartTime = time.Now()
 
 	// runTxnOnce is one fresh-transaction attempt against the user database: run
 	// fn, record the completion row, and commit — all atomic. A fresh tx is
