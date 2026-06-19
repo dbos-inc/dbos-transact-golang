@@ -140,7 +140,7 @@ func NewDataSource[E Engine](ctx DBOSContext, engine E, opts ...DataSourceOption
 	if err := ds.resolveDialect(c); err != nil {
 		return nil, fmt.Errorf("data source %q: %w", ds.name, err)
 	}
-	if err := ds.createCompletionTable(c); err != nil {
+	if err := ds.ensureCompletionTable(c); err != nil {
 		return nil, fmt.Errorf("data source %q: %w", ds.name, err)
 	}
 
@@ -212,16 +212,54 @@ func (ds *DataSource) resolveDialect(ctx context.Context) error {
 	return nil
 }
 
-// createCompletionTable creates the transaction_completion table in the user's
-// database.
-func (ds *DataSource) createCompletionTable(ctx context.Context) error {
+// completionTableInstalled reports whether the transaction_completion table
+// already exists in the user's database. When it does, ensureCompletionTable
+// skips all DDL — so a least-privilege role with only DML rights works against a
+// table that was pre-created (e.g. in the application's own migrations).
+func (ds *DataSource) completionTableInstalled(ctx context.Context) (bool, error) {
+	return retryWithResult(ctx, func() (bool, error) {
+		if ds.dialect.Name() == DialectSQLite {
+			var name string
+			err := ds.pool.QueryRow(ctx,
+				`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`,
+				transactionCompletionTable).Scan(&name)
+			if errors.Is(err, ErrNoRows) {
+				return false, nil
+			}
+			return err == nil, err
+		}
+		var exists bool
+		err := ds.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`,
+			ds.schema, transactionCompletionTable).Scan(&exists)
+		return exists, err
+	}, withRetrierLogger(ds.logger))
+}
+
+// ensureCompletionTable creates the transaction_completion table in the user's
+// database when it is not already present. It pre-checks for the table first, so
+// a role with only DML privileges works against a pre-provisioned table; only a
+// missing table triggers the CREATE SCHEMA / CREATE TABLE DDL.
+// A failed create returns an actionable error pointing the user at their own database migrations.
+func (ds *DataSource) ensureCompletionTable(ctx context.Context) error {
+	installed, err := ds.completionTableInstalled(ctx)
+	if err != nil {
+		return fmt.Errorf("checking for the %s table: %w", ds.qualifiedCompletionTable(), err)
+	}
+	if installed {
+		ds.logger.Debug("transaction_completion table already present; skipping creation")
+		return nil
+	}
 	for _, stmt := range ds.completionTableStatements() {
 		query := stmt
 		if err := retry(ctx, func() error {
 			_, execErr := ds.pool.Exec(ctx, query)
 			return execErr
 		}, withRetrierLogger(ds.logger)); err != nil {
-			return fmt.Errorf("creating %s table: %w", transactionCompletionTable, err)
+			return fmt.Errorf("the %s table does not exist and could not be created: %w; "+
+				"create it ahead of time in your application's database migrations "+
+				"or ensure the connecting role has CREATE privileges on the database and schema",
+				ds.qualifiedCompletionTable(), err)
 		}
 	}
 	return nil

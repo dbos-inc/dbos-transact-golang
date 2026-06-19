@@ -216,6 +216,151 @@ func TestNewDataSource(t *testing.T) {
 			require.Error(t, err)
 		}
 	})
+
+	// The existence pre-check drives the skip-DDL-when-installed path: a role with
+	// only DML rights works against a pre-provisioned table. completionTableInstalled
+	// must track the table's presence on both backends.
+	t.Run("DetectsInstalledTable", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ub.dropCompletionTable(t)
+
+		ds := ub.register(t, ctx, "app") // creates the table
+		installed, err := ds.completionTableInstalled(context.Background())
+		require.NoError(t, err)
+		require.True(t, installed)
+
+		ub.dropCompletionTable(t)
+		installed, err = ds.completionTableInstalled(context.Background())
+		require.NoError(t, err)
+		require.False(t, installed)
+	})
+}
+
+// TestNewDataSourceNoDDLPrivileges exercises the user-database permission model
+// with a real role that lacks DDL rights (Postgres only — SQLite has no roles).
+// It proves both halves of the TS-parity behavior: a missing table the role
+// cannot create yields an actionable error, while a pre-provisioned table reached
+// with only DML grants works end to end (the pre-check skips all DDL).
+func TestNewDataSourceNoDDLPrivileges(t *testing.T) {
+	skipIfSqlite(t, "Postgres role privileges; SQLite has no roles")
+
+	const role = "dbos_noddl_role"
+	const rolePw = "noddl_pw"
+
+	// newAdmin connects as the (superuser) test role and (re)creates a fresh
+	// login role that holds no DDL privileges: no CREATE on the database (so it
+	// cannot CREATE SCHEMA) and no CREATE on any schema (so it cannot CREATE TABLE).
+	newAdmin := func(t *testing.T) *pgxpool.Pool {
+		t.Helper()
+		admin, err := pgxpool.New(context.Background(), getDatabaseURL())
+		require.NoError(t, err)
+		t.Cleanup(admin.Close)
+		bg := context.Background()
+		// Fresh role: revoke anything previously granted to it, then recreate.
+		_, _ = admin.Exec(bg, "DROP OWNED BY "+role)
+		_, _ = admin.Exec(bg, "DROP ROLE IF EXISTS "+role)
+		_, err = admin.Exec(bg, fmt.Sprintf(
+			"CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOCREATEDB NOCREATEROLE", role, rolePw))
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+role)
+			_, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+role)
+		})
+		return admin
+	}
+
+	// openLimited builds a pgx pool that authenticates as the no-DDL role.
+	openLimited := func(t *testing.T) *pgxpool.Pool {
+		t.Helper()
+		cfg, err := pgxpool.ParseConfig(getDatabaseURL())
+		require.NoError(t, err)
+		cfg.ConnConfig.User = role
+		cfg.ConnConfig.Password = rolePw
+		limited, err := pgxpool.NewWithConfig(context.Background(), cfg)
+		require.NoError(t, err)
+		t.Cleanup(limited.Close)
+		return limited
+	}
+
+	// A role without CREATE on the database/schema cannot create the missing
+	// completion table; NewDataSource must fail fast with the actionable error
+	// (the permission error is non-retryable, so this does not hang).
+	t.Run("ActionableErrorWhenCannotCreate", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		admin := newAdmin(t)
+		const schema = "dbos_noddl_absent"
+		_, err := admin.Exec(context.Background(), fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema))
+		require.NoError(t, err)
+		limited := openLimited(t)
+
+		_, err = NewDataSource(ctx, limited, WithDataSourceSchema(schema))
+		require.Error(t, err)
+		msg := err.Error()
+		// The failure is reported against the right table...
+		require.Contains(t, msg, fmt.Sprintf(`"%s".transaction_completion`, schema))
+		require.Contains(t, msg, "could not be created")
+		// ...is genuinely a privilege denial (not some unrelated DDL error)...
+		require.Contains(t, msg, "permission denied")
+		// ...and points the user at provisioning it via their migrations.
+		require.Contains(t, msg, "migrations")
+	})
+
+	// A pre-provisioned table plus DML-only grants is enough: NewDataSource's
+	// pre-check finds the table and attempts no DDL, and the role runs a
+	// transaction end to end (app write + durability row, both via the user pool).
+	t.Run("WorksWhenPreProvisionedWithDMLOnly", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		admin := newAdmin(t)
+		limited := openLimited(t)
+		bg := context.Background()
+		const schema = "dbos_noddl_present"
+
+		mustExec := func(q string) { _, e := admin.Exec(bg, q); require.NoError(t, e) }
+		mustExec(fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema))
+		mustExec(fmt.Sprintf(`CREATE SCHEMA %q`, schema))
+		mustExec(fmt.Sprintf(`CREATE TABLE %q.transaction_completion (
+			workflow_id TEXT NOT NULL, step_id INT NOT NULL, output TEXT, error TEXT,
+			serialization TEXT, created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())*1000)::bigint,
+			PRIMARY KEY (workflow_id, step_id))`, schema))
+		mustExec(fmt.Sprintf(`CREATE TABLE %q.kv (k TEXT PRIMARY KEY, v TEXT)`, schema))
+		mustExec(fmt.Sprintf(`GRANT USAGE ON SCHEMA %q TO %s`, schema, role))
+		mustExec(fmt.Sprintf(`GRANT SELECT, INSERT ON %q.transaction_completion TO %s`, schema, role))
+		mustExec(fmt.Sprintf(`GRANT SELECT, INSERT, UPDATE ON %q.kv TO %s`, schema, role))
+		t.Cleanup(func() {
+			_, _ = admin.Exec(context.Background(), fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema))
+		})
+
+		// The pre-check finds the pre-provisioned table, so no DDL is attempted.
+		ds, err := NewDataSource(ctx, limited, WithDataSourceSchema(schema))
+		require.NoError(t, err)
+		require.NotNil(t, ds)
+
+		wf := func(dctx DBOSContext, item string) (int64, error) {
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
+				_, e := tx.Exec(c, fmt.Sprintf(`INSERT INTO %q.kv (k, v) VALUES ($1, $2)`, schema), "k1", item)
+				return 7, e
+			})
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+
+		h, err := RunWorkflow(ctx, wf, "hello", WithWorkflowID(uuid.NewString()))
+		require.NoError(t, err)
+		res, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, int64(7), res)
+
+		// The DML-only role wrote both the application row and the durability row.
+		var v string
+		require.NoError(t, limited.QueryRow(bg,
+			fmt.Sprintf(`SELECT v FROM %q.kv WHERE k = 'k1'`, schema)).Scan(&v))
+		require.Equal(t, "hello", v)
+		var n int
+		require.NoError(t, limited.QueryRow(bg,
+			fmt.Sprintf(`SELECT count(*) FROM %q.transaction_completion`, schema)).Scan(&n))
+		require.Equal(t, 1, n)
+	})
 }
 
 func TestRunAsTransaction(t *testing.T) {
