@@ -358,9 +358,6 @@ func RunAsTransaction[R any](ctx DBOSContext, ds *DataSource, fn Txn[R], opts ..
 // first (layer 1) then transaction_completion (layer 2), replaying the stored
 // output without re-running fn when the user transaction already committed.
 //
-// This is the concrete DBOSContext.RunAsTransaction; the generic RunAsTransaction
-// wrapper type-erases fn and dispatches here (or to a mock implementation).
-//
 // When the data source shares the system database's pool, the call collapses onto runAsTxn.
 func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn TxnFunc, opts ...StepOption) (any, error) {
 	// Reject a transaction nested inside another transaction.

@@ -2087,9 +2087,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 		return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("step function cannot be nil"))
 	}
 	if prep.IsWithinStep {
-		// Invoked inside an enclosing step: open a real transaction on the system
-		// database pool and manage its commit/rollback, but record no durability
-		// row — the enclosing step owns the durability boundary.
+		// Invoked inside an enclosing step: manage the transaction but record no durability
 		txOpts := TxOptions{IsoLevel: IsoLevelReadCommitted}
 		if prep.StepOpts.txIsoLevel != nil {
 			txOpts.IsoLevel = *prep.StepOpts.txIsoLevel
