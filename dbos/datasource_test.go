@@ -548,6 +548,27 @@ func TestRunAsTransaction(t *testing.T) {
 		// The failed transaction rolled back its application write.
 		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv`))
 	})
+
+	// RunAsTransaction must be called from within a workflow: invoked at top level
+	// (no workflow state in the context) the separate-DB path reaches
+	// prepareStepExecution and returns an error instead of opening a transaction.
+	t.Run("OutsideWorkflowReturnsError", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ds := ub.register(t, ctx, "app")
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+		require.False(t, ds.sameAsSystemDB)
+
+		_, err := RunAsTransaction(ctx, ds, func(c context.Context, tx Tx) (string, error) {
+			_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "v1")
+			return "unexpected", e
+		})
+		require.ErrorContains(t, err, "workflow state not found in context")
+
+		// fn never ran, so nothing was written.
+		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv`))
+	})
 }
 
 // setupSharedDBOS builds a DBOS context whose system-database pool is ALSO the
@@ -735,4 +756,24 @@ func TestRunAsTransactionSharedSystemDBRejectsNested(t *testing.T) {
 	steps, err := GetWorkflowSteps(ctx, wfID)
 	require.NoError(t, err)
 	require.Len(t, steps, 1)
+}
+
+// On the shared-pool path too, RunAsTransaction must be called from within a
+// workflow. The same-database optimization routes to runAsTxn, which reaches
+// prepareStepExecution and returns the same error when no workflow state is in
+// the context. Runs on every backend.
+func TestRunAsTransactionSharedSystemDBOutsideWorkflow(t *testing.T) {
+	ctx, ds, ub := setupSharedDBOS(t)
+	require.NoError(t, Launch(ctx))
+	ub.createAppTable(t)
+	require.True(t, ds.sameAsSystemDB)
+
+	_, err := RunAsTransaction(ctx, ds, func(c context.Context, tx Tx) (string, error) {
+		_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "v1")
+		return "unexpected", e
+	})
+	require.ErrorContains(t, err, "workflow state not found in context")
+
+	// fn never ran, so nothing was written.
+	require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv`))
 }
