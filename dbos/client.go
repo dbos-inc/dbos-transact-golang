@@ -32,8 +32,8 @@ type Client interface {
 	Send(destinationID string, message any, topic string, opts ...SendOption) error
 	GetEvent(targetWorkflowID, key string, timeout time.Duration) (any, error)
 	RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error)
-	CancelWorkflow(workflowID string) error
-	CancelWorkflows(workflowIDs []string) error
+	CancelWorkflow(workflowID string, cancelChildren bool) error
+	CancelWorkflows(workflowIDs []string, cancelChildren bool) error
 	SetWorkflowDelay(workflowID string, opts ...SetWorkflowDelayOption) error
 	DeleteWorkflows(workflowIDs []string, opts ...DeleteWorkflowOption) error
 	ResumeWorkflow(workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)
@@ -473,14 +473,14 @@ func (c *client) RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error
 }
 
 // CancelWorkflow cancels a running or enqueued workflow.
-func (c *client) CancelWorkflow(workflowID string) error {
-	return c.dbosCtx.CancelWorkflow(c.dbosCtx, workflowID)
+func (c *client) CancelWorkflow(workflowID string, cancelChildren bool) error {
+	return c.dbosCtx.CancelWorkflow(c.dbosCtx, workflowID, cancelChildren)
 }
 
 // CancelWorkflows cancels multiple workflows in a single database round-trip.
 // Workflows that are missing or already in a terminal state are silently skipped.
-func (c *client) CancelWorkflows(workflowIDs []string) error {
-	return c.dbosCtx.CancelWorkflows(c.dbosCtx, workflowIDs)
+func (c *client) CancelWorkflows(workflowIDs []string, cancelChildren bool) error {
+	return c.dbosCtx.CancelWorkflows(c.dbosCtx, workflowIDs, cancelChildren)
 }
 
 // SetWorkflowDelay sets or updates the delay on a DELAYED workflow.

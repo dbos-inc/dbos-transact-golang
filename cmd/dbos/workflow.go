@@ -72,6 +72,9 @@ func init() {
 	workflowCmd.AddCommand(workflowForkCmd)
 	workflowCmd.AddCommand(workflowDeleteCmd)
 
+	// Cancel command flags
+	workflowCancelCmd.Flags().BoolP("children", "c", false, "Also delete all children workflows")
+
 	// Delete command flags
 	workflowDeleteCmd.Flags().BoolP("children", "c", false, "Also delete all child workflows recursively")
 
@@ -267,6 +270,11 @@ func runWorkflowSteps(cmd *cobra.Command, args []string) error {
 }
 
 func runWorkflowCancel(cmd *cobra.Command, args []string) error {
+	cancelChildren, err := cmd.Flags().GetBool("children")
+	if err != nil {
+		return err
+	}
+
 	workflowID := args[0]
 
 	// Get database URL
@@ -284,7 +292,7 @@ func runWorkflowCancel(cmd *cobra.Command, args []string) error {
 	}
 
 	// Cancel workflow
-	err = ctx.CancelWorkflow(ctx, workflowID)
+	err = ctx.CancelWorkflow(ctx, workflowID, cancelChildren)
 	if err != nil {
 		return err
 	}

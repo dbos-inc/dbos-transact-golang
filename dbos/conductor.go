@@ -493,7 +493,7 @@ func (c *conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 	success := true
 	var errorMsg *string
 
-	if err := c.dbosCtx.CancelWorkflows(c.dbosCtx, workflowIDs); err != nil {
+	if err := c.dbosCtx.CancelWorkflows(c.dbosCtx, workflowIDs, req.CancelChildren); err != nil {
 		c.logger.Error("Failed to cancel workflows", "workflow_ids", workflowIDs, "error", err)
 		errStr := fmt.Sprintf("failed to cancel workflows: %v", err)
 		errorMsg = &errStr

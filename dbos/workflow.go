@@ -3394,18 +3394,25 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle
 	return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID()), nil
 }
 
-func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
+func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string, cancelChildren bool) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	var found []string
 	var err error
 	if isWithinWorkflow {
 		found, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
-			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{workflowIDs: []string{workflowID}, tx: tx})
+			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{
+				workflowIDs:    []string{workflowID},
+				cancelChildren: cancelChildren,
+				tx:             tx,
+			})
 		}, WithStepName("DBOS.cancelWorkflow"))
 	} else {
 		found, err = retryWithResult(c, func() ([]string, error) {
-			return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{workflowIDs: []string{workflowID}})
+			return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{
+				workflowIDs:    []string{workflowID},
+				cancelChildren: cancelChildren,
+			})
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
@@ -3432,24 +3439,24 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 //	if err != nil {
 //	    log.Printf("Failed to cancel workflow: %v", err)
 //	}
-func CancelWorkflow(ctx DBOSContext, workflowID string) error {
+func CancelWorkflow(ctx DBOSContext, workflowID string, cancelChildren bool) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.CancelWorkflow(ctx, workflowID)
+	return ctx.CancelWorkflow(ctx, workflowID, cancelChildren)
 }
 
-func (c *dbosContext) CancelWorkflows(_ DBOSContext, workflowIDs []string) error {
+func (c *dbosContext) CancelWorkflows(_ DBOSContext, workflowIDs []string, cancelChildren bool) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
-			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{workflowIDs: workflowIDs, tx: tx})
+			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{cancelChildren: cancelChildren, workflowIDs: workflowIDs, tx: tx})
 		}, WithStepName("DBOS.cancelWorkflows"))
 		return err
 	}
 	_, err := retryWithResult(c, func() ([]string, error) {
-		return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{workflowIDs: workflowIDs})
+		return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{cancelChildren: cancelChildren, workflowIDs: workflowIDs})
 	}, withRetrierLogger(c.logger))
 	return err
 }
@@ -3466,11 +3473,11 @@ func (c *dbosContext) CancelWorkflows(_ DBOSContext, workflowIDs []string) error
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-func CancelWorkflows(ctx DBOSContext, workflowIDs []string) error {
+func CancelWorkflows(ctx DBOSContext, workflowIDs []string, cancelChildren bool) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.CancelWorkflows(ctx, workflowIDs)
+	return ctx.CancelWorkflows(ctx, workflowIDs, cancelChildren)
 }
 
 // SetWorkflowDelayOption configures how the delay is set on a workflow.
