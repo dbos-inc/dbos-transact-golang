@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
-	"math/rand"
 	"net/url"
 	"reflect"
 	"regexp"
@@ -18,7 +16,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -89,6 +86,13 @@ type systemDatabase interface {
 	dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInput) ([]dequeuedWorkflow, error)
 	clearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
 	getQueuePartitions(ctx context.Context, queueName string) ([]string, error)
+
+	// Database-backed queue registry (the queues table)
+	getQueue(ctx context.Context, name string) (*WorkflowQueue, error) // returns nil if the queue does not exist
+	listQueues(ctx context.Context) ([]WorkflowQueue, error)
+	upsertQueue(ctx context.Context, input upsertQueueDBInput) (bool, error)
+	updateQueueConfig(ctx context.Context, name string, mutate func(*WorkflowQueue) error) (*WorkflowQueue, error)
+	deleteQueue(ctx context.Context, name string) error
 
 	// Garbage collection
 	garbageCollectWorkflows(ctx context.Context, input garbageCollectWorkflowsInput) error
@@ -333,11 +337,10 @@ const (
 	_DBOS_STREAM_CLOSED_SENTINEL = "__DBOS_STREAM_CLOSED__"
 
 	// Database retry timeouts
-	_DB_CONNECTION_RETRY_BASE_DELAY  = 1 * time.Second
-	_DB_CONNECTION_RETRY_FACTOR      = 2
-	_DB_CONNECTION_RETRY_MAX_RETRIES = 10
-	_DB_CONNECTION_MAX_DELAY         = 120 * time.Second
-	_DB_RETRY_INTERVAL               = 1 * time.Second
+	_DB_CONNECTION_RETRY_BASE_DELAY = 1 * time.Second
+	_DB_CONNECTION_RETRY_FACTOR     = 2
+	_DB_CONNECTION_MAX_DELAY        = 120 * time.Second
+	_DB_RETRY_INTERVAL              = 1 * time.Second
 )
 
 // returns the CONCURRENTLY keyword for online index DDL.
@@ -1287,6 +1290,8 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		qb.argCounter++
 		query += fmt.Sprintf(" LIMIT $%d", qb.argCounter)
 		qb.args = append(qb.args, *input.limit)
+	} else if input.offset != nil {
+		query += dialectNoLimitClause(s.dialect)
 	}
 
 	if input.offset != nil {
@@ -2453,6 +2458,8 @@ type stepInfo struct {
 type getWorkflowStepsInput struct {
 	workflowID string
 	loadOutput bool
+	limit      *int
+	offset     *int
 }
 
 func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]stepInfo, error) {
@@ -2461,7 +2468,19 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 			  WHERE workflow_uuid = $1
 			  ORDER BY function_id ASC`, s.dialect.SchemaPrefix(s.schema))
 
-	rows, err := s.pool.Query(ctx, query, input.workflowID)
+	args := []any{input.workflowID}
+	if input.limit != nil {
+		args = append(args, *input.limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
+	} else if input.offset != nil {
+		query += dialectNoLimitClause(s.dialect)
+	}
+	if input.offset != nil {
+		args = append(args, *input.offset)
+		query += fmt.Sprintf(" OFFSET $%d", len(args))
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query workflow steps: %w", err)
 	}
@@ -2522,10 +2541,16 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 // WorkflowAggregateRow is a single row of a workflow aggregate query result.
 // Group maps each grouping column name (e.g. "status", "name", "time_bucket") to its
 // stringified value, with nil entries for grouping columns that were NULL for that row.
-// Count is the number of workflows in this group.
+// Count, MinCreatedAt, MaxQueueWaitMs and MaxTotalLatencyMs are pointers because the caller
+// selects which aggregates to compute; an unselected aggregate is nil (serialized as null,
+// matching the other SDKs). MinCreatedAt is an epoch-ms timestamp; the latency fields are
+// in milliseconds.
 type WorkflowAggregateRow struct {
-	Group map[string]*string `json:"group"`
-	Count int64              `json:"count"`
+	Group             map[string]*string `json:"group"`
+	Count             *int64             `json:"count"`
+	MinCreatedAt      *int64             `json:"min_created_at"`
+	MaxQueueWaitMs    *int64             `json:"max_queue_wait_ms"`
+	MaxTotalLatencyMs *int64             `json:"max_total_latency_ms"`
 }
 
 // _DEFAULT_AGGREGATES_LIMIT caps the number of group rows returned by getWorkflowAggregates
@@ -2539,10 +2564,18 @@ type getWorkflowAggregatesDBInput struct {
 	groupByQueueName          bool
 	groupByExecutorID         bool
 	groupByApplicationVersion bool
+	selectCount               bool
+	selectMinCreatedAt        bool
+	selectMaxQueueWaitMs      bool
+	selectMaxTotalLatencyMs   bool
 	timeBucketSizeMs          int64 // 0 disables time bucketing
 	status                    []WorkflowStatusType
 	startTime                 time.Time
 	endTime                   time.Time
+	completedAfter            time.Time
+	completedBefore           time.Time
+	dequeuedAfter             time.Time
+	dequeuedBefore            time.Time
 	workflowName              []string
 	applicationVersion        []string
 	executorID                []string
@@ -2633,17 +2666,56 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 	if len(input.workflowIDPrefix) > 0 {
 		qb.addWhereLikeAny("workflow_uuid", input.workflowIDPrefix, "%")
 	}
+	// completed_after/before filter on completed_at; dequeued_after/before on
+	// started_at_epoch_ms (the dequeue timestamp). Both are epoch-ms columns.
+	if !input.completedAfter.IsZero() {
+		qb.addWhereGreaterEqual("completed_at", input.completedAfter.UnixMilli())
+	}
+	if !input.completedBefore.IsZero() {
+		qb.addWhereLessEqual("completed_at", input.completedBefore.UnixMilli())
+	}
+	if !input.dequeuedAfter.IsZero() {
+		qb.addWhereGreaterEqual("started_at_epoch_ms", input.dequeuedAfter.UnixMilli())
+	}
+	if !input.dequeuedBefore.IsZero() {
+		qb.addWhereLessEqual("started_at_epoch_ms", input.dequeuedBefore.UnixMilli())
+	}
+
+	// Build select aggregates. MAX/MIN ignore NULLs, so workflows missing a
+	// started_at_epoch_ms or completed_at drop out of the queue-wait / latency maxima.
+	type selectCol struct {
+		name string
+		expr string
+	}
+	var selects []selectCol
+	if input.selectCount {
+		selects = append(selects, selectCol{name: "count", expr: "COUNT(*)"})
+	}
+	if input.selectMinCreatedAt {
+		selects = append(selects, selectCol{name: "min_created_at", expr: "MIN(created_at)"})
+	}
+	if input.selectMaxQueueWaitMs {
+		selects = append(selects, selectCol{name: "max_queue_wait_ms", expr: "MAX(started_at_epoch_ms - created_at)"})
+	}
+	if input.selectMaxTotalLatencyMs {
+		selects = append(selects, selectCol{name: "max_total_latency_ms", expr: "MAX(completed_at - created_at)"})
+	}
+	if len(selects) == 0 {
+		return nil, errors.New("at least one select_ flag must be set")
+	}
 
 	// Build SELECT clause: each group expression aliased to "g0", "g1", ... so the position is stable
 	// regardless of whether the expression is a column or a CAST(...) expression.
-	selectParts := make([]string, 0, len(groups)+1)
+	selectParts := make([]string, 0, len(groups)+len(selects))
 	groupParts := make([]string, 0, len(groups))
 	for i, g := range groups {
 		alias := fmt.Sprintf("g%d", i)
 		selectParts = append(selectParts, fmt.Sprintf("%s AS %s", g.expr, alias))
 		groupParts = append(groupParts, g.expr)
 	}
-	selectParts = append(selectParts, "COUNT(*) AS cnt")
+	for i, sel := range selects {
+		selectParts = append(selectParts, fmt.Sprintf("%s AS s%d", sel.expr, i))
+	}
 
 	query := fmt.Sprintf("SELECT %s FROM %sworkflow_status",
 		strings.Join(selectParts, ", "),
@@ -2672,14 +2744,18 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 
 	results := make([]WorkflowAggregateRow, 0)
 	for rows.Next() {
-		// Scan each group column as nullable string, plus the count.
+		// Scan each group column as nullable string, plus each selected aggregate as nullable int64.
 		groupVals := make([]any, len(groups))
 		for i := range groups {
 			var v *string
 			groupVals[i] = &v
 		}
-		var count int64
-		scanArgs := append(append([]any{}, groupVals...), &count)
+		selectVals := make([]any, len(selects))
+		for i := range selects {
+			var v *int64
+			selectVals[i] = &v
+		}
+		scanArgs := append(append([]any{}, groupVals...), selectVals...)
 		if err := rows.Scan(scanArgs...); err != nil {
 			return nil, fmt.Errorf("failed to scan workflow aggregate row: %w", err)
 		}
@@ -2687,7 +2763,21 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 		for i, g := range groups {
 			groupMap[g.name] = *(groupVals[i].(**string))
 		}
-		results = append(results, WorkflowAggregateRow{Group: groupMap, Count: count})
+		row := WorkflowAggregateRow{Group: groupMap}
+		for i, sel := range selects {
+			val := *(selectVals[i].(**int64))
+			switch sel.name {
+			case "count":
+				row.Count = val
+			case "min_created_at":
+				row.MinCreatedAt = val
+			case "max_queue_wait_ms":
+				row.MaxQueueWaitMs = val
+			case "max_total_latency_ms":
+				row.MaxTotalLatencyMs = val
+			}
+		}
+		results = append(results, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating over workflow aggregate rows: %w", err)
@@ -3111,7 +3201,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 						break
 					}
 					s.logger.Debug("failed to re-acquire connection for notification listener", "error", err)
-					time.Sleep(backoffWithJitter(retryAttempt))
+					time.Sleep(connectionRetryBackoff.delayFor(retryAttempt + 1))
 					retryAttempt++
 				}
 				// The connection is re-aquired. Signal to all waiters they should poll the database for a potentially missed value.
@@ -3129,7 +3219,7 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			}
 			// Other transient errors. Backoff and continue on same conn
 			s.logger.Error("Error waiting for notification", "error", err)
-			time.Sleep(backoffWithJitter(retryAttempt))
+			time.Sleep(connectionRetryBackoff.delayFor(retryAttempt + 1))
 			retryAttempt++
 			continue
 		}
@@ -4294,6 +4384,225 @@ func (s *sysDB) getQueuePartitions(ctx context.Context, queueName string) ([]str
 }
 
 /*******************************/
+/******* QUEUE REGISTRY ********/
+/*******************************/
+
+const _QUEUE_SELECT_COLUMNS = "name, concurrency, worker_concurrency, rate_limit_max, rate_limit_period_sec, priority_enabled, partition_queue, polling_interval_sec"
+
+type upsertQueueDBInput struct {
+	queue          WorkflowQueue
+	updateExisting bool
+}
+
+// scanQueueRow builds a database-backed WorkflowQueue from a row selecting
+// _QUEUE_SELECT_COLUMNS, in order.
+func scanQueueRow(row Row) (*WorkflowQueue, error) {
+	var (
+		name                            string
+		concurrency, workerConcurrency  *int
+		rateLimitMax                    *int
+		rateLimitPeriodSec              *float64
+		priorityEnabled, partitionQueue bool
+		pollingIntervalSec              float64
+	)
+	if err := row.Scan(&name, &concurrency, &workerConcurrency, &rateLimitMax, &rateLimitPeriodSec, &priorityEnabled, &partitionQueue, &pollingIntervalSec); err != nil {
+		return nil, err
+	}
+	q := &WorkflowQueue{
+		Name:                 name,
+		GlobalConcurrency:    concurrency,
+		WorkerConcurrency:    workerConcurrency,
+		PriorityEnabled:      priorityEnabled,
+		PartitionQueue:       partitionQueue,
+		MaxTasksPerIteration: _DEFAULT_MAX_TASKS_PER_ITERATION, // not persisted; queue table has no such column
+		databaseBacked:       true,
+	}
+	if rateLimitMax != nil {
+		var period time.Duration
+		if rateLimitPeriodSec != nil {
+			period = time.Duration(*rateLimitPeriodSec * float64(time.Second))
+		}
+		q.RateLimit = &RateLimiter{Limit: *rateLimitMax, Period: period}
+	}
+	base := time.Duration(pollingIntervalSec * float64(time.Second))
+	if base <= 0 {
+		base = _DEFAULT_BASE_POLLING_INTERVAL
+	}
+	q.basePollingInterval = base
+	return q, nil
+}
+
+// getQueue returns the database-backed queue with the given name, or nil (with a
+// nil error) when no such queue exists.
+func (s *sysDB) getQueue(ctx context.Context, name string) (*WorkflowQueue, error) {
+	return s.getQueueRow(ctx, s.pool, name)
+}
+
+func (s *sysDB) getQueueRow(ctx context.Context, db Querier, name string) (*WorkflowQueue, error) {
+	query := s.renderSQL(`SELECT `+_QUEUE_SELECT_COLUMNS+` FROM %squeues WHERE name = $1`, s.dialect.SchemaPrefix(s.schema))
+	q, err := scanQueueRow(db.QueryRow(ctx, s.dialect.RewriteQuery(query), name))
+	if err != nil {
+		if errors.Is(err, ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get queue %s: %w", name, err)
+	}
+	return q, nil
+}
+
+// listQueues returns all database-backed queues registered in the queues table.
+func (s *sysDB) listQueues(ctx context.Context) ([]WorkflowQueue, error) {
+	query := s.renderSQL(`SELECT `+_QUEUE_SELECT_COLUMNS+` FROM %squeues`, s.dialect.SchemaPrefix(s.schema))
+	rows, err := s.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list queues: %w", err)
+	}
+	defer rows.Close()
+
+	var queues []WorkflowQueue
+	for rows.Next() {
+		q, err := scanQueueRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan queue: %w", err)
+		}
+		queues = append(queues, *q)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read queues: %w", err)
+	}
+	return queues, nil
+}
+
+// deleteQueue removes a database-backed queue's row, if it exists. Workflows
+// still enqueued on it become unrecoverable.
+func (s *sysDB) deleteQueue(ctx context.Context, name string) error {
+	query := s.renderSQL(`DELETE FROM %squeues WHERE name = $1`, s.dialect.SchemaPrefix(s.schema))
+	if _, err := s.pool.Exec(ctx, s.dialect.RewriteQuery(query), name); err != nil {
+		return fmt.Errorf("failed to delete queue %s: %w", name, err)
+	}
+	return nil
+}
+
+// upsertQueue inserts a queue row or, when updateExisting is set, overwrites the
+// existing configuration. It returns true iff a new row was inserted.
+func (s *sysDB) upsertQueue(ctx context.Context, input upsertQueueDBInput) (bool, error) {
+	q := input.queue
+	var rateLimitMax *int
+	var rateLimitPeriodSec *float64
+	if q.RateLimit != nil {
+		rateLimitMax = &q.RateLimit.Limit
+		sec := q.RateLimit.Period.Seconds()
+		rateLimitPeriodSec = &sec
+	}
+	pollingSec := q.basePollingInterval.Seconds()
+	if pollingSec <= 0 {
+		pollingSec = _DEFAULT_BASE_POLLING_INTERVAL.Seconds()
+	}
+	nowMs := time.Now().UnixMilli()
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Supply queue_id and created_at explicitly: the SQLite schema has no
+	// defaults for them (only the Postgres schema does).
+	insertQuery := s.renderSQL(`INSERT INTO %squeues
+		(queue_id, name, concurrency, worker_concurrency, rate_limit_max, rate_limit_period_sec, priority_enabled, partition_queue, polling_interval_sec, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT (name) DO NOTHING`, schemaPrefix)
+	res, err := tx.Exec(ctx, s.dialect.RewriteQuery(insertQuery),
+		uuid.New().String(), q.Name, q.GlobalConcurrency, q.WorkerConcurrency, rateLimitMax, rateLimitPeriodSec, q.PriorityEnabled, q.PartitionQueue, pollingSec, nowMs, nowMs)
+	if err != nil {
+		return false, fmt.Errorf("failed to insert queue %s: %w", q.Name, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to read rows affected for queue %s: %w", q.Name, err)
+	}
+	inserted := affected > 0
+
+	if !inserted && input.updateExisting {
+		if err := s.updateQueueRow(ctx, tx, q); err != nil {
+			return false, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return inserted, nil
+}
+
+func (s *sysDB) updateQueueQuery(schemaPrefix string) string {
+	return s.renderSQL(`UPDATE %squeues SET
+		concurrency = $2, worker_concurrency = $3, rate_limit_max = $4, rate_limit_period_sec = $5,
+		priority_enabled = $6, partition_queue = $7, polling_interval_sec = $8, updated_at = $9
+		WHERE name = $1`, schemaPrefix)
+}
+
+// updateQueueRow overwrites the configuration columns of an existing queue row
+// using the given Querier (a pool or a transaction). It returns an error if no
+// row with the queue's name exists.
+func (s *sysDB) updateQueueRow(ctx context.Context, db Querier, q WorkflowQueue) error {
+	var rateLimitMax *int
+	var rateLimitPeriodSec *float64
+	if q.RateLimit != nil {
+		rateLimitMax = &q.RateLimit.Limit
+		sec := q.RateLimit.Period.Seconds()
+		rateLimitPeriodSec = &sec
+	}
+	pollingSec := q.basePollingInterval.Seconds()
+	if pollingSec <= 0 {
+		pollingSec = _DEFAULT_BASE_POLLING_INTERVAL.Seconds()
+	}
+	nowMs := time.Now().UnixMilli()
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+
+	res, err := db.Exec(ctx, s.dialect.RewriteQuery(s.updateQueueQuery(schemaPrefix)),
+		q.Name, q.GlobalConcurrency, q.WorkerConcurrency, rateLimitMax, rateLimitPeriodSec, q.PriorityEnabled, q.PartitionQueue, pollingSec, nowMs)
+	if err != nil {
+		return fmt.Errorf("failed to update queue %s: %w", q.Name, err)
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		return fmt.Errorf("queue %s does not exist", q.Name)
+	}
+	return nil
+}
+
+// updateQueueConfig applies a single configuration change to a database-backed
+// queue within one transaction: it reads the current row, passes it to mutate
+// (which applies and validates the change against the freshly-read values),
+// persists the row, and returns the updated queue. Run with snapshot isolation.
+func (s *sysDB) updateQueueConfig(ctx context.Context, name string, mutate func(*WorkflowQueue) error) (*WorkflowQueue, error) {
+	tx, err := s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	q, err := s.getQueueRow(ctx, tx, name)
+	if err != nil {
+		return nil, err
+	}
+	if q == nil {
+		return nil, fmt.Errorf("queue %s no longer exists", name)
+	}
+	if err := mutate(q); err != nil {
+		return nil, err
+	}
+	if err := s.updateQueueRow(ctx, tx, *q); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return q, nil
+}
+
+/*******************************/
 /******* METRICS ********/
 /*******************************/
 
@@ -5116,20 +5425,6 @@ func (qb *queryBuilder) addWhereLessEqual(column string, value any) {
 	qb.args = append(qb.args, value)
 }
 
-func backoffWithJitter(retryAttempt int) time.Duration {
-	exp := float64(_DB_CONNECTION_RETRY_BASE_DELAY) * math.Pow(_DB_CONNECTION_RETRY_FACTOR, float64(retryAttempt))
-	// cap backoff to max number of retries, then do a fixed time delay
-	// expected retryAttempt to initially be 0, so >= used
-	// cap delay to maximum of _DB_CONNECTION_MAX_DELAY milliseconds
-	if retryAttempt >= _DB_CONNECTION_RETRY_MAX_RETRIES || exp > float64(_DB_CONNECTION_MAX_DELAY) {
-		exp = float64(_DB_CONNECTION_MAX_DELAY)
-	}
-
-	// want randomization between +-25% of exp
-	jitter := 0.75 + rand.Float64()*0.5 // #nosec G404 -- trivial use of math/rand
-	return time.Duration(exp * jitter)
-}
-
 // maskPassword replaces the password in a database URL with asterisks
 func maskPassword(dbURL string) (string, error) {
 	parsedURL, err := url.Parse(dbURL)
@@ -5172,19 +5467,6 @@ func maskPasswordInKeyValueFormat(connStr string) string {
 /*******************************/
 /******* RETRIER ********/
 /*******************************/
-
-// isRetryableTransaction returns true for PG error 40001 (SerializationFailure).
-// Useful for CockroachDB transaction retries
-func isRetryableTransaction(err error, _ *slog.Logger) bool {
-	if err == nil {
-		return false
-	}
-	var pgerr *pgconn.PgError
-	if errors.As(err, &pgerr) && pgerr.Code == pgerrcode.SerializationFailure {
-		return true
-	}
-	return false
-}
 
 // retryConfig holds the configuration for a retry operation
 type retryConfig struct {
@@ -5236,92 +5518,71 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 		opt(config)
 	}
 
-	var lastErr error
-	delay := config.baseDelay
-	attempt := 0
+	sched := backoffSchedule{
+		base:      config.baseDelay,
+		max:       config.maxDelay,
+		factor:    config.backoffFactor,
+		jitterMin: config.jitterMin,
+		jitterMax: config.jitterMax,
+	}
 
-	for {
-		lastErr = fn()
-
-		// Success and rollback case
-		if lastErr == nil {
-			return nil
-		}
-
-		// Check if error is retryable (any condition in the chain returns true)
+	// decide: retryable if any chain condition matches, until the (optional)
+	// maxRetries budget is spent. runs is the number of completed runs, so
+	// runs > maxRetries means the last allowed run has just failed.
+	decide := func(err error, runs int) (bool, error) {
 		retryable := false
 		for _, cond := range config.retryConditionChain {
-			if cond(lastErr, config.logger) {
+			if cond(err, config.logger) {
 				retryable = true
 				break
 			}
 		}
 		if !retryable {
 			if config.logger != nil {
-				config.logger.Debug("Non-retryable error encountered", "error", lastErr)
+				config.logger.Debug("Non-retryable error encountered", "error", err)
 			}
-			return lastErr
+			return false, err
 		}
-
-		// Check if we should continue retrying
-		// If maxRetries is -1, retry indefinitely
-		if config.maxRetries >= 0 && attempt >= config.maxRetries {
-			return lastErr
+		if config.maxRetries >= 0 && runs > config.maxRetries {
+			return false, err
 		}
+		return true, nil
+	}
 
-		// Log retry attempt if logger is provided
+	onRetry := func(err error, runs int, delay time.Duration) {
 		if config.logger != nil {
 			config.logger.Debug("Retrying operation",
-				"attempt", attempt+1,
+				"attempt", runs,
 				"max_retries", config.maxRetries,
 				"delay", delay,
-				"error", lastErr)
+				"error", err)
 		}
-
-		// Apply jitter to the delay
-		jitterRange := config.jitterMax - config.jitterMin
-		jitterFactor := config.jitterMin + rand.Float64()*jitterRange // #nosec G404 -- trivial use of math/rand
-		jitteredDelay := time.Duration(float64(delay) * jitterFactor)
-
-		// Wait before retrying with context cancellation support
-		select {
-		case <-time.After(jitteredDelay):
-		case <-ctx.Done():
-			if config.logger != nil {
-				config.logger.Debug("Retry operation cancelled", "error", ctx.Err())
-			}
-			return ctx.Err()
-		}
-
-		// Calculate next delay with exponential backoff
-		delay = min(time.Duration(float64(delay)*config.backoffFactor), config.maxDelay)
-
-		attempt++
 	}
+
+	onCancel := func() error {
+		if config.logger != nil {
+			config.logger.Debug("Retry operation cancelled", "error", ctx.Err())
+		}
+		return ctx.Err()
+	}
+
+	return retryLoop(ctx, sched, fn, decide, onRetry, onCancel)
 }
 
 // retryWithResult executes a function that returns a value with retry logic
 // It uses the non-generic retry function under the hood
 func retryWithResult[T any](ctx context.Context, fn func() (T, error), options ...retryOption) (T, error) {
 	var result T
-	var capturedErr error
 
-	// Wrap the generic function to work with the non-generic retry
 	wrappedFn := func() error {
 		var err error
 		result, err = fn()
-		capturedErr = err
 		return err
 	}
 
-	// Use the non-generic retry function
-	err := retry(ctx, wrappedFn, options...)
-
-	// Return the last result and error
-	if err != nil {
-		return result, capturedErr
-	}
-	return result, nil
+	// Return retry's error directly: it is the final fn() error, or ctx.Err()
+	// when the context is cancelled during a backoff wait.
+	return result, retry(ctx, wrappedFn, options...)
 }
 
 func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error) {

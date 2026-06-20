@@ -67,9 +67,10 @@
 //
 // # Queues
 //
-// Queues manage workflow concurrency and rate limiting:
+// Queues manage workflow concurrency and rate limiting. Register a queue to
+// persist its configuration in the system database:
 //
-//	queue := dbos.NewWorkflowQueue(dbosContext, "task_queue",
+//	queue, err := dbos.RegisterQueue(dbosContext, "task_queue",
 //	    dbos.WithWorkerConcurrency(5),    // Max 5 concurrent workflows per process
 //	    dbos.WithRateLimiter(&dbos.RateLimiter{
 //	        Limit:  100,

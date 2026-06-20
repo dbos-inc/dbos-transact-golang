@@ -405,6 +405,10 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleListApplicationVersionsRequest(data, base.RequestID)
 	case setLatestAppVersionMessage:
 		return c.handleSetLatestApplicationVersionRequest(data, base.RequestID)
+	case listQueuesMessage:
+		return c.handleListQueuesRequest(data, base.RequestID)
+	case getQueueMessage:
+		return c.handleGetQueueRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
 		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
@@ -929,7 +933,14 @@ func (c *conductor) handleListStepsRequest(data []byte, requestID string) error 
 	c.logger.Debug("Handling list steps request", "request", req)
 
 	// Get workflow steps using the public GetWorkflowSteps method
-	steps, err := GetWorkflowSteps(c.dbosCtx, req.WorkflowID, WithStepsLoadOutput(req.LoadOutput))
+	stepOpts := []GetWorkflowStepsOption{WithStepsLoadOutput(req.LoadOutput)}
+	if req.Limit != nil {
+		stepOpts = append(stepOpts, WithStepsLimit(*req.Limit))
+	}
+	if req.Offset != nil {
+		stepOpts = append(stepOpts, WithStepsOffset(*req.Offset))
+	}
+	steps, err := GetWorkflowSteps(c.dbosCtx, req.WorkflowID, stepOpts...)
 	if err != nil {
 		c.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflow steps: %v", err)
@@ -1490,17 +1501,42 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 	}
 	c.logger.Debug("Handling get workflow aggregates request", "request_id", requestID)
 
+	resp := getWorkflowAggregatesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getWorkflowAggregatesMessage, RequestID: requestID},
+		},
+		Output: []WorkflowAggregateRow{},
+	}
+
+	// An explicitly-provided time_bucket_size_ms must be > 0 (parity with the other SDKs);
+	// a nil value means "no bucketing". The public API can't distinguish the two, so reject here.
+	if req.Body.TimeBucketSizeMs != nil && *req.Body.TimeBucketSizeMs <= 0 {
+		errStr := "time_bucket_size_ms must be > 0"
+		resp.ErrorMessage = &errStr
+		return c.sendResponse(resp, string(getWorkflowAggregatesMessage))
+	}
+
 	input := GetWorkflowAggregatesInput{
 		GroupByStatus:             req.Body.GroupByStatus,
 		GroupByName:               req.Body.GroupByName,
 		GroupByQueueName:          req.Body.GroupByQueueName,
 		GroupByExecutorID:         req.Body.GroupByExecutorID,
 		GroupByApplicationVersion: req.Body.GroupByApplicationVersion,
+		SelectCount:               req.Body.SelectCount,
+		SelectMinCreatedAt:        req.Body.SelectMinCreatedAt,
+		SelectMaxQueueWaitMs:      req.Body.SelectMaxQueueWaitMs,
+		SelectMaxTotalLatencyMs:   req.Body.SelectMaxTotalLatencyMs,
 		Name:                      req.Body.Name.toSlice(),
 		ApplicationVersion:        req.Body.AppVersion.toSlice(),
 		ExecutorID:                req.Body.ExecutorID.toSlice(),
 		QueueName:                 req.Body.QueueName.toSlice(),
 		WorkflowIDPrefix:          req.Body.WorkflowIDPrefix.toSlice(),
+	}
+	// Default to count when nothing is selected: the admin aggregates API omits select
+	// flags when it only wants counts (e.g. grouping by time_bucket alone), and forwards
+	// the body verbatim. Without this the query would error "at least one select_ flag".
+	if !input.SelectCount && !input.SelectMinCreatedAt && !input.SelectMaxQueueWaitMs && !input.SelectMaxTotalLatencyMs {
+		input.SelectCount = true
 	}
 	if req.Body.TimeBucketSizeMs != nil {
 		input.TimeBucketSize = time.Duration(*req.Body.TimeBucketSizeMs) * time.Millisecond
@@ -1518,12 +1554,17 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 	if req.Body.EndTime != nil {
 		input.EndTime = *req.Body.EndTime
 	}
-
-	resp := getWorkflowAggregatesConductorResponse{
-		baseResponse: baseResponse{
-			baseMessage: baseMessage{Type: getWorkflowAggregatesMessage, RequestID: requestID},
-		},
-		Output: []WorkflowAggregateRow{},
+	if req.Body.CompletedAfter != nil {
+		input.CompletedAfter = *req.Body.CompletedAfter
+	}
+	if req.Body.CompletedBefore != nil {
+		input.CompletedBefore = *req.Body.CompletedBefore
+	}
+	if req.Body.DequeuedAfter != nil {
+		input.DequeuedAfter = *req.Body.DequeuedAfter
+	}
+	if req.Body.DequeuedBefore != nil {
+		input.DequeuedBefore = *req.Body.DequeuedBefore
 	}
 
 	rows, err := c.dbosCtx.GetWorkflowAggregates(c.dbosCtx, input)
@@ -1546,6 +1587,20 @@ func (c *conductor) handleGetStepAggregatesRequest(data []byte, requestID string
 	}
 	c.logger.Debug("Handling get step aggregates request", "request_id", requestID)
 
+	resp := getStepAggregatesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getStepAggregatesMessage, RequestID: requestID},
+		},
+		Output: []StepAggregateRow{},
+	}
+
+	// An explicitly-provided time_bucket_size_ms must be > 0 (parity with the other SDKs).
+	if req.Body.TimeBucketSizeMs != nil && *req.Body.TimeBucketSizeMs <= 0 {
+		errStr := "time_bucket_size_ms must be > 0"
+		resp.ErrorMessage = &errStr
+		return c.sendResponse(resp, string(getStepAggregatesMessage))
+	}
+
 	input := GetStepAggregatesInput{
 		GroupByFunctionName: req.Body.GroupByFunctionName,
 		GroupByStatus:       req.Body.GroupByStatus,
@@ -1555,6 +1610,12 @@ func (c *conductor) handleGetStepAggregatesRequest(data []byte, requestID string
 		FunctionName:        req.Body.FunctionName.toSlice(),
 		WorkflowIDPrefix:    req.Body.WorkflowIDPrefix.toSlice(),
 	}
+	// Default to count when nothing is selected: the admin aggregates API omits select
+	// flags when it only wants counts, and forwards the body verbatim. Without this the
+	// query would error "at least one select_ flag".
+	if !input.SelectCount && !input.SelectMaxDurationMs {
+		input.SelectCount = true
+	}
 	if req.Body.TimeBucketSizeMs != nil {
 		input.TimeBucketSize = time.Duration(*req.Body.TimeBucketSizeMs) * time.Millisecond
 	}
@@ -1563,13 +1624,6 @@ func (c *conductor) handleGetStepAggregatesRequest(data []byte, requestID string
 	}
 	if req.Body.CompletedBefore != nil {
 		input.CompletedBefore = *req.Body.CompletedBefore
-	}
-
-	resp := getStepAggregatesConductorResponse{
-		baseResponse: baseResponse{
-			baseMessage: baseMessage{Type: getStepAggregatesMessage, RequestID: requestID},
-		},
-		Output: []StepAggregateRow{},
 	}
 
 	rows, err := c.dbosCtx.GetStepAggregates(c.dbosCtx, input)
@@ -1935,4 +1989,64 @@ func (c *conductor) handleSetLatestApplicationVersionRequest(data []byte, reques
 		Success: success,
 	}
 	return c.sendResponse(resp, string(setLatestAppVersionMessage))
+}
+
+func (c *conductor) handleListQueuesRequest(data []byte, requestID string) error {
+	var req listQueuesConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse list queues request", "error", err)
+		return fmt.Errorf("failed to parse list queues request: %w", err)
+	}
+
+	queues, err := c.dbosCtx.ListQueues(c.dbosCtx)
+	output := []queueConductorOutput{}
+	var errorMsg *string
+	if err != nil {
+		c.logger.Error("Failed to list queues", "error", err)
+		msg := fmt.Sprintf("failed to list queues: %v", err)
+		errorMsg = &msg
+	} else {
+		output = make([]queueConductorOutput, len(queues))
+		for i := range queues {
+			output[i] = toQueueConductorOutput(queues[i])
+		}
+	}
+
+	resp := listQueuesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: listQueuesMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		Output: output,
+	}
+	return c.sendResponse(resp, string(listQueuesMessage))
+}
+
+func (c *conductor) handleGetQueueRequest(data []byte, requestID string) error {
+	var req getQueueConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse get queue request", "error", err)
+		return fmt.Errorf("failed to parse get queue request: %w", err)
+	}
+
+	queue, err := c.dbosCtx.RetrieveQueue(c.dbosCtx, req.Name)
+	var errorMsg *string
+	var output *queueConductorOutput
+	if err != nil {
+		c.logger.Error("Failed to get queue", "queue_name", req.Name, "error", err)
+		msg := fmt.Sprintf("failed to get queue '%s': %v", req.Name, err)
+		errorMsg = &msg
+	} else if queue != nil {
+		o := toQueueConductorOutput(queue)
+		output = &o
+	}
+
+	resp := getQueueConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: getQueueMessage, RequestID: requestID},
+			ErrorMessage: errorMsg,
+		},
+		Output: output,
+	}
+	return c.sendResponse(resp, string(getQueueMessage))
 }

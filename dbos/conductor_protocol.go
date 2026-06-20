@@ -65,6 +65,8 @@ const (
 	getStepAggregatesMessage     messageType = "get_step_aggregates"
 	listAppVersionsMessage       messageType = "list_application_versions"
 	setLatestAppVersionMessage   messageType = "set_latest_application_version"
+	listQueuesMessage            messageType = "list_queues"
+	getQueueMessage              messageType = "get_queue"
 )
 
 // baseMessage represents the common structure of all conductor messages
@@ -311,6 +313,8 @@ type listStepsConductorRequest struct {
 	baseMessage
 	WorkflowID string `json:"workflow_id"`
 	LoadOutput bool   `json:"load_output"`
+	Limit      *int   `json:"limit,omitempty"`
+	Offset     *int   `json:"offset,omitempty"`
 }
 
 // workflowStepsConductorResponseBody represents a single workflow step in the list response
@@ -631,6 +635,58 @@ type triggerScheduleConductorResponse struct {
 	WorkflowID *string `json:"workflow_id"`
 }
 
+// queueConductorOutput is the wire shape of a database-backed queue sent to the conductor.
+type queueConductorOutput struct {
+	Name               string   `json:"name"`
+	Concurrency        *int     `json:"concurrency"`
+	WorkerConcurrency  *int     `json:"worker_concurrency"`
+	RateLimitMax       *int     `json:"rate_limit_max"`
+	RateLimitPeriodSec *float64 `json:"rate_limit_period_sec"`
+	PriorityEnabled    bool     `json:"priority_enabled"`
+	PartitionQueue     bool     `json:"partition_queue"`
+	PollingIntervalSec float64  `json:"polling_interval_sec"`
+}
+
+// toQueueConductorOutput renders a WorkflowQueue into its conductor wire shape.
+func toQueueConductorOutput(q Queue) queueConductorOutput {
+	out := queueConductorOutput{
+		Name:              q.GetName(),
+		Concurrency:       q.GetGlobalConcurrency(),
+		WorkerConcurrency: q.GetWorkerConcurrency(),
+		PriorityEnabled:   q.GetPriorityEnabled(),
+		PartitionQueue:    q.GetPartitionQueue(),
+	}
+	if wq, ok := q.(*WorkflowQueue); ok {
+		out.PollingIntervalSec = wq.basePollingInterval.Seconds()
+	}
+	if rl := q.GetRateLimit(); rl != nil {
+		limit := rl.Limit
+		period := rl.Period.Seconds()
+		out.RateLimitMax = &limit
+		out.RateLimitPeriodSec = &period
+	}
+	return out
+}
+
+type listQueuesConductorRequest struct {
+	baseMessage
+}
+
+type listQueuesConductorResponse struct {
+	baseResponse
+	Output []queueConductorOutput `json:"output"`
+}
+
+type getQueueConductorRequest struct {
+	baseMessage
+	Name string `json:"name"`
+}
+
+type getQueueConductorResponse struct {
+	baseResponse
+	Output *queueConductorOutput `json:"output"`
+}
+
 // eventOutput is one entry returned by a get_workflow_events response.
 // Value is the workflow event's value decoded from its recorded serialization and re-marshaled as JSON.
 type eventOutput struct {
@@ -692,10 +748,18 @@ type getWorkflowAggregatesConductorRequestBody struct {
 	GroupByQueueName          bool         `json:"group_by_queue_name"`
 	GroupByExecutorID         bool         `json:"group_by_executor_id"`
 	GroupByApplicationVersion bool         `json:"group_by_application_version"`
+	SelectCount               bool         `json:"select_count"`
+	SelectMinCreatedAt        bool         `json:"select_min_created_at"`
+	SelectMaxQueueWaitMs      bool         `json:"select_max_queue_wait_ms"`
+	SelectMaxTotalLatencyMs   bool         `json:"select_max_total_latency_ms"`
 	TimeBucketSizeMs          *int64       `json:"time_bucket_size_ms,omitempty"`
 	Status                    stringOrList `json:"status,omitempty"`
-	StartTime                 *time.Time   `json:"start_time,omitempty"` // ISO 8601
-	EndTime                   *time.Time   `json:"end_time,omitempty"`   // ISO 8601
+	StartTime                 *time.Time   `json:"start_time,omitempty"`       // ISO 8601
+	EndTime                   *time.Time   `json:"end_time,omitempty"`         // ISO 8601
+	CompletedAfter            *time.Time   `json:"completed_after,omitempty"`  // ISO 8601
+	CompletedBefore           *time.Time   `json:"completed_before,omitempty"` // ISO 8601
+	DequeuedAfter             *time.Time   `json:"dequeued_after,omitempty"`   // ISO 8601
+	DequeuedBefore            *time.Time   `json:"dequeued_before,omitempty"`  // ISO 8601
 	Name                      stringOrList `json:"name,omitempty"`
 	AppVersion                stringOrList `json:"app_version,omitempty"`
 	ExecutorID                stringOrList `json:"executor_id,omitempty"`

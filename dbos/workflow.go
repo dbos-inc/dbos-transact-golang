@@ -1194,22 +1194,19 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		}
 	}
 
-	// Validate queue exists if provided
+	// Validate queue configuration if provided and if in-memory queue.
 	if len(params.QueueName) > 0 {
-		queue := c.queueRunner.getQueue(params.QueueName)
-		if queue == nil {
-			c.logger.Error("queue does not exist", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s does not exist", params.QueueName))
-		}
-		// If queue has partitions enabled, partition key must be provided
-		if queue.PartitionQueue && len(params.QueuePartitionKey) == 0 {
-			c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
-		}
-		// If partition key is provided, queue must have partitions enabled
-		if len(params.QueuePartitionKey) > 0 && !queue.PartitionQueue {
-			c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
+		if queue := c.queueRunner.getQueue(params.QueueName); queue != nil {
+			// If queue has partitions enabled, partition key must be provided
+			if queue.PartitionQueue && len(params.QueuePartitionKey) == 0 {
+				c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+				return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
+			}
+			// If partition key is provided, queue must have partitions enabled
+			if len(params.QueuePartitionKey) > 0 && !queue.PartitionQueue {
+				c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+				return nil, newWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
+			}
 		}
 	}
 
@@ -1258,7 +1255,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := retryWithResult(uncancellableCtx, func() (*string, error) {
+		childWorkflowID, err := retryWithResult(c, func() (*string, error) {
 			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
 		}, withRetrierLogger(c.logger))
 		if err != nil {
@@ -1408,7 +1405,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				stepID:           parentWorkflowState.stepID,
 				tx:               tx,
 			}
-			err = retry(uncancellableCtx, func() error {
+			err = retry(c, func() error {
 				return c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
 			}, withRetrierLogger(c.logger))
 			if err != nil {
@@ -1457,7 +1454,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		if !returnExisting || !errors.Is(err, &DBOSError{Code: QueueDeduplicated}) {
 			return nil, err
 		}
-		existingID, lookupErr := retryWithResult(uncancellableCtx, func() (*string, error) {
+		existingID, lookupErr := retryWithResult(c, func() (*string, error) {
 			return c.systemDB.getDeduplicatedWorkflow(uncancellableCtx, params.QueueName, params.DeduplicationID)
 		}, withRetrierLogger(c.logger))
 		if lookupErr != nil {
@@ -1853,37 +1850,43 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 
 // executeStepWithRetry runs runOnce (the step body) and retries with backoff on error when maxRetries > 0.
 func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptions, runOnce func() (any, error)) (stepOutput any, stepError error) {
-	stepOutput, stepError = runOnce()
-	if stepError == nil || stepOpts.maxRetries <= 0 {
-		return stepOutput, stepError
+	work := func() error {
+		stepOutput, stepError = runOnce()
+		return stepError
+	}
+	sched := backoffSchedule{
+		base:      stepOpts.baseInterval,
+		max:       stepOpts.maxInterval,
+		factor:    stepOpts.backoffFactor,
+		jitterMin: 0.95,
+		jitterMax: 1.05,
 	}
 	var joinedErrors error
-	joinedErrors = errors.Join(joinedErrors, stepError)
-	for retry := 1; retry <= stepOpts.maxRetries; retry++ {
-		// Check predicate before sleeping, exit immediately on non-retryable errors.
-		if stepOpts.retryPredicate != nil && !stepOpts.retryPredicate(stepError) {
-			return stepOutput, stepError
+	// decide: runs is the number of completed runs (>=1). runs > maxRetries means
+	// the last allowed run just failed. With maxRetries <= 0 the very first run is
+	// terminal, returning the raw error (no wrapping). The predicate gates the
+	// NEXT retry and is not consulted once the budget is exhausted.
+	decide := func(err error, runs int) (bool, error) {
+		joinedErrors = errors.Join(joinedErrors, err)
+		if runs > stepOpts.maxRetries {
+			if stepOpts.maxRetries <= 0 {
+				return false, err
+			}
+			return false, newMaxStepRetriesExceededError(workflowID, stepOpts.stepName, stepOpts.maxRetries, joinedErrors)
 		}
-		delay := stepOpts.baseInterval
-		if retry > 1 {
-			exponentialDelay := float64(stepOpts.baseInterval) * math.Pow(stepOpts.backoffFactor, float64(retry-1))
-			delay = time.Duration(math.Min(exponentialDelay, float64(stepOpts.maxInterval)))
+		if stepOpts.retryPredicate != nil && !stepOpts.retryPredicate(err) {
+			return false, err
 		}
-		c.logger.Error("step failed, retrying", "step_name", stepOpts.stepName, "retry", retry, "max_retries", stepOpts.maxRetries, "delay", delay, "error", stepError)
-		select {
-		case <-c.Done():
-			return nil, newStepExecutionError(workflowID, stepOpts.stepName, fmt.Errorf("context cancelled during retry: %w", c.Err()))
-		case <-time.After(delay):
-		}
-		stepOutput, stepError = runOnce()
-		if stepError == nil {
-			return stepOutput, stepError
-		}
-		joinedErrors = errors.Join(joinedErrors, stepError)
-		if retry == stepOpts.maxRetries {
-			stepError = newMaxStepRetriesExceededError(workflowID, stepOpts.stepName, stepOpts.maxRetries, joinedErrors)
-			break
-		}
+		return true, nil
+	}
+	onRetry := func(err error, runs int, delay time.Duration) {
+		c.logger.Error("step failed, retrying", "step_name", stepOpts.stepName, "retry", runs, "max_retries", stepOpts.maxRetries, "delay", delay, "error", err)
+	}
+	onCancel := func() error {
+		return newStepExecutionError(workflowID, stepOpts.stepName, fmt.Errorf("context cancelled during retry: %w", c.Err()))
+	}
+	if err := retryLoop(c, sched, work, decide, onRetry, onCancel); err != nil {
+		stepError = err
 	}
 	return stepOutput, stepError
 }
@@ -2486,7 +2489,7 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 	}
 	recvRetryOpts := []retryOption{withRetrierLogger(c.logger)}
 	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
-		recvRetryOpts = append(recvRetryOpts, withRetryCondition(isRetryableTransaction))
+		recvRetryOpts = append(recvRetryOpts, withRetryCondition(cockroachDialect{}.IsRetryableTransaction))
 	}
 	return retryWithResult(c, func() (*recvResult, error) {
 		return c.systemDB.recv(c, input)
@@ -4271,6 +4274,8 @@ type StepInfo struct {
 // getWorkflowStepsOptions holds optional parameters for GetWorkflowSteps.
 type getWorkflowStepsOptions struct {
 	loadOutput *bool
+	limit      *int
+	offset     *int
 }
 
 // GetWorkflowStepsOption is a functional option for GetWorkflowSteps.
@@ -4281,6 +4286,20 @@ type GetWorkflowStepsOption func(*getWorkflowStepsOptions)
 func WithStepsLoadOutput(loadOutput bool) GetWorkflowStepsOption {
 	return func(o *getWorkflowStepsOptions) {
 		o.loadOutput = &loadOutput
+	}
+}
+
+// WithStepsLimit limits the number of steps returned, ordered by function ID ascending.
+func WithStepsLimit(limit int) GetWorkflowStepsOption {
+	return func(o *getWorkflowStepsOptions) {
+		o.limit = &limit
+	}
+}
+
+// WithStepsOffset skips the given number of steps before returning results.
+func WithStepsOffset(offset int) GetWorkflowStepsOption {
+	return func(o *getWorkflowStepsOptions) {
+		o.offset = &offset
 	}
 }
 
@@ -4296,6 +4315,8 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string, opts ..
 	getWorkflowStepsInput := getWorkflowStepsInput{
 		workflowID: workflowID,
 		loadOutput: loadOutput,
+		limit:      options.limit,
+		offset:     options.offset,
 	}
 
 	var steps []stepInfo
@@ -4401,6 +4422,13 @@ type GetWorkflowAggregatesInput struct {
 	GroupByExecutorID         bool
 	GroupByApplicationVersion bool
 
+	// Select* flags choose which aggregates to compute. At least one must be true.
+	// MinCreatedAt is an epoch-ms timestamp; the latency fields are in milliseconds.
+	SelectCount             bool
+	SelectMinCreatedAt      bool
+	SelectMaxQueueWaitMs    bool
+	SelectMaxTotalLatencyMs bool
+
 	// When non-zero, groups results by created_at time bucket of this size.
 	TimeBucketSize time.Duration
 
@@ -4408,6 +4436,10 @@ type GetWorkflowAggregatesInput struct {
 	Status             []WorkflowStatusType
 	StartTime          time.Time
 	EndTime            time.Time
+	CompletedAfter     time.Time
+	CompletedBefore    time.Time
+	DequeuedAfter      time.Time
+	DequeuedBefore     time.Time
 	Name               []string
 	ApplicationVersion []string
 	ExecutorID         []string
@@ -4425,10 +4457,18 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 		groupByQueueName:          input.GroupByQueueName,
 		groupByExecutorID:         input.GroupByExecutorID,
 		groupByApplicationVersion: input.GroupByApplicationVersion,
+		selectCount:               input.SelectCount,
+		selectMinCreatedAt:        input.SelectMinCreatedAt,
+		selectMaxQueueWaitMs:      input.SelectMaxQueueWaitMs,
+		selectMaxTotalLatencyMs:   input.SelectMaxTotalLatencyMs,
 		timeBucketSizeMs:          input.TimeBucketSize.Milliseconds(),
 		status:                    input.Status,
 		startTime:                 input.StartTime,
 		endTime:                   input.EndTime,
+		completedAfter:            input.CompletedAfter,
+		completedBefore:           input.CompletedBefore,
+		dequeuedAfter:             input.DequeuedAfter,
+		dequeuedBefore:            input.DequeuedBefore,
 		workflowName:              input.Name,
 		applicationVersion:        input.ApplicationVersion,
 		executorID:                input.ExecutorID,
@@ -4457,22 +4497,25 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 // Filter fields (Status, StartTime, EndTime, Name, ApplicationVersion, ExecutorID,
 // QueueName, WorkflowIDPrefix) narrow which workflows are counted before grouping.
 //
-// Returns one WorkflowAggregateRow per non-empty group. Each row's Group map contains an
-// entry per enabled grouping column ("status", "name", "queue_name", "executor_id",
-// "application_version", "time_bucket"). Map values are pointers to allow representing
-// NULL grouping values (e.g. workflows without a queue_name).
+// At least one Select* flag must be true. Returns one WorkflowAggregateRow per non-empty
+// group. Each row's Group map contains an entry per enabled grouping column ("status",
+// "name", "queue_name", "executor_id", "application_version", "time_bucket"). Map values are
+// pointers to allow representing NULL grouping values (e.g. workflows without a queue_name).
+// Count, MinCreatedAt, MaxQueueWaitMs and MaxTotalLatencyMs are populated only for the
+// corresponding enabled Select* flag; the rest are nil.
 //
 // Example:
 //
 //	rows, err := dbos.GetWorkflowAggregates(ctx, dbos.GetWorkflowAggregatesInput{
 //	    GroupByStatus: true,
+//	    SelectCount:   true,
 //	    StartTime:     time.Now().Add(-24 * time.Hour),
 //	})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //	for _, r := range rows {
-//	    log.Printf("status=%s count=%d", *r.Group["status"], r.Count)
+//	    log.Printf("status=%s count=%d", *r.Group["status"], *r.Count)
 //	}
 func GetWorkflowAggregates(ctx DBOSContext, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error) {
 	if ctx == nil {
@@ -4596,14 +4639,10 @@ func ListRegisteredWorkflows(ctx DBOSContext, opts ...ListRegisteredWorkflowsOpt
 	return ctx.ListRegisteredWorkflows(ctx, opts...)
 }
 
-// ListRegisteredQueues returns all registered workflow queues.
+// ListRegisteredQueues returns all queues in the in-memory registry.
 //
-// Example:
-//
-//	queues := dbos.ListRegisteredQueues(ctx)
-//	for _, queue := range queues {
-//	    log.Printf("Queue: %s", queue.Name)
-//	}
+// Deprecated: in-memory queues are deprecated. Use [ListQueues] to list
+// database-backed queues registered with [RegisterQueue].
 func ListRegisteredQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
 	if ctx == nil {
 		return []WorkflowQueue{}, errors.New("ctx cannot be nil")
@@ -4612,40 +4651,40 @@ func ListRegisteredQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
 }
 
 func (c *dbosContext) ListenQueues(_ DBOSContext, queues ...WorkflowQueue) {
-	if c.launched.Load() {
-		panic("Cannot call ListenQueues after DBOS has launched")
-	}
-
-	// Set listen to true for each provided queue
+	launched := c.launched.Load()
+	c.queueRunner.listenMu.Lock()
+	defer c.queueRunner.listenMu.Unlock()
 	for _, queue := range queues {
-		if registeredQueue, exists := c.queueRunner.workflowQueueRegistry[queue.Name]; exists {
-			registeredQueue.listen = true
-			c.queueRunner.workflowQueueRegistry[queue.Name] = registeredQueue
-		} else {
-			c.logger.Warn("Queue not found in registry when calling ListenQueues. Did you create it with NewWorkflowQueue?", "queue_name", queue.Name)
+		// In-memory queues are fixed at launch, so listening to one after launch is rejected
+		if _, inMemory := c.queueRunner.workflowQueueRegistry[queue.Name]; launched && inMemory {
+			panic("Cannot call ListenQueues for an in-memory queue after DBOS has launched")
 		}
+		c.queueRunner.listenedQueues[queue.Name] = true
 	}
 }
 
 // ListenQueues configures which queues the current DBOS process should listen to.
-// By default, all registered queues are listened to. When ListenQueues is called,
-// only the specified queues (and the internal DBOS queue) will be listened to.
-// This allows multiple DBOS processes to share the same queue registry but listen
-// to different subsets of queues.
+// By default, all registered queues are listened to. Once ListenQueues has been
+// called, only the named queues (and the internal DBOS queue) are listened to.
+// This lets multiple DBOS processes share the same queues but listen to different
+// subsets.
 //
-// ListenQueues can only be called before DBOS has been launched. Calling it after
-// Launch will result in a panic.
+// A queue is identified by name, so a database-backed queue can be listened to by
+// passing a WorkflowQueue with its Name set (or a handle from RetrieveQueue),
+// even before the queue exists in the database — the supervisor resolves names
+// against the database on each reconcile tick. Database-backed queue names may be
+// added to the listen set at any time, including after Launch, allowing the
+// listen set to change dynamically.
 //
 // Example:
 //
-//	queue1 := dbos.NewWorkflowQueue(ctx, "queue-1")
-//	queue2 := dbos.NewWorkflowQueue(ctx, "queue-2")
-//	queue3 := dbos.NewWorkflowQueue(ctx, "queue-3")
+//	dbos.RegisterQueue(ctx, "queue-1")
+//	dbos.RegisterQueue(ctx, "queue-2")
 //
-//	// Only listen to queue1 and queue2
-//	dbos.ListenQueues(ctx, queue1, queue2)
-//
-//	dbos.Launch(ctx)
+//	// Only listen to queue-1 and queue-2.
+//	dbos.ListenQueues(ctx,
+//	    dbos.WorkflowQueue{Name: "queue-1"},
+//	    dbos.WorkflowQueue{Name: "queue-2"})
 func ListenQueues(ctx DBOSContext, queues ...WorkflowQueue) {
 	if ctx == nil {
 		panic("ctx cannot be nil")

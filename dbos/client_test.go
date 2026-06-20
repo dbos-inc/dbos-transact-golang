@@ -1287,6 +1287,18 @@ func TestListWorkflows(t *testing.T) {
 			assert.Equal(t, expectedOffsetThree[i].ID, wf.ID, "offset workflow at index %d: unexpected ID", i)
 		}
 
+		// Offset without a limit: SQLite rejects a bare OFFSET, so this exercises
+		// the dialect's "no limit" sentinel. Expect all workflows after the first 5.
+		offsetNoLimitWorkflows, err := client.ListWorkflows(
+			WithWorkflowIDPrefix("test-"),
+			WithOffset(5))
+		require.NoError(t, err, "failed to list workflows with offset and no limit")
+		expectedOffsetNoLimit := ascWorkflows[5:]
+		require.Len(t, offsetNoLimitWorkflows, len(expectedOffsetNoLimit), "unexpected workflow count with offset and no limit")
+		for i, wf := range offsetNoLimitWorkflows {
+			assert.Equal(t, expectedOffsetNoLimit[i].ID, wf.ID, "offset-no-limit workflow at index %d: unexpected ID", i)
+		}
+
 		// Test 10: Test input/output loading
 		noDataWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDs(workflowIDs[:2]),
