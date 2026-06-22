@@ -73,7 +73,7 @@ func init() {
 	workflowCmd.AddCommand(workflowDeleteCmd)
 
 	// Cancel command flags
-	workflowCancelCmd.Flags().BoolP("children", "c", false, "Also cancel all children workflows")
+	workflowCancelCmd.Flags().BoolP("children", "c", false, "Also cancel all child workflows recursively")
 
 	// Delete command flags
 	workflowDeleteCmd.Flags().BoolP("children", "c", false, "Also delete all child workflows recursively")
