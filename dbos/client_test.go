@@ -657,7 +657,7 @@ func TestCancelResume(t *testing.T) {
 
 		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
 
-		assert.Equal(t, nonExistentWorkflowID, dbosErr.DestinationID, "expected DestinationID to match")
+		assert.Equal(t, nonExistentWorkflowID, dbosErr.WorkflowID, "expected WorkflowID to match")
 	})
 
 	t.Run("ResumeNonExistentWorkflow", func(t *testing.T) {
@@ -673,7 +673,7 @@ func TestCancelResume(t *testing.T) {
 
 		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
 
-		assert.Equal(t, nonExistentWorkflowID, dbosErr.DestinationID, "expected DestinationID to match")
+		assert.Equal(t, nonExistentWorkflowID, dbosErr.WorkflowID, "expected WorkflowID to match")
 	})
 }
 
@@ -993,7 +993,7 @@ func TestForkWorkflow(t *testing.T) {
 
 		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
 
-		assert.Equal(t, nonExistentWorkflowID, dbosErr.DestinationID, "expected DestinationID to match")
+		assert.Equal(t, nonExistentWorkflowID, dbosErr.WorkflowID, "expected WorkflowID to match")
 	})
 
 	t.Run("ForkPartitionKeyWithoutQueue", func(t *testing.T) {

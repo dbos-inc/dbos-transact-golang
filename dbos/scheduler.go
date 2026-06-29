@@ -171,7 +171,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 			return nil, err
 		}
 		if len(existing) > 0 {
-			c.logger.Debug("skipping schedule tick", "schedule", scheduleName, "scheduledTime", input.ScheduledTime)
+			c.logger.Debug("skipping schedule tick", "schedule", scheduleName, "scheduled_time", input.ScheduledTime)
 			return nil, nil
 		}
 
@@ -198,8 +198,9 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 		}
 		result, runErr := wrappedFn(ctx, encodedInput, ser.Name(), opts...)
 
+		uncancellableCtx := WithoutCancel(c)
 		if err := retry(c, func() error {
-			return c.systemDB.updateScheduleLastFiredAt(c, scheduleName, time.Now())
+			return c.systemDB.updateScheduleLastFiredAt(uncancellableCtx, scheduleName, time.Now())
 		}, withRetrierLogger(c.logger)); err != nil {
 			c.logger.Error("failed to update schedule last fired time after retries", "schedule", scheduleName, "error", err)
 		}

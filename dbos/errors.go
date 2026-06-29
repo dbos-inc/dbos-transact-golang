@@ -25,6 +25,48 @@ const (
 	NoApplicationVersions                                 // No application versions are registered in the system database
 )
 
+// String returns the name of the error code, e.g. "NonExistentWorkflowError".
+func (c DBOSErrorCode) String() string {
+	switch c {
+	case ConflictingIDError:
+		return "ConflictingIDError"
+	case InitializationError:
+		return "InitializationError"
+	case NonExistentWorkflowError:
+		return "NonExistentWorkflowError"
+	case ConflictingWorkflowError:
+		return "ConflictingWorkflowError"
+	case WorkflowCancelled:
+		return "WorkflowCancelled"
+	case UnexpectedStep:
+		return "UnexpectedStep"
+	case AwaitedWorkflowCancelled:
+		return "AwaitedWorkflowCancelled"
+	case ConflictingRegistrationError:
+		return "ConflictingRegistrationError"
+	case WorkflowUnexpectedTypeError:
+		return "WorkflowUnexpectedTypeError"
+	case WorkflowExecutionError:
+		return "WorkflowExecutionError"
+	case StepExecutionError:
+		return "StepExecutionError"
+	case DeadLetterQueueError:
+		return "DeadLetterQueueError"
+	case MaxStepRetriesExceeded:
+		return "MaxStepRetriesExceeded"
+	case QueueDeduplicated:
+		return "QueueDeduplicated"
+	case PatchingNotEnabled:
+		return "PatchingNotEnabled"
+	case TimeoutError:
+		return "TimeoutError"
+	case NoApplicationVersions:
+		return "NoApplicationVersions"
+	default:
+		return fmt.Sprintf("DBOSErrorCode(%d)", int(c))
+	}
+}
+
 // DBOSError is the unified error type for all DBOS operations.
 // It provides structured error information with context-specific fields
 // and error codes for programmatic handling.
@@ -49,7 +91,7 @@ type DBOSError struct {
 // Error returns a formatted error message including the error code.
 // This implements the standard Go error interface.
 func (e *DBOSError) Error() string {
-	return fmt.Sprintf("DBOS Error %d: %s", int(e.Code), e.Message)
+	return fmt.Sprintf("DBOS Error %s: %s", e.Code, e.Message)
 }
 
 // Unwrap returns the underlying error, if any.
@@ -89,9 +131,9 @@ func newInitializationError(message string) *DBOSError {
 
 func newNonExistentWorkflowError(workflowID string) *DBOSError {
 	return &DBOSError{
-		Message:       fmt.Sprintf("workflow %s does not exist", workflowID),
-		Code:          NonExistentWorkflowError,
-		DestinationID: workflowID,
+		Message:    fmt.Sprintf("workflow %s does not exist", workflowID),
+		Code:       NonExistentWorkflowError,
+		WorkflowID: workflowID,
 	}
 }
 

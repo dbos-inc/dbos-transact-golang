@@ -1697,7 +1697,7 @@ func TestPortableInterop(t *testing.T) {
 		var pe *PortableWorkflowError
 		require.ErrorAs(t, err, &pe)
 		assert.Equal(t, "Portable Error", pe.Name)
-		assert.Contains(t, err.Error(), "DBOS Error 10")
+		assert.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %s", WorkflowExecutionError))
 	})
 }
 
