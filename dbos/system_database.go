@@ -3333,11 +3333,12 @@ func (s *sysDB) pollEvents(ctx context.Context) {
 const _DBOS_NULL_TOPIC = "__null__topic__"
 
 type WorkflowSendInput struct {
-	DestinationID string
-	Message       any
-	Topic         string
-	tx            Tx
-	serialization string
+	DestinationID  string
+	Message        any
+	Topic          string
+	tx             Tx
+	serialization  string
+	idempotencyKey string
 }
 
 // Send is a special type of step that sends a message to another workflow.
@@ -3354,8 +3355,14 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 		topic = input.Topic
 	}
 
-	insertQuery := s.renderSQL(`INSERT INTO %snotifications (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms) VALUES ($1, $2, $3, $4, $5, $6)`, s.dialect.SchemaPrefix(s.schema))
+	// ON CONFLICT DO NOTHING makes Send idempotent: with an idempotency key the
+	// message_uuid is deterministic, so a retried Send inserts at most once. Without
+	// a key the random UUID never collides, so the clause is a no-op.
+	insertQuery := s.renderSQL(`INSERT INTO %snotifications (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (message_uuid) DO NOTHING`, s.dialect.SchemaPrefix(s.schema))
 	messageUUID := uuid.NewString()
+	if input.idempotencyKey != "" {
+		messageUUID = fmt.Sprintf("%s::%s", input.idempotencyKey, input.DestinationID)
+	}
 	createdAtMs := time.Now().UnixMilli()
 	var err error
 	if input.tx != nil {

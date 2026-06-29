@@ -3270,6 +3270,64 @@ func TestSendRecv(t *testing.T) {
 	})
 }
 
+// receiveTwiceShortWorkflow receives one message (blocking up to 30s), then attempts a
+// second Recv with a short timeout. The second slot is "<timeout>" when no further message
+// arrives, letting a test observe whether a duplicate Send was deduplicated.
+func receiveTwiceShortWorkflow(ctx DBOSContext, topic string) (string, error) {
+	first, err := Recv[string](ctx, topic, 30*time.Second)
+	if err != nil {
+		return "", err
+	}
+	second, err := Recv[string](ctx, topic, 2*time.Second)
+	if err != nil {
+		if errors.Is(err, &DBOSError{Code: TimeoutError}) {
+			second = "<timeout>"
+		} else {
+			return "", err
+		}
+	}
+	return first + "|" + second, nil
+}
+
+func TestSendIdempotencyKey(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	RegisterWorkflow(dbosCtx, receiveTwiceShortWorkflow)
+	Launch(dbosCtx)
+
+	t.Run("DuplicateKeyDeliversOnce", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, receiveTwiceShortWorkflow, "idem-dup-topic")
+		require.NoError(t, err, "failed to start receive workflow")
+
+		// Two sends with the SAME idempotency key from outside a workflow: the second
+		// must be deduplicated rather than delivered as a separate message.
+		err = Send(dbosCtx, handle.GetWorkflowID(), "only-once", "idem-dup-topic", WithIdempotencyKey("dup-key"))
+		require.NoError(t, err, "first send failed")
+		err = Send(dbosCtx, handle.GetWorkflowID(), "only-once", "idem-dup-topic", WithIdempotencyKey("dup-key"))
+		require.NoError(t, err, "duplicate send with same key must not error")
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from receive workflow")
+		require.Equal(t, "only-once|<timeout>", result, "second Recv should time out: the duplicate send must be deduplicated")
+	})
+
+	t.Run("DistinctKeysDeliverEach", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, receiveTwiceShortWorkflow, "idem-distinct-topic")
+		require.NoError(t, err, "failed to start receive workflow")
+
+		err = Send(dbosCtx, handle.GetWorkflowID(), "msg-a", "idem-distinct-topic", WithIdempotencyKey("key-a"))
+		require.NoError(t, err, "send with key-a failed")
+		err = Send(dbosCtx, handle.GetWorkflowID(), "msg-b", "idem-distinct-topic", WithIdempotencyKey("key-b"))
+		require.NoError(t, err, "send with key-b failed")
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from receive workflow")
+		// Distinct keys both deliver; ordering between same-millisecond inserts is not guaranteed.
+		require.NotContains(t, result, "<timeout>", "both distinct-key messages should be delivered")
+		require.Contains(t, result, "msg-a")
+		require.Contains(t, result, "msg-b")
+	})
+}
+
 var (
 	setEventStart                 = NewEvent()
 	setSecondEventSignal          = NewEvent()

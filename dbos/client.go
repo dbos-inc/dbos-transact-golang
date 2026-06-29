@@ -450,6 +450,11 @@ func (c *client) ListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, e
 }
 
 // Send sends a message to another workflow.
+//
+// Pass WithIdempotencyKey to make the send deliver at most once: a retried Send
+// with the same key (e.g. after a crash or network failure) inserts the message
+// only once. Pass WithPortableSend when the destination workflow runs in another
+// language.
 func (c *client) Send(destinationID string, message any, topic string, opts ...SendOption) error {
 	return c.dbosCtx.Send(c.dbosCtx, destinationID, message, topic, opts...)
 }

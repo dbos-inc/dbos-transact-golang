@@ -2417,6 +2417,7 @@ func (c *dbosContext) Select(_ DBOSContext, channels []<-chan StepOutcome[any]) 
 // sendOptions holds configuration for a Send call.
 type sendOptions struct {
 	usePortableSerializer bool
+	idempotencyKey        string
 }
 
 // SendOption is a functional option for configuring a Send call.
@@ -2427,6 +2428,17 @@ type SendOption func(*sendOptions)
 func WithPortableSend() SendOption {
 	return func(opts *sendOptions) {
 		opts.usePortableSerializer = true
+	}
+}
+
+// WithIdempotencyKey makes a Send deliver at most once. The key is combined with
+// the destination workflow ID to form the message's primary key, so retrying a
+// Send with the same key (after a crash, timeout, or network failure) inserts the
+// message only once. Keys are scoped per destination. Without a key, every Send
+// delivers a new message.
+func WithIdempotencyKey(key string) SendOption {
+	return func(opts *sendOptions) {
+		opts.idempotencyKey = key
 	}
 }
 
@@ -2459,10 +2471,11 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 	}
 
 	input := WorkflowSendInput{
-		DestinationID: destinationID,
-		Message:       encodedMessage,
-		Topic:         topic,
-		serialization: sendSer.Name(),
+		DestinationID:  destinationID,
+		Message:        encodedMessage,
+		Topic:          topic,
+		serialization:  sendSer.Name(),
+		idempotencyKey: options.idempotencyKey,
 	}
 
 	if isWithinWorkflow {
