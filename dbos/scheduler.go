@@ -171,7 +171,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 			return nil, err
 		}
 		if len(existing) > 0 {
-			c.logger.Debug("skipping schedule tick", "schedule", scheduleName, "scheduledTime", input.ScheduledTime)
+			c.logger.Debug("skipping schedule tick", "schedule", scheduleName, "scheduled_time", input.ScheduledTime)
 			return nil, nil
 		}
 

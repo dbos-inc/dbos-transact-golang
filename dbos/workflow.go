@@ -231,7 +231,7 @@ func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
 		})
 	}, withRetrierLogger(dbosCtx.(*dbosContext).logger))
 	if err != nil {
-		return *new(R), false, newStepExecutionError(workflowState.workflowID, "DBOS.getResult", fmt.Errorf("Checking operation execution: %w", err))
+		return *new(R), false, newStepExecutionError(workflowState.workflowID, "DBOS.getResult", fmt.Errorf("checking operation execution: %w", err))
 	}
 	if recordedOutputs != nil {
 		workflowState.nextStepID()
@@ -541,7 +541,7 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowFQN, customName string, 
 	if _, err := c.addScheduleCronEntry(name, cronSchedule, scheduled, nil); err != nil {
 		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
 	}
-	c.logger.Info("Registered scheduled workflow", "fqn", workflowFQN, "customName", customName, "cron_schedule", cronSchedule)
+	c.logger.Info("Registered scheduled workflow", "fqn", workflowFQN, "custom_name", customName, "cron_schedule", cronSchedule)
 }
 
 // ConfiguredInstance is implemented by objects whose methods are registered as workflows.

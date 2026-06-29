@@ -3042,7 +3042,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 
 		err = s.recordOperationResult(ctx, recordInput)
 		if err != nil {
-			// Check if this is a ConflictingWorkflowError (operation already recorded by another process)
+			// Check if this is a ConflictingIDError (operation already recorded by another process)
 			if dbosErr, ok := err.(*DBOSError); ok && dbosErr.Code == ConflictingIDError {
 			} else {
 				return 0, fmt.Errorf("failed to record sleep operation result: %w", err)
@@ -4268,7 +4268,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	}
 
 	if len(dequeuedIDs) > 0 {
-		s.logger.Debug("attempting to dequeue task(s)", "queueName", input.queue.Name, "numTasks", len(dequeuedIDs))
+		s.logger.Debug("attempting to dequeue task(s)", "queue_name", input.queue.Name, "num_tasks", len(dequeuedIDs))
 	}
 
 	// Update workflows to PENDING status and get their details

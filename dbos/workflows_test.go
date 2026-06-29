@@ -2851,13 +2851,13 @@ func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 func durableRecvSleepWorkflow(ctx DBOSContext, topic string) (string, error) {
 	// First Recv with 2-second timeout (will timeout)
 	msg1, err := Recv[string](ctx, topic, 2*time.Second)
-	if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("DBOS Error %d", TimeoutError)) {
+	if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("DBOS Error %s", TimeoutError)) {
 		return "", fmt.Errorf("unexpected error in first recv: %w", err)
 	}
 
 	// Second Recv with 2-second timeout (will also timeout)
 	msg2, err := Recv[string](ctx, topic, 2*time.Second)
-	if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("DBOS Error %d", TimeoutError)) {
+	if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("DBOS Error %s", TimeoutError)) {
 		return "", fmt.Errorf("unexpected error in second recv: %w", err)
 	}
 
@@ -5950,7 +5950,7 @@ func TestPatching(t *testing.T) {
 		require.NoError(t, err, "failed to fork workflow")
 		_, err = forkHandle.GetResult()
 		require.Error(t, err, "expected error when forking old workflow onto new workflow")
-		require.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %d", UnexpectedStep))
+		require.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %s", UnexpectedStep))
 	})
 
 	t.Run("PatchingNotEnabledError", func(t *testing.T) {
