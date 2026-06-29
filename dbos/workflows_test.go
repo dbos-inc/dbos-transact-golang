@@ -661,9 +661,14 @@ func stepWithinAStepWorkflow(dbosCtx DBOSContext, input string) (string, error) 
 // Global counter for retry testing
 var stepRetryAttemptCount int
 
+// errStepRetrySentinel is wrapped by every failing attempt so the test can prove
+// the underlying errors remain reachable through the MaxStepRetriesExceeded wrapper
+// via errors.Is (i.e. the wrappedErr/Unwrap chain, not just the formatted message).
+var errStepRetrySentinel = errors.New("step retry sentinel")
+
 func stepRetryAlwaysFailsStep(_ context.Context) (string, error) {
 	stepRetryAttemptCount++
-	return "", fmt.Errorf("always fails - attempt %d", stepRetryAttemptCount)
+	return "", fmt.Errorf("always fails - attempt %d: %w", stepRetryAttemptCount, errStepRetrySentinel)
 }
 
 var stepIdempotencyCounter int
@@ -917,6 +922,13 @@ func TestSteps(t *testing.T) {
 			expectedMsg := fmt.Sprintf("always fails - attempt %d", i)
 			assert.Contains(t, dbosErr.Error(), expectedMsg, "expected joined error to contain expected message")
 		}
+
+		// Verify the wrapping contract itself (not just the formatted message):
+		// the error must match the MaxStepRetriesExceeded code via errors.Is, and
+		// the underlying step errors must remain reachable through Unwrap. This
+		// last check fails if newMaxStepRetriesExceededError stops setting wrappedErr.
+		assert.True(t, errors.Is(err, &DBOSError{Code: MaxStepRetriesExceeded}), "expected errors.Is to match MaxStepRetriesExceeded code")
+		assert.True(t, errors.Is(err, errStepRetrySentinel), "expected underlying step error to be reachable via errors.Is (Unwrap chain)")
 
 		// Verify that the failed step was still recorded in the database
 		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
