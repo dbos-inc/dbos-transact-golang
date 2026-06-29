@@ -2486,8 +2486,9 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 			return nil, ctx.(*dbosContext).systemDB.send(ctx, input)
 		}, WithStepName("DBOS.send"))
 	} else {
+		uncancellableCtx := WithoutCancel(c)
 		err = retry(c, func() error {
-			return c.systemDB.send(c, input)
+			return c.systemDB.send(uncancellableCtx, input)
 		}, withRetrierLogger(c.logger))
 	}
 	return err
@@ -3846,8 +3847,9 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 			return c.systemDB.forkWorkflow(ctx, dbInput)
 		}, WithStepName("DBOS.forkWorkflow"))
 	} else {
+		uncancellableCtx := WithoutCancel(c)
 		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
-			return c.systemDB.forkWorkflow(c, dbInput)
+			return c.systemDB.forkWorkflow(uncancellableCtx, dbInput)
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
@@ -4799,8 +4801,9 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, in
 		return err
 	}
 
+	uncancellableCtx := WithoutCancel(c)
 	return retry(c, func() error {
-		return c.systemDB.createSchedule(c, dbInput)
+		return c.systemDB.createSchedule(uncancellableCtx, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5072,8 +5075,9 @@ func (c *dbosContext) DeleteSchedule(_ DBOSContext, scheduleName string) error {
 		return err
 	}
 
+	uncancellableCtx := WithoutCancel(c)
 	return retry(c, func() error {
-		return c.systemDB.deleteSchedule(c, deleteScheduleDBInput{ScheduleName: scheduleName})
+		return c.systemDB.deleteSchedule(uncancellableCtx, deleteScheduleDBInput{ScheduleName: scheduleName})
 	}, withRetrierLogger(c.logger))
 }
 
