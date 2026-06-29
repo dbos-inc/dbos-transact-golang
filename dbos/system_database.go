@@ -2444,7 +2444,11 @@ type getWorkflowStepsInput struct {
 }
 
 func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]stepInfo, error) {
-	query := s.renderSQL(`SELECT function_id, function_name, output, error, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms, serialization
+	loadColumns := []string{"function_id", "function_name", "error", "child_workflow_id", "started_at_epoch_ms", "completed_at_epoch_ms", "serialization"}
+	if input.loadOutput {
+		loadColumns = append(loadColumns, "output")
+	}
+	query := s.renderSQL(`SELECT `+strings.Join(loadColumns, ", ")+`
 			  FROM %soperation_outputs
 			  WHERE workflow_uuid = $1
 			  ORDER BY function_id ASC`, s.dialect.SchemaPrefix(s.schema))
@@ -2476,7 +2480,11 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 		var startedAtMs, completedAtMs *int64
 		var serialization *string
 
-		err := rows.Scan(&step.StepID, &step.StepName, &outputString, &errorString, &childWorkflowID, &startedAtMs, &completedAtMs, &serialization)
+		scanArgs := []any{&step.StepID, &step.StepName, &errorString, &childWorkflowID, &startedAtMs, &completedAtMs, &serialization}
+		if input.loadOutput {
+			scanArgs = append(scanArgs, &outputString)
+		}
+		err := rows.Scan(scanArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan step row: %w", err)
 		}
