@@ -321,8 +321,9 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			stepName:        "DBOS.getResult",
 			serialization:   ser.Name(),
 		}
+		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := retry(h.dbosContext, func() error {
-			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
+			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(uncancellableCtx, recordGetResultInput)
 		}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 		if recordResultErr != nil {
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -407,8 +408,9 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 				stepName:        "DBOS.getResult",
 				serialization:   storedSerialization,
 			}
+			uncancellableCtx := context.WithoutCancel(h.dbosContext)
 			recordResultErr := retry(h.dbosContext, func() error {
-				return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
+				return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(uncancellableCtx, recordGetResultInput)
 			}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 			if recordResultErr != nil {
 				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
