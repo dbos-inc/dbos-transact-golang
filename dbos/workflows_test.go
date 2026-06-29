@@ -2672,7 +2672,7 @@ func TestResumeWorkflows(t *testing.T) {
 		var dbosErr *DBOSError
 		require.ErrorAs(t, err, &dbosErr, "expected *DBOSError, got %T", err)
 		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
-		assert.Equal(t, missingID, dbosErr.DestinationID)
+		assert.Equal(t, missingID, dbosErr.WorkflowID)
 	})
 }
 
