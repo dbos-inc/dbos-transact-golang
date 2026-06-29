@@ -2843,6 +2843,10 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 
 		currentOffset := fromOffset
 		closed := false
+		// finalRead is set once the producer is observed inactive; the loop then
+		// makes one more read pass to drain any values it committed just before
+		// terminating, then closes the stream.
+		finalRead := false
 
 		// Continue reading until workflow is inactive or stream is closed
 		for {
@@ -2885,6 +2889,13 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 				return
 			}
 
+			// A previous iteration observed the workflow was inactive; this pass
+			// has now drained anything it committed in the meantime, so close.
+			if finalRead {
+				send(StreamValue[any]{Closed: true})
+				return
+			}
+
 			// Check if workflow is still active (PENDING or ENQUEUED)
 			status, err := retryWithResult(c, func() (WorkflowStatusType, error) {
 				workflows, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{
@@ -2906,10 +2917,14 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 				return
 			}
 
-			// If workflow is inactive, send final message with Closed: true (BUG FIX)
+			// If the workflow is inactive it may still have committed values
+			// between the read above and this status check. Once it is terminal
+			// all of its writes are committed, so make one more read pass to drain
+			// to the end of the stream before closing, rather than returning here
+			// and dropping a value written just before completion.
 			if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
-				send(StreamValue[any]{Closed: true})
-				return
+				finalRead = true
+				continue
 			}
 
 			// If no new entries, wait a bit before polling again
