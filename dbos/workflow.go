@@ -69,10 +69,11 @@ type WorkflowStatus struct {
 
 // workflowState holds the runtime state for a workflow execution
 type workflowState struct {
-	workflowID         string
-	stepID             int
-	isWithinStep       bool
-	isPortableWorkflow bool
+	workflowID          string
+	stepID              int
+	isWithinStep        bool
+	isWithinTransaction bool
+	isPortableWorkflow  bool
 	// auth identity carried so child workflows can inherit it automatically
 	authenticatedUser  string
 	assumedRole        string
@@ -1636,12 +1637,11 @@ type StepFunc func(ctx context.Context) (any, error)
 // Step represents a type-safe step function with a specific output type R.
 type Step[R any] func(ctx context.Context) (R, error)
 
-// txnFunc represents a type-erased step function that receives a transaction.
-// Used internally by runAsTxn when the step body and checkpoint share one transaction.
-type txnFunc func(ctx context.Context, tx Tx) (any, error)
+// TxnFunc is a type-erased transaction function that receives a portable Tx.
+type TxnFunc func(ctx context.Context, tx Tx) (any, error)
 
-// txn represents a type-safe step function with output type R that receives a transaction.
-type txn[R any] func(ctx context.Context, tx Tx) (R, error)
+// Txn represents a type-safe step function with output type R that receives a transaction.
+type Txn[R any] func(ctx context.Context, tx Tx) (R, error)
 
 // stepOptions holds the configuration for step execution using functional options pattern.
 type stepOptions struct {
@@ -2035,8 +2035,8 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 
 // runAsTxn executes a step function that receives a transaction when run on its own.
 // The step body and checkpoint share one transaction, so system DB writes and recordOperationResult commit together.
-// Like RunAsStep but uses txn[R] / txnFunc; transaction is begun and committed inside this function.
-func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) {
+// Like RunAsStep but uses txn[R] / TxnFunc; transaction is begun and committed inside this function.
+func runAsTxn[R any](ctx DBOSContext, fn Txn[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
 	}
@@ -2053,7 +2053,7 @@ func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) 
 	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	opts = append(opts, WithStepName(stepName))
 
-	typeErasedFn := txnFunc(func(ctx context.Context, tx Tx) (any, error) { return fn(ctx, tx) })
+	typeErasedFn := TxnFunc(func(ctx context.Context, tx Tx) (any, error) { return fn(ctx, tx) })
 
 	result, err := c.runAsTxn(ctx, typeErasedFn, opts...)
 	if result == nil {
@@ -2066,7 +2066,19 @@ func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) 
 	return typedResult, err
 }
 
-func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (any, error) {
+// withinTransactionContext returns a child context whose workflow state is
+// flagged as executing inside a data source transaction.
+func withinTransactionContext(c *dbosContext) DBOSContext {
+	var state workflowState
+	if existing, ok := c.Value(workflowStateKey).(*workflowState); ok && existing != nil {
+		state = *existing
+	}
+	state.isWithinStep = true
+	state.isWithinTransaction = true
+	return WithValue(c, workflowStateKey, &state)
+}
+
+func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (any, error) {
 	prep, err := prepareStepExecution(c, opts)
 	if err != nil {
 		return nil, err
@@ -2075,11 +2087,30 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 		return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("step function cannot be nil"))
 	}
 	if prep.IsWithinStep {
-		return fn(c, nil)
+		// Invoked inside an enclosing step: manage the transaction but record no durability
+		txOpts := TxOptions{IsoLevel: IsoLevelReadCommitted}
+		if prep.StepOpts.txIsoLevel != nil {
+			txOpts.IsoLevel = *prep.StepOpts.txIsoLevel
+		}
+		uncancellableCtx := WithoutCancel(c)
+		tx, err := c.systemDB.(*sysDB).pool.BeginTx(uncancellableCtx, txOpts)
+		if err != nil {
+			return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		defer tx.Rollback(uncancellableCtx)
+		output, err := fn(withinTransactionContext(c), tx)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
+		}
+		return output, nil
 	}
 
 	uncancellableCtx := WithoutCancel(c)
 	stepState := prep.StepState
+	stepState.isWithinTransaction = true
 	stepOpts := prep.StepOpts
 	pool := c.systemDB.(*sysDB).pool
 	stepCtx := WithValue(c, workflowStateKey, stepState)

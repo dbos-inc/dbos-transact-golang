@@ -4079,8 +4079,16 @@ func TestWorkflowTimeout(t *testing.T) {
 	RegisterWorkflow(dbosCtx, detachedStepWorkflow)
 
 	t.Run("DetachedStepWorkflow", func(t *testing.T) {
-		// Start a workflow that runs a step that is not cancelable
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		// Start a workflow that runs a detached (uncancelable) step.
+		// A detached step only ignores *context* cancellation; its start is still
+		// gated by checkOperationExecution, which refuses the step if the workflow
+		// is already marked CANCELLED in the DB. A 1ms deadline races the step's
+		// first DB read against the deadline's cancel-DB-write, so under connection
+		// contention the step can be refused with WorkflowCancelled ("failed to run
+		// detached step"). Give the step a comfortable head start to pass that check
+		// before the deadline fires; the step still runs 2s (input*2), well past the
+		// deadline, so the workflow is genuinely cancelled mid-step.
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 250*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
 
 		handle, err := RunWorkflow(cancelCtx, detachedStepWorkflow, 1*time.Second)

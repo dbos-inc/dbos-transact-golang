@@ -38,6 +38,19 @@ func skipIfSqlite(t *testing.T, reason string) {
 	}
 }
 
+func skipIfCockroach(t *testing.T, reason string) {
+	t.Helper()
+	if useSqliteBackend() {
+		return // sqlite is never CRDB
+	}
+	conn, err := pgx.Connect(context.Background(), getDatabaseURL())
+	require.NoError(t, err)
+	defer conn.Close(context.Background())
+	if isCockroachDB(context.Background(), conn) {
+		t.Skipf("skipping on CockroachDB: %s", reason)
+	}
+}
+
 var testDBURLs sync.Map // *testing.T -> string; ensures setupDBOS and follow-up callers (e.g. NewClient) share the same sqlite file.
 
 func backendDatabaseURL(t *testing.T) string {
@@ -56,12 +69,15 @@ func backendDatabaseURL(t *testing.T) string {
 	return url
 }
 
-/* Test database reset.
+/*
+	Test database reset.
+
 Deletes rows from dbos-managed tables instead of dropping the database, which
 is much cheaper — especially on CockroachDB where every DDL is an async
 schema-change job. Falls back to a real drop when any dbos schema is not at
 the latest migration version (e.g. after a schema-mutating migration test or
-a branch switch). */
+a branch switch).
+*/
 func resetTestDatabase(t *testing.T, databaseURL string) {
 	t.Helper()
 

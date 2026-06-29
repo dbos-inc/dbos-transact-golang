@@ -144,6 +144,7 @@ type DBOSContext interface {
 
 	// Workflow operations
 	RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
+	RunAsTransaction(_ DBOSContext, ds *DataSource, fn TxnFunc, opts ...StepOption) (any, error)                // Execute a function as a durable transaction against a registered data source
 	RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
 	Go(_ DBOSContext, fn StepFunc, opts ...StepOption) (chan StepOutcome[any], error)                           // Starts a step inside a Go routine and returns a channel to receive the result
 	Select(_ DBOSContext, channels []<-chan StepOutcome[any]) (any, error)                                      // Performs a durable select over a slice of channels, checkpointing the selected channel and value
