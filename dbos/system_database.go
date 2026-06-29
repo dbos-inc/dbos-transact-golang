@@ -47,7 +47,7 @@ type systemDatabase interface {
 	// Child workflows
 	getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error)
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
-	checkChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
+	checkChildWorkflow(ctx context.Context, workflowUUID string, functionID int, functionName string) (*string, error)
 
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
@@ -2295,18 +2295,26 @@ func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkfl
 	return nil
 }
 
-func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, functionID int) (*string, error) {
-	query := s.renderSQL(`SELECT child_workflow_id
+func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, functionID int, functionName string) (*string, error) {
+	query := s.renderSQL(`SELECT child_workflow_id, function_name
               FROM %soperation_outputs
               WHERE workflow_uuid = $1 AND function_id = $2`, s.dialect.SchemaPrefix(s.schema))
 
 	var childWorkflowID *string
-	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID)
+	var recordedFunctionName string
+	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID, &recordedFunctionName)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to check child workflow: %w", err)
+	}
+
+	// A function is already recorded at this step ID. If it was invoked under a
+	// different name than on the original execution, the workflow is
+	// non-deterministic (a different child workflow or step is being called).
+	if functionName != recordedFunctionName {
+		return nil, newUnexpectedStepError(workflowID, functionID, functionName, recordedFunctionName)
 	}
 
 	return childWorkflowID, nil

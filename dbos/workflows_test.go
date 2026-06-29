@@ -2074,6 +2074,77 @@ func TestChildWorkflow(t *testing.T) {
 	})
 }
 
+// TestChildWorkflowDeterminismCheck verifies that checkChildWorkflow detects a
+// non-deterministic child invocation: if a child workflow is already recorded at
+// a given step ID, re-invoking that step under a different name is rejected with
+// an UnexpectedStep error rather than silently proceeding.
+func TestChildWorkflowDeterminismCheck(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	determinismChildWf := func(_ DBOSContext, _ string) (string, error) {
+		return "child-result", nil
+	}
+	RegisterWorkflow(dbosCtx, determinismChildWf)
+
+	determinismParentWf := func(ctx DBOSContext, _ string) (string, error) {
+		childHandle, err := RunWorkflow(ctx, determinismChildWf, "")
+		if err != nil {
+			return "", err
+		}
+		return childHandle.GetResult()
+	}
+	RegisterWorkflow(dbosCtx, determinismParentWf)
+
+	// Run the parent to completion so the child workflow is durably recorded in
+	// operation_outputs at step 0.
+	parentHandle, err := RunWorkflow(dbosCtx, determinismParentWf, "")
+	require.NoError(t, err, "failed to start parent workflow")
+	res, err := parentHandle.GetResult()
+	require.NoError(t, err, "failed to get parent result")
+	require.Equal(t, "child-result", res)
+
+	parentID := parentHandle.GetWorkflowID()
+	expectedChildID := fmt.Sprintf("%s-0", parentID)
+
+	sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+	require.True(t, ok, "expected sysDB instance")
+	ctx := context.Background()
+
+	// Read the name recorded for the child workflow at step 0 directly from the
+	// table, so the test does not depend on the function-name resolution rules.
+	var recordedName string
+	nameQuery := sysDB.renderSQL(`SELECT function_name FROM %soperation_outputs WHERE workflow_uuid = $1 AND function_id = 0`, sysDB.dialect.SchemaPrefix(sysDB.schema))
+	require.NoError(t, sysDB.pool.QueryRow(ctx, nameQuery, parentID).Scan(&recordedName))
+	require.NotEmpty(t, recordedName, "child workflow should have a recorded function name")
+
+	t.Run("MatchingNameReturnsChildID", func(t *testing.T) {
+		childID, err := sysDB.checkChildWorkflow(ctx, parentID, 0, recordedName)
+		require.NoError(t, err, "matching child workflow name must not error")
+		require.NotNil(t, childID, "expected a recorded child workflow ID")
+		require.Equal(t, expectedChildID, *childID)
+	})
+
+	t.Run("MismatchedNameIsNonDeterminismError", func(t *testing.T) {
+		childID, err := sysDB.checkChildWorkflow(ctx, parentID, 0, recordedName+"-different")
+		require.Error(t, err, "a different child workflow name must be a non-determinism error")
+		require.Nil(t, childID, "no child ID should be returned on a determinism error")
+
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, UnexpectedStep, dbosErr.Code)
+		require.Equal(t, parentID, dbosErr.WorkflowID)
+		require.Equal(t, 0, dbosErr.StepID)
+		require.Equal(t, recordedName+"-different", dbosErr.ExpectedName)
+		require.Equal(t, recordedName, dbosErr.RecordedName)
+	})
+
+	t.Run("UnrecordedStepReturnsNil", func(t *testing.T) {
+		childID, err := sysDB.checkChildWorkflow(ctx, parentID, 99, recordedName)
+		require.NoError(t, err, "an unrecorded step must not error")
+		require.Nil(t, childID, "an unrecorded step must return a nil child ID")
+	})
+}
+
 // Idempotency workflows moved to test functions
 
 func idempotencyWorkflow(dbosCtx DBOSContext, input string) (string, error) {
