@@ -1135,10 +1135,10 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 	t.Run("Go idempotency", func(t *testing.T) {
 		goWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 			channels := make([]chan StepOutcome[string], 0, 10)
-			for range 10 {
+			for i := range 10 {
 				ch, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 					return stepWithSleep(ctx, 1*time.Second)
-				})
+				}, WithStepName(fmt.Sprintf("goStep-%d", i)))
 				if err != nil {
 					return "", err
 				}
