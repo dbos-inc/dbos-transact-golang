@@ -4074,6 +4074,28 @@ func TestSleep(t *testing.T) {
 		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
 		require.Contains(t, err.Error(), expectedMessagePart)
 	})
+
+	t.Run("SleepContextCancellation", func(t *testing.T) {
+		// Cancelling Sleep's context mid-sleep should interrupt it and return the
+		// partial duration actually slept (less than the full requested duration).
+		sleepCancelWorkflow := func(ctx DBOSContext, _ string) (time.Duration, error) {
+			cancelCtx, cancel := WithCancel(ctx)
+			defer cancel()
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				cancel()
+			}()
+			return Sleep(cancelCtx, time.Minute)
+		}
+		RegisterWorkflow(dbosCtx, sleepCancelWorkflow)
+
+		handle, err := RunWorkflow(dbosCtx, sleepCancelWorkflow, "")
+		require.NoError(t, err, "failed to start sleep workflow")
+
+		slept, err := handle.GetResult()
+		require.Error(t, err, "expected a cancellation error from the interrupted Sleep")
+		assert.Less(t, slept, time.Minute, "expected interrupted Sleep to return a partial duration, got %v", slept)
+	})
 }
 
 func TestWorkflowTimeout(t *testing.T) {
