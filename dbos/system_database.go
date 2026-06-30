@@ -2967,9 +2967,10 @@ func (s *sysDB) getStepAggregates(ctx context.Context, input getStepAggregatesDB
 }
 
 type sleepInput struct {
-	duration  time.Duration // Duration to sleep
-	skipSleep bool          // If true, the function will not actually sleep and just return the remaining sleep duration
-	stepID    *int          // Optional step ID to use instead of generating a new one (for internal use)
+	duration   time.Duration // Duration to sleep
+	skipSleep  bool          // If true, the function will not actually sleep and just return the remaining sleep duration
+	workflowID string        // Workflow that owns this sleep (resolved by the caller from context)
+	stepID     int           // Step ID for this sleep
 }
 
 // Sleep is a special type of step that sleeps for a specified duration
@@ -2980,25 +2981,12 @@ type sleepInput struct {
 func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, error) {
 	functionName := "DBOS.sleep"
 
-	// Get workflow state from context
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	if !ok || wfState == nil {
-		return 0, newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
-	}
-
-	// Determine step ID
-	var stepID int
-	if input.stepID != nil && *input.stepID >= 0 {
-		stepID = *input.stepID
-	} else {
-		stepID = wfState.nextStepID()
-	}
-
+	stepID := input.stepID
 	startTime := time.Now()
 
 	// Check if operation was already executed
 	checkInput := checkOperationExecutionDBInput{
-		workflowID: wfState.workflowID,
+		workflowID: input.workflowID,
 		stepID:     stepID,
 		stepName:   functionName,
 	}
@@ -3039,7 +3027,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 		// Record the operation result with the calculated end time
 		completedTime := time.Now()
 		recordInput := recordOperationResultDBInput{
-			workflowID:    wfState.workflowID,
+			workflowID:    input.workflowID,
 			stepID:        stepID,
 			stepName:      functionName,
 			output:        encodedEndTime,
@@ -3401,15 +3389,9 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 func (s *sysDB) recv(ctx context.Context, input recvInput) (*recvResult, error) {
 	functionName := "DBOS.recv"
 
-	// Get workflow state from context
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	if !ok || wfState == nil {
-		return nil, newStepExecutionError("", functionName, fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
-	}
-
-	stepID := wfState.nextStepID()
-	sleepStepID := wfState.nextStepID() // We will use a sleep step to implement the timeout
-	destinationID := wfState.workflowID
+	stepID := input.stepID
+	sleepStepID := input.sleepStepID
+	destinationID := input.workflowID
 
 	// Set default topic if not provided
 	topic := _DBOS_NULL_TOPIC
@@ -3482,9 +3464,10 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*recvResult, error) 
 loop:
 	for !exists {
 		timeout, err := s.sleep(ctx, sleepInput{
-			duration:  input.Timeout,
-			skipSleep: true,
-			stepID:    &sleepStepID,
+			duration:   input.Timeout,
+			skipSleep:  true,
+			workflowID: destinationID,
+			stepID:     sleepStepID,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to sleep before recv timeout: %w", err)
@@ -3591,15 +3574,11 @@ type WorkflowSetEventInput struct {
 	Message       any
 	tx            Tx
 	serialization string
+	workflowID    string // Workflow that owns the event (resolved by the caller from context)
+	stepID        int    // Step ID for this setEvent (the enclosing transaction step's ID)
 }
 
 func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error {
-	// Get workflow state from context
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	if !ok || wfState == nil {
-		return newStepExecutionError("", "DBOS.setEvent", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
-	}
-
 	if _, ok := input.Message.(*string); !ok {
 		return fmt.Errorf("message must be a pointer to a string")
 	}
@@ -3613,9 +3592,9 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 
 	var err error
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Message, input.serialization)
+		_, err = input.tx.Exec(ctx, insertQuery, input.workflowID, input.Key, input.Message, input.serialization)
 	} else {
-		_, err = s.pool.Exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Message, input.serialization)
+		_, err = s.pool.Exec(ctx, insertQuery, input.workflowID, input.Key, input.Message, input.serialization)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to insert event: %w", err)
@@ -3628,9 +3607,9 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 					DO UPDATE SET value = EXCLUDED.value, serialization = EXCLUDED.serialization`, s.dialect.SchemaPrefix(s.schema))
 
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, insertHistoryQuery, wfState.workflowID, wfState.stepID, input.Key, input.Message, input.serialization)
+		_, err = input.tx.Exec(ctx, insertHistoryQuery, input.workflowID, input.stepID, input.Key, input.Message, input.serialization)
 	} else {
-		_, err = s.pool.Exec(ctx, insertHistoryQuery, wfState.workflowID, wfState.stepID, input.Key, input.Message, input.serialization)
+		_, err = s.pool.Exec(ctx, insertHistoryQuery, input.workflowID, input.stepID, input.Key, input.Message, input.serialization)
 	}
 	return err
 }
@@ -3638,24 +3617,15 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*getEventResult, error) {
 	functionName := "DBOS.getEvent"
 
-	// Get workflow state from context (optional for GetEvent as we can get an event from outside a workflow)
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	var stepID int
-	var sleepStepID int
-	var isInWorkflow bool
+	stepID := input.stepID
+	sleepStepID := input.sleepStepID
+	isInWorkflow := input.isInWorkflow
 
 	startTime := time.Now()
-	if ok && wfState != nil {
-		isInWorkflow = true
-		if wfState.isWithinStep {
-			return nil, newStepExecutionError(wfState.workflowID, functionName, fmt.Errorf("cannot call GetEvent within a step"))
-		}
-		stepID = wfState.nextStepID()
-		sleepStepID = wfState.nextStepID() // We will use a sleep step to implement the timeout
-
+	if isInWorkflow {
 		// Check if operation was already executed (only if in workflow)
 		checkInput := checkOperationExecutionDBInput{
-			workflowID: wfState.workflowID,
+			workflowID: input.workflowID,
 			stepID:     stepID,
 			stepName:   functionName,
 		}
@@ -3736,9 +3706,10 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*getEventRes
 			timeout := input.Timeout
 			if isInWorkflow {
 				timeout, err = s.sleep(ctx, sleepInput{
-					duration:  input.Timeout,
-					skipSleep: true,
-					stepID:    &sleepStepID,
+					duration:   input.Timeout,
+					skipSleep:  true,
+					workflowID: input.workflowID,
+					stepID:     sleepStepID,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("failed to sleep before getEvent timeout: %w", err)
@@ -3793,7 +3764,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*getEventRes
 	if isInWorkflow {
 		completedTime := time.Now()
 		recordInput := recordOperationResultDBInput{
-			workflowID:    wfState.workflowID,
+			workflowID:    input.workflowID,
 			stepID:        stepID,
 			stepName:      functionName,
 			output:        valueString,
@@ -3804,7 +3775,7 @@ func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*getEventRes
 
 		// Record an error if no event found and timeout occurred
 		if timeoutOccurred && valueString == nil {
-			timeoutErr = newTimeoutError(wfState.workflowID, functionName, fmt.Sprintf("no event found for key '%s' within %v", input.Key, input.Timeout))
+			timeoutErr = newTimeoutError(input.workflowID, functionName, fmt.Sprintf("no event found for key '%s' within %v", input.Key, input.Timeout))
 			s := timeoutErr.Error()
 			recordInput.errStr = &s
 		}
@@ -3833,6 +3804,8 @@ type writeStreamDBInput struct {
 	Value         *string // Already serialized
 	tx            Tx
 	serialization string
+	workflowID    string // Workflow that owns the stream (resolved by the caller from context)
+	stepID        int    // Step ID for this write (the enclosing transaction step's ID)
 }
 
 type readStreamDBInput struct {
@@ -3848,12 +3821,6 @@ type streamEntry struct {
 }
 
 func (s *sysDB) writeStream(ctx context.Context, input writeStreamDBInput) error {
-	// Get workflow state from context
-	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
-	if !ok || wfState == nil {
-		return fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
-	}
-
 	// When no transaction is provided, run queries on the pool directly (no transaction).
 	tx := input.tx
 	queryRow := func(ctx context.Context, sql string, args ...any) Row {
@@ -3885,14 +3852,14 @@ func (s *sysDB) writeStream(ctx context.Context, input writeStreamDBInput) error
 	var err error
 	var exists int
 
-	err = queryRow(ctx, checkClosedQuery, wfState.workflowID, input.Key, _DBOS_STREAM_CLOSED_SENTINEL).Scan(&exists)
+	err = queryRow(ctx, checkClosedQuery, input.workflowID, input.Key, _DBOS_STREAM_CLOSED_SENTINEL).Scan(&exists)
 	if err == nil && exists == 1 {
 		return fmt.Errorf("stream '%s' is already closed", input.Key)
 	} else if err != nil && err != pgx.ErrNoRows {
 		return fmt.Errorf("failed to check stream status: %w", err)
 	}
 
-	_, err = exec(ctx, insertQuery, wfState.workflowID, input.Key, input.Value, wfState.stepID, input.serialization)
+	_, err = exec(ctx, insertQuery, input.workflowID, input.Key, input.Value, input.stepID, input.serialization)
 	if err != nil {
 		return fmt.Errorf("failed to insert stream entry: %w", err)
 	}
