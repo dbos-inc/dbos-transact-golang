@@ -2576,8 +2576,8 @@ func TestCancelWorkflows(t *testing.T) {
 		}
 
 		assert.Equal(t, WorkflowStatusCancelled, statusByID[parentWorkflowID], "parent should be CANCELLED")
-		assert.Equal(t, WorkflowStatusPending, statusByID[childWorkflowID], "child should not be PENDING")
-		assert.Equal(t, WorkflowStatusPending, statusByID[grandChildWorkflowID], "grandchild should not be PENDING")
+		assert.Equal(t, WorkflowStatusPending, statusByID[childWorkflowID], "child should be PENDING")
+		assert.Equal(t, WorkflowStatusPending, statusByID[grandChildWorkflowID], "grandchild should be PENDING")
 
 		// now cancel workflow with children
 		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID, WithChildren()), "failed to cancel workflow") // first cancel without children
