@@ -69,10 +69,11 @@ type WorkflowStatus struct {
 
 // workflowState holds the runtime state for a workflow execution
 type workflowState struct {
-	workflowID         string
-	stepID             int
-	isWithinStep       bool
-	isPortableWorkflow bool
+	workflowID          string
+	stepID              int
+	isWithinStep        bool
+	isWithinTransaction bool
+	isPortableWorkflow  bool
 	// auth identity carried so child workflows can inherit it automatically
 	authenticatedUser  string
 	assumedRole        string
@@ -230,7 +231,7 @@ func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
 		})
 	}, withRetrierLogger(dbosCtx.(*dbosContext).logger))
 	if err != nil {
-		return *new(R), false, newStepExecutionError(workflowState.workflowID, "DBOS.getResult", fmt.Errorf("Checking operation execution: %w", err))
+		return *new(R), false, newStepExecutionError(workflowState.workflowID, "DBOS.getResult", fmt.Errorf("checking operation execution: %w", err))
 	}
 	if recordedOutputs != nil {
 		workflowState.nextStepID()
@@ -320,8 +321,9 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			stepName:        "DBOS.getResult",
 			serialization:   ser.Name(),
 		}
+		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := retry(h.dbosContext, func() error {
-			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
+			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(uncancellableCtx, recordGetResultInput)
 		}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 		if recordResultErr != nil {
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -406,8 +408,9 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 				stepName:        "DBOS.getResult",
 				serialization:   storedSerialization,
 			}
+			uncancellableCtx := context.WithoutCancel(h.dbosContext)
 			recordResultErr := retry(h.dbosContext, func() error {
-				return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
+				return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(uncancellableCtx, recordGetResultInput)
 			}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 			if recordResultErr != nil {
 				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -538,7 +541,7 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowFQN, customName string, 
 	if _, err := c.addScheduleCronEntry(name, cronSchedule, scheduled, nil); err != nil {
 		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
 	}
-	c.logger.Info("Registered scheduled workflow", "fqn", workflowFQN, "customName", customName, "cron_schedule", cronSchedule)
+	c.logger.Info("Registered scheduled workflow", "fqn", workflowFQN, "custom_name", customName, "cron_schedule", cronSchedule)
 }
 
 // ConfiguredInstance is implemented by objects whose methods are registered as workflows.
@@ -1256,9 +1259,16 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
 		childWorkflowID, err := retryWithResult(c, func() (*string, error) {
-			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
+			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID, params.WorkflowName)
 		}, withRetrierLogger(c.logger))
 		if err != nil {
+			// A non-determinism error (a different child workflow recorded at this
+			// step ID) is deterministic: surface it directly instead of masking it
+			// as a generic execution error.
+			if dbosErr := (*DBOSError)(nil); errors.As(err, &dbosErr) && dbosErr.Code == UnexpectedStep {
+				c.logger.Error("non-deterministic child workflow invocation", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
+				return nil, err
+			}
 			c.logger.Error("failed to check child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("checking child workflow: %w", err))
 		}
@@ -1636,12 +1646,11 @@ type StepFunc func(ctx context.Context) (any, error)
 // Step represents a type-safe step function with a specific output type R.
 type Step[R any] func(ctx context.Context) (R, error)
 
-// txnFunc represents a type-erased step function that receives a transaction.
-// Used internally by runAsTxn when the step body and checkpoint share one transaction.
-type txnFunc func(ctx context.Context, tx Tx) (any, error)
+// TxnFunc is a type-erased transaction function that receives a portable Tx.
+type TxnFunc func(ctx context.Context, tx Tx) (any, error)
 
-// txn represents a type-safe step function with output type R that receives a transaction.
-type txn[R any] func(ctx context.Context, tx Tx) (R, error)
+// Txn represents a type-safe step function with output type R that receives a transaction.
+type Txn[R any] func(ctx context.Context, tx Tx) (R, error)
 
 // stepOptions holds the configuration for step execution using functional options pattern.
 type stepOptions struct {
@@ -2035,8 +2044,8 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 
 // runAsTxn executes a step function that receives a transaction when run on its own.
 // The step body and checkpoint share one transaction, so system DB writes and recordOperationResult commit together.
-// Like RunAsStep but uses txn[R] / txnFunc; transaction is begun and committed inside this function.
-func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) {
+// Like RunAsStep but uses txn[R] / TxnFunc; transaction is begun and committed inside this function.
+func runAsTxn[R any](ctx DBOSContext, fn Txn[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), newStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
 	}
@@ -2053,7 +2062,7 @@ func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) 
 	stepName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	opts = append(opts, WithStepName(stepName))
 
-	typeErasedFn := txnFunc(func(ctx context.Context, tx Tx) (any, error) { return fn(ctx, tx) })
+	typeErasedFn := TxnFunc(func(ctx context.Context, tx Tx) (any, error) { return fn(ctx, tx) })
 
 	result, err := c.runAsTxn(ctx, typeErasedFn, opts...)
 	if result == nil {
@@ -2066,7 +2075,19 @@ func runAsTxn[R any](ctx DBOSContext, fn txn[R], opts ...StepOption) (R, error) 
 	return typedResult, err
 }
 
-func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (any, error) {
+// withinTransactionContext returns a child context whose workflow state is
+// flagged as executing inside a data source transaction.
+func withinTransactionContext(c *dbosContext) DBOSContext {
+	var state workflowState
+	if existing, ok := c.Value(workflowStateKey).(*workflowState); ok && existing != nil {
+		state = *existing
+	}
+	state.isWithinStep = true
+	state.isWithinTransaction = true
+	return WithValue(c, workflowStateKey, &state)
+}
+
+func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (any, error) {
 	prep, err := prepareStepExecution(c, opts)
 	if err != nil {
 		return nil, err
@@ -2075,11 +2096,30 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn txnFunc, opts ...StepOption) (a
 		return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("step function cannot be nil"))
 	}
 	if prep.IsWithinStep {
-		return fn(c, nil)
+		// Invoked inside an enclosing step: manage the transaction but record no durability
+		txOpts := TxOptions{IsoLevel: IsoLevelReadCommitted}
+		if prep.StepOpts.txIsoLevel != nil {
+			txOpts.IsoLevel = *prep.StepOpts.txIsoLevel
+		}
+		uncancellableCtx := WithoutCancel(c)
+		tx, err := c.systemDB.(*sysDB).pool.BeginTx(uncancellableCtx, txOpts)
+		if err != nil {
+			return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		defer tx.Rollback(uncancellableCtx)
+		output, err := fn(withinTransactionContext(c), tx)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return nil, newStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
+		}
+		return output, nil
 	}
 
 	uncancellableCtx := WithoutCancel(c)
 	stepState := prep.StepState
+	stepState.isWithinTransaction = true
 	stepOpts := prep.StepOpts
 	pool := c.systemDB.(*sysDB).pool
 	stepCtx := WithValue(c, workflowStateKey, stepState)
@@ -2386,6 +2426,7 @@ func (c *dbosContext) Select(_ DBOSContext, channels []<-chan StepOutcome[any]) 
 // sendOptions holds configuration for a Send call.
 type sendOptions struct {
 	usePortableSerializer bool
+	idempotencyKey        string
 }
 
 // SendOption is a functional option for configuring a Send call.
@@ -2396,6 +2437,17 @@ type SendOption func(*sendOptions)
 func WithPortableSend() SendOption {
 	return func(opts *sendOptions) {
 		opts.usePortableSerializer = true
+	}
+}
+
+// WithIdempotencyKey makes a Send deliver at most once. The key is combined with
+// the destination workflow ID to form the message's primary key, so retrying a
+// Send with the same key (after a crash, timeout, or network failure) inserts the
+// message only once. Keys are scoped per destination. Without a key, every Send
+// delivers a new message.
+func WithIdempotencyKey(key string) SendOption {
+	return func(opts *sendOptions) {
+		opts.idempotencyKey = key
 	}
 }
 
@@ -2428,10 +2480,11 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 	}
 
 	input := WorkflowSendInput{
-		DestinationID: destinationID,
-		Message:       encodedMessage,
-		Topic:         topic,
-		serialization: sendSer.Name(),
+		DestinationID:  destinationID,
+		Message:        encodedMessage,
+		Topic:          topic,
+		serialization:  sendSer.Name(),
+		idempotencyKey: options.idempotencyKey,
 	}
 
 	if isWithinWorkflow {
@@ -2440,8 +2493,9 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 			return nil, ctx.(*dbosContext).systemDB.send(ctx, input)
 		}, WithStepName("DBOS.send"))
 	} else {
+		uncancellableCtx := WithoutCancel(c)
 		err = retry(c, func() error {
-			return c.systemDB.send(c, input)
+			return c.systemDB.send(uncancellableCtx, input)
 		}, withRetrierLogger(c.logger))
 	}
 	return err
@@ -2799,6 +2853,10 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 
 		currentOffset := fromOffset
 		closed := false
+		// finalRead is set once the producer is observed inactive; the loop then
+		// makes one more read pass to drain any values it committed just before
+		// terminating, then closes the stream.
+		finalRead := false
 
 		// Continue reading until workflow is inactive or stream is closed
 		for {
@@ -2841,6 +2899,13 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 				return
 			}
 
+			// A previous iteration observed the workflow was inactive; this pass
+			// has now drained anything it committed in the meantime, so close.
+			if finalRead {
+				send(StreamValue[any]{Closed: true})
+				return
+			}
+
 			// Check if workflow is still active (PENDING or ENQUEUED)
 			status, err := retryWithResult(c, func() (WorkflowStatusType, error) {
 				workflows, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{
@@ -2862,10 +2927,14 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 				return
 			}
 
-			// If workflow is inactive, send final message with Closed: true (BUG FIX)
+			// If the workflow is inactive it may still have committed values
+			// between the read above and this status check. Once it is terminal
+			// all of its writes are committed, so make one more read pass to drain
+			// to the end of the stream before closing, rather than returning here
+			// and dropping a value written just before completion.
 			if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
-				send(StreamValue[any]{Closed: true})
-				return
+				finalRead = true
+				continue
 			}
 
 			// If no new entries, wait a bit before polling again
@@ -3818,8 +3887,9 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 			return c.systemDB.forkWorkflow(ctx, dbInput)
 		}, WithStepName("DBOS.forkWorkflow"))
 	} else {
+		uncancellableCtx := WithoutCancel(c)
 		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
-			return c.systemDB.forkWorkflow(c, dbInput)
+			return c.systemDB.forkWorkflow(uncancellableCtx, dbInput)
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
@@ -4771,8 +4841,9 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, in
 		return err
 	}
 
+	uncancellableCtx := WithoutCancel(c)
 	return retry(c, func() error {
-		return c.systemDB.createSchedule(c, dbInput)
+		return c.systemDB.createSchedule(uncancellableCtx, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5044,8 +5115,9 @@ func (c *dbosContext) DeleteSchedule(_ DBOSContext, scheduleName string) error {
 		return err
 	}
 
+	uncancellableCtx := WithoutCancel(c)
 	return retry(c, func() error {
-		return c.systemDB.deleteSchedule(c, deleteScheduleDBInput{ScheduleName: scheduleName})
+		return c.systemDB.deleteSchedule(uncancellableCtx, deleteScheduleDBInput{ScheduleName: scheduleName})
 	}, withRetrierLogger(c.logger))
 }
 

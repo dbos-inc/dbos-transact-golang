@@ -250,6 +250,18 @@ func SQLDB(p Pool) *sql.DB {
 	return nil
 }
 
+// sameEngine reports whether two portable pools wrap the same underlying engine
+// handle — the identical *pgxpool.Pool or *sql.DB.
+func sameEngine(a, b Pool) bool {
+	if pa := PgxPool(a); pa != nil {
+		return pa == PgxPool(b)
+	}
+	if sa := SQLDB(a); sa != nil {
+		return sa == SQLDB(b)
+	}
+	return false
+}
+
 type sqlTxAdapter struct{ tx *sql.Tx }
 
 func (t *sqlTxAdapter) Exec(ctx context.Context, q string, args ...any) (Result, error) {

@@ -47,7 +47,7 @@ type systemDatabase interface {
 	// Child workflows
 	getWorkflowChildren(ctx context.Context, input getWorkflowChildrenDBInput) ([]WorkflowStatus, error)
 	recordChildWorkflow(ctx context.Context, input recordChildWorkflowDBInput) error
-	checkChildWorkflow(ctx context.Context, workflowUUID string, functionID int) (*string, error)
+	checkChildWorkflow(ctx context.Context, workflowUUID string, functionID int, functionName string) (*string, error)
 
 	// Steps
 	recordOperationResult(ctx context.Context, input recordOperationResultDBInput) error
@@ -2314,18 +2314,26 @@ func (s *sysDB) recordChildWorkflow(ctx context.Context, input recordChildWorkfl
 	return nil
 }
 
-func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, functionID int) (*string, error) {
-	query := s.renderSQL(`SELECT child_workflow_id
+func (s *sysDB) checkChildWorkflow(ctx context.Context, workflowID string, functionID int, functionName string) (*string, error) {
+	query := s.renderSQL(`SELECT child_workflow_id, function_name
               FROM %soperation_outputs
               WHERE workflow_uuid = $1 AND function_id = $2`, s.dialect.SchemaPrefix(s.schema))
 
 	var childWorkflowID *string
-	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID)
+	var recordedFunctionName string
+	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID, &recordedFunctionName)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to check child workflow: %w", err)
+	}
+
+	// A function is already recorded at this step ID. If it was invoked under a
+	// different name than on the original execution, the workflow is
+	// non-deterministic (a different child workflow or step is being called).
+	if functionName != recordedFunctionName {
+		return nil, newUnexpectedStepError(workflowID, functionID, functionName, recordedFunctionName)
 	}
 
 	return childWorkflowID, nil
@@ -2463,7 +2471,11 @@ type getWorkflowStepsInput struct {
 }
 
 func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInput) ([]stepInfo, error) {
-	query := s.renderSQL(`SELECT function_id, function_name, output, error, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms, serialization
+	loadColumns := []string{"function_id", "function_name", "error", "child_workflow_id", "started_at_epoch_ms", "completed_at_epoch_ms", "serialization"}
+	if input.loadOutput {
+		loadColumns = append(loadColumns, "output")
+	}
+	query := s.renderSQL(`SELECT `+strings.Join(loadColumns, ", ")+`
 			  FROM %soperation_outputs
 			  WHERE workflow_uuid = $1
 			  ORDER BY function_id ASC`, s.dialect.SchemaPrefix(s.schema))
@@ -2495,7 +2507,11 @@ func (s *sysDB) getWorkflowSteps(ctx context.Context, input getWorkflowStepsInpu
 		var startedAtMs, completedAtMs *int64
 		var serialization *string
 
-		err := rows.Scan(&step.StepID, &step.StepName, &outputString, &errorString, &childWorkflowID, &startedAtMs, &completedAtMs, &serialization)
+		scanArgs := []any{&step.StepID, &step.StepName, &errorString, &childWorkflowID, &startedAtMs, &completedAtMs, &serialization}
+		if input.loadOutput {
+			scanArgs = append(scanArgs, &outputString)
+		}
+		err := rows.Scan(scanArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan step row: %w", err)
 		}
@@ -3053,7 +3069,7 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 
 		err = s.recordOperationResult(ctx, recordInput)
 		if err != nil {
-			// Check if this is a ConflictingWorkflowError (operation already recorded by another process)
+			// Check if this is a ConflictingIDError (operation already recorded by another process)
 			if dbosErr, ok := err.(*DBOSError); ok && dbosErr.Code == ConflictingIDError {
 			} else {
 				return 0, fmt.Errorf("failed to record sleep operation result: %w", err)
@@ -3352,11 +3368,12 @@ func (s *sysDB) pollEvents(ctx context.Context) {
 const _DBOS_NULL_TOPIC = "__null__topic__"
 
 type WorkflowSendInput struct {
-	DestinationID string
-	Message       any
-	Topic         string
-	tx            Tx
-	serialization string
+	DestinationID  string
+	Message        any
+	Topic          string
+	tx             Tx
+	serialization  string
+	idempotencyKey string
 }
 
 // Send is a special type of step that sends a message to another workflow.
@@ -3373,8 +3390,14 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 		topic = input.Topic
 	}
 
-	insertQuery := s.renderSQL(`INSERT INTO %snotifications (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms) VALUES ($1, $2, $3, $4, $5, $6)`, s.dialect.SchemaPrefix(s.schema))
+	// ON CONFLICT DO NOTHING makes Send idempotent: with an idempotency key the
+	// message_uuid is deterministic, so a retried Send inserts at most once. Without
+	// a key the random UUID never collides, so the clause is a no-op.
+	insertQuery := s.renderSQL(`INSERT INTO %snotifications (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (message_uuid) DO NOTHING`, s.dialect.SchemaPrefix(s.schema))
 	messageUUID := uuid.NewString()
+	if input.idempotencyKey != "" {
+		messageUUID = fmt.Sprintf("%s::%s", input.idempotencyKey, input.DestinationID)
+	}
 	createdAtMs := time.Now().UnixMilli()
 	var err error
 	if input.tx != nil {
@@ -4272,7 +4295,7 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	}
 
 	if len(dequeuedIDs) > 0 {
-		s.logger.Debug("attempting to dequeue task(s)", "queueName", input.queue.Name, "numTasks", len(dequeuedIDs))
+		s.logger.Debug("attempting to dequeue task(s)", "queue_name", input.queue.Name, "num_tasks", len(dequeuedIDs))
 	}
 
 	// Update workflows to PENDING status and get their details

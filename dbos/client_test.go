@@ -657,7 +657,7 @@ func TestCancelResume(t *testing.T) {
 
 		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
 
-		assert.Equal(t, nonExistentWorkflowID, dbosErr.DestinationID, "expected DestinationID to match")
+		assert.Equal(t, nonExistentWorkflowID, dbosErr.WorkflowID, "expected WorkflowID to match")
 	})
 
 	t.Run("ResumeNonExistentWorkflow", func(t *testing.T) {
@@ -673,7 +673,7 @@ func TestCancelResume(t *testing.T) {
 
 		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
 
-		assert.Equal(t, nonExistentWorkflowID, dbosErr.DestinationID, "expected DestinationID to match")
+		assert.Equal(t, nonExistentWorkflowID, dbosErr.WorkflowID, "expected WorkflowID to match")
 	})
 }
 
@@ -993,7 +993,7 @@ func TestForkWorkflow(t *testing.T) {
 
 		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
 
-		assert.Equal(t, nonExistentWorkflowID, dbosErr.DestinationID, "expected DestinationID to match")
+		assert.Equal(t, nonExistentWorkflowID, dbosErr.WorkflowID, "expected WorkflowID to match")
 	})
 
 	t.Run("ForkPartitionKeyWithoutQueue", func(t *testing.T) {
@@ -2413,4 +2413,41 @@ func TestClientCustomPool(t *testing.T) {
 	result, err := handle.GetResult()
 	require.NoError(t, err)
 	assert.Equal(t, "processed: hello", result)
+}
+
+func TestClientSend(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	RegisterWorkflow(serverCtx, receiveTwiceShortWorkflow)
+	require.NoError(t, Launch(serverCtx))
+
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+
+	t.Run("WithIdempotencyKeyDeliversOnce", func(t *testing.T) {
+		handle, err := RunWorkflow(serverCtx, receiveTwiceShortWorkflow, "client-idem-dup-topic")
+		require.NoError(t, err, "failed to start receive workflow")
+
+		// Two client Sends with the same idempotency key: only the first delivers.
+		require.NoError(t, client.Send(handle.GetWorkflowID(), "client-once", "client-idem-dup-topic", WithIdempotencyKey("client-dup-key")), "first client send failed")
+		require.NoError(t, client.Send(handle.GetWorkflowID(), "client-once", "client-idem-dup-topic", WithIdempotencyKey("client-dup-key")), "duplicate client send must not error")
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from receive workflow")
+		require.Equal(t, "client-once|<timeout>", result, "duplicate client send must be deduplicated")
+	})
+
+	t.Run("DistinctKeysDeliverEach", func(t *testing.T) {
+		handle, err := RunWorkflow(serverCtx, receiveTwiceShortWorkflow, "client-idem-distinct-topic")
+		require.NoError(t, err, "failed to start receive workflow")
+
+		require.NoError(t, client.Send(handle.GetWorkflowID(), "c-a", "client-idem-distinct-topic", WithIdempotencyKey("client-key-a")), "send with client-key-a failed")
+		require.NoError(t, client.Send(handle.GetWorkflowID(), "c-b", "client-idem-distinct-topic", WithIdempotencyKey("client-key-b")), "send with client-key-b failed")
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result from receive workflow")
+		require.NotContains(t, result, "<timeout>", "both distinct-key messages should be delivered")
+		require.Contains(t, result, "c-a")
+		require.Contains(t, result, "c-b")
+	})
 }
