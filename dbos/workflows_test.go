@@ -2478,7 +2478,7 @@ func TestCancelWorkflows(t *testing.T) {
 		require.Equal(t, IDs[1:], []string{workflowStatuses[0].ID, workflowStatuses[1].ID}, "children mismatch")
 
 		// cancel workflow without cancelling the child workflows
-		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID, false), "failed to cancel workflow") // first cancel without children
+		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID), "failed to cancel workflow") // first cancel without children
 		allStatuses, err := dbosCtx.ListWorkflows(dbosCtx,
 			WithWorkflowIDs(IDs),
 			WithLoadInput(false),
@@ -2497,7 +2497,7 @@ func TestCancelWorkflows(t *testing.T) {
 		assert.NotEqual(t, WorkflowStatusCancelled, statusByID[grandChildWorkflowID], "grandchild should not be cancelled")
 
 		// now cancel workflow with children
-		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID, true), "failed to cancel workflow") // first cancel without children
+		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID, WithChildren()), "failed to cancel workflow") // first cancel without children
 		allStatuses, err = dbosCtx.ListWorkflows(dbosCtx,
 			WithWorkflowIDs(IDs),
 			WithLoadInput(false),
@@ -2548,7 +2548,7 @@ func TestCancelWorkflows(t *testing.T) {
 		defer blockEvent.Set()
 		ids := startBlockedWorkflows(t, 3, "cancel-batch")
 
-		require.NoError(t, CancelWorkflows(dbosCtx, ids, false), "failed to cancel workflows batch")
+		require.NoError(t, CancelWorkflows(dbosCtx, ids), "failed to cancel workflows batch")
 
 		for _, id := range ids {
 			handle, err := RetrieveWorkflow[string](dbosCtx, id)
@@ -2566,7 +2566,7 @@ func TestCancelWorkflows(t *testing.T) {
 		ids := startBlockedWorkflows(t, 1, "cancel-mixed")
 
 		missingID := "missing-" + uuid.NewString()
-		require.NoError(t, CancelWorkflows(dbosCtx, []string{missingID, ids[0]}, false),
+		require.NoError(t, CancelWorkflows(dbosCtx, []string{missingID, ids[0]}),
 			"CancelWorkflows should not error on missing IDs")
 
 		handle, err := RetrieveWorkflow[string](dbosCtx, ids[0])
@@ -2583,7 +2583,7 @@ func TestCancelWorkflows(t *testing.T) {
 		_, err = h.GetResult()
 		require.NoError(t, err, "workflow should complete successfully")
 
-		require.NoError(t, CancelWorkflows(dbosCtx, []string{h.GetWorkflowID()}, false),
+		require.NoError(t, CancelWorkflows(dbosCtx, []string{h.GetWorkflowID()}),
 			"CancelWorkflows should succeed on already-completed workflow")
 
 		status, err := h.GetStatus()
@@ -2592,14 +2592,14 @@ func TestCancelWorkflows(t *testing.T) {
 	})
 
 	t.Run("CancelWorkflowsEmpty", func(t *testing.T) {
-		require.NoError(t, CancelWorkflows(dbosCtx, nil, false),
+		require.NoError(t, CancelWorkflows(dbosCtx, nil),
 			"CancelWorkflows with nil slice should be a no-op")
-		require.NoError(t, CancelWorkflows(dbosCtx, []string{}, false),
+		require.NoError(t, CancelWorkflows(dbosCtx, []string{}),
 			"CancelWorkflows with empty slice should be a no-op")
 	})
 
 	t.Run("CancelWorkflowsNilContext", func(t *testing.T) {
-		require.Error(t, CancelWorkflows(nil, []string{"id"}, false),
+		require.Error(t, CancelWorkflows(nil, []string{"id"}),
 			"CancelWorkflows should error on nil context")
 	})
 }
@@ -2628,7 +2628,7 @@ func TestResumeWorkflows(t *testing.T) {
 			h, err := RunWorkflow(dbosCtx, blockingWorkflow, fmt.Sprintf("%s-%d", prefix, i))
 			require.NoError(t, err, "failed to start workflow %d", i)
 			ids[i] = h.GetWorkflowID()
-			require.NoError(t, CancelWorkflow(dbosCtx, ids[i], false), "failed to cancel workflow %d", i)
+			require.NoError(t, CancelWorkflow(dbosCtx, ids[i]), "failed to cancel workflow %d", i)
 		}
 		return ids
 	}
@@ -4687,7 +4687,7 @@ func TestWorkflowCancel(t *testing.T) {
 		require.NoError(t, err, "failed to start blocking workflow")
 
 		// Cancel the workflow using DBOS.CancelWorkflow
-		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID(), false)
+		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to cancel workflow")
 
 		// Signal the event so the workflow can move on to Recv()
@@ -4729,7 +4729,7 @@ func TestWorkflowCancel(t *testing.T) {
 		require.NoError(t, err, "failed to start blocking workflow")
 
 		// Cancel the workflow using DBOS.CancelWorkflow
-		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID(), false)
+		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to cancel workflow")
 
 		// Signal the event so the workflow can move on to Recv()
@@ -5339,7 +5339,7 @@ func TestSpecialSteps(t *testing.T) {
 		}
 
 		// Step 1: Use CancelWorkflow on the child workflow (should be cancelled while waiting)
-		err = CancelWorkflow(dbosCtx, childHandle.GetWorkflowID(), false)
+		err = CancelWorkflow(dbosCtx, childHandle.GetWorkflowID())
 		if err != nil {
 			return "", fmt.Errorf("CancelWorkflow failed: %w", err)
 		}

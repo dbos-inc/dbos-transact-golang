@@ -579,7 +579,7 @@ func TestWorkflowQueues(t *testing.T) {
 		require.NoError(t, err, "failed to enqueue workflow with dedup ID")
 
 		// Cancel the workflow before it completes
-		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID(), false)
+		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to cancel workflow")
 
 		// Unblock any running workflow code
@@ -2014,7 +2014,7 @@ func TestListenQueues(t *testing.T) {
 		handle, err := RunWorkflow(dbosCtx, blockingWorkflow, "resume-queue-input")
 		require.NoError(t, err, "failed to start blocking workflow")
 
-		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID(), false)
+		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to cancel workflow")
 		blockEvent.Set()
 
@@ -2198,7 +2198,7 @@ func TestDelayedExecution(t *testing.T) {
 		}
 		assert.True(t, found, "delayed workflow should appear in list_queued_workflows")
 
-		err = CancelWorkflow(dbosCtx, cancelHandle.GetWorkflowID(), false)
+		err = CancelWorkflow(dbosCtx, cancelHandle.GetWorkflowID())
 		require.NoError(t, err)
 
 		cancelledStatus, err := cancelHandle.GetStatus()
@@ -2238,7 +2238,7 @@ func TestDelayedExecution(t *testing.T) {
 		assert.True(t, errors.Is(err, &DBOSError{Code: QueueDeduplicated}), "expected QueueDeduplicated error, got: %v", err)
 
 		// Clean up
-		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID(), false)
+		err = CancelWorkflow(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err)
 	})
 

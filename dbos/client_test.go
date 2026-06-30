@@ -321,7 +321,7 @@ func TestClientEnqueue(t *testing.T) {
 		assert.Equal(t, handle1.GetWorkflowID(), handle2.GetWorkflowID(), "expected handle2 to point to the existing workflow")
 
 		// Free the slot: cancel the blocking workflow and wait for it to reach a terminal state
-		require.NoError(t, client.CancelWorkflow(handle1.GetWorkflowID(), false))
+		require.NoError(t, client.CancelWorkflow(handle1.GetWorkflowID()))
 		_, _ = handle1.GetResult() // returns a cancellation error; we only need it terminal so the dedup slot clears
 
 		// With the slot cleared, a new enqueue starts a fresh workflow with a different ID
@@ -333,7 +333,7 @@ func TestClientEnqueue(t *testing.T) {
 		assert.NotEqual(t, handle1.GetWorkflowID(), handle3.GetWorkflowID(), "expected a fresh workflow after the slot cleared")
 
 		// Clean up the second blocking workflow
-		require.NoError(t, client.CancelWorkflow(handle3.GetWorkflowID(), false))
+		require.NoError(t, client.CancelWorkflow(handle3.GetWorkflowID()))
 	})
 
 	t.Run("EnqueueWithDedupReturnExistingMissingID", func(t *testing.T) {
@@ -533,7 +533,7 @@ func TestCancelResume(t *testing.T) {
 		assert.Equal(t, 1, stepsCompleted, "expected steps completed to be 1")
 
 		// Cancel the workflow
-		err = client.CancelWorkflow(workflowID, false)
+		err = client.CancelWorkflow(workflowID)
 		require.NoError(t, err, "failed to cancel workflow")
 
 		// Verify workflow is cancelled
@@ -597,7 +597,7 @@ func TestCancelResume(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 
 		// Cancel the workflow before timeout expires
-		err = client.CancelWorkflow(workflowID, false)
+		err = client.CancelWorkflow(workflowID)
 		require.NoError(t, err, "failed to cancel workflow")
 
 		// Verify workflow is cancelled
@@ -648,7 +648,7 @@ func TestCancelResume(t *testing.T) {
 		nonExistentWorkflowID := "non-existent-workflow-id"
 
 		// Try to cancel a non-existent workflow
-		err := client.CancelWorkflow(nonExistentWorkflowID, false)
+		err := client.CancelWorkflow(nonExistentWorkflowID)
 		require.Error(t, err, "expected error when canceling non-existent workflow, but got none")
 
 		// Verify error type and code
@@ -1615,7 +1615,7 @@ func TestClientReadStreamAsyncGoroutineLeak(t *testing.T) {
 	require.Equal(t, "value1", streamValue.Value)
 
 	// Cancel the workflow so it doesn't keep running after the test
-	require.NoError(t, CancelWorkflow(serverCtx, handle.GetWorkflowID(), false))
+	require.NoError(t, CancelWorkflow(serverCtx, handle.GetWorkflowID()))
 }
 
 // TestDebouncerClient tests the DebouncerClient functionality using a Client interface
@@ -2017,7 +2017,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, WorkflowStatusDelayed, status.Status)
 
-		err = client.CancelWorkflow(cancelHandle.GetWorkflowID(), false)
+		err = client.CancelWorkflow(cancelHandle.GetWorkflowID())
 		require.NoError(t, err)
 
 		cancelledStatus, err := cancelHandle.GetStatus()
