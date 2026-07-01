@@ -366,6 +366,27 @@ func TestWorkflowsRegistration(t *testing.T) {
 		RegisterWorkflow(freshCtx, simpleWorkflowError, WithWorkflowName("same-name"))
 	})
 
+	t.Run("SameWorkflowDifferentCustomNames", func(t *testing.T) {
+		// Create a fresh DBOS context for this test
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
+
+		// First registration with a custom name should work
+		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("name-a"))
+
+		// Registering the SAME function under a DIFFERENT custom name should panic with
+		// ConflictingRegistrationError: the registry is keyed on the function's FQN
+		// (runtime.FuncForPC), which is identical for the same function value, so the FQN
+		// collision is detected before the second custom name is ever stored.
+		defer func() {
+			r := recover()
+			require.NotNil(t, r, "expected panic from registering the same function under a different custom name but got none")
+			dbosErr, ok := r.(*DBOSError)
+			require.True(t, ok, "expected panic to be *DBOSError, got %T", r)
+			assert.Equal(t, ConflictingRegistrationError, dbosErr.Code)
+		}()
+		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("name-b"))
+	})
+
 	t.Run("RegisterAfterLaunchPanics", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
 		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
