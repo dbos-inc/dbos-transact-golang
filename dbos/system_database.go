@@ -113,7 +113,7 @@ type systemDatabase interface {
 	createApplicationVersion(ctx context.Context, versionName string) error
 	updateApplicationVersionTimestamp(ctx context.Context, versionName string, newTimestamp int64) error
 	listApplicationVersions(ctx context.Context) ([]VersionInfo, error)
-	getLatestApplicationVersion(ctx context.Context) (*VersionInfo, error)
+	getLatestApplicationVersion(ctx context.Context, tx Tx) (*VersionInfo, error)
 
 	// Workflow export/import
 	exportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error)
@@ -4217,17 +4217,28 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	// Build the SELECT for candidate workflow IDs. Always order by
 	// (priority, created_at) so the planner can satisfy the dequeue scan from
 	// idx_workflow_status_in_flight (queue_name, status, priority, created_at).
-	// Version-less workflows (application_version IS NULL) are only dequeued when
-	// this worker is running the latest registered application version.
+	isLatestVersion := true
+	switch latest, err := s.getLatestApplicationVersion(ctx, tx); {
+	case err == nil:
+		isLatestVersion = latest.Name == input.applicationVersion
+	case errors.Is(err, &DBOSError{Code: NoApplicationVersions}):
+		// No versions registered yet: treat this worker as the latest.
+	default:
+		return nil, fmt.Errorf("failed to query latest application version: %w", err)
+	}
+
+	versionClause := `application_version = $3`
+	if isLatestVersion {
+		versionClause = `(application_version = $3 OR application_version IS NULL)`
+	}
+
 	queryArgs := []any{input.queue.Name, WorkflowStatusEnqueued, input.applicationVersion}
 	query := s.renderSQL(`
 			SELECT workflow_uuid
 			FROM %sworkflow_status
 			WHERE queue_name = $1
 			  AND status = $2
-			  AND (application_version = $3 OR (application_version IS NULL AND $3 = (
-			      SELECT version_name FROM %sapplication_versions
-			      ORDER BY version_timestamp DESC LIMIT 1)))`, schemaPrefix, schemaPrefix)
+			  AND `+versionClause, schemaPrefix)
 
 	if len(input.queuePartitionKey) > 0 {
 		query += ` AND queue_partition_key = $4`
@@ -5005,7 +5016,7 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 	// version. If lookup fails (e.g. no versions registered yet) leave it unset.
 	var backfillAppVersion string
 	backfillLatest, err := retryWithResult(ctx, func() (*VersionInfo, error) {
-		return s.getLatestApplicationVersion(ctx)
+		return s.getLatestApplicationVersion(ctx, nil)
 	}, withRetrierLogger(s.logger))
 	if err != nil {
 		s.logger.Error("failed to fetch latest application version for schedule backfill", "schedule", input.ScheduleName, "error", err)
@@ -5124,7 +5135,7 @@ func (s *sysDB) triggerSchedule(ctx context.Context, scheduleName string) (strin
 	// version. If lookup fails (e.g. no versions registered yet) leave it unset.
 	var triggerAppVersion string
 	triggerLatest, err := retryWithResult(ctx, func() (*VersionInfo, error) {
-		return s.getLatestApplicationVersion(ctx)
+		return s.getLatestApplicationVersion(ctx, nil)
 	}, withRetrierLogger(s.logger))
 	if err != nil {
 		s.logger.Error("failed to fetch latest application version for schedule trigger", "schedule", scheduleName, "error", err)
@@ -5218,15 +5229,19 @@ func (s *sysDB) listApplicationVersions(ctx context.Context) ([]VersionInfo, err
 	return versions, nil
 }
 
-func (s *sysDB) getLatestApplicationVersion(ctx context.Context) (*VersionInfo, error) {
+func (s *sysDB) getLatestApplicationVersion(ctx context.Context, tx Tx) (*VersionInfo, error) {
 	query := s.renderSQL(`
 		SELECT version_id, version_name, version_timestamp, created_at
 		FROM %sapplication_versions
 		ORDER BY version_timestamp DESC
 		LIMIT 1
 	`, s.dialect.SchemaPrefix(s.schema))
+	var q Querier = s.pool
+	if tx != nil {
+		q = tx
+	}
 	var v VersionInfo
-	err := s.pool.QueryRow(ctx, query).Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt)
+	err := q.QueryRow(ctx, query).Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, newNoApplicationVersionsError()

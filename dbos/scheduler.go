@@ -189,7 +189,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 		}
 		// Scheduled workflows always run against the latest registered application version, so a stale executor does not pick them up after a new deploy.
 		latest, err := retryWithResult(c, func() (*VersionInfo, error) {
-			return c.systemDB.getLatestApplicationVersion(c)
+			return c.systemDB.getLatestApplicationVersion(c, nil)
 		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to fetch latest application version for scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
