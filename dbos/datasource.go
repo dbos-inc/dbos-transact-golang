@@ -197,7 +197,7 @@ func (ds *DataSource) resolveDialect(c *dbosContext) error {
 			return false, err
 		}
 		defer conn.Release()
-		return isCockroachDB(c, conn.Conn()), nil
+		return isCockroachDB(conn.Conn()), nil
 	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return err

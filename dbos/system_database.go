@@ -805,7 +805,7 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		return nil, fmt.Errorf("failed to acquire connection to detect database type: %v", err)
 	}
 	defer conn.Release()
-	isCockroach := isCockroachDB(ctx, conn.Conn())
+	isCockroach := isCockroachDB(conn.Conn())
 	if isCockroach {
 		logger.Info("Detected CockroachDB")
 	}
@@ -5236,7 +5236,7 @@ func (s *sysDB) getLatestApplicationVersion(ctx context.Context) (*VersionInfo, 
 /******* UTILS ********/
 /*******************************/
 
-func isCockroachDB(ctx context.Context, conn *pgx.Conn) bool {
+func isCockroachDB(conn *pgx.Conn) bool {
 	return conn.PgConn().ParameterStatus("crdb_version") != ""
 }
 
@@ -5244,7 +5244,7 @@ func isCockroachDB(ctx context.Context, conn *pgx.Conn) bool {
 // For CockroachDB, it terminates active connections first, then drops the database.
 // For PostgreSQL, it uses the WITH (FORCE) syntax.
 func dropDatabaseIfExists(ctx context.Context, conn *pgx.Conn, dbName string) error {
-	crdb := isCockroachDB(ctx, conn)
+	crdb := isCockroachDB(conn)
 
 	sanitizedDBName := pgx.Identifier{dbName}.Sanitize()
 

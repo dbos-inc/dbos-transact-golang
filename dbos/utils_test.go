@@ -46,7 +46,7 @@ func skipIfCockroach(t *testing.T, reason string) {
 	conn, err := pgx.Connect(context.Background(), getDatabaseURL())
 	require.NoError(t, err)
 	defer conn.Close(context.Background())
-	if isCockroachDB(context.Background(), conn) {
+	if isCockroachDB(conn) {
 		t.Skipf("skipping on CockroachDB: %s", reason)
 	}
 }
@@ -103,7 +103,7 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 // database. Returns false when the database cannot be safely reused and must
 // be dropped instead.
 func cleanDatabaseRows(ctx context.Context, conn *pgx.Conn) bool {
-	migrations := buildMigrations(_DEFAULT_SYSTEM_DB_SCHEMA, isCockroachDB(ctx, conn))
+	migrations := buildMigrations(_DEFAULT_SYSTEM_DB_SCHEMA, isCockroachDB(conn))
 	latestVersion := migrations[len(migrations)-1].version
 
 	rows, err := conn.Query(ctx,
