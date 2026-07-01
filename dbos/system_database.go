@@ -4217,13 +4217,17 @@ func (s *sysDB) dequeueWorkflows(ctx context.Context, input dequeueWorkflowsInpu
 	// Build the SELECT for candidate workflow IDs. Always order by
 	// (priority, created_at) so the planner can satisfy the dequeue scan from
 	// idx_workflow_status_in_flight (queue_name, status, priority, created_at).
+	// Version-less workflows (application_version IS NULL) are only dequeued when
+	// this worker is running the latest registered application version.
 	queryArgs := []any{input.queue.Name, WorkflowStatusEnqueued, input.applicationVersion}
 	query := s.renderSQL(`
 			SELECT workflow_uuid
 			FROM %sworkflow_status
 			WHERE queue_name = $1
 			  AND status = $2
-			  AND (application_version = $3 OR application_version IS NULL)`, schemaPrefix)
+			  AND (application_version = $3 OR (application_version IS NULL AND $3 = (
+			      SELECT version_name FROM %sapplication_versions
+			      ORDER BY version_timestamp DESC LIMIT 1)))`, schemaPrefix, schemaPrefix)
 
 	if len(input.queuePartitionKey) > 0 {
 		query += ` AND queue_partition_key = $4`
