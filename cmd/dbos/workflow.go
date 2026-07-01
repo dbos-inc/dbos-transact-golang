@@ -293,7 +293,7 @@ func runWorkflowCancel(cmd *cobra.Command, args []string) error {
 
 	opts := []dbos.CancelWorkflowOptions{}
 	if cancelChildren {
-		opts = append(opts, dbos.WithChildren())
+		opts = append(opts, dbos.WithCancelChildren())
 	}
 	// Cancel workflow
 	err = ctx.CancelWorkflow(ctx, workflowID, opts...)

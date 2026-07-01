@@ -481,7 +481,7 @@ func (c *client) RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error
 type CancelWorkflowOptions func(*cancelWorkflowOptions)
 
 // WithChildren enables cancellation for children workflows
-func WithChildren() CancelWorkflowOptions {
+func WithCancelChildren() CancelWorkflowOptions {
 	return func(cwo *cancelWorkflowOptions) {
 		cwo.cancelChildren = true
 	}

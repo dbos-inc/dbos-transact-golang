@@ -499,7 +499,7 @@ func (c *conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 
 	opts := []CancelWorkflowOptions{}
 	if req.CancelChildren {
-		opts = append(opts, WithChildren())
+		opts = append(opts, WithCancelChildren())
 	}
 
 	if err := c.dbosCtx.CancelWorkflows(c.dbosCtx, workflowIDs, opts...); err != nil {
