@@ -1857,6 +1857,18 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 	return &preparedStep{WorkflowID: wfState.workflowID, StepOpts: stepOpts, StepState: &stepState, IsWithinStep: false}, nil
 }
 
+// checkStepContext verifies that ctx carries workflow state marked as within a step.
+// DBOS invokes step bodies with a dedicated step context (isWithinStep == true); if that
+// invariant is broken (e.g. the raw workflow context is passed instead of the step context),
+// return a clear StepExecutionError rather than running the step body with a mis-wired context.
+func checkStepContext(ctx DBOSContext, workflowID, stepName string) error {
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil || !wfState.isWithinStep {
+		return newStepExecutionError(workflowID, stepName, fmt.Errorf("step must use the context.Context received from its dbos.Func closure."))
+	}
+	return nil
+}
+
 // executeStepWithRetry runs runOnce (the step body) and retries with backoff on error when maxRetries > 0.
 func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptions, runOnce func() (any, error)) (stepOutput any, stepError error) {
 	work := func() error {
@@ -2006,7 +2018,12 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 
 	stepCtx := WithValue(c, workflowStateKey, stepState)
 	stepStartTime := time.Now()
-	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx) })
+	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) {
+		if err := checkStepContext(stepCtx, stepState.workflowID, stepOpts.stepName); err != nil {
+			return nil, err
+		}
+		return fn(stepCtx)
+	})
 
 	// Serialize step output before recording
 	ser := resolveEncoder(c)

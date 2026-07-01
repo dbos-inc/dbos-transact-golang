@@ -833,6 +833,15 @@ func TestSteps(t *testing.T) {
 
 	RegisterWorkflow(dbosCtx, customNameWorkflow)
 
+	// A workflow that mistakenly runs its step with the outer executor context
+	// (captured from the closure) instead of the workflow context it is handed.
+	wrongCtxWorkflow := func(_ DBOSContext, input string) (string, error) {
+		return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+			return simpleStep(ctx)
+		})
+	}
+	RegisterWorkflow(dbosCtx, wrongCtxWorkflow, WithWorkflowName("wrongCtxWorkflow"))
+
 	// Define user-defined types for testing serialization
 	type StepInput struct {
 		Name      string            `json:"name"`
@@ -928,6 +937,42 @@ func TestSteps(t *testing.T) {
 		// Test the specific message from the 3rd argument
 		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
 		require.Contains(t, err.Error(), expectedMessagePart, "expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+	})
+
+	t.Run("WorkflowCallsStepWithWrongContext", func(t *testing.T) {
+		// The workflow runs its step with the outer executor context, which carries no
+		// workflow state, so the step must fail with a clear StepExecutionError.
+		handle, err := RunWorkflow(dbosCtx, wrongCtxWorkflow, "echo")
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.Error(t, err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, StepExecutionError, dbosErr.Code)
+		require.ErrorContains(t, err, "workflow state not found in context")
+	})
+
+	t.Run("GuardRejectsNonStepContext", func(t *testing.T) {
+		// checkStepContext is the last-line guard ensuring the step body only ever runs
+		// with the DBOS-provided step context (isWithinStep == true).
+
+		// A plain workflow context (isWithinStep == false) is not a valid step context.
+		wfCtx := WithValue(dbosCtx, workflowStateKey, &workflowState{workflowID: "wf-1"})
+		err := checkStepContext(wfCtx, "wf-1", "myStep")
+		require.Error(t, err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, StepExecutionError, dbosErr.Code)
+		require.ErrorContains(t, err, "not marked as within a step")
+
+		// A context with no workflow state at all is also rejected.
+		err = checkStepContext(dbosCtx, "wf-1", "myStep")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "not marked as within a step")
+
+		// A proper step context passes.
+		stepCtx := WithValue(dbosCtx, workflowStateKey, &workflowState{workflowID: "wf-1", isWithinStep: true})
+		require.NoError(t, checkStepContext(stepCtx, "wf-1", "myStep"))
 	})
 
 	t.Run("StepWithinAStepAreJustFunctions", func(t *testing.T) {
