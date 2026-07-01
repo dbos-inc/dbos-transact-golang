@@ -3050,8 +3050,16 @@ func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, err
 	remainingDuration := max(0, time.Until(endTime))
 
 	if !input.skipSleep {
-		// Actually sleep for the remaining duration
-		time.Sleep(remainingDuration)
+		// Sleep for the remaining duration, but wake early if the context is cancelled.
+		// If interrupted, return the duration actually slept.
+		sleepStart := time.Now()
+		timer := time.NewTimer(remainingDuration)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return time.Since(sleepStart), ctx.Err()
+		}
 	}
 
 	return remainingDuration, nil
