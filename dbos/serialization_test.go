@@ -2349,3 +2349,107 @@ func TestPortableWorkflowError(t *testing.T) {
 		assert.Equal(t, `"list-test"`, steps[0].Output)
 	})
 }
+
+// TestWorkflowErrorSerializationRoundTrip covers the pure serialize/deserialize logic:
+// Go <-> Go errors are gob-encoded (preserving the concrete type, e.g. *DBOSError),
+// portable workflows use the cross-language JSON envelope, and decode is self-describing.
+func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
+	t.Run("DBOSErrorPreservedGoToGo", func(t *testing.T) {
+		orig := newQueueDeduplicatedError("wf-1", "q-1", "dedup-1")
+		s := serializeWorkflowError(orig, "DBOS_JSON")
+
+		got := deserializeWorkflowError(&s)
+		var de *DBOSError
+		require.ErrorAs(t, got, &de)
+		assert.Equal(t, QueueDeduplicated, de.Code)
+		assert.Equal(t, "wf-1", de.WorkflowID)
+		assert.Equal(t, "q-1", de.QueueName)
+		assert.Equal(t, "dedup-1", de.DeduplicationID)
+		assert.Equal(t, orig.Message, de.Message)
+		assert.Equal(t, orig.Error(), got.Error())
+		require.ErrorIs(t, got, &DBOSError{Code: QueueDeduplicated})
+	})
+
+	t.Run("PlainErrorGoToGo", func(t *testing.T) {
+		// errors.New/fmt.Errorf types are not gob-encodable → plain-string fallback.
+		s := serializeWorkflowError(fmt.Errorf("boom"), "DBOS_JSON")
+		got := deserializeWorkflowError(&s)
+		require.Error(t, got)
+		assert.Equal(t, "boom", got.Error())
+		var de *DBOSError
+		assert.NotErrorAs(t, got, &de)
+	})
+
+	t.Run("LegacyPlainStringDecodes", func(t *testing.T) {
+		s := "DBOS Error WorkflowCancelled: legacy string, not encoded"
+		got := deserializeWorkflowError(&s)
+		require.Error(t, got)
+		assert.Equal(t, s, got.Error())
+		var pe *PortableWorkflowError
+		assert.NotErrorAs(t, got, &pe)
+	})
+
+	t.Run("NilAndEmpty", func(t *testing.T) {
+		assert.NoError(t, deserializeWorkflowError(nil))
+		empty := ""
+		assert.NoError(t, deserializeWorkflowError(&empty))
+		assert.Equal(t, "", serializeWorkflowError(nil, "DBOS_JSON"))
+	})
+}
+
+// TestGoToGoErrorTypePreservation verifies end-to-end (through the DB) that a *DBOSError
+// returned by a default (non-portable) workflow is reconstructed with its concrete type
+// and code when read back via a fresh handle, while a plain error keeps its message.
+func TestGoToGoErrorTypePreservation(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	dbosErrWf := func(ctx DBOSContext, _ string) (string, error) {
+		return "", &DBOSError{Code: WorkflowExecutionError, Message: "boom", WorkflowID: "inner"}
+	}
+	RegisterWorkflow(executor, dbosErrWf, WithWorkflowName("go_dbos_err_wf"))
+
+	plainErrWf := func(ctx DBOSContext, _ string) (string, error) {
+		return "", fmt.Errorf("plain boom")
+	}
+	RegisterWorkflow(executor, plainErrWf, WithWorkflowName("go_plain_err_wf"))
+
+	require.NoError(t, Launch(executor))
+	defer Shutdown(executor, 10*time.Second)
+
+	t.Run("DBOSErrorReconstructedViaRetrieve", func(t *testing.T) {
+		wfID := "go-dbos-err"
+		h, err := RunWorkflow(executor, dbosErrWf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.Error(t, err)
+
+		// Fresh handle → error comes from the DB round-trip, not the live goroutine.
+		retrieved, err := RetrieveWorkflow[string](executor, wfID)
+		require.NoError(t, err)
+		_, err = retrieved.GetResult()
+		require.Error(t, err)
+
+		var de *DBOSError
+		require.ErrorAs(t, err, &de)
+		assert.Equal(t, WorkflowExecutionError, de.Code)
+		assert.Equal(t, "boom", de.Message)
+		assert.Equal(t, "inner", de.WorkflowID)
+		require.ErrorIs(t, err, &DBOSError{Code: WorkflowExecutionError})
+	})
+
+	t.Run("PlainErrorMessagePreservedViaRetrieve", func(t *testing.T) {
+		wfID := "go-plain-err"
+		h, err := RunWorkflow(executor, plainErrWf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.Error(t, err)
+
+		retrieved, err := RetrieveWorkflow[string](executor, wfID)
+		require.NoError(t, err)
+		_, err = retrieved.GetResult()
+		require.Error(t, err)
+		assert.Equal(t, "plain boom", err.Error())
+		var de *DBOSError
+		assert.NotErrorAs(t, err, &de)
+	})
+}

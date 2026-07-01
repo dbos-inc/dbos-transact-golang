@@ -332,11 +332,29 @@ func (e *PortableWorkflowError) Error() string {
 	return e.Message
 }
 
-// serializeWorkflowError serializes an error for DB storage.
-// For portable workflows, uses the portable JSON format ({"name":..., "message":..., ...}).
-// For all others, stores the plain error string.
+func init() {
+	// Register the DBOS error types so they can be gob-encoded with their concrete
+	// type preserved on the Go <-> Go error path (see serializeWorkflowError).
+	gob.Register(&DBOSError{})
+	gob.Register(&PortableWorkflowError{})
+}
+
+// serializeWorkflowError encodes an error for DB storage.
+//   - Portable workflows use the cross-language JSON envelope
+//     ({"name":..., "message":..., ...}), readable by every DBOS language.
+//   - All other (Go <-> Go) workflows gob-encode the error so its concrete Go type
+//     (e.g. *DBOSError) is preserved and reconstructed as-is on decode. Errors whose type
+//     cannot be gob-encoded (e.g. errors.New/fmt.Errorf) fall back to their plain string.
 func serializeWorkflowError(err error, serialization string) string {
+	if err == nil {
+		return ""
+	}
 	if serialization != PortableSerializerName {
+		// Go <-> Go: gob-encode so the concrete error type (e.g. *DBOSError) is preserved.
+		// Types that cannot be gob-encoded (e.g. errors.New/fmt.Errorf) fall back to their string.
+		if encoded, gobErr := NewGobSerializer().Encode(err); gobErr == nil && encoded != nil {
+			return *encoded
+		}
 		return err.Error()
 	}
 	var errData PortableWorkflowError
@@ -355,19 +373,25 @@ func serializeWorkflowError(err error, serialization string) string {
 	return string(b)
 }
 
-// deserializeWorkflowError deserializes an error from DB storage.
-// For portable serialization, parses the JSON into a PortableWorkflowError.
-// For all others, creates a plain error from the string.
-func deserializeWorkflowError(errStr *string, serialization string) error {
+// deserializeWorkflowError decodes an error stored by serializeWorkflowError. The stored
+// format is self-describing, so no serialization hint is needed: gob-encoded (Go <-> Go)
+// errors are decoded back into their original Go type (e.g. *DBOSError), portable JSON
+// envelopes into a *PortableWorkflowError, and anything else (a legacy or fallback plain
+// string) into a normal error.
+func deserializeWorkflowError(errStr *string) error {
 	if errStr == nil || *errStr == "" {
 		return nil
 	}
-	if serialization != PortableSerializerName {
-		return errors.New(*errStr)
+	// Go <-> Go errors are gob-encoded; decode preserves their original type (e.g. *DBOSError).
+	// A portable JSON envelope or legacy plain string fails base64/gob and falls through below.
+	if decoded, gobErr := NewGobSerializer().Decode(errStr); gobErr == nil {
+		if e, ok := decoded.(error); ok {
+			return e
+		}
 	}
 	var pe PortableWorkflowError
-	if err := json.Unmarshal([]byte(*errStr), &pe); err != nil {
-		return errors.New(*errStr) // fallback: return plain error
+	if err := json.Unmarshal([]byte(*errStr), &pe); err == nil && (pe.Name != "" || pe.Message != "") {
+		return &pe
 	}
-	return &pe
+	return errors.New(*errStr)
 }
