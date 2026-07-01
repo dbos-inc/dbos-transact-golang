@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"net/url"
 	"os"
 	"os/exec"
