@@ -412,8 +412,9 @@ type forkWorkflowConductorResponse struct {
 // cancelWorkflowConductorRequest is sent by the conductor to cancel a workflow
 type cancelWorkflowConductorRequest struct {
 	baseMessage
-	WorkflowID  string   `json:"workflow_id"`
-	WorkflowIDs []string `json:"workflow_ids"`
+	CancelChildren bool     `json:"cancel_children"`
+	WorkflowID     string   `json:"workflow_id"`
+	WorkflowIDs    []string `json:"workflow_ids"`
 }
 
 // cancelWorkflowConductorResponse is sent in response to cancel workflow requests

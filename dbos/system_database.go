@@ -1497,8 +1497,9 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 }
 
 type cancelWorkflowsDBInput struct {
-	workflowIDs []string
-	tx          Tx
+	cancelChildren bool
+	workflowIDs    []string
+	tx             Tx
 }
 
 // cancelWorkflows cancels the given workflows in a single round-trip. Workflows that
@@ -1510,9 +1511,27 @@ func (s *sysDB) cancelWorkflows(ctx context.Context, input cancelWorkflowsDBInpu
 		return nil, nil
 	}
 
+	workflowIDs := make([]string, len(input.workflowIDs))
+	copy(workflowIDs, input.workflowIDs)
+
+	if input.cancelChildren {
+		for _, workflowID := range workflowIDs {
+			children, err := s.getWorkflowChildren(ctx, getWorkflowChildrenDBInput{
+				workflowID: workflowID,
+				tx:         input.tx,
+			})
+			if err != nil {
+				return nil, err
+			}
+			for _, child := range children {
+				workflowIDs = append(workflowIDs, child.ID)
+			}
+		}
+	}
+
 	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
 	anyClause := dialectAnyClause(s.dialect, "workflow_uuid", 3)
-	encodedIDs, err := encodeArrayParam(s.dialect, input.workflowIDs)
+	encodedIDs, err := encodeArrayParam(s.dialect, workflowIDs)
 	if err != nil {
 		return nil, fmt.Errorf("cancel workflows: %w", err)
 	}

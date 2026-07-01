@@ -2564,6 +2564,124 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 func TestCancelWorkflows(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
+	t.Run("CancelWorkflowsWithChildren", func(t *testing.T) {
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+
+		var (
+			parentWorkflowID     = uuid.NewString()
+			childWorkflowID      = uuid.NewString()
+			grandChildWorkflowID = uuid.NewString()
+
+			IDs = []string{parentWorkflowID, childWorkflowID, grandChildWorkflowID}
+
+			mainEvents     = make(map[string]*Event)
+			workflowEvents = make(map[string]*Event)
+		)
+
+		for i := range IDs {
+			mainEvents[IDs[i]] = NewEvent()
+			workflowEvents[IDs[i]] = NewEvent()
+		}
+
+		grandChildWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+			workflowID, err := GetWorkflowID(ctx)
+			require.NoError(t, err, "failed to get workflow ID")
+
+			require.Equal(t, grandChildWorkflowID, workflowID)
+
+			mainEvents[workflowID].Set()
+			workflowEvents[workflowID].Wait()
+			return simpleStep(ctx)
+		}
+		RegisterWorkflow(dbosCtx, grandChildWorkflow)
+
+		childWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+			workflowID, err := GetWorkflowID(ctx)
+			require.NoError(t, err, "failed to get workflow ID")
+
+			require.Equal(t, childWorkflowID, workflowID)
+
+			RunWorkflow(ctx, grandChildWorkflow, "test-grand-child-in", WithWorkflowID(grandChildWorkflowID))
+
+			mainEvents[workflowID].Set()
+			workflowEvents[workflowID].Wait()
+
+			return simpleStep(ctx)
+		}
+		RegisterWorkflow(dbosCtx, childWorkflow)
+
+		parentWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+			workflowID, err := GetWorkflowID(ctx)
+			require.NoError(t, err, "failed to get workflow ID")
+
+			require.Equal(t, parentWorkflowID, workflowID)
+
+			RunWorkflow(ctx, childWorkflow, "test-child-input", WithWorkflowID(childWorkflowID))
+
+			mainEvents[workflowID].Set()
+			workflowEvents[workflowID].Wait()
+
+			return simpleStep(ctx)
+		}
+		RegisterWorkflow(dbosCtx, parentWorkflow)
+		RunWorkflow(dbosCtx, parentWorkflow, "test-input", WithWorkflowID(parentWorkflowID))
+
+		// wait until whole tree is running and blocked
+		for id := range mainEvents {
+			mainEvents[id].Wait()
+		}
+
+		workflowStatuses, err := sysDB.getWorkflowChildren(dbosCtx, getWorkflowChildrenDBInput{workflowID: parentWorkflowID})
+		require.NoError(t, err, "failed to get workflow children")
+		require.Equal(t, len(workflowStatuses), 2, "expected %d children got %d", 2, len(workflowStatuses))
+
+		require.Equal(t, IDs[1:], []string{workflowStatuses[0].ID, workflowStatuses[1].ID}, "children mismatch")
+
+		// cancel workflow without cancelling the child workflows
+		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID), "failed to cancel workflow") // first cancel without children
+		allStatuses, err := dbosCtx.ListWorkflows(dbosCtx,
+			WithWorkflowIDs(IDs),
+			WithLoadInput(false),
+			WithLoadOutput(false),
+		)
+		require.NoError(t, err, "failed to list workflow statuses")
+		require.Len(t, allStatuses, 3, "expected 3 workflow statuses")
+
+		statusByID := make(map[string]WorkflowStatusType, len(allStatuses))
+		for _, s := range allStatuses {
+			statusByID[s.ID] = s.Status
+		}
+
+		assert.Equal(t, WorkflowStatusCancelled, statusByID[parentWorkflowID], "parent should be CANCELLED")
+		assert.Equal(t, WorkflowStatusPending, statusByID[childWorkflowID], "child should be PENDING")
+		assert.Equal(t, WorkflowStatusPending, statusByID[grandChildWorkflowID], "grandchild should be PENDING")
+
+		// now cancel workflow with children
+		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID, WithCancelChildren()), "failed to cancel workflow") // first cancel without children
+		allStatuses, err = dbosCtx.ListWorkflows(dbosCtx,
+			WithWorkflowIDs(IDs),
+			WithLoadInput(false),
+			WithLoadOutput(false),
+		)
+		require.NoError(t, err, "failed to list workflow statuses")
+		require.Len(t, allStatuses, 3, "expected 3 workflow statuses")
+
+		statusByID = make(map[string]WorkflowStatusType, len(allStatuses))
+		for _, s := range allStatuses {
+			statusByID[s.ID] = s.Status
+		}
+
+		assert.Equal(t, WorkflowStatusCancelled, statusByID[parentWorkflowID], "parent should be CANCELLED")
+		assert.Equal(t, WorkflowStatusCancelled, statusByID[childWorkflowID], "child should be CANCELLED")
+		assert.Equal(t, WorkflowStatusCancelled, statusByID[grandChildWorkflowID], "grandchild should be CANCELLED")
+
+		// release the workflows
+		for _, event := range workflowEvents {
+			event.Set()
+		}
+		assert.Equal(t, queueEntriesAreCleanedUp(dbosCtx), true)
+	})
+
 	blockEvent := NewEvent()
 	blockingWorkflow := func(ctx DBOSContext, input string) (string, error) {
 		blockEvent.Wait()
