@@ -2453,3 +2453,141 @@ func TestGoToGoErrorTypePreservation(t *testing.T) {
 		assert.NotErrorAs(t, err, &de)
 	})
 }
+
+// TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors verifies that a single
+// workflow's or step's undecodable input/output does not fail the entire
+// ListWorkflows / GetWorkflowSteps call. Other items in the batch must still be
+// returned and correctly decoded; the corrupted item's field is replaced with a
+// string describing the decode error instead of aborting the whole request.
+func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	echoWf := func(ctx DBOSContext, input string) (string, error) {
+		return RunAsStep(ctx, func(_ context.Context) (string, error) {
+			return input, nil
+		})
+	}
+	RegisterWorkflow(executor, echoWf, WithWorkflowName("decode_isolation_echo_wf"))
+
+	multiStepWf := func(ctx DBOSContext, input string) (string, error) {
+		for i := 0; i < 3; i++ {
+			idx := i
+			if _, err := RunAsStep(ctx, func(_ context.Context) (string, error) {
+				return fmt.Sprintf("%s-step-%d", input, idx), nil
+			}); err != nil {
+				return "", err
+			}
+		}
+		return input, nil
+	}
+	RegisterWorkflow(executor, multiStepWf, WithWorkflowName("decode_isolation_multi_step_wf"))
+
+	require.NoError(t, Launch(executor))
+	defer Shutdown(executor, 10*time.Second)
+
+	c := executor.(*dbosContext)
+	sysDB := c.systemDB.(*sysDB)
+	schemaPrefix := sysDB.dialect.SchemaPrefix(sysDB.schema)
+
+	const garbage = "not-valid-base64!!!"
+
+	// corruptWorkflowColumn overwrites a workflow_status column (output or inputs)
+	// with a value that cannot be base64-decoded.
+	corruptWorkflowColumn := func(t *testing.T, column, workflowID string) {
+		t.Helper()
+		q := sysDB.renderSQL(`UPDATE %sworkflow_status SET `+column+` = $1 WHERE workflow_uuid = $2`, schemaPrefix)
+		_, err := sysDB.pool.Exec(context.Background(), q, garbage, workflowID)
+		require.NoError(t, err)
+	}
+
+	// corruptStepOutput overwrites a single operation_outputs row's output with a
+	// value that cannot be base64-decoded.
+	corruptStepOutput := func(t *testing.T, workflowID string, functionID int) {
+		t.Helper()
+		q := sysDB.renderSQL(`UPDATE %soperation_outputs SET output = $1 WHERE workflow_uuid = $2 AND function_id = $3`, schemaPrefix)
+		_, err := sysDB.pool.Exec(context.Background(), q, garbage, workflowID, functionID)
+		require.NoError(t, err)
+	}
+
+	t.Run("ListWorkflowsOutputDecodeErrorIsolated", func(t *testing.T) {
+		goodID1 := "decode-good-output-1-" + t.Name()
+		corruptID := "decode-corrupt-output-" + t.Name()
+		goodID2 := "decode-good-output-2-" + t.Name()
+
+		for _, id := range []string{goodID1, corruptID, goodID2} {
+			handle, err := RunWorkflow(executor, echoWf, id, WithWorkflowID(id))
+			require.NoError(t, err)
+			result, err := handle.GetResult()
+			require.NoError(t, err)
+			assert.Equal(t, id, result)
+		}
+
+		corruptWorkflowColumn(t, "output", corruptID)
+
+		wfs, err := ListWorkflows(executor, WithWorkflowIDs([]string{goodID1, corruptID, goodID2}))
+		require.NoError(t, err, "one workflow's undecodable output should not fail the whole ListWorkflows call")
+		require.Len(t, wfs, 3)
+
+		byID := make(map[string]WorkflowStatus, len(wfs))
+		for _, wf := range wfs {
+			byID[wf.ID] = wf
+		}
+
+		// Good entries decode to their raw JSON representation.
+		assert.Equal(t, fmt.Sprintf("%q", goodID1), byID[goodID1].Output)
+		assert.Equal(t, fmt.Sprintf("%q", goodID2), byID[goodID2].Output)
+		// The corrupted entry's output is replaced with a string describing the
+		// decode error instead of failing the whole call.
+		corruptOutput, ok := byID[corruptID].Output.(string)
+		require.True(t, ok, "corrupted output should be a string")
+		assert.Contains(t, corruptOutput, "failed to decode workflow output")
+	})
+
+	t.Run("ListWorkflowsInputDecodeErrorIsolated", func(t *testing.T) {
+		goodID := "decode-good-input-" + t.Name()
+		corruptID := "decode-corrupt-input-" + t.Name()
+
+		for _, id := range []string{goodID, corruptID} {
+			handle, err := RunWorkflow(executor, echoWf, id, WithWorkflowID(id))
+			require.NoError(t, err)
+			_, err = handle.GetResult()
+			require.NoError(t, err)
+		}
+
+		corruptWorkflowColumn(t, "inputs", corruptID)
+
+		wfs, err := ListWorkflows(executor, WithWorkflowIDs([]string{goodID, corruptID}))
+		require.NoError(t, err, "one workflow's undecodable input should not fail the whole ListWorkflows call")
+		require.Len(t, wfs, 2)
+
+		byID := make(map[string]WorkflowStatus, len(wfs))
+		for _, wf := range wfs {
+			byID[wf.ID] = wf
+		}
+
+		assert.Equal(t, fmt.Sprintf("%q", goodID), byID[goodID].Input)
+		corruptInput, ok := byID[corruptID].Input.(string)
+		require.True(t, ok, "corrupted input should be a string")
+		assert.Contains(t, corruptInput, "failed to decode workflow input")
+	})
+
+	t.Run("GetWorkflowStepsOutputDecodeErrorIsolated", func(t *testing.T) {
+		workflowID := "decode-steps-" + t.Name()
+		handle, err := RunWorkflow(executor, multiStepWf, "payload", WithWorkflowID(workflowID))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		corruptStepOutput(t, workflowID, 1)
+
+		steps, err := GetWorkflowSteps(executor, workflowID)
+		require.NoError(t, err, "one step's undecodable output should not fail the whole GetWorkflowSteps call")
+		require.Len(t, steps, 3)
+
+		assert.Equal(t, `"payload-step-0"`, steps[0].Output)
+		corruptStepOutputVal, ok := steps[1].Output.(string)
+		require.True(t, ok, "corrupted step output should be a string")
+		assert.Contains(t, corruptStepOutputVal, "failed to decode step output")
+		assert.Equal(t, `"payload-step-2"`, steps[2].Output)
+	})
+}

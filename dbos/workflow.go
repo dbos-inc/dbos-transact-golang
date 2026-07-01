@@ -4307,15 +4307,19 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 				} else if c.serializer != nil {
 					decoded, err := c.serializer.Decode(encodedInput)
 					if err != nil {
-						return nil, fmt.Errorf("failed to decode workflow input for %s: %w", workflows[i].ID, err)
+						c.logger.Warn("failed to decode workflow input, storing error instead", "workflow_id", workflows[i].ID, "error", err)
+						workflows[i].Input = fmt.Sprintf("failed to decode workflow input: %v", err)
+					} else {
+						workflows[i].Input = decoded
 					}
-					workflows[i].Input = decoded
 				} else {
 					decodedBytes, err := base64.StdEncoding.DecodeString(*encodedInput)
 					if err != nil {
-						return nil, fmt.Errorf("failed to decode base64 workflow input for %s: %w", workflows[i].ID, err)
+						c.logger.Warn("failed to decode base64 workflow input, storing error instead", "workflow_id", workflows[i].ID, "error", err)
+						workflows[i].Input = fmt.Sprintf("failed to decode workflow input: %v", err)
+					} else {
+						workflows[i].Input = string(decodedBytes)
 					}
-					workflows[i].Input = string(decodedBytes)
 				}
 			}
 			if params.loadOutput && workflows[i].Output != nil {
@@ -4331,15 +4335,19 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 				} else if c.serializer != nil {
 					decoded, err := c.serializer.Decode(encodedOutput)
 					if err != nil {
-						return nil, fmt.Errorf("failed to decode workflow output for %s: %w", workflows[i].ID, err)
+						c.logger.Warn("failed to decode workflow output, storing error instead", "workflow_id", workflows[i].ID, "error", err)
+						workflows[i].Output = fmt.Sprintf("failed to decode workflow output: %v", err)
+					} else {
+						workflows[i].Output = decoded
 					}
-					workflows[i].Output = decoded
 				} else {
 					decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
 					if err != nil {
-						return nil, fmt.Errorf("failed to decode base64 workflow output for %s: %w", workflows[i].ID, err)
+						c.logger.Warn("failed to decode base64 workflow output, storing error instead", "workflow_id", workflows[i].ID, "error", err)
+						workflows[i].Output = fmt.Sprintf("failed to decode workflow output: %v", err)
+					} else {
+						workflows[i].Output = string(decodedBytes)
 					}
-					workflows[i].Output = string(decodedBytes)
 				}
 			}
 			if params.loadOutput && workflows[i].Error != nil {
@@ -4511,16 +4519,20 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string, opts ..
 				// Custom serializer: fully decode using the serializer
 				decoded, err := c.serializer.Decode(encodedOutput)
 				if err != nil {
-					return nil, fmt.Errorf("failed to decode step output for step %d: %w", steps[i].StepID, err)
+					c.logger.Warn("failed to decode step output, storing error instead", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
+					stepInfos[i].Output = fmt.Sprintf("failed to decode step output: %v", err)
+				} else {
+					stepInfos[i].Output = decoded
 				}
-				stepInfos[i].Output = decoded
 			} else {
 				// Default JSON: base64 decode to get the JSON string
 				decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
 				if err != nil {
-					return nil, fmt.Errorf("failed to decode base64 step output for step %d: %w", steps[i].StepID, err)
+					c.logger.Warn("failed to decode base64 step output, storing error instead", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
+					stepInfos[i].Output = fmt.Sprintf("failed to decode step output: %v", err)
+				} else {
+					stepInfos[i].Output = string(decodedBytes)
 				}
-				stepInfos[i].Output = string(decodedBytes)
 			}
 		}
 	}
