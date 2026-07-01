@@ -2520,6 +2520,9 @@ type recvInput struct {
 	Topic         string        // Topic to listen for (empty string receives from default topic)
 	Timeout       time.Duration // Maximum time to wait for a message
 	serialization string        // fallback serialization format (receiver's) for recording when no message is found
+	workflowID    string        // Receiving workflow (resolved by the caller from context)
+	stepID        int           // Step ID for the recv
+	sleepStepID   int           // Step ID for the internal timeout sleep
 }
 
 // recvResult carries the received message along with its serialization format from the notifications table.
@@ -2540,6 +2543,9 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 		Topic:         topic,
 		Timeout:       timeout,
 		serialization: resolveEncoder(c).Name(),
+		workflowID:    wfState.workflowID,
+		stepID:        wfState.nextStepID(),
+		sleepStepID:   wfState.nextStepID(),
 	}
 	recvRetryOpts := []retryOption{withRetrierLogger(c.logger)}
 	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
@@ -2646,11 +2652,17 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any, opts ...S
 	}
 
 	_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+		if !ok || wfState == nil {
+			return nil, newStepExecutionError("", "DBOS.setEvent", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
+		}
 		return nil, c.systemDB.setEvent(ctx, WorkflowSetEventInput{
 			Key:           key,
 			Message:       encodedMessage,
 			tx:            tx,
 			serialization: evtSer.Name(),
+			workflowID:    wfState.workflowID,
+			stepID:        wfState.stepID,
 		})
 	}, WithStepName("DBOS.setEvent"))
 	return err
@@ -2677,6 +2689,10 @@ type getEventInput struct {
 	Key              string        // Event key to retrieve
 	Timeout          time.Duration // Maximum time to wait for the event to be set
 	serialization    string        // fallback serialization format (caller's) for recording when no event is found
+	isInWorkflow     bool          // Whether the caller is inside a workflow (GetEvent is also callable from outside)
+	workflowID       string        // Calling workflow (resolved by the caller from context; empty when outside a workflow)
+	stepID           int           // Step ID for the getEvent, allocated by the caller before any retry
+	sleepStepID      int           // Step ID for the internal timeout sleep, allocated by the caller before any retry
 }
 
 // getEventResult carries the event value along with its serialization format from the workflow_events table.
@@ -2691,6 +2707,16 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 		Key:              key,
 		Timeout:          timeout,
 		serialization:    resolveEncoder(c).Name(),
+	}
+	// GetEvent may run inside or outside a workflow. When inside, allocate step IDs.
+	if wfState, ok := c.Value(workflowStateKey).(*workflowState); ok && wfState != nil {
+		if wfState.isWithinStep {
+			return nil, newStepExecutionError(wfState.workflowID, "DBOS.getEvent", fmt.Errorf("cannot call GetEvent within a step"))
+		}
+		input.isInWorkflow = true
+		input.workflowID = wfState.workflowID
+		input.stepID = wfState.nextStepID()
+		input.sleepStepID = wfState.nextStepID()
 	}
 	return retryWithResult(c, func() (*getEventResult, error) {
 		return c.systemDB.getEvent(c, input)
@@ -2790,11 +2816,17 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any, opts ...
 	}
 
 	_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+		if !ok || wfState == nil {
+			return "", fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
+		}
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
 			Key:           key,
 			Value:         encodedValue,
 			tx:            tx,
 			serialization: ser.Name(),
+			workflowID:    wfState.workflowID,
+			stepID:        wfState.stepID,
 		})
 	}, WithStepName("DBOS.writeStream"))
 	return err
@@ -3155,10 +3187,16 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
 	_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
+		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+		if !ok || wfState == nil {
+			return "", fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
+		}
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
-			Key:   key,
-			Value: &sentinel,
-			tx:    tx,
+			Key:        key,
+			Value:      &sentinel,
+			tx:         tx,
+			workflowID: wfState.workflowID,
+			stepID:     wfState.stepID,
 		})
 	}, WithStepName("DBOS.closeStream"))
 	return err
@@ -3189,8 +3227,14 @@ func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duratio
 	if wfState.isWithinStep {
 		return 0, newStepExecutionError(wfState.workflowID, "DBOS.sleep", fmt.Errorf("cannot call Sleep within a step"))
 	}
+	input := sleepInput{
+		duration:   duration,
+		skipSleep:  false,
+		workflowID: wfState.workflowID,
+		stepID:     wfState.nextStepID(),
+	}
 	return retryWithResult(c, func() (time.Duration, error) {
-		return c.systemDB.sleep(c, sleepInput{duration: duration, skipSleep: false})
+		return c.systemDB.sleep(c, input)
 	}, withRetrierLogger(c.logger))
 }
 

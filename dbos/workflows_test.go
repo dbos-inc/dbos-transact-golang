@@ -752,6 +752,54 @@ func genericStepWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 	return fmt.Sprintf("%s-%d", result1, result2*2), nil
 }
 
+// --- One-shot fault injection used by the step-ID-drift regression test ---
+//
+// faultPool wraps a Pool and, exactly once, makes the operation_outputs read
+// inside checkOperationExecution fail with a retryable ("conn closed") error for
+// a single target workflow. That forces retryWithResult to re-run the DB-layer
+// closure.
+
+type errRow struct{ err error }
+
+func (r errRow) Scan(...any) error { return r.err }
+
+type faultTx struct {
+	Tx
+	p *faultPool
+}
+
+func (t *faultTx) QueryRow(ctx context.Context, query string, args ...any) Row {
+	if strings.Contains(query, "operation_outputs") &&
+		len(args) > 0 && args[0] == t.p.target &&
+		t.p.fired.CompareAndSwap(false, true) {
+		return errRow{errors.New("conn closed")} // retryable per postgresDialect.IsRetryable
+	}
+	return t.Tx.QueryRow(ctx, query, args...)
+}
+
+type faultPool struct {
+	Pool
+	target string       // workflow ID whose operation_outputs read should fault
+	fired  *atomic.Bool // ensures the fault triggers at most once
+}
+
+func (p *faultPool) BeginTx(ctx context.Context, opts TxOptions) (Tx, error) {
+	tx, err := p.Pool.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &faultTx{Tx: tx, p: p}, nil
+}
+
+// sleepStepIDDriftWorkflow does a single durable Sleep, which records exactly one
+// step (DBOS.sleep) at function_id 0.
+func sleepStepIDDriftWorkflow(ctx DBOSContext, _ string) (string, error) {
+	if _, err := Sleep(ctx, time.Millisecond); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
 func TestSteps(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
@@ -858,6 +906,8 @@ func TestSteps(t *testing.T) {
 	}
 	// Register the workflow
 	RegisterWorkflow(dbosCtx, userObjectWorkflow)
+
+	RegisterWorkflow(dbosCtx, sleepStepIDDriftWorkflow)
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
@@ -1061,6 +1111,33 @@ func TestSteps(t *testing.T) {
 		require.Len(t, steps, 2, "expected 2 steps (one for string, one for int)")
 		assert.NotEmpty(t, steps[0].StepName, "first step name should not be empty")
 		assert.NotEmpty(t, steps[1].StepName, "second step name should not be empty")
+	})
+
+	t.Run("StepIDNotReallocatedOnDBRetry", func(t *testing.T) {
+		wfID := "step-id-drift-test"
+
+		s := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		orig := s.pool
+		var fired atomic.Bool
+		s.pool = &faultPool{Pool: orig, target: wfID, fired: &fired}
+		// The listener captured the real pool at Launch and no longer reads the
+		// field; the workflow goroutine is joined via GetResult before we restore,
+		// so this swap is race-free.
+		defer func() { s.pool = orig }()
+
+		handle, err := RunWorkflow(dbosCtx, sleepStepIDDriftWorkflow, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "ok", result)
+		require.True(t, fired.Load(), "fault injection never triggered; the test did not exercise a retry")
+
+		steps, err := GetWorkflowSteps(dbosCtx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1, "expected exactly one recorded step (DBOS.sleep)")
+		require.Equal(t, "DBOS.sleep", steps[0].StepName)
+		require.Equal(t, 0, steps[0].StepID,
+			"step ID was reallocated by the DB-layer retry: nextStepID() must be called outside the retried closure")
 	})
 }
 
@@ -4114,6 +4191,28 @@ func TestSleep(t *testing.T) {
 		// Test the specific message from the error
 		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
 		require.Contains(t, err.Error(), expectedMessagePart)
+	})
+
+	t.Run("SleepContextCancellation", func(t *testing.T) {
+		// Cancelling Sleep's context mid-sleep should interrupt it and return the
+		// partial duration actually slept (less than the full requested duration).
+		sleepCancelWorkflow := func(ctx DBOSContext, _ string) (time.Duration, error) {
+			cancelCtx, cancel := WithCancel(ctx)
+			defer cancel()
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				cancel()
+			}()
+			return Sleep(cancelCtx, time.Minute)
+		}
+		RegisterWorkflow(dbosCtx, sleepCancelWorkflow)
+
+		handle, err := RunWorkflow(dbosCtx, sleepCancelWorkflow, "")
+		require.NoError(t, err, "failed to start sleep workflow")
+
+		slept, err := handle.GetResult()
+		require.Error(t, err, "expected a cancellation error from the interrupted Sleep")
+		assert.Less(t, slept, time.Minute, "expected interrupted Sleep to return a partial duration, got %v", slept)
 	})
 }
 
