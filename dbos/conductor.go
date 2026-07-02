@@ -10,7 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/url"
 	"os"

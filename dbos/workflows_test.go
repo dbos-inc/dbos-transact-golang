@@ -366,6 +366,27 @@ func TestWorkflowsRegistration(t *testing.T) {
 		RegisterWorkflow(freshCtx, simpleWorkflowError, WithWorkflowName("same-name"))
 	})
 
+	t.Run("SameWorkflowDifferentCustomNames", func(t *testing.T) {
+		// Create a fresh DBOS context for this test
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
+
+		// First registration with a custom name should work
+		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("name-a"))
+
+		// Registering the SAME function under a DIFFERENT custom name should panic with
+		// ConflictingRegistrationError: the registry is keyed on the function's FQN
+		// (runtime.FuncForPC), which is identical for the same function value, so the FQN
+		// collision is detected before the second custom name is ever stored.
+		defer func() {
+			r := recover()
+			require.NotNil(t, r, "expected panic from registering the same function under a different custom name but got none")
+			dbosErr, ok := r.(*DBOSError)
+			require.True(t, ok, "expected panic to be *DBOSError, got %T", r)
+			assert.Equal(t, ConflictingRegistrationError, dbosErr.Code)
+		}()
+		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("name-b"))
+	})
+
 	t.Run("RegisterAfterLaunchPanics", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
 		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
@@ -833,6 +854,15 @@ func TestSteps(t *testing.T) {
 
 	RegisterWorkflow(dbosCtx, customNameWorkflow)
 
+	// A workflow that mistakenly runs its step with the outer executor context
+	// (captured from the closure) instead of the workflow context it is handed.
+	wrongCtxWorkflow := func(_ DBOSContext, input string) (string, error) {
+		return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+			return simpleStep(ctx)
+		})
+	}
+	RegisterWorkflow(dbosCtx, wrongCtxWorkflow, WithWorkflowName("wrongCtxWorkflow"))
+
 	// Define user-defined types for testing serialization
 	type StepInput struct {
 		Name      string            `json:"name"`
@@ -928,6 +958,42 @@ func TestSteps(t *testing.T) {
 		// Test the specific message from the 3rd argument
 		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
 		require.Contains(t, err.Error(), expectedMessagePart, "expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
+	})
+
+	t.Run("WorkflowCallsStepWithWrongContext", func(t *testing.T) {
+		// The workflow runs its step with the outer executor context, which carries no
+		// workflow state, so the step must fail with a clear StepExecutionError.
+		handle, err := RunWorkflow(dbosCtx, wrongCtxWorkflow, "echo")
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.Error(t, err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, StepExecutionError, dbosErr.Code)
+		require.ErrorContains(t, err, "workflow state not found in context")
+	})
+
+	t.Run("GuardRejectsNonStepContext", func(t *testing.T) {
+		// checkStepContext is the last-line guard ensuring the step body only ever runs
+		// with the DBOS-provided step context (isWithinStep == true).
+
+		// A plain workflow context (isWithinStep == false) is not a valid step context.
+		wfCtx := WithValue(dbosCtx, workflowStateKey, &workflowState{workflowID: "wf-1"})
+		err := checkStepContext(wfCtx, "wf-1", "myStep")
+		require.Error(t, err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, StepExecutionError, dbosErr.Code)
+		require.ErrorContains(t, err, "step must use the context.Context received from its dbos.Func closure")
+
+		// A context with no workflow state at all is also rejected.
+		err = checkStepContext(dbosCtx, "wf-1", "myStep")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "step must use the context.Context received from its dbos.Func closure")
+
+		// A proper step context passes.
+		stepCtx := WithValue(dbosCtx, workflowStateKey, &workflowState{workflowID: "wf-1", isWithinStep: true})
+		require.NoError(t, checkStepContext(stepCtx, "wf-1", "myStep"))
 	})
 
 	t.Run("StepWithinAStepAreJustFunctions", func(t *testing.T) {
@@ -5560,17 +5626,30 @@ func TestGarbageCollect(t *testing.T) {
 }
 
 // TestSpecialSteps tests that special workflow functions (ListWorkflows, CancelWorkflow,
-// ResumeWorkflow, ForkWorkflow, GetWorkflowSteps) work correctly as durable steps
+// CancelWorkflows, ResumeWorkflow, ForkWorkflow, GetWorkflowSteps, WriteStream,
+// SetWorkflowDelay, DeleteWorkflows) work correctly as durable steps
 func TestSpecialSteps(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	childEvent := NewEvent()
+	child2Event := NewEvent()
 
 	// Child workflow that blocks on an event (for cancellation testing)
 	childWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 		// Wait for event to be set (will be cancelled before this happens)
 		childEvent.Wait()
 		return fmt.Sprintf("auxiliary-result-%s", input), nil
+	}
+
+	// Second child workflow that blocks on its own event (for bulk cancel/delete testing)
+	child2Workflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		child2Event.Wait()
+		return fmt.Sprintf("auxiliary-result-2-%s", input), nil
+	}
+
+	// Workflow enqueued with a delay (for SetWorkflowDelay testing)
+	delayedWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		return input, nil
 	}
 
 	// Main workflow that uses all special steps
@@ -5668,14 +5747,52 @@ func TestSpecialSteps(t *testing.T) {
 			return "", fmt.Errorf("ListWorkflows did not return expected workflows. Found main: %v, child: %v, forked: %v", foundMain, foundChild, foundForked)
 		}
 
-		// Unblock the child
+		// Step 8: Use WriteStream
+		if err := WriteStream(dbosCtx, "special-steps-stream", "stream-value"); err != nil {
+			return "", fmt.Errorf("WriteStream failed: %w", err)
+		}
+
+		// Step 9: Start a second child workflow to use for bulk cancel/delete
+		child2Handle, err := RunWorkflow(dbosCtx, child2Workflow, "test-2")
+		if err != nil {
+			return "", fmt.Errorf("failed to start second child workflow: %w", err)
+		}
+
+		// Step 10: Use CancelWorkflows (bulk) on the second child workflow
+		if err := CancelWorkflows(dbosCtx, []string{child2Handle.GetWorkflowID()}); err != nil {
+			return "", fmt.Errorf("CancelWorkflows failed: %w", err)
+		}
+
+		// Step 11: Use DeleteWorkflows on the (now cancelled) second child workflow
+		if err := DeleteWorkflows(dbosCtx, []string{child2Handle.GetWorkflowID()}); err != nil {
+			return "", fmt.Errorf("DeleteWorkflows failed: %w", err)
+		}
+
+		// Step 12: Enqueue a delayed workflow to use for SetWorkflowDelay
+		delayedHandle, err := RunWorkflow(dbosCtx, delayedWorkflow, "delayed-input", WithQueue("special-steps-queue"), WithDelay(600*time.Second))
+		if err != nil {
+			return "", fmt.Errorf("failed to enqueue delayed workflow: %w", err)
+		}
+
+		// Step 13: Use SetWorkflowDelay to shorten the delay
+		if err := SetWorkflowDelay(dbosCtx, delayedHandle.GetWorkflowID(), WithDelayDuration(300*time.Second)); err != nil {
+			return "", fmt.Errorf("SetWorkflowDelay failed: %w", err)
+		}
+
+		// Unblock the children
 		childEvent.Set()
+		child2Event.Set()
 
 		return "success", nil
 	}
 
 	RegisterWorkflow(dbosCtx, childWorkflow, WithWorkflowName("child-workflow"))
+	RegisterWorkflow(dbosCtx, child2Workflow, WithWorkflowName("child-workflow-2"))
+	RegisterWorkflow(dbosCtx, delayedWorkflow, WithWorkflowName("delayed-workflow"))
 	RegisterWorkflow(dbosCtx, specialStepsWorkflow)
+
+	_, err := RegisterQueue(dbosCtx, "special-steps-queue")
+	require.NoError(t, err, "failed to register queue")
 
 	t.Run("SpecialStepsExecution", func(t *testing.T) {
 		workflowID := uuid.NewString()
@@ -5709,7 +5826,7 @@ func TestSpecialSteps(t *testing.T) {
 		// Check the steps are as expected
 		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
 		require.NoError(t, err, "failed to get workflow steps")
-		require.Len(t, steps, 8, "expected 8 steps")
+		require.Len(t, steps, 14, "expected 14 steps")
 		require.Equal(t, "child-workflow", steps[0].StepName, "first step should be child-workflow")
 		require.Equal(t, "DBOS.cancelWorkflow", steps[1].StepName, "second step should be DBOS.cancelWorkflow")
 		require.Equal(t, "DBOS.retrieveWorkflow", steps[2].StepName, "third step should be DBOS.retrieveWorkflow")
@@ -5718,6 +5835,12 @@ func TestSpecialSteps(t *testing.T) {
 		require.Equal(t, "DBOS.forkWorkflow", steps[5].StepName, "sixth step should be DBOS.forkWorkflow")
 		require.Equal(t, "DBOS.getWorkflowSteps", steps[6].StepName, "seventh step should be DBOS.getWorkflowSteps")
 		require.Equal(t, "DBOS.listWorkflows", steps[7].StepName, "eighth step should be DBOS.listWorkflows")
+		require.Equal(t, "DBOS.writeStream", steps[8].StepName, "ninth step should be DBOS.writeStream")
+		require.Equal(t, "child-workflow-2", steps[9].StepName, "tenth step should be child-workflow-2")
+		require.Equal(t, "DBOS.cancelWorkflows", steps[10].StepName, "eleventh step should be DBOS.cancelWorkflows")
+		require.Equal(t, "DBOS.deleteWorkflows", steps[11].StepName, "twelfth step should be DBOS.deleteWorkflows")
+		require.Equal(t, "delayed-workflow", steps[12].StepName, "thirteenth step should be delayed-workflow")
+		require.Equal(t, "DBOS.setWorkflowDelay", steps[13].StepName, "fourteenth step should be DBOS.setWorkflowDelay")
 	})
 }
 

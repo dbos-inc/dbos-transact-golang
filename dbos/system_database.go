@@ -67,7 +67,7 @@ type systemDatabase interface {
 	// Communication observability
 	getAllEvents(ctx context.Context, workflowID string) ([]eventRecord, error)
 	getAllNotifications(ctx context.Context, workflowID string) ([]notificationRecord, error)
-	getAllStreamEntries(ctx context.Context, workflowID string) ([]streamRecord, error)
+	getAllStreamEntries(ctx context.Context, workflowID string) ([]streamEntry, error)
 
 	// Streams
 	writeStream(ctx context.Context, input writeStreamDBInput) error
@@ -805,7 +805,7 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		return nil, fmt.Errorf("failed to acquire connection to detect database type: %v", err)
 	}
 	defer conn.Release()
-	isCockroach := isCockroachDB(ctx, conn.Conn())
+	isCockroach := isCockroachDB(conn.Conn())
 	if isCockroach {
 		logger.Info("Detected CockroachDB")
 	}
@@ -3842,6 +3842,7 @@ type readStreamDBInput struct {
 }
 
 type streamEntry struct {
+	Key           string
 	Value         string
 	Offset        int
 	Serialization string
@@ -4024,17 +4025,10 @@ func (s *sysDB) getAllNotifications(ctx context.Context, workflowID string) ([]n
 	return results, nil
 }
 
-// streamRecord is one row from the streams table; rows holding the closed sentinel are filtered out.
-type streamRecord struct {
-	Key           string
-	Value         string
-	Serialization string
-}
-
 // getAllStreamEntries returns every stream entry for the workflow, ordered by (key, offset).
 // Rows holding the stream-closed sentinel are filtered out; callers may group by Key.
-func (s *sysDB) getAllStreamEntries(ctx context.Context, workflowID string) ([]streamRecord, error) {
-	query := s.renderSQL(`SELECT key, value, serialization FROM %sstreams
+func (s *sysDB) getAllStreamEntries(ctx context.Context, workflowID string) ([]streamEntry, error) {
+	query := s.renderSQL(`SELECT key, value, "offset", serialization FROM %sstreams
 		WHERE workflow_uuid = $1
 		ORDER BY key, "offset"`,
 		s.dialect.SchemaPrefix(s.schema))
@@ -4045,11 +4039,11 @@ func (s *sysDB) getAllStreamEntries(ctx context.Context, workflowID string) ([]s
 	}
 	defer rows.Close()
 
-	var records []streamRecord
+	var records []streamEntry
 	for rows.Next() {
-		var rec streamRecord
+		var rec streamEntry
 		var serialization *string
-		if err := rows.Scan(&rec.Key, &rec.Value, &serialization); err != nil {
+		if err := rows.Scan(&rec.Key, &rec.Value, &rec.Offset, &serialization); err != nil {
 			return nil, fmt.Errorf("failed to scan stream row: %w", err)
 		}
 		if rec.Value == _DBOS_STREAM_CLOSED_SENTINEL {
@@ -5236,7 +5230,7 @@ func (s *sysDB) getLatestApplicationVersion(ctx context.Context) (*VersionInfo, 
 /******* UTILS ********/
 /*******************************/
 
-func isCockroachDB(ctx context.Context, conn *pgx.Conn) bool {
+func isCockroachDB(conn *pgx.Conn) bool {
 	return conn.PgConn().ParameterStatus("crdb_version") != ""
 }
 
@@ -5244,7 +5238,7 @@ func isCockroachDB(ctx context.Context, conn *pgx.Conn) bool {
 // For CockroachDB, it terminates active connections first, then drops the database.
 // For PostgreSQL, it uses the WITH (FORCE) syntax.
 func dropDatabaseIfExists(ctx context.Context, conn *pgx.Conn, dbName string) error {
-	crdb := isCockroachDB(ctx, conn)
+	crdb := isCockroachDB(conn)
 
 	sanitizedDBName := pgx.Identifier{dbName}.Sanitize()
 

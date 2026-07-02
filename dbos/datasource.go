@@ -197,7 +197,7 @@ func (ds *DataSource) resolveDialect(c *dbosContext) error {
 			return false, err
 		}
 		defer conn.Release()
-		return isCockroachDB(c, conn.Conn()), nil
+		return isCockroachDB(conn.Conn()), nil
 	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return err
@@ -447,7 +447,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	}
 	if recordedOutput != nil {
 		return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization},
-			deserializeWorkflowError(recordedOutput.errStr, recordedOutput.serialization)
+			deserializeWorkflowError(recordedOutput.errStr)
 	}
 
 	// Layer 2: did the user transaction commit on a previous run (crash window
@@ -469,7 +469,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, cerr)
 		}
 		return stepCheckpointedOutcome{value: completion.output, serialization: replaySer},
-			deserializeWorkflowError(completion.errStr, replaySer)
+			deserializeWorkflowError(completion.errStr)
 	}
 
 	// Fresh execution.

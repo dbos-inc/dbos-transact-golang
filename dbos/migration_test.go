@@ -30,7 +30,7 @@ func detectCockroach(t *testing.T, pool *pgxpool.Pool) bool {
 	conn, err := pool.Acquire(context.Background())
 	require.NoError(t, err)
 	defer conn.Release()
-	return isCockroachDB(context.Background(), conn.Conn())
+	return isCockroachDB(conn.Conn())
 }
 
 // TestShouldMigrate verifies the early-exit predicate used to skip the full
@@ -148,7 +148,7 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 	// are not online so cleanupInvalidIndexes is never invoked on CRDB.
 	conn, err := pool.Acquire(bg)
 	require.NoError(t, err)
-	if isCockroachDB(bg, conn.Conn()) {
+	if isCockroachDB(conn.Conn()) {
 		conn.Release()
 		t.Skip("invalid-index recovery is Postgres-only")
 	}

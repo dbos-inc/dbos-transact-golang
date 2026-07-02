@@ -1678,7 +1678,7 @@ func TestDebouncerClient(t *testing.T) {
 			conn, err := pgxPool.Acquire(serverCtx)
 			require.NoError(t, err)
 			defer conn.Release()
-			isCockroach = isCockroachDB(context.Background(), conn.Conn())
+			isCockroach = isCockroachDB(conn.Conn())
 		}
 
 		var delay time.Duration

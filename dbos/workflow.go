@@ -222,9 +222,8 @@ func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
 		return *new(R), false, nil
 	}
 	recordedOutputs, err := retryWithResult(dbosCtx, func() (*recordedResult, error) {
-		uncancelableCtx, cancel := context.WithCancel(dbosCtx)
-		defer cancel()
-		return dbosCtx.(*dbosContext).systemDB.checkOperationExecution(uncancelableCtx, checkOperationExecutionDBInput{
+		uncancellableCtx := context.WithoutCancel(dbosCtx)
+		return dbosCtx.(*dbosContext).systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 			workflowID: workflowState.workflowID,
 			stepID:     workflowState.stepID + 1,
 			stepName:   "DBOS.getResult",
@@ -371,7 +370,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	// awaitErr is a real DB/network/cancellation error; the workflow's recorded error is in awaitResult.errStr
 	err = awaitErr
 	if awaitErr == nil && awaitResult.errStr != nil {
-		err = deserializeWorkflowError(awaitResult.errStr, awaitResult.serialization)
+		err = deserializeWorkflowError(awaitResult.errStr)
 	}
 
 	// Deserialize the result directly into the target type
@@ -1566,7 +1565,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			}, withRetrierLogger(c.logger))
 			err = awaitErr
 			if awaitErr == nil && awaitOut != nil && awaitOut.errStr != nil {
-				err = deserializeWorkflowError(awaitOut.errStr, awaitOut.serialization)
+				err = deserializeWorkflowError(awaitOut.errStr)
 			}
 			var encodedResult any
 			var ser string
@@ -1857,6 +1856,18 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 	return &preparedStep{WorkflowID: wfState.workflowID, StepOpts: stepOpts, StepState: &stepState, IsWithinStep: false}, nil
 }
 
+// checkStepContext verifies that ctx carries workflow state marked as within a step.
+// DBOS invokes step bodies with a dedicated step context (isWithinStep == true); if that
+// invariant is broken (e.g. the raw workflow context is passed instead of the step context),
+// return a clear StepExecutionError rather than running the step body with a mis-wired context.
+func checkStepContext(ctx DBOSContext, workflowID, stepName string) error {
+	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil || !wfState.isWithinStep {
+		return newStepExecutionError(workflowID, stepName, fmt.Errorf("step must use the context.Context received from its dbos.Func closure."))
+	}
+	return nil
+}
+
 // executeStepWithRetry runs runOnce (the step body) and retries with backoff on error when maxRetries > 0.
 func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptions, runOnce func() (any, error)) (stepOutput any, stepError error) {
 	work := func() error {
@@ -2001,12 +2012,17 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	if recordedOutput != nil {
 		// Return the encoded output wrapped in stepCheckpointedOutcome
 		// This allows RunAsStep[R] to distinguish encoded values from direct values
-		return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, deserializeWorkflowError(recordedOutput.errStr, recordedOutput.serialization)
+		return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, deserializeWorkflowError(recordedOutput.errStr)
 	}
 
 	stepCtx := WithValue(c, workflowStateKey, stepState)
 	stepStartTime := time.Now()
-	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx) })
+	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) {
+		if err := checkStepContext(stepCtx, stepState.workflowID, stepOpts.stepName); err != nil {
+			return nil, err
+		}
+		return fn(stepCtx)
+	})
 
 	// Serialize step output before recording
 	ser := resolveEncoder(c)
@@ -2146,7 +2162,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
 		}
 		if recordedOutput != nil {
-			return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, deserializeWorkflowError(recordedOutput.errStr, recordedOutput.serialization)
+			return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, deserializeWorkflowError(recordedOutput.errStr)
 		}
 
 		stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
@@ -4290,15 +4306,19 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 				} else if c.serializer != nil {
 					decoded, err := c.serializer.Decode(encodedInput)
 					if err != nil {
-						return nil, fmt.Errorf("failed to decode workflow input for %s: %w", workflows[i].ID, err)
+						c.logger.Warn("failed to decode workflow input, storing error instead", "workflow_id", workflows[i].ID, "error", err)
+						workflows[i].Input = fmt.Sprintf("failed to decode workflow input: %v", err)
+					} else {
+						workflows[i].Input = decoded
 					}
-					workflows[i].Input = decoded
 				} else {
 					decodedBytes, err := base64.StdEncoding.DecodeString(*encodedInput)
 					if err != nil {
-						return nil, fmt.Errorf("failed to decode base64 workflow input for %s: %w", workflows[i].ID, err)
+						c.logger.Warn("failed to decode base64 workflow input, storing error instead", "workflow_id", workflows[i].ID, "error", err)
+						workflows[i].Input = fmt.Sprintf("failed to decode workflow input: %v", err)
+					} else {
+						workflows[i].Input = string(decodedBytes)
 					}
-					workflows[i].Input = string(decodedBytes)
 				}
 			}
 			if params.loadOutput && workflows[i].Output != nil {
@@ -4314,20 +4334,24 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 				} else if c.serializer != nil {
 					decoded, err := c.serializer.Decode(encodedOutput)
 					if err != nil {
-						return nil, fmt.Errorf("failed to decode workflow output for %s: %w", workflows[i].ID, err)
+						c.logger.Warn("failed to decode workflow output, storing error instead", "workflow_id", workflows[i].ID, "error", err)
+						workflows[i].Output = fmt.Sprintf("failed to decode workflow output: %v", err)
+					} else {
+						workflows[i].Output = decoded
 					}
-					workflows[i].Output = decoded
 				} else {
 					decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
 					if err != nil {
-						return nil, fmt.Errorf("failed to decode base64 workflow output for %s: %w", workflows[i].ID, err)
+						c.logger.Warn("failed to decode base64 workflow output, storing error instead", "workflow_id", workflows[i].ID, "error", err)
+						workflows[i].Output = fmt.Sprintf("failed to decode workflow output: %v", err)
+					} else {
+						workflows[i].Output = string(decodedBytes)
 					}
-					workflows[i].Output = string(decodedBytes)
 				}
 			}
 			if params.loadOutput && workflows[i].Error != nil {
 				s := workflows[i].Error.Error()
-				workflows[i].Error = deserializeWorkflowError(&s, workflows[i].Serialization)
+				workflows[i].Error = deserializeWorkflowError(&s)
 			}
 		}
 	}
@@ -4467,7 +4491,7 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string, opts ..
 		var stepErr error
 		if step.Error != nil {
 			s := step.Error.Error()
-			stepErr = deserializeWorkflowError(&s, step.Serialization)
+			stepErr = deserializeWorkflowError(&s)
 		}
 		stepInfos[i] = StepInfo{
 			StepID:          step.StepID,
@@ -4494,16 +4518,20 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string, opts ..
 				// Custom serializer: fully decode using the serializer
 				decoded, err := c.serializer.Decode(encodedOutput)
 				if err != nil {
-					return nil, fmt.Errorf("failed to decode step output for step %d: %w", steps[i].StepID, err)
+					c.logger.Warn("failed to decode step output, storing error instead", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
+					stepInfos[i].Output = fmt.Sprintf("failed to decode step output: %v", err)
+				} else {
+					stepInfos[i].Output = decoded
 				}
-				stepInfos[i].Output = decoded
 			} else {
 				// Default JSON: base64 decode to get the JSON string
 				decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
 				if err != nil {
-					return nil, fmt.Errorf("failed to decode base64 step output for step %d: %w", steps[i].StepID, err)
+					c.logger.Warn("failed to decode base64 step output, storing error instead", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
+					stepInfos[i].Output = fmt.Sprintf("failed to decode step output: %v", err)
+				} else {
+					stepInfos[i].Output = string(decodedBytes)
 				}
-				stepInfos[i].Output = string(decodedBytes)
 			}
 		}
 	}
