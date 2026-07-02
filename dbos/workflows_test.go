@@ -7738,3 +7738,246 @@ func TestGetStepAggregates(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+var (
+	attrBlockingStartEvent = NewEvent()
+	attrBlockingBlockEvent = NewEvent()
+)
+
+func attrChildWorkflow(dbosCtx DBOSContext, _ string) (string, error) {
+	return "child", nil
+}
+
+// attrParentWorkflow runs a child workflow and returns the child's workflow ID
+func attrParentWorkflow(dbosCtx DBOSContext, _ string) (string, error) {
+	handle, err := RunWorkflow(dbosCtx, attrChildWorkflow, "")
+	if err != nil {
+		return "", err
+	}
+	if _, err := handle.GetResult(); err != nil {
+		return "", err
+	}
+	return handle.GetWorkflowID(), nil
+}
+
+func attrNoopWorkflow(dbosCtx DBOSContext, x int) (int, error) {
+	return x, nil
+}
+
+func attrBlockingWorkflow(dbosCtx DBOSContext, _ string) (string, error) {
+	attrBlockingStartEvent.Set()
+	attrBlockingBlockEvent.Wait()
+	return "done", nil
+}
+
+func attrDebouncedWorkflow(dbosCtx DBOSContext, x int) (int, error) {
+	return x, nil
+}
+
+func TestWorkflowAttributes(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	RegisterWorkflow(dbosCtx, attrParentWorkflow)
+	RegisterWorkflow(dbosCtx, attrChildWorkflow)
+	RegisterWorkflow(dbosCtx, attrNoopWorkflow)
+	RegisterWorkflow(dbosCtx, attrBlockingWorkflow)
+	RegisterWorkflow(dbosCtx, attrDebouncedWorkflow)
+
+	queue, err := RegisterQueue(dbosCtx, "attr-test-queue")
+	require.NoError(t, err)
+
+	debouncer := NewDebouncer(dbosCtx, attrDebouncedWorkflow)
+
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	// matchedIDs returns the set of workflow IDs whose attributes contain all the given key-value pairs
+	matchedIDs := func(t *testing.T, attributes map[string]any) map[string]bool {
+		t.Helper()
+		statuses, err := ListWorkflows(dbosCtx, WithFilterAttributes(attributes))
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(statuses))
+		for _, s := range statuses {
+			ids[s.ID] = true
+		}
+		return ids
+	}
+
+	t.Run("DirectInvocation", func(t *testing.T) {
+		wfid := uuid.NewString()
+		attributes := map[string]any{"customer": "acme", "tier": 3}
+		handle, err := RunWorkflow(dbosCtx, attrParentWorkflow, "", WithWorkflowID(wfid), WithWorkflowAttributes(attributes))
+		require.NoError(t, err)
+		childID, err := handle.GetResult()
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		// Numbers round-trip through JSON as float64
+		assert.Equal(t, map[string]any{"customer": "acme", "tier": float64(3)}, status.Attributes)
+
+		// Child workflows do not inherit their parent's attributes
+		childStatuses, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{childID}))
+		require.NoError(t, err)
+		require.Len(t, childStatuses, 1)
+		assert.Nil(t, childStatuses[0].Attributes)
+
+		// Workflows started without the option have no attributes
+		plainHandle, err := RunWorkflow(dbosCtx, attrParentWorkflow, "")
+		require.NoError(t, err)
+		_, err = plainHandle.GetResult()
+		require.NoError(t, err)
+		plainStatus, err := plainHandle.GetStatus()
+		require.NoError(t, err)
+		assert.Nil(t, plainStatus.Attributes)
+	})
+
+	t.Run("Enqueue", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 5, WithQueue(queue.GetName()), WithWorkflowAttributes(map[string]any{"source": "queue"}))
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 5, result)
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"source": "queue"}, status.Attributes)
+	})
+
+	t.Run("Fork", func(t *testing.T) {
+		wfid := uuid.NewString()
+		handle, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 7, WithWorkflowID(wfid), WithWorkflowAttributes(map[string]any{"customer": "acme-fork"}))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		forkedHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: wfid})
+		require.NoError(t, err)
+		_, err = forkedHandle.GetResult()
+		require.NoError(t, err)
+		forkedStatus, err := forkedHandle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"customer": "acme-fork"}, forkedStatus.Attributes)
+	})
+
+	t.Run("ClientEnqueue", func(t *testing.T) {
+		config := ClientConfig{
+			DatabaseURL: backendDatabaseURL(t),
+		}
+		client, err := NewClient(dbosCtx, config)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			client.Shutdown(30 * time.Second)
+		})
+
+		// Enqueue to a queue nothing consumes; the workflow stays ENQUEUED, which
+		// is enough to check the attributes recorded at creation.
+		handle, err := client.Enqueue("unconsumed-queue", "client-workflow", 1, WithEnqueueAttributes(map[string]any{"source": "client", "n": 1}))
+		require.NoError(t, err)
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"source": "client", "n": float64(1)}, status.Attributes)
+
+		if !useSqliteBackend() {
+			handle2, err := client.Enqueue("unconsumed-queue", "client-workflow", 2, WithEnqueueAttributes(map[string]any{"source": "client", "n": 2}))
+			require.NoError(t, err)
+			statuses, err := client.ListWorkflows(WithFilterAttributes(map[string]any{"source": "client"}))
+			require.NoError(t, err)
+			ids := make(map[string]bool, len(statuses))
+			for _, s := range statuses {
+				ids[s.ID] = true
+			}
+			assert.Equal(t, map[string]bool{handle.GetWorkflowID(): true, handle2.GetWorkflowID(): true}, ids)
+			queued, err := client.ListWorkflows(WithQueuesOnly(), WithFilterAttributes(map[string]any{"n": 2}))
+			require.NoError(t, err)
+			require.Len(t, queued, 1)
+			assert.Equal(t, handle2.GetWorkflowID(), queued[0].ID)
+		}
+	})
+
+	t.Run("ListFilter", func(t *testing.T) {
+		skipIfSqlite(t, "attribute filters require JSONB containment")
+
+		h1, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 1, WithWorkflowAttributes(map[string]any{"customer": "acme-list", "tier": 1, "beta": true, "note": nil}))
+		require.NoError(t, err)
+		h2, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 2, WithWorkflowAttributes(map[string]any{"customer": "bigco-list", "tier": 2, "meta": map[string]any{"region": "us-east-1"}}))
+		require.NoError(t, err)
+		_, err = h1.GetResult()
+		require.NoError(t, err)
+		_, err = h2.GetResult()
+		require.NoError(t, err)
+
+		// Single key
+		assert.Equal(t, map[string]bool{h1.GetWorkflowID(): true}, matchedIDs(t, map[string]any{"customer": "acme-list"}))
+		// Multiple keys AND together
+		assert.Equal(t, map[string]bool{h2.GetWorkflowID(): true}, matchedIDs(t, map[string]any{"customer": "bigco-list", "tier": 2}))
+		// Value mismatch on one key matches nothing
+		assert.Empty(t, matchedIDs(t, map[string]any{"customer": "acme-list", "tier": 2}))
+		// Non-string value types
+		assert.Equal(t, map[string]bool{h1.GetWorkflowID(): true}, matchedIDs(t, map[string]any{"beta": true}))
+		assert.Equal(t, map[string]bool{h1.GetWorkflowID(): true}, matchedIDs(t, map[string]any{"note": nil}))
+		assert.Equal(t, map[string]bool{h2.GetWorkflowID(): true}, matchedIDs(t, map[string]any{"meta": map[string]any{"region": "us-east-1"}}))
+		// Composes with other filters
+		composed, err := ListWorkflows(dbosCtx, WithFilterAttributes(map[string]any{"tier": 1}), WithWorkflowIDs([]string{h2.GetWorkflowID()}))
+		require.NoError(t, err)
+		assert.Empty(t, composed)
+		// Workflows without attributes never match
+		assert.Empty(t, matchedIDs(t, map[string]any{"missing": "key"}))
+	})
+
+	t.Run("ListQueued", func(t *testing.T) {
+		skipIfSqlite(t, "attribute filters require JSONB containment")
+
+		handle, err := RunWorkflow(dbosCtx, attrBlockingWorkflow, "", WithQueue(queue.GetName()), WithWorkflowAttributes(map[string]any{"side": "queued"}))
+		require.NoError(t, err)
+		attrBlockingStartEvent.Wait()
+
+		queued, err := ListWorkflows(dbosCtx, WithQueuesOnly(), WithFilterAttributes(map[string]any{"side": "queued"}))
+		require.NoError(t, err)
+		require.Len(t, queued, 1)
+		assert.Equal(t, handle.GetWorkflowID(), queued[0].ID)
+
+		other, err := ListWorkflows(dbosCtx, WithQueuesOnly(), WithFilterAttributes(map[string]any{"side": "other"}))
+		require.NoError(t, err)
+		assert.Empty(t, other)
+
+		attrBlockingBlockEvent.Set()
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+	})
+
+	t.Run("FilterUnsupportedOnSQLite", func(t *testing.T) {
+		if !useSqliteBackend() {
+			t.Skip("tests the SQLite-only error path")
+		}
+		_, err := ListWorkflows(dbosCtx, WithFilterAttributes(map[string]any{"customer": "acme"}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not supported")
+	})
+
+	t.Run("NonSerializableAttributesRejected", func(t *testing.T) {
+		_, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 1, WithWorkflowAttributes(map[string]any{"bad": make(chan int)}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to marshal workflow attributes")
+	})
+
+	t.Run("Debouncer", func(t *testing.T) {
+		handle, err := debouncer.Debounce(dbosCtx, "attr-key", 100*time.Millisecond, 9, WithWorkflowAttributes(map[string]any{"source": "debouncer"}))
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 9, result)
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"source": "debouncer"}, status.Attributes)
+
+		// The internal debouncer workflow itself does not get the user's attributes
+		internalStatuses, err := ListWorkflows(dbosCtx, WithName(debouncer.internalDebouncerFQN))
+		require.NoError(t, err)
+		require.NotEmpty(t, internalStatuses)
+		for _, s := range internalStatuses {
+			if !strings.Contains(s.Name, "internalDebouncerWF") {
+				continue
+			}
+			assert.Nil(t, s.Attributes)
+		}
+	})
+}
