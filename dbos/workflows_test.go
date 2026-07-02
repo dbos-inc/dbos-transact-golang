@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -5137,6 +5138,22 @@ func gcBlockedWorkflow(dbosCtx DBOSContext, event *Event) (string, error) {
 }
 
 func TestGarbageCollect(t *testing.T) {
+	setWorkflowCreatedAt := func(t *testing.T, dbosCtx DBOSContext, workflowIDs []string, createdAt int64) {
+		t.Helper()
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		query := sysDB.renderSQL(`UPDATE %sworkflow_status SET created_at = $1 WHERE workflow_uuid = $2`, sysDB.dialect.SchemaPrefix(sysDB.schema))
+		for _, workflowID := range workflowIDs {
+			_, err := sysDB.pool.Exec(dbosCtx, query, createdAt, workflowID)
+			require.NoError(t, err, "failed to set created_at for workflow %s", workflowID)
+		}
+	}
+
+	sortedWorkflowIDsDesc := func(workflowIDs []string) []string {
+		sorted := append([]string(nil), workflowIDs...)
+		sort.Sort(sort.Reverse(sort.StringSlice(sorted)))
+		return sorted
+	}
+
 	t.Run("GarbageCollectWithOffset", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
 		databaseURL := backendDatabaseURL(t)
@@ -5160,6 +5177,7 @@ func TestGarbageCollect(t *testing.T) {
 		require.NoError(t, err, "failed to start blocked workflow")
 
 		var completedHandles []WorkflowHandle[int]
+		var completedIDs []string
 		for i := range numWorkflows {
 			handle, err := RunWorkflow(dbosCtx, gcTestWorkflow, i)
 			require.NoError(t, err, "failed to start test workflow %d", i)
@@ -5167,7 +5185,12 @@ func TestGarbageCollect(t *testing.T) {
 			require.NoError(t, err, "failed to get result from test workflow %d", i)
 			require.Equal(t, i, result, "expected result %d, got %d", i, result)
 			completedHandles = append(completedHandles, handle)
+			completedIDs = append(completedIDs, handle.GetWorkflowID())
 		}
+
+		// Force identical millisecond timestamps for completed workflows so the
+		// row-threshold GC path must apply its workflow_uuid tiebreaker.
+		setWorkflowCreatedAt(t, dbosCtx, completedIDs, time.Now().UnixMilli())
 
 		// Verify exactly 11 workflows exist before GC (1 blocked + 10 completed)
 		workflows, err := ListWorkflows(dbosCtx)
@@ -5206,18 +5229,16 @@ func TestGarbageCollect(t *testing.T) {
 			}
 		}
 
-		// Verify that the 5 newest completed workflows are preserved
-		// The completedHandles slice is in order of creation (0 is oldest, 9 is newest)
-		// So indices 5-9 (the last 5) should be preserved
+		// All completed workflows share the same created_at, so GC should keep the
+		// threshold newest rows according to workflow_uuid DESC.
+		expectedRetainedCompleted := sortedWorkflowIDsDesc(completedIDs)[:threshold]
+		expectedRetainedSet := make(map[string]bool, len(expectedRetainedCompleted))
+		for _, workflowID := range expectedRetainedCompleted {
+			expectedRetainedSet[workflowID] = true
+		}
 		for i := range numWorkflows {
 			wfID := completedHandles[i].GetWorkflowID()
-			if i < numWorkflows-threshold {
-				// Older workflows (indices 0-4) should be deleted
-				require.False(t, remainingIDs[wfID], "older workflow at index %d (ID: %s) should have been deleted", i, wfID)
-			} else {
-				// Newer workflows (indices 5-9) should be preserved
-				require.True(t, remainingIDs[wfID], "newer workflow at index %d (ID: %s) should have been preserved", i, wfID)
-			}
+			require.Equal(t, expectedRetainedSet[wfID], remainingIDs[wfID], "unexpected retention for workflow at index %d (ID: %s)", i, wfID)
 		}
 
 		// Complete the blocked workflow
@@ -5398,13 +5419,19 @@ func TestGarbageCollect(t *testing.T) {
 		require.NoError(t, err, "failed to start blocked workflow")
 
 		// Execute normal workflows to completion
+		completedIDs := make([]string, 0, numWorkflows)
 		for i := range numWorkflows {
 			handle, err := RunWorkflow(dbosCtx, gcTestWorkflow, i)
 			require.NoError(t, err, "failed to start test workflow %d", i)
 			result, err := handle.GetResult()
 			require.NoError(t, err, "failed to get result from test workflow %d", i)
 			require.Equal(t, i, result, "expected result %d, got %d", i, result)
+			completedIDs = append(completedIDs, handle.GetWorkflowID())
 		}
+
+		// Force all completed workflows onto the same millisecond to reproduce the
+		// original flake deterministically.
+		setWorkflowCreatedAt(t, dbosCtx, completedIDs, time.Now().UnixMilli())
 
 		// Verify exactly 6 workflows exist (1 blocked + 5 completed)
 		workflows, err := ListWorkflows(dbosCtx)
@@ -5440,6 +5467,7 @@ func TestGarbageCollect(t *testing.T) {
 		require.Equal(t, 2, len(workflows), "expected exactly 2 workflows after GC (1 newest + 1 pending)")
 
 		// Verify pending workflow still exists
+		expectedRetainedCompletedID := sortedWorkflowIDsDesc(completedIDs)[0]
 		found := false
 		pendingCount = 0
 		completedCount = 0
@@ -5453,6 +5481,7 @@ func TestGarbageCollect(t *testing.T) {
 				pendingCount++
 			case WorkflowStatusSuccess:
 				completedCount++
+				require.Equal(t, expectedRetainedCompletedID, wf.ID, "expected GC to retain the workflow with the highest workflow_uuid at the cutoff timestamp")
 			}
 		}
 		require.True(t, found, "pending workflow should remain")

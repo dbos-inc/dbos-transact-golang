@@ -1786,16 +1786,19 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 	}
 
 	cutoffTimestamp := input.cutoffEpochTimestampMs
+	var rowsBasedCutoffWorkflowID string
+	useRowsThresholdCutoff := false
 
-	// If rowsThreshold is provided, get the timestamp of the Nth newest workflow
+	// If rowsThreshold is provided, get the Nth newest workflow using workflow_uuid
+	// as a deterministic tiebreaker for workflows created in the same millisecond.
 	if input.rowsThreshold != nil {
-		query := s.renderSQL(`SELECT created_at
+		query := s.renderSQL(`SELECT created_at, workflow_uuid
 				  FROM %sworkflow_status
-				  ORDER BY created_at DESC
+				  ORDER BY created_at DESC, workflow_uuid DESC
 				  LIMIT 1 OFFSET $1`, s.dialect.SchemaPrefix(s.schema))
 
 		var rowsBasedCutoff int64
-		err := s.pool.QueryRow(ctx, query, *input.rowsThreshold-1).Scan(&rowsBasedCutoff)
+		err := s.pool.QueryRow(ctx, query, *input.rowsThreshold-1).Scan(&rowsBasedCutoff, &rowsBasedCutoffWorkflowID)
 		if err != nil && err != pgx.ErrNoRows {
 			return fmt.Errorf("failed to query cutoff timestamp by rows threshold: %w", err)
 		}
@@ -1804,6 +1807,9 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 		// Use the cutoff timestamp found in the database
 		if rowsBasedCutoff > 0 && cutoffTimestamp == nil || (cutoffTimestamp != nil && rowsBasedCutoff > *cutoffTimestamp) {
 			cutoffTimestamp = &rowsBasedCutoff
+			useRowsThresholdCutoff = true
+		} else {
+			rowsBasedCutoffWorkflowID = ""
 		}
 	}
 
@@ -1812,16 +1818,36 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 		return nil
 	}
 
-	// Delete all workflows older than cutoff that are NOT PENDING, ENQUEUED, or DELAYED
-	query := s.renderSQL(`DELETE FROM %sworkflow_status
+	var (
+		commandTag Result
+		err        error
+	)
+	if useRowsThresholdCutoff && rowsBasedCutoffWorkflowID != "" {
+		// When the row-threshold cutoff wins, delete rows strictly older than the
+		// chosen (created_at, workflow_uuid) pair so ties at the cutoff millisecond
+		// do not retain extra completed workflows.
+		query := s.renderSQL(`DELETE FROM %sworkflow_status
+			  WHERE (created_at < $1 OR (created_at = $1 AND workflow_uuid < $2))
+			    AND status NOT IN ($3, $4, $5)`, s.dialect.SchemaPrefix(s.schema))
+
+		commandTag, err = s.pool.Exec(ctx, query,
+			*cutoffTimestamp,
+			rowsBasedCutoffWorkflowID,
+			WorkflowStatusPending,
+			WorkflowStatusEnqueued,
+			WorkflowStatusDelayed)
+	} else {
+		// Delete all workflows older than cutoff that are NOT PENDING, ENQUEUED, or DELAYED.
+		query := s.renderSQL(`DELETE FROM %sworkflow_status
 			  WHERE created_at < $1
 			    AND status NOT IN ($2, $3, $4)`, s.dialect.SchemaPrefix(s.schema))
 
-	commandTag, err := s.pool.Exec(ctx, query,
-		*cutoffTimestamp,
-		WorkflowStatusPending,
-		WorkflowStatusEnqueued,
-		WorkflowStatusDelayed)
+		commandTag, err = s.pool.Exec(ctx, query,
+			*cutoffTimestamp,
+			WorkflowStatusPending,
+			WorkflowStatusEnqueued,
+			WorkflowStatusDelayed)
+	}
 
 	if err != nil {
 		return fmt.Errorf("failed to garbage collect workflows: %w", err)
@@ -1830,6 +1856,7 @@ func (s *sysDB) garbageCollectWorkflows(ctx context.Context, input garbageCollec
 	deletedCount, _ := commandTag.RowsAffected()
 	s.logger.Info("Garbage collected workflows",
 		"cutoff_timestamp", *cutoffTimestamp,
+		"cutoff_workflow_id", rowsBasedCutoffWorkflowID,
 		"deleted_count", deletedCount)
 
 	return nil
