@@ -90,6 +90,11 @@ type Dialect interface {
 	// INSERT/UPDATE/DELETE (pg yes, sqlite no).
 	SupportsDataModifyingCTE() bool
 
+	// SupportsAttributesContainment reports whether the dialect can filter
+	// workflows by JSONB attribute containment (@>). SQLite's JSON functions
+	// cannot faithfully reproduce it, so the filter is rejected there.
+	SupportsAttributesContainment() bool
+
 	// IsUniqueViolation reports whether err represents a unique-constraint
 	// violation surfaced from the driver.
 	IsUniqueViolation(err error) bool
@@ -194,9 +199,10 @@ func (postgresDialect) QueueDequeueIsolation(snapshot bool) IsoLevel {
 	}
 	return IsoLevelReadCommitted
 }
-func (postgresDialect) SupportsListenNotify() bool     { return true }
-func (postgresDialect) SupportsArrayParameters() bool  { return true }
-func (postgresDialect) SupportsDataModifyingCTE() bool { return true }
+func (postgresDialect) SupportsListenNotify() bool          { return true }
+func (postgresDialect) SupportsArrayParameters() bool       { return true }
+func (postgresDialect) SupportsDataModifyingCTE() bool      { return true }
+func (postgresDialect) SupportsAttributesContainment() bool { return true }
 
 // pgErrCode extracts the SQLSTATE code from a pgconn.PgError, or "" if err is
 // not a pg error.
@@ -321,6 +327,7 @@ func (sqliteDialect) QueueDequeueIsolation(_ bool) IsoLevel { return IsoLevelDef
 func (sqliteDialect) SupportsListenNotify() bool            { return false }
 func (sqliteDialect) SupportsArrayParameters() bool         { return false }
 func (sqliteDialect) SupportsDataModifyingCTE() bool        { return false }
+func (sqliteDialect) SupportsAttributesContainment() bool   { return false }
 
 // Classify sqlite errors via modernc's typed *sqlite.Error and the extended
 // result code constants in modernc.org/sqlite/lib. The Code() return is the

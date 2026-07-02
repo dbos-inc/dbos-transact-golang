@@ -528,6 +528,9 @@ func internalDebouncerWF[P any, R any](ctx DBOSContext, input debouncerInput[P])
 	if input.WorkflowOptions.QueuePartitionKey != "" {
 		workflowOpts = append(workflowOpts, WithQueuePartitionKey(input.WorkflowOptions.QueuePartitionKey))
 	}
+	if len(input.WorkflowOptions.WorkflowAttributes) > 0 {
+		workflowOpts = append(workflowOpts, WithWorkflowAttributes(input.WorkflowOptions.WorkflowAttributes))
+	}
 
 	// We use the wrapped, type-erased workflow wrapper from the workflow registry that calls ctx.RunWorkflow
 	// Which doesn't do any pre-encoding of the input, and calls a type-erased function that expects an encoded input
