@@ -2165,7 +2165,24 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 			return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, deserializeWorkflowError(recordedOutput.errStr)
 		}
 
-		stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
+		stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) {
+			// Without a savepoint fn's writes could not be discarded on error, so
+			// don't run fn at all.
+			if _, spErr := tx.Exec(uncancellableCtx, "SAVEPOINT dbos_step"); spErr != nil {
+				return nil, fmt.Errorf("failed to create savepoint: %w", spErr)
+			}
+			output, err := fn(stepCtx, tx)
+			if err != nil {
+				if _, rbErr := tx.Exec(uncancellableCtx, "ROLLBACK TO SAVEPOINT dbos_step"); rbErr != nil {
+					return nil, errors.Join(err, fmt.Errorf("failed to roll back to savepoint: %w", rbErr))
+				}
+				return output, err
+			}
+			if _, relErr := tx.Exec(uncancellableCtx, "RELEASE SAVEPOINT dbos_step"); relErr != nil {
+				return nil, fmt.Errorf("failed to release savepoint: %w", relErr)
+			}
+			return output, nil
+		})
 
 		txnSer := resolveEncoder(c)
 		encodedStepOutput, serErr := txnSer.Encode(stepOutput)

@@ -672,17 +672,24 @@ func TestRunAsTransaction(t *testing.T) {
 		require.Equal(t, 1, ub.countRows(t, fmt.Sprintf(`SELECT count(*) FROM %s`, ub.completionTable())))
 	})
 
-	// A transaction whose fn errors rolls back its application write in either
-	// nesting position, but durability differs by position:
-	//   - top-level: the failure is recorded in BOTH durability tables — the user
-	//     DB transaction_completion (error set, output null) and the system DB
-	//     operation_outputs.
+	// A transaction whose fn errors rolls back its application write in every
+	// nesting position and on both data source flavors, but durability differs:
 	//   - within a RunAsStep: the enclosing step owns durability, so the
 	//     transaction records no row of its own in either table.
+	//   - top-level on a data source sharing the system-DB pool: the savepoint
+	//     discards the write and only the error checkpoint commits to
+	//     operation_outputs (shared sources have no completion table).
+	//   - top-level on a separate data source: the failure is recorded in BOTH
+	//     durability tables — the user DB transaction_completion (error set,
+	//     output null) and the system DB operation_outputs.
+	// Uses setupSharedDBOS (unlike the sibling subtests) because a shared-pool
+	// data source can only exist when the system pool is user-provided.
 	t.Run("RollsBackOnError", func(t *testing.T) {
-		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ctx, sharedDS, sharedUB := setupSharedDBOS(t)
 		ub := openUserBackend(t)
 		ds := ub.register(t, ctx, "app")
+		require.False(t, ds.sameAsSystemDB)
+		require.True(t, sharedDS.sameAsSystemDB)
 
 		const wantErr = "permanent app failure"
 		wf := func(dctx DBOSContext, _ string) (string, error) {
@@ -702,8 +709,20 @@ func TestRunAsTransaction(t *testing.T) {
 			}); err != nil {
 				return "", err
 			}
-			// Step 1: a top-level transaction that errors. It rolls back too, but
-			// the failure is recorded in both durability tables.
+			// Step 1: a top-level transaction on the shared-pool data source that
+			// errors. The savepoint discards its write; only the error checkpoint
+			// commits.
+			if _, err := RunAsTransaction(dctx, sharedDS, func(c context.Context, tx Tx) (string, error) {
+				if _, err := tx.Exec(c, sharedUB.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_shared", "rollback"); err != nil {
+					return "", err
+				}
+				return "", errors.New("shared boom")
+			}); err == nil {
+				return "", errors.New("expected shared transaction to fail")
+			}
+			// Step 2: a top-level transaction on the separate data source that
+			// errors. It rolls back too, but the failure is recorded in both
+			// durability tables.
 			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
 				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_top", "rollback"); err != nil {
 					return "", err
@@ -713,7 +732,11 @@ func TestRunAsTransaction(t *testing.T) {
 		}
 		RegisterWorkflow(ctx, wf)
 		require.NoError(t, Launch(ctx))
+		// Create the kv table on both backends: one physical table on Postgres
+		// (both pools share the database), one per file on SQLite. Distinct keys
+		// keep the writes tellable apart either way.
 		ub.createAppTable(t)
+		sharedUB.createAppTable(t)
 
 		wfID := uuid.NewString()
 		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
@@ -721,25 +744,28 @@ func TestRunAsTransaction(t *testing.T) {
 		_, err = h.GetResult()
 		require.ErrorContains(t, err, wantErr)
 
-		// Both transactions rolled back their application writes.
+		// All three transactions rolled back their application writes.
 		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv`))
+		require.Equal(t, 0, sharedUB.countRows(t, `SELECT count(*) FROM kv`))
 
-		// User DB: only the top-level transaction wrote a row — a failure row at
-		// step 1 (the within-step transaction recorded nothing): error set, output null.
+		// User DB: only the separate top-level transaction wrote a row — a failure
+		// row at step 2 (the others recorded nothing): error set, output null.
 		require.Equal(t, 1, ub.countRows(t, fmt.Sprintf(`SELECT count(*) FROM %s`, ub.completionTable())))
-		output, errStr := ub.completionCells(t, wfID, 1)
+		output, errStr := ub.completionCells(t, wfID, 2)
 		require.Nil(t, output)
 		require.NotNil(t, errStr)
 		require.Contains(t, *errStr, wantErr)
 
-		// System DB: the RunAsStep (step 0) succeeded; the top-level transaction
-		// (step 1) is checkpointed with the error.
+		// System DB: the RunAsStep (step 0) succeeded; both top-level transactions
+		// are checkpointed with their errors.
 		steps, err := GetWorkflowSteps(ctx, wfID)
 		require.NoError(t, err)
-		require.Len(t, steps, 2)
+		require.Len(t, steps, 3)
 		require.Nil(t, steps[0].Error)
 		require.NotNil(t, steps[1].Error)
-		require.Contains(t, steps[1].Error.Error(), wantErr)
+		require.Contains(t, steps[1].Error.Error(), "shared boom")
+		require.NotNil(t, steps[2].Error)
+		require.Contains(t, steps[2].Error.Error(), wantErr)
 	})
 
 	// RunAsTransaction must be called from within a workflow: invoked at top level
