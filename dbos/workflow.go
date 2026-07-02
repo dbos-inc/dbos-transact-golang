@@ -222,9 +222,8 @@ func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
 		return *new(R), false, nil
 	}
 	recordedOutputs, err := retryWithResult(dbosCtx, func() (*recordedResult, error) {
-		uncancelableCtx, cancel := context.WithCancel(dbosCtx)
-		defer cancel()
-		return dbosCtx.(*dbosContext).systemDB.checkOperationExecution(uncancelableCtx, checkOperationExecutionDBInput{
+		uncancellableCtx := context.WithoutCancel(dbosCtx)
+		return dbosCtx.(*dbosContext).systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
 			workflowID: workflowState.workflowID,
 			stepID:     workflowState.stepID + 1,
 			stepName:   "DBOS.getResult",
