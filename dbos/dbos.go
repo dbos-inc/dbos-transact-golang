@@ -704,7 +704,7 @@ func (c *dbosContext) Launch() error {
 	}, withRetrierLogger(c.logger)); err != nil {
 		c.logger.Warn("Failed to register application version", "version", c.applicationVersion, "error", err)
 	} else if latest, err := retryWithResult(c, func() (*VersionInfo, error) {
-		return c.systemDB.getLatestApplicationVersion(c)
+		return c.systemDB.getLatestApplicationVersion(c, nil)
 	}, withRetrierLogger(c.logger)); err != nil {
 		c.logger.Warn("Failed to fetch latest application version", "error", err)
 	} else if latest.Name != c.applicationVersion {

@@ -5399,7 +5399,7 @@ func ListApplicationVersions(ctx DBOSContext) ([]VersionInfo, error) {
 // recent timestamp.
 func (c *dbosContext) GetLatestApplicationVersion(_ DBOSContext) (*VersionInfo, error) {
 	return retryWithResult(c, func() (*VersionInfo, error) {
-		return c.systemDB.getLatestApplicationVersion(c)
+		return c.systemDB.getLatestApplicationVersion(c, nil)
 	}, withRetrierLogger(c.logger))
 }
 

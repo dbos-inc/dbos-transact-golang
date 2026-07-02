@@ -368,7 +368,7 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 		updateExisting = false
 	default: // QueueConflictUpdateIfLatestVersion
 		latest, err := retryWithResult(c, func() (*VersionInfo, error) {
-			return c.systemDB.getLatestApplicationVersion(c)
+			return c.systemDB.getLatestApplicationVersion(c, nil)
 		}, withRetrierLogger(c.logger))
 		switch {
 		case errors.Is(err, &DBOSError{Code: NoApplicationVersions}):

@@ -955,6 +955,77 @@ func TestGlobalConcurrency(t *testing.T) {
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
 }
 
+// TestVersionlessDequeueRequiresLatestVersion verifies that a worker only dequeues
+// version-less (application_version IS NULL) workflows when it is running the latest
+// registered application version. A worker whose version is not the latest still
+// dequeues workflows tagged with its own version, but leaves version-less ones
+// ENQUEUED until it becomes the latest version again (e.g. after a rolling deploy).
+func TestVersionlessDequeueRequiresLatestVersion(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	versionlessWorkflow := func(_ DBOSContext, input string) (string, error) {
+		return input, nil
+	}
+	RegisterWorkflow(serverCtx, versionlessWorkflow, WithWorkflowName("VersionlessWorkflow"))
+
+	require.NoError(t, Launch(serverCtx))
+
+	// Database-backed queue registered after Launch, with a fast poll so the test is quick.
+	queue, err := registerWFQ(serverCtx, "versionless-dequeue-queue", WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
+
+	currentVersion := serverCtx.GetApplicationVersion()
+
+	// A client is used to enqueue a version-less (NULL application_version) workflow.
+	databaseURL := backendDatabaseURL(t)
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if client != nil {
+			client.Shutdown(30 * time.Second)
+		}
+	})
+
+	// Register a newer application version and make it the latest, so this worker is no
+	// longer running the latest version (simulating a rolling deploy).
+	sysdb := serverCtx.(*dbosContext).systemDB.(*sysDB)
+	require.NoError(t, sysdb.createApplicationVersion(context.Background(), "versionless-newer"))
+	require.NoError(t, sysdb.updateApplicationVersionTimestamp(context.Background(), "versionless-newer", time.Now().Add(time.Hour).UnixMilli()))
+
+	// Enqueue a version-less workflow: an empty application version is persisted as NULL.
+	versionlessHandle, err := Enqueue[string, string](client, queue.Name, "VersionlessWorkflow", "versionless",
+		WithEnqueueApplicationVersion(""))
+	require.NoError(t, err)
+
+	// Enqueue a workflow tagged with this worker's current version (the in-process default).
+	taggedHandle, err := RunWorkflow(serverCtx, versionlessWorkflow, "tagged", WithQueue(queue.Name))
+	require.NoError(t, err)
+
+	// The version-tagged workflow completes: the worker's version matches it even though the
+	// worker is not running the latest version.
+	taggedResult, err := taggedHandle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "tagged", taggedResult)
+
+	// The version-less workflow must NOT be dequeued while this worker is not the latest.
+	// Give the poller time to (wrongly) pick it up, then confirm it is still ENQUEUED.
+	time.Sleep(2 * time.Second)
+	status, err := versionlessHandle.GetStatus()
+	require.NoError(t, err)
+	assert.Equal(t, WorkflowStatusEnqueued, status.Status,
+		"version-less workflow must stay ENQUEUED while this worker is not the latest version")
+
+	// Promote this worker's version back to the latest.
+	require.NoError(t, sysdb.updateApplicationVersionTimestamp(context.Background(), currentVersion, time.Now().Add(2*time.Hour).UnixMilli()))
+
+	// Now that this worker is the latest again, the version-less workflow is dequeued and completes.
+	versionlessResult, err := versionlessHandle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "versionless", versionlessResult)
+
+	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after versionless dequeue test")
+}
+
 func TestWorkerConcurrency(t *testing.T) {
 	// Create two contexts that will represent 2 DBOS executors
 	os.Setenv("DBOS__VMID", "worker1")
