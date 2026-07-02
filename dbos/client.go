@@ -206,6 +206,15 @@ func WithEnqueueAuthenticatedRoles(roles []string) EnqueueOption {
 	}
 }
 
+// WithEnqueueAttributes attaches custom key-value attributes to the enqueued workflow.
+// Attributes are recorded in the workflow status at creation, must be
+// JSON-serializable, and can be searched with WithFilterAttributes on Postgres.
+func WithEnqueueAttributes(attributes map[string]any) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.attributes = attributes
+	}
+}
+
 type enqueueOptions struct {
 	workflowName        string
 	workflowID          string
@@ -222,6 +231,7 @@ type enqueueOptions struct {
 	authenticatedUser   string
 	assumedRole         string
 	authenticatedRoles  []string
+	attributes          map[string]any
 }
 
 // EnqueueWorkflow enqueues a workflow to a named queue for deferred execution.
@@ -324,6 +334,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		AuthenticatedUser:  params.authenticatedUser,
 		AssumedRole:        params.assumedRole,
 		AuthenticatedRoles: params.authenticatedRoles,
+		Attributes:         params.attributes,
 	}
 
 	uncancellableCtx := WithoutCancel(dbosCtx)
