@@ -6486,7 +6486,26 @@ func TestPatching(t *testing.T) {
 var (
 	streamBlockEvent   *Event
 	streamStartedEvent *Event
+	streamWriteGate    chan struct{}
 )
+
+// gatedWriteStreamWorkflow writes one value each time the gate is signaled,
+// letting the test measure the reader's wake-up latency per write.
+func gatedWriteStreamWorkflow(ctx DBOSContext, input struct {
+	StreamKey string
+	NumValues int
+}) (string, error) {
+	for i := range input.NumValues {
+		<-streamWriteGate
+		if err := WriteStream(ctx, input.StreamKey, fmt.Sprintf("value-%d", i)); err != nil {
+			return "", err
+		}
+	}
+	if err := CloseStream(ctx, input.StreamKey); err != nil {
+		return "", err
+	}
+	return "done", nil
+}
 
 func writeStreamWorkflow(ctx DBOSContext, input struct {
 	StreamKey string
@@ -6548,6 +6567,7 @@ func TestStreams(t *testing.T) {
 
 	// Register all stream workflows
 	RegisterWorkflow(dbosCtx, writeStreamWorkflow)
+	RegisterWorkflow(dbosCtx, gatedWriteStreamWorkflow)
 
 	Launch(dbosCtx)
 
@@ -6976,6 +6996,56 @@ func TestStreams(t *testing.T) {
 		// Test that channel closes after error
 		_, ok := <-ch
 		require.False(t, ok, "channel should be closed after error")
+	})
+
+	t.Run("NotificationLatency", func(t *testing.T) {
+		// A blocked reader must be woken by the streams LISTEN/NOTIFY trigger,
+		// not the bounded-wait fallback that fires every _DB_RETRY_INTERVAL (1s).
+		if dbosCtx.(*dbosContext).systemDB.(*sysDB).listenNotifyPool() == nil {
+			t.Skip("backend does not support LISTEN/NOTIFY")
+		}
+
+		const numValues = 5
+		streamWriteGate = make(chan struct{})
+		streamKey := "test-stream-latency"
+		writerHandle, err := RunWorkflow(dbosCtx, gatedWriteStreamWorkflow, struct {
+			StreamKey string
+			NumValues int
+		}{
+			StreamKey: streamKey,
+			NumValues: numValues,
+		})
+		require.NoError(t, err, "failed to start writer workflow")
+
+		ch, err := ReadStreamAsync[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey)
+		require.NoError(t, err, "failed to start async stream read")
+
+		var totalLatency time.Duration
+		for i := range numValues {
+			// Let the reader drain the stream and enter its blocked wait, so the
+			// value below is delivered by a notification, not the read pass that
+			// follows consuming the previous value.
+			time.Sleep(100 * time.Millisecond)
+			start := time.Now()
+			streamWriteGate <- struct{}{}
+			streamValue := <-ch
+			require.NoError(t, streamValue.Err)
+			require.Equal(t, fmt.Sprintf("value-%d", i), streamValue.Value)
+			totalLatency += time.Since(start)
+		}
+
+		// Each write is delivered to a reader blocked mid-interval, so with the
+		// polling fallback alone the five reads would take ~4.5s combined.
+		t.Logf("%d stream values delivered in %v total", numValues, totalLatency)
+		require.Less(t, totalLatency, 1*time.Second,
+			"blocked readers should be woken by NOTIFY, not the polling fallback")
+
+		streamValue := <-ch
+		require.NoError(t, streamValue.Err)
+		require.True(t, streamValue.Closed, "expected stream closed after CloseStream")
+
+		_, err = writerHandle.GetResult()
+		require.NoError(t, err)
 	})
 }
 

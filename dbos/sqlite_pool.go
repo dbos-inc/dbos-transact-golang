@@ -170,6 +170,7 @@ func newSqliteSystemDatabase(
 		workflowNotificationRepollMap: &sync.Map{},
 		workflowEventsMap:             &sync.Map{},
 		workflowEventsRepollMap:       &sync.Map{},
+		streamsMap:                    &sync.Map{},
 		notificationLoopDone:          make(chan struct{}),
 		logger:                        logger.With("service", "system_database"),
 		schema:                        databaseSchema,

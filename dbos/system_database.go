@@ -138,6 +138,7 @@ type sysDB struct {
 	workflowNotificationRepollMap *sync.Map
 	workflowEventsMap             *sync.Map
 	workflowEventsRepollMap       *sync.Map
+	streamsMap                    *sync.Map
 	logger                        *slog.Logger
 	schema                        string
 	launched                      bool
@@ -332,6 +333,7 @@ const (
 	// Notification channels
 	_DBOS_NOTIFICATIONS_CHANNEL   = "dbos_notifications_channel"
 	_DBOS_WORKFLOW_EVENTS_CHANNEL = "dbos_workflow_events_channel"
+	_DBOS_STREAMS_CHANNEL         = "dbos_streams_channel"
 
 	// Stream sentinel value for closure
 	_DBOS_STREAM_CLOSED_SENTINEL = "__DBOS_STREAM_CLOSED__"
@@ -836,12 +838,6 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 		return nil, fmt.Errorf("failed to ping database: %v", err)
 	}
 
-	// Create a map of notification payloads to channels
-	workflowNotificationsMap := &sync.Map{}
-	workflowNotificationRepollMap := &sync.Map{}
-	workflowEventsMap := &sync.Map{}
-	workflowEventsRepollMap := &sync.Map{}
-
 	dialect := Dialect(postgresDialect{})
 	if isCockroach {
 		dialect = cockroachDialect{}
@@ -850,10 +846,11 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	return &sysDB{
 		pool:                          newPgxPool(pool),
 		dialect:                       dialect,
-		workflowNotificationsMap:      workflowNotificationsMap,
-		workflowNotificationRepollMap: workflowNotificationRepollMap,
-		workflowEventsMap:             workflowEventsMap,
-		workflowEventsRepollMap:       workflowEventsRepollMap,
+		workflowNotificationsMap:      &sync.Map{},
+		workflowNotificationRepollMap: &sync.Map{},
+		workflowEventsMap:             &sync.Map{},
+		workflowEventsRepollMap:       &sync.Map{},
+		streamsMap:                    &sync.Map{},
 		notificationLoopDone:          make(chan struct{}),
 		logger:                        logger.With("service", "system_database"),
 		schema:                        databaseSchema,
@@ -906,6 +903,7 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 
 	s.workflowNotificationsMap.Clear()
 	s.workflowEventsMap.Clear()
+	s.streamsMap.Clear()
 
 	s.launched = false
 }
@@ -3148,21 +3146,15 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 			pc.Release()
 			return nil, err
 		}
-		if _, err = tx.Exec(ctx, fmt.Sprintf("LISTEN %s", _DBOS_NOTIFICATIONS_CHANNEL)); err != nil {
-			rErr := tx.Rollback(ctx)
-			if rErr != nil {
-				s.logger.Error("Failed to rollback transaction after LISTEN error", "error", rErr)
+		for _, channel := range []string{_DBOS_NOTIFICATIONS_CHANNEL, _DBOS_WORKFLOW_EVENTS_CHANNEL, _DBOS_STREAMS_CHANNEL} {
+			if _, err = tx.Exec(ctx, fmt.Sprintf("LISTEN %s", channel)); err != nil {
+				rErr := tx.Rollback(ctx)
+				if rErr != nil {
+					s.logger.Error("Failed to rollback transaction after LISTEN error", "error", rErr)
+				}
+				pc.Release()
+				return nil, err
 			}
-			pc.Release()
-			return nil, err
-		}
-		if _, err = tx.Exec(ctx, fmt.Sprintf("LISTEN %s", _DBOS_WORKFLOW_EVENTS_CHANNEL)); err != nil {
-			rErr := tx.Rollback(ctx)
-			if rErr != nil {
-				s.logger.Error("Failed to rollback transaction after LISTEN error", "error", rErr)
-			}
-			pc.Release()
-			return nil, err
 		}
 		if err = tx.Commit(ctx); err != nil {
 			rErr := tx.Rollback(ctx)
@@ -3253,6 +3245,13 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 				cond.(*sync.Cond).L.Lock()
 				cond.(*sync.Cond).Broadcast()
 				cond.(*sync.Cond).L.Unlock()
+			}
+		case _DBOS_STREAMS_CHANNEL:
+			if ch, ok := s.streamsMap.Load(n.Payload); ok {
+				select {
+				case ch.(chan struct{}) <- struct{}{}:
+				default: // A wake-up hint is already pending
+				}
 			}
 		}
 	}
