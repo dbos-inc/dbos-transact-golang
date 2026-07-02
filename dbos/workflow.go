@@ -2165,7 +2165,16 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 			return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization}, deserializeWorkflowError(recordedOutput.errStr)
 		}
 
-		stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) { return fn(stepCtx, tx) })
+		stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) {
+			tx.Exec(uncancellableCtx, "SAVEPOINT dbos_step")
+			output, err := fn(stepCtx, tx)
+			if err != nil {
+				tx.Exec(uncancellableCtx, "ROLLBACK TO SAVEPOINT dbos_step")
+			} else {
+				tx.Exec(uncancellableCtx, "RELEASE SAVEPOINT dbos_step")
+			}
+			return output, err
+		})
 
 		txnSer := resolveEncoder(c)
 		encodedStepOutput, serErr := txnSer.Encode(stepOutput)
