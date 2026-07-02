@@ -2923,8 +2923,30 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 		// terminating, then closes the stream.
 		finalRead := false
 
+		// Wake-up hint fired by the streams LISTEN/NOTIFY trigger when a value
+		// is written. Readers of the same (workflowID, key) share one channel, so
+		// a signal may be consumed by another reader and the first reader to
+		// finish drops the registration for all of them. The bounded wait below
+		// remains the fallback: workflow completion fires no stream notification,
+		// and polling backends never signal (wakeCh stays nil there).
+		var wakeCh chan struct{}
+		if sysdb, ok := c.systemDB.(*sysDB); ok {
+			payload := fmt.Sprintf("%s::%s", workflowID, key)
+			ch, _ := sysdb.streamsMap.LoadOrStore(payload, make(chan struct{}, 1))
+			wakeCh = ch.(chan struct{})
+			defer sysdb.streamsMap.Delete(payload)
+		}
+
 		// Continue reading until workflow is inactive or stream is closed
 		for {
+			// Clear any stale hint: the read below will pick up the rows it
+			// signals. This clear prevents a spurious wake-up if we get race to this
+			// point with the notification.
+			select {
+			case <-wakeCh:
+			default:
+			}
+
 			// Read stream entries from current offset
 			input := readStreamDBInput{
 				WorkflowID: workflowID,
@@ -3002,12 +3024,15 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 				continue
 			}
 
-			// If no new entries, wait a bit before polling again
+			// If no new entries, wait for a write notification, with a bounded
+			// fallback to poll for workflow termination and missed notifications
 			if len(entries) == 0 {
 				select {
 				case <-c.Done():
 					send(StreamValue[any]{Err: c.Err()})
 					return
+				case <-wakeCh:
+					// A value was written; read again immediately
 				case <-time.After(_DB_RETRY_INTERVAL):
 					// Continue loop to read again
 				}
