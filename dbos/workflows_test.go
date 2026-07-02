@@ -984,12 +984,12 @@ func TestSteps(t *testing.T) {
 		var dbosErr *DBOSError
 		require.ErrorAs(t, err, &dbosErr)
 		require.Equal(t, StepExecutionError, dbosErr.Code)
-		require.ErrorContains(t, err, "not marked as within a step")
+		require.ErrorContains(t, err, "step must use the context.Context received from its dbos.Func closure")
 
 		// A context with no workflow state at all is also rejected.
 		err = checkStepContext(dbosCtx, "wf-1", "myStep")
 		require.Error(t, err)
-		require.ErrorContains(t, err, "not marked as within a step")
+		require.ErrorContains(t, err, "step must use the context.Context received from its dbos.Func closure")
 
 		// A proper step context passes.
 		stepCtx := WithValue(dbosCtx, workflowStateKey, &workflowState{workflowID: "wf-1", isWithinStep: true})
