@@ -32,8 +32,8 @@ type Client interface {
 	Send(destinationID string, message any, topic string, opts ...SendOption) error
 	GetEvent(targetWorkflowID, key string, timeout time.Duration) (any, error)
 	RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error)
-	CancelWorkflow(workflowID string) error
-	CancelWorkflows(workflowIDs []string) error
+	CancelWorkflow(workflowID string, opts ...CancelWorkflowOptions) error
+	CancelWorkflows(workflowIDs []string, opts ...CancelWorkflowOptions) error
 	SetWorkflowDelay(workflowID string, opts ...SetWorkflowDelayOption) error
 	DeleteWorkflows(workflowIDs []string, opts ...DeleteWorkflowOption) error
 	ResumeWorkflow(workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)
@@ -477,15 +477,38 @@ func (c *client) RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error
 	return c.dbosCtx.RetrieveWorkflow(c.dbosCtx, workflowID)
 }
 
+// CancelWorkflowOption is a function option for configuring workflow cancelling parameters.
+type CancelWorkflowOptions func(*cancelWorkflowOptions)
+
+// WithChildren enables cancellation for children workflows
+func WithCancelChildren() CancelWorkflowOptions {
+	return func(cwo *cancelWorkflowOptions) {
+		cwo.cancelChildren = true
+	}
+}
+
+// cancelWorkflowOptions holds configuration parameter for cancelling workflows.
+type cancelWorkflowOptions struct {
+	cancelChildren bool
+}
+
 // CancelWorkflow cancels a running or enqueued workflow.
-func (c *client) CancelWorkflow(workflowID string) error {
-	return c.dbosCtx.CancelWorkflow(c.dbosCtx, workflowID)
+func (c *client) CancelWorkflow(workflowID string, opts ...CancelWorkflowOptions) error {
+	cwo := cancelWorkflowOptions{}
+	for _, opt := range opts {
+		opt(&cwo)
+	}
+	return c.dbosCtx.CancelWorkflow(c.dbosCtx, workflowID, opts...)
 }
 
 // CancelWorkflows cancels multiple workflows in a single database round-trip.
 // Workflows that are missing or already in a terminal state are silently skipped.
-func (c *client) CancelWorkflows(workflowIDs []string) error {
-	return c.dbosCtx.CancelWorkflows(c.dbosCtx, workflowIDs)
+func (c *client) CancelWorkflows(workflowIDs []string, opts ...CancelWorkflowOptions) error {
+	cwo := cancelWorkflowOptions{}
+	for _, opt := range opts {
+		opt(&cwo)
+	}
+	return c.dbosCtx.CancelWorkflows(c.dbosCtx, workflowIDs, opts...)
 }
 
 // SetWorkflowDelay sets or updates the delay on a DELAYED workflow.

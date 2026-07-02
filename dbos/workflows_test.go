@@ -661,9 +661,14 @@ func stepWithinAStepWorkflow(dbosCtx DBOSContext, input string) (string, error) 
 // Global counter for retry testing
 var stepRetryAttemptCount int
 
+// errStepRetrySentinel is wrapped by every failing attempt so the test can prove
+// the underlying errors remain reachable through the MaxStepRetriesExceeded wrapper
+// via errors.Is (i.e. the wrappedErr/Unwrap chain, not just the formatted message).
+var errStepRetrySentinel = errors.New("step retry sentinel")
+
 func stepRetryAlwaysFailsStep(_ context.Context) (string, error) {
 	stepRetryAttemptCount++
-	return "", fmt.Errorf("always fails - attempt %d", stepRetryAttemptCount)
+	return "", fmt.Errorf("always fails - attempt %d: %w", stepRetryAttemptCount, errStepRetrySentinel)
 }
 
 var stepIdempotencyCounter int
@@ -745,6 +750,54 @@ func genericStepWorkflow(dbosCtx DBOSContext, input string) (string, error) {
 
 	// Combine results
 	return fmt.Sprintf("%s-%d", result1, result2*2), nil
+}
+
+// --- One-shot fault injection used by the step-ID-drift regression test ---
+//
+// faultPool wraps a Pool and, exactly once, makes the operation_outputs read
+// inside checkOperationExecution fail with a retryable ("conn closed") error for
+// a single target workflow. That forces retryWithResult to re-run the DB-layer
+// closure.
+
+type errRow struct{ err error }
+
+func (r errRow) Scan(...any) error { return r.err }
+
+type faultTx struct {
+	Tx
+	p *faultPool
+}
+
+func (t *faultTx) QueryRow(ctx context.Context, query string, args ...any) Row {
+	if strings.Contains(query, "operation_outputs") &&
+		len(args) > 0 && args[0] == t.p.target &&
+		t.p.fired.CompareAndSwap(false, true) {
+		return errRow{errors.New("conn closed")} // retryable per postgresDialect.IsRetryable
+	}
+	return t.Tx.QueryRow(ctx, query, args...)
+}
+
+type faultPool struct {
+	Pool
+	target string       // workflow ID whose operation_outputs read should fault
+	fired  *atomic.Bool // ensures the fault triggers at most once
+}
+
+func (p *faultPool) BeginTx(ctx context.Context, opts TxOptions) (Tx, error) {
+	tx, err := p.Pool.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &faultTx{Tx: tx, p: p}, nil
+}
+
+// sleepStepIDDriftWorkflow does a single durable Sleep, which records exactly one
+// step (DBOS.sleep) at function_id 0.
+func sleepStepIDDriftWorkflow(ctx DBOSContext, _ string) (string, error) {
+	if _, err := Sleep(ctx, time.Millisecond); err != nil {
+		return "", err
+	}
+	return "ok", nil
 }
 
 func TestSteps(t *testing.T) {
@@ -854,6 +907,8 @@ func TestSteps(t *testing.T) {
 	// Register the workflow
 	RegisterWorkflow(dbosCtx, userObjectWorkflow)
 
+	RegisterWorkflow(dbosCtx, sleepStepIDDriftWorkflow)
+
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
 
@@ -917,6 +972,13 @@ func TestSteps(t *testing.T) {
 			expectedMsg := fmt.Sprintf("always fails - attempt %d", i)
 			assert.Contains(t, dbosErr.Error(), expectedMsg, "expected joined error to contain expected message")
 		}
+
+		// Verify the wrapping contract itself (not just the formatted message):
+		// the error must match the MaxStepRetriesExceeded code via errors.Is, and
+		// the underlying step errors must remain reachable through Unwrap. This
+		// last check fails if newMaxStepRetriesExceededError stops setting wrappedErr.
+		assert.True(t, errors.Is(err, &DBOSError{Code: MaxStepRetriesExceeded}), "expected errors.Is to match MaxStepRetriesExceeded code")
+		assert.True(t, errors.Is(err, errStepRetrySentinel), "expected underlying step error to be reachable via errors.Is (Unwrap chain)")
 
 		// Verify that the failed step was still recorded in the database
 		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
@@ -1050,6 +1112,33 @@ func TestSteps(t *testing.T) {
 		assert.NotEmpty(t, steps[0].StepName, "first step name should not be empty")
 		assert.NotEmpty(t, steps[1].StepName, "second step name should not be empty")
 	})
+
+	t.Run("StepIDNotReallocatedOnDBRetry", func(t *testing.T) {
+		wfID := "step-id-drift-test"
+
+		s := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		orig := s.pool
+		var fired atomic.Bool
+		s.pool = &faultPool{Pool: orig, target: wfID, fired: &fired}
+		// The listener captured the real pool at Launch and no longer reads the
+		// field; the workflow goroutine is joined via GetResult before we restore,
+		// so this swap is race-free.
+		defer func() { s.pool = orig }()
+
+		handle, err := RunWorkflow(dbosCtx, sleepStepIDDriftWorkflow, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "ok", result)
+		require.True(t, fired.Load(), "fault injection never triggered; the test did not exercise a retry")
+
+		steps, err := GetWorkflowSteps(dbosCtx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1, "expected exactly one recorded step (DBOS.sleep)")
+		require.Equal(t, "DBOS.sleep", steps[0].StepName)
+		require.Equal(t, 0, steps[0].StepID,
+			"step ID was reallocated by the DB-layer retry: nextStepID() must be called outside the retried closure")
+	})
 }
 
 func stepReturningStepID(ctx context.Context) (int, error) {
@@ -1135,10 +1224,10 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 	t.Run("Go idempotency", func(t *testing.T) {
 		goWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 			channels := make([]chan StepOutcome[string], 0, 10)
-			for range 10 {
+			for i := range 10 {
 				ch, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 					return stepWithSleep(ctx, 1*time.Second)
-				})
+				}, WithStepName(fmt.Sprintf("goStep-%d", i)))
 				if err != nil {
 					return "", err
 				}
@@ -2062,6 +2151,77 @@ func TestChildWorkflow(t *testing.T) {
 	})
 }
 
+// TestChildWorkflowDeterminismCheck verifies that checkChildWorkflow detects a
+// non-deterministic child invocation: if a child workflow is already recorded at
+// a given step ID, re-invoking that step under a different name is rejected with
+// an UnexpectedStep error rather than silently proceeding.
+func TestChildWorkflowDeterminismCheck(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	determinismChildWf := func(_ DBOSContext, _ string) (string, error) {
+		return "child-result", nil
+	}
+	RegisterWorkflow(dbosCtx, determinismChildWf)
+
+	determinismParentWf := func(ctx DBOSContext, _ string) (string, error) {
+		childHandle, err := RunWorkflow(ctx, determinismChildWf, "")
+		if err != nil {
+			return "", err
+		}
+		return childHandle.GetResult()
+	}
+	RegisterWorkflow(dbosCtx, determinismParentWf)
+
+	// Run the parent to completion so the child workflow is durably recorded in
+	// operation_outputs at step 0.
+	parentHandle, err := RunWorkflow(dbosCtx, determinismParentWf, "")
+	require.NoError(t, err, "failed to start parent workflow")
+	res, err := parentHandle.GetResult()
+	require.NoError(t, err, "failed to get parent result")
+	require.Equal(t, "child-result", res)
+
+	parentID := parentHandle.GetWorkflowID()
+	expectedChildID := fmt.Sprintf("%s-0", parentID)
+
+	sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+	require.True(t, ok, "expected sysDB instance")
+	ctx := context.Background()
+
+	// Read the name recorded for the child workflow at step 0 directly from the
+	// table, so the test does not depend on the function-name resolution rules.
+	var recordedName string
+	nameQuery := sysDB.renderSQL(`SELECT function_name FROM %soperation_outputs WHERE workflow_uuid = $1 AND function_id = 0`, sysDB.dialect.SchemaPrefix(sysDB.schema))
+	require.NoError(t, sysDB.pool.QueryRow(ctx, nameQuery, parentID).Scan(&recordedName))
+	require.NotEmpty(t, recordedName, "child workflow should have a recorded function name")
+
+	t.Run("MatchingNameReturnsChildID", func(t *testing.T) {
+		childID, err := sysDB.checkChildWorkflow(ctx, parentID, 0, recordedName)
+		require.NoError(t, err, "matching child workflow name must not error")
+		require.NotNil(t, childID, "expected a recorded child workflow ID")
+		require.Equal(t, expectedChildID, *childID)
+	})
+
+	t.Run("MismatchedNameIsNonDeterminismError", func(t *testing.T) {
+		childID, err := sysDB.checkChildWorkflow(ctx, parentID, 0, recordedName+"-different")
+		require.Error(t, err, "a different child workflow name must be a non-determinism error")
+		require.Nil(t, childID, "no child ID should be returned on a determinism error")
+
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, UnexpectedStep, dbosErr.Code)
+		require.Equal(t, parentID, dbosErr.WorkflowID)
+		require.Equal(t, 0, dbosErr.StepID)
+		require.Equal(t, recordedName+"-different", dbosErr.ExpectedName)
+		require.Equal(t, recordedName, dbosErr.RecordedName)
+	})
+
+	t.Run("UnrecordedStepReturnsNil", func(t *testing.T) {
+		childID, err := sysDB.checkChildWorkflow(ctx, parentID, 99, recordedName)
+		require.NoError(t, err, "an unrecorded step must not error")
+		require.Nil(t, childID, "an unrecorded step must return a nil child ID")
+	})
+}
+
 // Idempotency workflows moved to test functions
 
 func idempotencyWorkflow(dbosCtx DBOSContext, input string) (string, error) {
@@ -2404,6 +2564,124 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 func TestCancelWorkflows(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
+	t.Run("CancelWorkflowsWithChildren", func(t *testing.T) {
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+
+		var (
+			parentWorkflowID     = uuid.NewString()
+			childWorkflowID      = uuid.NewString()
+			grandChildWorkflowID = uuid.NewString()
+
+			IDs = []string{parentWorkflowID, childWorkflowID, grandChildWorkflowID}
+
+			mainEvents     = make(map[string]*Event)
+			workflowEvents = make(map[string]*Event)
+		)
+
+		for i := range IDs {
+			mainEvents[IDs[i]] = NewEvent()
+			workflowEvents[IDs[i]] = NewEvent()
+		}
+
+		grandChildWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+			workflowID, err := GetWorkflowID(ctx)
+			require.NoError(t, err, "failed to get workflow ID")
+
+			require.Equal(t, grandChildWorkflowID, workflowID)
+
+			mainEvents[workflowID].Set()
+			workflowEvents[workflowID].Wait()
+			return simpleStep(ctx)
+		}
+		RegisterWorkflow(dbosCtx, grandChildWorkflow)
+
+		childWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+			workflowID, err := GetWorkflowID(ctx)
+			require.NoError(t, err, "failed to get workflow ID")
+
+			require.Equal(t, childWorkflowID, workflowID)
+
+			RunWorkflow(ctx, grandChildWorkflow, "test-grand-child-in", WithWorkflowID(grandChildWorkflowID))
+
+			mainEvents[workflowID].Set()
+			workflowEvents[workflowID].Wait()
+
+			return simpleStep(ctx)
+		}
+		RegisterWorkflow(dbosCtx, childWorkflow)
+
+		parentWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+			workflowID, err := GetWorkflowID(ctx)
+			require.NoError(t, err, "failed to get workflow ID")
+
+			require.Equal(t, parentWorkflowID, workflowID)
+
+			RunWorkflow(ctx, childWorkflow, "test-child-input", WithWorkflowID(childWorkflowID))
+
+			mainEvents[workflowID].Set()
+			workflowEvents[workflowID].Wait()
+
+			return simpleStep(ctx)
+		}
+		RegisterWorkflow(dbosCtx, parentWorkflow)
+		RunWorkflow(dbosCtx, parentWorkflow, "test-input", WithWorkflowID(parentWorkflowID))
+
+		// wait until whole tree is running and blocked
+		for id := range mainEvents {
+			mainEvents[id].Wait()
+		}
+
+		workflowStatuses, err := sysDB.getWorkflowChildren(dbosCtx, getWorkflowChildrenDBInput{workflowID: parentWorkflowID})
+		require.NoError(t, err, "failed to get workflow children")
+		require.Equal(t, len(workflowStatuses), 2, "expected %d children got %d", 2, len(workflowStatuses))
+
+		require.Equal(t, IDs[1:], []string{workflowStatuses[0].ID, workflowStatuses[1].ID}, "children mismatch")
+
+		// cancel workflow without cancelling the child workflows
+		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID), "failed to cancel workflow") // first cancel without children
+		allStatuses, err := dbosCtx.ListWorkflows(dbosCtx,
+			WithWorkflowIDs(IDs),
+			WithLoadInput(false),
+			WithLoadOutput(false),
+		)
+		require.NoError(t, err, "failed to list workflow statuses")
+		require.Len(t, allStatuses, 3, "expected 3 workflow statuses")
+
+		statusByID := make(map[string]WorkflowStatusType, len(allStatuses))
+		for _, s := range allStatuses {
+			statusByID[s.ID] = s.Status
+		}
+
+		assert.Equal(t, WorkflowStatusCancelled, statusByID[parentWorkflowID], "parent should be CANCELLED")
+		assert.Equal(t, WorkflowStatusPending, statusByID[childWorkflowID], "child should be PENDING")
+		assert.Equal(t, WorkflowStatusPending, statusByID[grandChildWorkflowID], "grandchild should be PENDING")
+
+		// now cancel workflow with children
+		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID, WithCancelChildren()), "failed to cancel workflow") // first cancel without children
+		allStatuses, err = dbosCtx.ListWorkflows(dbosCtx,
+			WithWorkflowIDs(IDs),
+			WithLoadInput(false),
+			WithLoadOutput(false),
+		)
+		require.NoError(t, err, "failed to list workflow statuses")
+		require.Len(t, allStatuses, 3, "expected 3 workflow statuses")
+
+		statusByID = make(map[string]WorkflowStatusType, len(allStatuses))
+		for _, s := range allStatuses {
+			statusByID[s.ID] = s.Status
+		}
+
+		assert.Equal(t, WorkflowStatusCancelled, statusByID[parentWorkflowID], "parent should be CANCELLED")
+		assert.Equal(t, WorkflowStatusCancelled, statusByID[childWorkflowID], "child should be CANCELLED")
+		assert.Equal(t, WorkflowStatusCancelled, statusByID[grandChildWorkflowID], "grandchild should be CANCELLED")
+
+		// release the workflows
+		for _, event := range workflowEvents {
+			event.Set()
+		}
+		assert.Equal(t, queueEntriesAreCleanedUp(dbosCtx), true)
+	})
+
 	blockEvent := NewEvent()
 	blockingWorkflow := func(ctx DBOSContext, input string) (string, error) {
 		blockEvent.Wait()
@@ -2589,7 +2867,7 @@ func TestResumeWorkflows(t *testing.T) {
 		var dbosErr *DBOSError
 		require.ErrorAs(t, err, &dbosErr, "expected *DBOSError, got %T", err)
 		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
-		assert.Equal(t, missingID, dbosErr.DestinationID)
+		assert.Equal(t, missingID, dbosErr.WorkflowID)
 	})
 }
 
@@ -2839,13 +3117,13 @@ func receiveIdempotencyWorkflow(ctx DBOSContext, topic string) (string, error) {
 func durableRecvSleepWorkflow(ctx DBOSContext, topic string) (string, error) {
 	// First Recv with 2-second timeout (will timeout)
 	msg1, err := Recv[string](ctx, topic, 2*time.Second)
-	if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("DBOS Error %d", TimeoutError)) {
+	if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("DBOS Error %s", TimeoutError)) {
 		return "", fmt.Errorf("unexpected error in first recv: %w", err)
 	}
 
 	// Second Recv with 2-second timeout (will also timeout)
 	msg2, err := Recv[string](ctx, topic, 2*time.Second)
-	if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("DBOS Error %d", TimeoutError)) {
+	if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("DBOS Error %s", TimeoutError)) {
 		return "", fmt.Errorf("unexpected error in second recv: %w", err)
 	}
 
@@ -3913,6 +4191,28 @@ func TestSleep(t *testing.T) {
 		// Test the specific message from the error
 		expectedMessagePart := "workflow state not found in context: are you running this step within a workflow?"
 		require.Contains(t, err.Error(), expectedMessagePart)
+	})
+
+	t.Run("SleepContextCancellation", func(t *testing.T) {
+		// Cancelling Sleep's context mid-sleep should interrupt it and return the
+		// partial duration actually slept (less than the full requested duration).
+		sleepCancelWorkflow := func(ctx DBOSContext, _ string) (time.Duration, error) {
+			cancelCtx, cancel := WithCancel(ctx)
+			defer cancel()
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				cancel()
+			}()
+			return Sleep(cancelCtx, time.Minute)
+		}
+		RegisterWorkflow(dbosCtx, sleepCancelWorkflow)
+
+		handle, err := RunWorkflow(dbosCtx, sleepCancelWorkflow, "")
+		require.NoError(t, err, "failed to start sleep workflow")
+
+		slept, err := handle.GetResult()
+		require.Error(t, err, "expected a cancellation error from the interrupted Sleep")
+		assert.Less(t, slept, time.Minute, "expected interrupted Sleep to return a partial duration, got %v", slept)
 	})
 }
 
@@ -5938,7 +6238,7 @@ func TestPatching(t *testing.T) {
 		require.NoError(t, err, "failed to fork workflow")
 		_, err = forkHandle.GetResult()
 		require.Error(t, err, "expected error when forking old workflow onto new workflow")
-		require.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %d", UnexpectedStep))
+		require.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %s", UnexpectedStep))
 	})
 
 	t.Run("PatchingNotEnabledError", func(t *testing.T) {

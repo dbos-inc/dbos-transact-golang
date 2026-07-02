@@ -231,7 +231,7 @@ func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
 		})
 	}, withRetrierLogger(dbosCtx.(*dbosContext).logger))
 	if err != nil {
-		return *new(R), false, newStepExecutionError(workflowState.workflowID, "DBOS.getResult", fmt.Errorf("Checking operation execution: %w", err))
+		return *new(R), false, newStepExecutionError(workflowState.workflowID, "DBOS.getResult", fmt.Errorf("checking operation execution: %w", err))
 	}
 	if recordedOutputs != nil {
 		workflowState.nextStepID()
@@ -321,8 +321,9 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			stepName:        "DBOS.getResult",
 			serialization:   ser.Name(),
 		}
+		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := retry(h.dbosContext, func() error {
-			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
+			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(uncancellableCtx, recordGetResultInput)
 		}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 		if recordResultErr != nil {
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -407,8 +408,9 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 				stepName:        "DBOS.getResult",
 				serialization:   storedSerialization,
 			}
+			uncancellableCtx := context.WithoutCancel(h.dbosContext)
 			recordResultErr := retry(h.dbosContext, func() error {
-				return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(h.dbosContext, recordGetResultInput)
+				return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(uncancellableCtx, recordGetResultInput)
 			}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 			if recordResultErr != nil {
 				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -539,7 +541,7 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowFQN, customName string, 
 	if _, err := c.addScheduleCronEntry(name, cronSchedule, scheduled, nil); err != nil {
 		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
 	}
-	c.logger.Info("Registered scheduled workflow", "fqn", workflowFQN, "customName", customName, "cron_schedule", cronSchedule)
+	c.logger.Info("Registered scheduled workflow", "fqn", workflowFQN, "custom_name", customName, "cron_schedule", cronSchedule)
 }
 
 // ConfiguredInstance is implemented by objects whose methods are registered as workflows.
@@ -1257,9 +1259,16 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
 		childWorkflowID, err := retryWithResult(c, func() (*string, error) {
-			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID)
+			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID, params.WorkflowName)
 		}, withRetrierLogger(c.logger))
 		if err != nil {
+			// A non-determinism error (a different child workflow recorded at this
+			// step ID) is deterministic: surface it directly instead of masking it
+			// as a generic execution error.
+			if dbosErr := (*DBOSError)(nil); errors.As(err, &dbosErr) && dbosErr.Code == UnexpectedStep {
+				c.logger.Error("non-deterministic child workflow invocation", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
+				return nil, err
+			}
 			c.logger.Error("failed to check child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
 			return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("checking child workflow: %w", err))
 		}
@@ -2484,8 +2493,9 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 			return nil, ctx.(*dbosContext).systemDB.send(ctx, input)
 		}, WithStepName("DBOS.send"))
 	} else {
+		uncancellableCtx := WithoutCancel(c)
 		err = retry(c, func() error {
-			return c.systemDB.send(c, input)
+			return c.systemDB.send(uncancellableCtx, input)
 		}, withRetrierLogger(c.logger))
 	}
 	return err
@@ -2510,6 +2520,9 @@ type recvInput struct {
 	Topic         string        // Topic to listen for (empty string receives from default topic)
 	Timeout       time.Duration // Maximum time to wait for a message
 	serialization string        // fallback serialization format (receiver's) for recording when no message is found
+	workflowID    string        // Receiving workflow (resolved by the caller from context)
+	stepID        int           // Step ID for the recv
+	sleepStepID   int           // Step ID for the internal timeout sleep
 }
 
 // recvResult carries the received message along with its serialization format from the notifications table.
@@ -2530,6 +2543,9 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 		Topic:         topic,
 		Timeout:       timeout,
 		serialization: resolveEncoder(c).Name(),
+		workflowID:    wfState.workflowID,
+		stepID:        wfState.nextStepID(),
+		sleepStepID:   wfState.nextStepID(),
 	}
 	recvRetryOpts := []retryOption{withRetrierLogger(c.logger)}
 	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
@@ -2636,11 +2652,17 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any, opts ...S
 	}
 
 	_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+		if !ok || wfState == nil {
+			return nil, newStepExecutionError("", "DBOS.setEvent", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
+		}
 		return nil, c.systemDB.setEvent(ctx, WorkflowSetEventInput{
 			Key:           key,
 			Message:       encodedMessage,
 			tx:            tx,
 			serialization: evtSer.Name(),
+			workflowID:    wfState.workflowID,
+			stepID:        wfState.stepID,
 		})
 	}, WithStepName("DBOS.setEvent"))
 	return err
@@ -2667,6 +2689,10 @@ type getEventInput struct {
 	Key              string        // Event key to retrieve
 	Timeout          time.Duration // Maximum time to wait for the event to be set
 	serialization    string        // fallback serialization format (caller's) for recording when no event is found
+	isInWorkflow     bool          // Whether the caller is inside a workflow (GetEvent is also callable from outside)
+	workflowID       string        // Calling workflow (resolved by the caller from context; empty when outside a workflow)
+	stepID           int           // Step ID for the getEvent, allocated by the caller before any retry
+	sleepStepID      int           // Step ID for the internal timeout sleep, allocated by the caller before any retry
 }
 
 // getEventResult carries the event value along with its serialization format from the workflow_events table.
@@ -2681,6 +2707,16 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 		Key:              key,
 		Timeout:          timeout,
 		serialization:    resolveEncoder(c).Name(),
+	}
+	// GetEvent may run inside or outside a workflow. When inside, allocate step IDs.
+	if wfState, ok := c.Value(workflowStateKey).(*workflowState); ok && wfState != nil {
+		if wfState.isWithinStep {
+			return nil, newStepExecutionError(wfState.workflowID, "DBOS.getEvent", fmt.Errorf("cannot call GetEvent within a step"))
+		}
+		input.isInWorkflow = true
+		input.workflowID = wfState.workflowID
+		input.stepID = wfState.nextStepID()
+		input.sleepStepID = wfState.nextStepID()
 	}
 	return retryWithResult(c, func() (*getEventResult, error) {
 		return c.systemDB.getEvent(c, input)
@@ -2780,11 +2816,17 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any, opts ...
 	}
 
 	_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+		if !ok || wfState == nil {
+			return "", fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
+		}
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
 			Key:           key,
 			Value:         encodedValue,
 			tx:            tx,
 			serialization: ser.Name(),
+			workflowID:    wfState.workflowID,
+			stepID:        wfState.stepID,
 		})
 	}, WithStepName("DBOS.writeStream"))
 	return err
@@ -3145,10 +3187,16 @@ func ReadStreamAsync[R any](ctx DBOSContext, workflowID string, key string) (<-c
 func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
 	_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 		sentinel := _DBOS_STREAM_CLOSED_SENTINEL
+		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
+		if !ok || wfState == nil {
+			return "", fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
+		}
 		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
-			Key:   key,
-			Value: &sentinel,
-			tx:    tx,
+			Key:        key,
+			Value:      &sentinel,
+			tx:         tx,
+			workflowID: wfState.workflowID,
+			stepID:     wfState.stepID,
 		})
 	}, WithStepName("DBOS.closeStream"))
 	return err
@@ -3179,8 +3227,14 @@ func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duratio
 	if wfState.isWithinStep {
 		return 0, newStepExecutionError(wfState.workflowID, "DBOS.sleep", fmt.Errorf("cannot call Sleep within a step"))
 	}
+	input := sleepInput{
+		duration:   duration,
+		skipSleep:  false,
+		workflowID: wfState.workflowID,
+		stepID:     wfState.nextStepID(),
+	}
 	return retryWithResult(c, func() (time.Duration, error) {
-		return c.systemDB.sleep(c, sleepInput{duration: duration, skipSleep: false})
+		return c.systemDB.sleep(c, input)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -3456,18 +3510,30 @@ func RetrieveWorkflow[R any](ctx DBOSContext, workflowID string) (WorkflowHandle
 	return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID()), nil
 }
 
-func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
+func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string, opts ...CancelWorkflowOptions) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	var found []string
 	var err error
+	cwo := cancelWorkflowOptions{}
+	for _, opt := range opts {
+		opt(&cwo)
+	}
+
 	if isWithinWorkflow {
 		found, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
-			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{workflowIDs: []string{workflowID}, tx: tx})
+			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{
+				workflowIDs:    []string{workflowID},
+				cancelChildren: cwo.cancelChildren,
+				tx:             tx,
+			})
 		}, WithStepName("DBOS.cancelWorkflow"))
 	} else {
 		found, err = retryWithResult(c, func() ([]string, error) {
-			return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{workflowIDs: []string{workflowID}})
+			return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{
+				workflowIDs:    []string{workflowID},
+				cancelChildren: cwo.cancelChildren,
+			})
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
@@ -3494,24 +3560,30 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string) error {
 //	if err != nil {
 //	    log.Printf("Failed to cancel workflow: %v", err)
 //	}
-func CancelWorkflow(ctx DBOSContext, workflowID string) error {
+func CancelWorkflow(ctx DBOSContext, workflowID string, opts ...CancelWorkflowOptions) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.CancelWorkflow(ctx, workflowID)
+
+	return ctx.CancelWorkflow(ctx, workflowID, opts...)
 }
 
-func (c *dbosContext) CancelWorkflows(_ DBOSContext, workflowIDs []string) error {
+func (c *dbosContext) CancelWorkflows(_ DBOSContext, workflowIDs []string, opts ...CancelWorkflowOptions) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
+	cwo := cancelWorkflowOptions{}
+	for _, opt := range opts {
+		opt(&cwo)
+	}
+
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
-			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{workflowIDs: workflowIDs, tx: tx})
+			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{cancelChildren: cwo.cancelChildren, workflowIDs: workflowIDs, tx: tx})
 		}, WithStepName("DBOS.cancelWorkflows"))
 		return err
 	}
 	_, err := retryWithResult(c, func() ([]string, error) {
-		return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{workflowIDs: workflowIDs})
+		return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{cancelChildren: cwo.cancelChildren, workflowIDs: workflowIDs})
 	}, withRetrierLogger(c.logger))
 	return err
 }
@@ -3528,11 +3600,11 @@ func (c *dbosContext) CancelWorkflows(_ DBOSContext, workflowIDs []string) error
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-func CancelWorkflows(ctx DBOSContext, workflowIDs []string) error {
+func CancelWorkflows(ctx DBOSContext, workflowIDs []string, opts ...CancelWorkflowOptions) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.CancelWorkflows(ctx, workflowIDs)
+	return ctx.CancelWorkflows(ctx, workflowIDs, opts...)
 }
 
 // SetWorkflowDelayOption configures how the delay is set on a workflow.
@@ -3859,8 +3931,9 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 			return c.systemDB.forkWorkflow(ctx, dbInput)
 		}, WithStepName("DBOS.forkWorkflow"))
 	} else {
+		uncancellableCtx := WithoutCancel(c)
 		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
-			return c.systemDB.forkWorkflow(c, dbInput)
+			return c.systemDB.forkWorkflow(uncancellableCtx, dbInput)
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
@@ -4812,8 +4885,9 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, in
 		return err
 	}
 
+	uncancellableCtx := WithoutCancel(c)
 	return retry(c, func() error {
-		return c.systemDB.createSchedule(c, dbInput)
+		return c.systemDB.createSchedule(uncancellableCtx, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5085,8 +5159,9 @@ func (c *dbosContext) DeleteSchedule(_ DBOSContext, scheduleName string) error {
 		return err
 	}
 
+	uncancellableCtx := WithoutCancel(c)
 	return retry(c, func() error {
-		return c.systemDB.deleteSchedule(c, deleteScheduleDBInput{ScheduleName: scheduleName})
+		return c.systemDB.deleteSchedule(uncancellableCtx, deleteScheduleDBInput{ScheduleName: scheduleName})
 	}, withRetrierLogger(c.logger))
 }
 
