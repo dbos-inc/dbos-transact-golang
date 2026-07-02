@@ -3982,29 +3982,36 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 	if input.StartStep > uint(math.MaxInt) {
 		return nil, fmt.Errorf("start step too large: %d", input.StartStep)
 	}
-	dbInput := forkWorkflowDBInput{
-		originalWorkflowID: input.OriginalWorkflowID,
-		forkedWorkflowID:   input.ForkedWorkflowID,
-		startStep:          int(input.StartStep),
-		applicationVersion: input.ApplicationVersion,
-		queueName:          input.QueueName,
-		queuePartitionKey:  input.QueuePartitionKey,
+	dbInput := forkWorkflowsDBInput{
+		originalWorkflowIDs: []string{input.OriginalWorkflowID},
+		forkedWorkflowIDs:   []string{input.ForkedWorkflowID},
+		startSteps:          []int{int(input.StartStep)},
+		applicationVersion:  input.ApplicationVersion,
+		queueName:           input.QueueName,
+		queuePartitionKey:   input.QueuePartitionKey,
 	}
 
 	// Call system database method
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
+	forkSingle := func(ctx context.Context) (string, error) {
+		forkedWorkflowIDs, err := c.systemDB.forkWorkflows(ctx, dbInput)
+		if err != nil {
+			return "", err
+		}
+		return forkedWorkflowIDs[0], nil
+	}
 	var forkedWorkflowID string
 	var err error
 	if isWithinWorkflow {
 		forkedWorkflowID, err = runAsTxn(c, func(ctx context.Context, tx Tx) (string, error) {
 			dbInput.tx = tx
-			return c.systemDB.forkWorkflow(ctx, dbInput)
+			return forkSingle(ctx)
 		}, WithStepName("DBOS.forkWorkflow"))
 	} else {
 		uncancellableCtx := WithoutCancel(c)
 		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
-			return c.systemDB.forkWorkflow(uncancellableCtx, dbInput)
+			return forkSingle(uncancellableCtx)
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {

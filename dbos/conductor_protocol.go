@@ -45,6 +45,7 @@ const (
 	listStepsMessage             messageType = "list_steps"
 	getWorkflowMessage           messageType = "get_workflow"
 	forkWorkflowMessage          messageType = "fork_workflow"
+	forkFromFailureMessage       messageType = "fork_from_failure"
 	existPendingWorkflowsMessage messageType = "exist_pending_workflows"
 	retentionMessage             messageType = "retention"
 	getMetricsMessage            messageType = "get_metrics"
@@ -418,6 +419,30 @@ type forkWorkflowConductorRequest struct {
 type forkWorkflowConductorResponse struct {
 	baseResponse
 	NewWorkflowID *string `json:"new_workflow_id,omitempty"`
+}
+
+// forkFromFailureConductorRequestBody contains the bulk fork-from-failure parameters
+type forkFromFailureConductorRequestBody struct {
+	WorkflowIDs        []string `json:"workflow_ids"`
+	ApplicationVersion *string  `json:"application_version,omitempty"`
+	QueueName          *string  `json:"queue_name,omitempty"`
+	QueuePartitionKey  *string  `json:"queue_partition_key,omitempty"`
+	FromLastFailure    bool     `json:"from_last_failure,omitempty"`
+	FromLastStep       bool     `json:"from_last_step,omitempty"`
+	FromStep           *int     `json:"from_step,omitempty"`
+	FromStepName       *string  `json:"from_step_name,omitempty"`
+}
+
+// forkFromFailureConductorRequest is sent by the conductor to bulk fork workflows
+type forkFromFailureConductorRequest struct {
+	baseMessage
+	Body forkFromFailureConductorRequestBody `json:"body"`
+}
+
+// forkFromFailureConductorResponse is sent in response to fork-from-failure requests
+type forkFromFailureConductorResponse struct {
+	baseResponse
+	ForkedWorkflowIDs []string `json:"forked_workflow_ids,omitempty"`
 }
 
 // cancelWorkflowConductorRequest is sent by the conductor to cancel a workflow

@@ -365,6 +365,8 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleGetWorkflowRequest(data, base.RequestID)
 	case forkWorkflowMessage:
 		return c.handleForkWorkflowRequest(data, base.RequestID)
+	case forkFromFailureMessage:
+		return c.handleForkFromFailureRequest(data, base.RequestID)
 	case existPendingWorkflowsMessage:
 		return c.handleExistPendingWorkflowsRequest(data, base.RequestID)
 	case retentionMessage:
@@ -1099,6 +1101,55 @@ func (c *conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	}
 
 	return c.sendResponse(response, string(forkWorkflowMessage))
+}
+
+func (c *conductor) handleForkFromFailureRequest(data []byte, requestID string) error {
+	var req forkFromFailureConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse fork from failure request", "error", err)
+		return fmt.Errorf("failed to parse fork from failure request: %w", err)
+	}
+	c.logger.Debug("Handling fork from failure request", "request", req)
+
+	input := forkFromFailureDBInput{
+		workflowIDs:     req.Body.WorkflowIDs,
+		fromLastFailure: req.Body.FromLastFailure,
+		fromLastStep:    req.Body.FromLastStep,
+		fromStep:        req.Body.FromStep,
+		fromStepName:    req.Body.FromStepName,
+	}
+	if req.Body.ApplicationVersion != nil {
+		input.applicationVersion = *req.Body.ApplicationVersion
+	}
+	if req.Body.QueueName != nil {
+		input.queueName = *req.Body.QueueName
+	}
+	if req.Body.QueuePartitionKey != nil {
+		input.queuePartitionKey = *req.Body.QueuePartitionKey
+	}
+
+	forkedIDs, err := c.dbosCtx.systemDB.forkFrom(c.dbosCtx, input)
+	var errorMsg *string
+	if err != nil {
+		c.logger.Error("Failed to fork workflows from failure", "workflow_ids", req.Body.WorkflowIDs, "error", err)
+		errStr := fmt.Sprintf("failed to fork workflows from failure: %v", err)
+		errorMsg = &errStr
+	} else {
+		c.logger.Info("Successfully forked workflows from failure", "original_workflow_ids", req.Body.WorkflowIDs, "forked_workflow_ids", forkedIDs)
+	}
+
+	response := forkFromFailureConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      forkFromFailureMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
+		},
+		ForkedWorkflowIDs: forkedIDs,
+	}
+
+	return c.sendResponse(response, string(forkFromFailureMessage))
 }
 
 func (c *conductor) handleExistPendingWorkflowsRequest(data []byte, requestID string) error {

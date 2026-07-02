@@ -40,7 +40,8 @@ type systemDatabase interface {
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	deleteWorkflows(ctx context.Context, input deleteWorkflowsDBInput) error
 	resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInput) ([]string, error)
-	forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error)
+	forkWorkflows(ctx context.Context, input forkWorkflowsDBInput) ([]string, error)
+	forkFrom(ctx context.Context, input forkFromFailureDBInput) ([]string, error)
 
 	getDeduplicatedWorkflow(ctx context.Context, queueName, deduplicationID string) (*string, error)
 
@@ -2001,26 +2002,38 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 	return found, nil
 }
 
-type forkWorkflowDBInput struct {
-	originalWorkflowID string
-	forkedWorkflowID   string
-	startStep          int
-	applicationVersion string
-	queueName          string
-	queuePartitionKey  string
-	tx                 Tx
+type forkWorkflowsDBInput struct {
+	originalWorkflowIDs []string
+	forkedWorkflowIDs   []string // Optional: must match originalWorkflowIDs in length if set; empty entries are auto-generated
+	startSteps          []int
+	applicationVersion  string
+	queueName           string
+	queuePartitionKey   string
+	tx                  Tx
 }
 
-func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (string, error) {
-	// Generate new workflow ID if not provided
-	forkedWorkflowID := input.forkedWorkflowID
-	if forkedWorkflowID == "" {
-		forkedWorkflowID = uuid.New().String()
+func (s *sysDB) forkWorkflows(ctx context.Context, input forkWorkflowsDBInput) ([]string, error) {
+	if len(input.originalWorkflowIDs) == 0 {
+		return []string{}, nil
+	}
+	if len(input.startSteps) != len(input.originalWorkflowIDs) {
+		return nil, errors.New("originalWorkflowIDs and startSteps must have the same length")
+	}
+	if len(input.forkedWorkflowIDs) > 0 && len(input.forkedWorkflowIDs) != len(input.originalWorkflowIDs) {
+		return nil, errors.New("originalWorkflowIDs and forkedWorkflowIDs must have the same length")
 	}
 
-	// Validate startStep
-	if input.startStep < 0 {
-		return "", fmt.Errorf("startStep must be >= 0, got %d", input.startStep)
+	// Validate start steps and generate forked workflow IDs where not provided
+	forkedWorkflowIDs := make([]string, len(input.originalWorkflowIDs))
+	for i := range input.originalWorkflowIDs {
+		if input.startSteps[i] < 0 {
+			return nil, fmt.Errorf("startStep must be >= 0, got %d", input.startSteps[i])
+		}
+		if len(input.forkedWorkflowIDs) > 0 && input.forkedWorkflowIDs[i] != "" {
+			forkedWorkflowIDs[i] = input.forkedWorkflowIDs[i]
+		} else {
+			forkedWorkflowIDs[i] = uuid.New().String()
+		}
 	}
 
 	tx := input.tx
@@ -2029,68 +2042,37 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		var err error
 		tx, err = s.pool.BeginTx(ctx, TxOptions{})
 		if err != nil {
-			return "", fmt.Errorf("failed to begin fork transaction: %w", err)
+			return nil, fmt.Errorf("failed to begin fork transaction: %w", err)
 		}
 		defer tx.Rollback(ctx)
 	}
 	execCtx := tx.Exec
 
-	// Get the original workflow status. Use the same tx so the read sees the
-	// pre-fork state consistently with the writes below.
+	// Get the original workflow statuses in one query. Use the same tx so the
+	// read sees the pre-fork state consistently with the writes below.
 	listInput := listWorkflowsDBInput{
-		workflowIDs: []string{input.originalWorkflowID},
+		workflowIDs: input.originalWorkflowIDs,
 		loadInput:   true,
 		tx:          tx,
 	}
 	wfs, err := s.listWorkflows(ctx, listInput)
 	if err != nil {
-		return "", fmt.Errorf("failed to list workflows: %w", err)
+		return nil, fmt.Errorf("failed to list workflows: %w", err)
 	}
-	if len(wfs) == 0 {
-		return "", newNonExistentWorkflowError(input.originalWorkflowID)
+	statusByID := make(map[string]WorkflowStatus, len(wfs))
+	for _, wf := range wfs {
+		statusByID[wf.ID] = wf
 	}
-
-	originalWorkflow := wfs[0]
-
-	// Determine the application version to use
-	appVersion := originalWorkflow.ApplicationVersion
-	if input.applicationVersion != "" {
-		appVersion = input.applicationVersion
+	for _, id := range input.originalWorkflowIDs {
+		if _, ok := statusByID[id]; !ok {
+			return nil, newNonExistentWorkflowError(id)
+		}
 	}
 
-	// Determine the queue to place the forked workflow on
+	// Determine the queue to place the forked workflows on
 	queueName := input.queueName
 	if queueName == "" {
 		queueName = _DBOS_INTERNAL_QUEUE_NAME
-	}
-
-	// Create an entry for the forked workflow with the same initial values as the original
-	insertQuery := s.renderSQL(`INSERT INTO %sworkflow_status (
-		workflow_uuid,
-		status,
-		name,
-		authenticated_user,
-		assumed_role,
-		authenticated_roles,
-		application_version,
-		application_id,
-		queue_name,
-		queue_partition_key,
-		inputs,
-		created_at,
-		updated_at,
-		recovery_attempts,
-		forked_from,
-		serialization,
-		class_name,
-		config_name,
-		attributes
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`, s.dialect.SchemaPrefix(s.schema))
-
-	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
-	authenticatedRoles, err := json.Marshal(originalWorkflow.AuthenticatedRoles)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal the authenticated roles: %w", err)
 	}
 
 	var queuePartitionKey any
@@ -2098,113 +2080,257 @@ func (s *sysDB) forkWorkflow(ctx context.Context, input forkWorkflowDBInput) (st
 		queuePartitionKey = input.queuePartitionKey
 	}
 
-	var className any
-	if originalWorkflow.ClassName != "" {
-		className = originalWorkflow.ClassName
+	// Bulk insert all forked workflow status rows in one statement, each with
+	// the same initial values as its original.
+	insertColumns := []string{
+		"workflow_uuid", "status", "name", "authenticated_user", "assumed_role",
+		"authenticated_roles", "application_version", "application_id", "queue_name",
+		"queue_partition_key", "inputs", "created_at", "updated_at", "recovery_attempts",
+		"forked_from", "serialization", "class_name", "config_name", "attributes",
 	}
+	valueRows := make([]string, len(input.originalWorkflowIDs))
+	insertArgs := make([]any, 0, len(input.originalWorkflowIDs)*len(insertColumns))
+	for i, originalWorkflowID := range input.originalWorkflowIDs {
+		originalWorkflow := statusByID[originalWorkflowID]
 
-	var attributesJSON any
-	if len(originalWorkflow.Attributes) > 0 {
-		marshaled, err := json.Marshal(originalWorkflow.Attributes)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal workflow attributes: %w", err)
+		// Determine the application version to use
+		appVersion := originalWorkflow.ApplicationVersion
+		if input.applicationVersion != "" {
+			appVersion = input.applicationVersion
 		}
-		attributesJSON = string(marshaled)
+
+		// Marshal authenticated roles (slice of strings) to JSON for TEXT column
+		authenticatedRoles, err := json.Marshal(originalWorkflow.AuthenticatedRoles)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal the authenticated roles: %w", err)
+		}
+
+		var className any
+		if originalWorkflow.ClassName != "" {
+			className = originalWorkflow.ClassName
+		}
+
+		var attributesJSON any
+		if len(originalWorkflow.Attributes) > 0 {
+			marshaled, err := json.Marshal(originalWorkflow.Attributes)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal workflow attributes: %w", err)
+			}
+			attributesJSON = string(marshaled)
+		}
+
+		placeholders := make([]string, len(insertColumns))
+		for j := range placeholders {
+			placeholders[j] = fmt.Sprintf("$%d", i*len(insertColumns)+j+1)
+		}
+		valueRows[i] = "(" + strings.Join(placeholders, ", ") + ")"
+		insertArgs = append(insertArgs,
+			forkedWorkflowIDs[i],
+			WorkflowStatusEnqueued,
+			originalWorkflow.Name,
+			originalWorkflow.AuthenticatedUser,
+			originalWorkflow.AssumedRole,
+			authenticatedRoles,
+			appVersion,
+			originalWorkflow.ApplicationID,
+			queueName,
+			queuePartitionKey,
+			originalWorkflow.Input, // encoded
+			time.Now().UnixMilli(),
+			time.Now().UnixMilli(),
+			0,
+			originalWorkflowID, // forked_from
+			originalWorkflow.Serialization,
+			className,
+			originalWorkflow.ConfigName,
+			attributesJSON)
+	}
+	insertQuery := s.renderSQL(`INSERT INTO %sworkflow_status (`+strings.Join(insertColumns, ", ")+`)
+		VALUES `+strings.Join(valueRows, ", "), s.dialect.SchemaPrefix(s.schema))
+	if _, err = execCtx(ctx, insertQuery, insertArgs...); err != nil {
+		return nil, fmt.Errorf("failed to insert forked workflow statuses: %w", err)
 	}
 
-	_, err = execCtx(ctx, insertQuery,
-		forkedWorkflowID,
-		WorkflowStatusEnqueued,
-		originalWorkflow.Name,
-		originalWorkflow.AuthenticatedUser,
-		originalWorkflow.AssumedRole,
-		authenticatedRoles,
-		&appVersion,
-		originalWorkflow.ApplicationID,
-		queueName,
-		queuePartitionKey,
-		originalWorkflow.Input, // encoded
-		time.Now().UnixMilli(),
-		time.Now().UnixMilli(),
-		0,
-		input.originalWorkflowID, // forked_from
-		originalWorkflow.Serialization,
-		className,
-		originalWorkflow.ConfigName,
-		attributesJSON)
-
-	if err != nil {
-		return "", fmt.Errorf("failed to insert forked workflow status: %w", err)
+	// For workflows forked from a step > 0, copy checkpoints, events, and streams.
+	// A UNION ALL mapping of (orig_id, fork_id, start_step) makes each table copy
+	// a single statement regardless of batch size.
+	mappingBranches := make([]string, 0, len(input.originalWorkflowIDs))
+	mappingArgs := make([]any, 0, len(input.originalWorkflowIDs)*3)
+	for i, originalWorkflowID := range input.originalWorkflowIDs {
+		if input.startSteps[i] <= 0 {
+			continue
+		}
+		base := len(mappingArgs)
+		mappingBranches = append(mappingBranches, fmt.Sprintf(
+			"SELECT CAST($%d AS TEXT) AS orig_id, CAST($%d AS TEXT) AS fork_id, CAST($%d AS INTEGER) AS start_step",
+			base+1, base+2, base+3))
+		mappingArgs = append(mappingArgs, originalWorkflowID, forkedWorkflowIDs[i], input.startSteps[i])
 	}
 
-	// Mark the original workflow as having been forked from.
-	markForkedQuery := s.renderSQL(`UPDATE %sworkflow_status SET was_forked_from = TRUE WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
-	if _, err = execCtx(ctx, markForkedQuery, input.originalWorkflowID); err != nil {
-		return "", fmt.Errorf("failed to mark original workflow as forked: %w", err)
-	}
+	if len(mappingBranches) > 0 {
+		mapping := "(" + strings.Join(mappingBranches, " UNION ALL ") + ") AS m"
 
-	// If startStep > 0, copy the original workflow's outputs into the forked workflow
-	if input.startStep > 0 {
 		copyOutputsQuery := s.renderSQL(`INSERT INTO %soperation_outputs
 			(workflow_uuid, function_id, output, error, function_name, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms)
-			SELECT $1, function_id, output, error, function_name, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms
-			FROM %soperation_outputs
-			WHERE workflow_uuid = $2 AND function_id < $3`, s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
-
-		_, err = execCtx(ctx, copyOutputsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
-		if err != nil {
-			return "", fmt.Errorf("failed to copy operation outputs: %w", err)
+			SELECT m.fork_id, oo.function_id, oo.output, oo.error, oo.function_name, oo.child_workflow_id, oo.started_at_epoch_ms, oo.completed_at_epoch_ms
+			FROM `+mapping+`
+			JOIN %soperation_outputs oo ON oo.workflow_uuid = m.orig_id AND oo.function_id < m.start_step`,
+			s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
+		if _, err = execCtx(ctx, copyOutputsQuery, mappingArgs...); err != nil {
+			return nil, fmt.Errorf("failed to copy operation outputs: %w", err)
 		}
 
-		// Copy workflow events history for steps before startStep
 		copyEventsHistoryQuery := s.renderSQL(`INSERT INTO %sworkflow_events_history
 			(workflow_uuid, function_id, key, value)
-			SELECT $1, function_id, key, value
-			FROM %sworkflow_events_history
-			WHERE workflow_uuid = $2 AND function_id < $3`, s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
-
-		_, err = execCtx(ctx, copyEventsHistoryQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
-		if err != nil {
-			return "", fmt.Errorf("failed to copy workflow events history: %w", err)
+			SELECT m.fork_id, h.function_id, h.key, h.value
+			FROM `+mapping+`
+			JOIN %sworkflow_events_history h ON h.workflow_uuid = m.orig_id AND h.function_id < m.start_step`,
+			s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
+		if _, err = execCtx(ctx, copyEventsHistoryQuery, mappingArgs...); err != nil {
+			return nil, fmt.Errorf("failed to copy workflow events history: %w", err)
 		}
 
-		// Copy the latest version of each event (highest function_id for each key) into workflow_events.
+		// Copy only the latest version of each event (highest function_id per key) into workflow_events.
 		copyLatestEventsQuery := s.renderSQL(`INSERT INTO %sworkflow_events (workflow_uuid, key, value)
-			SELECT $1, h.key, h.value
-			FROM %sworkflow_events_history h
-			INNER JOIN (
-				SELECT key, MAX(function_id) AS max_fid
-				FROM %sworkflow_events_history
-				WHERE workflow_uuid = $2 AND function_id < $3
-				GROUP BY key
-			) latest ON h.key = latest.key AND h.function_id = latest.max_fid
-			WHERE h.workflow_uuid = $2 AND h.function_id < $3`,
-			s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
-
-		_, err = execCtx(ctx, copyLatestEventsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
-		if err != nil {
-			return "", fmt.Errorf("failed to copy latest workflow events: %w", err)
+			SELECT workflow_uuid, key, value FROM (
+				SELECT m.fork_id AS workflow_uuid, h.key AS key, h.value AS value,
+					ROW_NUMBER() OVER (PARTITION BY m.fork_id, h.key ORDER BY h.function_id DESC) AS rn
+				FROM `+mapping+`
+				JOIN %sworkflow_events_history h ON h.workflow_uuid = m.orig_id AND h.function_id < m.start_step
+			) ranked WHERE rn = 1`,
+			s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
+		if _, err = execCtx(ctx, copyLatestEventsQuery, mappingArgs...); err != nil {
+			return nil, fmt.Errorf("failed to copy latest workflow events: %w", err)
 		}
 
-		// Copy streams for steps before startStep
 		copyStreamsQuery := s.renderSQL(`INSERT INTO %sstreams
 			(workflow_uuid, key, value, "offset", function_id)
-			SELECT $1, key, value, "offset", function_id
-			FROM %sstreams
-			WHERE workflow_uuid = $2 AND function_id < $3`, s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
-
-		_, err = execCtx(ctx, copyStreamsQuery, forkedWorkflowID, input.originalWorkflowID, input.startStep)
-		if err != nil {
-			return "", fmt.Errorf("failed to copy streams: %w", err)
+			SELECT m.fork_id, st.key, st.value, st."offset", st.function_id
+			FROM `+mapping+`
+			JOIN %sstreams st ON st.workflow_uuid = m.orig_id AND st.function_id < m.start_step`,
+			s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
+		if _, err = execCtx(ctx, copyStreamsQuery, mappingArgs...); err != nil {
+			return nil, fmt.Errorf("failed to copy streams: %w", err)
 		}
+	}
+
+	// Mark the original workflows as having been forked from.
+	placeholders := make([]string, len(input.originalWorkflowIDs))
+	markArgs := make([]any, len(input.originalWorkflowIDs))
+	for i, id := range input.originalWorkflowIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		markArgs[i] = id
+	}
+	markForkedQuery := s.renderSQL(`UPDATE %sworkflow_status SET was_forked_from = TRUE WHERE workflow_uuid IN (`+strings.Join(placeholders, ", ")+`)`, s.dialect.SchemaPrefix(s.schema))
+	if _, err = execCtx(ctx, markForkedQuery, markArgs...); err != nil {
+		return nil, fmt.Errorf("failed to mark original workflows as forked: %w", err)
 	}
 
 	if ownTx {
 		if err := tx.Commit(ctx); err != nil {
-			return "", fmt.Errorf("failed to commit fork transaction: %w", err)
+			return nil, fmt.Errorf("failed to commit fork transaction: %w", err)
 		}
 	}
-	return forkedWorkflowID, nil
+	return forkedWorkflowIDs, nil
+}
+
+type forkFromFailureDBInput struct {
+	workflowIDs        []string
+	applicationVersion string
+	queueName          string
+	queuePartitionKey  string
+	fromLastFailure    bool
+	fromLastStep       bool
+	fromStep           *int
+	fromStepName       *string
+}
+
+// forkFrom forks a batch of workflows, computing each workflow's start step
+// from its recorded checkpoints according to exactly one of four modes:
+// fromLastFailure (last step that recorded an error, falling back to the last step),
+// fromLastStep, fromStep (explicit step), or fromStepName (last occurrence of a named step).
+func (s *sysDB) forkFrom(ctx context.Context, input forkFromFailureDBInput) ([]string, error) {
+	modes := 0
+	for _, set := range []bool{input.fromLastFailure, input.fromLastStep, input.fromStep != nil, input.fromStepName != nil} {
+		if set {
+			modes++
+		}
+	}
+	if modes != 1 {
+		return nil, errors.New("exactly one of fromLastFailure, fromLastStep, fromStep, or fromStepName must be specified")
+	}
+	if len(input.workflowIDs) == 0 {
+		return []string{}, nil
+	}
+
+	startSteps := make(map[string]int, len(input.workflowIDs))
+	if input.fromStep != nil {
+		for _, id := range input.workflowIDs {
+			startSteps[id] = *input.fromStep
+		}
+	} else {
+		placeholders := make([]string, len(input.workflowIDs))
+		args := make([]any, 0, len(input.workflowIDs)+1)
+		for i, id := range input.workflowIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args = append(args, id)
+		}
+		inClause := strings.Join(placeholders, ", ")
+
+		var stepExpr string
+		switch {
+		case input.fromLastFailure:
+			stepExpr = "COALESCE(MAX(CASE WHEN error IS NOT NULL THEN function_id END), MAX(function_id))"
+		default: // fromLastStep and fromStepName
+			stepExpr = "MAX(function_id)"
+		}
+		nameFilter := ""
+		if input.fromStepName != nil {
+			nameFilter = fmt.Sprintf(" AND function_name = $%d", len(input.workflowIDs)+1)
+			args = append(args, *input.fromStepName)
+		}
+
+		query := s.renderSQL(`SELECT workflow_uuid, `+stepExpr+`
+			FROM %soperation_outputs
+			WHERE workflow_uuid IN (`+inClause+`)`+nameFilter+`
+			GROUP BY workflow_uuid`, s.dialect.SchemaPrefix(s.schema))
+
+		rows, err := s.pool.Query(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query start steps: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var workflowID string
+			var startStep int
+			if err := rows.Scan(&workflowID, &startStep); err != nil {
+				return nil, fmt.Errorf("failed to scan start step: %w", err)
+			}
+			startSteps[workflowID] = startStep
+		}
+		rows.Close()
+
+		for _, id := range input.workflowIDs {
+			if _, ok := startSteps[id]; !ok {
+				if input.fromStepName != nil {
+					return nil, fmt.Errorf("workflow %s has no step named '%s'", id, *input.fromStepName)
+				}
+				return nil, fmt.Errorf("workflow %s has no steps", id)
+			}
+		}
+	}
+
+	orderedStartSteps := make([]int, len(input.workflowIDs))
+	for i, id := range input.workflowIDs {
+		orderedStartSteps[i] = startSteps[id]
+	}
+	return s.forkWorkflows(ctx, forkWorkflowsDBInput{
+		originalWorkflowIDs: input.workflowIDs,
+		startSteps:          orderedStartSteps,
+		applicationVersion:  input.applicationVersion,
+		queueName:           input.queueName,
+		queuePartitionKey:   input.queuePartitionKey,
+	})
 }
 
 type awaitWorkflowResultOutput struct {
