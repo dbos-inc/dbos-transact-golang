@@ -8043,8 +8043,38 @@ func TestFork(t *testing.T) {
 		return one + two + three, nil
 	}
 
+	// Workflow that catches its second step's error and continues, so its last
+	// failed step (1) differs from its last step (2) — distinguishing
+	// fromLastFailure from fromLastStep.
+	var caughtStepTwoCount atomic.Int64
+	caughtFailureWorkflow := func(ctx DBOSContext, _ string) (int, error) {
+		one, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			return 1, nil
+		}, WithStepName("stepOne"))
+		if err != nil {
+			return 0, err
+		}
+		two, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			if caughtStepTwoCount.Add(1) == 1 { // fail on first call only
+				return 0, errors.New("step two failed")
+			}
+			return 2, nil
+		}, WithStepName("stepTwo"))
+		if err != nil {
+			two = 0 // swallow the error and continue
+		}
+		three, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			return 3, nil
+		}, WithStepName("stepThree"))
+		if err != nil {
+			return 0, err
+		}
+		return one + two + three, nil
+	}
+
 	RegisterWorkflow(dbosCtx, failableWorkflow, WithWorkflowName("failableThreeStepWorkflow"))
 	RegisterWorkflow(dbosCtx, threeStepWorkflow, WithWorkflowName("bulkForkWorkflow"))
+	RegisterWorkflow(dbosCtx, caughtFailureWorkflow, WithWorkflowName("caughtFailureWorkflow"))
 	require.NoError(t, Launch(dbosCtx))
 
 	sysDB := dbosCtx.(*dbosContext).systemDB
@@ -8180,6 +8210,34 @@ func TestFork(t *testing.T) {
 				fromLastStep:    true,
 			})
 			require.ErrorContains(t, err, "exactly one")
+		})
+
+		t.Run("LastFailureVsLastStep", func(t *testing.T) {
+			wfID := uuid.NewString()
+			handle, err := RunWorkflow(dbosCtx, caughtFailureWorkflow, "", WithWorkflowID(wfID))
+			require.NoError(t, err)
+			res, err := handle.GetResult()
+			require.NoError(t, err)
+			require.Equal(t, 4, res) // stepTwo's error was caught, so two contributes 0
+
+			forkAndGet := func(input forkFromDBInput) int {
+				input.workflowIDs = []string{wfID}
+				forkedIDs, err := sysDB.forkFrom(dbosCtx, input)
+				require.NoError(t, err)
+				require.Len(t, forkedIDs, 1)
+				fh, err := RetrieveWorkflow[int](dbosCtx, forkedIDs[0])
+				require.NoError(t, err)
+				res, err := fh.GetResult()
+				require.NoError(t, err)
+				return res
+			}
+
+			// fromLastStep starts at the last step (stepThree): stepTwo's
+			// checkpointed error replays and is caught again.
+			require.Equal(t, 4, forkAndGet(forkFromDBInput{fromLastStep: true}))
+			// fromLastFailure starts at the failed step (stepTwo) even though a
+			// later step succeeded: stepTwo re-runs and succeeds this time.
+			require.Equal(t, 6, forkAndGet(forkFromDBInput{fromLastFailure: true}))
 		})
 	})
 
