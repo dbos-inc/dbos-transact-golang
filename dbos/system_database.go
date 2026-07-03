@@ -2090,6 +2090,7 @@ func (s *sysDB) forkWorkflows(ctx context.Context, input forkWorkflowsDBInput) (
 	}
 	valueRows := make([]string, len(input.originalWorkflowIDs))
 	insertArgs := make([]any, 0, len(input.originalWorkflowIDs)*len(insertColumns))
+	nowMs := time.Now().UnixMilli()
 	for i, originalWorkflowID := range input.originalWorkflowIDs {
 		originalWorkflow := statusByID[originalWorkflowID]
 
@@ -2136,8 +2137,8 @@ func (s *sysDB) forkWorkflows(ctx context.Context, input forkWorkflowsDBInput) (
 			queueName,
 			queuePartitionKey,
 			originalWorkflow.Input, // encoded
-			time.Now().UnixMilli(),
-			time.Now().UnixMilli(),
+			nowMs,
+			nowMs,
 			0,
 			originalWorkflowID, // forked_from
 			originalWorkflow.Serialization,
@@ -2215,14 +2216,12 @@ func (s *sysDB) forkWorkflows(ctx context.Context, input forkWorkflowsDBInput) (
 	}
 
 	// Mark the original workflows as having been forked from.
-	placeholders := make([]string, len(input.originalWorkflowIDs))
-	markArgs := make([]any, len(input.originalWorkflowIDs))
-	for i, id := range input.originalWorkflowIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		markArgs[i] = id
+	markIDs, err := encodeArrayParam(s.dialect, input.originalWorkflowIDs)
+	if err != nil {
+		return nil, err
 	}
-	markForkedQuery := s.renderSQL(`UPDATE %sworkflow_status SET was_forked_from = TRUE WHERE workflow_uuid IN (`+strings.Join(placeholders, ", ")+`)`, s.dialect.SchemaPrefix(s.schema))
-	if _, err = execCtx(ctx, markForkedQuery, markArgs...); err != nil {
+	markForkedQuery := s.renderSQL(`UPDATE %sworkflow_status SET was_forked_from = TRUE WHERE `+dialectAnyClause(s.dialect, "workflow_uuid", 1), s.dialect.SchemaPrefix(s.schema))
+	if _, err = execCtx(ctx, markForkedQuery, markIDs); err != nil {
 		return nil, fmt.Errorf("failed to mark original workflows as forked: %w", err)
 	}
 
@@ -2269,13 +2268,11 @@ func (s *sysDB) forkFrom(ctx context.Context, input forkFromDBInput) ([]string, 
 			startSteps[id] = *input.fromStep
 		}
 	} else {
-		placeholders := make([]string, len(input.workflowIDs))
-		args := make([]any, 0, len(input.workflowIDs)+1)
-		for i, id := range input.workflowIDs {
-			placeholders[i] = fmt.Sprintf("$%d", i+1)
-			args = append(args, id)
+		idsParam, err := encodeArrayParam(s.dialect, input.workflowIDs)
+		if err != nil {
+			return nil, err
 		}
-		inClause := strings.Join(placeholders, ", ")
+		args := []any{idsParam}
 
 		var stepExpr string
 		switch {
@@ -2286,13 +2283,13 @@ func (s *sysDB) forkFrom(ctx context.Context, input forkFromDBInput) ([]string, 
 		}
 		nameFilter := ""
 		if input.fromStepName != nil {
-			nameFilter = fmt.Sprintf(" AND function_name = $%d", len(input.workflowIDs)+1)
+			nameFilter = " AND function_name = $2"
 			args = append(args, *input.fromStepName)
 		}
 
 		query := s.renderSQL(`SELECT workflow_uuid, `+stepExpr+`
 			FROM %soperation_outputs
-			WHERE workflow_uuid IN (`+inClause+`)`+nameFilter+`
+			WHERE `+dialectAnyClause(s.dialect, "workflow_uuid", 1)+nameFilter+`
 			GROUP BY workflow_uuid`, s.dialect.SchemaPrefix(s.schema))
 
 		rows, err := s.pool.Query(ctx, query, args...)
