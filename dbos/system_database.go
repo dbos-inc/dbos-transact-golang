@@ -5881,7 +5881,8 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 				output, error, executor_id, created_at, updated_at, application_version, application_id,
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
-				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization
+				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization,
+				was_forked_from
 			FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
 
 		row := tx.QueryRow(ctx, statusQuery, wfID)
@@ -5896,6 +5897,7 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			priority                                                     *int
 			delayUntilEpochMs                                            *int64
 			serialization                                                *string
+			wasForkedFrom                                                *bool
 		)
 		err := row.Scan(
 			&wfUUID, &status, &name, &authUser, &assumedRole, &authRoles,
@@ -5903,6 +5905,7 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			&className, &configName, &recoveryAttempts, &queueName, &workflowTimeoutMs,
 			&workflowDeadlineEpochMs, &startedAtEpochMs, &dedupID, &inputs, &priority,
 			&queuePartitionKey, &forkedFrom, &parentWorkflowID, &delayUntilEpochMs, &serialization,
+			&wasForkedFrom,
 		)
 		if err != nil {
 			if err == pgx.ErrNoRows {
@@ -5940,6 +5943,7 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			"parent_workflow_id":         parentWorkflowID,
 			"delay_until_epoch_ms":       delayUntilEpochMs,
 			"serialization":              serialization,
+			"was_forked_from":            wasForkedFrom,
 		}
 
 		// Export operation_outputs
@@ -6111,9 +6115,23 @@ func (s *sysDB) importWorkflow(ctx context.Context, workflows []ExportedWorkflow
 				output, error, executor_id, created_at, updated_at, application_version, application_id,
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
-				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`,
+				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization,
+				was_forked_from
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)`,
 			s.dialect.SchemaPrefix(s.schema))
+
+		// was_forked_from is NOT NULL; default it to false for payloads exported
+		// before this field was included (older exports, or ones from an SDK that
+		// omits it), so importing them doesn't violate the constraint.
+		wasForkedFrom := false
+		switch v := status["was_forked_from"].(type) {
+		case bool:
+			wasForkedFrom = v
+		case *bool:
+			if v != nil {
+				wasForkedFrom = *v
+			}
+		}
 
 		_, err := tx.Exec(ctx, insertStatusQuery,
 			status["workflow_uuid"], status["status"], status["name"],
@@ -6124,7 +6142,7 @@ func (s *sysDB) importWorkflow(ctx context.Context, workflows []ExportedWorkflow
 			status["workflow_timeout_ms"], status["workflow_deadline_epoch_ms"], status["started_at_epoch_ms"],
 			status["deduplication_id"], status["inputs"], status["priority"],
 			status["queue_partition_key"], status["forked_from"], status["parent_workflow_id"],
-			status["delay_until_epoch_ms"], status["serialization"],
+			status["delay_until_epoch_ms"], status["serialization"], wasForkedFrom,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to import workflow_status: %w", err)
