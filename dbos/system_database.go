@@ -2308,9 +2308,6 @@ func (s *sysDB) forkFrom(ctx context.Context, input forkFromDBInput) ([]string, 
 			}
 			startSteps[workflowID] = startStep
 		}
-		if cerr := rows.Close(); cerr != nil {
-			return nil, fmt.Errorf("failed to close start step rows: %w", cerr)
-		}
 		if err := rows.Err(); err != nil {
 			return nil, fmt.Errorf("failed to read start steps: %w", err)
 		}
