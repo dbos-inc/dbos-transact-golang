@@ -1111,7 +1111,7 @@ func (c *conductor) handleForkFromFailureRequest(data []byte, requestID string) 
 	}
 	c.logger.Debug("Handling fork from failure request", "request", req)
 
-	input := forkFromFailureDBInput{
+	input := forkFromDBInput{
 		workflowIDs:     req.Body.WorkflowIDs,
 		fromLastFailure: req.Body.FromLastFailure,
 		fromLastStep:    req.Body.FromLastStep,

@@ -8093,7 +8093,7 @@ func TestFork(t *testing.T) {
 		require.Equal(t, int64(2), failStepThreeCount.Load())
 
 		t.Run("FromLastFailure", func(t *testing.T) {
-			forkedIDs, err := sysDB.forkFrom(dbosCtx, forkFromFailureDBInput{
+			forkedIDs, err := sysDB.forkFrom(dbosCtx, forkFromDBInput{
 				workflowIDs:     []string{wf1ID, wf2ID, wf3ID},
 				fromLastFailure: true,
 			})
@@ -8107,7 +8107,7 @@ func TestFork(t *testing.T) {
 		})
 
 		t.Run("FromLastStep", func(t *testing.T) {
-			forkedIDs, err := sysDB.forkFrom(dbosCtx, forkFromFailureDBInput{
+			forkedIDs, err := sysDB.forkFrom(dbosCtx, forkFromDBInput{
 				workflowIDs:  []string{wf1ID, wf2ID, wf3ID},
 				fromLastStep: true,
 			})
@@ -8123,7 +8123,7 @@ func TestFork(t *testing.T) {
 
 		t.Run("FromStep", func(t *testing.T) {
 			startStep := 0
-			forkedIDs, err := sysDB.forkFrom(dbosCtx, forkFromFailureDBInput{
+			forkedIDs, err := sysDB.forkFrom(dbosCtx, forkFromDBInput{
 				workflowIDs: []string{wf3ID},
 				fromStep:    &startStep,
 			})
@@ -8138,7 +8138,7 @@ func TestFork(t *testing.T) {
 
 		t.Run("FromStepName", func(t *testing.T) {
 			stepName := "stepTwo"
-			forkedIDs, err := sysDB.forkFrom(dbosCtx, forkFromFailureDBInput{
+			forkedIDs, err := sysDB.forkFrom(dbosCtx, forkFromDBInput{
 				workflowIDs:  []string{wf3ID},
 				fromStepName: &stepName,
 			})
@@ -8154,27 +8154,27 @@ func TestFork(t *testing.T) {
 		t.Run("Validation", func(t *testing.T) {
 			// wf1 never ran stepThree
 			missingName := "stepThree"
-			_, err := sysDB.forkFrom(dbosCtx, forkFromFailureDBInput{
+			_, err := sysDB.forkFrom(dbosCtx, forkFromDBInput{
 				workflowIDs:  []string{wf1ID},
 				fromStepName: &missingName,
 			})
 			require.ErrorContains(t, err, "has no step named")
 
 			nonexistent := "nonexistentStep"
-			_, err = sysDB.forkFrom(dbosCtx, forkFromFailureDBInput{
+			_, err = sysDB.forkFrom(dbosCtx, forkFromDBInput{
 				workflowIDs:  []string{wf3ID},
 				fromStepName: &nonexistent,
 			})
 			require.ErrorContains(t, err, "has no step named")
 
 			// no mode specified
-			_, err = sysDB.forkFrom(dbosCtx, forkFromFailureDBInput{
+			_, err = sysDB.forkFrom(dbosCtx, forkFromDBInput{
 				workflowIDs: []string{wf3ID},
 			})
 			require.ErrorContains(t, err, "exactly one")
 
 			// multiple modes specified
-			_, err = sysDB.forkFrom(dbosCtx, forkFromFailureDBInput{
+			_, err = sysDB.forkFrom(dbosCtx, forkFromDBInput{
 				workflowIDs:     []string{wf3ID},
 				fromLastFailure: true,
 				fromLastStep:    true,

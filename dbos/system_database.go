@@ -41,7 +41,7 @@ type systemDatabase interface {
 	deleteWorkflows(ctx context.Context, input deleteWorkflowsDBInput) error
 	resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInput) ([]string, error)
 	forkWorkflows(ctx context.Context, input forkWorkflowsDBInput) ([]string, error)
-	forkFrom(ctx context.Context, input forkFromFailureDBInput) ([]string, error)
+	forkFrom(ctx context.Context, input forkFromDBInput) ([]string, error)
 
 	getDeduplicatedWorkflow(ctx context.Context, queueName, deduplicationID string) (*string, error)
 
@@ -2234,7 +2234,7 @@ func (s *sysDB) forkWorkflows(ctx context.Context, input forkWorkflowsDBInput) (
 	return forkedWorkflowIDs, nil
 }
 
-type forkFromFailureDBInput struct {
+type forkFromDBInput struct {
 	workflowIDs        []string
 	applicationVersion string
 	queueName          string
@@ -2249,7 +2249,7 @@ type forkFromFailureDBInput struct {
 // from its recorded checkpoints according to exactly one of four modes:
 // fromLastFailure (last step that recorded an error, falling back to the last step),
 // fromLastStep, fromStep (explicit step), or fromStepName (last occurrence of a named step).
-func (s *sysDB) forkFrom(ctx context.Context, input forkFromFailureDBInput) ([]string, error) {
+func (s *sysDB) forkFrom(ctx context.Context, input forkFromDBInput) ([]string, error) {
 	modes := 0
 	for _, set := range []bool{input.fromLastFailure, input.fromLastStep, input.fromStep != nil, input.fromStepName != nil} {
 		if set {
