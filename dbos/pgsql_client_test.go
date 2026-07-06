@@ -225,11 +225,13 @@ func TestPgsqlClient(t *testing.T) {
 		wfID2 := fmt.Sprintf("pgsql-dedup-wf2-%d", time.Now().UnixNano())
 		dedupID := fmt.Sprintf("pgsql-dedup-%d", time.Now().UnixNano())
 
+		// Use the blocking workflow so wfID1 cannot complete (completion clears
+		// deduplication_id, which would let the wfID2 enqueue below succeed).
 		// First enqueue succeeds.
 		_, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
-			"workflow_name":       "pgsql_retrieve_test",
+			"workflow_name":       "pgsql_blocked_workflow",
 			"queue_name":          queue.Name,
-			"positional_args":     []string{`"abc"`},
+			"positional_args":     []string{`""`},
 			"named_args":          `{}`,
 			"workflow_id":         wfID1,
 			"app_version":         serverCtx.GetApplicationVersion(),
@@ -243,9 +245,9 @@ func TestPgsqlClient(t *testing.T) {
 
 		// Same wfID again is idempotent.
 		_, err = callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
-			"workflow_name":       "pgsql_retrieve_test",
+			"workflow_name":       "pgsql_blocked_workflow",
 			"queue_name":          queue.Name,
-			"positional_args":     []string{`"abc"`},
+			"positional_args":     []string{`""`},
 			"named_args":          `{}`,
 			"workflow_id":         wfID1,
 			"app_version":         serverCtx.GetApplicationVersion(),
@@ -259,9 +261,9 @@ func TestPgsqlClient(t *testing.T) {
 
 		// Different wfID with same dedup key must fail.
 		_, err = callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
-			"workflow_name":       "pgsql_retrieve_test",
+			"workflow_name":       "pgsql_blocked_workflow",
 			"queue_name":          queue.Name,
-			"positional_args":     []string{`"def"`},
+			"positional_args":     []string{`""`},
 			"named_args":          `{}`,
 			"workflow_id":         wfID2,
 			"app_version":         serverCtx.GetApplicationVersion(),
@@ -278,11 +280,12 @@ func TestPgsqlClient(t *testing.T) {
 		assert.Equal(t, "DBOS queue duplicated", pgErr.Message)
 		assert.Contains(t, pgErr.Detail, fmt.Sprintf("Workflow %s with queue %s and deduplication ID %s already exists", wfID2, queue.Name, dedupID))
 
+		// Release the dedup slot and wait for wfID1 to finish.
+		require.NoError(t, CancelWorkflow(serverCtx, wfID1))
 		handle, err := RetrieveWorkflow[string](serverCtx, wfID1)
 		require.NoError(t, err)
-		result, err := handle.GetResult()
-		require.NoError(t, err)
-		assert.Equal(t, "abc", result)
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected cancellation error")
 	})
 
 	t.Run("EnqueueWithPriority", func(t *testing.T) {
