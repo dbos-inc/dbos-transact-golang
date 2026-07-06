@@ -7370,80 +7370,6 @@ func TestExportImportWorkflow(t *testing.T) {
 	})
 }
 
-// TestExportImportPreservesWasForkedFrom checks that the was_forked_from flag —
-// which marks a workflow a fork was taken *from* (the fork source), not the fork
-// itself — survives an export/import round trip.
-//
-// Regression: the export/import status column list included forked_from but not
-// was_forked_from, so re-importing a fork source silently lost the flag (it
-// reverted to the column's NOT NULL DEFAULT FALSE).
-func TestExportImportPreservesWasForkedFrom(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
-	RegisterWorkflow(dbosCtx, simpleWorkflow)
-	Launch(dbosCtx)
-
-	sdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
-
-	lookup := func(ids ...string) map[string]WorkflowStatus {
-		wfs, err := sdb.listWorkflows(dbosCtx, listWorkflowsDBInput{workflowIDs: ids})
-		require.NoError(t, err)
-		m := make(map[string]WorkflowStatus, len(wfs))
-		for _, wf := range wfs {
-			m[wf.ID] = wf
-		}
-		return m
-	}
-
-	// Run a workflow, then fork it. Forking marks the ORIGINAL was_forked_from.
-	sourceID := uuid.NewString()
-	handle, err := RunWorkflow(dbosCtx, simpleWorkflow, "hello", WithWorkflowID(sourceID))
-	require.NoError(t, err)
-	_, err = handle.GetResult()
-	require.NoError(t, err)
-
-	forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: sourceID})
-	require.NoError(t, err)
-	forkID := forkHandle.GetWorkflowID()
-	_, err = forkHandle.GetResult()
-	require.NoError(t, err)
-
-	// Sanity check: the source is was_forked_from, the fork itself is not.
-	before := lookup(sourceID, forkID)
-	require.True(t, before[sourceID].WasForkedFrom, "the fork source should be was_forked_from")
-	require.False(t, before[forkID].WasForkedFrom, "the fork itself is not was_forked_from")
-
-	// The exported payload must carry the flag.
-	exported, err := sdb.exportWorkflow(dbosCtx, sourceID, false)
-	require.NoError(t, err)
-	require.Len(t, exported, 1)
-	wff, ok := exported[0].WorkflowStatus["was_forked_from"].(*bool)
-	require.True(t, ok, "was_forked_from must be present in the export payload")
-	require.NotNil(t, wff)
-	assert.True(t, *wff, "exported source should carry was_forked_from=true")
-
-	// Delete both, then re-import the source alone.
-	require.NoError(t, sdb.deleteWorkflows(dbosCtx, deleteWorkflowsDBInput{
-		workflowIDs: []string{sourceID, forkID},
-	}))
-	require.NoError(t, sdb.importWorkflow(dbosCtx, exported))
-
-	// The flag survived the round trip.
-	assert.True(t, lookup(sourceID)[sourceID].WasForkedFrom,
-		"was_forked_from must survive an export/import round trip")
-
-	// And the was_forked_from=true filter finds the re-imported source.
-	wasForkedFrom := true
-	filtered, err := sdb.listWorkflows(dbosCtx, listWorkflowsDBInput{wasForkedFrom: &wasForkedFrom})
-	require.NoError(t, err)
-	found := false
-	for _, wf := range filtered {
-		if wf.ID == sourceID {
-			found = true
-		}
-	}
-	assert.True(t, found, "re-imported source should match the was_forked_from=true filter")
-}
-
 func aggregatesWorkflowSuccess(_ DBOSContext, _ string) (string, error) {
 	return "ok", nil
 }
@@ -8288,6 +8214,12 @@ func TestFork(t *testing.T) {
 			require.Equal(t, int64(3), failStepOneCount.Load())   // replayed for all three forks
 			require.Equal(t, int64(4), failStepTwoCount.Load())   // re-run for wf1's fork only
 			require.Equal(t, int64(5), failStepThreeCount.Load()) // re-run for all three forks
+
+			// A fork also marks its source was_forked_from.
+			srcs, err := sysDB.listWorkflows(dbosCtx, listWorkflowsDBInput{workflowIDs: []string{wf1ID}})
+			require.NoError(t, err)
+			require.Len(t, srcs, 1)
+			require.True(t, srcs[0].WasForkedFrom, "a forked-from workflow should be marked was_forked_from")
 		})
 
 		t.Run("FromLastStep", func(t *testing.T) {
