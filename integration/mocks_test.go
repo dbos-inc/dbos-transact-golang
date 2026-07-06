@@ -421,3 +421,66 @@ func TestMocks(t *testing.T) {
 		t.Fatalf("clientMethodsFunction failed: %v", err)
 	}
 }
+
+// TestClientTypedHelpersWithMock verifies the typed, package-level Client helpers
+// (dbos.ClientGetEvent, dbos.Enqueue, dbos.ClientRetrieveWorkflow, etc.) route
+// through the Client interface methods and therefore work with a mocked Client,
+// rather than requiring the concrete built-in client implementation.
+func TestClientTypedHelpersWithMock(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	mockClient := mocks.NewMockClient(t)
+
+	// ClientGetEvent decodes via the interface GetEvent on a mocked client.
+	mockClient.On("GetEvent", "wf-evt", "key", 1*time.Second).Return(42, nil).Once()
+	evt, err := dbos.ClientGetEvent[int](mockClient, "wf-evt", "key", 1*time.Second)
+	if err != nil {
+		t.Fatalf("ClientGetEvent failed: %v", err)
+	}
+	if evt != 42 {
+		t.Fatalf("ClientGetEvent = %d, want 42", evt)
+	}
+
+	// Enqueue returns a typed handle backed by the mocked handle.
+	enqHandle := mocks.NewMockWorkflowHandle[any](t)
+	enqHandle.On("GetResult").Return(7, nil).Once()
+	mockClient.On("Enqueue", "q", "wf", "in", mock.Anything).Return(enqHandle, nil).Once()
+	eh, err := dbos.Enqueue[string, int](mockClient, "q", "wf", "in")
+	if err != nil {
+		t.Fatalf("Enqueue failed: %v", err)
+	}
+	if res, err := eh.GetResult(); err != nil || res != 7 {
+		t.Fatalf("Enqueue handle GetResult = (%d, %v), want (7, nil)", res, err)
+	}
+
+	// ClientRetrieveWorkflow returns a typed handle.
+	retHandle := mocks.NewMockWorkflowHandle[any](t)
+	retHandle.On("GetResult").Return(9, nil).Once()
+	mockClient.On("RetrieveWorkflow", "wf-ret").Return(retHandle, nil).Once()
+	rh, err := dbos.ClientRetrieveWorkflow[int](mockClient, "wf-ret")
+	if err != nil {
+		t.Fatalf("ClientRetrieveWorkflow failed: %v", err)
+	}
+	if res, err := rh.GetResult(); err != nil || res != 9 {
+		t.Fatalf("ClientRetrieveWorkflow handle GetResult = (%d, %v), want (9, nil)", res, err)
+	}
+
+	// ClientForkWorkflow returns a typed handle.
+	forkHandle := mocks.NewMockWorkflowHandle[any](t)
+	forkHandle.On("GetResult").Return(11, nil).Once()
+	mockClient.On("ForkWorkflow", mock.Anything).Return(forkHandle, nil).Once()
+	fh, err := dbos.ClientForkWorkflow[int](mockClient, dbos.ForkWorkflowInput{OriginalWorkflowID: "wf-ret"})
+	if err != nil {
+		t.Fatalf("ClientForkWorkflow failed: %v", err)
+	}
+	if res, err := fh.GetResult(); err != nil || res != 11 {
+		t.Fatalf("ClientForkWorkflow handle GetResult = (%d, %v), want (11, nil)", res, err)
+	}
+
+	// ClientListWorkflows is an interface method, so it mocks directly.
+	mockClient.On("ClientListWorkflows", mock.Anything).Return([]dbos.WorkflowStatus{{ID: "wf-ret"}}, nil).Once()
+	list, err := mockClient.ClientListWorkflows()
+	if err != nil || len(list) != 1 || list[0].ID != "wf-ret" {
+		t.Fatalf("ClientListWorkflows = (%v, %v), want one status with ID wf-ret", list, err)
+	}
+}

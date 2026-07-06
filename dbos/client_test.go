@@ -2451,3 +2451,275 @@ func TestClientSend(t *testing.T) {
 		require.Contains(t, result, "c-b")
 	})
 }
+
+// TestClientGetEvent verifies ClientGetEvent decodes an event value into the
+// requested type using the serialization recorded with the event.
+func TestClientGetEvent(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	queue := NewWorkflowQueue(serverCtx, "client-getevent-queue")
+
+	type eventPayload struct {
+		Label string
+		Count int
+	}
+
+	eventWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		if err := SetEvent(ctx, "struct-key", eventPayload{Label: "ready", Count: 7}); err != nil {
+			return "", err
+		}
+		if err := SetEvent(ctx, "string-key", "hello-event"); err != nil {
+			return "", err
+		}
+		return "done", nil
+	}
+	RegisterWorkflow(serverCtx, eventWorkflow, WithWorkflowName("EventWorkflow"))
+
+	require.NoError(t, Launch(serverCtx))
+
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+
+	workflowID := "client-getevent-wf"
+	handle, err := Enqueue[string, string](client, queue.Name, "EventWorkflow", "",
+		WithEnqueueWorkflowID(workflowID),
+		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+	require.NoError(t, err)
+	_, err = handle.GetResult()
+	require.NoError(t, err)
+
+	t.Run("DecodesStructEvent", func(t *testing.T) {
+		val, err := ClientGetEvent[eventPayload](client, workflowID, "struct-key", 5*time.Second)
+		require.NoError(t, err)
+		require.Equal(t, eventPayload{Label: "ready", Count: 7}, val)
+	})
+
+	t.Run("DecodesStringEvent", func(t *testing.T) {
+		val, err := ClientGetEvent[string](client, workflowID, "string-key", 5*time.Second)
+		require.NoError(t, err)
+		require.Equal(t, "hello-event", val)
+	})
+
+	t.Run("NilClient", func(t *testing.T) {
+		_, err := ClientGetEvent[string](nil, workflowID, "string-key", time.Second)
+		require.Error(t, err)
+	})
+
+	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after get event test")
+}
+
+// TestClientTypedHandles verifies the typed handle helpers (ClientRetrieveWorkflow,
+// ClientForkWorkflow, ClientResumeWorkflow, ClientResumeWorkflows) return handles
+// whose GetResult decodes the workflow output into the requested type.
+func TestClientTypedHandles(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	queue := NewWorkflowQueue(serverCtx, "client-typed-handles-queue")
+
+	type sumResult struct {
+		Sum int
+	}
+
+	sumWorkflow := func(ctx DBOSContext, n int) (sumResult, error) {
+		return RunAsStep(ctx, func(context.Context) (sumResult, error) {
+			return sumResult{Sum: n * 2}, nil
+		})
+	}
+	RegisterWorkflow(serverCtx, sumWorkflow, WithWorkflowName("SumWorkflow"))
+
+	require.NoError(t, Launch(serverCtx))
+
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+
+	appVersion := WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion())
+
+	t.Run("RetrieveWorkflowTyped", func(t *testing.T) {
+		workflowID := "client-retrieve-typed"
+		_, err := Enqueue[int, sumResult](client, queue.Name, "SumWorkflow", 21, WithEnqueueWorkflowID(workflowID), appVersion)
+		require.NoError(t, err)
+
+		handle, err := ClientRetrieveWorkflow[sumResult](client, workflowID)
+		require.NoError(t, err)
+		res, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, sumResult{Sum: 42}, res)
+	})
+
+	t.Run("ForkWorkflowTyped", func(t *testing.T) {
+		workflowID := "client-fork-typed"
+		h, err := Enqueue[int, sumResult](client, queue.Name, "SumWorkflow", 5, WithEnqueueWorkflowID(workflowID), appVersion)
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+
+		forkedHandle, err := ClientForkWorkflow[sumResult](client, ForkWorkflowInput{OriginalWorkflowID: workflowID, StartStep: 0})
+		require.NoError(t, err)
+		res, err := forkedHandle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, sumResult{Sum: 10}, res)
+	})
+
+	t.Run("ResumeWorkflowTyped", func(t *testing.T) {
+		workflowID := "client-resume-typed"
+		h, err := Enqueue[int, sumResult](client, queue.Name, "SumWorkflow", 8, WithEnqueueWorkflowID(workflowID), appVersion)
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+
+		// Resuming a completed workflow returns a typed handle to the existing result.
+		resumeHandle, err := ClientResumeWorkflow[sumResult](client, workflowID)
+		require.NoError(t, err)
+		res, err := resumeHandle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, sumResult{Sum: 16}, res)
+	})
+
+	t.Run("ResumeWorkflowsTyped", func(t *testing.T) {
+		ids := make([]string, 0, 2)
+		for i := range 2 {
+			workflowID := fmt.Sprintf("client-resume-multi-%d", i)
+			h, err := Enqueue[int, sumResult](client, queue.Name, "SumWorkflow", i+1, WithEnqueueWorkflowID(workflowID), appVersion)
+			require.NoError(t, err)
+			_, err = h.GetResult()
+			require.NoError(t, err)
+			ids = append(ids, workflowID)
+		}
+
+		handles, err := ClientResumeWorkflows[sumResult](client, ids)
+		require.NoError(t, err)
+		require.Len(t, handles, 2)
+		// ResumeWorkflows does not guarantee handle order matches input order,
+		// so verify each result against its own workflow ID.
+		expected := map[string]sumResult{
+			"client-resume-multi-0": {Sum: 2},
+			"client-resume-multi-1": {Sum: 4},
+		}
+		for _, h := range handles {
+			res, err := h.GetResult()
+			require.NoError(t, err)
+			require.Equal(t, expected[h.GetWorkflowID()], res)
+		}
+	})
+
+	t.Run("NilClient", func(t *testing.T) {
+		_, err := ClientRetrieveWorkflow[sumResult](nil, "any")
+		require.Error(t, err)
+	})
+
+	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after typed handles test")
+}
+
+// TestClientListAndSteps verifies ClientListWorkflows and ClientGetWorkflowSteps
+// do NOT load/decode input/output by default, and decode them when explicitly
+// asked via the load options.
+func TestClientListAndSteps(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	queue := NewWorkflowQueue(serverCtx, "client-list-steps-queue")
+
+	type wfInput struct {
+		Name string
+	}
+	type wfOutput struct {
+		Greeting string
+	}
+
+	listStepsWorkflow := func(ctx DBOSContext, input wfInput) (wfOutput, error) {
+		out, err := RunAsStep(ctx, func(context.Context) (wfOutput, error) {
+			return wfOutput{Greeting: "hi"}, nil
+		}, WithStepName("GreetStep"))
+		if err != nil {
+			return wfOutput{}, err
+		}
+		out.Greeting = out.Greeting + " " + input.Name
+		return out, nil
+	}
+	RegisterWorkflow(serverCtx, listStepsWorkflow, WithWorkflowName("ListStepsWorkflow"))
+
+	require.NoError(t, Launch(serverCtx))
+
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+
+	workflowID := "client-list-steps-wf"
+	handle, err := Enqueue[wfInput, wfOutput](client, queue.Name, "ListStepsWorkflow", wfInput{Name: "max"},
+		WithEnqueueWorkflowID(workflowID),
+		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
+	require.NoError(t, err)
+	_, err = handle.GetResult()
+	require.NoError(t, err)
+
+	t.Run("ListWorkflowsNoDecodeByDefault", func(t *testing.T) {
+		workflows, err := client.ClientListWorkflows(WithWorkflowIDs([]string{workflowID}))
+		require.NoError(t, err)
+		require.Len(t, workflows, 1)
+		assert.Nil(t, workflows[0].Input, "input must not be loaded by default")
+		assert.Nil(t, workflows[0].Output, "output must not be loaded by default")
+	})
+
+	t.Run("ListWorkflowsLoadsWhenRequested", func(t *testing.T) {
+		workflows, err := client.ClientListWorkflows(WithWorkflowIDs([]string{workflowID}), WithLoadInput(true), WithLoadOutput(true))
+		require.NoError(t, err)
+		require.Len(t, workflows, 1)
+
+		// With no serializer configured, payloads come back as raw JSON strings
+		// (cross-language friendly), not Go-decoded values.
+		input, ok := workflows[0].Input.(string)
+		require.True(t, ok, "expected loaded input to be a string, got %T", workflows[0].Input)
+		assert.JSONEq(t, `{"Name":"max"}`, input)
+
+		output, ok := workflows[0].Output.(string)
+		require.True(t, ok, "expected loaded output to be a string, got %T", workflows[0].Output)
+		assert.JSONEq(t, `{"Greeting":"hi max"}`, output)
+	})
+
+	t.Run("GetWorkflowStepsNoDecodeByDefault", func(t *testing.T) {
+		steps, err := client.ClientGetWorkflowSteps(workflowID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		assert.Equal(t, "GreetStep", steps[0].StepName)
+		assert.Nil(t, steps[0].Output, "step output must not be loaded by default")
+	})
+
+	t.Run("GetWorkflowStepsLoadsWhenRequested", func(t *testing.T) {
+		steps, err := client.ClientGetWorkflowSteps(workflowID, WithStepsLoadOutput(true))
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		output, ok := steps[0].Output.(string)
+		require.True(t, ok, "expected loaded step output to be a string, got %T", steps[0].Output)
+		assert.JSONEq(t, `{"Greeting":"hi"}`, output)
+	})
+
+	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after list/steps test")
+}
+
+// TestClientTriggerScheduleTyped verifies ClientTriggerSchedule returns a typed
+// handle whose GetResult decodes the triggered workflow's output.
+func TestClientTriggerScheduleTyped(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	RegisterWorkflow(serverCtx, testWorkflowForSchedule)
+	require.NoError(t, Launch(serverCtx))
+
+	c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+
+	const workflowFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule"
+	const name = "client-trigger-typed"
+	require.NoError(t, c.CreateSchedule(ClientScheduleInput{
+		ScheduleName: name,
+		WorkflowName: workflowFQN,
+		Schedule:     "0 0 * * * *",
+	}))
+	t.Cleanup(func() { _ = c.DeleteSchedule(name) })
+
+	handle, err := ClientTriggerSchedule[string](c, name)
+	require.NoError(t, err)
+	require.NotNil(t, handle)
+	require.Contains(t, handle.GetWorkflowID(), name)
+
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "completed", result)
+}
