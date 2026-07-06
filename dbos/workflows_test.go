@@ -3407,6 +3407,73 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, "DBOS.sleep", steps[1].StepName, "expected step 1 to have StepName 'DBOS.sleep'")
 	})
 
+	t.Run("RecvForkReplay", func(t *testing.T) {
+		sendRecvSyncEvent.Clear()
+
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveIdempotencyWorkflow, "fork-replay-topic")
+		require.NoError(t, err, "failed to start receive workflow")
+
+		// Send the message before Recv runs so it is already pending (no sleep step recorded)
+		err = Send(dbosCtx, receiveHandle.GetWorkflowID(), "fork-me", "fork-replay-topic")
+		require.NoError(t, err, "failed to send message")
+		sendRecvSyncEvent.Set()
+
+		result, err := receiveHandle.GetResult()
+		require.NoError(t, err, "failed to get result from receive workflow")
+		require.Equal(t, "fork-me", result)
+
+		originalSteps, err := GetWorkflowSteps(dbosCtx, receiveHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, originalSteps, 1, "expected only the recv step when the message was already pending")
+
+		// Fork past the recv step: its checkpoint is copied and the recv must replay from it,
+		// without waiting (the recv timeout is 60 minutes) and without recording new steps.
+		start := time.Now()
+		forkedHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: receiveHandle.GetWorkflowID(),
+			StartStep:          2,
+		})
+		require.NoError(t, err, "failed to fork receive workflow")
+		forkedResult, err := forkedHandle.GetResult()
+		require.NoError(t, err, "failed to get result from forked receive workflow")
+		require.Equal(t, "fork-me", forkedResult, "forked recv should replay the checkpointed message")
+		require.Less(t, time.Since(start), 30*time.Second, "forked recv replay should not wait on the recv timeout")
+
+		forkedSteps, err := GetWorkflowSteps(dbosCtx, forkedHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to get forked workflow steps")
+		require.Len(t, forkedSteps, 1, "recv replay must not record extra steps")
+		require.Equal(t, "DBOS.recv", forkedSteps[0].StepName)
+	})
+
+	t.Run("RecvTimeoutForkReplay", func(t *testing.T) {
+		sendRecvSyncEvent.Set()
+
+		receiveHandle, err := RunWorkflow(dbosCtx, receiveWorkflow, struct {
+			Topic   string
+			Timeout time.Duration
+		}{
+			Topic:   "timeout-fork-topic",
+			Timeout: 1 * time.Second,
+		})
+		require.NoError(t, err, "failed to start receive workflow")
+		_, err = receiveHandle.GetResult()
+		require.Error(t, err, "expected timeout error")
+
+		// Fork past the recv step: the checkpointed timeout error must round-trip through
+		// the recorded errStr with its concrete type and code preserved.
+		forkedHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: receiveHandle.GetWorkflowID(),
+			StartStep:          2,
+		})
+		require.NoError(t, err, "failed to fork receive workflow")
+		_, err = forkedHandle.GetResult()
+		require.Error(t, err, "expected replayed timeout error")
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		require.Equal(t, TimeoutError, dbosErr.Code, "expected TimeoutError code")
+		require.Contains(t, err.Error(), "DBOS.recv timed out")
+	})
+
 	t.Run("RecvMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run Recv outside of a workflow context
 		_, err := Recv[string](dbosCtx, "test-topic", 1*time.Second)

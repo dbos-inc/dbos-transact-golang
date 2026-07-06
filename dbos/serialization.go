@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 )
 
 const (
@@ -337,6 +338,7 @@ func init() {
 	// type preserved on the Go <-> Go error path (see serializeWorkflowError).
 	gob.Register(&DBOSError{})
 	gob.Register(&PortableWorkflowError{})
+	gob.Register(time.Time{})
 }
 
 // serializeWorkflowError encodes an error for DB storage.

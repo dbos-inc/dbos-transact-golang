@@ -104,6 +104,14 @@ type stepCheckpointedOutcome struct {
 	serialization string // DB-stored serialization format
 }
 
+// rawStepOutput is returned by internal special steps (e.g. recv) whose output is
+// already serialized. runAsTxn records value as-is under the given serialization
+// name instead of re-encoding it with the workflow serializer.
+type rawStepOutput struct {
+	value         *string
+	serialization string
+}
+
 // WorkflowHandle provides methods to interact with a running or completed workflow.
 // The type parameter R represents the expected return type of the workflow.
 // Handles can be used to wait for workflow completion, check status, and retrieve results.
@@ -2158,6 +2166,10 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 	if stepOpts.txIsoLevel != nil {
 		txOpts.IsoLevel = *stepOpts.txIsoLevel
 	}
+	txnRetryOpts := []retryOption{withRetrierLogger(c.logger)}
+	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
+		txnRetryOpts = append(txnRetryOpts, withRetryCondition(cockroachDialect{}.IsRetryableTransaction))
+	}
 	return retryWithResult(c, func() (any, error) {
 		tx, err := pool.BeginTx(uncancellableCtx, txOpts)
 		if err != nil {
@@ -2198,9 +2210,18 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 		})
 
 		txnSer := resolveEncoder(c)
-		encodedStepOutput, serErr := txnSer.Encode(stepOutput)
-		if serErr != nil {
-			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
+		serialization := txnSer.Name()
+		var encodedStepOutput *string
+		if raw, ok := stepOutput.(rawStepOutput); ok {
+			// Pre-serialized payload: record as-is under its own serialization name
+			encodedStepOutput = raw.value
+			serialization = raw.serialization
+		} else {
+			var serErr error
+			encodedStepOutput, serErr = txnSer.Encode(stepOutput)
+			if serErr != nil {
+				return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
+			}
 		}
 
 		var serializedTxnErr *string
@@ -2217,7 +2238,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 			completedAt:   time.Now(),
 			output:        encodedStepOutput,
 			tx:            tx,
-			serialization: txnSer.Name(),
+			serialization: serialization,
 		}
 		recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
 		if recErr != nil {
@@ -2230,7 +2251,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 			return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
 		}
 		return stepOutput, stepError
-	}, withRetrierLogger(c.logger))
+	}, txnRetryOpts...)
 }
 
 // Go runs a step inside a Go routine and returns a channel to receive the result.
@@ -2562,15 +2583,6 @@ func Send[P any](ctx DBOSContext, destinationID string, message P, topic string,
 	return ctx.Send(ctx, destinationID, message, topic, opts...)
 }
 
-type recvInput struct {
-	Topic         string        // Topic to listen for (empty string receives from default topic)
-	Timeout       time.Duration // Maximum time to wait for a message
-	serialization string        // fallback serialization format (receiver's) for recording when no message is found
-	workflowID    string        // Receiving workflow (resolved by the caller from context)
-	stepID        int           // Step ID for the recv
-	sleepStepID   int           // Step ID for the internal timeout sleep
-}
-
 // recvResult carries the received message along with its serialization format from the notifications table.
 type recvResult struct {
 	message       *string
@@ -2585,21 +2597,88 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 	if wfState.isWithinStep {
 		return nil, newStepExecutionError(wfState.workflowID, "DBOS.recv", fmt.Errorf("cannot call Recv within a step"))
 	}
-	input := recvInput{
-		Topic:         topic,
-		Timeout:       timeout,
-		serialization: resolveEncoder(c).Name(),
-		workflowID:    wfState.workflowID,
-		stepID:        wfState.nextStepID(),
-		sleepStepID:   wfState.nextStepID(),
+	workflowID := wfState.workflowID
+	// The recv step ID precedes its internal timeout sleep's; both are allocated
+	// up front so the recorded layout matches even when the sleep is skipped.
+	stepID := wfState.nextStepID()
+	sleepStepID := wfState.nextStepID()
+	if len(topic) == 0 {
+		topic = _DBOS_NULL_TOPIC
 	}
-	recvRetryOpts := []retryOption{withRetrierLogger(c.logger)}
-	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
-		recvRetryOpts = append(recvRetryOpts, withRetryCondition(cockroachDialect{}.IsRetryableTransaction))
+
+	// Early exit when this recv already has a checkpoint (recovery, fork),
+	// so replay neither waits nor records a spurious sleep step.
+	recorded, err := retryWithResult(c, func() (*recordedResult, error) {
+		return c.systemDB.checkOperationExecution(WithoutCancel(c), checkOperationExecutionDBInput{
+			workflowID: workflowID,
+			stepID:     stepID,
+			stepName:   "DBOS.recv",
+		})
+	}, withRetrierLogger(c.logger))
+	if err != nil {
+		return nil, err
 	}
-	return retryWithResult(c, func() (*recvResult, error) {
-		return c.systemDB.recv(c, input)
-	}, recvRetryOpts...)
+	if recorded != nil {
+		return &recvResult{message: recorded.output, serialization: recorded.serialization}, deserializeWorkflowError(recorded.errStr)
+	}
+
+	// Register as the receiver for this workflow/topic.
+	waiter, err := c.systemDB.startRecvListener(c, workflowID, topic)
+	if err != nil {
+		return nil, err
+	}
+	defer waiter.release()
+
+	var timeoutOccurred bool
+	if !waiter.pending {
+		// Checkpoint the timeout deadline as a "DBOS.sleep" step before waiting. On
+		// re-execution the recorded deadline is returned, so only the remaining time is waited.
+		deadline, err := runAsTxn(c, func(ctx context.Context, tx Tx) (time.Time, error) {
+			return time.Now().Add(timeout), nil
+		}, WithStepName("DBOS.sleep"), WithNextStepID(sleepStepID))
+		if err != nil {
+			return nil, err
+		}
+		// Wait for a pending message with no transaction open.
+		timeoutOccurred, err = waiter.wait(deadline)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Consume the message and checkpoint the recv result in a single transaction.
+	// If another executor already checkpointed this step, runAsTxn returns the recorded result.
+	out, err := c.runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		message, msgSerialization, err := c.systemDB.consumeMessage(ctx, tx, workflowID, topic)
+		if err != nil {
+			return nil, err
+		}
+		// Use the sender's serialization; fall back to the receiver's format for the timeout/no-message case
+		serialization := resolveEncoder(c).Name()
+		if msgSerialization != nil && len(*msgSerialization) > 0 {
+			serialization = *msgSerialization
+		}
+		output := rawStepOutput{value: message, serialization: serialization}
+		if message == nil && timeoutOccurred {
+			return output, newTimeoutError(workflowID, "DBOS.recv", fmt.Sprintf("no message received within %v", timeout))
+		}
+		return output, nil
+	}, WithStepName("DBOS.recv"), WithNextStepID(stepID))
+
+	switch v := out.(type) {
+	case rawStepOutput: // executed now
+		return &recvResult{message: v.value, serialization: v.serialization}, err
+	case stepCheckpointedOutcome: // replayed from a recorded checkpoint
+		message, ok := v.value.(*string)
+		if !ok {
+			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("recv checkpoint value is not *string, got %T", v.value))
+		}
+		return &recvResult{message: message, serialization: v.serialization}, err
+	case nil:
+		return nil, err
+	default:
+		return nil, newWorkflowUnexpectedResultType(workflowID, "rawStepOutput", fmt.Sprintf("%T", out))
+	}
 }
 
 // Recv receives a message sent to this workflow with type safety.
@@ -2730,17 +2809,6 @@ func SetEvent[P any](ctx DBOSContext, key string, message P, opts ...SetEventOpt
 	return ctx.SetEvent(ctx, key, message, opts...)
 }
 
-type getEventInput struct {
-	TargetWorkflowID string        // Workflow ID to get the event from
-	Key              string        // Event key to retrieve
-	Timeout          time.Duration // Maximum time to wait for the event to be set
-	serialization    string        // fallback serialization format (caller's) for recording when no event is found
-	isInWorkflow     bool          // Whether the caller is inside a workflow (GetEvent is also callable from outside)
-	workflowID       string        // Calling workflow (resolved by the caller from context; empty when outside a workflow)
-	stepID           int           // Step ID for the getEvent, allocated by the caller before any retry
-	sleepStepID      int           // Step ID for the internal timeout sleep, allocated by the caller before any retry
-}
-
 // getEventResult carries the event value along with its serialization format from the workflow_events table.
 type getEventResult struct {
 	value         *string
@@ -2748,25 +2816,119 @@ type getEventResult struct {
 }
 
 func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, timeout time.Duration) (any, error) {
-	input := getEventInput{
-		TargetWorkflowID: targetWorkflowID,
-		Key:              key,
-		Timeout:          timeout,
-		serialization:    resolveEncoder(c).Name(),
-	}
-	// GetEvent may run inside or outside a workflow. When inside, allocate step IDs.
-	if wfState, ok := c.Value(workflowStateKey).(*workflowState); ok && wfState != nil {
+	// GetEvent may run inside or outside a workflow. When inside, it is checkpointed.
+	wfState, _ := c.Value(workflowStateKey).(*workflowState)
+	isInWorkflow := wfState != nil
+	var workflowID string
+	var stepID, sleepStepID int
+	if isInWorkflow {
 		if wfState.isWithinStep {
 			return nil, newStepExecutionError(wfState.workflowID, "DBOS.getEvent", fmt.Errorf("cannot call GetEvent within a step"))
 		}
-		input.isInWorkflow = true
-		input.workflowID = wfState.workflowID
-		input.stepID = wfState.nextStepID()
-		input.sleepStepID = wfState.nextStepID()
+		workflowID = wfState.workflowID
+		stepID = wfState.nextStepID()
+		sleepStepID = wfState.nextStepID()
+
+		// Early exit when this getEvent already has a checkpoint (recovery, fork),
+		// so replay neither waits nor records a spurious sleep step.
+		recorded, err := retryWithResult(c, func() (*recordedResult, error) {
+			return c.systemDB.checkOperationExecution(WithoutCancel(c), checkOperationExecutionDBInput{
+				workflowID: workflowID,
+				stepID:     stepID,
+				stepName:   "DBOS.getEvent",
+			})
+		}, withRetrierLogger(c.logger))
+		if err != nil {
+			return nil, err
+		}
+		if recorded != nil {
+			return &getEventResult{value: recorded.output, serialization: recorded.serialization}, deserializeWorkflowError(recorded.errStr)
+		}
 	}
-	return retryWithResult(c, func() (*getEventResult, error) {
-		return c.systemDB.getEvent(c, input)
-	}, withRetrierLogger(c.logger))
+
+	// Register as a waiter for this event.
+	waiter, err := c.systemDB.startEventListener(c, targetWorkflowID, key)
+	if err != nil {
+		return nil, err
+	}
+	defer waiter.release()
+
+	var timeoutOccurred bool
+	if !waiter.pending {
+		deadline := time.Now().Add(timeout)
+		if isInWorkflow {
+			// Checkpoint the timeout deadline as a "DBOS.sleep" step before waiting. On
+			// re-execution the recorded deadline is returned, so only the remaining time is waited.
+			deadline, err = runAsTxn(c, func(ctx context.Context, tx Tx) (time.Time, error) {
+				return time.Now().Add(timeout), nil
+			}, WithStepName("DBOS.sleep"), WithNextStepID(sleepStepID))
+			if err != nil {
+				return nil, err
+			}
+		}
+		// Wait for the event with no transaction open.
+		timeoutOccurred, err = waiter.wait(deadline)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Use the event's serialization from the DB; fall back to the caller's format for the timeout/no-event case
+	fallbackSerialization := resolveEncoder(c).Name()
+
+	// If we aren't in a workflow, (attempt to) read and return the event
+	if !isInWorkflow {
+		var value, evtSerialization *string
+		err := retry(c, func() error {
+			var qErr error
+			value, evtSerialization, qErr = c.systemDB.getEventValue(c, nil, targetWorkflowID, key)
+			return qErr
+		}, withRetrierLogger(c.logger))
+		if err != nil {
+			return nil, err
+		}
+		serialization := fallbackSerialization
+		if evtSerialization != nil && len(*evtSerialization) > 0 {
+			serialization = *evtSerialization
+		}
+		if value == nil && timeoutOccurred {
+			return nil, newTimeoutError("", "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout))
+		}
+		return &getEventResult{value: value, serialization: serialization}, nil
+	}
+
+	// Read the event value and checkpoint the getEvent result in a single transaction.
+	// If another executor already checkpointed this step, runAsTxn returns the recorded result.
+	out, err := c.runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		value, evtSerialization, err := c.systemDB.getEventValue(ctx, tx, targetWorkflowID, key)
+		if err != nil {
+			return nil, err
+		}
+		serialization := fallbackSerialization
+		if evtSerialization != nil && len(*evtSerialization) > 0 {
+			serialization = *evtSerialization
+		}
+		output := rawStepOutput{value: value, serialization: serialization}
+		if value == nil && timeoutOccurred {
+			return output, newTimeoutError(workflowID, "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout))
+		}
+		return output, nil
+	}, WithStepName("DBOS.getEvent"), WithNextStepID(stepID))
+
+	switch v := out.(type) {
+	case rawStepOutput: // executed now
+		return &getEventResult{value: v.value, serialization: v.serialization}, err
+	case stepCheckpointedOutcome: // replayed from a recorded checkpoint
+		value, ok := v.value.(*string)
+		if !ok {
+			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("getEvent checkpoint value is not *string, got %T", v.value))
+		}
+		return &getEventResult{value: value, serialization: v.serialization}, err
+	case nil:
+		return nil, err
+	default:
+		return nil, newWorkflowUnexpectedResultType(workflowID, "rawStepOutput", fmt.Sprintf("%T", out))
+	}
 }
 
 // GetEvent retrieves a key-value event from a target workflow with type safety.
@@ -3298,15 +3460,27 @@ func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duratio
 	if wfState.isWithinStep {
 		return 0, newStepExecutionError(wfState.workflowID, "DBOS.sleep", fmt.Errorf("cannot call Sleep within a step"))
 	}
-	input := sleepInput{
-		duration:   duration,
-		skipSleep:  false,
-		workflowID: wfState.workflowID,
-		stepID:     wfState.nextStepID(),
+	// Checkpoint the wakeup time as a "DBOS.sleep" step; on re-execution the
+	// recorded deadline is returned, so only the remaining duration is slept.
+	deadline, err := runAsTxn(c, func(ctx context.Context, tx Tx) (time.Time, error) {
+		return time.Now().Add(duration), nil
+	}, WithStepName("DBOS.sleep"))
+	if err != nil {
+		return 0, err
 	}
-	return retryWithResult(c, func() (time.Duration, error) {
-		return c.systemDB.sleep(c, input)
-	}, withRetrierLogger(c.logger))
+	remainingDuration := max(0, time.Until(deadline))
+
+	// Sleep for the remaining duration, but wake early if the context is cancelled.
+	// If interrupted, return the duration actually slept.
+	sleepStart := time.Now()
+	timer := time.NewTimer(remainingDuration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-c.Done():
+		return time.Since(sleepStart), c.Err()
+	}
+	return remainingDuration, nil
 }
 
 // Sleep pauses workflow execution for the specified duration.

@@ -62,9 +62,11 @@ type systemDatabase interface {
 
 	// Communication (special steps)
 	send(ctx context.Context, input WorkflowSendInput) error
-	recv(ctx context.Context, input recvInput) (*recvResult, error)
+	startRecvListener(ctx context.Context, destinationID, topic string) (*notificationWaiter, error)
+	consumeMessage(ctx context.Context, tx Tx, destinationID, topic string) (*string, *string, error)
 	setEvent(ctx context.Context, input WorkflowSetEventInput) error
-	getEvent(ctx context.Context, input getEventInput) (*getEventResult, error)
+	startEventListener(ctx context.Context, targetWorkflowID, key string) (*notificationWaiter, error)
+	getEventValue(ctx context.Context, q Querier, targetWorkflowID, key string) (*string, *string, error)
 
 	// Communication observability
 	getAllEvents(ctx context.Context, workflowID string) ([]eventRecord, error)
@@ -76,7 +78,6 @@ type systemDatabase interface {
 	readStream(ctx context.Context, input readStreamDBInput) ([]streamEntry, bool, error)
 
 	// Timers (special steps)
-	sleep(ctx context.Context, input sleepInput) (time.Duration, error)
 
 	// Patches
 	patch(ctx context.Context, input patchDBInput) (bool, error)
@@ -3239,105 +3240,6 @@ func (s *sysDB) getStepAggregates(ctx context.Context, input getStepAggregatesDB
 	return results, nil
 }
 
-type sleepInput struct {
-	duration   time.Duration // Duration to sleep
-	skipSleep  bool          // If true, the function will not actually sleep and just return the remaining sleep duration
-	workflowID string        // Workflow that owns this sleep (resolved by the caller from context)
-	stepID     int           // Step ID for this sleep
-}
-
-// Sleep is a special type of step that sleeps for a specified duration
-// A wakeup time is computed and recorded in the database
-// If we sleep is re-executed, it will only sleep for the remaining duration until the wakeup time
-// sleep can be called within other special steps (e.g., getEvent, recv) to provide durable sleep
-
-func (s *sysDB) sleep(ctx context.Context, input sleepInput) (time.Duration, error) {
-	functionName := "DBOS.sleep"
-
-	stepID := input.stepID
-	startTime := time.Now()
-
-	// Check if operation was already executed
-	checkInput := checkOperationExecutionDBInput{
-		workflowID: input.workflowID,
-		stepID:     stepID,
-		stepName:   functionName,
-	}
-	recordedResult, err := s.checkOperationExecution(ctx, checkInput)
-	if err != nil {
-		return 0, fmt.Errorf("failed to check operation execution: %w", err)
-	}
-
-	var endTime time.Time
-
-	if recordedResult != nil {
-		if recordedResult.output == nil { // This should never happen
-			return 0, fmt.Errorf("no recorded end time for recorded sleep operation")
-		}
-
-		// Decode the recorded end time directly into time.Time
-		// recordedResult.output is an encoded *string
-		serializer := newJSONSerializer[time.Time]()
-		endTime, err = serializer.Decode(recordedResult.output)
-		if err != nil {
-			return 0, fmt.Errorf("failed to decode sleep end time: %w", err)
-		}
-
-		if recordedResult.errStr != nil { // This should never happen
-			return 0, errors.New(*recordedResult.errStr)
-		}
-	} else {
-		// First execution: calculate and record the end time
-		endTime = time.Now().Add(input.duration)
-
-		// Serialize the end time before recording
-		serializer := newJSONSerializer[time.Time]()
-		encodedEndTime, serErr := serializer.Encode(endTime)
-		if serErr != nil {
-			return 0, fmt.Errorf("failed to serialize sleep end time: %w", serErr)
-		}
-
-		// Record the operation result with the calculated end time
-		completedTime := time.Now()
-		recordInput := recordOperationResultDBInput{
-			workflowID:    input.workflowID,
-			stepID:        stepID,
-			stepName:      functionName,
-			output:        encodedEndTime,
-			startedAt:     startTime,
-			completedAt:   completedTime,
-			serialization: "DBOS_JSON",
-		}
-
-		err = s.recordOperationResult(ctx, recordInput)
-		if err != nil {
-			// Check if this is a ConflictingIDError (operation already recorded by another process)
-			if dbosErr, ok := err.(*DBOSError); ok && dbosErr.Code == ConflictingIDError {
-			} else {
-				return 0, fmt.Errorf("failed to record sleep operation result: %w", err)
-			}
-		}
-	}
-
-	// Calculate remaining duration until wake up time
-	remainingDuration := max(0, time.Until(endTime))
-
-	if !input.skipSleep {
-		// Sleep for the remaining duration, but wake early if the context is cancelled.
-		// If interrupted, return the duration actually slept.
-		sleepStart := time.Now()
-		timer := time.NewTimer(remainingDuration)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			return time.Since(sleepStart), ctx.Err()
-		}
-	}
-
-	return remainingDuration, nil
-}
-
 /****************************************/
 /******* PATCHES ********/
 /****************************************/
@@ -3667,38 +3569,47 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	return nil
 }
 
-// Recv is a special type of step that receives a message destined for a given workflow
-func (s *sysDB) recv(ctx context.Context, input recvInput) (*recvResult, error) {
-	functionName := "DBOS.recv"
+// notificationWaiter tracks a waiter registered for a notification (recv message or workflow event).
+type notificationWaiter struct {
+	pending bool                                   // the awaited row already existed at registration time
+	wait    func(deadline time.Time) (bool, error) // block until the row is pending or the deadline passes; true means timeout
+	release func()                                 // unregister the waiter and wake any waiting goroutine; must be called after the result is read (or on abandonment)
+}
 
-	stepID := input.stepID
-	sleepStepID := input.sleepStepID
-	destinationID := input.workflowID
-
-	// Set default topic if not provided
-	topic := _DBOS_NULL_TOPIC
-	if len(input.Topic) > 0 {
-		topic = input.Topic
-	}
-
-	// Check if operation was already executed
-	checkInput := checkOperationExecutionDBInput{
-		workflowID: destinationID,
-		stepID:     stepID,
-		stepName:   functionName,
-	}
-	recordedResult, err := s.checkOperationExecution(ctx, checkInput)
-	if err != nil {
-		return nil, err
-	}
-	if recordedResult != nil {
-		var recvErr error
-		if recordedResult.errStr != nil {
-			recvErr = errors.New(*recordedResult.errStr)
+// notificationWait builds the wait closure shared by recv and getEvent: block until a
+// notification arrives (done closed), the deadline passes (returns true), a repoll
+// signal triggers a recheck of the database, or the context is cancelled.
+func (s *sysDB) notificationWait(ctx context.Context, opName, payload string, exists bool, done <-chan struct{}, repollChannel chan struct{}, recheck func() (bool, error)) func(deadline time.Time) (bool, error) {
+	return func(deadline time.Time) (bool, error) {
+		found := exists
+		for !found {
+			select {
+			case <-done:
+				return false, nil
+			case <-time.After(max(0, time.Until(deadline))):
+				s.logger.Warn(opName+" timeout reached", "payload", payload, "deadline", deadline)
+				return true, nil
+			case <-repollChannel:
+				s.logger.Warn(opName+" polling after repoll channel signal", "payload", payload)
+				// We were instructed to poll again because the connection was disconnected
+				var err error
+				if found, err = recheck(); err != nil {
+					return false, err
+				}
+				// Restart at the beginning of the loop. If the value was found, we'll exit the loop and proceed to reading the value.
+				continue
+			case <-ctx.Done():
+				s.logger.Warn(opName+" context cancelled", "payload", payload, "cause", context.Cause(ctx))
+				return false, ctx.Err()
+			}
 		}
-		return &recvResult{message: recordedResult.output, serialization: recordedResult.serialization}, recvErr
+		return false, nil
 	}
+}
 
+// startRecvListener registers the calling workflow as the sole receiver for
+// (destinationID, topic) and checks whether a message is already pending.
+func (s *sysDB) startRecvListener(ctx context.Context, destinationID, topic string) (*notificationWaiter, error) {
 	// First check if there's already a receiver for this workflow/topic to avoid unnecessary database load
 	payload := fmt.Sprintf("%s::%s", destinationID, topic)
 	cond := sync.NewCond(&sync.Mutex{})
@@ -3711,30 +3622,30 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*recvResult, error) 
 	}
 	repollChannel := make(chan struct{}, 1)
 	s.workflowNotificationRepollMap.LoadOrStore(payload, repollChannel)
-	defer func() {
-		// Clean up the condition variable after we're done and broadcast to wake up any waiting goroutines
+	release := func() {
+		// Clean up the condition variable and broadcast to wake up any waiting goroutines
 		cond.Broadcast()
 		s.workflowNotificationsMap.Delete(payload)
 		s.workflowNotificationRepollMap.Delete(payload)
-	}()
+	}
 
 	// Now check if there is already an unconsumed message available in the database.
-	// If not, we'll wait for a notification and timeout
+	// If not, the caller will wait for a notification or its deadline.
 	var exists bool
 	query := s.renderSQL(`SELECT EXISTS (SELECT 1 FROM %snotifications WHERE destination_uuid = $1 AND topic = $2 AND consumed = false)`, s.dialect.SchemaPrefix(s.schema))
-	err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
+	err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 	if err != nil {
 		cond.L.Unlock()
+		release()
 		return nil, fmt.Errorf("failed to check message: %w", err)
 	}
-	var timeoutOccurred bool
 
 	// Create the waiting goroutine once (only if !exists, so we don't attempt to unlock twice)
 	done := make(chan struct{})
 	if !exists {
 		go func() {
 			// This is the only place we unlock the condition variable if the value did not exist
-			// Because of the deferred Broadcast, we'll eventually hit this before returning
+			// Because of the Broadcast in release, we'll eventually hit this before the caller returns
 			defer cond.L.Unlock()
 			cond.Wait()
 			close(done)
@@ -3743,53 +3654,23 @@ func (s *sysDB) recv(ctx context.Context, input recvInput) (*recvResult, error) 
 		cond.L.Unlock()
 	}
 
-loop:
-	for !exists {
-		timeout, err := s.sleep(ctx, sleepInput{
-			duration:   input.Timeout,
-			skipSleep:  true,
-			workflowID: destinationID,
-			stepID:     sleepStepID,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to sleep before recv timeout: %w", err)
+	recheck := func() (bool, error) {
+		var found bool
+		if err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&found); err != nil {
+			return false, fmt.Errorf("failed to check message: %w", err)
 		}
-
-		select {
-		case <-done:
-			break loop
-		case <-time.After(timeout):
-			timeoutOccurred = true
-			s.logger.Warn("Recv() timeout reached", "payload", payload, "timeout", input.Timeout)
-			break loop
-		case <-repollChannel:
-			s.logger.Warn("Receive polling after repoll channel signal", "payload", payload)
-			// We were instructed to poll again because the connection was disconnected
-			err = s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
-			if err != nil {
-				return nil, fmt.Errorf("failed to check message: %w", err)
-			}
-			// Restart at the beginning of the loop. If the value was found, we'll exit the loop and process to consuming the value.
-			continue
-		case <-ctx.Done():
-			s.logger.Warn("Recv() context cancelled", "payload", payload, "cause", context.Cause(ctx))
-			return nil, ctx.Err()
-		}
+		return found, nil
 	}
+	wait := s.notificationWait(ctx, "Recv()", payload, exists, done, repollChannel, recheck)
 
-	// Capture start time before finding and consuming the message
-	startTime := time.Now()
+	return &notificationWaiter{pending: exists, wait: wait, release: release}, nil
+}
 
-	// Find the oldest unconsumed message and atomically mark it consumed.
-	// Notifications are retained (consumed=true) so they remain visible for observability;
-	// rows are eventually cleaned up by FK cascade when the parent workflow is garbage-collected.
-	tx, err := s.pool.BeginTx(ctx, TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
+// consumeMessage finds the oldest unconsumed message for (destinationID, topic) and
+// atomically marks it consumed. Returns a nil message if none is pending.
+func (s *sysDB) consumeMessage(ctx context.Context, tx Tx, destinationID, topic string) (*string, *string, error) {
 	// Use message_uuid so we update exactly one row; created_at_epoch_ms can match multiple rows when inserts occur in the same millisecond.
-	query = s.renderSQL(`
+	query := s.renderSQL(`
     WITH oldest_entry AS (
         SELECT message_uuid
         FROM %snotifications
@@ -3804,51 +3685,11 @@ loop:
 
 	var messageString *string
 	var msgSerialization *string
-	err = tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString, &msgSerialization)
-	if err != nil {
-		if err != pgx.ErrNoRows {
-			return nil, fmt.Errorf("failed to consume message: %w", err)
-		}
+	err := tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString, &msgSerialization)
+	if err != nil && err != pgx.ErrNoRows {
+		return nil, nil, fmt.Errorf("failed to consume message: %w", err)
 	}
-
-	// Use the sender's serialization from the notification; fall back to receiver's format for timeout/no-message case
-	serialization := input.serialization
-	if msgSerialization != nil && len(*msgSerialization) > 0 {
-		serialization = *msgSerialization
-	}
-
-	// Record the operation result (with encoded message string)
-	completedTime := time.Now()
-	recordInput := recordOperationResultDBInput{
-		workflowID:    destinationID,
-		stepID:        stepID,
-		stepName:      functionName,
-		output:        messageString,
-		tx:            tx,
-		startedAt:     startTime,
-		completedAt:   completedTime,
-		serialization: serialization,
-	}
-
-	// Record an error if no message found and timeout occurred
-	var timeoutErr error
-	if timeoutOccurred && messageString == nil {
-		timeoutErr = newTimeoutError(destinationID, functionName, fmt.Sprintf("no message received within %v", input.Timeout))
-		s := timeoutErr.Error()
-		recordInput.errStr = &s
-	}
-
-	err = s.recordOperationResult(ctx, recordInput)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	// Return the message and its serialization format
-	return &recvResult{message: messageString, serialization: serialization}, timeoutErr
+	return messageString, msgSerialization, nil
 }
 
 type WorkflowSetEventInput struct {
@@ -3896,185 +3737,82 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 	return err
 }
 
-func (s *sysDB) getEvent(ctx context.Context, input getEventInput) (*getEventResult, error) {
-	functionName := "DBOS.getEvent"
-
-	stepID := input.stepID
-	sleepStepID := input.sleepStepID
-	isInWorkflow := input.isInWorkflow
-
-	startTime := time.Now()
-	if isInWorkflow {
-		// Check if operation was already executed (only if in workflow)
-		checkInput := checkOperationExecutionDBInput{
-			workflowID: input.workflowID,
-			stepID:     stepID,
-			stepName:   functionName,
-		}
-		recordedResult, err := s.checkOperationExecution(ctx, checkInput)
-		if err != nil {
-			return nil, err
-		}
-		if recordedResult != nil {
-			var evtErr error
-			if recordedResult.errStr != nil {
-				evtErr = errors.New(*recordedResult.errStr)
-			}
-			return &getEventResult{value: recordedResult.output, serialization: recordedResult.serialization}, evtErr
-		}
-	}
-
-	// Create notification payload and condition variable
-	payload := fmt.Sprintf("%s::%s", input.TargetWorkflowID, input.Key)
+// startEventListener registers the caller as a waiter for the (targetWorkflowID, key)
+// event and checks whether the event is already set. Unlike recv, multiple waiters
+// may listen for the same event and share its condition variable.
+func (s *sysDB) startEventListener(ctx context.Context, targetWorkflowID, key string) (*notificationWaiter, error) {
+	payload := fmt.Sprintf("%s::%s", targetWorkflowID, key)
 	cond := sync.NewCond(&sync.Mutex{})
 	cond.L.Lock()
 	existingCond, loaded := s.workflowEventsMap.LoadOrStore(payload, cond)
 	if loaded {
-		cond.L.Unlock()
 		// Reuse the existing condition variable
+		cond.L.Unlock()
 		cond = existingCond.(*sync.Cond)
+		cond.L.Lock()
 	}
 	repollChannel := make(chan struct{}, 1)
-	s.workflowEventsRepollMap.LoadOrStore(payload, repollChannel)
-
-	// Defer broadcast to ensure any waiting goroutines eventually unlock
-	defer func() {
+	existingRepoll, _ := s.workflowEventsRepollMap.LoadOrStore(payload, repollChannel)
+	repollChannel = existingRepoll.(chan struct{})
+	release := func() {
+		// Clean up the condition variable and broadcast to wake up any waiting goroutines
 		cond.Broadcast()
-		// Clean up the condition variable after we're done (Delete is a no-op if the key doesn't exist)
 		s.workflowEventsMap.Delete(payload)
 		s.workflowEventsRepollMap.Delete(payload)
-	}()
-
-	// Check if the event already exists in the database
-	query := s.renderSQL(`SELECT value, serialization FROM %sworkflow_events WHERE workflow_uuid = $1 AND key = $2`, s.dialect.SchemaPrefix(s.schema))
-	var valueString *string
-	var evtSerialization *string
-	var row pgx.Row
-	var err error
-
-	// Helper function to query the event and handle errors
-	queryEvent := func() error {
-		row = s.pool.QueryRow(ctx, query, input.TargetWorkflowID, input.Key)
-		err = row.Scan(&valueString, &evtSerialization)
-		if err != nil && err != pgx.ErrNoRows {
-			if !loaded {
-				cond.L.Unlock()
-			}
-			return fmt.Errorf("failed to query workflow event: %w", err)
-		}
-		return nil
 	}
 
-	if err := queryEvent(); err != nil {
-		return nil, err
+	// Now check if the event already exists in the database.
+	// If not, the caller will wait for a notification or its deadline.
+	var exists bool
+	query := s.renderSQL(`SELECT EXISTS (SELECT 1 FROM %sworkflow_events WHERE workflow_uuid = $1 AND key = $2)`, s.dialect.SchemaPrefix(s.schema))
+	err := s.pool.QueryRow(ctx, query, targetWorkflowID, key).Scan(&exists)
+	if err != nil {
+		cond.L.Unlock()
+		release()
+		return nil, fmt.Errorf("failed to check event: %w", err)
 	}
 
-	var timeoutOccurred bool
-	if valueString == nil {
-		// Start a goroutine to wait for the event to be set
-		// This goroutine is responsible for unlocking the CV, which will happen whenever the event is set (through either the deferred Broadcast or from the notification listener)
-		done := make(chan struct{})
+	// Create the waiting goroutine once (only if !exists, so we don't attempt to unlock twice)
+	done := make(chan struct{})
+	if !exists {
 		go func() {
-			if !loaded {
-				defer cond.L.Unlock()
-			}
+			// This is the only place we unlock the condition variable if the value did not exist
+			// Because of the Broadcast in release, we'll eventually hit this before the caller returns
+			defer cond.L.Unlock()
 			cond.Wait()
 			close(done)
 		}()
-
-	loop:
-		for valueString == nil {
-			// Wait for notification with timeout using condition variable
-			timeout := input.Timeout
-			if isInWorkflow {
-				timeout, err = s.sleep(ctx, sleepInput{
-					duration:   input.Timeout,
-					skipSleep:  true,
-					workflowID: input.workflowID,
-					stepID:     sleepStepID,
-				})
-				if err != nil {
-					return nil, fmt.Errorf("failed to sleep before getEvent timeout: %w", err)
-				}
-			}
-
-			select {
-			case <-done:
-				// Received notification
-				if err := queryEvent(); err != nil {
-					return nil, err
-				}
-				break loop
-			case <-time.After(timeout):
-				timeoutOccurred = true
-				s.logger.Warn("GetEvent() timeout reached", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "timeout", input.Timeout)
-				// Check if the event exists in the database -- we never know
-				if err := queryEvent(); err != nil {
-					return nil, err
-				}
-				break loop
-			case <-repollChannel:
-				// We were instructed to poll again because the connection was disconnected
-				if err := queryEvent(); err != nil {
-					return nil, err
-				}
-				// Restart at the beginning of the loop.
-				// If the value was found, we'll exit the loop
-				continue
-			case <-ctx.Done():
-				s.logger.Warn("GetEvent() context cancelled", "target_workflow_id", input.TargetWorkflowID, "key", input.Key, "cause", context.Cause(ctx))
-				if !loaded {
-					cond.L.Unlock()
-				}
-				return nil, ctx.Err()
-			}
-		}
 	} else {
-		if !loaded {
-			cond.L.Unlock()
-		}
+		cond.L.Unlock()
 	}
 
-	// Use the event's serialization from the DB; fall back to caller's format for timeout/no-event case
-	serialization := input.serialization
-	if evtSerialization != nil && len(*evtSerialization) > 0 {
-		serialization = *evtSerialization
+	recheck := func() (bool, error) {
+		var found bool
+		if err := s.pool.QueryRow(ctx, query, targetWorkflowID, key).Scan(&found); err != nil {
+			return false, fmt.Errorf("failed to check event: %w", err)
+		}
+		return found, nil
 	}
+	wait := s.notificationWait(ctx, "GetEvent()", payload, exists, done, repollChannel, recheck)
 
-	// Record the operation result if this is called within a workflow
-	var timeoutErr error
-	if isInWorkflow {
-		completedTime := time.Now()
-		recordInput := recordOperationResultDBInput{
-			workflowID:    input.workflowID,
-			stepID:        stepID,
-			stepName:      functionName,
-			output:        valueString,
-			startedAt:     startTime,
-			completedAt:   completedTime,
-			serialization: serialization,
-		}
+	return &notificationWaiter{pending: exists, wait: wait, release: release}, nil
+}
 
-		// Record an error if no event found and timeout occurred
-		if timeoutOccurred && valueString == nil {
-			timeoutErr = newTimeoutError(input.workflowID, functionName, fmt.Sprintf("no event found for key '%s' within %v", input.Key, input.Timeout))
-			s := timeoutErr.Error()
-			recordInput.errStr = &s
-		}
-
-		err = s.recordOperationResult(ctx, recordInput)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// If not in workflow and timeout occurred with no event found, return error
-		if timeoutOccurred && valueString == nil {
-			timeoutErr = newTimeoutError("", functionName, fmt.Sprintf("no event found for key '%s' within %v", input.Key, input.Timeout))
-		}
+// getEventValue reads the current value and serialization for (targetWorkflowID, key)
+// from the workflow_events table. Returns a nil value if the event is not set.
+// A nil Querier defaults to the pool (for callers outside a transaction).
+func (s *sysDB) getEventValue(ctx context.Context, q Querier, targetWorkflowID, key string) (*string, *string, error) {
+	if q == nil {
+		q = s.pool
 	}
-
-	// Return the event value and its serialization format
-	return &getEventResult{value: valueString, serialization: serialization}, timeoutErr
+	query := s.renderSQL(`SELECT value, serialization FROM %sworkflow_events WHERE workflow_uuid = $1 AND key = $2`, s.dialect.SchemaPrefix(s.schema))
+	var value *string
+	var serialization *string
+	err := q.QueryRow(ctx, query, targetWorkflowID, key).Scan(&value, &serialization)
+	if err != nil && err != pgx.ErrNoRows {
+		return nil, nil, fmt.Errorf("failed to query workflow event: %w", err)
+	}
+	return value, serialization, nil
 }
 
 /*******************************/
