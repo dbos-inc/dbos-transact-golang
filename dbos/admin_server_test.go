@@ -1101,3 +1101,66 @@ func mustMarshal(v any) []byte {
 	}
 	return data
 }
+
+// TestListWorkflowsRequestStatusDecoding verifies the status filter accepts both
+// a single string ("X") and an array of strings (["X","Y"]), matching the
+// contract used by the DBOS console and the Python/TypeScript SDKs.
+func TestListWorkflowsRequestStatusDecoding(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		expected []WorkflowStatusType
+		wantErr  bool
+	}{
+		{
+			name:     "single string status",
+			body:     `{"status": "PENDING"}`,
+			expected: []WorkflowStatusType{WorkflowStatusPending},
+		},
+		{
+			name:     "array of statuses",
+			body:     `{"status": ["ERROR", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"]}`,
+			expected: []WorkflowStatusType{WorkflowStatusType("ERROR"), WorkflowStatusType("MAX_RECOVERY_ATTEMPTS_EXCEEDED")},
+		},
+		{
+			name:     "single element array",
+			body:     `{"status": ["PENDING"]}`,
+			expected: []WorkflowStatusType{WorkflowStatusPending},
+		},
+		{
+			name:     "empty array",
+			body:     `{"status": []}`,
+			expected: nil,
+		},
+		{
+			name:     "omitted status",
+			body:     `{}`,
+			expected: nil,
+		},
+		{
+			name:    "invalid type",
+			body:    `{"status": 42}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req listWorkflowsRequest
+			err := json.Unmarshal([]byte(tt.body), &req)
+			if tt.wantErr {
+				require.Error(t, err, "Expected decode error")
+				return
+			}
+			require.NoError(t, err, "Failed to decode request")
+
+			// Apply the produced options and assert the resulting status filter.
+			opts := req.toListWorkflowsOptions()
+			var params listWorkflowsOptions
+			for _, opt := range opts {
+				opt(&params)
+			}
+			assert.Equal(t, tt.expected, params.status, "Unexpected status filter")
+		})
+	}
+}
