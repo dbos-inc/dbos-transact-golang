@@ -3639,6 +3639,44 @@ func CancelWorkflow(ctx DBOSContext, workflowID string, opts ...CancelWorkflowOp
 	return ctx.CancelWorkflow(ctx, workflowID, opts...)
 }
 
+func (c *dbosContext) UpdateWorkflowAttributes(_ DBOSContext, workflowID string, attributes map[string]any) error {
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+
+	if isWithinWorkflow {
+		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (struct{}, error) {
+			return struct{}{}, c.systemDB.updateWorkflowAttributes(ctx, updateWorkflowAttributesDBInput{
+				workflowID: workflowID,
+				attributes: attributes,
+				tx:         tx,
+			})
+		}, WithStepName("DBOS.updateWorkflowAttributes"))
+		return err
+	}
+	return retry(c, func() error {
+		return c.systemDB.updateWorkflowAttributes(c, updateWorkflowAttributesDBInput{
+			workflowID: workflowID,
+			attributes: attributes,
+		})
+	}, withRetrierLogger(c.logger))
+}
+
+// UpdateWorkflowAttributes replaces the custom attributes attached to an existing
+// workflow, identified by workflowID. Pass a nil attributes map to clear all
+// attributes. Attributes must be JSON-serializable.
+//
+// Returns an error if the workflow does not exist or the update fails.
+//
+// Example:
+//
+//	err := dbos.UpdateWorkflowAttributes(ctx, "my-workflow-id", map[string]any{"customer": "acme"})
+func UpdateWorkflowAttributes(ctx DBOSContext, workflowID string, attributes map[string]any) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.UpdateWorkflowAttributes(ctx, workflowID, attributes)
+}
+
 func (c *dbosContext) CancelWorkflows(_ DBOSContext, workflowIDs []string, opts ...CancelWorkflowOptions) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
@@ -4671,6 +4709,14 @@ type GetWorkflowAggregatesInput struct {
 	ExecutorID         []string
 	QueueName          []string
 	WorkflowIDPrefix   []string
+	WorkflowIDs        []string
+	AuthenticatedUser  []string
+	ForkedFrom         []string
+	ParentWorkflowID   []string
+	WasForkedFrom      *bool
+	HasParent          *bool
+
+	Attributes map[string]any
 }
 
 func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error) {
@@ -4700,6 +4746,13 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 		executorID:                input.ExecutorID,
 		queueName:                 input.QueueName,
 		workflowIDPrefix:          input.WorkflowIDPrefix,
+		workflowIDs:               input.WorkflowIDs,
+		authenticatedUser:         input.AuthenticatedUser,
+		forkedFrom:                input.ForkedFrom,
+		parentWorkflowID:          input.ParentWorkflowID,
+		wasForkedFrom:             input.WasForkedFrom,
+		hasParent:                 input.HasParent,
+		attributes:                input.Attributes,
 	}
 
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
@@ -4721,7 +4774,9 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 //
 // At least one GroupBy* flag in the input must be true, or TimeBucketSize must be > 0.
 // Filter fields (Status, StartTime, EndTime, Name, ApplicationVersion, ExecutorID,
-// QueueName, WorkflowIDPrefix) narrow which workflows are counted before grouping.
+// QueueName, WorkflowIDPrefix, WorkflowIDs, AuthenticatedUser, ForkedFrom,
+// ParentWorkflowID, WasForkedFrom, HasParent, Attributes) narrow which workflows are
+// counted before grouping. Attributes filtering requires a Postgres-compatible system database.
 //
 // At least one Select* flag must be true. Returns one WorkflowAggregateRow per non-empty
 // group. Each row's Group map contains an entry per enabled grouping column ("status",

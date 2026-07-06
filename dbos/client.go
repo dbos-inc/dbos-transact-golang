@@ -34,6 +34,7 @@ type Client interface {
 	RetrieveWorkflow(workflowID string) (WorkflowHandle[any], error)
 	CancelWorkflow(workflowID string, opts ...CancelWorkflowOptions) error
 	CancelWorkflows(workflowIDs []string, opts ...CancelWorkflowOptions) error
+	UpdateWorkflowAttributes(workflowID string, attributes map[string]any) error
 	SetWorkflowDelay(workflowID string, opts ...SetWorkflowDelayOption) error
 	DeleteWorkflows(workflowIDs []string, opts ...DeleteWorkflowOption) error
 	ResumeWorkflow(workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)
@@ -510,6 +511,13 @@ func (c *client) CancelWorkflow(workflowID string, opts ...CancelWorkflowOptions
 		opt(&cwo)
 	}
 	return c.dbosCtx.CancelWorkflow(c.dbosCtx, workflowID, opts...)
+}
+
+// UpdateWorkflowAttributes replaces the custom attributes attached to an existing
+// workflow by ID. Pass a nil attributes map to clear all attributes. Returns an
+// error if the workflow does not exist.
+func (c *client) UpdateWorkflowAttributes(workflowID string, attributes map[string]any) error {
+	return c.dbosCtx.UpdateWorkflowAttributes(c.dbosCtx, workflowID, attributes)
 }
 
 // CancelWorkflows cancels multiple workflows in a single database round-trip.
