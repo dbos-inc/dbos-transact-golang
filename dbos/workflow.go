@@ -4664,6 +4664,14 @@ type GetWorkflowAggregatesInput struct {
 	ExecutorID         []string
 	QueueName          []string
 	WorkflowIDPrefix   []string
+	WorkflowIDs        []string
+	AuthenticatedUser  []string
+	ForkedFrom         []string
+	ParentWorkflowID   []string
+	WasForkedFrom      *bool
+	HasParent          *bool
+
+	Attributes map[string]any
 }
 
 func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error) {
@@ -4693,6 +4701,13 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 		executorID:                input.ExecutorID,
 		queueName:                 input.QueueName,
 		workflowIDPrefix:          input.WorkflowIDPrefix,
+		workflowIDs:               input.WorkflowIDs,
+		authenticatedUser:         input.AuthenticatedUser,
+		forkedFrom:                input.ForkedFrom,
+		parentWorkflowID:          input.ParentWorkflowID,
+		wasForkedFrom:             input.WasForkedFrom,
+		hasParent:                 input.HasParent,
+		attributes:                input.Attributes,
 	}
 
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
@@ -4714,7 +4729,9 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 //
 // At least one GroupBy* flag in the input must be true, or TimeBucketSize must be > 0.
 // Filter fields (Status, StartTime, EndTime, Name, ApplicationVersion, ExecutorID,
-// QueueName, WorkflowIDPrefix) narrow which workflows are counted before grouping.
+// QueueName, WorkflowIDPrefix, WorkflowIDs, AuthenticatedUser, ForkedFrom,
+// ParentWorkflowID, WasForkedFrom, HasParent, Attributes) narrow which workflows are
+// counted before grouping. Attributes filtering requires a Postgres-compatible system database.
 //
 // At least one Select* flag must be true. Returns one WorkflowAggregateRow per non-empty
 // group. Each row's Group map contains an entry per enabled grouping column ("status",

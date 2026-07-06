@@ -1542,6 +1542,13 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 		ExecutorID:                req.Body.ExecutorID.toSlice(),
 		QueueName:                 req.Body.QueueName.toSlice(),
 		WorkflowIDPrefix:          req.Body.WorkflowIDPrefix.toSlice(),
+		WorkflowIDs:               req.Body.WorkflowIDs.toSlice(),
+		AuthenticatedUser:         req.Body.User.toSlice(),
+		ForkedFrom:                req.Body.ForkedFrom.toSlice(),
+		ParentWorkflowID:          req.Body.ParentWorkflowID.toSlice(),
+		WasForkedFrom:             req.Body.WasForkedFrom,
+		HasParent:                 req.Body.HasParent,
+		Attributes:                req.Body.Attributes,
 	}
 	// Default to count when nothing is selected: the admin aggregates API omits select
 	// flags when it only wants counts (e.g. grouping by time_bucket alone), and forwards

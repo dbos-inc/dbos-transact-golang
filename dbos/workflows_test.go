@@ -7511,6 +7511,52 @@ func TestGetWorkflowAggregates(t *testing.T) {
 		assert.Empty(t, rows)
 	})
 
+	t.Run("FilterByAttributes", func(t *testing.T) {
+		skipIfSqlite(t, "attribute filters require JSONB containment")
+
+		for i := 0; i < 2; i++ {
+			handle, err := RunWorkflow(dbosCtx, aggregatesWorkflowSuccess, fmt.Sprintf("attr-%d", i),
+				WithWorkflowAttributes(map[string]any{"customer": "acme-agg", "tier": 1}))
+			require.NoError(t, err)
+			_, err = handle.GetResult()
+			require.NoError(t, err)
+		}
+
+		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			GroupByName: true,
+			SelectCount: true,
+			Attributes:  map[string]any{"customer": "acme-agg"},
+		})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.NotNil(t, rows[0].Group["name"])
+		require.NotNil(t, rows[0].Count)
+		assert.Equal(t, successFQN, *rows[0].Group["name"])
+		assert.Equal(t, int64(2), *rows[0].Count)
+
+		// A non-matching attribute value yields no rows
+		rows, err = GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			GroupByStatus: true,
+			SelectCount:   true,
+			Attributes:    map[string]any{"customer": "nobody"},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, rows)
+	})
+
+	t.Run("FilterByAttributesUnsupportedOnSQLite", func(t *testing.T) {
+		if !useSqliteBackend() {
+			t.Skip("tests the SQLite-only error path")
+		}
+		_, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+			GroupByStatus: true,
+			SelectCount:   true,
+			Attributes:    map[string]any{"customer": "acme"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not supported")
+	})
+
 	t.Run("SelectMinCreatedAtAndLatency", func(t *testing.T) {
 		// Selecting only the timestamp/latency aggregates leaves Count nil.
 		rows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{

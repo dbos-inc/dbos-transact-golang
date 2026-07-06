@@ -2641,6 +2641,13 @@ type getWorkflowAggregatesDBInput struct {
 	executorID                []string
 	queueName                 []string
 	workflowIDPrefix          []string
+	workflowIDs               []string
+	authenticatedUser         []string
+	forkedFrom                []string
+	parentWorkflowID          []string
+	wasForkedFrom             *bool
+	hasParent                 *bool
+	attributes                map[string]any
 	limit                     int64 // 0 means use _DEFAULT_AGGREGATES_LIMIT
 	tx                        Tx
 }
@@ -2725,6 +2732,41 @@ func (s *sysDB) getWorkflowAggregates(ctx context.Context, input getWorkflowAggr
 	}
 	if len(input.workflowIDPrefix) > 0 {
 		qb.addWhereLikeAny("workflow_uuid", input.workflowIDPrefix, "%")
+	}
+	if len(input.workflowIDs) > 0 {
+		qb.addWhereAny("workflow_uuid", input.workflowIDs)
+	}
+	if len(input.authenticatedUser) > 0 {
+		qb.addWhereAny("authenticated_user", input.authenticatedUser)
+	}
+	if len(input.forkedFrom) > 0 {
+		qb.addWhereAny("forked_from", input.forkedFrom)
+	}
+	if len(input.parentWorkflowID) > 0 {
+		qb.addWhereAny("parent_workflow_id", input.parentWorkflowID)
+	}
+	if input.wasForkedFrom != nil {
+		qb.addWhere("was_forked_from", *input.wasForkedFrom)
+	}
+	if input.hasParent != nil {
+		if *input.hasParent {
+			qb.addWhereIsNotNull("parent_workflow_id")
+		} else {
+			qb.addWhereIsNull("parent_workflow_id")
+		}
+	}
+	if len(input.attributes) > 0 {
+		if !s.dialect.SupportsAttributesContainment() {
+			return nil, fmt.Errorf("filtering workflows by attributes is not supported on %s; use a Postgres system database to filter by attributes", s.dialect.Name())
+		}
+		attributesJSON, err := json.Marshal(input.attributes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal attributes filter: %w", err)
+		}
+		// JSONB containment (@>), served by the GIN index on the attributes column
+		qb.argCounter++
+		qb.whereClauses = append(qb.whereClauses, fmt.Sprintf("attributes @> $%d::jsonb", qb.argCounter))
+		qb.args = append(qb.args, string(attributesJSON))
 	}
 	// completed_after/before filter on completed_at; dequeued_after/before on
 	// started_at_epoch_ms (the dequeue timestamp). Both are epoch-ms columns.
