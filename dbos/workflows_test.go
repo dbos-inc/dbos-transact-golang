@@ -8026,4 +8026,38 @@ func TestWorkflowAttributes(t *testing.T) {
 			assert.Nil(t, s.Attributes)
 		}
 	})
+
+	t.Run("Update", func(t *testing.T) {
+		wfid := uuid.NewString()
+		handle, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 1, WithWorkflowID(wfid), WithWorkflowAttributes(map[string]any{"customer": "acme-upd", "tier": 1}))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		// Replace the attributes entirely
+		require.NoError(t, UpdateWorkflowAttributes(dbosCtx, wfid, map[string]any{"customer": "globex-upd"}))
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"customer": "globex-upd"}, status.Attributes)
+
+		// The old attribute value no longer matches; the new one does (Postgres only)
+		if !useSqliteBackend() {
+			assert.NotContains(t, matchedIDs(t, map[string]any{"customer": "acme-upd"}), wfid)
+			assert.Contains(t, matchedIDs(t, map[string]any{"customer": "globex-upd"}), wfid)
+		}
+
+		// Passing nil clears all attributes
+		require.NoError(t, UpdateWorkflowAttributes(dbosCtx, wfid, nil))
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Nil(t, status.Attributes)
+	})
+
+	t.Run("UpdateNonExistentWorkflow", func(t *testing.T) {
+		err := UpdateWorkflowAttributes(dbosCtx, "does-not-exist-"+uuid.NewString(), map[string]any{"k": "v"})
+		require.Error(t, err)
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+	})
 }

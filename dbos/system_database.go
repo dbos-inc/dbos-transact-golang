@@ -35,6 +35,7 @@ type systemDatabase interface {
 	insertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error)
 	listWorkflows(ctx context.Context, input listWorkflowsDBInput) ([]WorkflowStatus, error)
 	updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error
+	updateWorkflowAttributes(ctx context.Context, input updateWorkflowAttributesDBInput) error
 	awaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*awaitWorkflowResultOutput, error)
 	cancelWorkflows(ctx context.Context, input cancelWorkflowsDBInput) ([]string, error)
 	cancelAllBefore(ctx context.Context, cutoffTime time.Time) error
@@ -1525,6 +1526,48 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 
 	if err != nil {
 		return fmt.Errorf("failed to update workflow status: %w", err)
+	}
+	return nil
+}
+
+type updateWorkflowAttributesDBInput struct {
+	workflowID string
+	attributes map[string]any
+	tx         Tx
+}
+
+// updateWorkflowAttributes replaces the custom attributes attached to an existing
+// workflow. A nil/empty attributes map clears them (stored as NULL). Returns a
+// non-existent workflow error if no workflow with the given ID exists.
+func (s *sysDB) updateWorkflowAttributes(ctx context.Context, input updateWorkflowAttributesDBInput) error {
+	var attributesJSON *string
+	if len(input.attributes) > 0 {
+		marshaled, err := json.Marshal(input.attributes)
+		if err != nil {
+			return fmt.Errorf("failed to marshal workflow attributes: %w", err)
+		}
+		attributesStr := string(marshaled)
+		attributesJSON = &attributesStr
+	}
+
+	query := s.renderSQL(`UPDATE %sworkflow_status SET attributes = $1, updated_at = $2 WHERE workflow_uuid = $3`, s.dialect.SchemaPrefix(s.schema))
+
+	var res Result
+	var err error
+	if input.tx != nil {
+		res, err = input.tx.Exec(ctx, query, attributesJSON, time.Now().UnixMilli(), input.workflowID)
+	} else {
+		res, err = s.pool.Exec(ctx, query, attributesJSON, time.Now().UnixMilli(), input.workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to update workflow attributes: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to read rows affected: %w", err)
+	}
+	if affected == 0 {
+		return newNonExistentWorkflowError(input.workflowID)
 	}
 	return nil
 }
