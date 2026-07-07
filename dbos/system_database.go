@@ -3621,8 +3621,10 @@ func (s *sysDB) startRecvListener(ctx context.Context, destinationID, topic stri
 	repollChannel := make(chan struct{}, 1)
 	s.workflowNotificationRepollMap.LoadOrStore(payload, repollChannel)
 	release := func() {
-		// Clean up the condition variable and broadcast to wake up any waiting goroutines
+		// Clean up the condition variable and broadcast to wake up any waiting goroutines.
+		cond.L.Lock()
 		cond.Broadcast()
+		cond.L.Unlock()
 		s.workflowNotificationsMap.Delete(payload)
 		s.workflowNotificationRepollMap.Delete(payload)
 	}
@@ -3761,8 +3763,10 @@ func (s *sysDB) startEventListener(ctx context.Context, targetWorkflowID, key st
 		cond.L.Lock()
 	}
 	release := func() {
-		// Clean up the condition variable and broadcast to wake up any waiting goroutines
+		// Clean up the condition variable and broadcast to wake up any waiting goroutines.
+		cond.L.Lock()
 		cond.Broadcast()
+		cond.L.Unlock()
 		s.workflowEventsMap.Delete(payload)
 		s.workflowEventsRepollMap.Delete(payload)
 	}
