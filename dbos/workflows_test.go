@@ -3661,6 +3661,93 @@ func TestSendRecv(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		require.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 	})
+
+	t.Run("ConcurrentRecvSameTopicConflicts", func(t *testing.T) {
+		// A single (destination, topic) may only have one active receiver at a time.
+		// A second concurrent registration must be rejected with a ConflictingIDError
+		// rather than silently sharing/stealing the first receiver's slot.
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		destID := uuid.NewString()
+		topic := "single-receiver-topic"
+
+		waiter1, err := sysDB.startRecvListener(context.Background(), destID, topic)
+		require.NoError(t, err, "first receiver should register")
+		defer waiter1.release()
+
+		_, err = sysDB.startRecvListener(context.Background(), destID, topic)
+		require.Error(t, err, "second concurrent receiver for the same (destination, topic) must be rejected")
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected *DBOSError, got %T", err)
+		require.Equal(t, ConflictingIDError, dbosErr.Code, "expected ConflictingIDError")
+	})
+}
+
+// TestRecvStepConflict verifies that when two executors concurrently run the same
+// workflow and race to checkpoint the recv step, the loser does not fail: it either
+// replays the winner's checkpoint or loses the record race with a ConflictingIDError
+// that routes through the workflow-level conflict handler and awaits the winner's
+// result. Either way both executions converge on the delivered message.
+//
+// The two executors share one database (a single in-process guard cannot double-run
+// a workflow, so a real second executor is required). PostgreSQL row locking on
+// consumeMessage serializes consumption, making the converged outcome deterministic.
+func TestRecvStepConflict(t *testing.T) {
+	// checkLeaks is off: the two executors' lifetimes overlap, so a per-executor
+	// goroutine leak check would observe the other executor's live goroutines.
+	ctxA := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: false})
+	ctxB := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
+
+	recvConflictWorkflow := func(ctx DBOSContext, topic string) (string, error) {
+		return Recv[string](ctx, topic, 60*time.Second)
+	}
+	RegisterWorkflow(ctxA, recvConflictWorkflow)
+	RegisterWorkflow(ctxB, recvConflictWorkflow)
+	require.NoError(t, Launch(ctxA))
+	require.NoError(t, Launch(ctxB))
+
+	topic := "recv-step-conflict-topic"
+	workflowID := uuid.NewString()
+
+	// Executor A starts the workflow; it registers as receiver and blocks in wait.
+	handleA, err := RunWorkflow(ctxA, recvConflictWorkflow, topic, WithWorkflowID(workflowID))
+	require.NoError(t, err, "failed to start recv workflow on executor A")
+
+	sysA := ctxA.(*dbosContext).systemDB.(*sysDB)
+	sysB := ctxB.(*dbosContext).systemDB.(*sysDB)
+	payload := fmt.Sprintf("%s::%s", workflowID, topic)
+	require.Eventually(t, func() bool {
+		_, ok := sysA.workflowNotificationsMap.Load(payload)
+		return ok
+	}, 5*time.Second, 10*time.Millisecond, "executor A never registered as receiver")
+
+	// Executor B recovers the same workflow: a genuinely concurrent second
+	// execution with its own in-memory receiver map, so it proceeds to wait and
+	// later races A to consume+checkpoint the message.
+	setWorkflowStatusPending(t, ctxA, workflowID)
+	recovered, err := recoverPendingWorkflows(ctxB.(*dbosContext), []string{"local"})
+	require.NoError(t, err, "failed to recover workflow on executor B")
+	require.Len(t, recovered, 1, "expected one recovered handle")
+	require.Equal(t, workflowID, recovered[0].GetWorkflowID())
+
+	// Executor B must actually run the body (register as receiver), not
+	// short-circuit; its separate map confirms a real concurrent execution.
+	require.Eventually(t, func() bool {
+		_, ok := sysB.workflowNotificationsMap.Load(payload)
+		return ok
+	}, 5*time.Second, 10*time.Millisecond, "executor B (recovery) never ran the body")
+
+	// Deliver the message. Exactly one executor consumes and checkpoints it; the
+	// other replays that checkpoint or loses the checkpoint race and awaits. Both
+	// must converge on the delivered value with no permanent failure.
+	require.NoError(t, Send(ctxA, workflowID, "delivered", topic), "failed to send message")
+
+	gotA, err := handleA.GetResult()
+	require.NoError(t, err, "executor A workflow should succeed")
+	require.Equal(t, "delivered", gotA)
+
+	gotB, err := recovered[0].GetResult()
+	require.NoError(t, err, "the concurrent recovery must converge on the result, not fail")
+	require.Equal(t, "delivered", gotB)
 }
 
 // receiveTwiceShortWorkflow receives one message (blocking up to 30s), then attempts a
@@ -3809,6 +3896,21 @@ func getEventForkReplayWorkflow(ctx DBOSContext, input getEventWorkflowInput) (s
 	return GetEvent[string](ctx, input.TargetWorkflowID, input.Key, 60*time.Minute)
 }
 
+// setManyEventsWorkflow sets one event per (key, value) pair, so a single
+// workflow ID can back concurrent getters spread across several keys.
+type setManyEventsInput struct {
+	Values map[string]string
+}
+
+func setManyEventsWorkflow(ctx DBOSContext, input setManyEventsInput) (string, error) {
+	for key, value := range input.Values {
+		if err := SetEvent(ctx, key, value); err != nil {
+			return "", err
+		}
+	}
+	return "many-events-set", nil
+}
+
 func TestSetGetEvent(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
@@ -3819,6 +3921,7 @@ func TestSetGetEvent(t *testing.T) {
 	RegisterWorkflow(dbosCtx, setEventIdempotencyWorkflow)
 	RegisterWorkflow(dbosCtx, getEventIdempotencyWorkflow)
 	RegisterWorkflow(dbosCtx, getEventForkReplayWorkflow)
+	RegisterWorkflow(dbosCtx, setManyEventsWorkflow)
 
 	Launch(dbosCtx)
 
@@ -4168,56 +4271,64 @@ func TestSetGetEvent(t *testing.T) {
 	})
 
 	t.Run("ConcurrentGetEvent", func(t *testing.T) {
-		// Start the getters before the event is set so they block on the shared
-		// condition variable rather than taking the already-set fast path.
+		// Spread more getters than keys: several getters share each key's condition
+		// variable (within-key concurrency) while distinct keys use independent
+		// condition variables (across-key concurrency). Getters start before the
+		// events are set so they block rather than taking the already-set fast path.
 		setWorkflowID := uuid.NewString()
-		numGoroutines := 5
+		const numKeys = 3
+		const numGoroutines = 12 // > numKeys, so multiple getters land on each key
+		keyFor := func(i int) string { return fmt.Sprintf("concurrent-event-key-%d", i%numKeys) }
+		valueFor := func(key string) string { return "value-for-" + key }
+
+		values := make(map[string]string, numKeys)
+		for k := range numKeys {
+			key := fmt.Sprintf("concurrent-event-key-%d", k)
+			values[key] = valueFor(key)
+		}
+
 		var wg sync.WaitGroup
-		errors := make(chan error, numGoroutines)
+		errs := make(chan error, numGoroutines)
 		wg.Add(numGoroutines)
-		for range numGoroutines {
-			go func() {
+		for i := range numGoroutines {
+			go func(i int) {
 				defer wg.Done()
-				res, err := GetEvent[string](dbosCtx, setWorkflowID, "concurrent-event-key", 30*time.Second)
+				key := keyFor(i)
+				res, err := GetEvent[string](dbosCtx, setWorkflowID, key, 30*time.Second)
 				if err != nil {
-					errors <- fmt.Errorf("failed to get event in goroutine: %v", err)
+					errs <- fmt.Errorf("goroutine %d (key %s): %w", i, key, err)
 					return
 				}
-				if res != "concurrent-event-message" {
-					errors <- fmt.Errorf("expected result in goroutine to be 'concurrent-event-message', got '%s'", res)
-					return
+				if want := valueFor(key); res != want {
+					errs <- fmt.Errorf("goroutine %d (key %s): expected %q, got %q", i, key, want, res)
 				}
-			}()
+			}(i)
 		}
 
-		// Wait until the getters have registered as waiters before setting the event
+		// Wait until every key has a registered waiter before setting the events.
 		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
-		payload := fmt.Sprintf("%s::%s", setWorkflowID, "concurrent-event-key")
 		require.Eventually(t, func() bool {
-			_, ok := sysDB.workflowEventsMap.Load(payload)
-			return ok
-		}, 5*time.Second, 10*time.Millisecond, "getters never registered as event waiters")
+			for k := range numKeys {
+				payload := fmt.Sprintf("%s::%s", setWorkflowID, fmt.Sprintf("concurrent-event-key-%d", k))
+				if _, ok := sysDB.workflowEventsMap.Load(payload); !ok {
+					return false
+				}
+			}
+			return true
+		}, 5*time.Second, 10*time.Millisecond, "not all keys registered event waiters")
 
-		setHandle, err := RunWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
-			Key:     "concurrent-event-key",
-			Message: "concurrent-event-message",
-		}, WithWorkflowID(setWorkflowID))
-		if err != nil {
-			t.Fatalf("failed to start set event workflow: %v", err)
-		}
+		setHandle, err := RunWorkflow(dbosCtx, setManyEventsWorkflow, setManyEventsInput{Values: values}, WithWorkflowID(setWorkflowID))
+		require.NoError(t, err, "failed to start set-many-events workflow")
 		_, err = setHandle.GetResult()
-		if err != nil {
-			t.Fatalf("failed to get result from set event workflow: %v", err)
-		}
+		require.NoError(t, err, "failed to get result from set-many-events workflow")
 
 		wg.Wait()
-		close(errors)
-
-		// Check for any errors from goroutines
-		for err := range errors {
-			require.FailNow(t, "goroutine error: %v", err)
+		close(errs)
+		for err := range errs {
+			require.FailNow(t, "goroutine error", err)
 		}
 	})
+
 }
 
 // Test workflows and steps for parameter mismatch validation

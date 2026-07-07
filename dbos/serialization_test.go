@@ -1424,6 +1424,110 @@ func TestChickenSerializer(t *testing.T) {
 	})
 }
 
+// timeHostileSerializer behaves like the default JSON serializer but refuses to
+// encode a time.Time. It models a realistic custom serializer (schema/protobuf
+// based, or one with a type allowlist) that has no mapping for time.Time. It is
+// used to guard against DBOS routing an internal deadline through the user
+// serializer as a time.Time: the special steps (Sleep, and the timeout sleep of
+// Recv/GetEvent) must checkpoint the deadline as epoch millis (int64), which any
+// serializer can round-trip, rather than a time.Time.
+type timeHostileSerializer struct{}
+
+func (timeHostileSerializer) Name() string { return "TIME_HOSTILE" }
+
+func (timeHostileSerializer) Encode(data any) (*string, error) {
+	if _, ok := data.(time.Time); ok {
+		return nil, fmt.Errorf("timeHostileSerializer refuses to encode time.Time")
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	s := string(b)
+	return &s, nil
+}
+
+func (timeHostileSerializer) Decode(data *string) (any, error) {
+	if data == nil {
+		return nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader([]byte(*data)))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	// Return whole numbers as int64 so DBOS's typed decode of the epoch-millis
+	// deadline round-trips instead of surfacing a float64.
+	if n, ok := v.(json.Number); ok {
+		if i, ierr := n.Int64(); ierr == nil {
+			return i, nil
+		}
+		f, ferr := n.Float64()
+		if ferr != nil {
+			return nil, ferr
+		}
+		return f, nil
+	}
+	return v, nil
+}
+
+// TestTimeHostileSerializer verifies the special steps whose durable deadline is
+// a timestamp (Sleep, and the internal timeout sleep of Recv/GetEvent) encode that deadline as int64.
+func TestTimeHostileSerializer(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: timeHostileSerializer{}})
+
+	sleepWorkflow := func(ctx DBOSContext, ms int) (time.Duration, error) {
+		return Sleep(ctx, time.Duration(ms)*time.Millisecond)
+	}
+	recvTimeoutWorkflow := func(ctx DBOSContext, topic string) (string, error) {
+		return Recv[string](ctx, topic, 500*time.Millisecond)
+	}
+	getEventTimeoutWorkflow := func(ctx DBOSContext, targetID string) (string, error) {
+		return GetEvent[string](ctx, targetID, "no-such-key", 500*time.Millisecond)
+	}
+	RegisterWorkflow(dbosCtx, sleepWorkflow)
+	RegisterWorkflow(dbosCtx, recvTimeoutWorkflow)
+	RegisterWorkflow(dbosCtx, getEventTimeoutWorkflow)
+
+	err := Launch(dbosCtx)
+	require.NoError(t, err)
+
+	t.Run("Sleep", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, sleepWorkflow, 100)
+		require.NoError(t, err, "failed to start sleep workflow")
+		slept, err := handle.GetResult()
+		require.NoError(t, err, "Sleep must succeed: the deadline is stored as epoch millis, not a time.Time the serializer rejects")
+		require.LessOrEqual(t, slept, 100*time.Millisecond)
+
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		require.Equal(t, "DBOS.sleep", steps[0].StepName)
+		require.Nil(t, steps[0].Error, "the sleep deadline must checkpoint cleanly")
+	})
+
+	t.Run("RecvTimeout", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, recvTimeoutWorkflow, "time-hostile-topic")
+		require.NoError(t, err, "failed to start recv workflow")
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected a timeout")
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected *DBOSError, got %T (a serialization failure here would mean the deadline was routed through the serializer as a time.Time)", err)
+		require.Equal(t, TimeoutError, dbosErr.Code, "expected TimeoutError, not a serialization error")
+	})
+
+	t.Run("GetEventTimeout", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, getEventTimeoutWorkflow, "time-hostile-nonexistent-target")
+		require.NoError(t, err, "failed to start getEvent workflow")
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected a timeout")
+		dbosErr, ok := err.(*DBOSError)
+		require.True(t, ok, "expected *DBOSError, got %T", err)
+		require.Equal(t, TimeoutError, dbosErr.Code, "expected TimeoutError, not a serialization error")
+	})
+}
+
 // TestPortableInterop tests cross-language interoperability using the portable JSON format.
 // It simulates another language inserting a workflow into the DB with portable_json serialization,
 // and verifies that Go can recover and execute it correctly.
