@@ -132,18 +132,16 @@ type ExportedWorkflow struct {
 }
 
 type sysDB struct {
-	pool                          Pool
-	dialect                       Dialect
-	notificationLoopDone          chan struct{}
-	workflowNotificationsMap      *sync.Map
-	workflowNotificationRepollMap *sync.Map
-	workflowEventsMap             *sync.Map
-	workflowEventsRepollMap       *sync.Map
-	streamsMap                    *sync.Map
-	logger                        *slog.Logger
-	schema                        string
-	launched                      bool
-	isCockroachDB                 bool
+	pool                 Pool
+	dialect              Dialect
+	notificationLoopDone chan struct{}
+	recvNotifier         *notifyRegistry // recv waiters, keyed by "destinationID::topic"
+	eventNotifier        *notifyRegistry // getEvent waiters, keyed by "targetWorkflowID::key"
+	streamsMap           *sync.Map
+	logger               *slog.Logger
+	schema               string
+	launched             bool
+	isCockroachDB        bool
 }
 
 /*******************************/
@@ -845,17 +843,15 @@ func newSystemDatabase(ctx context.Context, inputs newSystemDatabaseInput) (syst
 	}
 
 	return &sysDB{
-		pool:                          newPgxPool(pool),
-		dialect:                       dialect,
-		workflowNotificationsMap:      &sync.Map{},
-		workflowNotificationRepollMap: &sync.Map{},
-		workflowEventsMap:             &sync.Map{},
-		workflowEventsRepollMap:       &sync.Map{},
-		streamsMap:                    &sync.Map{},
-		notificationLoopDone:          make(chan struct{}),
-		logger:                        logger.With("service", "system_database"),
-		schema:                        databaseSchema,
-		isCockroachDB:                 isCockroach,
+		pool:                 newPgxPool(pool),
+		dialect:              dialect,
+		recvNotifier:         newNotifyRegistry(),
+		eventNotifier:        newNotifyRegistry(),
+		streamsMap:           &sync.Map{},
+		notificationLoopDone: make(chan struct{}),
+		logger:               logger.With("service", "system_database"),
+		schema:               databaseSchema,
+		isCockroachDB:        isCockroach,
 	}, nil
 }
 
@@ -902,8 +898,8 @@ func (s *sysDB) shutdown(ctx context.Context, timeout time.Duration) {
 		}
 	}
 
-	s.workflowNotificationsMap.Clear()
-	s.workflowEventsMap.Clear()
+	s.recvNotifier.clear()
+	s.eventNotifier.clear()
 	s.streamsMap.Clear()
 
 	s.launched = false
@@ -3364,17 +3360,10 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 					time.Sleep(connectionRetryBackoff.delayFor(retryAttempt + 1))
 					retryAttempt++
 				}
-				// The connection is re-aquired. Signal to all waiters they should poll the database for a potentially missed value.
-				s.workflowNotificationRepollMap.Range(func(key, value any) bool {
-					repollChannel := value.(chan struct{})
-					repollChannel <- struct{}{}
-					return true
-				})
-				s.workflowEventsRepollMap.Range(func(key, value any) bool {
-					repollChannel := value.(chan struct{})
-					repollChannel <- struct{}{}
-					return true
-				})
+				// The connection is re-acquired. Wake all waiters so they re-poll the
+				// database for a value whose notification may have been missed.
+				s.recvNotifier.notifyAll()
+				s.eventNotifier.notifyAll()
 				continue
 			}
 			// Other transient errors. Backoff and continue on same conn
@@ -3391,17 +3380,9 @@ func (s *sysDB) notificationListenerLoop(ctx context.Context) {
 
 		switch n.Channel {
 		case _DBOS_NOTIFICATIONS_CHANNEL:
-			if cond, ok := s.workflowNotificationsMap.Load(n.Payload); ok {
-				cond.(*sync.Cond).L.Lock()
-				cond.(*sync.Cond).Broadcast()
-				cond.(*sync.Cond).L.Unlock()
-			}
+			s.recvNotifier.notify(n.Payload)
 		case _DBOS_WORKFLOW_EVENTS_CHANNEL:
-			if cond, ok := s.workflowEventsMap.Load(n.Payload); ok {
-				cond.(*sync.Cond).L.Lock()
-				cond.(*sync.Cond).Broadcast()
-				cond.(*sync.Cond).L.Unlock()
-			}
+			s.eventNotifier.notify(n.Payload)
 		case _DBOS_STREAMS_CHANNEL:
 			if ch, ok := s.streamsMap.Load(n.Payload); ok {
 				select {
@@ -3438,17 +3419,12 @@ func (s *sysDB) notificationPollerLoop(ctx context.Context) {
 
 func (s *sysDB) pollNotifications(ctx context.Context) {
 	// Iterate through all registered notification payloads
-	s.workflowNotificationsMap.Range(func(key, value any) bool {
-		payload, ok := key.(string)
-		if !ok {
-			return true // Continue to next item
-		}
-
+	for _, payload := range s.recvNotifier.payloads() {
 		// Parse payload: format is "destinationID::topic"
 		parts := strings.SplitN(payload, "::", 2)
 		if len(parts) != 2 {
 			s.logger.Warn("Invalid notification payload format", "payload", payload)
-			return true // Continue to next item
+			continue
 		}
 
 		destinationID := parts[0]
@@ -3460,35 +3436,24 @@ func (s *sysDB) pollNotifications(ctx context.Context) {
 		err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
 		if err != nil {
 			s.logger.Warn("Failed to poll notification", "payload", payload, "error", err)
-			return true // Continue to next item
+			continue
 		}
 
-		// If notification exists, signal the condition variable
+		// If a notification exists, wake the waiters so they re-check.
 		if exists {
-			if cond, ok := value.(*sync.Cond); ok {
-				cond.L.Lock()
-				cond.Broadcast()
-				cond.L.Unlock()
-			}
+			s.recvNotifier.notify(payload)
 		}
-
-		return true // Continue to next item
-	})
+	}
 }
 
 func (s *sysDB) pollEvents(ctx context.Context) {
 	// Iterate through all registered event payloads
-	s.workflowEventsMap.Range(func(key, value any) bool {
-		payload, ok := key.(string)
-		if !ok {
-			return true // Continue to next item
-		}
-
+	for _, payload := range s.eventNotifier.payloads() {
 		// Parse payload: format is "targetWorkflowID::key"
 		parts := strings.SplitN(payload, "::", 2)
 		if len(parts) != 2 {
 			s.logger.Warn("Invalid event payload format", "payload", payload)
-			return true // Continue to next item
+			continue
 		}
 
 		targetWorkflowID := parts[0]
@@ -3500,20 +3465,14 @@ func (s *sysDB) pollEvents(ctx context.Context) {
 		err := s.pool.QueryRow(ctx, query, targetWorkflowID, eventKey).Scan(&exists)
 		if err != nil {
 			s.logger.Warn("Failed to poll event", "payload", payload, "error", err)
-			return true // Continue to next item
+			continue
 		}
 
-		// If event exists, signal the condition variable
+		// If the event exists, wake the waiters so they re-check.
 		if exists {
-			if cond, ok := value.(*sync.Cond); ok {
-				cond.L.Lock()
-				cond.Broadcast()
-				cond.L.Unlock()
-			}
+			s.eventNotifier.notify(payload)
 		}
-
-		return true // Continue to next item
-	})
+	}
 }
 
 const _DBOS_NULL_TOPIC = "__null__topic__"
@@ -3567,98 +3526,158 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	return nil
 }
 
+// notifier delivers per-payload wake-ups to notification waiters (recv and
+// getEvent).
+type notifyRegistry struct {
+	mu   sync.Mutex
+	subs map[string]map[chan struct{}]struct{} // payload -> set of waiter channels
+}
+
+func newNotifyRegistry() *notifyRegistry {
+	return &notifyRegistry{subs: make(map[string]map[chan struct{}]struct{})}
+}
+
+func (n *notifyRegistry) addLocked(payload string, ch chan struct{}) {
+	set := n.subs[payload]
+	if set == nil {
+		set = make(map[chan struct{}]struct{})
+		n.subs[payload] = set
+	}
+	set[ch] = struct{}{}
+}
+
+// subscribe registers a new waiter for payload and returns its wake channel.
+func (n *notifyRegistry) subscribe(payload string) chan struct{} {
+	ch := make(chan struct{}, 1)
+	n.mu.Lock()
+	n.addLocked(payload, ch)
+	n.mu.Unlock()
+	return ch
+}
+
+// subscribeExclusive registers the sole waiter for payload, returning false if one
+// already exists.
+func (n *notifyRegistry) subscribeExclusive(payload string) (chan struct{}, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if len(n.subs[payload]) > 0 {
+		return nil, false
+	}
+	ch := make(chan struct{}, 1)
+	n.addLocked(payload, ch)
+	return ch, true
+}
+
+// unsubscribe removes a waiter; the payload entry is dropped once its last waiter leaves.
+func (n *notifyRegistry) unsubscribe(payload string, ch chan struct{}) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	set := n.subs[payload]
+	delete(set, ch)
+	if len(set) == 0 {
+		delete(n.subs, payload)
+	}
+}
+
+// notify wakes every waiter for payload.
+func (n *notifyRegistry) notify(payload string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for ch := range n.subs[payload] {
+		select {
+		case ch <- struct{}{}:
+		default: // Do not block (coalesce multiple notifications into one)
+		}
+	}
+}
+
+// notifyAll wakes every waiter regardless of payload; used after a listener
+// reconnect so waiters re-poll for a value whose notification may have been missed.
+func (n *notifyRegistry) notifyAll() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, set := range n.subs {
+		for ch := range set {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+// payloads returns a snapshot of the currently registered payloads (used by the
+// polling fallback to know which rows to check).
+func (n *notifyRegistry) payloads() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := make([]string, 0, len(n.subs))
+	for payload := range n.subs {
+		out = append(out, payload)
+	}
+	return out
+}
+
+// has reports whether any waiter is registered for payload.
+func (n *notifyRegistry) has(payload string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.subs[payload]) > 0
+}
+
+// clear drops all registrations (used on shutdown).
+func (n *notifyRegistry) clear() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.subs = make(map[string]map[chan struct{}]struct{})
+}
+
 // notificationWaiter tracks a waiter registered for a notification (recv message or workflow event).
 type notificationWaiter struct {
 	pending bool                                   // the awaited row already existed at registration time
 	wait    func(deadline time.Time) (bool, error) // block until the row is pending or the deadline passes; true means timeout
-	release func()                                 // unregister the waiter and wake any waiting goroutine; must be called after the result is read (or on abandonment)
+	release func()                                 // unregister the waiter; must be called after the result is read (or on abandonment)
 }
 
-// notificationWait builds the wait closure shared by recv and getEvent: block until a
-// notification arrives (done closed), the deadline passes (returns true), a repoll
-// signal triggers a recheck of the database, or the context is cancelled.
-func (s *sysDB) notificationWait(ctx context.Context, opName, payload string, exists bool, done <-chan struct{}, repollChannel chan struct{}, recheck func() (bool, error)) func(deadline time.Time) (bool, error) {
+func (s *sysDB) notificationWait(ctx context.Context, opName, payload string, ch <-chan struct{}, recheck func() (bool, error)) func(deadline time.Time) (bool, error) {
 	return func(deadline time.Time) (bool, error) {
-		found := exists
-		for !found {
-			select {
-			case <-done:
+		for {
+			found, err := recheck()
+			if err != nil {
+				return false, err
+			}
+			if found {
 				return false, nil
+			}
+			select {
+			case <-ch:
+				// A notification or reconnect repoll fired; loop and re-check.
 			case <-time.After(max(0, time.Until(deadline))):
 				s.logger.Warn(opName+" timeout reached", "payload", payload, "deadline", deadline)
 				return true, nil
-			case <-repollChannel:
-				s.logger.Warn(opName+" polling after repoll channel signal", "payload", payload)
-				// We were instructed to poll again because the connection was disconnected
-				var err error
-				if found, err = recheck(); err != nil {
-					return false, err
-				}
-				// Restart at the beginning of the loop. If the value was found, we'll exit the loop and proceed to reading the value.
-				continue
 			case <-ctx.Done():
 				s.logger.Warn(opName+" context cancelled", "payload", payload, "cause", context.Cause(ctx))
 				return false, ctx.Err()
 			}
 		}
-		return false, nil
 	}
 }
 
 // startRecvListener registers the calling workflow as the sole receiver for
 // (destinationID, topic) and checks whether a message is already pending.
 func (s *sysDB) startRecvListener(ctx context.Context, destinationID, topic string) (*notificationWaiter, error) {
-	// First check if there's already a receiver for this workflow/topic to avoid unnecessary database load
+	// A destination/topic may have only one receiver at a time.
 	payload := fmt.Sprintf("%s::%s", destinationID, topic)
-	cond := sync.NewCond(&sync.Mutex{})
-	cond.L.Lock()
-	_, loaded := s.workflowNotificationsMap.LoadOrStore(payload, cond)
-	if loaded {
-		cond.L.Unlock()
+	ch, ok := s.recvNotifier.subscribeExclusive(payload)
+	if !ok {
 		s.logger.Error("Receive already called for workflow", "destination_id", destinationID)
 		return nil, newWorkflowConflictIDError(destinationID)
 	}
-	repollChannel := make(chan struct{}, 1)
-	s.workflowNotificationRepollMap.LoadOrStore(payload, repollChannel)
-	release := func() {
-		// Clean up the condition variable and broadcast to wake up any waiting goroutines.
-		cond.L.Lock()
-		cond.Broadcast()
-		cond.L.Unlock()
-		s.workflowNotificationsMap.Delete(payload)
-		s.workflowNotificationRepollMap.Delete(payload)
-	}
+	release := func() { s.recvNotifier.unsubscribe(payload, ch) }
 
-	// Now check if there is already an unconsumed message available in the database.
-	// If not, the caller will wait for a notification or its deadline.
+	// recheck reports whether an unconsumed message is pending; it is used both for
+	// the initial "already pending?" probe and by the wait loop after each wake.
 	query := s.renderSQL(`SELECT EXISTS (SELECT 1 FROM %snotifications WHERE destination_uuid = $1 AND topic = $2 AND consumed = false)`, s.dialect.SchemaPrefix(s.schema))
-	exists, err := retryWithResult(ctx, func() (bool, error) {
-		var e bool
-		if err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&e); err != nil {
-			return false, fmt.Errorf("failed to check message: %w", err)
-		}
-		return e, nil
-	}, withRetrierLogger(s.logger))
-	if err != nil {
-		cond.L.Unlock()
-		release()
-		return nil, err
-	}
-
-	// Create the waiting goroutine once (only if !exists, so we don't attempt to unlock twice)
-	done := make(chan struct{})
-	if !exists {
-		go func() {
-			// This is the only place we unlock the condition variable if the value did not exist
-			// Because of the Broadcast in release, we'll eventually hit this before the caller returns
-			defer cond.L.Unlock()
-			cond.Wait()
-			close(done)
-		}()
-	} else {
-		cond.L.Unlock()
-	}
-
 	recheck := func() (bool, error) {
 		return retryWithResult(ctx, func() (bool, error) {
 			var found bool
@@ -3668,7 +3687,12 @@ func (s *sysDB) startRecvListener(ctx context.Context, destinationID, topic stri
 			return found, nil
 		}, withRetrierLogger(s.logger))
 	}
-	wait := s.notificationWait(ctx, "Recv()", payload, exists, done, repollChannel, recheck)
+	exists, err := recheck()
+	if err != nil {
+		release()
+		return nil, err
+	}
+	wait := s.notificationWait(ctx, "Recv()", payload, ch, recheck)
 
 	return &notificationWaiter{pending: exists, wait: wait, release: release}, nil
 }
@@ -3746,70 +3770,15 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 
 // startEventListener registers the caller as a waiter for the (targetWorkflowID, key)
 // event and checks whether the event is already set. Unlike recv, multiple waiters
-// may listen for the same event and share its condition variable.
+// may listen for the same event; they share one reference-counted notify hub.
 func (s *sysDB) startEventListener(ctx context.Context, targetWorkflowID, key string) (*notificationWaiter, error) {
 	payload := fmt.Sprintf("%s::%s", targetWorkflowID, key)
-	cond := sync.NewCond(&sync.Mutex{})
-	cond.L.Lock()
-	existingCond, loaded := s.workflowEventsMap.LoadOrStore(payload, cond)
-	if loaded {
-		// Reuse the existing condition variable
-		cond.L.Unlock()
-		ec, ok := existingCond.(*sync.Cond)
-		if !ok {
-			return nil, fmt.Errorf("workflow events map holds unexpected %T for %s", existingCond, payload)
-		}
-		cond = ec
-		cond.L.Lock()
-	}
-	release := func() {
-		// Clean up the condition variable and broadcast to wake up any waiting goroutines.
-		cond.L.Lock()
-		cond.Broadcast()
-		cond.L.Unlock()
-		s.workflowEventsMap.Delete(payload)
-		s.workflowEventsRepollMap.Delete(payload)
-	}
-	repollChannel := make(chan struct{}, 1)
-	existingRepoll, _ := s.workflowEventsRepollMap.LoadOrStore(payload, repollChannel)
-	rc, ok := existingRepoll.(chan struct{})
-	if !ok {
-		cond.L.Unlock()
-		release()
-		return nil, fmt.Errorf("workflow events repoll map holds unexpected %T for %s", existingRepoll, payload)
-	}
-	repollChannel = rc
+	ch := s.eventNotifier.subscribe(payload)
+	release := func() { s.eventNotifier.unsubscribe(payload, ch) }
 
-	// Now check if the event already exists in the database.
-	// If not, the caller will wait for a notification or its deadline.
+	// recheck reports whether the event is set; it is used both for the initial
+	// "already set?" probe and by the wait loop after each wake.
 	query := s.renderSQL(`SELECT EXISTS (SELECT 1 FROM %sworkflow_events WHERE workflow_uuid = $1 AND key = $2)`, s.dialect.SchemaPrefix(s.schema))
-	exists, err := retryWithResult(ctx, func() (bool, error) {
-		var e bool
-		if err := s.pool.QueryRow(ctx, query, targetWorkflowID, key).Scan(&e); err != nil {
-			return false, fmt.Errorf("failed to check event: %w", err)
-		}
-		return e, nil
-	}, withRetrierLogger(s.logger))
-	if err != nil {
-		cond.L.Unlock()
-		release()
-		return nil, err
-	}
-
-	// Create the waiting goroutine once (only if !exists, so we don't attempt to unlock twice)
-	done := make(chan struct{})
-	if !exists {
-		go func() {
-			// This is the only place we unlock the condition variable if the value did not exist
-			// Because of the Broadcast in release, we'll eventually hit this before the caller returns
-			defer cond.L.Unlock()
-			cond.Wait()
-			close(done)
-		}()
-	} else {
-		cond.L.Unlock()
-	}
-
 	recheck := func() (bool, error) {
 		return retryWithResult(ctx, func() (bool, error) {
 			var found bool
@@ -3819,7 +3788,12 @@ func (s *sysDB) startEventListener(ctx context.Context, targetWorkflowID, key st
 			return found, nil
 		}, withRetrierLogger(s.logger))
 	}
-	wait := s.notificationWait(ctx, "GetEvent()", payload, exists, done, repollChannel, recheck)
+	exists, err := recheck()
+	if err != nil {
+		release()
+		return nil, err
+	}
+	wait := s.notificationWait(ctx, "GetEvent()", payload, ch, recheck)
 
 	return &notificationWaiter{pending: exists, wait: wait, release: release}, nil
 }

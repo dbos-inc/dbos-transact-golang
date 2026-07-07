@@ -3716,8 +3716,7 @@ func TestRecvStepConflict(t *testing.T) {
 	sysB := ctxB.(*dbosContext).systemDB.(*sysDB)
 	payload := fmt.Sprintf("%s::%s", workflowID, topic)
 	require.Eventually(t, func() bool {
-		_, ok := sysA.workflowNotificationsMap.Load(payload)
-		return ok
+		return sysA.recvNotifier.has(payload)
 	}, 5*time.Second, 10*time.Millisecond, "executor A never registered as receiver")
 
 	// Executor B recovers the same workflow: a genuinely concurrent second
@@ -3732,7 +3731,7 @@ func TestRecvStepConflict(t *testing.T) {
 	// Executor B must actually run the body (register as receiver), not
 	// short-circuit; its separate map confirms a real concurrent execution.
 	require.Eventually(t, func() bool {
-		_, ok := sysB.workflowNotificationsMap.Load(payload)
+		ok := sysB.recvNotifier.has(payload)
 		return ok
 	}, 5*time.Second, 10*time.Millisecond, "executor B (recovery) never ran the body")
 
@@ -4271,10 +4270,10 @@ func TestSetGetEvent(t *testing.T) {
 	})
 
 	t.Run("ConcurrentGetEvent", func(t *testing.T) {
-		// Spread more getters than keys: several getters share each key's condition
-		// variable (within-key concurrency) while distinct keys use independent
-		// condition variables (across-key concurrency). Getters start before the
-		// events are set so they block rather than taking the already-set fast path.
+		// Spread more getters than keys: several getters register on each key
+		// (within-key concurrency) while distinct keys are independent (across-key
+		// concurrency). Getters start before the events are set so they block rather
+		// than taking the already-set fast path.
 		setWorkflowID := uuid.NewString()
 		const numKeys = 3
 		const numGoroutines = 12 // > numKeys, so multiple getters land on each key
@@ -4310,7 +4309,7 @@ func TestSetGetEvent(t *testing.T) {
 		require.Eventually(t, func() bool {
 			for k := range numKeys {
 				payload := fmt.Sprintf("%s::%s", setWorkflowID, fmt.Sprintf("concurrent-event-key-%d", k))
-				if _, ok := sysDB.workflowEventsMap.Load(payload); !ok {
+				if !sysDB.eventNotifier.has(payload) {
 					return false
 				}
 			}
@@ -4329,6 +4328,137 @@ func TestSetGetEvent(t *testing.T) {
 		}
 	})
 
+	t.Run("GetEventMixedTimeoutAndDelivery", func(t *testing.T) {
+		// On a single key, some waiters time out before the event is set and others
+		// block long enough to receive it. A departing waiter must not disturb the
+		// survivors: they must still receive the value once it is set, not return a
+		// premature nil. (Regression test for the per-waiter notify fix.)
+		setWorkflowID := uuid.NewString()
+		key := "mixed-timeout-key"
+		const numLong = 3
+		const numShort = 3
+
+		var longWg, shortWg sync.WaitGroup
+		longErrs := make(chan error, numLong)
+		shortErrs := make(chan error, numShort)
+
+		// Long waiters register first.
+		longWg.Add(numLong)
+		for i := range numLong {
+			go func(i int) {
+				defer longWg.Done()
+				res, err := GetEvent[string](dbosCtx, setWorkflowID, key, 30*time.Second)
+				if err != nil {
+					longErrs <- fmt.Errorf("long waiter %d: %w", i, err)
+					return
+				}
+				if res != "mixed-value" {
+					longErrs <- fmt.Errorf("long waiter %d: expected %q, got %q", i, "mixed-value", res)
+				}
+			}(i)
+		}
+
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		payload := fmt.Sprintf("%s::%s", setWorkflowID, key)
+		require.Eventually(t, func() bool {
+			ok := sysDB.eventNotifier.has(payload)
+			return ok
+		}, 5*time.Second, 10*time.Millisecond, "long waiters never registered")
+
+		// Short waiters register on the same key, then time out and leave.
+		shortWg.Add(numShort)
+		for i := range numShort {
+			go func(i int) {
+				defer shortWg.Done()
+				_, err := GetEvent[string](dbosCtx, setWorkflowID, key, 300*time.Millisecond)
+				if err == nil {
+					shortErrs <- fmt.Errorf("short waiter %d: expected a timeout", i)
+					return
+				}
+				dbosErr, ok := err.(*DBOSError)
+				if !ok || dbosErr.Code != TimeoutError {
+					shortErrs <- fmt.Errorf("short waiter %d: expected TimeoutError, got %v", i, err)
+				}
+			}(i)
+		}
+
+		// Let the short waiters time out and leave before setting the event.
+		shortWg.Wait()
+		close(shortErrs)
+		for err := range shortErrs {
+			require.FailNow(t, "short waiter error", err)
+		}
+
+		setHandle, err := RunWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
+			Key:     key,
+			Message: "mixed-value",
+		}, WithWorkflowID(setWorkflowID))
+		require.NoError(t, err, "failed to start set event workflow")
+		_, err = setHandle.GetResult()
+		require.NoError(t, err, "failed to get result from set event workflow")
+
+		longWg.Wait()
+		close(longErrs)
+		for err := range longErrs {
+			require.FailNow(t, "long waiter error", err)
+		}
+	})
+
+	t.Run("GetEventSiblingCancellationDoesNotWakeOthers", func(t *testing.T) {
+		// A sibling whose context is cancelled mid-wait must not wake the others into
+		// returning early: the survivor still receives the value once it is set.
+		setWorkflowID := uuid.NewString()
+		key := "cancel-sibling-key"
+
+		var survivorWg sync.WaitGroup
+		survivorErr := make(chan error, 1)
+		survivorWg.Add(1)
+		go func() {
+			defer survivorWg.Done()
+			res, err := GetEvent[string](dbosCtx, setWorkflowID, key, 30*time.Second)
+			if err != nil {
+				survivorErr <- fmt.Errorf("survivor: %w", err)
+				return
+			}
+			if res != "survivor-value" {
+				survivorErr <- fmt.Errorf("survivor: expected %q, got %q", "survivor-value", res)
+			}
+		}()
+
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		payload := fmt.Sprintf("%s::%s", setWorkflowID, key)
+		require.Eventually(t, func() bool {
+			ok := sysDB.eventNotifier.has(payload)
+			return ok
+		}, 5*time.Second, 10*time.Millisecond, "survivor never registered")
+
+		// A sibling on the same key that gets cancelled while waiting.
+		cancelCtx, cancel := WithCancel(dbosCtx)
+		siblingDone := make(chan struct{})
+		go func() {
+			defer close(siblingDone)
+			_, _ = GetEvent[string](cancelCtx, setWorkflowID, key, 30*time.Second)
+		}()
+		// Give the sibling time to register, then cancel it.
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+		<-siblingDone
+
+		// The survivor must still be waiting; setting the event delivers it.
+		setHandle, err := RunWorkflow(dbosCtx, setEventWorkflow, setEventWorkflowInput{
+			Key:     key,
+			Message: "survivor-value",
+		}, WithWorkflowID(setWorkflowID))
+		require.NoError(t, err, "failed to start set event workflow")
+		_, err = setHandle.GetResult()
+		require.NoError(t, err, "failed to get result from set event workflow")
+
+		survivorWg.Wait()
+		close(survivorErr)
+		for err := range survivorErr {
+			require.FailNow(t, "survivor error", err)
+		}
+	})
 }
 
 // Test workflows and steps for parameter mismatch validation

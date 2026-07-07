@@ -166,10 +166,8 @@ func newSqliteSystemDatabase(
 	return &sysDB{
 		pool:                          newSQLPool(db),
 		dialect:                       sqliteDialect{},
-		workflowNotificationsMap:      &sync.Map{},
-		workflowNotificationRepollMap: &sync.Map{},
-		workflowEventsMap:             &sync.Map{},
-		workflowEventsRepollMap:       &sync.Map{},
+		recvNotifier:                  newNotifyRegistry(),
+		eventNotifier:                 newNotifyRegistry(),
 		streamsMap:                    &sync.Map{},
 		notificationLoopDone:          make(chan struct{}),
 		logger:                        logger.With("service", "system_database"),
