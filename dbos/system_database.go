@@ -77,8 +77,6 @@ type systemDatabase interface {
 	writeStream(ctx context.Context, input writeStreamDBInput) error
 	readStream(ctx context.Context, input readStreamDBInput) ([]streamEntry, bool, error)
 
-	// Timers (special steps)
-
 	// Patches
 	patch(ctx context.Context, input patchDBInput) (bool, error)
 	doesPatchExists(ctx context.Context, input patchDBInput) (string, error)
@@ -3631,13 +3629,18 @@ func (s *sysDB) startRecvListener(ctx context.Context, destinationID, topic stri
 
 	// Now check if there is already an unconsumed message available in the database.
 	// If not, the caller will wait for a notification or its deadline.
-	var exists bool
 	query := s.renderSQL(`SELECT EXISTS (SELECT 1 FROM %snotifications WHERE destination_uuid = $1 AND topic = $2 AND consumed = false)`, s.dialect.SchemaPrefix(s.schema))
-	err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&exists)
+	exists, err := retryWithResult(ctx, func() (bool, error) {
+		var e bool
+		if err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&e); err != nil {
+			return false, fmt.Errorf("failed to check message: %w", err)
+		}
+		return e, nil
+	}, withRetrierLogger(s.logger))
 	if err != nil {
 		cond.L.Unlock()
 		release()
-		return nil, fmt.Errorf("failed to check message: %w", err)
+		return nil, err
 	}
 
 	// Create the waiting goroutine once (only if !exists, so we don't attempt to unlock twice)
@@ -3655,11 +3658,13 @@ func (s *sysDB) startRecvListener(ctx context.Context, destinationID, topic stri
 	}
 
 	recheck := func() (bool, error) {
-		var found bool
-		if err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&found); err != nil {
-			return false, fmt.Errorf("failed to check message: %w", err)
-		}
-		return found, nil
+		return retryWithResult(ctx, func() (bool, error) {
+			var found bool
+			if err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&found); err != nil {
+				return false, fmt.Errorf("failed to check message: %w", err)
+			}
+			return found, nil
+		}, withRetrierLogger(s.logger))
 	}
 	wait := s.notificationWait(ctx, "Recv()", payload, exists, done, repollChannel, recheck)
 
@@ -3763,13 +3768,18 @@ func (s *sysDB) startEventListener(ctx context.Context, targetWorkflowID, key st
 
 	// Now check if the event already exists in the database.
 	// If not, the caller will wait for a notification or its deadline.
-	var exists bool
 	query := s.renderSQL(`SELECT EXISTS (SELECT 1 FROM %sworkflow_events WHERE workflow_uuid = $1 AND key = $2)`, s.dialect.SchemaPrefix(s.schema))
-	err := s.pool.QueryRow(ctx, query, targetWorkflowID, key).Scan(&exists)
+	exists, err := retryWithResult(ctx, func() (bool, error) {
+		var e bool
+		if err := s.pool.QueryRow(ctx, query, targetWorkflowID, key).Scan(&e); err != nil {
+			return false, fmt.Errorf("failed to check event: %w", err)
+		}
+		return e, nil
+	}, withRetrierLogger(s.logger))
 	if err != nil {
 		cond.L.Unlock()
 		release()
-		return nil, fmt.Errorf("failed to check event: %w", err)
+		return nil, err
 	}
 
 	// Create the waiting goroutine once (only if !exists, so we don't attempt to unlock twice)
@@ -3787,11 +3797,13 @@ func (s *sysDB) startEventListener(ctx context.Context, targetWorkflowID, key st
 	}
 
 	recheck := func() (bool, error) {
-		var found bool
-		if err := s.pool.QueryRow(ctx, query, targetWorkflowID, key).Scan(&found); err != nil {
-			return false, fmt.Errorf("failed to check event: %w", err)
-		}
-		return found, nil
+		return retryWithResult(ctx, func() (bool, error) {
+			var found bool
+			if err := s.pool.QueryRow(ctx, query, targetWorkflowID, key).Scan(&found); err != nil {
+				return false, fmt.Errorf("failed to check event: %w", err)
+			}
+			return found, nil
+		}, withRetrierLogger(s.logger))
 	}
 	wait := s.notificationWait(ctx, "GetEvent()", payload, exists, done, repollChannel, recheck)
 
