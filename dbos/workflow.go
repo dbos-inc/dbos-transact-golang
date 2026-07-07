@@ -2817,7 +2817,13 @@ type getEventResult struct {
 
 func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, timeout time.Duration) (any, error) {
 	// GetEvent may run inside or outside a workflow. When inside, it is checkpointed.
-	wfState, _ := c.Value(workflowStateKey).(*workflowState)
+	var wfState *workflowState
+	if v := c.Value(workflowStateKey); v != nil {
+		var ok bool
+		if wfState, ok = v.(*workflowState); !ok {
+			return nil, newStepExecutionError("", "DBOS.getEvent", fmt.Errorf("workflow state in context has unexpected type %T", v))
+		}
+	}
 	isInWorkflow := wfState != nil
 	var workflowID string
 	var stepID, sleepStepID int
