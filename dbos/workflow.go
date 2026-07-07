@@ -2167,8 +2167,8 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 		txOpts.IsoLevel = *stepOpts.txIsoLevel
 	}
 	txnRetryOpts := []retryOption{withRetrierLogger(c.logger)}
-	if sysDB, ok := c.systemDB.(*sysDB); ok && sysDB.isCockroachDB {
-		txnRetryOpts = append(txnRetryOpts, withRetryCondition(cockroachDialect{}.IsRetryableTransaction))
+	if sysDB, ok := c.systemDB.(*sysDB); ok {
+		txnRetryOpts = append(txnRetryOpts, withRetryCondition(sysDB.dialect.IsRetryableTransaction))
 	}
 	return retryWithResult(c, func() (any, error) {
 		tx, err := pool.BeginTx(uncancellableCtx, txOpts)
@@ -2633,14 +2633,14 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 	if !waiter.pending {
 		// Checkpoint the timeout deadline as a "DBOS.sleep" step before waiting. On
 		// re-execution the recorded deadline is returned, so only the remaining time is waited.
-		deadline, err := runAsTxn(c, func(ctx context.Context, tx Tx) (time.Time, error) {
-			return time.Now().Add(timeout), nil
+		deadlineMs, err := runAsTxn(c, func(ctx context.Context, tx Tx) (int64, error) {
+			return time.Now().Add(timeout).UnixMilli(), nil
 		}, WithStepName("DBOS.sleep"), WithNextStepID(sleepStepID))
 		if err != nil {
 			return nil, err
 		}
 		// Wait for a pending message with no transaction open.
-		timeoutOccurred, err = waiter.wait(deadline)
+		timeoutOccurred, err = waiter.wait(time.UnixMilli(deadlineMs))
 		if err != nil {
 			return nil, err
 		}
@@ -2859,12 +2859,13 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 		if isInWorkflow {
 			// Checkpoint the timeout deadline as a "DBOS.sleep" step before waiting. On
 			// re-execution the recorded deadline is returned, so only the remaining time is waited.
-			deadline, err = runAsTxn(c, func(ctx context.Context, tx Tx) (time.Time, error) {
-				return time.Now().Add(timeout), nil
+			deadlineMs, txErr := runAsTxn(c, func(ctx context.Context, tx Tx) (int64, error) {
+				return time.Now().Add(timeout).UnixMilli(), nil
 			}, WithStepName("DBOS.sleep"), WithNextStepID(sleepStepID))
-			if err != nil {
-				return nil, err
+			if txErr != nil {
+				return nil, txErr
 			}
+			deadline = time.UnixMilli(deadlineMs)
 		}
 		// Wait for the event with no transaction open.
 		timeoutOccurred, err = waiter.wait(deadline)
@@ -3462,13 +3463,13 @@ func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duratio
 	}
 	// Checkpoint the wakeup time as a "DBOS.sleep" step; on re-execution the
 	// recorded deadline is returned, so only the remaining duration is slept.
-	deadline, err := runAsTxn(c, func(ctx context.Context, tx Tx) (time.Time, error) {
-		return time.Now().Add(duration), nil
+	deadlineMs, err := runAsTxn(c, func(ctx context.Context, tx Tx) (int64, error) {
+		return time.Now().Add(duration).UnixMilli(), nil
 	}, WithStepName("DBOS.sleep"))
 	if err != nil {
 		return 0, err
 	}
-	remainingDuration := max(0, time.Until(deadline))
+	remainingDuration := max(0, time.Until(time.UnixMilli(deadlineMs)))
 
 	// Sleep for the remaining duration, but wake early if the context is cancelled.
 	// If interrupted, return the duration actually slept.

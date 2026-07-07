@@ -3753,18 +3753,28 @@ func (s *sysDB) startEventListener(ctx context.Context, targetWorkflowID, key st
 	if loaded {
 		// Reuse the existing condition variable
 		cond.L.Unlock()
-		cond = existingCond.(*sync.Cond)
+		ec, ok := existingCond.(*sync.Cond)
+		if !ok {
+			return nil, fmt.Errorf("workflow events map holds unexpected %T for %s", existingCond, payload)
+		}
+		cond = ec
 		cond.L.Lock()
 	}
-	repollChannel := make(chan struct{}, 1)
-	existingRepoll, _ := s.workflowEventsRepollMap.LoadOrStore(payload, repollChannel)
-	repollChannel = existingRepoll.(chan struct{})
 	release := func() {
 		// Clean up the condition variable and broadcast to wake up any waiting goroutines
 		cond.Broadcast()
 		s.workflowEventsMap.Delete(payload)
 		s.workflowEventsRepollMap.Delete(payload)
 	}
+	repollChannel := make(chan struct{}, 1)
+	existingRepoll, _ := s.workflowEventsRepollMap.LoadOrStore(payload, repollChannel)
+	rc, ok := existingRepoll.(chan struct{})
+	if !ok {
+		cond.L.Unlock()
+		release()
+		return nil, fmt.Errorf("workflow events repoll map holds unexpected %T for %s", existingRepoll, payload)
+	}
+	repollChannel = rc
 
 	// Now check if the event already exists in the database.
 	// If not, the caller will wait for a notification or its deadline.
