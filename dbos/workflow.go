@@ -4190,22 +4190,69 @@ type ForkWorkflowInput struct {
 	QueuePartitionKey  string // Optional: Partition key when enqueueing the forked workflow onto a partitioned queue
 }
 
+// ForkWorkflowSpec describes a single workflow to fork within a batch.
+// OriginalWorkflowID is required. Other fields are optional.
+type ForkWorkflowSpec struct {
+	OriginalWorkflowID string // Required: The UUID of the original workflow to fork from
+	ForkedWorkflowID   string // Optional: Custom workflow ID for the forked workflow (auto-generated if empty)
+	StartStep          uint   // Optional: Step to start the forked workflow from (default: 0)
+}
+
+// ForkWorkflowsInput holds configuration parameters for forking a batch of
+// workflows in a single database round-trip. Workflows is required. The
+// ApplicationVersion, QueueName, and QueuePartitionKey fields apply to every
+// forked workflow in the batch.
+type ForkWorkflowsInput struct {
+	Workflows          []ForkWorkflowSpec // Required: The workflows to fork
+	ApplicationVersion string             // Optional: Application version for the forked workflows (inherits from originals if empty)
+	QueueName          string             // Optional: Queue to enqueue the forked workflows on (defaults to the internal queue)
+	QueuePartitionKey  string             // Optional: Partition key when enqueueing the forked workflows onto a partitioned queue
+}
+
 func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error) {
-	if input.OriginalWorkflowID == "" {
-		return nil, errors.New("original workflow ID cannot be empty")
+	handles, err := c.ForkWorkflows(c, ForkWorkflowsInput{
+		Workflows: []ForkWorkflowSpec{{
+			OriginalWorkflowID: input.OriginalWorkflowID,
+			ForkedWorkflowID:   input.ForkedWorkflowID,
+			StartStep:          input.StartStep,
+		}},
+		ApplicationVersion: input.ApplicationVersion,
+		QueueName:          input.QueueName,
+		QueuePartitionKey:  input.QueuePartitionKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return handles[0], nil
+}
+
+func (c *dbosContext) ForkWorkflows(_ DBOSContext, input ForkWorkflowsInput) ([]WorkflowHandle[any], error) {
+	if len(input.Workflows) == 0 {
+		return nil, errors.New("at least one workflow to fork is required")
 	}
 	if input.QueuePartitionKey != "" && input.QueueName == "" {
 		return nil, errors.New("queue partition key requires a queue name")
 	}
 
-	// Create input for system database
-	if input.StartStep > uint(math.MaxInt) {
-		return nil, fmt.Errorf("start step too large: %d", input.StartStep)
+	// Build the system database input, validating each workflow spec.
+	originalWorkflowIDs := make([]string, len(input.Workflows))
+	forkedWorkflowIDs := make([]string, len(input.Workflows))
+	startSteps := make([]int, len(input.Workflows))
+	for i, wf := range input.Workflows {
+		if wf.OriginalWorkflowID == "" {
+			return nil, errors.New("original workflow ID cannot be empty")
+		}
+		if wf.StartStep > uint(math.MaxInt) {
+			return nil, fmt.Errorf("start step too large: %d", wf.StartStep)
+		}
+		originalWorkflowIDs[i] = wf.OriginalWorkflowID
+		forkedWorkflowIDs[i] = wf.ForkedWorkflowID
+		startSteps[i] = int(wf.StartStep)
 	}
 	dbInput := forkWorkflowsDBInput{
-		originalWorkflowIDs: []string{input.OriginalWorkflowID},
-		forkedWorkflowIDs:   []string{input.ForkedWorkflowID},
-		startSteps:          []int{int(input.StartStep)},
+		originalWorkflowIDs: originalWorkflowIDs,
+		forkedWorkflowIDs:   forkedWorkflowIDs,
+		startSteps:          startSteps,
 		applicationVersion:  input.ApplicationVersion,
 		queueName:           input.QueueName,
 		queuePartitionKey:   input.QueuePartitionKey,
@@ -4214,31 +4261,31 @@ func (c *dbosContext) ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (Work
 	// Call system database method
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
-	forkSingle := func(ctx context.Context) (string, error) {
-		forkedWorkflowIDs, err := c.systemDB.forkWorkflows(ctx, dbInput)
-		if err != nil {
-			return "", err
-		}
-		return forkedWorkflowIDs[0], nil
+	forkBatch := func(ctx context.Context) ([]string, error) {
+		return c.systemDB.forkWorkflows(ctx, dbInput)
 	}
-	var forkedWorkflowID string
+	var forkedIDs []string
 	var err error
 	if isWithinWorkflow {
-		forkedWorkflowID, err = runAsTxn(c, func(ctx context.Context, tx Tx) (string, error) {
+		forkedIDs, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
 			dbInput.tx = tx
-			return forkSingle(ctx)
+			return forkBatch(ctx)
 		}, WithStepName("DBOS.forkWorkflow"))
 	} else {
 		uncancellableCtx := WithoutCancel(c)
-		forkedWorkflowID, err = retryWithResult(c, func() (string, error) {
-			return forkSingle(uncancellableCtx)
+		forkedIDs, err = retryWithResult(c, func() ([]string, error) {
+			return forkBatch(uncancellableCtx)
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	return newWorkflowPollingHandle[any](c, forkedWorkflowID), nil
+	handles := make([]WorkflowHandle[any], len(forkedIDs))
+	for i, id := range forkedIDs {
+		handles[i] = newWorkflowPollingHandle[any](c, id)
+	}
+	return handles, nil
 }
 
 // ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.
@@ -4289,6 +4336,40 @@ func ForkWorkflow[R any](ctx DBOSContext, input ForkWorkflowInput) (WorkflowHand
 		return nil, err
 	}
 	return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID()), nil
+}
+
+// ForkWorkflows forks a batch of workflows in a single database round-trip.
+// Each forked workflow gets a new UUID (unless a custom ForkedWorkflowID is
+// provided) and executes from its specified StartStep, reusing the operation
+// outputs of steps 0 to StartStep-1 copied from the original workflow.
+//
+// The returned handles are in the same order as input.Workflows.
+//
+// Example usage:
+//
+//	handles, err := dbos.ForkWorkflows[MyResultType](ctx, dbos.ForkWorkflowsInput{
+//	    Workflows: []dbos.ForkWorkflowSpec{
+//	        {OriginalWorkflowID: "wf-1", StartStep: 5},
+//	        {OriginalWorkflowID: "wf-2"},
+//	    },
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+func ForkWorkflows[R any](ctx DBOSContext, input ForkWorkflowsInput) ([]WorkflowHandle[R], error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+
+	handles, err := ctx.ForkWorkflows(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	typedHandles := make([]WorkflowHandle[R], len(handles))
+	for i, handle := range handles {
+		typedHandles[i] = newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID())
+	}
+	return typedHandles, nil
 }
 
 // listWorkflowsOptions holds configuration parameters for listing workflows

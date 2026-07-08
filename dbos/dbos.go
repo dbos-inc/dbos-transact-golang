@@ -171,6 +171,7 @@ type DBOSContext interface {
 	ResumeWorkflow(_ DBOSContext, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)       // Resume a cancelled workflow
 	ResumeWorkflows(_ DBOSContext, workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error) // Resume multiple workflows in a single DB round-trip
 	ForkWorkflow(_ DBOSContext, input ForkWorkflowInput) (WorkflowHandle[any], error)                                 // Fork a workflow from a specific step
+	ForkWorkflows(_ DBOSContext, input ForkWorkflowsInput) ([]WorkflowHandle[any], error)                             // Fork multiple workflows in a single DB round-trip
 	ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                               // List workflows based on filtering criteria
 	GetWorkflowSteps(_ DBOSContext, workflowID string, opts ...GetWorkflowStepsOption) ([]StepInfo, error)            // Get the execution steps of a workflow
 	GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error)            // Aggregate counts of workflows by one or more grouping columns
