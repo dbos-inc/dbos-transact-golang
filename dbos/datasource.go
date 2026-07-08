@@ -314,7 +314,7 @@ func (ds *DataSource) recordCompletion(ctx context.Context, q Querier, workflowI
 // exactly once even across crashes and recovery.
 //
 // It must be called from within a workflow. Standard StepOptions apply
-// (WithStepName, WithStepMaxRetries, retry predicate, WithStepTxIsolation).
+// (WithStepName, WithStepMaxRetries, retry predicate).
 //
 // Example:
 //
