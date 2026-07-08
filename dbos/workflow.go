@@ -66,6 +66,7 @@ type WorkflowStatus struct {
 	Serialization      string             `json:"serialization,omitempty"`       // Serialization format used for inputs/outputs (e.g., "DBOS_JSON", "portable_json")
 	DelayUntil         time.Time          `json:"delay_until,omitempty"`         // The time before which the workflow should not be dequeued
 	Attributes         map[string]any     `json:"attributes,omitempty"`          // Custom key-value attributes attached to the workflow at creation
+	ScheduleName       string             `json:"schedule_name,omitempty"`       // Name of the schedule that enqueued this workflow (if any)
 }
 
 // workflowState holds the runtime state for a workflow execution
@@ -872,6 +873,7 @@ type workflowOptions struct {
 	QueuePartitionKey   string
 	DelayDuration       time.Duration
 	WorkflowAttributes  map[string]any
+	scheduleName        string
 	alreadyEncodedInput bool
 	isDequeue           bool
 	isRecovery          bool
@@ -973,6 +975,14 @@ func withWorkflowName(name string) WorkflowOption {
 		if p.WorkflowName == "" {
 			p.WorkflowName = name
 		}
+	}
+}
+
+// An internal option used by the persistent scheduler to record which named
+// schedule enqueued the workflow.
+func withScheduleName(name string) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.scheduleName = name
 	}
 }
 
@@ -1383,6 +1393,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		QueuePartitionKey:  params.QueuePartitionKey,
 		DelayUntil:         delayUntil,
 		Attributes:         params.WorkflowAttributes,
+		ScheduleName:       params.scheduleName,
 		Serialization: func() string {
 			if params.isPortableWorkflow {
 				return PortableSerializerName
@@ -4318,6 +4329,7 @@ type listWorkflowsOptions struct {
 	wasForkedFrom    *bool
 	hasParent        *bool
 	attributes       map[string]any
+	scheduleName     []string
 }
 
 // ListWorkflowsOption is a functional option for configuring workflow listing parameters.
@@ -4508,6 +4520,14 @@ func WithFilterAttributes(attributes map[string]any) ListWorkflowsOption {
 	}
 }
 
+// WithFilterScheduleName filters workflows by the name(s) of the schedule that
+// enqueued them. Only workflows enqueued by a named schedule match.
+func WithFilterScheduleName(scheduleName ...string) ListWorkflowsOption {
+	return func(p *listWorkflowsOptions) {
+		p.scheduleName = scheduleName
+	}
+}
+
 func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
 	// Initialize parameters with defaults
 	loadInput := true
@@ -4559,6 +4579,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		wasForkedFrom:      params.wasForkedFrom,
 		hasParent:          params.hasParent,
 		attributes:         params.attributes,
+		scheduleName:       params.scheduleName,
 	}
 
 	// Call the context method to list workflows

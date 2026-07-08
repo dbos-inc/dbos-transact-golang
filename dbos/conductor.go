@@ -771,6 +771,9 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	if len(req.Body.Attributes) > 0 {
 		opts = append(opts, WithFilterAttributes(req.Body.Attributes))
 	}
+	if len(req.Body.ScheduleName) > 0 {
+		opts = append(opts, WithFilterScheduleName(req.Body.ScheduleName.toSlice()...))
+	}
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	if err != nil {
@@ -899,6 +902,9 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	}
 	if len(req.Body.Attributes) > 0 {
 		opts = append(opts, WithFilterAttributes(req.Body.Attributes))
+	}
+	if len(req.Body.ScheduleName) > 0 {
+		opts = append(opts, WithFilterScheduleName(req.Body.ScheduleName.toSlice()...))
 	}
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)

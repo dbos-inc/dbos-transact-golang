@@ -125,6 +125,7 @@ type listWorkflowsConductorRequestBody struct {
 	ExecutorID         stringOrList   `json:"executor_id,omitempty"`
 	QueuesOnly         bool           `json:"queues_only"`
 	Attributes         map[string]any `json:"attributes,omitempty"`
+	ScheduleName       stringOrList   `json:"schedule_name,omitempty"`
 }
 
 // listWorkflowsConductorRequest is sent by the conductor to list workflows
@@ -163,6 +164,7 @@ type listWorkflowsConductorResponseBody struct {
 	DelayUntilEpochMS       *string `json:"DelayUntilEpochMS,omitempty"`
 	CompletedAt             *string `json:"CompletedAt,omitempty"`
 	Attributes              *string `json:"Attributes,omitempty"`
+	ScheduleName            *string `json:"ScheduleName,omitempty"`
 }
 
 // listWorkflowsConductorResponse is sent in response to list workflows requests
@@ -315,6 +317,11 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 			attributesStr := string(attributesJSON)
 			output.Attributes = &attributesStr
 		}
+	}
+
+	// Copy schedule name
+	if wf.ScheduleName != "" {
+		output.ScheduleName = &wf.ScheduleName
 	}
 
 	return output

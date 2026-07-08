@@ -787,3 +787,118 @@ func TestScheduleCronTimezone(t *testing.T) {
 	require.Equal(t, time.January, next.Month())
 	require.Equal(t, 15, next.Day())
 }
+
+func testManualWorkflowForScheduleName(ctx DBOSContext, input string) (string, error) {
+	return "manual", nil
+}
+
+func TestListWorkflowsByScheduleName(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
+	defer dbosCtx.Shutdown(10 * time.Second)
+
+	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+	RegisterWorkflow(dbosCtx, testManualWorkflowForScheduleName)
+
+	require.NoError(t, dbosCtx.Launch())
+
+	// A directly-invoked workflow has no schedule name and is not returned by
+	// the schedule name filter.
+	manualHandle, err := RunWorkflow(dbosCtx, testManualWorkflowForScheduleName, "input")
+	require.NoError(t, err)
+	manualResult, err := manualHandle.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "manual", manualResult)
+	manualStatus, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{manualHandle.GetWorkflowID()}))
+	require.NoError(t, err)
+	require.Len(t, manualStatus, 1)
+	require.Empty(t, manualStatus[0].ScheduleName)
+
+	// Two distinct schedules sharing the same workflow function: ScheduleName is
+	// what distinguishes their runs, since both have the same workflow name.
+	for _, name := range []string{"search-a", "search-b"} {
+		require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+			ScheduleName: name,
+			Schedule:     "0 0 0 * * *", // daily, won't fire during the test
+		}))
+		t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, name) })
+	}
+
+	handleA, err := TriggerSchedule(dbosCtx, "search-a")
+	require.NoError(t, err)
+	handleB, err := TriggerSchedule(dbosCtx, "search-b")
+	require.NoError(t, err)
+	_, err = handleA.GetResult()
+	require.NoError(t, err)
+	_, err = handleB.GetResult()
+	require.NoError(t, err)
+
+	// Filter by a single schedule name
+	runsA, err := ListWorkflows(dbosCtx, WithFilterScheduleName("search-a"))
+	require.NoError(t, err)
+	require.Len(t, runsA, 1)
+	require.Equal(t, handleA.GetWorkflowID(), runsA[0].ID)
+	require.Equal(t, "search-a", runsA[0].ScheduleName)
+
+	// Filter by a list of schedule names
+	runsBoth, err := ListWorkflows(dbosCtx, WithFilterScheduleName("search-a", "search-b"))
+	require.NoError(t, err)
+	require.Len(t, runsBoth, 2)
+	gotIDs := make(map[string]bool, len(runsBoth))
+	for _, wf := range runsBoth {
+		gotIDs[wf.ID] = true
+		require.Contains(t, []string{"search-a", "search-b"}, wf.ScheduleName)
+	}
+	require.True(t, gotIDs[handleA.GetWorkflowID()])
+	require.True(t, gotIDs[handleB.GetWorkflowID()])
+
+	// A schedule name that produced no runs returns nothing
+	neverFired, err := ListWorkflows(dbosCtx, WithFilterScheduleName("never-fired"))
+	require.NoError(t, err)
+	require.Empty(t, neverFired)
+}
+
+func TestScheduleNameSurvivesExportImport(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
+	defer dbosCtx.Shutdown(10 * time.Second)
+
+	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+	require.NoError(t, dbosCtx.Launch())
+
+	require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		ScheduleName: "export-test",
+		Schedule:     "0 0 0 * * *", // daily, won't fire during the test
+	}))
+	t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, "export-test") })
+
+	handle, err := TriggerSchedule(dbosCtx, "export-test")
+	require.NoError(t, err)
+	_, err = handle.GetResult()
+	require.NoError(t, err)
+	workflowID := handle.GetWorkflowID()
+
+	original, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{workflowID}))
+	require.NoError(t, err)
+	require.Len(t, original, 1)
+	require.Equal(t, "export-test", original[0].ScheduleName)
+
+	// Export, delete, then reimport: schedule_name must survive the round-trip.
+	sdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+	exported, err := sdb.exportWorkflow(dbosCtx, workflowID, true)
+	require.NoError(t, err)
+	require.NoError(t, DeleteWorkflows(dbosCtx, []string{workflowID}))
+	gone, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{workflowID}))
+	require.NoError(t, err)
+	require.Empty(t, gone)
+
+	require.NoError(t, sdb.importWorkflow(dbosCtx, exported))
+	imported, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{workflowID}))
+	require.NoError(t, err)
+	require.Len(t, imported, 1)
+	require.Equal(t, "export-test", imported[0].ScheduleName)
+
+	// The reimported run is still found by the schedule name filter.
+	byName, err := ListWorkflows(dbosCtx, WithFilterScheduleName("export-test"))
+	require.NoError(t, err)
+	require.Len(t, byName, 1)
+	require.Equal(t, workflowID, byName[0].ID)
+}

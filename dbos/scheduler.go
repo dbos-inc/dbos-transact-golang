@@ -186,6 +186,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 			WithWorkflowID(wfID),
 			WithQueue(queueName),
 			withWorkflowName(entry.FQN),
+			withScheduleName(scheduleName),
 		}
 		// Scheduled workflows always run against the latest registered application version, so a stale executor does not pick them up after a new deploy.
 		latest, err := retryWithResult(c, func() (*VersionInfo, error) {

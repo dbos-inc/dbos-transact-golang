@@ -320,6 +320,9 @@ var migration39SQL string
 //go:embed migrations/40_add_attributes.sql
 var migration40SQL string
 
+//go:embed migrations/41_add_schedule_name.sql
+var migration41SQL string
+
 type migrationFile struct {
 	version int64
 	sql     string
@@ -444,6 +447,7 @@ func buildMigrations(schema string, isCockroach bool) []migrationFile {
 		{version: 38, sql: migration38SQLProcessed},
 		{version: 39, sql: migration39SQLProcessed},
 		{version: 40, sql: fmt.Sprintf(migration40SQL, sanitizedSchema, sanitizedSchema)},
+		{version: 41, sql: fmt.Sprintf(migration41SQL, sanitizedSchema, sanitizedSchema)},
 	}
 }
 
@@ -998,6 +1002,11 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		attributesJSON = &attributesStr
 	}
 
+	var scheduleName *string
+	if len(input.status.ScheduleName) > 0 {
+		scheduleName = &input.status.ScheduleName
+	}
+
 	query := s.renderSQL(`INSERT INTO %sworkflow_status (
         workflow_uuid,
         status,
@@ -1024,17 +1033,18 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
         config_name,
         serialization,
         delay_until_epoch_ms,
-        attributes
-    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+        attributes,
+        schedule_name
+    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
 			recovery_attempts = CASE
-                WHEN EXCLUDED.status NOT IN ($27, $28) THEN workflow_status.recovery_attempts + $29
+                WHEN EXCLUDED.status NOT IN ($28, $29) THEN workflow_status.recovery_attempts + $30
                 ELSE workflow_status.recovery_attempts
             END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status IN ($27, $28) THEN workflow_status.executor_id
+                WHEN EXCLUDED.status IN ($28, $29) THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
         RETURNING recovery_attempts, status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema))
@@ -1082,6 +1092,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		input.status.Serialization,
 		delayUntilEpochMs,
 		attributesJSON,
+		scheduleName,
 		WorkflowStatusEnqueued,
 		WorkflowStatusDelayed,
 		recoveryIncrement,
@@ -1180,6 +1191,7 @@ type listWorkflowsDBInput struct {
 	wasForkedFrom      *bool
 	hasParent          *bool
 	attributes         map[string]any
+	scheduleName       []string
 	limit              *int
 	offset             *int
 	sortDesc           bool
@@ -1199,7 +1211,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		"recovery_attempts", "queue_name", "workflow_timeout_ms", "workflow_deadline_epoch_ms", "started_at_epoch_ms",
 		"deduplication_id", "priority", "queue_partition_key", "forked_from", "parent_workflow_id",
 		"serialization", "delay_until_epoch_ms", "was_forked_from", "completed_at", "class_name", "config_name",
-		"attributes",
+		"attributes", "schedule_name",
 	}
 
 	if input.loadOutput {
@@ -1253,6 +1265,9 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 	}
 	if len(input.deduplicationID) > 0 {
 		qb.addWhereAny("deduplication_id", input.deduplicationID)
+	}
+	if len(input.scheduleName) > 0 {
+		qb.addWhereAny("schedule_name", input.scheduleName)
 	}
 	if !input.completedAfter.IsZero() {
 		qb.addWhereGreaterEqual("completed_at", input.completedAfter.UnixMilli())
@@ -1361,6 +1376,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 		var completedAtMs *int64
 		var className *string
 		var attributesJSON *string
+		var scheduleName *string
 
 		// Build scan arguments dynamically based on loaded columns.
 		scanArgs := []any{
@@ -1370,7 +1386,7 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			&wf.Attempts, &queueName, &timeoutMs,
 			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey, &forkedFrom, &parentWorkflowID,
 			&serialization, &delayUntilEpochMs, &wf.WasForkedFrom, &completedAtMs, &className, &wf.ConfigName,
-			&attributesJSON,
+			&attributesJSON, &scheduleName,
 		}
 
 		if input.loadOutput {
@@ -1440,6 +1456,10 @@ func (s *sysDB) listWorkflows(ctx context.Context, input listWorkflowsDBInput) (
 			if err := json.Unmarshal([]byte(*attributesJSON), &wf.Attributes); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal attributes: %w", err)
 			}
+		}
+
+		if scheduleName != nil && len(*scheduleName) > 0 {
+			wf.ScheduleName = *scheduleName
 		}
 
 		// Convert milliseconds to time.Time
@@ -5076,6 +5096,7 @@ func (s *sysDB) backfillSchedule(ctx context.Context, input backfillScheduleDBIn
 			Input:              encodedInput,
 			Serialization:      ser.Name(),
 			ApplicationVersion: backfillAppVersion,
+			ScheduleName:       input.ScheduleName,
 		}
 		if _, err := s.insertWorkflowStatus(ctx, insertWorkflowStatusDBInput{status: status, tx: tx}); err != nil {
 			return nil, fmt.Errorf("failed to enqueue backfill workflow %s: %w", workflowID, err)
@@ -5161,6 +5182,7 @@ func (s *sysDB) triggerSchedule(ctx context.Context, scheduleName string) (strin
 		Input:              encodedInput,
 		Serialization:      ser.Name(),
 		ApplicationVersion: triggerAppVersion,
+		ScheduleName:       scheduleName,
 	}
 
 	if _, err := s.insertWorkflowStatus(ctx, insertWorkflowStatusDBInput{status: status, tx: tx}); err != nil {
@@ -5641,7 +5663,7 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
 				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization,
-				was_forked_from
+				was_forked_from, rate_limited, completed_at, attributes, schedule_name
 			FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
 
 		row := tx.QueryRow(ctx, statusQuery, wfID)
@@ -5656,7 +5678,9 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			priority                                                     *int
 			delayUntilEpochMs                                            *int64
 			serialization                                                *string
-			wasForkedFrom                                                *bool
+			wasForkedFrom, rateLimited                                   *bool
+			completedAt                                                  *int64
+			attributes, wfScheduleName                                   *string
 		)
 		err := row.Scan(
 			&wfUUID, &status, &name, &authUser, &assumedRole, &authRoles,
@@ -5664,7 +5688,7 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			&className, &configName, &recoveryAttempts, &queueName, &workflowTimeoutMs,
 			&workflowDeadlineEpochMs, &startedAtEpochMs, &dedupID, &inputs, &priority,
 			&queuePartitionKey, &forkedFrom, &parentWorkflowID, &delayUntilEpochMs, &serialization,
-			&wasForkedFrom,
+			&wasForkedFrom, &rateLimited, &completedAt, &attributes, &wfScheduleName,
 		)
 		if err != nil {
 			if err == pgx.ErrNoRows {
@@ -5703,6 +5727,10 @@ func (s *sysDB) exportWorkflow(ctx context.Context, workflowID string, exportChi
 			"delay_until_epoch_ms":       delayUntilEpochMs,
 			"serialization":              serialization,
 			"was_forked_from":            wasForkedFrom,
+			"rate_limited":               rateLimited,
+			"completed_at":               completedAt,
+			"attributes":                 attributes,
+			"schedule_name":              wfScheduleName,
 		}
 
 		// Export operation_outputs
@@ -5875,22 +5903,27 @@ func (s *sysDB) importWorkflow(ctx context.Context, workflows []ExportedWorkflow
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
 				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization,
-				was_forked_from
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)`,
+				was_forked_from, rate_limited, completed_at, attributes, schedule_name
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)`,
 			s.dialect.SchemaPrefix(s.schema))
 
-		// was_forked_from is NOT NULL; default it to false for payloads exported
-		// before this field was included (older exports, or ones from an SDK that
-		// omits it), so importing them doesn't violate the constraint.
-		wasForkedFrom := false
-		switch v := status["was_forked_from"].(type) {
-		case bool:
-			wasForkedFrom = v
-		case *bool:
-			if v != nil {
-				wasForkedFrom = *v
+		// was_forked_from and rate_limited are NOT NULL; default them to false
+		// for payloads exported before these fields were included (older exports,
+		// or ones from an SDK that omits them), so importing them doesn't violate
+		// the constraint.
+		boolOrFalse := func(v any) bool {
+			switch b := v.(type) {
+			case bool:
+				return b
+			case *bool:
+				if b != nil {
+					return *b
+				}
 			}
+			return false
 		}
+		wasForkedFrom := boolOrFalse(status["was_forked_from"])
+		rateLimited := boolOrFalse(status["rate_limited"])
 
 		_, err := tx.Exec(ctx, insertStatusQuery,
 			status["workflow_uuid"], status["status"], status["name"],
@@ -5902,6 +5935,7 @@ func (s *sysDB) importWorkflow(ctx context.Context, workflows []ExportedWorkflow
 			status["deduplication_id"], status["inputs"], status["priority"],
 			status["queue_partition_key"], status["forked_from"], status["parent_workflow_id"],
 			status["delay_until_epoch_ms"], status["serialization"], wasForkedFrom,
+			rateLimited, status["completed_at"], status["attributes"], status["schedule_name"],
 		)
 		if err != nil {
 			return fmt.Errorf("failed to import workflow_status: %w", err)
