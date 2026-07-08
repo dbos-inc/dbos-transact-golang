@@ -1096,10 +1096,19 @@ func TestListWorkflows(t *testing.T) {
 		// Record start time for filtering tests
 		testStartTime := time.Now()
 
+		// Boundary between the test-batch-* and test-other-* workflows, observed
+		// rather than derived from the sleep cadence below: enqueue latency (notably
+		// on CockroachDB) makes wall-clock arithmetic unreliable.
+		var firstHalfTime time.Time
+
 		// Start 10 workflows at 100ms intervals with different patterns
 		for i := range 10 {
 			var workflowID string
 			var handle WorkflowHandle[string]
+
+			if i == 5 {
+				firstHalfTime = time.Now()
+			}
 
 			if i < 5 {
 				// First 5 workflows: use prefix "test-batch-" and succeed
@@ -1221,8 +1230,7 @@ func TestListWorkflows(t *testing.T) {
 			assert.Equal(t, WorkflowStatusError, wf.Status, "workflow %s has unexpected status", wf.ID)
 		}
 
-		// Test 6: Filter by time range - first 5 workflows (start to start+500ms)
-		firstHalfTime := testStartTime.Add(500 * time.Millisecond)
+		// Test 6: Filter by time range - the 5 test-batch-* workflows
 		firstHalfWorkflows, err := client.ListWorkflows(
 			WithWorkflowIDPrefix("test-"),
 			WithEndTime(firstHalfTime))
