@@ -8231,6 +8231,9 @@ func TestWorkflowAttributes(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, childStatuses, 1)
 		assert.Nil(t, childStatuses[0].Attributes)
+		// Workflows not enqueued by a named schedule have no schedule name and
+		// are never returned by the schedule name filter.
+		assert.Empty(t, childStatuses[0].ScheduleName)
 
 		// Workflows started without the option have no attributes
 		plainHandle, err := RunWorkflow(dbosCtx, attrParentWorkflow, "")
