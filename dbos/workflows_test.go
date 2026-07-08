@@ -3731,8 +3731,7 @@ func TestRecvStepConflict(t *testing.T) {
 	// Executor B must actually run the body (register as receiver), not
 	// short-circuit; its separate map confirms a real concurrent execution.
 	require.Eventually(t, func() bool {
-		ok := sysB.recvNotifier.has(payload)
-		return ok
+		return sysB.recvNotifier.has(payload)
 	}, 5*time.Second, 10*time.Millisecond, "executor B (recovery) never ran the body")
 
 	// Deliver the message. Exactly one executor consumes and checkpoints it; the
@@ -4361,8 +4360,7 @@ func TestSetGetEvent(t *testing.T) {
 		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
 		payload := fmt.Sprintf("%s::%s", setWorkflowID, key)
 		require.Eventually(t, func() bool {
-			ok := sysDB.eventNotifier.has(payload)
-			return ok
+			return sysDB.eventNotifier.has(payload)
 		}, 5*time.Second, 10*time.Millisecond, "long waiters never registered")
 
 		// Short waiters register on the same key, then time out and leave.
@@ -4428,8 +4426,7 @@ func TestSetGetEvent(t *testing.T) {
 		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysDB)
 		payload := fmt.Sprintf("%s::%s", setWorkflowID, key)
 		require.Eventually(t, func() bool {
-			ok := sysDB.eventNotifier.has(payload)
-			return ok
+			return sysDB.eventNotifier.has(payload)
 		}, 5*time.Second, 10*time.Millisecond, "survivor never registered")
 
 		// A sibling on the same key that gets cancelled while waiting.
@@ -4439,8 +4436,10 @@ func TestSetGetEvent(t *testing.T) {
 			defer close(siblingDone)
 			_, _ = GetEvent[string](cancelCtx, setWorkflowID, key, 30*time.Second)
 		}()
-		// Give the sibling time to register, then cancel it.
-		time.Sleep(200 * time.Millisecond)
+		// Wait until the sibling has actually registered, then cancel it.
+		require.Eventually(t, func() bool {
+			return sysDB.eventNotifier.waiterCount(payload) == 2
+		}, 5*time.Second, 10*time.Millisecond, "sibling never registered")
 		cancel()
 		<-siblingDone
 

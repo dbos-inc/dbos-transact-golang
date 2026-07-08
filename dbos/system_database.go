@@ -3526,7 +3526,7 @@ func (s *sysDB) send(ctx context.Context, input WorkflowSendInput) error {
 	return nil
 }
 
-// notifier delivers per-payload wake-ups to notification waiters (recv and
+// notifyRegistry delivers per-payload wake-ups to notification waiters (recv and
 // getEvent).
 type notifyRegistry struct {
 	mu   sync.Mutex
@@ -3625,6 +3625,13 @@ func (n *notifyRegistry) has(payload string) bool {
 	return len(n.subs[payload]) > 0
 }
 
+// waiterCount reports the number of waiters registered for payload.
+func (n *notifyRegistry) waiterCount(payload string) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.subs[payload])
+}
+
 // clear drops all registrations (used on shutdown).
 func (n *notifyRegistry) clear() {
 	n.mu.Lock()
@@ -3639,25 +3646,39 @@ type notificationWaiter struct {
 	release func()                                 // unregister the waiter; must be called after the result is read (or on abandonment)
 }
 
-func (s *sysDB) notificationWait(ctx context.Context, opName, payload string, ch <-chan struct{}, recheck func() (bool, error)) func(deadline time.Time) (bool, error) {
+func (s *sysDB) notificationWait(ctx context.Context, opName, payload string, ch <-chan struct{}, recheck func(context.Context) (bool, error)) func(deadline time.Time) (bool, error) {
 	return func(deadline time.Time) (bool, error) {
+		// The caller has already probed and found nothing; any notify since then is
+		// buffered in ch, so wait for a wake before rechecking. The deadline bounds
+		// recheck's retries so a DB outage cannot block past the timeout.
+		waitCtx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
 		for {
-			found, err := recheck()
+			select {
+			case <-ch:
+				// A notification or reconnect repoll fired; re-check.
+			case <-waitCtx.Done():
+				if err := ctx.Err(); err != nil {
+					s.logger.Warn(opName+" context cancelled", "payload", payload, "cause", context.Cause(ctx))
+					return false, err
+				}
+				s.logger.Warn(opName+" timeout reached", "payload", payload, "deadline", deadline)
+				return true, nil
+			}
+			found, err := recheck(waitCtx)
 			if err != nil {
+				if cerr := ctx.Err(); cerr != nil {
+					s.logger.Warn(opName+" context cancelled", "payload", payload, "cause", context.Cause(ctx))
+					return false, cerr
+				}
+				if waitCtx.Err() != nil {
+					s.logger.Warn(opName+" timeout reached", "payload", payload, "deadline", deadline)
+					return true, nil
+				}
 				return false, err
 			}
 			if found {
 				return false, nil
-			}
-			select {
-			case <-ch:
-				// A notification or reconnect repoll fired; loop and re-check.
-			case <-time.After(max(0, time.Until(deadline))):
-				s.logger.Warn(opName+" timeout reached", "payload", payload, "deadline", deadline)
-				return true, nil
-			case <-ctx.Done():
-				s.logger.Warn(opName+" context cancelled", "payload", payload, "cause", context.Cause(ctx))
-				return false, ctx.Err()
 			}
 		}
 	}
@@ -3678,7 +3699,7 @@ func (s *sysDB) startRecvListener(ctx context.Context, destinationID, topic stri
 	// recheck reports whether an unconsumed message is pending; it is used both for
 	// the initial "already pending?" probe and by the wait loop after each wake.
 	query := s.renderSQL(`SELECT EXISTS (SELECT 1 FROM %snotifications WHERE destination_uuid = $1 AND topic = $2 AND consumed = false)`, s.dialect.SchemaPrefix(s.schema))
-	recheck := func() (bool, error) {
+	recheck := func(ctx context.Context) (bool, error) {
 		return retryWithResult(ctx, func() (bool, error) {
 			var found bool
 			if err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&found); err != nil {
@@ -3687,7 +3708,7 @@ func (s *sysDB) startRecvListener(ctx context.Context, destinationID, topic stri
 			return found, nil
 		}, withRetrierLogger(s.logger))
 	}
-	exists, err := recheck()
+	exists, err := recheck(ctx)
 	if err != nil {
 		release()
 		return nil, err
@@ -3770,7 +3791,7 @@ func (s *sysDB) setEvent(ctx context.Context, input WorkflowSetEventInput) error
 
 // startEventListener registers the caller as a waiter for the (targetWorkflowID, key)
 // event and checks whether the event is already set. Unlike recv, multiple waiters
-// may listen for the same event; they share one reference-counted notify hub.
+// may listen for the same event.
 func (s *sysDB) startEventListener(ctx context.Context, targetWorkflowID, key string) (*notificationWaiter, error) {
 	payload := fmt.Sprintf("%s::%s", targetWorkflowID, key)
 	ch := s.eventNotifier.subscribe(payload)
@@ -3779,7 +3800,7 @@ func (s *sysDB) startEventListener(ctx context.Context, targetWorkflowID, key st
 	// recheck reports whether the event is set; it is used both for the initial
 	// "already set?" probe and by the wait loop after each wake.
 	query := s.renderSQL(`SELECT EXISTS (SELECT 1 FROM %sworkflow_events WHERE workflow_uuid = $1 AND key = $2)`, s.dialect.SchemaPrefix(s.schema))
-	recheck := func() (bool, error) {
+	recheck := func(ctx context.Context) (bool, error) {
 		return retryWithResult(ctx, func() (bool, error) {
 			var found bool
 			if err := s.pool.QueryRow(ctx, query, targetWorkflowID, key).Scan(&found); err != nil {
@@ -3788,7 +3809,7 @@ func (s *sysDB) startEventListener(ctx context.Context, targetWorkflowID, key st
 			return found, nil
 		}, withRetrierLogger(s.logger))
 	}
-	exists, err := recheck()
+	exists, err := recheck(ctx)
 	if err != nil {
 		release()
 		return nil, err
