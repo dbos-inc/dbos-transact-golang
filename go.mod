@@ -2,7 +2,7 @@ module github.com/dbos-inc/dbos-transact-golang
 
 go 1.25.0
 
-toolchain go1.25.11
+toolchain go1.25.12
 
 require (
 	github.com/containerd/errdefs v1.0.0
