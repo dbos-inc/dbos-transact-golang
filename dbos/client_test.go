@@ -2610,7 +2610,7 @@ func TestClientTypedHandles(t *testing.T) {
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after typed handles test")
 }
 
-// TestClientListAndSteps verifies ClientListWorkflows and ClientGetWorkflowSteps
+// TestClientListAndSteps verifies ListWorkflows and GetWorkflowSteps
 // do NOT load/decode input/output by default, and decode them when explicitly
 // asked via the load options.
 func TestClientListAndSteps(t *testing.T) {
@@ -2651,7 +2651,7 @@ func TestClientListAndSteps(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("ListWorkflowsNoDecodeByDefault", func(t *testing.T) {
-		workflows, err := client.ClientListWorkflows(WithWorkflowIDs([]string{workflowID}))
+		workflows, err := client.ListWorkflows(WithWorkflowIDs([]string{workflowID}))
 		require.NoError(t, err)
 		require.Len(t, workflows, 1)
 		assert.Nil(t, workflows[0].Input, "input must not be loaded by default")
@@ -2659,7 +2659,7 @@ func TestClientListAndSteps(t *testing.T) {
 	})
 
 	t.Run("ListWorkflowsLoadsWhenRequested", func(t *testing.T) {
-		workflows, err := client.ClientListWorkflows(WithWorkflowIDs([]string{workflowID}), WithLoadInput(true), WithLoadOutput(true))
+		workflows, err := client.ListWorkflows(WithWorkflowIDs([]string{workflowID}), WithLoadInput(true), WithLoadOutput(true))
 		require.NoError(t, err)
 		require.Len(t, workflows, 1)
 
@@ -2675,7 +2675,7 @@ func TestClientListAndSteps(t *testing.T) {
 	})
 
 	t.Run("GetWorkflowStepsNoDecodeByDefault", func(t *testing.T) {
-		steps, err := client.ClientGetWorkflowSteps(workflowID)
+		steps, err := client.GetWorkflowSteps(workflowID)
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
 		assert.Equal(t, "GreetStep", steps[0].StepName)
@@ -2683,7 +2683,7 @@ func TestClientListAndSteps(t *testing.T) {
 	})
 
 	t.Run("GetWorkflowStepsLoadsWhenRequested", func(t *testing.T) {
-		steps, err := client.ClientGetWorkflowSteps(workflowID, WithStepsLoadOutput(true))
+		steps, err := client.GetWorkflowSteps(workflowID, WithStepsLoadOutput(true))
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
 		output, ok := steps[0].Output.(string)

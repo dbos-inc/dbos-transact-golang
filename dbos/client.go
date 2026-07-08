@@ -40,9 +40,7 @@ type Client interface {
 	ResumeWorkflow(workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)
 	ResumeWorkflows(workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error)
 	ForkWorkflow(input ForkWorkflowInput) (WorkflowHandle[any], error)
-	GetWorkflowSteps(workflowID string) ([]StepInfo, error)
-	ClientListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, error)
-	ClientGetWorkflowSteps(workflowID string, opts ...GetWorkflowStepsOption) ([]StepInfo, error)
+	GetWorkflowSteps(workflowID string, opts ...GetWorkflowStepsOption) ([]StepInfo, error)
 	ClientReadStream(workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error)
 	ClientReadStreamAsync(workflowID string, key string) (<-chan StreamValue[any], error)
 
@@ -659,20 +657,9 @@ func ClientForkWorkflow[R any](c Client, input ForkWorkflowInput) (WorkflowHandl
 	return typedClientHandle[R](c, handle), nil
 }
 
-// GetWorkflowSteps retrieves the execution steps of a workflow.
-func (c *client) GetWorkflowSteps(workflowID string) ([]StepInfo, error) {
-	return c.dbosCtx.GetWorkflowSteps(c.dbosCtx, workflowID)
-}
-
-// ClientListWorkflows lists workflows. Input and output are NOT loaded or
-// decoded by default. Pass WithLoadInput(true) / WithLoadOutput(true) to opt in.
-func (c *client) ClientListWorkflows(opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
-	return c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
-}
-
-// ClientGetWorkflowSteps retrieves a workflow's execution steps. Step output is
+// GetWorkflowSteps retrieves a workflow's execution steps. Step output is
 // NOT loaded or decoded by default. Pass WithStepsLoadOutput(true) to opt in.
-func (c *client) ClientGetWorkflowSteps(workflowID string, opts ...GetWorkflowStepsOption) ([]StepInfo, error) {
+func (c *client) GetWorkflowSteps(workflowID string, opts ...GetWorkflowStepsOption) ([]StepInfo, error) {
 	return c.dbosCtx.GetWorkflowSteps(c.dbosCtx, workflowID, opts...)
 }
 

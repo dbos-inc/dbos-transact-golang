@@ -477,10 +477,10 @@ func TestClientTypedHelpersWithMock(t *testing.T) {
 		t.Fatalf("ClientForkWorkflow handle GetResult = (%d, %v), want (11, nil)", res, err)
 	}
 
-	// ClientListWorkflows is an interface method, so it mocks directly.
-	mockClient.On("ClientListWorkflows", mock.Anything).Return([]dbos.WorkflowStatus{{ID: "wf-ret"}}, nil).Once()
-	list, err := mockClient.ClientListWorkflows()
+	// ListWorkflows is an interface method, so it mocks directly.
+	mockClient.On("ListWorkflows", mock.Anything).Return([]dbos.WorkflowStatus{{ID: "wf-ret"}}, nil).Once()
+	list, err := mockClient.ListWorkflows()
 	if err != nil || len(list) != 1 || list[0].ID != "wf-ret" {
-		t.Fatalf("ClientListWorkflows = (%v, %v), want one status with ID wf-ret", list, err)
+		t.Fatalf("ListWorkflows = (%v, %v), want one status with ID wf-ret", list, err)
 	}
 }
