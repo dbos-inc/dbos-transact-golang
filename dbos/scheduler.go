@@ -137,22 +137,14 @@ func (c *dbosContext) addScheduleCronEntry(
 	return assigned, nil
 }
 
-// wraps the registry's type-erased workflow wrapper into a ScheduledWorkflowFunc
-// that also checks if the schedule already fired for this interval
-func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledWorkflowFunc, error) {
-	fqn, ok := c.workflowCustomNametoFQN.Load(schedule.WorkflowName)
-	if !ok {
-		return nil, fmt.Errorf("workflow not found: %s", schedule.WorkflowName)
+// buildDBScheduleFunc returns a ScheduledWorkflowFunc that enqueues the
+// schedule's workflow by name, client-style. The workflow does not need to be
+// registered on this executor: name -> FQN resolution happens at dequeue time
+// on a worker that has the function.
+func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWorkflowFunc {
+	if _, ok := c.workflowCustomNametoFQN.Load(schedule.WorkflowName); !ok {
+		c.logger.Debug("scheduled workflow not registered on this executor; ticks will enqueue by name", "schedule", schedule.ScheduleName, "workflow", schedule.WorkflowName)
 	}
-	value, ok := c.workflowRegistry.Load(fqn)
-	if !ok {
-		return nil, fmt.Errorf("workflow not found: %s", schedule.WorkflowName)
-	}
-	entry, ok := value.(WorkflowRegistryEntry)
-	if !ok {
-		return nil, fmt.Errorf("invalid workflow registry entry for: %s", schedule.WorkflowName)
-	}
-	wrappedFn := entry.wrappedFunction
 	scheduleName := schedule.ScheduleName
 	queueName := schedule.QueueName
 	if queueName == "" {
@@ -175,47 +167,67 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) (ScheduledW
 			return nil, nil
 		}
 
-		// The registry wrapper expects encoded inputs, so encode the ScheduledWorkflowInput, using the DBOS Context serializer, before invoking it.
 		ser := resolveEncoder(ctx)
 		encodedInput, err := ser.Encode(input)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode scheduled workflow input: %w", err)
 		}
 
-		opts := []WorkflowOption{
-			WithWorkflowID(wfID),
-			WithQueue(queueName),
-			withWorkflowName(entry.FQN),
-			withScheduleName(scheduleName),
-		}
 		// Scheduled workflows always run against the latest registered application version, so a stale executor does not pick them up after a new deploy.
+		// If lookup fails, leave the version unset: NULL rows are only dequeued by executors on the latest version.
+		var appVersion string
 		latest, err := retryWithResult(c, func() (*VersionInfo, error) {
 			return c.systemDB.getLatestApplicationVersion(c, nil)
 		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to fetch latest application version for scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
 		} else if latest != nil {
-			opts = append(opts, WithApplicationVersion(latest.Name))
+			appVersion = latest.Name
 		}
-		result, runErr := wrappedFn(ctx, encodedInput, ser.Name(), opts...)
+
+		status := WorkflowStatus{
+			Name:               schedule.WorkflowName,
+			ClassName:          schedule.WorkflowClassName,
+			ApplicationVersion: appVersion,
+			ApplicationID:      c.GetApplicationID(),
+			ExecutorID:         c.GetExecutorID(),
+			Status:             WorkflowStatusEnqueued,
+			ID:                 wfID,
+			CreatedAt:          time.Now(),
+			Input:              encodedInput,
+			QueueName:          queueName,
+			Serialization:      ser.Name(),
+			ScheduleName:       scheduleName,
+		}
 
 		uncancellableCtx := WithoutCancel(c)
+		if err := retry(c, func() error {
+			tx, err := c.systemDB.(*sysDB).pool.BeginTx(uncancellableCtx, TxOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to begin transaction: %w", err)
+			}
+			defer tx.Rollback(uncancellableCtx)
+			if _, err := c.systemDB.insertWorkflowStatus(uncancellableCtx, insertWorkflowStatusDBInput{status: status, tx: tx}); err != nil {
+				return err
+			}
+			return tx.Commit(uncancellableCtx)
+		}, withRetrierLogger(c.logger)); err != nil {
+			c.logger.Error("failed to enqueue scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
+			return nil, err
+		}
+
 		if err := retry(c, func() error {
 			return c.systemDB.updateScheduleLastFiredAt(uncancellableCtx, scheduleName, time.Now())
 		}, withRetrierLogger(c.logger)); err != nil {
 			c.logger.Error("failed to update schedule last fired time after retries", "schedule", scheduleName, "error", err)
 		}
 
-		return result, runErr
-	}, nil
+		return nil, nil
+	}
 }
 
 func (c *dbosContext) addDBScheduleToScheduler(schedule WorkflowSchedule) {
-	fn, err := c.buildDBScheduleFunc(schedule)
-	if err != nil {
-		c.logger.Error("failed to get workflow for schedule", "schedule", schedule.ScheduleName, "error", err)
-		return
-	}
+	fn := c.buildDBScheduleFunc(schedule)
 
 	spec := schedule.Schedule
 	if schedule.CronTimezone != "" {

@@ -873,7 +873,6 @@ type workflowOptions struct {
 	QueuePartitionKey   string
 	DelayDuration       time.Duration
 	WorkflowAttributes  map[string]any
-	scheduleName        string
 	alreadyEncodedInput bool
 	isDequeue           bool
 	isRecovery          bool
@@ -975,14 +974,6 @@ func withWorkflowName(name string) WorkflowOption {
 		if p.WorkflowName == "" {
 			p.WorkflowName = name
 		}
-	}
-}
-
-// An internal option used by the persistent scheduler to record which named
-// schedule enqueued the workflow.
-func withScheduleName(name string) WorkflowOption {
-	return func(p *workflowOptions) {
-		p.scheduleName = name
 	}
 }
 
@@ -1393,7 +1384,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		QueuePartitionKey:  params.QueuePartitionKey,
 		DelayUntil:         delayUntil,
 		Attributes:         params.WorkflowAttributes,
-		ScheduleName:       params.scheduleName,
 		Serialization: func() string {
 			if params.isPortableWorkflow {
 				return PortableSerializerName

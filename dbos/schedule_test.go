@@ -1,6 +1,7 @@
 package dbos
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -873,4 +874,48 @@ func TestScheduleNameSurvivesExportImport(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, byName, 1)
 	require.Equal(t, workflowID, byName[0].ID)
+}
+
+// A schedule can fire on an executor that does not have the target workflow
+// registered: the tick enqueues by name and name resolution happens at dequeue
+// time on a worker that has the function.
+func TestScheduleFiresWithoutLocalRegistration(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
+	defer dbosCtx.Shutdown(10 * time.Second)
+	require.NoError(t, dbosCtx.Launch())
+
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+
+	const scheduleName = "unregistered-workflow-schedule"
+	const workflowName = "workflowRegisteredOnAnotherWorker"
+	const queueName = "queue-listened-elsewhere"
+	require.NoError(t, client.CreateSchedule(ClientScheduleInput{
+		ScheduleName: scheduleName,
+		WorkflowName: workflowName,
+		Schedule:     "*/1 * * * * *",
+		QueueName:    queueName,
+	}))
+	t.Cleanup(func() { _ = client.DeleteSchedule(scheduleName) })
+
+	var enqueued WorkflowStatus
+	require.Eventually(t, func() bool {
+		wfs, err := ListWorkflows(dbosCtx, WithWorkflowIDPrefix("sched-"+scheduleName+"-"))
+		if err != nil || len(wfs) == 0 {
+			return false
+		}
+		enqueued = wfs[0]
+		return true
+	}, 15*time.Second, 100*time.Millisecond, "tick should enqueue even though the workflow is not registered locally")
+
+	require.Equal(t, workflowName, enqueued.Name)
+	require.Equal(t, queueName, enqueued.QueueName)
+	require.Equal(t, scheduleName, enqueued.ScheduleName)
+	require.Equal(t, WorkflowStatusEnqueued, enqueued.Status)
+
+	sched, err := client.GetSchedule(scheduleName)
+	require.NoError(t, err)
+	require.NotNil(t, sched)
+	require.NotNil(t, sched.LastFiredAt, "last_fired_at should be updated after the tick")
 }
