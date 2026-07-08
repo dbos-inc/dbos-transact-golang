@@ -23,28 +23,34 @@ import (
 // Signature: enqueue_workflow(workflow_name, queue_name, positional_args, named_args,
 //
 //	class_name, config_name, workflow_id, app_version, timeout_ms,
-//	deadline_epoch_ms, deduplication_id, priority, queue_partition_key)
+//	deadline_epoch_ms, deduplication_id, priority, queue_partition_key,
+//	authenticated_user, authenticated_roles, delay_until_epoch_ms)
+//
+// authenticated_roles is a JSON-encoded array of strings.
 func callEnqueueWorkflow(ctx context.Context, pool *pgxpool.Pool, schema string, params map[string]any) (string, error) {
 	sanitized := pgx.Identifier{schema}.Sanitize()
-	query := fmt.Sprintf(`SELECT %s.enqueue_workflow($1, $2, $3::json[], $4::json, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, sanitized)
+	query := fmt.Sprintf(`SELECT %s.enqueue_workflow($1, $2, $3::json[], $4::json, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`, sanitized)
 
 	get := func(key string) any { return params[key] }
 
 	var wfID string
 	err := pool.QueryRow(ctx, query,
-		get("workflow_name"),       // $1
-		get("queue_name"),          // $2
-		get("positional_args"),     // $3
-		get("named_args"),          // $4
-		get("class_name"),          // $5
-		get("config_name"),         // $6
-		get("workflow_id"),         // $7
-		get("app_version"),         // $8
-		get("timeout_ms"),          // $9
-		get("deadline_epoch_ms"),   // $10
-		get("deduplication_id"),    // $11
-		get("priority"),            // $12
-		get("queue_partition_key"), // $13
+		get("workflow_name"),        // $1
+		get("queue_name"),           // $2
+		get("positional_args"),      // $3
+		get("named_args"),           // $4
+		get("class_name"),           // $5
+		get("config_name"),          // $6
+		get("workflow_id"),          // $7
+		get("app_version"),          // $8
+		get("timeout_ms"),           // $9
+		get("deadline_epoch_ms"),    // $10
+		get("deduplication_id"),     // $11
+		get("priority"),             // $12
+		get("queue_partition_key"),  // $13
+		get("authenticated_user"),   // $14
+		get("authenticated_roles"),  // $15
+		get("delay_until_epoch_ms"), // $16
 	).Scan(&wfID)
 	return wfID, err
 }
@@ -321,6 +327,78 @@ func TestPgsqlClient(t *testing.T) {
 		result, err := handle.GetResult()
 		require.NoError(t, err)
 		assert.Equal(t, "priority-input", result)
+	})
+
+	t.Run("EnqueueWithAuthMetadata", func(t *testing.T) {
+		wfID := fmt.Sprintf("pgsql-auth-%d", time.Now().UnixNano())
+		roles := []string{"admin", "reader"}
+		rolesJSON, err := json.Marshal(roles)
+		require.NoError(t, err)
+
+		_, err = callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
+			"workflow_name":       "pgsql_retrieve_test",
+			"queue_name":          queue.Name,
+			"positional_args":     []string{`"auth-input"`},
+			"named_args":          `{}`,
+			"workflow_id":         wfID,
+			"app_version":         serverCtx.GetApplicationVersion(),
+			"authenticated_user":  "alice",
+			"authenticated_roles": string(rolesJSON),
+		})
+		require.NoError(t, err)
+
+		handle, err := RetrieveWorkflow[string](serverCtx, wfID)
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, "alice", status.AuthenticatedUser)
+		assert.Equal(t, roles, status.AuthenticatedRoles)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "auth-input", result)
+	})
+
+	t.Run("EnqueueWithDelay", func(t *testing.T) {
+		wfID := fmt.Sprintf("pgsql-delay-%d", time.Now().UnixNano())
+		// Far enough in the future that the workflow is not promoted during the test.
+		delayUntil := time.Now().Add(60 * time.Second).UnixMilli()
+
+		_, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
+			"workflow_name":        "pgsql_retrieve_test",
+			"queue_name":           queue.Name,
+			"positional_args":      []string{`"delay-input"`},
+			"named_args":           `{}`,
+			"workflow_id":          wfID,
+			"app_version":          serverCtx.GetApplicationVersion(),
+			"delay_until_epoch_ms": delayUntil,
+		})
+		require.NoError(t, err)
+
+		handle, err := RetrieveWorkflow[string](serverCtx, wfID)
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusDelayed, status.Status)
+		assert.Equal(t, delayUntil, status.DelayUntil.UnixMilli())
+
+		require.NoError(t, CancelWorkflow(serverCtx, wfID))
+	})
+
+	t.Run("EnqueueNegativeDelayRejected", func(t *testing.T) {
+		_, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
+			"workflow_name":        "pgsql_retrieve_test",
+			"queue_name":           queue.Name,
+			"positional_args":      []string{`"negative-delay-input"`},
+			"named_args":           `{}`,
+			"workflow_id":          fmt.Sprintf("pgsql-negative-delay-%d", time.Now().UnixNano()),
+			"app_version":          serverCtx.GetApplicationVersion(),
+			"delay_until_epoch_ms": int64(-1),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "delay_until_epoch_ms must be >= 0")
 	})
 
 	t.Run("SendWithTopic", func(t *testing.T) {
