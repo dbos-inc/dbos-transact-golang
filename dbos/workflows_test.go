@@ -790,18 +790,28 @@ type faultTx struct {
 }
 
 func (t *faultTx) QueryRow(ctx context.Context, query string, args ...any) Row {
-	if strings.Contains(query, "operation_outputs") &&
-		len(args) > 0 && args[0] == t.p.target &&
+	target, _ := t.p.target.Load().(string)
+	if target != "" && strings.Contains(query, "operation_outputs") &&
+		len(args) > 0 && args[0] == any(target) &&
 		t.p.fired.CompareAndSwap(false, true) {
 		return errRow{errors.New("conn closed")} // retryable per postgresDialect.IsRetryable
 	}
 	return t.Tx.QueryRow(ctx, query, args...)
 }
 
+// faultPool is installed over sysDB.pool before Launch — while no goroutine
+// reads the field — and stays for the whole test, so arming it later doesn't
+// race pool readers such as the queue runner. Disarmed (empty target) it is a
+// transparent pass-through.
 type faultPool struct {
 	Pool
-	target string       // workflow ID whose operation_outputs read should fault
-	fired  *atomic.Bool // ensures the fault triggers at most once
+	target atomic.Value // string: workflow ID whose operation_outputs read should fault; "" disarms
+	fired  atomic.Bool  // ensures the fault triggers at most once per arm
+}
+
+func (p *faultPool) arm(workflowID string) {
+	p.fired.Store(false)
+	p.target.Store(workflowID)
 }
 
 func (p *faultPool) BeginTx(ctx context.Context, opts TxOptions) (Tx, error) {
@@ -1005,6 +1015,12 @@ func TestSteps(t *testing.T) {
 		})
 	}
 	RegisterWorkflow(dbosCtx, stubbornParentWorkflow)
+
+	// Installed before Launch so no goroutine reads sysDB.pool concurrently
+	// with the swap; armed on demand by StepIDNotReallocatedOnDBRetry.
+	sysdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+	stepsFaultPool := &faultPool{Pool: sysdb.pool}
+	sysdb.pool = stepsFaultPool
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
@@ -1249,21 +1265,15 @@ func TestSteps(t *testing.T) {
 	t.Run("StepIDNotReallocatedOnDBRetry", func(t *testing.T) {
 		wfID := "step-id-drift-test"
 
-		s := dbosCtx.(*dbosContext).systemDB.(*sysDB)
-		orig := s.pool
-		var fired atomic.Bool
-		s.pool = &faultPool{Pool: orig, target: wfID, fired: &fired}
-		// The listener captured the real pool at Launch and no longer reads the
-		// field; the workflow goroutine is joined via GetResult before we restore,
-		// so this swap is race-free.
-		defer func() { s.pool = orig }()
+		stepsFaultPool.arm(wfID)
+		defer stepsFaultPool.arm("")
 
 		handle, err := RunWorkflow(dbosCtx, sleepStepIDDriftWorkflow, "", WithWorkflowID(wfID))
 		require.NoError(t, err)
 		result, err := handle.GetResult()
 		require.NoError(t, err)
 		require.Equal(t, "ok", result)
-		require.True(t, fired.Load(), "fault injection never triggered; the test did not exercise a retry")
+		require.True(t, stepsFaultPool.fired.Load(), "fault injection never triggered; the test did not exercise a retry")
 
 		steps, err := GetWorkflowSteps(dbosCtx, wfID)
 		require.NoError(t, err)
