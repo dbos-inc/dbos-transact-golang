@@ -163,18 +163,14 @@ func newAwaitedWorkflowCancelledError(workflowID string) *DBOSError {
 	}
 }
 
-func newAwaitedWorkflowMaxStepRetriesExceeded(workflowID string) *DBOSError {
+// newWorkflowCancelledError wraps the cancellation cause (e.g. the context error that
+// interrupted a step), so errors.Is still matches context.Canceled / context.DeadlineExceeded.
+func newWorkflowCancelledError(workflowID string, cause error) *DBOSError {
 	return &DBOSError{
-		Message:    fmt.Sprintf("Awaited workflow %s has exceeded the maximum number of step retries", workflowID),
-		Code:       MaxStepRetriesExceeded,
+		Message:    fmt.Sprintf("Workflow %s was cancelled", workflowID),
+		Code:       WorkflowCancelled,
 		WorkflowID: workflowID,
-	}
-}
-
-func newWorkflowCancelledError(workflowID string) *DBOSError {
-	return &DBOSError{
-		Message: fmt.Sprintf("Workflow %s was cancelled", workflowID),
-		Code:    WorkflowCancelled,
+		wrappedErr: cause,
 	}
 }
 

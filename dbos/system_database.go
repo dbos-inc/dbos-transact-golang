@@ -2638,7 +2638,7 @@ func (s *sysDB) checkOperationExecution(ctx context.Context, input checkOperatio
 
 	// If the workflow is cancelled, raise the exception
 	if workflowStatus == WorkflowStatusCancelled {
-		return nil, newWorkflowCancelledError(input.workflowID)
+		return nil, newWorkflowCancelledError(input.workflowID, errors.New("workflow status is CANCELLED"))
 	}
 
 	// Execute second query to get operation outputs
