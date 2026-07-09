@@ -2984,6 +2984,18 @@ func TestCancelWorkflows(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, noDeadlineCancelWorkflow)
 
+	var finalStepCancelAttempts atomic.Int64
+	finalStepCancelStarted := NewEvent()
+	finalStepCancelRelease := make(chan struct{})
+	finalStepCancelWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		if finalStepCancelAttempts.Add(1) == 1 {
+			finalStepCancelStarted.Set()
+			<-finalStepCancelRelease
+		}
+		return "completed", nil
+	}
+	RegisterWorkflow(dbosCtx, finalStepCancelWorkflow)
+
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
@@ -3056,6 +3068,35 @@ func TestCancelWorkflows(t *testing.T) {
 	t.Run("CancelWorkflowsNilContext", func(t *testing.T) {
 		require.Error(t, CancelWorkflows(nil, []string{"id"}),
 			"CancelWorkflows should error on nil context")
+	})
+
+	t.Run("CancelledDuringFinalStepDoesNotComplete", func(t *testing.T) {
+		// A workflow API-cancelled while finishing its last work must end as
+		// CANCELLED, not complete: the refused outcome write is surfaced as a
+		// cancellation and the workflow stays resumable (same semantics as the
+		// Python/TS/Java SDKs).
+		handle, err := RunWorkflow(dbosCtx, finalStepCancelWorkflow, "")
+		require.NoError(t, err, "failed to start workflow")
+		finalStepCancelStarted.Wait()
+
+		require.NoError(t, CancelWorkflow(dbosCtx, handle.GetWorkflowID()), "failed to cancel workflow")
+		close(finalStepCancelRelease)
+
+		_, err = handle.GetResult()
+		require.Error(t, err, "a cancelled workflow must not complete")
+		require.True(t, errors.Is(err, &DBOSError{Code: WorkflowCancelled}), "expected WorkflowCancelled error, got: %v", err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusCancelled, status.Status, "the durable status must remain CANCELLED")
+		require.Nil(t, status.Output, "the refused outcome must not record an output")
+
+		resumedHandle, err := ResumeWorkflow[string](dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to resume workflow")
+		result, err := resumedHandle.GetResult()
+		require.NoError(t, err, "resumed workflow should complete successfully")
+		require.Equal(t, "completed", result)
+		require.EqualValues(t, 2, finalStepCancelAttempts.Load(), "expected the workflow to re-execute on resume")
 	})
 
 	t.Run("CancelWithoutDeadlineIsResumable", func(t *testing.T) {
