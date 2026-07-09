@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -1588,6 +1589,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	go func() {
 		defer c.workflowsWg.Done()
 
+		removeActive := func() {}
 		if c.activeWorkflowIDs != nil {
 			entry := activeWorkflowEntry{}
 			if insertStatusResult.queueName != nil {
@@ -1600,8 +1602,10 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			if loaded { // This should never happen, but if it does, we need to log it
 				c.logger.Error("UNREACHABLE: workflow already running on this context", "workflow_id", workflowID)
 			}
-			defer c.activeWorkflowIDs.Delete(workflowID)
+			var removeOnce sync.Once
+			removeActive = func() { removeOnce.Do(func() { c.activeWorkflowIDs.Delete(workflowID) }) }
 		}
+		defer removeActive()
 
 		var result any
 		var err error
@@ -1671,6 +1675,10 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			if err != nil {
 				serializedErr = serializeWorkflowError(err, resolveEncoder(workflowCtx).Name())
 			}
+			// Remove from the active set before the outcome becomes durable: once it is
+			// visible, a resume→dequeue can re-dispatch this workflow to this executor,
+			// and a stale entry would make it skip the run, stranding the row PENDING.
+			removeActive()
 			recordErr := retry(c, func() error {
 				return c.systemDB.updateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
 					workflowID: workflowID,
