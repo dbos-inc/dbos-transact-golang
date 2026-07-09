@@ -1688,6 +1688,16 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				})
 			}, withRetrierLogger(c.logger))
 			if recordErr != nil {
+				// The write was refused because the workflow is already durably CANCELLED
+				// (e.g. cancelled during its final step): it must end as cancelled, not
+				// complete. Deliver a cancellation outcome wrapping the workflow's own
+				// error so context.Canceled/DeadlineExceeded still match via errors.Is.
+				// The in-memory result still rides along for direct callers.
+				if errors.Is(recordErr, &DBOSError{Code: WorkflowCancelled}) {
+					outcomeChan <- workflowOutcome[any]{result: result, err: newWorkflowCancelledError(workflowID, err), cancelled: true}
+					close(outcomeChan)
+					return
+				}
 				c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
 				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
 				close(outcomeChan)
