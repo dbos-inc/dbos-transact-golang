@@ -1108,6 +1108,9 @@ func TestListWorkflows(t *testing.T) {
 
 			if i == 5 {
 				firstHalfTime = time.Now()
+				// created_at is stored at millisecond resolution and WithEndTime is
+				// inclusive: keep test-other-5's stamp out of the boundary's tick.
+				time.Sleep(5 * time.Millisecond)
 			}
 
 			if i < 5 {
