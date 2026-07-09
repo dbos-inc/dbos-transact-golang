@@ -98,6 +98,9 @@ type workflowOutcome[R any] struct {
 	err           error
 	needsDecoding bool   // true if result came from awaitWorkflowResult (ID conflict path) and needs decoding
 	serialization string // serialization format of the encoded result (only used when needsDecoding is true)
+	// cancelled reports that the workflow settled in CANCELLED. A cancelled workflow is
+	// resumable, so its outcome is not final and an awaiting parent must not checkpoint it.
+	cancelled bool
 }
 
 type stepCheckpointedOutcome struct {
@@ -318,6 +321,11 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		if stepInterruptedByCancellation(workflowState, outcome.err) {
 			return *new(R), newWorkflowCancelledError(workflowState.workflowID, outcome.err)
 		}
+		// A cancelled child can be resumed, so its outcome is not final: don't
+		// checkpoint it, or the parent would replay the cancellation forever.
+		if outcome.cancelled {
+			return *new(R), newAwaitedWorkflowCancelledError(h.workflowID)
+		}
 		ser := resolveEncoder(h.dbosContext)
 		encodedOutput, encErr := ser.Encode(decodedResult)
 		if encErr != nil {
@@ -398,7 +406,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	// cancelled interrupts the getResult step: don't checkpoint it, so resume
 	// re-executes the await.
 	if isWithinWorkflow && stepInterruptedByCancellation(workflowState, err) {
-		return *new(R), newAwaitedWorkflowCancelledError(h.workflowID)
+		return *new(R), newWorkflowCancelledError(workflowState.workflowID, err)
 	}
 
 	// Deserialize the result directly into the target type
@@ -421,7 +429,8 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		}
 
 		// If we are calling GetResult inside a workflow, record the result as a step result
-		if isWithinWorkflow {
+		// Only record if we got the workflow result (no cancel, no dlq, no raw awaitWorkflowResult error)
+		if isWithinWorkflow && awaitErr == nil {
 			recordGetResultInput := recordOperationResultDBInput{
 				workflowID:      workflowState.workflowID,
 				childWorkflowID: h.workflowID,
@@ -1122,8 +1131,9 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 			// Handle nil results - nil cannot be type-asserted to any interface
 			if outcome.result == nil {
 				typedOutcomeChan <- workflowOutcome[R]{
-					result: typedResult,
-					err:    resultErr,
+					result:    typedResult,
+					err:       resultErr,
+					cancelled: outcome.cancelled,
 				}
 				return
 			}
@@ -1131,8 +1141,9 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 			// Check if this is a mocked path
 			if _, ok := handle.dbosContext.(*dbosContext); !ok {
 				typedOutcomeChan <- workflowOutcome[R]{
-					result: outcome.result.(R),
-					err:    resultErr,
+					result:    outcome.result.(R),
+					err:       resultErr,
+					cancelled: outcome.cancelled,
 				}
 				return
 			}
@@ -1164,8 +1175,9 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 			}
 
 			typedOutcomeChan <- workflowOutcome[R]{
-				result: typedResult,
-				err:    resultErr,
+				result:    typedResult,
+				err:       resultErr,
+				cancelled: outcome.cancelled,
 			}
 		}()
 
@@ -1593,6 +1605,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 		var result any
 		var err error
+		cancelled := false
 
 		result, err = fn(workflowCtx, input)
 
@@ -1613,7 +1626,8 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				ser = awaitOut.serialization
 			}
 			// Keep the encoded result - decoding will happen in RunWorkflow[P,R] when we know the target type
-			outcomeChan <- workflowOutcome[any]{result: encodedResult, err: err, needsDecoding: true, serialization: ser}
+			outcomeChan <- workflowOutcome[any]{result: encodedResult, err: err, needsDecoding: true, serialization: ser,
+				cancelled: errors.Is(err, &DBOSError{Code: AwaitedWorkflowCancelled})}
 			close(outcomeChan)
 			return
 		} else {
@@ -1642,6 +1656,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				// context cancellation. Mark it CANCELLED, not ERROR, so it can be resumed.
 				status = WorkflowStatusCancelled
 			}
+			cancelled = status == WorkflowStatusCancelled
 
 			// Serialize the output before recording
 			encodedOutput, serErr := resolveEncoder(workflowCtx).Encode(result)
@@ -1671,7 +1686,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				return
 			}
 		}
-		outcomeChan <- workflowOutcome[any]{result: result, err: err}
+		outcomeChan <- workflowOutcome[any]{result: result, err: err, cancelled: cancelled}
 		close(outcomeChan)
 	}()
 
