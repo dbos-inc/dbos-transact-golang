@@ -99,8 +99,8 @@ type workflowOutcome[R any] struct {
 	err           error
 	needsDecoding bool   // true if result came from awaitWorkflowResult (ID conflict path) and needs decoding
 	serialization string // serialization format of the encoded result (only used when needsDecoding is true)
-	// cancelled reports that the workflow settled in CANCELLED. A cancelled workflow is
-	// resumable, so its outcome is not final and an awaiting parent must not checkpoint it.
+	// cancelled reports that the workflow settled in CANCELLED. An awaiting parent
+	// records it as an AwaitedWorkflowCancelled outcome for its getResult step.
 	cancelled bool
 }
 
@@ -322,10 +322,12 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		if stepInterruptedByCancellation(workflowState, outcome.err) {
 			return *new(R), newWorkflowCancelledError(workflowState.workflowID, outcome.err)
 		}
-		// A cancelled child can be resumed, so its outcome is not final: don't
-		// checkpoint it, or the parent would replay the cancellation forever.
+		// A cancelled child is a terminal outcome for the awaiting parent: checkpoint
+		// it like any other child error so replay is deterministic, matching the
+		// other SDKs. Resuming the child later does not change what the parent saw.
 		if outcome.cancelled {
-			return *new(R), newAwaitedWorkflowCancelledError(h.workflowID)
+			decodedResult = *new(R)
+			outcome.err = newAwaitedWorkflowCancelledError(h.workflowID)
 		}
 		ser := resolveEncoder(h.dbosContext)
 		encodedOutput, encErr := ser.Encode(decodedResult)
@@ -410,6 +412,11 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		return *new(R), newWorkflowCancelledError(workflowState.workflowID, err)
 	}
 
+	// A cancelled child is a terminal outcome for the awaiting parent: checkpoint
+	// it like any other child error so replay is deterministic.
+	// Resuming the child later does not change what the parent saw.
+	childCancelled := errors.Is(awaitErr, &DBOSError{Code: AwaitedWorkflowCancelled})
+
 	// Deserialize the result directly into the target type
 	var typedResult R
 	var encodedStr *string
@@ -428,33 +435,40 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		if deserErr != nil {
 			return *new(R), fmt.Errorf("failed to deserialize workflow result: %w", deserErr)
 		}
-
-		// If we are calling GetResult inside a workflow, record the result as a step result
-		// Only record if we got the workflow result (no cancel, no dlq, no raw awaitWorkflowResult error)
-		if isWithinWorkflow && awaitErr == nil {
-			recordGetResultInput := recordOperationResultDBInput{
-				workflowID:      workflowState.workflowID,
-				childWorkflowID: h.workflowID,
-				stepID:          workflowState.nextStepID(),
-				output:          encodedStr,
-				errStr:          awaitResult.errStr,
-				startedAt:       startTime,
-				completedAt:     completedTime,
-				stepName:        "DBOS.getResult",
-				serialization:   storedSerialization,
-			}
-			uncancellableCtx := context.WithoutCancel(h.dbosContext)
-			recordResultErr := retry(h.dbosContext, func() error {
-				return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(uncancellableCtx, recordGetResultInput)
-			}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
-			if recordResultErr != nil {
-				h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
-				return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("recording child workflow result: %w", recordResultErr))
-			}
-		}
-		return typedResult, err
 	}
-	return *new(R), err
+
+	// If we are calling GetResult inside a workflow, record the outcome as a step
+	// result: either the workflow result proper (no dlq, no raw awaitWorkflowResult
+	// error) or the child's cancellation.
+	if isWithinWorkflow && (childCancelled || (awaitErr == nil && encodedStr != nil)) {
+		errStr := awaitResult.errStr
+		serialization := storedSerialization
+		if childCancelled {
+			serialization = resolveEncoder(h.dbosContext).Name()
+			serializedErr := serializeWorkflowError(awaitErr, serialization)
+			errStr = &serializedErr
+		}
+		recordGetResultInput := recordOperationResultDBInput{
+			workflowID:      workflowState.workflowID,
+			childWorkflowID: h.workflowID,
+			stepID:          workflowState.nextStepID(),
+			output:          encodedStr,
+			errStr:          errStr,
+			startedAt:       startTime,
+			completedAt:     completedTime,
+			stepName:        "DBOS.getResult",
+			serialization:   serialization,
+		}
+		uncancellableCtx := context.WithoutCancel(h.dbosContext)
+		recordResultErr := retry(h.dbosContext, func() error {
+			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(uncancellableCtx, recordGetResultInput)
+		}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
+		if recordResultErr != nil {
+			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
+			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("recording child workflow result: %w", recordResultErr))
+		}
+	}
+	return typedResult, err
 }
 
 // Wrapper handle -- useful for handling mocks in RunWorkflow

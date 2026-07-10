@@ -1016,6 +1016,34 @@ func TestSteps(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, stubbornParentWorkflow)
 
+	// Child cancelled via the API while the parent stays healthy: blocks until
+	// released, then observes its cancellation at the next step boundary.
+	var apiCancelledChildID string
+	apiCancelChildStarted := NewEvent()
+	apiCancelChildRelease := make(chan struct{})
+	apiCancelChildWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		id, err := GetWorkflowID(ctx)
+		if err != nil {
+			return "", err
+		}
+		apiCancelledChildID = id
+		apiCancelChildStarted.Set()
+		<-apiCancelChildRelease
+		return RunAsStep(ctx, func(context.Context) (string, error) {
+			return "child-result", nil
+		})
+	}
+	RegisterWorkflow(dbosCtx, apiCancelChildWorkflow)
+
+	apiCancelParentWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		childHandle, err := RunWorkflow(ctx, apiCancelChildWorkflow, "")
+		if err != nil {
+			return "", err
+		}
+		return childHandle.GetResult()
+	}
+	RegisterWorkflow(dbosCtx, apiCancelParentWorkflow)
+
 	// Installed before Launch so no goroutine reads sysDB.pool concurrently
 	// with the swap; armed on demand by StepIDNotReallocatedOnDBRetry.
 	sysdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
@@ -1424,6 +1452,39 @@ func TestSteps(t *testing.T) {
 		require.Len(t, steps, 2, "expected spawn and the re-executed getResult after resume")
 		require.Equal(t, "DBOS.getResult", steps[1].StepName)
 		require.Nil(t, steps[1].Error)
+	})
+
+	t.Run("CancelledChildOutcomeCheckpointed", func(t *testing.T) {
+		// The child is cancelled via the API while the parent stays healthy: the
+		// child's cancellation is a terminal outcome for the parent, recorded
+		// durably by getResult so replay is deterministic (like the other SDKs).
+		handle, err := RunWorkflow(dbosCtx, apiCancelParentWorkflow, "")
+		require.NoError(t, err, "failed to start parent workflow")
+
+		apiCancelChildStarted.Wait()
+		require.NoError(t, CancelWorkflow(dbosCtx, apiCancelledChildID), "failed to cancel child workflow")
+		close(apiCancelChildRelease)
+
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected error from parent awaiting a cancelled child")
+		require.True(t, errors.Is(err, &DBOSError{Code: AwaitedWorkflowCancelled}), "expected AwaitedWorkflowCancelled error, got: %v", err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get parent workflow status")
+		require.Equal(t, WorkflowStatusError, status.Status, "healthy parent observing a cancelled child ends in ERROR")
+
+		childHandle, err := RetrieveWorkflow[string](dbosCtx, apiCancelledChildID)
+		require.NoError(t, err, "failed to retrieve child workflow")
+		childStatus, err := childHandle.GetStatus()
+		require.NoError(t, err, "failed to get child workflow status")
+		require.Equal(t, WorkflowStatusCancelled, childStatus.Status, "expected child workflow to be cancelled")
+
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 2, "expected the child spawn and the recorded getResult")
+		require.Equal(t, "DBOS.getResult", steps[1].StepName)
+		require.Error(t, steps[1].Error, "the child's cancellation must be durably recorded")
+		require.True(t, errors.Is(steps[1].Error, &DBOSError{Code: AwaitedWorkflowCancelled}), "expected recorded AwaitedWorkflowCancelled error, got: %v", steps[1].Error)
 	})
 }
 
