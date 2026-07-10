@@ -1451,6 +1451,10 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		defer tx.Rollback(uncancellableCtx) // Rollback if not committed
 
 		// Insert workflow status with transaction
+		var loaded bool
+		if c.activeWorkflowIDs != nil {
+			_, loaded = c.activeWorkflowIDs.Load(workflowID)
+		}
 		ownerXID := uuid.New().String()
 		insertInput := insertWorkflowStatusDBInput{
 			status:            workflowStatus,
@@ -1458,6 +1462,8 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			tx:                tx,
 			ownerXID:          &ownerXID,
 			incrementAttempts: params.isDequeue || params.isRecovery,
+			// Only claim ownership if this dispatch will launch the workflow:
+			claimOwnership: (params.isDequeue || params.isRecovery) && !loaded,
 		}
 		insertStatusResult, err = c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
@@ -1486,11 +1492,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
 				return newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
 			}
-		}
-
-		var loaded bool
-		if c.activeWorkflowIDs != nil {
-			_, loaded = c.activeWorkflowIDs.Load(workflowID)
 		}
 
 		shouldSkip :=

@@ -2691,6 +2691,17 @@ func TestWorkflowRecovery(t *testing.T) {
 
 	RegisterWorkflow(dbosCtx, recoveryWorkflow)
 
+	blockingStart := NewEvent()
+	blockingEvent := NewEvent()
+	blockingWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
+			blockingStart.Set()
+			blockingEvent.Wait()
+			return input, nil
+		})
+	}
+	RegisterWorkflow(dbosCtx, blockingWorkflow, WithWorkflowName("blocking-recovery-workflow"))
+
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
 
@@ -2767,6 +2778,39 @@ func TestWorkflowRecovery(t *testing.T) {
 			require.True(t, ok, "workflow %d not found in list result", i)
 			require.Equal(t, 2, wf.Attempts, "workflow %d should have 2 attempts after recovery", i)
 		}
+	})
+
+	// Recovering a workflow that is actively running on this executor must not
+	// fence out the live run: recovery skips launching (already active locally)
+	// and must leave owner_xid untouched so the run can record its outcome.
+	t.Run("RecoverWhileRunning", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, blockingWorkflow, "hello", WithWorkflowID("recover-while-running"))
+		require.NoError(t, err, "failed to start blocking workflow")
+		blockingStart.Wait()
+
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		var recoveredHandle WorkflowHandle[any]
+		for _, h := range recoveredHandles {
+			if h.GetWorkflowID() == handle.GetWorkflowID() {
+				recoveredHandle = h
+			}
+		}
+		require.NotNil(t, recoveredHandle, "expected a handle for the running workflow")
+
+		blockingEvent.Set()
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "live run should complete despite recovery dispatch")
+		require.Equal(t, "hello", result)
+
+		recoveredResult, err := recoveredHandle.GetResult()
+		require.NoError(t, err, "recovered handle should observe the run's outcome")
+		require.Equal(t, "hello", recoveredResult)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusSuccess, status.Status)
 	})
 }
 

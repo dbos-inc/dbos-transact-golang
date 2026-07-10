@@ -930,6 +930,7 @@ type insertWorkflowStatusDBInput struct {
 	tx                Tx
 	ownerXID          *string
 	incrementAttempts bool
+	claimOwnership    bool
 }
 
 func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error) {
@@ -1048,7 +1049,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
                 ELSE EXCLUDED.executor_id
             END,
             owner_xid = CASE
-                WHEN $30 > 0 THEN EXCLUDED.owner_xid
+                WHEN $31 > 0 THEN EXCLUDED.owner_xid
                 ELSE workflow_status.owner_xid
             END
         RETURNING recovery_attempts, status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema))
@@ -1065,12 +1066,13 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		return nil, fmt.Errorf("failed to marshal the authenticated roles: %w", err)
 	}
 
-	// recoveryIncrement also gates the owner_xid re-claim: dequeue/recovery
-	// dispatches take ownership of the row, fencing a superseded run's
-	// outcome write (see updateWorkflowOutcome).
 	recoveryIncrement := 0
 	if input.incrementAttempts {
 		recoveryIncrement = 1
+	}
+	ownershipClaim := 0
+	if input.claimOwnership {
+		ownershipClaim = 1
 	}
 	err = input.tx.QueryRow(ctx, query,
 		input.status.ID,
@@ -1103,6 +1105,7 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		WorkflowStatusEnqueued,
 		WorkflowStatusDelayed,
 		recoveryIncrement,
+		ownershipClaim,
 	).Scan(
 		&result.attempts,
 		&result.status,
