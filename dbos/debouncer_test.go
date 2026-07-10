@@ -272,13 +272,9 @@ func TestDebouncer(t *testing.T) {
 		require.NoError(t, err, "failed to find debouncer workflow in operation_outputs")
 		require.NotEmpty(t, debouncerWorkflowID, "debouncer workflow ID should not be empty")
 
-		err = dbosCtxInstance.systemDB.updateWorkflowOutcome(context.Background(), updateWorkflowOutcomeDBInput{
-			workflowID: debouncerWorkflowID,
-			status:     WorkflowStatusPending,
-			output:     nil,
-			tx:         nil,
-		})
-		require.NoError(t, err, "failed to update workflow status to PENDING")
+		// updateWorkflowOutcome refuses to overwrite terminal rows, so reset the
+		// completed debouncer workflow with the raw-SQL test helper instead.
+		setWorkflowStatusPending(t, dbosCtx, debouncerWorkflowID)
 
 		cleared, err := dbosCtxInstance.systemDB.clearQueueAssignment(context.Background(), debouncerWorkflowID)
 		require.NoError(t, err, "failed to clear queue assignment")

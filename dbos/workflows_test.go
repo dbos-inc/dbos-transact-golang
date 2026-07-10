@@ -5772,10 +5772,14 @@ func TestWorkflowCancel(t *testing.T) {
 		// Signal the event so the workflow can move on to Recv()
 		blockingEventNoError.Set()
 
-		// Check the return values of the workflow
-		// Because this is a direct handle it'll not return an error
+		// The workflow swallowed the cancellation and returned success, but the
+		// outcome gate detected the CANCELLED row and propagates the cancellation
+		// to the caller instead of reporting success.
 		result, err := handle.GetResult()
-		require.NoError(t, err, "expected no error from direct handle")
+		require.Error(t, err, "expected cancellation error from direct handle")
+		var directErr *DBOSError
+		require.ErrorAs(t, err, &directErr, "expected error to be of type *DBOSError, got %T", err)
+		assert.Equal(t, WorkflowCancelled, directErr.Code, "expected WorkflowCancelled error code, got: %v", directErr.Code)
 		assert.Equal(t, "", result, "expected empty result from cancelled workflow")
 
 		// Now use a polling handle to get result -- observe the error

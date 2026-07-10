@@ -1551,8 +1551,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 	}
 	if rowsAffected == 0 {
 		// The guarded UPDATE matched no rows: the workflow is already terminal. Re-read
-		// the status (only on this rare no-op path) and, if it is CANCELLED, report it
-		// so the caller does not complete a cancelled workflow.
+		// the status (only on this rare no-op path) and, if it is CANCELLED, report it.
 		statusQuery := s.renderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
 		var currentStatus WorkflowStatusType
 		if err := runner.QueryRow(ctx, statusQuery, input.workflowID).Scan(&currentStatus); err != nil {

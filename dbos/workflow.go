@@ -323,8 +323,8 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			return *new(R), newWorkflowCancelledError(workflowState.workflowID, outcome.err)
 		}
 		// A cancelled child is a terminal outcome for the awaiting parent: checkpoint
-		// it like any other child error so replay is deterministic, matching the
-		// other SDKs. Resuming the child later does not change what the parent saw.
+		// it like any other child error so replay is deterministic.
+		// Resuming the child later does not change what the parent saw.
 		if outcome.cancelled {
 			decodedResult = *new(R)
 			outcome.err = newAwaitedWorkflowCancelledError(h.workflowID)
@@ -1691,7 +1691,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			}
 			// Remove from the active set before the outcome becomes durable: once it is
 			// visible, a resume→dequeue can re-dispatch this workflow to this executor,
-			// and a stale entry would make it skip the run, stranding the row PENDING.
+			// marking it PENDING. But a stale activeID entry would prevent the workflow from running.
 			removeActive()
 			recordErr := retry(c, func() error {
 				return c.systemDB.updateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
