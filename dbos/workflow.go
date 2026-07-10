@@ -1699,6 +1699,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 					status:     status,
 					errStr:     serializedErr,
 					output:     encodedOutput,
+					ownerXID:   insertStatusResult.ownerXID,
 				})
 			}, withRetrierLogger(c.logger))
 			if recordErr != nil {

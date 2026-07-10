@@ -8756,8 +8756,8 @@ func TestWorkflowAttributes(t *testing.T) {
 			assert.Nil(t, s.Attributes)
 		}
 	})
-  
-  t.Run("Update", func(t *testing.T) {
+
+	t.Run("Update", func(t *testing.T) {
 		wfid := uuid.NewString()
 		handle, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 1, WithWorkflowID(wfid), WithWorkflowAttributes(map[string]any{"customer": "acme-upd", "tier": 1}))
 		require.NoError(t, err)
@@ -8789,7 +8789,7 @@ func TestWorkflowAttributes(t *testing.T) {
 		var dbosErr *DBOSError
 		require.ErrorAs(t, err, &dbosErr)
 		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
-  })
+	})
 }
 
 func TestFork(t *testing.T) {
@@ -9217,4 +9217,210 @@ func TestFork(t *testing.T) {
 			require.Equal(t, forksBefore, listForks())
 		})
 	})
+}
+
+// parkingPool wraps the system database pool and parks the first
+// updateWorkflowOutcome Exec for the target workflow until released,
+// signaling staleDone once that write has been attempted.
+type parkingPool struct {
+	Pool
+	target    string
+	parked    *Event
+	release   chan struct{}
+	staleDone chan struct{}
+	first     atomic.Bool
+}
+
+func (p *parkingPool) Exec(ctx context.Context, query string, args ...any) (Result, error) {
+	isOutcomeWrite := strings.Contains(query, "output = $2") && strings.Contains(query, "completed_at = $4")
+	if isOutcomeWrite && len(args) >= 5 && args[4] == any(p.target) && p.first.CompareAndSwap(false, true) {
+		p.parked.Set()
+		<-p.release
+		res, err := p.Pool.Exec(ctx, query, args...)
+		close(p.staleDone)
+		return res, err
+	}
+	return p.Pool.Exec(ctx, query, args...)
+}
+
+// A cancelled run's outcome write landing after the workflow has been resumed
+// and re-dispatched to another executor must not clobber the new run's PENDING
+// row. Two DBOS contexts share the database: executor A runs and cancels the
+// workflow, parking its outcome write; the workflow is resumed onto a queue
+// only executor B listens to, so the second run is dequeued cross-executor
+// while A's stale write is still in flight.
+func TestStaleOutcomeWriteAfterResume(t *testing.T) {
+	ctxA := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	ctxB := setupDBOS(t, setupDBOSOptions{dropDB: false})
+
+	wfID := uuid.NewString()
+
+	var runs atomic.Int64
+	firstEntered := NewEvent()
+	firstRelease := make(chan struct{})
+	secondEntered := NewEvent()
+	secondRelease := make(chan struct{})
+	releaseFirst := sync.OnceFunc(func() { close(firstRelease) })
+	releaseSecond := sync.OnceFunc(func() { close(secondRelease) })
+	t.Cleanup(releaseFirst)
+	t.Cleanup(releaseSecond)
+
+	wf := func(ctx DBOSContext, _ string) (string, error) {
+		if runs.Add(1) == 1 {
+			firstEntered.Set()
+			<-firstRelease
+			return "", ctx.Err() // interrupted by the cancellation
+		}
+		secondEntered.Set()
+		<-secondRelease
+		return "completed", nil
+	}
+	RegisterWorkflow(ctxA, wf, WithWorkflowName("stale-outcome-write-workflow"))
+	RegisterWorkflow(ctxB, wf, WithWorkflowName("stale-outcome-write-workflow"))
+
+	const resumeQueue = "stale-outcome-resume-queue"
+	_, err := RegisterQueue(ctxB, resumeQueue)
+	require.NoError(t, err, "failed to register resume queue")
+	// Restrict A to the internal queue so only B can dequeue the resumed run.
+	ListenQueues(ctxA, WorkflowQueue{Name: "stale-outcome-unused-queue"})
+
+	sysdb := ctxA.(*dbosContext).systemDB.(*sysDB)
+	park := &parkingPool{
+		Pool:      sysdb.pool,
+		target:    wfID,
+		parked:    NewEvent(),
+		release:   make(chan struct{}),
+		staleDone: make(chan struct{}),
+	}
+	sysdb.pool = park
+	releaseStale := sync.OnceFunc(func() { close(park.release) })
+	t.Cleanup(releaseStale)
+
+	require.NoError(t, Launch(ctxA), "failed to launch executor A")
+	require.NoError(t, Launch(ctxB), "failed to launch executor B")
+
+	handle, err := RunWorkflow(ctxA, wf, "", WithWorkflowID(wfID))
+	require.NoError(t, err, "failed to start workflow")
+	firstEntered.Wait()
+
+	// Durably cancel while the first run is executing.
+	require.NoError(t, CancelWorkflow(ctxA, wfID), "failed to cancel workflow")
+
+	// Let the first run return: its outcome write parks before executing.
+	releaseFirst()
+	park.parked.Wait()
+
+	// The durable status is CANCELLED (written by CancelWorkflow, not parked).
+	status, err := handle.GetStatus()
+	require.NoError(t, err, "failed to get workflow status")
+	require.Equal(t, WorkflowStatusCancelled, status.Status, "expected CANCELLED before resume")
+
+	// Resume onto B's queue: B dequeues and starts the second run while A's
+	// stale outcome write is still in flight.
+	resumedHandle, err := ResumeWorkflow[string](ctxB, wfID, WithResumeQueue(resumeQueue))
+	require.NoError(t, err, "failed to resume workflow")
+	secondEntered.Wait()
+
+	// Land the stale write while the second run is executing (row is PENDING),
+	// then let the second run finish.
+	releaseStale()
+	<-park.staleDone
+	releaseSecond()
+
+	result, err := resumedHandle.GetResult()
+	require.NoError(t, err, "the stale outcome write must not clobber the resumed run")
+	require.Equal(t, "completed", result)
+	require.EqualValues(t, 2, runs.Load(), "the resume must re-dispatch the workflow")
+
+	status, err = resumedHandle.GetStatus()
+	require.NoError(t, err, "failed to get workflow status")
+	require.Equal(t, WorkflowStatusSuccess, status.Status, "the resumed run's outcome must survive")
+}
+
+// A cancelled run's stale outcome write landing while the resumed row is still
+// ENQUEUED (resumed but not yet dequeued) must not flip it back to a terminal
+// state: the row would never be dequeued and the resume would be lost. The
+// resume targets a queue this process does not listen to yet, holding the row
+// in ENQUEUED until the stale write has been refused.
+func TestStaleOutcomeWriteOverEnqueued(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	wfID := uuid.NewString()
+
+	var runs atomic.Int64
+	firstEntered := NewEvent()
+	firstRelease := make(chan struct{})
+	releaseFirst := sync.OnceFunc(func() { close(firstRelease) })
+	t.Cleanup(releaseFirst)
+
+	wf := func(ctx DBOSContext, _ string) (string, error) {
+		if runs.Add(1) == 1 {
+			firstEntered.Set()
+			<-firstRelease
+			return "", ctx.Err() // interrupted by the cancellation
+		}
+		return "completed", nil
+	}
+	RegisterWorkflow(dbosCtx, wf, WithWorkflowName("stale-over-enqueued-workflow"))
+
+	const parkedQueue = "stale-outcome-parked-queue"
+	_, err := RegisterQueue(dbosCtx, parkedQueue)
+	require.NoError(t, err, "failed to register queue")
+	// Don't listen to the parked queue yet: the resumed row must stay ENQUEUED
+	// until the stale write has landed.
+	ListenQueues(dbosCtx, WorkflowQueue{Name: "stale-outcome-unused-queue"})
+
+	sysdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+	park := &parkingPool{
+		Pool:      sysdb.pool,
+		target:    wfID,
+		parked:    NewEvent(),
+		release:   make(chan struct{}),
+		staleDone: make(chan struct{}),
+	}
+	sysdb.pool = park
+	releaseStale := sync.OnceFunc(func() { close(park.release) })
+	t.Cleanup(releaseStale)
+
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS instance")
+
+	handle, err := RunWorkflow(dbosCtx, wf, "", WithWorkflowID(wfID))
+	require.NoError(t, err, "failed to start workflow")
+	firstEntered.Wait()
+
+	// Durably cancel while the first run is executing.
+	require.NoError(t, CancelWorkflow(dbosCtx, wfID), "failed to cancel workflow")
+
+	// Let the first run return: its outcome write parks before executing.
+	releaseFirst()
+	park.parked.Wait()
+
+	// The durable status is CANCELLED (written by CancelWorkflow, not parked).
+	status, err := handle.GetStatus()
+	require.NoError(t, err, "failed to get workflow status")
+	require.Equal(t, WorkflowStatusCancelled, status.Status, "expected CANCELLED before resume")
+
+	// Resume onto the unlistened queue: the row is ENQUEUED and stays there.
+	resumedHandle, err := ResumeWorkflow[string](dbosCtx, wfID, WithResumeQueue(parkedQueue))
+	require.NoError(t, err, "failed to resume workflow")
+
+	// Land the stale write on the ENQUEUED row: it must be refused.
+	releaseStale()
+	<-park.staleDone
+
+	status, err = resumedHandle.GetStatus()
+	require.NoError(t, err, "failed to get workflow status")
+	require.Equal(t, WorkflowStatusEnqueued, status.Status, "the stale outcome write must not flip the resumed row terminal")
+
+	// Start listening to the queue: the workflow is dequeued and completes.
+	ListenQueues(dbosCtx, WorkflowQueue{Name: parkedQueue})
+
+	result, err := resumedHandle.GetResult()
+	require.NoError(t, err, "failed to get resumed workflow result")
+	require.Equal(t, "completed", result)
+	require.EqualValues(t, 2, runs.Load(), "the resume must re-dispatch the workflow")
+
+	status, err = resumedHandle.GetStatus()
+	require.NoError(t, err, "failed to get workflow status")
+	require.Equal(t, WorkflowStatusSuccess, status.Status, "the resumed run's outcome must survive")
 }

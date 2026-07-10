@@ -1046,6 +1046,10 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
             executor_id = CASE
                 WHEN EXCLUDED.status IN ($28, $29) THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
+            END,
+            owner_xid = CASE
+                WHEN $30 > 0 THEN EXCLUDED.owner_xid
+                ELSE workflow_status.owner_xid
             END
         RETURNING recovery_attempts, status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema))
 
@@ -1061,6 +1065,9 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		return nil, fmt.Errorf("failed to marshal the authenticated roles: %w", err)
 	}
 
+	// recoveryIncrement also gates the owner_xid re-claim: dequeue/recovery
+	// dispatches take ownership of the row, fencing a superseded run's
+	// outcome write (see updateWorkflowOutcome).
 	recoveryIncrement := 0
 	if input.incrementAttempts {
 		recoveryIncrement = 1
@@ -1522,18 +1529,20 @@ type updateWorkflowOutcomeDBInput struct {
 	status     WorkflowStatusType
 	output     *string
 	errStr     string
+	ownerXID   string
 	tx         Tx
 }
 
 // updateWorkflowOutcome records a workflow's terminal outcome, but never overwrites a
-// row that is already terminal. If the write is refused because the workflow is
-// CANCELLED (e.g. it was cancelled during its final step), returns a WorkflowCancelled
+// row that is already terminal, a row that has been re-enqueued, or a row
+// whose owner_xid no longer matches this run's claim (the workflow was resumed or
+// re-dispatched to another executor/goroutine). If the write is refused for any reason other
+// than the workflow having completed (SUCCESS/ERROR), returns a WorkflowCancelled
 // error so the caller ends the workflow as cancelled rather than completing it.
-// This mirrors update_workflow_outcome / #recordWorkflowOutcome in the other SDKs.
 func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error {
 	query := s.renderSQL(`UPDATE %sworkflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, completed_at = $4, deduplication_id = NULL
-			  WHERE workflow_uuid = $5 AND status NOT IN ($6, $7, $8)`, s.dialect.SchemaPrefix(s.schema))
+			  WHERE workflow_uuid = $5 AND status NOT IN ($6, $7, $8, $9) AND owner_xid = $10`, s.dialect.SchemaPrefix(s.schema))
 
 	var runner Querier = s.pool
 	if input.tx != nil {
@@ -1541,7 +1550,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 	}
 
 	// input.output is already a *string from the database layer
-	res, err := runner.Exec(ctx, query, input.status, input.output, input.errStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
+	res, err := runner.Exec(ctx, query, input.status, input.output, input.errStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError, WorkflowStatusEnqueued, input.ownerXID)
 	if err != nil {
 		return fmt.Errorf("failed to update workflow status: %w", err)
 	}
@@ -1550,8 +1559,10 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 		return fmt.Errorf("failed to check workflow status update: %w", err)
 	}
 	if rowsAffected == 0 {
-		// The guarded UPDATE matched no rows: the workflow is already terminal. Re-read
-		// the status (only on this rare no-op path) and, if it is CANCELLED, report it.
+		// The guarded UPDATE matched no rows. Re-read the status (only on this rare
+		// no-op path): if the workflow completed (SUCCESS/ERROR) the refusal is a
+		// no-op; otherwise the run was cancelled or superseded and must end as
+		// cancelled so it does not report a completion that was never recorded.
 		statusQuery := s.renderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
 		var currentStatus WorkflowStatusType
 		if err := runner.QueryRow(ctx, statusQuery, input.workflowID).Scan(&currentStatus); err != nil {
@@ -1560,7 +1571,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 			}
 			return fmt.Errorf("failed to read workflow status after refused outcome update: %w", err)
 		}
-		if currentStatus == WorkflowStatusCancelled {
+		if currentStatus != WorkflowStatusSuccess && currentStatus != WorkflowStatusError {
 			return newWorkflowCancelledError(input.workflowID, nil)
 		}
 	}
@@ -1983,6 +1994,9 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 		encodedIDs,
 		WorkflowStatusSuccess,
 		WorkflowStatusError,
+		// Rotate owner_xid so the superseded run's outcome write no longer
+		// matches the row and cannot clobber the resume.
+		uuid.NewString(),
 	}
 
 	// Dialects without data-modifying CTEs (sqlite) split the pg
@@ -1992,7 +2006,8 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 		updateQuery := s.renderSQL(`UPDATE %sworkflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
 			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
-			    started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL
+			    started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL,
+			    owner_xid = $8
 			WHERE %s AND status NOT IN ($6, $7)`, schemaPrefix, anyClause)
 		selectAnyClause := dialectAnyClause(s.dialect, "workflow_uuid", 1)
 		selectQuery := s.renderSQL(`SELECT workflow_uuid FROM %sworkflow_status WHERE %s`, schemaPrefix, selectAnyClause)
@@ -2050,7 +2065,8 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 			UPDATE %sworkflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
 			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
-			    started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL
+			    started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL,
+			    owner_xid = $8
 			WHERE %s AND status NOT IN ($6, $7)
 			RETURNING workflow_uuid
 		)
