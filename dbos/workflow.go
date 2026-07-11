@@ -73,6 +73,7 @@ type WorkflowStatus struct {
 // workflowState holds the runtime state for a workflow execution
 type workflowState struct {
 	workflowID          string
+	ownerXID            string
 	stepID              int
 	isWithinStep        bool
 	isWithinTransaction bool
@@ -1561,6 +1562,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID:         workflowID,
+		ownerXID:           insertStatusResult.ownerXID,
 		stepID:             -1, // Steps are O-indexed
 		isPortableWorkflow: params.isPortableWorkflow,
 		authenticatedUser:  params.AuthenticatedUser,
@@ -1942,6 +1944,7 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 	}
 	stepState := workflowState{
 		workflowID:   wfState.workflowID,
+		ownerXID:     wfState.ownerXID,
 		stepID:       stepID,
 		isWithinStep: true,
 		workflowCtx:  wfState.workflowCtx,
@@ -2157,6 +2160,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	}
 	dbInput := recordOperationResultDBInput{
 		workflowID:    stepState.workflowID,
+		ownerXID:      stepState.ownerXID,
 		stepName:      stepOpts.stepName,
 		stepID:        stepState.stepID,
 		errStr:        serializedStepErr,
@@ -2331,6 +2335,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 		}
 		dbInput := recordOperationResultDBInput{
 			workflowID:    stepState.workflowID,
+			ownerXID:      stepState.ownerXID,
 			stepName:      stepOpts.stepName,
 			stepID:        stepState.stepID,
 			errStr:        serializedTxnErr,

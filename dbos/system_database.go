@@ -2488,6 +2488,7 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, poll
 type recordOperationResultDBInput struct {
 	workflowID      string
 	childWorkflowID string
+	ownerXID        string
 	stepID          int
 	stepName        string
 	output          *string
@@ -2514,14 +2515,32 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		args = append(args, input.childWorkflowID)
 	}
 
-	query := s.renderSQL(`INSERT INTO %soperation_outputs (%s) VALUES (%s)`,
-		s.dialect.SchemaPrefix(s.schema), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
+	// When the caller carries an ownership claim, only record the step if this run
+	// still owns the workflow. A concurrent recovery/dequeue rotates owner_xid; a run
+	// that has since been superseded must not checkpoint (and, in a transaction, must
+	// roll back its consumeMessage) so the current owner takes over. Fold the guard
+	// into the INSERT so a non-owner never records, even on the non-transactional path
+	// where there is nothing to roll back. owner_xid = $1 reuses the workflow_uuid arg.
+	var query string
+	if input.ownerXID != "" {
+		argCounter++
+		args = append(args, input.ownerXID)
+		query = s.renderSQL(`INSERT INTO %soperation_outputs (%s)
+			SELECT %s
+			WHERE EXISTS (SELECT 1 FROM %sworkflow_status WHERE workflow_uuid = $1 AND owner_xid = $%d)`,
+			s.dialect.SchemaPrefix(s.schema), strings.Join(columns, ", "), strings.Join(placeholders, ", "),
+			s.dialect.SchemaPrefix(s.schema), argCounter)
+	} else {
+		query = s.renderSQL(`INSERT INTO %soperation_outputs (%s) VALUES (%s)`,
+			s.dialect.SchemaPrefix(s.schema), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
+	}
 
+	var res Result
 	var err error
 	if input.tx != nil {
-		_, err = input.tx.Exec(ctx, query, args...)
+		res, err = input.tx.Exec(ctx, query, args...)
 	} else {
-		_, err = s.pool.Exec(ctx, query, args...)
+		res, err = s.pool.Exec(ctx, query, args...)
 	}
 
 	if err != nil {
@@ -2529,6 +2548,18 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 			return newWorkflowConflictIDError(input.workflowID)
 		}
 		return err
+	}
+
+	// The ownership guard matched no rows: this run won the record race but has been
+	// superseded. Signal a conflict so the caller yields to the current owner.
+	if input.ownerXID != "" {
+		rowsAffected, raErr := res.RowsAffected()
+		if raErr != nil {
+			return fmt.Errorf("failed to check operation result insert: %w", raErr)
+		}
+		if rowsAffected == 0 {
+			return newWorkflowConflictIDError(input.workflowID)
+		}
 	}
 
 	return nil
