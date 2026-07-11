@@ -1525,15 +1525,14 @@ type updateWorkflowOutcomeDBInput struct {
 	tx         Tx
 }
 
-// updateWorkflowOutcome records a workflow's terminal outcome, but never overwrites a
-// row that is already terminal. If the write is refused because the workflow is
-// CANCELLED (e.g. it was cancelled during its final step), returns a WorkflowCancelled
-// error so the caller ends the workflow as cancelled rather than completing it.
-// This mirrors update_workflow_outcome / #recordWorkflowOutcome in the other SDKs.
+// updateWorkflowOutcome records a workflow's terminal outcome. Only a PENDING row can
+// receive an outcome: any other status means the run was superseded (already terminal,
+// re-enqueued by a resume, ...). If the write is refused for any reason other than the workflow having
+// completed (SUCCESS/ERROR), returns a WorkflowCancelled error.
 func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error {
 	query := s.renderSQL(`UPDATE %sworkflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, completed_at = $4, deduplication_id = NULL
-			  WHERE workflow_uuid = $5 AND status NOT IN ($6, $7, $8)`, s.dialect.SchemaPrefix(s.schema))
+			  WHERE workflow_uuid = $5 AND status = $6`, s.dialect.SchemaPrefix(s.schema))
 
 	var runner Querier = s.pool
 	if input.tx != nil {
@@ -1541,7 +1540,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 	}
 
 	// input.output is already a *string from the database layer
-	res, err := runner.Exec(ctx, query, input.status, input.output, input.errStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError)
+	res, err := runner.Exec(ctx, query, input.status, input.output, input.errStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusPending)
 	if err != nil {
 		return fmt.Errorf("failed to update workflow status: %w", err)
 	}
@@ -1550,8 +1549,10 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 		return fmt.Errorf("failed to check workflow status update: %w", err)
 	}
 	if rowsAffected == 0 {
-		// The guarded UPDATE matched no rows: the workflow is already terminal. Re-read
-		// the status (only on this rare no-op path) and, if it is CANCELLED, report it.
+		// The guarded UPDATE matched no rows. Re-read the status (only on this rare
+		// no-op path): if the workflow completed (SUCCESS/ERROR) the refusal is a
+		// no-op; otherwise the run was cancelled or superseded and is reported as
+		// cancelled to the caller.
 		statusQuery := s.renderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
 		var currentStatus WorkflowStatusType
 		if err := runner.QueryRow(ctx, statusQuery, input.workflowID).Scan(&currentStatus); err != nil {
@@ -1560,7 +1561,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 			}
 			return fmt.Errorf("failed to read workflow status after refused outcome update: %w", err)
 		}
-		if currentStatus == WorkflowStatusCancelled {
+		if currentStatus != WorkflowStatusSuccess && currentStatus != WorkflowStatusError {
 			return newWorkflowCancelledError(input.workflowID, nil)
 		}
 	}
