@@ -1629,8 +1629,12 @@ func TestSelect(t *testing.T) {
 
 	selectBlockStartEvent := NewEvent()
 	selectBlockEvent := NewEvent()
+	selectGoStepStarted := NewEvent()
 	selectCancelWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
 		ch1, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+			// Signal the step body has started (its checkpoint lookup passed), so
+			// the test can cancel without racing the durable cancel against it.
+			selectGoStepStarted.Set()
 			selectBlockEvent.Wait()
 			return "result", nil
 		})
@@ -1708,6 +1712,12 @@ func TestSelect(t *testing.T) {
 		// Wait for the workflow to reach the Select call (step has started and set the event)
 		selectBlockStartEvent.Wait()
 		selectBlockStartEvent.Clear()
+		// Wait for the Go step body to start: once it runs, its outcome is delivered
+		// and checkpointed even though the workflow is cancelled. Cancelling earlier
+		// would race the durable cancel against the step's checkpoint lookup, which
+		// can refuse to start the step at all (a valid outcome, but not this test's).
+		selectGoStepStarted.Wait()
+		selectGoStepStarted.Clear()
 
 		// Cancel the context manually
 		cancelFunc(nil)
@@ -1717,8 +1727,11 @@ func TestSelect(t *testing.T) {
 		require.Error(t, err, "expected error from cancelled workflow")
 		assert.Equal(t, "", result, "expected zero value string when cancelled")
 
-		// Verify the error is a cancellation error
-		assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled error, got: %v", err)
+		// Verify the error is a cancellation error. The durable cancel lands in the
+		// DB as soon as the context is cancelled, so Select is interrupted either
+		// mid-wait (wrapping context.Canceled) or at its step boundary by observing
+		// the CANCELLED status; both wrap WorkflowCancelled.
+		assert.True(t, errors.Is(err, &DBOSError{Code: WorkflowCancelled}), "expected WorkflowCancelled error, got: %v", err)
 
 		// Set the event to unblock the goroutine (cleanup)
 		selectBlockEvent.Set()
