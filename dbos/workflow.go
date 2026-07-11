@@ -1451,10 +1451,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		defer tx.Rollback(uncancellableCtx) // Rollback if not committed
 
 		// Insert workflow status with transaction
-		var loaded bool
-		if c.activeWorkflowIDs != nil {
-			_, loaded = c.activeWorkflowIDs.Load(workflowID)
-		}
 		ownerXID := uuid.New().String()
 		insertInput := insertWorkflowStatusDBInput{
 			status:            workflowStatus,
@@ -1490,6 +1486,11 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
 				return newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
 			}
+		}
+
+		var loaded bool
+		if c.activeWorkflowIDs != nil {
+			_, loaded = c.activeWorkflowIDs.Load(workflowID)
 		}
 
 		shouldSkip :=
@@ -1647,8 +1648,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			close(outcomeChan)
 			return
 		} else {
-			// The cancel path (cancelWorkflows) is the sole writer of CANCELLED: a
-			// cancelled run skips updateWorkflowOutcome entirely so it can never
+			// A cancelled run skips updateWorkflowOutcome entirely so it can never
 			// clobber the row (e.g., ENQUEUED written by a concurrent resume).
 			if !stopFunc() {
 				// AfterFunc fired => context is cancelled. Wait for the DB cancel to finish.
@@ -1660,8 +1660,8 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				return
 			}
 			if workflowCtx.Err() != nil && isCancellationError(err) {
-				// We stopped the AfterFunc but lost the race: the context was already
-				// cancelled when the workflow returned. Run the durable cancel ourselves.
+				// We stopped the AfterFunc but the context was already cancelled
+				// so we need to run the durable cancel ourselves.
 				workflowCancelFunction()
 				removeActive()
 				outcomeChan <- workflowOutcome[any]{result: result, err: err, cancelled: true}
