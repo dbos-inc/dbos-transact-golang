@@ -73,7 +73,6 @@ type WorkflowStatus struct {
 // workflowState holds the runtime state for a workflow execution
 type workflowState struct {
 	workflowID          string
-	ownerXID            string
 	stepID              int
 	isWithinStep        bool
 	isWithinTransaction bool
@@ -1463,8 +1462,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			tx:                tx,
 			ownerXID:          &ownerXID,
 			incrementAttempts: params.isDequeue || params.isRecovery,
-			// Only claim ownership if this dispatch will launch the workflow:
-			claimOwnership: (params.isDequeue || params.isRecovery) && !loaded,
 		}
 		insertStatusResult, err = c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
@@ -1562,7 +1559,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID:         workflowID,
-		ownerXID:           insertStatusResult.ownerXID,
 		stepID:             -1, // Steps are O-indexed
 		isPortableWorkflow: params.isPortableWorkflow,
 		authenticatedUser:  params.AuthenticatedUser,
@@ -1580,24 +1576,24 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		durableDeadline = insertStatusResult.workflowDeadline
 	}
 
-	var stopFunc func() bool
-	cancelFuncCompleted := make(chan struct{})
 	if !durableDeadline.IsZero() {
 		workflowCtx, _ = WithTimeout(workflowCtx, time.Until(durableDeadline))
-		// Register a cancel function that cancels the workflow in the DB as soon as the context is cancelled
-		workflowCancelFunction := func() {
-			c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
-			err := retry(c, func() error {
-				_, err := c.systemDB.cancelWorkflows(uncancellableCtx, cancelWorkflowsDBInput{workflowIDs: []string{workflowID}})
-				return err
-			}, withRetrierLogger(c.logger))
-			if err != nil {
-				c.logger.Error("Failed to cancel workflow", "error", err)
-			}
-			close(cancelFuncCompleted)
-		}
-		stopFunc = context.AfterFunc(workflowCtx, workflowCancelFunction)
 	}
+	// Register a cancel function that durably cancels the workflow in the DB as soon as
+	// the context is cancelled (durable deadline, user cancel, or parent cancellation).
+	cancelFuncCompleted := make(chan struct{})
+	workflowCancelFunction := func() {
+		c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
+		err := retry(c, func() error {
+			_, err := c.systemDB.cancelWorkflows(uncancellableCtx, cancelWorkflowsDBInput{workflowIDs: []string{workflowID}})
+			return err
+		}, withRetrierLogger(c.logger))
+		if err != nil {
+			c.logger.Error("Failed to cancel workflow", "error", err)
+		}
+		close(cancelFuncCompleted)
+	}
+	stopFunc := context.AfterFunc(workflowCtx, workflowCancelFunction)
 	wfState.workflowCtx = workflowCtx
 
 	// Run the function in a goroutine
@@ -1626,7 +1622,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 		var result any
 		var err error
-		cancelled := false
 
 		result, err = fn(workflowCtx, input)
 
@@ -1652,32 +1647,40 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			close(outcomeChan)
 			return
 		} else {
-			status := WorkflowStatusSuccess
+			// The cancel path (cancelWorkflows) is the sole writer of CANCELLED: a
+			// cancelled run skips updateWorkflowOutcome entirely so it can never
+			// clobber the row (e.g., ENQUEUED written by a concurrent resume).
+			if !stopFunc() {
+				// AfterFunc fired => context is cancelled. Wait for the DB cancel to finish.
+				c.logger.Info("Workflow was cancelled. Waiting for cancel function to complete", "workflow_id", workflowID)
+				<-cancelFuncCompleted
+				removeActive()
+				outcomeChan <- workflowOutcome[any]{result: result, err: err, cancelled: true}
+				close(outcomeChan)
+				return
+			}
+			if workflowCtx.Err() != nil && isCancellationError(err) {
+				// We stopped the AfterFunc but lost the race: the context was already
+				// cancelled when the workflow returned. Run the durable cancel ourselves.
+				workflowCancelFunction()
+				removeActive()
+				outcomeChan <- workflowOutcome[any]{result: result, err: err, cancelled: true}
+				close(outcomeChan)
+				return
+			}
+			if errors.Is(err, &DBOSError{Code: WorkflowCancelled}) {
+				// The workflow observed its own cancellation in the DB (external
+				// cancel): the row is already CANCELLED. Skip the outcome write.
+				removeActive()
+				outcomeChan <- workflowOutcome[any]{result: result, err: err, cancelled: true}
+				close(outcomeChan)
+				return
+			}
 
-			// If an error occurred, set the status to error
+			status := WorkflowStatusSuccess
 			if err != nil {
 				status = WorkflowStatusError
 			}
-
-			// If the afterFunc has started, the workflow was cancelled and the status should be set to cancelled
-			// Also handle the race between the AfterFunc firing and the workflow returning with a context cancellation.
-			if stopFunc != nil {
-				if !stopFunc() {
-					// AfterFunc fired => context is cancelled. Wait for the DB cancel to finish.
-					c.logger.Info("Workflow was cancelled. Waiting for cancel function to complete", "workflow_id", workflowID)
-					<-cancelFuncCompleted
-					status = WorkflowStatusCancelled
-				} else if workflowCtx.Err() != nil {
-					// We stopped the AfterFunc, but lost the race: the context was already
-					// cancelled by the time the workflow returned.
-					status = WorkflowStatusCancelled
-				}
-			} else if workflowCtx.Err() != nil && isCancellationError(err) {
-				// No durable deadline (no AfterFunc): the workflow was interrupted by
-				// context cancellation. Mark it CANCELLED, not ERROR, so it can be resumed.
-				status = WorkflowStatusCancelled
-			}
-			cancelled = status == WorkflowStatusCancelled
 
 			// Serialize the output before recording
 			encodedOutput, serErr := resolveEncoder(workflowCtx).Encode(result)
@@ -1702,15 +1705,14 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 					status:     status,
 					errStr:     serializedErr,
 					output:     encodedOutput,
-					ownerXID:   insertStatusResult.ownerXID,
 				})
 			}, withRetrierLogger(c.logger))
 			if recordErr != nil {
-				// The write was refused because the workflow is already durably CANCELLED
-				// (e.g. cancelled during its final step): it must end as cancelled, not
-				// complete. Deliver a cancellation outcome wrapping the workflow's own
-				// error so context.Canceled/DeadlineExceeded still match via errors.Is.
-				// The in-memory result still rides along for direct callers.
+				// The write was refused because the row is already terminal or has been
+				// superseded (cancelled during the final step, or re-enqueued by a
+				// concurrent resume): end as cancelled, not complete. Deliver a
+				// cancellation outcome wrapping the workflow's own error so
+				// context.Canceled/DeadlineExceeded still match via errors.Is.
 				if errors.Is(recordErr, &DBOSError{Code: WorkflowCancelled}) {
 					outcomeChan <- workflowOutcome[any]{result: result, err: newWorkflowCancelledError(workflowID, err), cancelled: true}
 					close(outcomeChan)
@@ -1722,7 +1724,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				return
 			}
 		}
-		outcomeChan <- workflowOutcome[any]{result: result, err: err, cancelled: cancelled}
+		outcomeChan <- workflowOutcome[any]{result: result, err: err}
 		close(outcomeChan)
 	}()
 
@@ -1944,7 +1946,6 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 	}
 	stepState := workflowState{
 		workflowID:   wfState.workflowID,
-		ownerXID:     wfState.ownerXID,
 		stepID:       stepID,
 		isWithinStep: true,
 		workflowCtx:  wfState.workflowCtx,
@@ -2160,7 +2161,6 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	}
 	dbInput := recordOperationResultDBInput{
 		workflowID:    stepState.workflowID,
-		ownerXID:      stepState.ownerXID,
 		stepName:      stepOpts.stepName,
 		stepID:        stepState.stepID,
 		errStr:        serializedStepErr,
@@ -2335,7 +2335,6 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 		}
 		dbInput := recordOperationResultDBInput{
 			workflowID:    stepState.workflowID,
-			ownerXID:      stepState.ownerXID,
 			stepName:      stepOpts.stepName,
 			stepID:        stepState.stepID,
 			errStr:        serializedTxnErr,

@@ -930,7 +930,6 @@ type insertWorkflowStatusDBInput struct {
 	tx                Tx
 	ownerXID          *string
 	incrementAttempts bool
-	claimOwnership    bool
 }
 
 func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowStatusDBInput) (*insertWorkflowResult, error) {
@@ -1047,10 +1046,6 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
             executor_id = CASE
                 WHEN EXCLUDED.status IN ($28, $29) THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
-            END,
-            owner_xid = CASE
-                WHEN $31 > 0 THEN EXCLUDED.owner_xid
-                ELSE workflow_status.owner_xid
             END
         RETURNING recovery_attempts, status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema))
 
@@ -1069,10 +1064,6 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 	recoveryIncrement := 0
 	if input.incrementAttempts {
 		recoveryIncrement = 1
-	}
-	ownershipClaim := 0
-	if input.claimOwnership {
-		ownershipClaim = 1
 	}
 	err = input.tx.QueryRow(ctx, query,
 		input.status.ID,
@@ -1105,7 +1096,6 @@ func (s *sysDB) insertWorkflowStatus(ctx context.Context, input insertWorkflowSt
 		WorkflowStatusEnqueued,
 		WorkflowStatusDelayed,
 		recoveryIncrement,
-		ownershipClaim,
 	).Scan(
 		&result.attempts,
 		&result.status,
@@ -1532,20 +1522,17 @@ type updateWorkflowOutcomeDBInput struct {
 	status     WorkflowStatusType
 	output     *string
 	errStr     string
-	ownerXID   string
 	tx         Tx
 }
 
-// updateWorkflowOutcome records a workflow's terminal outcome, but never overwrites a
-// row that is already terminal, a row that has been re-enqueued, or a row
-// whose owner_xid no longer matches this run's claim (the workflow was resumed or
-// re-dispatched to another executor/goroutine). If the write is refused for any reason other
-// than the workflow having completed (SUCCESS/ERROR), returns a WorkflowCancelled
-// error so the caller ends the workflow as cancelled rather than completing it.
+// updateWorkflowOutcome records a workflow's terminal outcome. Only a PENDING row can
+// receive an outcome: any other status means the run was superseded (already terminal,
+// re-enqueued by a resume, ...). If the write is refused for any reason other than the workflow having
+// completed (SUCCESS/ERROR), returns a WorkflowCancelled error.
 func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowOutcomeDBInput) error {
 	query := s.renderSQL(`UPDATE %sworkflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, completed_at = $4, deduplication_id = NULL
-			  WHERE workflow_uuid = $5 AND status NOT IN ($6, $7, $8, $9) AND owner_xid = $10`, s.dialect.SchemaPrefix(s.schema))
+			  WHERE workflow_uuid = $5 AND status = $6`, s.dialect.SchemaPrefix(s.schema))
 
 	var runner Querier = s.pool
 	if input.tx != nil {
@@ -1553,7 +1540,7 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 	}
 
 	// input.output is already a *string from the database layer
-	res, err := runner.Exec(ctx, query, input.status, input.output, input.errStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusCancelled, WorkflowStatusSuccess, WorkflowStatusError, WorkflowStatusEnqueued, input.ownerXID)
+	res, err := runner.Exec(ctx, query, input.status, input.output, input.errStr, time.Now().UnixMilli(), input.workflowID, WorkflowStatusPending)
 	if err != nil {
 		return fmt.Errorf("failed to update workflow status: %w", err)
 	}
@@ -1564,8 +1551,8 @@ func (s *sysDB) updateWorkflowOutcome(ctx context.Context, input updateWorkflowO
 	if rowsAffected == 0 {
 		// The guarded UPDATE matched no rows. Re-read the status (only on this rare
 		// no-op path): if the workflow completed (SUCCESS/ERROR) the refusal is a
-		// no-op; otherwise the run was cancelled or superseded and must end as
-		// cancelled so it does not report a completion that was never recorded.
+		// no-op; otherwise the run was cancelled or superseded and is reported as
+		// cancelled to the caller.
 		statusQuery := s.renderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
 		var currentStatus WorkflowStatusType
 		if err := runner.QueryRow(ctx, statusQuery, input.workflowID).Scan(&currentStatus); err != nil {
@@ -1997,9 +1984,6 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 		encodedIDs,
 		WorkflowStatusSuccess,
 		WorkflowStatusError,
-		// Rotate owner_xid so the superseded run's outcome write no longer
-		// matches the row and cannot clobber the resume.
-		uuid.NewString(),
 	}
 
 	// Dialects without data-modifying CTEs (sqlite) split the pg
@@ -2009,8 +1993,7 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 		updateQuery := s.renderSQL(`UPDATE %sworkflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
 			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
-			    started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL,
-			    owner_xid = $8
+			    started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL
 			WHERE %s AND status NOT IN ($6, $7)`, schemaPrefix, anyClause)
 		selectAnyClause := dialectAnyClause(s.dialect, "workflow_uuid", 1)
 		selectQuery := s.renderSQL(`SELECT workflow_uuid FROM %sworkflow_status WHERE %s`, schemaPrefix, selectAnyClause)
@@ -2068,8 +2051,7 @@ func (s *sysDB) resumeWorkflows(ctx context.Context, input resumeWorkflowsDBInpu
 			UPDATE %sworkflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
 			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
-			    started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL,
-			    owner_xid = $8
+			    started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL
 			WHERE %s AND status NOT IN ($6, $7)
 			RETURNING workflow_uuid
 		)
@@ -2488,7 +2470,6 @@ func (s *sysDB) awaitWorkflowResult(ctx context.Context, workflowID string, poll
 type recordOperationResultDBInput struct {
 	workflowID      string
 	childWorkflowID string
-	ownerXID        string
 	stepID          int
 	stepName        string
 	output          *string
@@ -2515,32 +2496,14 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 		args = append(args, input.childWorkflowID)
 	}
 
-	// When the caller carries an ownership claim, only record the step if this run
-	// still owns the workflow. A concurrent recovery/dequeue rotates owner_xid; a run
-	// that has since been superseded must not checkpoint (and, in a transaction, must
-	// roll back its consumeMessage) so the current owner takes over. Fold the guard
-	// into the INSERT so a non-owner never records, even on the non-transactional path
-	// where there is nothing to roll back. owner_xid = $1 reuses the workflow_uuid arg.
-	var query string
-	if input.ownerXID != "" {
-		argCounter++
-		args = append(args, input.ownerXID)
-		query = s.renderSQL(`INSERT INTO %soperation_outputs (%s)
-			SELECT %s
-			WHERE EXISTS (SELECT 1 FROM %sworkflow_status WHERE workflow_uuid = $1 AND owner_xid = $%d)`,
-			s.dialect.SchemaPrefix(s.schema), strings.Join(columns, ", "), strings.Join(placeholders, ", "),
-			s.dialect.SchemaPrefix(s.schema), argCounter)
-	} else {
-		query = s.renderSQL(`INSERT INTO %soperation_outputs (%s) VALUES (%s)`,
-			s.dialect.SchemaPrefix(s.schema), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
-	}
+	query := s.renderSQL(`INSERT INTO %soperation_outputs (%s) VALUES (%s)`,
+		s.dialect.SchemaPrefix(s.schema), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
 
-	var res Result
 	var err error
 	if input.tx != nil {
-		res, err = input.tx.Exec(ctx, query, args...)
+		_, err = input.tx.Exec(ctx, query, args...)
 	} else {
-		res, err = s.pool.Exec(ctx, query, args...)
+		_, err = s.pool.Exec(ctx, query, args...)
 	}
 
 	if err != nil {
@@ -2548,18 +2511,6 @@ func (s *sysDB) recordOperationResult(ctx context.Context, input recordOperation
 			return newWorkflowConflictIDError(input.workflowID)
 		}
 		return err
-	}
-
-	// The ownership guard matched no rows: this run won the record race but has been
-	// superseded. Signal a conflict so the caller yields to the current owner.
-	if input.ownerXID != "" {
-		rowsAffected, raErr := res.RowsAffected()
-		if raErr != nil {
-			return fmt.Errorf("failed to check operation result insert: %w", raErr)
-		}
-		if rowsAffected == 0 {
-			return newWorkflowConflictIDError(input.workflowID)
-		}
 	}
 
 	return nil
