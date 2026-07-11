@@ -9276,7 +9276,10 @@ type parkingPool struct {
 }
 
 func (p *parkingPool) Exec(ctx context.Context, query string, args ...any) (Result, error) {
-	isOutcomeWrite := strings.Contains(query, "output = $2") && strings.Contains(query, "completed_at = $4")
+	// Match on placeholder-free fragments: sqlite rewrites $N to ?N, so keying on
+	// "$2"/"$4" would never match there. The outcome-write UPDATE is the only query
+	// that sets both output and completed_at.
+	isOutcomeWrite := strings.Contains(query, "output =") && strings.Contains(query, "completed_at =")
 	if isOutcomeWrite && len(args) >= 5 && args[4] == any(p.target) && p.first.CompareAndSwap(false, true) {
 		p.parked.Set()
 		<-p.release
