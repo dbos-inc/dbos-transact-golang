@@ -3826,7 +3826,7 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string, opts ...C
 	isWithinWorkflow := ok && workflowState != nil
 	var found []string
 	var err error
-	cwo := cancelWorkflowOptions{}
+	cwo := models.CancelWorkflowInput{}
 	for _, opt := range opts {
 		opt(&cwo)
 	}
@@ -3835,7 +3835,7 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string, opts ...C
 		found, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
 			return c.systemDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{
 				WorkflowIDs:    []string{workflowID},
-				CancelChildren: cwo.cancelChildren,
+				CancelChildren: cwo.CancelChildren,
 				Tx:             tx,
 			})
 		}, WithStepName("DBOS.cancelWorkflow"))
@@ -3843,7 +3843,7 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string, opts ...C
 		found, err = sysdb.RetryWithResult(c, func() ([]string, error) {
 			return c.systemDB.CancelWorkflows(c, sysdb.CancelWorkflowsDBInput{
 				WorkflowIDs:    []string{workflowID},
-				CancelChildren: cwo.cancelChildren,
+				CancelChildren: cwo.CancelChildren,
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
 	}
@@ -3920,19 +3920,19 @@ func UpdateWorkflowAttributes(ctx DBOSContext, workflowID string, attributes map
 func (c *dbosContext) CancelWorkflows(_ DBOSContext, workflowIDs []string, opts ...CancelWorkflowOptions) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
-	cwo := cancelWorkflowOptions{}
+	cwo := models.CancelWorkflowInput{}
 	for _, opt := range opts {
 		opt(&cwo)
 	}
 
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
-			return c.systemDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.cancelChildren, WorkflowIDs: workflowIDs, Tx: tx})
+			return c.systemDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.CancelChildren, WorkflowIDs: workflowIDs, Tx: tx})
 		}, WithStepName("DBOS.cancelWorkflows"))
 		return err
 	}
 	_, err := sysdb.RetryWithResult(c, func() ([]string, error) {
-		return c.systemDB.CancelWorkflows(c, sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.cancelChildren, WorkflowIDs: workflowIDs})
+		return c.systemDB.CancelWorkflows(c, sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.CancelChildren, WorkflowIDs: workflowIDs})
 	}, sysdb.WithRetrierLogger(c.logger))
 	return err
 }
@@ -4106,18 +4106,12 @@ func DeleteWorkflows(ctx DBOSContext, workflowIDs []string, opts ...DeleteWorkfl
 	return ctx.DeleteWorkflows(ctx, workflowIDs, opts...)
 }
 
-// resumeWorkflowOptions holds configuration parameters for resuming workflows.
-type resumeWorkflowOptions struct {
-	queueName string
-}
-
-// ResumeWorkflowOption is a functional option for configuring workflow resumption.
-type ResumeWorkflowOption func(*resumeWorkflowOptions)
+// models.ResumeWorkflowInput holds configuration parameters for resuming workflows.
 
 // WithResumeQueue re-enqueues the resumed workflow(s) on the specified queue instead of the internal queue.
 func WithResumeQueue(queueName string) ResumeWorkflowOption {
-	return func(o *resumeWorkflowOptions) {
-		o.queueName = queueName
+	return func(o *models.ResumeWorkflowInput) {
+		o.QueueName = queueName
 	}
 }
 
@@ -4133,7 +4127,7 @@ func (c *dbosContext) ResumeWorkflow(_ DBOSContext, workflowID string, opts ...R
 }
 
 func (c *dbosContext) ResumeWorkflows(_ DBOSContext, workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error) {
-	params := &resumeWorkflowOptions{}
+	params := &models.ResumeWorkflowInput{}
 	for _, opt := range opts {
 		opt(params)
 	}
@@ -4146,7 +4140,7 @@ func (c *dbosContext) ResumeWorkflows(_ DBOSContext, workflowIDs []string, opts 
 		foundIDs, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
 			return c.systemDB.ResumeWorkflows(ctx, sysdb.ResumeWorkflowsDBInput{
 				WorkflowIDs: workflowIDs,
-				QueueName:   params.queueName,
+				QueueName:   params.QueueName,
 				Tx:          tx,
 			})
 		}, WithStepName("DBOS.resumeWorkflow"))
@@ -4154,7 +4148,7 @@ func (c *dbosContext) ResumeWorkflows(_ DBOSContext, workflowIDs []string, opts 
 		foundIDs, err = sysdb.RetryWithResult(c, func() ([]string, error) {
 			return c.systemDB.ResumeWorkflows(c, sysdb.ResumeWorkflowsDBInput{
 				WorkflowIDs: workflowIDs,
-				QueueName:   params.queueName,
+				QueueName:   params.QueueName,
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
 	}
@@ -4235,17 +4229,6 @@ func ResumeWorkflows[R any](ctx DBOSContext, workflowIDs []string, opts ...Resum
 		handles = append(handles, newWorkflowPollingHandle[R](ctx, h.GetWorkflowID()))
 	}
 	return handles, nil
-}
-
-// ForkWorkflowInput holds configuration parameters for forking workflows.
-// OriginalWorkflowID is required. Other fields are optional.
-type ForkWorkflowInput struct {
-	OriginalWorkflowID string // Required: The UUID of the original workflow to fork from
-	ForkedWorkflowID   string // Optional: Custom workflow ID for the forked workflow (auto-generated if empty)
-	StartStep          uint   // Optional: Step to start the forked workflow from (default: 0)
-	ApplicationVersion string // Optional: Application version for the forked workflow (inherits from original if empty)
-	QueueName          string // Optional: Queue to enqueue the forked workflow on (defaults to the internal queue)
-	QueuePartitionKey  string // Optional: Partition key when enqueueing the forked workflow onto a partitioned queue
 }
 
 // ForkWorkflowSpec describes a single workflow to fork within a batch.
@@ -4430,213 +4413,181 @@ func ForkWorkflows[R any](ctx DBOSContext, input ForkWorkflowsInput) ([]Workflow
 	return typedHandles, nil
 }
 
-// listWorkflowsOptions holds configuration parameters for listing workflows
-type listWorkflowsOptions struct {
-	workflowIDs      []string
-	status           []WorkflowStatusType
-	startTime        time.Time
-	endTime          time.Time
-	name             []string
-	appVersion       []string
-	user             []string
-	limit            *int
-	offset           *int
-	sortDesc         bool
-	workflowIDPrefix []string
-	loadInput        bool
-	loadOutput       bool
-	queueName        []string
-	queuesOnly       bool
-	executorIDs      []string
-	forkedFrom       []string
-	parentWorkflowID []string
-	deduplicationID  []string
-	completedAfter   time.Time
-	completedBefore  time.Time
-	dequeuedAfter    time.Time
-	dequeuedBefore   time.Time
-	wasForkedFrom    *bool
-	hasParent        *bool
-	attributes       map[string]any
-	scheduleName     []string
-}
-
-// ListWorkflowsOption is a functional option for configuring workflow listing parameters.
-type ListWorkflowsOption func(*listWorkflowsOptions)
+// models.ListWorkflowsInput holds configuration parameters for listing workflows
 
 // WithWorkflowIDs filters workflows by the specified workflow IDs.
 func WithWorkflowIDs(workflowIDs []string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.workflowIDs = workflowIDs
+	return func(p *models.ListWorkflowsInput) {
+		p.WorkflowIDs = workflowIDs
 	}
 }
 
 // WithStatus filters workflows by the specified list of statuses.
 func WithStatus(status []WorkflowStatusType) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.status = status
+	return func(p *models.ListWorkflowsInput) {
+		p.Status = status
 	}
 }
 
 // WithStartTime filters workflows created after the specified time.
 func WithStartTime(startTime time.Time) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.startTime = startTime
+	return func(p *models.ListWorkflowsInput) {
+		p.StartTime = startTime
 	}
 }
 
 // WithEndTime filters workflows created before the specified time.
 func WithEndTime(endTime time.Time) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.endTime = endTime
+	return func(p *models.ListWorkflowsInput) {
+		p.EndTime = endTime
 	}
 }
 
 // WithName filters workflows by the specified workflow function name(s).
 func WithName(name ...string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.name = name
+	return func(p *models.ListWorkflowsInput) {
+		p.Name = name
 	}
 }
 
 // WithAppVersion filters workflows by the specified application version(s).
 func WithAppVersion(appVersion ...string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.appVersion = appVersion
+	return func(p *models.ListWorkflowsInput) {
+		p.AppVersion = appVersion
 	}
 }
 
 // WithUser filters workflows by the specified authenticated user(s).
 func WithUser(user ...string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.user = user
+	return func(p *models.ListWorkflowsInput) {
+		p.User = user
 	}
 }
 
 // WithLimit limits the number of workflows returned.
 func WithLimit(limit int) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.limit = &limit
+	return func(p *models.ListWorkflowsInput) {
+		p.Limit = &limit
 	}
 }
 
 // WithOffset sets the offset for pagination.
 func WithOffset(offset int) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.offset = &offset
+	return func(p *models.ListWorkflowsInput) {
+		p.Offset = &offset
 	}
 }
 
 // WithSortDesc enables descending sort by creation time (default is ascending).
 func WithSortDesc() ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.sortDesc = true
+	return func(p *models.ListWorkflowsInput) {
+		p.SortDesc = true
 	}
 }
 
 // WithWorkflowIDPrefix filters workflows by workflow ID prefix(es).
 func WithWorkflowIDPrefix(prefix ...string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.workflowIDPrefix = prefix
+	return func(p *models.ListWorkflowsInput) {
+		p.WorkflowIDPrefix = prefix
 	}
 }
 
 // WithLoadInput controls whether to load workflow input data (default: true).
 func WithLoadInput(loadInput bool) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.loadInput = loadInput
+	return func(p *models.ListWorkflowsInput) {
+		p.LoadInput = loadInput
 	}
 }
 
 // WithLoadOutput controls whether to load workflow output data (default: true).
 func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.loadOutput = loadOutput
+	return func(p *models.ListWorkflowsInput) {
+		p.LoadOutput = loadOutput
 	}
 }
 
 // WithQueueName filters workflows by the specified queue name(s).
 // This is typically used when listing queued workflows.
 func WithQueueName(queueName ...string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.queueName = queueName
+	return func(p *models.ListWorkflowsInput) {
+		p.QueueName = queueName
 	}
 }
 
 // WithQueuesOnly filters to only return workflows that are in a queue.
 func WithQueuesOnly() ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.queuesOnly = true
+	return func(p *models.ListWorkflowsInput) {
+		p.QueuesOnly = true
 	}
 }
 
 // WithExecutorIDs filters workflows by the specified executor IDs.
 func WithExecutorIDs(executorIDs []string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.executorIDs = executorIDs
+	return func(p *models.ListWorkflowsInput) {
+		p.ExecutorIDs = executorIDs
 	}
 }
 
 // WithForkedFrom filters workflows by the specified forked_from workflow ID(s).
 func WithForkedFrom(forkedFrom ...string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.forkedFrom = forkedFrom
+	return func(p *models.ListWorkflowsInput) {
+		p.ForkedFrom = forkedFrom
 	}
 }
 
 // WithParentWorkflowID filters workflows by the specified parent workflow ID(s).
 func WithParentWorkflowID(parentWorkflowID ...string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.parentWorkflowID = parentWorkflowID
+	return func(p *models.ListWorkflowsInput) {
+		p.ParentWorkflowID = parentWorkflowID
 	}
 }
 
 // WithFilterDeduplicationID filters workflows by the specified deduplication ID(s).
 func WithFilterDeduplicationID(deduplicationID ...string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.deduplicationID = deduplicationID
+	return func(p *models.ListWorkflowsInput) {
+		p.DeduplicationID = deduplicationID
 	}
 }
 
 // WithCompletedAfter filters workflows that reached a terminal state at or after the specified time.
 func WithCompletedAfter(completedAfter time.Time) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.completedAfter = completedAfter
+	return func(p *models.ListWorkflowsInput) {
+		p.CompletedAfter = completedAfter
 	}
 }
 
 // WithCompletedBefore filters workflows that reached a terminal state at or before the specified time.
 func WithCompletedBefore(completedBefore time.Time) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.completedBefore = completedBefore
+	return func(p *models.ListWorkflowsInput) {
+		p.CompletedBefore = completedBefore
 	}
 }
 
 // WithDequeuedAfter filters workflows that started executing at or after the specified time.
 func WithDequeuedAfter(dequeuedAfter time.Time) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.dequeuedAfter = dequeuedAfter
+	return func(p *models.ListWorkflowsInput) {
+		p.DequeuedAfter = dequeuedAfter
 	}
 }
 
 // WithDequeuedBefore filters workflows that started executing at or before the specified time.
 func WithDequeuedBefore(dequeuedBefore time.Time) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.dequeuedBefore = dequeuedBefore
+	return func(p *models.ListWorkflowsInput) {
+		p.DequeuedBefore = dequeuedBefore
 	}
 }
 
 // WithWasForkedFrom filters workflows by whether they have been forked from (true) or not (false).
 func WithWasForkedFrom(wasForkedFrom bool) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.wasForkedFrom = &wasForkedFrom
+	return func(p *models.ListWorkflowsInput) {
+		p.WasForkedFrom = &wasForkedFrom
 	}
 }
 
 // WithHasParent filters workflows by whether they have a parent workflow (true) or not (false).
 func WithHasParent(hasParent bool) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.hasParent = &hasParent
+	return func(p *models.ListWorkflowsInput) {
+		p.HasParent = &hasParent
 	}
 }
 
@@ -4644,16 +4595,16 @@ func WithHasParent(hasParent bool) ListWorkflowsOption {
 // key-value pairs (JSONB containment). Requires a Postgres system database;
 // listing fails with an error on SQLite.
 func WithFilterAttributes(attributes map[string]any) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.attributes = attributes
+	return func(p *models.ListWorkflowsInput) {
+		p.Attributes = attributes
 	}
 }
 
 // WithFilterScheduleName filters workflows by the name(s) of the schedule that
 // enqueued them. Only workflows enqueued by a named schedule match.
 func WithFilterScheduleName(scheduleName ...string) ListWorkflowsOption {
-	return func(p *listWorkflowsOptions) {
-		p.scheduleName = scheduleName
+	return func(p *models.ListWorkflowsInput) {
+		p.ScheduleName = scheduleName
 	}
 }
 
@@ -4665,9 +4616,9 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 		loadInput = false
 		loadOutput = false
 	}
-	params := &listWorkflowsOptions{
-		loadInput:  loadInput,
-		loadOutput: loadOutput,
+	params := &models.ListWorkflowsInput{
+		LoadInput:  loadInput,
+		LoadOutput: loadOutput,
 	}
 
 	// Apply all provided options
@@ -4676,39 +4627,39 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	}
 
 	// If we are asked to retrieve only queue workflows with no status, only fetch ENQUEUED, PENDING, and DELAYED tasks
-	if params.queuesOnly && len(params.status) == 0 {
-		params.status = []WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending, WorkflowStatusDelayed}
+	if params.QueuesOnly && len(params.Status) == 0 {
+		params.Status = []WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending, WorkflowStatusDelayed}
 	}
 
 	// Convert to system database input structure
 	dbInput := sysdb.ListWorkflowsDBInput{
-		WorkflowIDs:        params.workflowIDs,
-		Status:             params.status,
-		StartTime:          params.startTime,
-		EndTime:            params.endTime,
-		WorkflowName:       params.name,
-		ApplicationVersion: params.appVersion,
-		AuthenticatedUser:  params.user,
-		Limit:              params.limit,
-		Offset:             params.offset,
-		SortDesc:           params.sortDesc,
-		WorkflowIDPrefix:   params.workflowIDPrefix,
-		LoadInput:          params.loadInput,
-		LoadOutput:         params.loadOutput,
-		QueueName:          params.queueName,
-		QueuesOnly:         params.queuesOnly,
-		ExecutorIDs:        params.executorIDs,
-		ForkedFrom:         params.forkedFrom,
-		ParentWorkflowID:   params.parentWorkflowID,
-		DeduplicationID:    params.deduplicationID,
-		CompletedAfter:     params.completedAfter,
-		CompletedBefore:    params.completedBefore,
-		DequeuedAfter:      params.dequeuedAfter,
-		DequeuedBefore:     params.dequeuedBefore,
-		WasForkedFrom:      params.wasForkedFrom,
-		HasParent:          params.hasParent,
-		Attributes:         params.attributes,
-		ScheduleName:       params.scheduleName,
+		WorkflowIDs:        params.WorkflowIDs,
+		Status:             params.Status,
+		StartTime:          params.StartTime,
+		EndTime:            params.EndTime,
+		WorkflowName:       params.Name,
+		ApplicationVersion: params.AppVersion,
+		AuthenticatedUser:  params.User,
+		Limit:              params.Limit,
+		Offset:             params.Offset,
+		SortDesc:           params.SortDesc,
+		WorkflowIDPrefix:   params.WorkflowIDPrefix,
+		LoadInput:          params.LoadInput,
+		LoadOutput:         params.LoadOutput,
+		QueueName:          params.QueueName,
+		QueuesOnly:         params.QueuesOnly,
+		ExecutorIDs:        params.ExecutorIDs,
+		ForkedFrom:         params.ForkedFrom,
+		ParentWorkflowID:   params.ParentWorkflowID,
+		DeduplicationID:    params.DeduplicationID,
+		CompletedAfter:     params.CompletedAfter,
+		CompletedBefore:    params.CompletedBefore,
+		DequeuedAfter:      params.DequeuedAfter,
+		DequeuedBefore:     params.DequeuedBefore,
+		WasForkedFrom:      params.WasForkedFrom,
+		HasParent:          params.HasParent,
+		Attributes:         params.Attributes,
+		ScheduleName:       params.ScheduleName,
 	}
 
 	// Call the context method to list workflows
@@ -4732,9 +4683,9 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	}
 
 	// Deserialize Input and Output fields if they were loaded
-	if params.loadInput || params.loadOutput {
+	if params.LoadInput || params.LoadOutput {
 		for i := range workflows {
-			if params.loadInput && workflows[i].Input != nil {
+			if params.LoadInput && workflows[i].Input != nil {
 				encodedInput, ok := workflows[i].Input.(*string)
 				if !ok {
 					return nil, fmt.Errorf("workflow input must be encoded string, got %T", workflows[i].Input)
@@ -4763,7 +4714,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 					}
 				}
 			}
-			if params.loadOutput && workflows[i].Output != nil {
+			if params.LoadOutput && workflows[i].Output != nil {
 				encodedOutput, ok := workflows[i].Output.(*string)
 				if !ok {
 					return nil, fmt.Errorf("workflow output must be encoded *string, got %T", workflows[i].Output)
@@ -4791,7 +4742,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 					}
 				}
 			}
-			if params.loadOutput && workflows[i].Error != nil {
+			if params.LoadOutput && workflows[i].Error != nil {
 				s := workflows[i].Error.Error()
 				workflows[i].Error = deserializeWorkflowError(&s)
 			}
@@ -4862,52 +4813,44 @@ type StepInfo struct {
 	CompletedAt     time.Time // When the step execution completed
 }
 
-// getWorkflowStepsOptions holds optional parameters for GetWorkflowSteps.
-type getWorkflowStepsOptions struct {
-	loadOutput *bool
-	limit      *int
-	offset     *int
-}
-
-// GetWorkflowStepsOption is a functional option for GetWorkflowSteps.
-type GetWorkflowStepsOption func(*getWorkflowStepsOptions)
+// models.GetWorkflowStepsInput holds optional parameters for GetWorkflowSteps.
 
 // WithStepsLoadOutput controls whether to load step output data.
 // When unset, output is loaded only if the DBOS context has been launched.
 func WithStepsLoadOutput(loadOutput bool) GetWorkflowStepsOption {
-	return func(o *getWorkflowStepsOptions) {
-		o.loadOutput = &loadOutput
+	return func(o *models.GetWorkflowStepsInput) {
+		o.LoadOutput = &loadOutput
 	}
 }
 
 // WithStepsLimit limits the number of steps returned, ordered by function ID ascending.
 func WithStepsLimit(limit int) GetWorkflowStepsOption {
-	return func(o *getWorkflowStepsOptions) {
-		o.limit = &limit
+	return func(o *models.GetWorkflowStepsInput) {
+		o.Limit = &limit
 	}
 }
 
 // WithStepsOffset skips the given number of steps before returning results.
 func WithStepsOffset(offset int) GetWorkflowStepsOption {
-	return func(o *getWorkflowStepsOptions) {
-		o.offset = &offset
+	return func(o *models.GetWorkflowStepsInput) {
+		o.Offset = &offset
 	}
 }
 
 func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string, opts ...GetWorkflowStepsOption) ([]StepInfo, error) {
-	options := getWorkflowStepsOptions{}
+	options := models.GetWorkflowStepsInput{}
 	for _, opt := range opts {
 		opt(&options)
 	}
 	loadOutput := c.launched.Load()
-	if options.loadOutput != nil {
-		loadOutput = *options.loadOutput
+	if options.LoadOutput != nil {
+		loadOutput = *options.LoadOutput
 	}
 	getWorkflowStepsInput := sysdb.GetWorkflowStepsInput{
 		WorkflowID: workflowID,
 		LoadOutput: loadOutput,
-		Limit:      options.limit,
-		Offset:     options.offset,
+		Limit:      options.Limit,
+		Offset:     options.Offset,
 	}
 
 	var steps []sysdb.StepRow
@@ -5007,49 +4950,6 @@ func GetWorkflowSteps(ctx DBOSContext, workflowID string, opts ...GetWorkflowSte
 	return ctx.GetWorkflowSteps(ctx, workflowID, opts...)
 }
 
-// GetWorkflowAggregatesInput is the input to GetWorkflowAggregates.
-//
-// At least one of the GroupBy* flags must be true, or TimeBucketSize must be > 0.
-type GetWorkflowAggregatesInput struct {
-	GroupByStatus             bool
-	GroupByName               bool
-	GroupByQueueName          bool
-	GroupByExecutorID         bool
-	GroupByApplicationVersion bool
-
-	// Select* flags choose which aggregates to compute. At least one must be true.
-	// MinCreatedAt is an epoch-ms timestamp; the latency fields are in milliseconds.
-	SelectCount             bool
-	SelectMinCreatedAt      bool
-	SelectMaxQueueWaitMs    bool
-	SelectMaxTotalLatencyMs bool
-
-	// When non-zero, groups results by created_at time bucket of this size.
-	TimeBucketSize time.Duration
-
-	// Filters
-	Status             []WorkflowStatusType
-	StartTime          time.Time
-	EndTime            time.Time
-	CompletedAfter     time.Time
-	CompletedBefore    time.Time
-	DequeuedAfter      time.Time
-	DequeuedBefore     time.Time
-	Name               []string
-	ApplicationVersion []string
-	ExecutorID         []string
-	QueueName          []string
-	WorkflowIDPrefix   []string
-	WorkflowIDs        []string
-	AuthenticatedUser  []string
-	ForkedFrom         []string
-	ParentWorkflowID   []string
-	WasForkedFrom      *bool
-	HasParent          *bool
-
-	Attributes map[string]any
-}
-
 func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error) {
 	if input.TimeBucketSize < 0 {
 		return nil, errors.New("TimeBucketSize must be >= 0")
@@ -5134,28 +5034,6 @@ func GetWorkflowAggregates(ctx DBOSContext, input GetWorkflowAggregatesInput) ([
 		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.GetWorkflowAggregates(ctx, input)
-}
-
-// GetStepAggregatesInput is the input to GetStepAggregates.
-//
-// At least one of the GroupBy* flags must be true, or TimeBucketSize must be > 0.
-// At least one of the Select* flags must be true.
-type GetStepAggregatesInput struct {
-	GroupByFunctionName bool
-	GroupByStatus       bool
-
-	SelectCount         bool
-	SelectMaxDurationMs bool
-
-	// When non-zero, groups results by completed_at time bucket of this size.
-	TimeBucketSize time.Duration
-
-	// Filters
-	Status           []string
-	FunctionName     []string
-	WorkflowIDPrefix []string
-	CompletedAfter   time.Time
-	CompletedBefore  time.Time
 }
 
 func (c *dbosContext) GetStepAggregates(_ DBOSContext, input GetStepAggregatesInput) ([]StepAggregateRow, error) {
@@ -5427,12 +5305,7 @@ func WithScheduleWorkflowClassName(name string) CreateScheduleOption {
 	return func(o *createScheduleOptions) { o.workflowClassName = name }
 }
 
-// listSchedulesOptions holds configuration parameters for listing schedules.
-type listSchedulesOptions struct {
-	statuses             []ScheduleStatus
-	workflowNames        []string
-	scheduleNamePrefixes []string
-}
+// models.ListSchedulesInput holds configuration parameters for listing schedules.
 
 // CreateSchedule creates a new schedule for a workflow. The reconciler loop
 // picks the new schedule up on its next tick and installs it in the cron
@@ -5709,14 +5582,14 @@ func GetSchedule(ctx DBOSContext, scheduleName string) (*WorkflowSchedule, error
 }
 
 func (c *dbosContext) ListSchedules(_ DBOSContext, opts ...ListSchedulesOption) ([]WorkflowSchedule, error) {
-	var o listSchedulesOptions
+	var o models.ListSchedulesInput
 	for _, opt := range opts {
 		opt(&o)
 	}
 	dbInput := sysdb.ListSchedulesDBInput{
-		Statuses:             o.statuses,
-		WorkflowNames:        o.workflowNames,
-		ScheduleNamePrefixes: o.scheduleNamePrefixes,
+		Statuses:             o.Statuses,
+		WorkflowNames:        o.WorkflowNames,
+		ScheduleNamePrefixes: o.ScheduleNamePrefixes,
 	}
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
 		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]WorkflowSchedule, error) {
@@ -5730,22 +5603,19 @@ func (c *dbosContext) ListSchedules(_ DBOSContext, opts ...ListSchedulesOption) 
 	}, sysdb.WithRetrierLogger(c.logger))
 }
 
-// ListSchedulesOption is a functional option for configuring schedule listing parameters.
-type ListSchedulesOption func(*listSchedulesOptions)
-
 // WithScheduleStatuses filters schedules by the specified status(es).
 func WithScheduleStatuses(statuses ...ScheduleStatus) ListSchedulesOption {
-	return func(o *listSchedulesOptions) { o.statuses = statuses }
+	return func(o *models.ListSchedulesInput) { o.Statuses = statuses }
 }
 
 // WithScheduleWorkflowNames filters schedules by the specified workflow name(s).
 func WithScheduleWorkflowNames(names ...string) ListSchedulesOption {
-	return func(o *listSchedulesOptions) { o.workflowNames = names }
+	return func(o *models.ListSchedulesInput) { o.WorkflowNames = names }
 }
 
 // WithScheduleNamePrefixes filters schedules by schedule name prefix(es).
 func WithScheduleNamePrefixes(prefixes ...string) ListSchedulesOption {
-	return func(o *listSchedulesOptions) { o.scheduleNamePrefixes = prefixes }
+	return func(o *models.ListSchedulesInput) { o.ScheduleNamePrefixes = prefixes }
 }
 
 // ListSchedules lists schedules, optionally filtered by the supplied options.

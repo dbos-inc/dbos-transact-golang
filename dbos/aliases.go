@@ -119,3 +119,15 @@ type WorkflowSetEventInput struct {
 	Key     string
 	Message any
 }
+
+// Option and input types (internal/models).
+type (
+	ListWorkflowsOption        = models.ListWorkflowsOption
+	ListSchedulesOption        = models.ListSchedulesOption
+	GetWorkflowStepsOption     = models.GetWorkflowStepsOption
+	ResumeWorkflowOption       = models.ResumeWorkflowOption
+	CancelWorkflowOptions      = models.CancelWorkflowOptions
+	ForkWorkflowInput          = models.ForkWorkflowInput
+	GetWorkflowAggregatesInput = models.GetWorkflowAggregatesInput
+	GetStepAggregatesInput     = models.GetStepAggregatesInput
+)

@@ -553,23 +553,19 @@ func ClientRetrieveWorkflow[R any](c Client, workflowID string) (WorkflowHandle[
 }
 
 // CancelWorkflowOption is a function option for configuring workflow cancelling parameters.
-type CancelWorkflowOptions func(*cancelWorkflowOptions)
 
 // WithChildren enables cancellation for children workflows
 func WithCancelChildren() CancelWorkflowOptions {
-	return func(cwo *cancelWorkflowOptions) {
-		cwo.cancelChildren = true
+	return func(cwo *models.CancelWorkflowInput) {
+		cwo.CancelChildren = true
 	}
 }
 
-// cancelWorkflowOptions holds configuration parameter for cancelling workflows.
-type cancelWorkflowOptions struct {
-	cancelChildren bool
-}
+// models.CancelWorkflowInput holds configuration parameter for cancelling workflows.
 
 // CancelWorkflow cancels a running or enqueued workflow.
 func (c *client) CancelWorkflow(workflowID string, opts ...CancelWorkflowOptions) error {
-	cwo := cancelWorkflowOptions{}
+	cwo := models.CancelWorkflowInput{}
 	for _, opt := range opts {
 		opt(&cwo)
 	}
@@ -586,7 +582,7 @@ func (c *client) UpdateWorkflowAttributes(workflowID string, attributes map[stri
 // CancelWorkflows cancels multiple workflows in a single database round-trip.
 // Workflows that are missing or already in a terminal state are silently skipped.
 func (c *client) CancelWorkflows(workflowIDs []string, opts ...CancelWorkflowOptions) error {
-	cwo := cancelWorkflowOptions{}
+	cwo := models.CancelWorkflowInput{}
 	for _, opt := range opts {
 		opt(&cwo)
 	}
