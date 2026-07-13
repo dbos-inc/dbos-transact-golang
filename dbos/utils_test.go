@@ -197,18 +197,22 @@ type setupDBOSOptions struct {
 	checkLeaks               bool
 	serializer               Serializer[any]
 	schedulerPollingInterval time.Duration
+	databaseURL              string // share another test's database (sqlite URLs are per-*testing.T otherwise)
 }
 
 /* Test database setup */
 func setupDBOS(t *testing.T, opts setupDBOSOptions) DBOSContext {
 	t.Helper()
 
-	if opts.dropDB && useSqliteBackend() {
-		testDBURLs.Delete(t)
-	}
-	databaseURL := backendDatabaseURL(t)
-	if opts.dropDB && !useSqliteBackend() {
-		resetTestDatabase(t, databaseURL)
+	databaseURL := opts.databaseURL
+	if databaseURL == "" {
+		if opts.dropDB && useSqliteBackend() {
+			testDBURLs.Delete(t)
+		}
+		databaseURL = backendDatabaseURL(t)
+		if opts.dropDB && !useSqliteBackend() {
+			resetTestDatabase(t, databaseURL)
+		}
 	}
 
 	config := Config{

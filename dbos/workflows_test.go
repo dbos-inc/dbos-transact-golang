@@ -833,6 +833,7 @@ func sleepStepIDDriftWorkflow(ctx DBOSContext, _ string) (string, error) {
 
 func TestSteps(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	stepsDatabaseURL := backendDatabaseURL(t)
 
 	// Create workflows with executor
 	RegisterWorkflow(dbosCtx, stepWithinAStepWorkflow)
@@ -1532,7 +1533,9 @@ func TestSteps(t *testing.T) {
 		// The losing execution needs a real second executor: a single
 		// in-process guard cannot double-run a workflow (same construction as
 		// TestRecvStepConflict). No leak check: its lifetime overlaps dbosCtx's.
-		ctxB := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
+		// Pin executor B to the parent's database: sqlite URLs are per-test, so a
+		// subtest's setupDBOS would otherwise get a fresh DB with nothing to recover.
+		ctxB := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false, databaseURL: stepsDatabaseURL})
 		RegisterWorkflow(ctxB, conflictCancelWorkflow, WithWorkflowName("conflict-cancel-workflow"))
 		// Register the parking queue on executor B but don't listen to it (and
 		// never register it on the main executor), so the later resume leaves
