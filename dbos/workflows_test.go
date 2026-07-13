@@ -3123,6 +3123,19 @@ func TestCancelWorkflows(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, finalStepCancelWorkflow)
 
+	// Ignores its cancellation entirely and returns a successful result.
+	var swallowCancelAttempts atomic.Int64
+	swallowCancelStarted := NewEvent()
+	swallowCancelRelease := make(chan struct{})
+	swallowCancelWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		if swallowCancelAttempts.Add(1) == 1 {
+			swallowCancelStarted.Set()
+			<-swallowCancelRelease
+		}
+		return "swallowed", nil
+	}
+	RegisterWorkflow(dbosCtx, swallowCancelWorkflow)
+
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
 
@@ -3252,6 +3265,47 @@ func TestCancelWorkflows(t *testing.T) {
 		require.NoError(t, err, "resumed workflow should complete successfully")
 		require.Equal(t, "completed", result)
 		require.EqualValues(t, 2, noDeadlineCancelAttempts.Load(), "expected the workflow to re-execute on resume")
+	})
+
+	t.Run("SwallowedCancellationIsNotSuccess", func(t *testing.T) {
+		// A workflow that ignores its cancellation and returns (result, nil) must
+		// not report success on the in-process handle: the durable row is CANCELLED
+		// and no output was recorded, so GetResult surfaces WorkflowCancelled —
+		// consistent with what a polling handle for the same workflow returns.
+		cancelCtx, cancelFunc := WithCancel(dbosCtx)
+		defer cancelFunc()
+		handle, err := RunWorkflow(cancelCtx, swallowCancelWorkflow, "")
+		require.NoError(t, err, "failed to start workflow")
+
+		swallowCancelStarted.Wait()
+		cancelFunc()
+
+		// Wait for the durable cancel before releasing the workflow, so its
+		// normal return deterministically lands after the cancellation.
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			require.NoError(t, err, "failed to get workflow status")
+			return status.Status == WorkflowStatusCancelled
+		}, 5*time.Second, 10*time.Millisecond, "workflow did not reach cancelled status in time")
+		close(swallowCancelRelease)
+
+		result, err := handle.GetResult()
+		require.Error(t, err, "a cancelled workflow must not report success")
+		require.True(t, errors.Is(err, &DBOSError{Code: WorkflowCancelled}), "expected WorkflowCancelled error, got: %v", err)
+		require.Equal(t, "", result, "no output may be reported for a cancelled workflow")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusCancelled, status.Status)
+		require.Nil(t, status.Output, "the swallowed result must not be recorded")
+
+		// Plain cancel remains resumable; re-execution completes normally.
+		resumedHandle, err := ResumeWorkflow[string](dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to resume workflow")
+		result, err = resumedHandle.GetResult()
+		require.NoError(t, err, "resumed workflow should complete successfully")
+		require.Equal(t, "swallowed", result)
+		require.EqualValues(t, 2, swallowCancelAttempts.Load(), "expected the workflow to re-execute on resume")
 	})
 }
 

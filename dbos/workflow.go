@@ -358,6 +358,11 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
 			return *new(R), newWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("recording child workflow result: %w", recordResultErr))
 		}
+	} else if outcome.cancelled && !isCancellationError(outcome.err) {
+		// The workflow swallowed its cancellation (returned normally or with an
+		// unrelated error) but we triggered durable cancel and no output was
+		// recorded: report cancellation, not success.
+		return *new(R), newWorkflowCancelledError(h.workflowID, outcome.err)
 	}
 	return decodedResult, outcome.err
 }
