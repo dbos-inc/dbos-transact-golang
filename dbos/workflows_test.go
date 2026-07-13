@@ -1044,6 +1044,28 @@ func TestSteps(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, apiCancelParentWorkflow)
 
+	// Two live executions of the same workflow race to checkpoint this step:
+	// each blocks until released; the one released second loses the checkpoint
+	// race. Used by ConflictingRunDisarmsDurableCancel.
+	var conflictCancelExecs atomic.Int64
+	conflictCancelFirstStarted := NewEvent()
+	conflictCancelSecondStarted := NewEvent()
+	conflictCancelReleaseFirst := make(chan struct{})
+	conflictCancelReleaseSecond := make(chan struct{})
+	conflictCancelWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		return RunAsStep(ctx, func(context.Context) (string, error) {
+			if conflictCancelExecs.Add(1) == 1 {
+				conflictCancelFirstStarted.Set()
+				<-conflictCancelReleaseFirst
+			} else {
+				conflictCancelSecondStarted.Set()
+				<-conflictCancelReleaseSecond
+			}
+			return "ok", nil
+		})
+	}
+	RegisterWorkflow(dbosCtx, conflictCancelWorkflow, WithWorkflowName("conflict-cancel-workflow"))
+
 	// Installed before Launch so no goroutine reads sysDB.pool concurrently
 	// with the swap; armed on demand by StepIDNotReallocatedOnDBRetry.
 	sysdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
@@ -1494,6 +1516,95 @@ func TestSteps(t *testing.T) {
 		require.Equal(t, "DBOS.getResult", steps[1].StepName)
 		require.Error(t, steps[1].Error, "the child's cancellation must be durably recorded")
 		require.True(t, errors.Is(steps[1].Error, &DBOSError{Code: AwaitedWorkflowCancelled}), "expected recorded AwaitedWorkflowCancelled error, got: %v", steps[1].Error)
+	})
+
+	t.Run("ConflictingRunDisarmsDurableCancel", func(t *testing.T) {
+		// When two live executions of the same workflow ID race to checkpoint a
+		// step, the loser's function returns ConflictingIDError and its
+		// RunWorkflow goroutine awaits the winner's result. Losing the conflict
+		// disproves ownership, so the branch must disarm the durable-cancel
+		// AfterFunc right there: a later cancellation of the context the caller
+		// used for the losing dispatch (the routine `defer cancelFunc()`
+		// pattern) must not durably cancel the owning — or a future resumed —
+		// run. The disarm cannot wait for the branch to settle: the loss is
+		// observable through polling handles while the loser is still awaiting.
+		//
+		// The losing execution needs a real second executor: a single
+		// in-process guard cannot double-run a workflow (same construction as
+		// TestRecvStepConflict). No leak check: its lifetime overlaps dbosCtx's.
+		ctxB := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
+		RegisterWorkflow(ctxB, conflictCancelWorkflow, WithWorkflowName("conflict-cancel-workflow"))
+		// Register the parking queue on executor B but don't listen to it (and
+		// never register it on the main executor), so the later resume leaves
+		// the workflow durably ENQUEUED — making a spurious cancel observable.
+		const parkedQueue = "conflict-cancel-parked-queue"
+		_, err := RegisterQueue(ctxB, parkedQueue)
+		require.NoError(t, err, "failed to register parking queue")
+		ListenQueues(ctxB, WorkflowQueue{Name: "conflict-cancel-unused-queue"})
+		require.NoError(t, Launch(ctxB), "failed to launch executor B")
+
+		wfID := uuid.NewString()
+
+		// Execution 1 on the main executor: enters the step and blocks.
+		handleA, err := RunWorkflow(dbosCtx, conflictCancelWorkflow, "", WithWorkflowID(wfID))
+		require.NoError(t, err, "failed to start workflow")
+		conflictCancelFirstStarted.Wait()
+
+		// Execution 2 on executor B, dispatched under a user-cancellable
+		// context. Recovery dispatch is the sanctioned way to get a genuinely
+		// concurrent second execution (a direct RunWorkflow attaches to the
+		// owner's run instead).
+		cancelCtx, cancelFunc := WithCancel(ctxB)
+		defer cancelFunc()
+		recovered, err := recoverPendingWorkflows(cancelCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover the workflow on executor B")
+		require.Len(t, recovered, 1, "expected exactly one pending workflow to recover")
+		require.Equal(t, wfID, recovered[0].GetWorkflowID())
+		conflictCancelSecondStarted.Wait()
+
+		// Cancel the workflow durably, then let execution 1 finish: its
+		// in-flight step checkpoints and the run ends cancelled.
+		require.NoError(t, CancelWorkflow(dbosCtx, wfID), "failed to cancel workflow")
+		close(conflictCancelReleaseFirst)
+		_, _ = handleA.GetResult()
+
+		// Let execution 2 finish: its step-0 checkpoint hits the unique
+		// violation and its goroutine takes the conflict-await branch.
+		close(conflictCancelReleaseSecond)
+		_, err = recovered[0].GetResult()
+		require.Error(t, err, "the losing execution must observe the cancelled outcome")
+		require.True(t, errors.Is(err, &DBOSError{Code: AwaitedWorkflowCancelled}) || errors.Is(err, &DBOSError{Code: WorkflowCancelled}),
+			"expected a cancellation error from the losing execution, got: %v", err)
+		require.EqualValues(t, 2, conflictCancelExecs.Load(), "both executions must have genuinely run the step body")
+
+		// Resume the workflow onto the unlistened queue: it is durably
+		// ENQUEUED, non-terminal again.
+		resumedHandle, err := ResumeWorkflow[string](ctxB, wfID, WithResumeQueue(parkedQueue))
+		require.NoError(t, err, "failed to resume workflow")
+		status, err := resumedHandle.GetStatus()
+		require.NoError(t, err, "failed to get resumed workflow status")
+		require.Equal(t, WorkflowStatusEnqueued, status.Status, "precondition: resumed workflow is ENQUEUED")
+
+		// Cancel the context used for the conflicting dispatch. That run lost
+		// the conflict and never owned this workflow: the resumed row must not
+		// be touched. A still-armed AfterFunc would durably cancel it within
+		// milliseconds.
+		cancelFunc()
+
+		require.Never(t, func() bool {
+			status, err := resumedHandle.GetStatus()
+			require.NoError(t, err, "failed to get workflow status")
+			return status.Status == WorkflowStatusCancelled
+		}, 3*time.Second, 100*time.Millisecond,
+			"cancelling the stale conflicting-dispatch context must not durably cancel the resumed workflow")
+
+		// Drain: start listening to the parking queue so the resumed workflow
+		// completes (replaying the checkpointed step), which also lets the
+		// loser's conflict-await goroutine finish before executor B shuts down.
+		ListenQueues(ctxB, WorkflowQueue{Name: parkedQueue})
+		result, err := resumedHandle.GetResult()
+		require.NoError(t, err, "resumed workflow should complete")
+		require.Equal(t, "ok", result)
 	})
 }
 

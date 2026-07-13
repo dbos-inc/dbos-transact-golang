@@ -1633,6 +1633,9 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 		// Handle DBOS ID conflict errors by waiting workflow result
 		if errors.Is(err, &DBOSError{Code: ConflictingIDError}) {
+			// This run lost the ID conflict: it does not own the workflow, so its
+			// context must no longer durably cancel it. Disarm the cancel function.
+			stopFunc()
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
 			awaitOut, awaitErr := retryWithResult(c, func() (*awaitWorkflowResultOutput, error) {
 				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID, _DB_RETRY_INTERVAL)
