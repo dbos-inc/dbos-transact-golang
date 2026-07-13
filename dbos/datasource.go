@@ -519,6 +519,10 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	// OUTER: the user-facing step retry policy (maxRetries + predicate).
 	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, runTxnResilient)
 
+	if stepInterruptedByCancellation(stepState, stepError) {
+		return stepOutput, newWorkflowCancelledError(stepState.workflowID, stepError)
+	}
+
 	// txn2: checkpoint the outcome into the system database.
 	encodedStepOutput, serErr := ser.Encode(stepOutput)
 	if serErr != nil {

@@ -453,6 +453,75 @@ func TestRunAsTransaction(t *testing.T) {
 		require.Equal(t, 1, ub.countRows(t, fmt.Sprintf(`SELECT count(*) FROM %s`, ub.completionTable())))
 	})
 
+	t.Run("CancelledTransactionNotCheckpointed", func(t *testing.T) {
+		// A transaction interrupted by workflow cancellation must not checkpoint
+		// its cancellation error — in the user DB or the system DB — so resume
+		// re-executes it instead of replaying the error.
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ds := ub.register(t, ctx, "app")
+
+		var attempts atomic.Int32
+		started := NewEvent()
+		wf := func(dctx DBOSContext, _ string) (string, error) {
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				if attempts.Add(1) == 1 {
+					started.Set()
+					<-c.Done()
+					return "", c.Err()
+				}
+				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "v1"); err != nil {
+					return "", err
+				}
+				return "completed", nil
+			})
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+
+		cancelCtx, cancelFunc := WithCancel(ctx)
+		defer cancelFunc()
+		wfID := uuid.NewString()
+		handle, err := RunWorkflow(cancelCtx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+
+		started.Wait()
+		cancelFunc()
+
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected error from cancelled workflow")
+		require.True(t, errors.Is(err, &DBOSError{Code: WorkflowCancelled}), "expected WorkflowCancelled error, got: %v", err)
+
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			require.NoError(t, err)
+			return status.Status == WorkflowStatusCancelled
+		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
+
+		// Neither database recorded the interrupted transaction.
+		steps, err := GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 0, "transaction interrupted by cancellation must not be checkpointed in the system DB")
+		require.Equal(t, 0, ub.countRows(t,
+			fmt.Sprintf(`SELECT count(*) FROM %s WHERE workflow_id = $1`, ub.completionTable()), wfID),
+			"transaction interrupted by cancellation must not be recorded in the user DB")
+
+		resumedHandle, err := ResumeWorkflow[string](ctx, wfID)
+		require.NoError(t, err)
+		res, err := resumedHandle.GetResult()
+		require.NoError(t, err, "resumed workflow should complete successfully")
+		require.Equal(t, "completed", res)
+		require.EqualValues(t, 2, attempts.Load(), "expected the transaction to re-execute on resume")
+
+		require.Equal(t, "v1", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k1'`))
+		require.Equal(t, 1, ub.countRows(t,
+			fmt.Sprintf(`SELECT count(*) FROM %s WHERE workflow_id = $1`, ub.completionTable()), wfID))
+		steps, err = GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1, "expected the re-executed transaction to be checkpointed")
+	})
+
 	t.Run("Layer1ReplayOnRecovery", func(t *testing.T) {
 		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 		ub := openUserBackend(t)

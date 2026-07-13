@@ -119,7 +119,7 @@ func TestCancellationChaos(t *testing.T) {
 			return fmt.Errorf("start workflow: %w", err)
 		}
 
-		const maxCancels = 3
+		const maxCancels = 10
 		cancels := 0
 		// Exec counts of the steps recorded before the last resume: these
 		// replay and must never execute again.
