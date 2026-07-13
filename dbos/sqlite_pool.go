@@ -153,9 +153,9 @@ func newSqliteSystemDatabase(
 			logger.Warn("Failed to close sqlite database during cleanup", "error", err)
 		}
 	}
-	if err := retry(ctx, func() error {
+	if err := Retry(ctx, func() error {
 		return RunSqliteMigrations(ctx, db, logger)
-	}, withRetrierLogger(logger)); err != nil {
+	}, WithRetrierLogger(logger)); err != nil {
 		closeIfOwned()
 		return nil, fmt.Errorf("failed to run sqlite migrations: %v", err)
 	}

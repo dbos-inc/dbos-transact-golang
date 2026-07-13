@@ -128,7 +128,7 @@ func NewDataSource[E Engine](ctx DBOSContext, engine E, opts ...DataSourceOption
 	// needs no durability table: RunAsTransaction collapses onto the single
 	// system transaction (runAsTxn), so skip dialect resolution and table
 	// creation entirely.
-	if SameEngine(ds.pool, c.systemDB.(*SysDB).pool) {
+	if SameEngine(ds.pool, c.systemDB.Pool()) {
 		ds.sameAsSystemDB = true
 		c.logger.Debug("Data source shares the system database; using single-transaction durability", "datasource", ds.name)
 		return ds, nil
@@ -191,14 +191,14 @@ func (ds *DataSource) resolveDialect(c *dbosContext) error {
 	if pgxPool == nil {
 		return nil
 	}
-	crdb, err := retryWithResult(c, func() (bool, error) {
+	crdb, err := RetryWithResult(c, func() (bool, error) {
 		conn, err := pgxPool.Acquire(c)
 		if err != nil {
 			return false, err
 		}
 		defer conn.Release()
 		return IsCockroachDB(conn.Conn()), nil
-	}, withRetrierLogger(c.logger))
+	}, WithRetrierLogger(c.logger))
 	if err != nil {
 		return err
 	}
@@ -214,7 +214,7 @@ func (ds *DataSource) resolveDialect(c *dbosContext) error {
 // skips all DDL — so a least-privilege role with only DML rights works against a
 // table that was pre-created (e.g. in the application's own migrations).
 func (ds *DataSource) completionTableInstalled(c *dbosContext) (bool, error) {
-	return retryWithResult(c, func() (bool, error) {
+	return RetryWithResult(c, func() (bool, error) {
 		if ds.dialect.Name() == DialectSQLite {
 			var name string
 			err := ds.pool.QueryRow(c,
@@ -230,7 +230,7 @@ func (ds *DataSource) completionTableInstalled(c *dbosContext) (bool, error) {
 			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`,
 			ds.schema, transactionCompletionTable).Scan(&exists)
 		return exists, err
-	}, withRetrierLogger(c.logger))
+	}, WithRetrierLogger(c.logger))
 }
 
 // ensureCompletionTable creates the transaction_completion table in the user's
@@ -249,10 +249,10 @@ func (ds *DataSource) ensureCompletionTable(c *dbosContext) error {
 	}
 	for _, stmt := range ds.completionTableStatements() {
 		query := stmt
-		if err := retry(c, func() error {
+		if err := Retry(c, func() error {
 			_, execErr := ds.pool.Exec(c, query)
 			return execErr
-		}, withRetrierLogger(c.logger)); err != nil {
+		}, WithRetrierLogger(c.logger)); err != nil {
 			return fmt.Errorf("the %s table does not exist and could not be created: %w; "+
 				"create it ahead of time in your application's database migrations "+
 				"or ensure the connecting role has CREATE privileges on the database and schema",
@@ -429,19 +429,19 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 			CompletedAt:   time.Now(),
 			Serialization: serialization,
 		}
-		return retry(c, func() error {
+		return Retry(c, func() error {
 			return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
-		}, withRetrierLogger(c.logger))
+		}, WithRetrierLogger(c.logger))
 	}
 
 	// Layer 1: already checkpointed in the system database? Replay it.
-	recordedOutput, err := retryWithResult(c, func() (*RecordedResult, error) {
+	recordedOutput, err := RetryWithResult(c, func() (*RecordedResult, error) {
 		return c.systemDB.CheckOperationExecution(uncancellableCtx, CheckOperationExecutionDBInput{
 			WorkflowID: stepState.workflowID,
 			StepID:     stepState.stepID,
 			StepName:   stepOpts.stepName,
 		})
-	}, withRetrierLogger(c.logger))
+	}, WithRetrierLogger(c.logger))
 	if err != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
 	}
@@ -453,9 +453,9 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	// Layer 2: did the user transaction commit on a previous run (crash window
 	// between txn1 and txn2)? Replay the stored output and apply txn2 without
 	// re-running fn.
-	completion, err := retryWithResult(c, func() (*completionRecord, error) {
+	completion, err := RetryWithResult(c, func() (*completionRecord, error) {
 		return ds.checkCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID)
-	}, withRetrierLogger(c.logger))
+	}, WithRetrierLogger(c.logger))
 	if err != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking transaction completion: %w", err))
 	}
@@ -513,7 +513,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	// through to the user retry policy below — so connection retries never burn
 	// the user's maxRetries budget (no compounding).
 	runTxnResilient := func() (any, error) {
-		return retryWithResult(c, runTxnOnce, withRetrierLogger(c.logger), withRetryCondition(ds.dialect.IsRetryableTransaction))
+		return RetryWithResult(c, runTxnOnce, WithRetrierLogger(c.logger), WithRetryCondition(ds.dialect.IsRetryableTransaction))
 	}
 
 	// OUTER: the user-facing step retry policy (maxRetries + predicate).
@@ -539,9 +539,9 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	// written before the system-DB checkpoint to keep the layer-1-then-layer-2 recovery order.
 	// Best-effort.
 	if serializedErr != nil {
-		if recErr := retry(c, func() error {
+		if recErr := Retry(c, func() error {
 			return ds.recordCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID, nil, serializedErr, ser.Name())
-		}, withRetrierLogger(c.logger)); recErr != nil {
+		}, WithRetrierLogger(c.logger)); recErr != nil {
 			c.logger.Warn("Failed to record transaction failure in the user database; the system database remains the source of truth",
 				"datasource", ds.name, "workflow_id", stepState.workflowID, "step_id", stepState.stepID, "error", recErr)
 		}

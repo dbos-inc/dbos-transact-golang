@@ -3,7 +3,7 @@ package dbos
 func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
-	pendingWorkflows, err := retryWithResult(ctx, func() ([]WorkflowStatus, error) {
+	pendingWorkflows, err := RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
 		appVersion := []string{}
 		if ctx.applicationVersion != "" {
 			appVersion = []string{ctx.applicationVersion}
@@ -14,16 +14,16 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 			ApplicationVersion: appVersion,
 			LoadInput:          true,
 		})
-	}, withRetrierLogger(ctx.logger))
+	}, WithRetrierLogger(ctx.logger))
 	if err != nil {
 		return nil, err
 	}
 
 	for _, workflow := range pendingWorkflows {
 		if workflow.QueueName != "" {
-			cleared, err := retryWithResult(ctx, func() (bool, error) {
+			cleared, err := RetryWithResult(ctx, func() (bool, error) {
 				return ctx.systemDB.ClearQueueAssignment(ctx, workflow.ID)
-			}, withRetrierLogger(ctx.logger))
+			}, WithRetrierLogger(ctx.logger))
 			if err != nil {
 				ctx.logger.Error("Error clearing queue assignment for workflow", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
 				continue

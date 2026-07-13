@@ -701,13 +701,13 @@ func (c *dbosContext) Launch() error {
 	c.systemDB.Launch(c)
 
 	// Register the current application version and warn if it is not the latest.
-	if err := retry(c, func() error {
+	if err := Retry(c, func() error {
 		return c.systemDB.CreateApplicationVersion(c, c.applicationVersion)
-	}, withRetrierLogger(c.logger)); err != nil {
+	}, WithRetrierLogger(c.logger)); err != nil {
 		c.logger.Warn("Failed to register application version", "version", c.applicationVersion, "error", err)
-	} else if latest, err := retryWithResult(c, func() (*VersionInfo, error) {
+	} else if latest, err := RetryWithResult(c, func() (*VersionInfo, error) {
 		return c.systemDB.GetLatestApplicationVersion(c, nil)
-	}, withRetrierLogger(c.logger)); err != nil {
+	}, WithRetrierLogger(c.logger)); err != nil {
 		c.logger.Warn("Failed to fetch latest application version", "error", err)
 	} else if latest.Name != c.applicationVersion {
 		c.logger.Warn("Current application version is not the latest",

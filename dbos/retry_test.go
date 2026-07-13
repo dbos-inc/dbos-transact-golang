@@ -46,7 +46,7 @@ func TestBackoffWithJitter(t *testing.T) {
 		t.Run(testcase.name, func(t *testing.T) {
 			// delayFor is 1-based; the listener loop counts attempts from 0 and
 			// passes retryAttempt+1, so mirror that here.
-			got := connectionRetryBackoff.delayFor(testcase.retryAttempt + 1)
+			got := ConnectionRetryBackoff.DelayFor(testcase.retryAttempt + 1)
 
 			if got < testcase.wantMin || got > testcase.wantMax {
 				t.Errorf("Should be between %v and %v, got=%v, attempt=%v",
@@ -68,7 +68,7 @@ func TestRetryWithResultContextError(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		_, err := retryWithResult(ctx, func() (int, error) {
+		_, err := RetryWithResult(ctx, func() (int, error) {
 			return 0, retryableErr
 		})
 
@@ -81,7 +81,7 @@ func TestRetryWithResultContextError(t *testing.T) {
 		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
 		defer cancel()
 
-		_, err := retryWithResult(ctx, func() (int, error) {
+		_, err := RetryWithResult(ctx, func() (int, error) {
 			return 0, retryableErr
 		})
 
@@ -92,7 +92,7 @@ func TestRetryWithResultContextError(t *testing.T) {
 
 	t.Run("NonRetryableErrorPreserved", func(t *testing.T) {
 		sentinel := errors.New("boom")
-		_, err := retryWithResult(context.Background(), func() (int, error) {
+		_, err := RetryWithResult(context.Background(), func() (int, error) {
 			return 0, sentinel
 		})
 

@@ -155,9 +155,9 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, input.ScheduledTime.Format(time.RFC3339))
 
 		// Skip if this tick's workflow already exists. Another executor may have enqueued it.
-		existing, err := retryWithResult(c, func() ([]WorkflowStatus, error) {
+		existing, err := RetryWithResult(c, func() ([]WorkflowStatus, error) {
 			return c.systemDB.ListWorkflows(c, ListWorkflowsDBInput{WorkflowIDs: []string{wfID}})
-		}, withRetrierLogger(c.logger))
+		}, WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to check existing scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
 			return nil, err
@@ -176,9 +176,9 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 		// Scheduled workflows always run against the latest registered application version, so a stale executor does not pick them up after a new deploy.
 		// If lookup fails, leave the version unset: NULL rows are only dequeued by executors on the latest version.
 		var appVersion string
-		latest, err := retryWithResult(c, func() (*VersionInfo, error) {
+		latest, err := RetryWithResult(c, func() (*VersionInfo, error) {
 			return c.systemDB.GetLatestApplicationVersion(c, nil)
-		}, withRetrierLogger(c.logger))
+		}, WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to fetch latest application version for scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
 		} else if latest != nil {
@@ -201,8 +201,8 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 		}
 
 		uncancellableCtx := WithoutCancel(c)
-		if err := retry(c, func() error {
-			tx, err := c.systemDB.(*SysDB).pool.BeginTx(uncancellableCtx, TxOptions{})
+		if err := Retry(c, func() error {
+			tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
 			if err != nil {
 				return fmt.Errorf("failed to begin transaction: %w", err)
 			}
@@ -211,14 +211,14 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 				return err
 			}
 			return tx.Commit(uncancellableCtx)
-		}, withRetrierLogger(c.logger)); err != nil {
+		}, WithRetrierLogger(c.logger)); err != nil {
 			c.logger.Error("failed to enqueue scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
 			return nil, err
 		}
 
-		if err := retry(c, func() error {
+		if err := Retry(c, func() error {
 			return c.systemDB.UpdateScheduleLastFiredAt(uncancellableCtx, scheduleName, time.Now())
-		}, withRetrierLogger(c.logger)); err != nil {
+		}, WithRetrierLogger(c.logger)); err != nil {
 			c.logger.Error("failed to update schedule last fired time after retries", "schedule", scheduleName, "error", err)
 		}
 

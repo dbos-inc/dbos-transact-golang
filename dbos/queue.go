@@ -142,12 +142,12 @@ func (q *WorkflowQueue) applyConfigChange(ctx DBOSContext, mutate func(*Workflow
 	if !ok {
 		return errors.New("invalid DBOS context")
 	}
-	_, err := retryWithResult(c, func() (*WorkflowQueue, error) {
+	_, err := RetryWithResult(c, func() (*WorkflowQueue, error) {
 		return c.systemDB.UpdateQueueConfig(c, q.Name, func(fresh *WorkflowQueue) error {
 			mutate(fresh)
 			return validateQueueConfig(fresh)
 		})
-	}, withRetrierLogger(c.logger), withRetryCondition(PostgresDialect{}.IsRetryableTransaction, SqliteDialect{}.IsRetryableTransaction))
+	}, WithRetrierLogger(c.logger), WithRetryCondition(PostgresDialect{}.IsRetryableTransaction, SqliteDialect{}.IsRetryableTransaction))
 	if err != nil {
 		return err
 	}
@@ -367,9 +367,9 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 	case QueueConflictNeverUpdate:
 		updateExisting = false
 	default: // QueueConflictUpdateIfLatestVersion
-		latest, err := retryWithResult(c, func() (*VersionInfo, error) {
+		latest, err := RetryWithResult(c, func() (*VersionInfo, error) {
 			return c.systemDB.GetLatestApplicationVersion(c, nil)
-		}, withRetrierLogger(c.logger))
+		}, WithRetrierLogger(c.logger))
 		switch {
 		case errors.Is(err, &DBOSError{Code: NoApplicationVersions}):
 			// No registered versions yet: this process is the first, hence the latest.
@@ -383,15 +383,15 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 		}
 	}
 
-	inserted, err := retryWithResult(c, func() (bool, error) {
+	inserted, err := RetryWithResult(c, func() (bool, error) {
 		return c.systemDB.UpsertQueue(c, UpsertQueueDBInput{Queue: q, UpdateExisting: updateExisting})
-	}, withRetrierLogger(c.logger))
+	}, WithRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
 	}
-	persisted, err := retryWithResult(c, func() (*WorkflowQueue, error) {
+	persisted, err := RetryWithResult(c, func() (*WorkflowQueue, error) {
 		return c.systemDB.GetQueue(c, name)
-	}, withRetrierLogger(c.logger))
+	}, WithRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
 	}
@@ -414,9 +414,9 @@ func RetrieveQueue(ctx DBOSContext, name string) (Queue, error) {
 }
 
 func (c *dbosContext) RetrieveQueue(_ DBOSContext, name string) (Queue, error) {
-	q, err := retryWithResult(c, func() (*WorkflowQueue, error) {
+	q, err := RetryWithResult(c, func() (*WorkflowQueue, error) {
 		return c.systemDB.GetQueue(c, name)
-	}, withRetrierLogger(c.logger))
+	}, WithRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
 	}
@@ -436,9 +436,9 @@ func ListQueues(ctx DBOSContext) ([]Queue, error) {
 }
 
 func (c *dbosContext) ListQueues(_ DBOSContext) ([]Queue, error) {
-	queues, err := retryWithResult(c, func() ([]WorkflowQueue, error) {
+	queues, err := RetryWithResult(c, func() ([]WorkflowQueue, error) {
 		return c.systemDB.ListQueues(c)
-	}, withRetrierLogger(c.logger))
+	}, WithRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
 	}
@@ -458,9 +458,9 @@ func DeleteQueue(ctx DBOSContext, name string) error {
 }
 
 func (c *dbosContext) DeleteQueue(_ DBOSContext, name string) error {
-	return retry(c, func() error {
+	return Retry(c, func() error {
 		return c.systemDB.DeleteQueue(c, name)
-	}, withRetrierLogger(c.logger))
+	}, WithRetrierLogger(c.logger))
 }
 
 type queueRunner struct {
@@ -547,9 +547,9 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 	const reconcileInterval = 1 * time.Second
 	for ctx.Err() == nil { // While ctx is not cancelled
 		// Transition any DELAYED workflows whose delay has expired to ENQUEUED.
-		if err := retry(ctx, func() error {
+		if err := Retry(ctx, func() error {
 			return ctx.systemDB.TransitionDelayedWorkflows(ctx)
-		}, withRetrierLogger(qr.logger)); err != nil {
+		}, WithRetrierLogger(qr.logger)); err != nil {
 			qr.logger.Warn("Exception transitioning delayed workflows", "error", err)
 		}
 
@@ -606,9 +606,9 @@ func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]WorkflowQueue
 		current[name] = queue
 	}
 
-	dbQueues, err := retryWithResult(ctx, func() ([]WorkflowQueue, error) {
+	dbQueues, err := RetryWithResult(ctx, func() ([]WorkflowQueue, error) {
 		return ctx.systemDB.ListQueues(ctx)
-	}, withRetrierLogger(qr.logger))
+	}, WithRetrierLogger(qr.logger))
 	if err != nil {
 		// Return a snapshot of the current set in case of transient errors
 		qr.logger.Warn("Exception listing database-backed queues", "error", err)
@@ -684,9 +684,9 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 		// Default to empty string for non-partitioned queues
 		partitionKeys := []string{""}
 		if queue.PartitionQueue {
-			partitions, err := retryWithResult(ctx, func() ([]string, error) {
+			partitions, err := RetryWithResult(ctx, func() ([]string, error) {
 				return ctx.systemDB.GetQueuePartitions(ctx, queue.Name)
-			}, withRetrierLogger(queueLogger))
+			}, WithRetrierLogger(queueLogger))
 			if err != nil {
 				skipDequeue = true
 				if pgErr, ok := err.(*pgconn.PgError); ok {
@@ -777,7 +777,7 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 // dequeueWorkflows dequeues workflows from a specific partition and handles errors.
 // Returns the dequeued workflows and a boolean indicating whether to continue to the next iteration.
 func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue WorkflowQueue, partitionKey string, hasBackoffError *bool) ([]DequeuedWorkflow, bool) {
-	dequeuedWorkflows, err := retryWithResult(ctx, func() ([]DequeuedWorkflow, error) {
+	dequeuedWorkflows, err := RetryWithResult(ctx, func() ([]DequeuedWorkflow, error) {
 		return ctx.systemDB.DequeueWorkflows(ctx, DequeueWorkflowsInput{
 			Queue:              queue,
 			ExecutorID:         ctx.executorID,
@@ -785,7 +785,7 @@ func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue WorkflowQueue, p
 			QueuePartitionKey:  partitionKey,
 			LocalRunningCount:  ctx.countActiveWorkflowsForQueue(queue.Name, partitionKey),
 		})
-	}, withRetrierLogger(qr.logger))
+	}, WithRetrierLogger(qr.logger))
 
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok {

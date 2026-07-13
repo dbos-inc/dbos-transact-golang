@@ -28,6 +28,11 @@ import (
 type SystemDatabase interface {
 	// SysDB management
 	Launch(ctx context.Context)
+	Pool() Pool
+	Dialect() Dialect
+	// StreamWakeChannel returns a channel signaled when new rows are written to
+	// the given workflow's stream, plus a cleanup func to drop the registration.
+	StreamWakeChannel(workflowID, key string) (chan struct{}, func())
 	Shutdown(ctx context.Context, timeout time.Duration)
 	ResetSystemDB(ctx context.Context) error
 
@@ -792,9 +797,9 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 
 	if customPool == nil {
 		// Create the database if it doesn't exist
-		if err := retry(ctx, func() error {
+		if err := Retry(ctx, func() error {
 			return createDatabaseIfNotExists(ctx, pool, logger)
-		}, withRetrierLogger(logger)); err != nil {
+		}, WithRetrierLogger(logger)); err != nil {
 			pool.Close()
 			return nil, fmt.Errorf("failed to create database: %v", err)
 		}
@@ -825,9 +830,9 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		return nil, fmt.Errorf("failed to determine migration status: %v", smErr)
 	}
 	if needsMigration {
-		if err := retry(ctx, func() error {
+		if err := Retry(ctx, func() error {
 			return RunMigrations(ctx, pool, databaseSchema, isCockroach, logger)
-		}, withRetrierLogger(logger)); err != nil {
+		}, WithRetrierLogger(logger)); err != nil {
 			if customPool == nil {
 				pool.Close()
 			}
@@ -866,6 +871,20 @@ func (s *SysDB) listenNotifyPool() *pgxpool.Pool {
 		return nil
 	}
 	return PgxPool(s.pool)
+}
+
+func (s *SysDB) Pool() Pool {
+	return s.pool
+}
+
+func (s *SysDB) Dialect() Dialect {
+	return s.dialect
+}
+
+func (s *SysDB) StreamWakeChannel(workflowID, key string) (chan struct{}, func()) {
+	payload := fmt.Sprintf("%s::%s", workflowID, key)
+	ch, _ := s.streamsMap.LoadOrStore(payload, make(chan struct{}, 1))
+	return ch.(chan struct{}), func() { s.streamsMap.Delete(payload) }
 }
 
 func (s *SysDB) Launch(ctx context.Context) {
@@ -3365,9 +3384,9 @@ func (s *SysDB) notificationListenerLoop(ctx context.Context) {
 
 	s.logger.Debug("DBOS: Starting notification listener loop")
 
-	poolConn, err := retryWithResult(ctx, func() (*pgxpool.Conn, error) {
+	poolConn, err := RetryWithResult(ctx, func() (*pgxpool.Conn, error) {
 		return acquire(ctx)
-	}, withRetrierLogger(s.logger))
+	}, WithRetrierLogger(s.logger))
 	if err != nil {
 		s.logger.Error("Failed to acquire listener connection", "error", err)
 		return
@@ -3401,7 +3420,7 @@ func (s *SysDB) notificationListenerLoop(ctx context.Context) {
 						break
 					}
 					s.logger.Debug("failed to re-acquire connection for notification listener", "error", err)
-					time.Sleep(connectionRetryBackoff.delayFor(retryAttempt + 1))
+					time.Sleep(ConnectionRetryBackoff.DelayFor(retryAttempt + 1))
 					retryAttempt++
 				}
 				// The connection is re-acquired. Wake all waiters so they re-poll the
@@ -3412,7 +3431,7 @@ func (s *SysDB) notificationListenerLoop(ctx context.Context) {
 			}
 			// Other transient errors. Backoff and continue on same conn
 			s.logger.Error("Error waiting for notification", "error", err)
-			time.Sleep(connectionRetryBackoff.delayFor(retryAttempt + 1))
+			time.Sleep(ConnectionRetryBackoff.DelayFor(retryAttempt + 1))
 			retryAttempt++
 			continue
 		}
@@ -3744,13 +3763,13 @@ func (s *SysDB) StartRecvListener(ctx context.Context, destinationID, topic stri
 	// the initial "already pending?" probe and by the wait loop after each wake.
 	query := s.renderSQL(`SELECT EXISTS (SELECT 1 FROM %snotifications WHERE destination_uuid = $1 AND topic = $2 AND consumed = false)`, s.dialect.SchemaPrefix(s.schema))
 	recheck := func(ctx context.Context) (bool, error) {
-		return retryWithResult(ctx, func() (bool, error) {
+		return RetryWithResult(ctx, func() (bool, error) {
 			var found bool
 			if err := s.pool.QueryRow(ctx, query, destinationID, topic).Scan(&found); err != nil {
 				return false, fmt.Errorf("failed to check message: %w", err)
 			}
 			return found, nil
-		}, withRetrierLogger(s.logger))
+		}, WithRetrierLogger(s.logger))
 	}
 	exists, err := recheck(ctx)
 	if err != nil {
@@ -3845,13 +3864,13 @@ func (s *SysDB) StartEventListener(ctx context.Context, targetWorkflowID, key st
 	// "already set?" probe and by the wait loop after each wake.
 	query := s.renderSQL(`SELECT EXISTS (SELECT 1 FROM %sworkflow_events WHERE workflow_uuid = $1 AND key = $2)`, s.dialect.SchemaPrefix(s.schema))
 	recheck := func(ctx context.Context) (bool, error) {
-		return retryWithResult(ctx, func() (bool, error) {
+		return RetryWithResult(ctx, func() (bool, error) {
 			var found bool
 			if err := s.pool.QueryRow(ctx, query, targetWorkflowID, key).Scan(&found); err != nil {
 				return false, fmt.Errorf("failed to check event: %w", err)
 			}
 			return found, nil
-		}, withRetrierLogger(s.logger))
+		}, WithRetrierLogger(s.logger))
 	}
 	exists, err := recheck(ctx)
 	if err != nil {
@@ -5067,9 +5086,9 @@ func (s *SysDB) BackfillSchedule(ctx context.Context, input BackfillScheduleDBIn
 	// Backfilled workflows always run against the latest registered application
 	// version. If lookup fails (e.g. no versions registered yet) leave it unset.
 	var backfillAppVersion string
-	backfillLatest, err := retryWithResult(ctx, func() (*VersionInfo, error) {
+	backfillLatest, err := RetryWithResult(ctx, func() (*VersionInfo, error) {
 		return s.GetLatestApplicationVersion(ctx, nil)
-	}, withRetrierLogger(s.logger))
+	}, WithRetrierLogger(s.logger))
 	if err != nil {
 		s.logger.Error("failed to fetch latest application version for schedule backfill", "schedule", input.ScheduleName, "error", err)
 	} else if backfillLatest != nil {
@@ -5187,9 +5206,9 @@ func (s *SysDB) TriggerSchedule(ctx context.Context, scheduleName string) (strin
 	// Triggered scheduled workflows run against the latest registered application
 	// version. If lookup fails (e.g. no versions registered yet) leave it unset.
 	var triggerAppVersion string
-	triggerLatest, err := retryWithResult(ctx, func() (*VersionInfo, error) {
+	triggerLatest, err := RetryWithResult(ctx, func() (*VersionInfo, error) {
 		return s.GetLatestApplicationVersion(ctx, nil)
-	}, withRetrierLogger(s.logger))
+	}, WithRetrierLogger(s.logger))
 	if err != nil {
 		s.logger.Error("failed to fetch latest application version for schedule trigger", "schedule", scheduleName, "error", err)
 	} else if triggerLatest != nil {
@@ -5551,26 +5570,26 @@ type retryConfig struct {
 	logger              *slog.Logger
 }
 
-// retryOption is a functional option for configuring retry behavior
-type retryOption func(*retryConfig)
+// RetryOption is a functional option for configuring retry behavior
+type RetryOption func(*retryConfig)
 
-// withRetrierLogger sets the logger for the retrier
-func withRetrierLogger(logger *slog.Logger) retryOption {
+// WithRetrierLogger sets the logger for the retrier
+func WithRetrierLogger(logger *slog.Logger) RetryOption {
 	return func(c *retryConfig) {
 		c.logger = logger
 	}
 }
 
-// withRetryCondition appends the given condition functions to the retry condition chain.
+// WithRetryCondition appends the given condition functions to the retry condition chain.
 // An error is retryable if any function in the chain returns true.
-func withRetryCondition(fns ...func(error, *slog.Logger) bool) retryOption {
+func WithRetryCondition(fns ...func(error, *slog.Logger) bool) RetryOption {
 	return func(c *retryConfig) {
 		c.retryConditionChain = append(c.retryConditionChain, fns...)
 	}
 }
 
-// retry executes a function with retry logic using functional optionsr
-func retry(ctx context.Context, fn func() error, options ...retryOption) error {
+// Retry executes a function with Retry logic using functional optionsr
+func Retry(ctx context.Context, fn func() error, options ...RetryOption) error {
 	config := &retryConfig{
 		maxRetries:    -1,
 		baseDelay:     100 * time.Millisecond,
@@ -5589,12 +5608,12 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 		opt(config)
 	}
 
-	sched := backoffSchedule{
-		base:      config.baseDelay,
-		max:       config.maxDelay,
-		factor:    config.backoffFactor,
-		jitterMin: config.jitterMin,
-		jitterMax: config.jitterMax,
+	sched := BackoffSchedule{
+		Base:      config.baseDelay,
+		Max:       config.maxDelay,
+		Factor:    config.backoffFactor,
+		JitterMin: config.jitterMin,
+		JitterMax: config.jitterMax,
 	}
 
 	// decide: retryable if any chain condition matches, until the (optional)
@@ -5637,12 +5656,12 @@ func retry(ctx context.Context, fn func() error, options ...retryOption) error {
 		return ctx.Err()
 	}
 
-	return retryLoop(ctx, sched, fn, decide, onRetry, onCancel)
+	return RetryLoop(ctx, sched, fn, decide, onRetry, onCancel)
 }
 
-// retryWithResult executes a function that returns a value with retry logic
+// RetryWithResult executes a function that returns a value with retry logic
 // It uses the non-generic retry function under the hood
-func retryWithResult[T any](ctx context.Context, fn func() (T, error), options ...retryOption) (T, error) {
+func RetryWithResult[T any](ctx context.Context, fn func() (T, error), options ...RetryOption) (T, error) {
 	var result T
 
 	wrappedFn := func() error {
@@ -5653,7 +5672,7 @@ func retryWithResult[T any](ctx context.Context, fn func() (T, error), options .
 
 	// Return retry's error directly: it is the final fn() error, or ctx.Err()
 	// when the context is cancelled during a backoff wait.
-	return result, retry(ctx, wrappedFn, options...)
+	return result, Retry(ctx, wrappedFn, options...)
 }
 
 func (s *SysDB) ExportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error) {

@@ -1685,7 +1685,7 @@ func TestDebouncerClient(t *testing.T) {
 		// CockroachDB has longer notification latency due to polling. Only pg
 		// backends expose a *pgxpool.Pool we can sniff; sqlite is never CRDB.
 		isCockroach := false
-		if pgxPool := PgxPool(serverCtx.(*dbosContext).systemDB.(*SysDB).pool); pgxPool != nil {
+		if pgxPool := PgxPool(serverCtx.(*dbosContext).systemDB.Pool()); pgxPool != nil {
 			conn, err := pgxPool.Acquire(serverCtx)
 			require.NoError(t, err)
 			defer conn.Release()
