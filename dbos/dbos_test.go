@@ -1052,9 +1052,7 @@ func TestSQLiteFoundation(t *testing.T) {
 	// control path (tx.exec: begin/commit/rollback), which returns the raw
 	// SQLite code (`interrupted (9)` or `database is locked (5)`). The dbos
 	// layer must map it back so callers (e.g. handle.GetResult after
-	// Shutdown) can errors.Is it. Reproduces the
-	// "failed to begin transaction: interrupted (9)" CI failure in
-	// TestWorkflowHandleContextCancel on the sqlite backend.
+	// Shutdown) can errors.Is it.
 	blocker, err := s.pool.BeginTx(context.Background(), TxOptions{})
 	require.NoError(t, err)
 	_, err = blocker.Exec(context.Background(), `CREATE TABLE begin_cancel_probe (x INT)`)
