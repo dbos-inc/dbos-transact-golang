@@ -227,7 +227,7 @@ type dbosContext struct {
 
 	launched atomic.Bool
 
-	systemDB    systemDatabase
+	systemDB    SystemDatabase
 	adminServer *adminServer
 	config      *Config
 
@@ -616,7 +616,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 	initExecutor.serializer = config.Serializer
 
-	newSystemDatabaseInputs := newSystemDatabaseInput{
+	newSystemDatabaseInputs := NewSystemDatabaseInput{
 		databaseURL:     config.DatabaseURL,
 		databaseSchema:  config.DatabaseSchema,
 		customPool:      config.SystemDBPool,
@@ -626,7 +626,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	}
 
 	// Create the system database
-	systemDB, err := newSystemDatabase(initExecutor, newSystemDatabaseInputs)
+	systemDB, err := NewSystemDatabase(initExecutor, newSystemDatabaseInputs)
 	if err != nil {
 		initExecutor.logger.Error("failed to create system database", "error", err)
 		return nil, newInitializationError(err.Error())
@@ -698,15 +698,15 @@ func (c *dbosContext) Launch() error {
 	}
 
 	// Start the system database
-	c.systemDB.launch(c)
+	c.systemDB.Launch(c)
 
 	// Register the current application version and warn if it is not the latest.
 	if err := retry(c, func() error {
-		return c.systemDB.createApplicationVersion(c, c.applicationVersion)
+		return c.systemDB.CreateApplicationVersion(c, c.applicationVersion)
 	}, withRetrierLogger(c.logger)); err != nil {
 		c.logger.Warn("Failed to register application version", "version", c.applicationVersion, "error", err)
 	} else if latest, err := retryWithResult(c, func() (*VersionInfo, error) {
-		return c.systemDB.getLatestApplicationVersion(c, nil)
+		return c.systemDB.GetLatestApplicationVersion(c, nil)
 	}, withRetrierLogger(c.logger)); err != nil {
 		c.logger.Warn("Failed to fetch latest application version", "error", err)
 	} else if latest.Name != c.applicationVersion {
@@ -846,7 +846,7 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	// Close the system database
 	if c.systemDB != nil {
 		c.logger.Debug("Shutting down system database")
-		c.systemDB.shutdown(c, timeout)
+		c.systemDB.Shutdown(c, timeout)
 	}
 
 	c.launched.Store(false)

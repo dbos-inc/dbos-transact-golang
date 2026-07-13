@@ -276,7 +276,7 @@ func TestDebouncer(t *testing.T) {
 		// completed debouncer workflow with the raw-SQL test helper instead.
 		setWorkflowStatusPending(t, dbosCtx, debouncerWorkflowID)
 
-		cleared, err := dbosCtxInstance.systemDB.clearQueueAssignment(context.Background(), debouncerWorkflowID)
+		cleared, err := dbosCtxInstance.systemDB.ClearQueueAssignment(context.Background(), debouncerWorkflowID)
 		require.NoError(t, err, "failed to clear queue assignment")
 		require.True(t, cleared, "should have cleared queue assignment")
 

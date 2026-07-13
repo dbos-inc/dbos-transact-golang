@@ -13,11 +13,11 @@ import (
 // uses. It embeds the interface so it satisfies the rest (none of which are
 // called here) without a pile of stub methods.
 type fakeStreamDB struct {
-	systemDatabase
+	SystemDatabase
 	reads int
 }
 
-func (f *fakeStreamDB) readStream(_ context.Context, _ readStreamDBInput) ([]streamEntry, bool, error) {
+func (f *fakeStreamDB) ReadStream(_ context.Context, _ ReadStreamDBInput) ([]StreamEntry, bool, error) {
 	f.reads++
 	if f.reads == 1 {
 		// First read: the producer's final value is not visible yet — it commits
@@ -26,10 +26,10 @@ func (f *fakeStreamDB) readStream(_ context.Context, _ readStreamDBInput) ([]str
 	}
 	// The post-inactive final read drains the value the producer committed just
 	// before it completed.
-	return []streamEntry{{Value: "final", Offset: 0}}, false, nil
+	return []StreamEntry{{Value: "final", Offset: 0}}, false, nil
 }
 
-func (f *fakeStreamDB) listWorkflows(_ context.Context, _ listWorkflowsDBInput) ([]WorkflowStatus, error) {
+func (f *fakeStreamDB) ListWorkflows(_ context.Context, _ ListWorkflowsDBInput) ([]WorkflowStatus, error) {
 	// The producer is terminal, but it committed "final" after the reader's first
 	// stream read above — so its writes are all committed by now.
 	return []WorkflowStatus{{Status: WorkflowStatusSuccess}}, nil

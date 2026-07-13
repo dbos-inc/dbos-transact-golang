@@ -2276,8 +2276,8 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		// Seed an older version directly so it sorts before the current one.
 		sysDB := serverCtx.(*dbosContext).systemDB
-		require.NoError(t, sysDB.createApplicationVersion(serverCtx, "older-version"))
-		require.NoError(t, sysDB.updateApplicationVersionTimestamp(serverCtx, "older-version", time.Now().Add(-time.Hour).UnixMilli()))
+		require.NoError(t, sysDB.CreateApplicationVersion(serverCtx, "older-version"))
+		require.NoError(t, sysDB.UpdateApplicationVersionTimestamp(serverCtx, "older-version", time.Now().Add(-time.Hour).UnixMilli()))
 
 		latest, err := c.GetLatestApplicationVersion()
 		require.NoError(t, err)

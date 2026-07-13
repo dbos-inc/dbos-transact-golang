@@ -179,7 +179,7 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 	if isWithinWorkflow {
 		workflowStatuses, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
 			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
-				return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
+				return c.systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{
 					workflowIDs: []string{h.workflowID},
 					loadInput:   loadInput,
 					loadOutput:  loadOutput,
@@ -188,7 +188,7 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 		}, WithStepName("DBOS.getStatus"))
 	} else {
 		workflowStatuses, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
-			return c.systemDB.listWorkflows(c, listWorkflowsDBInput{
+			return c.systemDB.ListWorkflows(c, ListWorkflowsDBInput{
 				workflowIDs: []string{h.workflowID},
 				loadInput:   loadInput,
 				loadOutput:  loadOutput,
@@ -235,9 +235,9 @@ func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
 	if !isWithinWorkflow {
 		return *new(R), false, nil
 	}
-	recordedOutputs, err := retryWithResult(dbosCtx, func() (*recordedResult, error) {
+	recordedOutputs, err := retryWithResult(dbosCtx, func() (*RecordedResult, error) {
 		uncancellableCtx := context.WithoutCancel(dbosCtx)
-		return dbosCtx.(*dbosContext).systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
+		return dbosCtx.(*dbosContext).systemDB.CheckOperationExecution(uncancellableCtx, CheckOperationExecutionDBInput{
 			workflowID: workflowState.workflowID,
 			stepID:     workflowState.stepID + 1,
 			stepName:   "DBOS.getResult",
@@ -338,7 +338,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			s := serializeWorkflowError(outcome.err, ser.Name())
 			serializedOutcomeErr = &s
 		}
-		recordGetResultInput := recordOperationResultDBInput{
+		recordGetResultInput := RecordOperationResultDBInput{
 			workflowID:      workflowState.workflowID,
 			childWorkflowID: h.workflowID,
 			stepID:          workflowState.nextStepID(),
@@ -351,7 +351,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		}
 		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := retry(h.dbosContext, func() error {
-			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(uncancellableCtx, recordGetResultInput)
+			return h.dbosContext.(*dbosContext).systemDB.RecordOperationResult(uncancellableCtx, recordGetResultInput)
 		}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 		if recordResultErr != nil {
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -394,8 +394,8 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		defer cancel()
 	}
 
-	awaitResult, awaitErr := retryWithResult(ctx, func() (*awaitWorkflowResultOutput, error) {
-		return h.dbosContext.(*dbosContext).systemDB.awaitWorkflowResult(ctx, h.workflowID, options.pollInterval)
+	awaitResult, awaitErr := retryWithResult(ctx, func() (*AwaitWorkflowResultOutput, error) {
+		return h.dbosContext.(*dbosContext).systemDB.AwaitWorkflowResult(ctx, h.workflowID, options.pollInterval)
 	}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 
 	completedTime := time.Now()
@@ -451,7 +451,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 			serializedErr := serializeWorkflowError(awaitErr, serialization)
 			errStr = &serializedErr
 		}
-		recordGetResultInput := recordOperationResultDBInput{
+		recordGetResultInput := RecordOperationResultDBInput{
 			workflowID:      workflowState.workflowID,
 			childWorkflowID: h.workflowID,
 			stepID:          workflowState.nextStepID(),
@@ -464,7 +464,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		}
 		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := retry(h.dbosContext, func() error {
-			return h.dbosContext.(*dbosContext).systemDB.recordOperationResult(uncancellableCtx, recordGetResultInput)
+			return h.dbosContext.(*dbosContext).systemDB.RecordOperationResult(uncancellableCtx, recordGetResultInput)
 		}, withRetrierLogger(h.dbosContext.(*dbosContext).logger))
 		if recordResultErr != nil {
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
@@ -1325,7 +1325,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
 		childWorkflowID, err := retryWithResult(c, func() (*string, error) {
-			return c.systemDB.checkChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID, params.WorkflowName)
+			return c.systemDB.CheckChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID, params.WorkflowName)
 		}, withRetrierLogger(c.logger))
 		if err != nil {
 			// A non-determinism error (a different child workflow recorded at this
@@ -1442,7 +1442,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	}
 
 	var earlyReturnPollingHandle *workflowPollingHandle[any]
-	var insertStatusResult *insertWorkflowResult
+	var insertStatusResult *InsertWorkflowResult
 	returnExisting := params.DeduplicationPolicy == DeduplicationPolicyReturnExisting
 
 	// Init status and record child workflow relationship in a single transaction
@@ -1455,14 +1455,14 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 		// Insert workflow status with transaction
 		ownerXID := uuid.New().String()
-		insertInput := insertWorkflowStatusDBInput{
+		insertInput := InsertWorkflowStatusDBInput{
 			status:            workflowStatus,
 			maxRetries:        params.MaxRetries,
 			tx:                tx,
 			ownerXID:          &ownerXID,
 			incrementAttempts: params.isDequeue || params.isRecovery,
 		}
-		insertStatusResult, err = c.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
+		insertStatusResult, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
 			// Silence dedup error under return-existing policy.
 			if !(returnExisting && errors.Is(err, &DBOSError{Code: QueueDeduplicated})) {
@@ -1475,7 +1475,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		// We already have checked this earlier so this path should only be taken if the child is executing the first time
 		if isChildWorkflow {
 			// Get the step ID that was used for generating the child workflow ID
-			childInput := recordChildWorkflowDBInput{
+			childInput := RecordChildWorkflowDBInput{
 				parentWorkflowID: parentWorkflowState.workflowID,
 				childWorkflowID:  workflowID,
 				stepName:         params.WorkflowName,
@@ -1483,7 +1483,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				tx:               tx,
 			}
 			err = retry(c, func() error {
-				return c.systemDB.recordChildWorkflow(uncancellableCtx, childInput)
+				return c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput)
 			}, withRetrierLogger(c.logger))
 			if err != nil {
 				c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
@@ -1532,7 +1532,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			return nil, err
 		}
 		existingID, lookupErr := retryWithResult(c, func() (*string, error) {
-			return c.systemDB.getDeduplicatedWorkflow(uncancellableCtx, params.QueueName, params.DeduplicationID)
+			return c.systemDB.GetDeduplicatedWorkflow(uncancellableCtx, params.QueueName, params.DeduplicationID)
 		}, withRetrierLogger(c.logger))
 		if lookupErr != nil {
 			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("looking up deduplicated workflow: %w", lookupErr))
@@ -1543,13 +1543,13 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		// Attach to the existing workflow holding the deduplication slot. For a child workflow, record
 		// the parent->child mapping at the reserved step ID so replay resolves to the same workflow.
 		if isChildWorkflow {
-			childInput := recordChildWorkflowDBInput{
+			childInput := RecordChildWorkflowDBInput{
 				parentWorkflowID: parentWorkflowState.workflowID,
 				childWorkflowID:  *existingID,
 				stepName:         params.WorkflowName,
 				stepID:           parentWorkflowState.stepID,
 			}
-			if err := c.systemDB.recordChildWorkflow(uncancellableCtx, childInput); err != nil {
+			if err := c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput); err != nil {
 				return nil, newWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
 			}
 		}
@@ -1589,7 +1589,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	workflowCancelFunction := func() {
 		c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
 		err := retry(c, func() error {
-			_, err := c.systemDB.cancelWorkflows(uncancellableCtx, cancelWorkflowsDBInput{workflowIDs: []string{workflowID}})
+			_, err := c.systemDB.CancelWorkflows(uncancellableCtx, CancelWorkflowsDBInput{workflowIDs: []string{workflowID}})
 			return err
 		}, withRetrierLogger(c.logger))
 		if err != nil {
@@ -1635,8 +1635,8 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			// context must no longer durably cancel it. Disarm the cancel function.
 			stopFunc()
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
-			awaitOut, awaitErr := retryWithResult(c, func() (*awaitWorkflowResultOutput, error) {
-				return c.systemDB.awaitWorkflowResult(uncancellableCtx, workflowID, _DB_RETRY_INTERVAL)
+			awaitOut, awaitErr := retryWithResult(c, func() (*AwaitWorkflowResultOutput, error) {
+				return c.systemDB.AwaitWorkflowResult(uncancellableCtx, workflowID, _DB_RETRY_INTERVAL)
 			}, withRetrierLogger(c.logger))
 			err = awaitErr
 			if awaitErr == nil && awaitOut != nil && awaitOut.errStr != nil {
@@ -1706,7 +1706,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			// marking it PENDING. But a stale activeID entry would prevent the workflow from running.
 			removeActive()
 			recordErr := retry(c, func() error {
-				return c.systemDB.updateWorkflowOutcome(uncancellableCtx, updateWorkflowOutcomeDBInput{
+				return c.systemDB.UpdateWorkflowOutcome(uncancellableCtx, UpdateWorkflowOutcomeDBInput{
 					workflowID: workflowID,
 					status:     status,
 					errStr:     serializedErr,
@@ -2122,8 +2122,8 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	stepOpts := prep.StepOpts
 
 	// Check the step is cancelled, has already completed, or is called with a different name
-	recordedOutput, err := retryWithResult(c, func() (*recordedResult, error) {
-		return c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
+	recordedOutput, err := retryWithResult(c, func() (*RecordedResult, error) {
+		return c.systemDB.CheckOperationExecution(uncancellableCtx, CheckOperationExecutionDBInput{
 			workflowID: stepState.workflowID,
 			stepID:     stepState.stepID,
 			stepName:   stepOpts.stepName,
@@ -2165,7 +2165,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		s := serializeWorkflowError(stepError, ser.Name())
 		serializedStepErr = &s
 	}
-	dbInput := recordOperationResultDBInput{
+	dbInput := RecordOperationResultDBInput{
 		workflowID:    stepState.workflowID,
 		stepName:      stepOpts.stepName,
 		stepID:        stepState.stepID,
@@ -2176,7 +2176,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 		serialization: ser.Name(),
 	}
 	recErr := retry(c, func() error {
-		return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+		return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
 	}, withRetrierLogger(c.logger))
 	if recErr != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
@@ -2283,7 +2283,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 		}
 		defer tx.Rollback(uncancellableCtx)
 
-		recordedOutput, err := c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
+		recordedOutput, err := c.systemDB.CheckOperationExecution(uncancellableCtx, CheckOperationExecutionDBInput{
 			workflowID: stepState.workflowID,
 			stepID:     stepState.stepID,
 			stepName:   stepOpts.stepName,
@@ -2339,7 +2339,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 			s := serializeWorkflowError(stepError, txnSer.Name())
 			serializedTxnErr = &s
 		}
-		dbInput := recordOperationResultDBInput{
+		dbInput := RecordOperationResultDBInput{
 			workflowID:    stepState.workflowID,
 			stepName:      stepOpts.stepName,
 			stepID:        stepState.stepID,
@@ -2350,7 +2350,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 			tx:            tx,
 			serialization: serialization,
 		}
-		recErr := c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+		recErr := c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
 		if recErr != nil {
 			if stepError != nil {
 				recErr = errors.Join(recErr, stepError)
@@ -2667,12 +2667,12 @@ func (c *dbosContext) Send(_ DBOSContext, destinationID string, message any, top
 	if isWithinWorkflow {
 		_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 			input.tx = tx
-			return nil, ctx.(*dbosContext).systemDB.send(ctx, input)
+			return nil, ctx.(*dbosContext).systemDB.Send(ctx, input)
 		}, WithStepName("DBOS.send"))
 	} else {
 		uncancellableCtx := WithoutCancel(c)
 		err = retry(c, func() error {
-			return c.systemDB.send(uncancellableCtx, input)
+			return c.systemDB.Send(uncancellableCtx, input)
 		}, withRetrierLogger(c.logger))
 	}
 	return err
@@ -2718,8 +2718,8 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 
 	// Early exit when this recv already has a checkpoint (recovery, fork),
 	// so replay neither waits nor records a spurious sleep step.
-	recorded, err := retryWithResult(c, func() (*recordedResult, error) {
-		return c.systemDB.checkOperationExecution(WithoutCancel(c), checkOperationExecutionDBInput{
+	recorded, err := retryWithResult(c, func() (*RecordedResult, error) {
+		return c.systemDB.CheckOperationExecution(WithoutCancel(c), CheckOperationExecutionDBInput{
 			workflowID: workflowID,
 			stepID:     stepID,
 			stepName:   "DBOS.recv",
@@ -2733,7 +2733,7 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 	}
 
 	// Register as the receiver for this workflow/topic.
-	waiter, err := c.systemDB.startRecvListener(c, workflowID, topic)
+	waiter, err := c.systemDB.StartRecvListener(c, workflowID, topic)
 	if err != nil {
 		return nil, err
 	}
@@ -2759,7 +2759,7 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 	// Consume the message and checkpoint the recv result in a single transaction.
 	// If another executor already checkpointed this step, runAsTxn returns the recorded result.
 	out, err := c.runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
-		message, msgSerialization, err := c.systemDB.consumeMessage(ctx, tx, workflowID, topic)
+		message, msgSerialization, err := c.systemDB.ConsumeMessage(ctx, tx, workflowID, topic)
 		if err != nil {
 			return nil, err
 		}
@@ -2891,7 +2891,7 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any, opts ...S
 		if !ok || wfState == nil {
 			return nil, newStepExecutionError("", "DBOS.setEvent", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
 		}
-		return nil, c.systemDB.setEvent(ctx, WorkflowSetEventInput{
+		return nil, c.systemDB.SetEvent(ctx, WorkflowSetEventInput{
 			Key:           key,
 			Message:       encodedMessage,
 			tx:            tx,
@@ -2947,8 +2947,8 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 
 		// Early exit when this getEvent already has a checkpoint (recovery, fork),
 		// so replay neither waits nor records a spurious sleep step.
-		recorded, err := retryWithResult(c, func() (*recordedResult, error) {
-			return c.systemDB.checkOperationExecution(WithoutCancel(c), checkOperationExecutionDBInput{
+		recorded, err := retryWithResult(c, func() (*RecordedResult, error) {
+			return c.systemDB.CheckOperationExecution(WithoutCancel(c), CheckOperationExecutionDBInput{
 				workflowID: workflowID,
 				stepID:     stepID,
 				stepName:   "DBOS.getEvent",
@@ -2963,7 +2963,7 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 	}
 
 	// Register as a waiter for this event.
-	waiter, err := c.systemDB.startEventListener(c, targetWorkflowID, key)
+	waiter, err := c.systemDB.StartEventListener(c, targetWorkflowID, key)
 	if err != nil {
 		return nil, err
 	}
@@ -2998,7 +2998,7 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 		var value, evtSerialization *string
 		err := retry(c, func() error {
 			var qErr error
-			value, evtSerialization, qErr = c.systemDB.getEventValue(c, nil, targetWorkflowID, key)
+			value, evtSerialization, qErr = c.systemDB.GetEventValue(c, nil, targetWorkflowID, key)
 			return qErr
 		}, withRetrierLogger(c.logger))
 		if err != nil {
@@ -3017,7 +3017,7 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 	// Read the event value and checkpoint the getEvent result in a single transaction.
 	// If another executor already checkpointed this step, runAsTxn returns the recorded result.
 	out, err := c.runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
-		value, evtSerialization, err := c.systemDB.getEventValue(ctx, tx, targetWorkflowID, key)
+		value, evtSerialization, err := c.systemDB.GetEventValue(ctx, tx, targetWorkflowID, key)
 		if err != nil {
 			return nil, err
 		}
@@ -3145,7 +3145,7 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any, opts ...
 		if !ok || wfState == nil {
 			return "", fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
 		}
-		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
+		return "", c.systemDB.WriteStream(ctx, WriteStreamDBInput{
 			Key:           key,
 			Value:         encodedValue,
 			tx:            tx,
@@ -3240,16 +3240,16 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 			}
 
 			// Read stream entries from current offset
-			input := readStreamDBInput{
+			input := ReadStreamDBInput{
 				WorkflowID: workflowID,
 				Key:        key,
 				FromOffset: currentOffset,
 			}
 
-			var entries []streamEntry
+			var entries []StreamEntry
 			err := retry(c, func() error {
 				var retryErr error
-				entries, closed, retryErr = c.systemDB.readStream(c, input)
+				entries, closed, retryErr = c.systemDB.ReadStream(c, input)
 				return retryErr
 			}, withRetrierLogger(c.logger))
 
@@ -3287,7 +3287,7 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 
 			// Check if workflow is still active (PENDING or ENQUEUED)
 			status, err := retryWithResult(c, func() (WorkflowStatusType, error) {
-				workflows, err := c.systemDB.listWorkflows(c, listWorkflowsDBInput{
+				workflows, err := c.systemDB.ListWorkflows(c, ListWorkflowsDBInput{
 					workflowIDs: []string{workflowID},
 					loadInput:   false,
 					loadOutput:  false,
@@ -3541,7 +3541,7 @@ func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
 		if !ok || wfState == nil {
 			return "", fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
 		}
-		return "", c.systemDB.writeStream(ctx, writeStreamDBInput{
+		return "", c.systemDB.WriteStream(ctx, WriteStreamDBInput{
 			Key:        key,
 			Value:      &sentinel,
 			tx:         tx,
@@ -3643,7 +3643,7 @@ func (c *dbosContext) Patch(_ DBOSContext, patchName string) (bool, error) {
 	prefixedPatchName := _DBOS_PATCH_PREFIX + patchName
 
 	patched, err := retryWithResult(c, func() (bool, error) {
-		return c.systemDB.patch(c, patchDBInput{
+		return c.systemDB.Patch(c, PatchDBInput{
 			workflowID: wfState.workflowID,
 			stepID:     wfState.stepID + 1, // We are checking if the upcoming step should use the patched code
 			patchName:  prefixedPatchName,
@@ -3703,7 +3703,7 @@ func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) error {
 	prefixedPatchName := _DBOS_PATCH_PREFIX + patchName
 
 	patchNameFromDB, err := retryWithResult(c, func() (string, error) {
-		return c.systemDB.doesPatchExists(c, patchDBInput{
+		return c.systemDB.DoesPatchExists(c, PatchDBInput{
 			workflowID: wfState.workflowID,
 			stepID:     wfState.stepID + 1,
 			patchName:  prefixedPatchName,
@@ -3815,7 +3815,7 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 	if isWithinWorkflow {
 		workflowStatus, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
 			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
-				return c.systemDB.listWorkflows(ctx, listWorkflowsDBInput{
+				return c.systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{
 					workflowIDs: []string{workflowID},
 					loadInput:   loadInput,
 					loadOutput:  loadOutput,
@@ -3824,7 +3824,7 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 		}, WithStepName("DBOS.retrieveWorkflow"))
 	} else {
 		workflowStatus, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
-			return c.systemDB.listWorkflows(c, listWorkflowsDBInput{
+			return c.systemDB.ListWorkflows(c, ListWorkflowsDBInput{
 				workflowIDs: []string{workflowID},
 				loadInput:   loadInput,
 				loadOutput:  loadOutput,
@@ -3884,7 +3884,7 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string, opts ...C
 
 	if isWithinWorkflow {
 		found, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
-			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{
+			return c.systemDB.CancelWorkflows(ctx, CancelWorkflowsDBInput{
 				workflowIDs:    []string{workflowID},
 				cancelChildren: cwo.cancelChildren,
 				tx:             tx,
@@ -3892,7 +3892,7 @@ func (c *dbosContext) CancelWorkflow(_ DBOSContext, workflowID string, opts ...C
 		}, WithStepName("DBOS.cancelWorkflow"))
 	} else {
 		found, err = retryWithResult(c, func() ([]string, error) {
-			return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{
+			return c.systemDB.CancelWorkflows(c, CancelWorkflowsDBInput{
 				workflowIDs:    []string{workflowID},
 				cancelChildren: cwo.cancelChildren,
 			})
@@ -3936,7 +3936,7 @@ func (c *dbosContext) UpdateWorkflowAttributes(_ DBOSContext, workflowID string,
 
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (struct{}, error) {
-			return struct{}{}, c.systemDB.updateWorkflowAttributes(ctx, updateWorkflowAttributesDBInput{
+			return struct{}{}, c.systemDB.UpdateWorkflowAttributes(ctx, UpdateWorkflowAttributesDBInput{
 				workflowID: workflowID,
 				attributes: attributes,
 				tx:         tx,
@@ -3945,7 +3945,7 @@ func (c *dbosContext) UpdateWorkflowAttributes(_ DBOSContext, workflowID string,
 		return err
 	}
 	return retry(c, func() error {
-		return c.systemDB.updateWorkflowAttributes(c, updateWorkflowAttributesDBInput{
+		return c.systemDB.UpdateWorkflowAttributes(c, UpdateWorkflowAttributesDBInput{
 			workflowID: workflowID,
 			attributes: attributes,
 		})
@@ -3978,12 +3978,12 @@ func (c *dbosContext) CancelWorkflows(_ DBOSContext, workflowIDs []string, opts 
 
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
-			return c.systemDB.cancelWorkflows(ctx, cancelWorkflowsDBInput{cancelChildren: cwo.cancelChildren, workflowIDs: workflowIDs, tx: tx})
+			return c.systemDB.CancelWorkflows(ctx, CancelWorkflowsDBInput{cancelChildren: cwo.cancelChildren, workflowIDs: workflowIDs, tx: tx})
 		}, WithStepName("DBOS.cancelWorkflows"))
 		return err
 	}
 	_, err := retryWithResult(c, func() ([]string, error) {
-		return c.systemDB.cancelWorkflows(c, cancelWorkflowsDBInput{cancelChildren: cwo.cancelChildren, workflowIDs: workflowIDs})
+		return c.systemDB.CancelWorkflows(c, CancelWorkflowsDBInput{cancelChildren: cwo.cancelChildren, workflowIDs: workflowIDs})
 	}, withRetrierLogger(c.logger))
 	return err
 }
@@ -4053,19 +4053,19 @@ func (c *dbosContext) SetWorkflowDelay(_ DBOSContext, workflowID string, opts ..
 	if err != nil {
 		return err
 	}
-	input := setWorkflowDelayDBInput{workflowID: workflowID, delayUntil: delayUntil}
+	input := SetWorkflowDelayDBInput{workflowID: workflowID, delayUntil: delayUntil}
 
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 			input.tx = tx
-			return nil, c.systemDB.setWorkflowDelay(ctx, input)
+			return nil, c.systemDB.SetWorkflowDelay(ctx, input)
 		}, WithStepName("DBOS.setWorkflowDelay"))
 		return err
 	}
 	return retry(c, func() error {
-		return c.systemDB.setWorkflowDelay(c, input)
+		return c.systemDB.SetWorkflowDelay(c, input)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -4095,7 +4095,7 @@ func (c *dbosContext) DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts 
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
-			err := c.systemDB.deleteWorkflows(ctx, deleteWorkflowsDBInput{
+			err := c.systemDB.DeleteWorkflows(ctx, DeleteWorkflowsDBInput{
 				workflowIDs:    workflowIDs,
 				deleteChildren: params.deleteChildren,
 				tx:             tx,
@@ -4105,7 +4105,7 @@ func (c *dbosContext) DeleteWorkflows(_ DBOSContext, workflowIDs []string, opts 
 		return err
 	} else {
 		return retry(c, func() error {
-			return c.systemDB.deleteWorkflows(c, deleteWorkflowsDBInput{
+			return c.systemDB.DeleteWorkflows(c, DeleteWorkflowsDBInput{
 				workflowIDs:    workflowIDs,
 				deleteChildren: params.deleteChildren,
 			})
@@ -4195,7 +4195,7 @@ func (c *dbosContext) ResumeWorkflows(_ DBOSContext, workflowIDs []string, opts 
 	var err error
 	if isWithinWorkflow {
 		foundIDs, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
-			return c.systemDB.resumeWorkflows(ctx, resumeWorkflowsDBInput{
+			return c.systemDB.ResumeWorkflows(ctx, ResumeWorkflowsDBInput{
 				workflowIDs: workflowIDs,
 				queueName:   params.queueName,
 				tx:          tx,
@@ -4203,7 +4203,7 @@ func (c *dbosContext) ResumeWorkflows(_ DBOSContext, workflowIDs []string, opts 
 		}, WithStepName("DBOS.resumeWorkflow"))
 	} else {
 		foundIDs, err = retryWithResult(c, func() ([]string, error) {
-			return c.systemDB.resumeWorkflows(c, resumeWorkflowsDBInput{
+			return c.systemDB.ResumeWorkflows(c, ResumeWorkflowsDBInput{
 				workflowIDs: workflowIDs,
 				queueName:   params.queueName,
 			})
@@ -4358,7 +4358,7 @@ func (c *dbosContext) ForkWorkflows(_ DBOSContext, input ForkWorkflowsInput) ([]
 		forkedWorkflowIDs[i] = wf.ForkedWorkflowID
 		startSteps[i] = int(wf.StartStep)
 	}
-	dbInput := forkWorkflowsDBInput{
+	dbInput := ForkWorkflowsDBInput{
 		originalWorkflowIDs: originalWorkflowIDs,
 		forkedWorkflowIDs:   forkedWorkflowIDs,
 		startSteps:          startSteps,
@@ -4371,7 +4371,7 @@ func (c *dbosContext) ForkWorkflows(_ DBOSContext, input ForkWorkflowsInput) ([]
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	forkBatch := func(ctx context.Context) ([]string, error) {
-		return c.systemDB.forkWorkflows(ctx, dbInput)
+		return c.systemDB.ForkWorkflows(ctx, dbInput)
 	}
 	var forkedIDs []string
 	var err error
@@ -4732,7 +4732,7 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	}
 
 	// Convert to system database input structure
-	dbInput := listWorkflowsDBInput{
+	dbInput := ListWorkflowsDBInput{
 		workflowIDs:        params.workflowIDs,
 		status:             params.status,
 		startTime:          params.startTime,
@@ -4770,12 +4770,12 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	if isWithinWorkflow {
 		workflows, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
 			return retryWithResult(ctx, func() ([]WorkflowStatus, error) {
-				return c.systemDB.listWorkflows(ctx, dbInput)
+				return c.systemDB.ListWorkflows(ctx, dbInput)
 			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.listWorkflows"))
 	} else {
 		workflows, err = retryWithResult(c, func() ([]WorkflowStatus, error) {
-			return c.systemDB.listWorkflows(c, dbInput)
+			return c.systemDB.ListWorkflows(c, dbInput)
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
@@ -4954,26 +4954,26 @@ func (c *dbosContext) GetWorkflowSteps(_ DBOSContext, workflowID string, opts ..
 	if options.loadOutput != nil {
 		loadOutput = *options.loadOutput
 	}
-	getWorkflowStepsInput := getWorkflowStepsInput{
+	getWorkflowStepsInput := GetWorkflowStepsInput{
 		workflowID: workflowID,
 		loadOutput: loadOutput,
 		limit:      options.limit,
 		offset:     options.offset,
 	}
 
-	var steps []stepInfo
+	var steps []StepRow
 	var err error
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		steps, err = RunAsStep(c, func(ctx context.Context) ([]stepInfo, error) {
-			return retryWithResult(ctx, func() ([]stepInfo, error) {
-				return c.systemDB.getWorkflowSteps(ctx, getWorkflowStepsInput)
+		steps, err = RunAsStep(c, func(ctx context.Context) ([]StepRow, error) {
+			return retryWithResult(ctx, func() ([]StepRow, error) {
+				return c.systemDB.GetWorkflowSteps(ctx, getWorkflowStepsInput)
 			}, withRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getWorkflowSteps"))
 	} else {
-		steps, err = retryWithResult(c, func() ([]stepInfo, error) {
-			return c.systemDB.getWorkflowSteps(c, getWorkflowStepsInput)
+		steps, err = retryWithResult(c, func() ([]StepRow, error) {
+			return c.systemDB.GetWorkflowSteps(c, getWorkflowStepsInput)
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
@@ -5105,7 +5105,7 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 	if input.TimeBucketSize < 0 {
 		return nil, errors.New("TimeBucketSize must be >= 0")
 	}
-	dbInput := getWorkflowAggregatesDBInput{
+	dbInput := GetWorkflowAggregatesDBInput{
 		groupByStatus:             input.GroupByStatus,
 		groupByName:               input.GroupByName,
 		groupByQueueName:          input.GroupByQueueName,
@@ -5143,11 +5143,11 @@ func (c *dbosContext) GetWorkflowAggregates(_ DBOSContext, input GetWorkflowAggr
 		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]WorkflowAggregateRow, error) {
 			in := dbInput
 			in.tx = tx
-			return c.systemDB.getWorkflowAggregates(ctx, in)
+			return c.systemDB.GetWorkflowAggregates(ctx, in)
 		}, WithStepName("DBOS.getWorkflowAggregates"))
 	}
 	return retryWithResult(c, func() ([]WorkflowAggregateRow, error) {
-		return c.systemDB.getWorkflowAggregates(c, dbInput)
+		return c.systemDB.GetWorkflowAggregates(c, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5213,7 +5213,7 @@ func (c *dbosContext) GetStepAggregates(_ DBOSContext, input GetStepAggregatesIn
 	if input.TimeBucketSize < 0 {
 		return nil, errors.New("TimeBucketSize must be >= 0")
 	}
-	dbInput := getStepAggregatesDBInput{
+	dbInput := GetStepAggregatesDBInput{
 		groupByFunctionName: input.GroupByFunctionName,
 		groupByStatus:       input.GroupByStatus,
 		selectCount:         input.SelectCount,
@@ -5232,11 +5232,11 @@ func (c *dbosContext) GetStepAggregates(_ DBOSContext, input GetStepAggregatesIn
 		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]StepAggregateRow, error) {
 			in := dbInput
 			in.tx = tx
-			return c.systemDB.getStepAggregates(ctx, in)
+			return c.systemDB.GetStepAggregates(ctx, in)
 		}, WithStepName("DBOS.getStepAggregates"))
 	}
 	return retryWithResult(c, func() ([]StepAggregateRow, error) {
-		return c.systemDB.getStepAggregates(c, dbInput)
+		return c.systemDB.GetStepAggregates(c, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5401,7 +5401,7 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, in
 	}
 
 	scheduleID := uuid.New().String()
-	dbInput := createScheduleDBInput{
+	dbInput := CreateScheduleDBInput{
 		ScheduleID:        scheduleID,
 		ScheduleName:      input.ScheduleName,
 		WorkflowName:      workflowName,
@@ -5418,14 +5418,14 @@ func (c *dbosContext) CreateSchedule(_ DBOSContext, fn ScheduledWorkflowFunc, in
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 			input := dbInput
 			input.tx = tx
-			return nil, c.systemDB.createSchedule(ctx, input)
+			return nil, c.systemDB.CreateSchedule(ctx, input)
 		}, WithStepName("DBOS.createSchedule"))
 		return err
 	}
 
 	uncancellableCtx := WithoutCancel(c)
 	return retry(c, func() error {
-		return c.systemDB.createSchedule(uncancellableCtx, dbInput)
+		return c.systemDB.CreateSchedule(uncancellableCtx, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5550,7 +5550,7 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 			}
 
 			// Delete any existing schedule with this name, then create the new one.
-			if err := c.systemDB.deleteSchedule(c, deleteScheduleDBInput{
+			if err := c.systemDB.DeleteSchedule(c, DeleteScheduleDBInput{
 				ScheduleName: req.ScheduleName,
 				tx:           tx,
 			}); err != nil {
@@ -5558,7 +5558,7 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 			}
 
 			scheduleID := uuid.New().String()
-			if err := c.systemDB.createSchedule(c, createScheduleDBInput{
+			if err := c.systemDB.CreateSchedule(c, CreateScheduleDBInput{
 				ScheduleID:        scheduleID,
 				ScheduleName:      req.ScheduleName,
 				WorkflowName:      workflowName,
@@ -5610,7 +5610,7 @@ func (c *dbosContext) PauseSchedule(_ DBOSContext, scheduleName string) error {
 		return fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
-	dbInput := updateScheduleDBInput{
+	dbInput := UpdateScheduleDBInput{
 		ScheduleName: scheduleName,
 		Status:       ScheduleStatusPaused,
 	}
@@ -5619,13 +5619,13 @@ func (c *dbosContext) PauseSchedule(_ DBOSContext, scheduleName string) error {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 			in := dbInput
 			in.tx = tx
-			return nil, c.systemDB.updateSchedule(ctx, in)
+			return nil, c.systemDB.UpdateSchedule(ctx, in)
 		}, WithStepName("DBOS.pauseSchedule"))
 		return err
 	}
 
 	return retry(c, func() error {
-		return c.systemDB.updateSchedule(c, dbInput)
+		return c.systemDB.UpdateSchedule(c, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5654,7 +5654,7 @@ func (c *dbosContext) ResumeSchedule(_ DBOSContext, scheduleName string) error {
 		return fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
-	dbInput := updateScheduleDBInput{
+	dbInput := UpdateScheduleDBInput{
 		ScheduleName: scheduleName,
 		Status:       ScheduleStatusActive,
 	}
@@ -5663,13 +5663,13 @@ func (c *dbosContext) ResumeSchedule(_ DBOSContext, scheduleName string) error {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 			in := dbInput
 			in.tx = tx
-			return nil, c.systemDB.updateSchedule(ctx, in)
+			return nil, c.systemDB.UpdateSchedule(ctx, in)
 		}, WithStepName("DBOS.resumeSchedule"))
 		return err
 	}
 
 	return retry(c, func() error {
-		return c.systemDB.updateSchedule(c, dbInput)
+		return c.systemDB.UpdateSchedule(c, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5692,14 +5692,14 @@ func (c *dbosContext) DeleteSchedule(_ DBOSContext, scheduleName string) error {
 
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
-			return nil, c.systemDB.deleteSchedule(ctx, deleteScheduleDBInput{ScheduleName: scheduleName, tx: tx})
+			return nil, c.systemDB.DeleteSchedule(ctx, DeleteScheduleDBInput{ScheduleName: scheduleName, tx: tx})
 		}, WithStepName("DBOS.deleteSchedule"))
 		return err
 	}
 
 	uncancellableCtx := WithoutCancel(c)
 	return retry(c, func() error {
-		return c.systemDB.deleteSchedule(uncancellableCtx, deleteScheduleDBInput{ScheduleName: scheduleName})
+		return c.systemDB.DeleteSchedule(uncancellableCtx, DeleteScheduleDBInput{ScheduleName: scheduleName})
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5721,7 +5721,7 @@ func (c *dbosContext) GetSchedule(_ DBOSContext, scheduleName string) (*Workflow
 		return nil, errors.New("schedule_name is required")
 	}
 
-	dbInput := listSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}}
+	dbInput := ListSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}}
 
 	var schedules []WorkflowSchedule
 	var err error
@@ -5729,11 +5729,11 @@ func (c *dbosContext) GetSchedule(_ DBOSContext, scheduleName string) (*Workflow
 		schedules, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]WorkflowSchedule, error) {
 			in := dbInput
 			in.tx = tx
-			return c.systemDB.listSchedules(ctx, in)
+			return c.systemDB.ListSchedules(ctx, in)
 		}, WithStepName("DBOS.getSchedule"))
 	} else {
 		schedules, err = retryWithResult(c, func() ([]WorkflowSchedule, error) {
-			return c.systemDB.listSchedules(c, dbInput)
+			return c.systemDB.ListSchedules(c, dbInput)
 		}, withRetrierLogger(c.logger))
 	}
 	if err != nil {
@@ -5764,7 +5764,7 @@ func (c *dbosContext) ListSchedules(_ DBOSContext, opts ...ListSchedulesOption) 
 	for _, opt := range opts {
 		opt(&o)
 	}
-	dbInput := listSchedulesDBInput{
+	dbInput := ListSchedulesDBInput{
 		Statuses:             o.statuses,
 		WorkflowNames:        o.workflowNames,
 		ScheduleNamePrefixes: o.scheduleNamePrefixes,
@@ -5773,11 +5773,11 @@ func (c *dbosContext) ListSchedules(_ DBOSContext, opts ...ListSchedulesOption) 
 		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]WorkflowSchedule, error) {
 			in := dbInput
 			in.tx = tx
-			return c.systemDB.listSchedules(ctx, in)
+			return c.systemDB.ListSchedules(ctx, in)
 		}, WithStepName("DBOS.listSchedules"))
 	}
 	return retryWithResult(c, func() ([]WorkflowSchedule, error) {
-		return c.systemDB.listSchedules(c, dbInput)
+		return c.systemDB.ListSchedules(c, dbInput)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5831,7 +5831,7 @@ func (c *dbosContext) BackfillSchedule(_ DBOSContext, scheduleName string, start
 	var ids []string
 	err = retry(c, func() error {
 		var bfErr error
-		ids, bfErr = c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
+		ids, bfErr = c.systemDB.BackfillSchedule(c, BackfillScheduleDBInput{
 			ScheduleName: scheduleName,
 			Schedule:     existing.Schedule,
 			StartTime:    start,
@@ -5869,7 +5869,7 @@ func (c *dbosContext) TriggerSchedule(_ DBOSContext, scheduleName string) (Workf
 		return nil, errors.New("DBOS.TriggerSchedule cannot be called from within a workflow")
 	}
 
-	workflowID, err := c.systemDB.triggerSchedule(c, scheduleName)
+	workflowID, err := c.systemDB.TriggerSchedule(c, scheduleName)
 	if err != nil {
 		return nil, err
 	}
@@ -5893,7 +5893,7 @@ func TriggerSchedule(ctx DBOSContext, scheduleName string) (WorkflowHandle[any],
 // by timestamp (newest first).
 func (c *dbosContext) ListApplicationVersions(_ DBOSContext) ([]VersionInfo, error) {
 	return retryWithResult(c, func() ([]VersionInfo, error) {
-		return c.systemDB.listApplicationVersions(c)
+		return c.systemDB.ListApplicationVersions(c)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5909,7 +5909,7 @@ func ListApplicationVersions(ctx DBOSContext) ([]VersionInfo, error) {
 // recent timestamp.
 func (c *dbosContext) GetLatestApplicationVersion(_ DBOSContext) (*VersionInfo, error) {
 	return retryWithResult(c, func() (*VersionInfo, error) {
-		return c.systemDB.getLatestApplicationVersion(c, nil)
+		return c.systemDB.GetLatestApplicationVersion(c, nil)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -5928,7 +5928,7 @@ func (c *dbosContext) SetLatestApplicationVersion(_ DBOSContext, versionName str
 		return errors.New("version_name is required")
 	}
 	return retry(c, func() error {
-		return c.systemDB.updateApplicationVersionTimestamp(c, versionName, time.Now().UnixMilli())
+		return c.systemDB.UpdateApplicationVersionTimestamp(c, versionName, time.Now().UnixMilli())
 	}, withRetrierLogger(c.logger))
 }
 

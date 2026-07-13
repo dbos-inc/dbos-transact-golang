@@ -96,7 +96,7 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 
 	asDBOSCtx, ok := dbosCtx.(*dbosContext)
 	if ok {
-		asDBOSCtx.systemDB.launch(asDBOSCtx)
+		asDBOSCtx.systemDB.Launch(asDBOSCtx)
 	}
 
 	return &client{
@@ -366,17 +366,17 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		}
 
 		// Insert workflow status with transaction
-		insertInput := insertWorkflowStatusDBInput{
+		insertInput := InsertWorkflowStatusDBInput{
 			status: status,
 			tx:     tx,
 		}
-		_, err = dbosCtx.systemDB.insertWorkflowStatus(uncancellableCtx, insertInput)
+		_, err = dbosCtx.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
 			if rbErr := tx.Rollback(uncancellableCtx); rbErr != nil {
 				dbosCtx.logger.Warn("failed to roll back transaction", "error", rbErr, "workflow_id", workflowID)
 			}
 			if returnExisting && errors.Is(err, &DBOSError{Code: QueueDeduplicated}) {
-				existingID, lookupErr := dbosCtx.systemDB.getDeduplicatedWorkflow(uncancellableCtx, queueName, params.deduplicationID)
+				existingID, lookupErr := dbosCtx.systemDB.GetDeduplicatedWorkflow(uncancellableCtx, queueName, params.deduplicationID)
 				if lookupErr != nil {
 					return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("looking up deduplicated workflow: %w", lookupErr))
 				}
@@ -885,7 +885,7 @@ func (c *client) CreateSchedule(input ClientScheduleInput) error {
 		return fmt.Errorf("failed to serialize context: %w", err)
 	}
 
-	return dbosCtx.systemDB.createSchedule(dbosCtx, createScheduleDBInput{
+	return dbosCtx.systemDB.CreateSchedule(dbosCtx, CreateScheduleDBInput{
 		ScheduleID:        scheduleID,
 		ScheduleName:      input.ScheduleName,
 		WorkflowName:      input.WorkflowName,
@@ -948,14 +948,14 @@ func (c *client) ApplySchedules(schedules []ClientScheduleInput) error {
 			queueName = _DBOS_INTERNAL_QUEUE_NAME
 		}
 
-		if err := dbosCtx.systemDB.deleteSchedule(dbosCtx, deleteScheduleDBInput{
+		if err := dbosCtx.systemDB.DeleteSchedule(dbosCtx, DeleteScheduleDBInput{
 			ScheduleName: req.ScheduleName,
 			tx:           tx,
 		}); err != nil {
 			return fmt.Errorf("failed to delete existing schedule: %w", err)
 		}
 
-		if err := dbosCtx.systemDB.createSchedule(dbosCtx, createScheduleDBInput{
+		if err := dbosCtx.systemDB.CreateSchedule(dbosCtx, CreateScheduleDBInput{
 			ScheduleID:        uuid.New().String(),
 			ScheduleName:      req.ScheduleName,
 			WorkflowName:      req.WorkflowName,
@@ -1062,6 +1062,6 @@ func (c *client) Shutdown(timeout time.Duration) {
 		dbosCtx.ctxCancelFunc(errors.New("client shutdown initiated"))
 
 		dbosCtx.logger.Debug("Shutting down system database")
-		dbosCtx.systemDB.shutdown(dbosCtx, timeout)
+		dbosCtx.systemDB.Shutdown(dbosCtx, timeout)
 	}
 }

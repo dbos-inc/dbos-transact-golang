@@ -227,7 +227,7 @@ func TestNewSystemDatabaseErrorPathNoDeadlock(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, sdErr := newSystemDatabase(bg, newSystemDatabaseInput{
+		_, sdErr := NewSystemDatabase(bg, NewSystemDatabaseInput{
 			databaseURL:    databaseURL,
 			databaseSchema: schema,
 			logger:         slog.Default(),

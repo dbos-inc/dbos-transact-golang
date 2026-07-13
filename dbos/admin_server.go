@@ -325,7 +325,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		ctx.logger.Info("Global timeout request", "cutoff_time", cutoffTime)
 
 		err := retry(ctx, func() error {
-			return ctx.systemDB.cancelAllBefore(ctx, cutoffTime)
+			return ctx.systemDB.CancelAllBefore(ctx, cutoffTime)
 		}, withRetrierLogger(ctx.logger))
 		if err != nil {
 			ctx.logger.Error("Global timeout failed", "error", err)

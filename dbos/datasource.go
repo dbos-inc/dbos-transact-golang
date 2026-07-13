@@ -419,7 +419,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	// checkpoint writes the step outcome into the system database (txn2). The
 	// user transaction has already committed durably, so this is retried hard.
 	checkpoint := func(encodedOutput, serializedErr *string, serialization string, startedAt time.Time) error {
-		dbInput := recordOperationResultDBInput{
+		dbInput := RecordOperationResultDBInput{
 			workflowID:    stepState.workflowID,
 			stepName:      stepOpts.stepName,
 			stepID:        stepState.stepID,
@@ -430,13 +430,13 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 			serialization: serialization,
 		}
 		return retry(c, func() error {
-			return c.systemDB.recordOperationResult(uncancellableCtx, dbInput)
+			return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
 		}, withRetrierLogger(c.logger))
 	}
 
 	// Layer 1: already checkpointed in the system database? Replay it.
-	recordedOutput, err := retryWithResult(c, func() (*recordedResult, error) {
-		return c.systemDB.checkOperationExecution(uncancellableCtx, checkOperationExecutionDBInput{
+	recordedOutput, err := retryWithResult(c, func() (*RecordedResult, error) {
+		return c.systemDB.CheckOperationExecution(uncancellableCtx, CheckOperationExecutionDBInput{
 			workflowID: stepState.workflowID,
 			stepID:     stepState.stepID,
 			stepName:   stepOpts.stepName,

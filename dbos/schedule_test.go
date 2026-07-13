@@ -489,7 +489,7 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 	start := time.Now().Add(-5 * time.Second).Truncate(time.Second)
 	end := time.Now()
 	c := dbosCtx.(*dbosContext)
-	ids, err := c.systemDB.backfillSchedule(c, backfillScheduleDBInput{
+	ids, err := c.systemDB.BackfillSchedule(c, BackfillScheduleDBInput{
 		ScheduleName: scheduleName,
 		Schedule:     "*/1 * * * * *",
 		StartTime:    start,
@@ -856,14 +856,14 @@ func TestScheduleNameSurvivesExportImport(t *testing.T) {
 
 	// Export, delete, then reimport: schedule_name must survive the round-trip.
 	sdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
-	exported, err := sdb.exportWorkflow(dbosCtx, workflowID, true)
+	exported, err := sdb.ExportWorkflow(dbosCtx, workflowID, true)
 	require.NoError(t, err)
 	require.NoError(t, DeleteWorkflows(dbosCtx, []string{workflowID}))
 	gone, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{workflowID}))
 	require.NoError(t, err)
 	require.Empty(t, gone)
 
-	require.NoError(t, sdb.importWorkflow(dbosCtx, exported))
+	require.NoError(t, sdb.ImportWorkflow(dbosCtx, exported))
 	imported, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{workflowID}))
 	require.NoError(t, err)
 	require.Len(t, imported, 1)

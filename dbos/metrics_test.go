@@ -70,7 +70,7 @@ func TestGetMetrics(t *testing.T) {
 
 	// Query metrics from start to now + 10 hours
 	endTime := time.Now().Add(10 * time.Hour)
-	metrics, err := sysDB.systemDB.getMetrics(context.Background(), startTime.Format(time.RFC3339), endTime.Format(time.RFC3339))
+	metrics, err := sysDB.systemDB.GetMetrics(context.Background(), startTime.Format(time.RFC3339), endTime.Format(time.RFC3339))
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(metrics), 4, "Expected at least 4 metrics (2 workflow counts + 2 step counts)")
 
@@ -124,7 +124,7 @@ func TestGetMetricsEmptyTimeRange(t *testing.T) {
 	futureTime := time.Now().Add(24 * time.Hour)
 	futureTime2 := futureTime.Add(1 * time.Hour)
 
-	metrics, err := sysDB.systemDB.getMetrics(context.Background(), futureTime.Format(time.RFC3339), futureTime2.Format(time.RFC3339))
+	metrics, err := sysDB.systemDB.GetMetrics(context.Background(), futureTime.Format(time.RFC3339), futureTime2.Format(time.RFC3339))
 	require.NoError(t, err)
 	assert.Equal(t, 0, len(metrics), "Should return empty metrics for future time range")
 }

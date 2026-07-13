@@ -945,19 +945,19 @@ func TestCustomPool(t *testing.T) {
 		defer customPool.Close()
 
 		// Create system database with custom pool
-		sysDBInput := newSystemDatabaseInput{
+		sysDBInput := NewSystemDatabaseInput{
 			databaseURL:    databaseURL,
 			databaseSchema: "dbos_test_custom_direct",
 			customPool:     customPool,
 			logger:         logger,
 		}
 
-		systemDB, err := newSystemDatabase(ctx, sysDBInput)
+		systemDB, err := NewSystemDatabase(ctx, sysDBInput)
 		require.NoError(t, err, "failed to create system database with custom pool")
 		require.NotNil(t, systemDB)
 
 		// Launch the system database
-		systemDB.launch(ctx)
+		systemDB.Launch(ctx)
 
 		require.Eventually(t, func() bool {
 			conn, err := PgxPool(systemDB.(*sysDB).pool).Acquire(ctx)
@@ -971,7 +971,7 @@ func TestCustomPool(t *testing.T) {
 		// Shutdown the system database
 		cancel() // Cancel context
 		shutdownTimeout := 2 * time.Second
-		systemDB.shutdown(ctx, shutdownTimeout)
+		systemDB.Shutdown(ctx, shutdownTimeout)
 		assert.False(t, systemDB.(*sysDB).launched)
 	})
 }
@@ -992,13 +992,13 @@ func TestSQLiteFoundation(t *testing.T) {
 	url := "sqlite:" + dbPath
 	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	sd, err := newSystemDatabase(context.Background(), newSystemDatabaseInput{
+	sd, err := NewSystemDatabase(context.Background(), NewSystemDatabaseInput{
 		databaseURL:    url,
 		databaseSchema: "dbos",
 		logger:         logger,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { sd.shutdown(context.Background(), 0) })
+	t.Cleanup(func() { sd.Shutdown(context.Background(), 0) })
 
 	s, ok := sd.(*sysDB)
 	require.True(t, ok, "expected *sysDB concrete type")
@@ -1014,13 +1014,13 @@ func TestSQLiteFoundation(t *testing.T) {
 	assert.Equal(t, latest, got)
 
 	// Re-opening the same file is a no-op (migrations already applied).
-	sd2, err := newSystemDatabase(context.Background(), newSystemDatabaseInput{
+	sd2, err := NewSystemDatabase(context.Background(), NewSystemDatabaseInput{
 		databaseURL:    url,
 		databaseSchema: "dbos",
 		logger:         logger,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { sd2.shutdown(context.Background(), 0) })
+	t.Cleanup(func() { sd2.Shutdown(context.Background(), 0) })
 
 	s2 := sd2.(*sysDB)
 	require.NoError(t, SQLDB(s2.pool).QueryRow(`SELECT version FROM dbos_migrations`).Scan(&got))
@@ -1629,7 +1629,7 @@ func TestCustomSqlitePool(t *testing.T) {
 		require.NoError(t, err)
 		defer customDB.Close()
 
-		systemDB, err := newSystemDatabase(ctx, newSystemDatabaseInput{
+		systemDB, err := NewSystemDatabase(ctx, NewSystemDatabaseInput{
 			databaseSchema: "dbos",
 			customSqliteDB: customDB,
 			logger:         logger,
@@ -1637,14 +1637,14 @@ func TestCustomSqlitePool(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, systemDB)
 
-		systemDB.launch(ctx)
+		systemDB.Launch(ctx)
 
 		require.Eventually(t, func() bool {
 			return SQLDB(systemDB.(*sysDB).pool).PingContext(ctx) == nil
 		}, 5*time.Second, 100*time.Millisecond, "system database should be reachable")
 
 		cancel()
-		systemDB.shutdown(ctx, 2*time.Second)
+		systemDB.Shutdown(ctx, 2*time.Second)
 		assert.False(t, systemDB.(*sysDB).launched)
 	})
 }

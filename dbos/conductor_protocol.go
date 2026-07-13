@@ -535,7 +535,7 @@ type getMetricsConductorRequest struct {
 // getMetricsConductorResponse is sent in response to metrics requests
 type getMetricsConductorResponse struct {
 	baseResponse
-	Metrics []metricData `json:"metrics"`
+	Metrics []MetricData `json:"metrics"`
 }
 
 // exportWorkflowConductorRequest is sent by the conductor to export a workflow

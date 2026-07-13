@@ -128,7 +128,7 @@ func newSqliteSystemDatabase(
 	databaseURL, databaseSchema string,
 	customDB *sql.DB,
 	logger *slog.Logger,
-) (systemDatabase, error) {
+) (SystemDatabase, error) {
 	var (
 		db    *sql.DB
 		owned bool

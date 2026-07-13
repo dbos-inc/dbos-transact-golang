@@ -143,7 +143,7 @@ func (q *WorkflowQueue) applyConfigChange(ctx DBOSContext, mutate func(*Workflow
 		return errors.New("invalid DBOS context")
 	}
 	_, err := retryWithResult(c, func() (*WorkflowQueue, error) {
-		return c.systemDB.updateQueueConfig(c, q.Name, func(fresh *WorkflowQueue) error {
+		return c.systemDB.UpdateQueueConfig(c, q.Name, func(fresh *WorkflowQueue) error {
 			mutate(fresh)
 			return validateQueueConfig(fresh)
 		})
@@ -368,7 +368,7 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 		updateExisting = false
 	default: // QueueConflictUpdateIfLatestVersion
 		latest, err := retryWithResult(c, func() (*VersionInfo, error) {
-			return c.systemDB.getLatestApplicationVersion(c, nil)
+			return c.systemDB.GetLatestApplicationVersion(c, nil)
 		}, withRetrierLogger(c.logger))
 		switch {
 		case errors.Is(err, &DBOSError{Code: NoApplicationVersions}):
@@ -384,13 +384,13 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 	}
 
 	inserted, err := retryWithResult(c, func() (bool, error) {
-		return c.systemDB.upsertQueue(c, upsertQueueDBInput{queue: q, updateExisting: updateExisting})
+		return c.systemDB.UpsertQueue(c, UpsertQueueDBInput{queue: q, updateExisting: updateExisting})
 	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
 	}
 	persisted, err := retryWithResult(c, func() (*WorkflowQueue, error) {
-		return c.systemDB.getQueue(c, name)
+		return c.systemDB.GetQueue(c, name)
 	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
@@ -415,7 +415,7 @@ func RetrieveQueue(ctx DBOSContext, name string) (Queue, error) {
 
 func (c *dbosContext) RetrieveQueue(_ DBOSContext, name string) (Queue, error) {
 	q, err := retryWithResult(c, func() (*WorkflowQueue, error) {
-		return c.systemDB.getQueue(c, name)
+		return c.systemDB.GetQueue(c, name)
 	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
@@ -437,7 +437,7 @@ func ListQueues(ctx DBOSContext) ([]Queue, error) {
 
 func (c *dbosContext) ListQueues(_ DBOSContext) ([]Queue, error) {
 	queues, err := retryWithResult(c, func() ([]WorkflowQueue, error) {
-		return c.systemDB.listQueues(c)
+		return c.systemDB.ListQueues(c)
 	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
@@ -459,7 +459,7 @@ func DeleteQueue(ctx DBOSContext, name string) error {
 
 func (c *dbosContext) DeleteQueue(_ DBOSContext, name string) error {
 	return retry(c, func() error {
-		return c.systemDB.deleteQueue(c, name)
+		return c.systemDB.DeleteQueue(c, name)
 	}, withRetrierLogger(c.logger))
 }
 
@@ -548,7 +548,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 	for ctx.Err() == nil { // While ctx is not cancelled
 		// Transition any DELAYED workflows whose delay has expired to ENQUEUED.
 		if err := retry(ctx, func() error {
-			return ctx.systemDB.transitionDelayedWorkflows(ctx)
+			return ctx.systemDB.TransitionDelayedWorkflows(ctx)
 		}, withRetrierLogger(qr.logger)); err != nil {
 			qr.logger.Warn("Exception transitioning delayed workflows", "error", err)
 		}
@@ -607,7 +607,7 @@ func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]WorkflowQueue
 	}
 
 	dbQueues, err := retryWithResult(ctx, func() ([]WorkflowQueue, error) {
-		return ctx.systemDB.listQueues(ctx)
+		return ctx.systemDB.ListQueues(ctx)
 	}, withRetrierLogger(qr.logger))
 	if err != nil {
 		// Return a snapshot of the current set in case of transient errors
@@ -685,7 +685,7 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 		partitionKeys := []string{""}
 		if queue.PartitionQueue {
 			partitions, err := retryWithResult(ctx, func() ([]string, error) {
-				return ctx.systemDB.getQueuePartitions(ctx, queue.Name)
+				return ctx.systemDB.GetQueuePartitions(ctx, queue.Name)
 			}, withRetrierLogger(queueLogger))
 			if err != nil {
 				skipDequeue = true
@@ -704,7 +704,7 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 
 		// Dequeue from each partition (or once for non-partitioned queues)
 		if !skipDequeue {
-			var dequeuedWorkflows []dequeuedWorkflow
+			var dequeuedWorkflows []DequeuedWorkflow
 			for _, partitionKey := range partitionKeys {
 				workflows, shouldContinue := qr.dequeueWorkflows(ctx, queue, partitionKey, &hasBackoffError)
 				if shouldContinue {
@@ -776,9 +776,9 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 
 // dequeueWorkflows dequeues workflows from a specific partition and handles errors.
 // Returns the dequeued workflows and a boolean indicating whether to continue to the next iteration.
-func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue WorkflowQueue, partitionKey string, hasBackoffError *bool) ([]dequeuedWorkflow, bool) {
-	dequeuedWorkflows, err := retryWithResult(ctx, func() ([]dequeuedWorkflow, error) {
-		return ctx.systemDB.dequeueWorkflows(ctx, dequeueWorkflowsInput{
+func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue WorkflowQueue, partitionKey string, hasBackoffError *bool) ([]DequeuedWorkflow, bool) {
+	dequeuedWorkflows, err := retryWithResult(ctx, func() ([]DequeuedWorkflow, error) {
+		return ctx.systemDB.DequeueWorkflows(ctx, DequeueWorkflowsInput{
 			queue:              queue,
 			executorID:         ctx.executorID,
 			applicationVersion: ctx.applicationVersion,
