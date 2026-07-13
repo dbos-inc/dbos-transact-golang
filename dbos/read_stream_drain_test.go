@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -13,11 +15,17 @@ import (
 // uses. It embeds the interface so it satisfies the rest (none of which are
 // called here) without a pile of stub methods.
 type fakeStreamDB struct {
-	SystemDatabase
+	sysdb.SystemDatabase
 	reads int
 }
 
-func (f *fakeStreamDB) ReadStream(_ context.Context, _ ReadStreamDBInput) ([]StreamEntry, bool, error) {
+// StreamWakeChannel mirrors the pre-refactor behavior for fakes: no wake
+// signal (readStream falls back to its bounded wait).
+func (f *fakeStreamDB) StreamWakeChannel(_, _ string) (chan struct{}, func()) {
+	return nil, func() {}
+}
+
+func (f *fakeStreamDB) ReadStream(_ context.Context, _ sysdb.ReadStreamDBInput) ([]sysdb.StreamEntry, bool, error) {
 	f.reads++
 	if f.reads == 1 {
 		// First read: the producer's final value is not visible yet — it commits
@@ -26,10 +34,10 @@ func (f *fakeStreamDB) ReadStream(_ context.Context, _ ReadStreamDBInput) ([]Str
 	}
 	// The post-inactive final read drains the value the producer committed just
 	// before it completed.
-	return []StreamEntry{{Value: "final", Offset: 0}}, false, nil
+	return []sysdb.StreamEntry{{Value: "final", Offset: 0}}, false, nil
 }
 
-func (f *fakeStreamDB) ListWorkflows(_ context.Context, _ ListWorkflowsDBInput) ([]WorkflowStatus, error) {
+func (f *fakeStreamDB) ListWorkflows(_ context.Context, _ sysdb.ListWorkflowsDBInput) ([]WorkflowStatus, error) {
 	// The producer is terminal, but it committed "final" after the reader's first
 	// stream read above — so its writes are all committed by now.
 	return []WorkflowStatus{{Status: WorkflowStatusSuccess}}, nil

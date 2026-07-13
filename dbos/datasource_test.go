@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -36,14 +38,14 @@ func openUserBackend(t *testing.T) *userBackend {
 		db, err := sql.Open("sqlite", path)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
-		return &userBackend{pool: NewSQLPool(db), dialect: SqliteDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
+		return &userBackend{pool: sysdb.NewSQLPool(db), dialect: sysdb.SqliteDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 	}
 	cfg, err := pgxpool.ParseConfig(backendDatabaseURL(t))
 	require.NoError(t, err)
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	return &userBackend{pool: NewPgxPool(pool), dialect: PostgresDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
+	return &userBackend{pool: sysdb.NewPgxPool(pool), dialect: sysdb.PostgresDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 }
 
 // register creates a data source over this backend's engine, naming it via
@@ -585,11 +587,11 @@ func TestRunAsTransaction(t *testing.T) {
 		// Simulate a crash between txn1 (user commit) and txn2 (system
 		// checkpoint): drop the operation_outputs row but keep the
 		// transaction_completion row.
-		sys := ctx.(*dbosContext).systemDB.(*SysDB)
-		delQ := sys.dialect.RewriteQuery(fmt.Sprintf(
+		sys := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
+		delQ := sys.Dialect().RewriteQuery(fmt.Sprintf(
 			`DELETE FROM %soperation_outputs WHERE workflow_uuid = $1 AND function_id = $2`,
-			sys.dialect.SchemaPrefix(sys.schema)))
-		_, err = sys.pool.Exec(context.Background(), delQ, wfID, 0)
+			sys.Dialect().SchemaPrefix(sys.Schema())))
+		_, err = sys.Pool().Exec(context.Background(), delQ, wfID, 0)
 		require.NoError(t, err)
 		require.Equal(t, 1, ub.countRows(t,
 			fmt.Sprintf(`SELECT count(*) FROM %s WHERE workflow_id = $1 AND step_id = 0`, ub.completionTable()), wfID))
@@ -877,10 +879,10 @@ func setupSharedDBOS(t *testing.T) (DBOSContext, *DataSource, *userBackend) {
 		// WAL, immediate txlock) so the data source's DDL/writes coexist with the
 		// system DB's background loops on one *sql.DB without SQLITE_BUSY.
 		path := filepath.Join(t.TempDir(), "shared.db")
-		db, err := OpenSQLitePool(context.Background(), "sqlite:"+path)
+		db, err := sysdb.OpenSQLitePool(context.Background(), "sqlite:"+path)
 		require.NoError(t, err)
 		config = Config{AppName: "test-app", SqliteSystemDB: db}
-		ub = &userBackend{pool: NewSQLPool(db), dialect: SqliteDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
+		ub = &userBackend{pool: sysdb.NewSQLPool(db), dialect: sysdb.SqliteDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 	} else {
 		url := getDatabaseURL()
 		resetTestDatabase(t, url)
@@ -889,7 +891,7 @@ func setupSharedDBOS(t *testing.T) (DBOSContext, *DataSource, *userBackend) {
 		pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 		require.NoError(t, err)
 		config = Config{AppName: "test-app", SystemDBPool: pool}
-		ub = &userBackend{pool: NewPgxPool(pool), dialect: PostgresDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
+		ub = &userBackend{pool: sysdb.NewPgxPool(pool), dialect: sysdb.PostgresDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 	}
 
 	ctx, err := NewDBOSContext(context.Background(), config)

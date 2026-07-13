@@ -17,6 +17,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/robfig/cron/v3"
@@ -61,7 +64,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		return nil, fmt.Errorf("missing required config field: appName")
 	}
 	if inputConfig.SystemDBPool == nil && inputConfig.SqliteSystemDB == nil {
-		if _, err := DetectDialect(inputConfig.DatabaseURL); err != nil {
+		if _, err := sysdb.DetectDialect(inputConfig.DatabaseURL); err != nil {
 			return nil, err
 		}
 	}
@@ -227,7 +230,7 @@ type dbosContext struct {
 
 	launched atomic.Bool
 
-	systemDB    SystemDatabase
+	systemDB    sysdb.SystemDatabase
 	adminServer *adminServer
 	config      *Config
 
@@ -601,7 +604,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	// Load and process the configuration
 	config, err := processConfig(&inputConfig)
 	if err != nil {
-		return nil, newInitializationError(err.Error())
+		return nil, models.NewInitializationError(err.Error())
 	}
 	initExecutor.config = config
 
@@ -616,20 +619,28 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 	initExecutor.serializer = config.Serializer
 
-	newSystemDatabaseInputs := NewSystemDatabaseInput{
+	newSystemDatabaseInputs := sysdb.NewSystemDatabaseInput{
 		DatabaseURL:     config.DatabaseURL,
 		DatabaseSchema:  config.DatabaseSchema,
 		CustomPool:      config.SystemDBPool,
 		CustomSqliteDB:  config.SqliteSystemDB,
 		Logger:          initExecutor.logger,
 		ApplicationName: config.AppName,
+		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (*string, string, error) {
+			ser := resolveEncoder(ctx)
+			encoded, err := ser.Encode(ScheduledWorkflowInput{
+				ScheduledTime: scheduledTime,
+				Context:       scheduleContext,
+			})
+			return encoded, ser.Name(), err
+		},
 	}
 
 	// Create the system database
-	systemDB, err := NewSystemDatabase(initExecutor, newSystemDatabaseInputs)
+	systemDB, err := sysdb.NewSystemDatabase(initExecutor, newSystemDatabaseInputs)
 	if err != nil {
 		initExecutor.logger.Error("failed to create system database", "error", err)
-		return nil, newInitializationError(err.Error())
+		return nil, models.NewInitializationError(err.Error())
 	}
 	initExecutor.systemDB = systemDB
 	initExecutor.logger.Debug("System database initialized")
@@ -678,7 +689,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	if conductorCfg != nil {
 		conductor, err := newConductor(initExecutor, *conductorCfg)
 		if err != nil {
-			return nil, newInitializationError(fmt.Sprintf("failed to initialize conductor: %v", err))
+			return nil, models.NewInitializationError(fmt.Sprintf("failed to initialize conductor: %v", err))
 		}
 		initExecutor.conductor = conductor
 		initExecutor.logger.Debug("Conductor initialized")
@@ -694,20 +705,20 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 // Returns an error if the context is already launched or if any component fails to start.
 func (c *dbosContext) Launch() error {
 	if c.launched.Load() {
-		return newInitializationError("DBOS is already launched")
+		return models.NewInitializationError("DBOS is already launched")
 	}
 
 	// Start the system database
 	c.systemDB.Launch(c)
 
 	// Register the current application version and warn if it is not the latest.
-	if err := Retry(c, func() error {
+	if err := sysdb.Retry(c, func() error {
 		return c.systemDB.CreateApplicationVersion(c, c.applicationVersion)
-	}, WithRetrierLogger(c.logger)); err != nil {
+	}, sysdb.WithRetrierLogger(c.logger)); err != nil {
 		c.logger.Warn("Failed to register application version", "version", c.applicationVersion, "error", err)
-	} else if latest, err := RetryWithResult(c, func() (*VersionInfo, error) {
+	} else if latest, err := sysdb.RetryWithResult(c, func() (*VersionInfo, error) {
 		return c.systemDB.GetLatestApplicationVersion(c, nil)
-	}, WithRetrierLogger(c.logger)); err != nil {
+	}, sysdb.WithRetrierLogger(c.logger)); err != nil {
 		c.logger.Warn("Failed to fetch latest application version", "error", err)
 	} else if latest.Name != c.applicationVersion {
 		c.logger.Warn("Current application version is not the latest",
@@ -720,7 +731,7 @@ func (c *dbosContext) Launch() error {
 		err := adminServer.Start()
 		if err != nil {
 			c.logger.Error("Failed to start admin server", "error", err)
-			return newInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
+			return models.NewInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
 		}
 		c.logger.Debug("Admin server started", "port", c.config.AdminServerPort)
 		c.adminServer = adminServer
@@ -749,7 +760,7 @@ func (c *dbosContext) Launch() error {
 	// Run a round of recovery on the local executor
 	recoveryHandles, err := recoverPendingWorkflows(c, []string{c.executorID})
 	if err != nil {
-		return newInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
+		return models.NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
 	}
 	if len(recoveryHandles) > 0 {
 		c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))

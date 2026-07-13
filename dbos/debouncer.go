@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/google/uuid"
 )
 
@@ -130,7 +131,7 @@ func NewDebouncer[P any, R any](
 	// Enforce that debouncers can only be created before DBOS has launched
 	// because they need to register the internal debouncer workflow
 	if dbosCtx.launched.Load() {
-		panic(newInitializationError("cannot create debouncer after DBOS has launched"))
+		panic(models.NewInitializationError("cannot create debouncer after DBOS has launched"))
 	}
 
 	// Get the fully qualified name of the workflow function using reflection.
@@ -145,7 +146,7 @@ func NewDebouncer[P any, R any](
 	// Validate that the workflow is registered in the registry
 	// Assertively panic if the workflow is not registered, as a sign of highly unexpected behavior
 	if _, exists := dbosCtx.workflowRegistry.Load(fqn); !exists {
-		panic(newNonExistentWorkflowError(fqn))
+		panic(models.NewNonExistentWorkflowError(fqn))
 	}
 
 	// Register the internal debouncer workflow for this debouncer if it has not been registered yet (first debouncer for this workflow)

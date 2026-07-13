@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -988,7 +990,7 @@ func TestVersionlessDequeueRequiresLatestVersion(t *testing.T) {
 
 	// Register a newer application version and make it the latest, so this worker is no
 	// longer running the latest version (simulating a rolling deploy).
-	sysdb := serverCtx.(*dbosContext).systemDB.(*SysDB)
+	sysdb := serverCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 	require.NoError(t, sysdb.CreateApplicationVersion(context.Background(), "versionless-newer"))
 	require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), "versionless-newer", time.Now().Add(time.Hour).UnixMilli()))
 
@@ -1053,7 +1055,7 @@ func TestWorkerConcurrency(t *testing.T) {
 
 	// Helper function to check the status of workflows in the queue
 	checkWorkflowStatus := func(t *testing.T, expectedPendingPerExecutor, expectedEnqueued int) {
-		workflows, err := dbosCtx1.(*dbosContext).systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
+		workflows, err := dbosCtx1.(*dbosContext).systemDB.ListWorkflows(context.Background(), sysdb.ListWorkflowsDBInput{
 			QueueName: []string{workerConcurrencyQueue.Name},
 		})
 		require.NoError(t, err, "failed to list workflows")
@@ -1698,7 +1700,7 @@ func TestPartitionedQueues(t *testing.T) {
 		var dbosErr *DBOSError
 		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
 
-		// Verify the error is wrapped by newWorkflowExecutionError with WorkflowExecutionError code
+		// Verify the error is wrapped by models.NewWorkflowExecutionError with WorkflowExecutionError code
 		assert.True(t, errors.Is(err, &DBOSError{Code: WorkflowExecutionError}), "expected error to be WorkflowExecutionError")
 
 		// Verify the unwrapped error contains the validation message
@@ -1733,7 +1735,7 @@ func TestPartitionedQueues(t *testing.T) {
 		var dbosErr *DBOSError
 		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *DBOSError, got %T", err)
 
-		// Verify the error is wrapped by newWorkflowExecutionError with WorkflowExecutionError code
+		// Verify the error is wrapped by models.NewWorkflowExecutionError with WorkflowExecutionError code
 		assert.True(t, errors.Is(err, &DBOSError{Code: WorkflowExecutionError}), "expected error to be WorkflowExecutionError")
 
 		// Verify the unwrapped error contains the validation message
@@ -2423,7 +2425,7 @@ func TestDatabaseBackedQueues(t *testing.T) {
 		require.Equal(t, 7, *got.GlobalConcurrency)
 
 		// ...but not once a newer application version is the latest (rolling deploy).
-		sysdb := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+		sysdb := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 		require.NoError(t, sysdb.CreateApplicationVersion(context.Background(), "v-newer"))
 		require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), "v-newer", time.Now().Add(time.Hour).UnixMilli()))
 		_, err = registerWFQ(dbosCtx, "conflict-q", WithGlobalConcurrency(1000))

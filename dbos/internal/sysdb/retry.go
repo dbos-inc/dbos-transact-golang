@@ -1,4 +1,4 @@
-package dbos
+package sysdb
 
 import (
 	"context"

@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -799,7 +801,7 @@ func (t *faultTx) QueryRow(ctx context.Context, query string, args ...any) Row {
 	return t.Tx.QueryRow(ctx, query, args...)
 }
 
-// faultPool is installed over sysDB.pool before Launch — while no goroutine
+// faultPool is installed over sysDB.Pool() before Launch — while no goroutine
 // reads the field — and stays for the whole test, so arming it later doesn't
 // race pool readers such as the queue runner. Disarmed (empty target) it is a
 // transparent pass-through.
@@ -1067,11 +1069,11 @@ func TestSteps(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, conflictCancelWorkflow, WithWorkflowName("conflict-cancel-workflow"))
 
-	// Installed before Launch so no goroutine reads sysDB.pool concurrently
+	// Installed before Launch so no goroutine reads sysDB.Pool() concurrently
 	// with the swap; armed on demand by StepIDNotReallocatedOnDBRetry.
-	sysdb := dbosCtx.(*dbosContext).systemDB.(*SysDB)
-	stepsFaultPool := &faultPool{Pool: sysdb.pool}
-	sysdb.pool = stepsFaultPool
+	sysdb := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	stepsFaultPool := &faultPool{Pool: sysdb.Pool()}
+	sysdb.SetPool(stepsFaultPool)
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
@@ -1176,7 +1178,7 @@ func TestSteps(t *testing.T) {
 		// Verify the wrapping contract itself (not just the formatted message):
 		// the error must match the MaxStepRetriesExceeded code via errors.Is, and
 		// the underlying step errors must remain reachable through Unwrap. This
-		// last check fails if newMaxStepRetriesExceededError stops setting wrappedErr.
+		// last check fails if models.NewMaxStepRetriesExceededError stops setting wrappedErr.
 		assert.True(t, errors.Is(err, &DBOSError{Code: MaxStepRetriesExceeded}), "expected errors.Is to match MaxStepRetriesExceeded code")
 		assert.True(t, errors.Is(err, errStepRetrySentinel), "expected underlying step error to be reachable via errors.Is (Unwrap chain)")
 
@@ -2477,24 +2479,24 @@ func TestChildWorkflow(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify events, streams, notifications, and steps exist via direct DB query
-		sysDB := dbosCtx.(*dbosContext).systemDB.(*SysDB)
-		schemaPrefix := sysDB.dialect.SchemaPrefix(sysDB.schema)
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+		schemaPrefix := sysDB.Dialect().SchemaPrefix(sysDB.Schema())
 
 		var eventCount, streamCount, notifCount, stepCount int
-		err = sysDB.pool.QueryRow(dbosCtx,
-			sysDB.renderSQL(`SELECT COUNT(*) FROM %sworkflow_events WHERE workflow_uuid = $1`, schemaPrefix),
+		err = sysDB.Pool().QueryRow(dbosCtx,
+			sysDB.RenderSQL(`SELECT COUNT(*) FROM %sworkflow_events WHERE workflow_uuid = $1`, schemaPrefix),
 			wfID).Scan(&eventCount)
 		require.NoError(t, err)
 		require.Greater(t, eventCount, 0, "expected events to exist before deletion")
 
-		err = sysDB.pool.QueryRow(dbosCtx,
-			sysDB.renderSQL(`SELECT COUNT(*) FROM %sstreams WHERE workflow_uuid = $1`, schemaPrefix),
+		err = sysDB.Pool().QueryRow(dbosCtx,
+			sysDB.RenderSQL(`SELECT COUNT(*) FROM %sstreams WHERE workflow_uuid = $1`, schemaPrefix),
 			wfID).Scan(&streamCount)
 		require.NoError(t, err)
 		require.Greater(t, streamCount, 0, "expected stream entries to exist before deletion")
 
-		err = sysDB.pool.QueryRow(dbosCtx,
-			sysDB.renderSQL(`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1`, schemaPrefix),
+		err = sysDB.Pool().QueryRow(dbosCtx,
+			sysDB.RenderSQL(`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1`, schemaPrefix),
 			wfID).Scan(&notifCount)
 		require.NoError(t, err)
 		require.Greater(t, notifCount, 0, "expected notifications to exist before deletion")
@@ -2507,8 +2509,8 @@ func TestChildWorkflow(t *testing.T) {
 		// so we just check the floor.
 		require.GreaterOrEqual(t, len(steps), 4, "expected at least 4 steps: SetEvent, WriteStream, CloseStream, Recv")
 
-		err = sysDB.pool.QueryRow(dbosCtx,
-			sysDB.renderSQL(`SELECT COUNT(*) FROM %soperation_outputs WHERE workflow_uuid = $1`, schemaPrefix),
+		err = sysDB.Pool().QueryRow(dbosCtx,
+			sysDB.RenderSQL(`SELECT COUNT(*) FROM %soperation_outputs WHERE workflow_uuid = $1`, schemaPrefix),
 			wfID).Scan(&stepCount)
 		require.NoError(t, err)
 		require.Greater(t, stepCount, 0, "expected operation_outputs to exist before deletion")
@@ -2518,26 +2520,26 @@ func TestChildWorkflow(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify all related data was cascade-deleted
-		err = sysDB.pool.QueryRow(dbosCtx,
-			sysDB.renderSQL(`SELECT COUNT(*) FROM %sworkflow_events WHERE workflow_uuid = $1`, schemaPrefix),
+		err = sysDB.Pool().QueryRow(dbosCtx,
+			sysDB.RenderSQL(`SELECT COUNT(*) FROM %sworkflow_events WHERE workflow_uuid = $1`, schemaPrefix),
 			wfID).Scan(&eventCount)
 		require.NoError(t, err)
 		require.Equal(t, 0, eventCount, "expected events to be cascade-deleted")
 
-		err = sysDB.pool.QueryRow(dbosCtx,
-			sysDB.renderSQL(`SELECT COUNT(*) FROM %sstreams WHERE workflow_uuid = $1`, schemaPrefix),
+		err = sysDB.Pool().QueryRow(dbosCtx,
+			sysDB.RenderSQL(`SELECT COUNT(*) FROM %sstreams WHERE workflow_uuid = $1`, schemaPrefix),
 			wfID).Scan(&streamCount)
 		require.NoError(t, err)
 		require.Equal(t, 0, streamCount, "expected stream entries to be cascade-deleted")
 
-		err = sysDB.pool.QueryRow(dbosCtx,
-			sysDB.renderSQL(`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1`, schemaPrefix),
+		err = sysDB.Pool().QueryRow(dbosCtx,
+			sysDB.RenderSQL(`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1`, schemaPrefix),
 			wfID).Scan(&notifCount)
 		require.NoError(t, err)
 		require.Equal(t, 0, notifCount, "expected notifications to be cascade-deleted")
 
-		err = sysDB.pool.QueryRow(dbosCtx,
-			sysDB.renderSQL(`SELECT COUNT(*) FROM %soperation_outputs WHERE workflow_uuid = $1`, schemaPrefix),
+		err = sysDB.Pool().QueryRow(dbosCtx,
+			sysDB.RenderSQL(`SELECT COUNT(*) FROM %soperation_outputs WHERE workflow_uuid = $1`, schemaPrefix),
 			wfID).Scan(&stepCount)
 		require.NoError(t, err)
 		require.Equal(t, 0, stepCount, "expected operation_outputs to be cascade-deleted")
@@ -2668,15 +2670,15 @@ func TestChildWorkflowDeterminismCheck(t *testing.T) {
 	parentID := parentHandle.GetWorkflowID()
 	expectedChildID := fmt.Sprintf("%s-0", parentID)
 
-	sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+	sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 	require.True(t, ok, "expected sysDB instance")
 	ctx := context.Background()
 
 	// Read the name recorded for the child workflow at step 0 directly from the
 	// table, so the test does not depend on the function-name resolution rules.
 	var recordedName string
-	nameQuery := sysDB.renderSQL(`SELECT function_name FROM %soperation_outputs WHERE workflow_uuid = $1 AND function_id = 0`, sysDB.dialect.SchemaPrefix(sysDB.schema))
-	require.NoError(t, sysDB.pool.QueryRow(ctx, nameQuery, parentID).Scan(&recordedName))
+	nameQuery := sysDB.RenderSQL(`SELECT function_name FROM %soperation_outputs WHERE workflow_uuid = $1 AND function_id = 0`, sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
+	require.NoError(t, sysDB.Pool().QueryRow(ctx, nameQuery, parentID).Scan(&recordedName))
 	require.NotEmpty(t, recordedName, "child workflow should have a recorded function name")
 
 	t.Run("MatchingNameReturnsChildID", func(t *testing.T) {
@@ -2938,7 +2940,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		for i := range numWorkflows {
 			workflowIDs[i] = handles[i].GetWorkflowID()
 		}
-		workflows, err := dbosCtx.(*dbosContext).systemDB.ListWorkflows(dbosCtx, ListWorkflowsDBInput{
+		workflows, err := dbosCtx.(*dbosContext).systemDB.ListWorkflows(dbosCtx, sysdb.ListWorkflowsDBInput{
 			WorkflowIDs: workflowIDs,
 		})
 		require.NoError(t, err, "failed to list workflows")
@@ -3127,7 +3129,7 @@ func TestCancelWorkflows(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	t.Run("CancelWorkflowsWithChildren", func(t *testing.T) {
-		sysDB := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 
 		var (
 			parentWorkflowID     = uuid.NewString()
@@ -3193,7 +3195,7 @@ func TestCancelWorkflows(t *testing.T) {
 			mainEvents[id].Wait()
 		}
 
-		workflowStatuses, err := sysDB.GetWorkflowChildren(dbosCtx, GetWorkflowChildrenDBInput{WorkflowID: parentWorkflowID})
+		workflowStatuses, err := sysDB.GetWorkflowChildren(dbosCtx, sysdb.GetWorkflowChildrenDBInput{WorkflowID: parentWorkflowID})
 		require.NoError(t, err, "failed to get workflow children")
 		require.Equal(t, len(workflowStatuses), 2, "expected %d children got %d", 2, len(workflowStatuses))
 
@@ -4297,7 +4299,7 @@ func TestSendRecv(t *testing.T) {
 		// A single (destination, topic) may only have one active receiver at a time.
 		// A second concurrent registration must be rejected with a ConflictingIDError
 		// rather than silently sharing/stealing the first receiver's slot.
-		sysDB := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 		destID := uuid.NewString()
 		topic := "single-receiver-topic"
 
@@ -4343,11 +4345,11 @@ func TestRecvStepConflict(t *testing.T) {
 	handleA, err := RunWorkflow(ctxA, recvConflictWorkflow, topic, WithWorkflowID(workflowID))
 	require.NoError(t, err, "failed to start recv workflow on executor A")
 
-	sysA := ctxA.(*dbosContext).systemDB.(*SysDB)
-	sysB := ctxB.(*dbosContext).systemDB.(*SysDB)
+	sysA := ctxA.(*dbosContext).systemDB.(*sysdb.SysDB)
+	sysB := ctxB.(*dbosContext).systemDB.(*sysdb.SysDB)
 	payload := fmt.Sprintf("%s::%s", workflowID, topic)
 	require.Eventually(t, func() bool {
-		return sysA.recvNotifier.has(payload)
+		return sysA.RecvNotifier.Has(payload)
 	}, 5*time.Second, 10*time.Millisecond, "executor A never registered as receiver")
 
 	// Executor B recovers the same workflow: a genuinely concurrent second
@@ -4362,7 +4364,7 @@ func TestRecvStepConflict(t *testing.T) {
 	// Executor B must actually run the body (register as receiver), not
 	// short-circuit; its separate map confirms a real concurrent execution.
 	require.Eventually(t, func() bool {
-		return sysB.recvNotifier.has(payload)
+		return sysB.RecvNotifier.Has(payload)
 	}, 5*time.Second, 10*time.Millisecond, "executor B (recovery) never ran the body")
 
 	// Deliver the message. Exactly one executor consumes and checkpoints it; the
@@ -4935,11 +4937,11 @@ func TestSetGetEvent(t *testing.T) {
 		}
 
 		// Wait until every key has a registered waiter before setting the events.
-		sysDB := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 		require.Eventually(t, func() bool {
 			for k := range numKeys {
 				payload := fmt.Sprintf("%s::%s", setWorkflowID, fmt.Sprintf("concurrent-event-key-%d", k))
-				if !sysDB.eventNotifier.has(payload) {
+				if !sysDB.EventNotifier.Has(payload) {
 					return false
 				}
 			}
@@ -4988,10 +4990,10 @@ func TestSetGetEvent(t *testing.T) {
 			}(i)
 		}
 
-		sysDB := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 		payload := fmt.Sprintf("%s::%s", setWorkflowID, key)
 		require.Eventually(t, func() bool {
-			return sysDB.eventNotifier.has(payload)
+			return sysDB.EventNotifier.Has(payload)
 		}, 5*time.Second, 10*time.Millisecond, "long waiters never registered")
 
 		// Short waiters register on the same key, then time out and leave.
@@ -5054,10 +5056,10 @@ func TestSetGetEvent(t *testing.T) {
 			}
 		}()
 
-		sysDB := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 		payload := fmt.Sprintf("%s::%s", setWorkflowID, key)
 		require.Eventually(t, func() bool {
-			return sysDB.eventNotifier.has(payload)
+			return sysDB.EventNotifier.Has(payload)
 		}, 5*time.Second, 10*time.Millisecond, "survivor never registered")
 
 		// A sibling on the same key that gets cancelled while waiting.
@@ -5069,7 +5071,7 @@ func TestSetGetEvent(t *testing.T) {
 		}()
 		// Wait until the sibling has actually registered, then cancel it.
 		require.Eventually(t, func() bool {
-			return sysDB.eventNotifier.waiterCount(payload) == 2
+			return sysDB.EventNotifier.WaiterCount(payload) == 2
 		}, 5*time.Second, 10*time.Millisecond, "sibling never registered")
 		cancel()
 		<-siblingDone
@@ -5177,7 +5179,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 
 		// This directly tests the CheckOperationExecution method with mismatched step name
 		wrongStepName := "wrong-step-name"
-		_, err = dbosCtx.(*dbosContext).systemDB.CheckOperationExecution(dbosCtx, CheckOperationExecutionDBInput{
+		_, err = dbosCtx.(*dbosContext).systemDB.CheckOperationExecution(dbosCtx, sysdb.CheckOperationExecutionDBInput{
 			WorkflowID: workflowID,
 			StepID:     0,
 			StepName:   wrongStepName,
@@ -5405,14 +5407,14 @@ func TestWorkflowTimeout(t *testing.T) {
 		if !ok {
 			return "", fmt.Errorf("failed to cast DBOSContext to dbosContext")
 		}
-		sysDB, ok := dbosCtxInternal.systemDB.(*SysDB)
+		sysDB, ok := dbosCtxInternal.systemDB.(*sysdb.SysDB)
 		if !ok {
 			return "", fmt.Errorf("failed to cast systemDB to sysDB")
 		}
-		query := sysDB.renderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`, sysDB.dialect.SchemaPrefix(sysDB.schema))
+		query := sysDB.RenderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`, sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
 		require.Eventually(t, func() bool {
 			var status WorkflowStatusType
-			err := sysDB.pool.QueryRow(uncancellableCtx, query, wfid).Scan(&status)
+			err := sysDB.Pool().QueryRow(uncancellableCtx, query, wfid).Scan(&status)
 			if err != nil {
 				return false
 			}
@@ -6242,7 +6244,7 @@ func TestGarbageCollect(t *testing.T) {
 		// Garbage collect keeping only the 5 newest workflows
 		// The blocked workflow won't be deleted because it's pending
 		threshold := 5
-		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, GarbageCollectWorkflowsInput{
+		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, sysdb.GarbageCollectWorkflowsInput{
 			RowsThreshold: &threshold,
 		})
 		require.NoError(t, err, "failed to garbage collect workflows")
@@ -6349,7 +6351,7 @@ func TestGarbageCollect(t *testing.T) {
 
 		// Garbage collect workflows completed before cutoff time
 		cutoffTimestamp := cutoffTime.UnixMilli()
-		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, GarbageCollectWorkflowsInput{
+		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, sysdb.GarbageCollectWorkflowsInput{
 			CutoffEpochTimestampMs: &cutoffTimestamp,
 		})
 		require.NoError(t, err, "failed to garbage collect workflows by time")
@@ -6391,7 +6393,7 @@ func TestGarbageCollect(t *testing.T) {
 
 		// Garbage collect all workflows - use a future cutoff to catch everything
 		futureTimestamp := time.Now().Add(1 * time.Hour).UnixMilli()
-		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, GarbageCollectWorkflowsInput{
+		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, sysdb.GarbageCollectWorkflowsInput{
 			CutoffEpochTimestampMs: &futureTimestamp,
 		})
 		require.NoError(t, err, "failed to garbage collect all completed workflows")
@@ -6418,7 +6420,7 @@ func TestGarbageCollect(t *testing.T) {
 
 		// Verify GC runs without errors on a blank table
 		threshold := 1
-		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, GarbageCollectWorkflowsInput{
+		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, sysdb.GarbageCollectWorkflowsInput{
 			RowsThreshold: &threshold,
 		})
 		require.NoError(t, err, "garbage collect should work on empty database")
@@ -6429,7 +6431,7 @@ func TestGarbageCollect(t *testing.T) {
 		require.Equal(t, 0, len(workflows), "expected exactly 0 workflows after row-based GC on empty database")
 
 		currentTimestamp := time.Now().UnixMilli()
-		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, GarbageCollectWorkflowsInput{
+		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, sysdb.GarbageCollectWorkflowsInput{
 			CutoffEpochTimestampMs: &currentTimestamp,
 		})
 		require.NoError(t, err, "time-based garbage collect should work on empty database")
@@ -6494,7 +6496,7 @@ func TestGarbageCollect(t *testing.T) {
 		// The blocked workflow is the oldest but won't be deleted because it's pending
 		// So we should have 2 workflows: 1 newest completed + 1 pending
 		threshold := 1
-		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, GarbageCollectWorkflowsInput{
+		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, sysdb.GarbageCollectWorkflowsInput{
 			RowsThreshold: &threshold,
 		})
 		require.NoError(t, err, "failed to garbage collect workflows")
@@ -6535,7 +6537,7 @@ func TestGarbageCollect(t *testing.T) {
 
 		// Now GC everything using future timestamp
 		futureTimestamp := time.Now().Add(1 * time.Hour).UnixMilli()
-		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, GarbageCollectWorkflowsInput{
+		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, sysdb.GarbageCollectWorkflowsInput{
 			CutoffEpochTimestampMs: &futureTimestamp,
 		})
 		require.NoError(t, err, "failed to garbage collect all workflows")
@@ -6594,7 +6596,7 @@ func TestGarbageCollect(t *testing.T) {
 		// Threshold would keep 6 newest, timestamp would keep 8 newest
 		// Result: threshold wins (higher timestamp), only 6 workflows remain
 		threshold := 6
-		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, GarbageCollectWorkflowsInput{
+		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, sysdb.GarbageCollectWorkflowsInput{
 			RowsThreshold:          &threshold,
 			CutoffEpochTimestampMs: &cutoff1,
 		})
@@ -6610,7 +6612,7 @@ func TestGarbageCollect(t *testing.T) {
 
 		// Case2: Threshold is less restrictive (lower cutoff)
 		threshold = 3
-		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, GarbageCollectWorkflowsInput{
+		err = dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, sysdb.GarbageCollectWorkflowsInput{
 			RowsThreshold:          &threshold,
 			CutoffEpochTimestampMs: &cutoff2,
 		})
@@ -6952,7 +6954,7 @@ func captureAuthFromDB(ctx DBOSContext) (authSnapshot, error) {
 	if err != nil {
 		return authSnapshot{}, err
 	}
-	rows, err := ctx.(*dbosContext).systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{
+	rows, err := ctx.(*dbosContext).systemDB.ListWorkflows(ctx, sysdb.ListWorkflowsDBInput{
 		WorkflowIDs: []string{wfID},
 	})
 	if err != nil || len(rows) == 0 {
@@ -7735,10 +7737,10 @@ func TestStreams(t *testing.T) {
 				// Query database directly to avoid blocking (ReadStream would block)
 				dbosCtxInternal, ok := dbosCtx.(*dbosContext)
 				require.True(t, ok, "expected dbosContext")
-				sysDB, ok := dbosCtxInternal.systemDB.(*SysDB)
+				sysDB, ok := dbosCtxInternal.systemDB.(*sysdb.SysDB)
 				require.True(t, ok, "expected sysDB")
 
-				entries, closed, err := sysDB.ReadStream(context.Background(), ReadStreamDBInput{
+				entries, closed, err := sysDB.ReadStream(context.Background(), sysdb.ReadStreamDBInput{
 					WorkflowID: forkHandle.GetWorkflowID(),
 					Key:        streamKey,
 					FromOffset: 0,
@@ -7855,10 +7857,10 @@ func TestStreams(t *testing.T) {
 		// Query database directly to avoid blocking (ReadStream would block)
 		dbosCtxInternal, ok := dbosCtx.(*dbosContext)
 		require.True(t, ok, "expected dbosContext")
-		sysDB, ok := dbosCtxInternal.systemDB.(*SysDB)
+		sysDB, ok := dbosCtxInternal.systemDB.(*sysdb.SysDB)
 		require.True(t, ok, "expected sysDB")
 
-		entries, closed, err := sysDB.ReadStream(context.Background(), ReadStreamDBInput{
+		entries, closed, err := sysDB.ReadStream(context.Background(), sysdb.ReadStreamDBInput{
 			WorkflowID: forkHandle.GetWorkflowID(),
 			Key:        streamKey,
 			FromOffset: 0,
@@ -7999,8 +8001,8 @@ func TestStreams(t *testing.T) {
 
 	t.Run("NotificationLatency", func(t *testing.T) {
 		// A blocked reader must be woken by the streams LISTEN/NOTIFY trigger,
-		// not the bounded-wait fallback that fires every _DB_RETRY_INTERVAL (1s).
-		if dbosCtx.(*dbosContext).systemDB.(*SysDB).listenNotifyPool() == nil {
+		// not the bounded-wait fallback that fires every sysdb.DBRetryInterval (1s).
+		if dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB).ListenNotifyPool() == nil {
 			t.Skip("backend does not support LISTEN/NOTIFY")
 		}
 
@@ -8201,7 +8203,7 @@ func TestExportImportWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, originalGrandchildSteps, 0, "grandchild should have 0 steps")
 
-	sdb := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+	sdb := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 
 	t.Run("ExportWithChildren", func(t *testing.T) {
 		exported, err := sdb.ExportWorkflow(dbosCtx, parentID, true)
@@ -8244,14 +8246,14 @@ func TestExportImportWorkflow(t *testing.T) {
 		require.Len(t, exported, 3)
 
 		// Delete all workflows so we can re-import
-		err = sdb.DeleteWorkflows(dbosCtx, DeleteWorkflowsDBInput{
+		err = sdb.DeleteWorkflows(dbosCtx, sysdb.DeleteWorkflowsDBInput{
 			WorkflowIDs:    []string{parentID},
 			DeleteChildren: true,
 		})
 		require.NoError(t, err)
 
 		// Verify all 3 workflows are gone
-		wfs, err := sdb.ListWorkflows(dbosCtx, ListWorkflowsDBInput{
+		wfs, err := sdb.ListWorkflows(dbosCtx, sysdb.ListWorkflowsDBInput{
 			WorkflowIDs: []string{parentID, childID, grandchildID},
 		})
 		require.NoError(t, err)
@@ -8262,7 +8264,7 @@ func TestExportImportWorkflow(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify all 3 workflows are present with correct input/output
-		wfs, err = sdb.ListWorkflows(dbosCtx, ListWorkflowsDBInput{
+		wfs, err = sdb.ListWorkflows(dbosCtx, sysdb.ListWorkflowsDBInput{
 			WorkflowIDs: []string{parentID, childID, grandchildID},
 			LoadInput:   true,
 			LoadOutput:  true,
@@ -8332,25 +8334,25 @@ func TestExportImportWorkflow(t *testing.T) {
 		require.Len(t, importedGrandchildSteps, 0, "imported grandchild should have 0 steps")
 
 		// Verify events, streams, and history via direct DB queries
-		schemaPrefix := sdb.dialect.SchemaPrefix(sdb.schema)
+		schemaPrefix := sdb.Dialect().SchemaPrefix(sdb.Schema())
 
 		var eventCount int
-		err = sdb.pool.QueryRow(dbosCtx,
-			sdb.renderSQL(`SELECT COUNT(*) FROM %sworkflow_events WHERE workflow_uuid = $1`, schemaPrefix),
+		err = sdb.Pool().QueryRow(dbosCtx,
+			sdb.RenderSQL(`SELECT COUNT(*) FROM %sworkflow_events WHERE workflow_uuid = $1`, schemaPrefix),
 			parentID).Scan(&eventCount)
 		require.NoError(t, err)
 		assert.Greater(t, eventCount, 0, "expected events to be imported")
 
 		var streamCount int
-		err = sdb.pool.QueryRow(dbosCtx,
-			sdb.renderSQL(`SELECT COUNT(*) FROM %sstreams WHERE workflow_uuid = $1`, schemaPrefix),
+		err = sdb.Pool().QueryRow(dbosCtx,
+			sdb.RenderSQL(`SELECT COUNT(*) FROM %sstreams WHERE workflow_uuid = $1`, schemaPrefix),
 			parentID).Scan(&streamCount)
 		require.NoError(t, err)
 		assert.Greater(t, streamCount, 0, "expected streams to be imported")
 
 		var historyCount int
-		err = sdb.pool.QueryRow(dbosCtx,
-			sdb.renderSQL(`SELECT COUNT(*) FROM %sworkflow_events_history WHERE workflow_uuid = $1`, schemaPrefix),
+		err = sdb.Pool().QueryRow(dbosCtx,
+			sdb.RenderSQL(`SELECT COUNT(*) FROM %sworkflow_events_history WHERE workflow_uuid = $1`, schemaPrefix),
 			parentID).Scan(&historyCount)
 		require.NoError(t, err)
 		assert.Greater(t, historyCount, 0, "expected workflow events history to be imported")
@@ -9205,7 +9207,7 @@ func TestFork(t *testing.T) {
 		require.Equal(t, int64(2), failStepThreeCount.Load())
 
 		t.Run("FromLastFailure", func(t *testing.T) {
-			forkedIDs, err := sysDB.ForkFrom(dbosCtx, ForkFromDBInput{
+			forkedIDs, err := sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
 				WorkflowIDs:     []string{wf1ID, wf2ID, wf3ID},
 				FromLastFailure: true,
 			})
@@ -9218,14 +9220,14 @@ func TestFork(t *testing.T) {
 			require.Equal(t, int64(5), failStepThreeCount.Load()) // re-run for all three forks
 
 			// A fork also marks its source was_forked_from.
-			srcs, err := sysDB.ListWorkflows(dbosCtx, ListWorkflowsDBInput{WorkflowIDs: []string{wf1ID}})
+			srcs, err := sysDB.ListWorkflows(dbosCtx, sysdb.ListWorkflowsDBInput{WorkflowIDs: []string{wf1ID}})
 			require.NoError(t, err)
 			require.Len(t, srcs, 1)
 			require.True(t, srcs[0].WasForkedFrom, "a forked-from workflow should be marked was_forked_from")
 		})
 
 		t.Run("FromLastStep", func(t *testing.T) {
-			forkedIDs, err := sysDB.ForkFrom(dbosCtx, ForkFromDBInput{
+			forkedIDs, err := sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
 				WorkflowIDs:  []string{wf1ID, wf2ID, wf3ID},
 				FromLastStep: true,
 			})
@@ -9241,7 +9243,7 @@ func TestFork(t *testing.T) {
 
 		t.Run("FromStep", func(t *testing.T) {
 			startStep := 0
-			forkedIDs, err := sysDB.ForkFrom(dbosCtx, ForkFromDBInput{
+			forkedIDs, err := sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
 				WorkflowIDs: []string{wf3ID},
 				FromStep:    &startStep,
 			})
@@ -9256,7 +9258,7 @@ func TestFork(t *testing.T) {
 
 		t.Run("FromStepName", func(t *testing.T) {
 			stepName := "stepTwo"
-			forkedIDs, err := sysDB.ForkFrom(dbosCtx, ForkFromDBInput{
+			forkedIDs, err := sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
 				WorkflowIDs:  []string{wf3ID},
 				FromStepName: &stepName,
 			})
@@ -9272,27 +9274,27 @@ func TestFork(t *testing.T) {
 		t.Run("Validation", func(t *testing.T) {
 			// wf1 never ran stepThree
 			missingName := "stepThree"
-			_, err := sysDB.ForkFrom(dbosCtx, ForkFromDBInput{
+			_, err := sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
 				WorkflowIDs:  []string{wf1ID},
 				FromStepName: &missingName,
 			})
 			require.ErrorContains(t, err, "has no step named")
 
 			nonexistent := "nonexistentStep"
-			_, err = sysDB.ForkFrom(dbosCtx, ForkFromDBInput{
+			_, err = sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
 				WorkflowIDs:  []string{wf3ID},
 				FromStepName: &nonexistent,
 			})
 			require.ErrorContains(t, err, "has no step named")
 
 			// no mode specified
-			_, err = sysDB.ForkFrom(dbosCtx, ForkFromDBInput{
+			_, err = sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
 				WorkflowIDs: []string{wf3ID},
 			})
 			require.ErrorContains(t, err, "exactly one")
 
 			// multiple modes specified
-			_, err = sysDB.ForkFrom(dbosCtx, ForkFromDBInput{
+			_, err = sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
 				WorkflowIDs:     []string{wf3ID},
 				FromLastFailure: true,
 				FromLastStep:    true,
@@ -9308,7 +9310,7 @@ func TestFork(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 4, res) // stepTwo's error was caught, so two contributes 0
 
-			forkAndGet := func(input ForkFromDBInput) int {
+			forkAndGet := func(input sysdb.ForkFromDBInput) int {
 				input.WorkflowIDs = []string{wfID}
 				forkedIDs, err := sysDB.ForkFrom(dbosCtx, input)
 				require.NoError(t, err)
@@ -9322,10 +9324,10 @@ func TestFork(t *testing.T) {
 
 			// fromLastStep starts at the last step (stepThree): stepTwo's
 			// checkpointed error replays and is caught again.
-			require.Equal(t, 4, forkAndGet(ForkFromDBInput{FromLastStep: true}))
+			require.Equal(t, 4, forkAndGet(sysdb.ForkFromDBInput{FromLastStep: true}))
 			// fromLastFailure starts at the failed step (stepTwo) even though a
 			// later step succeeded: stepTwo re-runs and succeeds this time.
-			require.Equal(t, 6, forkAndGet(ForkFromDBInput{FromLastFailure: true}))
+			require.Equal(t, 6, forkAndGet(sysdb.ForkFromDBInput{FromLastFailure: true}))
 		})
 	})
 
@@ -9358,7 +9360,7 @@ func TestFork(t *testing.T) {
 		}
 
 		t.Run("MixedStartSteps", func(t *testing.T) {
-			forkedIDs, err := sysDB.ForkWorkflows(dbosCtx, ForkWorkflowsDBInput{
+			forkedIDs, err := sysDB.ForkWorkflows(dbosCtx, sysdb.ForkWorkflowsDBInput{
 				OriginalWorkflowIDs: originalIDs,
 				StartSteps:          []int{0, 1, 2},
 			})
@@ -9384,7 +9386,7 @@ func TestFork(t *testing.T) {
 
 		t.Run("CustomForkedIDs", func(t *testing.T) {
 			customID := "custom-forked-" + uuid.NewString()
-			forkedIDs, err := sysDB.ForkWorkflows(dbosCtx, ForkWorkflowsDBInput{
+			forkedIDs, err := sysDB.ForkWorkflows(dbosCtx, sysdb.ForkWorkflowsDBInput{
 				OriginalWorkflowIDs: originalIDs[:2],
 				ForkedWorkflowIDs:   []string{customID, ""}, // empty entry is auto-generated
 				StartSteps:          []int{2, 2},
@@ -9444,19 +9446,19 @@ func TestFork(t *testing.T) {
 
 		t.Run("Validation", func(t *testing.T) {
 			// Empty input is a no-op
-			forkedIDs, err := sysDB.ForkWorkflows(dbosCtx, ForkWorkflowsDBInput{})
+			forkedIDs, err := sysDB.ForkWorkflows(dbosCtx, sysdb.ForkWorkflowsDBInput{})
 			require.NoError(t, err)
 			require.Empty(t, forkedIDs)
 
 			// startSteps length mismatch
-			_, err = sysDB.ForkWorkflows(dbosCtx, ForkWorkflowsDBInput{
+			_, err = sysDB.ForkWorkflows(dbosCtx, sysdb.ForkWorkflowsDBInput{
 				OriginalWorkflowIDs: originalIDs,
 				StartSteps:          []int{0},
 			})
 			require.ErrorContains(t, err, "same length")
 
 			// forkedWorkflowIDs length mismatch
-			_, err = sysDB.ForkWorkflows(dbosCtx, ForkWorkflowsDBInput{
+			_, err = sysDB.ForkWorkflows(dbosCtx, sysdb.ForkWorkflowsDBInput{
 				OriginalWorkflowIDs: originalIDs,
 				ForkedWorkflowIDs:   []string{"only-one"},
 				StartSteps:          []int{0, 0, 0},
@@ -9464,7 +9466,7 @@ func TestFork(t *testing.T) {
 			require.ErrorContains(t, err, "same length")
 
 			// Negative start step
-			_, err = sysDB.ForkWorkflows(dbosCtx, ForkWorkflowsDBInput{
+			_, err = sysDB.ForkWorkflows(dbosCtx, sysdb.ForkWorkflowsDBInput{
 				OriginalWorkflowIDs: originalIDs[:1],
 				StartSteps:          []int{-1},
 			})
@@ -9474,14 +9476,14 @@ func TestFork(t *testing.T) {
 		t.Run("Atomicity", func(t *testing.T) {
 			// Count existing forks of the first original
 			listForks := func() int {
-				wfs, err := sysDB.ListWorkflows(dbosCtx, ListWorkflowsDBInput{ForkedFrom: originalIDs[:1]})
+				wfs, err := sysDB.ListWorkflows(dbosCtx, sysdb.ListWorkflowsDBInput{ForkedFrom: originalIDs[:1]})
 				require.NoError(t, err)
 				return len(wfs)
 			}
 			forksBefore := listForks()
 
 			// A batch containing a nonexistent workflow fails and forks nothing
-			_, err := sysDB.ForkWorkflows(dbosCtx, ForkWorkflowsDBInput{
+			_, err := sysDB.ForkWorkflows(dbosCtx, sysdb.ForkWorkflowsDBInput{
 				OriginalWorkflowIDs: []string{originalIDs[0], "nonexistent-workflow-id"},
 				StartSteps:          []int{2, 2},
 			})
@@ -9551,15 +9553,15 @@ func TestStaleOutcomeWriteOverEnqueued(t *testing.T) {
 	// until the stale write has landed.
 	ListenQueues(dbosCtx, WorkflowQueue{Name: "stale-outcome-unused-queue"})
 
-	sysdb := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+	sysdb := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 	park := &parkingPool{
-		Pool:      sysdb.pool,
+		Pool:      sysdb.Pool(),
 		target:    wfID,
 		parked:    NewEvent(),
 		release:   make(chan struct{}),
 		staleDone: make(chan struct{}),
 	}
-	sysdb.pool = park
+	sysdb.SetPool(park)
 	releaseStale := sync.OnceFunc(func() { close(park.release) })
 	t.Cleanup(releaseStale)
 

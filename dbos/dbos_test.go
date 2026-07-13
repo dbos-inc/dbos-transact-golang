@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -248,7 +250,7 @@ func TestConfig(t *testing.T) {
 		require.True(t, ok, "expected dbosContext")
 		require.NotNil(t, dbosCtx.systemDB)
 
-		sysDB, ok := dbosCtx.systemDB.(*SysDB)
+		sysDB, ok := dbosCtx.systemDB.(*sysdb.SysDB)
 		require.True(t, ok, "expected sysDB")
 
 		// Verify all expected tables exist and have correct structure
@@ -256,55 +258,55 @@ func TestConfig(t *testing.T) {
 
 		// Test workflow_status table
 		var exists bool
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'workflow_status')").Scan(&exists)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'workflow_status')").Scan(&exists)
 		require.NoError(t, err)
 		assert.True(t, exists, "workflow_status table should exist")
 
 		// Test operation_outputs table
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'operation_outputs')").Scan(&exists)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'operation_outputs')").Scan(&exists)
 		require.NoError(t, err)
 		assert.True(t, exists, "operation_outputs table should exist")
 
 		// Test workflow_events table
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'workflow_events')").Scan(&exists)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'workflow_events')").Scan(&exists)
 		require.NoError(t, err)
 		assert.True(t, exists, "workflow_events table should exist")
 
 		// Test notifications table
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'notifications')").Scan(&exists)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'notifications')").Scan(&exists)
 		require.NoError(t, err)
 		assert.True(t, exists, "notifications table should exist")
 
 		// Test that all tables can be queried (empty results expected)
-		rows, err := sysDB.pool.Query(dbCtx, "SELECT workflow_uuid FROM dbos.workflow_status LIMIT 1")
+		rows, err := sysDB.Pool().Query(dbCtx, "SELECT workflow_uuid FROM dbos.workflow_status LIMIT 1")
 		require.NoError(t, err)
 		rows.Close()
 
-		rows, err = sysDB.pool.Query(dbCtx, "SELECT workflow_uuid FROM dbos.operation_outputs LIMIT 1")
+		rows, err = sysDB.Pool().Query(dbCtx, "SELECT workflow_uuid FROM dbos.operation_outputs LIMIT 1")
 		require.NoError(t, err)
 		rows.Close()
 
-		rows, err = sysDB.pool.Query(dbCtx, "SELECT workflow_uuid FROM dbos.workflow_events LIMIT 1")
+		rows, err = sysDB.Pool().Query(dbCtx, "SELECT workflow_uuid FROM dbos.workflow_events LIMIT 1")
 		require.NoError(t, err)
 		rows.Close()
 
-		rows, err = sysDB.pool.Query(dbCtx, "SELECT destination_uuid FROM dbos.notifications LIMIT 1")
+		rows, err = sysDB.Pool().Query(dbCtx, "SELECT destination_uuid FROM dbos.notifications LIMIT 1")
 		require.NoError(t, err)
 		rows.Close()
 
 		// Check that the dbos_migrations table exists and has one row with the correct version
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'dbos_migrations')").Scan(&exists)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'dbos_migrations')").Scan(&exists)
 		require.NoError(t, err)
 		assert.True(t, exists, "dbos_migrations table should exist")
 
 		// Verify migration version is 14 (after initial migration through pgsql_client_functions)
 		var version int64
 		var count int
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT COUNT(*) FROM dbos.dbos_migrations").Scan(&count)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT COUNT(*) FROM dbos.dbos_migrations").Scan(&count)
 		require.NoError(t, err)
 		assert.Equal(t, 1, count, "dbos_migrations table should have exactly one row")
 
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT version FROM dbos.dbos_migrations").Scan(&version)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT version FROM dbos.dbos_migrations").Scan(&version)
 		require.NoError(t, err)
 		assert.Equal(t, int64(41), version, "migration version should be 41 (after all migrations including the schedule_name column)")
 
@@ -372,7 +374,7 @@ func TestConfig(t *testing.T) {
 
 		for _, tc := range maskingTestCases {
 			t.Run("Masking_"+tc.name, func(t *testing.T) {
-				masked, err := MaskPassword(tc.connStr)
+				masked, err := sysdb.MaskPassword(tc.connStr)
 				require.NoError(t, err)
 				assert.Contains(t, masked, "***", "password should be masked")
 				passwordPattern := fmt.Sprintf("password=%s", testPassword)
@@ -407,17 +409,17 @@ func TestConfig(t *testing.T) {
 			// Verify system DB is functional
 			dbosCtx, ok := ctx.(*dbosContext)
 			require.True(t, ok)
-			sysDB, ok := dbosCtx.systemDB.(*SysDB)
+			sysDB, ok := dbosCtx.systemDB.(*sysdb.SysDB)
 			require.True(t, ok)
 
 			var exists bool
-			err = sysDB.pool.QueryRow(context.Background(), "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'workflow_status')").Scan(&exists)
+			err = sysDB.Pool().QueryRow(context.Background(), "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'dbos' AND table_name = 'workflow_status')").Scan(&exists)
 			require.NoError(t, err)
 			assert.True(t, exists)
 
 			// Verify masking works
-			poolConnStr := PgxPool(sysDB.pool).Config().ConnString()
-			maskedConnStr, err := MaskPassword(poolConnStr)
+			poolConnStr := PgxPool(sysDB.Pool()).Config().ConnString()
+			maskedConnStr, err := sysdb.MaskPassword(poolConnStr)
 			require.NoError(t, err)
 			if actualPassword == "" {
 				assert.NotContains(t, maskedConnStr, "password=")
@@ -543,66 +545,66 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		require.True(t, ok, "expected dbosContext")
 		require.NotNil(t, dbosCtx.systemDB)
 
-		sysDB, ok := dbosCtx.systemDB.(*SysDB)
+		sysDB, ok := dbosCtx.systemDB.(*sysdb.SysDB)
 		require.True(t, ok, "expected sysDB")
 
 		// Verify schema name was set correctly
-		assert.Equal(t, customSchema, sysDB.schema, "schema name should match custom schema")
+		assert.Equal(t, customSchema, sysDB.Schema(), "schema name should match custom schema")
 
 		// Verify all expected tables exist in the custom schema
 		dbCtx := context.Background()
 
 		// Test workflow_status table in custom schema
 		var exists bool
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'workflow_status')", customSchema).Scan(&exists)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'workflow_status')", customSchema).Scan(&exists)
 		require.NoError(t, err)
 		assert.True(t, exists, "workflow_status table should exist in custom schema")
 
 		// Test operation_outputs table in custom schema
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'operation_outputs')", customSchema).Scan(&exists)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'operation_outputs')", customSchema).Scan(&exists)
 		require.NoError(t, err)
 		assert.True(t, exists, "operation_outputs table should exist in custom schema")
 
 		// Test workflow_events table in custom schema
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'workflow_events')", customSchema).Scan(&exists)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'workflow_events')", customSchema).Scan(&exists)
 		require.NoError(t, err)
 		assert.True(t, exists, "workflow_events table should exist in custom schema")
 
 		// Test notifications table in custom schema
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'notifications')", customSchema).Scan(&exists)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'notifications')", customSchema).Scan(&exists)
 		require.NoError(t, err)
 		assert.True(t, exists, "notifications table should exist in custom schema")
 
 		// Test that all tables can be queried using custom schema (empty results expected)
-		rows, err := sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.workflow_status LIMIT 1", customSchema))
+		rows, err := sysDB.Pool().Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.workflow_status LIMIT 1", customSchema))
 		require.NoError(t, err)
 		rows.Close()
 
-		rows, err = sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.operation_outputs LIMIT 1", customSchema))
+		rows, err = sysDB.Pool().Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.operation_outputs LIMIT 1", customSchema))
 		require.NoError(t, err)
 		rows.Close()
 
-		rows, err = sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.workflow_events LIMIT 1", customSchema))
+		rows, err = sysDB.Pool().Query(dbCtx, fmt.Sprintf("SELECT workflow_uuid FROM %s.workflow_events LIMIT 1", customSchema))
 		require.NoError(t, err)
 		rows.Close()
 
-		rows, err = sysDB.pool.Query(dbCtx, fmt.Sprintf("SELECT destination_uuid FROM %s.notifications LIMIT 1", customSchema))
+		rows, err = sysDB.Pool().Query(dbCtx, fmt.Sprintf("SELECT destination_uuid FROM %s.notifications LIMIT 1", customSchema))
 		require.NoError(t, err)
 		rows.Close()
 
 		// Check that the dbos_migrations table exists in custom schema
-		err = sysDB.pool.QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'dbos_migrations')", customSchema).Scan(&exists)
+		err = sysDB.Pool().QueryRow(dbCtx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'dbos_migrations')", customSchema).Scan(&exists)
 		require.NoError(t, err)
 		assert.True(t, exists, "dbos_migrations table should exist in custom schema")
 
 		// Verify migration version is 14 (after initial migration through pgsql_client_functions)
 		var version int64
 		var count int
-		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT COUNT(*) FROM %s.dbos_migrations", customSchema)).Scan(&count)
+		err = sysDB.Pool().QueryRow(dbCtx, fmt.Sprintf("SELECT COUNT(*) FROM %s.dbos_migrations", customSchema)).Scan(&count)
 		require.NoError(t, err)
 		assert.Equal(t, 1, count, "dbos_migrations table should have exactly one row")
 
-		err = sysDB.pool.QueryRow(dbCtx, fmt.Sprintf("SELECT version FROM %s.dbos_migrations", customSchema)).Scan(&version)
+		err = sysDB.Pool().QueryRow(dbCtx, fmt.Sprintf("SELECT version FROM %s.dbos_migrations", customSchema)).Scan(&version)
 		require.NoError(t, err)
 		assert.Equal(t, int64(41), version, "migration version should be 41 (after all migrations including the schedule_name column)")
 	})
@@ -807,14 +809,14 @@ func TestCustomPool(t *testing.T) {
 		defer Shutdown(dbosCtx, 10*time.Second)
 		require.True(t, ok)
 
-		sysDB, ok := dbosCtx.systemDB.(*SysDB)
+		sysDB, ok := dbosCtx.systemDB.(*sysdb.SysDB)
 		require.True(t, ok)
-		assert.Same(t, pool, PgxPool(sysDB.pool), "The pool in dbosContext should be the same as the custom pool provided")
+		assert.Same(t, pool, PgxPool(sysDB.Pool()), "The pool in dbosContext should be the same as the custom pool provided")
 
-		stats := PgxPool(sysDB.pool).Stat()
+		stats := PgxPool(sysDB.Pool()).Stat()
 		assert.Equal(t, int32(10), stats.MaxConns(), "MaxConns should match custom pool config")
 
-		sysdbConfig := PgxPool(sysDB.pool).Config()
+		sysdbConfig := PgxPool(sysDB.Pool()).Config()
 		assert.Equal(t, int32(10), sysdbConfig.MaxConns)
 		assert.Equal(t, int32(5), sysdbConfig.MinConns)
 		assert.Equal(t, 2*time.Hour, sysdbConfig.MaxConnLifetime)
@@ -945,14 +947,14 @@ func TestCustomPool(t *testing.T) {
 		defer customPool.Close()
 
 		// Create system database with custom pool
-		sysDBInput := NewSystemDatabaseInput{
+		sysDBInput := sysdb.NewSystemDatabaseInput{
 			DatabaseURL:    databaseURL,
 			DatabaseSchema: "dbos_test_custom_direct",
 			CustomPool:     customPool,
 			Logger:         logger,
 		}
 
-		systemDB, err := NewSystemDatabase(ctx, sysDBInput)
+		systemDB, err := sysdb.NewSystemDatabase(ctx, sysDBInput)
 		require.NoError(t, err, "failed to create system database with custom pool")
 		require.NotNil(t, systemDB)
 
@@ -960,7 +962,7 @@ func TestCustomPool(t *testing.T) {
 		systemDB.Launch(ctx)
 
 		require.Eventually(t, func() bool {
-			conn, err := PgxPool(systemDB.(*SysDB).pool).Acquire(ctx)
+			conn, err := PgxPool(systemDB.(*sysdb.SysDB).Pool()).Acquire(ctx)
 			require.NoError(t, err)
 			defer conn.Release()
 			err = conn.Ping(ctx)
@@ -972,7 +974,7 @@ func TestCustomPool(t *testing.T) {
 		cancel() // Cancel context
 		shutdownTimeout := 2 * time.Second
 		systemDB.Shutdown(ctx, shutdownTimeout)
-		assert.False(t, systemDB.(*SysDB).launched)
+		assert.False(t, systemDB.(*sysdb.SysDB).Launched())
 	})
 }
 
@@ -992,7 +994,7 @@ func TestSQLiteFoundation(t *testing.T) {
 	url := "sqlite:" + dbPath
 	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	sd, err := NewSystemDatabase(context.Background(), NewSystemDatabaseInput{
+	sd, err := sysdb.NewSystemDatabase(context.Background(), sysdb.NewSystemDatabaseInput{
 		DatabaseURL:    url,
 		DatabaseSchema: "dbos",
 		Logger:         logger,
@@ -1000,21 +1002,21 @@ func TestSQLiteFoundation(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { sd.Shutdown(context.Background(), 0) })
 
-	s, ok := sd.(*SysDB)
+	s, ok := sd.(*sysdb.SysDB)
 	require.True(t, ok, "expected *sysDB concrete type")
-	require.Nil(t, PgxPool(s.pool), "pg pool should be nil for sqlite")
-	require.NotNil(t, SQLDB(s.pool), "sqlite handle should be non-nil")
-	require.Equal(t, DialectSQLite, s.dialect.Name())
+	require.Nil(t, PgxPool(s.Pool()), "pg pool should be nil for sqlite")
+	require.NotNil(t, SQLDB(s.Pool()), "sqlite handle should be non-nil")
+	require.Equal(t, DialectSQLite, s.Dialect().Name())
 
 	// Migrations table should be at the latest version.
-	migs := BuildSqliteMigrations()
-	latest := migs[len(migs)-1].version
+	migs := sysdb.BuildSqliteMigrations()
+	latest := migs[len(migs)-1].Version
 	var got int64
-	require.NoError(t, SQLDB(s.pool).QueryRow(`SELECT version FROM dbos_migrations`).Scan(&got))
+	require.NoError(t, SQLDB(s.Pool()).QueryRow(`SELECT version FROM dbos_migrations`).Scan(&got))
 	assert.Equal(t, latest, got)
 
 	// Re-opening the same file is a no-op (migrations already applied).
-	sd2, err := NewSystemDatabase(context.Background(), NewSystemDatabaseInput{
+	sd2, err := sysdb.NewSystemDatabase(context.Background(), sysdb.NewSystemDatabaseInput{
 		DatabaseURL:    url,
 		DatabaseSchema: "dbos",
 		Logger:         logger,
@@ -1022,17 +1024,17 @@ func TestSQLiteFoundation(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { sd2.Shutdown(context.Background(), 0) })
 
-	s2 := sd2.(*SysDB)
-	require.NoError(t, SQLDB(s2.pool).QueryRow(`SELECT version FROM dbos_migrations`).Scan(&got))
+	s2 := sd2.(*sysdb.SysDB)
+	require.NoError(t, SQLDB(s2.Pool()).QueryRow(`SELECT version FROM dbos_migrations`).Scan(&got))
 	assert.Equal(t, latest, got, "version should remain at latest on re-open")
 
 	// PRAGMAs we set should stick.
 	var jm string
-	require.NoError(t, SQLDB(s2.pool).QueryRow(`PRAGMA journal_mode`).Scan(&jm))
+	require.NoError(t, SQLDB(s2.Pool()).QueryRow(`PRAGMA journal_mode`).Scan(&jm))
 	assert.Equal(t, "wal", jm, "WAL journal mode should be enabled")
 
 	var fk int
-	require.NoError(t, SQLDB(s2.pool).QueryRow(`PRAGMA foreign_keys`).Scan(&fk))
+	require.NoError(t, SQLDB(s2.Pool()).QueryRow(`PRAGMA foreign_keys`).Scan(&fk))
 	assert.Equal(t, 1, fk, "foreign_keys pragma should be on")
 
 	// Core schema should exist.
@@ -1042,7 +1044,7 @@ func TestSQLiteFoundation(t *testing.T) {
 		"event_dispatch_kv", "workflow_schedules", "application_versions", "queues",
 	} {
 		var name string
-		err := SQLDB(s2.pool).QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
+		err := SQLDB(s2.Pool()).QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
 		assert.NoErrorf(t, err, "table %q missing after migrations", table)
 	}
 
@@ -1060,7 +1062,7 @@ func TestSQLiteFoundation(t *testing.T) {
 	// poisons the result. The 100ms cancel therefore lands mid-BEGIN unless
 	// the timer goroutine is starved for >5s; retry the scenario in that
 	// pathological case rather than mis-assert.
-	blocker, err := s.pool.BeginTx(context.Background(), TxOptions{})
+	blocker, err := s.Pool().BeginTx(context.Background(), TxOptions{})
 	require.NoError(t, err)
 	cancelLanded := false
 	for attempt := 0; attempt < 3 && !cancelLanded; attempt++ {
@@ -1070,7 +1072,7 @@ func TestSQLiteFoundation(t *testing.T) {
 			cancelBegin()
 		}()
 		var tx2 Tx
-		tx2, err = s.pool.BeginTx(cctx, TxOptions{})
+		tx2, err = s.Pool().BeginTx(cctx, TxOptions{})
 		cancelLanded = cctx.Err() != nil
 		if tx2 != nil {
 			_ = tx2.Rollback(context.Background())
@@ -1108,7 +1110,7 @@ func TestSQLiteURLParsing(t *testing.T) {
 		{"sqlite:file:/abs/x.db?_pragma=foreign_keys(1)#tag", "file:/abs/x.db?_pragma=foreign_keys(1)#tag"},
 	}
 	for _, c := range cases {
-		got, err := SqliteDSN(c.url)
+		got, err := sysdb.SqliteDSN(c.url)
 		require.NoErrorf(t, err, "sqliteDSN(%q)", c.url)
 		assert.Equalf(t, c.want, got, "sqliteDSN(%q)", c.url)
 	}
@@ -1123,7 +1125,7 @@ func TestSQLiteURLParsing(t *testing.T) {
 		{"sqlite://host/path", "host component"},
 	}
 	for _, b := range bads {
-		_, err := SqliteDSN(b.url)
+		_, err := sysdb.SqliteDSN(b.url)
 		require.Errorf(t, err, "sqliteDSN(%q) should error", b.url)
 		assert.Containsf(t, err.Error(), b.errMsg, "sqliteDSN(%q)", b.url)
 	}
@@ -1190,7 +1192,7 @@ func TestDetectDialect(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := DetectDialect(c.url)
+			got, err := sysdb.DetectDialect(c.url)
 			if c.errMsg == "" {
 				require.NoErrorf(t, err, "detectDialect(%q)", c.url)
 				assert.Equalf(t, c.want, got, "detectDialect(%q)", c.url)
@@ -1247,7 +1249,7 @@ func TestPostgresConnectionStringForms(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := DetectDialect(c.url)
+			got, err := sysdb.DetectDialect(c.url)
 			require.NoErrorf(t, err, "detectDialect(%q)", c.url)
 			assert.Equal(t, DialectPostgres, got)
 
@@ -1297,11 +1299,11 @@ func TestSQLiteConnectionStringForms(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := DetectDialect(c.url)
+			got, err := sysdb.DetectDialect(c.url)
 			require.NoErrorf(t, err, "detectDialect(%q)", c.url)
 			assert.Equal(t, DialectSQLite, got)
 
-			dsn, err := SqliteDSN(c.url)
+			dsn, err := sysdb.SqliteDSN(c.url)
 			require.NoErrorf(t, err, "sqliteDSN(%q)", c.url)
 
 			db, err := sql.Open("sqlite", dsn)
@@ -1331,11 +1333,11 @@ func TestSQLiteConnectionStringForms(t *testing.T) {
 		t.Chdir(t.TempDir())
 		const url = "sqlite3:relative.db"
 
-		got, err := DetectDialect(url)
+		got, err := sysdb.DetectDialect(url)
 		require.NoError(t, err)
 		assert.Equal(t, DialectSQLite, got)
 
-		dsn, err := SqliteDSN(url)
+		dsn, err := sysdb.SqliteDSN(url)
 		require.NoError(t, err)
 		assert.Equal(t, "relative.db", dsn)
 
@@ -1360,11 +1362,11 @@ func TestSQLiteConnectionStringForms(t *testing.T) {
 func TestSQLiteMemoryBackedFile(t *testing.T) {
 	const url = "sqlite::memory:"
 
-	got, err := DetectDialect(url)
+	got, err := sysdb.DetectDialect(url)
 	require.NoError(t, err)
 	assert.Equal(t, DialectSQLite, got)
 
-	dsn, err := SqliteDSN(url)
+	dsn, err := sysdb.SqliteDSN(url)
 	require.NoError(t, err)
 	assert.Equal(t, ":memory:", dsn)
 
@@ -1423,7 +1425,7 @@ func TestSQLiteDialectClassification(t *testing.T) {
 	// Unique violation.
 	_, err = db.ExecContext(ctx, `INSERT INTO t VALUES (2, 'x')`)
 	require.Error(t, err)
-	assert.True(t, SqliteDialect{}.IsUniqueViolation(err), "expected unique-violation: %v", err)
+	assert.True(t, sysdb.SqliteDialect{}.IsUniqueViolation(err), "expected unique-violation: %v", err)
 
 	// Foreign key enforcement on :memory: is per-connection; the PRAGMA above
 	// only sticks on the conn that executed it. Skip if not enforced here.
@@ -1431,7 +1433,7 @@ func TestSQLiteDialectClassification(t *testing.T) {
 	if err == nil {
 		t.Log("foreign_keys not enforced on this connection; skipping FK assertion")
 	} else {
-		assert.True(t, SqliteDialect{}.IsForeignKeyViolation(err), "expected fk-violation: %v", err)
+		assert.True(t, sysdb.SqliteDialect{}.IsForeignKeyViolation(err), "expected fk-violation: %v", err)
 	}
 }
 
@@ -1536,10 +1538,10 @@ func TestCustomSqlitePool(t *testing.T) {
 		require.True(t, ok)
 		defer Shutdown(dbosCtx, 10*time.Second)
 
-		sysDB, ok := dbosCtx.systemDB.(*SysDB)
+		sysDB, ok := dbosCtx.systemDB.(*sysdb.SysDB)
 		require.True(t, ok)
-		assert.Same(t, db, SQLDB(sysDB.pool), "sysDB should use the caller's *sql.DB instance")
-		require.Equal(t, DialectSQLite, sysDB.dialect.Name())
+		assert.Same(t, db, SQLDB(sysDB.Pool()), "sysDB should use the caller's *sql.DB instance")
+		require.Equal(t, DialectSQLite, sysDB.Dialect().Name())
 
 		RegisterWorkflow(customdbosContext, sendGetEventWorkflowCustom)
 		RegisterWorkflow(customdbosContext, recvSetEventWorkflowCustom)
@@ -1587,9 +1589,9 @@ func TestCustomSqlitePool(t *testing.T) {
 		require.NotNil(t, dbosCtx)
 		defer Shutdown(dbosCtx, 5*time.Second)
 
-		sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+		sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 		require.True(t, ok)
-		assert.Equal(t, DialectSQLite, sysDB.dialect.Name(), "sqlite custom DB should win over postgres URL")
+		assert.Equal(t, DialectSQLite, sysDB.Dialect().Name(), "sqlite custom DB should win over postgres URL")
 	})
 
 	t.Run("MutuallyExclusivePools", func(t *testing.T) {
@@ -1629,7 +1631,7 @@ func TestCustomSqlitePool(t *testing.T) {
 		require.NoError(t, err)
 		defer customDB.Close()
 
-		systemDB, err := NewSystemDatabase(ctx, NewSystemDatabaseInput{
+		systemDB, err := sysdb.NewSystemDatabase(ctx, sysdb.NewSystemDatabaseInput{
 			DatabaseSchema: "dbos",
 			CustomSqliteDB: customDB,
 			Logger:         logger,
@@ -1640,11 +1642,11 @@ func TestCustomSqlitePool(t *testing.T) {
 		systemDB.Launch(ctx)
 
 		require.Eventually(t, func() bool {
-			return SQLDB(systemDB.(*SysDB).pool).PingContext(ctx) == nil
+			return SQLDB(systemDB.(*sysdb.SysDB).Pool()).PingContext(ctx) == nil
 		}, 5*time.Second, 100*time.Millisecond, "system database should be reachable")
 
 		cancel()
 		systemDB.Shutdown(ctx, 2*time.Second)
-		assert.False(t, systemDB.(*SysDB).launched)
+		assert.False(t, systemDB.(*sysdb.SysDB).Launched())
 	})
 }

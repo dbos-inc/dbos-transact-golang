@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/robfig/cron/v3"
 	"github.com/stretchr/testify/require"
 )
@@ -489,7 +491,7 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 	start := time.Now().Add(-5 * time.Second).Truncate(time.Second)
 	end := time.Now()
 	c := dbosCtx.(*dbosContext)
-	ids, err := c.systemDB.BackfillSchedule(c, BackfillScheduleDBInput{
+	ids, err := c.systemDB.BackfillSchedule(c, sysdb.BackfillScheduleDBInput{
 		ScheduleName: scheduleName,
 		Schedule:     "*/1 * * * * *",
 		StartTime:    start,
@@ -855,7 +857,7 @@ func TestScheduleNameSurvivesExportImport(t *testing.T) {
 	require.Equal(t, "export-test", original[0].ScheduleName)
 
 	// Export, delete, then reimport: schedule_name must survive the round-trip.
-	sdb := dbosCtx.(*dbosContext).systemDB.(*SysDB)
+	sdb := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 	exported, err := sdb.ExportWorkflow(dbosCtx, workflowID, true)
 	require.NoError(t, err)
 	require.NoError(t, DeleteWorkflows(dbosCtx, []string{workflowID}))

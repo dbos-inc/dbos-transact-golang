@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,9 +20,9 @@ func poolFromContext(t *testing.T, ctx DBOSContext) *pgxpool.Pool {
 	t.Helper()
 	c, ok := ctx.(*dbosContext)
 	require.True(t, ok)
-	s, ok := c.systemDB.(*SysDB)
+	s, ok := c.systemDB.(*sysdb.SysDB)
 	require.True(t, ok)
-	return PgxPool(s.pool)
+	return PgxPool(s.Pool())
 }
 
 // detectCockroach reports whether the pool is connected to CockroachDB, so
@@ -31,7 +33,7 @@ func detectCockroach(t *testing.T, pool *pgxpool.Pool) bool {
 	conn, err := pool.Acquire(context.Background())
 	require.NoError(t, err)
 	defer conn.Release()
-	return IsCockroachDB(conn.Conn())
+	return sysdb.IsCockroachDB(conn.Conn())
 }
 
 // TestShouldMigrate verifies the early-exit predicate used to skip the full
@@ -41,18 +43,18 @@ func TestShouldMigrate(t *testing.T) {
 	ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 	pool := poolFromContext(t, ctx)
 	bg := context.Background()
-	migs := BuildMigrations("dbos", false)
-	latest := migs[len(migs)-1].version
+	migs := sysdb.BuildMigrations("dbos", false)
+	latest := migs[len(migs)-1].Version
 
 	// Freshly-migrated schema should report no migration needed.
-	need, err := ShouldMigrate(bg, pool, "dbos", false)
+	need, err := sysdb.ShouldMigrate(bg, pool, "dbos", false)
 	require.NoError(t, err)
 	assert.False(t, need, "fully migrated schema should not need migration")
 
 	// Rewinding the version makes a migration pending again.
 	_, err = pool.Exec(bg, "UPDATE dbos.dbos_migrations SET version = $1", latest-1)
 	require.NoError(t, err)
-	need, err = ShouldMigrate(bg, pool, "dbos", false)
+	need, err = sysdb.ShouldMigrate(bg, pool, "dbos", false)
 	require.NoError(t, err)
 	assert.True(t, need, "rewound schema should need migration")
 
@@ -60,18 +62,18 @@ func TestShouldMigrate(t *testing.T) {
 	// initialised schema. shouldMigrate must report True.
 	_, err = pool.Exec(bg, "UPDATE dbos.dbos_migrations SET version = $1", latest)
 	require.NoError(t, err)
-	need, err = ShouldMigrate(bg, pool, "dbos", false)
+	need, err = sysdb.ShouldMigrate(bg, pool, "dbos", false)
 	require.NoError(t, err)
 	assert.False(t, need)
 
 	_, err = pool.Exec(bg, "DROP TABLE dbos.dbos_migrations")
 	require.NoError(t, err)
-	need, err = ShouldMigrate(bg, pool, "dbos", false)
+	need, err = sysdb.ShouldMigrate(bg, pool, "dbos", false)
 	require.NoError(t, err)
 	assert.True(t, need, "missing migration table should need migration")
 
 	// A schema that does not exist should also need migration.
-	need, err = ShouldMigrate(bg, pool, "nonexistent_schema_xyz", false)
+	need, err = sysdb.ShouldMigrate(bg, pool, "nonexistent_schema_xyz", false)
 	require.NoError(t, err)
 	assert.True(t, need, "nonexistent schema should need migration")
 }
@@ -89,14 +91,14 @@ func TestOnlineMigrationsAreIdempotent(t *testing.T) {
 
 	// First online migration is version 22 (drop forked_from index).
 	const rewindTo = int64(21)
-	migs := BuildMigrations("dbos", isCockroach)
-	latest := migs[len(migs)-1].version
+	migs := sysdb.BuildMigrations("dbos", isCockroach)
+	latest := migs[len(migs)-1].Version
 
 	_, err := pool.Exec(bg, "UPDATE dbos.dbos_migrations SET version = $1", rewindTo)
 	require.NoError(t, err)
 
 	logger := slog.Default()
-	require.NoError(t, RunMigrations(bg, pool, "dbos", isCockroach, logger))
+	require.NoError(t, sysdb.RunMigrations(bg, pool, "dbos", isCockroach, logger))
 
 	var version int64
 	require.NoError(t, pool.QueryRow(bg, "SELECT version FROM dbos.dbos_migrations").Scan(&version))
@@ -112,14 +114,14 @@ func TestVersionNotBumpedOnMigrationFailure(t *testing.T) {
 	pool := poolFromContext(t, ctx)
 	bg := context.Background()
 	isCockroach := detectCockroach(t, pool)
-	migs := BuildMigrations("dbos", isCockroach)
-	latest := migs[len(migs)-1].version
+	migs := sysdb.BuildMigrations("dbos", isCockroach)
+	latest := migs[len(migs)-1].Version
 
 	const rewindTo = int64(20)
 	_, err := pool.Exec(bg, "UPDATE dbos.dbos_migrations SET version = $1", rewindTo)
 	require.NoError(t, err)
 
-	err = RunMigrations(bg, pool, "dbos", isCockroach, slog.Default())
+	err = sysdb.RunMigrations(bg, pool, "dbos", isCockroach, slog.Default())
 	require.Error(t, err, "migration 21 should fail because dbos.queues already exists")
 	assert.Contains(t, err.Error(), "already exists")
 
@@ -131,7 +133,7 @@ func TestVersionNotBumpedOnMigrationFailure(t *testing.T) {
 	// later online migrations idempotently re-apply.
 	_, err = pool.Exec(bg, "DROP TABLE dbos.queues")
 	require.NoError(t, err)
-	require.NoError(t, RunMigrations(bg, pool, "dbos", isCockroach, slog.Default()))
+	require.NoError(t, sysdb.RunMigrations(bg, pool, "dbos", isCockroach, slog.Default()))
 	require.NoError(t, pool.QueryRow(bg, "SELECT version FROM dbos.dbos_migrations").Scan(&version))
 	assert.Equal(t, latest, version)
 }
@@ -149,7 +151,7 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 	// are not online so cleanupInvalidIndexes is never invoked on CRDB.
 	conn, err := pool.Acquire(bg)
 	require.NoError(t, err)
-	if IsCockroachDB(conn.Conn()) {
+	if sysdb.IsCockroachDB(conn.Conn()) {
 		conn.Release()
 		t.Skip("invalid-index recovery is Postgres-only")
 	}
@@ -157,8 +159,8 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 
 	const targetIndex = "idx_workflow_status_in_flight"
 	const rewindTo = int64(31) // migration 32 builds the target index
-	migs := BuildMigrations("dbos", false)
-	latest := migs[len(migs)-1].version
+	migs := sysdb.BuildMigrations("dbos", false)
+	latest := migs[len(migs)-1].Version
 
 	// Drop the valid index, then plant an invalid one of the same name.
 	// Flipping pg_index.indisvalid mimics what Postgres leaves behind when
@@ -186,7 +188,7 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 
 	// Re-run migrations. cleanupInvalidIndexes should drop the invalid index,
 	// then migration 32+ rebuild it.
-	require.NoError(t, RunMigrations(bg, pool, "dbos", false, slog.Default()))
+	require.NoError(t, sysdb.RunMigrations(bg, pool, "dbos", false, slog.Default()))
 
 	require.NoError(t, pool.QueryRow(bg,
 		fmt.Sprintf(`SELECT indisvalid FROM pg_index WHERE indexrelid = 'dbos.%s'::regclass`, targetIndex)).Scan(&valid))
@@ -219,7 +221,7 @@ func TestNewSystemDatabaseErrorPathNoDeadlock(t *testing.T) {
 	require.NoError(t, err)
 	_, err = pool.Exec(bg, fmt.Sprintf("CREATE SCHEMA %s", schema))
 	require.NoError(t, err)
-	_, err = pool.Exec(bg, fmt.Sprintf("CREATE TABLE %s.%s (bogus INT)", schema, _DBOS_MIGRATION_TABLE))
+	_, err = pool.Exec(bg, fmt.Sprintf("CREATE TABLE %s.%s (bogus INT)", schema, sysdb.MigrationTable))
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
@@ -227,7 +229,7 @@ func TestNewSystemDatabaseErrorPathNoDeadlock(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, sdErr := NewSystemDatabase(bg, NewSystemDatabaseInput{
+		_, sdErr := sysdb.NewSystemDatabase(bg, sysdb.NewSystemDatabaseInput{
 			DatabaseURL:    databaseURL,
 			DatabaseSchema: schema,
 			Logger:         slog.Default(),

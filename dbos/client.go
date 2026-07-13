@@ -10,6 +10,9 @@ import (
 	"math"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -362,11 +365,11 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 	for {
 		tx, err := dbosCtx.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
 		if err != nil {
-			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %v", err))
+			return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %v", err))
 		}
 
 		// Insert workflow status with transaction
-		insertInput := InsertWorkflowStatusDBInput{
+		insertInput := sysdb.InsertWorkflowStatusDBInput{
 			Status: status,
 			Tx:     tx,
 		}
@@ -378,7 +381,7 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 			if returnExisting && errors.Is(err, &DBOSError{Code: QueueDeduplicated}) {
 				existingID, lookupErr := dbosCtx.systemDB.GetDeduplicatedWorkflow(uncancellableCtx, queueName, params.deduplicationID)
 				if lookupErr != nil {
-					return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("looking up deduplicated workflow: %w", lookupErr))
+					return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("looking up deduplicated workflow: %w", lookupErr))
 				}
 				if existingID != nil {
 					return newWorkflowPollingHandle[any](uncancellableCtx, *existingID), nil
@@ -885,7 +888,7 @@ func (c *client) CreateSchedule(input ClientScheduleInput) error {
 		return fmt.Errorf("failed to serialize context: %w", err)
 	}
 
-	return dbosCtx.systemDB.CreateSchedule(dbosCtx, CreateScheduleDBInput{
+	return dbosCtx.systemDB.CreateSchedule(dbosCtx, sysdb.CreateScheduleDBInput{
 		ScheduleID:        scheduleID,
 		ScheduleName:      input.ScheduleName,
 		WorkflowName:      input.WorkflowName,
@@ -948,14 +951,14 @@ func (c *client) ApplySchedules(schedules []ClientScheduleInput) error {
 			queueName = _DBOS_INTERNAL_QUEUE_NAME
 		}
 
-		if err := dbosCtx.systemDB.DeleteSchedule(dbosCtx, DeleteScheduleDBInput{
+		if err := dbosCtx.systemDB.DeleteSchedule(dbosCtx, sysdb.DeleteScheduleDBInput{
 			ScheduleName: req.ScheduleName,
 			Tx:           tx,
 		}); err != nil {
 			return fmt.Errorf("failed to delete existing schedule: %w", err)
 		}
 
-		if err := dbosCtx.systemDB.CreateSchedule(dbosCtx, CreateScheduleDBInput{
+		if err := dbosCtx.systemDB.CreateSchedule(dbosCtx, sysdb.CreateScheduleDBInput{
 			ScheduleID:        uuid.New().String(),
 			ScheduleName:      req.ScheduleName,
 			WorkflowName:      req.WorkflowName,

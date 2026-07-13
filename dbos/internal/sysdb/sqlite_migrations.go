@@ -1,4 +1,4 @@
-package dbos
+package sysdb
 
 import (
 	"context"
@@ -128,44 +128,44 @@ var sqliteMigration41SQL string
 // BuildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
 // 38, and 39 have no SQLite counterpart and are omitted.
-func BuildSqliteMigrations() []migrationFile {
-	return []migrationFile{
-		{version: 1, sql: sqliteMigration1SQL},
-		{version: 2, sql: sqliteMigration2SQL},
-		{version: 3, sql: sqliteMigration3SQL},
-		{version: 4, sql: sqliteMigration4SQL},
-		{version: 5, sql: sqliteMigration5SQL},
-		{version: 6, sql: sqliteMigration6SQL},
-		{version: 7, sql: sqliteMigration7SQL},
-		{version: 8, sql: sqliteMigration8SQL},
-		{version: 9, sql: sqliteMigration9SQL},
-		{version: 11, sql: sqliteMigration11SQL},
-		{version: 12, sql: sqliteMigration12SQL},
-		{version: 13, sql: sqliteMigration13SQL},
-		{version: 15, sql: sqliteMigration15SQL},
-		{version: 16, sql: sqliteMigration16SQL},
-		{version: 17, sql: sqliteMigration17SQL},
-		{version: 18, sql: sqliteMigration18SQL},
-		{version: 19, sql: sqliteMigration19SQL},
-		{version: 21, sql: sqliteMigration21SQL},
-		{version: 22, sql: sqliteMigration22SQL},
-		{version: 23, sql: sqliteMigration23SQL},
-		{version: 24, sql: sqliteMigration24SQL},
-		{version: 25, sql: sqliteMigration25SQL},
-		{version: 26, sql: sqliteMigration26SQL},
-		{version: 27, sql: sqliteMigration27SQL},
-		{version: 28, sql: sqliteMigration28SQL},
-		{version: 29, sql: sqliteMigration29SQL},
-		{version: 30, sql: sqliteMigration30SQL},
-		{version: 31, sql: sqliteMigration31SQL},
-		{version: 32, sql: sqliteMigration32SQL},
-		{version: 33, sql: sqliteMigration33SQL},
-		{version: 34, sql: sqliteMigration34SQL},
-		{version: 35, sql: sqliteMigration35SQL},
-		{version: 36, sql: sqliteMigration36SQL},
-		{version: 37, sql: sqliteMigration37SQL},
-		{version: 40, sql: sqliteMigration40SQL},
-		{version: 41, sql: sqliteMigration41SQL},
+func BuildSqliteMigrations() []MigrationFile {
+	return []MigrationFile{
+		{Version: 1, SQL: sqliteMigration1SQL},
+		{Version: 2, SQL: sqliteMigration2SQL},
+		{Version: 3, SQL: sqliteMigration3SQL},
+		{Version: 4, SQL: sqliteMigration4SQL},
+		{Version: 5, SQL: sqliteMigration5SQL},
+		{Version: 6, SQL: sqliteMigration6SQL},
+		{Version: 7, SQL: sqliteMigration7SQL},
+		{Version: 8, SQL: sqliteMigration8SQL},
+		{Version: 9, SQL: sqliteMigration9SQL},
+		{Version: 11, SQL: sqliteMigration11SQL},
+		{Version: 12, SQL: sqliteMigration12SQL},
+		{Version: 13, SQL: sqliteMigration13SQL},
+		{Version: 15, SQL: sqliteMigration15SQL},
+		{Version: 16, SQL: sqliteMigration16SQL},
+		{Version: 17, SQL: sqliteMigration17SQL},
+		{Version: 18, SQL: sqliteMigration18SQL},
+		{Version: 19, SQL: sqliteMigration19SQL},
+		{Version: 21, SQL: sqliteMigration21SQL},
+		{Version: 22, SQL: sqliteMigration22SQL},
+		{Version: 23, SQL: sqliteMigration23SQL},
+		{Version: 24, SQL: sqliteMigration24SQL},
+		{Version: 25, SQL: sqliteMigration25SQL},
+		{Version: 26, SQL: sqliteMigration26SQL},
+		{Version: 27, SQL: sqliteMigration27SQL},
+		{Version: 28, SQL: sqliteMigration28SQL},
+		{Version: 29, SQL: sqliteMigration29SQL},
+		{Version: 30, SQL: sqliteMigration30SQL},
+		{Version: 31, SQL: sqliteMigration31SQL},
+		{Version: 32, SQL: sqliteMigration32SQL},
+		{Version: 33, SQL: sqliteMigration33SQL},
+		{Version: 34, SQL: sqliteMigration34SQL},
+		{Version: 35, SQL: sqliteMigration35SQL},
+		{Version: 36, SQL: sqliteMigration36SQL},
+		{Version: 37, SQL: sqliteMigration37SQL},
+		{Version: 40, SQL: sqliteMigration40SQL},
+		{Version: 41, SQL: sqliteMigration41SQL},
 	}
 }
 
@@ -176,13 +176,13 @@ func RunSqliteMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) e
 	var exists int
 	err := db.QueryRowContext(ctx,
 		`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
-		_DBOS_MIGRATION_TABLE).Scan(&exists)
+		MigrationTable).Scan(&exists)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("failed to probe sqlite_master: %v", err)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, err := db.ExecContext(ctx,
-			fmt.Sprintf(`CREATE TABLE %s (version INTEGER NOT NULL PRIMARY KEY)`, _DBOS_MIGRATION_TABLE)); err != nil {
+			fmt.Sprintf(`CREATE TABLE %s (version INTEGER NOT NULL PRIMARY KEY)`, MigrationTable)); err != nil {
 			return fmt.Errorf("failed to create migrations table: %v", err)
 		}
 	}
@@ -190,19 +190,19 @@ func RunSqliteMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) e
 	// Read current version (single-row table).
 	var currentVersion int64
 	if err := db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT version FROM %s LIMIT 1`, _DBOS_MIGRATION_TABLE)).Scan(&currentVersion); err != nil &&
+		fmt.Sprintf(`SELECT version FROM %s LIMIT 1`, MigrationTable)).Scan(&currentVersion); err != nil &&
 		!errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("failed to read current migration version: %v", err)
+		return fmt.Errorf("failed to read current migration Version: %v", err)
 	}
 
 	for _, m := range migrations {
-		if m.version <= currentVersion {
+		if m.Version <= currentVersion {
 			continue
 		}
 		if err := applySqliteMigration(ctx, db, m, currentVersion, logger); err != nil {
 			return err
 		}
-		currentVersion = m.version
+		currentVersion = m.Version
 	}
 	return nil
 }
@@ -210,40 +210,40 @@ func RunSqliteMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) e
 func applySqliteMigration(
 	ctx context.Context,
 	db *sql.DB,
-	m migrationFile,
+	m MigrationFile,
 	lastApplied int64,
 	logger *slog.Logger,
 ) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction for migration %d: %v", m.version, err)
+		return fmt.Errorf("failed to begin transaction for migration %d: %v", m.Version, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	body := strings.TrimSpace(m.sql)
+	body := strings.TrimSpace(m.SQL)
 	for _, stmt := range splitSqliteStatements(body) {
 		if logger != nil {
-			logger.Debug("applying sqlite migration statement", "version", m.version, "stmt_prefix", firstNonEmptyLine(stmt))
+			logger.Debug("applying sqlite migration statement", "version", m.Version, "stmt_prefix", firstNonEmptyLine(stmt))
 		}
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("failed to execute migration %d: %v", m.version, err)
+			return fmt.Errorf("failed to execute migration %d: %v", m.Version, err)
 		}
 	}
 
 	if lastApplied == 0 {
 		if _, err := tx.ExecContext(ctx,
-			fmt.Sprintf(`INSERT INTO %s (version) VALUES (?)`, _DBOS_MIGRATION_TABLE), m.version); err != nil {
-			return fmt.Errorf("failed to insert migration version %d: %v", m.version, err)
+			fmt.Sprintf(`INSERT INTO %s (version) VALUES (?)`, MigrationTable), m.Version); err != nil {
+			return fmt.Errorf("failed to insert migration version %d: %v", m.Version, err)
 		}
 	} else {
 		if _, err := tx.ExecContext(ctx,
-			fmt.Sprintf(`UPDATE %s SET version = ?`, _DBOS_MIGRATION_TABLE), m.version); err != nil {
-			return fmt.Errorf("failed to update migration version to %d: %v", m.version, err)
+			fmt.Sprintf(`UPDATE %s SET version = ?`, MigrationTable), m.Version); err != nil {
+			return fmt.Errorf("failed to update migration version to %d: %v", m.Version, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit migration %d: %v", m.version, err)
+		return fmt.Errorf("failed to commit migration %d: %v", m.Version, err)
 	}
 	return nil
 }

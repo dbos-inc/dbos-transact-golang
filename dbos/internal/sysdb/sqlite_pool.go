@@ -1,4 +1,4 @@
-package dbos
+package sysdb
 
 import (
 	"context"
@@ -123,7 +123,8 @@ func OpenSQLitePool(ctx context.Context, databaseURL string) (*sql.DB, error) {
 // owns its lifecycle and PRAGMA configuration); otherwise the function opens
 // a fresh pool from databaseURL and applies default PRAGMAs.
 // Either way it runs SQLite migrations and returns a sysDB.
-func newSqliteSystemDatabase(
+func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Time, any) (*string, string, error),
+
 	ctx context.Context,
 	databaseURL, databaseSchema string,
 	customDB *sql.DB,
@@ -164,14 +165,15 @@ func newSqliteSystemDatabase(
 		return nil, fmt.Errorf("failed to ping sqlite database: %v", err)
 	}
 	return &SysDB{
-		pool:                          NewSQLPool(db),
-		dialect:                       SqliteDialect{},
-		recvNotifier:                  newNotifyRegistry(),
-		eventNotifier:                 newNotifyRegistry(),
-		streamsMap:                    &sync.Map{},
-		notificationLoopDone:          make(chan struct{}),
-		logger:                        logger.With("service", "system_database"),
-		schema:                        databaseSchema,
+		pool:                 NewSQLPool(db),
+		dialect:              SqliteDialect{},
+		RecvNotifier:         newNotifyRegistry(),
+		EventNotifier:        newNotifyRegistry(),
+		streamsMap:           &sync.Map{},
+		notificationLoopDone: make(chan struct{}),
+		logger:               logger.With("service", "system_database"),
+		schema:               databaseSchema,
+		encodeScheduledInput: encodeScheduledInput,
 	}, nil
 }
 

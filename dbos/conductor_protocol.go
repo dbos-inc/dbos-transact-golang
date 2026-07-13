@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strconv"
 	"time"
+
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 )
 
 // stringOrList is a custom JSON type that accepts either a single string
@@ -535,7 +537,7 @@ type getMetricsConductorRequest struct {
 // getMetricsConductorResponse is sent in response to metrics requests
 type getMetricsConductorResponse struct {
 	baseResponse
-	Metrics []MetricData `json:"metrics"`
+	Metrics []sysdb.MetricData `json:"metrics"`
 }
 
 // exportWorkflowConductorRequest is sent by the conductor to export a workflow

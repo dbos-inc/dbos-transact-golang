@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -46,7 +48,7 @@ func skipIfCockroach(t *testing.T, reason string) {
 	conn, err := pgx.Connect(context.Background(), getDatabaseURL())
 	require.NoError(t, err)
 	defer conn.Close(context.Background())
-	if IsCockroachDB(conn) {
+	if sysdb.IsCockroachDB(conn) {
 		t.Skipf("skipping on CockroachDB: %s", reason)
 	}
 }
@@ -103,12 +105,12 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 // database. Returns false when the database cannot be safely reused and must
 // be dropped instead.
 func cleanDatabaseRows(ctx context.Context, conn *pgx.Conn) bool {
-	migrations := BuildMigrations(_DEFAULT_SYSTEM_DB_SCHEMA, IsCockroachDB(conn))
-	latestVersion := migrations[len(migrations)-1].version
+	migrations := sysdb.BuildMigrations(_DEFAULT_SYSTEM_DB_SCHEMA, sysdb.IsCockroachDB(conn))
+	latestVersion := migrations[len(migrations)-1].Version
 
 	rows, err := conn.Query(ctx,
 		`SELECT DISTINCT table_schema FROM information_schema.tables WHERE table_name IN ('workflow_status', $1)`,
-		_DBOS_MIGRATION_TABLE)
+		sysdb.MigrationTable)
 	if err != nil {
 		return false
 	}
@@ -128,7 +130,7 @@ func cleanDatabaseRows(ctx context.Context, conn *pgx.Conn) bool {
 
 	for _, schema := range schemas {
 		var version int64
-		q := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", pgx.Identifier{schema}.Sanitize(), _DBOS_MIGRATION_TABLE)
+		q := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", pgx.Identifier{schema}.Sanitize(), sysdb.MigrationTable)
 		if err := conn.QueryRow(ctx, q).Scan(&version); err != nil || version != latestVersion {
 			return false
 		}
@@ -143,7 +145,7 @@ func cleanDatabaseRows(ctx context.Context, conn *pgx.Conn) bool {
 		tableRows, err := conn.Query(ctx,
 			`SELECT table_name FROM information_schema.tables
 			 WHERE table_schema = $1 AND table_type = 'BASE TABLE' AND table_name NOT IN ('workflow_status', $2)`,
-			schema, _DBOS_MIGRATION_TABLE)
+			schema, sysdb.MigrationTable)
 		if err != nil {
 			return false
 		}
@@ -188,7 +190,7 @@ func dropTestDatabase(t *testing.T, databaseURL string) {
 	require.NoError(t, err)
 	defer conn.Close(context.Background())
 
-	err = DropDatabaseIfExists(context.Background(), conn, dbName)
+	err = sysdb.DropDatabaseIfExists(context.Background(), conn, dbName)
 	require.NoError(t, err)
 }
 
@@ -291,12 +293,12 @@ func setWorkflowStatusPending(t *testing.T, dbosCtx DBOSContext, workflowID stri
 	t.Helper()
 	c, ok := dbosCtx.(*dbosContext)
 	require.True(t, ok, "expected DBOSContext to be *dbosContext")
-	sysDB, ok := c.systemDB.(*SysDB)
+	sysDB, ok := c.systemDB.(*sysdb.SysDB)
 	require.True(t, ok, "expected systemDB to be *sysDB")
-	updateQuery := sysDB.dialect.RewriteQuery(fmt.Sprintf(`UPDATE %sworkflow_status
+	updateQuery := sysDB.Dialect().RewriteQuery(fmt.Sprintf(`UPDATE %sworkflow_status
 		SET status = $1, output = NULL, error = NULL, started_at_epoch_ms = NULL, updated_at = $2
-		WHERE workflow_uuid = $3`, sysDB.dialect.SchemaPrefix(sysDB.schema)))
-	_, err := sysDB.pool.Exec(context.Background(), updateQuery,
+		WHERE workflow_uuid = $3`, sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+	_, err := sysDB.Pool().Exec(context.Background(), updateQuery,
 		WorkflowStatusPending, time.Now().UnixMilli(), workflowID)
 	require.NoError(t, err, "failed to set workflow status to PENDING")
 }
@@ -309,18 +311,18 @@ func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 		fmt.Println("Expected ctx to be of type *dbosContext in queueEntriesAreCleanedUp")
 		return false
 	}
-	sdb := exec.systemDB.(*SysDB)
+	sdb := exec.systemDB.(*sysdb.SysDB)
 	for range maxTries {
-		tx, err := sdb.pool.BeginTx(ctx, TxOptions{})
+		tx, err := sdb.Pool().BeginTx(ctx, TxOptions{})
 		if err != nil {
 			return false
 		}
 
-		query := sdb.dialect.RewriteQuery(fmt.Sprintf(`SELECT COUNT(*)
+		query := sdb.Dialect().RewriteQuery(fmt.Sprintf(`SELECT COUNT(*)
 				  FROM %sworkflow_status
 				  WHERE queue_name IS NOT NULL
 					AND queue_name != $1
-					AND status IN ('ENQUEUED', 'PENDING')`, sdb.dialect.SchemaPrefix(sdb.schema)))
+					AND status IN ('ENQUEUED', 'PENDING')`, sdb.Dialect().SchemaPrefix(sdb.Schema())))
 
 		var count int
 		err = tx.QueryRow(ctx, query, _DBOS_INTERNAL_QUEUE_NAME).Scan(&count)

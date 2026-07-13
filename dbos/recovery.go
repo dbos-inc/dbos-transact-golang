@@ -1,29 +1,31 @@
 package dbos
 
+import "github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
 	// List pending workflows for the executors
-	pendingWorkflows, err := RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
+	pendingWorkflows, err := sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
 		appVersion := []string{}
 		if ctx.applicationVersion != "" {
 			appVersion = []string{ctx.applicationVersion}
 		}
-		return ctx.systemDB.ListWorkflows(ctx, ListWorkflowsDBInput{
+		return ctx.systemDB.ListWorkflows(ctx, sysdb.ListWorkflowsDBInput{
 			Status:             []WorkflowStatusType{WorkflowStatusPending},
 			ExecutorIDs:        executorIDs,
 			ApplicationVersion: appVersion,
 			LoadInput:          true,
 		})
-	}, WithRetrierLogger(ctx.logger))
+	}, sysdb.WithRetrierLogger(ctx.logger))
 	if err != nil {
 		return nil, err
 	}
 
 	for _, workflow := range pendingWorkflows {
 		if workflow.QueueName != "" {
-			cleared, err := RetryWithResult(ctx, func() (bool, error) {
+			cleared, err := sysdb.RetryWithResult(ctx, func() (bool, error) {
 				return ctx.systemDB.ClearQueueAssignment(ctx, workflow.ID)
-			}, WithRetrierLogger(ctx.logger))
+			}, sysdb.WithRetrierLogger(ctx.logger))
 			if err != nil {
 				ctx.logger.Error("Error clearing queue assignment for workflow", "workflow_id", workflow.ID, "name", workflow.Name, "error", err)
 				continue

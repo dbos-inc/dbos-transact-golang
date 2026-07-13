@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -70,8 +72,8 @@ func TestApplicationVersions(t *testing.T) {
 		// Launch registers the current version; clear the table to simulate empty state.
 		require.NoError(t, dbosCtx.Launch())
 		c := dbosCtx.(*dbosContext)
-		s := c.systemDB.(*SysDB)
-		_, err := s.pool.Exec(c, s.renderSQL("DELETE FROM %sapplication_versions", s.dialect.SchemaPrefix(s.schema)))
+		s := c.systemDB.(*sysdb.SysDB)
+		_, err := s.Pool().Exec(c, s.RenderSQL("DELETE FROM %sapplication_versions", s.Dialect().SchemaPrefix(s.Schema())))
 		require.NoError(t, err)
 
 		_, err = GetLatestApplicationVersion(dbosCtx)
