@@ -1053,24 +1053,32 @@ func TestSQLiteFoundation(t *testing.T) {
 	// SQLite code (`interrupted (9)` or `database is locked (5)`). The dbos
 	// layer must map it back so callers (e.g. handle.GetResult after
 	// Shutdown) can errors.Is it.
+	// Every dbos sqlite connection is opened with _txlock=immediate, so BEGIN
+	// itself acquires the write lock: blocker holds it from BeginTx on, and
+	// tx2's BEGIN IMMEDIATE blocks in the busy handler for the full
+	// busy_timeout (5s) — the interrupt does not shorten the wait, only
+	// poisons the result. The 100ms cancel therefore lands mid-BEGIN unless
+	// the timer goroutine is starved for >5s; retry the scenario in that
+	// pathological case rather than mis-assert.
 	blocker, err := s.pool.BeginTx(context.Background(), TxOptions{})
 	require.NoError(t, err)
-	_, err = blocker.Exec(context.Background(), `CREATE TABLE begin_cancel_probe (x INT)`)
-	require.NoError(t, err)
-
-	cctx, cancelBegin := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(100 * time.Millisecond)
+	cancelLanded := false
+	for attempt := 0; attempt < 3 && !cancelLanded; attempt++ {
+		cctx, cancelBegin := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			cancelBegin()
+		}()
+		var tx2 Tx
+		tx2, err = s.pool.BeginTx(cctx, TxOptions{})
+		cancelLanded = cctx.Err() != nil
+		if tx2 != nil {
+			_ = tx2.Rollback(context.Background())
+		}
 		cancelBegin()
-	}()
-	// Blocks on the write lock held by blocker (busy_timeout=5000), so the
-	// cancel deterministically lands while BEGIN is in flight.
-	tx2, err := s.pool.BeginTx(cctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
-	if err == nil {
-		_ = tx2.Rollback(context.Background())
 	}
 	_ = blocker.Rollback(context.Background())
-	cancelBegin()
+	require.True(t, cancelLanded, "cancel never landed while BEGIN was in flight")
 	require.Error(t, err, "BeginTx should fail when its context is cancelled mid-flight")
 	assert.True(t, errors.Is(err, context.Canceled),
 		"expected error to be detectable as context.Canceled, got: %v", err)
