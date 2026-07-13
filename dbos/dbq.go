@@ -209,6 +209,17 @@ func pgxTxOpts(o TxOptions) pgx.TxOptions {
 // newSQLPool wraps a *sql.DB so it satisfies Pool.
 func newSQLPool(db *sql.DB) Pool { return &sqlPoolAdapter{db: db} }
 
+// ctxErr attaches the context error to a driver error so callers can
+// errors.Is(err, context.Canceled/DeadlineExceeded). modernc/sqlite does this
+// substitution for statements (stmt.exec) but not for begin/commit/rollback
+// (tx.exec).
+func ctxErr(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() == nil || errors.Is(err, ctx.Err()) {
+		return err
+	}
+	return errors.Join(err, ctx.Err())
+}
+
 type sqlPoolAdapter struct{ db *sql.DB }
 
 func (a *sqlPoolAdapter) Exec(ctx context.Context, q string, args ...any) (Result, error) {
@@ -234,7 +245,7 @@ func (a *sqlPoolAdapter) QueryRow(ctx context.Context, q string, args ...any) Ro
 func (a *sqlPoolAdapter) BeginTx(ctx context.Context, opts TxOptions) (Tx, error) {
 	tx, err := a.db.BeginTx(ctx, sqlTxOpts(opts))
 	if err != nil {
-		return nil, err
+		return nil, ctxErr(ctx, err)
 	}
 	return &sqlTxAdapter{tx: tx}, nil
 }
@@ -284,8 +295,8 @@ func (t *sqlTxAdapter) QueryRow(ctx context.Context, q string, args ...any) Row 
 	return &sqlRow{r: t.tx.QueryRowContext(ctx, q, args...)}
 }
 
-func (t *sqlTxAdapter) Commit(_ context.Context) error   { return t.tx.Commit() }
-func (t *sqlTxAdapter) Rollback(_ context.Context) error { return t.tx.Rollback() }
+func (t *sqlTxAdapter) Commit(ctx context.Context) error   { return ctxErr(ctx, t.tx.Commit()) }
+func (t *sqlTxAdapter) Rollback(ctx context.Context) error { return ctxErr(ctx, t.tx.Rollback()) }
 
 type sqlRows struct{ r *sql.Rows }
 

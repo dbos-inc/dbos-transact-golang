@@ -3,6 +3,7 @@ package dbos
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -1044,6 +1045,37 @@ func TestSQLiteFoundation(t *testing.T) {
 		err := SQLDB(s2.pool).QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
 		assert.NoErrorf(t, err, "table %q missing after migrations", table)
 	}
+
+	// A BeginTx interrupted by context cancellation must surface an error
+	// detectable as context.Canceled. modernc/sqlite substitutes ctx.Err()
+	// for interrupted statements (stmt.exec) but NOT for the transaction
+	// control path (tx.exec: begin/commit/rollback), which returns the raw
+	// SQLite code (`interrupted (9)` or `database is locked (5)`). The dbos
+	// layer must map it back so callers (e.g. handle.GetResult after
+	// Shutdown) can errors.Is it. Reproduces the
+	// "failed to begin transaction: interrupted (9)" CI failure in
+	// TestWorkflowHandleContextCancel on the sqlite backend.
+	blocker, err := s.pool.BeginTx(context.Background(), TxOptions{})
+	require.NoError(t, err)
+	_, err = blocker.Exec(context.Background(), `CREATE TABLE begin_cancel_probe (x INT)`)
+	require.NoError(t, err)
+
+	cctx, cancelBegin := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancelBegin()
+	}()
+	// Blocks on the write lock held by blocker (busy_timeout=5000), so the
+	// cancel deterministically lands while BEGIN is in flight.
+	tx2, err := s.pool.BeginTx(cctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
+	if err == nil {
+		_ = tx2.Rollback(context.Background())
+	}
+	_ = blocker.Rollback(context.Background())
+	cancelBegin()
+	require.Error(t, err, "BeginTx should fail when its context is cancelled mid-flight")
+	assert.True(t, errors.Is(err, context.Canceled),
+		"expected error to be detectable as context.Canceled, got: %v", err)
 }
 
 // TestSQLiteURLParsing checks the DSN extraction for common URL forms.
