@@ -1594,12 +1594,17 @@ func TestSteps(t *testing.T) {
 		// milliseconds.
 		cancelFunc()
 
-		require.Never(t, func() bool {
+		// Poll synchronously rather than with require.Never: testify runs each
+		// tick in a goroutine and returns at the timeout without awaiting an
+		// in-flight tick, so a straggler GetStatus can race the subtest's
+		// ctxB shutdown in t.Cleanup and fail with "context canceled".
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
 			status, err := resumedHandle.GetStatus()
 			require.NoError(t, err, "failed to get workflow status")
-			return status.Status == WorkflowStatusCancelled
-		}, 3*time.Second, 100*time.Millisecond,
-			"cancelling the stale conflicting-dispatch context must not durably cancel the resumed workflow")
+			require.NotEqual(t, WorkflowStatusCancelled, status.Status,
+				"cancelling the stale conflicting-dispatch context must not durably cancel the resumed workflow")
+			time.Sleep(100 * time.Millisecond)
+		}
 
 		// Drain: start listening to the parking queue so the resumed workflow
 		// completes (replaying the checkpointed step), which also lets the
