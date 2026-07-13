@@ -277,13 +277,12 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 
 	// If within a workflow, check if we already ran that step
 	result, found, err := checkGetResultExecution[R](h.dbosContext)
-	if err != nil {
+	if found {
+		return result, err
+	}
+	if err != nil { // not found and err means err is an infrastructure error
 		return *new(R), err
 	}
-	if found {
-		return result, nil
-	}
-
 	startTime := time.Now()
 
 	var timeoutChan <-chan time.Time
@@ -379,13 +378,12 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 
 	// If within a workflow, check if we already ran that step
 	result, found, err := checkGetResultExecution[R](h.dbosContext)
+	if found {
+		return result, err
+	}
 	if err != nil {
 		return *new(R), err
 	}
-	if found {
-		return result, nil
-	}
-
 	startTime := time.Now()
 
 	// Use timeout if specified, otherwise use DBOS context directly

@@ -2801,6 +2801,15 @@ func TestWorkflowRecovery(t *testing.T) {
 
 	var recoveryCounters []int64
 
+	// A child that fails while still returning a value: the parent's getResult
+	// checkpoint must carry both so replay matches the live execution.
+	var recoveryChildExecutions atomic.Int64
+	recoveryChildWorkflow := func(dbosCtx DBOSContext, index int) (int64, error) {
+		recoveryChildExecutions.Add(1)
+		return 42, errors.New("child failure")
+	}
+	RegisterWorkflow(dbosCtx, recoveryChildWorkflow, WithWorkflowName("recovery-child-workflow"))
+
 	recoveryWorkflow := func(dbosCtx DBOSContext, index int) (int64, error) {
 		// First step - increments the counter
 		_, err := RunAsStep(dbosCtx, func(ctx context.Context) (int64, error) {
@@ -2817,6 +2826,18 @@ func TestWorkflowRecovery(t *testing.T) {
 		}, WithStepName("step-two"))
 		if err != nil {
 			return 0, err
+		}
+
+		childHandle, err := RunWorkflow(dbosCtx, recoveryChildWorkflow, index)
+		if err != nil {
+			return 0, err
+		}
+		childRes, childErr := childHandle.GetResult()
+		if childErr == nil {
+			return 0, errors.New("expected the child failure to be returned")
+		}
+		if childRes != 42 {
+			return 0, fmt.Errorf("child value lost alongside its error: got %d", childRes)
 		}
 
 		return recoveryCounters[index], nil
@@ -2842,6 +2863,7 @@ func TestWorkflowRecovery(t *testing.T) {
 		const numWorkflows = 5
 
 		recoveryCounters = make([]int64, numWorkflows)
+		recoveryChildExecutions.Store(0)
 
 		// Start all workflows and let them run to completion
 		handles := make([]WorkflowHandle[int64], numWorkflows)
@@ -2854,6 +2876,7 @@ func TestWorkflowRecovery(t *testing.T) {
 			_, err := handles[i].GetResult()
 			require.NoError(t, err, "failed to get result from workflow %d", i)
 		}
+		require.EqualValues(t, numWorkflows, recoveryChildExecutions.Load(), "each workflow runs its child once")
 
 		// Flip all workflow statuses to PENDING, then recover
 		for i := range numWorkflows {
@@ -2868,7 +2891,9 @@ func TestWorkflowRecovery(t *testing.T) {
 			recoveredMap[h.GetWorkflowID()] = h
 		}
 
-		// 1) Result is as expected (counter value 1 from single execution, replayed idempotently)
+		// 1) Result is as expected (counter value 1 from single execution, replayed
+		// idempotently). The recovered run replays the child's checkpointed
+		// getResult, which must carry both the child's value and its error.
 		for i := range numWorkflows {
 			recoveredHandle := recoveredMap[handles[i].GetWorkflowID()]
 			require.NotNil(t, recoveredHandle, "workflow %d not found in recovered handles", i)
@@ -2876,12 +2901,13 @@ func TestWorkflowRecovery(t *testing.T) {
 			require.NoError(t, err, "failed to get result from recovered workflow %d", i)
 			require.Equal(t, float64(1), result.(float64), "workflow %d result should be 1", i)
 		}
+		require.EqualValues(t, numWorkflows, recoveryChildExecutions.Load(), "children must replay from their checkpoint, not re-execute")
 
-		// 2) Steps are as expected from a single execution (2 steps: step-one, step-two)
+		// 2) Steps are as expected from a single execution (4 steps: step-one, step-two, child spawn, getResult)
 		for i := range numWorkflows {
 			steps, err := GetWorkflowSteps(dbosCtx, handles[i].GetWorkflowID())
 			require.NoError(t, err, "failed to get steps for workflow %d", i)
-			require.Len(t, steps, 2, "expected 2 steps for workflow %d", i)
+			require.Len(t, steps, 4, "expected 4 steps for workflow %d", i)
 			assert.Equal(t, "step-one", steps[0].StepName, "workflow %d first step name", i)
 			assert.Equal(t, 0, steps[0].StepID, "workflow %d first step ID", i)
 			assert.NotNil(t, steps[0].Output, "workflow %d first step should have output", i)
@@ -2890,6 +2916,13 @@ func TestWorkflowRecovery(t *testing.T) {
 			assert.Equal(t, 1, steps[1].StepID, "workflow %d second step ID", i)
 			assert.NotNil(t, steps[1].Output, "workflow %d second step should have output", i)
 			assert.Nil(t, steps[1].Error, "workflow %d second step should not have error", i)
+			assert.Equal(t, "recovery-child-workflow", steps[2].StepName, "workflow %d third step name", i)
+			assert.Equal(t, 2, steps[2].StepID, "workflow %d third step ID", i)
+			assert.NotEmpty(t, steps[2].ChildWorkflowID, "workflow %d third step should record the child spawn", i)
+			assert.Equal(t, "DBOS.getResult", steps[3].StepName, "workflow %d fourth step name", i)
+			assert.Equal(t, 3, steps[3].StepID, "workflow %d fourth step ID", i)
+			assert.NotNil(t, steps[3].Output, "workflow %d getResult must checkpoint the child's value alongside its error", i)
+			assert.Error(t, steps[3].Error, "workflow %d getResult must checkpoint the child's error", i)
 		}
 
 		// 3) Workflow Attempts counter is 2 (initial run + recovery)
