@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -194,4 +195,51 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 	var version int64
 	require.NoError(t, pool.QueryRow(bg, "SELECT version FROM dbos.dbos_migrations").Scan(&version))
 	assert.Equal(t, latest, version)
+}
+
+// TestNewSystemDatabaseErrorPathNoDeadlock forces shouldMigrate to fail inside
+// newSystemDatabase and verifies the error is returned instead of deadlocking.
+// The error paths after the CockroachDB-detection Acquire call pool.Close()
+// while that connection is still checked out; puddle's Close blocks until all
+// resources are destroyed, and the deferred Release can only run after
+// newSystemDatabase returns — a single-goroutine deadlock.
+func TestNewSystemDatabaseErrorPathNoDeadlock(t *testing.T) {
+	skipIfSqlite(t, "pg pool lifecycle; sqlite has no pgx pool to close")
+	databaseURL := getDatabaseURL()
+	bg := context.Background()
+
+	pool, err := pgxpool.New(bg, databaseURL)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	// A migration table without a version column makes shouldMigrate fail
+	// with a non-retryable error (undefined column).
+	const schema = "deadlock_test_schema"
+	_, err = pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(bg, fmt.Sprintf("CREATE SCHEMA %s", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(bg, fmt.Sprintf("CREATE TABLE %s.%s (bogus INT)", schema, _DBOS_MIGRATION_TABLE))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, sdErr := newSystemDatabase(bg, newSystemDatabaseInput{
+			databaseURL:    databaseURL,
+			databaseSchema: schema,
+			logger:         slog.Default(),
+		})
+		done <- sdErr
+	}()
+
+	select {
+	case sdErr := <-done:
+		require.Error(t, sdErr)
+		assert.Contains(t, sdErr.Error(), "failed to determine migration status")
+	case <-time.After(30 * time.Second):
+		t.Fatal("newSystemDatabase deadlocked on its error path: pool.Close() waits on the still-acquired CockroachDB-detection connection")
+	}
 }
