@@ -89,8 +89,8 @@ var ErrNoRows = pgx.ErrNoRows
    pgx adapter
    ------------------------------------------------------------------------- */
 
-// newPgxPool wraps a *pgxpool.Pool so it satisfies Pool.
-func newPgxPool(p *pgxpool.Pool) Pool { return &pgxPoolAdapter{p: p} }
+// NewPgxPool wraps a *pgxpool.Pool so it satisfies Pool.
+func NewPgxPool(p *pgxpool.Pool) Pool { return &pgxPoolAdapter{p: p} }
 
 type pgxPoolAdapter struct{ p *pgxpool.Pool }
 
@@ -206,8 +206,8 @@ func pgxTxOpts(o TxOptions) pgx.TxOptions {
    database/sql adapter (used by SQLite)
    ------------------------------------------------------------------------- */
 
-// newSQLPool wraps a *sql.DB so it satisfies Pool.
-func newSQLPool(db *sql.DB) Pool { return &sqlPoolAdapter{db: db} }
+// NewSQLPool wraps a *sql.DB so it satisfies Pool.
+func NewSQLPool(db *sql.DB) Pool { return &sqlPoolAdapter{db: db} }
 
 // ctxErr attaches the context error to a driver error so callers can
 // errors.Is(err, context.Canceled/DeadlineExceeded). modernc/sqlite does this
@@ -261,9 +261,9 @@ func SQLDB(p Pool) *sql.DB {
 	return nil
 }
 
-// sameEngine reports whether two portable pools wrap the same underlying engine
+// SameEngine reports whether two portable pools wrap the same underlying engine
 // handle — the identical *pgxpool.Pool or *sql.DB.
-func sameEngine(a, b Pool) bool {
+func SameEngine(a, b Pool) bool {
 	if pa := PgxPool(a); pa != nil {
 		return pa == PgxPool(b)
 	}

@@ -906,7 +906,7 @@ func TestForkWorkflow(t *testing.T) {
 			// Get database pool from serverCtx to query workflow_events_history
 			dbosCtx, ok := serverCtx.(*dbosContext)
 			require.True(t, ok, "expected dbosContext")
-			sysDB, ok := dbosCtx.systemDB.(*sysDB)
+			sysDB, ok := dbosCtx.systemDB.(*SysDB)
 			require.True(t, ok, "expected sysDB")
 
 			// Query all events from workflow_events_history
@@ -1685,11 +1685,11 @@ func TestDebouncerClient(t *testing.T) {
 		// CockroachDB has longer notification latency due to polling. Only pg
 		// backends expose a *pgxpool.Pool we can sniff; sqlite is never CRDB.
 		isCockroach := false
-		if pgxPool := PgxPool(serverCtx.(*dbosContext).systemDB.(*sysDB).pool); pgxPool != nil {
+		if pgxPool := PgxPool(serverCtx.(*dbosContext).systemDB.(*SysDB).pool); pgxPool != nil {
 			conn, err := pgxPool.Acquire(serverCtx)
 			require.NoError(t, err)
 			defer conn.Release()
-			isCockroach = isCockroachDB(conn.Conn())
+			isCockroach = IsCockroachDB(conn.Conn())
 		}
 
 		var delay time.Duration
@@ -2303,7 +2303,7 @@ func TestClientApplicationVersions(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
 		// Launch registers the current version; clear table to simulate empty state.
-		s := serverCtx.(*dbosContext).systemDB.(*sysDB)
+		s := serverCtx.(*dbosContext).systemDB.(*SysDB)
 		_, err = s.pool.Exec(serverCtx, s.renderSQL("DELETE FROM %sapplication_versions", s.dialect.SchemaPrefix(s.schema)))
 		require.NoError(t, err)
 
@@ -2365,7 +2365,7 @@ func TestClientCustomSqliteDB(t *testing.T) {
 	require.True(t, ok)
 	dbosCtx, ok := clientImpl.dbosCtx.(*dbosContext)
 	require.True(t, ok)
-	sysDB, ok := dbosCtx.systemDB.(*sysDB)
+	sysDB, ok := dbosCtx.systemDB.(*SysDB)
 	require.True(t, ok)
 	assert.Same(t, clientDB, SQLDB(sysDB.pool), "client should use the caller's sqlite *sql.DB")
 	require.Equal(t, DialectSQLite, sysDB.dialect.Name())
@@ -2411,7 +2411,7 @@ func TestClientCustomPool(t *testing.T) {
 	require.True(t, ok)
 	dbosCtx, ok := clientImpl.dbosCtx.(*dbosContext)
 	require.True(t, ok)
-	sysDB, ok := dbosCtx.systemDB.(*sysDB)
+	sysDB, ok := dbosCtx.systemDB.(*SysDB)
 	require.True(t, ok)
 	assert.Same(t, clientPool, PgxPool(sysDB.pool), "client should use the caller's *pgxpool.Pool")
 	require.Contains(t, []DialectName{DialectPostgres, DialectCockroach}, sysDB.dialect.Name())

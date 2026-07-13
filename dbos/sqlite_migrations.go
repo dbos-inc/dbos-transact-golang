@@ -125,10 +125,10 @@ var sqliteMigration40SQL string
 //go:embed migrations/sqlite/41_add_schedule_name.sql
 var sqliteMigration41SQL string
 
-// buildSqliteMigrations returns the SQLite migration list. Versions mirror pg
+// BuildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
 // 38, and 39 have no SQLite counterpart and are omitted.
-func buildSqliteMigrations() []migrationFile {
+func BuildSqliteMigrations() []migrationFile {
 	return []migrationFile{
 		{version: 1, sql: sqliteMigration1SQL},
 		{version: 2, sql: sqliteMigration2SQL},
@@ -169,8 +169,8 @@ func buildSqliteMigrations() []migrationFile {
 	}
 }
 
-func runSqliteMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
-	migrations := buildSqliteMigrations()
+func RunSqliteMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
+	migrations := BuildSqliteMigrations()
 
 	// Ensure the dbos_migrations table exists.
 	var exists int

@@ -61,7 +61,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		return nil, fmt.Errorf("missing required config field: appName")
 	}
 	if inputConfig.SystemDBPool == nil && inputConfig.SqliteSystemDB == nil {
-		if _, err := detectDialect(inputConfig.DatabaseURL); err != nil {
+		if _, err := DetectDialect(inputConfig.DatabaseURL); err != nil {
 			return nil, err
 		}
 	}
@@ -617,12 +617,12 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	initExecutor.serializer = config.Serializer
 
 	newSystemDatabaseInputs := NewSystemDatabaseInput{
-		databaseURL:     config.DatabaseURL,
-		databaseSchema:  config.DatabaseSchema,
-		customPool:      config.SystemDBPool,
-		customSqliteDB:  config.SqliteSystemDB,
-		logger:          initExecutor.logger,
-		applicationName: config.AppName,
+		DatabaseURL:     config.DatabaseURL,
+		DatabaseSchema:  config.DatabaseSchema,
+		CustomPool:      config.SystemDBPool,
+		CustomSqliteDB:  config.SqliteSystemDB,
+		Logger:          initExecutor.logger,
+		ApplicationName: config.AppName,
 	}
 
 	// Create the system database

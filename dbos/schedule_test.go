@@ -855,7 +855,7 @@ func TestScheduleNameSurvivesExportImport(t *testing.T) {
 	require.Equal(t, "export-test", original[0].ScheduleName)
 
 	// Export, delete, then reimport: schedule_name must survive the round-trip.
-	sdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+	sdb := dbosCtx.(*dbosContext).systemDB.(*SysDB)
 	exported, err := sdb.ExportWorkflow(dbosCtx, workflowID, true)
 	require.NoError(t, err)
 	require.NoError(t, DeleteWorkflows(dbosCtx, []string{workflowID}))

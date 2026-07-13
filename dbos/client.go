@@ -360,15 +360,15 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 	returnExisting := params.deduplicationPolicy == DeduplicationPolicyReturnExisting
 
 	for {
-		tx, err := dbosCtx.systemDB.(*sysDB).pool.BeginTx(uncancellableCtx, TxOptions{})
+		tx, err := dbosCtx.systemDB.(*SysDB).pool.BeginTx(uncancellableCtx, TxOptions{})
 		if err != nil {
 			return nil, newWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %v", err))
 		}
 
 		// Insert workflow status with transaction
 		insertInput := InsertWorkflowStatusDBInput{
-			status: status,
-			tx:     tx,
+			Status: status,
+			Tx:     tx,
 		}
 		_, err = dbosCtx.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
@@ -931,7 +931,7 @@ func (c *client) ApplySchedules(schedules []ClientScheduleInput) error {
 		return errors.New("invalid DBOS context")
 	}
 
-	tx, err := dbosCtx.systemDB.(*sysDB).pool.BeginTx(dbosCtx, TxOptions{})
+	tx, err := dbosCtx.systemDB.(*SysDB).pool.BeginTx(dbosCtx, TxOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -950,7 +950,7 @@ func (c *client) ApplySchedules(schedules []ClientScheduleInput) error {
 
 		if err := dbosCtx.systemDB.DeleteSchedule(dbosCtx, DeleteScheduleDBInput{
 			ScheduleName: req.ScheduleName,
-			tx:           tx,
+			Tx:           tx,
 		}); err != nil {
 			return fmt.Errorf("failed to delete existing schedule: %w", err)
 		}
@@ -966,7 +966,7 @@ func (c *client) ApplySchedules(schedules []ClientScheduleInput) error {
 			AutomaticBackfill: req.AutomaticBackfill,
 			CronTimezone:      req.CronTimezone,
 			QueueName:         queueName,
-			tx:                tx,
+			Tx:                tx,
 		}); err != nil {
 			return fmt.Errorf("failed to create schedule: %w", err)
 		}

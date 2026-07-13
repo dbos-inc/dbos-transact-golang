@@ -156,7 +156,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 
 		// Skip if this tick's workflow already exists. Another executor may have enqueued it.
 		existing, err := retryWithResult(c, func() ([]WorkflowStatus, error) {
-			return c.systemDB.ListWorkflows(c, ListWorkflowsDBInput{workflowIDs: []string{wfID}})
+			return c.systemDB.ListWorkflows(c, ListWorkflowsDBInput{WorkflowIDs: []string{wfID}})
 		}, withRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to check existing scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
@@ -202,12 +202,12 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 
 		uncancellableCtx := WithoutCancel(c)
 		if err := retry(c, func() error {
-			tx, err := c.systemDB.(*sysDB).pool.BeginTx(uncancellableCtx, TxOptions{})
+			tx, err := c.systemDB.(*SysDB).pool.BeginTx(uncancellableCtx, TxOptions{})
 			if err != nil {
 				return fmt.Errorf("failed to begin transaction: %w", err)
 			}
 			defer tx.Rollback(uncancellableCtx)
-			if _, err := c.systemDB.InsertWorkflowStatus(uncancellableCtx, InsertWorkflowStatusDBInput{status: status, tx: tx}); err != nil {
+			if _, err := c.systemDB.InsertWorkflowStatus(uncancellableCtx, InsertWorkflowStatusDBInput{Status: status, Tx: tx}); err != nil {
 				return err
 			}
 			return tx.Commit(uncancellableCtx)

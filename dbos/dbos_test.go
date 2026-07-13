@@ -248,7 +248,7 @@ func TestConfig(t *testing.T) {
 		require.True(t, ok, "expected dbosContext")
 		require.NotNil(t, dbosCtx.systemDB)
 
-		sysDB, ok := dbosCtx.systemDB.(*sysDB)
+		sysDB, ok := dbosCtx.systemDB.(*SysDB)
 		require.True(t, ok, "expected sysDB")
 
 		// Verify all expected tables exist and have correct structure
@@ -372,7 +372,7 @@ func TestConfig(t *testing.T) {
 
 		for _, tc := range maskingTestCases {
 			t.Run("Masking_"+tc.name, func(t *testing.T) {
-				masked, err := maskPassword(tc.connStr)
+				masked, err := MaskPassword(tc.connStr)
 				require.NoError(t, err)
 				assert.Contains(t, masked, "***", "password should be masked")
 				passwordPattern := fmt.Sprintf("password=%s", testPassword)
@@ -407,7 +407,7 @@ func TestConfig(t *testing.T) {
 			// Verify system DB is functional
 			dbosCtx, ok := ctx.(*dbosContext)
 			require.True(t, ok)
-			sysDB, ok := dbosCtx.systemDB.(*sysDB)
+			sysDB, ok := dbosCtx.systemDB.(*SysDB)
 			require.True(t, ok)
 
 			var exists bool
@@ -417,7 +417,7 @@ func TestConfig(t *testing.T) {
 
 			// Verify masking works
 			poolConnStr := PgxPool(sysDB.pool).Config().ConnString()
-			maskedConnStr, err := maskPassword(poolConnStr)
+			maskedConnStr, err := MaskPassword(poolConnStr)
 			require.NoError(t, err)
 			if actualPassword == "" {
 				assert.NotContains(t, maskedConnStr, "password=")
@@ -543,7 +543,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		require.True(t, ok, "expected dbosContext")
 		require.NotNil(t, dbosCtx.systemDB)
 
-		sysDB, ok := dbosCtx.systemDB.(*sysDB)
+		sysDB, ok := dbosCtx.systemDB.(*SysDB)
 		require.True(t, ok, "expected sysDB")
 
 		// Verify schema name was set correctly
@@ -807,7 +807,7 @@ func TestCustomPool(t *testing.T) {
 		defer Shutdown(dbosCtx, 10*time.Second)
 		require.True(t, ok)
 
-		sysDB, ok := dbosCtx.systemDB.(*sysDB)
+		sysDB, ok := dbosCtx.systemDB.(*SysDB)
 		require.True(t, ok)
 		assert.Same(t, pool, PgxPool(sysDB.pool), "The pool in dbosContext should be the same as the custom pool provided")
 
@@ -946,10 +946,10 @@ func TestCustomPool(t *testing.T) {
 
 		// Create system database with custom pool
 		sysDBInput := NewSystemDatabaseInput{
-			databaseURL:    databaseURL,
-			databaseSchema: "dbos_test_custom_direct",
-			customPool:     customPool,
-			logger:         logger,
+			DatabaseURL:    databaseURL,
+			DatabaseSchema: "dbos_test_custom_direct",
+			CustomPool:     customPool,
+			Logger:         logger,
 		}
 
 		systemDB, err := NewSystemDatabase(ctx, sysDBInput)
@@ -960,7 +960,7 @@ func TestCustomPool(t *testing.T) {
 		systemDB.Launch(ctx)
 
 		require.Eventually(t, func() bool {
-			conn, err := PgxPool(systemDB.(*sysDB).pool).Acquire(ctx)
+			conn, err := PgxPool(systemDB.(*SysDB).pool).Acquire(ctx)
 			require.NoError(t, err)
 			defer conn.Release()
 			err = conn.Ping(ctx)
@@ -972,7 +972,7 @@ func TestCustomPool(t *testing.T) {
 		cancel() // Cancel context
 		shutdownTimeout := 2 * time.Second
 		systemDB.Shutdown(ctx, shutdownTimeout)
-		assert.False(t, systemDB.(*sysDB).launched)
+		assert.False(t, systemDB.(*SysDB).launched)
 	})
 }
 
@@ -993,21 +993,21 @@ func TestSQLiteFoundation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	sd, err := NewSystemDatabase(context.Background(), NewSystemDatabaseInput{
-		databaseURL:    url,
-		databaseSchema: "dbos",
-		logger:         logger,
+		DatabaseURL:    url,
+		DatabaseSchema: "dbos",
+		Logger:         logger,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { sd.Shutdown(context.Background(), 0) })
 
-	s, ok := sd.(*sysDB)
+	s, ok := sd.(*SysDB)
 	require.True(t, ok, "expected *sysDB concrete type")
 	require.Nil(t, PgxPool(s.pool), "pg pool should be nil for sqlite")
 	require.NotNil(t, SQLDB(s.pool), "sqlite handle should be non-nil")
 	require.Equal(t, DialectSQLite, s.dialect.Name())
 
 	// Migrations table should be at the latest version.
-	migs := buildSqliteMigrations()
+	migs := BuildSqliteMigrations()
 	latest := migs[len(migs)-1].version
 	var got int64
 	require.NoError(t, SQLDB(s.pool).QueryRow(`SELECT version FROM dbos_migrations`).Scan(&got))
@@ -1015,14 +1015,14 @@ func TestSQLiteFoundation(t *testing.T) {
 
 	// Re-opening the same file is a no-op (migrations already applied).
 	sd2, err := NewSystemDatabase(context.Background(), NewSystemDatabaseInput{
-		databaseURL:    url,
-		databaseSchema: "dbos",
-		logger:         logger,
+		DatabaseURL:    url,
+		DatabaseSchema: "dbos",
+		Logger:         logger,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { sd2.Shutdown(context.Background(), 0) })
 
-	s2 := sd2.(*sysDB)
+	s2 := sd2.(*SysDB)
 	require.NoError(t, SQLDB(s2.pool).QueryRow(`SELECT version FROM dbos_migrations`).Scan(&got))
 	assert.Equal(t, latest, got, "version should remain at latest on re-open")
 
@@ -1108,7 +1108,7 @@ func TestSQLiteURLParsing(t *testing.T) {
 		{"sqlite:file:/abs/x.db?_pragma=foreign_keys(1)#tag", "file:/abs/x.db?_pragma=foreign_keys(1)#tag"},
 	}
 	for _, c := range cases {
-		got, err := sqliteDSN(c.url)
+		got, err := SqliteDSN(c.url)
 		require.NoErrorf(t, err, "sqliteDSN(%q)", c.url)
 		assert.Equalf(t, c.want, got, "sqliteDSN(%q)", c.url)
 	}
@@ -1123,7 +1123,7 @@ func TestSQLiteURLParsing(t *testing.T) {
 		{"sqlite://host/path", "host component"},
 	}
 	for _, b := range bads {
-		_, err := sqliteDSN(b.url)
+		_, err := SqliteDSN(b.url)
 		require.Errorf(t, err, "sqliteDSN(%q) should error", b.url)
 		assert.Containsf(t, err.Error(), b.errMsg, "sqliteDSN(%q)", b.url)
 	}
@@ -1190,7 +1190,7 @@ func TestDetectDialect(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := detectDialect(c.url)
+			got, err := DetectDialect(c.url)
 			if c.errMsg == "" {
 				require.NoErrorf(t, err, "detectDialect(%q)", c.url)
 				assert.Equalf(t, c.want, got, "detectDialect(%q)", c.url)
@@ -1247,7 +1247,7 @@ func TestPostgresConnectionStringForms(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := detectDialect(c.url)
+			got, err := DetectDialect(c.url)
 			require.NoErrorf(t, err, "detectDialect(%q)", c.url)
 			assert.Equal(t, DialectPostgres, got)
 
@@ -1297,11 +1297,11 @@ func TestSQLiteConnectionStringForms(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := detectDialect(c.url)
+			got, err := DetectDialect(c.url)
 			require.NoErrorf(t, err, "detectDialect(%q)", c.url)
 			assert.Equal(t, DialectSQLite, got)
 
-			dsn, err := sqliteDSN(c.url)
+			dsn, err := SqliteDSN(c.url)
 			require.NoErrorf(t, err, "sqliteDSN(%q)", c.url)
 
 			db, err := sql.Open("sqlite", dsn)
@@ -1331,11 +1331,11 @@ func TestSQLiteConnectionStringForms(t *testing.T) {
 		t.Chdir(t.TempDir())
 		const url = "sqlite3:relative.db"
 
-		got, err := detectDialect(url)
+		got, err := DetectDialect(url)
 		require.NoError(t, err)
 		assert.Equal(t, DialectSQLite, got)
 
-		dsn, err := sqliteDSN(url)
+		dsn, err := SqliteDSN(url)
 		require.NoError(t, err)
 		assert.Equal(t, "relative.db", dsn)
 
@@ -1360,11 +1360,11 @@ func TestSQLiteConnectionStringForms(t *testing.T) {
 func TestSQLiteMemoryBackedFile(t *testing.T) {
 	const url = "sqlite::memory:"
 
-	got, err := detectDialect(url)
+	got, err := DetectDialect(url)
 	require.NoError(t, err)
 	assert.Equal(t, DialectSQLite, got)
 
-	dsn, err := sqliteDSN(url)
+	dsn, err := SqliteDSN(url)
 	require.NoError(t, err)
 	assert.Equal(t, ":memory:", dsn)
 
@@ -1423,7 +1423,7 @@ func TestSQLiteDialectClassification(t *testing.T) {
 	// Unique violation.
 	_, err = db.ExecContext(ctx, `INSERT INTO t VALUES (2, 'x')`)
 	require.Error(t, err)
-	assert.True(t, sqliteDialect{}.IsUniqueViolation(err), "expected unique-violation: %v", err)
+	assert.True(t, SqliteDialect{}.IsUniqueViolation(err), "expected unique-violation: %v", err)
 
 	// Foreign key enforcement on :memory: is per-connection; the PRAGMA above
 	// only sticks on the conn that executed it. Skip if not enforced here.
@@ -1431,7 +1431,7 @@ func TestSQLiteDialectClassification(t *testing.T) {
 	if err == nil {
 		t.Log("foreign_keys not enforced on this connection; skipping FK assertion")
 	} else {
-		assert.True(t, sqliteDialect{}.IsForeignKeyViolation(err), "expected fk-violation: %v", err)
+		assert.True(t, SqliteDialect{}.IsForeignKeyViolation(err), "expected fk-violation: %v", err)
 	}
 }
 
@@ -1536,7 +1536,7 @@ func TestCustomSqlitePool(t *testing.T) {
 		require.True(t, ok)
 		defer Shutdown(dbosCtx, 10*time.Second)
 
-		sysDB, ok := dbosCtx.systemDB.(*sysDB)
+		sysDB, ok := dbosCtx.systemDB.(*SysDB)
 		require.True(t, ok)
 		assert.Same(t, db, SQLDB(sysDB.pool), "sysDB should use the caller's *sql.DB instance")
 		require.Equal(t, DialectSQLite, sysDB.dialect.Name())
@@ -1587,7 +1587,7 @@ func TestCustomSqlitePool(t *testing.T) {
 		require.NotNil(t, dbosCtx)
 		defer Shutdown(dbosCtx, 5*time.Second)
 
-		sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*SysDB)
 		require.True(t, ok)
 		assert.Equal(t, DialectSQLite, sysDB.dialect.Name(), "sqlite custom DB should win over postgres URL")
 	})
@@ -1630,9 +1630,9 @@ func TestCustomSqlitePool(t *testing.T) {
 		defer customDB.Close()
 
 		systemDB, err := NewSystemDatabase(ctx, NewSystemDatabaseInput{
-			databaseSchema: "dbos",
-			customSqliteDB: customDB,
-			logger:         logger,
+			DatabaseSchema: "dbos",
+			CustomSqliteDB: customDB,
+			Logger:         logger,
 		})
 		require.NoError(t, err)
 		require.NotNil(t, systemDB)
@@ -1640,11 +1640,11 @@ func TestCustomSqlitePool(t *testing.T) {
 		systemDB.Launch(ctx)
 
 		require.Eventually(t, func() bool {
-			return SQLDB(systemDB.(*sysDB).pool).PingContext(ctx) == nil
+			return SQLDB(systemDB.(*SysDB).pool).PingContext(ctx) == nil
 		}, 5*time.Second, 100*time.Millisecond, "system database should be reachable")
 
 		cancel()
 		systemDB.Shutdown(ctx, 2*time.Second)
-		assert.False(t, systemDB.(*sysDB).launched)
+		assert.False(t, systemDB.(*SysDB).launched)
 	})
 }

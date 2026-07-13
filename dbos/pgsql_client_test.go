@@ -88,8 +88,8 @@ func TestPgsqlClient(t *testing.T) {
 	skipIfSqlite(t, "exercises pg/CRDB plpgsql stored functions; sqlite has none")
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	pool := PgxPool(serverCtx.(*dbosContext).systemDB.(*sysDB).pool)
-	schema := serverCtx.(*dbosContext).systemDB.(*sysDB).schema
+	pool := PgxPool(serverCtx.(*dbosContext).systemDB.(*SysDB).pool)
+	schema := serverCtx.(*dbosContext).systemDB.(*SysDB).schema
 
 	queue := NewWorkflowQueue(serverCtx, "pgsql-test-queue")
 

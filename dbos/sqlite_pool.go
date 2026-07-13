@@ -21,7 +21,7 @@ import (
 //     (foreign_keys, journal_mode=WAL, synchronous=NORMAL, busy_timeout) so
 //     write-heavy workloads behave well.
 
-// sqliteDSN extracts the modernc-compatible DSN from a DBOS-style sqlite URL.
+// SqliteDSN extracts the modernc-compatible DSN from a DBOS-style sqlite URL.
 //
 // Examples (input → DSN):
 //
@@ -34,7 +34,7 @@ import (
 //
 // SQLite has no host concept, so a URL with a non-empty authority (e.g.
 // sqlite://server/path) is rejected.
-func sqliteDSN(raw string) (string, error) {
+func SqliteDSN(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", fmt.Errorf("invalid sqlite URL %q: %v", raw, err)
@@ -64,11 +64,11 @@ func sqliteDSN(raw string) (string, error) {
 	return dsn, nil
 }
 
-// openSQLitePool opens a *sql.DB backed by modernc.org/sqlite, ensures the
+// OpenSQLitePool opens a *sql.DB backed by modernc.org/sqlite, ensures the
 // parent directory of file-backed databases exists, applies recommended
 // PRAGMAs, and returns the pool. The caller owns Close.
-func openSQLitePool(ctx context.Context, databaseURL string) (*sql.DB, error) {
-	dsn, err := sqliteDSN(databaseURL)
+func OpenSQLitePool(ctx context.Context, databaseURL string) (*sql.DB, error) {
+	dsn, err := SqliteDSN(databaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func newSqliteSystemDatabase(
 		db = customDB
 	} else {
 		logger.Info("Connecting to SQLite system database", "database_url", databaseURL)
-		opened, err := openSQLitePool(ctx, databaseURL)
+		opened, err := OpenSQLitePool(ctx, databaseURL)
 		if err != nil {
 			return nil, err
 		}
@@ -154,7 +154,7 @@ func newSqliteSystemDatabase(
 		}
 	}
 	if err := retry(ctx, func() error {
-		return runSqliteMigrations(ctx, db, logger)
+		return RunSqliteMigrations(ctx, db, logger)
 	}, withRetrierLogger(logger)); err != nil {
 		closeIfOwned()
 		return nil, fmt.Errorf("failed to run sqlite migrations: %v", err)
@@ -163,9 +163,9 @@ func newSqliteSystemDatabase(
 		closeIfOwned()
 		return nil, fmt.Errorf("failed to ping sqlite database: %v", err)
 	}
-	return &sysDB{
-		pool:                          newSQLPool(db),
-		dialect:                       sqliteDialect{},
+	return &SysDB{
+		pool:                          NewSQLPool(db),
+		dialect:                       SqliteDialect{},
 		recvNotifier:                  newNotifyRegistry(),
 		eventNotifier:                 newNotifyRegistry(),
 		streamsMap:                    &sync.Map{},

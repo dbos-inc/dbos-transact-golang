@@ -119,7 +119,7 @@ type Dialect interface {
 	IsRetryableTransaction(err error, logger *slog.Logger) bool
 }
 
-// detectDialect identifies the backend from a DBOS database URL by parsing
+// DetectDialect identifies the backend from a DBOS database URL by parsing
 // the scheme.
 //
 // Postgres and CockroachDB are wire-compatible and share the postgres:
@@ -135,7 +135,7 @@ type Dialect interface {
 // If a user wants to pass modernc's URI-mode flags they can embed them
 // inside a sqlite: URL, e.g. "sqlite:file:/path/x.db?_pragma=foreign_keys(1)";
 // sqliteDSN trims the outer "sqlite:" and hands the rest to the driver.
-func detectDialect(rawURL string) (DialectName, error) {
+func DetectDialect(rawURL string) (DialectName, error) {
 	if rawURL == "" {
 		return "", fmt.Errorf("database URL is empty")
 	}
@@ -183,26 +183,26 @@ func looksLikePostgresKVDSN(s string) bool {
    Postgres
    ------------------------------------------------------------------------- */
 
-type postgresDialect struct{}
+type PostgresDialect struct{}
 
-func (postgresDialect) Name() DialectName { return DialectPostgres }
-func (postgresDialect) SchemaPrefix(schema string) string {
+func (PostgresDialect) Name() DialectName { return DialectPostgres }
+func (PostgresDialect) SchemaPrefix(schema string) string {
 	return pgx.Identifier{schema}.Sanitize() + "."
 }
-func (postgresDialect) RewriteQuery(q string) string { return q }
-func (postgresDialect) LockSkipLocked() string       { return "FOR UPDATE SKIP LOCKED" }
-func (postgresDialect) LockNoWait() string           { return "FOR UPDATE NOWAIT" }
-func (postgresDialect) SnapshotIsolation() IsoLevel  { return IsoLevelRepeatableRead }
-func (postgresDialect) QueueDequeueIsolation(snapshot bool) IsoLevel {
+func (PostgresDialect) RewriteQuery(q string) string { return q }
+func (PostgresDialect) LockSkipLocked() string       { return "FOR UPDATE SKIP LOCKED" }
+func (PostgresDialect) LockNoWait() string           { return "FOR UPDATE NOWAIT" }
+func (PostgresDialect) SnapshotIsolation() IsoLevel  { return IsoLevelRepeatableRead }
+func (PostgresDialect) QueueDequeueIsolation(snapshot bool) IsoLevel {
 	if snapshot {
 		return IsoLevelRepeatableRead
 	}
 	return IsoLevelReadCommitted
 }
-func (postgresDialect) SupportsListenNotify() bool          { return true }
-func (postgresDialect) SupportsArrayParameters() bool       { return true }
-func (postgresDialect) SupportsDataModifyingCTE() bool      { return true }
-func (postgresDialect) SupportsAttributesContainment() bool { return true }
+func (PostgresDialect) SupportsListenNotify() bool          { return true }
+func (PostgresDialect) SupportsArrayParameters() bool       { return true }
+func (PostgresDialect) SupportsDataModifyingCTE() bool      { return true }
+func (PostgresDialect) SupportsAttributesContainment() bool { return true }
 
 // pgErrCode extracts the SQLSTATE code from a pgconn.PgError, or "" if err is
 // not a pg error.
@@ -214,10 +214,10 @@ func pgErrCode(err error) string {
 	return ""
 }
 
-func (postgresDialect) IsUniqueViolation(err error) bool {
+func (PostgresDialect) IsUniqueViolation(err error) bool {
 	return pgErrCode(err) == pgerrcode.UniqueViolation
 }
-func (postgresDialect) IsForeignKeyViolation(err error) bool {
+func (PostgresDialect) IsForeignKeyViolation(err error) bool {
 	return pgErrCode(err) == pgerrcode.ForeignKeyViolation
 }
 
@@ -226,7 +226,7 @@ func (postgresDialect) IsForeignKeyViolation(err error) bool {
 // connect failures, EOF/closed-conn strings, and net.Error. Serialization /
 // deadlock SQLSTATEs are intentionally excluded — those require retrying the
 // entire transaction and are opted in per call site via IsRetryableTransaction.
-func (postgresDialect) IsRetryable(err error, logger *slog.Logger) bool {
+func (PostgresDialect) IsRetryable(err error, logger *slog.Logger) bool {
 	if err == nil {
 		return false
 	}
@@ -266,7 +266,7 @@ func (postgresDialect) IsRetryable(err error, logger *slog.Logger) bool {
 // IsRetryableTransaction matches pg/CRDB transaction-level conflicts that
 // require restarting the whole transaction with a fresh tx: 40001
 // serialization_failure (MVCC conflict) and 40P01 deadlock_detected.
-func (postgresDialect) IsRetryableTransaction(err error, logger *slog.Logger) bool {
+func (PostgresDialect) IsRetryableTransaction(err error, logger *slog.Logger) bool {
 	switch pgErrCode(err) {
 	case pgerrcode.SerializationFailure, pgerrcode.DeadlockDetected:
 		if logger != nil {
@@ -285,10 +285,10 @@ func (postgresDialect) IsRetryableTransaction(err error, logger *slog.Logger) bo
      - migration 10 needs application-layer handling (see system_database.go)
    ------------------------------------------------------------------------- */
 
-type cockroachDialect struct{ postgresDialect }
+type CockroachDialect struct{ PostgresDialect }
 
-func (cockroachDialect) Name() DialectName          { return DialectCockroach }
-func (cockroachDialect) SupportsListenNotify() bool { return false }
+func (CockroachDialect) Name() DialectName          { return DialectCockroach }
+func (CockroachDialect) SupportsListenNotify() bool { return false }
 
 /* ---------------------------------------------------------------------------
    SQLite
@@ -300,10 +300,10 @@ func (cockroachDialect) SupportsListenNotify() bool { return false }
    - error classification by message substring (driver does not expose codes)
    ------------------------------------------------------------------------- */
 
-type sqliteDialect struct{}
+type SqliteDialect struct{}
 
-func (sqliteDialect) Name() DialectName            { return DialectSQLite }
-func (sqliteDialect) SchemaPrefix(_ string) string { return "" }
+func (SqliteDialect) Name() DialectName            { return DialectSQLite }
+func (SqliteDialect) SchemaPrefix(_ string) string { return "" }
 
 // sqlitePlaceholderRe matches $N-style Postgres placeholders so they can be
 // rewritten to sqlite's ?N form. Numbering is preserved so queries that
@@ -316,18 +316,18 @@ func (sqliteDialect) SchemaPrefix(_ string) string { return "" }
 // queries live in system_database.go and are vetted to avoid this pattern.
 var sqlitePlaceholderRe = regexp.MustCompile(`\$(\d+)`)
 
-func (sqliteDialect) RewriteQuery(q string) string {
+func (SqliteDialect) RewriteQuery(q string) string {
 	return sqlitePlaceholderRe.ReplaceAllString(q, "?$1")
 }
 
-func (sqliteDialect) LockSkipLocked() string                { return "" }
-func (sqliteDialect) LockNoWait() string                    { return "" }
-func (sqliteDialect) SnapshotIsolation() IsoLevel           { return IsoLevelDefault }
-func (sqliteDialect) QueueDequeueIsolation(_ bool) IsoLevel { return IsoLevelDefault }
-func (sqliteDialect) SupportsListenNotify() bool            { return false }
-func (sqliteDialect) SupportsArrayParameters() bool         { return false }
-func (sqliteDialect) SupportsDataModifyingCTE() bool        { return false }
-func (sqliteDialect) SupportsAttributesContainment() bool   { return false }
+func (SqliteDialect) LockSkipLocked() string                { return "" }
+func (SqliteDialect) LockNoWait() string                    { return "" }
+func (SqliteDialect) SnapshotIsolation() IsoLevel           { return IsoLevelDefault }
+func (SqliteDialect) QueueDequeueIsolation(_ bool) IsoLevel { return IsoLevelDefault }
+func (SqliteDialect) SupportsListenNotify() bool            { return false }
+func (SqliteDialect) SupportsArrayParameters() bool         { return false }
+func (SqliteDialect) SupportsDataModifyingCTE() bool        { return false }
+func (SqliteDialect) SupportsAttributesContainment() bool   { return false }
 
 // Classify sqlite errors via modernc's typed *sqlite.Error and the extended
 // result code constants in modernc.org/sqlite/lib. The Code() return is the
@@ -345,7 +345,7 @@ func sqliteCode(err error) int {
 	return -1
 }
 
-func (sqliteDialect) IsUniqueViolation(err error) bool {
+func (SqliteDialect) IsUniqueViolation(err error) bool {
 	switch sqliteCode(err) {
 	case sqlite3.SQLITE_CONSTRAINT_UNIQUE, sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY:
 		return true
@@ -353,14 +353,14 @@ func (sqliteDialect) IsUniqueViolation(err error) bool {
 	return false
 }
 
-func (sqliteDialect) IsForeignKeyViolation(err error) bool {
+func (SqliteDialect) IsForeignKeyViolation(err error) bool {
 	return sqliteCode(err) == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY
 }
 
 // IsRetryable matches SQLITE_BUSY / SQLITE_LOCKED and their extended variants
 // (BUSY_RECOVERY, BUSY_SNAPSHOT, BUSY_TIMEOUT, LOCKED_SHAREDCACHE, ...) — all
 // of which share the same primary result code in the low byte.
-func (sqliteDialect) IsRetryable(err error, logger *slog.Logger) bool {
+func (SqliteDialect) IsRetryable(err error, logger *slog.Logger) bool {
 	code := sqliteCode(err)
 	if code < 0 {
 		return false
@@ -381,7 +381,7 @@ func (sqliteDialect) IsRetryable(err error, logger *slog.Logger) bool {
 // with a fresh tx. The two methods stay distinct on the Dialect interface
 // (pg/CRDB separate connection-level errors from serialization/deadlock
 // conflicts) but collapse to the same check here.
-func (d sqliteDialect) IsRetryableTransaction(err error, logger *slog.Logger) bool {
+func (d SqliteDialect) IsRetryableTransaction(err error, logger *slog.Logger) bool {
 	return d.IsRetryable(err, logger)
 }
 

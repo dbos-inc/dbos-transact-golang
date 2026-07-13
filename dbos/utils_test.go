@@ -46,7 +46,7 @@ func skipIfCockroach(t *testing.T, reason string) {
 	conn, err := pgx.Connect(context.Background(), getDatabaseURL())
 	require.NoError(t, err)
 	defer conn.Close(context.Background())
-	if isCockroachDB(conn) {
+	if IsCockroachDB(conn) {
 		t.Skipf("skipping on CockroachDB: %s", reason)
 	}
 }
@@ -103,7 +103,7 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 // database. Returns false when the database cannot be safely reused and must
 // be dropped instead.
 func cleanDatabaseRows(ctx context.Context, conn *pgx.Conn) bool {
-	migrations := buildMigrations(_DEFAULT_SYSTEM_DB_SCHEMA, isCockroachDB(conn))
+	migrations := BuildMigrations(_DEFAULT_SYSTEM_DB_SCHEMA, IsCockroachDB(conn))
 	latestVersion := migrations[len(migrations)-1].version
 
 	rows, err := conn.Query(ctx,
@@ -188,7 +188,7 @@ func dropTestDatabase(t *testing.T, databaseURL string) {
 	require.NoError(t, err)
 	defer conn.Close(context.Background())
 
-	err = dropDatabaseIfExists(context.Background(), conn, dbName)
+	err = DropDatabaseIfExists(context.Background(), conn, dbName)
 	require.NoError(t, err)
 }
 
@@ -291,7 +291,7 @@ func setWorkflowStatusPending(t *testing.T, dbosCtx DBOSContext, workflowID stri
 	t.Helper()
 	c, ok := dbosCtx.(*dbosContext)
 	require.True(t, ok, "expected DBOSContext to be *dbosContext")
-	sysDB, ok := c.systemDB.(*sysDB)
+	sysDB, ok := c.systemDB.(*SysDB)
 	require.True(t, ok, "expected systemDB to be *sysDB")
 	updateQuery := sysDB.dialect.RewriteQuery(fmt.Sprintf(`UPDATE %sworkflow_status
 		SET status = $1, output = NULL, error = NULL, started_at_epoch_ms = NULL, updated_at = $2
@@ -309,7 +309,7 @@ func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 		fmt.Println("Expected ctx to be of type *dbosContext in queueEntriesAreCleanedUp")
 		return false
 	}
-	sdb := exec.systemDB.(*sysDB)
+	sdb := exec.systemDB.(*SysDB)
 	for range maxTries {
 		tx, err := sdb.pool.BeginTx(ctx, TxOptions{})
 		if err != nil {

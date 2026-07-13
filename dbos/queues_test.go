@@ -988,7 +988,7 @@ func TestVersionlessDequeueRequiresLatestVersion(t *testing.T) {
 
 	// Register a newer application version and make it the latest, so this worker is no
 	// longer running the latest version (simulating a rolling deploy).
-	sysdb := serverCtx.(*dbosContext).systemDB.(*sysDB)
+	sysdb := serverCtx.(*dbosContext).systemDB.(*SysDB)
 	require.NoError(t, sysdb.CreateApplicationVersion(context.Background(), "versionless-newer"))
 	require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), "versionless-newer", time.Now().Add(time.Hour).UnixMilli()))
 
@@ -1054,7 +1054,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	// Helper function to check the status of workflows in the queue
 	checkWorkflowStatus := func(t *testing.T, expectedPendingPerExecutor, expectedEnqueued int) {
 		workflows, err := dbosCtx1.(*dbosContext).systemDB.ListWorkflows(context.Background(), ListWorkflowsDBInput{
-			queueName: []string{workerConcurrencyQueue.Name},
+			QueueName: []string{workerConcurrencyQueue.Name},
 		})
 		require.NoError(t, err, "failed to list workflows")
 
@@ -2423,7 +2423,7 @@ func TestDatabaseBackedQueues(t *testing.T) {
 		require.Equal(t, 7, *got.GlobalConcurrency)
 
 		// ...but not once a newer application version is the latest (rolling deploy).
-		sysdb := dbosCtx.(*dbosContext).systemDB.(*sysDB)
+		sysdb := dbosCtx.(*dbosContext).systemDB.(*SysDB)
 		require.NoError(t, sysdb.CreateApplicationVersion(context.Background(), "v-newer"))
 		require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), "v-newer", time.Now().Add(time.Hour).UnixMilli()))
 		_, err = registerWFQ(dbosCtx, "conflict-q", WithGlobalConcurrency(1000))

@@ -263,7 +263,7 @@ func TestDebouncer(t *testing.T) {
 
 		// Find the internal debouncer workflow by querying operation_outputs table
 		// The debouncer workflow is the one that has a step with child_workflow_id set to handle1's workflow ID
-		sysDBInstance, ok := dbosCtxInstance.systemDB.(*sysDB)
+		sysDBInstance, ok := dbosCtxInstance.systemDB.(*SysDB)
 		require.True(t, ok, "expected sysDB instance")
 
 		query := sysDBInstance.renderSQL(`SELECT workflow_uuid FROM %soperation_outputs WHERE child_workflow_id = $1 LIMIT 1`, sysDBInstance.dialect.SchemaPrefix(sysDBInstance.schema))

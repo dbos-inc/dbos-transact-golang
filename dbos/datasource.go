@@ -107,14 +107,14 @@ func NewDataSource[E Engine](ctx DBOSContext, engine E, opts ...DataSourceOption
 		if e == nil {
 			return nil, errors.New("data source engine (*pgxpool.Pool) is nil")
 		}
-		pool = newPgxPool(e)
-		dialect = postgresDialect{} // resolve CRDB below
+		pool = NewPgxPool(e)
+		dialect = PostgresDialect{} // resolve CRDB below
 	case *sql.DB:
 		if e == nil {
 			return nil, errors.New("data source engine (*sql.DB) is nil")
 		}
-		pool = newSQLPool(e)
-		dialect = sqliteDialect{}
+		pool = NewSQLPool(e)
+		dialect = SqliteDialect{}
 	}
 
 	ds := &DataSource{
@@ -128,7 +128,7 @@ func NewDataSource[E Engine](ctx DBOSContext, engine E, opts ...DataSourceOption
 	// needs no durability table: RunAsTransaction collapses onto the single
 	// system transaction (runAsTxn), so skip dialect resolution and table
 	// creation entirely.
-	if sameEngine(ds.pool, c.systemDB.(*sysDB).pool) {
+	if SameEngine(ds.pool, c.systemDB.(*SysDB).pool) {
 		ds.sameAsSystemDB = true
 		c.logger.Debug("Data source shares the system database; using single-transaction durability", "datasource", ds.name)
 		return ds, nil
@@ -197,13 +197,13 @@ func (ds *DataSource) resolveDialect(c *dbosContext) error {
 			return false, err
 		}
 		defer conn.Release()
-		return isCockroachDB(conn.Conn()), nil
+		return IsCockroachDB(conn.Conn()), nil
 	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return err
 	}
 	if crdb {
-		ds.dialect = cockroachDialect{}
+		ds.dialect = CockroachDialect{}
 		c.logger.Debug("Detected CockroachDB data source", "datasource", ds.name)
 	}
 	return nil
@@ -420,14 +420,14 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	// user transaction has already committed durably, so this is retried hard.
 	checkpoint := func(encodedOutput, serializedErr *string, serialization string, startedAt time.Time) error {
 		dbInput := RecordOperationResultDBInput{
-			workflowID:    stepState.workflowID,
-			stepName:      stepOpts.stepName,
-			stepID:        stepState.stepID,
-			output:        encodedOutput,
-			errStr:        serializedErr,
-			startedAt:     startedAt,
-			completedAt:   time.Now(),
-			serialization: serialization,
+			WorkflowID:    stepState.workflowID,
+			StepName:      stepOpts.stepName,
+			StepID:        stepState.stepID,
+			Output:        encodedOutput,
+			ErrStr:        serializedErr,
+			StartedAt:     startedAt,
+			CompletedAt:   time.Now(),
+			Serialization: serialization,
 		}
 		return retry(c, func() error {
 			return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
@@ -437,17 +437,17 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	// Layer 1: already checkpointed in the system database? Replay it.
 	recordedOutput, err := retryWithResult(c, func() (*RecordedResult, error) {
 		return c.systemDB.CheckOperationExecution(uncancellableCtx, CheckOperationExecutionDBInput{
-			workflowID: stepState.workflowID,
-			stepID:     stepState.stepID,
-			stepName:   stepOpts.stepName,
+			WorkflowID: stepState.workflowID,
+			StepID:     stepState.stepID,
+			StepName:   stepOpts.stepName,
 		})
 	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return nil, newStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking operation execution: %w", err))
 	}
 	if recordedOutput != nil {
-		return stepCheckpointedOutcome{value: recordedOutput.output, serialization: recordedOutput.serialization},
-			deserializeWorkflowError(recordedOutput.errStr)
+		return stepCheckpointedOutcome{value: recordedOutput.Output, serialization: recordedOutput.Serialization},
+			deserializeWorkflowError(recordedOutput.ErrStr)
 	}
 
 	// Layer 2: did the user transaction commit on a previous run (crash window

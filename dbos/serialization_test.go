@@ -192,7 +192,7 @@ func testAllSerializationPaths[T any](
 			// Get the database pool to query directly
 			dbosCtx, ok := executor.(*dbosContext)
 			require.True(t, ok, "expected dbosContext")
-			sysDB, ok := dbosCtx.systemDB.(*sysDB)
+			sysDB, ok := dbosCtx.systemDB.(*SysDB)
 			require.True(t, ok, "expected sysDB")
 
 			// Query the database directly to check for the marker
@@ -1648,7 +1648,7 @@ func TestPortableInterop(t *testing.T) {
 	insertPortableWorkflow := func(t *testing.T, workflowID, status string, queueName *string) {
 		t.Helper()
 		c := executor.(*dbosContext)
-		sysDB := c.systemDB.(*sysDB)
+		sysDB := c.systemDB.(*SysDB)
 		insertQuery := sysDB.renderSQL(`INSERT INTO %sworkflow_status (
 			workflow_uuid, status, name, inputs, serialization, queue_name,
 			created_at, updated_at, recovery_attempts, executor_id, priority,
@@ -1751,7 +1751,7 @@ func TestPortableInterop(t *testing.T) {
 
 		// Verify the DB has portable_json serialization and the correct envelope
 		c := executor.(*dbosContext)
-		sysDB := c.systemDB.(*sysDB)
+		sysDB := c.systemDB.(*SysDB)
 		var storedInputs, storedSerialization string
 		selectQuery := sysDB.renderSQL(`SELECT inputs, serialization FROM %sworkflow_status WHERE workflow_uuid = $1`,
 			sysDB.dialect.SchemaPrefix(sysDB.schema))
@@ -1781,7 +1781,7 @@ func TestPortableInterop(t *testing.T) {
 		badInputsJSON := `{"positionalArgs":["not-an-object"],"namedArgs":{}}`
 
 		c := executor.(*dbosContext)
-		sysDB := c.systemDB.(*sysDB)
+		sysDB := c.systemDB.(*SysDB)
 		insertQuery := sysDB.renderSQL(`INSERT INTO %sworkflow_status (
 			workflow_uuid, status, name, inputs, serialization, queue_name,
 			created_at, updated_at, recovery_attempts, executor_id, priority,
@@ -1819,7 +1819,7 @@ func TestPortablePerOperationOptions(t *testing.T) {
 	payload := Payload{Name: "portable-op", Count: 7}
 
 	c := executor.(*dbosContext)
-	sysDB := c.systemDB.(*sysDB)
+	sysDB := c.systemDB.(*SysDB)
 
 	// Helper: fetch the serialization recorded in operation_outputs for the Recv step of a workflow.
 	// The Recv step stores the serialization of the message it consumed, which reflects what the sender used.
@@ -2039,7 +2039,7 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	defer Shutdown(executor, 10*time.Second)
 
 	c := executor.(*dbosContext)
-	sysDB := c.systemDB.(*sysDB)
+	sysDB := c.systemDB.(*SysDB)
 
 	// Helper: read the stored inputs and serialization from the DB.
 	readStoredInputs := func(t *testing.T, workflowID string) (string, string) {
@@ -2310,7 +2310,7 @@ func TestPortableWorkflowError(t *testing.T) {
 	defer Shutdown(executor, 10*time.Second)
 
 	c := executor.(*dbosContext)
-	sysDB := c.systemDB.(*sysDB)
+	sysDB := c.systemDB.(*SysDB)
 
 	readStoredError := func(t *testing.T, workflowID string) string {
 		t.Helper()
@@ -2590,7 +2590,7 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 	defer Shutdown(executor, 10*time.Second)
 
 	c := executor.(*dbosContext)
-	sysDB := c.systemDB.(*sysDB)
+	sysDB := c.systemDB.(*SysDB)
 	schemaPrefix := sysDB.dialect.SchemaPrefix(sysDB.schema)
 
 	const garbage = "not-valid-base64!!!"

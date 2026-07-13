@@ -595,8 +595,8 @@ func (c *conductor) handleRetentionRequest(data []byte, requestID string) error 
 		}
 
 		input := GarbageCollectWorkflowsInput{
-			cutoffEpochTimestampMs: cutoffMs,
-			rowsThreshold:          rowsThreshold,
+			CutoffEpochTimestampMs: cutoffMs,
+			RowsThreshold:          rowsThreshold,
 		}
 
 		err := retry(c.dbosCtx, func() error {
@@ -1118,20 +1118,20 @@ func (c *conductor) handleForkFromFailureRequest(data []byte, requestID string) 
 	c.logger.Debug("Handling fork from failure request", "request", req)
 
 	input := ForkFromDBInput{
-		workflowIDs:     req.Body.WorkflowIDs,
-		fromLastFailure: req.Body.FromLastFailure,
-		fromLastStep:    req.Body.FromLastStep,
-		fromStep:        req.Body.FromStep,
-		fromStepName:    req.Body.FromStepName,
+		WorkflowIDs:     req.Body.WorkflowIDs,
+		FromLastFailure: req.Body.FromLastFailure,
+		FromLastStep:    req.Body.FromLastStep,
+		FromStep:        req.Body.FromStep,
+		FromStepName:    req.Body.FromStepName,
 	}
 	if req.Body.ApplicationVersion != nil {
-		input.applicationVersion = *req.Body.ApplicationVersion
+		input.ApplicationVersion = *req.Body.ApplicationVersion
 	}
 	if req.Body.QueueName != nil {
-		input.queueName = *req.Body.QueueName
+		input.QueueName = *req.Body.QueueName
 	}
 	if req.Body.QueuePartitionKey != nil {
-		input.queuePartitionKey = *req.Body.QueuePartitionKey
+		input.QueuePartitionKey = *req.Body.QueuePartitionKey
 	}
 
 	forkedIDs, err := c.dbosCtx.systemDB.ForkFrom(c.dbosCtx, input)
@@ -1388,8 +1388,8 @@ func (c *conductor) handleDeleteWorkflowRequest(data []byte, requestID string) e
 
 	err := retry(c.dbosCtx, func() error {
 		return c.dbosCtx.systemDB.DeleteWorkflows(c.dbosCtx, DeleteWorkflowsDBInput{
-			workflowIDs:    workflowIDs,
-			deleteChildren: req.DeleteChildren,
+			WorkflowIDs:    workflowIDs,
+			DeleteChildren: req.DeleteChildren,
 		})
 	}, withRetrierLogger(c.logger))
 	if err != nil {

@@ -147,7 +147,7 @@ func (q *WorkflowQueue) applyConfigChange(ctx DBOSContext, mutate func(*Workflow
 			mutate(fresh)
 			return validateQueueConfig(fresh)
 		})
-	}, withRetrierLogger(c.logger), withRetryCondition(postgresDialect{}.IsRetryableTransaction, sqliteDialect{}.IsRetryableTransaction))
+	}, withRetrierLogger(c.logger), withRetryCondition(PostgresDialect{}.IsRetryableTransaction, SqliteDialect{}.IsRetryableTransaction))
 	if err != nil {
 		return err
 	}
@@ -384,7 +384,7 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 	}
 
 	inserted, err := retryWithResult(c, func() (bool, error) {
-		return c.systemDB.UpsertQueue(c, UpsertQueueDBInput{queue: q, updateExisting: updateExisting})
+		return c.systemDB.UpsertQueue(c, UpsertQueueDBInput{Queue: q, UpdateExisting: updateExisting})
 	}, withRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
@@ -719,29 +719,29 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 			for _, workflow := range dequeuedWorkflows {
 				// Find the workflow in the registry. Configured instance workflows are
 				// registered under a name qualified with their config name.
-				lookupName := workflow.name
-				if workflow.configName != nil && *workflow.configName != "" {
-					lookupName = instanceQualifiedName(workflow.name, *workflow.configName)
+				lookupName := workflow.Name
+				if workflow.ConfigName != nil && *workflow.ConfigName != "" {
+					lookupName = instanceQualifiedName(workflow.Name, *workflow.ConfigName)
 				}
 				wfName, ok := ctx.workflowCustomNametoFQN.Load(lookupName)
 				if !ok {
-					queueLogger.Error("Workflow not found in registry", "workflow_name", workflow.name)
+					queueLogger.Error("Workflow not found in registry", "workflow_name", workflow.Name)
 					continue
 				}
 
 				registeredWorkflowAny, exists := ctx.workflowRegistry.Load(wfName.(string))
 				if !exists {
-					queueLogger.Error("workflow function not found in registry", "workflow_name", workflow.name)
+					queueLogger.Error("workflow function not found in registry", "workflow_name", workflow.Name)
 					continue
 				}
 				registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
 				if !ok {
-					queueLogger.Error("invalid workflow registry entry type", "workflow_name", workflow.name)
+					queueLogger.Error("invalid workflow registry entry type", "workflow_name", workflow.Name)
 					continue
 				}
 
 				// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
-				_, err := registeredWorkflow.wrappedFunction(ctx, workflow.input, workflow.serialization, WithWorkflowID(workflow.id), withIsDequeue())
+				_, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, workflow.Serialization, WithWorkflowID(workflow.Id), withIsDequeue())
 				if err != nil {
 					queueLogger.Error("Error running queued workflow", "error", err)
 				}
@@ -779,11 +779,11 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue WorkflowQueue, partitionKey string, hasBackoffError *bool) ([]DequeuedWorkflow, bool) {
 	dequeuedWorkflows, err := retryWithResult(ctx, func() ([]DequeuedWorkflow, error) {
 		return ctx.systemDB.DequeueWorkflows(ctx, DequeueWorkflowsInput{
-			queue:              queue,
-			executorID:         ctx.executorID,
-			applicationVersion: ctx.applicationVersion,
-			queuePartitionKey:  partitionKey,
-			localRunningCount:  ctx.countActiveWorkflowsForQueue(queue.Name, partitionKey),
+			Queue:              queue,
+			ExecutorID:         ctx.executorID,
+			ApplicationVersion: ctx.applicationVersion,
+			QueuePartitionKey:  partitionKey,
+			LocalRunningCount:  ctx.countActiveWorkflowsForQueue(queue.Name, partitionKey),
 		})
 	}, withRetrierLogger(qr.logger))
 
