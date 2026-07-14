@@ -32,6 +32,9 @@ type SystemDatabase interface {
 	Launch(ctx context.Context)
 	Pool() Pool
 	Dialect() Dialect
+	// IsContentionError reports whether err is a lock/serialization contention
+	// error for the active backend. See Dialect.IsContentionError.
+	IsContentionError(err error) bool
 	Shutdown(ctx context.Context, timeout time.Duration)
 	ResetSystemDB(ctx context.Context) error
 
@@ -901,6 +904,10 @@ func (s *SysDB) Pool() Pool {
 
 func (s *SysDB) Dialect() Dialect {
 	return s.dialect
+}
+
+func (s *SysDB) IsContentionError(err error) bool {
+	return s.dialect.IsContentionError(err)
 }
 
 func (s *SysDB) StreamWakeChannel(workflowID, key string) (chan struct{}, func()) {

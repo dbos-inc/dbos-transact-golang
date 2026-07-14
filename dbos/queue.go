@@ -11,9 +11,6 @@ import (
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
-
-	"github.com/jackc/pgerrcode"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const _DEFAULT_MAX_POLLING_INTERVAL = 120 * time.Second
@@ -730,11 +727,8 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue WorkflowQueue) {
 			}, sysdb.WithRetrierLogger(queueLogger))
 			if err != nil {
 				skipDequeue = true
-				if pgErr, ok := err.(*pgconn.PgError); ok {
-					switch pgErr.Code {
-					case pgerrcode.SerializationFailure, pgerrcode.LockNotAvailable:
-						hasBackoffError = true
-					}
+				if ctx.systemDB.IsContentionError(err) {
+					hasBackoffError = true
 				} else {
 					queueLogger.Error("Error getting queue partitions", "error", err)
 				}
@@ -829,11 +823,8 @@ func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue WorkflowQueue, p
 	}, sysdb.WithRetrierLogger(qr.logger))
 
 	if err != nil {
-		if pgErr, ok := err.(*pgconn.PgError); ok {
-			switch pgErr.Code {
-			case pgerrcode.SerializationFailure, pgerrcode.LockNotAvailable:
-				*hasBackoffError = true
-			}
+		if ctx.systemDB.IsContentionError(err) {
+			*hasBackoffError = true
 		} else {
 			qr.logger.Error("Error dequeuing workflows from queue", "queue_name", queue.Name, "partition_key", partitionKey, "error", err)
 		}

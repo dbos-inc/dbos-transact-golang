@@ -110,6 +110,12 @@ type Dialect interface {
 	// be inserted into the chain directly.
 	IsRetryable(err error, logger *slog.Logger) bool
 
+	// IsContentionError reports whether err represents lock or serialization
+	// contention (serialization failure, deadlock, lock-not-available on
+	// pg/CRDB; busy/locked on SQLite). Callers such as the queue poller use it
+	// to back off instead of retrying inline.
+	IsContentionError(err error) bool
+
 	// IsRetryableTransaction reports whether err is a transaction-level conflict
 	// (serialization failure / deadlock / write-lock contention) that must be
 	// retried by restarting the ENTIRE transaction with a fresh tx. This is
@@ -277,6 +283,16 @@ func (PostgresDialect) IsRetryableTransaction(err error, logger *slog.Logger) bo
 	return false
 }
 
+// IsContentionError matches the transaction-conflict SQLSTATEs plus 55P03
+// lock_not_available (a FOR UPDATE NOWAIT that lost the race for a lock).
+func (PostgresDialect) IsContentionError(err error) bool {
+	switch pgErrCode(err) {
+	case pgerrcode.SerializationFailure, pgerrcode.DeadlockDetected, pgerrcode.LockNotAvailable:
+		return true
+	}
+	return false
+}
+
 /* ---------------------------------------------------------------------------
    CockroachDB
 
@@ -383,6 +399,11 @@ func (SqliteDialect) IsRetryable(err error, logger *slog.Logger) bool {
 // conflicts) but collapse to the same check here.
 func (d SqliteDialect) IsRetryableTransaction(err error, logger *slog.Logger) bool {
 	return d.IsRetryable(err, logger)
+}
+
+// IsContentionError: busy/locked is also SQLite's contention signal.
+func (d SqliteDialect) IsContentionError(err error) bool {
+	return d.IsRetryable(err, nil)
 }
 
 /* ---------------------------------------------------------------------------
