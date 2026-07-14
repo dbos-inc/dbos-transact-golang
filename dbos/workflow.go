@@ -17,7 +17,6 @@ import (
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 /*******************************/
@@ -3659,18 +3658,18 @@ func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) error {
 		})
 	}, sysdb.WithRetrierLogger(c.logger))
 
-	// If patch doesn't exist, it's already deprecated (or never existed)
-	if patchNameFromDB != prefixedPatchName || err == pgx.ErrNoRows {
-		return nil
-	}
-
-	// If there was an error checking, return it
 	if err != nil {
+		// If patch doesn't exist, it's already deprecated (or never existed)
+		if errors.Is(err, sysdb.ErrNoRows) {
+			return nil
+		}
 		return err
 	}
 
 	// Patch exists, deprecate it by incrementing step ID
-	wfState.nextStepID()
+	if patchNameFromDB == prefixedPatchName {
+		wfState.nextStepID()
+	}
 	return nil
 }
 

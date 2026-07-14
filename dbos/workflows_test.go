@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"reflect"
 	"runtime"
 	"strings"
@@ -7169,6 +7171,62 @@ func TestWorkflowHandleContextCancel(t *testing.T) {
 	})
 }
 
+// stubPatchCheckDB answers every DoesPatchExists call made through the
+// SystemDatabase interface with a fixed result. Only DeprecatePatch reaches
+// it that way — SysDB.Patch invokes its own method directly, so Patch keeps
+// working when the embedded SystemDatabase is real.
+type stubPatchCheckDB struct {
+	sysdb.SystemDatabase
+	name string
+	err  error
+}
+
+func (f *stubPatchCheckDB) DoesPatchExists(context.Context, sysdb.PatchDBInput) (string, error) {
+	return f.name, f.err
+}
+
+// TestDeprecatePatchStepID exercises DeprecatePatch's step-ID accounting
+// directly: the step ID may only advance when the history lookup confirms
+// the patch marker occupies the next slot. In particular a failed lookup
+// must leave it untouched — guessing either way corrupts step numbering.
+func TestDeprecatePatchStepID(t *testing.T) {
+	run := func(db sysdb.SystemDatabase) (*workflowState, error) {
+		wfState := &workflowState{workflowID: "wf-id", stepID: 3}
+		c := &dbosContext{
+			ctx:      context.WithValue(context.Background(), workflowStateKey, wfState),
+			config:   &Config{EnablePatching: true},
+			logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			systemDB: db,
+		}
+		return wfState, c.DeprecatePatch(nil, "my-patch")
+	}
+
+	t.Run("MarkerPresentConsumesStepID", func(t *testing.T) {
+		ws, err := run(&stubPatchCheckDB{name: _DBOS_PATCH_PREFIX + "my-patch"})
+		require.NoError(t, err)
+		require.Equal(t, 4, ws.stepID)
+	})
+
+	t.Run("NoRowLeavesStepIDUntouched", func(t *testing.T) {
+		ws, err := run(&stubPatchCheckDB{err: sysdb.ErrNoRows})
+		require.NoError(t, err)
+		require.Equal(t, 3, ws.stepID)
+	})
+
+	t.Run("OtherMarkerLeavesStepIDUntouched", func(t *testing.T) {
+		ws, err := run(&stubPatchCheckDB{name: _DBOS_PATCH_PREFIX + "other-patch"})
+		require.NoError(t, err)
+		require.Equal(t, 3, ws.stepID)
+	})
+
+	t.Run("LookupErrorPropagatesAndLeavesStepIDUntouched", func(t *testing.T) {
+		injected := errors.New("simulated patch lookup failure")
+		ws, err := run(&stubPatchCheckDB{err: injected})
+		require.ErrorIs(t, err, injected)
+		require.Equal(t, 3, ws.stepID)
+	})
+}
+
 func TestPatching(t *testing.T) {
 	t.Run("PatchingEnabled", func(t *testing.T) {
 		// Create a DBOS context with patching enabled
@@ -7364,6 +7422,84 @@ func TestPatching(t *testing.T) {
 		_, err = forkHandle.GetResult()
 		require.Error(t, err, "expected error when forking old workflow onto new workflow")
 		require.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %s", UnexpectedStep))
+	})
+
+	// A DB error during DeprecatePatch's history check must surface, not be
+	// swallowed. Swallowing it skips the patch marker's step ID, so every
+	// subsequent step drifts one slot back into the marker's position and the
+	// re-execution dies with a spurious UnexpectedStep non-determinism error.
+	t.Run("DeprecatePatchDBErrorPropagates", func(t *testing.T) {
+		databaseURL := backendDatabaseURL(t)
+		resetTestDatabase(t, databaseURL)
+		dbosCtx, err := NewDBOSContext(context.Background(), Config{
+			DatabaseURL:        databaseURL,
+			AppName:            "test-app-deprecate-patch-db-error",
+			EnablePatching:     true,
+			ApplicationVersion: "PATCHING_ENABLED",
+		})
+		require.NoError(t, err, "failed to create DBOS context")
+		t.Cleanup(func() {
+			Shutdown(dbosCtx, 30*time.Second)
+		})
+
+		injectedErr := errors.New("simulated patch lookup failure")
+		c := dbosCtx.(*dbosContext)
+		c.systemDB = &stubPatchCheckDB{SystemDatabase: c.systemDB, err: injectedErr}
+
+		step := func(input int) (int, error) {
+			return input + 1, nil
+		}
+
+		wfPatched := func(ctx DBOSContext, input int) (int, error) {
+			RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("firstStep"))
+			if _, err := Patch(ctx, "my-patch"); err != nil {
+				return 0, err
+			}
+			return RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("secondStep"))
+		}
+
+		RegisterWorkflow(dbosCtx, wfPatched, WithWorkflowName("wf"))
+		require.NoError(t, Launch(dbosCtx))
+
+		handle, err := RunWorkflow(dbosCtx, wfPatched, 1)
+		require.NoError(t, err, "failed to start workflow")
+		_, err = handle.GetResult()
+		require.NoError(t, err, "failed to get result")
+		// History: 0=firstStep, 1=DBOS.patch-my-patch, 2=secondStep
+
+		wfDeprecated := func(ctx DBOSContext, input int) (int, error) {
+			RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("firstStep"))
+			if err := DeprecatePatch(ctx, "my-patch"); err != nil {
+				return 0, err
+			}
+			return RunAsStep(ctx, func(ctx context.Context) (int, error) {
+				return step(input)
+			}, WithStepName("secondStep"))
+		}
+
+		dbosCtx.(*dbosContext).launched.Store(false)
+		ClearRegistries(dbosCtx)
+		RegisterWorkflow(dbosCtx, wfDeprecated, WithWorkflowName("wf"))
+		dbosCtx.(*dbosContext).launched.Store(true)
+
+		// Re-execute the patched history on the deprecated code: after
+		// firstStep replays, DeprecatePatch checks the marker at step 1 and
+		// the check fails with the injected error.
+		forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: handle.GetWorkflowID(),
+			StartStep:          2,
+		})
+		require.NoError(t, err, "failed to fork workflow")
+		_, err = forkHandle.GetResult()
+		require.Error(t, err, "expected the patch lookup error to surface")
+		require.Contains(t, err.Error(), "simulated patch lookup failure")
+		require.NotContains(t, err.Error(), fmt.Sprintf("DBOS Error %s", UnexpectedStep), "step IDs drifted into the patch marker's slot")
 	})
 
 	t.Run("PatchingNotEnabledError", func(t *testing.T) {
