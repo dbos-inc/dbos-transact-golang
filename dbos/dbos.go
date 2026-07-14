@@ -327,16 +327,12 @@ func (c *dbosContext) Value(key any) any {
 	return c.ctx.Value(key)
 }
 
-// From returns a copy of the current DBOSContext with the underlying context.Context set to the provided ctx.
-// The provided context must be a child of a context.Context that was provided by DBOS (e.g., the first argument of RunWorkflow or RunAsStep)
-// That is because such context embeds important metadata necessary for DBOS to function correctly.
-func (c *dbosContext) From(_ DBOSContext, ctx context.Context) DBOSContext {
-	if ctx == nil {
-		return nil
-	}
-	launched := c.launched.Load()
+// clone returns a copy of the DBOS context with the underlying context.Context replaced by ctx.
+// Root-only lifecycle fields (cancel func, admin server, conductor, scheduler state, alert handler)
+// are deliberately not propagated to derived contexts.
+func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 	childCtx := &dbosContext{
-		ctx:                     ctx, // Use the provided context
+		ctx:                     ctx,
 		config:                  c.config,
 		logger:                  c.logger,
 		systemDB:                c.systemDB,
@@ -350,8 +346,18 @@ func (c *dbosContext) From(_ DBOSContext, ctx context.Context) DBOSContext {
 		queueRunner:             c.queueRunner,
 		serializer:              c.serializer,
 	}
-	childCtx.launched.Store(launched)
+	childCtx.launched.Store(c.launched.Load())
 	return childCtx
+}
+
+// From returns a copy of the current DBOSContext with the underlying context.Context set to the provided ctx.
+// The provided context must be a child of a context.Context that was provided by DBOS (e.g., the first argument of RunWorkflow or RunAsStep)
+// That is because such context embeds important metadata necessary for DBOS to function correctly.
+func (c *dbosContext) From(_ DBOSContext, ctx context.Context) DBOSContext {
+	if ctx == nil {
+		return nil
+	}
+	return c.clone(ctx)
 }
 
 func From(dbosCtx DBOSContext, ctx context.Context) DBOSContext {
@@ -371,45 +377,11 @@ func WithValue(ctx DBOSContext, key, val any) DBOSContext {
 }
 
 func (c *dbosContext) WithValue(key, val any) DBOSContext {
-	launched := c.launched.Load()
-	childCtx := &dbosContext{
-		ctx:                     context.WithValue(c.ctx, key, val), // Spawn a new child context with the value set
-		config:                  c.config,
-		logger:                  c.logger,
-		systemDB:                c.systemDB,
-		workflowsWg:             c.workflowsWg,
-		workflowRegistry:        c.workflowRegistry,
-		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
-		activeWorkflowIDs:       c.activeWorkflowIDs,
-		applicationVersion:      c.applicationVersion,
-		executorID:              c.executorID,
-		applicationID:           c.applicationID,
-		queueRunner:             c.queueRunner,
-		serializer:              c.serializer,
-	}
-	childCtx.launched.Store(launched)
-	return childCtx
+	return c.clone(context.WithValue(c.ctx, key, val))
 }
 
 func (c *dbosContext) WithoutCancel(_ DBOSContext) DBOSContext {
-	launched := c.launched.Load()
-	childCtx := &dbosContext{
-		ctx:                     context.WithoutCancel(c.ctx),
-		config:                  c.config,
-		logger:                  c.logger,
-		systemDB:                c.systemDB,
-		workflowsWg:             c.workflowsWg,
-		workflowRegistry:        c.workflowRegistry,
-		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
-		activeWorkflowIDs:       c.activeWorkflowIDs,
-		applicationVersion:      c.applicationVersion,
-		executorID:              c.executorID,
-		applicationID:           c.applicationID,
-		queueRunner:             c.queueRunner,
-		serializer:              c.serializer,
-	}
-	childCtx.launched.Store(launched)
-	return childCtx
+	return c.clone(context.WithoutCancel(c.ctx))
 }
 
 // WithoutCancel returns a copy of the DBOS context that is not canceled when the parent context is canceled.
@@ -422,24 +394,8 @@ func WithoutCancel(ctx DBOSContext) DBOSContext {
 }
 
 func (c *dbosContext) WithCancel() (DBOSContext, context.CancelFunc) {
-	launched := c.launched.Load()
 	newCtx, cancelFunc := context.WithCancel(c.ctx)
-	childCtx := &dbosContext{
-		ctx:                     newCtx,
-		logger:                  c.logger,
-		systemDB:                c.systemDB,
-		workflowsWg:             c.workflowsWg,
-		workflowRegistry:        c.workflowRegistry,
-		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
-		activeWorkflowIDs:       c.activeWorkflowIDs,
-		applicationVersion:      c.applicationVersion,
-		executorID:              c.executorID,
-		applicationID:           c.applicationID,
-		queueRunner:             c.queueRunner,
-		serializer:              c.serializer,
-	}
-	childCtx.launched.Store(launched)
-	return childCtx, cancelFunc
+	return c.clone(newCtx), cancelFunc
 }
 
 // WithCancel returns a copy of the DBOS context that can be manually canceled.
@@ -453,24 +409,8 @@ func WithCancel(ctx DBOSContext) (DBOSContext, context.CancelFunc) {
 }
 
 func (c *dbosContext) WithCancelCause() (DBOSContext, context.CancelCauseFunc) {
-	launched := c.launched.Load()
 	newCtx, cancelCauseFunc := context.WithCancelCause(c.ctx)
-	childCtx := &dbosContext{
-		ctx:                     newCtx,
-		logger:                  c.logger,
-		systemDB:                c.systemDB,
-		workflowsWg:             c.workflowsWg,
-		workflowRegistry:        c.workflowRegistry,
-		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
-		activeWorkflowIDs:       c.activeWorkflowIDs,
-		applicationVersion:      c.applicationVersion,
-		executorID:              c.executorID,
-		applicationID:           c.applicationID,
-		queueRunner:             c.queueRunner,
-		serializer:              c.serializer,
-	}
-	childCtx.launched.Store(launched)
-	return childCtx, cancelCauseFunc
+	return c.clone(newCtx), cancelCauseFunc
 }
 
 // WithCancelCause returns a copy of the DBOS context that can be canceled with a cause.
@@ -483,25 +423,8 @@ func WithCancelCause(ctx DBOSContext) (DBOSContext, context.CancelCauseFunc) {
 }
 
 func (c *dbosContext) WithTimeout(_ DBOSContext, timeout time.Duration) (DBOSContext, context.CancelFunc) {
-	launched := c.launched.Load()
 	newCtx, cancelFunc := context.WithTimeoutCause(c.ctx, timeout, errors.New("DBOS context timeout"))
-	childCtx := &dbosContext{
-		ctx:                     newCtx,
-		config:                  c.config,
-		logger:                  c.logger,
-		systemDB:                c.systemDB,
-		workflowsWg:             c.workflowsWg,
-		workflowRegistry:        c.workflowRegistry,
-		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
-		activeWorkflowIDs:       c.activeWorkflowIDs,
-		applicationVersion:      c.applicationVersion,
-		executorID:              c.executorID,
-		applicationID:           c.applicationID,
-		queueRunner:             c.queueRunner,
-		serializer:              c.serializer,
-	}
-	childCtx.launched.Store(launched)
-	return childCtx, cancelFunc
+	return c.clone(newCtx), cancelFunc
 }
 
 // WithTimeout returns a copy of the DBOS context that is canceled after the given timeout.
