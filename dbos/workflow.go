@@ -4106,7 +4106,7 @@ func DeleteWorkflows(ctx DBOSContext, workflowIDs []string, opts ...DeleteWorkfl
 	return ctx.DeleteWorkflows(ctx, workflowIDs, opts...)
 }
 
-// models.ResumeWorkflowInput holds configuration parameters for resuming workflows.
+// ResumeWorkflowInput holds configuration parameters for resuming workflows.
 
 // WithResumeQueue re-enqueues the resumed workflow(s) on the specified queue instead of the internal queue.
 func WithResumeQueue(queueName string) ResumeWorkflowOption {
@@ -4411,7 +4411,7 @@ func ForkWorkflows[R any](ctx DBOSContext, input ForkWorkflowsInput) ([]Workflow
 	return typedHandles, nil
 }
 
-// models.ListWorkflowsInput holds configuration parameters for listing workflows
+// ListWorkflowsInput holds configuration parameters for listing workflows
 
 // WithWorkflowIDs filters workflows by the specified workflow IDs.
 func WithWorkflowIDs(workflowIDs []string) ListWorkflowsOption {
@@ -4747,7 +4747,7 @@ func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStat
 	return ctx.ListWorkflows(ctx, opts...)
 }
 
-// models.GetWorkflowStepsInput holds optional parameters for GetWorkflowSteps.
+// GetWorkflowStepsInput holds optional parameters for GetWorkflowSteps.
 
 // WithStepsLoadOutput controls whether to load step output data.
 // When unset, output is loaded only if the DBOS context has been launched.
@@ -5233,7 +5233,7 @@ func WithScheduleWorkflowClassName(name string) CreateScheduleOption {
 	return func(o *createScheduleOptions) { o.workflowClassName = name }
 }
 
-// models.ListSchedulesInput holds configuration parameters for listing schedules.
+// ListSchedulesInput holds configuration parameters for listing schedules.
 
 // CreateSchedule creates a new schedule for a workflow. The reconciler loop
 // picks the new schedule up on its next tick and installs it in the cron

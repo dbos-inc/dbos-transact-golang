@@ -559,7 +559,7 @@ func WithCancelChildren() CancelWorkflowOptions {
 	return models.WithCancelChildren()
 }
 
-// models.CancelWorkflowInput holds configuration parameter for cancelling workflows.
+// CancelWorkflowInput holds configuration parameter for cancelling workflows.
 
 // CancelWorkflow cancels a running or enqueued workflow.
 func (c *client) CancelWorkflow(workflowID string, opts ...CancelWorkflowOptions) error {

@@ -24,7 +24,7 @@ import (
 // newTestConductor builds a Conductor wired to the given dbosContext, the way
 // NewDBOSContext does in production.
 func newTestConductor(dbosCtx *dbosContext, config conductor.Config) (*conductor.Conductor, error) {
-	return newTestConductor(dbosCtx, config)
+	return conductor.New(dbosCtx, executorAdapter{ctx: dbosCtx}, dbosCtx.logger, config)
 }
 
 // writeCommand represents a command to write to the WebSocket connection
