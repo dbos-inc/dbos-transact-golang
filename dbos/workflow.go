@@ -1555,6 +1555,29 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 	// Run the function in a goroutine
 	outcomeChan := make(chan workflowOutcome[any], 1)
+
+	// awaitExistingOutcome delivers the result of another execution of this workflow
+	// (one this run does not own) to the outcome channel.
+	awaitExistingOutcome := func() {
+		awaitOut, awaitErr := sysdb.RetryWithResult(c, func() (*sysdb.AwaitWorkflowResultOutput, error) {
+			return c.systemDB.AwaitWorkflowResult(uncancellableCtx, workflowID, sysdb.DBRetryInterval)
+		}, sysdb.WithRetrierLogger(c.logger))
+		err := awaitErr
+		if awaitErr == nil && awaitOut != nil && awaitOut.ErrStr != nil {
+			err = deserializeWorkflowError(awaitOut.ErrStr)
+		}
+		var encodedResult any
+		var ser string
+		if awaitOut != nil {
+			encodedResult = awaitOut.Output
+			ser = awaitOut.Serialization
+		}
+		// Keep the encoded result - decoding will happen in RunWorkflow[P,R] when we know the target type
+		outcomeChan <- workflowOutcome[any]{result: encodedResult, err: err, needsDecoding: true, serialization: ser,
+			cancelled: errors.Is(err, &DBOSError{Code: AwaitedWorkflowCancelled})}
+		close(outcomeChan)
+	}
+
 	c.workflowsWg.Add(1)
 	go func() {
 		defer c.workflowsWg.Done()
@@ -1569,8 +1592,15 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				entry.queuePartitionKey = *insertStatusResult.QueuePartitionKey
 			}
 			_, loaded := c.activeWorkflowIDs.LoadOrStore(workflowID, entry)
-			if loaded { // This should never happen, but if it does, we need to log it
-				c.logger.Error("UNREACHABLE: workflow already running on this context", "workflow_id", workflowID)
+			if loaded {
+				// Lost a start race: a concurrent start of this workflow (recovery and
+				// dequeue bypass the ownerXID guard) activated itself between this run's
+				// active-ID check and here. The winner owns the active entry, so leave it
+				// alone, disarm the durable cancel, and await the winner's result.
+				stopFunc()
+				c.logger.Warn("Workflow is already executing on this executor. Waiting for the existing execution to complete", "workflow_id", workflowID)
+				awaitExistingOutcome()
+				return
 			}
 			var removeOnce sync.Once
 			removeActive = func() { removeOnce.Do(func() { c.activeWorkflowIDs.Delete(workflowID) }) }
@@ -1588,23 +1618,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			// context must no longer durably cancel it. Disarm the cancel function.
 			stopFunc()
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
-			awaitOut, awaitErr := sysdb.RetryWithResult(c, func() (*sysdb.AwaitWorkflowResultOutput, error) {
-				return c.systemDB.AwaitWorkflowResult(uncancellableCtx, workflowID, sysdb.DBRetryInterval)
-			}, sysdb.WithRetrierLogger(c.logger))
-			err = awaitErr
-			if awaitErr == nil && awaitOut != nil && awaitOut.ErrStr != nil {
-				err = deserializeWorkflowError(awaitOut.ErrStr)
-			}
-			var encodedResult any
-			var ser string
-			if awaitOut != nil {
-				encodedResult = awaitOut.Output
-				ser = awaitOut.Serialization
-			}
-			// Keep the encoded result - decoding will happen in RunWorkflow[P,R] when we know the target type
-			outcomeChan <- workflowOutcome[any]{result: encodedResult, err: err, needsDecoding: true, serialization: ser,
-				cancelled: errors.Is(err, &DBOSError{Code: AwaitedWorkflowCancelled})}
-			close(outcomeChan)
+			awaitExistingOutcome()
 			return
 		} else {
 			// A cancelled run skips updateWorkflowOutcome entirely so it can never

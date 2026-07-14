@@ -9744,3 +9744,76 @@ func TestStaleOutcomeWriteOverEnqueued(t *testing.T) {
 	require.NoError(t, err, "failed to get workflow status")
 	require.Equal(t, WorkflowStatusSuccess, status.Status, "the resumed run's outcome must survive")
 }
+
+// TestConcurrentStartRaceSameExecutor reproduces B5: the active-workflow-ID check
+// (Load inside the insert tx) and set (LoadOrStore in the spawned goroutine) are not
+// atomic, and recovery/dequeue starts bypass the ownerXID guard. Two concurrent
+// recovery requests for the same PENDING workflow can both pass the Load check before
+// either goroutine runs LoadOrStore, so both execute the workflow body; the loser then
+// deleted the winner's active entry on completion. The workflow body must never run
+// concurrently with itself on one executor, and every handle must still resolve.
+func TestConcurrentStartRaceSameExecutor(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	c := dbosCtx.(*dbosContext)
+
+	var running atomic.Int32
+	var doubleExecutions atomic.Int32
+	raceWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		if running.Add(1) > 1 {
+			doubleExecutions.Add(1)
+		}
+		defer running.Add(-1)
+		// Keep the body open long enough for an overlapping execution to be observed.
+		time.Sleep(50 * time.Millisecond)
+		return "done", nil
+	}
+	RegisterWorkflow(dbosCtx, raceWorkflow, WithWorkflowName("start-race-workflow"))
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	const attempts = 20
+	for i := range attempts {
+		workflowID := fmt.Sprintf("start-race-%d", i)
+		handle, err := RunWorkflow(dbosCtx, raceWorkflow, "in", WithWorkflowID(workflowID))
+		require.NoError(t, err, "failed to run workflow")
+		_, err = handle.GetResult()
+		require.NoError(t, err, "failed to get seed result")
+
+		setWorkflowStatusPending(t, dbosCtx, workflowID)
+
+		// Fire two concurrent recovery requests for the same PENDING workflow. Both
+		// bypass the ownerXID guard, so both can land in the Load/LoadOrStore window.
+		var wg sync.WaitGroup
+		recoveredHandles := make([][]WorkflowHandle[any], 2)
+		for j := range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				handles, err := recoverPendingWorkflows(c, []string{"local"})
+				assert.NoError(t, err, "recoverPendingWorkflows failed")
+				recoveredHandles[j] = handles
+			}()
+		}
+		wg.Wait()
+
+		// Join every recovered execution before asserting; a handle that never
+		// resolves (workflow stuck PENDING) fails the test via the suite timeout.
+		var handleErrs []error
+		for _, handles := range recoveredHandles {
+			for _, h := range handles {
+				if _, err := h.GetResult(); err != nil {
+					handleErrs = append(handleErrs, err)
+				}
+			}
+		}
+
+		require.Zero(t, doubleExecutions.Load(),
+			"attempt %d: workflow body executed concurrently with itself on the same executor", i)
+		for _, err := range handleErrs {
+			require.NoError(t, err, "attempt %d: a recovered handle returned an error", i)
+		}
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusSuccess, status.Status, "attempt %d: workflow must end SUCCESS", i)
+	}
+}
