@@ -1,4 +1,4 @@
-package dbos
+package adminserver
 
 import (
 	"context"
@@ -11,25 +11,44 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 )
+
+// Executor is the narrow surface of the DBOS runtime the admin server needs.
+// It is implemented by an adapter in the dbos package.
+type Executor interface {
+	ListWorkflows(ctx context.Context, opts ...models.ListWorkflowsOption) ([]models.WorkflowStatus, error)
+	GetWorkflowSteps(ctx context.Context, workflowID string) ([]models.StepInfo, error)
+	CancelWorkflow(ctx context.Context, workflowID string) error
+	ResumeWorkflow(ctx context.Context, workflowID string) error
+	// ForkWorkflow returns the ID of the newly forked workflow.
+	ForkWorkflow(ctx context.Context, input models.ForkWorkflowInput) (string, error)
+	// RecoverPendingWorkflows returns the IDs of the recovered workflows.
+	RecoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]string, error)
+	// CancelAllBefore cancels all pending/enqueued workflows created before the cutoff.
+	CancelAllBefore(ctx context.Context, cutoff time.Time) error
+	// QueueMetadata lists the queues registered on this executor.
+	QueueMetadata() []models.QueueConfig
+	// Deactivate stops this executor's scheduler so it winds down gracefully.
+	Deactivate()
+}
 
 const (
 	// HTTP handler patterns with verbs
-	_HEALTHCHECK_PATTERN              = "GET /dbos-healthz"
-	_WORKFLOW_RECOVERY_PATTERN        = "POST /dbos-workflow-recovery"
-	_DEACTIVATE_PATTERN               = "GET /deactivate"
-	_WORKFLOW_QUEUES_METADATA_PATTERN = "GET /dbos-workflow-queues-metadata"
-	_GARBAGE_COLLECT_PATTERN          = "POST /dbos-garbage-collect"
-	_GLOBAL_TIMEOUT_PATTERN           = "POST /dbos-global-timeout"
-	_QUEUED_WORKFLOWS_PATTERN         = "POST /queues"
-	_WORKFLOWS_PATTERN                = "POST /workflows"
-	_WORKFLOW_PATTERN                 = "GET /workflows/{id}"
-	_WORKFLOW_STEPS_PATTERN           = "GET /workflows/{id}/steps"
-	_WORKFLOW_CANCEL_PATTERN          = "POST /workflows/{id}/cancel"
-	_WORKFLOW_RESUME_PATTERN          = "POST /workflows/{id}/resume"
-	_WORKFLOW_FORK_PATTERN            = "POST /workflows/{id}/fork"
-	_CONDUCTOR_PATTERN                = "GET /conductor"
+	HealthcheckPattern            = "GET /dbos-healthz"
+	WorkflowRecoveryPattern       = "POST /dbos-workflow-recovery"
+	DeactivatePattern             = "GET /deactivate"
+	WorkflowQueuesMetadataPattern = "GET /dbos-workflow-queues-metadata"
+	GarbageCollectPattern         = "POST /dbos-garbage-collect"
+	GlobalTimeoutPattern          = "POST /dbos-global-timeout"
+	QueuedWorkflowsPattern        = "POST /queues"
+	WorkflowsPattern              = "POST /workflows"
+	WorkflowPattern               = "GET /workflows/{id}"
+	WorkflowStepsPattern          = "GET /workflows/{id}/steps"
+	WorkflowCancelPattern         = "POST /workflows/{id}/cancel"
+	WorkflowResumePattern         = "POST /workflows/{id}/resume"
+	WorkflowForkPattern           = "POST /workflows/{id}/fork"
+	ConductorPattern              = "GET /conductor"
 
 	_ADMIN_SERVER_READ_HEADER_TIMEOUT = 5 * time.Second
 )
@@ -53,8 +72,8 @@ func (s *stringOrSlice) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// listWorkflowsRequest represents the request structure for listing workflows
-type listWorkflowsRequest struct {
+// ListWorkflowsRequest represents the request structure for listing workflows
+type ListWorkflowsRequest struct {
 	WorkflowUUIDs      []string      `json:"workflow_uuids"`      // Filter by specific workflow IDs
 	AuthenticatedUser  *string       `json:"authenticated_user"`  // Filter by user who initiated the workflow
 	StartTime          *time.Time    `json:"start_time"`          // Filter workflows created after this time (RFC3339 format)
@@ -71,59 +90,59 @@ type listWorkflowsRequest struct {
 	QueueName          *string       `json:"queue_name"`          // Filter by queue name (for queued workflows)
 }
 
-// buildOptions converts the request struct into a slice of ListWorkflowsOption
-func (req *listWorkflowsRequest) toListWorkflowsOptions() []ListWorkflowsOption {
-	var opts []ListWorkflowsOption
+// buildOptions converts the request struct into a slice of models.ListWorkflowsOption
+func (req *ListWorkflowsRequest) ToListWorkflowsOptions() []models.ListWorkflowsOption {
+	var opts []models.ListWorkflowsOption
 	if len(req.WorkflowUUIDs) > 0 {
-		opts = append(opts, WithWorkflowIDs(req.WorkflowUUIDs))
+		opts = append(opts, models.WithWorkflowIDs(req.WorkflowUUIDs))
 	}
 	if req.AuthenticatedUser != nil {
-		opts = append(opts, WithUser(*req.AuthenticatedUser))
+		opts = append(opts, models.WithUser(*req.AuthenticatedUser))
 	}
 	if req.StartTime != nil {
-		opts = append(opts, WithStartTime(*req.StartTime))
+		opts = append(opts, models.WithStartTime(*req.StartTime))
 	}
 	if req.EndTime != nil {
-		opts = append(opts, WithEndTime(*req.EndTime))
+		opts = append(opts, models.WithEndTime(*req.EndTime))
 	}
 	if len(req.Status) > 0 {
-		statuses := make([]WorkflowStatusType, len(req.Status))
+		statuses := make([]models.WorkflowStatusType, len(req.Status))
 		for i, s := range req.Status {
-			statuses[i] = WorkflowStatusType(s)
+			statuses[i] = models.WorkflowStatusType(s)
 		}
-		opts = append(opts, WithStatus(statuses))
+		opts = append(opts, models.WithStatus(statuses))
 	}
 	if req.ApplicationVersion != nil {
-		opts = append(opts, WithAppVersion(*req.ApplicationVersion))
+		opts = append(opts, models.WithAppVersion(*req.ApplicationVersion))
 	}
 	if req.WorkflowName != nil {
-		opts = append(opts, WithName(*req.WorkflowName))
+		opts = append(opts, models.WithName(*req.WorkflowName))
 	}
 	if req.Limit != nil {
-		opts = append(opts, WithLimit(*req.Limit))
+		opts = append(opts, models.WithLimit(*req.Limit))
 	}
 	if req.Offset != nil {
-		opts = append(opts, WithOffset(*req.Offset))
+		opts = append(opts, models.WithOffset(*req.Offset))
 	}
 	if req.SortDesc != nil {
-		opts = append(opts, WithSortDesc())
+		opts = append(opts, models.WithSortDesc())
 	}
 	if req.WorkflowIDPrefix != nil {
-		opts = append(opts, WithWorkflowIDPrefix(*req.WorkflowIDPrefix))
+		opts = append(opts, models.WithWorkflowIDPrefix(*req.WorkflowIDPrefix))
 	}
 	if req.LoadInput != nil {
-		opts = append(opts, WithLoadInput(*req.LoadInput))
+		opts = append(opts, models.WithLoadInput(*req.LoadInput))
 	}
 	if req.LoadOutput != nil {
-		opts = append(opts, WithLoadOutput(*req.LoadOutput))
+		opts = append(opts, models.WithLoadOutput(*req.LoadOutput))
 	}
 	if req.QueueName != nil {
-		opts = append(opts, WithQueueName(*req.QueueName))
+		opts = append(opts, models.WithQueueName(*req.QueueName))
 	}
 	return opts
 }
 
-type adminServer struct {
+type Server struct {
 	server        *http.Server
 	logger        *slog.Logger
 	port          int
@@ -131,9 +150,9 @@ type adminServer struct {
 	wg            sync.WaitGroup
 }
 
-// toListWorkflowResponse converts a WorkflowStatus to a map with all time fields in UTC
+// toListWorkflowResponse converts a models.WorkflowStatus to a map with all time fields in UTC
 // not super ergonomic but the DBOS console excepts unix timestamps
-func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
+func toListWorkflowResponse(ws models.WorkflowStatus) (map[string]any, error) {
 	result := map[string]any{
 		"WorkflowUUID":       ws.ID,
 		"Status":             ws.Status,
@@ -200,97 +219,87 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 	return result, nil
 }
 
-func newAdminServer(ctx *dbosContext, port int) *adminServer {
-	as := &adminServer{
-		logger: ctx.logger,
+func New(exec Executor, logger *slog.Logger, port int) *Server {
+	as := &Server{
+		logger: logger,
 		port:   port,
 	}
 
 	mux := http.NewServeMux()
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _HEALTHCHECK_PATTERN)
-	mux.HandleFunc(_HEALTHCHECK_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", HealthcheckPattern)
+	mux.HandleFunc(HealthcheckPattern, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte(`{"status":"healthy"}`))
 		if err != nil {
-			ctx.logger.Error("Error writing health check response", "error", err)
+			logger.Error("Error writing health check response", "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_RECOVERY_PATTERN)
-	mux.HandleFunc(_WORKFLOW_RECOVERY_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", WorkflowRecoveryPattern)
+	mux.HandleFunc(WorkflowRecoveryPattern, func(w http.ResponseWriter, r *http.Request) {
 		var executorIDs []string
 		if err := json.NewDecoder(r.Body).Decode(&executorIDs); err != nil {
 			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 			return
 		}
 
-		ctx.logger.Info("Recovering workflows for executors", "executors", executorIDs)
+		logger.Info("Recovering workflows for executors", "executors", executorIDs)
 
-		handles, err := recoverPendingWorkflows(ctx, executorIDs)
+		workflowIDs, err := exec.RecoverPendingWorkflows(r.Context(), executorIDs)
 		if err != nil {
-			ctx.logger.Error("Error recovering workflows", "error", err)
+			logger.Error("Error recovering workflows", "error", err)
 			http.Error(w, fmt.Sprintf("Recovery failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		// Extract workflow IDs from handles
-		workflowIDs := make([]string, len(handles))
-		for i, handle := range handles {
-			workflowIDs[i] = handle.GetWorkflowID()
-		}
-
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(workflowIDs); err != nil {
-			ctx.logger.Error("Error encoding response", "error", err)
+			logger.Error("Error encoding response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 			return
 		}
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _DEACTIVATE_PATTERN)
-	mux.HandleFunc(_DEACTIVATE_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", DeactivatePattern)
+	mux.HandleFunc(DeactivatePattern, func(w http.ResponseWriter, r *http.Request) {
 		if as.isDeactivated.CompareAndSwap(0, 1) {
-			ctx.logger.Info("Deactivating DBOS executor", "executor_id", ctx.executorID, "app_version", ctx.applicationVersion)
-			// Stop the workflow scheduler. Note we don't wait for running jobs to complete
-			if ctx.workflowScheduler != nil {
-				ctx.workflowScheduler.Stop()
-			}
+			exec.Deactivate()
 		}
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("deactivated")); err != nil {
-			ctx.logger.Error("Error writing deactivate response", "error", err)
+			logger.Error("Error writing deactivate response", "error", err)
 		}
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _CONDUCTOR_PATTERN)
-	mux.HandleFunc(_CONDUCTOR_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", ConductorPattern)
+	mux.HandleFunc(ConductorPattern, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte(`{"status":true}`)); err != nil {
-			ctx.logger.Error("Error writing conductor response", "error", err)
+			logger.Error("Error writing conductor response", "error", err)
 		}
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_QUEUES_METADATA_PATTERN)
-	mux.HandleFunc(_WORKFLOW_QUEUES_METADATA_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-		queueMetadataArray := ctx.queueRunner.listQueues()
+	logger.Debug("Registering admin server endpoint", "pattern", WorkflowQueuesMetadataPattern)
+	mux.HandleFunc(WorkflowQueuesMetadataPattern, func(w http.ResponseWriter, r *http.Request) {
+		queueMetadataArray := exec.QueueMetadata()
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(queueMetadataArray); err != nil {
-			ctx.logger.Error("Error encoding queue metadata response", "error", err)
+			logger.Error("Error encoding queue metadata response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 			return
 		}
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _GARBAGE_COLLECT_PATTERN)
-	mux.HandleFunc(_GARBAGE_COLLECT_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", GarbageCollectPattern)
+	mux.HandleFunc(GarbageCollectPattern, func(w http.ResponseWriter, r *http.Request) {
 		var inputs struct {
 			CutoffEpochTimestampMs *int64 `json:"cutoff_epoch_timestamp_ms"`
 			RowsThreshold          *int   `json:"rows_threshold"`
@@ -304,7 +313,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		// TODO: Implement garbage collection
 		// err := garbageCollect(ctx, inputs.CutoffEpochTimestampMs, inputs.RowsThreshold)
 		// if err != nil {
-		//     ctx.logger.Error("Garbage collection failed", "error", err)
+		//     logger.Error("Garbage collection failed", "error", err)
 		//     http.Error(w, fmt.Sprintf("Garbage collection failed: %v", err), http.StatusInternalServerError)
 		//     return
 		// }
@@ -312,8 +321,8 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _GLOBAL_TIMEOUT_PATTERN)
-	mux.HandleFunc(_GLOBAL_TIMEOUT_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", GlobalTimeoutPattern)
+	mux.HandleFunc(GlobalTimeoutPattern, func(w http.ResponseWriter, r *http.Request) {
 		var inputs struct {
 			CutoffEpochTimestampMs int64 `json:"cutoff_epoch_timestamp_ms"`
 		}
@@ -324,13 +333,11 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 
 		cutoffTime := time.UnixMilli(inputs.CutoffEpochTimestampMs)
-		ctx.logger.Info("Global timeout request", "cutoff_time", cutoffTime)
+		logger.Info("Global timeout request", "cutoff_time", cutoffTime)
 
-		err := sysdb.Retry(ctx, func() error {
-			return ctx.systemDB.CancelAllBefore(ctx, cutoffTime)
-		}, sysdb.WithRetrierLogger(ctx.logger))
+		err := exec.CancelAllBefore(r.Context(), cutoffTime)
 		if err != nil {
-			ctx.logger.Error("Global timeout failed", "error", err)
+			logger.Error("Global timeout failed", "error", err)
 			http.Error(w, fmt.Sprintf("Global timeout failed: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -338,9 +345,9 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOWS_PATTERN)
-	mux.HandleFunc(_WORKFLOWS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-		var req listWorkflowsRequest
+	logger.Debug("Registering admin server endpoint", "pattern", WorkflowsPattern)
+	mux.HandleFunc(WorkflowsPattern, func(w http.ResponseWriter, r *http.Request) {
+		var req ListWorkflowsRequest
 		if r.ContentLength > 0 {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, fmt.Sprintf("Invalid JSON input: %v", err), http.StatusBadRequest)
@@ -348,9 +355,9 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			}
 		}
 
-		workflows, err := ListWorkflows(ctx, req.toListWorkflowsOptions()...)
+		workflows, err := exec.ListWorkflows(r.Context(), req.ToListWorkflowsOptions()...)
 		if err != nil {
-			ctx.logger.Error("Failed to list workflows", "error", err)
+			logger.Error("Failed to list workflows", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to list workflows: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -360,7 +367,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		for i, wf := range workflows {
 			responseWorkflows[i], err = toListWorkflowResponse(wf)
 			if err != nil {
-				ctx.logger.Error("Error transforming workflow response", "error", err)
+				logger.Error("Error transforming workflow response", "error", err)
 				http.Error(w, fmt.Sprintf("Failed to format workflow response: %v", err), http.StatusInternalServerError)
 				return
 			}
@@ -368,20 +375,20 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(responseWorkflows); err != nil {
-			ctx.logger.Error("Error encoding workflows response", "error", err)
+			logger.Error("Error encoding workflows response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_PATTERN)
-	mux.HandleFunc(_WORKFLOW_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", WorkflowPattern)
+	mux.HandleFunc(WorkflowPattern, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
 
 		// Use ListWorkflows with the specific workflow ID filter
-		opts := []ListWorkflowsOption{WithWorkflowIDs([]string{workflowID})}
-		workflows, err := ListWorkflows(ctx, opts...)
+		opts := []models.ListWorkflowsOption{models.WithWorkflowIDs([]string{workflowID})}
+		workflows, err := exec.ListWorkflows(r.Context(), opts...)
 		if err != nil {
-			ctx.logger.Error("Failed to get workflow", "workflow_id", workflowID, "error", err)
+			logger.Error("Failed to get workflow", "workflow_id", workflowID, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to get workflow: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -395,21 +402,21 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		// Return the first (and only) workflow, transformed to UTC
 		workflow, err := toListWorkflowResponse(workflows[0])
 		if err != nil {
-			ctx.logger.Error("Error transforming workflow response", "error", err)
+			logger.Error("Error transforming workflow response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to format workflow response: %v", err), http.StatusInternalServerError)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(workflow); err != nil {
-			ctx.logger.Error("Error encoding workflow response", "error", err)
+			logger.Error("Error encoding workflow response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _QUEUED_WORKFLOWS_PATTERN)
-	mux.HandleFunc(_QUEUED_WORKFLOWS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
-		var req listWorkflowsRequest
+	logger.Debug("Registering admin server endpoint", "pattern", QueuedWorkflowsPattern)
+	mux.HandleFunc(QueuedWorkflowsPattern, func(w http.ResponseWriter, r *http.Request) {
+		var req ListWorkflowsRequest
 		if r.ContentLength > 0 {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, fmt.Sprintf("Invalid JSON input: %v", err), http.StatusBadRequest)
@@ -417,14 +424,14 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			}
 		}
 
-		filters := req.toListWorkflowsOptions()
+		filters := req.ToListWorkflowsOptions()
 		if len(req.Status) == 0 {
-			filters = append(filters, WithStatus([]WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending, WorkflowStatusDelayed}))
+			filters = append(filters, models.WithStatus([]models.WorkflowStatusType{models.WorkflowStatusEnqueued, models.WorkflowStatusPending, models.WorkflowStatusDelayed}))
 		}
-		filters = append(filters, WithQueuesOnly())
-		workflows, err := ListWorkflows(ctx, filters...)
+		filters = append(filters, models.WithQueuesOnly())
+		workflows, err := exec.ListWorkflows(r.Context(), filters...)
 		if err != nil {
-			ctx.logger.Error("Failed to list queued workflows", "error", err)
+			logger.Error("Failed to list queued workflows", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to list queued workflows: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -434,7 +441,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		for i, wf := range workflows {
 			responseWorkflows[i], err = toListWorkflowResponse(wf)
 			if err != nil {
-				ctx.logger.Error("Error transforming workflow response", "error", err)
+				logger.Error("Error transforming workflow response", "error", err)
 				http.Error(w, fmt.Sprintf("Failed to format workflow response: %v", err), http.StatusInternalServerError)
 				return
 			}
@@ -442,18 +449,18 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(responseWorkflows); err != nil {
-			ctx.logger.Error("Error encoding queued workflows response", "error", err)
+			logger.Error("Error encoding queued workflows response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_STEPS_PATTERN)
-	mux.HandleFunc(_WORKFLOW_STEPS_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", WorkflowStepsPattern)
+	mux.HandleFunc(WorkflowStepsPattern, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
 
-		steps, err := GetWorkflowSteps(ctx, workflowID)
+		steps, err := exec.GetWorkflowSteps(r.Context(), workflowID)
 		if err != nil {
-			ctx.logger.Error("Failed to list workflow steps", "workflow_id", workflowID, "error", err)
+			logger.Error("Failed to list workflow steps", "workflow_id", workflowID, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to list steps: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -493,7 +500,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 				errStr := step.Error.Error()
 				bytes, err := json.Marshal(errStr)
 				if err != nil {
-					ctx.logger.Error("Failed to marshal step error", "error", err)
+					logger.Error("Failed to marshal step error", "error", err)
 					http.Error(w, fmt.Sprintf("Failed to format step error: %v", err), http.StatusInternalServerError)
 					return
 				}
@@ -505,19 +512,19 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(formattedSteps); err != nil {
-			ctx.logger.Error("Error encoding steps response", "error", err)
+			logger.Error("Error encoding steps response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_CANCEL_PATTERN)
-	mux.HandleFunc(_WORKFLOW_CANCEL_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", WorkflowCancelPattern)
+	mux.HandleFunc(WorkflowCancelPattern, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
-		ctx.logger.Info("Cancelling workflow", "workflow_id", workflowID)
+		logger.Info("Cancelling workflow", "workflow_id", workflowID)
 
-		err := ctx.CancelWorkflow(ctx, workflowID)
+		err := exec.CancelWorkflow(r.Context(), workflowID)
 		if err != nil {
-			ctx.logger.Error("Failed to cancel workflow", "workflow_id", workflowID, "error", err)
+			logger.Error("Failed to cancel workflow", "workflow_id", workflowID, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to cancel workflow: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -525,14 +532,14 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_RESUME_PATTERN)
-	mux.HandleFunc(_WORKFLOW_RESUME_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", WorkflowResumePattern)
+	mux.HandleFunc(WorkflowResumePattern, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
-		ctx.logger.Info("Resuming workflow", "workflow_id", workflowID)
+		logger.Info("Resuming workflow", "workflow_id", workflowID)
 
-		_, err := ctx.ResumeWorkflow(ctx, workflowID)
+		err := exec.ResumeWorkflow(r.Context(), workflowID)
 		if err != nil {
-			ctx.logger.Error("Failed to resume workflow", "workflow_id", workflowID, "error", err)
+			logger.Error("Failed to resume workflow", "workflow_id", workflowID, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to resume workflow: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -540,8 +547,8 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_FORK_PATTERN)
-	mux.HandleFunc(_WORKFLOW_FORK_PATTERN, func(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Registering admin server endpoint", "pattern", WorkflowForkPattern)
+	mux.HandleFunc(WorkflowForkPattern, func(w http.ResponseWriter, r *http.Request) {
 		workflowID := r.PathValue("id")
 		var data struct {
 			StartStep          *uint   `json:"start_step"`
@@ -555,7 +562,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		}
 
 		// Prepare fork input
-		input := ForkWorkflowInput{
+		input := models.ForkWorkflowInput{
 			OriginalWorkflowID: workflowID,
 		}
 		if data.StartStep != nil {
@@ -568,22 +575,22 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			input.ApplicationVersion = *data.ApplicationVersion
 		}
 
-		ctx.logger.Info("Forking workflow", "workflow_id", workflowID, "start_step", input.StartStep)
+		logger.Info("Forking workflow", "workflow_id", workflowID, "start_step", input.StartStep)
 
-		handle, err := ctx.ForkWorkflow(ctx, input)
+		newWorkflowID, err := exec.ForkWorkflow(r.Context(), input)
 		if err != nil {
-			ctx.logger.Error("Failed to fork workflow", "workflow_id", workflowID, "error", err)
+			logger.Error("Failed to fork workflow", "workflow_id", workflowID, "error", err)
 			http.Error(w, fmt.Sprintf("Failed to fork workflow: %v", err), http.StatusInternalServerError)
 			return
 		}
 
 		response := map[string]string{
-			"workflow_id": handle.GetWorkflowID(),
+			"workflow_id": newWorkflowID,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(response); err != nil {
-			ctx.logger.Error("Error encoding fork response", "error", err)
+			logger.Error("Error encoding fork response", "error", err)
 			http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 		}
 	})
@@ -598,7 +605,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	return as
 }
 
-func (as *adminServer) Start() error {
+func (as *Server) Start() error {
 	as.logger.Info("Starting admin server", "port", as.port)
 
 	as.wg.Add(1)
@@ -612,7 +619,7 @@ func (as *adminServer) Start() error {
 	return nil
 }
 
-func (as *adminServer) Shutdown(timeout time.Duration) error {
+func (as *Server) Shutdown(timeout time.Duration) error {
 	as.logger.Info("Shutting down admin server")
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

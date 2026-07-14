@@ -20,6 +20,7 @@ type (
 	WorkflowSchedule       = models.WorkflowSchedule
 	ScheduleStatus         = models.ScheduleStatus
 	ScheduledWorkflowInput = models.ScheduledWorkflowInput
+	StepInfo               = models.StepInfo
 	RateLimiter            = models.RateLimiter
 )
 

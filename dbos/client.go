@@ -556,9 +556,7 @@ func ClientRetrieveWorkflow[R any](c Client, workflowID string) (WorkflowHandle[
 
 // WithChildren enables cancellation for children workflows
 func WithCancelChildren() CancelWorkflowOptions {
-	return func(cwo *models.CancelWorkflowInput) {
-		cwo.CancelChildren = true
-	}
+	return models.WithCancelChildren()
 }
 
 // models.CancelWorkflowInput holds configuration parameter for cancelling workflows.

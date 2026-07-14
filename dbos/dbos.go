@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/adminserver"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
@@ -231,7 +232,7 @@ type dbosContext struct {
 	launched atomic.Bool
 
 	systemDB    sysdb.SystemDatabase
-	adminServer *adminServer
+	adminServer *adminserver.Server
 	config      *Config
 
 	// Queue runner
@@ -727,7 +728,7 @@ func (c *dbosContext) Launch() error {
 
 	// Start the admin server if enabled
 	if c.config.AdminServer {
-		adminServer := newAdminServer(c, c.config.AdminServerPort)
+		adminServer := adminserver.New(executorAdapter{ctx: c}, c.logger, c.config.AdminServerPort)
 		err := adminServer.Start()
 		if err != nil {
 			c.logger.Error("Failed to start admin server", "error", err)
