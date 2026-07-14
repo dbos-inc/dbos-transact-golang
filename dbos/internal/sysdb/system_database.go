@@ -489,7 +489,7 @@ func ShouldMigrate(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 	q := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", pgx.Identifier{schema}.Sanitize(), MigrationTable)
 	err = pool.QueryRow(ctx, q).Scan(&currentVersion)
 	if err != nil && err != pgx.ErrNoRows {
-		return false, fmt.Errorf("failed to get current migration Version: %v", err)
+		return false, fmt.Errorf("failed to get current migration version: %v", err)
 	}
 	migrations := BuildMigrations(schema, isCockroach)
 	return currentVersion < migrations[len(migrations)-1].Version, nil
@@ -591,7 +591,7 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 	var currentVersion int64
 	q := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", sanitizedSchema, MigrationTable)
 	if err := tx.QueryRow(ctx, q).Scan(&currentVersion); err != nil && err != pgx.ErrNoRows {
-		return fmt.Errorf("failed to get current migration Version: %v", err)
+		return fmt.Errorf("failed to get current migration version: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit migration setup transaction: %v", err)
@@ -705,7 +705,7 @@ type NewSystemDatabaseInput struct {
 	// EncodeScheduledInput serializes the input of a schedule-created workflow
 	// (backfill/trigger). Injected by the caller to keep serialization concerns
 	// out of the system database.
-	EncodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (encoded *string, Serialization string, err error)
+	EncodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (encoded *string, serialization string, err error)
 }
 
 // New creates a new SystemDatabase instance and runs migrations
@@ -4317,7 +4317,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	case errors.Is(err, &models.DBOSError{Code: models.NoApplicationVersions}):
 		// No versions registered yet: treat this worker as the latest.
 	default:
-		return nil, fmt.Errorf("failed to query latest application Version: %w", err)
+		return nil, fmt.Errorf("failed to query latest application version: %w", err)
 	}
 
 	versionClause := `application_version = $3`
@@ -5272,7 +5272,7 @@ func (s *SysDB) CreateApplicationVersion(ctx context.Context, versionName string
 	`, s.dialect.SchemaPrefix(s.schema))
 	nowMs := time.Now().UnixMilli()
 	if _, err := s.pool.Exec(ctx, query, uuid.New().String(), versionName, nowMs, nowMs); err != nil {
-		return fmt.Errorf("failed to create application Version: %w", err)
+		return fmt.Errorf("failed to create application version: %w", err)
 	}
 	return nil
 }
@@ -5305,7 +5305,7 @@ func (s *SysDB) ListApplicationVersions(ctx context.Context) ([]VersionInfo, err
 	for rows.Next() {
 		var v VersionInfo
 		if err := rows.Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan application Version: %w", err)
+			return nil, fmt.Errorf("failed to scan application version: %w", err)
 		}
 		versions = append(versions, v)
 	}
@@ -5332,7 +5332,7 @@ func (s *SysDB) GetLatestApplicationVersion(ctx context.Context, tx Tx) (*Versio
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, models.NewNoApplicationVersionsError()
 		}
-		return nil, fmt.Errorf("failed to get latest application Version: %w", err)
+		return nil, fmt.Errorf("failed to get latest application version: %w", err)
 	}
 	return &v, nil
 }

@@ -192,7 +192,7 @@ func RunSqliteMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) e
 	if err := db.QueryRowContext(ctx,
 		fmt.Sprintf(`SELECT version FROM %s LIMIT 1`, MigrationTable)).Scan(&currentVersion); err != nil &&
 		!errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("failed to read current migration Version: %v", err)
+		return fmt.Errorf("failed to read current migration version: %v", err)
 	}
 
 	for _, m := range migrations {

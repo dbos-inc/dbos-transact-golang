@@ -245,7 +245,7 @@ func (c *Conductor) run() {
 		}
 
 		// Read message (will timeout based on read deadline set in connect)
-		MessageType, message, err := c.conn.ReadMessage()
+		messageType, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				c.logger.Warn("Unexpected WebSocket close", "error", err)
@@ -260,8 +260,8 @@ func (c *Conductor) run() {
 		}
 
 		// Only accept text messages
-		if MessageType != websocket.TextMessage {
-			c.logger.Warn("Received unexpected message type, forcing reconnection", "type", MessageType)
+		if messageType != websocket.TextMessage {
+			c.logger.Warn("Received unexpected message type, forcing reconnection", "type", messageType)
 			c.closeConn()
 			continue
 		}
@@ -270,7 +270,7 @@ func (c *Conductor) run() {
 		if err := c.handleMessage(message); err != nil {
 			c.logger.Error("Failed to handle message", "error", err)
 		}
-		c.logger.Debug("Handled message", "message", MessageType, "latency_us", time.Since(ht).Microseconds())
+		c.logger.Debug("Handled message", "message", messageType, "latency_us", time.Since(ht).Microseconds())
 	}
 }
 
