@@ -305,7 +305,7 @@ func (c *dbosContext) ClearRegistries() {
 	c.workflowRegistry.Clear()
 	c.workflowCustomNametoFQN.Clear()
 	for name := range c.queueRunner.workflowQueueRegistry {
-		if name != _DBOS_INTERNAL_QUEUE_NAME {
+		if name != models.InternalQueueName {
 			delete(c.queueRunner.workflowQueueRegistry, name)
 		}
 	}
@@ -611,7 +611,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	// Set global logger
 	initExecutor.logger = config.Logger
-	initExecutor.logger.Info("Initializing DBOS context", "app_name", config.AppName, "dbos_version", models.DBOSVersion())
+	initExecutor.logger.Info("Initializing DBOS context", "app_name", config.AppName, "dbos_version", conductor.DBOSVersion())
 
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion
@@ -648,7 +648,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	// Initialize the queue runner and register DBOS internal queue
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
-	NewWorkflowQueue(initExecutor, _DBOS_INTERNAL_QUEUE_NAME)
+	NewWorkflowQueue(initExecutor, models.InternalQueueName)
 
 	// Register the any,any internal debouncer workflow so it's always available for execution
 	// This allows a client to debounce workflow and the server side to run them, even without knowing the actual workflow types

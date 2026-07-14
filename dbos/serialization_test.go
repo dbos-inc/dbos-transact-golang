@@ -993,6 +993,24 @@ var (
 )
 
 // TestGobSerializer tests the built-in gob serializer through all workflow paths.
+func TestGobScheduledWorkflowInput(t *testing.T) {
+	// ScheduledWorkflowInput is gob-registered by the SDK itself; a gob
+	// serializer must round-trip it without any user-side registration.
+	ser := NewGobSerializer()
+	in := ScheduledWorkflowInput{
+		ScheduledTime: time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC),
+		Context:       "schedule-context",
+	}
+	encoded, err := ser.Encode(in)
+	require.NoError(t, err)
+	decoded, err := ser.Decode(encoded)
+	require.NoError(t, err)
+	out, ok := decoded.(ScheduledWorkflowInput)
+	require.True(t, ok, "decoded value has type %T", decoded)
+	require.True(t, out.ScheduledTime.Equal(in.ScheduledTime))
+	require.Equal(t, in.Context, out.Context)
+}
+
 func TestGobSerializer(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: NewGobSerializer()})
 
@@ -2475,6 +2493,16 @@ func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
 		assert.Equal(t, orig.Message, de.Message)
 		assert.Equal(t, orig.Error(), got.Error())
 		require.ErrorIs(t, got, &DBOSError{Code: QueueDeduplicated})
+	})
+
+	t.Run("GobWireNamePinned", func(t *testing.T) {
+		// Stored errors reference the registered gob name; it must stay
+		// "*dbos.DBOSError" (see the RegisterName in serialization.go) or
+		// errors persisted by earlier versions become undecodable.
+		s := serializeWorkflowError(models.NewQueueDeduplicatedError("wf-1", "q-1", "dedup-1"), "DBOS_JSON")
+		raw, err := base64.StdEncoding.DecodeString(s)
+		require.NoError(t, err)
+		require.Contains(t, string(raw), "*dbos.DBOSError")
 	})
 
 	t.Run("PlainErrorGoToGo", func(t *testing.T) {

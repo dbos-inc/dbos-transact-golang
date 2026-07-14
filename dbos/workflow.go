@@ -538,7 +538,7 @@ func registerScheduledWorkflow(ctx DBOSContext, workflowFQN, customName string, 
 		wfID := fmt.Sprintf("sched-%s-%s", name, scheduledTime)
 		opts := []WorkflowOption{
 			WithWorkflowID(wfID),
-			WithQueue(_DBOS_INTERNAL_QUEUE_NAME),
+			WithQueue(models.InternalQueueName),
 			withWorkflowName(workflowFQN),
 		}
 		return ctx.RunWorkflow(ctx, fn, scheduledTime, opts...)
@@ -4106,8 +4106,6 @@ func DeleteWorkflows(ctx DBOSContext, workflowIDs []string, opts ...DeleteWorkfl
 	return ctx.DeleteWorkflows(ctx, workflowIDs, opts...)
 }
 
-// ResumeWorkflowInput holds configuration parameters for resuming workflows.
-
 // WithResumeQueue re-enqueues the resumed workflow(s) on the specified queue instead of the internal queue.
 func WithResumeQueue(queueName string) ResumeWorkflowOption {
 	return models.WithResumeQueue(queueName)
@@ -4410,8 +4408,6 @@ func ForkWorkflows[R any](ctx DBOSContext, input ForkWorkflowsInput) ([]Workflow
 	}
 	return typedHandles, nil
 }
-
-// ListWorkflowsInput holds configuration parameters for listing workflows
 
 // WithWorkflowIDs filters workflows by the specified workflow IDs.
 func WithWorkflowIDs(workflowIDs []string) ListWorkflowsOption {
@@ -5233,8 +5229,6 @@ func WithScheduleWorkflowClassName(name string) CreateScheduleOption {
 	return func(o *createScheduleOptions) { o.workflowClassName = name }
 }
 
-// ListSchedulesInput holds configuration parameters for listing schedules.
-
 // CreateSchedule creates a new schedule for a workflow. The reconciler loop
 // picks the new schedule up on its next tick and installs it in the cron
 // scheduler. The fn must already be registered via RegisterWorkflow.
@@ -5296,7 +5290,7 @@ func (c *dbosContext) ApplySchedules(_ DBOSContext, schedules []ApplySchedulesRe
 
 			queueName := req.QueueName
 			if queueName == "" {
-				queueName = _DBOS_INTERNAL_QUEUE_NAME
+				queueName = models.InternalQueueName
 			}
 
 			// Delete any existing schedule with this name, then create the new one.

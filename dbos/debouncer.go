@@ -212,7 +212,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 	for {
 		// internalDebouncerWF[P, R] is a generic workflow, so its dynamic name resolution will yield a different name than its registration name
 		// This is because the function passed through as an argument can have a different reflection name
-		_, err := RunWorkflow(ctx, internalDebouncerWF[P, R], dInput, WithQueue(_DBOS_INTERNAL_QUEUE_NAME), WithDeduplicationID(key), withWorkflowName(d.internalDebouncerFQN))
+		_, err := RunWorkflow(ctx, internalDebouncerWF[P, R], dInput, WithQueue(models.InternalQueueName), WithDeduplicationID(key), withWorkflowName(d.internalDebouncerFQN))
 		if err == nil {
 			return newWorkflowPollingHandle[R](ctx, dInput.TargetWorkflowID), nil
 		}
@@ -348,7 +348,7 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 	for {
 		// Try to enqueue the internal debouncer workflow
 		// Use the package-level Enqueue function which handles encoding automatically
-		_, err := Enqueue[debouncerInput[P], R](dc.Client, _DBOS_INTERNAL_QUEUE_NAME, dc.internalDebouncerFQN, dInput, WithEnqueueDeduplicationID(key))
+		_, err := Enqueue[debouncerInput[P], R](dc.Client, models.InternalQueueName, dc.internalDebouncerFQN, dInput, WithEnqueueDeduplicationID(key))
 		if err == nil {
 			return newWorkflowPollingHandle[R](dc.Client.(*client).dbosCtx, dInput.TargetWorkflowID), nil
 		}

@@ -153,7 +153,7 @@ func TestAdminServer(t *testing.T) {
 					// Verify internal queue fields
 					foundInternalQueue := false
 					for _, queue := range queueMetadata {
-						if queue.Name == _DBOS_INTERNAL_QUEUE_NAME { // Internal queue name
+						if queue.Name == models.InternalQueueName { // Internal queue name
 							foundInternalQueue = true
 							assert.Nil(t, queue.GlobalConcurrency, "Expected internal queue to have no concurrency limit")
 							assert.Nil(t, queue.WorkerConcurrency, "Expected internal queue to have no worker concurrency limit")

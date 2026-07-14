@@ -336,9 +336,14 @@ func (e *PortableWorkflowError) Error() string {
 func init() {
 	// Register the DBOS error types so they can be gob-encoded with their concrete
 	// type preserved on the Go <-> Go error path (see serializeWorkflowError).
-	gob.Register(&DBOSError{})
+	// DBOSError must keep the wire name from when it was defined in this package:
+	// stored errors were encoded under it, and decode looks types up by name.
+	gob.RegisterName("*dbos.DBOSError", &DBOSError{})
 	gob.Register(&PortableWorkflowError{})
 	gob.Register(time.Time{})
+	// Register the scheduled workflow input so gob-serialized schedule firings
+	// round-trip without users having to register it themselves.
+	gob.Register(ScheduledWorkflowInput{})
 }
 
 // serializeWorkflowError encodes an error for DB storage.

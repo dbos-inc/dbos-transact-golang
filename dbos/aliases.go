@@ -107,20 +107,6 @@ type (
 // ErrNoRows is returned by Row.Scan when no row matched.
 var ErrNoRows = sysdb.ErrNoRows
 
-// WorkflowSendInput and WorkflowSetEventInput are carriers for the system
-// database's send/setEvent operations. Kept for API compatibility; the
-// internal system database uses its own representation.
-type WorkflowSendInput struct {
-	DestinationID string
-	Message       any
-	Topic         string
-}
-
-type WorkflowSetEventInput struct {
-	Key     string
-	Message any
-}
-
 // Option and input types (internal/models).
 type (
 	ListWorkflowsOption        = models.ListWorkflowsOption

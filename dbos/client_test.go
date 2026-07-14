@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -566,7 +567,7 @@ func TestCancelResume(t *testing.T) {
 		assert.Equal(t, WorkflowStatusSuccess, finalStatus.Status, "expected final workflow status to be SUCCESS")
 
 		// After resume, the queue name should change to the internal queue name
-		assert.Equal(t, _DBOS_INTERNAL_QUEUE_NAME, finalStatus.QueueName, "expected queue name to be %s", _DBOS_INTERNAL_QUEUE_NAME)
+		assert.Equal(t, models.InternalQueueName, finalStatus.QueueName, "expected queue name to be %s", models.InternalQueueName)
 
 		// Resume the workflow again - should not run again
 		resumeAgainHandle, err := client.ResumeWorkflow(workflowID)
@@ -1637,9 +1638,9 @@ func TestDebouncerClient(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Set internal queue polling interval to 10ms for faster tests
-	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
+	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName]
 	internalQueue.basePollingInterval = 10 * time.Millisecond
-	serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME] = internalQueue
+	serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName] = internalQueue
 
 	// Register test workflow with a custom name
 	debounceTestWorkflow := func(ctx DBOSContext, input string) (string, error) {
@@ -1840,9 +1841,9 @@ func TestDebouncerClientConfiguredInstance(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Set internal queue polling interval to 10ms for faster tests
-	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
+	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName]
 	internalQueue.basePollingInterval = 10 * time.Millisecond
-	serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME] = internalQueue
+	serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName] = internalQueue
 
 	// Two configured instances of the same workflow method, sharing a custom name
 	slackNotifier := &configuredNotifier{channel: "slack"}
@@ -2171,7 +2172,7 @@ func TestClientSchedules(t *testing.T) {
 		a, err := c.GetSchedule(nameA)
 		require.NoError(t, err)
 		require.NotNil(t, a)
-		require.Equal(t, _DBOS_INTERNAL_QUEUE_NAME, a.QueueName, "QueueName should default to the internal queue")
+		require.Equal(t, models.InternalQueueName, a.QueueName, "QueueName should default to the internal queue")
 
 		b, err := c.GetSchedule(nameB)
 		require.NoError(t, err)

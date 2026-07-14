@@ -708,7 +708,6 @@ type NewSystemDatabaseInput struct {
 	EncodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (encoded *string, serialization string, err error)
 }
 
-// New creates a new SystemDatabase instance and runs migrations
 // RenderSQL formats a canonical pg-style query string with sprintf and runs
 // it through the dialect's rewrite pass. Use this for every sysDB query that
 // must work on both pg and sqlite — it converts $N placeholders to ?N for
@@ -717,6 +716,7 @@ func (s *SysDB) RenderSQL(format string, args ...any) string {
 	return s.dialect.RewriteQuery(fmt.Sprintf(format, args...))
 }
 
+// NewSystemDatabase creates a new SystemDatabase instance and runs migrations.
 func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (SystemDatabase, error) {
 	// Dereference fields from inputs
 	databaseURL := inputs.DatabaseURL
@@ -5073,6 +5073,9 @@ type BackfillScheduleDBInput struct {
 }
 
 func (s *SysDB) BackfillSchedule(ctx context.Context, input BackfillScheduleDBInput) ([]string, error) {
+	if s.encodeScheduledInput == nil {
+		return nil, errors.New("scheduled input encoder is not configured")
+	}
 	schedules, err := s.ListSchedules(ctx, ListSchedulesDBInput{ScheduleNamePrefixes: []string{input.ScheduleName}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get schedule: %w", err)
@@ -5177,6 +5180,9 @@ func (s *SysDB) BackfillSchedule(ctx context.Context, input BackfillScheduleDBIn
 func (s *SysDB) TriggerSchedule(ctx context.Context, scheduleName string) (string, error) {
 	if scheduleName == "" {
 		return "", errors.New("schedule_name is required")
+	}
+	if s.encodeScheduledInput == nil {
+		return "", errors.New("scheduled input encoder is not configured")
 	}
 
 	tx, err := s.pool.BeginTx(ctx, TxOptions{})

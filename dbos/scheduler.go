@@ -118,7 +118,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 	scheduleName := schedule.ScheduleName
 	queueName := schedule.QueueName
 	if queueName == "" {
-		queueName = _DBOS_INTERNAL_QUEUE_NAME
+		queueName = models.InternalQueueName
 	}
 
 	return func(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {

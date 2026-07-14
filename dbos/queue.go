@@ -16,12 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const (
-	_DBOS_INTERNAL_QUEUE_NAME        = models.InternalQueueName
-	_DEFAULT_MAX_TASKS_PER_ITERATION = models.DefaultMaxTasksPerIteration
-	_DEFAULT_BASE_POLLING_INTERVAL   = models.DefaultBasePollingInterval
-	_DEFAULT_MAX_POLLING_INTERVAL    = 120 * time.Second
-)
+const _DEFAULT_MAX_POLLING_INTERVAL = 120 * time.Second
 
 // WorkflowQueue defines a named queue for workflow execution.
 // Queues provide controlled workflow execution with concurrency limits, priority scheduling, and rate limiting.
@@ -317,8 +312,8 @@ func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) 
 		GlobalConcurrency:    nil,
 		PriorityEnabled:      false,
 		RateLimit:            nil,
-		MaxTasksPerIteration: _DEFAULT_MAX_TASKS_PER_ITERATION,
-		basePollingInterval:  _DEFAULT_BASE_POLLING_INTERVAL,
+		MaxTasksPerIteration: models.DefaultMaxTasksPerIteration,
+		basePollingInterval:  models.DefaultBasePollingInterval,
 		maxPollingInterval:   _DEFAULT_MAX_POLLING_INTERVAL,
 	}
 
@@ -381,8 +376,8 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 
 	q := WorkflowQueue{
 		Name:                 name,
-		MaxTasksPerIteration: _DEFAULT_MAX_TASKS_PER_ITERATION,
-		basePollingInterval:  _DEFAULT_BASE_POLLING_INTERVAL,
+		MaxTasksPerIteration: models.DefaultMaxTasksPerIteration,
+		basePollingInterval:  models.DefaultBasePollingInterval,
 		maxPollingInterval:   _DEFAULT_MAX_POLLING_INTERVAL,
 		onConflict:           QueueConflictUpdateIfLatestVersion,
 		databaseBacked:       true,
@@ -645,7 +640,7 @@ func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]WorkflowQueue
 
 	// In-memory queues are always available
 	for name, queue := range qr.workflowQueueRegistry {
-		if hasListenFilter && !listen[name] && name != _DBOS_INTERNAL_QUEUE_NAME {
+		if hasListenFilter && !listen[name] && name != models.InternalQueueName {
 			continue
 		}
 		current[name] = queue

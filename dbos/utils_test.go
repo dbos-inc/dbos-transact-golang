@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/jackc/pgx/v5"
@@ -325,7 +326,7 @@ func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
 					AND status IN ('ENQUEUED', 'PENDING')`, sdb.Dialect().SchemaPrefix(sdb.Schema())))
 
 		var count int
-		err = tx.QueryRow(ctx, query, _DBOS_INTERNAL_QUEUE_NAME).Scan(&count)
+		err = tx.QueryRow(ctx, query, models.InternalQueueName).Scan(&count)
 		tx.Rollback(ctx)
 
 		if err != nil {

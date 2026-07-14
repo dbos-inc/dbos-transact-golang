@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/google/uuid"
@@ -1071,9 +1072,9 @@ func TestSteps(t *testing.T) {
 
 	// Installed before Launch so no goroutine reads sysDB.Pool() concurrently
 	// with the swap; armed on demand by StepIDNotReallocatedOnDBRetry.
-	sysdb := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
-	stepsFaultPool := &faultPool{Pool: sysdb.Pool()}
-	sysdb.SetPool(stepsFaultPool)
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	stepsFaultPool := &faultPool{Pool: sysDB.Pool()}
+	sysDB.SetPool(stepsFaultPool)
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
@@ -3514,7 +3515,7 @@ func TestResumeWorkflows(t *testing.T) {
 
 			status, err := h.GetStatus()
 			require.NoError(t, err, "failed to get status for resumed workflow %s", h.GetWorkflowID())
-			assert.Equal(t, _DBOS_INTERNAL_QUEUE_NAME, status.QueueName, "batch resume should default to the internal queue")
+			assert.Equal(t, models.InternalQueueName, status.QueueName, "batch resume should default to the internal queue")
 		}
 	})
 

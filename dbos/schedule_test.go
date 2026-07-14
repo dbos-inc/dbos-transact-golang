@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/robfig/cron/v3"
@@ -142,7 +143,7 @@ func TestScheduleCRUD(t *testing.T) {
 				}
 			}
 			require.NotNil(t, found, "schedule %s should be listed", want)
-			require.Equal(t, _DBOS_INTERNAL_QUEUE_NAME, found.QueueName, "schedule %s should default to the internal queue", want)
+			require.Equal(t, models.InternalQueueName, found.QueueName, "schedule %s should default to the internal queue", want)
 		}
 
 		// Filter by status

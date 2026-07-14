@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,7 +64,6 @@ const (
 	_WRITE_DEADLINE         = 5 * time.Second
 )
 
-// Config contains configuration for the conductor
 // Config configures the conductor connection.
 type Config struct {
 	URL              string
@@ -477,12 +477,28 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 		ExecutorID:         c.exec.GetExecutorID(),
 		ApplicationVersion: c.exec.GetApplicationVersion(),
 		Hostname:           &hostname,
-		DBOSVersion:        models.DBOSVersion(),
+		DBOSVersion:        DBOSVersion(),
 		Language:           "go",
 		ExecutorMetadata:   c.executorMetadata,
 	}
 
 	return c.sendResponse(response, string(ExecutorInfo))
+}
+
+// DBOSVersion returns the version of the DBOS module
+func DBOSVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, dep := range info.Deps {
+			if dep.Path == "github.com/dbos-inc/dbos-transact-golang" {
+				return dep.Version
+			}
+		}
+		// If running as main module, return main module version
+		if info.Main.Path == "github.com/dbos-inc/dbos-transact-golang" {
+			return info.Main.Version
+		}
+	}
+	return "unknown"
 }
 
 func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/stretchr/testify/assert"
@@ -58,9 +59,9 @@ func TestDebouncer(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Set internal queue polling interval to 100ms
-	internalQueue := dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
+	internalQueue := dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName]
 	internalQueue.basePollingInterval = 10 * time.Millisecond
-	dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME] = internalQueue
+	dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName] = internalQueue
 
 	// Register test workflows
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
@@ -115,7 +116,7 @@ func TestDebouncer(t *testing.T) {
 
 		// also verify the start time step is present in the internal debouncer workflow
 		// First find it: it should be the only workflow in the internal queue
-		workflows, err := ListWorkflows(dbosCtx, WithQueueName(_DBOS_INTERNAL_QUEUE_NAME))
+		workflows, err := ListWorkflows(dbosCtx, WithQueueName(models.InternalQueueName))
 		require.NoError(t, err, "failed to list workflows")
 		require.Len(t, workflows, 1, "should have exactly one workflow in the internal queue")
 		// Now find the step in the workflow
@@ -396,9 +397,9 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 func TestDebouncerConfiguredInstance(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	internalQueue := dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME]
+	internalQueue := dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName]
 	internalQueue.basePollingInterval = 10 * time.Millisecond
-	dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[_DBOS_INTERNAL_QUEUE_NAME] = internalQueue
+	dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName] = internalQueue
 
 	slack := &configuredNotifier{channel: "slack"}
 	email := &configuredNotifier{channel: "email"}

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/google/uuid"
@@ -1839,7 +1840,7 @@ func TestQueuePollingIntervals(t *testing.T) {
 
 		queue, err := registerWFQ(ctx, "polling-default-queue")
 		require.NoError(t, err)
-		require.Equal(t, _DEFAULT_BASE_POLLING_INTERVAL, queue.basePollingInterval)
+		require.Equal(t, models.DefaultBasePollingInterval, queue.basePollingInterval)
 		// maxPollingInterval is not persisted: the DB-backed handle leaves it unset
 		// and the queue worker derives the backoff ceiling from the base at runtime.
 		require.Zero(t, queue.maxPollingInterval)
@@ -1989,7 +1990,7 @@ func TestListenQueues(t *testing.T) {
 		// Verify the forked workflow was on the internal queue
 		forkStatus, err := forkHandle.GetStatus()
 		require.NoError(t, err, "failed to get status of forked workflow")
-		assert.Equal(t, _DBOS_INTERNAL_QUEUE_NAME, forkStatus.QueueName, "expected forked workflow to be on internal queue")
+		assert.Equal(t, models.InternalQueueName, forkStatus.QueueName, "expected forked workflow to be on internal queue")
 
 	})
 
@@ -2464,9 +2465,9 @@ func TestDatabaseBackedQueues(t *testing.T) {
 	t.Run("RejectsCollisionWithInMemoryQueue", func(t *testing.T) {
 		// The internal queue is an in-memory queue; registering a database-backed
 		// queue with the same name must be rejected, and nothing persisted.
-		_, err := registerWFQ(dbosCtx, _DBOS_INTERNAL_QUEUE_NAME)
+		_, err := registerWFQ(dbosCtx, models.InternalQueueName)
 		require.Error(t, err)
-		got, err := retrieveWFQ(dbosCtx, _DBOS_INTERNAL_QUEUE_NAME)
+		got, err := retrieveWFQ(dbosCtx, models.InternalQueueName)
 		require.NoError(t, err)
 		require.Nil(t, got)
 	})

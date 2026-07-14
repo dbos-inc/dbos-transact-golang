@@ -552,14 +552,10 @@ func ClientRetrieveWorkflow[R any](c Client, workflowID string) (WorkflowHandle[
 	return typedClientHandle[R](c, handle), nil
 }
 
-// CancelWorkflowOption is a function option for configuring workflow cancelling parameters.
-
 // WithChildren enables cancellation for children workflows
 func WithCancelChildren() CancelWorkflowOptions {
 	return models.WithCancelChildren()
 }
-
-// CancelWorkflowInput holds configuration parameter for cancelling workflows.
 
 // CancelWorkflow cancels a running or enqueued workflow.
 func (c *client) CancelWorkflow(workflowID string, opts ...CancelWorkflowOptions) error {
@@ -942,7 +938,7 @@ func (c *client) ApplySchedules(schedules []ClientScheduleInput) error {
 
 		queueName := req.QueueName
 		if queueName == "" {
-			queueName = _DBOS_INTERNAL_QUEUE_NAME
+			queueName = models.InternalQueueName
 		}
 
 		if err := dbosCtx.systemDB.DeleteSchedule(dbosCtx, sysdb.DeleteScheduleDBInput{
