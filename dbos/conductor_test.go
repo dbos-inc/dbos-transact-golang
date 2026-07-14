@@ -700,6 +700,92 @@ func TestConductorReconnection(t *testing.T) {
 	})
 }
 
+// TestConductorStalePingReconnect reproduces B4: when a stale ping goroutine
+// (one whose pingCancel was lost) signals needsReconnect, the run loop calls
+// connect(), which overwrites c.conn without closing the previous connection
+// (FD leak). connect() also writes c.conn and c.pingCancel without holding any
+// lock, racing with ping()'s read of c.conn under writeMu — caught by -race.
+func TestConductorStalePingReconnect(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	mockServer := newMockWebSocketServer()
+	defer mockServer.shutdown()
+
+	config := conductorConfig{
+		url:     mockServer.getURL(),
+		apiKey:  "test-key",
+		appName: "test-app",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dbosCtx := &dbosContext{
+		ctx:    ctx,
+		logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+
+	cond, err := newConductor(dbosCtx, config)
+	require.NoError(t, err)
+	cond.pingInterval = 100 * time.Millisecond
+	cond.pingTimeout = 500 * time.Millisecond
+	cond.reconnectWait = 100 * time.Millisecond
+
+	cond.launch()
+	require.True(t, mockServer.waitForConnection(5*time.Second), "Should establish initial connection")
+
+	var oldConn *websocket.Conn
+	require.Eventually(t, func() bool {
+		oldConn = cond.getConn()
+		return oldConn != nil
+	}, 5*time.Second, 10*time.Millisecond, "conductor should store its connection")
+
+	// Simulate a stale ping goroutine: one created for a previous connection
+	// whose pingCancel was overwritten, so it keeps calling ping() while the
+	// run loop reconnects. Its reads of c.conn race with connect()'s writes.
+	stalePingDone := make(chan struct{})
+	var stalePingWg sync.WaitGroup
+	stalePingWg.Add(1)
+	go func() {
+		defer stalePingWg.Done()
+		for {
+			select {
+			case <-stalePingDone:
+				return
+			case <-time.After(10 * time.Millisecond):
+				_ = cond.ping()
+			}
+		}
+	}()
+
+	// Simulate the stale ping goroutine's reconnect signal (conductor.go:309)
+	// while the current connection is still healthy.
+	cond.needsReconnect.Store(true)
+
+	// Deliver a message so the blocked ReadMessage returns and the run loop
+	// re-checks needsReconnect, triggering connect() over the live connection.
+	require.NoError(t, mockServer.sendTextMessage([]byte(`{"type":"bogus_message_type","request_id":"stale-1"}`)))
+
+	// Wait for the forced reconnection to swap in a new connection.
+	require.Eventually(t, func() bool {
+		conn := cond.getConn()
+		return conn != nil && conn != oldConn
+	}, 5*time.Second, 10*time.Millisecond, "conductor should reconnect after needsReconnect signal")
+
+	close(stalePingDone)
+	stalePingWg.Wait()
+
+	// The conductor must close the connection it abandons. Close on an
+	// already-closed connection errors; nil means the old connection's FD was
+	// leaked when connect() overwrote c.conn.
+	assert.Error(t, oldConn.Close(), "old websocket connection was leaked: conductor reconnected without closing it")
+
+	cancel()
+
+	// Give conductor time to clean up
+	time.Sleep(500 * time.Millisecond)
+}
+
 func TestConductorExecutorInfo(t *testing.T) {
 	runExecutorInfo := func(t *testing.T, metadata map[string]any) executorInfoResponse {
 		t.Helper()

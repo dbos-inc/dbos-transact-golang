@@ -109,10 +109,6 @@ func newConductor(dbosCtx *dbosContext, config conductorConfig) (*conductor, err
 
 func (c *conductor) shutdown(timeout time.Duration) {
 	c.stopOnce.Do(func() {
-		if c.pingCancel != nil {
-			c.pingCancel()
-		}
-
 		c.closeConn()
 
 		done := make(chan struct{})
@@ -139,15 +135,15 @@ func (c *conductor) reconnectWaitWithJitter() time.Duration {
 
 // closeConn closes the connection and signals that reconnection is needed
 func (c *conductor) closeConn() {
+	// Acquire write mutex to ensure no concurrent writes during close
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
 	// Cancel ping goroutine first
 	if c.pingCancel != nil {
 		c.pingCancel()
 		c.pingCancel = nil
 	}
-
-	// Acquire write mutex to ensure no concurrent writes during close
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 
 	if c.conn != nil {
 		if err := c.conn.SetWriteDeadline(time.Now().Add(_WRITE_DEADLINE)); err != nil {
@@ -205,13 +201,14 @@ func (c *conductor) run() {
 		}
 
 		// This shouldn't happen but check anyway
-		if c.conn == nil {
+		conn := c.getConn()
+		if conn == nil {
 			c.needsReconnect.Store(true)
 			continue
 		}
 
 		// Read message (will timeout based on read deadline set in connect)
-		messageType, message, err := c.conn.ReadMessage()
+		messageType, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				c.logger.Warn("Unexpected WebSocket close", "error", err)
@@ -240,7 +237,19 @@ func (c *conductor) run() {
 	}
 }
 
+// getConn returns the current connection under the write mutex
+func (c *conductor) getConn() *websocket.Conn {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.conn
+}
+
 func (c *conductor) connect() error {
+	// Close any leftover connection and cancel its ping goroutine before
+	// dialing a new one (a stale ping goroutine can request reconnection
+	// while the previous connection is still open)
+	c.closeConn()
+
 	c.logger.Debug("Connecting to conductor")
 
 	dialer := websocket.Dialer{
@@ -283,12 +292,14 @@ func (c *conductor) connect() error {
 		return conn.SetReadDeadline(time.Now().Add(c.pingTimeout))
 	})
 
-	// Store the connection
-	c.conn = conn
-
 	// Create a cancellable context for the ping goroutine
 	pingCtx, pingCancel := context.WithCancel(c.dbosCtx)
+
+	// Store the connection and ping cancel func under the write mutex
+	c.writeMu.Lock()
+	c.conn = conn
 	c.pingCancel = pingCancel
+	c.writeMu.Unlock()
 
 	// Start ping goroutine
 	c.wg.Add(1)
@@ -1240,10 +1251,6 @@ func (c *conductor) handleAlertRequest(data []byte, requestID string) error {
 }
 
 func (c *conductor) handleUnknownMessageType(requestID string, msgType messageType, errorMsg string) error {
-	if c.conn == nil {
-		return fmt.Errorf("no connection")
-	}
-
 	response := baseResponse{
 		baseMessage: baseMessage{
 			Type:      msgType,
