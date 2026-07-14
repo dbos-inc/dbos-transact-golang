@@ -1,4 +1,4 @@
-package conductor
+package dbos
 
 import (
 	"bytes"
@@ -14,46 +14,14 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/gorilla/websocket"
 )
-
-// Executor is the narrow surface of the DBOS runtime the conductor needs.
-// It is implemented by an adapter in the dbos package.
-type Executor interface {
-	// SystemDB exposes the system database for read/admin operations.
-	SystemDB() sysdb.SystemDatabase
-	GetExecutorID() string
-	GetApplicationVersion() string
-	// AlertHandler returns the user-registered alert handler, or nil.
-	AlertHandler() models.AlertHandler
-	// DecodeStoredValue deserializes a stored value using its recorded
-	// serialization format and re-marshals it as plain JSON.
-	DecodeStoredValue(ctx context.Context, value, serialization string) (string, error)
-	// RecoverPendingWorkflows returns the IDs of the recovered workflows.
-	RecoverPendingWorkflows(ctx context.Context, executorIDs []string) ([]string, error)
-	ListWorkflows(ctx context.Context, opts ...models.ListWorkflowsOption) ([]models.WorkflowStatus, error)
-	GetWorkflowSteps(ctx context.Context, workflowID string, opts ...models.GetWorkflowStepsOption) ([]models.StepInfo, error)
-	CancelWorkflows(ctx context.Context, workflowIDs []string, opts ...models.CancelWorkflowOptions) error
-	ResumeWorkflows(ctx context.Context, workflowIDs []string, opts ...models.ResumeWorkflowOption) error
-	// ForkWorkflow returns the ID of the newly forked workflow.
-	ForkWorkflow(ctx context.Context, input models.ForkWorkflowInput) (string, error)
-	GetWorkflowAggregates(ctx context.Context, input models.GetWorkflowAggregatesInput) ([]sysdb.WorkflowAggregateRow, error)
-	GetStepAggregates(ctx context.Context, input models.GetStepAggregatesInput) ([]sysdb.StepAggregateRow, error)
-	ListSchedules(ctx context.Context, opts ...models.ListSchedulesOption) ([]models.WorkflowSchedule, error)
-	GetSchedule(ctx context.Context, scheduleName string) (*models.WorkflowSchedule, error)
-	PauseSchedule(ctx context.Context, scheduleName string) error
-	ResumeSchedule(ctx context.Context, scheduleName string) error
-	ListQueues(ctx context.Context) ([]models.QueueConfig, error)
-	RetrieveQueue(ctx context.Context, name string) (*models.QueueConfig, error)
-}
 
 const (
 	_PING_INTERVAL          = 20 * time.Second
@@ -64,19 +32,18 @@ const (
 	_WRITE_DEADLINE         = 5 * time.Second
 )
 
-// Config configures the conductor connection.
-type Config struct {
-	URL              string
-	APIKey           string
-	AppName          string
-	ExecutorMetadata map[string]any
+// conductorConfig contains configuration for the conductor
+type conductorConfig struct {
+	url              string
+	apiKey           string
+	appName          string
+	executorMetadata map[string]any
 }
 
 // conductor manages the WebSocket connection to the DBOS conductor service
-type Conductor struct {
-	ctx    context.Context
-	exec   Executor
-	logger *slog.Logger
+type conductor struct {
+	dbosCtx *dbosContext
+	logger  *slog.Logger
 
 	// Connection management
 	conn           *websocket.Conn
@@ -87,9 +54,9 @@ type Conductor struct {
 
 	// Connection parameters
 	url           url.URL
-	PingInterval  time.Duration
-	PingTimeout   time.Duration
-	ReconnectWait time.Duration
+	pingInterval  time.Duration
+	pingTimeout   time.Duration
+	reconnectWait time.Duration
 
 	// User-defined metadata for this executor
 	executorMetadata map[string]any
@@ -99,21 +66,21 @@ type Conductor struct {
 }
 
 // launch starts the conductor main goroutine
-func (c *Conductor) Launch() {
+func (c *conductor) launch() {
 	c.logger.Info("Launching conductor")
 	c.wg.Add(1)
 	go c.run()
 }
 
-func New(ctx context.Context, exec Executor, logger *slog.Logger, config Config) (*Conductor, error) {
-	if config.APIKey == "" {
+func newConductor(dbosCtx *dbosContext, config conductorConfig) (*conductor, error) {
+	if config.apiKey == "" {
 		return nil, fmt.Errorf("conductor API key is required")
 	}
-	if config.URL == "" {
+	if config.url == "" {
 		return nil, fmt.Errorf("conductor URL is required")
 	}
 
-	baseURL, err := url.Parse(config.URL)
+	baseURL, err := url.Parse(config.url)
 	if err != nil {
 		return nil, fmt.Errorf("invalid conductor URL: %w", err)
 	}
@@ -121,18 +88,17 @@ func New(ctx context.Context, exec Executor, logger *slog.Logger, config Config)
 	wsURL := url.URL{
 		Scheme: baseURL.Scheme,
 		Host:   baseURL.Host,
-		Path:   baseURL.JoinPath("websocket", config.AppName, config.APIKey).Path,
+		Path:   baseURL.JoinPath("websocket", config.appName, config.apiKey).Path,
 	}
 
-	c := &Conductor{
-		ctx:              ctx,
-		exec:             exec,
+	c := &conductor{
+		dbosCtx:          dbosCtx,
 		url:              wsURL,
-		PingInterval:     _PING_INTERVAL,
-		PingTimeout:      _PING_TIMEOUT,
-		ReconnectWait:    _INITIAL_RECONNECT_WAIT,
-		logger:           logger.With("service", "conductor"),
-		executorMetadata: config.ExecutorMetadata,
+		pingInterval:     _PING_INTERVAL,
+		pingTimeout:      _PING_TIMEOUT,
+		reconnectWait:    _INITIAL_RECONNECT_WAIT,
+		logger:           dbosCtx.logger.With("service", "conductor"),
+		executorMetadata: config.executorMetadata,
 	}
 
 	// Start with needsReconnect set to true so we connect on first run
@@ -141,7 +107,7 @@ func New(ctx context.Context, exec Executor, logger *slog.Logger, config Config)
 	return c, nil
 }
 
-func (c *Conductor) Shutdown(timeout time.Duration) {
+func (c *conductor) shutdown(timeout time.Duration) {
 	c.stopOnce.Do(func() {
 		if c.pingCancel != nil {
 			c.pingCancel()
@@ -165,14 +131,14 @@ func (c *Conductor) Shutdown(timeout time.Duration) {
 }
 
 // reconnectWaitWithJitter adds random jitter to the reconnect wait time to prevent thundering herd
-func (c *Conductor) reconnectWaitWithJitter() time.Duration {
+func (c *conductor) reconnectWaitWithJitter() time.Duration {
 	// Add jitter: random value between 0.5 * wait and 1.5 * wait
 	jitter := 0.5 + rand.Float64() // #nosec G404 -- jitter for backoff doesn't need crypto-secure randomness
-	return time.Duration(float64(c.ReconnectWait) * jitter)
+	return time.Duration(float64(c.reconnectWait) * jitter)
 }
 
 // closeConn closes the connection and signals that reconnection is needed
-func (c *Conductor) closeConn() {
+func (c *conductor) closeConn() {
 	// Cancel ping goroutine first
 	if c.pingCancel != nil {
 		c.pingCancel()
@@ -201,14 +167,14 @@ func (c *Conductor) closeConn() {
 	c.needsReconnect.Store(true)
 }
 
-func (c *Conductor) run() {
+func (c *conductor) run() {
 	defer c.wg.Done()
 
 	for {
 		// Check if the context has been cancelled
 		select {
-		case <-c.ctx.Done():
-			c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.ctx))
+		case <-c.dbosCtx.Done():
+			c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
 			c.closeConn()
 			return
 		default:
@@ -219,22 +185,22 @@ func (c *Conductor) run() {
 			if err := c.connect(); err != nil {
 				c.logger.Warn("Failed to connect to conductor", "error", err)
 				select {
-				case <-c.ctx.Done():
-					c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.ctx))
+				case <-c.dbosCtx.Done():
+					c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
 					return
 				case <-time.After(c.reconnectWaitWithJitter()):
 					// Exponential backoff with jitter up to max wait
-					if c.ReconnectWait < _MAX_RECONNECT_WAIT {
-						c.ReconnectWait *= 2
-						if c.ReconnectWait > _MAX_RECONNECT_WAIT {
-							c.ReconnectWait = _MAX_RECONNECT_WAIT
+					if c.reconnectWait < _MAX_RECONNECT_WAIT {
+						c.reconnectWait *= 2
+						if c.reconnectWait > _MAX_RECONNECT_WAIT {
+							c.reconnectWait = _MAX_RECONNECT_WAIT
 						}
 					}
 					continue
 				}
 			}
 			// Reset reconnect wait and clear reconnect flag on successful connection
-			c.ReconnectWait = _INITIAL_RECONNECT_WAIT
+			c.reconnectWait = _INITIAL_RECONNECT_WAIT
 			c.needsReconnect.Store(false)
 		}
 
@@ -274,7 +240,7 @@ func (c *Conductor) run() {
 	}
 }
 
-func (c *Conductor) connect() error {
+func (c *conductor) connect() error {
 	c.logger.Debug("Connecting to conductor")
 
 	dialer := websocket.Dialer{
@@ -303,7 +269,7 @@ func (c *Conductor) connect() error {
 	}
 
 	// Set initial read deadline
-	if err := conn.SetReadDeadline(time.Now().Add(c.PingTimeout)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(c.pingTimeout)); err != nil {
 		cErr := conn.Close()
 		if cErr != nil {
 			c.logger.Warn("Failed to close connection", "error", cErr)
@@ -314,21 +280,21 @@ func (c *Conductor) connect() error {
 	// Set pong handler to reset read deadline
 	conn.SetPongHandler(func(appData string) error {
 		c.logger.Debug("Received pong from conductor")
-		return conn.SetReadDeadline(time.Now().Add(c.PingTimeout))
+		return conn.SetReadDeadline(time.Now().Add(c.pingTimeout))
 	})
 
 	// Store the connection
 	c.conn = conn
 
 	// Create a cancellable context for the ping goroutine
-	pingCtx, pingCancel := context.WithCancel(c.ctx)
+	pingCtx, pingCancel := context.WithCancel(c.dbosCtx)
 	c.pingCancel = pingCancel
 
 	// Start ping goroutine
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		ticker := time.NewTicker(c.PingInterval)
+		ticker := time.NewTicker(c.pingInterval)
 		defer ticker.Stop()
 
 		for {
@@ -351,7 +317,7 @@ func (c *Conductor) connect() error {
 	return nil
 }
 
-func (c *Conductor) ping() error {
+func (c *conductor) ping() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
@@ -374,8 +340,8 @@ func (c *Conductor) ping() error {
 	return nil
 }
 
-func (c *Conductor) handleMessage(data []byte) error {
-	var base BaseMessage
+func (c *conductor) handleMessage(data []byte) error {
+	var base baseMessage
 	if err := json.Unmarshal(data, &base); err != nil {
 		c.logger.Error("Failed to parse message", "error", err)
 		return fmt.Errorf("failed to parse base message: %w", err)
@@ -383,69 +349,69 @@ func (c *Conductor) handleMessage(data []byte) error {
 	c.logger.Debug("Received message", "type", base.Type, "request_id", base.RequestID)
 
 	switch base.Type {
-	case ExecutorInfo:
+	case executorInfo:
 		return c.handleExecutorInfoRequest(data, base.RequestID)
-	case RecoveryMessage:
+	case recoveryMessage:
 		return c.handleRecoveryRequest(data, base.RequestID)
-	case CancelWorkflowMessage:
+	case cancelWorkflowMessage:
 		return c.handleCancelWorkflowRequest(data, base.RequestID)
-	case ResumeWorkflowMessage:
+	case resumeWorkflowMessage:
 		return c.handleResumeWorkflowRequest(data, base.RequestID)
-	case ListWorkflowsMessage:
+	case listWorkflowsMessage:
 		return c.handleListWorkflowsRequest(data, base.RequestID)
-	case ListQueuedWorkflowsMessage:
+	case listQueuedWorkflowsMessage:
 		return c.handleListQueuedWorkflowsRequest(data, base.RequestID)
-	case ListStepsMessage:
+	case listStepsMessage:
 		return c.handleListStepsRequest(data, base.RequestID)
-	case GetWorkflowMessage:
+	case getWorkflowMessage:
 		return c.handleGetWorkflowRequest(data, base.RequestID)
-	case ForkWorkflowMessage:
+	case forkWorkflowMessage:
 		return c.handleForkWorkflowRequest(data, base.RequestID)
-	case ForkFromFailureMessage:
+	case forkFromFailureMessage:
 		return c.handleForkFromFailureRequest(data, base.RequestID)
-	case ExistPendingWorkflowsMessage:
+	case existPendingWorkflowsMessage:
 		return c.handleExistPendingWorkflowsRequest(data, base.RequestID)
-	case RetentionMessage:
+	case retentionMessage:
 		return c.handleRetentionRequest(data, base.RequestID)
-	case GetMetricsMessage:
+	case getMetricsMessage:
 		return c.handleGetMetricsRequest(data, base.RequestID)
-	case ExportWorkflowMessage:
+	case exportWorkflowMessage:
 		return c.handleExportWorkflowRequest(data, base.RequestID)
-	case ImportWorkflowMessage:
+	case importWorkflowMessage:
 		return c.handleImportWorkflowRequest(data, base.RequestID)
-	case DeleteWorkflowMessage:
+	case deleteWorkflowMessage:
 		return c.handleDeleteWorkflowRequest(data, base.RequestID)
-	case AlertMessage:
+	case alertMessage:
 		return c.handleAlertRequest(data, base.RequestID)
-	case ListSchedulesMessage:
+	case listSchedulesMessage:
 		return c.handleListSchedulesRequest(data, base.RequestID)
-	case GetScheduleMessage:
+	case getScheduleMessage:
 		return c.handleGetScheduleRequest(data, base.RequestID)
-	case PauseScheduleMessage:
+	case pauseScheduleMessage:
 		return c.handlePauseScheduleRequest(data, base.RequestID)
-	case ResumeScheduleMessage:
+	case resumeScheduleMessage:
 		return c.handleResumeScheduleRequest(data, base.RequestID)
-	case BackfillScheduleMessage:
+	case backfillScheduleMessage:
 		return c.handleBackfillScheduleRequest(data, base.RequestID)
-	case TriggerScheduleMessage:
+	case triggerScheduleMessage:
 		return c.handleTriggerScheduleRequest(data, base.RequestID)
-	case GetWorkflowEventsMessage:
+	case getWorkflowEventsMessage:
 		return c.handleGetWorkflowEventsRequest(data, base.RequestID)
-	case GetWorkflowNotificationsMsg:
+	case getWorkflowNotificationsMsg:
 		return c.handleGetWorkflowNotificationsRequest(data, base.RequestID)
-	case GetWorkflowStreamsMessage:
+	case getWorkflowStreamsMessage:
 		return c.handleGetWorkflowStreamsRequest(data, base.RequestID)
-	case GetWorkflowAggregatesMessage:
+	case getWorkflowAggregatesMessage:
 		return c.handleGetWorkflowAggregatesRequest(data, base.RequestID)
-	case GetStepAggregatesMessage:
+	case getStepAggregatesMessage:
 		return c.handleGetStepAggregatesRequest(data, base.RequestID)
-	case ListAppVersionsMessage:
+	case listAppVersionsMessage:
 		return c.handleListApplicationVersionsRequest(data, base.RequestID)
-	case SetLatestAppVersionMessage:
+	case setLatestAppVersionMessage:
 		return c.handleSetLatestApplicationVersionRequest(data, base.RequestID)
-	case ListQueuesMessage:
+	case listQueuesMessage:
 		return c.handleListQueuesRequest(data, base.RequestID)
-	case GetQueueMessage:
+	case getQueueMessage:
 		return c.handleGetQueueRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
@@ -453,8 +419,8 @@ func (c *Conductor) handleMessage(data []byte) error {
 	}
 }
 
-func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) error {
-	var req ExecutorInfoRequest
+func (c *conductor) handleExecutorInfoRequest(data []byte, requestID string) error {
+	var req executorInfoRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse executor info request", "error", err)
 		return fmt.Errorf("failed to parse executor info request: %w", err)
@@ -467,42 +433,26 @@ func (c *Conductor) handleExecutorInfoRequest(data []byte, requestID string) err
 		return fmt.Errorf("failed to get hostname: %w", err)
 	}
 
-	response := ExecutorInfoResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      ExecutorInfo,
+	response := executorInfoResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      executorInfo,
 				RequestID: requestID,
 			},
 		},
-		ExecutorID:         c.exec.GetExecutorID(),
-		ApplicationVersion: c.exec.GetApplicationVersion(),
+		ExecutorID:         c.dbosCtx.GetExecutorID(),
+		ApplicationVersion: c.dbosCtx.GetApplicationVersion(),
 		Hostname:           &hostname,
-		DBOSVersion:        DBOSVersion(),
+		DBOSVersion:        getDBOSVersion(),
 		Language:           "go",
 		ExecutorMetadata:   c.executorMetadata,
 	}
 
-	return c.sendResponse(response, string(ExecutorInfo))
+	return c.sendResponse(response, string(executorInfo))
 }
 
-// DBOSVersion returns the version of the DBOS module
-func DBOSVersion() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, dep := range info.Deps {
-			if dep.Path == "github.com/dbos-inc/dbos-transact-golang" {
-				return dep.Version
-			}
-		}
-		// If running as main module, return main module version
-		if info.Main.Path == "github.com/dbos-inc/dbos-transact-golang" {
-			return info.Main.Version
-		}
-	}
-	return "unknown"
-}
-
-func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
-	var req RecoveryConductorRequest
+func (c *conductor) handleRecoveryRequest(data []byte, requestID string) error {
+	var req recoveryConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse recovery request", "error", err)
 		return fmt.Errorf("failed to parse recovery request: %w", err)
@@ -512,7 +462,7 @@ func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 	success := true
 	var errorMsg *string
 
-	_, err := c.exec.RecoverPendingWorkflows(c.ctx, req.ExecutorIDs)
+	_, err := recoverPendingWorkflows(c.dbosCtx, req.ExecutorIDs)
 	if err != nil {
 		c.logger.Error("Failed to recover pending workflows", "executor_ids", req.ExecutorIDs, "error", err)
 		errStr := fmt.Sprintf("failed to recover pending workflows: %v", err)
@@ -522,10 +472,10 @@ func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 		c.logger.Info("Successfully recovered pending workflows", "executor_ids", req.ExecutorIDs)
 	}
 
-	response := RecoveryConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      RecoveryMessage,
+	response := recoveryConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      recoveryMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -533,11 +483,11 @@ func (c *Conductor) handleRecoveryRequest(data []byte, requestID string) error {
 		Success: success,
 	}
 
-	return c.sendResponse(response, string(RecoveryMessage))
+	return c.sendResponse(response, string(recoveryMessage))
 }
 
-func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) error {
-	var req CancelWorkflowConductorRequest
+func (c *conductor) handleCancelWorkflowRequest(data []byte, requestID string) error {
+	var req cancelWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse cancel workflow request", "error", err)
 		return fmt.Errorf("failed to parse cancel workflow request: %w", err)
@@ -551,12 +501,12 @@ func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 	success := true
 	var errorMsg *string
 
-	opts := []models.CancelWorkflowOptions{}
+	opts := []CancelWorkflowOptions{}
 	if req.CancelChildren {
-		opts = append(opts, models.WithCancelChildren())
+		opts = append(opts, WithCancelChildren())
 	}
 
-	if err := c.exec.CancelWorkflows(c.ctx, workflowIDs, opts...); err != nil {
+	if err := c.dbosCtx.CancelWorkflows(c.dbosCtx, workflowIDs, opts...); err != nil {
 		c.logger.Error("Failed to cancel workflows", "workflow_ids", workflowIDs, "error", err)
 		errStr := fmt.Sprintf("failed to cancel workflows: %v", err)
 		errorMsg = &errStr
@@ -565,10 +515,10 @@ func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 		c.logger.Info("Successfully cancelled workflows", "workflow_ids", workflowIDs)
 	}
 
-	response := CancelWorkflowConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      CancelWorkflowMessage,
+	response := cancelWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      cancelWorkflowMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -576,11 +526,11 @@ func (c *Conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 		Success: success,
 	}
 
-	return c.sendResponse(response, string(CancelWorkflowMessage))
+	return c.sendResponse(response, string(cancelWorkflowMessage))
 }
 
-func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) error {
-	var req ResumeWorkflowConductorRequest
+func (c *conductor) handleResumeWorkflowRequest(data []byte, requestID string) error {
+	var req resumeWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse resume workflow request", "error", err)
 		return fmt.Errorf("failed to parse resume workflow request: %w", err)
@@ -594,11 +544,11 @@ func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 	success := true
 	var errorMsg *string
 
-	var resumeOpts []models.ResumeWorkflowOption
+	var resumeOpts []ResumeWorkflowOption
 	if req.QueueName != nil {
-		resumeOpts = append(resumeOpts, models.WithResumeQueue(*req.QueueName))
+		resumeOpts = append(resumeOpts, WithResumeQueue(*req.QueueName))
 	}
-	err := c.exec.ResumeWorkflows(c.ctx, workflowIDs, resumeOpts...)
+	_, err := c.dbosCtx.ResumeWorkflows(c.dbosCtx, workflowIDs, resumeOpts...)
 	if err != nil {
 		c.logger.Error("Failed to resume workflows", "workflow_ids", workflowIDs, "error", err)
 		errStr := fmt.Sprintf("failed to resume workflows: %v", err)
@@ -608,10 +558,10 @@ func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 		c.logger.Info("Successfully resumed workflows", "workflow_ids", workflowIDs)
 	}
 
-	response := ResumeWorkflowConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      ResumeWorkflowMessage,
+	response := resumeWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      resumeWorkflowMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -619,11 +569,11 @@ func (c *Conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 		Success: success,
 	}
 
-	return c.sendResponse(response, string(ResumeWorkflowMessage))
+	return c.sendResponse(response, string(resumeWorkflowMessage))
 }
 
-func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error {
-	var req RetentionConductorRequest
+func (c *conductor) handleRetentionRequest(data []byte, requestID string) error {
+	var req retentionConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse retention request", "error", err)
 		return fmt.Errorf("failed to parse retention request: %w", err)
@@ -651,8 +601,8 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 			RowsThreshold:          rowsThreshold,
 		}
 
-		err := sysdb.Retry(c.ctx, func() error {
-			return c.exec.SystemDB().GarbageCollectWorkflows(c.ctx, input)
+		err := sysdb.Retry(c.dbosCtx, func() error {
+			return c.dbosCtx.systemDB.GarbageCollectWorkflows(c.dbosCtx, input)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("Failed to garbage collect workflows", "error", err)
@@ -667,8 +617,8 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 	// Handle timeout enforcement if parameter is provided and garbage collection succeeded
 	if success && req.Body.TimeoutCutoffEpochMs != nil {
 		cutoffTime := time.UnixMilli(int64(*req.Body.TimeoutCutoffEpochMs))
-		err := sysdb.Retry(c.ctx, func() error {
-			return c.exec.SystemDB().CancelAllBefore(c.ctx, cutoffTime)
+		err := sysdb.Retry(c.dbosCtx, func() error {
+			return c.dbosCtx.systemDB.CancelAllBefore(c.dbosCtx, cutoffTime)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("Failed to timeout workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs, "error", err)
@@ -680,10 +630,10 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 		}
 	}
 
-	response := RetentionConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      RetentionMessage,
+	response := retentionConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      retentionMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -691,11 +641,11 @@ func (c *Conductor) handleRetentionRequest(data []byte, requestID string) error 
 		Success: success,
 	}
 
-	return c.sendResponse(response, string(RetentionMessage))
+	return c.sendResponse(response, string(retentionMessage))
 }
 
-func (c *Conductor) handleGetMetricsRequest(data []byte, requestID string) error {
-	var req GetMetricsConductorRequest
+func (c *conductor) handleGetMetricsRequest(data []byte, requestID string) error {
+	var req getMetricsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse get metrics request", "error", err)
 		return fmt.Errorf("failed to parse get metrics request: %w", err)
@@ -711,8 +661,8 @@ func (c *Conductor) handleGetMetricsRequest(data []byte, requestID string) error
 
 	if req.MetricClass == "workflow_step_count" {
 		var err error
-		metricsData, err = sysdb.RetryWithResult(c.ctx, func() ([]sysdb.MetricData, error) {
-			return c.exec.SystemDB().GetMetrics(c.ctx, req.StartTime, req.EndTime)
+		metricsData, err = sysdb.RetryWithResult(c.dbosCtx, func() ([]sysdb.MetricData, error) {
+			return c.dbosCtx.systemDB.GetMetrics(c.dbosCtx, req.StartTime, req.EndTime)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("Failed to get metrics", "error", err)
@@ -725,10 +675,10 @@ func (c *Conductor) handleGetMetricsRequest(data []byte, requestID string) error
 		c.logger.Warn("Unexpected metric class", "metric_class", req.MetricClass)
 	}
 
-	response := GetMetricsConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      GetMetricsMessage,
+	response := getMetricsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      getMetricsMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -736,134 +686,134 @@ func (c *Conductor) handleGetMetricsRequest(data []byte, requestID string) error
 		Metrics: metricsData,
 	}
 
-	return c.sendResponse(response, string(GetMetricsMessage))
+	return c.sendResponse(response, string(getMetricsMessage))
 }
 
-func (c *Conductor) handleListWorkflowsRequest(data []byte, requestID string) error {
-	var req ListWorkflowsConductorRequest
+func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) error {
+	var req listWorkflowsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse list workflows request", "error", err)
 		return fmt.Errorf("failed to parse list workflows request: %w", err)
 	}
 	c.logger.Debug("Handling list workflows request", "request", req)
 
-	var opts []models.ListWorkflowsOption
-	opts = append(opts, models.WithLoadInput(req.Body.LoadInput))
-	opts = append(opts, models.WithLoadOutput(req.Body.LoadOutput))
+	var opts []ListWorkflowsOption
+	opts = append(opts, WithLoadInput(req.Body.LoadInput))
+	opts = append(opts, WithLoadOutput(req.Body.LoadOutput))
 	if req.Body.SortDesc {
-		opts = append(opts, models.WithSortDesc())
+		opts = append(opts, WithSortDesc())
 	}
 	if req.Body.QueuesOnly {
-		opts = append(opts, models.WithQueuesOnly())
+		opts = append(opts, WithQueuesOnly())
 	}
 	if len(req.Body.WorkflowUUIDs) > 0 {
-		opts = append(opts, models.WithWorkflowIDs(req.Body.WorkflowUUIDs))
+		opts = append(opts, WithWorkflowIDs(req.Body.WorkflowUUIDs))
 	}
 	if len(req.Body.WorkflowName) > 0 {
-		opts = append(opts, models.WithName(req.Body.WorkflowName.toSlice()...))
+		opts = append(opts, WithName(req.Body.WorkflowName.toSlice()...))
 	}
 	if len(req.Body.AuthenticatedUser) > 0 {
-		opts = append(opts, models.WithUser(req.Body.AuthenticatedUser.toSlice()...))
+		opts = append(opts, WithUser(req.Body.AuthenticatedUser.toSlice()...))
 	}
 	if len(req.Body.ApplicationVersion) > 0 {
-		opts = append(opts, models.WithAppVersion(req.Body.ApplicationVersion.toSlice()...))
+		opts = append(opts, WithAppVersion(req.Body.ApplicationVersion.toSlice()...))
 	}
 	if req.Body.Limit != nil {
-		opts = append(opts, models.WithLimit(*req.Body.Limit))
+		opts = append(opts, WithLimit(*req.Body.Limit))
 	}
 	if req.Body.Offset != nil {
-		opts = append(opts, models.WithOffset(*req.Body.Offset))
+		opts = append(opts, WithOffset(*req.Body.Offset))
 	}
 	if req.Body.StartTime != nil {
-		opts = append(opts, models.WithStartTime(*req.Body.StartTime))
+		opts = append(opts, WithStartTime(*req.Body.StartTime))
 	}
 	if req.Body.EndTime != nil {
-		opts = append(opts, models.WithEndTime(*req.Body.EndTime))
+		opts = append(opts, WithEndTime(*req.Body.EndTime))
 	}
 	if req.Body.CompletedAfter != nil {
-		opts = append(opts, models.WithCompletedAfter(*req.Body.CompletedAfter))
+		opts = append(opts, WithCompletedAfter(*req.Body.CompletedAfter))
 	}
 	if req.Body.CompletedBefore != nil {
-		opts = append(opts, models.WithCompletedBefore(*req.Body.CompletedBefore))
+		opts = append(opts, WithCompletedBefore(*req.Body.CompletedBefore))
 	}
 	if req.Body.DequeuedAfter != nil {
-		opts = append(opts, models.WithDequeuedAfter(*req.Body.DequeuedAfter))
+		opts = append(opts, WithDequeuedAfter(*req.Body.DequeuedAfter))
 	}
 	if req.Body.DequeuedBefore != nil {
-		opts = append(opts, models.WithDequeuedBefore(*req.Body.DequeuedBefore))
+		opts = append(opts, WithDequeuedBefore(*req.Body.DequeuedBefore))
 	}
 	if len(req.Body.Status) > 0 {
-		statuses := make([]models.WorkflowStatusType, len(req.Body.Status))
+		statuses := make([]WorkflowStatusType, len(req.Body.Status))
 		for i, s := range req.Body.Status {
-			statuses[i] = models.WorkflowStatusType(s)
+			statuses[i] = WorkflowStatusType(s)
 		}
-		opts = append(opts, models.WithStatus(statuses))
+		opts = append(opts, WithStatus(statuses))
 	}
 	if len(req.Body.ForkedFrom) > 0 {
-		opts = append(opts, models.WithForkedFrom(req.Body.ForkedFrom.toSlice()...))
+		opts = append(opts, WithForkedFrom(req.Body.ForkedFrom.toSlice()...))
 	}
 	if len(req.Body.ParentWorkflowID) > 0 {
-		opts = append(opts, models.WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
+		opts = append(opts, WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
 	}
 	if req.Body.WasForkedFrom != nil {
-		opts = append(opts, models.WithWasForkedFrom(*req.Body.WasForkedFrom))
+		opts = append(opts, WithWasForkedFrom(*req.Body.WasForkedFrom))
 	}
 	if req.Body.HasParent != nil {
-		opts = append(opts, models.WithHasParent(*req.Body.HasParent))
+		opts = append(opts, WithHasParent(*req.Body.HasParent))
 	}
 	if len(req.Body.QueueName) > 0 {
-		opts = append(opts, models.WithQueueName(req.Body.QueueName.toSlice()...))
+		opts = append(opts, WithQueueName(req.Body.QueueName.toSlice()...))
 	}
 	if len(req.Body.WorkflowIDPrefix) > 0 {
-		opts = append(opts, models.WithWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
+		opts = append(opts, WithWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
 	}
 	if len(req.Body.ExecutorID) > 0 {
-		opts = append(opts, models.WithExecutorIDs(req.Body.ExecutorID.toSlice()))
+		opts = append(opts, WithExecutorIDs(req.Body.ExecutorID.toSlice()))
 	}
 	if len(req.Body.Attributes) > 0 {
-		opts = append(opts, models.WithFilterAttributes(req.Body.Attributes))
+		opts = append(opts, WithFilterAttributes(req.Body.Attributes))
 	}
 	if len(req.Body.ScheduleName) > 0 {
-		opts = append(opts, models.WithFilterScheduleName(req.Body.ScheduleName.toSlice()...))
+		opts = append(opts, WithFilterScheduleName(req.Body.ScheduleName.toSlice()...))
 	}
 
-	workflows, err := c.exec.ListWorkflows(c.ctx, opts...)
+	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	if err != nil {
 		c.logger.Error("Failed to list workflows", "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflows: %v", err)
-		response := ListWorkflowsConductorResponse{
-			BaseResponse: BaseResponse{
-				BaseMessage: BaseMessage{
-					Type:      ListWorkflowsMessage,
+		response := listWorkflowsConductorResponse{
+			baseResponse: baseResponse{
+				baseMessage: baseMessage{
+					Type:      listWorkflowsMessage,
 					RequestID: requestID,
 				},
 				ErrorMessage: &errorMsg,
 			},
-			Output: []ListWorkflowsConductorResponseBody{},
+			Output: []listWorkflowsConductorResponseBody{},
 		}
 		return c.sendResponse(response, "list workflows response")
 	}
 
-	formattedWorkflows := make([]ListWorkflowsConductorResponseBody, len(workflows))
+	formattedWorkflows := make([]listWorkflowsConductorResponseBody, len(workflows))
 	for i, wf := range workflows {
 		formattedWorkflows[i] = formatListWorkflowsResponseBody(wf)
 	}
 
-	response := ListWorkflowsConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      ListWorkflowsMessage,
+	response := listWorkflowsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      listWorkflowsMessage,
 				RequestID: requestID,
 			},
 		},
 		Output: formattedWorkflows,
 	}
 
-	return c.sendResponse(response, string(ListWorkflowsMessage))
+	return c.sendResponse(response, string(listWorkflowsMessage))
 }
 
-func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID string) error {
-	var req ListWorkflowsConductorRequest
+func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID string) error {
+	var req listWorkflowsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse list queued workflows request", "error", err)
 		return fmt.Errorf("failed to parse list queued workflows request: %w", err)
@@ -871,132 +821,132 @@ func (c *Conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	c.logger.Debug("Handling list queued workflows request", "request", req)
 
 	// Build functional options for ListWorkflows
-	var opts []models.ListWorkflowsOption
-	opts = append(opts, models.WithLoadInput(req.Body.LoadInput))
-	opts = append(opts, models.WithLoadOutput(false)) // Don't load output for queued workflows
-	opts = append(opts, models.WithQueuesOnly())      // Only include workflows that are in queues
+	var opts []ListWorkflowsOption
+	opts = append(opts, WithLoadInput(req.Body.LoadInput))
+	opts = append(opts, WithLoadOutput(false)) // Don't load output for queued workflows
+	opts = append(opts, WithQueuesOnly())      // Only include workflows that are in queues
 	if len(req.Body.WorkflowUUIDs) > 0 {
-		opts = append(opts, models.WithWorkflowIDs(req.Body.WorkflowUUIDs))
+		opts = append(opts, WithWorkflowIDs(req.Body.WorkflowUUIDs))
 	}
 
 	// Add status filter for queued workflows
-	queuedStatuses := make([]models.WorkflowStatusType, 0)
+	queuedStatuses := make([]WorkflowStatusType, 0)
 	if len(req.Body.Status) > 0 {
 		for _, s := range req.Body.Status {
-			status := models.WorkflowStatusType(s)
-			if status != models.WorkflowStatusPending && status != models.WorkflowStatusEnqueued && status != models.WorkflowStatusDelayed {
+			status := WorkflowStatusType(s)
+			if status != WorkflowStatusPending && status != WorkflowStatusEnqueued && status != WorkflowStatusDelayed {
 				c.logger.Warn("Received unexpected filtering status for listing queued workflows", "status", status)
 			}
 			queuedStatuses = append(queuedStatuses, status)
 		}
 	}
 	if len(queuedStatuses) == 0 {
-		queuedStatuses = []models.WorkflowStatusType{models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed}
+		queuedStatuses = []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued, WorkflowStatusDelayed}
 	}
-	opts = append(opts, models.WithStatus(queuedStatuses))
+	opts = append(opts, WithStatus(queuedStatuses))
 
 	if req.Body.SortDesc {
-		opts = append(opts, models.WithSortDesc())
+		opts = append(opts, WithSortDesc())
 	}
 	if len(req.Body.WorkflowName) > 0 {
-		opts = append(opts, models.WithName(req.Body.WorkflowName.toSlice()...))
+		opts = append(opts, WithName(req.Body.WorkflowName.toSlice()...))
 	}
 	if req.Body.Limit != nil {
-		opts = append(opts, models.WithLimit(*req.Body.Limit))
+		opts = append(opts, WithLimit(*req.Body.Limit))
 	}
 	if req.Body.Offset != nil {
-		opts = append(opts, models.WithOffset(*req.Body.Offset))
+		opts = append(opts, WithOffset(*req.Body.Offset))
 	}
 	if req.Body.StartTime != nil {
-		opts = append(opts, models.WithStartTime(*req.Body.StartTime))
+		opts = append(opts, WithStartTime(*req.Body.StartTime))
 	}
 	if req.Body.EndTime != nil {
-		opts = append(opts, models.WithEndTime(*req.Body.EndTime))
+		opts = append(opts, WithEndTime(*req.Body.EndTime))
 	}
 	if req.Body.CompletedAfter != nil {
-		opts = append(opts, models.WithCompletedAfter(*req.Body.CompletedAfter))
+		opts = append(opts, WithCompletedAfter(*req.Body.CompletedAfter))
 	}
 	if req.Body.CompletedBefore != nil {
-		opts = append(opts, models.WithCompletedBefore(*req.Body.CompletedBefore))
+		opts = append(opts, WithCompletedBefore(*req.Body.CompletedBefore))
 	}
 	if req.Body.DequeuedAfter != nil {
-		opts = append(opts, models.WithDequeuedAfter(*req.Body.DequeuedAfter))
+		opts = append(opts, WithDequeuedAfter(*req.Body.DequeuedAfter))
 	}
 	if req.Body.DequeuedBefore != nil {
-		opts = append(opts, models.WithDequeuedBefore(*req.Body.DequeuedBefore))
+		opts = append(opts, WithDequeuedBefore(*req.Body.DequeuedBefore))
 	}
 	if len(req.Body.QueueName) > 0 {
-		opts = append(opts, models.WithQueueName(req.Body.QueueName.toSlice()...))
+		opts = append(opts, WithQueueName(req.Body.QueueName.toSlice()...))
 	}
 	if len(req.Body.ExecutorID) > 0 {
-		opts = append(opts, models.WithExecutorIDs(req.Body.ExecutorID.toSlice()))
+		opts = append(opts, WithExecutorIDs(req.Body.ExecutorID.toSlice()))
 	}
 	if len(req.Body.WorkflowIDPrefix) > 0 {
-		opts = append(opts, models.WithWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
+		opts = append(opts, WithWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
 	}
 	if len(req.Body.ForkedFrom) > 0 {
-		opts = append(opts, models.WithForkedFrom(req.Body.ForkedFrom.toSlice()...))
+		opts = append(opts, WithForkedFrom(req.Body.ForkedFrom.toSlice()...))
 	}
 	if len(req.Body.ParentWorkflowID) > 0 {
-		opts = append(opts, models.WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
+		opts = append(opts, WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
 	}
 	if req.Body.WasForkedFrom != nil {
-		opts = append(opts, models.WithWasForkedFrom(*req.Body.WasForkedFrom))
+		opts = append(opts, WithWasForkedFrom(*req.Body.WasForkedFrom))
 	}
 	if req.Body.HasParent != nil {
-		opts = append(opts, models.WithHasParent(*req.Body.HasParent))
+		opts = append(opts, WithHasParent(*req.Body.HasParent))
 	}
 	if len(req.Body.AuthenticatedUser) > 0 {
-		opts = append(opts, models.WithUser(req.Body.AuthenticatedUser.toSlice()...))
+		opts = append(opts, WithUser(req.Body.AuthenticatedUser.toSlice()...))
 	}
 	if len(req.Body.ApplicationVersion) > 0 {
-		opts = append(opts, models.WithAppVersion(req.Body.ApplicationVersion.toSlice()...))
+		opts = append(opts, WithAppVersion(req.Body.ApplicationVersion.toSlice()...))
 	}
 	if len(req.Body.Attributes) > 0 {
-		opts = append(opts, models.WithFilterAttributes(req.Body.Attributes))
+		opts = append(opts, WithFilterAttributes(req.Body.Attributes))
 	}
 	if len(req.Body.ScheduleName) > 0 {
-		opts = append(opts, models.WithFilterScheduleName(req.Body.ScheduleName.toSlice()...))
+		opts = append(opts, WithFilterScheduleName(req.Body.ScheduleName.toSlice()...))
 	}
 
-	workflows, err := c.exec.ListWorkflows(c.ctx, opts...)
+	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	if err != nil {
 		c.logger.Error("Failed to list queued workflows", "error", err)
 		errorMsg := fmt.Sprintf("failed to list queued workflows: %v", err)
-		response := ListWorkflowsConductorResponse{
-			BaseResponse: BaseResponse{
-				BaseMessage: BaseMessage{
-					Type:      ListQueuedWorkflowsMessage,
+		response := listWorkflowsConductorResponse{
+			baseResponse: baseResponse{
+				baseMessage: baseMessage{
+					Type:      listQueuedWorkflowsMessage,
 					RequestID: requestID,
 				},
 				ErrorMessage: &errorMsg,
 			},
-			Output: []ListWorkflowsConductorResponseBody{},
+			Output: []listWorkflowsConductorResponseBody{},
 		}
-		return c.sendResponse(response, string(ListQueuedWorkflowsMessage))
+		return c.sendResponse(response, string(listQueuedWorkflowsMessage))
 	}
 
 	// Prepare response payload
-	formattedWorkflows := make([]ListWorkflowsConductorResponseBody, len(workflows))
+	formattedWorkflows := make([]listWorkflowsConductorResponseBody, len(workflows))
 	for i, wf := range workflows {
 		formattedWorkflows[i] = formatListWorkflowsResponseBody(wf)
 	}
 
-	response := ListWorkflowsConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      ListQueuedWorkflowsMessage,
+	response := listWorkflowsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      listQueuedWorkflowsMessage,
 				RequestID: requestID,
 			},
 		},
 		Output: formattedWorkflows,
 	}
 
-	return c.sendResponse(response, string(ListQueuedWorkflowsMessage))
+	return c.sendResponse(response, string(listQueuedWorkflowsMessage))
 }
 
-func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error {
-	var req ListStepsConductorRequest
+func (c *conductor) handleListStepsRequest(data []byte, requestID string) error {
+	var req listStepsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse list steps request", "error", err)
 		return fmt.Errorf("failed to parse list steps request: %w", err)
@@ -1004,71 +954,72 @@ func (c *Conductor) handleListStepsRequest(data []byte, requestID string) error 
 	c.logger.Debug("Handling list steps request", "request", req)
 
 	// Get workflow steps using the public GetWorkflowSteps method
-	stepOpts := []models.GetWorkflowStepsOption{models.WithStepsLoadOutput(req.LoadOutput)}
+	stepOpts := []GetWorkflowStepsOption{WithStepsLoadOutput(req.LoadOutput)}
 	if req.Limit != nil {
-		stepOpts = append(stepOpts, models.WithStepsLimit(*req.Limit))
+		stepOpts = append(stepOpts, WithStepsLimit(*req.Limit))
 	}
 	if req.Offset != nil {
-		stepOpts = append(stepOpts, models.WithStepsOffset(*req.Offset))
+		stepOpts = append(stepOpts, WithStepsOffset(*req.Offset))
 	}
-	steps, err := c.exec.GetWorkflowSteps(c.ctx, req.WorkflowID, stepOpts...)
+	steps, err := GetWorkflowSteps(c.dbosCtx, req.WorkflowID, stepOpts...)
 	if err != nil {
 		c.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to list workflow steps: %v", err)
-		response := ListStepsConductorResponse{
-			BaseResponse: BaseResponse{
-				BaseMessage: BaseMessage{
-					Type:      ListStepsMessage,
+		response := listStepsConductorResponse{
+			baseResponse: baseResponse{
+				baseMessage: baseMessage{
+					Type:      listStepsMessage,
 					RequestID: requestID,
 				},
 				ErrorMessage: &errorMsg,
 			},
 			Output: nil,
 		}
-		return c.sendResponse(response, string(ListStepsMessage))
+		return c.sendResponse(response, string(listStepsMessage))
 	}
 
 	// Convert steps to response format
-	var formattedSteps *[]WorkflowStepsConductorResponseBody
+	var formattedSteps *[]workflowStepsConductorResponseBody
 	if steps != nil {
-		stepsList := make([]WorkflowStepsConductorResponseBody, len(steps))
+		stepsList := make([]workflowStepsConductorResponseBody, len(steps))
 		for i, step := range steps {
 			stepsList[i] = formatWorkflowStepsResponseBody(step)
 		}
 		formattedSteps = &stepsList
 	}
 
-	response := ListStepsConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      ListStepsMessage,
+	response := listStepsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      listStepsMessage,
 				RequestID: requestID,
 			},
 		},
 		Output: formattedSteps,
 	}
 
-	return c.sendResponse(response, string(ListStepsMessage))
+	return c.sendResponse(response, string(listStepsMessage))
 }
 
-func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) error {
-	var req GetWorkflowConductorRequest
+func (c *conductor) handleGetWorkflowRequest(data []byte, requestID string) error {
+	var req getWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse get workflow request", "error", err)
 		return fmt.Errorf("failed to parse get workflow request: %w", err)
 	}
 	c.logger.Debug("Handling get workflow request", "workflow_id", req.WorkflowID)
 
-	workflows, err := c.exec.ListWorkflows(c.ctx, models.WithWorkflowIDs([]string{req.WorkflowID}),
-		models.WithLoadInput(req.LoadInput),
-		models.WithLoadOutput(req.LoadOutput))
+	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx,
+		WithWorkflowIDs([]string{req.WorkflowID}),
+		WithLoadInput(req.LoadInput),
+		WithLoadOutput(req.LoadOutput))
 	if err != nil {
 		c.logger.Error("Failed to get workflow", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to get workflow: %v", err)
-		response := GetWorkflowConductorResponse{
-			BaseResponse: BaseResponse{
-				BaseMessage: BaseMessage{
-					Type:      GetWorkflowMessage,
+		response := getWorkflowConductorResponse{
+			baseResponse: baseResponse{
+				baseMessage: baseMessage{
+					Type:      getWorkflowMessage,
 					RequestID: requestID,
 				},
 				ErrorMessage: &errorMsg,
@@ -1078,27 +1029,27 @@ func (c *Conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 		return c.sendResponse(response, "get workflow response")
 	}
 
-	var formattedWorkflow *ListWorkflowsConductorResponseBody
+	var formattedWorkflow *listWorkflowsConductorResponseBody
 	if len(workflows) > 0 {
 		formatted := formatListWorkflowsResponseBody(workflows[0])
 		formattedWorkflow = &formatted
 	}
 
-	response := GetWorkflowConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      GetWorkflowMessage,
+	response := getWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      getWorkflowMessage,
 				RequestID: requestID,
 			},
 		},
 		Output: formattedWorkflow,
 	}
 
-	return c.sendResponse(response, string(GetWorkflowMessage))
+	return c.sendResponse(response, string(getWorkflowMessage))
 }
 
-func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) error {
-	var req ForkWorkflowConductorRequest
+func (c *conductor) handleForkWorkflowRequest(data []byte, requestID string) error {
+	var req forkWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse fork workflow request", "error", err)
 		return fmt.Errorf("failed to parse fork workflow request: %w", err)
@@ -1112,7 +1063,7 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	if req.Body.StartStep > math.MaxInt32/2 {
 		return fmt.Errorf("invalid StartStep: cannot be greater than %d", math.MaxInt32/2)
 	}
-	input := models.ForkWorkflowInput{
+	input := ForkWorkflowInput{
 		OriginalWorkflowID: req.Body.WorkflowID,
 		StartStep:          uint(req.Body.StartStep), // #nosec G115 -- validated above
 	}
@@ -1132,7 +1083,7 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	}
 
 	// Execute the fork workflow
-	forkedID, err := c.exec.ForkWorkflow(c.ctx, input)
+	handle, err := c.dbosCtx.ForkWorkflow(c.dbosCtx, input)
 	var newWorkflowID *string
 	var errorMsg *string
 
@@ -1141,15 +1092,15 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 		errStr := fmt.Sprintf("failed to fork workflow: %v", err)
 		errorMsg = &errStr
 	} else {
-		workflowID := forkedID
+		workflowID := handle.GetWorkflowID()
 		newWorkflowID = &workflowID
 		c.logger.Info("Successfully forked workflow", "original_workflow_id", req.Body.WorkflowID, "new_workflow_id", workflowID)
 	}
 
-	response := ForkWorkflowConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      ForkWorkflowMessage,
+	response := forkWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      forkWorkflowMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -1157,11 +1108,11 @@ func (c *Conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 		NewWorkflowID: newWorkflowID,
 	}
 
-	return c.sendResponse(response, string(ForkWorkflowMessage))
+	return c.sendResponse(response, string(forkWorkflowMessage))
 }
 
-func (c *Conductor) handleForkFromFailureRequest(data []byte, requestID string) error {
-	var req ForkFromFailureConductorRequest
+func (c *conductor) handleForkFromFailureRequest(data []byte, requestID string) error {
+	var req forkFromFailureConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse fork from failure request", "error", err)
 		return fmt.Errorf("failed to parse fork from failure request: %w", err)
@@ -1185,7 +1136,7 @@ func (c *Conductor) handleForkFromFailureRequest(data []byte, requestID string) 
 		input.QueuePartitionKey = *req.Body.QueuePartitionKey
 	}
 
-	forkedIDs, err := c.exec.SystemDB().ForkFrom(c.ctx, input)
+	forkedIDs, err := c.dbosCtx.systemDB.ForkFrom(c.dbosCtx, input)
 	var errorMsg *string
 	if err != nil {
 		c.logger.Error("Failed to fork workflows from failure", "workflow_ids", req.Body.WorkflowIDs, "error", err)
@@ -1195,10 +1146,10 @@ func (c *Conductor) handleForkFromFailureRequest(data []byte, requestID string) 
 		c.logger.Info("Successfully forked workflows from failure", "original_workflow_ids", req.Body.WorkflowIDs, "forked_workflow_ids", forkedIDs)
 	}
 
-	response := ForkFromFailureConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      ForkFromFailureMessage,
+	response := forkFromFailureConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      forkFromFailureMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -1206,25 +1157,25 @@ func (c *Conductor) handleForkFromFailureRequest(data []byte, requestID string) 
 		ForkedWorkflowIDs: forkedIDs,
 	}
 
-	return c.sendResponse(response, string(ForkFromFailureMessage))
+	return c.sendResponse(response, string(forkFromFailureMessage))
 }
 
-func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID string) error {
-	var req ExistPendingWorkflowsConductorRequest
+func (c *conductor) handleExistPendingWorkflowsRequest(data []byte, requestID string) error {
+	var req existPendingWorkflowsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse exist pending workflows request", "error", err)
 		return fmt.Errorf("failed to parse exist pending workflows request: %w", err)
 	}
 	c.logger.Debug("Handling exist pending workflows request", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion)
 
-	opts := []models.ListWorkflowsOption{
-		models.WithStatus([]models.WorkflowStatusType{models.WorkflowStatusPending}),
-		models.WithLimit(1), // We only need to know if any exist, so limit to 1 for efficiency
-		models.WithExecutorIDs([]string{req.ExecutorID}),
-		models.WithAppVersion(req.ApplicationVersion),
+	opts := []ListWorkflowsOption{
+		WithStatus([]WorkflowStatusType{WorkflowStatusPending}),
+		WithLimit(1), // We only need to know if any exist, so limit to 1 for efficiency
+		WithExecutorIDs([]string{req.ExecutorID}),
+		WithAppVersion(req.ApplicationVersion),
 	}
 
-	workflows, err := c.exec.ListWorkflows(c.ctx, opts...)
+	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	var errorMsg *string
 	if err != nil {
 		c.logger.Error("Failed to check for pending workflows", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion, "error", err)
@@ -1232,10 +1183,10 @@ func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 		errorMsg = &errStr
 	}
 
-	response := ExistPendingWorkflowsConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      ExistPendingWorkflowsMessage,
+	response := existPendingWorkflowsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      existPendingWorkflowsMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -1243,11 +1194,11 @@ func (c *Conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 		Exist: len(workflows) > 0,
 	}
 
-	return c.sendResponse(response, string(ExistPendingWorkflowsMessage))
+	return c.sendResponse(response, string(existPendingWorkflowsMessage))
 }
 
-func (c *Conductor) handleAlertRequest(data []byte, requestID string) error {
-	var req AlertRequest
+func (c *conductor) handleAlertRequest(data []byte, requestID string) error {
+	var req alertRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse alert request", "error", err)
 		return fmt.Errorf("failed to parse alert request: %w", err)
@@ -1257,7 +1208,7 @@ func (c *Conductor) handleAlertRequest(data []byte, requestID string) error {
 	success := true
 	var errorMsg *string
 
-	handler := c.exec.AlertHandler()
+	handler := c.dbosCtx.alertHandler
 	if handler != nil {
 		func() {
 			defer func() {
@@ -1274,10 +1225,10 @@ func (c *Conductor) handleAlertRequest(data []byte, requestID string) error {
 		c.logger.Info("Alert received (no handler registered)", "name", req.Name, "message", req.Message, "metadata", req.Metadata)
 	}
 
-	response := AlertConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      AlertMessage,
+	response := alertConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      alertMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -1285,16 +1236,16 @@ func (c *Conductor) handleAlertRequest(data []byte, requestID string) error {
 		Success: success,
 	}
 
-	return c.sendResponse(response, string(AlertMessage))
+	return c.sendResponse(response, string(alertMessage))
 }
 
-func (c *Conductor) handleUnknownMessageType(requestID string, msgType MessageType, errorMsg string) error {
+func (c *conductor) handleUnknownMessageType(requestID string, msgType messageType, errorMsg string) error {
 	if c.conn == nil {
 		return fmt.Errorf("no connection")
 	}
 
-	response := BaseResponse{
-		BaseMessage: BaseMessage{
+	response := baseResponse{
+		baseMessage: baseMessage{
 			Type:      msgType,
 			RequestID: requestID,
 		},
@@ -1304,8 +1255,8 @@ func (c *Conductor) handleUnknownMessageType(requestID string, msgType MessageTy
 	return c.sendResponse(response, "unknown message type response")
 }
 
-func (c *Conductor) handleExportWorkflowRequest(data []byte, requestID string) error {
-	var req ExportWorkflowConductorRequest
+func (c *conductor) handleExportWorkflowRequest(data []byte, requestID string) error {
+	var req exportWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse export workflow request", "error", err)
 		return fmt.Errorf("failed to parse export workflow request: %w", err)
@@ -1315,8 +1266,8 @@ func (c *Conductor) handleExportWorkflowRequest(data []byte, requestID string) e
 	var serializedWorkflow *string
 	var errorMsg *string
 
-	exported, err := sysdb.RetryWithResult(c.ctx, func() ([]sysdb.ExportedWorkflow, error) {
-		return c.exec.SystemDB().ExportWorkflow(c.ctx, req.WorkflowID, req.ExportChildren)
+	exported, err := sysdb.RetryWithResult(c.dbosCtx, func() ([]ExportedWorkflow, error) {
+		return c.dbosCtx.systemDB.ExportWorkflow(c.dbosCtx, req.WorkflowID, req.ExportChildren)
 	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
 		c.logger.Error("Failed to export workflow", "workflow_id", req.WorkflowID, "error", err)
@@ -1343,10 +1294,10 @@ func (c *Conductor) handleExportWorkflowRequest(data []byte, requestID string) e
 		}
 	}
 
-	response := ExportWorkflowConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      ExportWorkflowMessage,
+	response := exportWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      exportWorkflowMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -1354,11 +1305,11 @@ func (c *Conductor) handleExportWorkflowRequest(data []byte, requestID string) e
 		SerializedWorkflow: serializedWorkflow,
 	}
 
-	return c.sendResponse(response, string(ExportWorkflowMessage))
+	return c.sendResponse(response, string(exportWorkflowMessage))
 }
 
-func (c *Conductor) handleImportWorkflowRequest(data []byte, requestID string) error {
-	var req ImportWorkflowConductorRequest
+func (c *conductor) handleImportWorkflowRequest(data []byte, requestID string) error {
+	var req importWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse import workflow request", "error", err)
 		return fmt.Errorf("failed to parse import workflow request: %w", err)
@@ -1389,14 +1340,14 @@ func (c *Conductor) handleImportWorkflowRequest(data []byte, requestID string) e
 				errorMsg = &errStr
 				success = false
 			} else {
-				var workflows []sysdb.ExportedWorkflow
+				var workflows []ExportedWorkflow
 				if err := json.Unmarshal(jsonData, &workflows); err != nil {
 					errStr := fmt.Sprintf("Failed to unmarshal workflow data: %v", err)
 					errorMsg = &errStr
 					success = false
 				} else {
-					err := sysdb.Retry(c.ctx, func() error {
-						return c.exec.SystemDB().ImportWorkflow(c.ctx, workflows)
+					err := sysdb.Retry(c.dbosCtx, func() error {
+						return c.dbosCtx.systemDB.ImportWorkflow(c.dbosCtx, workflows)
 					}, sysdb.WithRetrierLogger(c.logger))
 					if err != nil {
 						errStr := fmt.Sprintf("Exception encountered when importing workflow: %v", err)
@@ -1408,10 +1359,10 @@ func (c *Conductor) handleImportWorkflowRequest(data []byte, requestID string) e
 		}
 	}
 
-	response := ImportWorkflowConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      ImportWorkflowMessage,
+	response := importWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      importWorkflowMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -1419,11 +1370,11 @@ func (c *Conductor) handleImportWorkflowRequest(data []byte, requestID string) e
 		Success: success,
 	}
 
-	return c.sendResponse(response, string(ImportWorkflowMessage))
+	return c.sendResponse(response, string(importWorkflowMessage))
 }
 
-func (c *Conductor) handleDeleteWorkflowRequest(data []byte, requestID string) error {
-	var req DeleteWorkflowConductorRequest
+func (c *conductor) handleDeleteWorkflowRequest(data []byte, requestID string) error {
+	var req deleteWorkflowConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse delete workflow request", "error", err)
 		return fmt.Errorf("failed to parse delete workflow request: %w", err)
@@ -1437,8 +1388,8 @@ func (c *Conductor) handleDeleteWorkflowRequest(data []byte, requestID string) e
 	success := true
 	var errorMsg *string
 
-	err := sysdb.Retry(c.ctx, func() error {
-		return c.exec.SystemDB().DeleteWorkflows(c.ctx, sysdb.DeleteWorkflowsDBInput{
+	err := sysdb.Retry(c.dbosCtx, func() error {
+		return c.dbosCtx.systemDB.DeleteWorkflows(c.dbosCtx, sysdb.DeleteWorkflowsDBInput{
 			WorkflowIDs:    workflowIDs,
 			DeleteChildren: req.DeleteChildren,
 		})
@@ -1452,10 +1403,10 @@ func (c *Conductor) handleDeleteWorkflowRequest(data []byte, requestID string) e
 		c.logger.Info("Successfully deleted workflows", "workflow_ids", workflowIDs)
 	}
 
-	response := DeleteWorkflowConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{
-				Type:      DeleteWorkflowMessage,
+	response := deleteWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      deleteWorkflowMessage,
 				RequestID: requestID,
 			},
 			ErrorMessage: errorMsg,
@@ -1463,40 +1414,52 @@ func (c *Conductor) handleDeleteWorkflowRequest(data []byte, requestID string) e
 		Success: success,
 	}
 
-	return c.sendResponse(response, string(DeleteWorkflowMessage))
+	return c.sendResponse(response, string(deleteWorkflowMessage))
 }
 
 // decodeStoredValueForConductor deserializes a value using its recorded serialization
 // format and re-marshals it as plain JSON so Conductor receives a portable string
 // regardless of the on-disk encoding. Custom non-JSON serializers may not round-trip
 // losslessly for types that don't JSON-encode.
-func (c *Conductor) decodeStoredValueForConductor(value, serialization string) (string, error) {
-	return c.exec.DecodeStoredValue(c.ctx, value, serialization)
+func (c *conductor) decodeStoredValueForConductor(value, serialization string) (string, error) {
+	decoder, err := resolveDecoder[any](serialization, getCustomSerializerFromCtx(c.dbosCtx))
+	if err != nil {
+		return "", err
+	}
+	decoded, err := decoder.Decode(&value)
+	if err != nil {
+		return "", err
+	}
+	out, err := json.Marshal(decoded)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
-func (c *Conductor) handleGetWorkflowEventsRequest(data []byte, requestID string) error {
-	var req GetWorkflowEventsConductorRequest
+func (c *conductor) handleGetWorkflowEventsRequest(data []byte, requestID string) error {
+	var req getWorkflowEventsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse get workflow events request", "error", err)
 		return fmt.Errorf("failed to parse get workflow events request: %w", err)
 	}
 	c.logger.Debug("Handling get workflow events request", "workflow_id", req.WorkflowID, "request_id", requestID)
 
-	resp := GetWorkflowEventsConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{Type: GetWorkflowEventsMessage, RequestID: requestID},
+	resp := getWorkflowEventsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getWorkflowEventsMessage, RequestID: requestID},
 		},
 	}
 
-	records, err := c.exec.SystemDB().GetAllEvents(c.ctx, req.WorkflowID)
+	records, err := c.dbosCtx.systemDB.GetAllEvents(c.dbosCtx, req.WorkflowID)
 	if err != nil {
 		c.logger.Error("Failed to get workflow events", "workflow_id", req.WorkflowID, "error", err)
 		errStr := fmt.Sprintf("failed to get workflow events: %v", err)
 		resp.ErrorMessage = &errStr
-		return c.sendResponse(resp, string(GetWorkflowEventsMessage))
+		return c.sendResponse(resp, string(getWorkflowEventsMessage))
 	}
 
-	events := make([]EventOutput, 0, len(records))
+	events := make([]eventOutput, 0, len(records))
 	for _, r := range records {
 		value, err := c.decodeStoredValueForConductor(r.Value, r.Serialization)
 		if err != nil {
@@ -1504,37 +1467,37 @@ func (c *Conductor) handleGetWorkflowEventsRequest(data []byte, requestID string
 			errStr := fmt.Sprintf("failed to decode event %q: %v", r.Key, err)
 			resp.ErrorMessage = &errStr
 			resp.Events = nil
-			return c.sendResponse(resp, string(GetWorkflowEventsMessage))
+			return c.sendResponse(resp, string(getWorkflowEventsMessage))
 		}
-		events = append(events, EventOutput{Key: r.Key, Value: value})
+		events = append(events, eventOutput{Key: r.Key, Value: value})
 	}
 	resp.Events = events
-	return c.sendResponse(resp, string(GetWorkflowEventsMessage))
+	return c.sendResponse(resp, string(getWorkflowEventsMessage))
 }
 
-func (c *Conductor) handleGetWorkflowNotificationsRequest(data []byte, requestID string) error {
-	var req GetWorkflowNotificationsConductorRequest
+func (c *conductor) handleGetWorkflowNotificationsRequest(data []byte, requestID string) error {
+	var req getWorkflowNotificationsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse get workflow notifications request", "error", err)
 		return fmt.Errorf("failed to parse get workflow notifications request: %w", err)
 	}
 	c.logger.Debug("Handling get workflow notifications request", "workflow_id", req.WorkflowID, "request_id", requestID)
 
-	resp := GetWorkflowNotificationsConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{Type: GetWorkflowNotificationsMsg, RequestID: requestID},
+	resp := getWorkflowNotificationsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getWorkflowNotificationsMsg, RequestID: requestID},
 		},
 	}
 
-	records, err := c.exec.SystemDB().GetAllNotifications(c.ctx, req.WorkflowID)
+	records, err := c.dbosCtx.systemDB.GetAllNotifications(c.dbosCtx, req.WorkflowID)
 	if err != nil {
 		c.logger.Error("Failed to get workflow notifications", "workflow_id", req.WorkflowID, "error", err)
 		errStr := fmt.Sprintf("failed to get workflow notifications: %v", err)
 		resp.ErrorMessage = &errStr
-		return c.sendResponse(resp, string(GetWorkflowNotificationsMsg))
+		return c.sendResponse(resp, string(getWorkflowNotificationsMsg))
 	}
 
-	notifs := make([]NotificationOutput, 0, len(records))
+	notifs := make([]notificationOutput, 0, len(records))
 	for _, r := range records {
 		msg, err := c.decodeStoredValueForConductor(r.Message, r.Serialization)
 		if err != nil {
@@ -1542,9 +1505,9 @@ func (c *Conductor) handleGetWorkflowNotificationsRequest(data []byte, requestID
 			errStr := fmt.Sprintf("failed to decode notification: %v", err)
 			resp.ErrorMessage = &errStr
 			resp.Notifications = nil
-			return c.sendResponse(resp, string(GetWorkflowNotificationsMsg))
+			return c.sendResponse(resp, string(getWorkflowNotificationsMsg))
 		}
-		notifs = append(notifs, NotificationOutput{
+		notifs = append(notifs, notificationOutput{
 			Topic:            r.Topic,
 			Message:          msg,
 			CreatedAtEpochMs: r.CreatedAtEpochMs,
@@ -1552,34 +1515,34 @@ func (c *Conductor) handleGetWorkflowNotificationsRequest(data []byte, requestID
 		})
 	}
 	resp.Notifications = notifs
-	return c.sendResponse(resp, string(GetWorkflowNotificationsMsg))
+	return c.sendResponse(resp, string(getWorkflowNotificationsMsg))
 }
 
-func (c *Conductor) handleGetWorkflowStreamsRequest(data []byte, requestID string) error {
-	var req GetWorkflowStreamsConductorRequest
+func (c *conductor) handleGetWorkflowStreamsRequest(data []byte, requestID string) error {
+	var req getWorkflowStreamsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse get workflow streams request", "error", err)
 		return fmt.Errorf("failed to parse get workflow streams request: %w", err)
 	}
 	c.logger.Debug("Handling get workflow streams request", "workflow_id", req.WorkflowID, "request_id", requestID)
 
-	resp := GetWorkflowStreamsConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{Type: GetWorkflowStreamsMessage, RequestID: requestID},
+	resp := getWorkflowStreamsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getWorkflowStreamsMessage, RequestID: requestID},
 		},
 	}
 
-	records, err := c.exec.SystemDB().GetAllStreamEntries(c.ctx, req.WorkflowID)
+	records, err := c.dbosCtx.systemDB.GetAllStreamEntries(c.dbosCtx, req.WorkflowID)
 	if err != nil {
 		c.logger.Error("Failed to get workflow streams", "workflow_id", req.WorkflowID, "error", err)
 		errStr := fmt.Sprintf("failed to get workflow streams: %v", err)
 		resp.ErrorMessage = &errStr
-		return c.sendResponse(resp, string(GetWorkflowStreamsMessage))
+		return c.sendResponse(resp, string(getWorkflowStreamsMessage))
 	}
 
 	// Group consecutive records by key (rows are pre-ordered by (key, offset)).
-	var streams []StreamEntryOutput
-	var current *StreamEntryOutput
+	var streams []streamEntryOutput
+	var current *streamEntryOutput
 	for _, r := range records {
 		value, err := c.decodeStoredValueForConductor(r.Value, r.Serialization)
 		if err != nil {
@@ -1587,32 +1550,32 @@ func (c *Conductor) handleGetWorkflowStreamsRequest(data []byte, requestID strin
 			errStr := fmt.Sprintf("failed to decode stream %q: %v", r.Key, err)
 			resp.ErrorMessage = &errStr
 			resp.Streams = nil
-			return c.sendResponse(resp, string(GetWorkflowStreamsMessage))
+			return c.sendResponse(resp, string(getWorkflowStreamsMessage))
 		}
 		if current == nil || current.Key != r.Key {
-			streams = append(streams, StreamEntryOutput{Key: r.Key, Values: []string{value}})
+			streams = append(streams, streamEntryOutput{Key: r.Key, Values: []string{value}})
 			current = &streams[len(streams)-1]
 			continue
 		}
 		current.Values = append(current.Values, value)
 	}
 	resp.Streams = streams
-	return c.sendResponse(resp, string(GetWorkflowStreamsMessage))
+	return c.sendResponse(resp, string(getWorkflowStreamsMessage))
 }
 
-func (c *Conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID string) error {
-	var req GetWorkflowAggregatesConductorRequest
+func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID string) error {
+	var req getWorkflowAggregatesConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse get workflow aggregates request", "error", err)
 		return fmt.Errorf("failed to parse get workflow aggregates request: %w", err)
 	}
 	c.logger.Debug("Handling get workflow aggregates request", "request_id", requestID)
 
-	resp := GetWorkflowAggregatesConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{Type: GetWorkflowAggregatesMessage, RequestID: requestID},
+	resp := getWorkflowAggregatesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getWorkflowAggregatesMessage, RequestID: requestID},
 		},
-		Output: []sysdb.WorkflowAggregateRow{},
+		Output: []WorkflowAggregateRow{},
 	}
 
 	// An explicitly-provided time_bucket_size_ms must be > 0 (parity with the other SDKs);
@@ -1620,10 +1583,10 @@ func (c *Conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 	if req.Body.TimeBucketSizeMs != nil && *req.Body.TimeBucketSizeMs <= 0 {
 		errStr := "time_bucket_size_ms must be > 0"
 		resp.ErrorMessage = &errStr
-		return c.sendResponse(resp, string(GetWorkflowAggregatesMessage))
+		return c.sendResponse(resp, string(getWorkflowAggregatesMessage))
 	}
 
-	input := models.GetWorkflowAggregatesInput{
+	input := GetWorkflowAggregatesInput{
 		GroupByStatus:             req.Body.GroupByStatus,
 		GroupByName:               req.Body.GroupByName,
 		GroupByQueueName:          req.Body.GroupByQueueName,
@@ -1656,9 +1619,9 @@ func (c *Conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 		input.TimeBucketSize = time.Duration(*req.Body.TimeBucketSizeMs) * time.Millisecond
 	}
 	if len(req.Body.Status) > 0 {
-		statuses := make([]models.WorkflowStatusType, len(req.Body.Status))
+		statuses := make([]WorkflowStatusType, len(req.Body.Status))
 		for i, s := range req.Body.Status {
-			statuses[i] = models.WorkflowStatusType(s)
+			statuses[i] = WorkflowStatusType(s)
 		}
 		input.Status = statuses
 	}
@@ -1681,41 +1644,41 @@ func (c *Conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 		input.DequeuedBefore = *req.Body.DequeuedBefore
 	}
 
-	rows, err := c.exec.GetWorkflowAggregates(c.ctx, input)
+	rows, err := c.dbosCtx.GetWorkflowAggregates(c.dbosCtx, input)
 	if err != nil {
 		c.logger.Error("Failed to get workflow aggregates", "error", err)
 		errStr := fmt.Sprintf("failed to get workflow aggregates: %v", err)
 		resp.ErrorMessage = &errStr
-		return c.sendResponse(resp, string(GetWorkflowAggregatesMessage))
+		return c.sendResponse(resp, string(getWorkflowAggregatesMessage))
 	}
 
 	resp.Output = rows
-	return c.sendResponse(resp, string(GetWorkflowAggregatesMessage))
+	return c.sendResponse(resp, string(getWorkflowAggregatesMessage))
 }
 
-func (c *Conductor) handleGetStepAggregatesRequest(data []byte, requestID string) error {
-	var req GetStepAggregatesConductorRequest
+func (c *conductor) handleGetStepAggregatesRequest(data []byte, requestID string) error {
+	var req getStepAggregatesConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse get step aggregates request", "error", err)
 		return fmt.Errorf("failed to parse get step aggregates request: %w", err)
 	}
 	c.logger.Debug("Handling get step aggregates request", "request_id", requestID)
 
-	resp := GetStepAggregatesConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage: BaseMessage{Type: GetStepAggregatesMessage, RequestID: requestID},
+	resp := getStepAggregatesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{Type: getStepAggregatesMessage, RequestID: requestID},
 		},
-		Output: []sysdb.StepAggregateRow{},
+		Output: []StepAggregateRow{},
 	}
 
 	// An explicitly-provided time_bucket_size_ms must be > 0 (parity with the other SDKs).
 	if req.Body.TimeBucketSizeMs != nil && *req.Body.TimeBucketSizeMs <= 0 {
 		errStr := "time_bucket_size_ms must be > 0"
 		resp.ErrorMessage = &errStr
-		return c.sendResponse(resp, string(GetStepAggregatesMessage))
+		return c.sendResponse(resp, string(getStepAggregatesMessage))
 	}
 
-	input := models.GetStepAggregatesInput{
+	input := GetStepAggregatesInput{
 		GroupByFunctionName: req.Body.GroupByFunctionName,
 		GroupByStatus:       req.Body.GroupByStatus,
 		SelectCount:         req.Body.SelectCount,
@@ -1740,19 +1703,19 @@ func (c *Conductor) handleGetStepAggregatesRequest(data []byte, requestID string
 		input.CompletedBefore = *req.Body.CompletedBefore
 	}
 
-	rows, err := c.exec.GetStepAggregates(c.ctx, input)
+	rows, err := c.dbosCtx.GetStepAggregates(c.dbosCtx, input)
 	if err != nil {
 		c.logger.Error("Failed to get step aggregates", "error", err)
 		errStr := fmt.Sprintf("Exception encountered when getting step aggregates: %v", err)
 		resp.ErrorMessage = &errStr
-		return c.sendResponse(resp, string(GetStepAggregatesMessage))
+		return c.sendResponse(resp, string(getStepAggregatesMessage))
 	}
 
 	resp.Output = rows
-	return c.sendResponse(resp, string(GetStepAggregatesMessage))
+	return c.sendResponse(resp, string(getStepAggregatesMessage))
 }
 
-func (c *Conductor) sendResponse(response any, responseType string) error {
+func (c *conductor) sendResponse(response any, responseType string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
@@ -1781,10 +1744,10 @@ func (c *Conductor) sendResponse(response any, responseType string) error {
 	return nil
 }
 
-// toScheduleConductorOutput renders a models.WorkflowSchedule for the conductor wire format.
+// toScheduleConductorOutput renders a WorkflowSchedule for the conductor wire format.
 // When loadContext is true, Context is JSON-encoded into a string; otherwise it is omitted.
-func toScheduleConductorOutput(s models.WorkflowSchedule, loadContext bool) ScheduleConductorOutput {
-	out := ScheduleConductorOutput{
+func toScheduleConductorOutput(s WorkflowSchedule, loadContext bool) scheduleConductorOutput {
+	out := scheduleConductorOutput{
 		ScheduleID:        s.ScheduleID,
 		ScheduleName:      s.ScheduleName,
 		WorkflowName:      s.WorkflowName,
@@ -1817,8 +1780,8 @@ func toScheduleConductorOutput(s models.WorkflowSchedule, loadContext bool) Sche
 	return out
 }
 
-func (c *Conductor) handleListSchedulesRequest(data []byte, requestID string) error {
-	var req ListSchedulesConductorRequest
+func (c *conductor) handleListSchedulesRequest(data []byte, requestID string) error {
+	var req listSchedulesConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse list schedules request", "error", err)
 		return fmt.Errorf("failed to parse list schedules request: %w", err)
@@ -1829,47 +1792,47 @@ func (c *Conductor) handleListSchedulesRequest(data []byte, requestID string) er
 		loadContext = *req.Body.LoadContext
 	}
 
-	var opts []models.ListSchedulesOption
+	var opts []ListSchedulesOption
 	if len(req.Body.Status) > 0 {
-		statuses := make([]models.ScheduleStatus, len(req.Body.Status))
+		statuses := make([]ScheduleStatus, len(req.Body.Status))
 		for i, s := range req.Body.Status {
-			statuses[i] = models.ScheduleStatus(s)
+			statuses[i] = ScheduleStatus(s)
 		}
-		opts = append(opts, models.WithScheduleStatuses(statuses...))
+		opts = append(opts, WithScheduleStatuses(statuses...))
 	}
 	if len(req.Body.WorkflowName) > 0 {
-		opts = append(opts, models.WithScheduleWorkflowNames(req.Body.WorkflowName.toSlice()...))
+		opts = append(opts, WithScheduleWorkflowNames(req.Body.WorkflowName.toSlice()...))
 	}
 	if len(req.Body.ScheduleNamePrefix) > 0 {
-		opts = append(opts, models.WithScheduleNamePrefixes(req.Body.ScheduleNamePrefix.toSlice()...))
+		opts = append(opts, WithScheduleNamePrefixes(req.Body.ScheduleNamePrefix.toSlice()...))
 	}
 
-	schedules, err := c.exec.ListSchedules(c.ctx, opts...)
-	output := []ScheduleConductorOutput{}
+	schedules, err := c.dbosCtx.ListSchedules(c.dbosCtx, opts...)
+	output := []scheduleConductorOutput{}
 	var errorMsg *string
 	if err != nil {
 		c.logger.Error("Failed to list schedules", "error", err)
 		msg := fmt.Sprintf("failed to list schedules: %v", err)
 		errorMsg = &msg
 	} else {
-		output = make([]ScheduleConductorOutput, len(schedules))
+		output = make([]scheduleConductorOutput, len(schedules))
 		for i := range schedules {
 			output[i] = toScheduleConductorOutput(schedules[i], loadContext)
 		}
 	}
 
-	resp := ListSchedulesConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage:  BaseMessage{Type: ListSchedulesMessage, RequestID: requestID},
+	resp := listSchedulesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: listSchedulesMessage, RequestID: requestID},
 			ErrorMessage: errorMsg,
 		},
 		Output: output,
 	}
-	return c.sendResponse(resp, string(ListSchedulesMessage))
+	return c.sendResponse(resp, string(listSchedulesMessage))
 }
 
-func (c *Conductor) handleGetScheduleRequest(data []byte, requestID string) error {
-	var req GetScheduleConductorRequest
+func (c *conductor) handleGetScheduleRequest(data []byte, requestID string) error {
+	var req getScheduleConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse get schedule request", "error", err)
 		return fmt.Errorf("failed to parse get schedule request: %w", err)
@@ -1880,9 +1843,9 @@ func (c *Conductor) handleGetScheduleRequest(data []byte, requestID string) erro
 		loadContext = *req.LoadContext
 	}
 
-	schedule, err := c.exec.GetSchedule(c.ctx, req.ScheduleName)
+	schedule, err := c.dbosCtx.GetSchedule(c.dbosCtx, req.ScheduleName)
 	var errorMsg *string
-	var output *ScheduleConductorOutput
+	var output *scheduleConductorOutput
 	if err != nil {
 		c.logger.Error("Failed to get schedule", "schedule_name", req.ScheduleName, "error", err)
 		msg := fmt.Sprintf("failed to get schedule '%s': %v", req.ScheduleName, err)
@@ -1892,18 +1855,18 @@ func (c *Conductor) handleGetScheduleRequest(data []byte, requestID string) erro
 		output = &o
 	}
 
-	resp := GetScheduleConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage:  BaseMessage{Type: GetScheduleMessage, RequestID: requestID},
+	resp := getScheduleConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: getScheduleMessage, RequestID: requestID},
 			ErrorMessage: errorMsg,
 		},
 		Output: output,
 	}
-	return c.sendResponse(resp, string(GetScheduleMessage))
+	return c.sendResponse(resp, string(getScheduleMessage))
 }
 
-func (c *Conductor) handlePauseScheduleRequest(data []byte, requestID string) error {
-	var req PauseScheduleConductorRequest
+func (c *conductor) handlePauseScheduleRequest(data []byte, requestID string) error {
+	var req pauseScheduleConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse pause schedule request", "error", err)
 		return fmt.Errorf("failed to parse pause schedule request: %w", err)
@@ -1911,25 +1874,25 @@ func (c *Conductor) handlePauseScheduleRequest(data []byte, requestID string) er
 
 	success := true
 	var errorMsg *string
-	if err := c.exec.PauseSchedule(c.ctx, req.ScheduleName); err != nil {
+	if err := c.dbosCtx.PauseSchedule(c.dbosCtx, req.ScheduleName); err != nil {
 		c.logger.Error("Failed to pause schedule", "schedule_name", req.ScheduleName, "error", err)
 		msg := fmt.Sprintf("failed to pause schedule '%s': %v", req.ScheduleName, err)
 		errorMsg = &msg
 		success = false
 	}
 
-	resp := PauseScheduleConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage:  BaseMessage{Type: PauseScheduleMessage, RequestID: requestID},
+	resp := pauseScheduleConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: pauseScheduleMessage, RequestID: requestID},
 			ErrorMessage: errorMsg,
 		},
 		Success: success,
 	}
-	return c.sendResponse(resp, string(PauseScheduleMessage))
+	return c.sendResponse(resp, string(pauseScheduleMessage))
 }
 
-func (c *Conductor) handleResumeScheduleRequest(data []byte, requestID string) error {
-	var req ResumeScheduleConductorRequest
+func (c *conductor) handleResumeScheduleRequest(data []byte, requestID string) error {
+	var req resumeScheduleConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse resume schedule request", "error", err)
 		return fmt.Errorf("failed to parse resume schedule request: %w", err)
@@ -1937,25 +1900,25 @@ func (c *Conductor) handleResumeScheduleRequest(data []byte, requestID string) e
 
 	success := true
 	var errorMsg *string
-	if err := c.exec.ResumeSchedule(c.ctx, req.ScheduleName); err != nil {
+	if err := c.dbosCtx.ResumeSchedule(c.dbosCtx, req.ScheduleName); err != nil {
 		c.logger.Error("Failed to resume schedule", "schedule_name", req.ScheduleName, "error", err)
 		msg := fmt.Sprintf("failed to resume schedule '%s': %v", req.ScheduleName, err)
 		errorMsg = &msg
 		success = false
 	}
 
-	resp := ResumeScheduleConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage:  BaseMessage{Type: ResumeScheduleMessage, RequestID: requestID},
+	resp := resumeScheduleConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: resumeScheduleMessage, RequestID: requestID},
 			ErrorMessage: errorMsg,
 		},
 		Success: success,
 	}
-	return c.sendResponse(resp, string(ResumeScheduleMessage))
+	return c.sendResponse(resp, string(resumeScheduleMessage))
 }
 
-func (c *Conductor) handleBackfillScheduleRequest(data []byte, requestID string) error {
-	var req BackfillScheduleConductorRequest
+func (c *conductor) handleBackfillScheduleRequest(data []byte, requestID string) error {
+	var req backfillScheduleConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse backfill schedule request", "error", err)
 		return fmt.Errorf("failed to parse backfill schedule request: %w", err)
@@ -1980,7 +1943,7 @@ func (c *Conductor) handleBackfillScheduleRequest(data []byte, requestID string)
 			msg := fmt.Sprintf("failed to parse end time '%s': %v", req.End, errEnd)
 			errorMsg = &msg
 		} else {
-			schedule, errGet := c.exec.GetSchedule(c.ctx, req.ScheduleName)
+			schedule, errGet := c.dbosCtx.GetSchedule(c.dbosCtx, req.ScheduleName)
 			if errGet != nil {
 				msg := fmt.Sprintf("failed to get schedule '%s': %v", req.ScheduleName, errGet)
 				errorMsg = &msg
@@ -1988,7 +1951,7 @@ func (c *Conductor) handleBackfillScheduleRequest(data []byte, requestID string)
 				msg := fmt.Sprintf("schedule not found: %s", req.ScheduleName)
 				errorMsg = &msg
 			} else {
-				ids, errBf := c.exec.SystemDB().BackfillSchedule(c.ctx, sysdb.BackfillScheduleDBInput{
+				ids, errBf := c.dbosCtx.systemDB.BackfillSchedule(c.dbosCtx, sysdb.BackfillScheduleDBInput{
 					ScheduleName: req.ScheduleName,
 					Schedule:     schedule.Schedule,
 					StartTime:    start,
@@ -2007,18 +1970,18 @@ func (c *Conductor) handleBackfillScheduleRequest(data []byte, requestID string)
 	if workflowIDs == nil {
 		workflowIDs = []string{}
 	}
-	resp := BackfillScheduleConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage:  BaseMessage{Type: BackfillScheduleMessage, RequestID: requestID},
+	resp := backfillScheduleConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: backfillScheduleMessage, RequestID: requestID},
 			ErrorMessage: errorMsg,
 		},
 		WorkflowIDs: workflowIDs,
 	}
-	return c.sendResponse(resp, string(BackfillScheduleMessage))
+	return c.sendResponse(resp, string(backfillScheduleMessage))
 }
 
-func (c *Conductor) handleTriggerScheduleRequest(data []byte, requestID string) error {
-	var req TriggerScheduleConductorRequest
+func (c *conductor) handleTriggerScheduleRequest(data []byte, requestID string) error {
+	var req triggerScheduleConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse trigger schedule request", "error", err)
 		return fmt.Errorf("failed to parse trigger schedule request: %w", err)
@@ -2026,7 +1989,7 @@ func (c *Conductor) handleTriggerScheduleRequest(data []byte, requestID string) 
 
 	var errorMsg *string
 	var workflowID *string
-	id, err := c.exec.SystemDB().TriggerSchedule(c.ctx, req.ScheduleName)
+	id, err := c.dbosCtx.systemDB.TriggerSchedule(c.dbosCtx, req.ScheduleName)
 	if err != nil {
 		c.logger.Error("Failed to trigger schedule", "schedule_name", req.ScheduleName, "error", err)
 		msg := fmt.Sprintf("failed to trigger schedule '%s': %v", req.ScheduleName, err)
@@ -2035,27 +1998,27 @@ func (c *Conductor) handleTriggerScheduleRequest(data []byte, requestID string) 
 		workflowID = &id
 	}
 
-	resp := TriggerScheduleConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage:  BaseMessage{Type: TriggerScheduleMessage, RequestID: requestID},
+	resp := triggerScheduleConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: triggerScheduleMessage, RequestID: requestID},
 			ErrorMessage: errorMsg,
 		},
 		WorkflowID: workflowID,
 	}
-	return c.sendResponse(resp, string(TriggerScheduleMessage))
+	return c.sendResponse(resp, string(triggerScheduleMessage))
 }
 
-func (c *Conductor) handleListApplicationVersionsRequest(data []byte, requestID string) error {
-	var req ListApplicationVersionsConductorRequest
+func (c *conductor) handleListApplicationVersionsRequest(data []byte, requestID string) error {
+	var req listApplicationVersionsConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse list application versions request", "error", err)
 		return fmt.Errorf("failed to parse list application versions request: %w", err)
 	}
 
 	var errorMsg *string
-	output := []ApplicationVersionOutput{}
-	versions, err := sysdb.RetryWithResult(c.ctx, func() ([]sysdb.VersionInfo, error) {
-		return c.exec.SystemDB().ListApplicationVersions(c.ctx)
+	output := []applicationVersionOutput{}
+	versions, err := sysdb.RetryWithResult(c.dbosCtx, func() ([]VersionInfo, error) {
+		return c.dbosCtx.systemDB.ListApplicationVersions(c.dbosCtx)
 	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
 		c.logger.Error("Failed to list application versions", "error", err)
@@ -2067,18 +2030,18 @@ func (c *Conductor) handleListApplicationVersionsRequest(data []byte, requestID 
 		}
 	}
 
-	resp := ListApplicationVersionsConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage:  BaseMessage{Type: ListAppVersionsMessage, RequestID: requestID},
+	resp := listApplicationVersionsConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: listAppVersionsMessage, RequestID: requestID},
 			ErrorMessage: errorMsg,
 		},
 		Output: output,
 	}
-	return c.sendResponse(resp, string(ListAppVersionsMessage))
+	return c.sendResponse(resp, string(listAppVersionsMessage))
 }
 
-func (c *Conductor) handleSetLatestApplicationVersionRequest(data []byte, requestID string) error {
-	var req SetLatestApplicationVersionConductorRequest
+func (c *conductor) handleSetLatestApplicationVersionRequest(data []byte, requestID string) error {
+	var req setLatestApplicationVersionConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse set latest application version request", "error", err)
 		return fmt.Errorf("failed to parse set latest application version request: %w", err)
@@ -2086,8 +2049,8 @@ func (c *Conductor) handleSetLatestApplicationVersionRequest(data []byte, reques
 
 	success := true
 	var errorMsg *string
-	if err := sysdb.Retry(c.ctx, func() error {
-		return c.exec.SystemDB().UpdateApplicationVersionTimestamp(c.ctx, req.VersionName, time.Now().UnixMilli())
+	if err := sysdb.Retry(c.dbosCtx, func() error {
+		return c.dbosCtx.systemDB.UpdateApplicationVersionTimestamp(c.dbosCtx, req.VersionName, time.Now().UnixMilli())
 	}, sysdb.WithRetrierLogger(c.logger)); err != nil {
 		c.logger.Error("Failed to set latest application version", "version_name", req.VersionName, "error", err)
 		msg := fmt.Sprintf("failed to set latest application version '%s': %v", req.VersionName, err)
@@ -2095,72 +2058,72 @@ func (c *Conductor) handleSetLatestApplicationVersionRequest(data []byte, reques
 		success = false
 	}
 
-	resp := SetLatestApplicationVersionConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage:  BaseMessage{Type: SetLatestAppVersionMessage, RequestID: requestID},
+	resp := setLatestApplicationVersionConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: setLatestAppVersionMessage, RequestID: requestID},
 			ErrorMessage: errorMsg,
 		},
 		Success: success,
 	}
-	return c.sendResponse(resp, string(SetLatestAppVersionMessage))
+	return c.sendResponse(resp, string(setLatestAppVersionMessage))
 }
 
-func (c *Conductor) handleListQueuesRequest(data []byte, requestID string) error {
-	var req ListQueuesConductorRequest
+func (c *conductor) handleListQueuesRequest(data []byte, requestID string) error {
+	var req listQueuesConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse list queues request", "error", err)
 		return fmt.Errorf("failed to parse list queues request: %w", err)
 	}
 
-	queues, err := c.exec.ListQueues(c.ctx)
-	output := []QueueConductorOutput{}
+	queues, err := c.dbosCtx.ListQueues(c.dbosCtx)
+	output := []queueConductorOutput{}
 	var errorMsg *string
 	if err != nil {
 		c.logger.Error("Failed to list queues", "error", err)
 		msg := fmt.Sprintf("failed to list queues: %v", err)
 		errorMsg = &msg
 	} else {
-		output = make([]QueueConductorOutput, len(queues))
+		output = make([]queueConductorOutput, len(queues))
 		for i := range queues {
 			output[i] = toQueueConductorOutput(queues[i])
 		}
 	}
 
-	resp := ListQueuesConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage:  BaseMessage{Type: ListQueuesMessage, RequestID: requestID},
+	resp := listQueuesConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: listQueuesMessage, RequestID: requestID},
 			ErrorMessage: errorMsg,
 		},
 		Output: output,
 	}
-	return c.sendResponse(resp, string(ListQueuesMessage))
+	return c.sendResponse(resp, string(listQueuesMessage))
 }
 
-func (c *Conductor) handleGetQueueRequest(data []byte, requestID string) error {
-	var req GetQueueConductorRequest
+func (c *conductor) handleGetQueueRequest(data []byte, requestID string) error {
+	var req getQueueConductorRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		c.logger.Error("Failed to parse get queue request", "error", err)
 		return fmt.Errorf("failed to parse get queue request: %w", err)
 	}
 
-	queue, err := c.exec.RetrieveQueue(c.ctx, req.Name)
+	queue, err := c.dbosCtx.RetrieveQueue(c.dbosCtx, req.Name)
 	var errorMsg *string
-	var output *QueueConductorOutput
+	var output *queueConductorOutput
 	if err != nil {
 		c.logger.Error("Failed to get queue", "queue_name", req.Name, "error", err)
 		msg := fmt.Sprintf("failed to get queue '%s': %v", req.Name, err)
 		errorMsg = &msg
 	} else if queue != nil {
-		o := toQueueConductorOutput(*queue)
+		o := toQueueConductorOutput(queue)
 		output = &o
 	}
 
-	resp := GetQueueConductorResponse{
-		BaseResponse: BaseResponse{
-			BaseMessage:  BaseMessage{Type: GetQueueMessage, RequestID: requestID},
+	resp := getQueueConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage:  baseMessage{Type: getQueueMessage, RequestID: requestID},
 			ErrorMessage: errorMsg,
 		},
 		Output: output,
 	}
-	return c.sendResponse(resp, string(GetQueueMessage))
+	return c.sendResponse(resp, string(getQueueMessage))
 }

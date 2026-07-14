@@ -1,4 +1,4 @@
-package conductor
+package dbos
 
 import (
 	"encoding/json"
@@ -10,28 +10,28 @@ import (
 
 func TestStringOrList_UnmarshalJSON(t *testing.T) {
 	t.Run("single string", func(t *testing.T) {
-		var s StringOrList
+		var s stringOrList
 		err := json.Unmarshal([]byte(`"foo"`), &s)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"foo"}, s.toSlice())
 	})
 
 	t.Run("array of strings", func(t *testing.T) {
-		var s StringOrList
+		var s stringOrList
 		err := json.Unmarshal([]byte(`["a","b","c"]`), &s)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"a", "b", "c"}, s.toSlice())
 	})
 
 	t.Run("null", func(t *testing.T) {
-		var s StringOrList
+		var s stringOrList
 		err := json.Unmarshal([]byte(`null`), &s)
 		require.NoError(t, err)
 		assert.Nil(t, s.toSlice())
 	})
 
 	t.Run("empty array", func(t *testing.T) {
-		var s StringOrList
+		var s stringOrList
 		err := json.Unmarshal([]byte(`[]`), &s)
 		require.NoError(t, err)
 		assert.Equal(t, []string{}, s.toSlice())
@@ -40,28 +40,28 @@ func TestStringOrList_UnmarshalJSON(t *testing.T) {
 
 func TestListWorkflowsConductorRequestBody_StringOrListFields(t *testing.T) {
 	t.Run("workflow_name as string", func(t *testing.T) {
-		var req ListWorkflowsConductorRequest
+		var req listWorkflowsConductorRequest
 		err := json.Unmarshal([]byte(`{"type":"list_workflows","request_id":"x","body":{"workflow_name":"MyWorkflow"}}`), &req)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"MyWorkflow"}, req.Body.WorkflowName.toSlice())
 	})
 
 	t.Run("workflow_name as array", func(t *testing.T) {
-		var req ListWorkflowsConductorRequest
+		var req listWorkflowsConductorRequest
 		err := json.Unmarshal([]byte(`{"type":"list_workflows","request_id":"x","body":{"workflow_name":["A","B"]}}`), &req)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"A", "B"}, req.Body.WorkflowName.toSlice())
 	})
 
 	t.Run("parent_workflow_id as string", func(t *testing.T) {
-		var req ListWorkflowsConductorRequest
+		var req listWorkflowsConductorRequest
 		err := json.Unmarshal([]byte(`{"type":"list_workflows","request_id":"x","body":{"parent_workflow_id":"parent-123"}}`), &req)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"parent-123"}, req.Body.ParentWorkflowID.toSlice())
 	})
 
 	t.Run("parent_workflow_id as array", func(t *testing.T) {
-		var req ListWorkflowsConductorRequest
+		var req listWorkflowsConductorRequest
 		err := json.Unmarshal([]byte(`{"type":"list_workflows","request_id":"x","body":{"parent_workflow_id":["p1","p2"]}}`), &req)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"p1", "p2"}, req.Body.ParentWorkflowID.toSlice())
@@ -70,7 +70,7 @@ func TestListWorkflowsConductorRequestBody_StringOrListFields(t *testing.T) {
 
 func TestGetWorkflowAggregatesConductorRequestBody_Unmarshal(t *testing.T) {
 	t.Run("all group_by flags and a time bucket", func(t *testing.T) {
-		var req GetWorkflowAggregatesConductorRequest
+		var req getWorkflowAggregatesConductorRequest
 		err := json.Unmarshal([]byte(`{
 			"type":"get_workflow_aggregates",
 			"request_id":"r1",
@@ -94,14 +94,14 @@ func TestGetWorkflowAggregatesConductorRequestBody_Unmarshal(t *testing.T) {
 	})
 
 	t.Run("status as single string", func(t *testing.T) {
-		var req GetWorkflowAggregatesConductorRequest
+		var req getWorkflowAggregatesConductorRequest
 		err := json.Unmarshal([]byte(`{"type":"get_workflow_aggregates","request_id":"r","body":{"group_by_status":true,"status":"SUCCESS"}}`), &req)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"SUCCESS"}, req.Body.Status.toSlice())
 	})
 
 	t.Run("name and app_version as arrays", func(t *testing.T) {
-		var req GetWorkflowAggregatesConductorRequest
+		var req getWorkflowAggregatesConductorRequest
 		err := json.Unmarshal([]byte(`{"type":"get_workflow_aggregates","request_id":"r","body":{"group_by_name":true,"name":["wf1","wf2"],"app_version":["v1"]}}`), &req)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"wf1", "wf2"}, req.Body.Name.toSlice())
@@ -109,7 +109,7 @@ func TestGetWorkflowAggregatesConductorRequestBody_Unmarshal(t *testing.T) {
 	})
 
 	t.Run("attributes filter", func(t *testing.T) {
-		var req GetWorkflowAggregatesConductorRequest
+		var req getWorkflowAggregatesConductorRequest
 		err := json.Unmarshal([]byte(`{"type":"get_workflow_aggregates","request_id":"r","body":{"group_by_status":true,"attributes":{"customer":"acme","tier":1}}}`), &req)
 		require.NoError(t, err)
 		assert.Equal(t, "acme", req.Body.Attributes["customer"])
@@ -117,7 +117,7 @@ func TestGetWorkflowAggregatesConductorRequestBody_Unmarshal(t *testing.T) {
 	})
 
 	t.Run("relationship filters", func(t *testing.T) {
-		var req GetWorkflowAggregatesConductorRequest
+		var req getWorkflowAggregatesConductorRequest
 		err := json.Unmarshal([]byte(`{"type":"get_workflow_aggregates","request_id":"r","body":{
 			"group_by_status":true,
 			"workflow_ids":["a","b"],
