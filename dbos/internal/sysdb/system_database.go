@@ -2530,6 +2530,19 @@ type RecordOperationResultDBInput struct {
 	Serialization   string
 }
 
+// RecordOperationResult checkpoints a step outcome. A checkpoint already
+// existing at (workflow_uuid, function_id) is disambiguated by content:
+//   - identical to input (including the caller's timestamps) → our own earlier
+//     write whose commit ack was lost; the retry is a no-op success.
+//   - different function name → determinism violation (UnexpectedStep).
+//   - anything else → a concurrent execution of this workflow checkpointed the
+//     step first → ConflictingIDError. Callers must surface it as the step
+//     error so the workflow-level handler parks this run in polling mode
+//     rather than racing the other execution step by step.
+//
+// ON CONFLICT DO NOTHING (instead of letting the unique violation surface)
+// keeps a caller-owned transaction healthy so it can still be used or rolled
+// back cleanly after the conflict.
 func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperationResultDBInput) error {
 	startedAtMs := input.StartedAt.UnixMilli()
 	completedAtMs := input.CompletedAt.UnixMilli()
@@ -2546,24 +2559,76 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 		args = append(args, input.ChildWorkflowID)
 	}
 
-	query := s.RenderSQL(`INSERT INTO %soperation_outputs (%s) VALUES (%s)`,
+	query := s.RenderSQL(`INSERT INTO %soperation_outputs (%s) VALUES (%s)
+		ON CONFLICT (workflow_uuid, function_id) DO NOTHING`,
 		s.dialect.SchemaPrefix(s.schema), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
 
-	var err error
+	var querier Querier = s.pool
 	if input.Tx != nil {
-		_, err = input.Tx.Exec(ctx, query, args...)
-	} else {
-		_, err = s.pool.Exec(ctx, query, args...)
+		querier = input.Tx
 	}
 
+	result, err := querier.Exec(ctx, query, args...)
 	if err != nil {
-		if s.dialect.IsUniqueViolation(err) {
-			return models.NewWorkflowConflictIDError(input.WorkflowID)
-		}
 		return err
 	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to read rows affected after recording operation result: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
 
-	return nil
+	selectQuery := s.RenderSQL(`SELECT output, error, function_name, serialization, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms
+		FROM %soperation_outputs
+		WHERE workflow_uuid = $1 AND function_id = $2`, s.dialect.SchemaPrefix(s.schema))
+	var storedOutput *string
+	var storedError *string
+	var storedFunctionName string
+	var storedSerialization *string
+	var storedChildID *string
+	var storedStartedAtMs *int64
+	var storedCompletedAtMs *int64
+	err = querier.QueryRow(ctx, selectQuery, input.WorkflowID, input.StepID).Scan(
+		&storedOutput, &storedError, &storedFunctionName, &storedSerialization, &storedChildID, &storedStartedAtMs, &storedCompletedAtMs)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			// The conflicting row is not visible to this transaction's snapshot
+			// It means a concurrent writer inserted the row
+			return models.NewWorkflowConflictIDError(input.WorkflowID)
+		}
+		return fmt.Errorf("failed to read existing operation result: %w", err)
+	}
+	if input.StepName != storedFunctionName {
+		return models.NewUnexpectedStepError(input.WorkflowID, input.StepID, input.StepName, storedFunctionName)
+	}
+	// Our own earlier write (commit succeeded but its ack was lost) is identical
+	// to the input, including the caller-supplied timestamps: the retry already
+	// happened, report success. A concurrent execution's row differs (at minimum
+	// in its timestamps): report the conflict so the caller parks this run.
+	sameWrite := nullableStrEq(storedOutput, input.Output) &&
+		nullableStrEq(storedError, input.ErrStr) &&
+		nullableStrEq(storedSerialization, &input.Serialization) &&
+		derefStr(storedChildID) == input.ChildWorkflowID &&
+		storedStartedAtMs != nil && *storedStartedAtMs == startedAtMs &&
+		storedCompletedAtMs != nil && *storedCompletedAtMs == completedAtMs
+	if sameWrite {
+		return nil
+	}
+	return models.NewWorkflowConflictIDError(input.WorkflowID)
+}
+
+// nullableStrEq compares two nullable strings, treating NULL and "" as equal.
+func nullableStrEq(a, b *string) bool {
+	return derefStr(a) == derefStr(b)
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 /*******************************/
@@ -2579,35 +2644,47 @@ type RecordChildWorkflowDBInput struct {
 }
 
 func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error {
+	// Idempotent: a retry after a lost commit ack (or a concurrent recovery of
+	// the parent) re-inserts the same row; only a *different* child at the same
+	// step is a determinism violation. ON CONFLICT DO NOTHING raises no error,
+	// so a duplicate never aborts the caller's transaction; on conflict, read
+	// back the recorded child and compare.
 	query := s.RenderSQL(`INSERT INTO %soperation_outputs
             (workflow_uuid, function_id, function_name, child_workflow_id)
-            VALUES ($1, $2, $3, $4)`, s.dialect.SchemaPrefix(s.schema))
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (workflow_uuid, function_id) DO NOTHING`, s.dialect.SchemaPrefix(s.schema))
 
-	var result Result
-	var err error
+	var querier Querier = s.pool
 	if input.Tx != nil {
-		result, err = input.Tx.Exec(ctx, query,
-			input.ParentWorkflowID, input.StepID, input.StepName, input.ChildWorkflowID)
-	} else {
-		result, err = s.pool.Exec(ctx, query,
-			input.ParentWorkflowID, input.StepID, input.StepName, input.ChildWorkflowID)
+		querier = input.Tx
 	}
 
+	result, err := querier.Exec(ctx, query,
+		input.ParentWorkflowID, input.StepID, input.StepName, input.ChildWorkflowID)
 	if err != nil {
-		if s.dialect.IsUniqueViolation(err) {
-			return fmt.Errorf(
-				"child workflow %s already registered for parent workflow %s (operation ID: %d). Is your workflow deterministic?",
-				input.ChildWorkflowID, input.ParentWorkflowID, input.StepID)
-		}
 		return fmt.Errorf("failed to record child workflow: %w", err)
 	}
-
 	n, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to read rows affected after recording child workflow: %w", err)
 	}
 	if n == 0 {
-		s.logger.Warn("RecordChildWorkflow No rows were affected by the insert")
+		selectQuery := s.RenderSQL(`SELECT child_workflow_id
+              FROM %soperation_outputs
+              WHERE workflow_uuid = $1 AND function_id = $2`, s.dialect.SchemaPrefix(s.schema))
+		var recordedChildID *string
+		if err := querier.QueryRow(ctx, selectQuery, input.ParentWorkflowID, input.StepID).Scan(&recordedChildID); err != nil {
+			return fmt.Errorf("failed to check existing child workflow record: %w", err)
+		}
+		if recordedChildID == nil || *recordedChildID != input.ChildWorkflowID {
+			recorded := "<nil>"
+			if recordedChildID != nil {
+				recorded = *recordedChildID
+			}
+			return fmt.Errorf(
+				"child workflow %s already registered for parent workflow %s (operation ID: %d) with a different child ID %s. Is your workflow deterministic?",
+				input.ChildWorkflowID, input.ParentWorkflowID, input.StepID, recorded)
+		}
 	}
 
 	return nil

@@ -1435,9 +1435,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				StepID:           parentWorkflowState.stepID,
 				Tx:               tx,
 			}
-			err = sysdb.Retry(c, func() error {
-				return c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput)
-			}, sysdb.WithRetrierLogger(c.logger))
+			err = c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput)
 			if err != nil {
 				c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
 				return models.NewWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))

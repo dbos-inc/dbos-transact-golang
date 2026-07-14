@@ -879,6 +879,14 @@ func TestSteps(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, wrongCtxWorkflow, WithWorkflowName("wrongCtxWorkflow"))
 
+	// Single-step workflow for the RecordOperationResultIdempotency subtest.
+	recordOpResultWf := func(ctx DBOSContext, _ string) (string, error) {
+		return RunAsStep(ctx, func(_ context.Context) (string, error) {
+			return "step-output", nil
+		})
+	}
+	RegisterWorkflow(dbosCtx, recordOpResultWf, WithWorkflowName("recordOpResultWf"))
+
 	// Define user-defined types for testing serialization
 	type StepInput struct {
 		Name      string            `json:"name"`
@@ -1618,6 +1626,98 @@ func TestSteps(t *testing.T) {
 		result, err := resumedHandle.GetResult()
 		require.NoError(t, err, "resumed workflow should complete")
 		require.Equal(t, "ok", result)
+	})
+
+	t.Run("RecordOperationResultIdempotency", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, recordOpResultWf, "")
+		require.NoError(t, err, "failed to start workflow")
+		res, err := handle.GetResult()
+		require.NoError(t, err, "failed to get workflow result")
+		require.Equal(t, "step-output", res)
+
+		wfID := handle.GetWorkflowID()
+		sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+		require.True(t, ok, "expected sysDB instance")
+		ctx := context.Background()
+
+		// Read the step-0 checkpoint exactly as recorded, so the test can replay a
+		// byte-identical write (the lost-commit-ack retry) without depending on
+		// name-resolution or serialization details.
+		var recordedName string
+		var recordedOutput *string
+		var recordedSerialization *string
+		var recordedStartedAtMs, recordedCompletedAtMs int64
+		q := sysDB.RenderSQL(`SELECT function_name, output, serialization, started_at_epoch_ms, completed_at_epoch_ms
+			FROM %soperation_outputs WHERE workflow_uuid = $1 AND function_id = 0`, sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
+		require.NoError(t, sysDB.Pool().QueryRow(ctx, q, wfID).Scan(
+			&recordedName, &recordedOutput, &recordedSerialization, &recordedStartedAtMs, &recordedCompletedAtMs))
+		require.NotNil(t, recordedOutput)
+		require.NotNil(t, recordedSerialization)
+
+		t.Run("IdenticalRetrySucceeds", func(t *testing.T) {
+			// Same content and timestamps as the recorded row: this is our own write
+			// re-run after a lost commit ack, and must be a no-op success.
+			err := sysDB.RecordOperationResult(ctx, sysdb.RecordOperationResultDBInput{
+				WorkflowID:    wfID,
+				StepID:        0,
+				StepName:      recordedName,
+				Output:        recordedOutput,
+				StartedAt:     time.UnixMilli(recordedStartedAtMs),
+				CompletedAt:   time.UnixMilli(recordedCompletedAtMs),
+				Serialization: *recordedSerialization,
+			})
+			require.NoError(t, err, "replaying our own committed write must succeed")
+		})
+
+		t.Run("DifferentWriteIsConflict", func(t *testing.T) {
+			// Same step, different content/timestamps: a concurrent execution
+			// checkpointed first; the caller must park via ConflictingIDError.
+			differentPayload := "different-payload"
+			err := sysDB.RecordOperationResult(ctx, sysdb.RecordOperationResultDBInput{
+				WorkflowID:    wfID,
+				StepID:        0,
+				StepName:      recordedName,
+				Output:        &differentPayload,
+				StartedAt:     time.Now(),
+				CompletedAt:   time.Now(),
+				Serialization: *recordedSerialization,
+			})
+			require.Error(t, err, "a different write at a recorded step must be a conflict")
+			var dbosErr *DBOSError
+			require.ErrorAs(t, err, &dbosErr)
+			require.Equal(t, ConflictingIDError, dbosErr.Code)
+		})
+
+		t.Run("FreshRecordSucceeds", func(t *testing.T) {
+			payload := "fresh-payload"
+			err := sysDB.RecordOperationResult(ctx, sysdb.RecordOperationResultDBInput{
+				WorkflowID:    wfID,
+				StepID:        99,
+				StepName:      "someStep",
+				Output:        &payload,
+				StartedAt:     time.Now(),
+				CompletedAt:   time.Now(),
+				Serialization: "json",
+			})
+			require.NoError(t, err)
+		})
+
+		t.Run("MismatchedNameIsNonDeterminismError", func(t *testing.T) {
+			err := sysDB.RecordOperationResult(ctx, sysdb.RecordOperationResultDBInput{
+				WorkflowID:    wfID,
+				StepID:        0,
+				StepName:      recordedName + "-different",
+				StartedAt:     time.Now(),
+				CompletedAt:   time.Now(),
+				Serialization: "json",
+			})
+			require.Error(t, err, "a different step name at a recorded step must be a non-determinism error")
+			var dbosErr *DBOSError
+			require.ErrorAs(t, err, &dbosErr)
+			require.Equal(t, UnexpectedStep, dbosErr.Code)
+			require.Equal(t, recordedName+"-different", dbosErr.ExpectedName)
+			require.Equal(t, recordedName, dbosErr.RecordedName)
+		})
 	})
 }
 
@@ -2709,6 +2809,45 @@ func TestChildWorkflowDeterminismCheck(t *testing.T) {
 		childID, err := sysDB.CheckChildWorkflow(ctx, parentID, 99, recordedName)
 		require.NoError(t, err, "an unrecorded step must not error")
 		require.Nil(t, childID, "an unrecorded step must return a nil child ID")
+	})
+
+	t.Run("RecordSameChildIsIdempotent", func(t *testing.T) {
+		err := sysDB.RecordChildWorkflow(ctx, sysdb.RecordChildWorkflowDBInput{
+			ParentWorkflowID: parentID,
+			ChildWorkflowID:  expectedChildID,
+			StepID:           0,
+			StepName:         recordedName,
+		})
+		require.NoError(t, err, "re-recording the same child at the same step must succeed")
+	})
+
+	t.Run("RecordSameChildInTxDoesNotAbortTx", func(t *testing.T) {
+		tx, err := sysDB.Pool().BeginTx(ctx, sysdb.TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+		err = sysDB.RecordChildWorkflow(ctx, sysdb.RecordChildWorkflowDBInput{
+			ParentWorkflowID: parentID,
+			ChildWorkflowID:  expectedChildID,
+			StepID:           0,
+			StepName:         recordedName,
+			Tx:               tx,
+		})
+		require.NoError(t, err, "re-recording the same child within a tx must succeed")
+		// The tx must still be usable after the conflict.
+		var one int
+		require.NoError(t, tx.QueryRow(ctx, "SELECT 1").Scan(&one))
+		require.NoError(t, tx.Commit(ctx))
+	})
+
+	t.Run("RecordDifferentChildIsNonDeterminismError", func(t *testing.T) {
+		err := sysDB.RecordChildWorkflow(ctx, sysdb.RecordChildWorkflowDBInput{
+			ParentWorkflowID: parentID,
+			ChildWorkflowID:  expectedChildID + "-different",
+			StepID:           0,
+			StepName:         recordedName,
+		})
+		require.Error(t, err, "a different child at the same step must be a non-determinism error")
+		require.Contains(t, err.Error(), "Is your workflow deterministic?")
 	})
 }
 
