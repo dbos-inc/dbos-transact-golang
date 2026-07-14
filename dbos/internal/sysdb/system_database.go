@@ -32,9 +32,6 @@ type SystemDatabase interface {
 	Launch(ctx context.Context)
 	Pool() Pool
 	Dialect() Dialect
-	// StreamWakeChannel returns a channel signaled when new rows are written to
-	// the given workflow's stream, plus a cleanup func to drop the registration.
-	StreamWakeChannel(workflowID, key string) (chan struct{}, func())
 	Shutdown(ctx context.Context, timeout time.Duration)
 	ResetSystemDB(ctx context.Context) error
 
@@ -83,6 +80,9 @@ type SystemDatabase interface {
 	// Streams
 	WriteStream(ctx context.Context, input WriteStreamDBInput) error
 	ReadStream(ctx context.Context, input ReadStreamDBInput) ([]StreamEntry, bool, error)
+	// StreamWakeChannel returns a channel signaled when new rows are written to
+	// the given workflow's stream, plus a cleanup func to drop the registration.
+	StreamWakeChannel(workflowID, key string) (chan struct{}, func())
 
 	// Patches
 	Patch(ctx context.Context, input PatchDBInput) (bool, error)
