@@ -4747,7 +4747,6 @@ func ListWorkflows(ctx DBOSContext, opts ...ListWorkflowsOption) ([]WorkflowStat
 	return ctx.ListWorkflows(ctx, opts...)
 }
 
-
 // models.GetWorkflowStepsInput holds optional parameters for GetWorkflowSteps.
 
 // WithStepsLoadOutput controls whether to load step output data.

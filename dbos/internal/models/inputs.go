@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"runtime/debug"
+	"time"
+)
 
 type ListWorkflowsInput struct {
 	WorkflowIDs      []string
@@ -354,4 +357,23 @@ type StepInfo struct {
 	ChildWorkflowID string    // The ID of a child workflow spawned by this step (if applicable)
 	StartedAt       time.Time // When the step execution started
 	CompletedAt     time.Time // When the step execution completed
+}
+
+// AlertHandler is a function that handles alerts received from DBOS Conductor.
+type AlertHandler func(name string, message string, metadata map[string]string)
+
+// DBOSVersion returns the version of the DBOS module
+func DBOSVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, dep := range info.Deps {
+			if dep.Path == "github.com/dbos-inc/dbos-transact-golang" {
+				return dep.Version
+			}
+		}
+		// If running as main module, return main module version
+		if info.Main.Path == "github.com/dbos-inc/dbos-transact-golang" {
+			return info.Main.Version
+		}
+	}
+	return "unknown"
 }

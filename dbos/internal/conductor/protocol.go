@@ -1,97 +1,98 @@
-package dbos
+package conductor
 
 import (
 	"encoding/json"
 	"strconv"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 )
 
-// stringOrList is a custom JSON type that accepts either a single string
+// StringOrList is a custom JSON type that accepts either a single string
 // or an array of strings, matching the conductor's StringOrList for filter fields.
-type stringOrList []string
+type StringOrList []string
 
-func (s *stringOrList) UnmarshalJSON(data []byte) error {
+func (s *StringOrList) UnmarshalJSON(data []byte) error {
 	if string(data) == "null" {
 		*s = nil
 		return nil
 	}
 	var single string
 	if err := json.Unmarshal(data, &single); err == nil {
-		*s = stringOrList{single}
+		*s = StringOrList{single}
 		return nil
 	}
 	var list []string
 	if err := json.Unmarshal(data, &list); err != nil {
 		return err
 	}
-	*s = stringOrList(list)
+	*s = StringOrList(list)
 	return nil
 }
 
-func (s stringOrList) toSlice() []string {
+func (s StringOrList) toSlice() []string {
 	return []string(s)
 }
 
-// messageType represents the type of message exchanged with the conductor
-type messageType string
+// MessageType represents the type of message exchanged with the conductor
+type MessageType string
 
 const (
-	executorInfo                 messageType = "executor_info"
-	recoveryMessage              messageType = "recovery"
-	cancelWorkflowMessage        messageType = "cancel"
-	resumeWorkflowMessage        messageType = "resume"
-	listWorkflowsMessage         messageType = "list_workflows"
-	listQueuedWorkflowsMessage   messageType = "list_queued_workflows"
-	listStepsMessage             messageType = "list_steps"
-	getWorkflowMessage           messageType = "get_workflow"
-	forkWorkflowMessage          messageType = "fork_workflow"
-	forkFromFailureMessage       messageType = "fork_from_failure"
-	existPendingWorkflowsMessage messageType = "exist_pending_workflows"
-	retentionMessage             messageType = "retention"
-	getMetricsMessage            messageType = "get_metrics"
-	exportWorkflowMessage        messageType = "export_workflow"
-	importWorkflowMessage        messageType = "import_workflow"
-	deleteWorkflowMessage        messageType = "delete"
-	alertMessage                 messageType = "alert"
-	listSchedulesMessage         messageType = "list_schedules"
-	getScheduleMessage           messageType = "get_schedule"
-	pauseScheduleMessage         messageType = "pause_schedule"
-	resumeScheduleMessage        messageType = "resume_schedule"
-	backfillScheduleMessage      messageType = "backfill_schedule"
-	triggerScheduleMessage       messageType = "trigger_schedule"
-	getWorkflowEventsMessage     messageType = "get_workflow_events"
-	getWorkflowNotificationsMsg  messageType = "get_workflow_notifications"
-	getWorkflowStreamsMessage    messageType = "get_workflow_streams"
-	getWorkflowAggregatesMessage messageType = "get_workflow_aggregates"
-	getStepAggregatesMessage     messageType = "get_step_aggregates"
-	listAppVersionsMessage       messageType = "list_application_versions"
-	setLatestAppVersionMessage   messageType = "set_latest_application_version"
-	listQueuesMessage            messageType = "list_queues"
-	getQueueMessage              messageType = "get_queue"
+	ExecutorInfo                 MessageType = "executor_info"
+	RecoveryMessage              MessageType = "recovery"
+	CancelWorkflowMessage        MessageType = "cancel"
+	ResumeWorkflowMessage        MessageType = "resume"
+	ListWorkflowsMessage         MessageType = "list_workflows"
+	ListQueuedWorkflowsMessage   MessageType = "list_queued_workflows"
+	ListStepsMessage             MessageType = "list_steps"
+	GetWorkflowMessage           MessageType = "get_workflow"
+	ForkWorkflowMessage          MessageType = "fork_workflow"
+	ForkFromFailureMessage       MessageType = "fork_from_failure"
+	ExistPendingWorkflowsMessage MessageType = "exist_pending_workflows"
+	RetentionMessage             MessageType = "retention"
+	GetMetricsMessage            MessageType = "get_metrics"
+	ExportWorkflowMessage        MessageType = "export_workflow"
+	ImportWorkflowMessage        MessageType = "import_workflow"
+	DeleteWorkflowMessage        MessageType = "delete"
+	AlertMessage                 MessageType = "alert"
+	ListSchedulesMessage         MessageType = "list_schedules"
+	GetScheduleMessage           MessageType = "get_schedule"
+	PauseScheduleMessage         MessageType = "pause_schedule"
+	ResumeScheduleMessage        MessageType = "resume_schedule"
+	BackfillScheduleMessage      MessageType = "backfill_schedule"
+	TriggerScheduleMessage       MessageType = "trigger_schedule"
+	GetWorkflowEventsMessage     MessageType = "get_workflow_events"
+	GetWorkflowNotificationsMsg  MessageType = "get_workflow_notifications"
+	GetWorkflowStreamsMessage    MessageType = "get_workflow_streams"
+	GetWorkflowAggregatesMessage MessageType = "get_workflow_aggregates"
+	GetStepAggregatesMessage     MessageType = "get_step_aggregates"
+	ListAppVersionsMessage       MessageType = "list_application_versions"
+	SetLatestAppVersionMessage   MessageType = "set_latest_application_version"
+	ListQueuesMessage            MessageType = "list_queues"
+	GetQueueMessage              MessageType = "get_queue"
 )
 
-// baseMessage represents the common structure of all conductor messages
-type baseMessage struct {
-	Type      messageType `json:"type"`
+// BaseMessage represents the common structure of all conductor messages
+type BaseMessage struct {
+	Type      MessageType `json:"type"`
 	RequestID string      `json:"request_id"`
 }
 
-// baseResponse extends baseMessage with optional error handling
-type baseResponse struct {
-	baseMessage
+// BaseResponse extends BaseMessage with optional error handling
+type BaseResponse struct {
+	BaseMessage
 	ErrorMessage *string `json:"error_message,omitempty"`
 }
 
-// executorInfoRequest is sent by the conductor to request executor information
-type executorInfoRequest struct {
-	baseMessage
+// ExecutorInfoRequest is sent by the conductor to request executor information
+type ExecutorInfoRequest struct {
+	BaseMessage
 }
 
-// executorInfoResponse is sent in response to executor info requests
-type executorInfoResponse struct {
-	baseResponse
+// ExecutorInfoResponse is sent in response to executor info requests
+type ExecutorInfoResponse struct {
+	BaseResponse
 	ExecutorID         string         `json:"executor_id"`
 	ApplicationVersion string         `json:"application_version"`
 	Hostname           *string        `json:"hostname,omitempty"`
@@ -100,44 +101,44 @@ type executorInfoResponse struct {
 	ExecutorMetadata   map[string]any `json:"executor_metadata,omitempty"`
 }
 
-// listWorkflowsConductorRequestBody contains filter parameters for listing workflows.
-type listWorkflowsConductorRequestBody struct {
+// ListWorkflowsConductorRequestBody contains filter parameters for listing workflows.
+type ListWorkflowsConductorRequestBody struct {
 	WorkflowUUIDs      []string       `json:"workflow_uuids,omitempty"`
-	WorkflowName       stringOrList   `json:"workflow_name,omitempty"`
-	AuthenticatedUser  stringOrList   `json:"authenticated_user,omitempty"`
+	WorkflowName       StringOrList   `json:"workflow_name,omitempty"`
+	AuthenticatedUser  StringOrList   `json:"authenticated_user,omitempty"`
 	StartTime          *time.Time     `json:"start_time,omitempty"`       // ISO 8601
 	EndTime            *time.Time     `json:"end_time,omitempty"`         // ISO 8601
 	CompletedAfter     *time.Time     `json:"completed_after,omitempty"`  // ISO 8601
 	CompletedBefore    *time.Time     `json:"completed_before,omitempty"` // ISO 8601
 	DequeuedAfter      *time.Time     `json:"dequeued_after,omitempty"`   // ISO 8601
 	DequeuedBefore     *time.Time     `json:"dequeued_before,omitempty"`  // ISO 8601
-	Status             stringOrList   `json:"status,omitempty"`
-	ApplicationVersion stringOrList   `json:"application_version,omitempty"`
-	ForkedFrom         stringOrList   `json:"forked_from,omitempty"`
-	ParentWorkflowID   stringOrList   `json:"parent_workflow_id,omitempty"`
+	Status             StringOrList   `json:"status,omitempty"`
+	ApplicationVersion StringOrList   `json:"application_version,omitempty"`
+	ForkedFrom         StringOrList   `json:"forked_from,omitempty"`
+	ParentWorkflowID   StringOrList   `json:"parent_workflow_id,omitempty"`
 	WasForkedFrom      *bool          `json:"was_forked_from,omitempty"`
 	HasParent          *bool          `json:"has_parent,omitempty"`
-	QueueName          stringOrList   `json:"queue_name,omitempty"`
+	QueueName          StringOrList   `json:"queue_name,omitempty"`
 	Limit              *int           `json:"limit,omitempty"`
 	Offset             *int           `json:"offset,omitempty"`
 	SortDesc           bool           `json:"sort_desc"`
-	WorkflowIDPrefix   stringOrList   `json:"workflow_id_prefix,omitempty"`
+	WorkflowIDPrefix   StringOrList   `json:"workflow_id_prefix,omitempty"`
 	LoadInput          bool           `json:"load_input"`
 	LoadOutput         bool           `json:"load_output"`
-	ExecutorID         stringOrList   `json:"executor_id,omitempty"`
+	ExecutorID         StringOrList   `json:"executor_id,omitempty"`
 	QueuesOnly         bool           `json:"queues_only"`
 	Attributes         map[string]any `json:"attributes,omitempty"`
-	ScheduleName       stringOrList   `json:"schedule_name,omitempty"`
+	ScheduleName       StringOrList   `json:"schedule_name,omitempty"`
 }
 
-// listWorkflowsConductorRequest is sent by the conductor to list workflows
-type listWorkflowsConductorRequest struct {
-	baseMessage
-	Body listWorkflowsConductorRequestBody `json:"body"`
+// ListWorkflowsConductorRequest is sent by the conductor to list workflows
+type ListWorkflowsConductorRequest struct {
+	BaseMessage
+	Body ListWorkflowsConductorRequestBody `json:"body"`
 }
 
-// listWorkflowsConductorResponseBody represents a single workflow in the list response
-type listWorkflowsConductorResponseBody struct {
+// ListWorkflowsConductorResponseBody represents a single workflow in the list response
+type ListWorkflowsConductorResponseBody struct {
 	WorkflowUUID            string  `json:"WorkflowUUID"`
 	Status                  *string `json:"Status,omitempty"`
 	WorkflowName            *string `json:"WorkflowName,omitempty"`
@@ -169,15 +170,15 @@ type listWorkflowsConductorResponseBody struct {
 	ScheduleName            *string `json:"ScheduleName,omitempty"`
 }
 
-// listWorkflowsConductorResponse is sent in response to list workflows requests
-type listWorkflowsConductorResponse struct {
-	baseResponse
-	Output []listWorkflowsConductorResponseBody `json:"output"`
+// ListWorkflowsConductorResponse is sent in response to list workflows requests
+type ListWorkflowsConductorResponse struct {
+	BaseResponse
+	Output []ListWorkflowsConductorResponseBody `json:"output"`
 }
 
-// formatListWorkflowsResponseBody converts WorkflowStatus to listWorkflowsConductorResponseBody for the conductor protocol
-func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorResponseBody {
-	output := listWorkflowsConductorResponseBody{
+// formatListWorkflowsResponseBody converts models.WorkflowStatus to ListWorkflowsConductorResponseBody for the conductor protocol
+func formatListWorkflowsResponseBody(wf models.WorkflowStatus) ListWorkflowsConductorResponseBody {
+	output := ListWorkflowsConductorResponseBody{
 		WorkflowUUID: wf.ID,
 	}
 
@@ -295,7 +296,7 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 
 	// DequeuedAt: when a workflow is dequeued and starts running, started_at is set.
 	// Use StartedAt as DequeuedAt for workflows that have been dequeued (PENDING with started_at).
-	if (wf.Status == WorkflowStatusPending) && !wf.StartedAt.IsZero() {
+	if (wf.Status == models.WorkflowStatusPending) && !wf.StartedAt.IsZero() {
 		dequeuedStr := strconv.FormatInt(wf.StartedAt.UnixMilli(), 10)
 		output.DequeuedAt = &dequeuedStr
 	}
@@ -329,17 +330,17 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 	return output
 }
 
-// listStepsConductorRequest is sent by the conductor to list workflow steps
-type listStepsConductorRequest struct {
-	baseMessage
+// ListStepsConductorRequest is sent by the conductor to list workflow steps
+type ListStepsConductorRequest struct {
+	BaseMessage
 	WorkflowID string `json:"workflow_id"`
 	LoadOutput bool   `json:"load_output"`
 	Limit      *int   `json:"limit,omitempty"`
 	Offset     *int   `json:"offset,omitempty"`
 }
 
-// workflowStepsConductorResponseBody represents a single workflow step in the list response
-type workflowStepsConductorResponseBody struct {
+// WorkflowStepsConductorResponseBody represents a single workflow step in the list response
+type WorkflowStepsConductorResponseBody struct {
 	FunctionID         int     `json:"function_id"`
 	FunctionName       string  `json:"function_name"`
 	Output             *string `json:"output,omitempty"`
@@ -349,15 +350,15 @@ type workflowStepsConductorResponseBody struct {
 	CompletedAtEpochMs *string `json:"completed_at_epoch_ms,omitempty"`
 }
 
-// listStepsConductorResponse is sent in response to list steps requests
-type listStepsConductorResponse struct {
-	baseResponse
-	Output *[]workflowStepsConductorResponseBody `json:"output,omitempty"`
+// ListStepsConductorResponse is sent in response to list steps requests
+type ListStepsConductorResponse struct {
+	BaseResponse
+	Output *[]WorkflowStepsConductorResponseBody `json:"output,omitempty"`
 }
 
-// formatWorkflowStepsResponseBody converts StepInfo to workflowStepsConductorResponseBody for the conductor protocol
-func formatWorkflowStepsResponseBody(step StepInfo) workflowStepsConductorResponseBody {
-	output := workflowStepsConductorResponseBody{
+// formatWorkflowStepsResponseBody converts models.StepInfo to WorkflowStepsConductorResponseBody for the conductor protocol
+func formatWorkflowStepsResponseBody(step models.StepInfo) WorkflowStepsConductorResponseBody {
+	output := WorkflowStepsConductorResponseBody{
 		FunctionID:   step.StepID,
 		FunctionName: step.StepName,
 	}
@@ -394,22 +395,22 @@ func formatWorkflowStepsResponseBody(step StepInfo) workflowStepsConductorRespon
 	return output
 }
 
-// getWorkflowConductorRequest is sent by the conductor to get a specific workflow
-type getWorkflowConductorRequest struct {
-	baseMessage
+// GetWorkflowConductorRequest is sent by the conductor to get a specific workflow
+type GetWorkflowConductorRequest struct {
+	BaseMessage
 	WorkflowID string `json:"workflow_id"`
 	LoadInput  bool   `json:"load_input"`
 	LoadOutput bool   `json:"load_output"`
 }
 
-// getWorkflowConductorResponse is sent in response to get workflow requests
-type getWorkflowConductorResponse struct {
-	baseResponse
-	Output *listWorkflowsConductorResponseBody `json:"output,omitempty"`
+// GetWorkflowConductorResponse is sent in response to get workflow requests
+type GetWorkflowConductorResponse struct {
+	BaseResponse
+	Output *ListWorkflowsConductorResponseBody `json:"output,omitempty"`
 }
 
-// forkWorkflowConductorRequestBody contains the fork workflow parameters
-type forkWorkflowConductorRequestBody struct {
+// ForkWorkflowConductorRequestBody contains the fork workflow parameters
+type ForkWorkflowConductorRequestBody struct {
 	WorkflowID         string  `json:"workflow_id"`
 	StartStep          int     `json:"start_step"`
 	ApplicationVersion *string `json:"application_version,omitempty"`
@@ -418,20 +419,20 @@ type forkWorkflowConductorRequestBody struct {
 	QueuePartitionKey  *string `json:"queue_partition_key,omitempty"`
 }
 
-// forkWorkflowConductorRequest is sent by the conductor to fork a workflow
-type forkWorkflowConductorRequest struct {
-	baseMessage
-	Body forkWorkflowConductorRequestBody `json:"body"`
+// ForkWorkflowConductorRequest is sent by the conductor to fork a workflow
+type ForkWorkflowConductorRequest struct {
+	BaseMessage
+	Body ForkWorkflowConductorRequestBody `json:"body"`
 }
 
-// forkWorkflowConductorResponse is sent in response to fork workflow requests
-type forkWorkflowConductorResponse struct {
-	baseResponse
+// ForkWorkflowConductorResponse is sent in response to fork workflow requests
+type ForkWorkflowConductorResponse struct {
+	BaseResponse
 	NewWorkflowID *string `json:"new_workflow_id,omitempty"`
 }
 
-// forkFromFailureConductorRequestBody contains the bulk fork-from-failure parameters
-type forkFromFailureConductorRequestBody struct {
+// ForkFromFailureConductorRequestBody contains the bulk fork-from-failure parameters
+type ForkFromFailureConductorRequestBody struct {
 	WorkflowIDs        []string `json:"workflow_ids"`
 	ApplicationVersion *string  `json:"application_version,omitempty"`
 	QueueName          *string  `json:"queue_name,omitempty"`
@@ -442,160 +443,160 @@ type forkFromFailureConductorRequestBody struct {
 	FromStepName       *string  `json:"from_step_name,omitempty"`
 }
 
-// forkFromFailureConductorRequest is sent by the conductor to bulk fork workflows
-type forkFromFailureConductorRequest struct {
-	baseMessage
-	Body forkFromFailureConductorRequestBody `json:"body"`
+// ForkFromFailureConductorRequest is sent by the conductor to bulk fork workflows
+type ForkFromFailureConductorRequest struct {
+	BaseMessage
+	Body ForkFromFailureConductorRequestBody `json:"body"`
 }
 
-// forkFromFailureConductorResponse is sent in response to fork-from-failure requests
-type forkFromFailureConductorResponse struct {
-	baseResponse
+// ForkFromFailureConductorResponse is sent in response to fork-from-failure requests
+type ForkFromFailureConductorResponse struct {
+	BaseResponse
 	ForkedWorkflowIDs []string `json:"forked_workflow_ids,omitempty"`
 }
 
-// cancelWorkflowConductorRequest is sent by the conductor to cancel a workflow
-type cancelWorkflowConductorRequest struct {
-	baseMessage
+// CancelWorkflowConductorRequest is sent by the conductor to cancel a workflow
+type CancelWorkflowConductorRequest struct {
+	BaseMessage
 	CancelChildren bool     `json:"cancel_children"`
 	WorkflowID     string   `json:"workflow_id"`
 	WorkflowIDs    []string `json:"workflow_ids"`
 }
 
-// cancelWorkflowConductorResponse is sent in response to cancel workflow requests
-type cancelWorkflowConductorResponse struct {
-	baseResponse
+// CancelWorkflowConductorResponse is sent in response to cancel workflow requests
+type CancelWorkflowConductorResponse struct {
+	BaseResponse
 	Success bool `json:"success"`
 }
 
-// recoveryConductorRequest is sent by the conductor to request recovery of pending workflows
-type recoveryConductorRequest struct {
-	baseMessage
+// RecoveryConductorRequest is sent by the conductor to request recovery of pending workflows
+type RecoveryConductorRequest struct {
+	BaseMessage
 	ExecutorIDs []string `json:"executor_ids"`
 }
 
-// recoveryConductorResponse is sent in response to recovery requests
-type recoveryConductorResponse struct {
-	baseResponse
+// RecoveryConductorResponse is sent in response to recovery requests
+type RecoveryConductorResponse struct {
+	BaseResponse
 	Success bool `json:"success"`
 }
 
-// existPendingWorkflowsConductorRequest is sent by the conductor to check for pending workflows
-type existPendingWorkflowsConductorRequest struct {
-	baseMessage
+// ExistPendingWorkflowsConductorRequest is sent by the conductor to check for pending workflows
+type ExistPendingWorkflowsConductorRequest struct {
+	BaseMessage
 	ExecutorID         string `json:"executor_id"`
 	ApplicationVersion string `json:"application_version"`
 }
 
-// existPendingWorkflowsConductorResponse is sent in response to exist pending workflows requests
-type existPendingWorkflowsConductorResponse struct {
-	baseResponse
+// ExistPendingWorkflowsConductorResponse is sent in response to exist pending workflows requests
+type ExistPendingWorkflowsConductorResponse struct {
+	BaseResponse
 	Exist bool `json:"exist"`
 }
 
-// resumeWorkflowConductorRequest is sent by the conductor to resume a workflow
-type resumeWorkflowConductorRequest struct {
-	baseMessage
+// ResumeWorkflowConductorRequest is sent by the conductor to resume a workflow
+type ResumeWorkflowConductorRequest struct {
+	BaseMessage
 	WorkflowID  string   `json:"workflow_id"`
 	WorkflowIDs []string `json:"workflow_ids"`
 	QueueName   *string  `json:"queue_name,omitempty"`
 }
 
-// resumeWorkflowConductorResponse is sent in response to resume workflow requests
-type resumeWorkflowConductorResponse struct {
-	baseResponse
+// ResumeWorkflowConductorResponse is sent in response to resume workflow requests
+type ResumeWorkflowConductorResponse struct {
+	BaseResponse
 	Success bool `json:"success"`
 }
 
-// retentionConductorRequestBody contains retention policy parameters
-type retentionConductorRequestBody struct {
+// RetentionConductorRequestBody contains retention policy parameters
+type RetentionConductorRequestBody struct {
 	GCCutoffEpochMs      *int `json:"gc_cutoff_epoch_ms,omitempty"`
 	GCRowsThreshold      *int `json:"gc_rows_threshold,omitempty"`
 	TimeoutCutoffEpochMs *int `json:"timeout_cutoff_epoch_ms,omitempty"`
 }
 
-// retentionConductorRequest is sent by the conductor to enforce retention policies
-type retentionConductorRequest struct {
-	baseMessage
-	Body retentionConductorRequestBody `json:"body"`
+// RetentionConductorRequest is sent by the conductor to enforce retention policies
+type RetentionConductorRequest struct {
+	BaseMessage
+	Body RetentionConductorRequestBody `json:"body"`
 }
 
-// retentionConductorResponse is sent in response to retention requests
-type retentionConductorResponse struct {
-	baseResponse
+// RetentionConductorResponse is sent in response to retention requests
+type RetentionConductorResponse struct {
+	BaseResponse
 	Success bool `json:"success"`
 }
 
-// getMetricsConductorRequest is sent by the conductor to request metrics
-type getMetricsConductorRequest struct {
-	baseMessage
+// GetMetricsConductorRequest is sent by the conductor to request metrics
+type GetMetricsConductorRequest struct {
+	BaseMessage
 	StartTime   string `json:"start_time"`
 	EndTime     string `json:"end_time"`
 	MetricClass string `json:"metric_class"`
 }
 
-// getMetricsConductorResponse is sent in response to metrics requests
-type getMetricsConductorResponse struct {
-	baseResponse
+// GetMetricsConductorResponse is sent in response to metrics requests
+type GetMetricsConductorResponse struct {
+	BaseResponse
 	Metrics []sysdb.MetricData `json:"metrics"`
 }
 
-// exportWorkflowConductorRequest is sent by the conductor to export a workflow
-type exportWorkflowConductorRequest struct {
-	baseMessage
+// ExportWorkflowConductorRequest is sent by the conductor to export a workflow
+type ExportWorkflowConductorRequest struct {
+	BaseMessage
 	WorkflowID     string `json:"workflow_id"`
 	ExportChildren bool   `json:"export_children"`
 }
 
-// exportWorkflowConductorResponse is sent in response to export workflow requests
-type exportWorkflowConductorResponse struct {
-	baseResponse
+// ExportWorkflowConductorResponse is sent in response to export workflow requests
+type ExportWorkflowConductorResponse struct {
+	BaseResponse
 	SerializedWorkflow *string `json:"serialized_workflow,omitempty"`
 }
 
-// importWorkflowConductorRequest is sent by the conductor to import a workflow
-type importWorkflowConductorRequest struct {
-	baseMessage
+// ImportWorkflowConductorRequest is sent by the conductor to import a workflow
+type ImportWorkflowConductorRequest struct {
+	BaseMessage
 	SerializedWorkflow string `json:"serialized_workflow"`
 }
 
-// importWorkflowConductorResponse is sent in response to import workflow requests
-type importWorkflowConductorResponse struct {
-	baseResponse
+// ImportWorkflowConductorResponse is sent in response to import workflow requests
+type ImportWorkflowConductorResponse struct {
+	BaseResponse
 	Success bool `json:"success"`
 }
 
-// deleteWorkflowConductorRequest is sent by the conductor to delete workflow(s)
-type deleteWorkflowConductorRequest struct {
-	baseMessage
+// DeleteWorkflowConductorRequest is sent by the conductor to delete workflow(s)
+type DeleteWorkflowConductorRequest struct {
+	BaseMessage
 	WorkflowID     string   `json:"workflow_id"`
 	WorkflowIDs    []string `json:"workflow_ids"`
 	DeleteChildren bool     `json:"delete_children"`
 }
 
-// deleteWorkflowConductorResponse is sent in response to delete workflow requests
-type deleteWorkflowConductorResponse struct {
-	baseResponse
+// DeleteWorkflowConductorResponse is sent in response to delete workflow requests
+type DeleteWorkflowConductorResponse struct {
+	BaseResponse
 	Success bool `json:"success"`
 }
 
-// alertRequest is sent by the conductor to deliver an alert
-type alertRequest struct {
-	baseMessage
+// AlertRequest is sent by the conductor to deliver an alert
+type AlertRequest struct {
+	BaseMessage
 	Name     string            `json:"name"`
 	Message  string            `json:"message"`
 	Metadata map[string]string `json:"metadata"`
 }
 
-// alertConductorResponse is sent in response to alert requests
-type alertConductorResponse struct {
-	baseResponse
+// AlertConductorResponse is sent in response to alert requests
+type AlertConductorResponse struct {
+	BaseResponse
 	Success bool `json:"success"`
 }
 
-// scheduleConductorOutput is the wire shape of a schedule sent to the conductor.
+// ScheduleConductorOutput is the wire shape of a schedule sent to the conductor.
 // Context is rendered when load_context is true on the request, otherwise omitted.
-type scheduleConductorOutput struct {
+type ScheduleConductorOutput struct {
 	ScheduleID        string  `json:"schedule_id"`
 	ScheduleName      string  `json:"schedule_name"`
 	WorkflowName      string  `json:"workflow_name"`
@@ -609,79 +610,79 @@ type scheduleConductorOutput struct {
 	QueueName         *string `json:"queue_name"`
 }
 
-// listSchedulesConductorRequestBody contains filter parameters for listing schedules.
-type listSchedulesConductorRequestBody struct {
-	Status             stringOrList `json:"status,omitempty"`
-	WorkflowName       stringOrList `json:"workflow_name,omitempty"`
-	ScheduleNamePrefix stringOrList `json:"schedule_name_prefix,omitempty"`
+// ListSchedulesConductorRequestBody contains filter parameters for listing schedules.
+type ListSchedulesConductorRequestBody struct {
+	Status             StringOrList `json:"status,omitempty"`
+	WorkflowName       StringOrList `json:"workflow_name,omitempty"`
+	ScheduleNamePrefix StringOrList `json:"schedule_name_prefix,omitempty"`
 	LoadContext        *bool        `json:"load_context,omitempty"`
 }
 
-type listSchedulesConductorRequest struct {
-	baseMessage
-	Body listSchedulesConductorRequestBody `json:"body"`
+type ListSchedulesConductorRequest struct {
+	BaseMessage
+	Body ListSchedulesConductorRequestBody `json:"body"`
 }
 
-type listSchedulesConductorResponse struct {
-	baseResponse
-	Output []scheduleConductorOutput `json:"output"`
+type ListSchedulesConductorResponse struct {
+	BaseResponse
+	Output []ScheduleConductorOutput `json:"output"`
 }
 
-type getScheduleConductorRequest struct {
-	baseMessage
+type GetScheduleConductorRequest struct {
+	BaseMessage
 	ScheduleName string `json:"schedule_name"`
 	LoadContext  *bool  `json:"load_context,omitempty"`
 }
 
-type getScheduleConductorResponse struct {
-	baseResponse
-	Output *scheduleConductorOutput `json:"output"`
+type GetScheduleConductorResponse struct {
+	BaseResponse
+	Output *ScheduleConductorOutput `json:"output"`
 }
 
-type pauseScheduleConductorRequest struct {
-	baseMessage
+type PauseScheduleConductorRequest struct {
+	BaseMessage
 	ScheduleName string `json:"schedule_name"`
 }
 
-type pauseScheduleConductorResponse struct {
-	baseResponse
+type PauseScheduleConductorResponse struct {
+	BaseResponse
 	Success bool `json:"success"`
 }
 
-type resumeScheduleConductorRequest struct {
-	baseMessage
+type ResumeScheduleConductorRequest struct {
+	BaseMessage
 	ScheduleName string `json:"schedule_name"`
 }
 
-type resumeScheduleConductorResponse struct {
-	baseResponse
+type ResumeScheduleConductorResponse struct {
+	BaseResponse
 	Success bool `json:"success"`
 }
 
-type backfillScheduleConductorRequest struct {
-	baseMessage
+type BackfillScheduleConductorRequest struct {
+	BaseMessage
 	ScheduleName string `json:"schedule_name"`
 	Start        string `json:"start"` // ISO 8601
 	End          string `json:"end"`   // ISO 8601
 }
 
-type backfillScheduleConductorResponse struct {
-	baseResponse
+type BackfillScheduleConductorResponse struct {
+	BaseResponse
 	WorkflowIDs []string `json:"workflow_ids"`
 }
 
-type triggerScheduleConductorRequest struct {
-	baseMessage
+type TriggerScheduleConductorRequest struct {
+	BaseMessage
 	ScheduleName string `json:"schedule_name"`
 }
 
-type triggerScheduleConductorResponse struct {
-	baseResponse
+type TriggerScheduleConductorResponse struct {
+	BaseResponse
 	WorkflowID *string `json:"workflow_id"`
 }
 
-// queueConductorOutput is the wire shape of a database-backed queue sent to the conductor.
-type queueConductorOutput struct {
+// QueueConductorOutput is the wire shape of a database-backed queue sent to the conductor.
+type QueueConductorOutput struct {
 	Name               string   `json:"name"`
 	Concurrency        *int     `json:"concurrency"`
 	WorkerConcurrency  *int     `json:"worker_concurrency"`
@@ -692,19 +693,17 @@ type queueConductorOutput struct {
 	PollingIntervalSec float64  `json:"polling_interval_sec"`
 }
 
-// toQueueConductorOutput renders a WorkflowQueue into its conductor wire shape.
-func toQueueConductorOutput(q Queue) queueConductorOutput {
-	out := queueConductorOutput{
-		Name:              q.GetName(),
-		Concurrency:       q.GetGlobalConcurrency(),
-		WorkerConcurrency: q.GetWorkerConcurrency(),
-		PriorityEnabled:   q.GetPriorityEnabled(),
-		PartitionQueue:    q.GetPartitionQueue(),
+// toQueueConductorOutput renders a queue config into its conductor wire shape.
+func toQueueConductorOutput(q models.QueueConfig) QueueConductorOutput {
+	out := QueueConductorOutput{
+		Name:              q.Name,
+		Concurrency:       q.GlobalConcurrency,
+		WorkerConcurrency: q.WorkerConcurrency,
+		PriorityEnabled:   q.PriorityEnabled,
+		PartitionQueue:    q.PartitionQueue,
 	}
-	if wq, ok := q.(*WorkflowQueue); ok {
-		out.PollingIntervalSec = wq.basePollingInterval.Seconds()
-	}
-	if rl := q.GetRateLimit(); rl != nil {
+	out.PollingIntervalSec = q.BasePollingInterval.Seconds()
+	if rl := q.RateLimit; rl != nil {
 		limit := rl.Limit
 		period := rl.Period.Seconds()
 		out.RateLimitMax = &limit
@@ -713,81 +712,81 @@ func toQueueConductorOutput(q Queue) queueConductorOutput {
 	return out
 }
 
-type listQueuesConductorRequest struct {
-	baseMessage
+type ListQueuesConductorRequest struct {
+	BaseMessage
 }
 
-type listQueuesConductorResponse struct {
-	baseResponse
-	Output []queueConductorOutput `json:"output"`
+type ListQueuesConductorResponse struct {
+	BaseResponse
+	Output []QueueConductorOutput `json:"output"`
 }
 
-type getQueueConductorRequest struct {
-	baseMessage
+type GetQueueConductorRequest struct {
+	BaseMessage
 	Name string `json:"name"`
 }
 
-type getQueueConductorResponse struct {
-	baseResponse
-	Output *queueConductorOutput `json:"output"`
+type GetQueueConductorResponse struct {
+	BaseResponse
+	Output *QueueConductorOutput `json:"output"`
 }
 
-// eventOutput is one entry returned by a get_workflow_events response.
+// EventOutput is one entry returned by a get_workflow_events response.
 // Value is the workflow event's value decoded from its recorded serialization and re-marshaled as JSON.
-type eventOutput struct {
+type EventOutput struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 }
 
-// notificationOutput is one entry returned by a get_workflow_notifications response.
+// NotificationOutput is one entry returned by a get_workflow_notifications response.
 // Topic is nil when the notification was sent without a topic.
 // Message is decoded from its recorded serialization and re-marshaled as JSON.
-type notificationOutput struct {
+type NotificationOutput struct {
 	Topic            *string `json:"topic"`
 	Message          string  `json:"message"`
 	CreatedAtEpochMs int64   `json:"created_at_epoch_ms"`
 	Consumed         bool    `json:"consumed"`
 }
 
-// streamEntryOutput is one entry returned by a get_workflow_streams response.
+// StreamEntryOutput is one entry returned by a get_workflow_streams response.
 // Values are grouped by stream key and ordered by write offset; each value is JSON-marshaled.
-type streamEntryOutput struct {
+type StreamEntryOutput struct {
 	Key    string   `json:"key"`
 	Values []string `json:"values"`
 }
 
-type getWorkflowEventsConductorRequest struct {
-	baseMessage
+type GetWorkflowEventsConductorRequest struct {
+	BaseMessage
 	WorkflowID string `json:"workflow_id"`
 }
 
-type getWorkflowEventsConductorResponse struct {
-	baseResponse
-	Events []eventOutput `json:"events"`
+type GetWorkflowEventsConductorResponse struct {
+	BaseResponse
+	Events []EventOutput `json:"events"`
 }
 
-type getWorkflowNotificationsConductorRequest struct {
-	baseMessage
+type GetWorkflowNotificationsConductorRequest struct {
+	BaseMessage
 	WorkflowID string `json:"workflow_id"`
 }
 
-type getWorkflowNotificationsConductorResponse struct {
-	baseResponse
-	Notifications []notificationOutput `json:"notifications"`
+type GetWorkflowNotificationsConductorResponse struct {
+	BaseResponse
+	Notifications []NotificationOutput `json:"notifications"`
 }
 
-type getWorkflowStreamsConductorRequest struct {
-	baseMessage
+type GetWorkflowStreamsConductorRequest struct {
+	BaseMessage
 	WorkflowID string `json:"workflow_id"`
 }
 
-type getWorkflowStreamsConductorResponse struct {
-	baseResponse
-	Streams []streamEntryOutput `json:"streams"`
+type GetWorkflowStreamsConductorResponse struct {
+	BaseResponse
+	Streams []StreamEntryOutput `json:"streams"`
 }
 
-// getWorkflowAggregatesConductorRequestBody contains the workflow aggregate query parameters.
-type getWorkflowAggregatesConductorRequestBody struct {
+// GetWorkflowAggregatesConductorRequestBody contains the workflow aggregate query parameters.
+type GetWorkflowAggregatesConductorRequestBody struct {
 	GroupByStatus             bool           `json:"group_by_status"`
 	GroupByName               bool           `json:"group_by_name"`
 	GroupByQueueName          bool           `json:"group_by_queue_name"`
@@ -798,80 +797,80 @@ type getWorkflowAggregatesConductorRequestBody struct {
 	SelectMaxQueueWaitMs      bool           `json:"select_max_queue_wait_ms"`
 	SelectMaxTotalLatencyMs   bool           `json:"select_max_total_latency_ms"`
 	TimeBucketSizeMs          *int64         `json:"time_bucket_size_ms,omitempty"`
-	Status                    stringOrList   `json:"status,omitempty"`
+	Status                    StringOrList   `json:"status,omitempty"`
 	StartTime                 *time.Time     `json:"start_time,omitempty"`       // ISO 8601
 	EndTime                   *time.Time     `json:"end_time,omitempty"`         // ISO 8601
 	CompletedAfter            *time.Time     `json:"completed_after,omitempty"`  // ISO 8601
 	CompletedBefore           *time.Time     `json:"completed_before,omitempty"` // ISO 8601
 	DequeuedAfter             *time.Time     `json:"dequeued_after,omitempty"`   // ISO 8601
 	DequeuedBefore            *time.Time     `json:"dequeued_before,omitempty"`  // ISO 8601
-	Name                      stringOrList   `json:"name,omitempty"`
-	AppVersion                stringOrList   `json:"app_version,omitempty"`
-	ExecutorID                stringOrList   `json:"executor_id,omitempty"`
-	QueueName                 stringOrList   `json:"queue_name,omitempty"`
-	WorkflowIDPrefix          stringOrList   `json:"workflow_id_prefix,omitempty"`
-	WorkflowIDs               stringOrList   `json:"workflow_ids,omitempty"`
-	ForkedFrom                stringOrList   `json:"forked_from,omitempty"`
-	ParentWorkflowID          stringOrList   `json:"parent_workflow_id,omitempty"`
-	User                      stringOrList   `json:"user,omitempty"`
+	Name                      StringOrList   `json:"name,omitempty"`
+	AppVersion                StringOrList   `json:"app_version,omitempty"`
+	ExecutorID                StringOrList   `json:"executor_id,omitempty"`
+	QueueName                 StringOrList   `json:"queue_name,omitempty"`
+	WorkflowIDPrefix          StringOrList   `json:"workflow_id_prefix,omitempty"`
+	WorkflowIDs               StringOrList   `json:"workflow_ids,omitempty"`
+	ForkedFrom                StringOrList   `json:"forked_from,omitempty"`
+	ParentWorkflowID          StringOrList   `json:"parent_workflow_id,omitempty"`
+	User                      StringOrList   `json:"user,omitempty"`
 	WasForkedFrom             *bool          `json:"was_forked_from,omitempty"`
 	HasParent                 *bool          `json:"has_parent,omitempty"`
 	Attributes                map[string]any `json:"attributes,omitempty"`
 }
 
-// getWorkflowAggregatesConductorRequest is sent by the conductor to fetch workflow aggregates.
-type getWorkflowAggregatesConductorRequest struct {
-	baseMessage
-	Body getWorkflowAggregatesConductorRequestBody `json:"body"`
+// GetWorkflowAggregatesConductorRequest is sent by the conductor to fetch workflow aggregates.
+type GetWorkflowAggregatesConductorRequest struct {
+	BaseMessage
+	Body GetWorkflowAggregatesConductorRequestBody `json:"body"`
 }
 
-// getWorkflowAggregatesConductorResponse is sent in response to workflow aggregate requests.
-// Output uses WorkflowAggregateRow directly: it has the matching JSON tags and there is no
+// GetWorkflowAggregatesConductorResponse is sent in response to workflow aggregate requests.
+// Output uses sysdb.WorkflowAggregateRow directly: it has the matching JSON tags and there is no
 // conversion needed between the public Go shape and the wire shape.
-type getWorkflowAggregatesConductorResponse struct {
-	baseResponse
-	Output []WorkflowAggregateRow `json:"output"`
+type GetWorkflowAggregatesConductorResponse struct {
+	BaseResponse
+	Output []sysdb.WorkflowAggregateRow `json:"output"`
 }
 
-// getStepAggregatesConductorRequestBody contains the step aggregate query parameters.
-type getStepAggregatesConductorRequestBody struct {
+// GetStepAggregatesConductorRequestBody contains the step aggregate query parameters.
+type GetStepAggregatesConductorRequestBody struct {
 	GroupByFunctionName bool         `json:"group_by_function_name"`
 	GroupByStatus       bool         `json:"group_by_status"`
 	SelectCount         bool         `json:"select_count"`
 	SelectMaxDurationMs bool         `json:"select_max_duration_ms"`
 	TimeBucketSizeMs    *int64       `json:"time_bucket_size_ms,omitempty"`
-	Status              stringOrList `json:"status,omitempty"`
-	FunctionName        stringOrList `json:"function_name,omitempty"`
-	WorkflowIDPrefix    stringOrList `json:"workflow_id_prefix,omitempty"`
+	Status              StringOrList `json:"status,omitempty"`
+	FunctionName        StringOrList `json:"function_name,omitempty"`
+	WorkflowIDPrefix    StringOrList `json:"workflow_id_prefix,omitempty"`
 	CompletedAfter      *time.Time   `json:"completed_after,omitempty"`  // ISO 8601
 	CompletedBefore     *time.Time   `json:"completed_before,omitempty"` // ISO 8601
 }
 
-// getStepAggregatesConductorRequest is sent by the conductor to fetch step aggregates.
-type getStepAggregatesConductorRequest struct {
-	baseMessage
-	Body getStepAggregatesConductorRequestBody `json:"body"`
+// GetStepAggregatesConductorRequest is sent by the conductor to fetch step aggregates.
+type GetStepAggregatesConductorRequest struct {
+	BaseMessage
+	Body GetStepAggregatesConductorRequestBody `json:"body"`
 }
 
-// getStepAggregatesConductorResponse is sent in response to step aggregate requests.
-// Output uses StepAggregateRow directly: it has the matching JSON tags and there is no
+// GetStepAggregatesConductorResponse is sent in response to step aggregate requests.
+// Output uses sysdb.StepAggregateRow directly: it has the matching JSON tags and there is no
 // conversion needed between the public Go shape and the wire shape.
-type getStepAggregatesConductorResponse struct {
-	baseResponse
-	Output []StepAggregateRow `json:"output"`
+type GetStepAggregatesConductorResponse struct {
+	BaseResponse
+	Output []sysdb.StepAggregateRow `json:"output"`
 }
 
-// applicationVersionOutput is the wire shape for a single application version
+// ApplicationVersionOutput is the wire shape for a single application version
 // returned to the conductor.
-type applicationVersionOutput struct {
+type ApplicationVersionOutput struct {
 	ID        string `json:"version_id"`
 	Name      string `json:"version_name"`
 	Timestamp int64  `json:"version_timestamp"`
 	CreatedAt int64  `json:"created_at"`
 }
 
-func formatApplicationVersionOutput(v VersionInfo) applicationVersionOutput {
-	return applicationVersionOutput{
+func formatApplicationVersionOutput(v sysdb.VersionInfo) ApplicationVersionOutput {
+	return ApplicationVersionOutput{
 		ID:        v.ID,
 		Name:      v.Name,
 		Timestamp: v.Timestamp,
@@ -879,25 +878,25 @@ func formatApplicationVersionOutput(v VersionInfo) applicationVersionOutput {
 	}
 }
 
-// listApplicationVersionsConductorRequest is sent by the conductor to list registered application versions.
-type listApplicationVersionsConductorRequest struct {
-	baseMessage
+// ListApplicationVersionsConductorRequest is sent by the conductor to list registered application versions.
+type ListApplicationVersionsConductorRequest struct {
+	BaseMessage
 }
 
-// listApplicationVersionsConductorResponse is sent in response to list application version requests.
-type listApplicationVersionsConductorResponse struct {
-	baseResponse
-	Output []applicationVersionOutput `json:"output"`
+// ListApplicationVersionsConductorResponse is sent in response to list application version requests.
+type ListApplicationVersionsConductorResponse struct {
+	BaseResponse
+	Output []ApplicationVersionOutput `json:"output"`
 }
 
-// setLatestApplicationVersionConductorRequest is sent by the conductor to mark a version as latest.
-type setLatestApplicationVersionConductorRequest struct {
-	baseMessage
+// SetLatestApplicationVersionConductorRequest is sent by the conductor to mark a version as latest.
+type SetLatestApplicationVersionConductorRequest struct {
+	BaseMessage
 	VersionName string `json:"version_name"`
 }
 
-// setLatestApplicationVersionConductorResponse is sent in response to set-latest requests.
-type setLatestApplicationVersionConductorResponse struct {
-	baseResponse
+// SetLatestApplicationVersionConductorResponse is sent in response to set-latest requests.
+type SetLatestApplicationVersionConductorResponse struct {
+	BaseResponse
 	Success bool `json:"success"`
 }

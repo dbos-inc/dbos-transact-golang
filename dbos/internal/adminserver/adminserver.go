@@ -18,7 +18,7 @@ import (
 // It is implemented by an adapter in the dbos package.
 type Executor interface {
 	ListWorkflows(ctx context.Context, opts ...models.ListWorkflowsOption) ([]models.WorkflowStatus, error)
-	GetWorkflowSteps(ctx context.Context, workflowID string) ([]models.StepInfo, error)
+	GetWorkflowSteps(ctx context.Context, workflowID string, opts ...models.GetWorkflowStepsOption) ([]models.StepInfo, error)
 	CancelWorkflow(ctx context.Context, workflowID string) error
 	ResumeWorkflow(ctx context.Context, workflowID string) error
 	// ForkWorkflow returns the ID of the newly forked workflow.

@@ -12,12 +12,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/adminserver"
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/conductor"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
@@ -131,7 +131,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 }
 
 // AlertHandler is a function that handles alerts received from DBOS Conductor.
-type AlertHandler func(name string, message string, metadata map[string]string)
+type AlertHandler = models.AlertHandler
 
 // DBOSContext represents a DBOS execution context that provides workflow orchestration capabilities.
 // It extends the standard Go context.Context and adds methods for running workflows and steps,
@@ -239,7 +239,7 @@ type dbosContext struct {
 	queueRunner *queueRunner
 
 	// Conductor client
-	conductor *conductor
+	conductor *conductor.Conductor
 
 	// Application metadata
 	applicationVersion string
@@ -611,7 +611,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 
 	// Set global logger
 	initExecutor.logger = config.Logger
-	initExecutor.logger.Info("Initializing DBOS context", "app_name", config.AppName, "dbos_version", getDBOSVersion())
+	initExecutor.logger.Info("Initializing DBOS context", "app_name", config.AppName, "dbos_version", models.DBOSVersion())
 
 	// Initialize global variables from processed config (already handles env vars and defaults)
 	initExecutor.applicationVersion = config.ApplicationVersion
@@ -657,17 +657,17 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 	// Initialize conductor. In DBOS Cloud, connect to Conductor for observability
 	// using the cloud-provided environment variables. Otherwise, connect if a
 	// Conductor API key was configured.
-	var conductorCfg *conductorConfig
+	var conductorCfg *conductor.Config
 	if os.Getenv("DBOS__CLOUD") == "true" {
 		cloudAppName := os.Getenv("DBOS__CONDUCTOR_APP_NAME")
 		cloudConductorKey := os.Getenv("DBOS__CONDUCTOR_KEY")
 		cloudConductorURL := os.Getenv("DBOS__CONDUCTOR_URL")
 		if cloudAppName != "" && cloudConductorKey != "" && cloudConductorURL != "" {
-			conductorCfg = &conductorConfig{
-				url:              cloudConductorURL,
-				apiKey:           cloudConductorKey,
-				appName:          cloudAppName,
-				executorMetadata: config.ConductorExecutorMetadata,
+			conductorCfg = &conductor.Config{
+				URL:              cloudConductorURL,
+				APIKey:           cloudConductorKey,
+				AppName:          cloudAppName,
+				ExecutorMetadata: config.ConductorExecutorMetadata,
 			}
 		}
 	} else if config.ConductorAPIKey != "" {
@@ -679,16 +679,16 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 			}
 			config.ConductorURL = fmt.Sprintf("wss://%s/conductor/v1alpha1", dbosDomain)
 		}
-		conductorCfg = &conductorConfig{
-			url:              config.ConductorURL,
-			apiKey:           config.ConductorAPIKey,
-			appName:          config.AppName,
-			executorMetadata: config.ConductorExecutorMetadata,
+		conductorCfg = &conductor.Config{
+			URL:              config.ConductorURL,
+			APIKey:           config.ConductorAPIKey,
+			AppName:          config.AppName,
+			ExecutorMetadata: config.ConductorExecutorMetadata,
 		}
 	}
 
 	if conductorCfg != nil {
-		conductor, err := newConductor(initExecutor, *conductorCfg)
+		conductor, err := conductor.New(initExecutor, executorAdapter{ctx: initExecutor}, initExecutor.logger, *conductorCfg)
 		if err != nil {
 			return nil, models.NewInitializationError(fmt.Sprintf("failed to initialize conductor: %v", err))
 		}
@@ -754,7 +754,7 @@ func (c *dbosContext) Launch() error {
 
 	// Start the conductor if it has been initialized
 	if c.conductor != nil {
-		c.conductor.launch()
+		c.conductor.Launch()
 		c.logger.Debug("Conductor started")
 	}
 
@@ -827,7 +827,7 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	// Shutdown the conductor
 	if c.conductor != nil {
 		c.logger.Debug("Shutting down conductor")
-		c.conductor.shutdown(timeout)
+		c.conductor.Shutdown(timeout)
 	}
 
 	// Shutdown the admin server
@@ -907,22 +907,6 @@ func computeApplicationVersion() string {
 		return ""
 	}
 	return hash
-}
-
-// getDBOSVersion returns the version of the DBOS module
-func getDBOSVersion() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, dep := range info.Deps {
-			if dep.Path == "github.com/dbos-inc/dbos-transact-golang" {
-				return dep.Version
-			}
-		}
-		// If running as main module, return main module version
-		if info.Main.Path == "github.com/dbos-inc/dbos-transact-golang" {
-			return info.Main.Version
-		}
-	}
-	return "unknown"
 }
 
 // Launch launches the DBOS runtime using the provided DBOSContext.
