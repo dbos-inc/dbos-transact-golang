@@ -2726,3 +2726,62 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 		assert.Equal(t, `"payload-step-2"`, steps[2].Output)
 	})
 }
+
+// TestForkPreservesSerialization: forking with StartStep > 0 must copy the
+// serialization column on checkpoints, events, and streams. If the copies
+// drop it, the forked replay decodes gob payloads with the default JSON
+// decoder and fails.
+func TestForkPreservesSerialization(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: NewGobSerializer()})
+
+	wf := func(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
+		out, err := RunAsStep(ctx, func(ctx context.Context) (TestWorkflowData, error) {
+			return input, nil
+		}, WithStepName("checkpointStep"))
+		if err != nil {
+			return TestWorkflowData{}, err
+		}
+		if err := SetEvent(ctx, "fork-event", out); err != nil {
+			return TestWorkflowData{}, err
+		}
+		if err := WriteStream(ctx, "fork-stream", out); err != nil {
+			return TestWorkflowData{}, err
+		}
+		return out, nil
+	}
+	RegisterWorkflow(executor, wf, WithWorkflowName("fork-serialization-wf"))
+	require.NoError(t, Launch(executor))
+
+	input := TestWorkflowData{
+		ID: "fork-serialization", Message: "gob payload", Value: 7,
+		Data:     TestData{Message: "nested", Value: 14},
+		Metadata: map[string]string{"path": "fork"},
+	}
+	handle, err := RunWorkflow(executor, wf, input, WithWorkflowID("fork-serialization-orig"))
+	require.NoError(t, err)
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, input, result)
+
+	// Fork past all recorded steps (0=checkpointStep, 1=SetEvent, 2=WriteStream)
+	// so every copied row must carry its serialization to replay correctly.
+	forkHandle, err := ForkWorkflow[TestWorkflowData](executor, ForkWorkflowInput{
+		OriginalWorkflowID: "fork-serialization-orig",
+		StartStep:          3,
+	})
+	require.NoError(t, err)
+	forkResult, err := forkHandle.GetResult()
+	require.NoError(t, err, "forked replay must decode copied checkpoints with their recorded serializer")
+	assert.Equal(t, input, forkResult)
+
+	forkID := forkHandle.GetWorkflowID()
+	event, err := GetEvent[TestWorkflowData](executor, forkID, "fork-event", 10*time.Second)
+	require.NoError(t, err, "copied event must decode with its recorded serializer")
+	assert.Equal(t, input, event)
+
+	values, closed, err := ReadStream[TestWorkflowData](executor, forkID, "fork-stream")
+	require.NoError(t, err, "copied stream entry must decode with its recorded serializer")
+	assert.True(t, closed)
+	require.Len(t, values, 1)
+	assert.Equal(t, input, values[0])
+}

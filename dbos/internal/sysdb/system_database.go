@@ -2302,8 +2302,8 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 		mapping := "(" + strings.Join(mappingBranches, " UNION ALL ") + ") AS m"
 
 		copyOutputsQuery := s.RenderSQL(`INSERT INTO %soperation_outputs
-			(workflow_uuid, function_id, output, error, function_name, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms)
-			SELECT m.fork_id, oo.function_id, oo.output, oo.error, oo.function_name, oo.child_workflow_id, oo.started_at_epoch_ms, oo.completed_at_epoch_ms
+			(workflow_uuid, function_id, output, error, function_name, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms, serialization)
+			SELECT m.fork_id, oo.function_id, oo.output, oo.error, oo.function_name, oo.child_workflow_id, oo.started_at_epoch_ms, oo.completed_at_epoch_ms, oo.serialization
 			FROM `+mapping+`
 			JOIN %soperation_outputs oo ON oo.workflow_uuid = m.orig_id AND oo.function_id < m.start_step`,
 			s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
@@ -2312,8 +2312,8 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 		}
 
 		copyEventsHistoryQuery := s.RenderSQL(`INSERT INTO %sworkflow_events_history
-			(workflow_uuid, function_id, key, value)
-			SELECT m.fork_id, h.function_id, h.key, h.value
+			(workflow_uuid, function_id, key, value, serialization)
+			SELECT m.fork_id, h.function_id, h.key, h.value, h.serialization
 			FROM `+mapping+`
 			JOIN %sworkflow_events_history h ON h.workflow_uuid = m.orig_id AND h.function_id < m.start_step`,
 			s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
@@ -2322,9 +2322,9 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 		}
 
 		// Copy only the latest version of each event (highest function_id per key) into workflow_events.
-		copyLatestEventsQuery := s.RenderSQL(`INSERT INTO %sworkflow_events (workflow_uuid, key, value)
-			SELECT workflow_uuid, key, value FROM (
-				SELECT m.fork_id AS workflow_uuid, h.key AS key, h.value AS value,
+		copyLatestEventsQuery := s.RenderSQL(`INSERT INTO %sworkflow_events (workflow_uuid, key, value, serialization)
+			SELECT workflow_uuid, key, value, serialization FROM (
+				SELECT m.fork_id AS workflow_uuid, h.key AS key, h.value AS value, h.serialization AS serialization,
 					ROW_NUMBER() OVER (PARTITION BY m.fork_id, h.key ORDER BY h.function_id DESC) AS rn
 				FROM `+mapping+`
 				JOIN %sworkflow_events_history h ON h.workflow_uuid = m.orig_id AND h.function_id < m.start_step
@@ -2335,8 +2335,8 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 		}
 
 		copyStreamsQuery := s.RenderSQL(`INSERT INTO %sstreams
-			(workflow_uuid, key, value, "offset", function_id)
-			SELECT m.fork_id, st.key, st.value, st."offset", st.function_id
+			(workflow_uuid, key, value, "offset", function_id, serialization)
+			SELECT m.fork_id, st.key, st.value, st."offset", st.function_id, st.serialization
 			FROM `+mapping+`
 			JOIN %sstreams st ON st.workflow_uuid = m.orig_id AND st.function_id < m.start_step`,
 			s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
