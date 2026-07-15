@@ -4568,6 +4568,9 @@ func (s *SysDB) GetQueuePartitions(ctx context.Context, queueName string) ([]str
 		}
 		partitions = append(partitions, partitionKey)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read queue partitions: %w", err)
+	}
 
 	return partitions, nil
 }
@@ -5081,6 +5084,9 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 		}
 
 		schedules = append(schedules, schedule)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to list schedules: %w", err)
 	}
 
 	return schedules, nil
