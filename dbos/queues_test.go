@@ -1391,8 +1391,11 @@ func TestQueueTimeouts(t *testing.T) {
 	})
 
 	t.Run("EnqueueWorkflowThatEnqueuesADetachedWorkflow", func(t *testing.T) {
-		// Start a workflow that enqueues another workflow that is not cancelable
-		timeout := 100 * time.Millisecond
+		// Start a workflow that enqueues another workflow that is not cancelable.
+		// The timeout must be long enough for the parent to enqueue the child and
+		// start its getResult step (both DB roundtrips) before the deadline fires,
+		// or the getResult pre-check sees the parent CANCELLED and errors.
+		timeout := 1 * time.Second
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, timeout)
 		defer cancelFunc() // Ensure we clean up the context
 
