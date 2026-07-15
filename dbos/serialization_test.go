@@ -149,6 +149,12 @@ func testAllSerializationPaths[T any](
 		require.NoError(t, err)
 		require.Len(t, wfs, 1)
 		wf := wfs[0]
+
+		// GetStatus on a launched context must load input/output too
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, wf.Input, status.Input, "GetStatus input should match ListWorkflows input")
+		assert.Equal(t, wf.Output, status.Output, "GetStatus output should match ListWorkflows output")
 		if isNilExpected {
 			require.Nil(t, wf.Input, "Workflow input should be nil")
 			require.Nil(t, wf.Output, "Workflow output should be nil")

@@ -121,8 +121,8 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 	loadInput := false
 	loadOutput := false
 	if h.dbosContext.(*dbosContext).launched.Load() {
-		loadInput = false
-		loadOutput = false
+		loadInput = true
+		loadOutput = true
 	}
 	c := h.dbosContext.(*dbosContext)
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
@@ -153,6 +153,9 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 	}
 	if len(workflowStatuses) == 0 {
 		return WorkflowStatus{}, models.NewNonExistentWorkflowError(h.workflowID)
+	}
+	if err := c.decodeWorkflowsInputOutput(workflowStatuses, loadInput, loadOutput); err != nil {
+		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
 	}
 	return workflowStatuses[0], nil
 }
@@ -3761,13 +3764,6 @@ func GetStepID(ctx DBOSContext) (int, error) {
 }
 
 func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (WorkflowHandle[any], error) {
-	loadInput := false
-	loadOutput := false
-	if c.launched.Load() {
-		loadInput = false
-		loadOutput = false
-	}
-
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	var workflowStatus []WorkflowStatus
@@ -3777,8 +3773,8 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 			return sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
 				return c.systemDB.ListWorkflows(ctx, sysdb.ListWorkflowsDBInput{
 					WorkflowIDs: []string{workflowID},
-					LoadInput:   loadInput,
-					LoadOutput:  loadOutput,
+					LoadInput:   false,
+					LoadOutput:  false,
 				})
 			}, sysdb.WithRetrierLogger(c.logger))
 		}, WithStepName("DBOS.retrieveWorkflow"))
@@ -3786,8 +3782,8 @@ func (c *dbosContext) RetrieveWorkflow(_ DBOSContext, workflowID string) (Workfl
 		workflowStatus, err = sysdb.RetryWithResult(c, func() ([]WorkflowStatus, error) {
 			return c.systemDB.ListWorkflows(c, sysdb.ListWorkflowsDBInput{
 				WorkflowIDs: []string{workflowID},
-				LoadInput:   loadInput,
-				LoadOutput:  loadOutput,
+				LoadInput:   false,
+				LoadOutput:  false,
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
 	}
@@ -4690,12 +4686,21 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 	}
 
 	// Deserialize Input and Output fields if they were loaded
-	if params.LoadInput || params.LoadOutput {
+	if err := c.decodeWorkflowsInputOutput(workflows, params.LoadInput, params.LoadOutput); err != nil {
+		return nil, err
+	}
+
+	return workflows, nil
+}
+
+// decodeWorkflowsInputOutput decodes the raw encoded input/output columns loaded from the system database.
+func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loadInput, loadOutput bool) error {
+	if loadInput || loadOutput {
 		for i := range workflows {
-			if params.LoadInput && workflows[i].Input != nil {
+			if loadInput && workflows[i].Input != nil {
 				encodedInput, ok := workflows[i].Input.(*string)
 				if !ok {
-					return nil, fmt.Errorf("workflow input must be encoded string, got %T", workflows[i].Input)
+					return fmt.Errorf("workflow input must be encoded string, got %T", workflows[i].Input)
 				}
 				if encodedInput == nil || *encodedInput == nilMarker {
 					workflows[i].Input = nil
@@ -4721,10 +4726,10 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 					}
 				}
 			}
-			if params.LoadOutput && workflows[i].Output != nil {
+			if loadOutput && workflows[i].Output != nil {
 				encodedOutput, ok := workflows[i].Output.(*string)
 				if !ok {
-					return nil, fmt.Errorf("workflow output must be encoded *string, got %T", workflows[i].Output)
+					return fmt.Errorf("workflow output must be encoded *string, got %T", workflows[i].Output)
 				}
 				if encodedOutput == nil || *encodedOutput == nilMarker {
 					workflows[i].Output = nil
@@ -4749,14 +4754,14 @@ func (c *dbosContext) ListWorkflows(_ DBOSContext, opts ...ListWorkflowsOption) 
 					}
 				}
 			}
-			if params.LoadOutput && workflows[i].Error != nil {
+			if loadOutput && workflows[i].Error != nil {
 				s := workflows[i].Error.Error()
 				workflows[i].Error = deserializeWorkflowError(&s)
 			}
 		}
 	}
 
-	return workflows, nil
+	return nil
 }
 
 // ListWorkflows retrieves a list of workflows based on the provided filters.
