@@ -2682,9 +2682,7 @@ func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkfl
 			if recordedChildID != nil {
 				recorded = *recordedChildID
 			}
-			return fmt.Errorf(
-				"child workflow %s already registered for parent workflow %s (operation ID: %d) with a different child ID %s. Is your workflow deterministic?",
-				input.ChildWorkflowID, input.ParentWorkflowID, input.StepID, recorded)
+			return models.NewUnexpectedStepError(input.ParentWorkflowID, input.StepID, input.ChildWorkflowID, recorded)
 		}
 	}
 
