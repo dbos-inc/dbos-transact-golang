@@ -4542,9 +4542,23 @@ func receiveTwiceShortWorkflow(ctx DBOSContext, topic string) (string, error) {
 	return first + "|" + second, nil
 }
 
+// receiveOneShortWorkflow receives a single message with a short timeout, returning
+// "<timeout>" if none arrives so a test can observe a silently dropped Send.
+func receiveOneShortWorkflow(ctx DBOSContext, topic string) (string, error) {
+	msg, err := Recv[string](ctx, topic, 3*time.Second)
+	if err != nil {
+		if errors.Is(err, &DBOSError{Code: TimeoutError}) {
+			return "<timeout>", nil
+		}
+		return "", err
+	}
+	return msg, nil
+}
+
 func TestSendIdempotencyKey(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, receiveTwiceShortWorkflow)
+	RegisterWorkflow(dbosCtx, receiveOneShortWorkflow)
 	Launch(dbosCtx)
 
 	t.Run("DuplicateKeyDeliversOnce", func(t *testing.T) {
@@ -4578,6 +4592,27 @@ func TestSendIdempotencyKey(t *testing.T) {
 		require.NotContains(t, result, "<timeout>", "both distinct-key messages should be delivered")
 		require.Contains(t, result, "msg-a")
 		require.Contains(t, result, "msg-b")
+	})
+
+	t.Run("SameKeyDistinctDestinationsDeliverEach", func(t *testing.T) {
+		// The idempotency key is scoped per destination (message_uuid is key::destinationID):
+		// the same key sent to two different workflows must deliver to both.
+		handleA, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "idem-cross-dest-topic")
+		require.NoError(t, err, "failed to start first receive workflow")
+		handleB, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "idem-cross-dest-topic")
+		require.NoError(t, err, "failed to start second receive workflow")
+
+		err = Send(dbosCtx, handleA.GetWorkflowID(), "to-a", "idem-cross-dest-topic", WithIdempotencyKey("cross-dest-key"))
+		require.NoError(t, err, "send to first destination failed")
+		err = Send(dbosCtx, handleB.GetWorkflowID(), "to-b", "idem-cross-dest-topic", WithIdempotencyKey("cross-dest-key"))
+		require.NoError(t, err, "send to second destination failed")
+
+		resultA, err := handleA.GetResult()
+		require.NoError(t, err, "failed to get result from first receive workflow")
+		require.Equal(t, "to-a", resultA)
+		resultB, err := handleB.GetResult()
+		require.NoError(t, err, "failed to get result from second receive workflow")
+		require.Equal(t, "to-b", resultB, "same key to a different destination must still deliver")
 	})
 }
 
