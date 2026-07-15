@@ -145,6 +145,7 @@ type ExportedWorkflow struct {
 type SysDB struct {
 	pool                 Pool
 	dialect              Dialect
+	notificationLoopMu   sync.Mutex
 	notificationLoopDone chan struct{}
 	RecvNotifier         *notifyRegistry // recv waiters, keyed by "destinationID::topic"
 	EventNotifier        *notifyRegistry // getEvent waiters, keyed by "targetWorkflowID::key"
@@ -922,6 +923,8 @@ func (s *SysDB) SetPool(p Pool) {
 }
 
 func (s *SysDB) Launched() bool {
+	s.notificationLoopMu.Lock()
+	defer s.notificationLoopMu.Unlock()
 	return s.launched
 }
 
@@ -944,22 +947,37 @@ func (s *SysDB) StreamWakeChannel(workflowID, key string) (chan struct{}, func()
 }
 
 func (s *SysDB) Launch(ctx context.Context) {
-	if s.ListenNotifyPool() == nil {
-		go s.notificationPollerLoop(ctx)
-	} else {
-		go s.notificationListenerLoop(ctx)
-	}
+	done := make(chan struct{})
+	s.notificationLoopMu.Lock()
+	s.notificationLoopDone = done
 	s.launched = true
+	s.notificationLoopMu.Unlock()
+
+	if s.ListenNotifyPool() == nil {
+		go func() {
+			s.notificationPollerLoop(ctx)
+			close(done)
+		}()
+	} else {
+		go func() {
+			s.notificationListenerLoop(ctx)
+			close(done)
+		}()
+	}
 }
 
 func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 	s.logger.Debug("Closing system database connection pool")
 
-	if s.launched {
+	s.notificationLoopMu.Lock()
+	launched := s.launched
+	done := s.notificationLoopDone
+	s.notificationLoopMu.Unlock()
+	if launched {
 		// Wait for the notification loop to exit
 		// The context should be cancelled prior to calling shutdown
 		select {
-		case <-s.notificationLoopDone:
+		case <-done:
 		case <-time.After(timeout):
 			s.logger.Warn("Notification listener loop did not finish in time", "timeout", timeout)
 		}
@@ -983,7 +1001,9 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 	s.EventNotifier.clear()
 	s.streamNotifier.clear()
 
+	s.notificationLoopMu.Lock()
 	s.launched = false
+	s.notificationLoopMu.Unlock()
 }
 
 /*******************************/
@@ -3475,7 +3495,6 @@ func (s *SysDB) Patch(ctx context.Context, input PatchDBInput) (bool, error) {
 func (s *SysDB) notificationListenerLoop(ctx context.Context) {
 	defer func() {
 		s.logger.Debug("Notification listener loop exiting")
-		s.notificationLoopDone <- struct{}{}
 	}()
 
 	pgxPool := s.ListenNotifyPool()
@@ -3554,7 +3573,9 @@ func (s *SysDB) notificationListenerLoop(ctx context.Context) {
 						break
 					}
 					s.logger.Debug("failed to re-acquire connection for notification listener", "error", err)
-					time.Sleep(ConnectionRetryBackoff.DelayFor(retryAttempt + 1))
+					if !WaitForRetry(ctx, ConnectionRetryBackoff.DelayFor(retryAttempt+1)) {
+						return
+					}
 					retryAttempt++
 				}
 				// The connection is re-acquired. Wake all waiters so they re-poll the
@@ -3565,7 +3586,9 @@ func (s *SysDB) notificationListenerLoop(ctx context.Context) {
 			}
 			// Other transient errors. Backoff and continue on same conn
 			s.logger.Error("Error waiting for notification", "error", err)
-			time.Sleep(ConnectionRetryBackoff.DelayFor(retryAttempt + 1))
+			if !WaitForRetry(ctx, ConnectionRetryBackoff.DelayFor(retryAttempt+1)) {
+				return
+			}
 			retryAttempt++
 			continue
 		}
@@ -3589,7 +3612,6 @@ func (s *SysDB) notificationListenerLoop(ctx context.Context) {
 func (s *SysDB) notificationPollerLoop(ctx context.Context) {
 	defer func() {
 		s.logger.Debug("Notification poller loop exiting")
-		s.notificationLoopDone <- struct{}{}
 	}()
 
 	s.logger.Debug("DBOS: Starting notification poller loop")

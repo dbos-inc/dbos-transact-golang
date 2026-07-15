@@ -12,6 +12,35 @@ import (
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 )
 
+func TestNotificationLoopCompletionDoesNotRequireShutdownWaiter(t *testing.T) {
+	s := &SysDB{
+		dialect: SqliteDialect{},
+		logger:  slog.New(slog.DiscardHandler),
+	}
+	var previousDone chan struct{}
+	for launch := 0; launch < 2; launch++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.Launch(ctx)
+		s.notificationLoopMu.Lock()
+		done := s.notificationLoopDone
+		s.notificationLoopMu.Unlock()
+		if done == previousDone {
+			t.Fatal("notification completion channel was reused across launches")
+		}
+		previousDone = done
+		cancel()
+
+		select {
+		case _, ok := <-done:
+			if ok {
+				t.Fatal("notification loop completion channel was sent to instead of closed")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("notification loop did not exit")
+		}
+	}
+}
+
 func TestStreamWakeChannelCleanupPreservesConcurrentReaders(t *testing.T) {
 	s := &SysDB{streamNotifier: newNotifyRegistry()}
 	const readers = 32
