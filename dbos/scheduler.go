@@ -1,6 +1,7 @@
 package dbos
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"time"
@@ -203,6 +204,8 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 }
 
 func (c *dbosContext) addDBScheduleToScheduler(schedule WorkflowSchedule) {
+	sig := c.calculateSignature(schedule)
+
 	fn := c.buildDBScheduleFunc(schedule)
 
 	spec := schedule.Schedule
@@ -218,7 +221,7 @@ func (c *dbosContext) addDBScheduleToScheduler(schedule WorkflowSchedule) {
 
 	c.scheduleMu.Lock()
 	c.scheduleEntryIDs[schedule.ScheduleName] = entryID
-	c.scheduleInstalledIDs[schedule.ScheduleName] = schedule.ScheduleID
+	c.scheduleInstalledSignatures[schedule.ScheduleName] = sig
 	c.scheduleMu.Unlock()
 	c.logger.Info("Added schedule to scheduler", "schedule", schedule.ScheduleName, "workflow", schedule.WorkflowName)
 }
@@ -235,7 +238,7 @@ func (c *dbosContext) removeDBScheduleFromScheduler(scheduleName string) {
 	entryID, exists := c.scheduleEntryIDs[scheduleName]
 	if exists {
 		delete(c.scheduleEntryIDs, scheduleName)
-		delete(c.scheduleInstalledIDs, scheduleName)
+		delete(c.scheduleInstalledSignatures, scheduleName)
 	}
 	c.scheduleMu.Unlock()
 	if !exists {
@@ -267,6 +270,57 @@ func (c *dbosContext) runScheduleReconciler() {
 	}
 }
 
+// scheduleSignature holds definition fields used to detect when an installed
+// cron entry must be restarted after ApplySchedules / reconciler updates.
+// Identity, lifecycle, and runtime fields (schedule_id, status, last_fired_at,
+// automatic_backfill) are intentionally omitted.
+type scheduleSignature struct {
+	WorkflowName      string
+	WorkflowClassName string
+	Schedule          string
+	ContextJSON       string
+	CronTimezone      string
+	QueueName         string
+}
+
+func (c *dbosContext) calculateSignature(s WorkflowSchedule) scheduleSignature {
+	ctxJSON, err := json.Marshal(s.Context)
+	if err != nil {
+		// Context is a JSON-decoded value, so this should be unreachable. Fall
+		// back to fmt, which prints maps with sorted keys, keeping the
+		// signature deterministic.
+		ctxJSON = fmt.Appendf(nil, "%+v", s.Context)
+	}
+	return scheduleSignature{
+		WorkflowName:      s.WorkflowName,
+		WorkflowClassName: s.WorkflowClassName,
+		Schedule:          s.Schedule,
+		ContextJSON:       string(ctxJSON),
+		CronTimezone:      s.CronTimezone,
+		QueueName:         s.QueueName,
+	}
+}
+
+func (c *dbosContext) maybeAutomaticBackfill(sched *WorkflowSchedule) {
+	if !sched.AutomaticBackfill || sched.LastFiredAt == nil {
+		return
+	}
+	start := sched.LastFiredAt.Add(time.Second)
+	end := time.Now()
+	if !start.Before(end) {
+		return
+	}
+	c.logger.Info("performing automatic backfill", "schedule", sched.ScheduleName, "start", start, "end", end)
+	if _, err := c.systemDB.BackfillSchedule(c, sysdb.BackfillScheduleDBInput{
+		ScheduleName: sched.ScheduleName,
+		Schedule:     sched.Schedule,
+		StartTime:    start,
+		EndTime:      end,
+	}); err != nil {
+		c.logger.Error("automatic backfill failed", "schedule", sched.ScheduleName, "error", err)
+	}
+}
+
 func (c *dbosContext) reconcileSchedules() {
 	schedules, err := c.systemDB.ListSchedules(c, sysdb.ListSchedulesDBInput{})
 	if err != nil {
@@ -279,18 +333,13 @@ func (c *dbosContext) reconcileSchedules() {
 		current[schedules[i].ScheduleName] = &schedules[i]
 	}
 
-	// Remove entries that were deleted, paused, or replaced (re-applied with a
-	// new ScheduleID — e.g. a changed cron spec, queue, context, or timezone).
-	// Collect names first to avoid mutating the map while iterating.
+	// Remove entries that were deleted or paused. Collect names first to avoid
+	// mutating the map while iterating.
 	var toRemove []string
 	c.scheduleMu.Lock()
 	for name := range c.scheduleEntryIDs {
 		sched, ok := current[name]
 		if !ok || sched.Status != ScheduleStatusActive {
-			toRemove = append(toRemove, name)
-			continue
-		}
-		if c.scheduleInstalledIDs[name] != sched.ScheduleID {
 			toRemove = append(toRemove, name)
 		}
 	}
@@ -299,34 +348,30 @@ func (c *dbosContext) reconcileSchedules() {
 		c.removeDBScheduleFromScheduler(name)
 	}
 
-	// Add new active schedules.
+	// Start, restart, or leave running based on definition signature.
 	for name, sched := range current {
 		if sched.Status != ScheduleStatusActive {
 			continue
 		}
+
 		c.scheduleMu.Lock()
 		_, exists := c.scheduleEntryIDs[name]
+		installedSig := c.scheduleInstalledSignatures[name]
 		c.scheduleMu.Unlock()
+
 		if exists {
+			// Running — restart on a changed definition; no backfill needed.
+			sig := c.calculateSignature(*sched)
+			if installedSig == sig {
+				continue
+			}
+			c.removeDBScheduleFromScheduler(name)
+			c.addDBScheduleToScheduler(*sched)
 			continue
 		}
 
-		if sched.AutomaticBackfill && sched.LastFiredAt != nil {
-			start := sched.LastFiredAt.Add(time.Second)
-			end := time.Now()
-			if start.Before(end) {
-				c.logger.Info("performing automatic backfill", "schedule", sched.ScheduleName, "start", start, "end", end)
-				if _, err := c.systemDB.BackfillSchedule(c, sysdb.BackfillScheduleDBInput{
-					ScheduleName: sched.ScheduleName,
-					Schedule:     sched.Schedule,
-					StartTime:    start,
-					EndTime:      end,
-				}); err != nil {
-					c.logger.Error("automatic backfill failed", "schedule", sched.ScheduleName, "error", err)
-				}
-			}
-		}
-
+		// Not running — start it, backfilling missed executions first if enabled.
+		c.maybeAutomaticBackfill(sched)
 		c.addDBScheduleToScheduler(*sched)
 	}
 }

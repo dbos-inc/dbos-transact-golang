@@ -2233,7 +2233,7 @@ func TestClientSchedules(t *testing.T) {
 		const nameA = "client-apply-a"
 		const nameB = "client-apply-b"
 		require.NoError(t, c.ApplySchedules([]ClientScheduleInput{
-			{ScheduleName: nameA, WorkflowName: workflowFQN, Schedule: "0 0 * * * *"},
+			{ScheduleName: nameA, WorkflowName: workflowFQN, Schedule: "0 0 * * * *", Context: map[string]any{"region": "us"}},
 			{ScheduleName: nameB, WorkflowName: workflowFQN, WorkflowClassName: "MyClass", Schedule: "0 0 * * * *"},
 		}))
 		t.Cleanup(func() {
@@ -2245,11 +2245,24 @@ func TestClientSchedules(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, a)
 		require.Equal(t, models.InternalQueueName, a.QueueName, "QueueName should default to the internal queue")
+		require.Equal(t, map[string]any{"region": "us"}, a.Context)
+		scheduleIDA := a.ScheduleID
 
 		b, err := c.GetSchedule(nameB)
 		require.NoError(t, err)
 		require.NotNil(t, b)
 		require.Equal(t, "MyClass", b.WorkflowClassName)
+
+		// Re-apply updates definition in place and preserves schedule_id.
+		require.NoError(t, c.ApplySchedules([]ClientScheduleInput{
+			{ScheduleName: nameA, WorkflowName: workflowFQN, Schedule: "0 0 0 * * *", Context: map[string]any{"region": "eu"}},
+		}))
+		a, err = c.GetSchedule(nameA)
+		require.NoError(t, err)
+		require.NotNil(t, a)
+		require.Equal(t, scheduleIDA, a.ScheduleID, "client upsert must preserve schedule_id")
+		require.Equal(t, "0 0 0 * * *", a.Schedule)
+		require.Equal(t, map[string]any{"region": "eu"}, a.Context)
 	})
 
 	t.Run("BackfillSchedule", func(t *testing.T) {

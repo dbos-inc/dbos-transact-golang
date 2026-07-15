@@ -261,9 +261,9 @@ type dbosContext struct {
 	scheduleMu sync.Mutex
 	// Schedule entry ID mapping (scheduleName -> cron.EntryID)
 	scheduleEntryIDs map[string]cron.EntryID
-	// ScheduleID of the schedule currently backing each installed cron entry.
-	// Used by the reconciler to detect re-applies and reinstall the entry.
-	scheduleInstalledIDs map[string]string
+	// Definition signature of each installed cron entry (scheduleName -> sig).
+	// Used by the reconciler to detect definition changes and reinstall the entry.
+	scheduleInstalledSignatures map[string]scheduleSignature
 
 	// logger
 	logger *slog.Logger
@@ -439,7 +439,7 @@ func (c *dbosContext) getWorkflowScheduler() *cron.Cron {
 	if c.workflowScheduler == nil {
 		c.workflowScheduler = cron.New(cron.WithSeconds())
 		c.scheduleEntryIDs = make(map[string]cron.EntryID)
-		c.scheduleInstalledIDs = make(map[string]string)
+		c.scheduleInstalledSignatures = make(map[string]scheduleSignature)
 	}
 	return c.workflowScheduler
 }
