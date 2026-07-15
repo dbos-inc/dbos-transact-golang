@@ -361,7 +361,6 @@ func serializeWorkflowError(logger *slog.Logger, err error, serialization string
 		// Go <-> Go: gob-encode so the concrete error type (e.g. *DBOSError) is preserved.
 		// Types that cannot be gob-encoded (e.g. errors.New/fmt.Errorf) fall back to their string.
 		if encoded, gobErr := NewGobSerializer().Encode(err); gobErr == nil && encoded != nil {
-			warnIfCauseChainLost(logger, err, encoded)
 			return *encoded
 		} else if logger != nil {
 			logger.Warn("workflow error type cannot be gob-encoded; persisting its message only: errors.Is/errors.As will not match this error when read back from the database",
@@ -383,24 +382,6 @@ func serializeWorkflowError(logger *slog.Logger, err error, serialization string
 		return err.Error() // fallback to plain string
 	}
 	return string(b)
-}
-
-// warnIfCauseChainLost detects when an error gob-encodes successfully but its wrapped
-// cause does not survive the round-trip (gob silently drops unexported fields, e.g.
-// DBOSError.wrappedErr). Decoding the just-encoded bytes and comparing Unwrap avoids
-// false positives for types whose cause is carried in an exported field.
-func warnIfCauseChainLost(logger *slog.Logger, err error, encoded *string) {
-	if logger == nil || errors.Unwrap(err) == nil {
-		return
-	}
-	decoded, decErr := NewGobSerializer().Decode(encoded)
-	if decErr != nil {
-		return
-	}
-	if e, ok := decoded.(error); ok && errors.Unwrap(e) == nil {
-		logger.Warn("workflow error wraps a cause that does not survive persistence; errors.Is/errors.As will not match the wrapped error when read back from the database",
-			"error_type", fmt.Sprintf("%T", err), "error", err, "wrapped_error", errors.Unwrap(err))
-	}
 }
 
 // deserializeWorkflowError decodes an error stored by serializeWorkflowError. The stored

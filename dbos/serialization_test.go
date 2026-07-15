@@ -2516,7 +2516,7 @@ func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
 		assert.NotErrorAs(t, got, &de)
 	})
 
-	t.Run("WarnsOnLossyErrorPersistence", func(t *testing.T) {
+	t.Run("WarnsOnPlainStringFallback", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, nil))
 
@@ -2524,15 +2524,10 @@ func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
 		serializeWorkflowError(logger, fmt.Errorf("boom"), "DBOS_JSON")
 		assert.Contains(t, buf.String(), "cannot be gob-encoded", "expected a warning for the plain-string fallback")
 
-		// Encodable type whose wrapped cause is dropped by gob must warn
+		// Gob-encodable error must not warn
 		buf.Reset()
 		serializeWorkflowError(logger, models.NewWorkflowCancelledError("wf-1", context.Canceled), "DBOS_JSON")
-		assert.Contains(t, buf.String(), "does not survive persistence", "expected a warning for the dropped cause chain")
-
-		// Fully round-trippable error must not warn
-		buf.Reset()
-		serializeWorkflowError(logger, models.NewNonExistentWorkflowError("wf-1"), "DBOS_JSON")
-		assert.Empty(t, buf.String(), "expected no warning for a cleanly encodable error")
+		assert.Empty(t, buf.String(), "expected no warning for a gob-encodable error")
 	})
 
 	t.Run("LegacyPlainStringDecodes", func(t *testing.T) {
