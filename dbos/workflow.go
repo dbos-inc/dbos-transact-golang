@@ -1818,7 +1818,7 @@ func WithRetryPredicate(fn func(error) bool) StepOption {
 	}
 }
 
-func WithNextStepID(stepID int) StepOption {
+func withNextStepID(stepID int) StepOption {
 	return func(opts *stepOptions) {
 		opts.preGeneratedStepID = &stepID
 	}
@@ -2408,7 +2408,7 @@ func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (chan
 	if !ok || wfState == nil {
 		return nil, models.NewStepExecutionError("", "", errors.New("workflow state not found in context: are you running this step within a workflow?"))
 	}
-	opts = append(opts, WithNextStepID(wfState.nextStepID()))
+	opts = append(opts, withNextStepID(wfState.nextStepID()))
 
 	// Run step inside a Go routine
 	result := make(chan StepOutcome[any], 1)
@@ -2713,7 +2713,7 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 		// re-execution the recorded deadline is returned, so only the remaining time is waited.
 		deadlineMs, err := runAsTxn(c, func(ctx context.Context, tx Tx) (int64, error) {
 			return time.Now().Add(timeout).UnixMilli(), nil
-		}, WithStepName("DBOS.sleep"), WithNextStepID(sleepStepID))
+		}, WithStepName("DBOS.sleep"), withNextStepID(sleepStepID))
 		if err != nil {
 			return nil, err
 		}
@@ -2741,7 +2741,7 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 			return output, models.NewTimeoutError(workflowID, "DBOS.recv", fmt.Sprintf("no message received within %v", timeout))
 		}
 		return output, nil
-	}, WithStepName("DBOS.recv"), WithNextStepID(stepID))
+	}, WithStepName("DBOS.recv"), withNextStepID(stepID))
 
 	switch v := out.(type) {
 	case rawStepOutput: // executed now
@@ -2945,7 +2945,7 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 			// re-execution the recorded deadline is returned, so only the remaining time is waited.
 			deadlineMs, txErr := runAsTxn(c, func(ctx context.Context, tx Tx) (int64, error) {
 				return time.Now().Add(timeout).UnixMilli(), nil
-			}, WithStepName("DBOS.sleep"), WithNextStepID(sleepStepID))
+			}, WithStepName("DBOS.sleep"), withNextStepID(sleepStepID))
 			if txErr != nil {
 				return nil, txErr
 			}
@@ -2998,7 +2998,7 @@ func (c *dbosContext) GetEvent(_ DBOSContext, targetWorkflowID, key string, time
 			return output, models.NewTimeoutError(workflowID, "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout))
 		}
 		return output, nil
-	}, WithStepName("DBOS.getEvent"), WithNextStepID(stepID))
+	}, WithStepName("DBOS.getEvent"), withNextStepID(stepID))
 
 	switch v := out.(type) {
 	case rawStepOutput: // executed now
