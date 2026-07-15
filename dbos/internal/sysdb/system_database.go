@@ -2599,14 +2599,11 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 		}
 		return fmt.Errorf("failed to read existing operation result: %w", err)
 	}
-	if input.StepName != storedFunctionName {
-		return models.NewUnexpectedStepError(input.WorkflowID, input.StepID, input.StepName, storedFunctionName)
-	}
 	// Our own earlier write (commit succeeded but its ack was lost) is identical
 	// to the input, including the caller-supplied timestamps: the retry already
-	// happened, report success. A concurrent execution's row differs (at minimum
-	// in its timestamps): report the conflict so the caller parks this run.
-	sameWrite := nullableStrEq(storedOutput, input.Output) &&
+	// happened, report success.
+	sameWrite := input.StepName == storedFunctionName &&
+		nullableStrEq(storedOutput, input.Output) &&
 		nullableStrEq(storedError, input.ErrStr) &&
 		nullableStrEq(storedSerialization, &input.Serialization) &&
 		derefStr(storedChildID) == input.ChildWorkflowID &&
@@ -2615,6 +2612,11 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 	if sameWrite {
 		return nil
 	}
+	if input.StepName != storedFunctionName {
+		return models.NewUnexpectedStepError(input.WorkflowID, input.StepID, input.StepName, storedFunctionName)
+	}
+	// A concurrent execution's row differs (at minimum in its timestamps):
+	// report the conflict so the caller parks this run.
 	return models.NewWorkflowConflictIDError(input.WorkflowID)
 }
 
@@ -2680,9 +2682,7 @@ func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkfl
 			if recordedChildID != nil {
 				recorded = *recordedChildID
 			}
-			return fmt.Errorf(
-				"child workflow %s already registered for parent workflow %s (operation ID: %d) with a different child ID %s. Is your workflow deterministic?",
-				input.ChildWorkflowID, input.ParentWorkflowID, input.StepID, recorded)
+			return models.NewUnexpectedStepError(input.ParentWorkflowID, input.StepID, input.ChildWorkflowID, recorded)
 		}
 	}
 
