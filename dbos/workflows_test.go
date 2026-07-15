@@ -1,6 +1,7 @@
 package dbos
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1718,6 +1719,79 @@ func TestSteps(t *testing.T) {
 			require.Equal(t, recordedName+"-different", dbosErr.ExpectedName)
 			require.Equal(t, recordedName, dbosErr.RecordedName)
 		})
+	})
+
+	t.Run("StepOptionsRetryIntervalDefaults", func(t *testing.T) {
+		tests := []struct {
+			name         string
+			baseInterval time.Duration
+			maxInterval  time.Duration
+			wantBase     time.Duration
+			wantMax      time.Duration
+			wantWarning  bool
+		}{
+			{
+				name:     "both implicit",
+				wantBase: _DEFAULT_STEP_BASE_INTERVAL,
+				wantMax:  _DEFAULT_STEP_MAX_INTERVAL,
+			},
+			{
+				name:         "explicit base below implicit max",
+				baseInterval: time.Second,
+				wantBase:     time.Second,
+				wantMax:      _DEFAULT_STEP_MAX_INTERVAL,
+			},
+			{
+				name:         "explicit base equals implicit max",
+				baseInterval: _DEFAULT_STEP_MAX_INTERVAL,
+				wantBase:     _DEFAULT_STEP_MAX_INTERVAL,
+				wantMax:      _DEFAULT_STEP_MAX_INTERVAL,
+			},
+			{
+				name:         "explicit base exceeds implicit max",
+				baseInterval: 2 * _DEFAULT_STEP_MAX_INTERVAL,
+				wantBase:     2 * _DEFAULT_STEP_MAX_INTERVAL,
+				wantMax:      2 * _DEFAULT_STEP_MAX_INTERVAL,
+				wantWarning:  true,
+			},
+			{
+				name:        "implicit base and explicit max",
+				maxInterval: time.Second,
+				wantBase:    _DEFAULT_STEP_BASE_INTERVAL,
+				wantMax:     time.Second,
+			},
+			{
+				name:         "explicit max below explicit base remains explicit",
+				baseInterval: 2 * time.Second,
+				maxInterval:  time.Second,
+				wantBase:     2 * time.Second,
+				wantMax:      time.Second,
+			},
+			{
+				name:         "explicit max above explicit base",
+				baseInterval: 2 * _DEFAULT_STEP_MAX_INTERVAL,
+				maxInterval:  3 * _DEFAULT_STEP_MAX_INTERVAL,
+				wantBase:     2 * _DEFAULT_STEP_MAX_INTERVAL,
+				wantMax:      3 * _DEFAULT_STEP_MAX_INTERVAL,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				var logOutput bytes.Buffer
+				logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+				opts := stepOptions{
+					baseInterval: tt.baseInterval,
+					maxInterval:  tt.maxInterval,
+				}
+
+				opts.setDefaults(logger)
+
+				require.Equal(t, tt.wantBase, opts.baseInterval)
+				require.Equal(t, tt.wantMax, opts.maxInterval)
+				require.Equal(t, tt.wantWarning, strings.Contains(logOutput.String(), "increasing max interval"))
+			})
+		}
 	})
 }
 
