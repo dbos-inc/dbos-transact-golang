@@ -26,10 +26,11 @@ import (
 )
 
 const (
-	_DEFAULT_ADMIN_SERVER_PORT = 3001
-	_DEFAULT_SYSTEM_DB_SCHEMA  = "dbos"
-	_DBOS_DOMAIN               = "cloud.dbos.dev"
-	_LAUNCH_ROLLBACK_TIMEOUT   = 30 * time.Second
+	_DEFAULT_ADMIN_SERVER_PORT         = 3001
+	_DEFAULT_SYSTEM_DB_SCHEMA          = "dbos"
+	_DEFAULT_SYSTEM_DB_STARTUP_TIMEOUT = 2 * time.Minute
+	_DBOS_DOMAIN                       = "cloud.dbos.dev"
+	_LAUNCH_ROLLBACK_TIMEOUT           = 30 * time.Second
 )
 
 // Config holds configuration parameters for initializing a DBOS context.
@@ -51,6 +52,7 @@ type Config struct {
 	EnablePatching            bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
 	Serializer                Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
 	SchedulerPollingInterval  time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
+	SystemDBStartupTimeout    time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -72,6 +74,9 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	if inputConfig.AdminServerPort == 0 {
 		inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
 	}
+	if inputConfig.SystemDBStartupTimeout < 0 {
+		return nil, fmt.Errorf("systemDBStartupTimeout cannot be negative")
+	}
 
 	dbosConfig := &Config{
 		DatabaseURL:               inputConfig.DatabaseURL,
@@ -90,6 +95,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		EnablePatching:            inputConfig.EnablePatching,
 		Serializer:                inputConfig.Serializer,
 		SchedulerPollingInterval:  inputConfig.SchedulerPollingInterval,
+		SystemDBStartupTimeout:    inputConfig.SystemDBStartupTimeout,
 	}
 
 	if dbosConfig.ConductorExecutorMetadata != nil {
@@ -104,6 +110,9 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 	if dbosConfig.DatabaseSchema == "" {
 		dbosConfig.DatabaseSchema = _DEFAULT_SYSTEM_DB_SCHEMA
+	}
+	if dbosConfig.SystemDBStartupTimeout == 0 {
+		dbosConfig.SystemDBStartupTimeout = _DEFAULT_SYSTEM_DB_STARTUP_TIMEOUT
 	}
 
 	// If patching is enabled and application version is not set, fix the application version
@@ -562,8 +571,12 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 		},
 	}
 
-	// Create the system database
-	systemDB, err := sysdb.NewSystemDatabase(initExecutor, newSystemDatabaseInputs)
+	// Create the system database within a bounded startup window. This covers
+	// pool acquisition, database creation, migrations, and the final ping.
+	startupCtx, cancelStartup := context.WithTimeout(initExecutor, config.SystemDBStartupTimeout)
+	defer cancelStartup()
+	newSystemDatabaseInputs.StartupTimeout = config.SystemDBStartupTimeout
+	systemDB, err := sysdb.NewSystemDatabase(startupCtx, newSystemDatabaseInputs)
 	if err != nil {
 		initExecutor.logger.Error("failed to create system database", "error", err)
 		return nil, models.NewInitializationError(err.Error())

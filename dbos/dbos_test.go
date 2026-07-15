@@ -433,6 +433,78 @@ func TestConfig(t *testing.T) {
 
 }
 
+func TestSystemDBStartupTimeoutConfig(t *testing.T) {
+	t.Run("Default", func(t *testing.T) {
+		config, err := processConfig(&Config{AppName: "test", DatabaseURL: "sqlite::memory:"})
+		require.NoError(t, err)
+		assert.Equal(t, 2*time.Minute, config.SystemDBStartupTimeout)
+	})
+
+	t.Run("Explicit", func(t *testing.T) {
+		config, err := processConfig(&Config{
+			AppName:                "test",
+			DatabaseURL:            "sqlite::memory:",
+			SystemDBStartupTimeout: 17 * time.Second,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 17*time.Second, config.SystemDBStartupTimeout)
+	})
+
+	t.Run("Negative", func(t *testing.T) {
+		_, err := processConfig(&Config{
+			AppName:                "test",
+			DatabaseURL:            "sqlite::memory:",
+			SystemDBStartupTimeout: -time.Second,
+		})
+		require.EqualError(t, err, "systemDBStartupTimeout cannot be negative")
+	})
+}
+
+func TestSystemDBStartupTimeoutBoundsSQLitePoolWait(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	defer conn.Close()
+
+	const timeout = 50 * time.Millisecond
+	started := time.Now()
+	_, err = NewDBOSContext(context.Background(), Config{
+		AppName:                "startup-timeout-sqlite",
+		SqliteSystemDB:         db,
+		SystemDBStartupTimeout: timeout,
+	})
+	elapsed := time.Since(started)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "system database startup timed out after 50ms while initializing the SQLite system database")
+	assert.Less(t, elapsed, time.Second)
+}
+
+func TestSystemDBStartupTimeoutDiagnosesExhaustedPostgresPool(t *testing.T) {
+	skipIfSqlite(t, "PostgreSQL pool statistics")
+	poolConfig, err := pgxpool.ParseConfig(backendDatabaseURL(t))
+	require.NoError(t, err)
+	poolConfig.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	conn, err := pool.Acquire(context.Background())
+	require.NoError(t, err)
+	defer conn.Release()
+
+	_, err = NewDBOSContext(context.Background(), Config{
+		AppName:                "startup-timeout-exhausted-pool",
+		SystemDBPool:           pool,
+		SystemDBStartupTimeout: 50 * time.Millisecond,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "while acquiring a connection from the custom pool: connection pool has no free connections (acquired=1, max=1)")
+}
+
 type launchRecoveryFaultPool struct {
 	sysdb.Pool
 }

@@ -706,10 +706,25 @@ type NewSystemDatabaseInput struct {
 	CustomSqliteDB  *sql.DB
 	Logger          *slog.Logger
 	ApplicationName string
+	StartupTimeout  time.Duration
 	// EncodeScheduledInput serializes the input of a schedule-created workflow
 	// (backfill/trigger). Injected by the caller to keep serialization concerns
 	// out of the system database.
 	EncodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (encoded *string, serialization string, err error)
+}
+
+func startupError(ctx context.Context, timeout time.Duration, phase string, pool *pgxpool.Pool, err error) error {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	if pool != nil {
+		stat := pool.Stat()
+		if stat.MaxConns() > 0 && stat.AcquiredConns() >= stat.MaxConns() {
+			return fmt.Errorf("system database startup timed out after %s while %s: connection pool has no free connections (acquired=%d, max=%d); increase pool capacity or release checked-out connections: %w",
+				timeout, phase, stat.AcquiredConns(), stat.MaxConns(), context.DeadlineExceeded)
+		}
+	}
+	return fmt.Errorf("system database startup timed out after %s while %s; check database connectivity, pool capacity, and blocking database locks: %w", timeout, phase, context.DeadlineExceeded)
 }
 
 // RenderSQL formats a canonical pg-style query string with sprintf and runs
@@ -739,7 +754,11 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 
 	// Dispatch sqlite first
 	if customSqliteDB != nil {
-		return newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, customSqliteDB, logger)
+		systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, customSqliteDB, logger)
+		if err != nil {
+			return nil, startupError(ctx, inputs.StartupTimeout, "initializing the SQLite system database", nil, err)
+		}
+		return systemDB, nil
 	}
 	if customPool == nil {
 		dialectName, err := DetectDialect(databaseURL)
@@ -747,7 +766,11 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 			return nil, err
 		}
 		if dialectName == DialectSQLite {
-			return newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, nil, logger)
+			systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, nil, logger)
+			if err != nil {
+				return nil, startupError(ctx, inputs.StartupTimeout, "initializing the SQLite system database", nil, err)
+			}
+			return systemDB, nil
 		}
 	}
 
@@ -758,12 +781,12 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		// Verify the pool is valid
 		poolConn, err := customPool.Acquire(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to validate custom pool: %v", err)
+			return nil, startupError(ctx, inputs.StartupTimeout, "acquiring a connection from the custom pool", customPool, fmt.Errorf("failed to validate custom pool: %w", err))
 		}
-		defer poolConn.Release()
 		err = poolConn.Ping(ctx)
+		poolConn.Release()
 		if err != nil {
-			return nil, fmt.Errorf("failed to validate custom pool: %v", err)
+			return nil, startupError(ctx, inputs.StartupTimeout, "validating the custom pool", customPool, fmt.Errorf("failed to validate custom pool: %w", err))
 		}
 		pool = customPool
 	} else {
@@ -812,7 +835,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 			return createDatabaseIfNotExists(ctx, pool, logger)
 		}, WithRetrierLogger(logger)); err != nil {
 			pool.Close()
-			return nil, fmt.Errorf("failed to create database: %v", err)
+			return nil, startupError(ctx, inputs.StartupTimeout, "connecting to or creating the system database", pool, fmt.Errorf("failed to create database: %w", err))
 		}
 	}
 
@@ -823,7 +846,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		if customPool == nil {
 			pool.Close()
 		}
-		return nil, fmt.Errorf("failed to acquire connection to detect database type: %v", err)
+		return nil, startupError(ctx, inputs.StartupTimeout, "acquiring a connection to detect database type", pool, fmt.Errorf("failed to acquire connection to detect database type: %w", err))
 	}
 	isCockroach := IsCockroachDB(conn.Conn())
 	// Release before any error path calls pool.Close(): Close blocks until all
@@ -838,7 +861,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		if customPool == nil {
 			pool.Close()
 		}
-		return nil, fmt.Errorf("failed to determine migration status: %v", smErr)
+		return nil, startupError(ctx, inputs.StartupTimeout, "checking system database migration status", pool, fmt.Errorf("failed to determine migration status: %w", smErr))
 	}
 	if needsMigration {
 		if err := Retry(ctx, func() error {
@@ -847,7 +870,10 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 			if customPool == nil {
 				pool.Close()
 			}
-			return nil, fmt.Errorf("failed to run migrations: %v", err)
+			if errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
+			return nil, startupError(ctx, inputs.StartupTimeout, "running system database migrations", pool, fmt.Errorf("failed to run migrations: %w", err))
 		}
 	}
 
@@ -856,7 +882,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		if customPool == nil {
 			pool.Close()
 		}
-		return nil, fmt.Errorf("failed to ping database: %v", err)
+		return nil, startupError(ctx, inputs.StartupTimeout, "pinging the system database", pool, fmt.Errorf("failed to ping database: %w", err))
 	}
 
 	dialect := Dialect(PostgresDialect{})
