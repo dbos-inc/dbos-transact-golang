@@ -3162,6 +3162,59 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 	RegisterWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
 	dbosCtx.Launch()
 
+	t.Run("DatabaseRetryWithSameOwnerDoesNotDeadLetter", func(t *testing.T) {
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+		workflowID := uuid.NewString()
+		status := models.WorkflowStatus{
+			ID:            workflowID,
+			Status:        models.WorkflowStatusPending,
+			Name:          "dead-letter-owner-test",
+			ExecutorID:    "local",
+			CreatedAt:     time.Now(),
+			Serialization: "DBOS_JSON",
+		}
+
+		insert := func(ownerXID string, incrementAttempts bool, maxRetries int) (*sysdb.InsertWorkflowResult, error) {
+			tx, err := sysDB.Pool().BeginTx(context.Background(), TxOptions{})
+			require.NoError(t, err)
+			defer tx.Rollback(context.Background())
+			result, err := sysDB.InsertWorkflowStatus(context.Background(), sysdb.InsertWorkflowStatusDBInput{
+				Status:            status,
+				MaxRetries:        maxRetries,
+				Tx:                tx,
+				OwnerXID:          &ownerXID,
+				IncrementAttempts: incrementAttempts,
+			})
+			if err != nil {
+				return nil, err
+			}
+			require.NoError(t, tx.Commit(context.Background()))
+			return result, nil
+		}
+
+		_, err := insert("initial-owner", false, 1)
+		require.NoError(t, err)
+		result, err := insert("recovery-owner-1", true, 100)
+		require.NoError(t, err)
+		require.Equal(t, 2, result.Attempts)
+		result, err = insert("recovery-owner-2", true, 100)
+		require.NoError(t, err)
+		require.Equal(t, 3, result.Attempts)
+
+		// Replay the original initialization after a lost commit acknowledgement.
+		// Concurrent recoveries raised the counter, but this replay is not a new
+		// recovery attempt and must not dead-letter the workflow.
+		result, err = insert("initial-owner", false, 1)
+		require.NoError(t, err)
+		require.Equal(t, 3, result.Attempts)
+		require.Equal(t, models.WorkflowStatusPending, result.Status)
+
+		// A genuinely new recovery owner is a new attempt and may dead-letter.
+		_, err = insert("next-recovery-owner", true, 1)
+		require.Error(t, err)
+		require.ErrorIs(t, err, &DBOSError{Code: DeadLetterQueueError})
+	})
+
 	t.Run("DeadLetterQueueBehavior", func(t *testing.T) {
 		recoveryCount = 0
 

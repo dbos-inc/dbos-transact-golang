@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"reflect"
 	"runtime"
@@ -1400,6 +1401,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	var earlyReturnPollingHandle *workflowPollingHandle[any]
 	var insertStatusResult *sysdb.InsertWorkflowResult
 	returnExisting := params.DeduplicationPolicy == DeduplicationPolicyReturnExisting
+	ownerXID := uuid.New().String()
 
 	// Init status and record child workflow relationship in a single transaction
 	insertWorkflowStatusTx := func() error {
@@ -1410,7 +1412,6 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		defer tx.Rollback(uncancellableCtx) // Rollback if not committed
 
 		// Insert workflow status with transaction
-		ownerXID := uuid.New().String()
 		insertInput := sysdb.InsertWorkflowStatusDBInput{
 			Status:            workflowStatus,
 			MaxRetries:        params.MaxRetries,
@@ -1734,7 +1735,8 @@ type stepOptions struct {
 }
 
 // setDefaults applies default values to stepOptions
-func (opts *stepOptions) setDefaults() {
+func (opts *stepOptions) setDefaults(logger *slog.Logger) {
+	usesDefaultMaxInterval := opts.maxInterval == 0
 	if opts.backoffFactor == 0 {
 		opts.backoffFactor = _DEFAULT_STEP_BACKOFF_FACTOR
 	}
@@ -1743,6 +1745,15 @@ func (opts *stepOptions) setDefaults() {
 	}
 	if opts.maxInterval == 0 {
 		opts.maxInterval = _DEFAULT_STEP_MAX_INTERVAL
+	}
+	if usesDefaultMaxInterval && opts.baseInterval > opts.maxInterval {
+		if logger != nil {
+			logger.Warn("Step base interval exceeds the default max interval; increasing max interval to match base interval",
+				"base_interval", opts.baseInterval,
+				"default_max_interval", opts.maxInterval,
+			)
+		}
+		opts.maxInterval = opts.baseInterval
 	}
 }
 
@@ -1901,7 +1912,7 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 	for _, opt := range opts {
 		opt(stepOpts)
 	}
-	stepOpts.setDefaults()
+	stepOpts.setDefaults(c.logger)
 
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {

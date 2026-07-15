@@ -1160,6 +1160,8 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 	if ownerXIDReturn != nil {
 		result.OwnerXID = *ownerXIDReturn
 	}
+	ownerXIDMatches := (input.OwnerXID == nil && ownerXIDReturn == nil) ||
+		(input.OwnerXID != nil && ownerXIDReturn != nil && *input.OwnerXID == *ownerXIDReturn)
 	if err != nil {
 		// Handle unique constraint violation for the deduplication ID (this should be the only case)
 		if s.dialect.IsUniqueViolation(err) {
@@ -1192,7 +1194,7 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
 	// When this number becomes equal to `maxRetries + 1`, we mark the workflow as `MAX_RECOVERY_ATTEMPTS_EXCEEDED`.
 	if result.Status != models.WorkflowStatusSuccess && result.Status != models.WorkflowStatusError &&
-		input.MaxRetries > 0 && result.Attempts > input.MaxRetries+1 {
+		input.MaxRetries > 0 && result.Attempts > input.MaxRetries+1 && !ownerXIDMatches {
 
 		// Update workflow status to MAX_RECOVERY_ATTEMPTS_EXCEEDED and clear queue-related fields
 		dlqQuery := s.RenderSQL(`UPDATE %sworkflow_status
