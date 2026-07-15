@@ -2594,8 +2594,7 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 		&storedOutput, &storedError, &storedFunctionName, &storedSerialization, &storedChildID, &storedStartedAtMs, &storedCompletedAtMs)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			// The conflicting row is not visible to this transaction's snapshot
-			// It means a concurrent writer inserted the row
+			// This should only happen if the conflicting row was deleted, e.g., during GC
 			return models.NewWorkflowConflictIDError(input.WorkflowID)
 		}
 		return fmt.Errorf("failed to read existing operation result: %w", err)
