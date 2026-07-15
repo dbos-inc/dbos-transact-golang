@@ -2847,7 +2847,13 @@ func TestChildWorkflowDeterminismCheck(t *testing.T) {
 			StepName:         recordedName,
 		})
 		require.Error(t, err, "a different child at the same step must be a non-determinism error")
-		require.Contains(t, err.Error(), "Is your workflow deterministic?")
+		var dbosErr *DBOSError
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, UnexpectedStep, dbosErr.Code)
+		require.Equal(t, parentID, dbosErr.WorkflowID)
+		require.Equal(t, 0, dbosErr.StepID)
+		require.Equal(t, expectedChildID+"-different", dbosErr.ExpectedName)
+		require.Equal(t, expectedChildID, dbosErr.RecordedName)
 	})
 }
 
