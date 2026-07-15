@@ -288,7 +288,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		}
 		var serializedOutcomeErr *string
 		if outcome.err != nil {
-			s := serializeWorkflowError(outcome.err, ser.Name())
+			s := serializeWorkflowError(h.dbosContext.(*dbosContext).logger, outcome.err, ser.Name())
 			serializedOutcomeErr = &s
 		}
 		recordGetResultInput := sysdb.RecordOperationResultDBInput{
@@ -401,7 +401,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		serialization := storedSerialization
 		if childCancelled {
 			serialization = resolveEncoder(h.dbosContext).Name()
-			serializedErr := serializeWorkflowError(awaitErr, serialization)
+			serializedErr := serializeWorkflowError(h.dbosContext.(*dbosContext).logger, awaitErr, serialization)
 			errStr = &serializedErr
 		}
 		recordGetResultInput := sysdb.RecordOperationResultDBInput{
@@ -1664,7 +1664,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 
 			var serializedErr string
 			if err != nil {
-				serializedErr = serializeWorkflowError(err, resolveEncoder(workflowCtx).Name())
+				serializedErr = serializeWorkflowError(c.logger, err, resolveEncoder(workflowCtx).Name())
 			}
 			// Remove from the active set before the outcome becomes durable: once it is
 			// visible, a resume→dequeue can re-dispatch this workflow to this executor,
@@ -2127,7 +2127,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 	stepCompletedTime := time.Now()
 	var serializedStepErr *string
 	if stepError != nil {
-		s := serializeWorkflowError(stepError, ser.Name())
+		s := serializeWorkflowError(c.logger, stepError, ser.Name())
 		serializedStepErr = &s
 	}
 	dbInput := sysdb.RecordOperationResultDBInput{
@@ -2301,7 +2301,7 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 
 		var serializedTxnErr *string
 		if stepError != nil {
-			s := serializeWorkflowError(stepError, txnSer.Name())
+			s := serializeWorkflowError(c.logger, stepError, txnSer.Name())
 			serializedTxnErr = &s
 		}
 		dbInput := sysdb.RecordOperationResultDBInput{

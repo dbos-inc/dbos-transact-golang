@@ -533,7 +533,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn T
 	}
 	var serializedErr *string
 	if stepError != nil {
-		s := serializeWorkflowError(stepError, ser.Name())
+		s := serializeWorkflowError(c.logger, stepError, ser.Name())
 		serializedErr = &s
 	}
 
