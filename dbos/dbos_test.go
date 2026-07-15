@@ -433,6 +433,41 @@ func TestConfig(t *testing.T) {
 
 }
 
+type launchRecoveryFaultPool struct {
+	sysdb.Pool
+}
+
+func (p *launchRecoveryFaultPool) Query(ctx context.Context, query string, args ...any) (sysdb.Rows, error) {
+	if strings.Contains(query, "SELECT workflow_uuid, status, name") {
+		return nil, errors.New("injected recovery failure")
+	}
+	return p.Pool.Query(ctx, query, args...)
+}
+
+func TestLaunchFailureCleansUpStartedComponents(t *testing.T) {
+	ctx, err := NewDBOSContext(context.Background(), Config{
+		AppName:     "test-launch-cleanup",
+		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+	})
+	require.NoError(t, err)
+
+	dbosCtx := ctx.(*dbosContext)
+	systemDB := dbosCtx.systemDB.(*sysdb.SysDB)
+	systemDB.SetPool(&launchRecoveryFaultPool{Pool: systemDB.Pool()})
+
+	err = dbosCtx.Launch()
+	require.ErrorContains(t, err, "failed to recover pending workflows during launch")
+	require.ErrorContains(t, err, "injected recovery failure")
+
+	assert.False(t, dbosCtx.launched.Load())
+	assert.False(t, dbosCtx.queueRunnerStarted.Load())
+	assert.False(t, dbosCtx.workflowSchedulerStarted.Load())
+	assert.Nil(t, dbosCtx.workflowScheduler)
+	assert.ErrorIs(t, dbosCtx.Err(), context.Canceled)
+	assert.False(t, systemDB.Launched())
+	require.Error(t, systemDB.Pool().Ping(context.Background()))
+}
+
 func TestContext(t *testing.T) {
 	databaseURL := backendDatabaseURL(t)
 

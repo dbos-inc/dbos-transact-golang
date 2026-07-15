@@ -29,6 +29,7 @@ const (
 	_DEFAULT_ADMIN_SERVER_PORT = 3001
 	_DEFAULT_SYSTEM_DB_SCHEMA  = "dbos"
 	_DBOS_DOMAIN               = "cloud.dbos.dev"
+	_LAUNCH_ROLLBACK_TIMEOUT   = 30 * time.Second
 )
 
 // Config holds configuration parameters for initializing a DBOS context.
@@ -235,7 +236,8 @@ type dbosContext struct {
 	config      *Config
 
 	// Queue runner
-	queueRunner *queueRunner
+	queueRunner        *queueRunner
+	queueRunnerStarted atomic.Bool
 
 	// Conductor client
 	conductor *conductor
@@ -256,7 +258,8 @@ type dbosContext struct {
 	activeWorkflowIDs *sync.Map
 
 	// Workflow scheduler
-	workflowScheduler *cron.Cron
+	workflowScheduler        *cron.Cron
+	workflowSchedulerStarted atomic.Bool
 
 	scheduleMu sync.Mutex
 	// Schedule entry ID mapping (scheduleName -> cron.EntryID)
@@ -630,6 +633,12 @@ func (c *dbosContext) Launch() error {
 	if c.launched.Load() {
 		return models.NewInitializationError("DBOS is already launched")
 	}
+	launchCompleted := false
+	defer func() {
+		if !launchCompleted {
+			c.Shutdown(_LAUNCH_ROLLBACK_TIMEOUT)
+		}
+	}()
 
 	// Start the system database
 	c.systemDB.Launch(c)
@@ -650,24 +659,25 @@ func (c *dbosContext) Launch() error {
 
 	// Start the admin server if enabled
 	if c.config.AdminServer {
-		adminServer := newAdminServer(c, c.config.AdminServerPort)
-		err := adminServer.Start()
+		c.adminServer = newAdminServer(c, c.config.AdminServerPort)
+		err := c.adminServer.Start()
 		if err != nil {
 			c.logger.Error("Failed to start admin server", "error", err)
 			return models.NewInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
 		}
 		c.logger.Debug("Admin server started", "port", c.config.AdminServerPort)
-		c.adminServer = adminServer
 	}
 
 	// Start the queue runner in a goroutine
 	go func() {
 		c.queueRunner.run(c)
 	}()
+	c.queueRunnerStarted.Store(true)
 	c.logger.Debug("Queue runner started")
 
 	// Start the cron scheduler.
 	c.getWorkflowScheduler().Start()
+	c.workflowSchedulerStarted.Store(true)
 	c.logger.Debug("Workflow scheduler started")
 
 	// Start the dynamic schedule reconciler. It polls the schedules table every
@@ -693,6 +703,7 @@ func (c *dbosContext) Launch() error {
 
 	c.logger.Info("DBOS launched", "app_version", c.applicationVersion, "executor_id", c.executorID)
 	c.launched.Store(true)
+	launchCompleted = true
 	return nil
 }
 
@@ -722,20 +733,22 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	// waiting on the WaitGroup before they finish races with those Adds.
 
 	// Wait for queue runner to finish
-	if c.queueRunner != nil && c.launched.Load() {
+	if c.queueRunner != nil && c.queueRunnerStarted.Load() {
 		c.logger.Debug("Waiting for queue runner to complete")
 		select {
 		case <-c.queueRunner.completionChan:
 			c.logger.Debug("Queue runner completed")
+			c.queueRunnerStarted.Store(false)
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for queue runner to complete", "timeout", timeout)
 		}
 	}
 
 	// Stop the workflow scheduler and wait until all scheduled workflows are done
-	if c.workflowScheduler != nil && c.launched.Load() {
+	if c.workflowScheduler != nil && c.workflowSchedulerStarted.Load() {
 		c.logger.Debug("Stopping workflow scheduler")
 		ctx := c.workflowScheduler.Stop()
+		c.workflowSchedulerStarted.Store(false)
 
 		select {
 		case <-ctx.Done():
@@ -753,7 +766,7 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	}
 
 	// Shutdown the admin server
-	if c.adminServer != nil && c.launched.Load() {
+	if c.adminServer != nil {
 		c.logger.Debug("Shutting down admin server")
 		err := c.adminServer.Shutdown(timeout)
 		if err != nil {
