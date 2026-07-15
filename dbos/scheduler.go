@@ -3,7 +3,6 @@ package dbos
 import (
 	"fmt"
 	"math/rand/v2"
-	"sync/atomic"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
@@ -72,14 +71,20 @@ func (c *dbosContext) addScheduleCronEntry(
 	fn ScheduledWorkflowFunc,
 	scheduleContext any,
 ) (cron.EntryID, error) {
-	// The closure runs in a cron-managed goroutine after AddFunc returns. Use
-	// an atomic to publish the entryID to that goroutine without a data race.
-	var entryIDAtomic atomic.Int64
+	// A tick can fire before the entryID is published below; wait for it so the
+	// Entry lookup never runs with a bogus zero ID.
+	var entryID cron.EntryID
+	ready := make(chan struct{})
 	assigned, err := c.getWorkflowScheduler().AddFunc(cronSchedule, func() {
 		if !c.launched.Load() {
 			return
 		}
-		entry := c.getWorkflowScheduler().Entry(cron.EntryID(entryIDAtomic.Load()))
+		select {
+		case <-ready:
+		case <-c.Done():
+			return
+		}
+		entry := c.getWorkflowScheduler().Entry(entryID)
 		scheduledTime := entry.Prev
 		if scheduledTime.IsZero() {
 			scheduledTime = entry.Next
@@ -103,7 +108,8 @@ func (c *dbosContext) addScheduleCronEntry(
 	if err != nil {
 		return 0, err
 	}
-	entryIDAtomic.Store(int64(assigned))
+	entryID = assigned
+	close(ready)
 	return assigned, nil
 }
 
