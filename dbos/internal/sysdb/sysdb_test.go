@@ -5,10 +5,46 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 )
+
+func TestStreamWakeChannelCleanupPreservesConcurrentReaders(t *testing.T) {
+	s := &SysDB{streamNotifier: newNotifyRegistry()}
+	const readers = 32
+
+	type subscription struct {
+		ch      chan struct{}
+		cleanup func()
+	}
+	subs := make([]subscription, readers)
+	for i := range subs {
+		subs[i].ch, subs[i].cleanup = s.StreamWakeChannel("workflow", "key")
+	}
+
+	var cleanupWG sync.WaitGroup
+	for i := 0; i < readers; i += 2 {
+		cleanupWG.Add(1)
+		go func(cleanup func()) {
+			defer cleanupWG.Done()
+			cleanup()
+		}(subs[i].cleanup)
+	}
+	cleanupWG.Wait()
+
+	s.streamNotifier.notify("workflow::key")
+	for i := 1; i < readers; i += 2 {
+		select {
+		case <-subs[i].ch:
+		case <-time.After(time.Second):
+			t.Fatalf("reader %d was unregistered by another reader's cleanup", i)
+		}
+		subs[i].cleanup()
+	}
+}
 
 // fakeRows simulates a result set that is truncated mid-stream: it yields its
 // rows, then Next() returns false with the error parked on Err() — exactly how

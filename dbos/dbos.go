@@ -239,6 +239,9 @@ type dbosContext struct {
 	ctxCancelFunc context.CancelCauseFunc
 
 	launched atomic.Bool
+	// Launch and shutdown are permanent, one-shot lifecycle transitions.
+	launchStarted   atomic.Bool
+	shutdownStarted atomic.Bool
 
 	systemDB    sysdb.SystemDatabase
 	adminServer *adminServer
@@ -269,6 +272,7 @@ type dbosContext struct {
 	// Workflow scheduler
 	workflowScheduler        *cron.Cron
 	workflowSchedulerStarted atomic.Bool
+	scheduleReconcilerWg     sync.WaitGroup
 
 	scheduleMu sync.Mutex
 	// Schedule entry ID mapping (scheduleName -> cron.EntryID)
@@ -448,11 +452,6 @@ func WithTimeout(ctx DBOSContext, timeout time.Duration) (DBOSContext, context.C
 }
 
 func (c *dbosContext) getWorkflowScheduler() *cron.Cron {
-	if c.workflowScheduler == nil {
-		c.workflowScheduler = cron.New(cron.WithSeconds())
-		c.scheduleEntryIDs = make(map[string]cron.EntryID)
-		c.scheduleInstalledSignatures = make(map[string]scheduleSignature)
-	}
 	return c.workflowScheduler
 }
 
@@ -528,12 +527,15 @@ func (c *dbosContext) ListRegisteredWorkflows(_ DBOSContext, opts ...ListRegiste
 func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error) {
 	dbosBaseCtx, cancelFunc := context.WithCancelCause(ctx)
 	initExecutor := &dbosContext{
-		workflowsWg:             &sync.WaitGroup{},
-		ctx:                     dbosBaseCtx,
-		ctxCancelFunc:           cancelFunc,
-		workflowRegistry:        &sync.Map{},
-		workflowCustomNametoFQN: &sync.Map{},
-		activeWorkflowIDs:       &sync.Map{},
+		workflowsWg:                 &sync.WaitGroup{},
+		ctx:                         dbosBaseCtx,
+		ctxCancelFunc:               cancelFunc,
+		workflowRegistry:            &sync.Map{},
+		workflowCustomNametoFQN:     &sync.Map{},
+		activeWorkflowIDs:           &sync.Map{},
+		workflowScheduler:           cron.New(cron.WithSeconds()),
+		scheduleEntryIDs:            make(map[string]cron.EntryID),
+		scheduleInstalledSignatures: make(map[string]scheduleSignature),
 	}
 
 	// Load and process the configuration
@@ -643,7 +645,7 @@ func NewDBOSContext(ctx context.Context, inputConfig Config) (DBOSContext, error
 //
 // Returns an error if the context is already launched or if any component fails to start.
 func (c *dbosContext) Launch() error {
-	if c.launched.Load() {
+	if !c.launchStarted.CompareAndSwap(false, true) {
 		return models.NewInitializationError("DBOS is already launched")
 	}
 	launchCompleted := false
@@ -695,7 +697,11 @@ func (c *dbosContext) Launch() error {
 
 	// Start the dynamic schedule reconciler. It polls the schedules table every
 	// _SCHEDULE_POLL_INTERVAL and reconciles cron entries against DB state.
-	go c.runScheduleReconciler()
+	c.scheduleReconcilerWg.Add(1)
+	go func() {
+		defer c.scheduleReconcilerWg.Done()
+		c.runScheduleReconciler()
+	}()
 
 	// Start the conductor if it has been initialized
 	if c.conductor != nil {
@@ -736,6 +742,9 @@ func (c *dbosContext) Launch() error {
 //
 // Shutdown is a permanent operation and should be called when the application is terminating.
 func (c *dbosContext) Shutdown(timeout time.Duration) {
+	if !c.shutdownStarted.CompareAndSwap(false, true) {
+		return
+	}
 	c.logger.Debug("Shutting down DBOS context")
 
 	// Cancel the context to signal all resources to stop
@@ -744,6 +753,17 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 	// Stop workflow producers before draining in-flight workflows. Producers
 	// (.e.g, queue runner) call RunWorkflow, which calls workflowsWg.Add(1);
 	// waiting on the WaitGroup before they finish races with those Adds.
+	reconcilerDone := make(chan struct{})
+	go func() {
+		c.scheduleReconcilerWg.Wait()
+		close(reconcilerDone)
+	}()
+	select {
+	case <-reconcilerDone:
+		c.logger.Debug("Schedule reconciler completed")
+	case <-time.After(timeout):
+		c.logger.Warn("Timeout waiting for schedule reconciler to complete", "timeout", timeout)
+	}
 
 	// Wait for queue runner to finish
 	if c.queueRunner != nil && c.queueRunnerStarted.Load() {
@@ -766,7 +786,6 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 		select {
 		case <-ctx.Done():
 			c.logger.Debug("All scheduled jobs completed")
-			c.workflowScheduler = nil
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for jobs to complete. Moving on", "timeout", timeout)
 		}

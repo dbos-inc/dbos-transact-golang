@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -534,10 +535,129 @@ func TestLaunchFailureCleansUpStartedComponents(t *testing.T) {
 	assert.False(t, dbosCtx.launched.Load())
 	assert.False(t, dbosCtx.queueRunnerStarted.Load())
 	assert.False(t, dbosCtx.workflowSchedulerStarted.Load())
-	assert.Nil(t, dbosCtx.workflowScheduler)
+	assert.NotNil(t, dbosCtx.workflowScheduler)
 	assert.ErrorIs(t, dbosCtx.Err(), context.Canceled)
 	assert.False(t, systemDB.Launched())
 	require.Error(t, systemDB.Pool().Ping(context.Background()))
+}
+
+func TestConcurrentLaunchOnlyStartsOnce(t *testing.T) {
+	ctx, err := NewDBOSContext(context.Background(), Config{
+		AppName:     "test-concurrent-launch",
+		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+	})
+	require.NoError(t, err)
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- Launch(ctx)
+		}()
+	}
+	close(start)
+
+	var successes int
+	for range 2 {
+		if err := <-results; err == nil {
+			successes++
+		} else {
+			assert.ErrorContains(t, err, "DBOS is already launched")
+		}
+	}
+	assert.Equal(t, 1, successes)
+	Shutdown(ctx, 5*time.Second)
+}
+
+func TestConcurrentShutdownDoesNotWaitTwice(t *testing.T) {
+	ctx, err := NewDBOSContext(context.Background(), Config{
+		AppName:     "test-concurrent-shutdown",
+		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+	})
+	require.NoError(t, err)
+	dbosCtx := ctx.(*dbosContext)
+	// Simulate a queue runner that cannot complete so the first caller remains
+	// in Shutdown long enough for the second caller to enter.
+	dbosCtx.queueRunnerStarted.Store(true)
+
+	const timeout = 200 * time.Millisecond
+	start := make(chan struct{})
+	durations := make(chan time.Duration, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for range 2 {
+		go func() {
+			ready.Done()
+			<-start
+			began := time.Now()
+			Shutdown(ctx, timeout)
+			durations <- time.Since(began)
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	first := <-durations
+	second := <-durations
+	assert.Less(t, min(first, second), timeout/2)
+}
+
+type blockingScheduleListDB struct {
+	sysdb.SystemDatabase
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingScheduleListDB) ListSchedules(context.Context, sysdb.ListSchedulesDBInput) ([]WorkflowSchedule, error) {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return nil, nil
+}
+
+func TestShutdownJoinsScheduleReconciler(t *testing.T) {
+	ctx, err := NewDBOSContext(context.Background(), Config{
+		AppName:                  "test-reconciler-shutdown",
+		DatabaseURL:              "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+		SchedulerPollingInterval: time.Hour,
+	})
+	require.NoError(t, err)
+	dbosCtx := ctx.(*dbosContext)
+	blockingDB := &blockingScheduleListDB{
+		SystemDatabase: dbosCtx.systemDB,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	dbosCtx.systemDB = blockingDB
+	dbosCtx.workflowScheduler.Start()
+	dbosCtx.workflowSchedulerStarted.Store(true)
+	dbosCtx.scheduleReconcilerWg.Add(1)
+	go func() {
+		defer dbosCtx.scheduleReconcilerWg.Done()
+		dbosCtx.runScheduleReconciler()
+	}()
+	<-blockingDB.entered
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		Shutdown(ctx, time.Second)
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+		t.Fatal("Shutdown returned before the schedule reconciler exited")
+	case <-time.After(50 * time.Millisecond):
+	}
+	assert.True(t, dbosCtx.workflowSchedulerStarted.Load())
+
+	close(blockingDB.release)
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not complete after the schedule reconciler exited")
+	}
+	assert.False(t, dbosCtx.workflowSchedulerStarted.Load())
 }
 
 func TestContext(t *testing.T) {

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -169,7 +168,7 @@ func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Tim
 		dialect:              SqliteDialect{},
 		RecvNotifier:         newNotifyRegistry(),
 		EventNotifier:        newNotifyRegistry(),
-		streamsMap:           &sync.Map{},
+		streamNotifier:       newNotifyRegistry(),
 		notificationLoopDone: make(chan struct{}),
 		logger:               logger.With("service", "system_database"),
 		schema:               databaseSchema,

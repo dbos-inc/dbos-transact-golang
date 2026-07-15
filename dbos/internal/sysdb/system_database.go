@@ -148,7 +148,7 @@ type SysDB struct {
 	notificationLoopDone chan struct{}
 	RecvNotifier         *notifyRegistry // recv waiters, keyed by "destinationID::topic"
 	EventNotifier        *notifyRegistry // getEvent waiters, keyed by "targetWorkflowID::key"
-	streamsMap           *sync.Map
+	streamNotifier       *notifyRegistry // stream readers, keyed by "workflowID::key"
 	logger               *slog.Logger
 	encodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (*string, string, error)
 	schema               string
@@ -895,7 +895,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		dialect:              dialect,
 		RecvNotifier:         newNotifyRegistry(),
 		EventNotifier:        newNotifyRegistry(),
-		streamsMap:           &sync.Map{},
+		streamNotifier:       newNotifyRegistry(),
 		encodeScheduledInput: inputs.EncodeScheduledInput,
 		notificationLoopDone: make(chan struct{}),
 		logger:               logger.With("service", "system_database"),
@@ -939,8 +939,8 @@ func (s *SysDB) IsContentionError(err error) bool {
 
 func (s *SysDB) StreamWakeChannel(workflowID, key string) (chan struct{}, func()) {
 	payload := fmt.Sprintf("%s::%s", workflowID, key)
-	ch, _ := s.streamsMap.LoadOrStore(payload, make(chan struct{}, 1))
-	return ch.(chan struct{}), func() { s.streamsMap.Delete(payload) }
+	ch := s.streamNotifier.subscribe(payload)
+	return ch, func() { s.streamNotifier.unsubscribe(payload, ch) }
 }
 
 func (s *SysDB) Launch(ctx context.Context) {
@@ -981,7 +981,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 
 	s.RecvNotifier.clear()
 	s.EventNotifier.clear()
-	s.streamsMap.Clear()
+	s.streamNotifier.clear()
 
 	s.launched = false
 }
@@ -3581,12 +3581,7 @@ func (s *SysDB) notificationListenerLoop(ctx context.Context) {
 		case _DBOS_WORKFLOW_EVENTS_CHANNEL:
 			s.EventNotifier.notify(n.Payload)
 		case _DBOS_STREAMS_CHANNEL:
-			if ch, ok := s.streamsMap.Load(n.Payload); ok {
-				select {
-				case ch.(chan struct{}) <- struct{}{}:
-				default: // A wake-up hint is already pending
-				}
-			}
+			s.streamNotifier.notify(n.Payload)
 		}
 	}
 }
