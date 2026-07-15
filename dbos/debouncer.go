@@ -335,6 +335,11 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 	// Generate message ID for ACK protocol
 	messageID := uuid.New().String()
 
+	dbosCtx, err := clientCtx(dc.Client)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create debouncer input
 	dInput := debouncerInput[P]{
 		InitialInput:                  input,
@@ -350,7 +355,7 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 		// Use the package-level Enqueue function which handles encoding automatically
 		_, err := Enqueue[debouncerInput[P], R](dc.Client, models.InternalQueueName, dc.internalDebouncerFQN, dInput, WithEnqueueDeduplicationID(key))
 		if err == nil {
-			return newWorkflowPollingHandle[R](dc.Client.(*client).dbosCtx, dInput.TargetWorkflowID), nil
+			return newWorkflowPollingHandle[R](dbosCtx, dInput.TargetWorkflowID), nil
 		}
 
 		// Check if error is due to deduplication (workflow already exists)
@@ -397,7 +402,7 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 			if err := json.Unmarshal([]byte(encodedInputStr), &decodedInput); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal debouncer workflow input: %w", err)
 			}
-			return newWorkflowPollingHandle[R](dc.Client.(*client).dbosCtx, decodedInput.TargetWorkflowID), nil
+			return newWorkflowPollingHandle[R](dbosCtx, decodedInput.TargetWorkflowID), nil
 		}
 		return nil, err
 	}
