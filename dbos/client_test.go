@@ -36,6 +36,9 @@ func TestClientEnqueue(t *testing.T) {
 	// Must be created before Launch()
 	partitionedQueue := NewWorkflowQueue(serverCtx, "client-partitioned-queue", WithPartitionQueue())
 
+	// Concurrency-1 queue to hold a workflow ENQUEUED past its timeout (timeout clock test)
+	timeoutClockQueue := NewWorkflowQueue(serverCtx, "client-timeout-clock-queue", WithGlobalConcurrency(1))
+
 	// Track execution order for priority test
 	var executionOrder []string
 	var mu sync.Mutex
@@ -62,6 +65,23 @@ func TestClientEnqueue(t *testing.T) {
 		}
 	}
 	RegisterWorkflow(serverCtx, blockingWorkflow, WithWorkflowName("BlockingWorkflow"))
+
+	// Workflow that blocks until released via channel (for timeout clock test)
+	blockerRelease := make(chan struct{})
+	signalBlockingWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+		select {
+		case <-blockerRelease:
+			return "released", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	RegisterWorkflow(serverCtx, signalBlockingWorkflow, WithWorkflowName("SignalBlockingWorkflow"))
+
+	quickWorkflow := func(ctx DBOSContext, input string) (string, error) {
+		return "quick: " + input, nil
+	}
+	RegisterWorkflow(serverCtx, quickWorkflow, WithWorkflowName("QuickWorkflow"))
 
 	// Register a workflow that records its execution order (for priority test)
 	priorityWorkflow := func(ctx DBOSContext, input string) (string, error) {
@@ -191,6 +211,50 @@ func TestClientEnqueue(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, WorkflowStatusCancelled, status.Status)
+	})
+
+	t.Run("EnqueueTimeoutClockStartsAtDequeue", func(t *testing.T) {
+		// Occupy the concurrency-1 queue so the timed workflow stays ENQUEUED past its timeout
+		blockerHandle, err := Enqueue[string, string](client, timeoutClockQueue.Name, "SignalBlockingWorkflow", "blocker")
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			status, err := blockerHandle.GetStatus()
+			return err == nil && status.Status == WorkflowStatusPending
+		}, 10*time.Second, 50*time.Millisecond, "blocker workflow never started")
+
+		timeout := 500 * time.Millisecond
+		enqueueTime := time.Now()
+		handle, err := Enqueue[string, string](client, timeoutClockQueue.Name, "QuickWorkflow", "timed-input",
+			WithEnqueueTimeout(timeout))
+		require.NoError(t, err)
+
+		// While ENQUEUED the timeout must be persisted but the deadline must not be set:
+		// the clock only starts at dequeue
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, WorkflowStatusEnqueued, status.Status)
+		assert.Equal(t, timeout, status.Timeout)
+		assert.True(t, status.Deadline.IsZero(), "deadline should not be set while the workflow is queued, got %v", status.Deadline)
+
+		// Keep it queued for well over its timeout, then release the blocker
+		time.Sleep(3 * timeout)
+		close(blockerRelease)
+		_, err = blockerHandle.GetResult()
+		require.NoError(t, err)
+
+		// The workflow spent longer than its timeout in the queue, yet must complete
+		// because the deadline is computed at dequeue time
+		result, err := handle.GetResult()
+		require.NoError(t, err, "workflow should not time out while waiting in the queue")
+		assert.Equal(t, "quick: timed-input", result)
+
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, WorkflowStatusSuccess, status.Status)
+		assert.True(t, status.Deadline.After(enqueueTime.Add(3*timeout)),
+			"deadline %v should be computed at dequeue, after %v", status.Deadline, enqueueTime.Add(3*timeout))
+
+		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up")
 	})
 
 	t.Run("EnqueueWithPriority", func(t *testing.T) {

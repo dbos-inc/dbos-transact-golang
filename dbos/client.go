@@ -297,13 +297,12 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		workflowID = uuid.New().String()
 	}
 
-	var deadline time.Time
-	if params.workflowTimeout > 0 {
-		deadline = time.Now().Add(params.workflowTimeout)
-	}
-
 	if params.priority > uint(math.MaxInt) {
 		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.priority, math.MaxInt)
+	}
+
+	if params.workflowTimeout > 0 {
+		dbosCtx.logger.Warn("enqueue timeout does not set a deadline: the timeout clock starts when the workflow is dequeued", "workflow_id", workflowID, "timeout", params.workflowTimeout)
 	}
 
 	// Encode input and determine serialization format
@@ -342,7 +341,6 @@ func (c *client) Enqueue(queueName, workflowName string, input any, opts ...Enqu
 		Status:             wfStatus,
 		ID:                 workflowID,
 		CreatedAt:          time.Now(),
-		Deadline:           deadline,
 		Timeout:            params.workflowTimeout,
 		Input:              encodedInput,
 		QueueName:          queueName,
