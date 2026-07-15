@@ -5065,13 +5065,15 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 
 		if lastFiredAtStr != nil {
 			t, err := time.Parse(time.RFC3339Nano, *lastFiredAtStr)
+			if err != nil {
+				t, err = time.Parse(time.RFC3339, *lastFiredAtStr)
+			}
 			if err == nil {
 				schedule.LastFiredAt = &t
 			} else {
-				t, err = time.Parse(time.RFC3339, *lastFiredAtStr)
-				if err == nil {
-					schedule.LastFiredAt = &t
-				}
+				// A nil LastFiredAt disables automatic backfill for this schedule
+				s.logger.Warn("failed to parse schedule last_fired_at; automatic backfill will not run for this schedule",
+					"schedule_name", schedule.ScheduleName, "last_fired_at", *lastFiredAtStr, "error", err)
 			}
 		}
 		if err := json.Unmarshal([]byte(contextJSON), &schedule.Context); err != nil {
