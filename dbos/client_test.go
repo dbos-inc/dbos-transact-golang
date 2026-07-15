@@ -660,8 +660,17 @@ func TestCancelResume(t *testing.T) {
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue timeout blocking workflow")
 
-		// Wait 500ms (well before the timeout expires)
-		time.Sleep(500 * time.Millisecond)
+		// The deadline is not set at enqueue: it is computed at dequeue.
+		// Wait for the workflow to be dequeued and get its deadline.
+		var originalDeadline time.Time
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			if err != nil {
+				return false
+			}
+			originalDeadline = status.Deadline
+			return status.Status == WorkflowStatusPending && !status.Deadline.IsZero()
+		}, 10*time.Second, 50*time.Millisecond, "workflow was never dequeued with a deadline")
 
 		// Cancel the workflow before timeout expires
 		err = client.CancelWorkflow(workflowID)
@@ -673,9 +682,6 @@ func TestCancelResume(t *testing.T) {
 
 		assert.Equal(t, WorkflowStatusCancelled, cancelStatus.Status, "expected workflow status to be CANCELLED")
 
-		// Record the original deadline before resume
-		originalDeadline := cancelStatus.Deadline
-
 		// Resume the workflow
 		resumeHandle, err := client.ResumeWorkflow(workflowID)
 		require.NoError(t, err, "failed to resume workflow")
@@ -685,8 +691,10 @@ func TestCancelResume(t *testing.T) {
 		resumeStatus, err := resumeHandle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status after resume")
 
-		// Verify the deadline was reset (should be different from original)
-		assert.False(t, resumeStatus.Deadline.Equal(originalDeadline), "expected deadline to be reset after resume, but it remained the same: %v", originalDeadline)
+		// Resume clears the deadline; it is recomputed at the next dequeue. Depending
+		// on timing we observe either the cleared deadline or a fresh, later one.
+		assert.True(t, resumeStatus.Deadline.IsZero() || resumeStatus.Deadline.After(originalDeadline),
+			"expected deadline to be reset after resume, but got %v (original %v)", resumeStatus.Deadline, originalDeadline)
 
 		// Wait for the workflow to complete
 		_, err = resumeHandle.GetResult()
