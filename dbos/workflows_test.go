@@ -7421,9 +7421,9 @@ func TestWorkflowHandles(t *testing.T) {
 		require.Error(t, err, "expected timeout error")
 		assert.Contains(t, err.Error(), "workflow result timeout")
 		assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
+		assert.True(t, errors.Is(err, ErrTimeout), "expected a DBOS timeout error, got: %v", err)
 		assert.True(t, errors.Is(err, context.DeadlineExceeded),
 			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
-		assert.True(t, errors.Is(err, ErrTimeout), "expected a DBOS timeout error, got: %v", err)
 	})
 
 	t.Run("WorkflowPollingHandleTimeout", func(t *testing.T) {
@@ -7445,7 +7445,6 @@ func TestWorkflowHandles(t *testing.T) {
 		require.Error(t, err, "expected timeout error")
 		assert.True(t, errors.Is(err, context.DeadlineExceeded),
 			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
-		assert.True(t, errors.Is(err, ErrTimeout), "expected a DBOS timeout error, got: %v", err)
 	})
 }
 
