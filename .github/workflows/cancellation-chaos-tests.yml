@@ -1,40 +1,40 @@
 name: Run Cancellation Chaos Tests
 on:
-    schedule:
-        # Runs every 3 hours on the half hour
-        - cron: '30 */3 * * *'
-    push:
-      branches:
-        - main
-    pull_request:
-      types:
-        - ready_for_review
-        - opened
-        - reopened
-        - synchronize
-    workflow_dispatch:
+  schedule:
+    # Runs every 3 hours on the half hour
+    - cron: "30 */3 * * *"
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - ready_for_review
+      - opened
+      - reopened
+      - synchronize
+  workflow_dispatch:
 
 jobs:
   cancellation-chaos-test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v5
-      with:
-        fetch-depth: 0
-        fetch-tags: true
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
-    - name: Setup Go
-      uses: actions/setup-go@v6
-      with:
-        go-version: '1.25.12'
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.1"
 
-    - name: Download dependencies
-      run: go mod download
+      - name: Download dependencies
+        run: go mod download
 
-    - name: Run cancellation chaos tests
-      run: go vet ./... && go test -v -race -timeout 30m -count=1 -run 'TestCancellationChaos' ./...
-      working-directory: ./chaos_tests
-      env:
-        PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run cancellation chaos tests
+        run: go vet ./... && go test -v -race -timeout 30m -count=1 -run 'TestCancellationChaos' ./...
+        working-directory: ./chaos_tests
+        env:
+          PGPASSWORD: a!b@c$d()e*_,/:;=?@ff[]22
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
