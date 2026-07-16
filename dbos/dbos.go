@@ -211,10 +211,6 @@ type Client interface {
 // It extends the standard Go context.Context and adds methods for running workflows and steps,
 // inter-workflow communication, and state management.
 //
-// A DBOSContext is a Client that can also register, run, and recover workflows:
-// every Client operation is available on a DBOSContext, and a launched
-// DBOSContext can be passed anywhere a Client is accepted.
-//
 // The context manages the lifecycle of workflows, provides durability guarantees, and enables
 // recovery of interrupted workflows.
 type DBOSContext interface {
