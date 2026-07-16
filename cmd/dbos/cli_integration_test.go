@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	_ "embed"
@@ -1060,4 +1061,52 @@ func buildCLI(t *testing.T) string {
 	absPath, err := filepath.Abs(cliPath)
 	require.NoError(t, err, "Failed to get absolute path")
 	return absPath
+}
+
+// TestMigratePrintOnly verifies `dbos migrate --print-only` prints clean SQL
+// to stdout without connecting to a database. The DB URL points at an
+// unreachable host so any connection attempt would fail the test.
+func TestMigratePrintOnly(t *testing.T) {
+	cliPath := buildCLI(t)
+	dir := t.TempDir()
+	env := append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL=postgres://nouser:nopass@unreachable-host.invalid:5432/nodb")
+
+	t.Run("PrintsSQLWithoutConnecting", func(t *testing.T) {
+		cmd := exec.Command(cliPath, "migrate", "--print-only", "--app-role", "print_role", "--schema", "myschema")
+		cmd.Dir = dir
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		require.NoError(t, cmd.Run(), "stderr: %s", stderr.String())
+
+		out := stdout.String()
+		assert.Contains(t, out, `CREATE SCHEMA IF NOT EXISTS "myschema";`)
+		assert.Contains(t, out, `CREATE TABLE IF NOT EXISTS "myschema".dbos_migrations (version BIGINT NOT NULL PRIMARY KEY);`)
+		assert.Contains(t, out, `CREATE TABLE "myschema".workflow_status`)
+		assert.Contains(t, out, `INSERT INTO "myschema".dbos_migrations (version) VALUES (1);`)
+		assert.Regexp(t, `UPDATE "myschema"\.dbos_migrations SET version = \d+;`, out)
+		assert.Contains(t, out, `GRANT USAGE ON SCHEMA "myschema" TO "print_role";`)
+		assert.Contains(t, out, `ALTER DEFAULT PRIVILEGES IN SCHEMA "myschema" GRANT EXECUTE ON FUNCTIONS TO "print_role";`)
+		// stdout must be SQL only: no JSON log lines
+		assert.NotContains(t, out, `{"time"`)
+	})
+
+	t.Run("SkipsConfigMigrateCommands", func(t *testing.T) {
+		configDir := t.TempDir()
+		configContent := "name: printonly-app\ndatabase:\n  migrate:\n    - echo should-not-run\n"
+		require.NoError(t, os.WriteFile(filepath.Join(configDir, "dbos-config.yaml"), []byte(configContent), 0644))
+
+		cmd := exec.Command(cliPath, "migrate", "--print-only")
+		cmd.Dir = configDir
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		require.NoError(t, cmd.Run(), "stderr: %s", stderr.String())
+
+		assert.Contains(t, stderr.String(), "Skipping migration commands")
+		assert.Contains(t, stdout.String(), `CREATE SCHEMA IF NOT EXISTS "dbos";`)
+		assert.NotContains(t, stdout.String(), "should-not-run")
+	})
 }

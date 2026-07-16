@@ -245,3 +245,35 @@ func TestNewSystemDatabaseErrorPathNoDeadlock(t *testing.T) {
 		t.Fatal("newSystemDatabase deadlocked on its error path: pool.Close() waits on the still-acquired CockroachDB-detection connection")
 	}
 }
+
+// TestMigrationStatements verifies the printable migration SQL (used by
+// `dbos migrate --print-only`) is complete: executing it on a fresh database
+// leaves the schema fully migrated.
+func TestMigrationStatements(t *testing.T) {
+	skipIfSqlite(t, "printable migration SQL targets Postgres")
+	skipIfCockroach(t, "printable migration SQL is built with isCockroach=false")
+	ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+	pool := poolFromContext(t, ctx)
+	bg := context.Background()
+
+	migs := sysdb.BuildMigrations("dbos", false)
+	latest := migs[len(migs)-1].Version
+
+	stmts := MigrationStatements("")
+	require.Greater(t, len(stmts), 2)
+	assert.Equal(t, `CREATE SCHEMA IF NOT EXISTS "dbos";`, stmts[0])
+	assert.Equal(t, `CREATE TABLE IF NOT EXISTS "dbos".dbos_migrations (version BIGINT NOT NULL PRIMARY KEY);`, stmts[1])
+	assert.Equal(t, fmt.Sprintf(`UPDATE "dbos".dbos_migrations SET version = %d;`, latest), stmts[len(stmts)-1])
+
+	_, err := pool.Exec(bg, "DROP SCHEMA dbos CASCADE")
+	require.NoError(t, err)
+
+	for _, stmt := range stmts {
+		_, err := pool.Exec(bg, stmt)
+		require.NoError(t, err, "statement failed: %s", stmt)
+	}
+
+	need, err := sysdb.ShouldMigrate(bg, pool, "dbos", false)
+	require.NoError(t, err)
+	assert.False(t, need, "SQL from MigrationStatements should leave the schema fully migrated")
+}
