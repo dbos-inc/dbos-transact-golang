@@ -355,13 +355,6 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		return h.dbosContext.(*dbosContext).systemDB.AwaitWorkflowResult(ctx, h.workflowID, options.pollInterval)
 	}, sysdb.WithRetrierLogger(h.dbosContext.(*dbosContext).logger))
 
-	// An expired GetResult timeout surfaces as the derived context's deadline: report
-	// it as a typed timeout error wrapping the deadline error so both dbos.ErrTimeout
-	// and context.DeadlineExceeded match.
-	if options.timeout > 0 && errors.Is(awaitErr, context.DeadlineExceeded) {
-		awaitErr = models.NewTimeoutError(h.workflowID, "", fmt.Sprintf("workflow result timeout after %v", options.timeout), awaitErr)
-	}
-
 	completedTime := time.Now()
 
 	// awaitErr is a real DB/network/cancellation error; the workflow's recorded error is in awaitResult.errStr
