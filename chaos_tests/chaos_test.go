@@ -244,7 +244,7 @@ func PostgresChaosMonkey(t *testing.T, ctx context.Context, wg *sync.WaitGroup) 
 }
 
 // setupDBOS sets up a DBOS context for integration testing
-func setupDBOS(t *testing.T) dbos.DBOSContext {
+func setupDBOS(t *testing.T) dbos.Context {
 	t.Helper()
 
 	databaseURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL")
@@ -270,7 +270,7 @@ func setupDBOS(t *testing.T) dbos.DBOSContext {
 	err = dropDatabaseIfExists(context.Background(), conn, dbName)
 	require.NoError(t, err)
 
-	dbosCtx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
+	dbosCtx, err := dbos.NewContext(context.Background(), dbos.Config{
 		DatabaseURL: databaseURL,
 		AppName:     "chaos-test",
 		Logger:      slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})),
@@ -300,7 +300,7 @@ func TestChaosWorkflow(t *testing.T) {
 	PostgresChaosMonkey(t, ctx, &wg)
 
 	// Define scheduled workflow that runs every second
-	scheduledWorkflow := func(ctx dbos.DBOSContext, scheduledTime time.Time) (struct{}, error) {
+	scheduledWorkflow := func(ctx dbos.Context, scheduledTime time.Time) (struct{}, error) {
 		return struct{}{}, nil
 	}
 
@@ -314,7 +314,7 @@ func TestChaosWorkflow(t *testing.T) {
 	}
 
 	// Define workflow function
-	workflow := func(ctx dbos.DBOSContext, x int) (int, error) {
+	workflow := func(ctx dbos.Context, x int) (int, error) {
 		// Execute step one
 		x, err := dbos.RunAsStep(ctx, func(context context.Context) (int, error) {
 			return stepOne(context, x)
@@ -397,7 +397,7 @@ func TestChaosRecv(t *testing.T) {
 	}
 
 	// Define recv workflow - takes index as parameter
-	recvWorkflow := func(ctx dbos.DBOSContext, index int) (string, error) {
+	recvWorkflow := func(ctx dbos.Context, index int) (string, error) {
 		// Signal that we've started
 		signals[index].Set()
 
@@ -455,7 +455,7 @@ func TestChaosEvents(t *testing.T) {
 	key := "test_key"
 
 	// Define event workflow
-	eventWorkflow := func(ctx dbos.DBOSContext, _ string) (string, error) {
+	eventWorkflow := func(ctx dbos.Context, _ string) (string, error) {
 		value := uuid.NewString()
 		err := dbos.SetEvent(ctx, key, value)
 		if err != nil {
@@ -507,7 +507,7 @@ func TestChaosQueues(t *testing.T) {
 	queue := dbos.NewWorkflowQueue(dbosCtx, "test_queue")
 
 	// Define step functions
-	stepOne := func(ctx dbos.DBOSContext, x int) (int, error) {
+	stepOne := func(ctx dbos.Context, x int) (int, error) {
 		// Run as a step
 		result, err := dbos.RunAsStep(ctx, func(context context.Context) (int, error) {
 			return x + 1, nil
@@ -518,7 +518,7 @@ func TestChaosQueues(t *testing.T) {
 		return result, nil
 	}
 
-	stepTwo := func(ctx dbos.DBOSContext, x int) (int, error) {
+	stepTwo := func(ctx dbos.Context, x int) (int, error) {
 		// Run as a step
 		result, err := dbos.RunAsStep(ctx, func(context context.Context) (int, error) {
 			return x + 2, nil
@@ -530,7 +530,7 @@ func TestChaosQueues(t *testing.T) {
 	}
 
 	// Define main workflow that enqueues other workflows
-	workflow := func(ctx dbos.DBOSContext, x int) (int, error) {
+	workflow := func(ctx dbos.Context, x int) (int, error) {
 		// Enqueue step one
 		handle1, err := dbos.RunWorkflow(ctx, stepOne, x, dbos.WithQueue(queue.Name))
 		if err != nil {

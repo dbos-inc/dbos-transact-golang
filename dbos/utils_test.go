@@ -91,7 +91,7 @@ func resetTestDatabase(t *testing.T, databaseURL string) {
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
-		// Database likely does not exist yet; NewDBOSContext will create it.
+		// Database likely does not exist yet; NewContext will create it.
 		return
 	}
 	defer conn.Close(ctx)
@@ -204,7 +204,7 @@ type setupDBOSOptions struct {
 }
 
 /* Test database setup */
-func setupDBOS(t *testing.T, opts setupDBOSOptions) DBOSContext {
+func setupDBOS(t *testing.T, opts setupDBOSOptions) Context {
 	t.Helper()
 
 	databaseURL := opts.databaseURL
@@ -225,7 +225,7 @@ func setupDBOS(t *testing.T, opts setupDBOSOptions) DBOSContext {
 		SchedulerPollingInterval: opts.schedulerPollingInterval,
 	}
 
-	dbosCtx, err := NewDBOSContext(context.Background(), config)
+	dbosCtx, err := NewContext(context.Background(), config)
 	require.NoError(t, err)
 	require.NotNil(t, dbosCtx)
 
@@ -290,10 +290,10 @@ func (e *Event) Clear() {
 }
 
 // setWorkflowStatusPending sets the workflow's status to PENDING in the DB (clearing output, error, started_at_epoch_ms).
-func setWorkflowStatusPending(t *testing.T, dbosCtx DBOSContext, workflowID string) {
+func setWorkflowStatusPending(t *testing.T, dbosCtx Context, workflowID string) {
 	t.Helper()
 	c, ok := dbosCtx.(*dbosContext)
-	require.True(t, ok, "expected DBOSContext to be *dbosContext")
+	require.True(t, ok, "expected Context to be *dbosContext")
 	sysDB, ok := c.systemDB.(*sysdb.SysDB)
 	require.True(t, ok, "expected systemDB to be *sysDB")
 	updateQuery := sysDB.Dialect().RewriteQuery(fmt.Sprintf(`UPDATE %sworkflow_status
@@ -304,7 +304,7 @@ func setWorkflowStatusPending(t *testing.T, dbosCtx DBOSContext, workflowID stri
 	require.NoError(t, err, "failed to set workflow status to PENDING")
 }
 
-func queueEntriesAreCleanedUp(ctx DBOSContext) bool {
+func queueEntriesAreCleanedUp(ctx Context) bool {
 	maxTries := 10
 	success := false
 	exec, ok := ctx.(*dbosContext)

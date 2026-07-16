@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// poolFromContext extracts the underlying pgxpool from a DBOSContext that was
+// poolFromContext extracts the underlying pgxpool from a Context that was
 // set up via setupDBOS.
-func poolFromContext(t *testing.T, ctx DBOSContext) *pgxpool.Pool {
+func poolFromContext(t *testing.T, ctx Context) *pgxpool.Pool {
 	t.Helper()
 	c, ok := ctx.(*dbosContext)
 	require.True(t, ok)

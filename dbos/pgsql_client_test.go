@@ -105,7 +105,7 @@ func TestPgsqlClient(t *testing.T) {
 			Age   int
 		}
 	}
-	enqueueWorkflow := func(ctx DBOSContext, args enqueueArgs) (string, error) {
+	enqueueWorkflow := func(ctx Context, args enqueueArgs) (string, error) {
 		personJSON, err := json.Marshal(args.Person)
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal person: %w", err)
@@ -115,7 +115,7 @@ func TestPgsqlClient(t *testing.T) {
 	RegisterWorkflow(serverCtx, enqueueWorkflow, WithWorkflowName("pgsql_enqueue_test"))
 
 	// A workflow that blocks until cancelled.
-	blockedWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+	blockedWorkflow := func(ctx Context, _ string) (string, error) {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -126,13 +126,13 @@ func TestPgsqlClient(t *testing.T) {
 	RegisterWorkflow(serverCtx, blockedWorkflow, WithWorkflowName("pgsql_blocked_workflow"))
 
 	// A workflow that just returns its input string.
-	retrieveWorkflow := func(ctx DBOSContext, input string) (string, error) {
+	retrieveWorkflow := func(ctx Context, input string) (string, error) {
 		return input, nil
 	}
 	RegisterWorkflow(serverCtx, retrieveWorkflow, WithWorkflowName("pgsql_retrieve_test"))
 
 	// A workflow that waits for a message on a topic and returns it.
-	recvWorkflow := func(ctx DBOSContext, topic string) (string, error) {
+	recvWorkflow := func(ctx Context, topic string) (string, error) {
 		return Recv[string](ctx, topic, 30*time.Second)
 	}
 	RegisterWorkflow(serverCtx, recvWorkflow, WithWorkflowName("pgsql_recv_test"))
@@ -194,9 +194,9 @@ func TestPgsqlClient(t *testing.T) {
 		require.NoError(t, err)
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected timeout/cancellation error")
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected DBOSError, got %T: %v", err, err)
-		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected Error, got %T: %v", err, err)
+		assert.Equal(t, ErrorCodeAwaitedWorkflowCancelled, dbosErr.Code)
 	})
 
 	t.Run("EnqueueIdempotent", func(t *testing.T) {

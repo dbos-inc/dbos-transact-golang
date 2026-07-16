@@ -17,19 +17,19 @@ import (
 /*******************************/
 
 // ScheduleSpec describes a workflow schedule. It is the input to
-// CreateSchedule and ApplySchedules, usable from both a DBOSContext and a
+// CreateSchedule and ApplySchedules, usable from both a Context and a
 // Client.
 //
 // The target workflow is identified by WorkflowName — the name under which the
 // workflow is registered — allowing schedules to be managed for workflows
-// owned by any process or language. From a DBOSContext, Workflow can be set
+// owned by any process or language. From a Context, Workflow can be set
 // instead to reference a registered Go workflow function directly; when set,
 // it takes precedence over WorkflowName.
 type ScheduleSpec struct {
 	ScheduleName      string // Required: unique name of the schedule
 	Schedule          string // Required: cron expression driving the schedule
 	WorkflowName      string // Name of the target workflow (required unless Workflow is set)
-	Workflow          any    // Registered scheduled workflow function (DBOSContext only; takes precedence over WorkflowName)
+	Workflow          any    // Registered scheduled workflow function (Context only; takes precedence over WorkflowName)
 	WorkflowClassName string // Optional class/namespace name for cross-language dispatch
 	Context           any    // Optional user-defined context (serialized as JSON) passed to each scheduled invocation
 	AutomaticBackfill bool   // Backfill missed ticks when the schedule is reloaded after downtime
@@ -71,7 +71,7 @@ func jitterCap(sched cron.Schedule, scheduledTime time.Time) time.Duration {
 // functions must conform to. Each tick the scheduler invokes the function
 // with a ScheduledWorkflowInput carrying the cron tick time and the
 // user-defined context attached to the schedule.
-type ScheduledWorkflowFunc func(ctx DBOSContext, input ScheduledWorkflowInput) (any, error)
+type ScheduledWorkflowFunc func(ctx Context, input ScheduledWorkflowInput) (any, error)
 
 /************************************/
 /******* SCHEDULE MANAGEMENT ********/
@@ -139,7 +139,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 		queueName = models.InternalQueueName
 	}
 
-	return func(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+	return func(ctx Context, input ScheduledWorkflowInput) (any, error) {
 		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, input.ScheduledTime.Format(time.RFC3339))
 
 		// Skip if this tick's workflow already exists. Another executor may have enqueued it.

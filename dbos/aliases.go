@@ -39,28 +39,28 @@ const (
 
 // Error types (internal/models).
 type (
-	DBOSError     = models.DBOSError
-	DBOSErrorCode = models.DBOSErrorCode
+	Error     = models.Error
+	ErrorCode = models.ErrorCode
 )
 
 const (
-	ConflictingIDError           = models.ConflictingIDError
-	InitializationError          = models.InitializationError
-	NonExistentWorkflowError     = models.NonExistentWorkflowError
-	ConflictingWorkflowError     = models.ConflictingWorkflowError
-	WorkflowCancelled            = models.WorkflowCancelled
-	UnexpectedStep               = models.UnexpectedStep
-	AwaitedWorkflowCancelled     = models.AwaitedWorkflowCancelled
-	ConflictingRegistrationError = models.ConflictingRegistrationError
-	WorkflowUnexpectedTypeError  = models.WorkflowUnexpectedTypeError
-	WorkflowExecutionError       = models.WorkflowExecutionError
-	StepExecutionError           = models.StepExecutionError
-	DeadLetterQueueError         = models.DeadLetterQueueError
-	MaxStepRetriesExceeded       = models.MaxStepRetriesExceeded
-	QueueDeduplicated            = models.QueueDeduplicated
-	PatchingNotEnabled           = models.PatchingNotEnabled
-	TimeoutError                 = models.TimeoutError
-	NoApplicationVersions        = models.NoApplicationVersions
+	ErrorCodeConflictingID            = models.ErrorCodeConflictingID
+	ErrorCodeInitialization           = models.ErrorCodeInitialization
+	ErrorCodeNonExistentWorkflow      = models.ErrorCodeNonExistentWorkflow
+	ErrorCodeConflictingWorkflow      = models.ErrorCodeConflictingWorkflow
+	ErrorCodeWorkflowCancelled        = models.ErrorCodeWorkflowCancelled
+	ErrorCodeUnexpectedStep           = models.ErrorCodeUnexpectedStep
+	ErrorCodeAwaitedWorkflowCancelled = models.ErrorCodeAwaitedWorkflowCancelled
+	ErrorCodeConflictingRegistration  = models.ErrorCodeConflictingRegistration
+	ErrorCodeWorkflowUnexpectedType   = models.ErrorCodeWorkflowUnexpectedType
+	ErrorCodeWorkflowExecution        = models.ErrorCodeWorkflowExecution
+	ErrorCodeStepExecution            = models.ErrorCodeStepExecution
+	ErrorCodeDeadLetterQueue          = models.ErrorCodeDeadLetterQueue
+	ErrorCodeMaxStepRetriesExceeded   = models.ErrorCodeMaxStepRetriesExceeded
+	ErrorCodeQueueDeduplicated        = models.ErrorCodeQueueDeduplicated
+	ErrorCodePatchingNotEnabled       = models.ErrorCodePatchingNotEnabled
+	ErrorCodeTimeout                  = models.ErrorCodeTimeout
+	ErrorCodeNoApplicationVersions    = models.ErrorCodeNoApplicationVersions
 )
 
 // Driver-facing SQL surface (internal/sysdb). Future database drivers

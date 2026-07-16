@@ -590,7 +590,7 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 	require.NoError(t, dbosCtx.Launch())
 
 	// Second argument is not ScheduledWorkflowInput.
-	badInputType := func(ctx DBOSContext, input string) (any, error) { return nil, nil }
+	badInputType := func(ctx Context, input string) (any, error) { return nil, nil }
 	err := ApplySchedules(dbosCtx, []ScheduleSpec{
 		{ScheduleName: "bad-input", Workflow: badInputType, Schedule: "0 0 * * * *"},
 	})
@@ -604,7 +604,7 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 	require.Error(t, err)
 
 	// Too few parameters.
-	tooFewParams := func(ctx DBOSContext) (any, error) { return nil, nil }
+	tooFewParams := func(ctx Context) (any, error) { return nil, nil }
 	err = ApplySchedules(dbosCtx, []ScheduleSpec{
 		{ScheduleName: "too-few", Workflow: tooFewParams, Schedule: "0 0 * * * *"},
 	})
@@ -889,11 +889,11 @@ func TestScheduleWithOptions(t *testing.T) {
 	require.Equal(t, "my-queue", schedule.QueueName)
 }
 
-func testWorkflowForSchedule(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+func testWorkflowForSchedule(ctx Context, input ScheduledWorkflowInput) (any, error) {
 	return "completed", nil
 }
 
-func testWorkflowForScheduleCustomName(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+func testWorkflowForScheduleCustomName(ctx Context, input ScheduledWorkflowInput) (any, error) {
 	return "completed", nil
 }
 
@@ -918,7 +918,7 @@ func liveUpdateVersionCount(version float64) int {
 	return liveUpdateVersionCounts[version]
 }
 
-func testLiveUpdateScheduledWorkflow(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+func testLiveUpdateScheduledWorkflow(ctx Context, input ScheduledWorkflowInput) (any, error) {
 	if m, ok := input.Context.(map[string]any); ok {
 		if v, ok := m["version"].(float64); ok {
 			liveUpdateMu.Lock()
@@ -929,7 +929,7 @@ func testLiveUpdateScheduledWorkflow(ctx DBOSContext, input ScheduledWorkflowInp
 	return "completed", nil
 }
 
-func testCapturingScheduledWorkflow(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+func testCapturingScheduledWorkflow(ctx Context, input ScheduledWorkflowInput) (any, error) {
 	wfID, _ := GetWorkflowID(ctx)
 	scheduledInputCapture.Store(wfID, input)
 	// CreateSchedule is wrapped as a step via runAsTxn when called inside a
@@ -946,7 +946,7 @@ func testCapturingScheduledWorkflow(ctx DBOSContext, input ScheduledWorkflowInpu
 
 var backfillRestartFiredEvent *Event
 
-func testWorkflowForBackfillRestart(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+func testWorkflowForBackfillRestart(ctx Context, input ScheduledWorkflowInput) (any, error) {
 	if backfillRestartFiredEvent != nil {
 		backfillRestartFiredEvent.Set()
 	}
@@ -1012,7 +1012,7 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond, "expected backfill to produce more than one additional successful workflow")
 }
 
-func testWorkflowExpectingApplySchedulesError(ctx DBOSContext, _ string) (string, error) {
+func testWorkflowExpectingApplySchedulesError(ctx Context, _ string) (string, error) {
 	err := ApplySchedules(ctx, []ScheduleSpec{
 		{ScheduleName: "x", Workflow: testWorkflowForSchedule, Schedule: "0 0 * * * *"},
 	})
@@ -1022,7 +1022,7 @@ func testWorkflowExpectingApplySchedulesError(ctx DBOSContext, _ string) (string
 	return err.Error(), nil
 }
 
-func testWorkflowExpectingBackfillScheduleError(ctx DBOSContext, _ string) (string, error) {
+func testWorkflowExpectingBackfillScheduleError(ctx Context, _ string) (string, error) {
 	_, err := BackfillSchedule(ctx, "any", time.Now().Add(-time.Minute), time.Now())
 	if err == nil {
 		return "", nil
@@ -1030,7 +1030,7 @@ func testWorkflowExpectingBackfillScheduleError(ctx DBOSContext, _ string) (stri
 	return err.Error(), nil
 }
 
-func testWorkflowExpectingTriggerScheduleError(ctx DBOSContext, _ string) (string, error) {
+func testWorkflowExpectingTriggerScheduleError(ctx Context, _ string) (string, error) {
 	_, err := TriggerSchedule[any](ctx, "any")
 	if err == nil {
 		return "", nil

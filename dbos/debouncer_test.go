@@ -18,7 +18,7 @@ var debouncer10sTimeout *Debouncer[string, string]
 var debouncer200msTimeout *Debouncer[string, string]
 
 // Helper test workflows
-func debounceTestWorkflow(ctx DBOSContext, input string) (string, error) {
+func debounceTestWorkflow(ctx Context, input string) (string, error) {
 	return input, nil
 }
 
@@ -30,7 +30,7 @@ type debounceCallInput struct {
 	Inputs []string      // Single element for single call, multiple for multiple calls
 }
 
-func workflowThatCallsDebounce(ctx DBOSContext, input debounceCallInput) (string, error) {
+func workflowThatCallsDebounce(ctx Context, input debounceCallInput) (string, error) {
 	var lastHandle WorkflowHandle[string]
 	var err error
 
@@ -306,14 +306,14 @@ func TestDebouncerCannotBeCreatedAfterLaunch(t *testing.T) {
 	}, "creating a debouncer after launch should panic")
 
 	// Verify the panic is with the correct error type
-	var panicErr *DBOSError
+	var panicErr *Error
 	panicked := false
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				panicked = true
 				var ok bool
-				panicErr, ok = r.(*DBOSError)
+				panicErr, ok = r.(*Error)
 				if !ok {
 					panic(r) // Re-panic if it's not the expected error type
 				}
@@ -324,7 +324,7 @@ func TestDebouncerCannotBeCreatedAfterLaunch(t *testing.T) {
 
 	assert.True(t, panicked, "should have panicked")
 	require.NotNil(t, panicErr, "panic error should not be nil")
-	assert.Equal(t, InitializationError, panicErr.Code, "error code should be InitializationError")
+	assert.Equal(t, ErrorCodeInitialization, panicErr.Code, "error code should be ErrorCodeInitialization")
 	assert.Contains(t, panicErr.Message, "cannot create debouncer after DBOS has launched", "error message should mention debouncer creation after launch")
 }
 

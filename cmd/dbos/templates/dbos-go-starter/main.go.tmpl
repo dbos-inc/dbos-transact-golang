@@ -13,13 +13,13 @@ import (
 
 const STEPS_EVENT = "steps_event"
 
-var dbosCtx dbos.DBOSContext
+var dbosCtx dbos.Context
 
 /*****************************/
 /**** WORKFLOWS AND STEPS ****/
 /*****************************/
 
-func ExampleWorkflow(ctx dbos.DBOSContext, _ string) (string, error) {
+func ExampleWorkflow(ctx dbos.Context, _ string) (string, error) {
 	_, err := dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
 		return stepOne(stepCtx)
 	})
@@ -78,7 +78,7 @@ func stepThree(ctx context.Context) (string, error) {
 func main() {
 	// Create DBOS context
 	var err error
-	dbosCtx, err = dbos.NewDBOSContext(context.Background(), dbos.Config{
+	dbosCtx, err = dbos.NewContext(context.Background(), dbos.Config{
 		DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 		AppName: "{{.ProjectName}}",
 		AdminServer: true,

@@ -22,13 +22,13 @@ type Config struct {
 }
 
 // Global variables
-var dbosCtx dbos.DBOSContext
+var dbosCtx dbos.Context
 
 /*****************************/
 /**** WORKFLOWS AND STEPS ****/
 /*****************************/
 
-func ExampleWorkflow(ctx dbos.DBOSContext, _ string) (string, error) {
+func ExampleWorkflow(ctx dbos.Context, _ string) (string, error) {
 	_, err := dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
 		return stepOne(stepCtx)
 	})
@@ -54,13 +54,13 @@ func stepTwo(ctx context.Context) (string, error) {
 /**** QUEUES *****************/
 /*****************************/
 
-func QueuedStepWorkflow(ctx dbos.DBOSContext, i int) (int, error) {
+func QueuedStepWorkflow(ctx dbos.Context, i int) (int, error) {
 	dbos.Sleep(ctx, 5*time.Second)
 	fmt.Printf("Step %d completed!\n", i)
 	return i, nil
 }
 
-func QueueWorkflow(ctx dbos.DBOSContext, _ string) (string, error) {
+func QueueWorkflow(ctx dbos.Context, _ string) (string, error) {
 	fmt.Println("Enqueueing steps")
 	handles := make([]dbos.WorkflowHandle[int], 10)
 	for i := range 10 {
@@ -78,7 +78,7 @@ func QueueWorkflow(ctx dbos.DBOSContext, _ string) (string, error) {
 /**** SCHEDULED WORKFLOWS ****/
 /*****************************/
 
-func ScheduledWorkflow(ctx dbos.DBOSContext, scheduledTime time.Time) (string, error) {
+func ScheduledWorkflow(ctx dbos.Context, scheduledTime time.Time) (string, error) {
 	fmt.Printf("I am a scheduled workflow scheduled at %v and running at %v\n", scheduledTime, time.Now())
 	return "", nil
 }
@@ -97,7 +97,7 @@ func main() {
 		config.DatabaseSchema = schema
 	}
 
-	dbosCtx, err = dbos.NewDBOSContext(context.Background(), config)
+	dbosCtx, err = dbos.NewContext(context.Background(), config)
 	if err != nil {
 		panic(err)
 	}

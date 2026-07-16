@@ -114,7 +114,7 @@ func (o *debouncerOptions) resolveConfigName() string {
 //	handle1, err := debouncer.Debounce(ctx, "user-123", 2*time.Second, inputData1)
 //	handle2, err := debouncer.Debounce(ctx, "user-456", 3*time.Second, inputData2)
 func NewDebouncer[P any, R any](
-	ctx DBOSContext,
+	ctx Context,
 	workflow Workflow[P, R],
 	opts ...DebouncerOption,
 ) *Debouncer[P, R] {
@@ -162,7 +162,7 @@ func NewDebouncer[P any, R any](
 	}
 }
 
-func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Duration, input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
+func (d *Debouncer[P, R]) Debounce(ctx Context, key string, delay time.Duration, input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	workflowState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 
@@ -217,7 +217,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 			return newWorkflowPollingHandle[R](ctx, dInput.TargetWorkflowID), nil
 		}
 		// A dedup error means the internal debouncer workflow was already started, in which case we should send it the new input
-		if errors.Is(err, &DBOSError{Code: QueueDeduplicated}) {
+		if errors.Is(err, ErrQueueDeduplicated) {
 			// Identify the ID of the internal debouncer workflow from the dedup error
 			debouncerWorkflowStatus, err := ListWorkflows(ctx, WithFilterDeduplicationID(key))
 			if err != nil {
@@ -240,7 +240,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 
 			// Acknowledge the send by getting an event with the message ID
 			_, err = GetEvent[bool](ctx, debouncerWorkflowID, messageID, 2*time.Second) // XXX unclear what's a good timeout here.
-			if errors.Is(err, &DBOSError{Code: TimeoutError}) {
+			if errors.Is(err, ErrTimeout) {
 				continue // The debouncer workflow might have started the user workflow and exited already, in which case we should try again to create a new internal debouncer workflow
 			} else if err != nil {
 				return nil, err
@@ -263,7 +263,7 @@ func (d *Debouncer[P, R]) Debounce(ctx DBOSContext, key string, delay time.Durat
 }
 
 // DebouncerClient provides workflow debouncing functionality using a Client.
-// It is similar to Debouncer but uses a Client interface instead of a DBOSContext
+// It is similar to Debouncer but uses a Client interface instead of a Context
 // and takes a workflow name string instead of a workflow function.
 type DebouncerClient[P any, R any] struct {
 	WorkflowName         string        // Name of the target workflow
@@ -359,8 +359,8 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 		}
 
 		// Check if error is due to deduplication (workflow already exists)
-		var dbosErr *DBOSError
-		if errors.As(err, &dbosErr) && dbosErr.Code == QueueDeduplicated {
+		var dbosErr *Error
+		if errors.As(err, &dbosErr) && dbosErr.Code == ErrorCodeQueueDeduplicated {
 			// The internal debouncer workflow already exists, send it the new input
 			// List workflows with the deduplication ID to find the existing debouncer workflow
 			debouncerWorkflowStatus, err := dc.Client.ListWorkflows(dc.Client, WithFilterDeduplicationID(key), WithLoadInput(true))
@@ -385,7 +385,7 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 
 			// Acknowledge the send by getting an event with the message ID
 			_, err = dc.Client.GetEvent(dc.Client, debouncerWorkflowID, messageID, 2*time.Second)
-			if errors.Is(err, &DBOSError{Code: TimeoutError}) {
+			if errors.Is(err, ErrTimeout) {
 				// The debouncer workflow might have started the user workflow and exited already, try again
 				continue
 			} else if err != nil {
@@ -410,7 +410,7 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 
 // internalDebouncerWF is the internal workflow that implements debouncing logic.
 // It collects inputs, delays execution, and runs the target workflow with the latest input.
-func internalDebouncerWF[P any, R any](ctx DBOSContext, input debouncerInput[P]) (R, error) {
+func internalDebouncerWF[P any, R any](ctx Context, input debouncerInput[P]) (R, error) {
 	var zero R
 
 	dbosCtx, ok := ctx.(*dbosContext)

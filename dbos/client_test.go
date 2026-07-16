@@ -47,7 +47,7 @@ func TestClientEnqueue(t *testing.T) {
 	type wfInput struct {
 		Input string
 	}
-	serverWorkflow := func(ctx DBOSContext, input wfInput) (string, error) {
+	serverWorkflow := func(ctx Context, input wfInput) (string, error) {
 		if input.Input != "test-input" {
 			return "", fmt.Errorf("unexpected input: %s", input.Input)
 		}
@@ -56,7 +56,7 @@ func TestClientEnqueue(t *testing.T) {
 	RegisterWorkflow(serverCtx, serverWorkflow, WithWorkflowName("ServerWorkflow"))
 
 	// Workflow that blocks until cancelled (for timeout test)
-	blockingWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+	blockingWorkflow := func(ctx Context, _ string) (string, error) {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -68,7 +68,7 @@ func TestClientEnqueue(t *testing.T) {
 
 	// Workflow that blocks until released via channel (for timeout clock test)
 	blockerRelease := make(chan struct{})
-	signalBlockingWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+	signalBlockingWorkflow := func(ctx Context, _ string) (string, error) {
 		select {
 		case <-blockerRelease:
 			return "released", nil
@@ -78,13 +78,13 @@ func TestClientEnqueue(t *testing.T) {
 	}
 	RegisterWorkflow(serverCtx, signalBlockingWorkflow, WithWorkflowName("SignalBlockingWorkflow"))
 
-	quickWorkflow := func(ctx DBOSContext, input string) (string, error) {
+	quickWorkflow := func(ctx Context, input string) (string, error) {
 		return "quick: " + input, nil
 	}
 	RegisterWorkflow(serverCtx, quickWorkflow, WithWorkflowName("QuickWorkflow"))
 
 	// Register a workflow that records its execution order (for priority test)
-	priorityWorkflow := func(ctx DBOSContext, input string) (string, error) {
+	priorityWorkflow := func(ctx Context, input string) (string, error) {
 		mu.Lock()
 		executionOrder = append(executionOrder, input)
 		mu.Unlock()
@@ -93,7 +93,7 @@ func TestClientEnqueue(t *testing.T) {
 	RegisterWorkflow(serverCtx, priorityWorkflow, WithWorkflowName("PriorityWorkflow"))
 
 	// Simple workflow for partitioned queue test
-	partitionedWorkflow := func(ctx DBOSContext, input string) (string, error) {
+	partitionedWorkflow := func(ctx Context, input string) (string, error) {
 		return "partitioned: " + input, nil
 	}
 	RegisterWorkflow(serverCtx, partitionedWorkflow, WithWorkflowName("PartitionedWorkflow"))
@@ -201,10 +201,10 @@ func TestClientEnqueue(t *testing.T) {
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected timeout error, but got none")
 
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T (%v)", err, err)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected error to be of type *Error, got %T (%v)", err, err)
 
-		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code)
+		assert.Equal(t, ErrorCodeAwaitedWorkflowCancelled, dbosErr.Code)
 
 		// Verify workflow is cancelled
 		status, err := handle.GetStatus()
@@ -324,9 +324,9 @@ func TestClientEnqueue(t *testing.T) {
 		require.Error(t, err, "expected error when enqueueing workflow with same deduplication ID")
 
 		// Check that it's the correct error type and message
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
-		assert.Equal(t, QueueDeduplicated, dbosErr.Code, "expected error code to be QueueDeduplicated")
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected error to be of type *Error, got %T", err)
+		assert.Equal(t, ErrorCodeQueueDeduplicated, dbosErr.Code, "expected error code to be ErrorCodeQueueDeduplicated")
 
 		expectedMsgPart := fmt.Sprintf("Workflow %s was deduplicated due to an existing workflow in queue %s with deduplication ID %s", wfid2, queue.Name, dedupID)
 		assert.Contains(t, err.Error(), expectedMsgPart, "expected error message to contain deduplication information")
@@ -527,7 +527,7 @@ func TestCancelResume(t *testing.T) {
 	proceedSignal := NewEvent()
 
 	// Workflow that executes steps with blocking behavior
-	cancelResumeWorkflow := func(ctx DBOSContext, input int) (int, error) {
+	cancelResumeWorkflow := func(ctx Context, input int) (int, error) {
 		// Execute step one
 		_, err := RunAsStep(ctx, step)
 		if err != nil {
@@ -551,7 +551,7 @@ func TestCancelResume(t *testing.T) {
 	RegisterWorkflow(serverCtx, cancelResumeWorkflow, WithWorkflowName("CancelResumeWorkflow"))
 
 	// Timeout blocking workflow that spins until context is done
-	timeoutBlockingWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+	timeoutBlockingWorkflow := func(ctx Context, _ string) (string, error) {
 		for {
 			select {
 			case <-ctx.Done():
@@ -700,10 +700,10 @@ func TestCancelResume(t *testing.T) {
 		_, err = resumeHandle.GetResult()
 		require.Error(t, err, "expected timeout error, but got none")
 
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected error to be of type *Error, got %T", err)
 
-		assert.Equal(t, AwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be AwaitedWorkflowCancelled")
+		assert.Equal(t, ErrorCodeAwaitedWorkflowCancelled, dbosErr.Code, "expected error code to be ErrorCodeAwaitedWorkflowCancelled")
 
 		assert.Contains(t, dbosErr.Error(), "test-cancel-resume-timeout-workflow was cancelled", "expected error message to contain cancellation text")
 
@@ -727,10 +727,10 @@ func TestCancelResume(t *testing.T) {
 		require.Error(t, err, "expected error when canceling non-existent workflow, but got none")
 
 		// Verify error type and code
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected error to be of type *Error, got %T", err)
 
-		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
+		assert.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code, "expected error code to be ErrorCodeNonExistentWorkflow")
 
 		assert.Equal(t, nonExistentWorkflowID, dbosErr.WorkflowID, "expected WorkflowID to match")
 	})
@@ -743,10 +743,10 @@ func TestCancelResume(t *testing.T) {
 		require.Error(t, err, "expected error when resuming non-existent workflow, but got none")
 
 		// Verify error type and code
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected error to be of type *Error, got %T", err)
 
-		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
+		assert.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code, "expected error code to be ErrorCodeNonExistentWorkflow")
 
 		assert.Equal(t, nonExistentWorkflowID, dbosErr.WorkflowID, "expected WorkflowID to match")
 	})
@@ -756,7 +756,7 @@ func TestDeleteWorkflow(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	queue := NewWorkflowQueue(serverCtx, "delete-workflow-queue")
 
-	simpleWf := func(ctx DBOSContext, input string) (string, error) {
+	simpleWf := func(ctx Context, input string) (string, error) {
 		return "done: " + input, nil
 	}
 	RegisterWorkflow(serverCtx, simpleWf, WithWorkflowName("SimpleDeleteWorkflow"))
@@ -793,9 +793,9 @@ func TestDeleteWorkflow(t *testing.T) {
 
 		_, err = client.RetrieveWorkflow(client, workflowID)
 		require.Error(t, err)
-		dbosErr, ok := err.(*DBOSError)
+		dbosErr, ok := err.(*Error)
 		require.True(t, ok)
-		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code)
+		assert.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code)
 	})
 }
 
@@ -815,20 +815,20 @@ func TestForkWorkflow(t *testing.T) {
 	queue := NewWorkflowQueue(serverCtx, "fork-workflow-queue")
 
 	// Simple child workflows (no steps, just increment counters)
-	childWorkflow1 := func(ctx DBOSContext, input string) (string, error) {
+	childWorkflow1 := func(ctx Context, input string) (string, error) {
 		child1Count++
 		return "child1-" + input, nil
 	}
 	RegisterWorkflow(serverCtx, childWorkflow1, WithWorkflowName("ChildWorkflow1"))
 
-	childWorkflow2 := func(ctx DBOSContext, input string) (string, error) {
+	childWorkflow2 := func(ctx Context, input string) (string, error) {
 		child2Count++
 		return "child2-" + input, nil
 	}
 	RegisterWorkflow(serverCtx, childWorkflow2, WithWorkflowName("ChildWorkflow2"))
 
 	// Parent workflow with 2 steps and 2 child workflows
-	parentWorkflow := func(ctx DBOSContext, input string) (string, error) {
+	parentWorkflow := func(ctx Context, input string) (string, error) {
 		// Set events: A=1, B=1, A=2, B=2
 		err := SetEvent(ctx, "A", "1")
 		if err != nil {
@@ -1063,10 +1063,10 @@ func TestForkWorkflow(t *testing.T) {
 		require.Error(t, err, "expected error when forking non-existent workflow, but got none")
 
 		// Verify error type
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected error to be of type *DBOSError, got %T", err)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected error to be of type *Error, got %T", err)
 
-		assert.Equal(t, NonExistentWorkflowError, dbosErr.Code, "expected error code to be NonExistentWorkflowError")
+		assert.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code, "expected error code to be ErrorCodeNonExistentWorkflow")
 
 		assert.Equal(t, nonExistentWorkflowID, dbosErr.WorkflowID, "expected WorkflowID to match")
 	})
@@ -1095,7 +1095,7 @@ func TestListWorkflows(t *testing.T) {
 	if useSqliteBackend() {
 		customSchema = ""
 	}
-	serverCtx, err := NewDBOSContext(context.Background(), Config{
+	serverCtx, err := NewContext(context.Background(), Config{
 		DatabaseURL:    databaseURL,
 		AppName:        "test-list-workflows",
 		DatabaseSchema: customSchema,
@@ -1120,13 +1120,13 @@ func TestListWorkflows(t *testing.T) {
 		ID    string
 	}
 
-	simpleWorkflow := func(ctx DBOSContext, input testInput) (string, error) {
+	simpleWorkflow := func(ctx Context, input testInput) (string, error) {
 		if input.Value < 0 {
 			return "", fmt.Errorf("negative value: %d", input.Value)
 		}
 		return fmt.Sprintf("result-%d-%s", input.Value, input.ID), nil
 	}
-	otherWorkflow := func(ctx DBOSContext, input testInput) (string, error) {
+	otherWorkflow := func(ctx Context, input testInput) (string, error) {
 		if input.Value < 0 {
 			return "", fmt.Errorf("negative value: %d", input.Value)
 		}
@@ -1136,8 +1136,8 @@ func TestListWorkflows(t *testing.T) {
 	RegisterWorkflow(serverCtx, otherWorkflow, WithWorkflowName("OtherWorkflow"))
 
 	// Parent/child workflows for WithParentWorkflowID filter test
-	childWfForListTest := func(ctx DBOSContext, input string) (string, error) { return input, nil }
-	parentWfForListTest := func(ctx DBOSContext, _ string) (string, error) {
+	childWfForListTest := func(ctx Context, input string) (string, error) { return input, nil }
+	parentWfForListTest := func(ctx Context, _ string) (string, error) {
 		h, err := RunWorkflow(ctx, childWfForListTest, "child-input")
 		if err != nil {
 			return "", err
@@ -1509,7 +1509,7 @@ func TestGetWorkflowSteps(t *testing.T) {
 		return "abc", nil
 	}
 
-	testWorkflow := func(ctx DBOSContext, input string) (string, error) {
+	testWorkflow := func(ctx Context, input string) (string, error) {
 		result, err := RunAsStep(ctx, stepFunction, WithStepName("TestStep"))
 		if err != nil {
 			return "", err
@@ -1593,7 +1593,7 @@ func TestClientReadStream(t *testing.T) {
 	queue := NewWorkflowQueue(serverCtx, "read-stream-queue")
 
 	// Workflow that writes to a stream
-	streamWriterWorkflow := func(ctx DBOSContext, input struct {
+	streamWriterWorkflow := func(ctx Context, input struct {
 		StreamKey string
 		Values    []string
 	}) (string, error) {
@@ -1670,7 +1670,7 @@ func TestClientReadStreamAsyncGoroutineLeak(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
 
 	// Workflow that writes values then blocks waiting for a message, keeping it PENDING
-	blockingStreamWorkflow := func(ctx DBOSContext, streamKey string) (string, error) {
+	blockingStreamWorkflow := func(ctx Context, streamKey string) (string, error) {
 		for _, v := range []string{"value1", "value2", "value3"} {
 			if err := WriteStream(ctx, streamKey, v); err != nil {
 				return "", err
@@ -1715,7 +1715,7 @@ func TestDebouncerClient(t *testing.T) {
 	serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName] = internalQueue
 
 	// Register test workflow with a custom name
-	debounceTestWorkflow := func(ctx DBOSContext, input string) (string, error) {
+	debounceTestWorkflow := func(ctx Context, input string) (string, error) {
 		return input, nil
 	}
 	RegisterWorkflow(serverCtx, debounceTestWorkflow, WithWorkflowName("DebounceTestWorkflow"))
@@ -1963,7 +1963,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	testQueue := NewWorkflowQueue(serverCtx, "debouncer-client-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())
 
 	// Register test workflow with a custom name
-	debounceTestWorkflow := func(ctx DBOSContext, input string) (string, error) {
+	debounceTestWorkflow := func(ctx Context, input string) (string, error) {
 		return input, nil
 	}
 	RegisterWorkflow(serverCtx, debounceTestWorkflow, WithWorkflowName("DebounceTestWorkflow"))
@@ -2047,7 +2047,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 		WithQueueBasePollingInterval(50*time.Millisecond),
 		WithQueueMaxPollingInterval(500*time.Millisecond))
 
-	delayWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+	delayWorkflow := func(ctx Context, _ string) (string, error) {
 		return "delayed-done", nil
 	}
 	RegisterWorkflow(serverCtx, delayWorkflow, WithWorkflowName("DelayWorkflow"))
@@ -2397,9 +2397,9 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		_, err = c.GetLatestApplicationVersion(c)
 		require.Error(t, err)
-		var dbosErr *DBOSError
-		require.True(t, errors.As(err, &dbosErr), "expected *DBOSError, got %T: %v", err, err)
-		require.Equal(t, NoApplicationVersions, dbosErr.Code)
+		var dbosErr *Error
+		require.True(t, errors.As(err, &dbosErr), "expected *Error, got %T: %v", err, err)
+		require.Equal(t, ErrorCodeNoApplicationVersions, dbosErr.Code)
 	})
 
 	t.Run("SetLatestRequiresVersionName", func(t *testing.T) {
@@ -2425,7 +2425,7 @@ func TestClientCustomSqliteDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "dbos.db")
 	serverDB, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	serverCtx, err := NewDBOSContext(context.Background(), Config{
+	serverCtx, err := NewContext(context.Background(), Config{
 		AppName:        "test-client-custom-sqlite-db",
 		SqliteSystemDB: serverDB,
 	})
@@ -2434,7 +2434,7 @@ func TestClientCustomSqliteDB(t *testing.T) {
 	queue := NewWorkflowQueue(serverCtx, "client-custom-sqlite-queue")
 
 	type wfInput struct{ Input string }
-	wf := func(ctx DBOSContext, in wfInput) (string, error) {
+	wf := func(ctx Context, in wfInput) (string, error) {
 		return "processed: " + in.Input, nil
 	}
 	RegisterWorkflow(serverCtx, wf, WithWorkflowName("CustomSqliteClientWorkflow"))
@@ -2478,7 +2478,7 @@ func TestClientCustomPool(t *testing.T) {
 	queue := NewWorkflowQueue(serverCtx, "client-custom-pool-queue")
 
 	type wfInput struct{ Input string }
-	wf := func(ctx DBOSContext, in wfInput) (string, error) {
+	wf := func(ctx Context, in wfInput) (string, error) {
 		return "processed: " + in.Input, nil
 	}
 	RegisterWorkflow(serverCtx, wf, WithWorkflowName("CustomPoolClientWorkflow"))
@@ -2558,7 +2558,7 @@ func TestClientGetEvent(t *testing.T) {
 		Count int
 	}
 
-	eventWorkflow := func(ctx DBOSContext, _ string) (string, error) {
+	eventWorkflow := func(ctx Context, _ string) (string, error) {
 		if err := SetEvent(ctx, "struct-key", eventPayload{Label: "ready", Count: 7}); err != nil {
 			return "", err
 		}
@@ -2614,7 +2614,7 @@ func TestClientTypedHandles(t *testing.T) {
 		Sum int
 	}
 
-	sumWorkflow := func(ctx DBOSContext, n int) (sumResult, error) {
+	sumWorkflow := func(ctx Context, n int) (sumResult, error) {
 		return RunAsStep(ctx, func(context.Context) (sumResult, error) {
 			return sumResult{Sum: n * 2}, nil
 		})
@@ -2719,7 +2719,7 @@ func TestClientListAndSteps(t *testing.T) {
 		Greeting string
 	}
 
-	listStepsWorkflow := func(ctx DBOSContext, input wfInput) (wfOutput, error) {
+	listStepsWorkflow := func(ctx Context, input wfInput) (wfOutput, error) {
 		out, err := RunAsStep(ctx, func(context.Context) (wfOutput, error) {
 			return wfOutput{Greeting: "hi"}, nil
 		}, WithStepName("GreetStep"))

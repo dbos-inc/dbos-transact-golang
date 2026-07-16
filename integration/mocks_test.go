@@ -17,11 +17,11 @@ func step(ctx context.Context) (int, error) {
 	return 1, nil
 }
 
-func childWorkflow(ctx dbos.DBOSContext, i int) (int, error) {
+func childWorkflow(ctx dbos.Context, i int) (int, error) {
 	return i + 1, nil
 }
 
-func workflow(ctx dbos.DBOSContext, i int) (int, error) {
+func workflow(ctx dbos.Context, i int) (int, error) {
 	// Test RunAsStep
 	a, err := dbos.RunAsStep(ctx, step)
 	if err != nil {
@@ -137,7 +137,7 @@ func workflow(ctx dbos.DBOSContext, i int) (int, error) {
 	return a + b + c + d + e.(int), nil
 }
 
-func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
+func aRealProgramFunction(dbosCtx dbos.Context) error {
 
 	dbos.RegisterWorkflow(dbosCtx, workflow)
 
@@ -182,8 +182,8 @@ func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
 	return nil
 }
 
-// clientMethodsFunction exercises remaining DBOSContext methods
-func clientMethodsFunction(ctx dbos.DBOSContext) error {
+// clientMethodsFunction exercises remaining Context methods
+func clientMethodsFunction(ctx dbos.Context) error {
 	// WriteStream
 	err := dbos.WriteStream(ctx, "stream-key", "stream-value")
 	if err != nil {
@@ -294,7 +294,7 @@ func clientUsingFunction(client dbos.Client) error {
 
 func TestMocks(t *testing.T) {
 	defer goleak.VerifyNone(t)
-	mockCtx := mocks.NewMockDBOSContext(t)
+	mockCtx := mocks.NewMockContext(t)
 
 	// Context lifecycle
 	mockCtx.On("Launch").Return(nil)
@@ -353,10 +353,10 @@ func TestMocks(t *testing.T) {
 	})).Return(1, nil).Once()
 
 	// Context management
-	mockValCtx := mocks.NewMockDBOSContext(t)
+	mockValCtx := mocks.NewMockContext(t)
 	mockCtx.On("WithValue", "key", "val").Return(mockValCtx)
 
-	mockCancelCtx := mocks.NewMockDBOSContext(t)
+	mockCancelCtx := mocks.NewMockContext(t)
 	var cancelFunc context.CancelCauseFunc = func(error) {}
 	mockCtx.On("WithCancelCause").Return(mockCancelCtx, cancelFunc)
 
@@ -382,8 +382,8 @@ func TestMocks(t *testing.T) {
 		t.Fatalf("clientUsingFunction failed: %v", err)
 	}
 
-	// Test remaining DBOSContext methods
-	mockCtx2 := mocks.NewMockDBOSContext(t)
+	// Test remaining Context methods
+	mockCtx2 := mocks.NewMockContext(t)
 
 	// WriteStream
 	mockCtx2.On("WriteStream", mockCtx2, "stream-key", "stream-value").Return(nil).Once()
@@ -416,15 +416,15 @@ func TestMocks(t *testing.T) {
 	}, nil).Once()
 
 	// From
-	mockFromCtx := mocks.NewMockDBOSContext(t)
+	mockFromCtx := mocks.NewMockContext(t)
 	mockCtx2.On("From", mockCtx2, mock.Anything).Return(mockFromCtx, nil).Once()
 
 	// WithoutCancel
-	mockNoCancelCtx := mocks.NewMockDBOSContext(t)
+	mockNoCancelCtx := mocks.NewMockContext(t)
 	mockCtx2.On("WithoutCancel", mockCtx2).Return(mockNoCancelCtx, nil).Once()
 
 	// WithTimeout
-	mockTimeoutCtx := mocks.NewMockDBOSContext(t)
+	mockTimeoutCtx := mocks.NewMockContext(t)
 	var timeoutCancelFunc context.CancelFunc = func() {}
 	mockCtx2.On("WithTimeout", mockCtx2, 5*time.Minute).Return(mockTimeoutCtx, timeoutCancelFunc, nil).Once()
 

@@ -281,7 +281,7 @@ func resolveDecoder[T any](storedSerialization string, customSer Serializer[any]
 }
 
 // getCustomSerializerFromCtx extracts the user-provided custom serializer, if set.
-// It accepts any context but only real DBOS contexts (a Client or DBOSContext,
+// It accepts any context but only real DBOS contexts (a Client or Context,
 // both *dbosContext under the hood) carry one; mocks and plain contexts yield nil.
 func getCustomSerializerFromCtx(ctx context.Context) Serializer[any] {
 	if dc, ok := ctx.(*dbosContext); ok {
@@ -339,9 +339,10 @@ func (e *PortableWorkflowError) Error() string {
 func init() {
 	// Register the DBOS error types so they can be gob-encoded with their concrete
 	// type preserved on the Go <-> Go error path (see serializeWorkflowError).
-	// DBOSError must keep the wire name from when it was defined in this package:
-	// stored errors were encoded under it, and decode looks types up by name.
-	gob.RegisterName("*dbos.DBOSError", &DBOSError{})
+	// Error (formerly DBOSError) must keep its original wire name: stored errors
+	// were encoded under it, and decode looks types up by name. Do not change this
+	// pin — it is what keeps v0-persisted error payloads decodable.
+	gob.RegisterName("*dbos.DBOSError", &Error{})
 	gob.Register(&PortableWorkflowError{})
 	gob.Register(time.Time{})
 	// Register the scheduled workflow input so gob-serialized schedule firings
@@ -353,14 +354,14 @@ func init() {
 //   - Portable workflows use the cross-language JSON envelope
 //     ({"name":..., "message":..., ...}), readable by every DBOS language.
 //   - All other (Go <-> Go) workflows gob-encode the error so its concrete Go type
-//     (e.g. *DBOSError) is preserved and reconstructed as-is on decode. Errors whose type
+//     (e.g. *Error) is preserved and reconstructed as-is on decode. Errors whose type
 //     cannot be gob-encoded (e.g. errors.New/fmt.Errorf) fall back to their plain string.
 func serializeWorkflowError(logger *slog.Logger, err error, serialization string) string {
 	if err == nil {
 		return ""
 	}
 	if serialization != PortableSerializerName {
-		// Go <-> Go: gob-encode so the concrete error type (e.g. *DBOSError) is preserved.
+		// Go <-> Go: gob-encode so the concrete error type (e.g. *Error) is preserved.
 		// Types that cannot be gob-encoded (e.g. errors.New/fmt.Errorf) fall back to their string.
 		if encoded, gobErr := NewGobSerializer().Encode(err); gobErr == nil && encoded != nil {
 			return *encoded
@@ -388,14 +389,14 @@ func serializeWorkflowError(logger *slog.Logger, err error, serialization string
 
 // deserializeWorkflowError decodes an error stored by serializeWorkflowError. The stored
 // format is self-describing, so no serialization hint is needed: gob-encoded (Go <-> Go)
-// errors are decoded back into their original Go type (e.g. *DBOSError), portable JSON
+// errors are decoded back into their original Go type (e.g. *Error), portable JSON
 // envelopes into a *PortableWorkflowError, and anything else (a legacy or fallback plain
 // string) into a normal error.
 func deserializeWorkflowError(errStr *string) error {
 	if errStr == nil || *errStr == "" {
 		return nil
 	}
-	// Go <-> Go errors are gob-encoded; decode preserves their original type (e.g. *DBOSError).
+	// Go <-> Go errors are gob-encoded; decode preserves their original type (e.g. *Error).
 	// A portable JSON envelope or legacy plain string fails base64/gob and falls through below.
 	if decoded, gobErr := NewGobSerializer().Decode(errStr); gobErr == nil {
 		if e, ok := decoded.(error); ok {

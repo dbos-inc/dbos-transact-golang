@@ -1292,7 +1292,7 @@ func TestConductorQueueHandlers(t *testing.T) {
 }
 
 // conductorAggregatesWorkflow is a no-op workflow used by TestConductorWorkflowAggregatesHandler.
-func conductorAggregatesWorkflow(_ DBOSContext, in string) (string, error) {
+func conductorAggregatesWorkflow(_ Context, in string) (string, error) {
 	return in, nil
 }
 
@@ -1369,7 +1369,7 @@ func TestConductorWorkflowAggregatesHandler(t *testing.T) {
 }
 
 // conductorStepAggWorkflow runs a single named step for the conductor handler test.
-func conductorStepAggWorkflow(ctx DBOSContext, _ string) (string, error) {
+func conductorStepAggWorkflow(ctx Context, _ string) (string, error) {
 	return RunAsStep(ctx, stepAggOK, WithStepName("condAggStep"))
 }
 
@@ -1448,7 +1448,7 @@ func conductorPrivateModeStep(_ context.Context, in string) (string, error) {
 }
 
 // conductorPrivateModeWorkflow runs a single step and returns its output.
-func conductorPrivateModeWorkflow(ctx DBOSContext, in string) (string, error) {
+func conductorPrivateModeWorkflow(ctx Context, in string) (string, error) {
 	return RunAsStep(ctx, func(c context.Context) (string, error) {
 		return conductorPrivateModeStep(c, in)
 	})
@@ -1547,7 +1547,7 @@ func TestConductorPrivateMode(t *testing.T) {
 
 // conductorPaginationWorkflow runs five named steps so list_steps pagination
 // can be exercised against a stable, ordered set of function IDs (0..4).
-func conductorPaginationWorkflow(ctx DBOSContext, _ string) (string, error) {
+func conductorPaginationWorkflow(ctx Context, _ string) (string, error) {
 	for i := 0; i < 5; i++ {
 		_, err := RunAsStep(ctx, func(c context.Context) (string, error) {
 			return "ok", nil

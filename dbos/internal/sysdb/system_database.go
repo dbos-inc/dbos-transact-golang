@@ -1627,7 +1627,7 @@ type UpdateWorkflowOutcomeDBInput struct {
 // UpdateWorkflowOutcome records a workflow's terminal outcome. Only a PENDING row can
 // receive an outcome: any other status means the run was superseded (already terminal,
 // re-enqueued by a resume, ...). If the write is refused for any reason other than the workflow having
-// completed (SUCCESS/ERROR), returns a models.WorkflowCancelled error.
+// completed (SUCCESS/ERROR), returns a models.ErrorCodeWorkflowCancelled error.
 func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error {
 	query := s.RenderSQL(`UPDATE %sworkflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, completed_at = $4, deduplication_id = NULL
@@ -2583,9 +2583,9 @@ type RecordOperationResultDBInput struct {
 // existing at (workflow_uuid, function_id) is disambiguated by content:
 //   - identical to input (including the caller's timestamps) → our own earlier
 //     write whose commit ack was lost; the retry is a no-op success.
-//   - different function name → determinism violation (UnexpectedStep).
+//   - different function name → determinism violation (ErrorCodeUnexpectedStep).
 //   - anything else → a concurrent execution of this workflow checkpointed the
-//     step first → ConflictingIDError. Callers must surface it as the step
+//     step first → ErrorCodeConflictingID. Callers must surface it as the step
 //     error so the workflow-level handler parks this run in polling mode
 //     rather than racing the other execution step by step.
 //
@@ -4443,7 +4443,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	switch latest, err := s.GetLatestApplicationVersion(ctx, tx); {
 	case err == nil:
 		isLatestVersion = latest.Name == input.ApplicationVersion
-	case errors.Is(err, &models.DBOSError{Code: models.NoApplicationVersions}):
+	case errors.Is(err, &models.Error{Code: models.ErrorCodeNoApplicationVersions}):
 		// No versions registered yet: treat this worker as the latest.
 	default:
 		return nil, fmt.Errorf("failed to query latest application version: %w", err)

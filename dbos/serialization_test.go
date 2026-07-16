@@ -27,7 +27,7 @@ import (
 // If input is nil, the test expects the output to be nil too.
 func testAllSerializationPaths[T any](
 	t *testing.T,
-	executor DBOSContext,
+	executor Context,
 	recoveryWorkflow Workflow[T, T],
 	input T,
 	workflowID string,
@@ -235,7 +235,7 @@ func testAllSerializationPaths[T any](
 // Helper function to test Send/Recv communication
 func testSendRecv[T any](
 	t *testing.T,
-	executor DBOSContext,
+	executor Context,
 	senderWorkflow Workflow[T, T],
 	receiverWorkflow Workflow[T, T],
 	input T,
@@ -267,7 +267,7 @@ func testSendRecv[T any](
 // Helper function to test SetEvent/GetEvent communication
 func testSetGetEvent[T any](
 	t *testing.T,
-	executor DBOSContext,
+	executor Context,
 	setEventWorkflow Workflow[T, T],
 	getEventWorkflow Workflow[string, T],
 	input T,
@@ -379,7 +379,7 @@ var serializerStreamWorkflow = makeStreamWorkflow[TestWorkflowData]()
 
 // makeSenderWorkflow creates a generic sender workflow that sends a message to a receiver workflow.
 func makeSenderWorkflow[T any]() Workflow[T, T] {
-	return func(ctx DBOSContext, input T) (T, error) {
+	return func(ctx Context, input T) (T, error) {
 		receiverWorkflowID, err := GetWorkflowID(ctx)
 		if err != nil {
 			return *new(T), fmt.Errorf("failed to get workflow ID: %w", err)
@@ -395,7 +395,7 @@ func makeSenderWorkflow[T any]() Workflow[T, T] {
 
 // makeReceiverWorkflow creates a generic receiver workflow that receives a message.
 func makeReceiverWorkflow[T any]() Workflow[T, T] {
-	return func(ctx DBOSContext, _ T) (T, error) {
+	return func(ctx Context, _ T) (T, error) {
 		received, err := Recv[T](ctx, "test-topic", 10*time.Second)
 		if err != nil {
 			return *new(T), fmt.Errorf("recv failed: %w", err)
@@ -406,7 +406,7 @@ func makeReceiverWorkflow[T any]() Workflow[T, T] {
 
 // makeSetEventWorkflow creates a generic workflow that sets an event.
 func makeSetEventWorkflow[T any]() Workflow[T, T] {
-	return func(ctx DBOSContext, input T) (T, error) {
+	return func(ctx Context, input T) (T, error) {
 		err := SetEvent(ctx, "test-key", input)
 		if err != nil {
 			return *new(T), fmt.Errorf("set event failed: %w", err)
@@ -417,7 +417,7 @@ func makeSetEventWorkflow[T any]() Workflow[T, T] {
 
 // makeGetEventWorkflow creates a generic workflow that gets an event.
 func makeGetEventWorkflow[T any]() Workflow[string, T] {
-	return func(ctx DBOSContext, targetWorkflowID string) (T, error) {
+	return func(ctx Context, targetWorkflowID string) (T, error) {
 		event, err := GetEvent[T](ctx, targetWorkflowID, "test-key", 10*time.Second)
 		if err != nil {
 			return *new(T), fmt.Errorf("get event failed: %w", err)
@@ -428,7 +428,7 @@ func makeGetEventWorkflow[T any]() Workflow[string, T] {
 
 // makeTestWorkflow creates a generic workflow that simply returns the input.
 func makeTestWorkflow[T any]() Workflow[T, T] {
-	return func(ctx DBOSContext, input T) (T, error) {
+	return func(ctx Context, input T) (T, error) {
 		return RunAsStep(ctx, func(context context.Context) (T, error) {
 			return input, nil
 		})
@@ -439,7 +439,7 @@ func serializerErrorStep(_ context.Context, _ TestWorkflowData) (TestWorkflowDat
 	return TestWorkflowData{}, fmt.Errorf("step error")
 }
 
-func serializerErrorWorkflow(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
+func serializerErrorWorkflow(ctx Context, input TestWorkflowData) (TestWorkflowData, error) {
 	return RunAsStep(ctx, func(context context.Context) (TestWorkflowData, error) {
 		return serializerErrorStep(context, input)
 	})
@@ -456,7 +456,7 @@ var recoveryEventRegistry = make(map[string]struct {
 // This is used to test workflow recovery with various types.
 // The workflow looks up events from recoveryEventRegistry using the workflow ID.
 func makeRecoveryWorkflow[T any]() Workflow[T, T] {
-	return func(ctx DBOSContext, input T) (T, error) {
+	return func(ctx Context, input T) (T, error) {
 		// First step: return the input (tests encoding/decoding of type T)
 		firstStepOutput, err := RunAsStep(ctx, func(context context.Context) (T, error) {
 			return input, nil
@@ -1208,13 +1208,13 @@ func TestClientCustomSerializer(t *testing.T) {
 
 	// Workflow that returns its input — on the server side the deserialized input
 	// will be fixedChicken because the chickenSerializer always decodes to that.
-	echoWorkflow := func(ctx DBOSContext, input Chicken) (Chicken, error) {
+	echoWorkflow := func(ctx Context, input Chicken) (Chicken, error) {
 		return input, nil
 	}
 	RegisterWorkflow(serverCtx, echoWorkflow, WithWorkflowName("ClientSerEchoWorkflow"))
 
 	// Workflow that writes to a stream
-	streamWorkflow := func(ctx DBOSContext, input Chicken) (Chicken, error) {
+	streamWorkflow := func(ctx Context, input Chicken) (Chicken, error) {
 		if err := WriteStream(ctx, "client-ser-stream", input); err != nil {
 			return Chicken{}, err
 		}
@@ -1226,7 +1226,7 @@ func TestClientCustomSerializer(t *testing.T) {
 	RegisterWorkflow(serverCtx, streamWorkflow, WithWorkflowName("ClientSerStreamWorkflow"))
 
 	// Workflow that waits for a message via Recv then returns it
-	recvWorkflow := func(ctx DBOSContext, _ Chicken) (Chicken, error) {
+	recvWorkflow := func(ctx Context, _ Chicken) (Chicken, error) {
 		msg, err := Recv[Chicken](ctx, "client-topic", 10*time.Second)
 		if err != nil {
 			return Chicken{}, err
@@ -1236,7 +1236,7 @@ func TestClientCustomSerializer(t *testing.T) {
 	RegisterWorkflow(serverCtx, recvWorkflow, WithWorkflowName("ClientSerRecvWorkflow"))
 
 	// Workflow that sets an event
-	setEventWorkflow := func(ctx DBOSContext, input Chicken) (Chicken, error) {
+	setEventWorkflow := func(ctx Context, input Chicken) (Chicken, error) {
 		if err := SetEvent(ctx, "client-event-key", input); err != nil {
 			return Chicken{}, err
 		}
@@ -1375,7 +1375,7 @@ func (s *chickenSerializer) Decode(data *string) (any, error) {
 
 // makeStreamWorkflow creates a workflow that writes a value to a stream, then closes it.
 func makeStreamWorkflow[T any]() Workflow[T, T] {
-	return func(ctx DBOSContext, input T) (T, error) {
+	return func(ctx Context, input T) (T, error) {
 		if err := WriteStream(ctx, "test-stream", input); err != nil {
 			return *new(T), fmt.Errorf("write stream failed: %w", err)
 		}
@@ -1499,13 +1499,13 @@ func (timeHostileSerializer) Decode(data *string) (any, error) {
 func TestTimeHostileSerializer(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: timeHostileSerializer{}})
 
-	sleepWorkflow := func(ctx DBOSContext, ms int) (time.Duration, error) {
+	sleepWorkflow := func(ctx Context, ms int) (time.Duration, error) {
 		return Sleep(ctx, time.Duration(ms)*time.Millisecond)
 	}
-	recvTimeoutWorkflow := func(ctx DBOSContext, topic string) (string, error) {
+	recvTimeoutWorkflow := func(ctx Context, topic string) (string, error) {
 		return Recv[string](ctx, topic, 500*time.Millisecond)
 	}
-	getEventTimeoutWorkflow := func(ctx DBOSContext, targetID string) (string, error) {
+	getEventTimeoutWorkflow := func(ctx Context, targetID string) (string, error) {
 		return GetEvent[string](ctx, targetID, "no-such-key", 500*time.Millisecond)
 	}
 	RegisterWorkflow(dbosCtx, sleepWorkflow)
@@ -1534,9 +1534,9 @@ func TestTimeHostileSerializer(t *testing.T) {
 		require.NoError(t, err, "failed to start recv workflow")
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected a timeout")
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected *DBOSError, got %T (a serialization failure here would mean the deadline was routed through the serializer as a time.Time)", err)
-		require.Equal(t, TimeoutError, dbosErr.Code, "expected TimeoutError, not a serialization error")
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected *Error, got %T (a serialization failure here would mean the deadline was routed through the serializer as a time.Time)", err)
+		require.Equal(t, ErrorCodeTimeout, dbosErr.Code, "expected ErrorCodeTimeout, not a serialization error")
 	})
 
 	t.Run("GetEventTimeout", func(t *testing.T) {
@@ -1544,9 +1544,9 @@ func TestTimeHostileSerializer(t *testing.T) {
 		require.NoError(t, err, "failed to start getEvent workflow")
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected a timeout")
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected *DBOSError, got %T", err)
-		require.Equal(t, TimeoutError, dbosErr.Code, "expected TimeoutError, not a serialization error")
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected *Error, got %T", err)
+		require.Equal(t, ErrorCodeTimeout, dbosErr.Code, "expected ErrorCodeTimeout, not a serialization error")
 	})
 }
 
@@ -1603,7 +1603,7 @@ func TestPortableInterop(t *testing.T) {
 
 	// A single workflow that exercises all serialization paths:
 	// step output, send/recv, set_event/get_event, and write_stream/read_stream.
-	portableWf := func(ctx DBOSContext, input InteropArgs) (InteropResult, error) {
+	portableWf := func(ctx Context, input InteropArgs) (InteropResult, error) {
 		// 1. Step: encode/decode step output
 		stepOut, err := RunAsStep(ctx, func(_ context.Context) (InteropArgs, error) {
 			return input, nil
@@ -1823,7 +1823,7 @@ func TestPortableInterop(t *testing.T) {
 		var pe *PortableWorkflowError
 		require.ErrorAs(t, err, &pe)
 		assert.Equal(t, "Portable Error", pe.Name)
-		assert.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %s", WorkflowExecutionError))
+		assert.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %s", ErrorCodeWorkflowExecution))
 	})
 }
 
@@ -1883,19 +1883,19 @@ func TestPortablePerOperationOptions(t *testing.T) {
 		portableWriterWf       Workflow[string, string]
 	)
 
-	portableSendSenderWf = func(ctx DBOSContext, receiverID string) (string, error) {
+	portableSendSenderWf = func(ctx Context, receiverID string) (string, error) {
 		return "", Send(ctx, receiverID, payload, "topic", WithPortableSend())
 	}
-	portableSendReceiverWf = func(ctx DBOSContext, _ string) (Payload, error) {
+	portableSendReceiverWf = func(ctx Context, _ string) (Payload, error) {
 		return Recv[Payload](ctx, "topic", 10*time.Second)
 	}
-	portableSetterWf = func(ctx DBOSContext, _ string) (string, error) {
+	portableSetterWf = func(ctx Context, _ string) (string, error) {
 		return "", SetEvent(ctx, "evt-key", payload, WithPortableSetEvent())
 	}
-	portableGetterWf = func(ctx DBOSContext, targetID string) (Payload, error) {
+	portableGetterWf = func(ctx Context, targetID string) (Payload, error) {
 		return GetEvent[Payload](ctx, targetID, "evt-key", 10*time.Second)
 	}
-	portableWriterWf = func(ctx DBOSContext, _ string) (string, error) {
+	portableWriterWf = func(ctx Context, _ string) (string, error) {
 		if err := WriteStream(ctx, "stream-key", payload, WithPortableWriteStream()); err != nil {
 			return "", err
 		}
@@ -1985,7 +1985,7 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	expectedInput := InteropInput{Name: "direct-portable", Value: 99}
 
 	// Simple workflow that returns its input through a step (exercises encode/decode).
-	portableEchoWf := func(ctx DBOSContext, input InteropInput) (InteropInput, error) {
+	portableEchoWf := func(ctx Context, input InteropInput) (InteropInput, error) {
 		stepOut, err := RunAsStep(ctx, func(_ context.Context) (InteropInput, error) {
 			return input, nil
 		})
@@ -1997,7 +1997,7 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	RegisterWorkflow(executor, portableEchoWf, WithWorkflowName("portable_echo"))
 
 	// Workflow that accepts the full PortableWorkflowArgs envelope directly.
-	portableEnvelopeWf := func(ctx DBOSContext, input PortableWorkflowArgs) (PortableWorkflowArgs, error) {
+	portableEnvelopeWf := func(ctx Context, input PortableWorkflowArgs) (PortableWorkflowArgs, error) {
 		stepOut, err := RunAsStep(ctx, func(_ context.Context) (PortableWorkflowArgs, error) {
 			return input, nil
 		})
@@ -2009,12 +2009,12 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	RegisterWorkflow(executor, portableEnvelopeWf, WithWorkflowName("portable_envelope"))
 
 	// Workflows for primitive input tests (int, string).
-	portableIntEchoWf := func(ctx DBOSContext, input int) (int, error) {
+	portableIntEchoWf := func(ctx Context, input int) (int, error) {
 		return RunAsStep(ctx, func(_ context.Context) (int, error) { return input, nil })
 	}
 	RegisterWorkflow(executor, portableIntEchoWf, WithWorkflowName("portable_int_echo"))
 
-	portableStringEchoWf := func(ctx DBOSContext, input string) (string, error) {
+	portableStringEchoWf := func(ctx Context, input string) (string, error) {
 		return RunAsStep(ctx, func(_ context.Context) (string, error) { return input, nil })
 	}
 	RegisterWorkflow(executor, portableStringEchoWf, WithWorkflowName("portable_string_echo"))
@@ -2025,7 +2025,7 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 		RecvOut  InteropInput `json:"recvOut"`
 		EventOut InteropInput `json:"eventOut"`
 	}
-	multiStepWf := func(ctx DBOSContext, input InteropInput) (PartialRecoveryResult, error) {
+	multiStepWf := func(ctx Context, input InteropInput) (PartialRecoveryResult, error) {
 		stepOut, err := RunAsStep(ctx, func(_ context.Context) (InteropInput, error) {
 			return input, nil
 		})
@@ -2288,7 +2288,7 @@ func TestPortableWorkflowError(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Workflow that runs a step then raises a PortableWorkflowError with all fields set.
-	portableErrWf := func(ctx DBOSContext, input string) (string, error) {
+	portableErrWf := func(ctx Context, input string) (string, error) {
 		_, err := RunAsStep(ctx, func(_ context.Context) (string, error) {
 			return input, nil
 		})
@@ -2305,7 +2305,7 @@ func TestPortableWorkflowError(t *testing.T) {
 	RegisterWorkflow(executor, portableErrWf, WithWorkflowName("portable_err_wf"))
 
 	// Workflow that runs a step that itself fails with a PortableWorkflowError.
-	portableStepErrWf := func(ctx DBOSContext, input string) (string, error) {
+	portableStepErrWf := func(ctx Context, input string) (string, error) {
 		return RunAsStep(ctx, func(_ context.Context) (string, error) {
 			return "", &PortableWorkflowError{
 				Name:    "StepError",
@@ -2317,7 +2317,7 @@ func TestPortableWorkflowError(t *testing.T) {
 	RegisterWorkflow(executor, portableStepErrWf, WithWorkflowName("portable_step_err_wf"))
 
 	// Workflow that runs a step then raises a plain Go error (triggers best-effort conversion).
-	plainErrWf := func(ctx DBOSContext, input string) (string, error) {
+	plainErrWf := func(ctx Context, input string) (string, error) {
 		_, err := RunAsStep(ctx, func(_ context.Context) (string, error) {
 			return input, nil
 		})
@@ -2477,23 +2477,23 @@ func TestPortableWorkflowError(t *testing.T) {
 }
 
 // TestWorkflowErrorSerializationRoundTrip covers the pure serialize/deserialize logic:
-// Go <-> Go errors are gob-encoded (preserving the concrete type, e.g. *DBOSError),
+// Go <-> Go errors are gob-encoded (preserving the concrete type, e.g. *Error),
 // portable workflows use the cross-language JSON envelope, and decode is self-describing.
 func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
-	t.Run("DBOSErrorPreservedGoToGo", func(t *testing.T) {
+	t.Run("ErrorPreservedGoToGo", func(t *testing.T) {
 		orig := models.NewQueueDeduplicatedError("wf-1", "q-1", "dedup-1")
 		s := serializeWorkflowError(nil, orig, "DBOS_JSON")
 
 		got := deserializeWorkflowError(&s)
-		var de *DBOSError
+		var de *Error
 		require.ErrorAs(t, got, &de)
-		assert.Equal(t, QueueDeduplicated, de.Code)
+		assert.Equal(t, ErrorCodeQueueDeduplicated, de.Code)
 		assert.Equal(t, "wf-1", de.WorkflowID)
 		assert.Equal(t, "q-1", de.QueueName)
 		assert.Equal(t, "dedup-1", de.DeduplicationID)
 		assert.Equal(t, orig.Message, de.Message)
 		assert.Equal(t, orig.Error(), got.Error())
-		require.ErrorIs(t, got, &DBOSError{Code: QueueDeduplicated})
+		require.ErrorIs(t, got, ErrQueueDeduplicated)
 	})
 
 	t.Run("GobWireNamePinned", func(t *testing.T) {
@@ -2512,7 +2512,7 @@ func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
 		got := deserializeWorkflowError(&s)
 		require.Error(t, got)
 		assert.Equal(t, "boom", got.Error())
-		var de *DBOSError
+		var de *Error
 		assert.NotErrorAs(t, got, &de)
 	})
 
@@ -2547,18 +2547,18 @@ func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
 	})
 }
 
-// TestGoToGoErrorTypePreservation verifies end-to-end (through the DB) that a *DBOSError
+// TestGoToGoErrorTypePreservation verifies end-to-end (through the DB) that a *Error
 // returned by a default (non-portable) workflow is reconstructed with its concrete type
 // and code when read back via a fresh handle, while a plain error keeps its message.
 func TestGoToGoErrorTypePreservation(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	dbosErrWf := func(ctx DBOSContext, _ string) (string, error) {
-		return "", &DBOSError{Code: WorkflowExecutionError, Message: "boom", WorkflowID: "inner"}
+	dbosErrWf := func(ctx Context, _ string) (string, error) {
+		return "", &Error{Code: ErrorCodeWorkflowExecution, Message: "boom", WorkflowID: "inner"}
 	}
 	RegisterWorkflow(executor, dbosErrWf, WithWorkflowName("go_dbos_err_wf"))
 
-	plainErrWf := func(ctx DBOSContext, _ string) (string, error) {
+	plainErrWf := func(ctx Context, _ string) (string, error) {
 		return "", fmt.Errorf("plain boom")
 	}
 	RegisterWorkflow(executor, plainErrWf, WithWorkflowName("go_plain_err_wf"))
@@ -2566,7 +2566,7 @@ func TestGoToGoErrorTypePreservation(t *testing.T) {
 	require.NoError(t, Launch(executor))
 	defer Shutdown(executor, 10*time.Second)
 
-	t.Run("DBOSErrorReconstructedViaRetrieve", func(t *testing.T) {
+	t.Run("ErrorReconstructedViaRetrieve", func(t *testing.T) {
 		wfID := "go-dbos-err"
 		h, err := RunWorkflow(executor, dbosErrWf, "", WithWorkflowID(wfID))
 		require.NoError(t, err)
@@ -2579,12 +2579,12 @@ func TestGoToGoErrorTypePreservation(t *testing.T) {
 		_, err = retrieved.GetResult()
 		require.Error(t, err)
 
-		var de *DBOSError
+		var de *Error
 		require.ErrorAs(t, err, &de)
-		assert.Equal(t, WorkflowExecutionError, de.Code)
+		assert.Equal(t, ErrorCodeWorkflowExecution, de.Code)
 		assert.Equal(t, "boom", de.Message)
 		assert.Equal(t, "inner", de.WorkflowID)
-		require.ErrorIs(t, err, &DBOSError{Code: WorkflowExecutionError})
+		require.ErrorIs(t, err, &Error{Code: ErrorCodeWorkflowExecution})
 	})
 
 	t.Run("PlainErrorMessagePreservedViaRetrieve", func(t *testing.T) {
@@ -2599,7 +2599,7 @@ func TestGoToGoErrorTypePreservation(t *testing.T) {
 		_, err = retrieved.GetResult()
 		require.Error(t, err)
 		assert.Equal(t, "plain boom", err.Error())
-		var de *DBOSError
+		var de *Error
 		assert.NotErrorAs(t, err, &de)
 	})
 }
@@ -2612,14 +2612,14 @@ func TestGoToGoErrorTypePreservation(t *testing.T) {
 func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	echoWf := func(ctx DBOSContext, input string) (string, error) {
+	echoWf := func(ctx Context, input string) (string, error) {
 		return RunAsStep(ctx, func(_ context.Context) (string, error) {
 			return input, nil
 		})
 	}
 	RegisterWorkflow(executor, echoWf, WithWorkflowName("decode_isolation_echo_wf"))
 
-	multiStepWf := func(ctx DBOSContext, input string) (string, error) {
+	multiStepWf := func(ctx Context, input string) (string, error) {
 		for i := 0; i < 3; i++ {
 			idx := i
 			if _, err := RunAsStep(ctx, func(_ context.Context) (string, error) {
@@ -2749,7 +2749,7 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 func TestForkPreservesSerialization(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: NewGobSerializer()})
 
-	wf := func(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
+	wf := func(ctx Context, input TestWorkflowData) (TestWorkflowData, error) {
 		out, err := RunAsStep(ctx, func(ctx context.Context) (TestWorkflowData, error) {
 			return input, nil
 		}, WithStepName("checkpointStep"))
@@ -2809,7 +2809,7 @@ func TestForkPreservesSerialization(t *testing.T) {
 func TestExportImportPreservesSerialization(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: NewGobSerializer()})
 
-	wf := func(ctx DBOSContext, input TestWorkflowData) (TestWorkflowData, error) {
+	wf := func(ctx Context, input TestWorkflowData) (TestWorkflowData, error) {
 		out, err := RunAsStep(ctx, func(ctx context.Context) (TestWorkflowData, error) {
 			return input, nil
 		}, WithStepName("checkpointStep"))

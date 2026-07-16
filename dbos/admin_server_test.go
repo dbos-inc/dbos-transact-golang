@@ -37,7 +37,7 @@ func TestAdminServer(t *testing.T) {
 	t.Run("Admin server is not started by default", func(t *testing.T) {
 		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
-		ctx, err := NewDBOSContext(context.Background(), Config{
+		ctx, err := NewContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 		})
@@ -69,7 +69,7 @@ func TestAdminServer(t *testing.T) {
 		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
 		// Launch DBOS with admin server once for all endpoint tests
-		ctx, err := NewDBOSContext(context.Background(), Config{
+		ctx, err := NewContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,
 			AppName:         "test-app",
 			AdminServer:     true,
@@ -248,7 +248,7 @@ func TestAdminServer(t *testing.T) {
 	t.Run("List workflows input/output values", func(t *testing.T) {
 		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
-		ctx, err := NewDBOSContext(context.Background(), Config{
+		ctx, err := NewContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,
 			AppName:         "test-app",
 			AdminServer:     true,
@@ -263,19 +263,19 @@ func TestAdminServer(t *testing.T) {
 		}
 
 		// Test workflow with int input/output
-		intWorkflow := func(dbosCtx DBOSContext, input int) (int, error) {
+		intWorkflow := func(dbosCtx Context, input int) (int, error) {
 			return input * 2, nil
 		}
 		RegisterWorkflow(ctx, intWorkflow)
 
 		// Test workflow with empty string input/output
-		emptyStringWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		emptyStringWorkflow := func(dbosCtx Context, input string) (string, error) {
 			return "", nil
 		}
 		RegisterWorkflow(ctx, emptyStringWorkflow)
 
 		// Test workflow with struct input/output
-		structWorkflow := func(dbosCtx DBOSContext, input TestStruct) (TestStruct, error) {
+		structWorkflow := func(dbosCtx Context, input TestStruct) (TestStruct, error) {
 			return TestStruct{Name: "output-" + input.Name, Value: input.Value * 2}, nil
 		}
 		RegisterWorkflow(ctx, structWorkflow)
@@ -396,7 +396,7 @@ func TestAdminServer(t *testing.T) {
 	t.Run("List endpoints time filtering", func(t *testing.T) {
 		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
-		ctx, err := NewDBOSContext(context.Background(), Config{
+		ctx, err := NewContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,
 			AppName:         "test-app",
 			AdminServer:     true,
@@ -404,7 +404,7 @@ func TestAdminServer(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		testWorkflow := func(dbosCtx Context, input string) (string, error) {
 			return "result-" + input, nil
 		}
 		RegisterWorkflow(ctx, testWorkflow)
@@ -577,7 +577,7 @@ func TestAdminServer(t *testing.T) {
 	t.Run("ListQueuedWorkflows", func(t *testing.T) {
 		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
-		ctx, err := NewDBOSContext(context.Background(), Config{
+		ctx, err := NewContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,
 			AppName:         "test-app",
 			AdminServer:     true,
@@ -591,7 +591,7 @@ func TestAdminServer(t *testing.T) {
 		// Define a blocking workflow that will hold up the queue
 		startEvent := NewEvent()
 		blockingChan := make(chan struct{})
-		blockingWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		blockingWorkflow := func(dbosCtx Context, input string) (string, error) {
 			startEvent.Set()
 			<-blockingChan // Block until channel is closed
 			return "blocked-" + input, nil
@@ -599,7 +599,7 @@ func TestAdminServer(t *testing.T) {
 		RegisterWorkflow(ctx, blockingWorkflow)
 
 		// Define a regular non-blocking workflow
-		regularWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		regularWorkflow := func(dbosCtx Context, input string) (string, error) {
 			return "regular-" + input, nil
 		}
 		RegisterWorkflow(ctx, regularWorkflow)
@@ -764,7 +764,7 @@ func TestAdminServer(t *testing.T) {
 	t.Run("ListQueuedWorkflowsWithAdvancedFeatures", func(t *testing.T) {
 		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
-		ctx, err := NewDBOSContext(context.Background(), Config{
+		ctx, err := NewContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,
 			AppName:         "test-app",
 			AdminServer:     true,
@@ -780,7 +780,7 @@ func TestAdminServer(t *testing.T) {
 
 		// Define a blocking workflow that will hold up the queue
 		blockingChan := make(chan struct{})
-		blockingWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		blockingWorkflow := func(dbosCtx Context, input string) (string, error) {
 			<-blockingChan // Block until channel is closed
 			return "blocked-" + input, nil
 		}
@@ -874,7 +874,7 @@ func TestAdminServer(t *testing.T) {
 	t.Run("WorkflowSteps", func(t *testing.T) {
 		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
-		ctx, err := NewDBOSContext(context.Background(), Config{
+		ctx, err := NewContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 			AdminServer: true,
@@ -882,7 +882,7 @@ func TestAdminServer(t *testing.T) {
 		require.NoError(t, err)
 
 		// Test workflow with multiple steps - simpler version that won't fail on serialization
-		testWorkflow := func(dbosCtx DBOSContext, input string) (string, error) {
+		testWorkflow := func(dbosCtx Context, input string) (string, error) {
 			// Step 1: Return a string
 			stepResult1, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
 				return "step1-output", nil
@@ -1030,7 +1030,7 @@ func TestAdminServer(t *testing.T) {
 	t.Run("TestDeactivate", func(t *testing.T) {
 		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
-		ctx, err := NewDBOSContext(context.Background(), Config{
+		ctx, err := NewContext(context.Background(), Config{
 			DatabaseURL:     databaseURL,
 			AppName:         "test-app",
 			AdminServer:     true,
@@ -1042,7 +1042,7 @@ func TestAdminServer(t *testing.T) {
 		var executionCount atomic.Int32
 
 		// Register a scheduled workflow that runs every second
-		RegisterWorkflow(ctx, func(dbosCtx DBOSContext, scheduledTime time.Time) (string, error) {
+		RegisterWorkflow(ctx, func(dbosCtx Context, scheduledTime time.Time) (string, error) {
 			executionCount.Add(1)
 			return fmt.Sprintf("executed at %v", scheduledTime), nil
 		}, WithSchedule("* * * * * *")) // Every second

@@ -8,7 +8,7 @@
 //
 // Create a DBOS context to start building durable applications:
 //
-//	dbosContext, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
+//	dbosContext, err := dbos.NewContext(context.Background(), dbos.Config{
 //	    AppName:     "my-app",
 //	    DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 //	})
@@ -23,10 +23,10 @@
 // # Workflows
 //
 // Workflows provide durable execution, automatically resuming from the last completed step
-// after any failure. Write workflows as normal Go functions that take a DBOSContext and
+// after any failure. Write workflows as normal Go functions that take a Context and
 // return serializable values:
 //
-//	func myWorkflow(ctx dbos.DBOSContext, input string) (string, error) {
+//	func myWorkflow(ctx dbos.Context, input string) (string, error) {
 //	    // Workflow logic here
 //	    result, err := dbos.RunAsStep(ctx, someOperation)
 //	    if err != nil {
@@ -53,7 +53,7 @@
 //	    return data, nil
 //	}
 //
-//	func workflow(ctx dbos.DBOSContext, input string) (string, error) {
+//	func workflow(ctx dbos.Context, input string) (string, error) {
 //	    data, err := dbos.RunAsStep(ctx, fetchData,
 //	        dbos.WithStepName("fetchData"),
 //	        dbos.WithStepMaxRetries(3))
@@ -103,10 +103,10 @@
 //
 // # Testing
 //
-// DBOSContext is fully mockable for unit testing:
+// Context is fully mockable for unit testing:
 //
 //	func TestWorkflow(t *testing.T) {
-//	    mockCtx := mocks.NewMockDBOSContext(t)
+//	    mockCtx := mocks.NewMockContext(t)
 //	    mockCtx.On("RunAsStep", mockCtx, mock.Anything, mock.Anything).Return("result", nil)
 //
 //	    result, err := myWorkflow(mockCtx, "input")

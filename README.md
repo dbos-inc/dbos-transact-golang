@@ -50,7 +50,7 @@ import (
     "github.com/dbos-inc/dbos-transact-golang/dbos"
 )
 
-func workflow(dbosCtx dbos.DBOSContext, _ string) (string, error) {
+func workflow(dbosCtx dbos.Context, _ string) (string, error) {
     _, err := dbos.RunAsStep(dbosCtx, stepOne)
     if err != nil {
         return "", err
@@ -70,7 +70,7 @@ func stepTwo(ctx context.Context) (string, error) {
 
 func main() {
     // Initialize a DBOS context
-    ctx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
+    ctx, err := dbos.NewContext(context.Background(), dbos.Config{
         DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
         AppName:     "myapp",
     })
@@ -136,7 +136,7 @@ import (
     "github.com/dbos-inc/dbos-transact-golang/dbos"
 )
 
-func task(ctx dbos.DBOSContext, i int) (int, error) {
+func task(ctx dbos.Context, i int) (int, error) {
     dbos.Sleep(ctx, 5*time.Second)
     fmt.Printf("Task %d completed\n", i)
     return i, nil
@@ -144,7 +144,7 @@ func task(ctx dbos.DBOSContext, i int) (int, error) {
 
 func main() {
     // Initialize a DBOS context
-    ctx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
+    ctx, err := dbos.NewContext(context.Background(), dbos.Config{
         DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
         AppName:     "myapp",
     })
@@ -207,7 +207,7 @@ _, err := dbos.RunWorkflow(ctx, task, i, dbos.WithWorkflowID(exactlyOnceEventID)
 Schedule workflows using cron syntax, or use durable sleep to pause workflows for as long as you like (even days or weeks) before executing.
 
 ```golang
-dbos.RegisterWorkflow(dbosCtx, func(ctx dbos.DBOSContext, scheduledTime time.Time) (string, error) {
+dbos.RegisterWorkflow(dbosCtx, func(ctx dbos.Context, scheduledTime time.Time) (string, error) {
     return fmt.Sprintf("Workflow executed at %s", scheduledTime), nil
 }, dbos.WithSchedule("* * * * * *")) // Every second
 ```
@@ -216,7 +216,7 @@ You can add a durable sleep to any workflow with a single line of code.
 It stores its wakeup time in Postgres so the workflow sleeps through any interruption or restart, then always resumes on schedule.
 
 ```golang
-func workflow(ctx dbos.DBOSContext, duration time.Duration) (string, error) {
+func workflow(ctx dbos.Context, duration time.Duration) (string, error) {
     dbos.Sleep(ctx, duration)
     return fmt.Sprintf("Workflow slept for %s", duration), nil
 }
@@ -238,12 +238,12 @@ Set durable timeouts when waiting for events, so you can wait for as long as you
 For example, build a reliable billing workflow that durably waits for a notification from a payments service, processing it exactly-once:
 
 ```golang
-func sendWorkflow(ctx dbos.DBOSContext, message string) (string, error) {
+func sendWorkflow(ctx dbos.Context, message string) (string, error) {
     err := dbos.Send(ctx, "receiverID", message, "topic")
     return "sent", err
 }
 
-func receiveWorkflow(ctx dbos.DBOSContext, topic string) (string, error) {
+func receiveWorkflow(ctx dbos.Context, topic string) (string, error) {
     return dbos.Recv[string](ctx, topic, 48 * time.Hour)
 }
 

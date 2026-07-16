@@ -288,7 +288,7 @@ func WithQueueOnConflict(policy QueueConflictResolution) QueueOption {
 // Deprecated: Use [RegisterQueue], which persists the queue configuration in the
 // system database. Database-backed queues can be registered after launch and are
 // discovered across processes.
-func NewWorkflowQueue(dbosCtx DBOSContext, name string, options ...QueueOption) WorkflowQueue {
+func NewWorkflowQueue(dbosCtx Context, name string, options ...QueueOption) WorkflowQueue {
 	ctx, ok := dbosCtx.(*dbosContext)
 	if !ok {
 		return WorkflowQueue{} // Do nothing if the concrete type is not dbosContext
@@ -405,7 +405,7 @@ func (c *dbosContext) RegisterQueue(_ Client, name string, options ...QueueOptio
 			return c.systemDB.GetLatestApplicationVersion(c, nil)
 		}, sysdb.WithRetrierLogger(c.logger))
 		switch {
-		case errors.Is(err, &DBOSError{Code: NoApplicationVersions}):
+		case errors.Is(err, &Error{Code: ErrorCodeNoApplicationVersions}):
 			// No registered versions yet: this process is the first, hence the latest.
 			updateExisting = true
 		case err != nil:
