@@ -17,3 +17,4 @@ packages:
       DBOSContext:
       WorkflowHandle:
       Client:
+      Queue:

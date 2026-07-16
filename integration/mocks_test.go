@@ -170,6 +170,15 @@ func aRealProgramFunction(dbosCtx dbos.DBOSContext) error {
 		return fmt.Errorf("WithCancelCause returned nil cancel function")
 	}
 
+	// Test WithCancel
+	plainCancelCtx, plainCancel := dbos.WithCancel(dbosCtx)
+	if plainCancelCtx == nil {
+		return fmt.Errorf("WithCancel returned nil context")
+	}
+	if plainCancel == nil {
+		return fmt.Errorf("WithCancel returned nil cancel function")
+	}
+
 	return nil
 }
 
@@ -250,6 +259,14 @@ func clientMethodsFunction(ctx dbos.DBOSContext) error {
 	err = dbos.DeleteWorkflows(ctx, []string{"wf-to-delete"})
 	if err != nil {
 		return fmt.Errorf("DeleteWorkflows failed: %w", err)
+	}
+
+	// RunAsTransaction
+	txnResult, err := dbos.RunAsTransaction(ctx, &dbos.DataSource{}, func(ctx context.Context, tx dbos.Tx) (int, error) {
+		return 21, nil
+	})
+	if err != nil || txnResult != 21 {
+		return fmt.Errorf("RunAsTransaction failed: result=%v, err=%v", txnResult, err)
 	}
 
 	return nil
@@ -343,6 +360,9 @@ func TestMocks(t *testing.T) {
 	var cancelFunc context.CancelCauseFunc = func(error) {}
 	mockCtx.On("WithCancelCause").Return(mockCancelCtx, cancelFunc)
 
+	var plainCancelFunc context.CancelFunc = func() {}
+	mockCtx.On("WithCancel").Return(mockCancelCtx, plainCancelFunc)
+
 	err := aRealProgramFunction(mockCtx)
 	if err != nil {
 		t.Fatal(err)
@@ -416,6 +436,9 @@ func TestMocks(t *testing.T) {
 	// DeleteWorkflows
 	mockCtx2.On("DeleteWorkflows", mockCtx2, []string{"wf-to-delete"}, mock.Anything).Return(nil).Once()
 
+	// RunAsTransaction (args: ds, fn, WithStepName option appended by the generic)
+	mockCtx2.On("RunAsTransaction", mockCtx2, mock.Anything, mock.Anything, mock.Anything).Return(21, nil).Once()
+
 	err = clientMethodsFunction(mockCtx2)
 	if err != nil {
 		t.Fatalf("clientMethodsFunction failed: %v", err)
@@ -482,5 +505,87 @@ func TestClientTypedHelpersWithMock(t *testing.T) {
 	list, err := mockClient.ListWorkflows(mockClient)
 	if err != nil || len(list) != 1 || list[0].ID != "wf-ret" {
 		t.Fatalf("ListWorkflows = (%v, %v), want one status with ID wf-ret", list, err)
+	}
+
+	// TriggerSchedule returns a typed handle through the proxy path.
+	trigHandle := mocks.NewMockWorkflowHandle[any](t)
+	trigHandle.On("GetResult").Return(13, nil).Once()
+	mockClient.On("TriggerSchedule", mockClient, "sched").Return(trigHandle, nil).Once()
+	th, err := dbos.TriggerSchedule[int](mockClient, "sched")
+	if err != nil {
+		t.Fatalf("TriggerSchedule failed: %v", err)
+	}
+	if res, err := th.GetResult(); err != nil || res != 13 {
+		t.Fatalf("TriggerSchedule handle GetResult = (%d, %v), want (13, nil)", res, err)
+	}
+
+	// ResumeWorkflows wraps each returned handle in a typed proxy.
+	batchIDs := []string{"wf-1", "wf-2"}
+	res1 := mocks.NewMockWorkflowHandle[any](t)
+	res1.On("GetResult").Return(1, nil).Once()
+	res2 := mocks.NewMockWorkflowHandle[any](t)
+	res2.On("GetResult").Return(2, nil).Once()
+	mockClient.On("ResumeWorkflows", mockClient, batchIDs).Return([]dbos.WorkflowHandle[any]{res1, res2}, nil).Once()
+	resumed, err := dbos.ResumeWorkflows[int](mockClient, batchIDs)
+	if err != nil {
+		t.Fatalf("ResumeWorkflows failed: %v", err)
+	}
+	if len(resumed) != 2 {
+		t.Fatalf("ResumeWorkflows returned %d handles, want 2", len(resumed))
+	}
+	for i, want := range []int{1, 2} {
+		if res, err := resumed[i].GetResult(); err != nil || res != want {
+			t.Fatalf("ResumeWorkflows handle %d GetResult = (%d, %v), want (%d, nil)", i, res, err, want)
+		}
+	}
+
+	// ForkWorkflows wraps each returned handle in a typed proxy.
+	fork1 := mocks.NewMockWorkflowHandle[any](t)
+	fork1.On("GetResult").Return(3, nil).Once()
+	fork2 := mocks.NewMockWorkflowHandle[any](t)
+	fork2.On("GetResult").Return(4, nil).Once()
+	mockClient.On("ForkWorkflows", mockClient, mock.Anything).Return([]dbos.WorkflowHandle[any]{fork1, fork2}, nil).Once()
+	forked, err := dbos.ForkWorkflows[int](mockClient, dbos.ForkWorkflowsInput{
+		Workflows: []dbos.ForkWorkflowSpec{{OriginalWorkflowID: "wf-1"}, {OriginalWorkflowID: "wf-2"}},
+	})
+	if err != nil {
+		t.Fatalf("ForkWorkflows failed: %v", err)
+	}
+	if len(forked) != 2 {
+		t.Fatalf("ForkWorkflows returned %d handles, want 2", len(forked))
+	}
+	for i, want := range []int{3, 4} {
+		if res, err := forked[i].GetResult(); err != nil || res != want {
+			t.Fatalf("ForkWorkflows handle %d GetResult = (%d, %v), want (%d, nil)", i, res, err, want)
+		}
+	}
+
+	// CancelWorkflows passes through to the interface method.
+	mockClient.On("CancelWorkflows", mockClient, batchIDs).Return(nil).Once()
+	if err := dbos.CancelWorkflows(mockClient, batchIDs); err != nil {
+		t.Fatalf("CancelWorkflows failed: %v", err)
+	}
+
+	// Queue management round-trips through a MockQueue.
+	mockQueue := mocks.NewMockQueue(t)
+	mockQueue.On("GetName").Return("mock-queue").Once()
+	mockClient.On("RegisterQueue", mockClient, "mock-queue").Return(mockQueue, nil).Once()
+	q, err := dbos.RegisterQueue(mockClient, "mock-queue")
+	if err != nil {
+		t.Fatalf("RegisterQueue failed: %v", err)
+	}
+	if q.GetName() != "mock-queue" {
+		t.Fatalf("RegisterQueue name = %q, want mock-queue", q.GetName())
+	}
+
+	limit := 5
+	mockQueue.On("SetGlobalConcurrency", mockClient, &limit).Return(nil).Once()
+	if err := q.SetGlobalConcurrency(mockClient, &limit); err != nil {
+		t.Fatalf("SetGlobalConcurrency failed: %v", err)
+	}
+
+	mockClient.On("RetrieveQueue", mockClient, "mock-queue").Return(mockQueue, nil).Once()
+	if _, err := dbos.RetrieveQueue(mockClient, "mock-queue"); err != nil {
+		t.Fatalf("RetrieveQueue failed: %v", err)
 	}
 }
