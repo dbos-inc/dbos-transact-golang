@@ -16,14 +16,25 @@ import (
 /******* SCHEDULE TYPES ********/
 /*******************************/
 
-type ApplySchedulesRequest struct {
-	ScheduleName      string
-	WorkflowFn        any
-	Schedule          string
-	Context           any
-	AutomaticBackfill bool
-	CronTimezone      string
-	QueueName         string
+// ScheduleSpec describes a workflow schedule. It is the input to
+// CreateSchedule and ApplySchedules, usable from both a DBOSContext and a
+// Client.
+//
+// The target workflow is identified by WorkflowName — the name under which the
+// workflow is registered — allowing schedules to be managed for workflows
+// owned by any process or language. From a DBOSContext, Workflow can be set
+// instead to reference a registered Go workflow function directly; when set,
+// it takes precedence over WorkflowName.
+type ScheduleSpec struct {
+	ScheduleName      string // Required: unique name of the schedule
+	Schedule          string // Required: cron expression driving the schedule
+	WorkflowName      string // Name of the target workflow (required unless Workflow is set)
+	Workflow          any    // Registered scheduled workflow function (DBOSContext only; takes precedence over WorkflowName)
+	WorkflowClassName string // Optional class/namespace name for cross-language dispatch
+	Context           any    // Optional user-defined context (serialized as JSON) passed to each scheduled invocation
+	AutomaticBackfill bool   // Backfill missed ticks when the schedule is reloaded after downtime
+	CronTimezone      string // Optional IANA timezone used to interpret the cron expression
+	QueueName         string // Optional queue to route scheduled invocations to (defaults to the internal queue)
 }
 
 const (

@@ -335,9 +335,9 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 	// Generate message ID for ACK protocol
 	messageID := uuid.New().String()
 
-	dbosCtx, err := clientCtx(dc.Client)
-	if err != nil {
-		return nil, err
+	dbosCtx, ok := dc.Client.(*dbosContext)
+	if !ok || dbosCtx == nil {
+		return nil, errors.New("client is nil or an unsupported implementation")
 	}
 
 	// Create debouncer input
@@ -363,7 +363,7 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 		if errors.As(err, &dbosErr) && dbosErr.Code == QueueDeduplicated {
 			// The internal debouncer workflow already exists, send it the new input
 			// List workflows with the deduplication ID to find the existing debouncer workflow
-			debouncerWorkflowStatus, err := dc.Client.ListWorkflows(WithFilterDeduplicationID(key), WithLoadInput(true))
+			debouncerWorkflowStatus, err := dc.Client.ListWorkflows(dc.Client, WithFilterDeduplicationID(key), WithLoadInput(true))
 			if err != nil {
 				return nil, err
 			}
@@ -374,7 +374,7 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 			debouncerWorkflowID := debouncerWorkflowStatus[0].ID
 
 			// Send the new input to the internal debouncer workflow
-			err = dc.Client.Send(debouncerWorkflowID, DebounceMessage[P]{
+			err = dc.Client.Send(dc.Client, debouncerWorkflowID, DebounceMessage[P]{
 				Input: input,
 				Delay: delay,
 				ID:    messageID,
@@ -384,7 +384,7 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 			}
 
 			// Acknowledge the send by getting an event with the message ID
-			_, err = dc.Client.GetEvent(debouncerWorkflowID, messageID, 2*time.Second)
+			_, err = dc.Client.GetEvent(dc.Client, debouncerWorkflowID, messageID, 2*time.Second)
 			if errors.Is(err, &DBOSError{Code: TimeoutError}) {
 				// The debouncer workflow might have started the user workflow and exited already, try again
 				continue

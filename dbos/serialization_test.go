@@ -1278,7 +1278,7 @@ func TestClientCustomSerializer(t *testing.T) {
 		require.NoError(t, err)
 
 		// Send a message via client — the serializer encodes it to fixedChicken
-		err = client.Send(handle.GetWorkflowID(), Chicken{Name: "ignored"}, "client-topic")
+		err = client.Send(client, handle.GetWorkflowID(), Chicken{Name: "ignored"}, "client-topic")
 		require.NoError(t, err)
 
 		result, err := handle.GetResult()
@@ -1297,17 +1297,11 @@ func TestClientCustomSerializer(t *testing.T) {
 		_, err = handle.GetResult()
 		require.NoError(t, err)
 
-		// The untyped client.GetEvent returns a raw *string (encoded).
-		// Decode it manually to verify the custom serializer was used for encoding.
-		rawEvent, err := client.GetEvent(handle.GetWorkflowID(), "client-event-key", 10*time.Second)
+		// GetEvent decodes using the serialization recorded with the event,
+		// verifying the custom serializer was used for the round-trip.
+		event, err := GetEvent[Chicken](client, handle.GetWorkflowID(), "client-event-key", 10*time.Second)
 		require.NoError(t, err)
-		require.NotNil(t, rawEvent)
-		encodedStr, ok := rawEvent.(*string)
-		require.True(t, ok, "expected *string, got %T", rawEvent)
-
-		decoded, err := customSer.Decode(encodedStr)
-		require.NoError(t, err)
-		assert.Equal(t, fixedChicken, decoded)
+		assert.Equal(t, fixedChicken, event)
 	})
 
 	t.Run("ClientReadStreamWithCustomSerializer", func(t *testing.T) {
@@ -1322,7 +1316,7 @@ func TestClientCustomSerializer(t *testing.T) {
 		require.NoError(t, err)
 
 		// Read stream via typed client API
-		values, closed, err := ClientReadStream[Chicken](client, handle.GetWorkflowID(), "client-ser-stream")
+		values, closed, err := ReadStream[Chicken](client, handle.GetWorkflowID(), "client-ser-stream")
 		require.NoError(t, err)
 		assert.True(t, closed)
 		require.Len(t, values, 1)
@@ -2488,7 +2482,7 @@ func TestPortableWorkflowError(t *testing.T) {
 func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
 	t.Run("DBOSErrorPreservedGoToGo", func(t *testing.T) {
 		orig := models.NewQueueDeduplicatedError("wf-1", "q-1", "dedup-1")
-		s := serializeWorkflowError(nil,orig, "DBOS_JSON")
+		s := serializeWorkflowError(nil, orig, "DBOS_JSON")
 
 		got := deserializeWorkflowError(&s)
 		var de *DBOSError
@@ -2506,7 +2500,7 @@ func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
 		// Stored errors reference the registered gob name; it must stay
 		// "*dbos.DBOSError" (see the RegisterName in serialization.go) or
 		// errors persisted by earlier versions become undecodable.
-		s := serializeWorkflowError(nil,models.NewQueueDeduplicatedError("wf-1", "q-1", "dedup-1"), "DBOS_JSON")
+		s := serializeWorkflowError(nil, models.NewQueueDeduplicatedError("wf-1", "q-1", "dedup-1"), "DBOS_JSON")
 		raw, err := base64.StdEncoding.DecodeString(s)
 		require.NoError(t, err)
 		require.Contains(t, string(raw), "*dbos.DBOSError")
@@ -2514,7 +2508,7 @@ func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
 
 	t.Run("PlainErrorGoToGo", func(t *testing.T) {
 		// errors.New/fmt.Errorf types are not gob-encodable → plain-string fallback.
-		s := serializeWorkflowError(nil,fmt.Errorf("boom"), "DBOS_JSON")
+		s := serializeWorkflowError(nil, fmt.Errorf("boom"), "DBOS_JSON")
 		got := deserializeWorkflowError(&s)
 		require.Error(t, got)
 		assert.Equal(t, "boom", got.Error())
@@ -2549,7 +2543,7 @@ func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
 		assert.NoError(t, deserializeWorkflowError(nil))
 		empty := ""
 		assert.NoError(t, deserializeWorkflowError(&empty))
-		assert.Equal(t, "", serializeWorkflowError(nil,nil, "DBOS_JSON"))
+		assert.Equal(t, "", serializeWorkflowError(nil, nil, "DBOS_JSON"))
 	})
 }
 

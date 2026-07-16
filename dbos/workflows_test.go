@@ -9364,23 +9364,23 @@ func TestWorkflowAttributes(t *testing.T) {
 
 		// Enqueue to a queue nothing consumes; the workflow stays ENQUEUED, which
 		// is enough to check the attributes recorded at creation.
-		handle, err := client.Enqueue("unconsumed-queue", "client-workflow", 1, WithEnqueueAttributes(map[string]any{"source": "client", "n": 1}))
+		handle, err := client.Enqueue(client, "unconsumed-queue", "client-workflow", 1, WithEnqueueAttributes(map[string]any{"source": "client", "n": 1}))
 		require.NoError(t, err)
 		status, err := handle.GetStatus()
 		require.NoError(t, err)
 		assert.Equal(t, map[string]any{"source": "client", "n": float64(1)}, status.Attributes)
 
 		if !useSqliteBackend() {
-			handle2, err := client.Enqueue("unconsumed-queue", "client-workflow", 2, WithEnqueueAttributes(map[string]any{"source": "client", "n": 2}))
+			handle2, err := client.Enqueue(client, "unconsumed-queue", "client-workflow", 2, WithEnqueueAttributes(map[string]any{"source": "client", "n": 2}))
 			require.NoError(t, err)
-			statuses, err := client.ListWorkflows(WithFilterAttributes(map[string]any{"source": "client"}))
+			statuses, err := client.ListWorkflows(client, WithFilterAttributes(map[string]any{"source": "client"}))
 			require.NoError(t, err)
 			ids := make(map[string]bool, len(statuses))
 			for _, s := range statuses {
 				ids[s.ID] = true
 			}
 			assert.Equal(t, map[string]bool{handle.GetWorkflowID(): true, handle2.GetWorkflowID(): true}, ids)
-			queued, err := client.ListWorkflows(WithQueuesOnly(), WithFilterAttributes(map[string]any{"n": 2}))
+			queued, err := client.ListWorkflows(client, WithQueuesOnly(), WithFilterAttributes(map[string]any{"n": 2}))
 			require.NoError(t, err)
 			require.Len(t, queued, 1)
 			assert.Equal(t, handle2.GetWorkflowID(), queued[0].ID)

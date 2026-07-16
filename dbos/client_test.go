@@ -181,7 +181,7 @@ func TestClientEnqueue(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify the workflow ID is what we set
-		retrieveHandle, err := client.RetrieveWorkflow(customWorkflowID)
+		retrieveHandle, err := client.RetrieveWorkflow(client, customWorkflowID)
 		require.NoError(t, err)
 
 		result, err := retrieveHandle.GetResult()
@@ -388,7 +388,7 @@ func TestClientEnqueue(t *testing.T) {
 		assert.Equal(t, handle1.GetWorkflowID(), handle2.GetWorkflowID(), "expected handle2 to point to the existing workflow")
 
 		// Free the slot: cancel the blocking workflow and wait for it to reach a terminal state
-		require.NoError(t, client.CancelWorkflow(handle1.GetWorkflowID()))
+		require.NoError(t, client.CancelWorkflow(client, handle1.GetWorkflowID()))
 		_, _ = handle1.GetResult() // returns a cancellation error; we only need it terminal so the dedup slot clears
 
 		// With the slot cleared, a new enqueue starts a fresh workflow with a different ID
@@ -400,7 +400,7 @@ func TestClientEnqueue(t *testing.T) {
 		assert.NotEqual(t, handle1.GetWorkflowID(), handle3.GetWorkflowID(), "expected a fresh workflow after the slot cleared")
 
 		// Clean up the second blocking workflow
-		require.NoError(t, client.CancelWorkflow(handle3.GetWorkflowID()))
+		require.NoError(t, client.CancelWorkflow(client, handle3.GetWorkflowID()))
 	})
 
 	t.Run("EnqueueWithDedupReturnExistingMissingID", func(t *testing.T) {
@@ -600,7 +600,7 @@ func TestCancelResume(t *testing.T) {
 		assert.Equal(t, 1, stepsCompleted, "expected steps completed to be 1")
 
 		// Cancel the workflow
-		err = client.CancelWorkflow(workflowID)
+		err = client.CancelWorkflow(client, workflowID)
 		require.NoError(t, err, "failed to cancel workflow")
 
 		// Verify workflow is cancelled
@@ -610,7 +610,7 @@ func TestCancelResume(t *testing.T) {
 		assert.Equal(t, WorkflowStatusCancelled, cancelStatus.Status, "expected workflow status to be CANCELLED")
 
 		// Resume the workflow
-		resumeHandle, err := client.ResumeWorkflow(workflowID)
+		resumeHandle, err := client.ResumeWorkflow(client, workflowID)
 		require.NoError(t, err, "failed to resume workflow")
 
 		// Wait for workflow completion
@@ -634,7 +634,7 @@ func TestCancelResume(t *testing.T) {
 		assert.Equal(t, models.InternalQueueName, finalStatus.QueueName, "expected queue name to be %s", models.InternalQueueName)
 
 		// Resume the workflow again - should not run again
-		resumeAgainHandle, err := client.ResumeWorkflow(workflowID)
+		resumeAgainHandle, err := client.ResumeWorkflow(client, workflowID)
 		require.NoError(t, err, "failed to resume workflow again")
 
 		resultAgainAny, err := resumeAgainHandle.GetResult()
@@ -673,7 +673,7 @@ func TestCancelResume(t *testing.T) {
 		}, 10*time.Second, 50*time.Millisecond, "workflow was never dequeued with a deadline")
 
 		// Cancel the workflow before timeout expires
-		err = client.CancelWorkflow(workflowID)
+		err = client.CancelWorkflow(client, workflowID)
 		require.NoError(t, err, "failed to cancel workflow")
 
 		// Verify workflow is cancelled
@@ -683,7 +683,7 @@ func TestCancelResume(t *testing.T) {
 		assert.Equal(t, WorkflowStatusCancelled, cancelStatus.Status, "expected workflow status to be CANCELLED")
 
 		// Resume the workflow
-		resumeHandle, err := client.ResumeWorkflow(workflowID)
+		resumeHandle, err := client.ResumeWorkflow(client, workflowID)
 		require.NoError(t, err, "failed to resume workflow")
 		resumeStart := time.Now()
 
@@ -723,7 +723,7 @@ func TestCancelResume(t *testing.T) {
 		nonExistentWorkflowID := "non-existent-workflow-id"
 
 		// Try to cancel a non-existent workflow
-		err := client.CancelWorkflow(nonExistentWorkflowID)
+		err := client.CancelWorkflow(client, nonExistentWorkflowID)
 		require.Error(t, err, "expected error when canceling non-existent workflow, but got none")
 
 		// Verify error type and code
@@ -739,7 +739,7 @@ func TestCancelResume(t *testing.T) {
 		nonExistentWorkflowID := "non-existent-resume-workflow-id"
 
 		// Try to resume a non-existent workflow
-		_, err := client.ResumeWorkflow(nonExistentWorkflowID)
+		_, err := client.ResumeWorkflow(client, nonExistentWorkflowID)
 		require.Error(t, err, "expected error when resuming non-existent workflow, but got none")
 
 		// Verify error type and code
@@ -785,13 +785,13 @@ func TestDeleteWorkflow(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "done: test", result)
 
-		_, err = client.RetrieveWorkflow(workflowID)
+		_, err = client.RetrieveWorkflow(client, workflowID)
 		require.NoError(t, err)
 
-		err = client.DeleteWorkflows([]string{workflowID})
+		err = client.DeleteWorkflows(client, []string{workflowID})
 		require.NoError(t, err)
 
-		_, err = client.RetrieveWorkflow(workflowID)
+		_, err = client.RetrieveWorkflow(client, workflowID)
 		require.Error(t, err)
 		dbosErr, ok := err.(*DBOSError)
 		require.True(t, ok)
@@ -955,7 +955,7 @@ func TestForkWorkflow(t *testing.T) {
 			t.Logf("Forking at step %d", startStep)
 
 			customForkedWorkflowID := fmt.Sprintf("forked-workflow-step-%d", startStep)
-			forkedHandle, err := client.ForkWorkflow(ForkWorkflowInput{
+			forkedHandle, err := client.ForkWorkflow(client, ForkWorkflowInput{
 				OriginalWorkflowID: originalWorkflowID,
 				ForkedWorkflowID:   customForkedWorkflowID,
 				StartStep:          uint(startStep),
@@ -1029,13 +1029,13 @@ func TestForkWorkflow(t *testing.T) {
 		t.Logf("Final counters after all forks - steps:%d, child1:%d, child2:%d", stepCount1, child1Count, child2Count)
 
 		// Verify the original workflow is marked as having been forked from
-		originalStatus, err := client.ListWorkflows(WithWorkflowIDs([]string{originalWorkflowID}))
+		originalStatus, err := client.ListWorkflows(client, WithWorkflowIDs([]string{originalWorkflowID}))
 		require.NoError(t, err, "failed to list original workflow")
 		require.Len(t, originalStatus, 1)
 		assert.True(t, originalStatus[0].WasForkedFrom, "original workflow should be marked was_forked_from")
 
 		// WithWasForkedFrom(true) returns the original; WithWasForkedFrom(false) excludes it
-		forkedFromTrue, err := client.ListWorkflows(WithWasForkedFrom(true))
+		forkedFromTrue, err := client.ListWorkflows(client, WithWasForkedFrom(true))
 		require.NoError(t, err)
 		foundOriginal := false
 		for _, wf := range forkedFromTrue {
@@ -1045,7 +1045,7 @@ func TestForkWorkflow(t *testing.T) {
 			}
 		}
 		assert.True(t, foundOriginal, "expected original workflow in WithWasForkedFrom(true) results")
-		forkedFromFalse, err := client.ListWorkflows(WithWasForkedFrom(false))
+		forkedFromFalse, err := client.ListWorkflows(client, WithWasForkedFrom(false))
 		require.NoError(t, err)
 		for _, wf := range forkedFromFalse {
 			assert.NotEqual(t, originalWorkflowID, wf.ID, "WithWasForkedFrom(false) must exclude forked-from workflows")
@@ -1056,7 +1056,7 @@ func TestForkWorkflow(t *testing.T) {
 		nonExistentWorkflowID := "non-existent-workflow-for-fork"
 
 		// Try to fork a non-existent workflow
-		_, err := client.ForkWorkflow(ForkWorkflowInput{
+		_, err := client.ForkWorkflow(client, ForkWorkflowInput{
 			OriginalWorkflowID: nonExistentWorkflowID,
 			StartStep:          1,
 		})
@@ -1072,7 +1072,7 @@ func TestForkWorkflow(t *testing.T) {
 	})
 
 	t.Run("ForkPartitionKeyWithoutQueue", func(t *testing.T) {
-		_, err := client.ForkWorkflow(ForkWorkflowInput{
+		_, err := client.ForkWorkflow(client, ForkWorkflowInput{
 			OriginalWorkflowID: "any-workflow-id",
 			QueuePartitionKey:  "partition-1",
 		})
@@ -1248,7 +1248,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 1: List all workflows (no filters)
-		allWorkflows, err := client.ListWorkflows()
+		allWorkflows, err := client.ListWorkflows(client)
 		require.NoError(t, err, "failed to list all workflows")
 		assert.GreaterOrEqual(t, len(allWorkflows), 14, "expected at least 14 workflows (10 initial + 2 OtherWorkflow + 2 on queue2)")
 
@@ -1265,7 +1265,7 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 2: Filter by workflow IDs
 		expectedIDs := workflowIDs[:3]
-		specificWorkflows, err := client.ListWorkflows(WithWorkflowIDs(expectedIDs))
+		specificWorkflows, err := client.ListWorkflows(client, WithWorkflowIDs(expectedIDs))
 		require.NoError(t, err, "failed to list workflows by IDs")
 		assert.Len(t, specificWorkflows, 3, "expected 3 workflows")
 		// Verify returned workflow IDs match expected
@@ -1278,7 +1278,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 3: Filter by workflow ID prefix
-		batchWorkflows, err := client.ListWorkflows(WithWorkflowIDPrefix("test-batch-"))
+		batchWorkflows, err := client.ListWorkflows(client, WithWorkflowIDPrefix("test-batch-"))
 		require.NoError(t, err, "failed to list workflows by prefix")
 		assert.Len(t, batchWorkflows, 5, "expected 5 batch workflows")
 		// Verify all returned workflow IDs have the correct prefix
@@ -1287,7 +1287,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 4: Filter by status - SUCCESS
-		successWorkflows, err := client.ListWorkflows(
+		successWorkflows, err := client.ListWorkflows(client,
 			WithWorkflowIDPrefix("test-"), // Only our test workflows
 			WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}))
 		require.NoError(t, err, "failed to list successful workflows")
@@ -1298,7 +1298,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 5: Filter by status - ERROR
-		errorWorkflows, err := client.ListWorkflows(
+		errorWorkflows, err := client.ListWorkflows(client,
 			WithWorkflowIDPrefix("test-"),
 			WithStatus([]WorkflowStatusType{WorkflowStatusError}))
 		require.NoError(t, err, "failed to list error workflows")
@@ -1309,26 +1309,26 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 6: Filter by time range - the 5 test-batch-* workflows
-		firstHalfWorkflows, err := client.ListWorkflows(
+		firstHalfWorkflows, err := client.ListWorkflows(client,
 			WithWorkflowIDPrefix("test-"),
 			WithEndTime(firstHalfTime))
 		require.NoError(t, err, "failed to list first half workflows by time range")
 		assert.Len(t, firstHalfWorkflows, 5, "expected 5 workflows in first half time range")
 
 		// Test 6b: Filter by time range - workflows started at or after firstHalfTime
-		secondHalfWorkflows, err := client.ListWorkflows(
+		secondHalfWorkflows, err := client.ListWorkflows(client,
 			WithWorkflowIDPrefix("test-"),
 			WithStartTime(firstHalfTime))
 		require.NoError(t, err, "failed to list second half workflows by time range")
 		assert.Len(t, secondHalfWorkflows, 9, "expected 9 workflows in second half (5 test-other-5..9 + 2 test-other-name + 2 test-queue2)")
 
 		// Test 7: Test sorting order (ascending - default)
-		ascWorkflows, err := client.ListWorkflows(
+		ascWorkflows, err := client.ListWorkflows(client,
 			WithWorkflowIDPrefix("test-"))
 		require.NoError(t, err, "failed to list workflows ascending")
 
 		// Test 8: Test sorting order (descending)
-		descWorkflows, err := client.ListWorkflows(
+		descWorkflows, err := client.ListWorkflows(client,
 			WithWorkflowIDPrefix("test-"),
 			WithSortDesc())
 		require.NoError(t, err, "failed to list workflows descending")
@@ -1350,7 +1350,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 9: Test limit and offset
-		limitedWorkflows, err := client.ListWorkflows(
+		limitedWorkflows, err := client.ListWorkflows(client,
 			WithWorkflowIDPrefix("test-"),
 			WithLimit(5))
 		require.NoError(t, err, "failed to list workflows with limit")
@@ -1361,7 +1361,7 @@ func TestListWorkflows(t *testing.T) {
 			assert.Equal(t, expectedFirstFive[i].ID, wf.ID, "limited workflow at index %d: unexpected ID", i)
 		}
 
-		offsetWorkflows, err := client.ListWorkflows(
+		offsetWorkflows, err := client.ListWorkflows(client,
 			WithWorkflowIDPrefix("test-"),
 			WithOffset(5),
 			WithLimit(3))
@@ -1375,7 +1375,7 @@ func TestListWorkflows(t *testing.T) {
 
 		// Offset without a limit: SQLite rejects a bare OFFSET, so this exercises
 		// the dialect's "no limit" sentinel. Expect all workflows after the first 5.
-		offsetNoLimitWorkflows, err := client.ListWorkflows(
+		offsetNoLimitWorkflows, err := client.ListWorkflows(client,
 			WithWorkflowIDPrefix("test-"),
 			WithOffset(5))
 		require.NoError(t, err, "failed to list workflows with offset and no limit")
@@ -1386,7 +1386,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 10: Test input/output loading
-		noDataWorkflows, err := client.ListWorkflows(
+		noDataWorkflows, err := client.ListWorkflows(client,
 			WithWorkflowIDs(workflowIDs[:2]),
 			WithLoadInput(false),
 			WithLoadOutput(false))
@@ -1400,7 +1400,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 11: Filter by multiple workflow ID prefixes (slice option)
-		multiPrefixWorkflows, err := client.ListWorkflows(WithWorkflowIDPrefix("test-batch-", "test-other-"))
+		multiPrefixWorkflows, err := client.ListWorkflows(client, WithWorkflowIDPrefix("test-batch-", "test-other-"))
 		require.NoError(t, err, "failed to list workflows by multiple prefixes")
 		// Matches test-batch-0..4 (5) + test-other-5..9 (5) + test-other-name-0,1 (2) = 12
 		assert.Len(t, multiPrefixWorkflows, 12, "expected 12 workflows matching either prefix")
@@ -1410,7 +1410,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 12: Filter by multiple workflow names (slice option)
-		multiNameWorkflows, err := client.ListWorkflows(WithName("SimpleWorkflow", "OtherWorkflow"))
+		multiNameWorkflows, err := client.ListWorkflows(client, WithName("SimpleWorkflow", "OtherWorkflow"))
 		require.NoError(t, err, "failed to list workflows by multiple names")
 		assert.Len(t, multiNameWorkflows, 14, "expected 14 workflows (10 SimpleWorkflow + 2 OtherWorkflow + 2 SimpleWorkflow on queue2)")
 		namesSeen := make(map[string]int)
@@ -1423,7 +1423,7 @@ func TestListWorkflows(t *testing.T) {
 		assert.GreaterOrEqual(t, namesSeen["OtherWorkflow"], 2, "expected at least 2 OtherWorkflow")
 
 		// Test 13: Filter by multiple queue names (slice option)
-		multiQueueWorkflows, err := client.ListWorkflows(WithQueueName(queue.Name, queue2.Name))
+		multiQueueWorkflows, err := client.ListWorkflows(client, WithQueueName(queue.Name, queue2.Name))
 		require.NoError(t, err, "failed to list workflows by multiple queues")
 		assert.Len(t, multiQueueWorkflows, 14, "expected 14 workflows (12 on queue + 2 on queue2)")
 		queuesSeen := make(map[string]int)
@@ -1445,18 +1445,18 @@ func TestListWorkflows(t *testing.T) {
 		require.NoError(t, err, "parent workflow should succeed")
 		assert.Equal(t, parentID, parentHandle.GetWorkflowID(), "parent should have requested workflow ID")
 		expectedChildID := parentID + "-0"
-		childWorkflows, err := client.ListWorkflows(WithParentWorkflowID(parentID))
+		childWorkflows, err := client.ListWorkflows(client, WithParentWorkflowID(parentID))
 		require.NoError(t, err, "failed to list workflows by parent ID")
 		assert.Len(t, childWorkflows, 1, "expected one child workflow")
 		assert.Equal(t, parentID, childWorkflows[0].ParentWorkflowID, "child should have ParentWorkflowID set")
 		assert.Equal(t, expectedChildID, childWorkflows[0].ID, "child workflow ID should be parentID-0")
 		// Filter with nonexistent parent returns empty
-		nonexistent, err := client.ListWorkflows(WithParentWorkflowID("nonexistent-parent-id"))
+		nonexistent, err := client.ListWorkflows(client, WithParentWorkflowID("nonexistent-parent-id"))
 		require.NoError(t, err)
 		assert.Len(t, nonexistent, 0)
 
 		// Test 15: Filter by presence of a parent workflow
-		withParent, err := client.ListWorkflows(WithHasParent(true))
+		withParent, err := client.ListWorkflows(client, WithHasParent(true))
 		require.NoError(t, err, "failed to list workflows with a parent")
 		foundChild := false
 		for _, wf := range withParent {
@@ -1466,30 +1466,30 @@ func TestListWorkflows(t *testing.T) {
 			}
 		}
 		assert.True(t, foundChild, "expected child workflow in WithHasParent(true) results")
-		withoutParent, err := client.ListWorkflows(WithHasParent(false))
+		withoutParent, err := client.ListWorkflows(client, WithHasParent(false))
 		require.NoError(t, err, "failed to list workflows without a parent")
 		for _, wf := range withoutParent {
 			assert.Empty(t, wf.ParentWorkflowID, "WithHasParent(false) must only return workflows without a parent")
 		}
 
 		// Test 16: completed_at is populated for terminal workflows and supports range filters
-		completedChild, err := client.ListWorkflows(WithWorkflowIDs([]string{expectedChildID}))
+		completedChild, err := client.ListWorkflows(client, WithWorkflowIDs([]string{expectedChildID}))
 		require.NoError(t, err)
 		require.Len(t, completedChild, 1)
 		require.False(t, completedChild[0].CompletedAt.IsZero(), "completed workflow should have CompletedAt set")
-		afterStart, err := client.ListWorkflows(WithParentWorkflowID(parentID), WithCompletedAfter(testStartTime))
+		afterStart, err := client.ListWorkflows(client, WithParentWorkflowID(parentID), WithCompletedAfter(testStartTime))
 		require.NoError(t, err)
 		assert.Len(t, afterStart, 1, "child completed after test start should be returned")
-		beforeStart, err := client.ListWorkflows(WithParentWorkflowID(parentID), WithCompletedBefore(testStartTime))
+		beforeStart, err := client.ListWorkflows(client, WithParentWorkflowID(parentID), WithCompletedBefore(testStartTime))
 		require.NoError(t, err)
 		assert.Len(t, beforeStart, 0, "no child completed before test start")
 
 		// Test 17: dequeued_after/before filter on started_at (the parent was
 		// enqueued, so it has a started_at; direct child workflows do not).
-		dequeuedAfter, err := client.ListWorkflows(WithWorkflowIDs([]string{parentID}), WithDequeuedAfter(testStartTime))
+		dequeuedAfter, err := client.ListWorkflows(client, WithWorkflowIDs([]string{parentID}), WithDequeuedAfter(testStartTime))
 		require.NoError(t, err)
 		assert.Len(t, dequeuedAfter, 1, "parent dequeued after test start should be returned")
-		dequeuedBefore, err := client.ListWorkflows(WithWorkflowIDs([]string{parentID}), WithDequeuedBefore(testStartTime))
+		dequeuedBefore, err := client.ListWorkflows(client, WithWorkflowIDs([]string{parentID}), WithDequeuedBefore(testStartTime))
 		require.NoError(t, err)
 		assert.Len(t, dequeuedBefore, 0, "parent not dequeued before test start")
 	})
@@ -1546,7 +1546,7 @@ func TestGetWorkflowSteps(t *testing.T) {
 	assert.Equal(t, "abc", result)
 
 	// Test GetWorkflowSteps with loadOutput = true
-	stepsWithOutput, err := client.GetWorkflowSteps(workflowID)
+	stepsWithOutput, err := client.GetWorkflowSteps(client, workflowID)
 	require.NoError(t, err)
 	require.Len(t, stepsWithOutput, 1, "expected exactly 1 step")
 
@@ -1573,12 +1573,12 @@ type clientReadStreamFunc func(c Client, workflowID string, key string) ([]strin
 
 // syncClientReadStream wraps ClientReadStream for use in test table
 func syncClientReadStream(c Client, workflowID string, key string) ([]string, bool, error) {
-	return ClientReadStream[string](c, workflowID, key)
+	return ReadStream[string](c, workflowID, key)
 }
 
 // asyncClientReadStream wraps ClientReadStreamAsync and collects values for use in test table
 func asyncClientReadStream(c Client, workflowID string, key string) ([]string, bool, error) {
-	ch, err := ClientReadStreamAsync[string](c, workflowID, key)
+	ch, err := ReadStreamAsync[string](c, workflowID, key)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1692,7 +1692,7 @@ func TestClientReadStreamAsyncGoroutineLeak(t *testing.T) {
 	handle, err := RunWorkflow(serverCtx, blockingStreamWorkflow, streamKey)
 	require.NoError(t, err)
 
-	ch, err := ClientReadStreamAsync[string](client, handle.GetWorkflowID(), streamKey)
+	ch, err := ReadStreamAsync[string](client, handle.GetWorkflowID(), streamKey)
 	require.NoError(t, err)
 
 	// Read one value then abandon the channel — goroutine must exit on client shutdown
@@ -2022,7 +2022,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	assert.Equal(t, testInput, result, "result should match input")
 
 	// List the workflow to verify all options are set correctly
-	workflows, err := client.ListWorkflows(WithWorkflowIDs([]string{workflowID}))
+	workflows, err := client.ListWorkflows(client, WithWorkflowIDs([]string{workflowID}))
 	require.NoError(t, err, "failed to list workflows")
 	require.Len(t, workflows, 1, "should find exactly one workflow")
 
@@ -2066,7 +2066,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 		delayDuration := 2 * time.Second
 		tBefore := time.Now()
 
-		handle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
+		handle, err := client.Enqueue(client, queue.Name, "DelayWorkflow", "",
 			WithEnqueueDelay(delayDuration),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -2094,7 +2094,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 	t.Run("ClientEnqueueDelayedCancelResume", func(t *testing.T) {
 		tBefore := time.Now()
 		// Cancel a delayed workflow
-		cancelHandle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
+		cancelHandle, err := client.Enqueue(client, queue.Name, "DelayWorkflow", "",
 			WithEnqueueDelay(60*time.Second),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -2103,7 +2103,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, WorkflowStatusDelayed, status.Status)
 
-		err = client.CancelWorkflow(cancelHandle.GetWorkflowID())
+		err = client.CancelWorkflow(client, cancelHandle.GetWorkflowID())
 		require.NoError(t, err)
 
 		cancelledStatus, err := cancelHandle.GetStatus()
@@ -2111,7 +2111,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 		assert.Equal(t, WorkflowStatusCancelled, cancelledStatus.Status)
 
 		// Resume the cancelled workflow — should complete well before the 60s delay
-		_, err = client.ResumeWorkflow(cancelHandle.GetWorkflowID())
+		_, err = client.ResumeWorkflow(client, cancelHandle.GetWorkflowID())
 		require.NoError(t, err)
 
 		result, err := cancelHandle.GetResult()
@@ -2121,7 +2121,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 	})
 
 	t.Run("ClientSetWorkflowDelayDuration", func(t *testing.T) {
-		handle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
+		handle, err := client.Enqueue(client, queue.Name, "DelayWorkflow", "",
 			WithEnqueueDelay(600*time.Second),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -2130,7 +2130,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, WorkflowStatusDelayed, status.Status)
 
-		err = client.SetWorkflowDelay(handle.GetWorkflowID(), WithDelayDuration(500*time.Millisecond))
+		err = client.SetWorkflowDelay(client, handle.GetWorkflowID(), WithDelayDuration(500*time.Millisecond))
 		require.NoError(t, err)
 
 		status, err = handle.GetStatus()
@@ -2147,7 +2147,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 	})
 
 	t.Run("ClientSetWorkflowDelayUntil", func(t *testing.T) {
-		handle, err := client.Enqueue(queue.Name, "DelayWorkflow", "",
+		handle, err := client.Enqueue(client, queue.Name, "DelayWorkflow", "",
 			WithEnqueueDelay(600*time.Second),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -2157,7 +2157,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 		assert.Equal(t, WorkflowStatusDelayed, status.Status)
 
 		soon := time.Now().Add(500 * time.Millisecond)
-		err = client.SetWorkflowDelay(handle.GetWorkflowID(), WithDelayUntil(soon))
+		err = client.SetWorkflowDelay(client, handle.GetWorkflowID(), WithDelayUntil(soon))
 		require.NoError(t, err)
 
 		status, err = handle.GetStatus()
@@ -2194,37 +2194,37 @@ func TestClientSchedules(t *testing.T) {
 
 	t.Run("CreateGetListPauseResumeDelete", func(t *testing.T) {
 		const name = "client-schedule-lifecycle"
-		require.NoError(t, c.CreateSchedule(ClientScheduleInput{
+		require.NoError(t, c.CreateSchedule(c, ScheduleSpec{
 			ScheduleName:      name,
 			WorkflowName:      workflowFQN,
 			WorkflowClassName: "MyClass",
 			Schedule:          "0 0 * * * *",
 		}))
 
-		got, err := c.GetSchedule(name)
+		got, err := c.GetSchedule(c, name)
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		require.Equal(t, name, got.ScheduleName)
 		require.Equal(t, workflowFQN, got.WorkflowName)
 		require.Equal(t, "MyClass", got.WorkflowClassName)
 
-		listed, err := c.ListSchedules(WithScheduleNamePrefixes(name))
+		listed, err := c.ListSchedules(c, WithScheduleNamePrefixes(name))
 		require.NoError(t, err)
 		require.Len(t, listed, 1)
 		require.Equal(t, name, listed[0].ScheduleName)
 
-		require.NoError(t, c.PauseSchedule(name))
-		got, err = c.GetSchedule(name)
+		require.NoError(t, c.PauseSchedule(c, name))
+		got, err = c.GetSchedule(c, name)
 		require.NoError(t, err)
 		require.Equal(t, ScheduleStatusPaused, got.Status)
 
-		require.NoError(t, c.ResumeSchedule(name))
-		got, err = c.GetSchedule(name)
+		require.NoError(t, c.ResumeSchedule(c, name))
+		got, err = c.GetSchedule(c, name)
 		require.NoError(t, err)
 		require.Equal(t, ScheduleStatusActive, got.Status)
 
-		require.NoError(t, c.DeleteSchedule(name))
-		got, err = c.GetSchedule(name)
+		require.NoError(t, c.DeleteSchedule(c, name))
+		got, err = c.GetSchedule(c, name)
 		require.NoError(t, err)
 		require.Nil(t, got)
 	})
@@ -2232,32 +2232,32 @@ func TestClientSchedules(t *testing.T) {
 	t.Run("ApplySchedules", func(t *testing.T) {
 		const nameA = "client-apply-a"
 		const nameB = "client-apply-b"
-		require.NoError(t, c.ApplySchedules([]ClientScheduleInput{
+		require.NoError(t, c.ApplySchedules(c, []ScheduleSpec{
 			{ScheduleName: nameA, WorkflowName: workflowFQN, Schedule: "0 0 * * * *", Context: map[string]any{"region": "us"}},
 			{ScheduleName: nameB, WorkflowName: workflowFQN, WorkflowClassName: "MyClass", Schedule: "0 0 * * * *"},
 		}))
 		t.Cleanup(func() {
-			_ = c.DeleteSchedule(nameA)
-			_ = c.DeleteSchedule(nameB)
+			_ = c.DeleteSchedule(c, nameA)
+			_ = c.DeleteSchedule(c, nameB)
 		})
 
-		a, err := c.GetSchedule(nameA)
+		a, err := c.GetSchedule(c, nameA)
 		require.NoError(t, err)
 		require.NotNil(t, a)
 		require.Equal(t, models.InternalQueueName, a.QueueName, "QueueName should default to the internal queue")
 		require.Equal(t, map[string]any{"region": "us"}, a.Context)
 		scheduleIDA := a.ScheduleID
 
-		b, err := c.GetSchedule(nameB)
+		b, err := c.GetSchedule(c, nameB)
 		require.NoError(t, err)
 		require.NotNil(t, b)
 		require.Equal(t, "MyClass", b.WorkflowClassName)
 
 		// Re-apply updates definition in place and preserves schedule_id.
-		require.NoError(t, c.ApplySchedules([]ClientScheduleInput{
+		require.NoError(t, c.ApplySchedules(c, []ScheduleSpec{
 			{ScheduleName: nameA, WorkflowName: workflowFQN, Schedule: "0 0 0 * * *", Context: map[string]any{"region": "eu"}},
 		}))
-		a, err = c.GetSchedule(nameA)
+		a, err = c.GetSchedule(c, nameA)
 		require.NoError(t, err)
 		require.NotNil(t, a)
 		require.Equal(t, scheduleIDA, a.ScheduleID, "client upsert must preserve schedule_id")
@@ -2267,16 +2267,16 @@ func TestClientSchedules(t *testing.T) {
 
 	t.Run("BackfillSchedule", func(t *testing.T) {
 		const name = "client-backfill"
-		require.NoError(t, c.CreateSchedule(ClientScheduleInput{
+		require.NoError(t, c.CreateSchedule(c, ScheduleSpec{
 			ScheduleName: name,
 			WorkflowName: workflowFQN,
 			Schedule:     "*/1 * * * * *",
 		}))
-		t.Cleanup(func() { _ = c.DeleteSchedule(name) })
+		t.Cleanup(func() { _ = c.DeleteSchedule(c, name) })
 
 		start := time.Now().Add(-5 * time.Second)
 		end := time.Now()
-		ids, err := c.BackfillSchedule(name, start, end)
+		ids, err := c.BackfillSchedule(c, name, start, end)
 		require.NoError(t, err)
 		require.NotEmpty(t, ids)
 
@@ -2287,14 +2287,14 @@ func TestClientSchedules(t *testing.T) {
 
 	t.Run("TriggerSchedule", func(t *testing.T) {
 		const name = "client-trigger"
-		require.NoError(t, c.CreateSchedule(ClientScheduleInput{
+		require.NoError(t, c.CreateSchedule(c, ScheduleSpec{
 			ScheduleName: name,
 			WorkflowName: workflowFQN,
 			Schedule:     "0 0 * * * *",
 		}))
-		t.Cleanup(func() { _ = c.DeleteSchedule(name) })
+		t.Cleanup(func() { _ = c.DeleteSchedule(c, name) })
 
-		handle, err := c.TriggerSchedule(name)
+		handle, err := c.TriggerSchedule(c, name)
 		require.NoError(t, err)
 		require.NotNil(t, handle)
 		require.Contains(t, handle.GetWorkflowID(), name)
@@ -2307,26 +2307,26 @@ func TestClientSchedules(t *testing.T) {
 
 	t.Run("CronValidation", func(t *testing.T) {
 		// CreateSchedule rejects garbage cron up-front.
-		err := c.CreateSchedule(ClientScheduleInput{
+		err := c.CreateSchedule(c, ScheduleSpec{
 			ScheduleName: "client-bad-create",
 			WorkflowName: workflowFQN,
 			Schedule:     "not a cron",
 		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "invalid cron schedule")
-		got, err := c.GetSchedule("client-bad-create")
+		got, err := c.GetSchedule(c, "client-bad-create")
 		require.NoError(t, err)
 		require.Nil(t, got)
 
 		// ApplySchedules validates every entry before writing any row.
-		err = c.ApplySchedules([]ClientScheduleInput{
+		err = c.ApplySchedules(c, []ScheduleSpec{
 			{ScheduleName: "client-apply-good", WorkflowName: workflowFQN, Schedule: "0 0 * * * *"},
 			{ScheduleName: "client-apply-bad", WorkflowName: workflowFQN, Schedule: "garbage"},
 		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "invalid cron schedule")
 		for _, name := range []string{"client-apply-good", "client-apply-bad"} {
-			s, err := c.GetSchedule(name)
+			s, err := c.GetSchedule(c, name)
 			require.NoError(t, err)
 			require.Nil(t, s, "schedule %s should not have been created", name)
 		}
@@ -2342,12 +2342,12 @@ func TestClientApplicationVersions(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
 
-		latest, err := c.GetLatestApplicationVersion()
+		latest, err := c.GetLatestApplicationVersion(c)
 		require.NoError(t, err)
 		require.NotNil(t, latest)
 		require.Equal(t, serverCtx.GetApplicationVersion(), latest.Name)
 
-		versions, err := c.ListApplicationVersions()
+		versions, err := c.ListApplicationVersions(c)
 		require.NoError(t, err)
 		require.Len(t, versions, 1)
 		require.Equal(t, latest.Name, versions[0].Name)
@@ -2367,17 +2367,17 @@ func TestClientApplicationVersions(t *testing.T) {
 		require.NoError(t, sysDB.CreateApplicationVersion(serverCtx, "older-version"))
 		require.NoError(t, sysDB.UpdateApplicationVersionTimestamp(serverCtx, "older-version", time.Now().Add(-time.Hour).UnixMilli()))
 
-		latest, err := c.GetLatestApplicationVersion()
+		latest, err := c.GetLatestApplicationVersion(c)
 		require.NoError(t, err)
 		require.Equal(t, serverCtx.GetApplicationVersion(), latest.Name)
 
-		require.NoError(t, c.SetLatestApplicationVersion("older-version"))
+		require.NoError(t, c.SetLatestApplicationVersion(c, "older-version"))
 
-		latest, err = c.GetLatestApplicationVersion()
+		latest, err = c.GetLatestApplicationVersion(c)
 		require.NoError(t, err)
 		require.Equal(t, "older-version", latest.Name)
 
-		versions, err := c.ListApplicationVersions()
+		versions, err := c.ListApplicationVersions(c)
 		require.NoError(t, err)
 		require.Len(t, versions, 2)
 		require.Equal(t, "older-version", versions[0].Name)
@@ -2395,7 +2395,7 @@ func TestClientApplicationVersions(t *testing.T) {
 		_, err = s.Pool().Exec(serverCtx, s.RenderSQL("DELETE FROM %sapplication_versions", s.Dialect().SchemaPrefix(s.Schema())))
 		require.NoError(t, err)
 
-		_, err = c.GetLatestApplicationVersion()
+		_, err = c.GetLatestApplicationVersion(c)
 		require.Error(t, err)
 		var dbosErr *DBOSError
 		require.True(t, errors.As(err, &dbosErr), "expected *DBOSError, got %T: %v", err, err)
@@ -2410,7 +2410,7 @@ func TestClientApplicationVersions(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
 
-		require.Error(t, c.SetLatestApplicationVersion(""))
+		require.Error(t, c.SetLatestApplicationVersion(c, ""))
 	})
 }
 
@@ -2449,9 +2449,7 @@ func TestClientCustomSqliteDB(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { c.Shutdown(10 * time.Second) })
 
-	clientImpl, ok := c.(*client)
-	require.True(t, ok)
-	dbosCtx, ok := clientImpl.dbosCtx.(*dbosContext)
+	dbosCtx, ok := c.(*dbosContext)
 	require.True(t, ok)
 	sysDB, ok := dbosCtx.systemDB.(*sysdb.SysDB)
 	require.True(t, ok)
@@ -2495,9 +2493,7 @@ func TestClientCustomPool(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { c.Shutdown(10 * time.Second) })
 
-	clientImpl, ok := c.(*client)
-	require.True(t, ok)
-	dbosCtx, ok := clientImpl.dbosCtx.(*dbosContext)
+	dbosCtx, ok := c.(*dbosContext)
 	require.True(t, ok)
 	sysDB, ok := dbosCtx.systemDB.(*sysdb.SysDB)
 	require.True(t, ok)
@@ -2528,8 +2524,8 @@ func TestClientSend(t *testing.T) {
 		require.NoError(t, err, "failed to start receive workflow")
 
 		// Two client Sends with the same idempotency key: only the first delivers.
-		require.NoError(t, client.Send(handle.GetWorkflowID(), "client-once", "client-idem-dup-topic", WithIdempotencyKey("client-dup-key")), "first client send failed")
-		require.NoError(t, client.Send(handle.GetWorkflowID(), "client-once", "client-idem-dup-topic", WithIdempotencyKey("client-dup-key")), "duplicate client send must not error")
+		require.NoError(t, client.Send(client, handle.GetWorkflowID(), "client-once", "client-idem-dup-topic", WithIdempotencyKey("client-dup-key")), "first client send failed")
+		require.NoError(t, client.Send(client, handle.GetWorkflowID(), "client-once", "client-idem-dup-topic", WithIdempotencyKey("client-dup-key")), "duplicate client send must not error")
 
 		result, err := handle.GetResult()
 		require.NoError(t, err, "failed to get result from receive workflow")
@@ -2540,8 +2536,8 @@ func TestClientSend(t *testing.T) {
 		handle, err := RunWorkflow(serverCtx, receiveTwiceShortWorkflow, "client-idem-distinct-topic")
 		require.NoError(t, err, "failed to start receive workflow")
 
-		require.NoError(t, client.Send(handle.GetWorkflowID(), "c-a", "client-idem-distinct-topic", WithIdempotencyKey("client-key-a")), "send with client-key-a failed")
-		require.NoError(t, client.Send(handle.GetWorkflowID(), "c-b", "client-idem-distinct-topic", WithIdempotencyKey("client-key-b")), "send with client-key-b failed")
+		require.NoError(t, client.Send(client, handle.GetWorkflowID(), "c-a", "client-idem-distinct-topic", WithIdempotencyKey("client-key-a")), "send with client-key-a failed")
+		require.NoError(t, client.Send(client, handle.GetWorkflowID(), "c-b", "client-idem-distinct-topic", WithIdempotencyKey("client-key-b")), "send with client-key-b failed")
 
 		result, err := handle.GetResult()
 		require.NoError(t, err, "failed to get result from receive workflow")
@@ -2588,19 +2584,19 @@ func TestClientGetEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("DecodesStructEvent", func(t *testing.T) {
-		val, err := ClientGetEvent[eventPayload](client, workflowID, "struct-key", 5*time.Second)
+		val, err := GetEvent[eventPayload](client, workflowID, "struct-key", 5*time.Second)
 		require.NoError(t, err)
 		require.Equal(t, eventPayload{Label: "ready", Count: 7}, val)
 	})
 
 	t.Run("DecodesStringEvent", func(t *testing.T) {
-		val, err := ClientGetEvent[string](client, workflowID, "string-key", 5*time.Second)
+		val, err := GetEvent[string](client, workflowID, "string-key", 5*time.Second)
 		require.NoError(t, err)
 		require.Equal(t, "hello-event", val)
 	})
 
 	t.Run("NilClient", func(t *testing.T) {
-		_, err := ClientGetEvent[string](nil, workflowID, "string-key", time.Second)
+		_, err := GetEvent[string](nil, workflowID, "string-key", time.Second)
 		require.Error(t, err)
 	})
 
@@ -2638,7 +2634,7 @@ func TestClientTypedHandles(t *testing.T) {
 		_, err := Enqueue[int, sumResult](client, queue.Name, "SumWorkflow", 21, WithEnqueueWorkflowID(workflowID), appVersion)
 		require.NoError(t, err)
 
-		handle, err := ClientRetrieveWorkflow[sumResult](client, workflowID)
+		handle, err := RetrieveWorkflow[sumResult](client, workflowID)
 		require.NoError(t, err)
 		res, err := handle.GetResult()
 		require.NoError(t, err)
@@ -2652,7 +2648,7 @@ func TestClientTypedHandles(t *testing.T) {
 		_, err = h.GetResult()
 		require.NoError(t, err)
 
-		forkedHandle, err := ClientForkWorkflow[sumResult](client, ForkWorkflowInput{OriginalWorkflowID: workflowID, StartStep: 0})
+		forkedHandle, err := ForkWorkflow[sumResult](client, ForkWorkflowInput{OriginalWorkflowID: workflowID, StartStep: 0})
 		require.NoError(t, err)
 		res, err := forkedHandle.GetResult()
 		require.NoError(t, err)
@@ -2667,7 +2663,7 @@ func TestClientTypedHandles(t *testing.T) {
 		require.NoError(t, err)
 
 		// Resuming a completed workflow returns a typed handle to the existing result.
-		resumeHandle, err := ClientResumeWorkflow[sumResult](client, workflowID)
+		resumeHandle, err := ResumeWorkflow[sumResult](client, workflowID)
 		require.NoError(t, err)
 		res, err := resumeHandle.GetResult()
 		require.NoError(t, err)
@@ -2685,7 +2681,7 @@ func TestClientTypedHandles(t *testing.T) {
 			ids = append(ids, workflowID)
 		}
 
-		handles, err := ClientResumeWorkflows[sumResult](client, ids)
+		handles, err := ResumeWorkflows[sumResult](client, ids)
 		require.NoError(t, err)
 		require.Len(t, handles, 2)
 		// ResumeWorkflows does not guarantee handle order matches input order,
@@ -2702,7 +2698,7 @@ func TestClientTypedHandles(t *testing.T) {
 	})
 
 	t.Run("NilClient", func(t *testing.T) {
-		_, err := ClientRetrieveWorkflow[sumResult](nil, "any")
+		_, err := RetrieveWorkflow[sumResult](nil, "any")
 		require.Error(t, err)
 	})
 
@@ -2750,7 +2746,7 @@ func TestClientListAndSteps(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("ListWorkflowsNoDecodeByDefault", func(t *testing.T) {
-		workflows, err := client.ListWorkflows(WithWorkflowIDs([]string{workflowID}))
+		workflows, err := client.ListWorkflows(client, WithWorkflowIDs([]string{workflowID}))
 		require.NoError(t, err)
 		require.Len(t, workflows, 1)
 		assert.Nil(t, workflows[0].Input, "input must not be loaded by default")
@@ -2758,7 +2754,7 @@ func TestClientListAndSteps(t *testing.T) {
 	})
 
 	t.Run("ListWorkflowsLoadsWhenRequested", func(t *testing.T) {
-		workflows, err := client.ListWorkflows(WithWorkflowIDs([]string{workflowID}), WithLoadInput(true), WithLoadOutput(true))
+		workflows, err := client.ListWorkflows(client, WithWorkflowIDs([]string{workflowID}), WithLoadInput(true), WithLoadOutput(true))
 		require.NoError(t, err)
 		require.Len(t, workflows, 1)
 
@@ -2774,7 +2770,7 @@ func TestClientListAndSteps(t *testing.T) {
 	})
 
 	t.Run("GetWorkflowStepsNoDecodeByDefault", func(t *testing.T) {
-		steps, err := client.GetWorkflowSteps(workflowID)
+		steps, err := client.GetWorkflowSteps(client, workflowID)
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
 		assert.Equal(t, "GreetStep", steps[0].StepName)
@@ -2782,7 +2778,7 @@ func TestClientListAndSteps(t *testing.T) {
 	})
 
 	t.Run("GetWorkflowStepsLoadsWhenRequested", func(t *testing.T) {
-		steps, err := client.GetWorkflowSteps(workflowID, WithStepsLoadOutput(true))
+		steps, err := client.GetWorkflowSteps(client, workflowID, WithStepsLoadOutput(true))
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
 		output, ok := steps[0].Output.(string)
@@ -2806,14 +2802,14 @@ func TestClientTriggerScheduleTyped(t *testing.T) {
 
 	const workflowFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule"
 	const name = "client-trigger-typed"
-	require.NoError(t, c.CreateSchedule(ClientScheduleInput{
+	require.NoError(t, c.CreateSchedule(c, ScheduleSpec{
 		ScheduleName: name,
 		WorkflowName: workflowFQN,
 		Schedule:     "0 0 * * * *",
 	}))
-	t.Cleanup(func() { _ = c.DeleteSchedule(name) })
+	t.Cleanup(func() { _ = c.DeleteSchedule(c, name) })
 
-	handle, err := ClientTriggerSchedule[string](c, name)
+	handle, err := TriggerSchedule[string](c, name)
 	require.NoError(t, err)
 	require.NotNil(t, handle)
 	require.Contains(t, handle.GetWorkflowID(), name)

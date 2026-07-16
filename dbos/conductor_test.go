@@ -1050,10 +1050,12 @@ func TestConductorScheduleHandlers(t *testing.T) {
 	require.NoError(t, dbosCtx.Launch())
 
 	const baseSchedule = "cond-base-schedule"
-	require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+	require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: baseSchedule,
 		Schedule:     "0 0 0 1 1 *",
-	}, WithScheduleContext("hello")))
+		Workflow:     testWorkflowForSchedule,
+		Context:      "hello",
+	}))
 
 	mockServer := newMockWebSocketServer()
 	t.Cleanup(mockServer.shutdown)
@@ -1150,9 +1152,10 @@ func TestConductorScheduleHandlers(t *testing.T) {
 	t.Run("backfill_schedule", func(t *testing.T) {
 		// Create a fast-cron schedule so backfill produces multiple ticks.
 		const fastSchedule = "cond-backfill-schedule"
-		require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
 			ScheduleName: fastSchedule,
 			Schedule:     "*/1 * * * * *",
+			Workflow:     testWorkflowForSchedule,
 		}))
 		t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, fastSchedule) })
 

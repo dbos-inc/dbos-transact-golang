@@ -280,8 +280,10 @@ func resolveDecoder[T any](storedSerialization string, customSer Serializer[any]
 	return nil, fmt.Errorf("unknown serialization format %q", storedSerialization)
 }
 
-// getCustomSerializerFromCtx extracts the user-provided custom serializer from a DBOSContext, if set.
-func getCustomSerializerFromCtx(ctx DBOSContext) Serializer[any] {
+// getCustomSerializerFromCtx extracts the user-provided custom serializer, if set.
+// It accepts any context but only real DBOS contexts (a Client or DBOSContext,
+// both *dbosContext under the hood) carry one; mocks and plain contexts yield nil.
+func getCustomSerializerFromCtx(ctx context.Context) Serializer[any] {
 	if dc, ok := ctx.(*dbosContext); ok {
 		return dc.serializer
 	}

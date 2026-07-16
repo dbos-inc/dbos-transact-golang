@@ -89,12 +89,12 @@ type Queue interface {
 	GetPartitionQueue() bool
 	GetPollingInterval() time.Duration
 
-	SetGlobalConcurrency(ctx DBOSContext, value *int) error
-	SetWorkerConcurrency(ctx DBOSContext, value *int) error
-	SetRateLimit(ctx DBOSContext, value *RateLimiter) error
-	SetPriorityEnabled(ctx DBOSContext, value bool) error
-	SetPartitionQueue(ctx DBOSContext, value bool) error
-	SetPollingInterval(ctx DBOSContext, value time.Duration) error
+	SetGlobalConcurrency(ctx Client, value *int) error
+	SetWorkerConcurrency(ctx Client, value *int) error
+	SetRateLimit(ctx Client, value *RateLimiter) error
+	SetPriorityEnabled(ctx Client, value bool) error
+	SetPartitionQueue(ctx Client, value bool) error
+	SetPollingInterval(ctx Client, value time.Duration) error
 }
 
 // Compile-time check that *WorkflowQueue satisfies the Queue interface.
@@ -110,22 +110,22 @@ func (q *WorkflowQueue) GetPartitionQueue() bool    { return q.PartitionQueue }
 func (q *WorkflowQueue) GetPollingInterval() time.Duration { return q.basePollingInterval }
 
 // SetGlobalConcurrency updates the queue's global concurrency limit. Pass nil to clear it.
-func (q *WorkflowQueue) SetGlobalConcurrency(ctx DBOSContext, value *int) error {
+func (q *WorkflowQueue) SetGlobalConcurrency(ctx Client, value *int) error {
 	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.GlobalConcurrency = value })
 }
 
 // SetWorkerConcurrency updates the queue's per-executor concurrency limit. Pass nil to clear it.
-func (q *WorkflowQueue) SetWorkerConcurrency(ctx DBOSContext, value *int) error {
+func (q *WorkflowQueue) SetWorkerConcurrency(ctx Client, value *int) error {
 	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.WorkerConcurrency = value })
 }
 
 // SetRateLimit updates the queue's rate limiter. Pass nil to clear it.
-func (q *WorkflowQueue) SetRateLimit(ctx DBOSContext, value *RateLimiter) error {
+func (q *WorkflowQueue) SetRateLimit(ctx Client, value *RateLimiter) error {
 	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.RateLimit = value })
 }
 
 // SetPriorityEnabled toggles priority-based scheduling for the queue.
-func (q *WorkflowQueue) SetPriorityEnabled(ctx DBOSContext, value bool) error {
+func (q *WorkflowQueue) SetPriorityEnabled(ctx Client, value bool) error {
 	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.PriorityEnabled = value })
 }
 
@@ -135,7 +135,7 @@ func (q *WorkflowQueue) SetPriorityEnabled(ctx DBOSContext, value bool) error {
 // workflows already enqueued on it: they were enqueued without a partition key,
 // and a partitioned queue only dequeues from its partitions, so they will never
 // be dequeued.
-func (q *WorkflowQueue) SetPartitionQueue(ctx DBOSContext, value bool) error {
+func (q *WorkflowQueue) SetPartitionQueue(ctx Client, value bool) error {
 	wasUnpartitioned := !q.PartitionQueue
 	if err := q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.PartitionQueue = value }); err != nil {
 		return err
@@ -153,7 +153,7 @@ func (q *WorkflowQueue) SetPartitionQueue(ctx DBOSContext, value bool) error {
 // This does not reset a worker currently backed off above the base; the change
 // takes effect immediately only when it raises the floor above the current
 // interval, otherwise as the worker scales back down on successful iterations.
-func (q *WorkflowQueue) SetPollingInterval(ctx DBOSContext, value time.Duration) error {
+func (q *WorkflowQueue) SetPollingInterval(ctx Client, value time.Duration) error {
 	return q.applyConfigChange(ctx, func(c *WorkflowQueue) { c.basePollingInterval = value })
 }
 
@@ -163,7 +163,7 @@ func (q *WorkflowQueue) SetPollingInterval(ctx DBOSContext, value time.Duration)
 // applies the change, cross-field validation runs against the fresh values, and
 // the row is written. On success the change is reflected on the receiver so its
 // getters return the updated value.
-func (q *WorkflowQueue) applyConfigChange(ctx DBOSContext, mutate func(*WorkflowQueue)) error {
+func (q *WorkflowQueue) applyConfigChange(ctx Client, mutate func(*WorkflowQueue)) error {
 	if !q.databaseBacked {
 		return fmt.Errorf("queue %s: configuration can only be updated on database-backed queues registered via RegisterQueue", q.Name)
 	}
@@ -357,14 +357,14 @@ func validateQueueConfig(q *WorkflowQueue) error {
 //	    dbos.WithWorkerConcurrency(5),
 //	    dbos.WithPriorityEnabled(),
 //	)
-func RegisterQueue(ctx DBOSContext, name string, options ...QueueOption) (Queue, error) {
+func RegisterQueue(ctx Client, name string, options ...QueueOption) (Queue, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.RegisterQueue(ctx, name, options...)
 }
 
-func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...QueueOption) (Queue, error) {
+func (c *dbosContext) RegisterQueue(_ Client, name string, options ...QueueOption) (Queue, error) {
 	if _, inMemory := c.queueRunner.workflowQueueRegistry[name]; inMemory {
 		err := fmt.Errorf("cannot register database-backed queue %q: an in-memory queue with that name already exists", name)
 		c.logger.Error("queue name conflict", "queue_name", name, "error", err)
@@ -441,14 +441,14 @@ func (c *dbosContext) RegisterQueue(_ DBOSContext, name string, options ...Queue
 
 // RetrieveQueue returns the queue with the given name, or nil if
 // no such queue has been registered.
-func RetrieveQueue(ctx DBOSContext, name string) (Queue, error) {
+func RetrieveQueue(ctx Client, name string) (Queue, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.RetrieveQueue(ctx, name)
 }
 
-func (c *dbosContext) RetrieveQueue(_ DBOSContext, name string) (Queue, error) {
+func (c *dbosContext) RetrieveQueue(_ Client, name string) (Queue, error) {
 	cfg, err := sysdb.RetryWithResult(c, func() (*models.QueueConfig, error) {
 		return c.systemDB.GetQueue(c, name)
 	}, sysdb.WithRetrierLogger(c.logger))
@@ -464,14 +464,14 @@ func (c *dbosContext) RetrieveQueue(_ DBOSContext, name string) (Queue, error) {
 }
 
 // ListQueues returns all queues registered in the system database.
-func ListQueues(ctx DBOSContext) ([]Queue, error) {
+func ListQueues(ctx Client) ([]Queue, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 	return ctx.ListQueues(ctx)
 }
 
-func (c *dbosContext) ListQueues(_ DBOSContext) ([]Queue, error) {
+func (c *dbosContext) ListQueues(_ Client) ([]Queue, error) {
 	cfgs, err := sysdb.RetryWithResult(c, func() ([]models.QueueConfig, error) {
 		return c.systemDB.ListQueues(c)
 	}, sysdb.WithRetrierLogger(c.logger))
@@ -487,14 +487,14 @@ func (c *dbosContext) ListQueues(_ DBOSContext) ([]Queue, error) {
 	return result, nil
 }
 
-func DeleteQueue(ctx DBOSContext, name string) error {
+func DeleteQueue(ctx Client, name string) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
 	return ctx.DeleteQueue(ctx, name)
 }
 
-func (c *dbosContext) DeleteQueue(_ DBOSContext, name string) error {
+func (c *dbosContext) DeleteQueue(_ Client, name string) error {
 	return sysdb.Retry(c, func() error {
 		return c.systemDB.DeleteQueue(c, name)
 	}, sysdb.WithRetrierLogger(c.logger))

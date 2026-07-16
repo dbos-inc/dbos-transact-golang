@@ -38,10 +38,13 @@ func TestScheduleCRUD(t *testing.T) {
 		const name = "create-delete-schedule"
 		const ctxValue = "test-context"
 		capturingFQN := "github.com/dbos-inc/dbos-transact-golang/dbos.testCapturingScheduledWorkflow"
-		err := CreateSchedule(dbosCtx, testCapturingScheduledWorkflow, CreateScheduleRequest{
+		err := CreateSchedule(dbosCtx, ScheduleSpec{
 			ScheduleName: name,
 			Schedule:     "*/1 * * * * *",
-		}, WithScheduleContext(ctxValue), WithScheduleQueueName(customQueue.Name))
+			Workflow:     testCapturingScheduledWorkflow,
+			Context:      ctxValue,
+			QueueName:    customQueue.Name,
+		})
 		require.NoError(t, err)
 
 		schedule, err := GetSchedule(dbosCtx, name)
@@ -106,23 +109,26 @@ func TestScheduleCRUD(t *testing.T) {
 		const nameB = "list-schedule-b"
 		const nameC = "list-schedule-c"
 
-		err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		err := CreateSchedule(dbosCtx, ScheduleSpec{
 			ScheduleName: nameA,
 			Schedule:     "0 0 * * * *",
+			Workflow:     testWorkflowForSchedule,
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, nameA) })
 
-		err = CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		err = CreateSchedule(dbosCtx, ScheduleSpec{
 			ScheduleName: nameB,
 			Schedule:     "0 0 * * * *",
+			Workflow:     testWorkflowForSchedule,
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, nameB) })
 
-		err = CreateSchedule(dbosCtx, testWorkflowForScheduleCustomName, CreateScheduleRequest{
+		err = CreateSchedule(dbosCtx, ScheduleSpec{
 			ScheduleName: nameC,
 			Schedule:     "0 0 * * * *",
+			Workflow:     testWorkflowForScheduleCustomName,
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, nameC) })
@@ -198,24 +204,27 @@ func TestScheduleCRUD(t *testing.T) {
 
 	t.Run("DuplicateName", func(t *testing.T) {
 		const name = "duplicate-name-schedule"
-		require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
 			ScheduleName: name,
 			Schedule:     "0 0 * * * *",
+			Workflow:     testWorkflowForSchedule,
 		}))
 		t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, name) })
 
-		err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		err := CreateSchedule(dbosCtx, ScheduleSpec{
 			ScheduleName: name,
 			Schedule:     "0 0 * * * *",
+			Workflow:     testWorkflowForSchedule,
 		})
 		require.Error(t, err, "creating a schedule with a duplicate name must fail")
 	})
 
 	t.Run("PauseResumeSchedule", func(t *testing.T) {
 		const name = "pause-resume-schedule"
-		err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		err := CreateSchedule(dbosCtx, ScheduleSpec{
 			ScheduleName: name,
 			Schedule:     "0 0 * * * *",
+			Workflow:     testWorkflowForSchedule,
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, name) })
@@ -277,10 +286,10 @@ func TestApplySchedules(t *testing.T) {
 
 	// Round 1: apply three active schedules. toKeep fires every second on
 	// queueA so we can observe that a queue change takes effect on re-apply.
-	err := ApplySchedules(dbosCtx, []ApplySchedulesRequest{
-		{ScheduleName: toPause, WorkflowFn: testWorkflowForSchedule, Schedule: "*/10 * * * * *"},
-		{ScheduleName: toKeep, WorkflowFn: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueA.Name},
-		{ScheduleName: toDrop, WorkflowFn: testWorkflowForSchedule, Schedule: "0 30 * * * *"},
+	err := ApplySchedules(dbosCtx, []ScheduleSpec{
+		{ScheduleName: toPause, Workflow: testWorkflowForSchedule, Schedule: "*/10 * * * * *"},
+		{ScheduleName: toKeep, Workflow: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueA.Name},
+		{ScheduleName: toDrop, Workflow: testWorkflowForSchedule, Schedule: "0 30 * * * *"},
 	})
 	require.NoError(t, err)
 
@@ -311,8 +320,8 @@ func TestApplySchedules(t *testing.T) {
 	// Round 2: pause one, delete one, re-apply the third to change its queue.
 	require.NoError(t, PauseSchedule(dbosCtx, toPause))
 	require.NoError(t, DeleteSchedule(dbosCtx, toDrop))
-	require.NoError(t, ApplySchedules(dbosCtx, []ApplySchedulesRequest{
-		{ScheduleName: toKeep, WorkflowFn: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueB.Name},
+	require.NoError(t, ApplySchedules(dbosCtx, []ScheduleSpec{
+		{ScheduleName: toKeep, Workflow: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueB.Name},
 	}))
 
 	// Paused: schedule still exists but its cron entry is removed.
@@ -378,10 +387,10 @@ func TestApplySchedulesConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			errs <- ApplySchedules(dbosCtx, []ApplySchedulesRequest{
+			errs <- ApplySchedules(dbosCtx, []ScheduleSpec{
 				{
 					ScheduleName: name,
-					WorkflowFn:   testWorkflowForSchedule,
+					Workflow:     testWorkflowForSchedule,
 					Schedule:     "0 0 * * * *",
 					Context:      map[string]any{"region": "us"},
 				},
@@ -404,10 +413,10 @@ func TestApplySchedulesConcurrent(t *testing.T) {
 	scheduleID := schedules[0].ScheduleID
 
 	// Re-applying updates definition in place and preserves schedule_id.
-	require.NoError(t, ApplySchedules(dbosCtx, []ApplySchedulesRequest{
+	require.NoError(t, ApplySchedules(dbosCtx, []ScheduleSpec{
 		{
 			ScheduleName: name,
-			WorkflowFn:   testWorkflowForSchedule,
+			Workflow:     testWorkflowForSchedule,
 			Schedule:     "0 0 0 * * *",
 			Context:      map[string]any{"region": "eu"},
 		},
@@ -436,10 +445,10 @@ func TestApplySchedulesLiveUpdate(t *testing.T) {
 	require.NoError(t, dbosCtx.Launch())
 
 	const name = "live-update"
-	require.NoError(t, ApplySchedules(dbosCtx, []ApplySchedulesRequest{
+	require.NoError(t, ApplySchedules(dbosCtx, []ScheduleSpec{
 		{
 			ScheduleName: name,
-			WorkflowFn:   testLiveUpdateScheduledWorkflow,
+			Workflow:     testLiveUpdateScheduledWorkflow,
 			Schedule:     "*/1 * * * * *",
 			Context:      map[string]any{"version": 1},
 		},
@@ -454,10 +463,10 @@ func TestApplySchedulesLiveUpdate(t *testing.T) {
 		return liveUpdateVersionCount(1) >= 1
 	}, 10*time.Second, 100*time.Millisecond, "schedule should fire with context version 1")
 
-	require.NoError(t, ApplySchedules(dbosCtx, []ApplySchedulesRequest{
+	require.NoError(t, ApplySchedules(dbosCtx, []ScheduleSpec{
 		{
 			ScheduleName: name,
-			WorkflowFn:   testLiveUpdateScheduledWorkflow,
+			Workflow:     testLiveUpdateScheduledWorkflow,
 			Schedule:     "*/1 * * * * *",
 			Context:      map[string]any{"version": 2},
 		},
@@ -486,10 +495,10 @@ func TestApplySchedulesPreservesRuntimeState(t *testing.T) {
 	c := dbosCtx.(*dbosContext)
 
 	const name = "state-keep"
-	require.NoError(t, ApplySchedules(dbosCtx, []ApplySchedulesRequest{
+	require.NoError(t, ApplySchedules(dbosCtx, []ScheduleSpec{
 		{
 			ScheduleName: name,
-			WorkflowFn:   testWorkflowForSchedule,
+			Workflow:     testWorkflowForSchedule,
 			Schedule:     "0 0 0 * * *", // rare fire
 			Context:      map[string]any{"version": 1},
 		},
@@ -500,10 +509,10 @@ func TestApplySchedulesPreservesRuntimeState(t *testing.T) {
 	lastFired := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	require.NoError(t, c.systemDB.UpdateScheduleLastFiredAt(c, name, lastFired))
 
-	require.NoError(t, ApplySchedules(dbosCtx, []ApplySchedulesRequest{
+	require.NoError(t, ApplySchedules(dbosCtx, []ScheduleSpec{
 		{
 			ScheduleName: name,
-			WorkflowFn:   testWorkflowForSchedule,
+			Workflow:     testWorkflowForSchedule,
 			Schedule:     "0 0 0 * * *",
 			Context:      map[string]any{"version": 2},
 		},
@@ -582,22 +591,22 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 
 	// Second argument is not ScheduledWorkflowInput.
 	badInputType := func(ctx DBOSContext, input string) (any, error) { return nil, nil }
-	err := ApplySchedules(dbosCtx, []ApplySchedulesRequest{
-		{ScheduleName: "bad-input", WorkflowFn: badInputType, Schedule: "0 0 * * * *"},
+	err := ApplySchedules(dbosCtx, []ScheduleSpec{
+		{ScheduleName: "bad-input", Workflow: badInputType, Schedule: "0 0 * * * *"},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ScheduledWorkflowInput")
 
 	// Not a function at all.
-	err = ApplySchedules(dbosCtx, []ApplySchedulesRequest{
-		{ScheduleName: "not-a-func", WorkflowFn: "not a function", Schedule: "0 0 * * * *"},
+	err = ApplySchedules(dbosCtx, []ScheduleSpec{
+		{ScheduleName: "not-a-func", Workflow: "not a function", Schedule: "0 0 * * * *"},
 	})
 	require.Error(t, err)
 
 	// Too few parameters.
 	tooFewParams := func(ctx DBOSContext) (any, error) { return nil, nil }
-	err = ApplySchedules(dbosCtx, []ApplySchedulesRequest{
-		{ScheduleName: "too-few", WorkflowFn: tooFewParams, Schedule: "0 0 * * * *"},
+	err = ApplySchedules(dbosCtx, []ScheduleSpec{
+		{ScheduleName: "too-few", Workflow: tooFewParams, Schedule: "0 0 * * * *"},
 	})
 	require.Error(t, err)
 
@@ -617,9 +626,10 @@ func TestScheduleCronValidation(t *testing.T) {
 	require.NoError(t, dbosCtx.Launch())
 
 	// CreateSchedule rejects a garbage cron expression up-front.
-	err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+	err := CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: "bad-cron-create",
 		Schedule:     "not a cron",
+		Workflow:     testWorkflowForSchedule,
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid cron schedule")
@@ -628,9 +638,9 @@ func TestScheduleCronValidation(t *testing.T) {
 	require.Nil(t, got, "invalid-cron schedule must not be persisted")
 
 	// ApplySchedules rejects invalid cron before writing any row (atomicity).
-	err = ApplySchedules(dbosCtx, []ApplySchedulesRequest{
-		{ScheduleName: "apply-good", WorkflowFn: testWorkflowForSchedule, Schedule: "0 0 * * * *"},
-		{ScheduleName: "apply-bad", WorkflowFn: testWorkflowForSchedule, Schedule: "garbage"},
+	err = ApplySchedules(dbosCtx, []ScheduleSpec{
+		{ScheduleName: "apply-good", Workflow: testWorkflowForSchedule, Schedule: "0 0 * * * *"},
+		{ScheduleName: "apply-bad", Workflow: testWorkflowForSchedule, Schedule: "garbage"},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid cron schedule")
@@ -641,10 +651,12 @@ func TestScheduleCronValidation(t *testing.T) {
 	}
 
 	// Invalid timezone also surfaces at validate time.
-	err = CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+	err = CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: "bad-tz",
 		Schedule:     "0 0 * * * *",
-	}, WithCronTimezone("Not/A_Zone"))
+		Workflow:     testWorkflowForSchedule,
+		CronTimezone: "Not/A_Zone",
+	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid cron schedule")
 }
@@ -656,9 +668,10 @@ func TestBackfillSchedule(t *testing.T) {
 	// First register the workflow
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 
-	err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+	err := CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: "backfill-schedule",
-		Schedule:     "*/1 * * * * *", // Every second for testing
+		Schedule:     "*/1 * * * * *", // Every second for testing,
+		Workflow:     testWorkflowForSchedule,
 	})
 	require.NoError(t, err)
 
@@ -708,10 +721,12 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 	// Use a far-future cron so the live scheduler doesn't fire while the test runs.
 	const ctxValue = "backfill-recovery-context"
 	const scheduleName = "backfill-recovery-schedule"
-	err := CreateSchedule(dbosCtx, testCapturingScheduledWorkflow, CreateScheduleRequest{
+	err := CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: scheduleName,
-		Schedule:     "0 0 0 1 1 *", // Once a year
-	}, WithScheduleContext(ctxValue))
+		Schedule:     "0 0 0 1 1 *", // Once a year,
+		Workflow:     testCapturingScheduledWorkflow,
+		Context:      ctxValue,
+	})
 	require.NoError(t, err)
 
 	// Backfill a 5-second window of every-second ticks.
@@ -777,14 +792,16 @@ func TestTriggerSchedule(t *testing.T) {
 	require.NoError(t, dbosCtx.Launch())
 
 	const ctxValue = "trigger-context-value"
-	err := CreateSchedule(dbosCtx, testCapturingScheduledWorkflow, CreateScheduleRequest{
+	err := CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: "trigger-schedule",
 		Schedule:     "0 0 * * * *",
-	}, WithScheduleContext(ctxValue))
+		Workflow:     testCapturingScheduledWorkflow,
+		Context:      ctxValue,
+	})
 	require.NoError(t, err)
 
 	beforeTrigger := time.Now()
-	handle, err := TriggerSchedule(dbosCtx, "trigger-schedule")
+	handle, err := TriggerSchedule[any](dbosCtx, "trigger-schedule")
 	afterTrigger := time.Now()
 	require.NoError(t, err)
 	require.NotNil(t, handle)
@@ -805,12 +822,14 @@ func TestTriggerSchedule(t *testing.T) {
 
 	// A second schedule sharing the same workflow function: ScheduleName is what
 	// distinguishes their runs, since both have the same workflow name.
-	err = CreateSchedule(dbosCtx, testCapturingScheduledWorkflow, CreateScheduleRequest{
+	err = CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: "trigger-schedule-b",
 		Schedule:     "0 0 * * * *",
-	}, WithScheduleContext(ctxValue))
+		Workflow:     testCapturingScheduledWorkflow,
+		Context:      ctxValue,
+	})
 	require.NoError(t, err)
-	handleB, err := TriggerSchedule(dbosCtx, "trigger-schedule-b")
+	handleB, err := TriggerSchedule[any](dbosCtx, "trigger-schedule-b")
 	require.NoError(t, err)
 	_, err = handleB.GetResult()
 	require.NoError(t, err)
@@ -852,15 +871,15 @@ func TestScheduleWithOptions(t *testing.T) {
 	// First register the workflow
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 
-	err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
-		ScheduleName: "full-options-schedule",
-		Schedule:     "0 0 * * * *",
-	},
-		WithScheduleContext(map[string]string{"key": "value"}),
-		WithAutomaticBackfill(true),
-		WithCronTimezone("America/New_York"),
-		WithScheduleQueueName("my-queue"),
-	)
+	err := CreateSchedule(dbosCtx, ScheduleSpec{
+		ScheduleName:      "full-options-schedule",
+		Schedule:          "0 0 * * * *",
+		Workflow:          testWorkflowForSchedule,
+		Context:           map[string]string{"key": "value"},
+		AutomaticBackfill: true,
+		CronTimezone:      "America/New_York",
+		QueueName:         "my-queue",
+	})
 	require.NoError(t, err)
 
 	schedule, err := GetSchedule(dbosCtx, "full-options-schedule")
@@ -915,9 +934,10 @@ func testCapturingScheduledWorkflow(ctx DBOSContext, input ScheduledWorkflowInpu
 	scheduledInputCapture.Store(wfID, input)
 	// CreateSchedule is wrapped as a step via runAsTxn when called inside a
 	// workflow. The inner cron never fires during tests.
-	if err := CreateSchedule(ctx, testCapturingScheduledWorkflow, CreateScheduleRequest{
+	if err := CreateSchedule(ctx, ScheduleSpec{
 		ScheduleName: wfID + "-inner",
 		Schedule:     "0 0 0 1 1 *",
+		Workflow:     testCapturingScheduledWorkflow,
 	}); err != nil {
 		return nil, err
 	}
@@ -944,10 +964,12 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 	const scheduleName = "test-backfill-restart"
 	const wfFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForBackfillRestart"
 
-	err := CreateSchedule(dbosCtx, testWorkflowForBackfillRestart, CreateScheduleRequest{
-		ScheduleName: scheduleName,
-		Schedule:     "*/1 * * * * *", // Every second
-	}, WithAutomaticBackfill(true))
+	err := CreateSchedule(dbosCtx, ScheduleSpec{
+		ScheduleName:      scheduleName,
+		Schedule:          "*/1 * * * * *", // Every second,
+		Workflow:          testWorkflowForBackfillRestart,
+		AutomaticBackfill: true,
+	})
 	require.NoError(t, err)
 
 	// Wait for the schedule to fire at least once so LastFiredAt is set.
@@ -991,8 +1013,8 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 }
 
 func testWorkflowExpectingApplySchedulesError(ctx DBOSContext, _ string) (string, error) {
-	err := ApplySchedules(ctx, []ApplySchedulesRequest{
-		{ScheduleName: "x", WorkflowFn: testWorkflowForSchedule, Schedule: "0 0 * * * *"},
+	err := ApplySchedules(ctx, []ScheduleSpec{
+		{ScheduleName: "x", Workflow: testWorkflowForSchedule, Schedule: "0 0 * * * *"},
 	})
 	if err == nil {
 		return "", nil
@@ -1009,7 +1031,7 @@ func testWorkflowExpectingBackfillScheduleError(ctx DBOSContext, _ string) (stri
 }
 
 func testWorkflowExpectingTriggerScheduleError(ctx DBOSContext, _ string) (string, error) {
-	_, err := TriggerSchedule(ctx, "any")
+	_, err := TriggerSchedule[any](ctx, "any")
 	if err == nil {
 		return "", nil
 	}
@@ -1059,10 +1081,12 @@ func TestScheduleCronTimezone(t *testing.T) {
 	require.NoError(t, dbosCtx.Launch())
 
 	const scheduleName = "tz-schedule"
-	err := CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+	err := CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: scheduleName,
-		Schedule:     "0 0 9 * * *", // 09:00:00 every day
-	}, WithCronTimezone("America/New_York"))
+		Schedule:     "0 0 9 * * *", // 09:00:00 every day,
+		Workflow:     testWorkflowForSchedule,
+		CronTimezone: "America/New_York",
+	})
 	require.NoError(t, err)
 
 	c := dbosCtx.(*dbosContext)
@@ -1096,13 +1120,14 @@ func TestScheduleNameSurvivesExportImport(t *testing.T) {
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 	require.NoError(t, dbosCtx.Launch())
 
-	require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+	require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: "export-test",
-		Schedule:     "0 0 0 * * *", // daily, won't fire during the test
+		Schedule:     "0 0 0 * * *", // daily, won't fire during the test,
+		Workflow:     testWorkflowForSchedule,
 	}))
 	t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, "export-test") })
 
-	handle, err := TriggerSchedule(dbosCtx, "export-test")
+	handle, err := TriggerSchedule[any](dbosCtx, "export-test")
 	require.NoError(t, err)
 	_, err = handle.GetResult()
 	require.NoError(t, err)
@@ -1150,13 +1175,13 @@ func TestScheduleFiresWithoutLocalRegistration(t *testing.T) {
 	const scheduleName = "unregistered-workflow-schedule"
 	const workflowName = "workflowRegisteredOnAnotherWorker"
 	const queueName = "queue-listened-elsewhere"
-	require.NoError(t, client.CreateSchedule(ClientScheduleInput{
+	require.NoError(t, client.CreateSchedule(client, ScheduleSpec{
 		ScheduleName: scheduleName,
 		WorkflowName: workflowName,
 		Schedule:     "*/1 * * * * *",
 		QueueName:    queueName,
 	}))
-	t.Cleanup(func() { _ = client.DeleteSchedule(scheduleName) })
+	t.Cleanup(func() { _ = client.DeleteSchedule(client, scheduleName) })
 
 	var enqueued WorkflowStatus
 	require.Eventually(t, func() bool {
@@ -1173,7 +1198,7 @@ func TestScheduleFiresWithoutLocalRegistration(t *testing.T) {
 	require.Equal(t, scheduleName, enqueued.ScheduleName)
 	require.Equal(t, WorkflowStatusEnqueued, enqueued.Status)
 
-	sched, err := client.GetSchedule(scheduleName)
+	sched, err := client.GetSchedule(client, scheduleName)
 	require.NoError(t, err)
 	require.NotNil(t, sched)
 	require.NotNil(t, sched.LastFiredAt, "last_fired_at should be updated after the tick")
