@@ -90,7 +90,7 @@ func workflow(ctx dbos.Context, i int) (int, error) {
 		return 0, err
 	}
 
-	_, err = dbos.ForkWorkflow[int](ctx, workflowID, dbos.WithForkStartStep(uint(stepID)))
+	_, err = dbos.ForkWorkflow[int](ctx, dbos.ForkWorkflowInput{OriginalWorkflowID: workflowID, StartStep: uint(stepID)})
 	if err != nil {
 		return 0, err
 	}
@@ -478,7 +478,7 @@ func TestClientTypedHelpersWithMock(t *testing.T) {
 	forkHandle := mocks.NewMockWorkflowHandle[any](t)
 	forkHandle.On("GetResult").Return(11, nil).Once()
 	mockClient.On("ForkWorkflow", mockClient, dbos.ForkWorkflowInput{OriginalWorkflowID: "wf-ret"}).Return(forkHandle, nil).Once()
-	fh, err := dbos.ForkWorkflow[int](mockClient, "wf-ret")
+	fh, err := dbos.ForkWorkflow[int](mockClient, dbos.ForkWorkflowInput{OriginalWorkflowID: "wf-ret"})
 	if err != nil {
 		t.Fatalf("ForkWorkflow failed: %v", err)
 	}

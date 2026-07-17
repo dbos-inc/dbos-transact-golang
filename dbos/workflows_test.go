@@ -4177,7 +4177,7 @@ func TestSendRecv(t *testing.T) {
 		// Fork past the recv step: its checkpoint is copied and the recv must replay from it,
 		// without waiting (the recv timeout is 60 minutes) and without recording new steps.
 		start := time.Now()
-		forkedHandle, err := ForkWorkflow[string](dbosCtx, receiveHandle.GetWorkflowID(), WithForkStartStep(2))
+		forkedHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: receiveHandle.GetWorkflowID(), StartStep: 2})
 		require.NoError(t, err, "failed to fork receive workflow")
 		forkedResult, err := forkedHandle.GetResult()
 		require.NoError(t, err, "failed to get result from forked receive workflow")
@@ -4206,7 +4206,7 @@ func TestSendRecv(t *testing.T) {
 
 		// Fork past the recv step: the checkpointed timeout error must round-trip through
 		// the recorded errStr with its concrete type and code preserved.
-		forkedHandle, err := ForkWorkflow[string](dbosCtx, receiveHandle.GetWorkflowID(), WithForkStartStep(2))
+		forkedHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: receiveHandle.GetWorkflowID(), StartStep: 2})
 		require.NoError(t, err, "failed to fork receive workflow")
 		_, err = forkedHandle.GetResult()
 		require.Error(t, err, "expected replayed timeout error")
@@ -4923,7 +4923,7 @@ func TestSetGetEvent(t *testing.T) {
 
 		// Fork past both steps: the checkpointed timeout error must round-trip through
 		// the recorded errStr with its concrete type and code preserved.
-		forkedHandle, err := ForkWorkflow[string](dbosCtx, getHandle.GetWorkflowID(), WithForkStartStep(2))
+		forkedHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: getHandle.GetWorkflowID(), StartStep: 2})
 		require.NoError(t, err, "failed to fork get event workflow")
 		_, err = forkedHandle.GetResult()
 		require.Error(t, err, "expected replayed timeout error")
@@ -4958,7 +4958,7 @@ func TestSetGetEvent(t *testing.T) {
 		// Fork past the getEvent step: its checkpoint is copied and the getEvent must replay
 		// from it, without waiting (the timeout is 60 minutes) and without recording new steps.
 		start := time.Now()
-		forkedHandle, err := ForkWorkflow[string](dbosCtx, getHandle.GetWorkflowID(), WithForkStartStep(2))
+		forkedHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: getHandle.GetWorkflowID(), StartStep: 2})
 		require.NoError(t, err, "failed to fork get event workflow")
 		forkedResult, err := forkedHandle.GetResult()
 		require.NoError(t, err, "failed to get result from forked get event workflow")
@@ -7468,7 +7468,7 @@ func TestPatching(t *testing.T) {
 		// Fork the workflow at different steps and verify behavior
 		// Steps 0 and 1 should take the new code (patched), step 2 should take the old code
 		for startStep := 0; startStep <= 2; startStep++ {
-			forkHandle, err := ForkWorkflow[int](dbosCtx, handle.GetWorkflowID(), WithForkStartStep(uint(startStep)))
+			forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: handle.GetWorkflowID(), StartStep: uint(startStep)})
 			require.NoError(t, err, "failed to fork workflow at step %d", startStep)
 			result, err := forkHandle.GetResult()
 			require.NoError(t, err, "failed to get result for fork at step %d", startStep)
@@ -7523,7 +7523,7 @@ func TestPatching(t *testing.T) {
 		// Forking an old workflow (post-patch), at or after the patch step, on the new code should work without non-determinism errors
 		// Because step 1 (the patch) is matched by DeprecatePatch in the new code
 		for _, startStep := range []uint{2, 3} {
-			forkHandle, err := ForkWorkflow[int](dbosCtx, patchedHandle.GetWorkflowID(), WithForkStartStep(startStep))
+			forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: patchedHandle.GetWorkflowID(), StartStep: startStep})
 			require.NoError(t, err, "failed to fork workflow")
 			result, err = forkHandle.GetResult()
 			require.NoError(t, err, "failed to get result")
@@ -7536,7 +7536,7 @@ func TestPatching(t *testing.T) {
 
 		// Forking an old workflow (pre-patch), after the patch step, on the new code will result in a non-determinism error, because the 2nd step name changed
 		// Because the patch step now has a new name
-		forkHandle, err := ForkWorkflow[int](dbosCtx, handle.GetWorkflowID(), WithForkStartStep(2))
+		forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: handle.GetWorkflowID(), StartStep: 2})
 		require.NoError(t, err, "failed to fork workflow")
 		_, err = forkHandle.GetResult()
 		require.Error(t, err, "expected error when forking old workflow onto new workflow")
@@ -7610,7 +7610,7 @@ func TestPatching(t *testing.T) {
 		// Re-execute the patched history on the deprecated code: after
 		// firstStep replays, DeprecatePatch checks the marker at step 1 and
 		// the check fails with the injected error.
-		forkHandle, err := ForkWorkflow[int](dbosCtx, handle.GetWorkflowID(), WithForkStartStep(2))
+		forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: handle.GetWorkflowID(), StartStep: 2})
 		require.NoError(t, err, "failed to fork workflow")
 		_, err = forkHandle.GetResult()
 		require.Error(t, err, "expected the patch lookup error to surface")
@@ -7980,7 +7980,7 @@ func TestStreams(t *testing.T) {
 				streamStartedEvent.Wait()
 
 				// Fork workflow from step 2 (after the two first writes)
-				forkHandle, err := ForkWorkflow[string](dbosCtx, originalHandle.GetWorkflowID(), WithForkStartStep(2))
+				forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: originalHandle.GetWorkflowID(), StartStep: 2})
 				require.NoError(t, err, "failed to fork workflow")
 
 				// Verify forked workflow has stream entries up to step 2 (stream history copied)
@@ -8097,7 +8097,7 @@ func TestStreams(t *testing.T) {
 		streamStartedEvent.Wait()
 
 		// Fork workflow from step 2 (after the two first writes)
-		forkHandle, err := ForkWorkflow[string](dbosCtx, originalHandle.GetWorkflowID(), WithForkStartStep(2))
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: originalHandle.GetWorkflowID(), StartStep: 2})
 		require.NoError(t, err, "failed to fork workflow")
 
 		// Verify forked workflow has stream entries up to step 2 (stream history copied)
@@ -8605,7 +8605,7 @@ func TestExportImportWorkflow(t *testing.T) {
 		assert.Greater(t, historyCount, 0, "expected workflow events history to be imported")
 
 		// Verify the imported workflow can be forked
-		forkHandle, err := ForkWorkflow[exportTestPerson](dbosCtx, parentID, WithForkStartStep(uint(len(importedParentSteps))))
+		forkHandle, err := ForkWorkflow[exportTestPerson](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: parentID, StartStep: uint(len(importedParentSteps))})
 		require.NoError(t, err)
 
 		forkResult, err := forkHandle.GetResult()

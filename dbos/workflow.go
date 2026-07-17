@@ -822,6 +822,7 @@ type workflowOptions struct {
 	isRecovery          bool
 	isPortableWorkflow  bool
 	runInstance         ConfiguredInstance
+	err                 error // invalid option usage, surfaced when options are parsed
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
@@ -847,12 +848,14 @@ func WithRunInstance(instance ConfiguredInstance) WorkflowOption {
 
 // WithQueue enqueues the workflow to the given queue instead of executing immediately.
 // Queued workflows will be processed by the queue runner according to the queue's configuration.
-// The queue must be a non-nil handle from [RegisterQueue], [RetrieveQueue], or [ListQueues].
+// The queue must be a non-nil handle from [RegisterQueue], [RetrieveQueue], or [ListQueues];
+// passing nil makes the enclosing call return an error.
 // To enqueue by name, use [Enqueue].
 func WithQueue(queue Queue) WorkflowOption {
 	return func(p *workflowOptions) {
 		if queue == nil {
-			panic("WithQueue: queue cannot be nil")
+			p.err = errors.Join(p.err, errors.New("WithQueue: queue cannot be nil"))
+			return
 		}
 		p.queue = queue
 		p.QueueName = queue.GetName()
@@ -1135,6 +1138,10 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	}
 	for _, opt := range opts {
 		opt(&params)
+	}
+	if params.err != nil {
+		c.logger.Error("invalid workflow options", "workflow_name", params.WorkflowName, "error", params.err)
+		return nil, models.NewWorkflowExecutionError("", params.err)
 	}
 
 	// Lookup the registry for registration-time options
@@ -4693,108 +4700,50 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 	return handles, nil
 }
 
-// forkWorkflowOptions holds configuration parameters for forking a workflow.
-type forkWorkflowOptions struct {
-	forkedWorkflowID   string
-	startStep          uint
-	applicationVersion string
-	queueName          string
-	queuePartitionKey  string
-}
-
-// ForkOption is a functional option for configuring ForkWorkflow.
-type ForkOption func(*forkWorkflowOptions)
-
-// WithForkStartStep starts the forked workflow from the given step (default: 0).
-// The forked workflow reuses the operation outputs of steps 0 to startStep-1
-// copied from the original workflow.
-func WithForkStartStep(startStep uint) ForkOption {
-	return func(p *forkWorkflowOptions) {
-		p.startStep = startStep
-	}
-}
-
-// WithForkWorkflowID sets a custom workflow ID for the forked workflow (auto-generated if not set).
-func WithForkWorkflowID(id string) ForkOption {
-	return func(p *forkWorkflowOptions) {
-		p.forkedWorkflowID = id
-	}
-}
-
-// WithForkApplicationVersion sets the application version of the forked workflow
-// (inherited from the original workflow if not set).
-func WithForkApplicationVersion(version string) ForkOption {
-	return func(p *forkWorkflowOptions) {
-		p.applicationVersion = version
-	}
-}
-
-// WithForkQueue enqueues the forked workflow on the given queue instead of the
-// internal DBOS queue. The queue must be a non-nil handle from [RegisterQueue],
-// [RetrieveQueue], or [ListQueues].
-func WithForkQueue(queue Queue) ForkOption {
-	return func(p *forkWorkflowOptions) {
-		if queue == nil {
-			panic("WithForkQueue: queue cannot be nil")
-		}
-		p.queueName = queue.GetName()
-	}
-}
-
-// WithForkQueuePartitionKey sets the partition key used when enqueueing the
-// forked workflow onto a partitioned queue.
-func WithForkQueuePartitionKey(partitionKey string) ForkOption {
-	return func(p *forkWorkflowOptions) {
-		p.queuePartitionKey = partitionKey
-	}
-}
-
 // ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.
-// The forked workflow will have a new UUID (unless WithForkWorkflowID is used) and will execute
-// from the step set with WithForkStartStep, reusing the operation outputs of the preceding steps
+// The forked workflow will have a new UUID and will execute from the specified StartStep.
+// If StartStep > 0, the forked workflow will reuse the operation outputs from steps 0 to StartStep-1
 // copied from the original workflow.
+//
+// Parameters:
+//   - ctx: DBOS context for the operation
+//   - input: Configuration parameters for the forked workflow
 //
 // Returns a typed workflow handle for the newly created forked workflow.
 //
 // Example usage:
 //
 //	// Basic fork from step 5
-//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, "original-workflow-id",
-//	    dbos.WithForkStartStep(5))
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
+//	    OriginalWorkflowID: "original-workflow-id",
+//	    StartStep:          5,
+//	})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //
 //	// Fork with custom workflow ID and application version
-//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, "original-workflow-id",
-//	    dbos.WithForkStartStep(3),
-//	    dbos.WithForkWorkflowID("my-custom-fork-id"),
-//	    dbos.WithForkApplicationVersion("v2.0.0"))
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
+//	    OriginalWorkflowID: "original-workflow-id",
+//	    ForkedWorkflowID:   "my-custom-fork-id",
+//	    StartStep:          3,
+//	    ApplicationVersion: "v2.0.0",
+//	})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //
-//	// Fork onto a queue instead of the internal queue.
-//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, "original-workflow-id",
-//	    dbos.WithForkQueue(priorityQueue))
-func ForkWorkflow[R any](ctx Client, originalWorkflowID string, opts ...ForkOption) (WorkflowHandle[R], error) {
+//	// Fork onto a named queue instead of the internal queue.
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
+//	    OriginalWorkflowID: "original-workflow-id",
+//	    QueueName:          "priority",
+//	})
+func ForkWorkflow[R any](ctx Client, input ForkWorkflowInput) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 
-	var params forkWorkflowOptions
-	for _, opt := range opts {
-		opt(&params)
-	}
-
-	handle, err := ctx.ForkWorkflow(ctx, ForkWorkflowInput{
-		OriginalWorkflowID: originalWorkflowID,
-		ForkedWorkflowID:   params.forkedWorkflowID,
-		StartStep:          params.startStep,
-		ApplicationVersion: params.applicationVersion,
-		QueueName:          params.queueName,
-		QueuePartitionKey:  params.queuePartitionKey,
-	})
+	handle, err := ctx.ForkWorkflow(ctx, input)
 	if err != nil {
 		return nil, err
 	}

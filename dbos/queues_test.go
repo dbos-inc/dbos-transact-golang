@@ -2002,8 +2002,10 @@ func TestListenQueues(t *testing.T) {
 		_, err = originalHandle.GetResult()
 		require.NoError(t, err, "failed to get result from original workflow")
 
-		forkHandle, err := ForkWorkflow[string](dbosCtx, originalHandle.GetWorkflowID(),
-			WithForkQueue(forkTargetQueue))
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: originalHandle.GetWorkflowID(),
+			QueueName:          forkTargetQueue.GetName(),
+		})
 		require.NoError(t, err, "failed to fork workflow to custom queue")
 
 		forkResult, err := forkHandle.GetResult()
@@ -2037,9 +2039,11 @@ func TestListenQueues(t *testing.T) {
 		_, err = originalHandle.GetResult()
 		require.NoError(t, err, "failed to get result from original workflow")
 
-		forkHandle, err := ForkWorkflow[string](dbosCtx, originalHandle.GetWorkflowID(),
-			WithForkQueue(forkPartitionedQueue),
-			WithForkQueuePartitionKey("forked-partition"))
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: originalHandle.GetWorkflowID(),
+			QueueName:          forkPartitionedQueue.GetName(),
+			QueuePartitionKey:  "forked-partition",
+		})
 		require.NoError(t, err, "failed to fork workflow to partitioned queue")
 
 		forkResult, err := forkHandle.GetResult()

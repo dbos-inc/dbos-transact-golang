@@ -2784,7 +2784,7 @@ func TestForkPreservesSerialization(t *testing.T) {
 
 	// Fork past all recorded steps (0=checkpointStep, 1=SetEvent, 2=WriteStream)
 	// so every copied row must carry its serialization to replay correctly.
-	forkHandle, err := ForkWorkflow[TestWorkflowData](executor, "fork-serialization-orig", WithForkStartStep(3))
+	forkHandle, err := ForkWorkflow[TestWorkflowData](executor, ForkWorkflowInput{OriginalWorkflowID: "fork-serialization-orig", StartStep: 3})
 	require.NoError(t, err)
 	forkResult, err := forkHandle.GetResult()
 	require.NoError(t, err, "forked replay must decode copied checkpoints with their recorded serializer")
@@ -2878,7 +2878,7 @@ func TestExportImportPreservesSerialization(t *testing.T) {
 
 	// Fork past all steps: replay of the reimported checkpoints must decode
 	// with the serialization the import round-tripped.
-	forkHandle, err := ForkWorkflow[TestWorkflowData](executor, workflowID, WithForkStartStep(3))
+	forkHandle, err := ForkWorkflow[TestWorkflowData](executor, ForkWorkflowInput{OriginalWorkflowID: workflowID, StartStep: 3})
 	require.NoError(t, err)
 	forkResult, err := forkHandle.GetResult()
 	require.NoError(t, err, "replay of reimported checkpoints must decode with their recorded serializer")

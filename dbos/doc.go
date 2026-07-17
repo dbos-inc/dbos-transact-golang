@@ -97,7 +97,7 @@
 //	err = dbos.ResumeWorkflow(ctx, workflowID)
 //
 //	// Fork a workflow from a specific step
-//	handle, err := dbos.ForkWorkflow[string](ctx, originalID, dbos.WithForkStartStep(stepNumber))
+//	handle, err := dbos.ForkWorkflow[string](ctx, dbos.ForkWorkflowInput{OriginalWorkflowID: originalID, StartStep: stepNumber})
 //
 // Workflows can also be visualized and managed through the DBOS Console web UI.
 //

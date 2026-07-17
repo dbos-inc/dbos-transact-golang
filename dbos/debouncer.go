@@ -171,6 +171,9 @@ func (d *Debouncer[P, R]) Debounce(ctx Context, key string, delay time.Duration,
 	for _, opt := range opts {
 		opt(&options)
 	}
+	if options.err != nil {
+		return nil, options.err
+	}
 	if options.WorkflowID == "" {
 		if isWithinWorkflow {
 			workflowID, err := RunAsStep(ctx, func(ctx context.Context) (string, error) {
@@ -325,6 +328,9 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 	options := workflowOptions{}
 	for _, opt := range opts {
 		opt(&options)
+	}
+	if options.err != nil {
+		return nil, options.err
 	}
 
 	// Generate workflow ID if not provided
