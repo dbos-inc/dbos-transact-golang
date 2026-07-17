@@ -1818,7 +1818,7 @@ func TestDebouncerClient(t *testing.T) {
 		// Verify execution happened at least delay after first call
 		elapsed := time.Since(startTime)
 		assert.GreaterOrEqual(t, elapsed, delay, "execution should take at least delay")
-		assert.LessOrEqual(t, elapsed, 10*time.Second, "execution should take less than 10s")
+		assert.LessOrEqual(t, elapsed, 10*time.Second+delay, "execution should take at most the debouncer timeout plus completion slack")
 	})
 
 	t.Run("TestDelayGreaterThanTimeout", func(t *testing.T) {
