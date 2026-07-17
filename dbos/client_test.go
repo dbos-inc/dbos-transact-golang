@@ -1777,10 +1777,10 @@ func TestDebouncerClient(t *testing.T) {
 		var delay time.Duration
 		if isCockroach || useSqliteBackend() {
 			// CRDB and sqlite both use polling for notifications. Each Debounce
-			// call's GetEvent ACK can take >200ms, so the debouncer expires
-			// before the next call arrives. Bump the delay so the debouncer
+			// call's Send + GetEvent ACK round-trip can take ~2s, so the debouncer
+			// expires before the next call arrives. Bump the delay so the debouncer
 			// stays alive across all 5 calls.
-			delay = 2000 * time.Millisecond
+			delay = 5000 * time.Millisecond
 		} else {
 			delay = 200 * time.Millisecond
 		}
