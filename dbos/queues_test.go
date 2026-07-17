@@ -24,33 +24,33 @@ import (
 
 // registerWFQ / retrieveWFQ / listWFQ are test helpers that call the public
 // queue API (which returns the Queue interface) and unwrap the concrete
-// *WorkflowQueue, so existing tests can keep reading struct fields directly.
-func registerWFQ(ctx Context, name string, options ...QueueOption) (*WorkflowQueue, error) {
+// *workflowQueue, so existing tests can keep reading struct fields directly.
+func registerWFQ(ctx Context, name string, options ...QueueOption) (*workflowQueue, error) {
 	q, err := RegisterQueue(ctx, name, options...)
 	if err != nil {
 		return nil, err
 	}
-	return q.(*WorkflowQueue), nil
+	return q.(*workflowQueue), nil
 }
 
 func intPtr(i int) *int { return &i }
 
-func retrieveWFQ(ctx Context, name string) (*WorkflowQueue, error) {
+func retrieveWFQ(ctx Context, name string) (*workflowQueue, error) {
 	q, err := RetrieveQueue(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	return q.(*WorkflowQueue), nil
+	return q.(*workflowQueue), nil
 }
 
-func listWFQ(ctx Context) ([]WorkflowQueue, error) {
+func listWFQ(ctx Context) ([]workflowQueue, error) {
 	qs, err := ListQueues(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]WorkflowQueue, len(qs))
+	out := make([]workflowQueue, len(qs))
 	for i, q := range qs {
-		out[i] = *q.(*WorkflowQueue)
+		out[i] = *q.(*workflowQueue)
 	}
 	return out, nil
 }
@@ -76,11 +76,11 @@ func TestWorkflowQueues(t *testing.T) {
 	// handles up front so the workflow closures registered before launch can
 	// reference their names; they are assigned before any closure runs.
 	var (
-		queue           *WorkflowQueue
-		dlqEnqueueQueue *WorkflowQueue
-		conflictQueue1  *WorkflowQueue
-		conflictQueue2  *WorkflowQueue
-		dedupQueue      *WorkflowQueue
+		queue           *workflowQueue
+		dlqEnqueueQueue *workflowQueue
+		conflictQueue1  *workflowQueue
+		conflictQueue2  *workflowQueue
+		dedupQueue      *workflowQueue
 	)
 
 	dlqStartEvent := NewEvent()
@@ -757,7 +757,7 @@ func TestWorkflowQueues(t *testing.T) {
 func TestQueueRecovery(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	var recoveryQueue *WorkflowQueue // database-backed; registered after Launch
+	var recoveryQueue *workflowQueue // database-backed; registered after Launch
 	var recoveryStepCounter int64
 
 	recoveryStepWorkflowFunc := func(ctx Context, i int) (int, error) {
@@ -891,7 +891,7 @@ func TestQueueRecovery(t *testing.T) {
 func TestGlobalConcurrency(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	var globalConcurrencyQueue *WorkflowQueue // database-backed; registered after Launch
+	var globalConcurrencyQueue *workflowQueue // database-backed; registered after Launch
 	workflowEvent1 := NewEvent()
 	workflowEvent2 := NewEvent()
 	workflowDoneEvent := NewEvent()
@@ -986,7 +986,7 @@ func TestVersionlessDequeueRequiresLatestVersion(t *testing.T) {
 	require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), "versionless-newer", time.Now().Add(time.Hour).UnixMilli()))
 
 	// Enqueue a version-less workflow: an empty application version is persisted as NULL.
-	versionlessHandle, err := Enqueue[string, string](client, queue.Name, "VersionlessWorkflow", "versionless",
+	versionlessHandle, err := Enqueue[string](client, queue.Name, "VersionlessWorkflow", "versionless",
 		WithEnqueueApplicationVersion(""))
 	require.NoError(t, err)
 
@@ -1030,7 +1030,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	assert.Equal(t, "worker1", dbosCtx1.GetExecutorID(), "expected first executor ID to be 'worker1'")
 	assert.Equal(t, "worker2", dbosCtx2.GetExecutorID(), "expected second executor ID to be 'worker2'")
 
-	var workerConcurrencyQueue *WorkflowQueue // database-backed; registered after Launch
+	var workerConcurrencyQueue *workflowQueue // database-backed; registered after Launch
 	startEvents := []*Event{
 		NewEvent(),
 		NewEvent(),
@@ -1233,7 +1233,7 @@ func TestQueueRateLimiter(t *testing.T) {
 func TestQueueTimeouts(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	var timeoutQueue *WorkflowQueue // database-backed; registered after Launch
+	var timeoutQueue *workflowQueue // database-backed; registered after Launch
 
 	queuedWaitForCancelWorkflow := func(ctx Context, _ string) (string, error) {
 		// This workflow will wait indefinitely until it is cancelled
@@ -1286,7 +1286,7 @@ func TestQueueTimeouts(t *testing.T) {
 	RegisterWorkflow(dbosCtx, detachedWorkflow)
 	RegisterWorkflow(dbosCtx, enqueuedWorkflowEnqueuesADetachedWorkflow)
 
-	var timeoutOnDequeueQueue *WorkflowQueue // database-backed; registered after Launch
+	var timeoutOnDequeueQueue *workflowQueue // database-backed; registered after Launch
 	blockingEvent := NewEvent()
 	blockingWorkflow := func(ctx Context, _ string) (string, error) {
 		blockingEvent.Wait()
@@ -1471,7 +1471,7 @@ func TestPriorityQueue(t *testing.T) {
 
 	// Priority-enabled queue with max concurrency of 1, plus a child queue.
 	// Database-backed; registered after Launch.
-	var priorityQueue, childQueue *WorkflowQueue
+	var priorityQueue, childQueue *workflowQueue
 
 	workflowEvent := NewEvent()
 	var wfPriorityList []int
@@ -1884,7 +1884,7 @@ func TestQueuePollingIntervals(t *testing.T) {
 		require.Equal(t, 250*time.Millisecond, qi.GetPollingInterval())
 
 		// Setters only apply to database-backed queues.
-		notDBBacked := &WorkflowQueue{Name: "not-db-backed"}
+		notDBBacked := &workflowQueue{Name: "not-db-backed"}
 		require.Error(t, notDBBacked.SetPollingInterval(ctx, time.Second))
 	})
 }

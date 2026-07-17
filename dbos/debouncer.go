@@ -268,7 +268,7 @@ func (d *Debouncer[P, R]) Debounce(ctx Context, key string, delay time.Duration,
 // DebouncerClient provides workflow debouncing functionality using a Client.
 // It is similar to Debouncer but uses a Client interface instead of a Context
 // and takes a workflow name string instead of a workflow function.
-type DebouncerClient[P any, R any] struct {
+type DebouncerClient[R any, P any] struct {
 	WorkflowName         string        // Name of the target workflow
 	Client               Client        // DBOS client for operations
 	Timeout              time.Duration // Maximum time before starting the workflow (0 = no timeout)
@@ -285,11 +285,11 @@ type DebouncerClient[P any, R any] struct {
 //   - WithDebouncerConfigName: Config name of the configured instance the workflow is bound to [required for instance methods]
 //
 // Returns a pointer to a DebouncerClient instance that can be used to call Debounce.
-func NewDebouncerClient[P any, R any](
+func NewDebouncerClient[R any, P any](
 	workflowName string,
 	client Client,
 	opts ...DebouncerOption,
-) *DebouncerClient[P, R] {
+) *DebouncerClient[R, P] {
 	options := debouncerOptions{}
 	for _, opt := range opts {
 		opt(&options)
@@ -300,7 +300,7 @@ func NewDebouncerClient[P any, R any](
 		workflowName = instanceQualifiedName(workflowName, configName)
 	}
 
-	return &DebouncerClient[P, R]{
+	return &DebouncerClient[R, P]{
 		WorkflowName: workflowName,
 		Client:       client,
 		Timeout:      options.timeout,
@@ -323,7 +323,7 @@ func NewDebouncerClient[P any, R any](
 //   - opts: Optional workflow options (e.g., WithWorkflowID, WithQueue, etc.)
 //
 // Returns a WorkflowHandle that can be used to check status and retrieve results.
-func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
+func (dc *DebouncerClient[R, P]) Debounce(key string, delay time.Duration, input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	// Resolve workflow options
 	options := workflowOptions{}
 	for _, opt := range opts {
@@ -359,7 +359,7 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 	for {
 		// Try to enqueue the internal debouncer workflow
 		// Use the package-level Enqueue function which handles encoding automatically
-		_, err := Enqueue[debouncerInput[P], R](dc.Client, models.InternalQueueName, dc.internalDebouncerFQN, dInput, WithEnqueueDeduplicationID(key))
+		_, err := Enqueue[R](dc.Client, models.InternalQueueName, dc.internalDebouncerFQN, dInput, WithEnqueueDeduplicationID(key))
 		if err == nil {
 			return newWorkflowPollingHandle[R](dbosCtx, dInput.TargetWorkflowID), nil
 		}

@@ -277,7 +277,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_QUEUES_METADATA_PATTERN)
 	mux.HandleFunc(_WORKFLOW_QUEUES_METADATA_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		// The internal queue plus all database-backed queues.
-		queueMetadataArray := []WorkflowQueue{ctx.queueRunner.internalQueue}
+		queueMetadataArray := []workflowQueue{ctx.queueRunner.internalQueue}
 		if dbQueueCfgs, err := ctx.systemDB.ListQueues(ctx); err != nil {
 			ctx.logger.Error("Error listing database-backed queues", "error", err)
 		} else {

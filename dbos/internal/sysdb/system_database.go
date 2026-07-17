@@ -35,7 +35,8 @@ type SystemDatabase interface {
 	// IsContentionError reports whether err is a lock/serialization contention
 	// error for the active backend. See Dialect.IsContentionError.
 	IsContentionError(err error) bool
-	Shutdown(ctx context.Context, timeout time.Duration)
+	// Shutdown returns the names of sub-components still running when timeout expired.
+	Shutdown(ctx context.Context, timeout time.Duration) []string
 	ResetSystemDB(ctx context.Context) error
 
 	// Workflows
@@ -966,8 +967,9 @@ func (s *SysDB) Launch(ctx context.Context) {
 	}
 }
 
-func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
+func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 	s.logger.Debug("Closing system database connection pool")
+	var pending []string
 
 	s.notificationLoopMu.Lock()
 	launched := s.launched
@@ -980,6 +982,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 		case <-done:
 		case <-time.After(timeout):
 			s.logger.Warn("Notification listener loop did not finish in time", "timeout", timeout)
+			pending = append(pending, "notification listener")
 		}
 	}
 
@@ -994,6 +997,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 		case <-poolClose:
 		case <-time.After(timeout):
 			s.logger.Warn("System database connection pool did not close in time", "timeout", timeout)
+			pending = append(pending, "connection pool")
 		}
 	}
 
@@ -1004,6 +1008,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 	s.notificationLoopMu.Lock()
 	s.launched = false
 	s.notificationLoopMu.Unlock()
+	return pending
 }
 
 /*******************************/

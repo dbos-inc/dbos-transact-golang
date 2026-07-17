@@ -50,7 +50,7 @@ func TestScheduleCRUD(t *testing.T) {
 
 		schedule, err := GetSchedule(dbosCtx, name)
 		require.NoError(t, err)
-		require.NotNil(t, schedule)
+		require.NotZero(t, schedule)
 		require.Equal(t, name, schedule.ScheduleName)
 		require.Equal(t, capturingFQN, schedule.WorkflowName)
 		require.Equal(t, "*/1 * * * * *", schedule.Schedule)
@@ -96,7 +96,7 @@ func TestScheduleCRUD(t *testing.T) {
 
 		schedule, err = GetSchedule(dbosCtx, name)
 		require.ErrorIs(t, err, ErrScheduleNotFound)
-		require.Nil(t, schedule)
+		require.Zero(t, schedule)
 
 		// Reconciler should drop the cron entry once the schedule is gone.
 		require.Eventually(t, func() bool {
@@ -315,7 +315,7 @@ func TestApplySchedules(t *testing.T) {
 	// Snapshot schedule_id: re-apply must update definition in place, not replace the row.
 	beforeKeep, err := GetSchedule(dbosCtx, toKeep)
 	require.NoError(t, err)
-	require.NotNil(t, beforeKeep)
+	require.NotZero(t, beforeKeep)
 	keepScheduleID := beforeKeep.ScheduleID
 
 	// Round 2: pause one, delete one, re-apply the third to change its queue.
@@ -328,7 +328,7 @@ func TestApplySchedules(t *testing.T) {
 	// Paused: schedule still exists but its cron entry is removed.
 	paused, err := GetSchedule(dbosCtx, toPause)
 	require.NoError(t, err)
-	require.NotNil(t, paused)
+	require.NotZero(t, paused)
 	require.Equal(t, ScheduleStatusPaused, paused.Status)
 	require.Eventually(t, func() bool { return !hasEntry(toPause) },
 		3*time.Second, 50*time.Millisecond, "reconciler should drop the cron entry for paused %s", toPause)
@@ -336,14 +336,14 @@ func TestApplySchedules(t *testing.T) {
 	// Deleted: schedule is gone and its cron entry is removed.
 	dropped, err := GetSchedule(dbosCtx, toDrop)
 	require.ErrorIs(t, err, ErrScheduleNotFound)
-	require.Nil(t, dropped)
+	require.Zero(t, dropped)
 	require.Eventually(t, func() bool { return !hasEntry(toDrop) },
 		3*time.Second, 50*time.Millisecond, "reconciler should drop the cron entry for deleted %s", toDrop)
 
 	// Kept: still active, same schedule_id, cron entry installed, queue updated to queueB.
 	kept, err := GetSchedule(dbosCtx, toKeep)
 	require.NoError(t, err)
-	require.NotNil(t, kept)
+	require.NotZero(t, kept)
 	require.Equal(t, ScheduleStatusActive, kept.Status)
 	require.Equal(t, keepScheduleID, kept.ScheduleID, "upsert must preserve schedule_id on re-apply")
 	require.Equal(t, queueB.GetName(), kept.QueueName)
@@ -458,7 +458,7 @@ func TestApplySchedulesLiveUpdate(t *testing.T) {
 
 	before, err := GetSchedule(dbosCtx, name)
 	require.NoError(t, err)
-	require.NotNil(t, before)
+	require.NotZero(t, before)
 
 	require.Eventually(t, func() bool {
 		return liveUpdateVersionCount(1) >= 1
@@ -475,7 +475,7 @@ func TestApplySchedulesLiveUpdate(t *testing.T) {
 
 	after, err := GetSchedule(dbosCtx, name)
 	require.NoError(t, err)
-	require.NotNil(t, after)
+	require.NotZero(t, after)
 	require.Equal(t, before.ScheduleID, after.ScheduleID, "live update must preserve schedule_id")
 
 	// Reconciler should restart the entry and fire with the new context.
@@ -521,7 +521,7 @@ func TestApplySchedulesPreservesRuntimeState(t *testing.T) {
 
 	sched, err := GetSchedule(dbosCtx, name)
 	require.NoError(t, err)
-	require.NotNil(t, sched)
+	require.NotZero(t, sched)
 	require.Equal(t, ScheduleStatusPaused, sched.Status, "status must be preserved")
 	require.NotNil(t, sched.LastFiredAt)
 	require.True(t, sched.LastFiredAt.Equal(lastFired), "last_fired_at must be preserved, got %v", sched.LastFiredAt)
@@ -615,7 +615,7 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 	for _, name := range []string{"bad-input", "not-a-func", "too-few"} {
 		s, err := GetSchedule(dbosCtx, name)
 		require.ErrorIs(t, err, ErrScheduleNotFound, "schedule %s should not have been created", name)
-		require.Nil(t, s)
+		require.Zero(t, s)
 	}
 }
 
@@ -636,7 +636,7 @@ func TestScheduleCronValidation(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid cron schedule")
 	got, err := GetSchedule(dbosCtx, "bad-cron-create")
 	require.ErrorIs(t, err, ErrScheduleNotFound, "invalid-cron schedule must not be persisted")
-	require.Nil(t, got)
+	require.Zero(t, got)
 
 	// ApplySchedules rejects invalid cron before writing any row (atomicity).
 	err = ApplySchedules(dbosCtx, []ScheduleSpec{
@@ -648,7 +648,7 @@ func TestScheduleCronValidation(t *testing.T) {
 	for _, name := range []string{"apply-good", "apply-bad"} {
 		s, err := GetSchedule(dbosCtx, name)
 		require.ErrorIs(t, err, ErrScheduleNotFound, "schedule %s should not have been created", name)
-		require.Nil(t, s)
+		require.Zero(t, s)
 	}
 
 	// Invalid timezone also surfaces at validate time.
@@ -1201,6 +1201,6 @@ func TestScheduleFiresWithoutLocalRegistration(t *testing.T) {
 
 	sched, err := client.GetSchedule(client, scheduleName)
 	require.NoError(t, err)
-	require.NotNil(t, sched)
+	require.NotZero(t, sched)
 	require.NotNil(t, sched.LastFiredAt, "last_fired_at should be updated after the tick")
 }

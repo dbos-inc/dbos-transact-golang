@@ -108,7 +108,8 @@ func newConductor(dbosCtx *dbosContext, config conductorConfig) (*conductor, err
 	return c, nil
 }
 
-func (c *conductor) shutdown(timeout time.Duration) {
+func (c *conductor) shutdown(timeout time.Duration) error {
+	var err error
 	c.stopOnce.Do(func() {
 		c.closeConn()
 
@@ -123,8 +124,10 @@ func (c *conductor) shutdown(timeout time.Duration) {
 			c.logger.Info("Conductor shut down")
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for conductor to shut down", "timeout", timeout)
+			err = fmt.Errorf("conductor did not shut down within %v", timeout)
 		}
 	})
+	return err
 }
 
 // reconnectWaitWithJitter adds random jitter to the reconnect wait time to prevent thundering herd
@@ -1858,8 +1861,8 @@ func (c *conductor) handleGetScheduleRequest(data []byte, requestID string) erro
 		c.logger.Error("Failed to get schedule", "schedule_name", req.ScheduleName, "error", err)
 		msg := fmt.Sprintf("failed to get schedule '%s': %v", req.ScheduleName, err)
 		errorMsg = &msg
-	} else if schedule != nil {
-		o := toScheduleConductorOutput(*schedule, loadContext)
+	} else if err == nil {
+		o := toScheduleConductorOutput(schedule, loadContext)
 		output = &o
 	}
 

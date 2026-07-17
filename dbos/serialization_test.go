@@ -1750,7 +1750,7 @@ func TestPortableInterop(t *testing.T) {
 			PositionalArgs: []any{expectedArgs, "extra-positional", 99},
 			NamedArgs:      map[string]any{"lang": "python", "debug": true},
 		}
-		handle, err := Enqueue[PortableWorkflowArgs, InteropResult](client, "portable-interop-queue", "interop_workflow", portableArgs)
+		handle, err := Enqueue[InteropResult, PortableWorkflowArgs](client, "portable-interop-queue", "interop_workflow", portableArgs)
 		require.NoError(t, err)
 		require.NotEmpty(t, handle.GetWorkflowID())
 

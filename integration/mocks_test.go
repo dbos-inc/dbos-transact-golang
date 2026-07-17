@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dbos-inc/dbos-transact-golang/integration/mocks"
+	"github.com/dbos-inc/dbos-transact-golang/integration/internal/mocks"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
 	"github.com/stretchr/testify/mock"
@@ -457,7 +457,7 @@ func TestClientTypedHelpersWithMock(t *testing.T) {
 	enqHandle := mocks.NewMockWorkflowHandle[any](t)
 	enqHandle.On("GetResult").Return(7, nil).Once()
 	mockClient.On("Enqueue", mockClient, "q", "wf", "in", mock.Anything).Return(enqHandle, nil).Once()
-	eh, err := dbos.Enqueue[string, int](mockClient, "q", "wf", "in")
+	eh, err := dbos.Enqueue[int](mockClient, "q", "wf", "in")
 	if err != nil {
 		t.Fatalf("Enqueue failed: %v", err)
 	}

@@ -479,7 +479,7 @@ type wrappedWorkflowFunc func(ctx Context, input any, inputSerialization string,
 type WorkflowRegistryEntry struct {
 	wrappedFunction wrappedWorkflowFunc
 	workflowFn      WorkflowFunc // Type-erased registered function taking a raw (non-encoded) input. Used by RunWorkflow for direct execution.
-	MaxRetries      int
+	MaxRetries      int // Maximum recovery attempts before dead-lettering (set via WithMaxRecoveryAttempts); not step retries
 	Name            string
 	FQN             string // Fully qualified name of the workflow function. For configured instances, qualified with the config name.
 	ClassName       string // Receiver type name for configured instance workflows
@@ -1969,7 +1969,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 //   - c: Client or Context instance for the operation
 //   - queueName: Name of the queue to enqueue the workflow to
 //   - workflowName: Name of the registered workflow function to execute
-//   - input: Input parameters to pass to the workflow (type P)
+//   - input: Input parameters to pass to the workflow (type P, inferred; only the result type R needs to be specified)
 //   - opts: Optional configuration options
 //
 // Available options:
@@ -1986,7 +1986,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 // Example usage:
 //
 //	// Enqueue a workflow with string input and int output
-//	handle, err := dbos.Enqueue[string, int](client, "data-processing", "ProcessDataWorkflow", "input data",
+//	handle, err := dbos.Enqueue[int](client, "data-processing", "ProcessDataWorkflow", "input data",
 //	    dbos.WithEnqueueTimeout(30 * time.Minute))
 //	if err != nil {
 //	    log.Fatal(err)
@@ -2007,7 +2007,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 //	}
 //
 //	// Enqueue with deduplication and custom workflow ID
-//	handle, err := dbos.Enqueue[MyInputType, MyOutputType](client, "my-queue", "MyWorkflow", MyInputType{Field: "value"},
+//	handle, err := dbos.Enqueue[MyOutputType](client, "my-queue", "MyWorkflow", MyInputType{Field: "value"},
 //	    dbos.WithEnqueueWorkflowID("custom-workflow-id"),
 //	    dbos.WithEnqueueDeduplicationID("unique-operation-id"))
 //
@@ -2019,8 +2019,8 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 //	    PositionalArgs: []any{"hello", 42},
 //	    NamedArgs:      map[string]any{"key": "value"},
 //	}
-//	handle, err := dbos.Enqueue[dbos.PortableWorkflowArgs, any](client, "queue", "py_workflow", args)
-func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, opts ...EnqueueOption) (WorkflowHandle[R], error) {
+//	handle, err := dbos.Enqueue[any](client, "queue", "py_workflow", args)
+func Enqueue[R any, P any](c Client, queueName, workflowName string, input P, opts ...EnqueueOption) (WorkflowHandle[R], error) {
 	if c == nil {
 		return nil, errors.New("client cannot be nil")
 	}
@@ -2175,8 +2175,8 @@ func withNextStepID(stepID int) StepOption {
 // StepOutcome holds the result and error from a step execution
 // This struct is returned as part of a channel from the Go function when running the step inside a Go routine
 type StepOutcome[R any] struct {
-	Result R     `json:"result"`
-	Err    error `json:"err"`
+	Result R
+	Err    error
 }
 
 // StreamValue holds a value, error, and closed status from a stream read operation
@@ -5417,7 +5417,7 @@ func GetStepAggregates(ctx Client, input GetStepAggregatesInput) ([]StepAggregat
 
 // ListRegisteredWorkflows returns information about workflows registered with DBOS.
 // Each WorkflowRegistryEntry contains:
-// - MaxRetries: Maximum number of retry attempts for workflow recovery
+// - MaxRetries: Maximum recovery attempts before dead-lettering (WithMaxRecoveryAttempts)
 // - Name: Custom name if provided during registration, otherwise empty
 // - FQN: Fully qualified name of the workflow function (always present)
 //
@@ -5800,9 +5800,9 @@ func DeleteSchedule(ctx Client, scheduleName string) error {
 	return ctx.DeleteSchedule(ctx, scheduleName)
 }
 
-func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (*WorkflowSchedule, error) {
+func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (WorkflowSchedule, error) {
 	if scheduleName == "" {
-		return nil, errors.New("schedule_name is required")
+		return WorkflowSchedule{}, errors.New("schedule_name is required")
 	}
 
 	dbInput := sysdb.ListSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}}
@@ -5821,14 +5821,14 @@ func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (*WorkflowSched
 		}, sysdb.WithRetrierLogger(c.logger))
 	}
 	if err != nil {
-		return nil, err
+		return WorkflowSchedule{}, err
 	}
 	for i := range schedules {
 		if schedules[i].ScheduleName == scheduleName {
-			return &schedules[i], nil
+			return schedules[i], nil
 		}
 	}
-	return nil, models.NewScheduleNotFoundError(scheduleName)
+	return WorkflowSchedule{}, models.NewScheduleNotFoundError(scheduleName)
 }
 
 // GetSchedule gets a schedule by name. If no schedule with the given name
@@ -5837,9 +5837,9 @@ func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (*WorkflowSched
 // Example:
 //
 //	schedule, err := dbos.GetSchedule(ctx, "my-schedule")
-func GetSchedule(ctx Client, scheduleName string) (*WorkflowSchedule, error) {
+func GetSchedule(ctx Client, scheduleName string) (WorkflowSchedule, error) {
 	if ctx == nil {
-		return nil, errors.New("ctx cannot be nil")
+		return WorkflowSchedule{}, errors.New("ctx cannot be nil")
 	}
 	return ctx.GetSchedule(ctx, scheduleName)
 }
@@ -5996,16 +5996,20 @@ func ListApplicationVersions(ctx Client) ([]VersionInfo, error) {
 
 // GetLatestApplicationVersion returns the application version with the most
 // recent timestamp.
-func (c *dbosContext) GetLatestApplicationVersion(_ Client) (*VersionInfo, error) {
-	return sysdb.RetryWithResult(c, func() (*VersionInfo, error) {
+func (c *dbosContext) GetLatestApplicationVersion(_ Client) (VersionInfo, error) {
+	latest, err := sysdb.RetryWithResult(c, func() (*VersionInfo, error) {
 		return c.systemDB.GetLatestApplicationVersion(c, nil)
 	}, sysdb.WithRetrierLogger(c.logger))
+	if err != nil {
+		return VersionInfo{}, err
+	}
+	return *latest, nil
 }
 
 // GetLatestApplicationVersion is the package-level wrapper for Context.GetLatestApplicationVersion.
-func GetLatestApplicationVersion(ctx Client) (*VersionInfo, error) {
+func GetLatestApplicationVersion(ctx Client) (VersionInfo, error) {
 	if ctx == nil {
-		return nil, errors.New("ctx cannot be nil")
+		return VersionInfo{}, errors.New("ctx cannot be nil")
 	}
 	return ctx.GetLatestApplicationVersion(ctx)
 }

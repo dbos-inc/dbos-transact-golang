@@ -25,6 +25,21 @@ const (
 // The type parameter T determines what types the serializer handles.
 // The built-in JSON serializer uses concrete types (Serializer[P]) for correct struct unmarshaling.
 // Custom serializers implement Serializer[any] and must embed type info in payloads (e.g., using a type envelope)
+//
+// Every implementation must honor this contract:
+//
+//  1. Decode can be called with a nil *string, even though the serializer's own
+//     Encode never produced one: some checkpoints record an error and never write
+//     an output, so the stored value is SQL NULL. Decode must tolerate nil input
+//     and choose its own nil semantics (typically returning the zero value of T).
+//  2. Encode may be called with a nil or zero value, and the nil round-trip must
+//     be lossless: Decode(Encode(nil-value)) must yield that nil value back.
+//  3. The literal string "__DBOS_NIL" is reserved by the engine and wire-frozen.
+//     A custom Encode must never emit it for non-nil data; a value stored as
+//     "__DBOS_NIL" would be misreported as nil by observability paths.
+//  4. Encode must not return a nil *string. To represent nil data, return a
+//     pointer to a sentinel string (e.g. the built-in gob serializer stores
+//     "__DBOS_NIL"; the portable JSON serializer stores "null").
 type Serializer[T any] interface {
 	// Name returns the name of the serialization format (e.g., "DBOS_JSON", "DBOS_GOB").
 	Name() string
@@ -105,21 +120,21 @@ func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
 	return result, nil
 }
 
-// GobSerializer implements Serializer[any] using Go's gob encoding.
+// gobSerializer implements Serializer[any] using Go's gob encoding.
 // Users must call gob.Register(ConcreteType{}) for each concrete type
 // used in workflow inputs, outputs, events, and messages.
-type GobSerializer struct{}
+type gobSerializer struct{}
 
 // NewGobSerializer returns a new gob-based serializer.
 func NewGobSerializer() Serializer[any] {
-	return &GobSerializer{}
+	return &gobSerializer{}
 }
 
-func (g *GobSerializer) Name() string {
+func (g *gobSerializer) Name() string {
 	return "DBOS_GOB"
 }
 
-func (g *GobSerializer) Encode(data any) (*string, error) {
+func (g *gobSerializer) Encode(data any) (*string, error) {
 	if isNilValue(data) {
 		marker := string(nilMarker)
 		return &marker, nil
@@ -134,7 +149,7 @@ func (g *GobSerializer) Encode(data any) (*string, error) {
 	return &encodedStr, nil
 }
 
-func (g *GobSerializer) Decode(data *string) (any, error) {
+func (g *gobSerializer) Decode(data *string) (any, error) {
 	if data == nil || *data == nilMarker {
 		return nil, nil
 	}
@@ -192,7 +207,7 @@ func (a *typedCustomSerializerAdapter[T]) Decode(data *string) (T, error) {
 //	    PositionalArgs: []any{"hello", 42},
 //	    NamedArgs:      map[string]any{"key": "value"},
 //	}
-//	handle, err := dbos.Enqueue[dbos.PortableWorkflowArgs, any](client, "queue", "pyWorkflow", args)
+//	handle, err := dbos.Enqueue[any](client, "queue", "pyWorkflow", args)
 type PortableWorkflowArgs struct {
 	PositionalArgs []any          `json:"positionalArgs"`
 	NamedArgs      map[string]any `json:"namedArgs"`

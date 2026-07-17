@@ -7472,7 +7472,7 @@ func TestPatching(t *testing.T) {
 
 		// Clear the context registries and re-register the patched wf with the same name
 		dbosCtx.(*dbosContext).launched.Store(false)
-		ClearRegistries(dbosCtx)
+		clearRegistries(dbosCtx)
 		RegisterWorkflow(dbosCtx, wfPatched, WithWorkflowName("wf"))
 		dbosCtx.(*dbosContext).launched.Store(true)
 
@@ -7528,7 +7528,7 @@ func TestPatching(t *testing.T) {
 
 		// Clear the context registries and register the deprecated wf with the same name
 		dbosCtx.(*dbosContext).launched.Store(false)
-		ClearRegistries(dbosCtx)
+		clearRegistries(dbosCtx)
 		RegisterWorkflow(dbosCtx, wfDeprecatePatch, WithWorkflowName("wf"))
 		dbosCtx.(*dbosContext).launched.Store(true)
 
@@ -7625,7 +7625,7 @@ func TestPatching(t *testing.T) {
 		}
 
 		dbosCtx.(*dbosContext).launched.Store(false)
-		ClearRegistries(dbosCtx)
+		clearRegistries(dbosCtx)
 		RegisterWorkflow(dbosCtx, wfDeprecated, WithWorkflowName("wf"))
 		dbosCtx.(*dbosContext).launched.Store(true)
 

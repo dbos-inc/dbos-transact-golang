@@ -195,14 +195,14 @@ type Client interface {
 	PauseSchedule(_ Client, scheduleName string) error                                      // Pause a schedule
 	ResumeSchedule(_ Client, scheduleName string) error                                     // Resume a paused schedule
 	DeleteSchedule(_ Client, scheduleName string) error                                     // Delete a schedule
-	GetSchedule(_ Client, scheduleName string) (*WorkflowSchedule, error)                   // Get a schedule by name (ErrScheduleNotFound if absent)
+	GetSchedule(_ Client, scheduleName string) (WorkflowSchedule, error)                    // Get a schedule by name (ErrScheduleNotFound if absent)
 	ListSchedules(_ Client, opts ...ListSchedulesOption) ([]WorkflowSchedule, error)        // List schedules with optional filters
 	BackfillSchedule(_ Client, scheduleName string, start, end time.Time) ([]string, error) // Backfill a schedule, returning the IDs of the enqueued workflows
 	TriggerSchedule(_ Client, scheduleName string) (WorkflowHandle[any], error)             // Trigger a schedule immediately, returning a handle to the enqueued workflow
 
 	// Application version management
 	ListApplicationVersions(_ Client) ([]VersionInfo, error)        // List all registered application versions, newest first
-	GetLatestApplicationVersion(_ Client) (*VersionInfo, error)     // Get the latest registered application version
+	GetLatestApplicationVersion(_ Client) (VersionInfo, error)      // Get the latest registered application version
 	SetLatestApplicationVersion(_ Client, versionName string) error // Mark the named version as latest by bumping its timestamp to now
 
 	Shutdown(timeout time.Duration) error // Gracefully shutdown all DBOS resources; returns an error if the timeout expired before they all stopped
@@ -873,7 +873,9 @@ func (c *dbosContext) Shutdown(timeout time.Duration) error {
 	// Shutdown the conductor
 	if c.conductor != nil {
 		c.logger.Debug("Shutting down conductor")
-		c.conductor.shutdown(timeout)
+		if err := c.conductor.shutdown(timeout); err != nil {
+			pending = append(pending, "conductor")
+		}
 	}
 
 	// Shutdown the admin server
@@ -906,7 +908,9 @@ func (c *dbosContext) Shutdown(timeout time.Duration) error {
 	// Close the system database
 	if c.systemDB != nil {
 		c.logger.Debug("Shutting down system database")
-		c.systemDB.Shutdown(c, timeout)
+		for _, p := range c.systemDB.Shutdown(c, timeout) {
+			pending = append(pending, "system database "+p)
+		}
 	}
 
 	c.launched.Store(false)
@@ -1020,9 +1024,9 @@ func Shutdown(c Client, timeout time.Duration) error {
 	return c.Shutdown(timeout)
 }
 
-// ClearRegistries clears the workflow registry,
+// clearRegistries clears the workflow registry,
 // allowing re-registration of workflows. Intended for testing only.
-func ClearRegistries(ctx Context) {
+func clearRegistries(ctx Context) {
 	c, ok := ctx.(*dbosContext)
 	if !ok {
 		return

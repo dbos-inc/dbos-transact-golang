@@ -1205,6 +1205,67 @@ func TestCustomPool(t *testing.T) {
 	})
 }
 
+// TestSystemDBShutdownReportsPending verifies SysDB.Shutdown returns the
+// sub-components that failed to stop within the timeout.
+func TestSystemDBShutdownReportsPending(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	dbPath := filepath.Join(t.TempDir(), "dbos.db")
+	customDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer customDB.Close()
+
+	systemDB, err := sysdb.NewSystemDatabase(ctx, sysdb.NewSystemDatabaseInput{
+		DatabaseSchema: "dbos",
+		CustomSqliteDB: customDB,
+		Logger:         logger,
+	})
+	require.NoError(t, err)
+	systemDB.Launch(ctx)
+
+	// ctx is deliberately not cancelled, so the notification loop cannot exit
+	pending := systemDB.Shutdown(ctx, 100*time.Millisecond)
+	require.Contains(t, pending, "notification listener")
+
+	cancel()
+	require.Eventually(t, func() bool {
+		return len(systemDB.Shutdown(ctx, 100*time.Millisecond)) == 0
+	}, 5*time.Second, 100*time.Millisecond, "notification loop should exit after cancel")
+}
+
+// TestClientShutdownReportsSystemDBTimeout verifies Client.Shutdown returns an
+// error when the system database fails to shut down within the timeout.
+func TestClientShutdownReportsSystemDBTimeout(t *testing.T) {
+	skipIfSqlite(t, "holds a pgx pool connection to block pool close")
+	ctx := context.Background()
+
+	poolConfig, err := pgxpool.ParseConfig(getDatabaseURL())
+	require.NoError(t, err)
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	require.NoError(t, err)
+
+	client, err := NewClient(ctx, ClientConfig{
+		SystemDBPool:   pool,
+		DatabaseSchema: "dbos_test_shutdown_client",
+	})
+	require.NoError(t, err)
+
+	// A held connection blocks pool.Close() past the timeout
+	conn, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+
+	err = client.Shutdown(500 * time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "system database connection pool")
+
+	conn.Release()
+	require.Eventually(t, func() bool {
+		return pool.Stat().TotalConns() == 0
+	}, 5*time.Second, 100*time.Millisecond, "pool should close after connection release")
+}
+
 // -----------------------------------------------------------------------------
 // SQLite-specific suite. These tests construct sqlite handles directly so they
 // run on every test invocation, regardless of DBOS_TEST_BACKEND. They cover

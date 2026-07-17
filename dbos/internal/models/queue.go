@@ -16,7 +16,7 @@ type RateLimiter struct {
 }
 
 // QueueConfig is the persisted configuration of a workflow queue, as stored in
-// the queues table. The public dbos.WorkflowQueue wraps it with runtime-only
+// the queues table. The dbos package's unexported workflowQueue wraps it with runtime-only
 // registration state.
 type QueueConfig struct {
 	Name                string        `json:"name"`

@@ -689,7 +689,7 @@ type queueConductorOutput struct {
 	PollingIntervalSec float64  `json:"polling_interval_sec"`
 }
 
-// toQueueConductorOutput renders a WorkflowQueue into its conductor wire shape.
+// toQueueConductorOutput renders a workflowQueue into its conductor wire shape.
 func toQueueConductorOutput(q Queue) queueConductorOutput {
 	out := queueConductorOutput{
 		Name:              q.GetName(),
@@ -698,7 +698,7 @@ func toQueueConductorOutput(q Queue) queueConductorOutput {
 		PriorityEnabled:   q.GetPriorityEnabled(),
 		PartitionQueue:    q.GetPartitionQueue(),
 	}
-	if wq, ok := q.(*WorkflowQueue); ok {
+	if wq, ok := q.(*workflowQueue); ok {
 		out.PollingIntervalSec = wq.basePollingInterval.Seconds()
 	}
 	if rl := q.GetRateLimit(); rl != nil {
