@@ -720,7 +720,9 @@ func (c *dbosContext) Launch() error {
 	launchCompleted := false
 	defer func() {
 		if !launchCompleted {
-			c.Shutdown(_LAUNCH_ROLLBACK_TIMEOUT)
+			if err := c.Shutdown(_LAUNCH_ROLLBACK_TIMEOUT); err != nil {
+				c.logger.Error("Failed to roll back launch", "error", err)
+			}
 		}
 	}()
 

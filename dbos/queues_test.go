@@ -2414,7 +2414,7 @@ func TestDatabaseBackedQueues(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "rate limiter limit must be positive")
 		got, err := retrieveWFQ(dbosCtx, "bad-rate-limit-queue")
-		require.NoError(t, err)
+		require.ErrorIs(t, err, ErrQueueNotFound)
 		require.Nil(t, got)
 
 		// A non-positive period is rejected too.
@@ -2423,7 +2423,7 @@ func TestDatabaseBackedQueues(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "rate limiter period must be positive")
 		got, err = retrieveWFQ(dbosCtx, "bad-rate-period-queue")
-		require.NoError(t, err)
+		require.ErrorIs(t, err, ErrQueueNotFound)
 		require.Nil(t, got)
 	})
 
@@ -2433,7 +2433,7 @@ func TestDatabaseBackedQueues(t *testing.T) {
 		_, err := registerWFQ(dbosCtx, models.InternalQueueName)
 		require.Error(t, err)
 		got, err := retrieveWFQ(dbosCtx, models.InternalQueueName)
-		require.NoError(t, err)
+		require.ErrorIs(t, err, ErrQueueNotFound)
 		require.Nil(t, got)
 	})
 }
@@ -2594,6 +2594,10 @@ func TestDatabaseBackedQueueRespawnAfterDelete(t *testing.T) {
 
 	blockerStarted := NewEvent()
 	releaseBlocker := NewEvent()
+	// Release the blocker even if a require fails first: an unreleased blocker
+	// leaks its workflow goroutine past Shutdown's timeout and fails the leak
+	// check of every subsequent test.
+	t.Cleanup(releaseBlocker.Set)
 	respawnWorkflow := func(_ Context, input string) (string, error) {
 		if input == "blocker" {
 			blockerStarted.Set()
@@ -2629,8 +2633,8 @@ func TestDatabaseBackedQueueRespawnAfterDelete(t *testing.T) {
 	// worker stops; the target's workflow_status row is untouched.
 	require.NoError(t, DeleteQueue(dbosCtx, queueName))
 	require.Eventually(t, func() bool {
-		q, err := retrieveWFQ(dbosCtx, queueName)
-		return err == nil && q == nil
+		_, err := retrieveWFQ(dbosCtx, queueName)
+		return errors.Is(err, ErrQueueNotFound)
 	}, 3*time.Second, 50*time.Millisecond, "queue should be deleted")
 
 	// Wait long enough for the worker to observe the deletion and stop, then
