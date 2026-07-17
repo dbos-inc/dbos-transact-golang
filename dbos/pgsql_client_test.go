@@ -93,7 +93,8 @@ func TestPgsqlClient(t *testing.T) {
 	pool := PgxPool(serverCtx.(*dbosContext).systemDB.Pool())
 	schema := serverCtx.(*dbosContext).systemDB.(*sysdb.SysDB).Schema()
 
-	queue := NewWorkflowQueue(serverCtx, "pgsql-test-queue")
+	queue, err := RegisterQueue(serverCtx, "pgsql-test-queue")
+	require.NoError(t, err)
 
 	// A simple workflow that joins its positional args into a string.
 	type enqueueArgs struct {
@@ -137,9 +138,7 @@ func TestPgsqlClient(t *testing.T) {
 	}
 	RegisterWorkflow(serverCtx, recvWorkflow, WithWorkflowName("pgsql_recv_test"))
 
-	_ = queue
-
-	err := Launch(serverCtx)
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 
 	t.Run("EnqueueAndGetResult", func(t *testing.T) {
@@ -153,7 +152,7 @@ func TestPgsqlClient(t *testing.T) {
 
 		wfID, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
 			"workflow_name":       "pgsql_enqueue_test",
-			"queue_name":          queue.Name,
+			"queue_name":          queue.GetName(),
 			"positional_args":     args,
 			"named_args":          `{"ignored_key": "ignored_value"}`,
 			"workflow_id":         nil,
@@ -177,7 +176,7 @@ func TestPgsqlClient(t *testing.T) {
 	t.Run("EnqueueWithTimeout", func(t *testing.T) {
 		wfID, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
 			"workflow_name":       "pgsql_blocked_workflow",
-			"queue_name":          queue.Name,
+			"queue_name":          queue.GetName(),
 			"positional_args":     []string{`""`},
 			"named_args":          `{}`,
 			"workflow_id":         nil,
@@ -203,7 +202,7 @@ func TestPgsqlClient(t *testing.T) {
 		wfID := fmt.Sprintf("pgsql-idempotent-%d", time.Now().UnixNano())
 		params := map[string]any{
 			"workflow_name":       "pgsql_retrieve_test",
-			"queue_name":          queue.Name,
+			"queue_name":          queue.GetName(),
 			"positional_args":     []string{`"idempotent-input"`},
 			"named_args":          `{}`,
 			"workflow_id":         wfID,
@@ -238,7 +237,7 @@ func TestPgsqlClient(t *testing.T) {
 		// First enqueue succeeds.
 		_, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
 			"workflow_name":       "pgsql_blocked_workflow",
-			"queue_name":          queue.Name,
+			"queue_name":          queue.GetName(),
 			"positional_args":     []string{`""`},
 			"named_args":          `{}`,
 			"workflow_id":         wfID1,
@@ -254,7 +253,7 @@ func TestPgsqlClient(t *testing.T) {
 		// Same wfID again is idempotent.
 		_, err = callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
 			"workflow_name":       "pgsql_blocked_workflow",
-			"queue_name":          queue.Name,
+			"queue_name":          queue.GetName(),
 			"positional_args":     []string{`""`},
 			"named_args":          `{}`,
 			"workflow_id":         wfID1,
@@ -270,7 +269,7 @@ func TestPgsqlClient(t *testing.T) {
 		// Different wfID with same dedup key must fail.
 		_, err = callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
 			"workflow_name":       "pgsql_blocked_workflow",
-			"queue_name":          queue.Name,
+			"queue_name":          queue.GetName(),
 			"positional_args":     []string{`""`},
 			"named_args":          `{}`,
 			"workflow_id":         wfID2,
@@ -286,7 +285,7 @@ func TestPgsqlClient(t *testing.T) {
 		require.ErrorAs(t, err, &pgErr, "expected pgconn.PgError, got %T: %v", err, err)
 		assert.Equal(t, pgerrcode.UniqueViolation, pgErr.Code)
 		assert.Equal(t, "DBOS queue duplicated", pgErr.Message)
-		assert.Contains(t, pgErr.Detail, fmt.Sprintf("Workflow %s with queue %s and deduplication ID %s already exists", wfID2, queue.Name, dedupID))
+		assert.Contains(t, pgErr.Detail, fmt.Sprintf("Workflow %s with queue %s and deduplication ID %s already exists", wfID2, queue.GetName(), dedupID))
 
 		// Release the dedup slot and wait for wfID1 to finish.
 		require.NoError(t, CancelWorkflow(serverCtx, wfID1))
@@ -301,7 +300,7 @@ func TestPgsqlClient(t *testing.T) {
 
 		_, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
 			"workflow_name":       "pgsql_retrieve_test",
-			"queue_name":          queue.Name,
+			"queue_name":          queue.GetName(),
 			"positional_args":     []string{`"priority-input"`},
 			"named_args":          `{}`,
 			"workflow_id":         wfID,
@@ -339,7 +338,7 @@ func TestPgsqlClient(t *testing.T) {
 
 		_, err = callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
 			"workflow_name":       "pgsql_retrieve_test",
-			"queue_name":          queue.Name,
+			"queue_name":          queue.GetName(),
 			"positional_args":     []string{`"auth-input"`},
 			"named_args":          `{}`,
 			"workflow_id":         wfID,
@@ -369,7 +368,7 @@ func TestPgsqlClient(t *testing.T) {
 
 		_, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
 			"workflow_name":        "pgsql_retrieve_test",
-			"queue_name":           queue.Name,
+			"queue_name":           queue.GetName(),
 			"positional_args":      []string{`"delay-input"`},
 			"named_args":           `{}`,
 			"workflow_id":          wfID,
@@ -392,7 +391,7 @@ func TestPgsqlClient(t *testing.T) {
 	t.Run("EnqueueNegativeDelayRejected", func(t *testing.T) {
 		_, err := callEnqueueWorkflow(context.Background(), pool, schema, map[string]any{
 			"workflow_name":        "pgsql_retrieve_test",
-			"queue_name":           queue.Name,
+			"queue_name":           queue.GetName(),
 			"positional_args":      []string{`"negative-delay-input"`},
 			"named_args":           `{}`,
 			"workflow_id":          fmt.Sprintf("pgsql-negative-delay-%d", time.Now().UnixNano()),

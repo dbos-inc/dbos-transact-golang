@@ -482,7 +482,6 @@ type WorkflowRegistryEntry struct {
 	MaxRetries      int
 	Name            string
 	FQN             string // Fully qualified name of the workflow function. For configured instances, qualified with the config name.
-	CronSchedule    string // Empty string for non-scheduled workflows
 	ClassName       string // Receiver type name for configured instance workflows
 	ConfigName      string // Config name for configured instance workflows
 }
@@ -523,47 +522,6 @@ func registerWorkflow(ctx Context, entry WorkflowRegistryEntry) {
 	}
 }
 
-func registerScheduledWorkflow(ctx Context, workflowFQN, customName string, fn WorkflowFunc, cronSchedule string) {
-	// Skip if we don't have a concrete dbosContext
-	c, ok := ctx.(*dbosContext)
-	if !ok {
-		return
-	}
-
-	if c.launched.Load() {
-		panic("Cannot register scheduled workflow after DBOS has launched")
-	}
-
-	// Update the existing workflow entry with the cron schedule
-	registryEntryAny, exists := c.workflowRegistry.Load(workflowFQN)
-	if !exists {
-		panic(fmt.Sprintf("workflow %s must be registered before scheduling", workflowFQN))
-	}
-	registryEntry := registryEntryAny.(WorkflowRegistryEntry)
-	registryEntry.CronSchedule = cronSchedule
-	c.workflowRegistry.Store(workflowFQN, registryEntry)
-
-	name := workflowFQN
-	if len(customName) > 0 {
-		name = customName
-	}
-	scheduled := ScheduledWorkflowFunc(func(ctx Context, input ScheduledWorkflowInput) (any, error) {
-		scheduledTime := input.ScheduledTime
-		wfID := fmt.Sprintf("sched-%s-%s", name, scheduledTime)
-		opts := []WorkflowOption{
-			WithWorkflowID(wfID),
-			WithQueue(models.InternalQueueName),
-			withWorkflowName(workflowFQN),
-		}
-		return ctx.RunWorkflow(ctx, fn, scheduledTime, opts...)
-	})
-
-	if _, err := c.addScheduleCronEntry(name, cronSchedule, scheduled, nil); err != nil {
-		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
-	}
-	c.logger.Info("Registered scheduled workflow", "fqn", workflowFQN, "custom_name", customName, "cron_schedule", cronSchedule)
-}
-
 // ConfiguredInstance is implemented by objects whose methods are registered as workflows.
 // ConfigName must return a stable, unique name for the instance: it disambiguates method
 // values bound to different receivers (which share a function name) and is durably recorded
@@ -579,10 +537,9 @@ func instanceQualifiedName(name, configName string) string {
 }
 
 type workflowRegistrationOptions struct {
-	cronSchedule string
-	maxRetries   int
-	name         string
-	instance     ConfiguredInstance
+	maxRetries int
+	name       string
+	instance   ConfiguredInstance
 }
 
 type WorkflowRegistrationOption func(*workflowRegistrationOptions)
@@ -602,15 +559,6 @@ const (
 func WithMaxRetries(maxRetries int) WorkflowRegistrationOption {
 	return func(p *workflowRegistrationOptions) {
 		p.maxRetries = maxRetries
-	}
-}
-
-// WithSchedule registers the workflow as a scheduled workflow using cron syntax.
-// The schedule string follows standard cron format with second precision.
-// Scheduled workflows automatically receive a time.Time input parameter.
-func WithSchedule(schedule string) WorkflowRegistrationOption {
-	return func(p *workflowRegistrationOptions) {
-		p.cronSchedule = schedule
 	}
 }
 
@@ -672,11 +620,8 @@ func resolveWorkflowFunctionName[P any, R any](fn Workflow[P, R]) string {
 //
 // Registration options include:
 //   - WithMaxRetries: Set maximum retry attempts for workflow recovery
-//   - WithSchedule: Register as a scheduled workflow with cron syntax
 //   - WithWorkflowName: Set a custom name for the workflow
 //   - WithInstance: Register a method bound to a named instance
-//
-// Scheduled workflows receive a time.Time as input representing the scheduled execution time.
 //
 // Example:
 //
@@ -690,8 +635,7 @@ func resolveWorkflowFunctionName[P any, R any](fn Workflow[P, R]) string {
 //	// With options:
 //	dbos.RegisterWorkflow(ctx, MyWorkflow,
 //	    dbos.WithMaxRetries(5),
-//	    dbos.WithSchedule("0 0 * * * *")) // daily at midnight
-//		dbos.WithWorkflowName("MyCustomWorkflowName") // Custom name for the workflow
+//	    dbos.WithWorkflowName("MyCustomWorkflowName"))
 func RegisterWorkflow[P any, R any](ctx Context, fn Workflow[P, R], opts ...WorkflowRegistrationOption) {
 	if ctx == nil {
 		panic("ctx cannot be nil")
@@ -700,8 +644,6 @@ func RegisterWorkflow[P any, R any](ctx Context, fn Workflow[P, R], opts ...Work
 	if fn == nil {
 		panic("workflow function cannot be nil")
 	}
-
-	var p P
 
 	registrationParams := workflowRegistrationOptions{
 		maxRetries: _DEFAULT_MAX_RECOVERY_ATTEMPTS,
@@ -791,16 +733,6 @@ func RegisterWorkflow[P any, R any](ctx Context, fn Workflow[P, R], opts ...Work
 		ConfigName:      configName,
 	})
 
-	// If this is a scheduled workflow, register a cron job
-	if registrationParams.cronSchedule != "" {
-		if reflect.TypeOf(p) != reflect.TypeFor[time.Time]() {
-			panic(fmt.Sprintf("scheduled workflow function must accept a time.Time as input, got %T", p))
-		}
-		scheduledWfFunc := WorkflowFunc(func(ctx Context, input any) (any, error) {
-			return typedErasedWorkflow(ctx, input, resolveEncoder(ctx).Name())
-		})
-		registerScheduledWorkflow(ctx, fqn, registrationParams.name, scheduledWfFunc, registrationParams.cronSchedule)
-	}
 }
 
 // resolveWorkflowName returns either the FQN or the custom name of a function, if present in the workflow registry
@@ -873,6 +805,7 @@ type workflowOptions struct {
 	WorkflowName        string
 	WorkflowID          string
 	QueueName           string
+	queue               Queue
 	ApplicationVersion  string
 	MaxRetries          int
 	DeduplicationID     string
@@ -912,10 +845,29 @@ func WithRunInstance(instance ConfiguredInstance) WorkflowOption {
 	}
 }
 
-// WithQueue enqueues the workflow to the specified queue instead of executing immediately.
+// WithQueue enqueues the workflow to the given queue instead of executing immediately.
 // Queued workflows will be processed by the queue runner according to the queue's configuration.
-func WithQueue(queueName string) WorkflowOption {
+// The queue must be a non-nil handle from [RegisterQueue], [RetrieveQueue], or [ListQueues].
+// To enqueue by name, use [Enqueue].
+func WithQueue(queue Queue) WorkflowOption {
 	return func(p *workflowOptions) {
+		if queue == nil {
+			panic("WithQueue: queue cannot be nil")
+		}
+		p.queue = queue
+		p.QueueName = queue.GetName()
+	}
+}
+
+// withQueueName enqueues the workflow to a queue identified by name only.
+// It is a no-op if a queue handle was already set with WithQueue: an explicit
+// user choice always wins over an internally-supplied name.
+// XXX: this will be removed when we update the debouncer implementation.
+func withQueueName(queueName string) WorkflowOption {
+	return func(p *workflowOptions) {
+		if p.queue != nil {
+			return
+		}
 		p.QueueName = queueName
 	}
 }
@@ -1231,19 +1183,29 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		}
 	}
 
-	// Validate queue configuration if provided and if in-memory queue.
-	if len(params.QueueName) > 0 {
-		if queue := c.queueRunner.getQueue(params.QueueName); queue != nil {
-			// If queue has partitions enabled, partition key must be provided
-			if queue.PartitionQueue && len(params.QueuePartitionKey) == 0 {
-				c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-				return nil, models.NewWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
-			}
-			// If partition key is provided, queue must have partitions enabled
-			if len(params.QueuePartitionKey) > 0 && !queue.PartitionQueue {
-				c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-				return nil, models.NewWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
-			}
+	// Validate partitioned-queue usage. Prefer the handle provided via WithQueue
+	// (configuration as of registration/retrieval time); for name-only enqueues,
+	// fall back to the queue runner's latest reconciled snapshot. If neither knows
+	// the queue (e.g. before launch, or a queue this process does not listen to),
+	// skip validation and let the queue runner resolve the name.
+	var partitionQueue, queueKnown bool
+	if params.queue != nil {
+		partitionQueue, queueKnown = params.queue.GetPartitionQueue(), true
+	} else if len(params.QueueName) > 0 {
+		if q, ok := c.queueRunner.currentQueueConfig(params.QueueName); ok {
+			partitionQueue, queueKnown = q.PartitionQueue, true
+		}
+	}
+	if queueKnown {
+		// If queue has partitions enabled, partition key must be provided
+		if partitionQueue && len(params.QueuePartitionKey) == 0 {
+			c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+			return nil, models.NewWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
+		}
+		// If partition key is provided, queue must have partitions enabled
+		if len(params.QueuePartitionKey) > 0 && !partitionQueue {
+			c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+			return nil, models.NewWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
 		}
 	}
 
@@ -2186,6 +2148,15 @@ func WithMaxInterval(interval time.Duration) StepOption {
 func WithRetryPredicate(fn func(error) bool) StepOption {
 	return func(opts *stepOptions) {
 		opts.retryPredicate = fn
+	}
+}
+
+// WithTxIsolation sets the transaction isolation level used by [RunAsTransaction].
+// It has no effect outside a transaction: RunAsStep and Go ignore it.
+// If not set, the data source's default isolation level is used.
+func WithTxIsolation(level IsoLevel) StepOption {
+	return func(opts *stepOptions) {
+		opts.txIsoLevel = &level
 	}
 }
 
@@ -4722,50 +4693,108 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 	return handles, nil
 }
 
-// ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.
-// The forked workflow will have a new UUID and will execute from the specified StartStep.
-// If StartStep > 0, the forked workflow will reuse the operation outputs from steps 0 to StartStep-1
+// forkWorkflowOptions holds configuration parameters for forking a workflow.
+type forkWorkflowOptions struct {
+	forkedWorkflowID   string
+	startStep          uint
+	applicationVersion string
+	queueName          string
+	queuePartitionKey  string
+}
+
+// ForkOption is a functional option for configuring ForkWorkflow.
+type ForkOption func(*forkWorkflowOptions)
+
+// WithForkStartStep starts the forked workflow from the given step (default: 0).
+// The forked workflow reuses the operation outputs of steps 0 to startStep-1
 // copied from the original workflow.
-//
-// Parameters:
-//   - ctx: DBOS context for the operation
-//   - input: Configuration parameters for the forked workflow
+func WithForkStartStep(startStep uint) ForkOption {
+	return func(p *forkWorkflowOptions) {
+		p.startStep = startStep
+	}
+}
+
+// WithForkWorkflowID sets a custom workflow ID for the forked workflow (auto-generated if not set).
+func WithForkWorkflowID(id string) ForkOption {
+	return func(p *forkWorkflowOptions) {
+		p.forkedWorkflowID = id
+	}
+}
+
+// WithForkApplicationVersion sets the application version of the forked workflow
+// (inherited from the original workflow if not set).
+func WithForkApplicationVersion(version string) ForkOption {
+	return func(p *forkWorkflowOptions) {
+		p.applicationVersion = version
+	}
+}
+
+// WithForkQueue enqueues the forked workflow on the given queue instead of the
+// internal DBOS queue. The queue must be a non-nil handle from [RegisterQueue],
+// [RetrieveQueue], or [ListQueues].
+func WithForkQueue(queue Queue) ForkOption {
+	return func(p *forkWorkflowOptions) {
+		if queue == nil {
+			panic("WithForkQueue: queue cannot be nil")
+		}
+		p.queueName = queue.GetName()
+	}
+}
+
+// WithForkQueuePartitionKey sets the partition key used when enqueueing the
+// forked workflow onto a partitioned queue.
+func WithForkQueuePartitionKey(partitionKey string) ForkOption {
+	return func(p *forkWorkflowOptions) {
+		p.queuePartitionKey = partitionKey
+	}
+}
+
+// ForkWorkflow creates a new workflow instance by copying an existing workflow from a specific step.
+// The forked workflow will have a new UUID (unless WithForkWorkflowID is used) and will execute
+// from the step set with WithForkStartStep, reusing the operation outputs of the preceding steps
+// copied from the original workflow.
 //
 // Returns a typed workflow handle for the newly created forked workflow.
 //
 // Example usage:
 //
 //	// Basic fork from step 5
-//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
-//	    OriginalWorkflowID: "original-workflow-id",
-//	    StartStep:          5,
-//	})
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, "original-workflow-id",
+//	    dbos.WithForkStartStep(5))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //
 //	// Fork with custom workflow ID and application version
-//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
-//	    OriginalWorkflowID: "original-workflow-id",
-//	    ForkedWorkflowID:   "my-custom-fork-id",
-//	    StartStep:          3,
-//	    ApplicationVersion: "v2.0.0",
-//	})
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, "original-workflow-id",
+//	    dbos.WithForkStartStep(3),
+//	    dbos.WithForkWorkflowID("my-custom-fork-id"),
+//	    dbos.WithForkApplicationVersion("v2.0.0"))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //
-//	// Fork onto a named queue instead of the internal queue.
-//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
-//	    OriginalWorkflowID: "original-workflow-id",
-//	    QueueName:          "priority",
-//	})
-func ForkWorkflow[R any](ctx Client, input ForkWorkflowInput) (WorkflowHandle[R], error) {
+//	// Fork onto a queue instead of the internal queue.
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, "original-workflow-id",
+//	    dbos.WithForkQueue(priorityQueue))
+func ForkWorkflow[R any](ctx Client, originalWorkflowID string, opts ...ForkOption) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 
-	handle, err := ctx.ForkWorkflow(ctx, input)
+	var params forkWorkflowOptions
+	for _, opt := range opts {
+		opt(&params)
+	}
+
+	handle, err := ctx.ForkWorkflow(ctx, ForkWorkflowInput{
+		OriginalWorkflowID: originalWorkflowID,
+		ForkedWorkflowID:   params.forkedWorkflowID,
+		StartStep:          params.startStep,
+		ApplicationVersion: params.applicationVersion,
+		QueueName:          params.queueName,
+		QueuePartitionKey:  params.queuePartitionKey,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -5474,87 +5503,39 @@ func GetStepAggregates(ctx Client, input GetStepAggregatesInput) ([]StepAggregat
 	return ctx.GetStepAggregates(ctx, input)
 }
 
-// listRegisteredWorkflowsOptions holds configuration parameters for listing registered workflows
-type listRegisteredWorkflowsOptions struct {
-	scheduledOnly bool
-}
-
-// ListRegisteredWorkflowsOption is a functional option for configuring registered workflow listing parameters.
-type ListRegisteredWorkflowsOption func(*listRegisteredWorkflowsOptions)
-
-// WithScheduledOnly filters to only return scheduled workflows (those with a cron schedule).
-func WithScheduledOnly() ListRegisteredWorkflowsOption {
-	return func(p *listRegisteredWorkflowsOptions) {
-		p.scheduledOnly = true
-	}
-}
-
 // ListRegisteredWorkflows returns information about workflows registered with DBOS.
 // Each WorkflowRegistryEntry contains:
 // - MaxRetries: Maximum number of retry attempts for workflow recovery
 // - Name: Custom name if provided during registration, otherwise empty
 // - FQN: Fully qualified name of the workflow function (always present)
-// - CronSchedule: Empty string for non-scheduled workflows
-//
-// The function supports filtering using functional options:
-// - WithScheduledOnly(): Return only scheduled workflows
 //
 // Example:
 //
-//	// List all registered workflows
-//	workflows, err := dbos.ListRegisteredWorkflows(ctx)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//
-//	// List only scheduled workflows
-//	scheduled, err := dbos.ListRegisteredWorkflows(ctx, dbos.WithScheduledOnly())
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-func ListRegisteredWorkflows(ctx Context, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) {
+//	workflows := dbos.ListRegisteredWorkflows(ctx)
+func ListRegisteredWorkflows(ctx Context) []WorkflowRegistryEntry {
 	if ctx == nil {
-		return nil, errors.New("ctx cannot be nil")
+		panic("ctx cannot be nil")
 	}
-	return ctx.ListRegisteredWorkflows(ctx, opts...)
+	return ctx.ListRegisteredWorkflows(ctx)
 }
 
-// ListRegisteredQueues returns all queues in the in-memory registry.
-//
-// Deprecated: in-memory queues are deprecated. Use [ListQueues] to list
-// database-backed queues registered with [RegisterQueue].
-func ListRegisteredQueues(ctx Context) ([]WorkflowQueue, error) {
-	if ctx == nil {
-		return []WorkflowQueue{}, errors.New("ctx cannot be nil")
-	}
-	return ctx.ListRegisteredQueues(ctx)
-}
-
-func (c *dbosContext) ListenQueues(_ Context, queues ...WorkflowQueue) {
-	launched := c.launched.Load()
+func (c *dbosContext) ListenQueues(_ Context, names ...string) {
 	c.queueRunner.listenMu.Lock()
 	defer c.queueRunner.listenMu.Unlock()
-	for _, queue := range queues {
-		// In-memory queues are fixed at launch, so listening to one after launch is rejected
-		if _, inMemory := c.queueRunner.workflowQueueRegistry[queue.Name]; launched && inMemory {
-			panic("Cannot call ListenQueues for an in-memory queue after DBOS has launched")
-		}
-		c.queueRunner.listenedQueues[queue.Name] = true
+	for _, name := range names {
+		c.queueRunner.listenedQueues[name] = true
 	}
 }
 
 // ListenQueues configures which queues the current DBOS process should listen to.
-// By default, all registered queues are listened to. Once ListenQueues has been
-// called, only the named queues (and the internal DBOS queue) are listened to.
-// This lets multiple DBOS processes share the same queues but listen to different
-// subsets.
+// By default, all queues are listened to. Once ListenQueues has been called, only
+// the named queues (and the internal DBOS queue) are listened to. This lets
+// multiple DBOS processes share the same queues but listen to different subsets.
 //
-// A queue is identified by name, so a database-backed queue can be listened to by
-// passing a WorkflowQueue with its Name set (or a handle from RetrieveQueue),
-// even before the queue exists in the database — the supervisor resolves names
-// against the database on each reconcile tick. Database-backed queue names may be
-// added to the listen set at any time, including after Launch, allowing the
-// listen set to change dynamically.
+// Names are resolved against the queues table on each reconcile tick, so a queue
+// can be listened to before it exists in the database. Names may be added to the
+// listen set at any time, including after Launch, allowing the listen set to
+// change dynamically.
 //
 // Example:
 //
@@ -5562,14 +5543,12 @@ func (c *dbosContext) ListenQueues(_ Context, queues ...WorkflowQueue) {
 //	dbos.RegisterQueue(ctx, "queue-2")
 //
 //	// Only listen to queue-1 and queue-2.
-//	dbos.ListenQueues(ctx,
-//	    dbos.WorkflowQueue{Name: "queue-1"},
-//	    dbos.WorkflowQueue{Name: "queue-2"})
-func ListenQueues(ctx Context, queues ...WorkflowQueue) {
+//	dbos.ListenQueues(ctx, "queue-1", "queue-2")
+func ListenQueues(ctx Context, names ...string) {
 	if ctx == nil {
 		panic("ctx cannot be nil")
 	}
-	ctx.ListenQueues(ctx, queues...)
+	ctx.ListenQueues(ctx, names...)
 }
 
 /*******************************/

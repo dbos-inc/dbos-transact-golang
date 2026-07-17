@@ -524,7 +524,8 @@ func TestSerializer(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create a test queue for queued workflow tests
-	testQueue := NewWorkflowQueue(executor, "serializer-test-queue")
+	testQueue, err := RegisterQueue(executor, "serializer-test-queue")
+	require.NoError(t, err)
 
 	// Register workflows
 	RegisterWorkflow(executor, serializerWorkflow)
@@ -571,7 +572,7 @@ func TestSerializer(t *testing.T) {
 	RegisterWorkflow(executor, serializerMyIntGetEventWorkflow)
 	RegisterWorkflow(executor, serializerStreamWorkflow)
 
-	err := Launch(executor)
+	err = Launch(executor)
 	require.NoError(t, err)
 	defer Shutdown(executor, 10*time.Second)
 
@@ -890,7 +891,7 @@ func TestSerializer(t *testing.T) {
 		}
 
 		// Start workflow with queue option
-		handle, err := RunWorkflow(executor, serializerWorkflow, input, WithWorkflowID("serializer-queued-wf"), WithQueue(testQueue.Name))
+		handle, err := RunWorkflow(executor, serializerWorkflow, input, WithWorkflowID("serializer-queued-wf"), WithQueue(testQueue))
 		require.NoError(t, err, "failed to start queued workflow")
 
 		// Get result from the handle
@@ -1041,9 +1042,10 @@ func TestGobSerializer(t *testing.T) {
 	RegisterWorkflow(executor, gobGobOnlyStreamWorkflow)
 	RegisterWorkflow(executor, gobQueuedWorkflow)
 
-	gobTestQueue := NewWorkflowQueue(executor, "gob-serializer-test-queue")
+	gobTestQueue, err := RegisterQueue(executor, "gob-serializer-test-queue")
+	require.NoError(t, err)
 
-	err := Launch(executor)
+	err = Launch(executor)
 	require.NoError(t, err)
 	defer Shutdown(executor, 10*time.Second)
 
@@ -1178,7 +1180,7 @@ func TestGobSerializer(t *testing.T) {
 			Data:     TestData{Message: "queued", Value: 888},
 			Metadata: map[string]string{"type": "gob-queued"},
 		}
-		handle, err := RunWorkflow(executor, gobQueuedWorkflow, input, WithWorkflowID("gob-queued-wf"), WithQueue(gobTestQueue.Name))
+		handle, err := RunWorkflow(executor, gobQueuedWorkflow, input, WithWorkflowID("gob-queued-wf"), WithQueue(gobTestQueue))
 		require.NoError(t, err)
 
 		result, err := handle.GetResult()
@@ -1204,7 +1206,8 @@ func TestClientCustomSerializer(t *testing.T) {
 	// Server uses the same custom serializer so it can decode what the client encodes
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: customSer})
 
-	queue := NewWorkflowQueue(serverCtx, "client-ser-queue")
+	queue, err := RegisterQueue(serverCtx, "client-ser-queue")
+	require.NoError(t, err)
 
 	// Workflow that returns its input — on the server side the deserialized input
 	// will be fixedChicken because the chickenSerializer always decodes to that.
@@ -1244,7 +1247,7 @@ func TestClientCustomSerializer(t *testing.T) {
 	}
 	RegisterWorkflow(serverCtx, setEventWorkflow, WithWorkflowName("ClientSerSetEventWorkflow"))
 
-	err := Launch(serverCtx)
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 	defer Shutdown(serverCtx, 10*time.Second)
 
@@ -1260,7 +1263,7 @@ func TestClientCustomSerializer(t *testing.T) {
 	t.Run("EnqueueWithCustomSerializer", func(t *testing.T) {
 		// The chicken serializer always encodes to fixedChicken, so regardless
 		// of what we pass in, the server should decode fixedChicken.
-		handle, err := Enqueue[Chicken, Chicken](client, queue.Name, "ClientSerEchoWorkflow",
+		handle, err := Enqueue[Chicken, Chicken](client, queue.GetName(), "ClientSerEchoWorkflow",
 			Chicken{Name: "ignored", Noise: "ignored", Legs: 99},
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -1272,7 +1275,7 @@ func TestClientCustomSerializer(t *testing.T) {
 
 	t.Run("SendWithCustomSerializer", func(t *testing.T) {
 		// Enqueue a workflow that waits for a message
-		handle, err := Enqueue[Chicken, Chicken](client, queue.Name, "ClientSerRecvWorkflow",
+		handle, err := Enqueue[Chicken, Chicken](client, queue.GetName(), "ClientSerRecvWorkflow",
 			Chicken{},
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -1288,7 +1291,7 @@ func TestClientCustomSerializer(t *testing.T) {
 
 	t.Run("GetEventWithCustomSerializer", func(t *testing.T) {
 		// Enqueue a workflow that sets an event
-		handle, err := Enqueue[Chicken, Chicken](client, queue.Name, "ClientSerSetEventWorkflow",
+		handle, err := Enqueue[Chicken, Chicken](client, queue.GetName(), "ClientSerSetEventWorkflow",
 			fixedChicken,
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -1306,7 +1309,7 @@ func TestClientCustomSerializer(t *testing.T) {
 
 	t.Run("ClientReadStreamWithCustomSerializer", func(t *testing.T) {
 		// Enqueue a workflow that writes to a stream
-		handle, err := Enqueue[Chicken, Chicken](client, queue.Name, "ClientSerStreamWorkflow",
+		handle, err := Enqueue[Chicken, Chicken](client, queue.GetName(), "ClientSerStreamWorkflow",
 			fixedChicken,
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -1661,7 +1664,8 @@ func TestPortableInterop(t *testing.T) {
 		}, nil
 	}
 	RegisterWorkflow(executor, portableWf, WithWorkflowName("interop_workflow"))
-	NewWorkflowQueue(executor, "portable-interop-queue")
+	_, err := RegisterQueue(executor, "portable-interop-queue")
+	require.NoError(t, err)
 
 	require.NoError(t, Launch(executor))
 	defer Shutdown(executor, 10*time.Second)
@@ -2780,10 +2784,7 @@ func TestForkPreservesSerialization(t *testing.T) {
 
 	// Fork past all recorded steps (0=checkpointStep, 1=SetEvent, 2=WriteStream)
 	// so every copied row must carry its serialization to replay correctly.
-	forkHandle, err := ForkWorkflow[TestWorkflowData](executor, ForkWorkflowInput{
-		OriginalWorkflowID: "fork-serialization-orig",
-		StartStep:          3,
-	})
+	forkHandle, err := ForkWorkflow[TestWorkflowData](executor, "fork-serialization-orig", WithForkStartStep(3))
 	require.NoError(t, err)
 	forkResult, err := forkHandle.GetResult()
 	require.NoError(t, err, "forked replay must decode copied checkpoints with their recorded serializer")
@@ -2877,10 +2878,7 @@ func TestExportImportPreservesSerialization(t *testing.T) {
 
 	// Fork past all steps: replay of the reimported checkpoints must decode
 	// with the serialization the import round-tripped.
-	forkHandle, err := ForkWorkflow[TestWorkflowData](executor, ForkWorkflowInput{
-		OriginalWorkflowID: workflowID,
-		StartStep:          3,
-	})
+	forkHandle, err := ForkWorkflow[TestWorkflowData](executor, workflowID, WithForkStartStep(3))
 	require.NoError(t, err)
 	forkResult, err := forkHandle.GetResult()
 	require.NoError(t, err, "replay of reimported checkpoints must decode with their recorded serializer")

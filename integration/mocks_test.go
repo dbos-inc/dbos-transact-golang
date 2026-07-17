@@ -90,11 +90,7 @@ func workflow(ctx dbos.Context, i int) (int, error) {
 		return 0, err
 	}
 
-	forkInput := dbos.ForkWorkflowInput{
-		OriginalWorkflowID: workflowID,
-		StartStep:          uint(stepID),
-	}
-	_, err = dbos.ForkWorkflow[int](ctx, forkInput)
+	_, err = dbos.ForkWorkflow[int](ctx, workflowID, dbos.WithForkStartStep(uint(stepID)))
 	if err != nil {
 		return 0, err
 	}
@@ -223,15 +219,9 @@ func clientMethodsFunction(ctx dbos.Context) error {
 	}
 
 	// ListRegisteredWorkflows
-	entries, err := dbos.ListRegisteredWorkflows(ctx)
-	if err != nil || len(entries) != 1 {
-		return fmt.Errorf("ListRegisteredWorkflows failed: entries=%v, err=%v", entries, err)
-	}
-
-	// ListRegisteredQueues
-	queues, err := dbos.ListRegisteredQueues(ctx)
-	if err != nil || len(queues) != 1 {
-		return fmt.Errorf("ListRegisteredQueues failed: queues=%v, err=%v", queues, err)
+	entries := dbos.ListRegisteredWorkflows(ctx)
+	if len(entries) != 1 {
+		return fmt.Errorf("ListRegisteredWorkflows failed: entries=%v", entries)
 	}
 
 	// From
@@ -253,7 +243,7 @@ func clientMethodsFunction(ctx dbos.Context) error {
 	}
 
 	// ListenQueues
-	dbos.ListenQueues(ctx, dbos.WorkflowQueue{Name: "queue1"}, dbos.WorkflowQueue{Name: "queue2"})
+	dbos.ListenQueues(ctx, "queue1", "queue2")
 
 	// DeleteWorkflows
 	err = dbos.DeleteWorkflows(ctx, []string{"wf-to-delete"})
@@ -330,7 +320,10 @@ func TestMocks(t *testing.T) {
 	mockCtx.On("RetrieveWorkflow", mockCtx, "test-workflow-id").Return(mockGenericHandle, nil)
 	mockCtx.On("CancelWorkflow", mockCtx, "test-workflow-id").Return(nil)
 	mockCtx.On("ResumeWorkflow", mockCtx, "test-workflow-id").Return(mockGenericHandle, nil)
-	mockCtx.On("ForkWorkflow", mockCtx, mock.Anything).Return(mockGenericHandle, nil)
+	mockCtx.On("ForkWorkflow", mockCtx, dbos.ForkWorkflowInput{
+		OriginalWorkflowID: "test-workflow-id",
+		StartStep:          1,
+	}).Return(mockGenericHandle, nil)
 	mockCtx.On("ListWorkflows", mockCtx).Return([]dbos.WorkflowStatus{}, nil)
 	mockCtx.On("GetWorkflowSteps", mockCtx, "test-workflow-id").Return([]dbos.StepInfo{}, nil)
 
@@ -408,12 +401,7 @@ func TestMocks(t *testing.T) {
 	// ListRegisteredWorkflows
 	mockCtx2.On("ListRegisteredWorkflows", mockCtx2).Return([]dbos.WorkflowRegistryEntry{
 		{Name: "Workflow1", FQN: "workflow1"},
-	}, nil).Once()
-
-	// ListRegisteredQueues
-	mockCtx2.On("ListRegisteredQueues", mockCtx2).Return([]dbos.WorkflowQueue{
-		{Name: "queue1"},
-	}, nil).Once()
+	}).Once()
 
 	// From
 	mockFromCtx := mocks.NewMockContext(t)
@@ -429,9 +417,7 @@ func TestMocks(t *testing.T) {
 	mockCtx2.On("WithTimeout", mockCtx2, 5*time.Minute).Return(mockTimeoutCtx, timeoutCancelFunc, nil).Once()
 
 	// ListenQueues
-	mockCtx2.On("ListenQueues", mockCtx2, mock.MatchedBy(func(qs []dbos.WorkflowQueue) bool {
-		return len(qs) == 2
-	})).Return(nil).Once()
+	mockCtx2.On("ListenQueues", mockCtx2, []string{"queue1", "queue2"}).Return().Once()
 
 	// DeleteWorkflows
 	mockCtx2.On("DeleteWorkflows", mockCtx2, []string{"wf-to-delete"}, mock.Anything).Return(nil).Once()
@@ -491,8 +477,8 @@ func TestClientTypedHelpersWithMock(t *testing.T) {
 	// ForkWorkflow returns a typed handle.
 	forkHandle := mocks.NewMockWorkflowHandle[any](t)
 	forkHandle.On("GetResult").Return(11, nil).Once()
-	mockClient.On("ForkWorkflow", mockClient, mock.Anything).Return(forkHandle, nil).Once()
-	fh, err := dbos.ForkWorkflow[int](mockClient, dbos.ForkWorkflowInput{OriginalWorkflowID: "wf-ret"})
+	mockClient.On("ForkWorkflow", mockClient, dbos.ForkWorkflowInput{OriginalWorkflowID: "wf-ret"}).Return(forkHandle, nil).Once()
+	fh, err := dbos.ForkWorkflow[int](mockClient, "wf-ret")
 	if err != nil {
 		t.Fatalf("ForkWorkflow failed: %v", err)
 	}

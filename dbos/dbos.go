@@ -236,10 +236,8 @@ type Context interface {
 	GetStepID() (int, error)                                                                                // Get the current step ID (only available within workflows)
 
 	// Registration
-	ListRegisteredWorkflows(_ Context, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) // List registered workflows with filtering options
-	// Deprecated: in-memory queues are deprecated; use ListQueues for database-backed queues.
-	ListRegisteredQueues(_ Context) ([]WorkflowQueue, error)
-	ListenQueues(_ Context, queues ...WorkflowQueue) // Configure which queues this process should listen to
+	ListRegisteredWorkflows(_ Context) []WorkflowRegistryEntry // List workflows registered in this process
+	ListenQueues(_ Context, names ...string)                   // Configure which queues this process should listen to
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -338,16 +336,11 @@ func SetAlertHandler(ctx Context, handler AlertHandler) {
 	ctx.SetAlertHandler(handler)
 }
 
-// ClearRegistries clears the workflow and queue registries,
-// allowing re-registration of workflows and queues. Intended for testing only.
+// ClearRegistries clears the workflow registry,
+// allowing re-registration of workflows. Intended for testing only.
 func (c *dbosContext) ClearRegistries() {
 	c.workflowRegistry.Clear()
 	c.workflowCustomNametoFQN.Clear()
-	for name := range c.queueRunner.workflowQueueRegistry {
-		if name != models.InternalQueueName {
-			delete(c.queueRunner.workflowQueueRegistry, name)
-		}
-	}
 	c.alertHandler = nil
 }
 
@@ -491,42 +484,14 @@ func (c *dbosContext) GetApplicationID() string {
 	return c.applicationID
 }
 
-// ListRegisteredQueues returns all queues in the in-memory registry.
-//
-// Deprecated: in-memory queues are deprecated; use ListQueues for database-backed queues.
-func (c *dbosContext) ListRegisteredQueues(_ Context) ([]WorkflowQueue, error) {
-	if c.queueRunner == nil {
-		return []WorkflowQueue{}, nil
-	}
-	return c.queueRunner.listQueues(), nil
-}
-
 // ListRegisteredWorkflows returns information about registered workflows with their registration parameters.
-// Supports filtering using functional options.
-func (c *dbosContext) ListRegisteredWorkflows(_ Context, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) {
-	// Initialize parameters with defaults
-	params := &listRegisteredWorkflowsOptions{}
-
-	// Apply all provided options
-	for _, opt := range opts {
-		opt(params)
-	}
-
-	// Get all registered workflows and apply filters
-	var filteredWorkflows []WorkflowRegistryEntry
+func (c *dbosContext) ListRegisteredWorkflows(_ Context) []WorkflowRegistryEntry {
+	var workflows []WorkflowRegistryEntry
 	c.workflowRegistry.Range(func(key, value any) bool {
-		workflow := value.(WorkflowRegistryEntry)
-
-		// Filter by scheduled only
-		if params.scheduledOnly && workflow.CronSchedule == "" {
-			return true
-		}
-
-		filteredWorkflows = append(filteredWorkflows, workflow)
+		workflows = append(workflows, value.(WorkflowRegistryEntry))
 		return true
 	})
-
-	return filteredWorkflows, nil
+	return workflows
 }
 
 // NewContext creates a new DBOS context with the provided configuration.
@@ -610,9 +575,8 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	initExecutor.systemDB = systemDB
 	initExecutor.logger.Debug("System database initialized")
 
-	// Initialize the queue runner and register DBOS internal queue
+	// Initialize the queue runner (which owns the DBOS internal queue)
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
-	NewWorkflowQueue(initExecutor, models.InternalQueueName)
 
 	// Register the any,any internal debouncer workflow so it's always available for execution
 	// This allows a client to debounce workflow and the server side to run them, even without knowing the actual workflow types

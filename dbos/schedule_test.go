@@ -25,7 +25,8 @@ func TestScheduleCRUD(t *testing.T) {
 
 	// Custom queue used by CreateDelete to verify WithScheduleQueueName routes
 	// scheduled workflows to the configured queue.
-	customQueue := NewWorkflowQueue(dbosCtx, "schedule-crud-custom-queue")
+	customQueue, err := RegisterQueue(dbosCtx, "schedule-crud-custom-queue")
+	require.NoError(t, err)
 
 	require.NoError(t, dbosCtx.Launch())
 
@@ -43,7 +44,7 @@ func TestScheduleCRUD(t *testing.T) {
 			Schedule:     "*/1 * * * * *",
 			Workflow:     testCapturingScheduledWorkflow,
 			Context:      ctxValue,
-			QueueName:    customQueue.Name,
+			QueueName:    customQueue.GetName(),
 		})
 		require.NoError(t, err)
 
@@ -54,7 +55,7 @@ func TestScheduleCRUD(t *testing.T) {
 		require.Equal(t, capturingFQN, schedule.WorkflowName)
 		require.Equal(t, "*/1 * * * * *", schedule.Schedule)
 		require.Equal(t, ScheduleStatusActive, schedule.Status)
-		require.Equal(t, customQueue.Name, schedule.QueueName)
+		require.Equal(t, customQueue.GetName(), schedule.QueueName)
 
 		// Reconciler should install a cron entry for the new schedule.
 		require.Eventually(t, func() bool {
@@ -71,7 +72,7 @@ func TestScheduleCRUD(t *testing.T) {
 		require.Eventually(t, func() bool {
 			wfs, err := ListWorkflows(dbosCtx,
 				WithWorkflowIDPrefix("sched-"+name+"-"),
-				WithQueueName(customQueue.Name),
+				WithQueueName(customQueue.GetName()),
 			)
 			if err != nil || len(wfs) == 0 {
 				return false
@@ -263,8 +264,10 @@ func TestApplySchedules(t *testing.T) {
 
 	// Two queues so we can verify that re-applying a schedule with a different
 	// QueueName routes future ticks to the new queue.
-	queueA := NewWorkflowQueue(dbosCtx, "apply-queue-a")
-	queueB := NewWorkflowQueue(dbosCtx, "apply-queue-b")
+	queueA, err := RegisterQueue(dbosCtx, "apply-queue-a")
+	require.NoError(t, err)
+	queueB, err := RegisterQueue(dbosCtx, "apply-queue-b")
+	require.NoError(t, err)
 
 	require.NoError(t, dbosCtx.Launch())
 
@@ -286,9 +289,9 @@ func TestApplySchedules(t *testing.T) {
 
 	// Round 1: apply three active schedules. toKeep fires every second on
 	// queueA so we can observe that a queue change takes effect on re-apply.
-	err := ApplySchedules(dbosCtx, []ScheduleSpec{
+	err = ApplySchedules(dbosCtx, []ScheduleSpec{
 		{ScheduleName: toPause, Workflow: testWorkflowForSchedule, Schedule: "*/10 * * * * *"},
-		{ScheduleName: toKeep, Workflow: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueA.Name},
+		{ScheduleName: toKeep, Workflow: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueA.GetName()},
 		{ScheduleName: toDrop, Workflow: testWorkflowForSchedule, Schedule: "0 30 * * * *"},
 	})
 	require.NoError(t, err)
@@ -306,7 +309,7 @@ func TestApplySchedules(t *testing.T) {
 	require.Eventually(t, func() bool {
 		wfs, err := ListWorkflows(dbosCtx,
 			WithWorkflowIDPrefix("sched-"+toKeep+"-"),
-			WithQueueName(queueA.Name),
+			WithQueueName(queueA.GetName()),
 		)
 		return err == nil && len(wfs) > 0
 	}, 5*time.Second, 100*time.Millisecond, "toKeep should enqueue on queueA before re-apply")
@@ -321,7 +324,7 @@ func TestApplySchedules(t *testing.T) {
 	require.NoError(t, PauseSchedule(dbosCtx, toPause))
 	require.NoError(t, DeleteSchedule(dbosCtx, toDrop))
 	require.NoError(t, ApplySchedules(dbosCtx, []ScheduleSpec{
-		{ScheduleName: toKeep, Workflow: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueB.Name},
+		{ScheduleName: toKeep, Workflow: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueB.GetName()},
 	}))
 
 	// Paused: schedule still exists but its cron entry is removed.
@@ -345,7 +348,7 @@ func TestApplySchedules(t *testing.T) {
 	require.NotNil(t, kept)
 	require.Equal(t, ScheduleStatusActive, kept.Status)
 	require.Equal(t, keepScheduleID, kept.ScheduleID, "upsert must preserve schedule_id on re-apply")
-	require.Equal(t, queueB.Name, kept.QueueName)
+	require.Equal(t, queueB.GetName(), kept.QueueName)
 	require.Eventually(t, func() bool { return hasEntry(toKeep) },
 		3*time.Second, 50*time.Millisecond, "re-applied toKeep should have a cron entry")
 
@@ -353,7 +356,7 @@ func TestApplySchedules(t *testing.T) {
 	require.Eventually(t, func() bool {
 		wfs, err := ListWorkflows(dbosCtx,
 			WithWorkflowIDPrefix("sched-"+toKeep+"-"),
-			WithQueueName(queueB.Name),
+			WithQueueName(queueB.GetName()),
 		)
 		return err == nil && len(wfs) > 0
 	}, 5*time.Second, 100*time.Millisecond, "re-applied toKeep should enqueue on queueB")

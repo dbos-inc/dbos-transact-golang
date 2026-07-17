@@ -4395,14 +4395,16 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	}
 
 	// Calculate max_tasks based on concurrency limits
-	maxTasks := input.Queue.MaxTasksPerIteration
-
+	// maxTasks < 0 means this dequeue is unbounded.
+	maxTasks := -1
 	if input.Queue.WorkerConcurrency != nil {
 		workerConcurrency := *input.Queue.WorkerConcurrency
 		if input.LocalRunningCount > workerConcurrency {
 			s.logger.Warn("Local running workflows on queue exceeds worker concurrency limit", "local_running", input.LocalRunningCount, "queue_name", input.Queue.Name, "concurrency_limit", workerConcurrency)
 		}
-		maxTasks = max(workerConcurrency-input.LocalRunningCount, 0)
+		if available := max(workerConcurrency-input.LocalRunningCount, 0); maxTasks < 0 || available < maxTasks {
+			maxTasks = available
+		}
 	}
 
 	if input.Queue.GlobalConcurrency != nil {
@@ -4426,13 +4428,12 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		if globalCount > concurrency {
 			s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalCount, "queue_name", input.Queue.Name, "concurrency_limit", concurrency)
 		}
-		availableTasks := max(concurrency-globalCount, 0)
-		if availableTasks < maxTasks {
+		if availableTasks := max(concurrency-globalCount, 0); maxTasks < 0 || availableTasks < maxTasks {
 			maxTasks = availableTasks
 		}
 	}
 
-	if maxTasks <= 0 {
+	if maxTasks == 0 {
 		return nil, nil
 	}
 
@@ -4647,13 +4648,12 @@ func scanQueueRow(row Row) (*models.QueueConfig, error) {
 		return nil, err
 	}
 	q := &models.QueueConfig{
-		Name:                 name,
-		GlobalConcurrency:    concurrency,
-		WorkerConcurrency:    workerConcurrency,
-		PriorityEnabled:      priorityEnabled,
-		PartitionQueue:       partitionQueue,
-		MaxTasksPerIteration: models.DefaultMaxTasksPerIteration, // not persisted; queue table has no such column
-		DatabaseBacked:       true,
+		Name:              name,
+		GlobalConcurrency: concurrency,
+		WorkerConcurrency: workerConcurrency,
+		PriorityEnabled:   priorityEnabled,
+		PartitionQueue:    partitionQueue,
+		DatabaseBacked:    true,
 	}
 	if rateLimitMax != nil {
 		var period time.Duration

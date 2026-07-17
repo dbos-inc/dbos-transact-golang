@@ -79,7 +79,7 @@
 //
 //	// Enqueue workflows with optional deduplication and priority
 //	handle, err := dbos.RunWorkflow(ctx, taskWorkflow, input,
-//	    dbos.WithQueue(queue.Name),
+//	    dbos.WithQueue(queue),
 //	    dbos.WithDeduplicationID("unique-id"),
 //	    dbos.WithPriority(10))
 //
@@ -97,7 +97,7 @@
 //	err = dbos.ResumeWorkflow(ctx, workflowID)
 //
 //	// Fork a workflow from a specific step
-//	newID, err := dbos.ForkWorkflow(ctx, originalID, stepNumber)
+//	handle, err := dbos.ForkWorkflow[string](ctx, originalID, dbos.WithForkStartStep(stepNumber))
 //
 // Workflows can also be visualized and managed through the DBOS Console web UI.
 //

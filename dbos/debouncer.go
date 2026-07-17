@@ -212,7 +212,7 @@ func (d *Debouncer[P, R]) Debounce(ctx Context, key string, delay time.Duration,
 	for {
 		// internalDebouncerWF[P, R] is a generic workflow, so its dynamic name resolution will yield a different name than its registration name
 		// This is because the function passed through as an argument can have a different reflection name
-		_, err := RunWorkflow(ctx, internalDebouncerWF[P, R], dInput, WithQueue(models.InternalQueueName), WithDeduplicationID(key), withWorkflowName(d.internalDebouncerFQN))
+		_, err := RunWorkflow(ctx, internalDebouncerWF[P, R], dInput, withQueueName(models.InternalQueueName), WithDeduplicationID(key), withWorkflowName(d.internalDebouncerFQN))
 		if err == nil {
 			return newWorkflowPollingHandle[R](ctx, dInput.TargetWorkflowID), nil
 		}
@@ -511,7 +511,7 @@ func internalDebouncerWF[P any, R any](ctx Context, input debouncerInput[P]) (R,
 		workflowOpts = append(workflowOpts, WithWorkflowID(input.WorkflowOptions.WorkflowID))
 	}
 	if input.WorkflowOptions.QueueName != "" {
-		workflowOpts = append(workflowOpts, WithQueue(input.WorkflowOptions.QueueName))
+		workflowOpts = append(workflowOpts, withQueueName(input.WorkflowOptions.QueueName))
 	}
 	if input.WorkflowOptions.ApplicationVersion != "" {
 		workflowOpts = append(workflowOpts, WithApplicationVersion(input.WorkflowOptions.ApplicationVersion))

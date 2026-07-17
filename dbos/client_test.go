@@ -26,18 +26,20 @@ func TestClientEnqueue(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication between client and server
-	queue := NewWorkflowQueue(serverCtx, "client-enqueue-queue")
+	queue, err := RegisterQueue(serverCtx, "client-enqueue-queue")
+	require.NoError(t, err)
 
 	// Create a priority-enabled queue with max concurrency of 1 to ensure ordering
-	// Must be created before Launch()
-	priorityQueue := NewWorkflowQueue(serverCtx, "priority-test-queue", WithGlobalConcurrency(1), WithPriorityEnabled())
+	priorityQueue, err := RegisterQueue(serverCtx, "priority-test-queue", WithGlobalConcurrency(1), WithPriorityEnabled())
+	require.NoError(t, err)
 
 	// Create a partitioned queue for partition key test
-	// Must be created before Launch()
-	partitionedQueue := NewWorkflowQueue(serverCtx, "client-partitioned-queue", WithPartitionQueue())
+	partitionedQueue, err := RegisterQueue(serverCtx, "client-partitioned-queue", WithPartitionQueue())
+	require.NoError(t, err)
 
 	// Concurrency-1 queue to hold a workflow ENQUEUED past its timeout (timeout clock test)
-	timeoutClockQueue := NewWorkflowQueue(serverCtx, "client-timeout-clock-queue", WithGlobalConcurrency(1))
+	timeoutClockQueue, err := RegisterQueue(serverCtx, "client-timeout-clock-queue", WithGlobalConcurrency(1))
+	require.NoError(t, err)
 
 	// Track execution order for priority test
 	var executionOrder []string
@@ -105,7 +107,7 @@ func TestClientEnqueue(t *testing.T) {
 	RegisterWorkflow(serverCtx, emailNotifier.Send, WithWorkflowName("NotifierWorkflow"), WithInstance(emailNotifier))
 
 	// Launch the server context to start processing tasks
-	err := Launch(serverCtx)
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client - this will enqueue tasks
@@ -124,7 +126,7 @@ func TestClientEnqueue(t *testing.T) {
 	t.Run("EnqueueToConfiguredInstance", func(t *testing.T) {
 		// The config name routes the workflow to the matching registered instance
 		for _, inst := range []*configuredNotifier{slackNotifier, emailNotifier} {
-			handle, err := Enqueue[string, string](client, queue.Name, "NotifierWorkflow", "hi",
+			handle, err := Enqueue[string, string](client, queue.GetName(), "NotifierWorkflow", "hi",
 				WithEnqueueConfigName(inst.channel),
 				WithEnqueueClassName("interop"),
 				WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -146,7 +148,7 @@ func TestClientEnqueue(t *testing.T) {
 
 	t.Run("EnqueueAndGetResult", func(t *testing.T) {
 		// Client enqueues a task using the new Enqueue method
-		handle, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
 
@@ -167,7 +169,7 @@ func TestClientEnqueue(t *testing.T) {
 
 		assert.Equal(t, WorkflowStatusSuccess, status.Status)
 		assert.Equal(t, "ServerWorkflow", status.Name)
-		assert.Equal(t, queue.Name, status.QueueName)
+		assert.Equal(t, queue.GetName(), status.QueueName)
 
 		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
@@ -176,7 +178,7 @@ func TestClientEnqueue(t *testing.T) {
 		customWorkflowID := "custom-client-workflow-id"
 
 		// Client enqueues a task with a custom workflow ID
-		_, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		_, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(customWorkflowID))
 		require.NoError(t, err)
 
@@ -193,7 +195,7 @@ func TestClientEnqueue(t *testing.T) {
 	})
 
 	t.Run("EnqueueWithTimeout", func(t *testing.T) {
-		handle, err := Enqueue[string, string](client, queue.Name, "BlockingWorkflow", "blocking-input",
+		handle, err := Enqueue[string, string](client, queue.GetName(), "BlockingWorkflow", "blocking-input",
 			WithEnqueueTimeout(500*time.Millisecond))
 		require.NoError(t, err)
 
@@ -215,7 +217,7 @@ func TestClientEnqueue(t *testing.T) {
 
 	t.Run("EnqueueTimeoutClockStartsAtDequeue", func(t *testing.T) {
 		// Occupy the concurrency-1 queue so the timed workflow stays ENQUEUED past its timeout
-		blockerHandle, err := Enqueue[string, string](client, timeoutClockQueue.Name, "SignalBlockingWorkflow", "blocker")
+		blockerHandle, err := Enqueue[string, string](client, timeoutClockQueue.GetName(), "SignalBlockingWorkflow", "blocker")
 		require.NoError(t, err)
 		require.Eventually(t, func() bool {
 			status, err := blockerHandle.GetStatus()
@@ -224,7 +226,7 @@ func TestClientEnqueue(t *testing.T) {
 
 		timeout := 500 * time.Millisecond
 		enqueueTime := time.Now()
-		handle, err := Enqueue[string, string](client, timeoutClockQueue.Name, "QuickWorkflow", "timed-input",
+		handle, err := Enqueue[string, string](client, timeoutClockQueue.GetName(), "QuickWorkflow", "timed-input",
 			WithEnqueueTimeout(timeout))
 		require.NoError(t, err)
 
@@ -264,18 +266,18 @@ func TestClientEnqueue(t *testing.T) {
 		mu.Unlock()
 
 		// Enqueue workflow without priority (will use default priority of 0)
-		handle1, err := Enqueue[string, string](client, priorityQueue.Name, "PriorityWorkflow", "abc",
+		handle1, err := Enqueue[string, string](client, priorityQueue.GetName(), "PriorityWorkflow", "abc",
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow without priority")
 
 		// Enqueue with a lower priority (higher number = lower priority)
-		handle2, err := Enqueue[string, string](client, priorityQueue.Name, "PriorityWorkflow", "def",
+		handle2, err := Enqueue[string, string](client, priorityQueue.GetName(), "PriorityWorkflow", "def",
 			WithEnqueuePriority(5),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with priority 5")
 
 		// Enqueue with a higher priority (lower number = higher priority)
-		handle3, err := Enqueue[string, string](client, priorityQueue.Name, "PriorityWorkflow", "ghi",
+		handle3, err := Enqueue[string, string](client, priorityQueue.GetName(), "PriorityWorkflow", "ghi",
 			WithEnqueuePriority(1),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with priority 1")
@@ -310,14 +312,14 @@ func TestClientEnqueue(t *testing.T) {
 		wfid2 := "client-dedup-wf2"
 
 		// First workflow with deduplication ID - should succeed
-		handle1, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle1, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfid1),
 			WithEnqueueDeduplicationID(dedupID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue first workflow with deduplication ID")
 
 		// Second workflow with same deduplication ID but different workflow ID - should fail
-		_, err = Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		_, err = Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfid2),
 			WithEnqueueDeduplicationID(dedupID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -328,17 +330,17 @@ func TestClientEnqueue(t *testing.T) {
 		require.True(t, ok, "expected error to be of type *Error, got %T", err)
 		assert.Equal(t, ErrorCodeQueueDeduplicated, dbosErr.Code, "expected error code to be ErrorCodeQueueDeduplicated")
 
-		expectedMsgPart := fmt.Sprintf("Workflow %s was deduplicated due to an existing workflow in queue %s with deduplication ID %s", wfid2, queue.Name, dedupID)
+		expectedMsgPart := fmt.Sprintf("Workflow %s was deduplicated due to an existing workflow in queue %s with deduplication ID %s", wfid2, queue.GetName(), dedupID)
 		assert.Contains(t, err.Error(), expectedMsgPart, "expected error message to contain deduplication information")
 
 		// Third workflow with different deduplication ID - should succeed
-		handle3, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle3, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueDeduplicationID("different-dedup-id"),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with different deduplication ID")
 
 		// Fourth workflow without deduplication ID - should succeed
-		handle4, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle4, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow without deduplication ID")
 
@@ -356,7 +358,7 @@ func TestClientEnqueue(t *testing.T) {
 		assert.Equal(t, "processed: test-input", result4)
 
 		// After first workflow completes, we should be able to enqueue with same deduplication ID
-		handle5, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle5, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfid2),        // Reuse the workflow ID that failed before
 			WithEnqueueDeduplicationID(dedupID), // Same deduplication ID as first workflow
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -373,14 +375,14 @@ func TestClientEnqueue(t *testing.T) {
 		dedupID := "client-return-existing-dedup-id"
 
 		// First enqueue holds the dedup slot (BlockingWorkflow stays running)
-		handle1, err := Enqueue[string, string](client, queue.Name, "BlockingWorkflow", "first",
+		handle1, err := Enqueue[string, string](client, queue.GetName(), "BlockingWorkflow", "first",
 			WithEnqueueDeduplicationID(dedupID),
 			WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue first workflow")
 
 		// Second enqueue with the same dedup ID returns a handle to the existing workflow instead of erroring
-		handle2, err := Enqueue[string, string](client, queue.Name, "BlockingWorkflow", "second",
+		handle2, err := Enqueue[string, string](client, queue.GetName(), "BlockingWorkflow", "second",
 			WithEnqueueDeduplicationID(dedupID),
 			WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -392,7 +394,7 @@ func TestClientEnqueue(t *testing.T) {
 		_, _ = handle1.GetResult() // returns a cancellation error; we only need it terminal so the dedup slot clears
 
 		// With the slot cleared, a new enqueue starts a fresh workflow with a different ID
-		handle3, err := Enqueue[string, string](client, queue.Name, "BlockingWorkflow", "third",
+		handle3, err := Enqueue[string, string](client, queue.GetName(), "BlockingWorkflow", "third",
 			WithEnqueueDeduplicationID(dedupID),
 			WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -404,7 +406,7 @@ func TestClientEnqueue(t *testing.T) {
 	})
 
 	t.Run("EnqueueWithDedupReturnExistingMissingID", func(t *testing.T) {
-		_, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "x"},
+		_, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "x"},
 			WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.Error(t, err, "expected error when deduplication ID is missing")
@@ -413,7 +415,7 @@ func TestClientEnqueue(t *testing.T) {
 
 	t.Run("EnqueueToPartitionedQueue", func(t *testing.T) {
 		// Enqueue a workflow to a partitioned queue with a partition key
-		handle, err := Enqueue[string, string](client, partitionedQueue.Name, "PartitionedWorkflow", "test-input",
+		handle, err := Enqueue[string, string](client, partitionedQueue.GetName(), "PartitionedWorkflow", "test-input",
 			WithEnqueueQueuePartitionKey("partition-1"),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow to partitioned queue")
@@ -435,7 +437,7 @@ func TestClientEnqueue(t *testing.T) {
 
 		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected workflow status to be SUCCESS")
 		assert.Equal(t, "PartitionedWorkflow", status.Name, "expected workflow name to match")
-		assert.Equal(t, partitionedQueue.Name, status.QueueName, "expected queue name to match")
+		assert.Equal(t, partitionedQueue.GetName(), status.QueueName, "expected queue name to match")
 
 		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after partitioned queue test")
 	})
@@ -453,7 +455,7 @@ func TestClientEnqueue(t *testing.T) {
 	t.Run("EnqueueWithPartitionKeyAndDeduplicationID", func(t *testing.T) {
 		// Attempt to enqueue with both partition key and deduplication ID
 		// This should return an error
-		_, err := Enqueue[string, string](client, partitionedQueue.Name, "PartitionedWorkflow", "test-input",
+		_, err := Enqueue[string, string](client, partitionedQueue.GetName(), "PartitionedWorkflow", "test-input",
 			WithEnqueueQueuePartitionKey("partition-1"),
 			WithEnqueueDeduplicationID("dedup-id"))
 		require.Error(t, err, "expected error when enqueueing with both partition key and deduplication ID")
@@ -475,7 +477,7 @@ func TestClientEnqueue(t *testing.T) {
 	t.Run("EnqueueWithEmptyWorkflowName", func(t *testing.T) {
 		// Attempt to enqueue with empty workflow name
 		// This should return an error
-		_, err := Enqueue[wfInput, string](client, queue.Name, "", wfInput{Input: "test-input"})
+		_, err := Enqueue[wfInput, string](client, queue.GetName(), "", wfInput{Input: "test-input"})
 		require.Error(t, err, "expected error when enqueueing with empty workflow name")
 
 		// Verify the error message contains the expected text
@@ -484,7 +486,7 @@ func TestClientEnqueue(t *testing.T) {
 
 	t.Run("EnqueueWithAuthOptions", func(t *testing.T) {
 		wfID := "client-auth-options-wf"
-		handle, err := Enqueue[wfInput, string](client, queue.Name, "ServerWorkflow", wfInput{Input: "test-input"},
+		handle, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfID),
 			WithEnqueueAuthenticatedUser("test-user"),
 			WithEnqueueAssumedRole("test-role"),
@@ -514,7 +516,8 @@ func TestCancelResume(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication between client and server
-	queue := NewWorkflowQueue(serverCtx, "cancel-resume-queue")
+	queue, err := RegisterQueue(serverCtx, "cancel-resume-queue")
+	require.NoError(t, err)
 
 	// Step functions
 	step := func(ctx context.Context) (string, error) {
@@ -565,7 +568,7 @@ func TestCancelResume(t *testing.T) {
 	RegisterWorkflow(serverCtx, timeoutBlockingWorkflow, WithWorkflowName("TimeoutBlockingWorkflow"))
 
 	// Launch the server context to start processing tasks
-	err := Launch(serverCtx)
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client - this will enqueue tasks
@@ -588,7 +591,7 @@ func TestCancelResume(t *testing.T) {
 		workflowID := "test-cancel-resume-workflow"
 
 		// Start the workflow - it will execute step one and then wait
-		handle, err := Enqueue[int, int](client, queue.Name, "CancelResumeWorkflow", input,
+		handle, err := Enqueue[int, int](client, queue.GetName(), "CancelResumeWorkflow", input,
 			WithEnqueueWorkflowID(workflowID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow from client")
@@ -654,7 +657,7 @@ func TestCancelResume(t *testing.T) {
 		workflowTimeout := 2 * time.Second
 
 		// Start the workflow with a 2-second timeout
-		handle, err := Enqueue[string, string](client, queue.Name, "TimeoutBlockingWorkflow", "timeout-test",
+		handle, err := Enqueue[string, string](client, queue.GetName(), "TimeoutBlockingWorkflow", "timeout-test",
 			WithEnqueueWorkflowID(workflowID),
 			WithEnqueueTimeout(workflowTimeout),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -754,14 +757,15 @@ func TestCancelResume(t *testing.T) {
 
 func TestDeleteWorkflow(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
-	queue := NewWorkflowQueue(serverCtx, "delete-workflow-queue")
+	queue, err := RegisterQueue(serverCtx, "delete-workflow-queue")
+	require.NoError(t, err)
 
 	simpleWf := func(ctx Context, input string) (string, error) {
 		return "done: " + input, nil
 	}
 	RegisterWorkflow(serverCtx, simpleWf, WithWorkflowName("SimpleDeleteWorkflow"))
 
-	err := Launch(serverCtx)
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 
 	databaseURL := backendDatabaseURL(t)
@@ -776,7 +780,7 @@ func TestDeleteWorkflow(t *testing.T) {
 	t.Run("DeleteCompletedWorkflow", func(t *testing.T) {
 		workflowID := "test-delete-completed-workflow"
 
-		handle, err := Enqueue[string, string](client, queue.Name, "SimpleDeleteWorkflow", "test",
+		handle, err := Enqueue[string, string](client, queue.GetName(), "SimpleDeleteWorkflow", "test",
 			WithEnqueueWorkflowID(workflowID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -812,7 +816,8 @@ func TestForkWorkflow(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication between client and server
-	queue := NewWorkflowQueue(serverCtx, "fork-workflow-queue")
+	queue, err := RegisterQueue(serverCtx, "fork-workflow-queue")
+	require.NoError(t, err)
 
 	// Simple child workflows (no steps, just increment counters)
 	childWorkflow1 := func(ctx Context, input string) (string, error) {
@@ -893,7 +898,7 @@ func TestForkWorkflow(t *testing.T) {
 	RegisterWorkflow(serverCtx, parentWorkflow, WithWorkflowName("ParentWorkflow"))
 
 	// Launch the server context to start processing tasks
-	err := Launch(serverCtx)
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client
@@ -916,7 +921,7 @@ func TestForkWorkflow(t *testing.T) {
 		originalWorkflowID := "original-workflow-fork-test"
 
 		// 1. Run the entire workflow first and check counters are 1
-		handle, err := Enqueue[string, string](client, queue.Name, "ParentWorkflow", "test",
+		handle, err := Enqueue[string, string](client, queue.GetName(), "ParentWorkflow", "test",
 			WithEnqueueWorkflowID(originalWorkflowID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue original workflow")
@@ -1111,8 +1116,10 @@ func TestListWorkflows(t *testing.T) {
 	})
 
 	// Create queues for communication (second queue used for multi-value filter tests)
-	queue := NewWorkflowQueue(serverCtx, "list-workflows-queue")
-	queue2 := NewWorkflowQueue(serverCtx, "list-workflows-queue-2")
+	queue, err := RegisterQueue(serverCtx, "list-workflows-queue")
+	require.NoError(t, err)
+	queue2, err := RegisterQueue(serverCtx, "list-workflows-queue-2")
+	require.NoError(t, err)
 
 	// Simple test workflow
 	type testInput struct {
@@ -1191,7 +1198,7 @@ func TestListWorkflows(t *testing.T) {
 			if i < 5 {
 				// First 5 workflows: use prefix "test-batch-" and succeed
 				workflowID = fmt.Sprintf("test-batch-%d", i)
-				handle, err = Enqueue[testInput, string](client, queue.Name, "SimpleWorkflow", testInput{Value: i, ID: fmt.Sprintf("success-%d", i)},
+				handle, err = Enqueue[testInput, string](client, queue.GetName(), "SimpleWorkflow", testInput{Value: i, ID: fmt.Sprintf("success-%d", i)},
 					WithEnqueueWorkflowID(workflowID),
 					WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			} else {
@@ -1201,7 +1208,7 @@ func TestListWorkflows(t *testing.T) {
 				if i >= 8 {
 					value = -i // These will fail
 				}
-				handle, err = Enqueue[testInput, string](client, queue.Name, "SimpleWorkflow", testInput{Value: value, ID: fmt.Sprintf("test-%d", i)},
+				handle, err = Enqueue[testInput, string](client, queue.GetName(), "SimpleWorkflow", testInput{Value: value, ID: fmt.Sprintf("test-%d", i)},
 					WithEnqueueWorkflowID(workflowID),
 					WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			}
@@ -1229,7 +1236,7 @@ func TestListWorkflows(t *testing.T) {
 
 		// Run 2 workflows with different name (OtherWorkflow) for multi-name filter test
 		for i := range 2 {
-			h, err := Enqueue[testInput, string](client, queue.Name, "OtherWorkflow", testInput{Value: i, ID: fmt.Sprintf("other-%d", i)},
+			h, err := Enqueue[testInput, string](client, queue.GetName(), "OtherWorkflow", testInput{Value: i, ID: fmt.Sprintf("other-%d", i)},
 				WithEnqueueWorkflowID(fmt.Sprintf("test-other-name-%d", i)),
 				WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			require.NoError(t, err, "failed to enqueue OtherWorkflow %d", i)
@@ -1239,7 +1246,7 @@ func TestListWorkflows(t *testing.T) {
 
 		// Run 2 workflows on second queue for multi-queue filter test
 		for i := range 2 {
-			h, err := Enqueue[testInput, string](client, queue2.Name, "SimpleWorkflow", testInput{Value: 100 + i, ID: fmt.Sprintf("q2-%d", i)},
+			h, err := Enqueue[testInput, string](client, queue2.GetName(), "SimpleWorkflow", testInput{Value: 100 + i, ID: fmt.Sprintf("q2-%d", i)},
 				WithEnqueueWorkflowID(fmt.Sprintf("test-queue2-%d", i)),
 				WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			require.NoError(t, err, "failed to enqueue to queue2 %d", i)
@@ -1423,7 +1430,7 @@ func TestListWorkflows(t *testing.T) {
 		assert.GreaterOrEqual(t, namesSeen["OtherWorkflow"], 2, "expected at least 2 OtherWorkflow")
 
 		// Test 13: Filter by multiple queue names (slice option)
-		multiQueueWorkflows, err := client.ListWorkflows(client, WithQueueName(queue.Name, queue2.Name))
+		multiQueueWorkflows, err := client.ListWorkflows(client, WithQueueName(queue.GetName(), queue2.GetName()))
 		require.NoError(t, err, "failed to list workflows by multiple queues")
 		assert.Len(t, multiQueueWorkflows, 14, "expected 14 workflows (12 on queue + 2 on queue2)")
 		queuesSeen := make(map[string]int)
@@ -1432,12 +1439,12 @@ func TestListWorkflows(t *testing.T) {
 				queuesSeen[wf.QueueName]++
 			}
 		}
-		assert.GreaterOrEqual(t, queuesSeen[queue.Name], 12, "expected at least 12 workflows on first queue")
-		assert.GreaterOrEqual(t, queuesSeen[queue2.Name], 2, "expected at least 2 workflows on second queue")
+		assert.GreaterOrEqual(t, queuesSeen[queue.GetName()], 12, "expected at least 12 workflows on first queue")
+		assert.GreaterOrEqual(t, queuesSeen[queue2.GetName()], 2, "expected at least 2 workflows on second queue")
 
 		// Test 14: Filter by parent workflow ID (child ID is parentID-0 for first step)
 		parentID := "list-test-parent-id"
-		parentHandle, err := Enqueue[string, string](client, queue.Name, "ParentForListTest", "ignored",
+		parentHandle, err := Enqueue[string, string](client, queue.GetName(), "ParentForListTest", "ignored",
 			WithEnqueueWorkflowID(parentID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue parent workflow")
@@ -1502,7 +1509,8 @@ func TestGetWorkflowSteps(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication
-	queue := NewWorkflowQueue(serverCtx, "get-workflow-steps-queue")
+	queue, err := RegisterQueue(serverCtx, "get-workflow-steps-queue")
+	require.NoError(t, err)
 
 	// Workflow with one step
 	stepFunction := func(ctx context.Context) (string, error) {
@@ -1519,7 +1527,7 @@ func TestGetWorkflowSteps(t *testing.T) {
 	RegisterWorkflow(serverCtx, testWorkflow, WithWorkflowName("TestWorkflow"))
 
 	// Launch server
-	err := Launch(serverCtx)
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client
@@ -1537,7 +1545,7 @@ func TestGetWorkflowSteps(t *testing.T) {
 
 	// Enqueue and run the workflow
 	workflowID := "test-get-workflow-steps"
-	handle, err := Enqueue[string, string](client, queue.Name, "TestWorkflow", "test-input", WithEnqueueWorkflowID(workflowID))
+	handle, err := Enqueue[string, string](client, queue.GetName(), "TestWorkflow", "test-input", WithEnqueueWorkflowID(workflowID))
 	require.NoError(t, err)
 
 	// Wait for workflow to complete
@@ -1590,7 +1598,8 @@ func TestClientReadStream(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create queue for communication
-	queue := NewWorkflowQueue(serverCtx, "read-stream-queue")
+	queue, err := RegisterQueue(serverCtx, "read-stream-queue")
+	require.NoError(t, err)
 
 	// Workflow that writes to a stream
 	streamWriterWorkflow := func(ctx Context, input struct {
@@ -1608,7 +1617,7 @@ func TestClientReadStream(t *testing.T) {
 	RegisterWorkflow(serverCtx, streamWriterWorkflow, WithWorkflowName("StreamWriterWorkflow"))
 
 	// Launch server
-	err := Launch(serverCtx)
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client
@@ -1640,7 +1649,7 @@ func TestClientReadStream(t *testing.T) {
 			handle, err := Enqueue[struct {
 				StreamKey string
 				Values    []string
-			}, string](client, queue.Name, "StreamWriterWorkflow", struct {
+			}, string](client, queue.GetName(), "StreamWriterWorkflow", struct {
 				StreamKey string
 				Values    []string
 			}{
@@ -1710,9 +1719,7 @@ func TestDebouncerClient(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Set internal queue polling interval to 10ms for faster tests
-	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName]
-	internalQueue.basePollingInterval = 10 * time.Millisecond
-	serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName] = internalQueue
+	serverCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
 
 	// Register test workflow with a custom name
 	debounceTestWorkflow := func(ctx Context, input string) (string, error) {
@@ -1913,9 +1920,7 @@ func TestDebouncerClientConfiguredInstance(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Set internal queue polling interval to 10ms for faster tests
-	internalQueue := serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName]
-	internalQueue.basePollingInterval = 10 * time.Millisecond
-	serverCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName] = internalQueue
+	serverCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
 
 	// Two configured instances of the same workflow method, sharing a custom name
 	slackNotifier := &configuredNotifier{channel: "slack"}
@@ -1960,7 +1965,8 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create test queue
-	testQueue := NewWorkflowQueue(serverCtx, "debouncer-client-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())
+	testQueue, err := RegisterQueue(serverCtx, "debouncer-client-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())
+	require.NoError(t, err)
 
 	// Register test workflow with a custom name
 	debounceTestWorkflow := func(ctx Context, input string) (string, error) {
@@ -1969,7 +1975,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	RegisterWorkflow(serverCtx, debounceTestWorkflow, WithWorkflowName("DebounceTestWorkflow"))
 
 	// Launch the server context
-	err := Launch(serverCtx)
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client
@@ -2003,7 +2009,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 		200*time.Millisecond,
 		testInput,
 		WithWorkflowID(expectedWorkflowID),
-		WithQueue(testQueue.Name),
+		WithQueue(testQueue),
 		WithPriority(expectedPriority),
 		WithQueuePartitionKey(expectedPartitionKey),
 		WithAssumedRole(expectedAssumedRole),
@@ -2030,7 +2036,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 
 	// Verify all workflow options are set correctly
 	assert.Equal(t, expectedWorkflowID, workflow.ID, "workflow ID should match")
-	assert.Equal(t, testQueue.Name, workflow.QueueName, "queue name should match")
+	assert.Equal(t, testQueue.GetName(), workflow.QueueName, "queue name should match")
 	assert.Equal(t, int(expectedPriority), workflow.Priority, "priority should match")
 	assert.Equal(t, expectedPartitionKey, workflow.QueuePartitionKey, "queue partition key should match")
 	assert.Equal(t, expectedAssumedRole, workflow.AssumedRole, "assumed role should match")
@@ -2043,16 +2049,16 @@ func TestClientEnqueueDelay(t *testing.T) {
 	// Setup server context
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	queue := NewWorkflowQueue(serverCtx, "client-delay-queue",
-		WithQueueBasePollingInterval(50*time.Millisecond),
-		WithQueueMaxPollingInterval(500*time.Millisecond))
+	queue, err := RegisterQueue(serverCtx, "client-delay-queue",
+		WithQueueBasePollingInterval(50*time.Millisecond))
+	require.NoError(t, err)
 
 	delayWorkflow := func(ctx Context, _ string) (string, error) {
 		return "delayed-done", nil
 	}
 	RegisterWorkflow(serverCtx, delayWorkflow, WithWorkflowName("DelayWorkflow"))
 
-	err := Launch(serverCtx)
+	err = Launch(serverCtx)
 	require.NoError(t, err)
 
 	// Setup client
@@ -2066,7 +2072,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 		delayDuration := 2 * time.Second
 		tBefore := time.Now()
 
-		handle, err := client.Enqueue(client, queue.Name, "DelayWorkflow", "",
+		handle, err := client.Enqueue(client, queue.GetName(), "DelayWorkflow", "",
 			WithEnqueueDelay(delayDuration),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -2094,7 +2100,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 	t.Run("ClientEnqueueDelayedCancelResume", func(t *testing.T) {
 		tBefore := time.Now()
 		// Cancel a delayed workflow
-		cancelHandle, err := client.Enqueue(client, queue.Name, "DelayWorkflow", "",
+		cancelHandle, err := client.Enqueue(client, queue.GetName(), "DelayWorkflow", "",
 			WithEnqueueDelay(60*time.Second),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -2121,7 +2127,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 	})
 
 	t.Run("ClientSetWorkflowDelayDuration", func(t *testing.T) {
-		handle, err := client.Enqueue(client, queue.Name, "DelayWorkflow", "",
+		handle, err := client.Enqueue(client, queue.GetName(), "DelayWorkflow", "",
 			WithEnqueueDelay(600*time.Second),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -2147,7 +2153,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 	})
 
 	t.Run("ClientSetWorkflowDelayUntil", func(t *testing.T) {
-		handle, err := client.Enqueue(client, queue.Name, "DelayWorkflow", "",
+		handle, err := client.Enqueue(client, queue.GetName(), "DelayWorkflow", "",
 			WithEnqueueDelay(600*time.Second),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
@@ -2431,7 +2437,8 @@ func TestClientCustomSqliteDB(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	queue := NewWorkflowQueue(serverCtx, "client-custom-sqlite-queue")
+	queue, err := RegisterQueue(serverCtx, "client-custom-sqlite-queue")
+	require.NoError(t, err)
 
 	type wfInput struct{ Input string }
 	wf := func(ctx Context, in wfInput) (string, error) {
@@ -2456,7 +2463,7 @@ func TestClientCustomSqliteDB(t *testing.T) {
 	assert.Same(t, clientDB, SQLDB(sysDB.Pool()), "client should use the caller's sqlite *sql.DB")
 	require.Equal(t, DialectSQLite, sysDB.Dialect().Name())
 
-	handle, err := Enqueue[wfInput, string](c, queue.Name, "CustomSqliteClientWorkflow",
+	handle, err := Enqueue[wfInput, string](c, queue.GetName(), "CustomSqliteClientWorkflow",
 		wfInput{Input: "hello"},
 		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 	require.NoError(t, err)
@@ -2475,7 +2482,8 @@ func TestClientCustomPool(t *testing.T) {
 	// setupDBOS handles dbos-database bootstrap and schema migrations; the
 	// server uses the standard URL-based config.
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
-	queue := NewWorkflowQueue(serverCtx, "client-custom-pool-queue")
+	queue, err := RegisterQueue(serverCtx, "client-custom-pool-queue")
+	require.NoError(t, err)
 
 	type wfInput struct{ Input string }
 	wf := func(ctx Context, in wfInput) (string, error) {
@@ -2500,7 +2508,7 @@ func TestClientCustomPool(t *testing.T) {
 	assert.Same(t, clientPool, PgxPool(sysDB.Pool()), "client should use the caller's *pgxpool.Pool")
 	require.Contains(t, []DialectName{DialectPostgres, DialectCockroach}, sysDB.Dialect().Name())
 
-	handle, err := Enqueue[wfInput, string](c, queue.Name, "CustomPoolClientWorkflow",
+	handle, err := Enqueue[wfInput, string](c, queue.GetName(), "CustomPoolClientWorkflow",
 		wfInput{Input: "hello"},
 		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 	require.NoError(t, err)
@@ -2551,7 +2559,8 @@ func TestClientSend(t *testing.T) {
 // requested type using the serialization recorded with the event.
 func TestClientGetEvent(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
-	queue := NewWorkflowQueue(serverCtx, "client-getevent-queue")
+	queue, err := RegisterQueue(serverCtx, "client-getevent-queue")
+	require.NoError(t, err)
 
 	type eventPayload struct {
 		Label string
@@ -2576,7 +2585,7 @@ func TestClientGetEvent(t *testing.T) {
 	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
 
 	workflowID := "client-getevent-wf"
-	handle, err := Enqueue[string, string](client, queue.Name, "EventWorkflow", "",
+	handle, err := Enqueue[string, string](client, queue.GetName(), "EventWorkflow", "",
 		WithEnqueueWorkflowID(workflowID),
 		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 	require.NoError(t, err)
@@ -2608,7 +2617,8 @@ func TestClientGetEvent(t *testing.T) {
 // whose GetResult decodes the workflow output into the requested type.
 func TestClientTypedHandles(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
-	queue := NewWorkflowQueue(serverCtx, "client-typed-handles-queue")
+	queue, err := RegisterQueue(serverCtx, "client-typed-handles-queue")
+	require.NoError(t, err)
 
 	type sumResult struct {
 		Sum int
@@ -2631,7 +2641,7 @@ func TestClientTypedHandles(t *testing.T) {
 
 	t.Run("RetrieveWorkflowTyped", func(t *testing.T) {
 		workflowID := "client-retrieve-typed"
-		_, err := Enqueue[int, sumResult](client, queue.Name, "SumWorkflow", 21, WithEnqueueWorkflowID(workflowID), appVersion)
+		_, err := Enqueue[int, sumResult](client, queue.GetName(), "SumWorkflow", 21, WithEnqueueWorkflowID(workflowID), appVersion)
 		require.NoError(t, err)
 
 		handle, err := RetrieveWorkflow[sumResult](client, workflowID)
@@ -2643,12 +2653,12 @@ func TestClientTypedHandles(t *testing.T) {
 
 	t.Run("ForkWorkflowTyped", func(t *testing.T) {
 		workflowID := "client-fork-typed"
-		h, err := Enqueue[int, sumResult](client, queue.Name, "SumWorkflow", 5, WithEnqueueWorkflowID(workflowID), appVersion)
+		h, err := Enqueue[int, sumResult](client, queue.GetName(), "SumWorkflow", 5, WithEnqueueWorkflowID(workflowID), appVersion)
 		require.NoError(t, err)
 		_, err = h.GetResult()
 		require.NoError(t, err)
 
-		forkedHandle, err := ForkWorkflow[sumResult](client, ForkWorkflowInput{OriginalWorkflowID: workflowID, StartStep: 0})
+		forkedHandle, err := ForkWorkflow[sumResult](client, workflowID)
 		require.NoError(t, err)
 		res, err := forkedHandle.GetResult()
 		require.NoError(t, err)
@@ -2657,7 +2667,7 @@ func TestClientTypedHandles(t *testing.T) {
 
 	t.Run("ResumeWorkflowTyped", func(t *testing.T) {
 		workflowID := "client-resume-typed"
-		h, err := Enqueue[int, sumResult](client, queue.Name, "SumWorkflow", 8, WithEnqueueWorkflowID(workflowID), appVersion)
+		h, err := Enqueue[int, sumResult](client, queue.GetName(), "SumWorkflow", 8, WithEnqueueWorkflowID(workflowID), appVersion)
 		require.NoError(t, err)
 		_, err = h.GetResult()
 		require.NoError(t, err)
@@ -2674,7 +2684,7 @@ func TestClientTypedHandles(t *testing.T) {
 		ids := make([]string, 0, 2)
 		for i := range 2 {
 			workflowID := fmt.Sprintf("client-resume-multi-%d", i)
-			h, err := Enqueue[int, sumResult](client, queue.Name, "SumWorkflow", i+1, WithEnqueueWorkflowID(workflowID), appVersion)
+			h, err := Enqueue[int, sumResult](client, queue.GetName(), "SumWorkflow", i+1, WithEnqueueWorkflowID(workflowID), appVersion)
 			require.NoError(t, err)
 			_, err = h.GetResult()
 			require.NoError(t, err)
@@ -2710,7 +2720,8 @@ func TestClientTypedHandles(t *testing.T) {
 // asked via the load options.
 func TestClientListAndSteps(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
-	queue := NewWorkflowQueue(serverCtx, "client-list-steps-queue")
+	queue, err := RegisterQueue(serverCtx, "client-list-steps-queue")
+	require.NoError(t, err)
 
 	type wfInput struct {
 		Name string
@@ -2738,7 +2749,7 @@ func TestClientListAndSteps(t *testing.T) {
 	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
 
 	workflowID := "client-list-steps-wf"
-	handle, err := Enqueue[wfInput, wfOutput](client, queue.Name, "ListStepsWorkflow", wfInput{Name: "max"},
+	handle, err := Enqueue[wfInput, wfOutput](client, queue.GetName(), "ListStepsWorkflow", wfInput{Name: "max"},
 		WithEnqueueWorkflowID(workflowID),
 		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 	require.NoError(t, err)

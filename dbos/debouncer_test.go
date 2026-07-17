@@ -59,9 +59,7 @@ func TestDebouncer(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Set internal queue polling interval to 100ms
-	internalQueue := dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName]
-	internalQueue.basePollingInterval = 10 * time.Millisecond
-	dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName] = internalQueue
+	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
 
 	// Register test workflows
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
@@ -331,7 +329,8 @@ func TestDebouncerCannotBeCreatedAfterLaunch(t *testing.T) {
 func TestDebouncerWorkflowOptions(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	testQueue := NewWorkflowQueue(dbosCtx, "debouncer-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())
+	testQueue, err := RegisterQueue(dbosCtx, "debouncer-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())
+	require.NoError(t, err)
 
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
 
@@ -355,7 +354,7 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 		200*time.Millisecond,
 		testInput,
 		WithWorkflowID(expectedWorkflowID),
-		WithQueue(testQueue.Name),
+		WithQueue(testQueue),
 		WithPriority(expectedPriority),
 		WithQueuePartitionKey(expectedPartitionKey),
 		WithAssumedRole(expectedAssumedRole),
@@ -382,7 +381,7 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 
 	// Verify all workflow options are set correctly
 	assert.Equal(t, expectedWorkflowID, workflow.ID, "workflow ID should match")
-	assert.Equal(t, testQueue.Name, workflow.QueueName, "queue name should match")
+	assert.Equal(t, testQueue.GetName(), workflow.QueueName, "queue name should match")
 	assert.Equal(t, int(expectedPriority), workflow.Priority, "priority should match")
 	assert.Equal(t, expectedPartitionKey, workflow.QueuePartitionKey, "queue partition key should match")
 	assert.Equal(t, expectedAssumedRole, workflow.AssumedRole, "assumed role should match")
@@ -397,9 +396,7 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 func TestDebouncerConfiguredInstance(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	internalQueue := dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName]
-	internalQueue.basePollingInterval = 10 * time.Millisecond
-	dbosCtx.(*dbosContext).queueRunner.workflowQueueRegistry[models.InternalQueueName] = internalQueue
+	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
 
 	slack := &configuredNotifier{channel: "slack"}
 	email := &configuredNotifier{channel: "email"}
