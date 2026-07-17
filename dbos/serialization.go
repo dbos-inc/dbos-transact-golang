@@ -426,6 +426,11 @@ func deserializeWorkflowError(errStr *string) error {
 	// A portable JSON envelope or legacy plain string fails base64/gob and falls through below.
 	if decoded, gobErr := NewGobSerializer().Decode(errStr); gobErr == nil {
 		if e, ok := decoded.(error); ok {
+			if de, isDBOS := e.(*Error); isDBOS {
+				// wrappedErr is unexported and not gob-encoded; rebuild stdlib
+				// causes (context.Canceled/DeadlineExceeded) from CauseKind.
+				de.RestoreWrappedCause()
+			}
 			return e
 		}
 	}

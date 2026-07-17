@@ -1,6 +1,10 @@
 package models
 
-import "fmt"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
 
 // ErrorCode represents the different types of errors that can occur in DBOS operations.
 type ErrorCode int
@@ -91,7 +95,47 @@ type Error struct {
 	RecordedName    string // Actually recorded function name (for determinism errors)
 	MaxRetries      int    // Maximum retry limit (for retry-related errors)
 
+	// CauseKind marks well-known stdlib wrapped causes ("canceled", "deadline")
+	// so they survive serialization (wrappedErr is unexported and not encoded).
+	// Set by constructors; not intended for direct use.
+	CauseKind string
+
 	wrappedErr error // Underlying error being wrapped (for error unwrapping)
+}
+
+const (
+	causeKindCanceled = "canceled"
+	causeKindDeadline = "deadline"
+)
+
+// withCause records cause for unwrapping and stamps CauseKind for the closed
+// set of stdlib causes that must survive a DB round trip.
+func (e *Error) withCause(cause error) *Error {
+	e.wrappedErr = cause
+	switch {
+	case cause == nil:
+	case errors.Is(cause, context.Canceled):
+		e.CauseKind = causeKindCanceled
+	case errors.Is(cause, context.DeadlineExceeded):
+		e.CauseKind = causeKindDeadline
+	}
+	return e
+}
+
+// RestoreWrappedCause reconstructs the wrapped stdlib cause from CauseKind after
+// decoding a persisted Error, so errors.Is(err, context.Canceled) and
+// errors.Is(err, context.DeadlineExceeded) keep matching. No-op if a wrapped
+// error is already present.
+func (e *Error) RestoreWrappedCause() {
+	if e.wrappedErr != nil {
+		return
+	}
+	switch e.CauseKind {
+	case causeKindCanceled:
+		e.wrappedErr = context.Canceled
+	case causeKindDeadline:
+		e.wrappedErr = context.DeadlineExceeded
+	}
 }
 
 // Error returns a formatted error message including the error code.
@@ -172,12 +216,11 @@ func NewAwaitedWorkflowCancelledError(workflowID string) *Error {
 // NewWorkflowCancelledError wraps the cancellation cause (e.g. the context error that
 // interrupted a step), so errors.Is still matches context.Canceled / context.DeadlineExceeded.
 func NewWorkflowCancelledError(workflowID string, cause error) *Error {
-	return &Error{
+	return (&Error{
 		Message:    fmt.Sprintf("Workflow %s was cancelled", workflowID),
 		Code:       ErrorCodeWorkflowCancelled,
 		WorkflowID: workflowID,
-		wrappedErr: cause,
-	}
+	}).withCause(cause)
 }
 
 func NewWorkflowConflictIDError(workflowID string) *Error {
@@ -204,22 +247,20 @@ func NewWorkflowUnexpectedInputType(workflowName, expectedType, actualType strin
 }
 
 func NewWorkflowExecutionError(workflowID string, err error) *Error {
-	return &Error{
+	return (&Error{
 		Message:    fmt.Sprintf("Workflow %s execution error: %s", workflowID, err.Error()),
 		Code:       ErrorCodeWorkflowExecution,
 		WorkflowID: workflowID,
-		wrappedErr: err,
-	}
+	}).withCause(err)
 }
 
 func NewStepExecutionError(workflowID, stepName string, err error) *Error {
-	return &Error{
+	return (&Error{
 		Message:    fmt.Sprintf("Step %s in workflow %s execution error: %v", stepName, workflowID, err),
 		Code:       ErrorCodeStepExecution,
 		WorkflowID: workflowID,
 		StepName:   stepName,
-		wrappedErr: err,
-	}
+	}).withCause(err)
 }
 
 func NewDeadLetterQueueError(workflowID string, maxRetries int) *Error {
@@ -232,14 +273,13 @@ func NewDeadLetterQueueError(workflowID string, maxRetries int) *Error {
 }
 
 func NewMaxStepRetriesExceededError(workflowID, stepName string, maxRetries int, err error) *Error {
-	return &Error{
+	return (&Error{
 		Message:    fmt.Sprintf("Step %s has exceeded its maximum of %d retries: %v", stepName, maxRetries, err),
 		Code:       ErrorCodeMaxStepRetriesExceeded,
 		WorkflowID: workflowID,
 		StepName:   stepName,
 		MaxRetries: maxRetries,
-		wrappedErr: err,
-	}
+	}).withCause(err)
 }
 
 func NewQueueDeduplicatedError(workflowID, queueName, deduplicationID string) *Error {
@@ -295,11 +335,10 @@ func NewTimeoutError(workflowID, stepName, message string, cause error) *Error {
 	if message != "" {
 		msg += ": " + message
 	}
-	return &Error{
+	return (&Error{
 		Message:    msg,
 		Code:       ErrorCodeTimeout,
 		WorkflowID: workflowID,
 		StepName:   stepName,
-		wrappedErr: cause,
-	}
+	}).withCause(cause)
 }

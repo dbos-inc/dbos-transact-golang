@@ -238,7 +238,8 @@ type Context interface {
 
 	// Registration
 	ListRegisteredWorkflows(_ Context) []WorkflowRegistryEntry // List workflows registered in this process
-	ListenQueues(_ Context, names ...string)                   // Configure which queues this process should listen to
+	ListenQueues(_ Context, names ...string)                   // Replace the set of queues this process listens to (each call replaces the whole set)
+	ListenedQueues(_ Context) []string                         // Get the current listen set (empty means every queue)
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context

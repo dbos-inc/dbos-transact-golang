@@ -26,7 +26,8 @@ var (
 	ErrMaxStepRetriesExceeded = &Error{Code: ErrorCodeMaxStepRetriesExceeded}
 	// ErrTimeout matches DBOS timeout errors (e.g. Recv/GetEvent timeouts, GetResult
 	// handle timeouts). A timeout error built from an expired context deadline also
-	// wraps that cause, so errors.Is(err, context.DeadlineExceeded) matches it too.
+	// wraps that cause, so errors.Is(err, context.DeadlineExceeded) matches it too,
+	// including for errors read back from the database.
 	ErrTimeout = &Error{Code: ErrorCodeTimeout}
 	// ErrQueueNotFound matches errors referencing a queue that does not exist.
 	ErrQueueNotFound = &Error{Code: ErrorCodeQueueNotFound}

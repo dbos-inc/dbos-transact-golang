@@ -1899,9 +1899,9 @@ func TestListenQueues(t *testing.T) {
 		}
 		RegisterWorkflow(dbosCtx, testWorkflow)
 
-		// Call ListenQueues twice, each time with a list of one queue (so we want to listen to only 2 out of 3 queues)
-		ListenQueues(dbosCtx, "listen-test-queue-1")
-		ListenQueues(dbosCtx, "listen-test-queue-2")
+		// Listen to only 2 out of 3 queues. Each ListenQueues call replaces the
+		// whole set, so both names must be passed in one call.
+		ListenQueues(dbosCtx, "listen-test-queue-1", "listen-test-queue-2")
 
 		// Launch DBOS
 		err := Launch(dbosCtx)
@@ -2143,12 +2143,81 @@ func TestListenQueues(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, WorkflowStatusEnqueued, st.Status)
 
-		// Add the database-backed queue to the listen set after launch; the supervisor
-		// picks it up on its next reconcile tick and the workflow completes.
+		// Replace the listen set after launch; the supervisor picks it up on its
+		// next reconcile tick and the workflow completes.
 		ListenQueues(dbosCtx, "dynamic-db-queue")
 		r, err := h.GetResult()
 		require.NoError(t, err)
 		require.Equal(t, "c", r)
+	})
+
+	t.Run("EachCallReplacesTheListenSet", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		qr := dbosCtx.(*dbosContext).queueRunner
+
+		snapshot := func() map[string]bool {
+			qr.listenMu.Lock()
+			defer qr.listenMu.Unlock()
+			out := make(map[string]bool, len(qr.listenedQueues))
+			for k, v := range qr.listenedQueues {
+				out[k] = v
+			}
+			return out
+		}
+
+		ListenQueues(dbosCtx, "a", "b")
+		require.Equal(t, map[string]bool{"a": true, "b": true}, snapshot())
+		require.Equal(t, []string{"a", "b"}, ListenedQueues(dbosCtx))
+
+		// A second call replaces the whole set: "a" and "b" are unlistened.
+		ListenQueues(dbosCtx, "c")
+		require.Equal(t, map[string]bool{"c": true}, snapshot())
+
+		// Incremental add: read the current set, append, listen again.
+		ListenQueues(dbosCtx, append(ListenedQueues(dbosCtx), "d")...)
+		require.Equal(t, map[string]bool{"c": true, "d": true}, snapshot())
+
+		// Zero names clears the filter (back to listening to every queue).
+		ListenQueues(dbosCtx)
+		require.Empty(t, snapshot())
+		require.Empty(t, ListenedQueues(dbosCtx))
+	})
+
+	t.Run("ReplaceListenSetUnlistensQueue", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		RegisterWorkflow(dbosCtx, queueWorkflow)
+
+		ListenQueues(dbosCtx, "replace-queue-a")
+		require.NoError(t, Launch(dbosCtx))
+
+		queueA, err := registerWFQ(dbosCtx, "replace-queue-a", WithQueueBasePollingInterval(50*time.Millisecond))
+		require.NoError(t, err)
+		queueB, err := registerWFQ(dbosCtx, "replace-queue-b", WithQueueBasePollingInterval(50*time.Millisecond))
+		require.NoError(t, err)
+
+		// A is listened: its workflow completes.
+		hA, err := RunWorkflow(dbosCtx, queueWorkflow, "a1", WithQueue(queueA))
+		require.NoError(t, err)
+		rA, err := hA.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "a1", rA)
+
+		// Replace the set with B only: A is unlistened, B starts dispatching.
+		ListenQueues(dbosCtx, "replace-queue-b")
+
+		hB, err := RunWorkflow(dbosCtx, queueWorkflow, "b1", WithQueue(queueB))
+		require.NoError(t, err)
+		rB, err := hB.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "b1", rB)
+
+		// A no longer dispatches: its workflow stays ENQUEUED.
+		hA2, err := RunWorkflow(dbosCtx, queueWorkflow, "a2", WithQueue(queueA))
+		require.NoError(t, err)
+		time.Sleep(3 * time.Second)
+		stA2, err := hA2.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, WorkflowStatusEnqueued, stA2.Status)
 	})
 }
 

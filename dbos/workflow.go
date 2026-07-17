@@ -9,6 +9,7 @@ import (
 	"math"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -5431,11 +5432,24 @@ func ListRegisteredWorkflows(ctx Context) []WorkflowRegistryEntry {
 }
 
 func (c *dbosContext) ListenQueues(_ Context, names ...string) {
-	c.queueRunner.listenMu.Lock()
-	defer c.queueRunner.listenMu.Unlock()
+	newSet := make(map[string]bool, len(names))
 	for _, name := range names {
-		c.queueRunner.listenedQueues[name] = true
+		newSet[name] = true
 	}
+	c.queueRunner.listenMu.Lock()
+	c.queueRunner.listenedQueues = newSet
+	c.queueRunner.listenMu.Unlock()
+}
+
+func (c *dbosContext) ListenedQueues(_ Context) []string {
+	c.queueRunner.listenMu.Lock()
+	names := make([]string, 0, len(c.queueRunner.listenedQueues))
+	for name := range c.queueRunner.listenedQueues {
+		names = append(names, name)
+	}
+	c.queueRunner.listenMu.Unlock()
+	slices.Sort(names)
+	return names
 }
 
 // ListenQueues configures which queues the current DBOS process should listen to.
@@ -5443,10 +5457,15 @@ func (c *dbosContext) ListenQueues(_ Context, names ...string) {
 // the named queues (and the internal DBOS queue) are listened to. This lets
 // multiple DBOS processes share the same queues but listen to different subsets.
 //
+// Each call REPLACES the entire listen set. Calling with a
+// reduced set unlistens the removed queues; calling with no names clears the
+// filter, restoring the default of listening to every queue.
+// To add or remove a queue incrementally, read the current set with
+// ListenedQueues and pass the modified set back.
+//
 // Names are resolved against the queues table on each reconcile tick, so a queue
-// can be listened to before it exists in the database. Names may be added to the
-// listen set at any time, including after Launch, allowing the listen set to
-// change dynamically.
+// can be listened to before it exists in the database. The set may be replaced
+// at any time, including after Launch, allowing it to change dynamically.
 //
 // Example:
 //
@@ -5460,6 +5479,19 @@ func ListenQueues(ctx Context, names ...string) {
 		panic("ctx cannot be nil")
 	}
 	ctx.ListenQueues(ctx, names...)
+}
+
+// ListenedQueues returns the current listen set as a sorted slice. An empty
+// slice means the process listens to every queue. Use it to modify the set
+// incrementally:
+//
+//	queues := dbos.ListenedQueues(ctx)
+//	dbos.ListenQueues(ctx, append(queues, "new-queue")...)
+func ListenedQueues(ctx Context) []string {
+	if ctx == nil {
+		panic("ctx cannot be nil")
+	}
+	return ctx.ListenedQueues(ctx)
 }
 
 /*******************************/

@@ -525,8 +525,8 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 			qr.logger.Warn("Exception transitioning delayed workflows", "error", err)
 		}
 
-		// Rebuild the listen set each tick so database-backed queues added to it
-		// via ListenQueues after launch take effect dynamically.
+		// Rebuild the listen set each tick so changes made via ListenQueues
+		// after launch take effect dynamically.
 		for name, queue := range qr.queuesToListen(ctx) {
 			if done, exists := workerDone[name]; exists {
 				select {
