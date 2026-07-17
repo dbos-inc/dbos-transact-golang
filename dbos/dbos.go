@@ -218,7 +218,7 @@ type Context interface {
 	Client
 
 	// Context Lifecycle
-	Launch() error // Launch the DBOS runtime including system database, queues, and perform a workflow recovery for the local executor
+	Launch() error // Launch the DBOS runtime (system database, queues, scheduler) and recover this executor's PENDING workflows: interrupted workflows resume from their last completed step; queued ones are returned to their queue
 
 	// Workflow operations
 	RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
@@ -1018,8 +1018,8 @@ func Shutdown(c Client, timeout time.Duration) error {
 	return c.Shutdown(timeout)
 }
 
-// ClearRegistries clears the workflow and queue registries,
-// allowing re-registration of workflows and queues. Intended for testing only.
+// ClearRegistries clears the workflow registry,
+// allowing re-registration of workflows. Intended for testing only.
 func ClearRegistries(ctx Context) {
 	c, ok := ctx.(*dbosContext)
 	if !ok {

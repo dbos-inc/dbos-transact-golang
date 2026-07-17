@@ -2686,15 +2686,14 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 // Go generates a deterministic step ID for the step before running the step in a routine, since goroutines are not deterministic.
 // Example:
 //
-// resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
-//   return "Hello, World!", nil
-// })
+//	resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
+//	    return "Hello, World!", nil
+//	})
 //
-// resultChan := <-resultChan // wait for the channel to receive
-// if resultChan.err != nil {
-//   // Handle error
-// }
-
+//	outcome := <-resultChan // wait for the channel to receive
+//	if outcome.Err != nil {
+//	    // Handle error
+//	}
 func Go[R any](ctx Context, fn Step[R], opts ...StepOption) (<-chan StepOutcome[R], error) {
 	if ctx == nil {
 		return nil, models.NewStepExecutionError("", "", errors.New("ctx cannot be nil"))
@@ -2782,12 +2781,12 @@ func (c *dbosContext) Go(ctx Context, fn StepFunc, opts ...StepOption) (<-chan S
 //
 //	ch1, _ := dbos.Go(ctx, func(ctx context.Context) (string, error) { return "result1", nil })
 //	ch2, _ := dbos.Go(ctx, func(ctx context.Context) (string, error) { return "result2", nil })
-//	outcome, err := dbos.Select(ctx, []<-chan dbos.StepOutcome[string]{ch1, ch2})
+//	result, err := dbos.Select(ctx, []<-chan dbos.StepOutcome[string]{ch1, ch2})
 //	if err != nil {
 //	    // Handle error
 //	    return err
 //	}
-//	log.Printf("Selected result: %v, error: %v", outcome.result, outcome.err)
+//	log.Printf("Selected result: %v", result)
 func Select[R any](ctx Context, channels []<-chan StepOutcome[R]) (R, error) {
 	if ctx == nil {
 		var zero R
@@ -3998,7 +3997,11 @@ func (c *dbosContext) Patch(_ Context, patchName string) (bool, error) {
 //
 // Example:
 //
-//	if dbos.Patch(ctx, "my-patch") {
+//	patched, err := dbos.Patch(ctx, "my-patch")
+//	if err != nil {
+//	    return err
+//	}
+//	if patched {
 //	    // New code path
 //	} else {
 //	    // Old code path
@@ -4060,13 +4063,11 @@ func (c *dbosContext) DeprecatePatch(_ Context, patchName string) error {
 //
 // Example:
 //
-// err := dbos.DeprecatePatch(ctx, "my-patch")
-//
+//	err := dbos.DeprecatePatch(ctx, "my-patch")
 //	if err != nil {
 //	    return err
 //	}
-//
-// // New code path
+//	// New code path
 func DeprecatePatch(ctx Context, patchName string) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
@@ -5156,7 +5157,7 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 // Example usage:
 //
 //	// List all successful workflows from the last 24 hours
-//	workflows, err := dbos.ListWorkflows(
+//	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithFilterStatus(dbos.WorkflowStatusSuccess),
 //	    dbos.WithFilterCreatedAfter(time.Now().Add(-24*time.Hour)),
 //	    dbos.WithFilterLimit(100))
@@ -5165,7 +5166,7 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 //	}
 //
 //	// List workflows by specific IDs without loading input/output data
-//	workflows, err := dbos.ListWorkflows(
+//	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithFilterWorkflowIDs("workflow1", "workflow2"),
 //	    dbos.WithFilterLoadInput(false),
 //	    dbos.WithFilterLoadOutput(false))
@@ -5174,11 +5175,11 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 //	}
 //
 //	// List workflows with pagination
-//	workflows, err := dbos.ListWorkflows(
+//	workflows, err := dbos.ListWorkflows(ctx,
 //	    dbos.WithFilterUser("john.doe"),
 //	    dbos.WithFilterOffset(50),
 //	    dbos.WithFilterLimit(25),
-//	    dbos.WithFilterSortDesc()
+//	    dbos.WithFilterSortDesc())
 //	if err != nil {
 //	    log.Fatal(err)
 //	}

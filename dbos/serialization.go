@@ -192,7 +192,7 @@ func (a *typedCustomSerializerAdapter[T]) Decode(data *string) (T, error) {
 //	    PositionalArgs: []any{"hello", 42},
 //	    NamedArgs:      map[string]any{"key": "value"},
 //	}
-//	handle, err := client.Enqueue("queue", "pyWorkflow", args)
+//	handle, err := dbos.Enqueue[dbos.PortableWorkflowArgs, any](client, "queue", "pyWorkflow", args)
 type PortableWorkflowArgs struct {
 	PositionalArgs []any          `json:"positionalArgs"`
 	NamedArgs      map[string]any `json:"namedArgs"`
