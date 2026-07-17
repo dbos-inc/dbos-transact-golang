@@ -19,6 +19,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// jsonRoundTrip normalizes a value to its generic JSON representation (as any),
+// matching what listing paths produce when decoding default-JSON rows.
+func jsonRoundTrip(t *testing.T, v any) any {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	var out any
+	require.NoError(t, json.Unmarshal(b, &out))
+	return out
+}
+
 // testAllSerializationPaths tests workflow recovery and verifies all read paths.
 // This is the unified test function that exercises:
 // 1. Workflow recovery: starts a workflow, blocks it, recovers it, then verifies completion
@@ -123,18 +134,8 @@ func testAllSerializationPaths[T any](
 					// Custom serializer: output is already decoded to concrete type
 					assert.Equal(t, expectedOutput, lastStep.Output, "Step output should match expected output")
 				} else {
-					// Default JSON: output is a base64-decoded JSON string
-					strValue, ok := lastStep.Output.(string)
-					require.True(t, ok, "Step output should be a string")
-					if strValue == "" {
-						var zero T
-						assert.Equal(t, zero, expectedOutput, "Step output should be the zero value of type T")
-					} else {
-						var decodedOutput T
-						err := json.Unmarshal([]byte(strValue), &decodedOutput)
-						require.NoError(t, err, "Failed to unmarshal step output to type T")
-						assert.Equal(t, expectedOutput, decodedOutput, "Step output should match expected output")
-					}
+					// Default JSON: output is decoded into any (generic JSON value)
+					assert.Equal(t, jsonRoundTrip(t, expectedOutput), lastStep.Output, "Step output should match expected output")
 				}
 			}
 			assert.Nil(t, lastStep.Error)
@@ -167,31 +168,9 @@ func testAllSerializationPaths[T any](
 				assert.Equal(t, input, wf.Input, "Workflow input should match input")
 				assert.Equal(t, expectedOutput, wf.Output, "Workflow output should match expected output")
 			} else {
-				// Default JSON: input/output are base64-decoded JSON strings
-				inputStr, ok := wf.Input.(string)
-				require.True(t, ok, "Workflow input should be a string")
-				outputStr, ok := wf.Output.(string)
-				require.True(t, ok, "Workflow output should be a string")
-
-				if inputStr == "" {
-					var zero T
-					assert.Equal(t, zero, input, "Workflow input should be the zero value of type T")
-				} else {
-					var decodedInput T
-					err := json.Unmarshal([]byte(inputStr), &decodedInput)
-					require.NoError(t, err, "Failed to unmarshal workflow input to type T")
-					assert.Equal(t, input, decodedInput, "Workflow input should match input")
-				}
-
-				if outputStr == "" {
-					var zero T
-					assert.Equal(t, zero, expectedOutput, "Workflow output should be the zero value of type T")
-				} else {
-					var decodedOutput T
-					err = json.Unmarshal([]byte(outputStr), &decodedOutput)
-					require.NoError(t, err, "Failed to unmarshal workflow output to type T")
-					assert.Equal(t, expectedOutput, decodedOutput, "Workflow output should match expected output")
-				}
+				// Default JSON: input/output are decoded into any (generic JSON values)
+				assert.Equal(t, jsonRoundTrip(t, input), wf.Input, "Workflow input should match input")
+				assert.Equal(t, jsonRoundTrip(t, expectedOutput), wf.Output, "Workflow output should match expected output")
 			}
 		}
 	})
@@ -2883,4 +2862,65 @@ func TestExportImportPreservesSerialization(t *testing.T) {
 	forkResult, err := forkHandle.GetResult()
 	require.NoError(t, err, "replay of reimported checkpoints must decode with their recorded serializer")
 	assert.Equal(t, input, forkResult)
+}
+
+// listingSpySerializer records whether its Decode was consulted.
+type listingSpySerializer struct{ decodeCalls int }
+
+func (s *listingSpySerializer) Name() string { return "listing-spy" }
+func (s *listingSpySerializer) Encode(data any) (*string, error) {
+	str := fmt.Sprintf("%v", data)
+	return &str, nil
+}
+func (s *listingSpySerializer) Decode(data *string) (any, error) {
+	s.decodeCalls++
+	return "spy:" + *data, nil
+}
+
+// TestListingDecodeUsesStoredSerialization verifies the listing decode path picks
+// the decoder from each row's persisted serialization format, not from the currently
+// configured serializer: a DBOS_JSON row must never be routed through a custom serializer.
+func TestListingDecodeUsesStoredSerialization(t *testing.T) {
+	spy := &listingSpySerializer{}
+	c := &dbosContext{
+		logger:     slog.Default(),
+		serializer: spy,
+	}
+
+	defaultJSON := `{"count":3,"name":"pre-serializer-era"}`
+	b64 := base64.StdEncoding.EncodeToString([]byte(defaultJSON))
+	spyPayload := "spy-payload"
+	portableJSON := `{"positionalArgs":["x"]}`
+
+	workflows := []WorkflowStatus{
+		{ID: "wf-json", Serialization: "DBOS_JSON", Input: &b64, Output: &b64},
+		{ID: "wf-empty", Serialization: "", Input: &b64, Output: &b64},
+		{ID: "wf-custom", Serialization: "listing-spy", Input: &spyPayload, Output: &spyPayload},
+		{ID: "wf-portable", Serialization: PortableSerializerName, Input: &portableJSON, Output: &portableJSON},
+		{ID: "wf-unknown", Serialization: "DBOS_GOB", Input: &b64, Output: &b64},
+	}
+
+	require.NoError(t, c.decodeWorkflowsInputOutput(workflows, true, true))
+
+	// DBOS_JSON and legacy empty-format rows: decoded JSON value, spy not consulted.
+	decodedJSON := map[string]any{"count": float64(3), "name": "pre-serializer-era"}
+	assert.Equal(t, decodedJSON, workflows[0].Input)
+	assert.Equal(t, decodedJSON, workflows[0].Output)
+	assert.Equal(t, decodedJSON, workflows[1].Input)
+	assert.Equal(t, decodedJSON, workflows[1].Output)
+
+	// Row whose stored format matches the custom serializer: decoded by it.
+	assert.Equal(t, "spy:"+spyPayload, workflows[2].Input)
+	assert.Equal(t, "spy:"+spyPayload, workflows[2].Output)
+
+	// Portable rows: decoded JSON value.
+	decodedPortable := map[string]any{"positionalArgs": []any{"x"}}
+	assert.Equal(t, decodedPortable, workflows[3].Input)
+	assert.Equal(t, decodedPortable, workflows[3].Output)
+
+	// Unknown format: raw stored string kept as-is, spy not consulted.
+	assert.Equal(t, b64, workflows[4].Input)
+	assert.Equal(t, b64, workflows[4].Output)
+
+	assert.Equal(t, 2, spy.decodeCalls, "custom serializer must only decode rows tagged with its format")
 }

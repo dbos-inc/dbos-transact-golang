@@ -280,6 +280,32 @@ func resolveDecoder[T any](storedSerialization string, customSer Serializer[any]
 	return nil, fmt.Errorf("unknown serialization format %q", storedSerialization)
 }
 
+// decodeListingValue decodes a persisted value for listing/display paths
+// (ListWorkflows, GetWorkflowSteps) using the decoder resolved from the
+// stored per-row format. If no decoder resolves or decoding fails, it
+// returns the raw stored string alongside the error.
+func decodeListingValue(encoded *string, storedSerialization string, customSer Serializer[any]) (any, error) {
+	decoder, err := resolveDecoder[any](storedSerialization, customSer)
+	if err != nil {
+		return *encoded, err
+	}
+	decoded, err := decoder.Decode(encoded)
+	if err != nil {
+		return *encoded, err
+	}
+	return decoded, nil
+}
+
+// listingValueJSON renders a decoded listing value as JSON text for wire
+// protocols (conductor, admin server) that expect JSON strings.
+func listingValueJSON(v any) (string, bool) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
 // getCustomSerializerFromCtx extracts the user-provided custom serializer, if set.
 // It accepts any context but only real DBOS contexts (a Client or Context,
 // both *dbosContext under the hood) carry one; mocks and plain contexts yield nil.

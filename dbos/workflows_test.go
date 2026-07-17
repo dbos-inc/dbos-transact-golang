@@ -1291,19 +1291,16 @@ func TestSteps(t *testing.T) {
 		require.NotNil(t, step.Output, "step output should not be nil")
 		assert.Nil(t, step.Error)
 
-		// Deserialize the output from the database to verify proper encoding
-		// Use json.Unmarshal to handle JSON encode/decode round-trip
-		var storedOutput StepOutput
-		err = json.Unmarshal([]byte(step.Output.(string)), &storedOutput)
-		require.NoError(t, err, "failed to decode step output to StepOutput")
+		// Listing paths decode default-JSON rows into generic JSON values
+		storedOutput, ok := step.Output.(map[string]any)
+		require.True(t, ok, "expected decoded step output map, got %T", step.Output)
 
 		// Verify all fields were correctly serialized and deserialized
-		assert.Equal(t, "Processed_TestObject", storedOutput.ProcessedName, "ProcessedName not correctly serialized")
-		assert.Equal(t, 84, storedOutput.TotalCount, "TotalCount not correctly serialized")
-		assert.True(t, storedOutput.Success, "Success flag not correctly serialized")
-		assert.Len(t, storedOutput.Details, 3, "Details array length incorrect")
-		assert.Equal(t, []string{"step1", "step2", "step3"}, storedOutput.Details, "Details array not correctly serialized")
-		assert.False(t, storedOutput.ProcessedAt.IsZero(), "ProcessedAt timestamp should not be zero")
+		assert.Equal(t, "Processed_TestObject", storedOutput["processed_name"], "ProcessedName not correctly serialized")
+		assert.Equal(t, float64(84), storedOutput["total_count"], "TotalCount not correctly serialized")
+		assert.Equal(t, true, storedOutput["success"], "Success flag not correctly serialized")
+		assert.Equal(t, []any{"step1", "step2", "step3"}, storedOutput["details"], "Details array not correctly serialized")
+		assert.NotEmpty(t, storedOutput["processed_at"], "ProcessedAt timestamp should not be zero")
 	})
 
 	t.Run("genericStepFunction", func(t *testing.T) {
@@ -2074,18 +2071,9 @@ func TestSelect(t *testing.T) {
 		assert.Equal(t, 1, steps[1].StepID, "second step should have StepID 1")
 		assert.Equal(t, "DBOS.select", steps[2].StepName, "third step should be DBOS.select")
 		assert.Equal(t, 2, steps[2].StepID, "Select step should have StepID 2")
-		var output0 string
-		err = json.Unmarshal([]byte(steps[0].Output.(string)), &output0)
-		require.NoError(t, err, "failed to decode step 0 output")
-		assert.Equal(t, "result1", output0, "first Go step should have output 'result1'")
-		var output1 string
-		err = json.Unmarshal([]byte(steps[1].Output.(string)), &output1)
-		require.NoError(t, err, "failed to decode step 1 output")
-		assert.Equal(t, "result2", output1, "second Go step should have output 'result2'")
-		var output2 string
-		err = json.Unmarshal([]byte(steps[2].Output.(string)), &output2)
-		require.NoError(t, err, "failed to decode step 2 output")
-		assert.Equal(t, result1, output2, "Select step output should match workflow result")
+		assert.Equal(t, "result1", steps[0].Output, "first Go step should have output 'result1'")
+		assert.Equal(t, "result2", steps[1].Output, "second Go step should have output 'result2'")
+		assert.Equal(t, result1, steps[2].Output, "Select step output should match workflow result")
 	})
 }
 
@@ -2167,13 +2155,8 @@ func TestChildWorkflow(t *testing.T) {
 		if steps[1].StepName != "DBOS.getResult" {
 			return "", fmt.Errorf("expected second step name to be getResult, got %s", steps[1].StepName)
 		}
-		var stepOutput string
-		err = json.Unmarshal([]byte(steps[1].Output.(string)), &stepOutput)
-		if err != nil {
-			return "", fmt.Errorf("failed to unmarshal step output: %w", err)
-		}
-		if stepOutput != "from step" {
-			return "", fmt.Errorf("expected second step output to be 'from step', got %s", steps[1].Output)
+		if steps[1].Output != "from step" {
+			return "", fmt.Errorf("expected second step output to be 'from step', got %v", steps[1].Output)
 		}
 		if steps[1].Error != nil {
 			return "", fmt.Errorf("expected second step error to be nil, got %s", steps[1].Error)
@@ -2251,13 +2234,8 @@ func TestChildWorkflow(t *testing.T) {
 			if childWfStep.Output != nil {
 				return "", fmt.Errorf("expected child wf step output to be nil, got %s", childWfStep.Output)
 			}
-			var stepOutput string
-			err = json.Unmarshal([]byte(getResultStep.Output.(string)), &stepOutput)
-			if err != nil {
-				return "", fmt.Errorf("failed to unmarshal step output: %w", err)
-			}
-			if stepOutput != "from step" {
-				return "", fmt.Errorf("expected get result step output to be 'from step', got %s", getResultStep.Output)
+			if getResultStep.Output != "from step" {
+				return "", fmt.Errorf("expected get result step output to be 'from step', got %v", getResultStep.Output)
 			}
 
 			if childWfStep.Error != nil {
@@ -3226,10 +3204,16 @@ func deadLetterQueueWorkflow(ctx Context, input string) (int, error) {
 func infiniteDeadLetterQueueWorkflow(ctx Context, input string) (int, error) {
 	return 0, nil
 }
+
+func poisonedDLQWorkflow(ctx Context, input string) (int, error) {
+	return 0, nil
+}
+
 func TestWorkflowDeadLetterQueue(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, deadLetterQueueWorkflow, WithMaxRecoveryAttempts(maxRecoveryAttempts))
 	RegisterWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, WithMaxRecoveryAttempts(-1)) // A negative value means infinite retries
+	RegisterWorkflow(dbosCtx, poisonedDLQWorkflow, WithMaxRecoveryAttempts(1))
 	dbosCtx.Launch()
 
 	t.Run("DatabaseRetryWithSameOwnerDoesNotDeadLetter", func(t *testing.T) {
@@ -3312,10 +3296,10 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			setWorkflowStatusPending(t, dbosCtx, wfID)
 		}
 
-		// Verify an additional attempt throws a DLQ error and puts the workflow in the DLQ status
-		_, err = recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
-		require.Error(t, err, "expected dead letter queue error but got none")
-		require.True(t, errors.Is(err, &Error{Code: ErrorCodeDeadLetterQueue}), "expected error to be ErrorCodeDeadLetterQueue, got %T", err)
+		// Verify an additional attempt dead-letters the workflow; recovery skips it without error
+		dlqHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "recovery should not fail on a dead-lettered workflow")
+		require.Empty(t, dlqHandles, "dead-lettered workflow should not be recovered")
 
 		// Verify workflow status is MAX_RECOVERY_ATTEMPTS_EXCEEDED
 		status, err := handle.GetStatus()
@@ -3393,6 +3377,44 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			require.NoError(t, err, "failed to decode result to int")
 			require.Equal(t, 0, result, "expected result 0 on attempt %d", i+1)
 		}
+	})
+
+	t.Run("DeadLetterDoesNotAbortRecovery", func(t *testing.T) {
+		// One poisoned (max attempts already reached) and one healthy pending workflow:
+		// recovery must skip the poisoned one and still recover the healthy one.
+		poisonedID := uuid.NewString()
+		poisonedHandle, err := RunWorkflow(dbosCtx, poisonedDLQWorkflow, "test", WithWorkflowID(poisonedID))
+		require.NoError(t, err, "failed to start poisoned workflow")
+		_, err = poisonedHandle.GetResult()
+		require.NoError(t, err, "failed to get result from poisoned workflow initial run")
+
+		// Exhaust the single allowed recovery attempt
+		setWorkflowStatusPending(t, dbosCtx, poisonedID)
+		primed, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed priming recovery of poisoned workflow")
+		require.Len(t, primed, 1)
+		_, err = primed[0].GetResult()
+		require.NoError(t, err, "failed to get result from primed recovery")
+
+		healthyID := uuid.NewString()
+		healthyHandle, err := RunWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, "test", WithWorkflowID(healthyID))
+		require.NoError(t, err, "failed to start healthy workflow")
+		_, err = healthyHandle.GetResult()
+		require.NoError(t, err, "failed to get result from healthy workflow initial run")
+
+		setWorkflowStatusPending(t, dbosCtx, poisonedID)
+		setWorkflowStatusPending(t, dbosCtx, healthyID)
+
+		handles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "dead-lettered workflow must not abort recovery")
+		require.Len(t, handles, 1, "expected only the healthy workflow to be recovered")
+		require.Equal(t, healthyID, handles[0].GetWorkflowID())
+		_, err = handles[0].GetResult()
+		require.NoError(t, err, "failed to get result from recovered healthy workflow")
+
+		status, err := poisonedHandle.GetStatus()
+		require.NoError(t, err, "failed to get status of poisoned workflow")
+		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
 	})
 }
 
@@ -5311,12 +5333,12 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 		require.Equal(t, "step-a-result", result)
 
 		// Now try to run conflictWorkflowB with the same workflow ID
-		// This should return a ErrorCodeConflictingWorkflow
+		// This should return a ErrorCodeUnexpectedWorkflow
 		_, err = RunWorkflow(dbosCtx, conflictWorkflowB, "test-input", WithWorkflowID(workflowID))
-		require.Error(t, err, "expected ErrorCodeConflictingWorkflow when running different workflow with same ID, but got none")
+		require.Error(t, err, "expected ErrorCodeUnexpectedWorkflow when running different workflow with same ID, but got none")
 
 		// Check that it's the correct error type
-		require.True(t, errors.Is(err, &Error{Code: ErrorCodeConflictingWorkflow}), "expected error to be ErrorCodeConflictingWorkflow, got %T", err)
+		require.True(t, errors.Is(err, ErrUnexpectedWorkflow), "expected error to be ErrorCodeUnexpectedWorkflow, got %T", err)
 
 		// Check that the error message contains the workflow names
 		expectedMsgPart := "Workflow already exists with a different name"

@@ -199,14 +199,14 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 				return err
 			}
 			return tx.Commit(uncancellableCtx)
-		}, sysdb.WithRetrierLogger(c.logger)); err != nil {
+		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction)); err != nil {
 			c.logger.Error("failed to enqueue scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
 			return nil, err
 		}
 
 		if err := sysdb.Retry(c, func() error {
 			return c.systemDB.UpdateScheduleLastFiredAt(uncancellableCtx, scheduleName, time.Now())
-		}, sysdb.WithRetrierLogger(c.logger)); err != nil {
+		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction)); err != nil {
 			c.logger.Error("failed to update schedule last fired time after retries", "schedule", scheduleName, "error", err)
 		}
 

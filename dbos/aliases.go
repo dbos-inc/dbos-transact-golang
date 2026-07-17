@@ -47,7 +47,7 @@ const (
 	ErrorCodeConflictingID            = models.ErrorCodeConflictingID
 	ErrorCodeInitialization           = models.ErrorCodeInitialization
 	ErrorCodeNonExistentWorkflow      = models.ErrorCodeNonExistentWorkflow
-	ErrorCodeConflictingWorkflow      = models.ErrorCodeConflictingWorkflow
+	ErrorCodeUnexpectedWorkflow       = models.ErrorCodeUnexpectedWorkflow
 	ErrorCodeWorkflowCancelled        = models.ErrorCodeWorkflowCancelled
 	ErrorCodeUnexpectedStep           = models.ErrorCodeUnexpectedStep
 	ErrorCodeAwaitedWorkflowCancelled = models.ErrorCodeAwaitedWorkflowCancelled

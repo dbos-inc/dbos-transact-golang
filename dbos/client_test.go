@@ -2769,15 +2769,9 @@ func TestClientListAndSteps(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, workflows, 1)
 
-		// With no serializer configured, payloads come back as raw JSON strings
-		// (cross-language friendly), not Go-decoded values.
-		input, ok := workflows[0].Input.(string)
-		require.True(t, ok, "expected loaded input to be a string, got %T", workflows[0].Input)
-		assert.JSONEq(t, `{"Name":"max"}`, input)
-
-		output, ok := workflows[0].Output.(string)
-		require.True(t, ok, "expected loaded output to be a string, got %T", workflows[0].Output)
-		assert.JSONEq(t, `{"Greeting":"hi max"}`, output)
+		// With no serializer configured, payloads decode to generic JSON values.
+		assert.Equal(t, map[string]any{"Name": "max"}, workflows[0].Input)
+		assert.Equal(t, map[string]any{"Greeting": "hi max"}, workflows[0].Output)
 	})
 
 	t.Run("GetWorkflowStepsNoDecodeByDefault", func(t *testing.T) {
@@ -2792,9 +2786,7 @@ func TestClientListAndSteps(t *testing.T) {
 		steps, err := client.GetWorkflowSteps(client, workflowID, WithStepsLoadOutput(true))
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
-		output, ok := steps[0].Output.(string)
-		require.True(t, ok, "expected loaded step output to be a string, got %T", steps[0].Output)
-		assert.JSONEq(t, `{"Greeting":"hi"}`, output)
+		assert.Equal(t, map[string]any{"Greeting": "hi"}, steps[0].Output)
 	})
 
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after list/steps test")

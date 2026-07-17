@@ -1,6 +1,10 @@
 package dbos
 
-import "github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+import (
+	"errors"
+
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+)
 
 func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]WorkflowHandle[any], error) {
 	workflowHandles := make([]WorkflowHandle[any], 0)
@@ -72,6 +76,11 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 		// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
 		handle, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, workflow.Serialization, opts...)
 		if err != nil {
+			// A dead-lettered workflow must not abort recovery of the remaining workflows
+			if errors.Is(err, &Error{Code: ErrorCodeDeadLetterQueue}) {
+				ctx.logger.Warn("Workflow exceeded max recovery attempts, moved to dead-letter queue", "workflow_id", workflow.ID, "name", workflow.Name)
+				continue
+			}
 			return nil, err
 		}
 		workflowHandles = append(workflowHandles, handle)

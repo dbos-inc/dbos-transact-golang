@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1922,21 +1921,26 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	returnExisting := params.deduplicationPolicy == DeduplicationPolicyReturnExisting
 
 	for {
-		tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
-		if err != nil {
-			return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %v", err))
-		}
-
-		// Insert workflow status with transaction
-		insertInput := sysdb.InsertWorkflowStatusDBInput{
-			Status: status,
-			Tx:     tx,
-		}
-		_, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
-		if err != nil {
-			if rbErr := tx.Rollback(uncancellableCtx); rbErr != nil {
-				c.logger.Warn("failed to roll back transaction", "error", rbErr, "workflow_id", workflowID)
+		err := sysdb.Retry(c, func() error {
+			tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
+			if err != nil {
+				return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
 			}
+			defer tx.Rollback(uncancellableCtx)
+
+			insertInput := sysdb.InsertWorkflowStatusDBInput{
+				Status: status,
+				Tx:     tx,
+			}
+			if _, err := c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput); err != nil {
+				return err
+			}
+			if err := tx.Commit(uncancellableCtx); err != nil {
+				return fmt.Errorf("failed to commit transaction: %w", err)
+			}
+			return nil
+		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
+		if err != nil {
 			if returnExisting && errors.Is(err, ErrQueueDeduplicated) {
 				existingID, lookupErr := c.systemDB.GetDeduplicatedWorkflow(uncancellableCtx, queueName, params.deduplicationID)
 				if lookupErr != nil {
@@ -1950,13 +1954,6 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 			}
 			c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
 			return nil, err
-		}
-
-		if err := tx.Commit(uncancellableCtx); err != nil {
-			if rbErr := tx.Rollback(uncancellableCtx); rbErr != nil {
-				c.logger.Warn("failed to roll back transaction", "error", rbErr, "workflow_id", workflowID)
-			}
-			return nil, fmt.Errorf("failed to commit transaction: %w", err)
 		}
 
 		return newWorkflowPollingHandle[any](uncancellableCtx, workflowID), nil
@@ -5079,26 +5076,12 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 				}
 				if encodedInput == nil || *encodedInput == nilMarker {
 					workflows[i].Input = nil
-				} else if workflows[i].Serialization == PortableSerializerName {
-					// Portable inputs are stored as plain JSON (possibly with envelope from other languages).
-					// Return the raw JSON string as-is.
-					workflows[i].Input = *encodedInput
-				} else if c.serializer != nil {
-					decoded, err := c.serializer.Decode(encodedInput)
-					if err != nil {
-						c.logger.Warn("failed to decode workflow input, storing error instead", "workflow_id", workflows[i].ID, "error", err)
-						workflows[i].Input = fmt.Sprintf("failed to decode workflow input: %v", err)
-					} else {
-						workflows[i].Input = decoded
-					}
 				} else {
-					decodedBytes, err := base64.StdEncoding.DecodeString(*encodedInput)
+					decoded, err := decodeListingValue(encodedInput, workflows[i].Serialization, c.serializer)
 					if err != nil {
-						c.logger.Warn("failed to decode base64 workflow input, storing error instead", "workflow_id", workflows[i].ID, "error", err)
-						workflows[i].Input = fmt.Sprintf("failed to decode workflow input: %v", err)
-					} else {
-						workflows[i].Input = string(decodedBytes)
+						c.logger.Warn("failed to decode workflow input, storing raw value", "workflow_id", workflows[i].ID, "error", err)
 					}
+					workflows[i].Input = decoded
 				}
 			}
 			if loadOutput && workflows[i].Output != nil {
@@ -5108,25 +5091,12 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 				}
 				if encodedOutput == nil || *encodedOutput == nilMarker {
 					workflows[i].Output = nil
-				} else if workflows[i].Serialization == PortableSerializerName {
-					// Portable outputs are stored as plain JSON. Return raw string.
-					workflows[i].Output = *encodedOutput
-				} else if c.serializer != nil {
-					decoded, err := c.serializer.Decode(encodedOutput)
-					if err != nil {
-						c.logger.Warn("failed to decode workflow output, storing error instead", "workflow_id", workflows[i].ID, "error", err)
-						workflows[i].Output = fmt.Sprintf("failed to decode workflow output: %v", err)
-					} else {
-						workflows[i].Output = decoded
-					}
 				} else {
-					decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
+					decoded, err := decodeListingValue(encodedOutput, workflows[i].Serialization, c.serializer)
 					if err != nil {
-						c.logger.Warn("failed to decode base64 workflow output, storing error instead", "workflow_id", workflows[i].ID, "error", err)
-						workflows[i].Output = fmt.Sprintf("failed to decode workflow output: %v", err)
-					} else {
-						workflows[i].Output = string(decodedBytes)
+						c.logger.Warn("failed to decode workflow output, storing raw value", "workflow_id", workflows[i].ID, "error", err)
 					}
+					workflows[i].Output = decoded
 				}
 			}
 			if loadOutput && workflows[i].Error != nil {
@@ -5273,28 +5243,11 @@ func (c *dbosContext) GetWorkflowSteps(_ Client, workflowID string, opts ...GetW
 				stepInfos[i].Output = nil
 				continue
 			}
-			if steps[i].Serialization == PortableSerializerName {
-				// Portable outputs are plain JSON — return raw string as-is.
-				stepInfos[i].Output = *encodedOutput
-			} else if c.serializer != nil {
-				// Custom serializer: fully decode using the serializer
-				decoded, err := c.serializer.Decode(encodedOutput)
-				if err != nil {
-					c.logger.Warn("failed to decode step output, storing error instead", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
-					stepInfos[i].Output = fmt.Sprintf("failed to decode step output: %v", err)
-				} else {
-					stepInfos[i].Output = decoded
-				}
-			} else {
-				// Default JSON: base64 decode to get the JSON string
-				decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
-				if err != nil {
-					c.logger.Warn("failed to decode base64 step output, storing error instead", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
-					stepInfos[i].Output = fmt.Sprintf("failed to decode step output: %v", err)
-				} else {
-					stepInfos[i].Output = string(decodedBytes)
-				}
+			decoded, err := decodeListingValue(encodedOutput, steps[i].Serialization, c.serializer)
+			if err != nil {
+				c.logger.Warn("failed to decode step output, storing raw value", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
 			}
+			stepInfos[i].Output = decoded
 		}
 	}
 
@@ -5591,7 +5544,7 @@ func (c *dbosContext) CreateSchedule(_ Client, spec ScheduleSpec) error {
 	uncancellableCtx := WithoutCancel(c)
 	return sysdb.Retry(c, func() error {
 		return c.systemDB.CreateSchedule(uncancellableCtx, dbInput)
-	}, sysdb.WithRetrierLogger(c.logger))
+	}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
 }
 
 // CreateSchedule creates a new schedule for a workflow. The reconciler loop
@@ -5684,7 +5637,7 @@ func (c *dbosContext) ApplySchedules(_ Client, schedules []ScheduleSpec) error {
 			return fmt.Errorf("failed to commit transaction: %w", err)
 		}
 		return nil
-	}, sysdb.WithRetrierLogger(c.logger))
+	}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
 }
 
 // ApplySchedules applies a list of schedules, creating new ones or updating existing ones.

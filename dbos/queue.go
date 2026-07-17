@@ -367,7 +367,7 @@ func (c *dbosContext) RegisterQueue(_ Client, name string, options ...QueueOptio
 
 	inserted, err := sysdb.RetryWithResult(c, func() (bool, error) {
 		return c.systemDB.UpsertQueue(c, sysdb.UpsertQueueDBInput{Queue: q.toConfig(), UpdateExisting: updateExisting})
-	}, sysdb.WithRetrierLogger(c.logger))
+	}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
 	if err != nil {
 		return nil, err
 	}

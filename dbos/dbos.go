@@ -708,9 +708,9 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 	return dbosCtx, nil
 }
 
-// Launch initializes and starts the DBOS runtime components including the system database,
-// admin server (if enabled), queue runner, workflow scheduler, and performs recovery
-// of any pending workflows on this executor.
+// Launch initializes and starts the DBOS runtime components including the system database
+// and admin server (if enabled), recovers any pending workflows on this executor, then
+// starts the queue runner and workflow scheduler.
 //
 // Returns an error if the context is already launched or if any component fails to start.
 func (c *dbosContext) Launch() error {
@@ -754,6 +754,18 @@ func (c *dbosContext) Launch() error {
 		c.logger.Debug("Admin server started", "port", c.config.AdminServerPort)
 	}
 
+	// Recover local pending workflows before starting the queue runner so
+	// recovered workflows are not racing a fresh dequeue pass.
+	recoveryHandles, err := recoverPendingWorkflows(c, []string{c.executorID})
+	if err != nil {
+		return models.NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
+	}
+	if len(recoveryHandles) > 0 {
+		c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
+	} else {
+		c.logger.Debug("No pending workflows to recover")
+	}
+
 	// Start the queue runner in a goroutine
 	go func() {
 		c.queueRunner.run(c)
@@ -778,17 +790,6 @@ func (c *dbosContext) Launch() error {
 	if c.conductor != nil {
 		c.conductor.launch()
 		c.logger.Debug("Conductor started")
-	}
-
-	// Run a round of recovery on the local executor
-	recoveryHandles, err := recoverPendingWorkflows(c, []string{c.executorID})
-	if err != nil {
-		return models.NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
-	}
-	if len(recoveryHandles) > 0 {
-		c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
-	} else {
-		c.logger.Debug("No pending workflows to recover")
 	}
 
 	c.logger.Info("DBOS launched", "app_version", c.applicationVersion, "executor_id", c.executorID)

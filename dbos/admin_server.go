@@ -167,19 +167,16 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 	result["StartedAt"] = formatEpochMs(ws.StartedAt)
 
 	if ws.Input != nil {
-		// If there is a value, it should be a JSON string
-		jsonInput, ok := ws.Input.(string)
-		if ok {
-			result["Input"] = jsonInput
+		if s, ok := listingValueJSON(ws.Input); ok {
+			result["Input"] = s
 		} else {
 			result["Input"] = ""
 		}
 	}
 
 	if ws.Output != nil {
-		jsonOutput, ok := ws.Output.(string)
-		if ok {
-			result["Output"] = jsonOutput
+		if s, ok := listingValueJSON(ws.Output); ok {
+			result["Output"] = s
 		} else {
 			result["Output"] = ""
 		}
@@ -482,10 +479,8 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			}
 
 			if step.Output != nil {
-				// If there is a value, it should be a JSON string
-				jsonOutput, ok := step.Output.(string)
-				if ok {
-					formattedStep["output"] = jsonOutput
+				if s, ok := listingValueJSON(step.Output); ok {
+					formattedStep["output"] = s
 				} else {
 					formattedStep["output"] = ""
 				}

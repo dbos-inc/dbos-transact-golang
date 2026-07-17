@@ -466,7 +466,7 @@ func TestWorkflowQueues(t *testing.T) {
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after successive enqueues test")
 	})
 
-	t.Run("ConflictingWorkflowOnDifferentQueues", func(t *testing.T) {
+	t.Run("UnexpectedWorkflowOnDifferentQueues", func(t *testing.T) {
 		workflowID := "conflicting-workflow-id"
 
 		// Enqueue the same workflow ID on the first queue
@@ -479,12 +479,12 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Equal(t, "test-input-1", result, "expected 'test-input-1'")
 
 		// Now try to enqueue the same workflow ID on a different queue
-		// This should trigger a ErrorCodeConflictingWorkflow
+		// This should trigger a ErrorCodeUnexpectedWorkflow
 		_, err = RunWorkflow(dbosCtx, queueWorkflow, "test-input-2", WithQueue(conflictQueue2), WithWorkflowID(workflowID))
-		require.Error(t, err, "expected ErrorCodeConflictingWorkflow when enqueueing same workflow ID on different queue, but got none")
+		require.Error(t, err, "expected ErrorCodeUnexpectedWorkflow when enqueueing same workflow ID on different queue, but got none")
 
 		// Check that it's the correct error type
-		require.True(t, errors.Is(err, &Error{Code: ErrorCodeConflictingWorkflow}), "expected error to be ErrorCodeConflictingWorkflow, got %T", err)
+		require.True(t, errors.Is(err, ErrUnexpectedWorkflow), "expected error to be ErrorCodeUnexpectedWorkflow, got %T", err)
 
 		// Check that the error message contains queue information
 		expectedMsgPart := "Workflow already exists in a different queue"

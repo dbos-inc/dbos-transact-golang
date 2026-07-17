@@ -208,17 +208,15 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 		}
 	}
 
-	// input/output are already JSON strings
+	// input/output are decoded values; render as JSON text for the protocol
 	if wf.Input != nil {
-		inputStr, ok := wf.Input.(string)
-		if ok {
-			output.Input = &inputStr
+		if s, ok := listingValueJSON(wf.Input); ok {
+			output.Input = &s
 		}
 	}
 	if wf.Output != nil {
-		outputStr, ok := wf.Output.(string)
-		if ok {
-			output.Output = &outputStr
+		if s, ok := listingValueJSON(wf.Output); ok {
+			output.Output = &s
 		}
 	}
 
@@ -362,11 +360,10 @@ func formatWorkflowStepsResponseBody(step StepInfo) workflowStepsConductorRespon
 		FunctionName: step.StepName,
 	}
 
-	// output is already a JSON string
+	// output is a decoded value; render as JSON text for the protocol
 	if step.Output != nil {
-		outputStr, ok := step.Output.(string)
-		if ok {
-			output.Output = &outputStr
+		if s, ok := listingValueJSON(step.Output); ok {
+			output.Output = &s
 		}
 	}
 

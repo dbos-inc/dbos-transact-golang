@@ -18,6 +18,10 @@ var (
 	ErrNonExistentWorkflow = &Error{Code: ErrorCodeNonExistentWorkflow}
 	// ErrConflictingWorkflowID matches errors from conflicting workflow IDs.
 	ErrConflictingWorkflowID = &Error{Code: ErrorCodeConflictingID}
+	// ErrUnexpectedWorkflow matches errors raised when a workflow ID is reused with a
+	// different workflow function or a different queue, indicating non-determinism or
+	// conflicting ID reuse. Match with errors.Is(err, dbos.ErrUnexpectedWorkflow).
+	ErrUnexpectedWorkflow = &Error{Code: ErrorCodeUnexpectedWorkflow}
 	// ErrMaxStepRetriesExceeded matches errors from steps that exhausted their retries.
 	ErrMaxStepRetriesExceeded = &Error{Code: ErrorCodeMaxStepRetriesExceeded}
 	// ErrTimeout matches DBOS timeout errors (e.g. Recv/GetEvent timeouts, GetResult

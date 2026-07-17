@@ -9,7 +9,7 @@ const (
 	ErrorCodeConflictingID            ErrorCode = iota + 1 // Workflow ID conflicts or duplicate operations
 	ErrorCodeInitialization                                // DBOS context initialization failures
 	ErrorCodeNonExistentWorkflow                           // Referenced workflow does not exist
-	ErrorCodeConflictingWorkflow                           // Workflow with same ID already exists with different parameters
+	ErrorCodeUnexpectedWorkflow                            // Workflow ID previously used by a different workflow function or queue (non-deterministic reuse)
 	ErrorCodeWorkflowCancelled                             // Workflow was cancelled during execution
 	ErrorCodeUnexpectedStep                                // Step function mismatch during recovery (non-deterministic workflow)
 	ErrorCodeAwaitedWorkflowCancelled                      // A workflow being awaited was cancelled
@@ -36,8 +36,8 @@ func (c ErrorCode) String() string {
 		return "Initialization"
 	case ErrorCodeNonExistentWorkflow:
 		return "NonExistentWorkflow"
-	case ErrorCodeConflictingWorkflow:
-		return "ConflictingWorkflow"
+	case ErrorCodeUnexpectedWorkflow:
+		return "UnexpectedWorkflow"
 	case ErrorCodeWorkflowCancelled:
 		return "WorkflowCancelled"
 	case ErrorCodeUnexpectedStep:
@@ -116,14 +116,14 @@ func (e *Error) Is(target error) bool {
 	return t.Code != 0 && e.Code == t.Code
 }
 
-func NewConflictingWorkflowError(workflowID, message string) *Error {
-	msg := fmt.Sprintf("Conflicting workflow invocation with the same ID (%s)", workflowID)
+func NewUnexpectedWorkflowError(workflowID, message string) *Error {
+	msg := fmt.Sprintf("Workflow ID %s was previously used by a different workflow. Check that your workflow is deterministic.", workflowID)
 	if message != "" {
-		msg += ": " + message
+		msg += " " + message
 	}
 	return &Error{
 		Message:    msg,
-		Code:       ErrorCodeConflictingWorkflow,
+		Code:       ErrorCodeUnexpectedWorkflow,
 		WorkflowID: workflowID,
 	}
 }

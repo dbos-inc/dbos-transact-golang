@@ -250,13 +250,13 @@ func (d *Debouncer[P, R]) Debounce(ctx Context, key string, delay time.Duration,
 			}
 
 			// Retrieve the user workflow ID from the input of the internal debouncer workflow
-			// The input comes from the DB and was decoded as a typeless JSON string
-			encodedInput, ok := debouncerWorkflowStatus[0].Input.(string)
-			if !ok {
-				return nil, fmt.Errorf("internal debouncer workflow input is not encoded")
+			// The listing decode returns a generic value; JSON round-trip it into the typed input
+			inputBytes, err := json.Marshal(debouncerWorkflowStatus[0].Input)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal debouncer workflow input: %w", err)
 			}
 			var decodedInput debouncerInput[P]
-			if err := json.Unmarshal([]byte(encodedInput), &decodedInput); err != nil {
+			if err := json.Unmarshal(inputBytes, &decodedInput); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal debouncer workflow input: %w", err)
 			}
 			return newWorkflowPollingHandle[R](ctx, decodedInput.TargetWorkflowID), nil
@@ -399,13 +399,13 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 			}
 
 			// Retrieve the user workflow ID from the input of the internal debouncer workflow
-			// The input comes from the DB and was decoded as a typeless JSON string
-			encodedInputStr, ok := debouncerWorkflowStatus[0].Input.(string)
-			if !ok {
-				return nil, fmt.Errorf("internal debouncer workflow input is not encoded")
+			// The listing decode returns a generic value; JSON round-trip it into the typed input
+			inputBytes, err := json.Marshal(debouncerWorkflowStatus[0].Input)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal debouncer workflow input: %w", err)
 			}
 			var decodedInput debouncerInput[P]
-			if err := json.Unmarshal([]byte(encodedInputStr), &decodedInput); err != nil {
+			if err := json.Unmarshal(inputBytes, &decodedInput); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal debouncer workflow input: %w", err)
 			}
 			return newWorkflowPollingHandle[R](dbosCtx, decodedInput.TargetWorkflowID), nil
