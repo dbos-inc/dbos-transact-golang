@@ -6859,7 +6859,7 @@ func TestSpecialSteps(t *testing.T) {
 		}
 
 		// Step 5: Use ForkWorkflow
-		forkHandle, err := ForkWorkflow[string](dbosCtx, currentWorkflowID)
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: currentWorkflowID})
 		if err != nil {
 			return "", fmt.Errorf("ForkWorkflow failed: %w", err)
 		}
@@ -9143,7 +9143,7 @@ func TestWorkflowAttributes(t *testing.T) {
 		_, err = handle.GetResult()
 		require.NoError(t, err)
 
-		forkedHandle, err := ForkWorkflow[int](dbosCtx, wfid)
+		forkedHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: wfid})
 		require.NoError(t, err)
 		_, err = forkedHandle.GetResult()
 		require.NoError(t, err)

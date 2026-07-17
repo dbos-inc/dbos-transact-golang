@@ -19,13 +19,13 @@ type RateLimiter struct {
 // the queues table. The public dbos.WorkflowQueue wraps it with runtime-only
 // registration state.
 type QueueConfig struct {
-	Name                 string        `json:"name"`
-	WorkerConcurrency    *int          `json:"workerConcurrency,omitempty"`
-	GlobalConcurrency    *int          `json:"concurrency,omitempty"`
-	PriorityEnabled      bool          `json:"priorityEnabled,omitempty"`
-	RateLimit            *RateLimiter  `json:"rateLimit,omitempty"`
-	PartitionQueue       bool          `json:"partitionQueue,omitempty"`
-	BasePollingInterval  time.Duration `json:"-"`
-	MaxPollingInterval   time.Duration `json:"-"`
-	DatabaseBacked       bool          `json:"-"`
+	Name                string        `json:"name"`
+	WorkerConcurrency   *int          `json:"workerConcurrency,omitempty"`
+	GlobalConcurrency   *int          `json:"concurrency,omitempty"`
+	PriorityEnabled     bool          `json:"priorityEnabled,omitempty"`
+	RateLimit           *RateLimiter  `json:"rateLimit,omitempty"`
+	PartitionQueue      bool          `json:"partitionQueue,omitempty"`
+	BasePollingInterval time.Duration `json:"-"`
+	MaxPollingInterval  time.Duration `json:"-"`
+	DatabaseBacked      bool          `json:"-"`
 }

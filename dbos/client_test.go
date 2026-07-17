@@ -2658,7 +2658,7 @@ func TestClientTypedHandles(t *testing.T) {
 		_, err = h.GetResult()
 		require.NoError(t, err)
 
-		forkedHandle, err := ForkWorkflow[sumResult](client, workflowID)
+		forkedHandle, err := ForkWorkflow[sumResult](client, ForkWorkflowInput{OriginalWorkflowID: workflowID})
 		require.NoError(t, err)
 		res, err := forkedHandle.GetResult()
 		require.NoError(t, err)

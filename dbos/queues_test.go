@@ -1967,7 +1967,7 @@ func TestListenQueues(t *testing.T) {
 		assert.Equal(t, "original-input", originalResult, "expected original workflow to complete")
 
 		// Fork the workflow - this will enqueue it to the internal queue
-		forkHandle, err := ForkWorkflow[string](dbosCtx, originalHandle.GetWorkflowID())
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: originalHandle.GetWorkflowID()})
 		require.NoError(t, err, "failed to fork workflow")
 
 		// Verify the forked workflow completes (proving the internal queue is being listened to)

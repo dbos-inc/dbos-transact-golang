@@ -18,14 +18,14 @@ const _DEFAULT_MAX_POLLING_INTERVAL = 120 * time.Second
 // WorkflowQueue defines a named queue for workflow execution.
 // Queues provide controlled workflow execution with concurrency limits, priority scheduling, and rate limiting.
 type WorkflowQueue struct {
-	Name                 string        `json:"name"`                        // Unique queue name
-	WorkerConcurrency    *int          `json:"workerConcurrency,omitempty"` // Max concurrent workflows per executor
-	GlobalConcurrency    *int          `json:"concurrency,omitempty"`       // Max concurrent workflows across all executors
-	PriorityEnabled      bool          `json:"priorityEnabled,omitempty"`   // Enable priority-based scheduling
-	RateLimit            *RateLimiter  `json:"rateLimit,omitempty"`         // Rate limiting configuration
-	PartitionQueue       bool          `json:"partitionQueue,omitempty"`    // Enable partitioned queue mode
-	basePollingInterval  time.Duration // Base polling interval (minimum, never poll faster)
-	maxPollingInterval   time.Duration // Maximum polling interval (never poll slower)
+	Name                string        `json:"name"`                        // Unique queue name
+	WorkerConcurrency   *int          `json:"workerConcurrency,omitempty"` // Max concurrent workflows per executor
+	GlobalConcurrency   *int          `json:"concurrency,omitempty"`       // Max concurrent workflows across all executors
+	PriorityEnabled     bool          `json:"priorityEnabled,omitempty"`   // Enable priority-based scheduling
+	RateLimit           *RateLimiter  `json:"rateLimit,omitempty"`         // Rate limiting configuration
+	PartitionQueue      bool          `json:"partitionQueue,omitempty"`    // Enable partitioned queue mode
+	basePollingInterval time.Duration // Base polling interval (minimum, never poll faster)
+	maxPollingInterval  time.Duration // Maximum polling interval (never poll slower)
 
 	databaseBacked bool                    // Whether this queue's config lives in the queues table
 	onConflict     QueueConflictResolution // Registration conflict policy
@@ -482,10 +482,10 @@ type queueRunner struct {
 
 func newQueueRunner(logger *slog.Logger) *queueRunner {
 	return &queueRunner{
-		backoffFactor:         2.0,
-		scalebackFactor:       0.9,
-		jitterMin:             0.95,
-		jitterMax:             1.05,
+		backoffFactor:   2.0,
+		scalebackFactor: 0.9,
+		jitterMin:       0.95,
+		jitterMax:       1.05,
 		internalQueue: WorkflowQueue{
 			Name:                models.InternalQueueName,
 			basePollingInterval: models.DefaultBasePollingInterval,
