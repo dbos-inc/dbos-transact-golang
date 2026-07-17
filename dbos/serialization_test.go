@@ -144,8 +144,8 @@ func testAllSerializationPaths[T any](
 	// Verify final state via ListWorkflows
 	t.Run("ListWorkflows", func(t *testing.T) {
 		wfs, err := ListWorkflows(executor,
-			WithWorkflowIDs([]string{handle.GetWorkflowID()}),
-			WithLoadInput(true), WithLoadOutput(true))
+			WithFilterWorkflowIDs(handle.GetWorkflowID()),
+			WithFilterLoadInput(true), WithFilterLoadOutput(true))
 		require.NoError(t, err)
 		require.Len(t, wfs, 1)
 		wf := wfs[0]
@@ -1719,8 +1719,8 @@ func TestPortableInterop(t *testing.T) {
 
 		// Verify ListWorkflows returns portable inputs/outputs correctly
 		wfs, err := ListWorkflows(executor,
-			WithWorkflowIDs([]string{workflowID}),
-			WithLoadInput(true), WithLoadOutput(true))
+			WithFilterWorkflowIDs(workflowID),
+			WithFilterLoadInput(true), WithFilterLoadOutput(true))
 		require.NoError(t, err)
 		require.Len(t, wfs, 1)
 		wf := wfs[0]
@@ -2460,7 +2460,7 @@ func TestPortableWorkflowError(t *testing.T) {
 		require.Error(t, err)
 
 		// ListWorkflows: error goes through errors.New → .Error() → deserializeWorkflowError.
-		wfs, err := ListWorkflows(executor, WithWorkflowIDs([]string{wfID}))
+		wfs, err := ListWorkflows(executor, WithFilterWorkflowIDs(wfID))
 		require.NoError(t, err)
 		require.Len(t, wfs, 1)
 		var listPe *PortableWorkflowError
@@ -2678,7 +2678,7 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 
 		corruptWorkflowColumn(t, "output", corruptID)
 
-		wfs, err := ListWorkflows(executor, WithWorkflowIDs([]string{goodID1, corruptID, goodID2}))
+		wfs, err := ListWorkflows(executor, WithFilterWorkflowIDs(goodID1, corruptID, goodID2))
 		require.NoError(t, err, "one workflow's undecodable output should not fail the whole ListWorkflows call")
 		require.Len(t, wfs, 3)
 
@@ -2710,7 +2710,7 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 
 		corruptWorkflowColumn(t, "inputs", corruptID)
 
-		wfs, err := ListWorkflows(executor, WithWorkflowIDs([]string{goodID, corruptID}))
+		wfs, err := ListWorkflows(executor, WithFilterWorkflowIDs(goodID, corruptID))
 		require.NoError(t, err, "one workflow's undecodable input should not fail the whole ListWorkflows call")
 		require.Len(t, wfs, 2)
 

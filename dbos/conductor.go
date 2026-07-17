@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -512,7 +513,7 @@ func (c *conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 	success := true
 	var errorMsg *string
 
-	opts := []CancelWorkflowOptions{}
+	opts := []CancelWorkflowOption{}
 	if req.CancelChildren {
 		opts = append(opts, WithCancelChildren())
 	}
@@ -709,77 +710,77 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	c.logger.Debug("Handling list workflows request", "request", req)
 
 	var opts []ListWorkflowsOption
-	opts = append(opts, WithLoadInput(req.Body.LoadInput))
-	opts = append(opts, WithLoadOutput(req.Body.LoadOutput))
+	opts = append(opts, WithFilterLoadInput(req.Body.LoadInput))
+	opts = append(opts, WithFilterLoadOutput(req.Body.LoadOutput))
 	if req.Body.SortDesc {
-		opts = append(opts, WithSortDesc())
+		opts = append(opts, WithFilterSortDesc())
 	}
 	if req.Body.QueuesOnly {
-		opts = append(opts, WithQueuesOnly())
+		opts = append(opts, WithFilterQueuesOnly())
 	}
 	if len(req.Body.WorkflowUUIDs) > 0 {
-		opts = append(opts, WithWorkflowIDs(req.Body.WorkflowUUIDs))
+		opts = append(opts, WithFilterWorkflowIDs(req.Body.WorkflowUUIDs...))
 	}
 	if len(req.Body.WorkflowName) > 0 {
-		opts = append(opts, WithName(req.Body.WorkflowName.toSlice()...))
+		opts = append(opts, WithFilterName(req.Body.WorkflowName.toSlice()...))
 	}
 	if len(req.Body.AuthenticatedUser) > 0 {
-		opts = append(opts, WithUser(req.Body.AuthenticatedUser.toSlice()...))
+		opts = append(opts, WithFilterUser(req.Body.AuthenticatedUser.toSlice()...))
 	}
 	if len(req.Body.ApplicationVersion) > 0 {
-		opts = append(opts, WithAppVersion(req.Body.ApplicationVersion.toSlice()...))
+		opts = append(opts, WithFilterAppVersion(req.Body.ApplicationVersion.toSlice()...))
 	}
 	if req.Body.Limit != nil {
-		opts = append(opts, WithLimit(*req.Body.Limit))
+		opts = append(opts, WithFilterLimit(*req.Body.Limit))
 	}
 	if req.Body.Offset != nil {
-		opts = append(opts, WithOffset(*req.Body.Offset))
+		opts = append(opts, WithFilterOffset(*req.Body.Offset))
 	}
 	if req.Body.StartTime != nil {
-		opts = append(opts, WithStartTime(*req.Body.StartTime))
+		opts = append(opts, WithFilterCreatedAfter(*req.Body.StartTime))
 	}
 	if req.Body.EndTime != nil {
-		opts = append(opts, WithEndTime(*req.Body.EndTime))
+		opts = append(opts, WithFilterCreatedBefore(*req.Body.EndTime))
 	}
 	if req.Body.CompletedAfter != nil {
-		opts = append(opts, WithCompletedAfter(*req.Body.CompletedAfter))
+		opts = append(opts, WithFilterCompletedAfter(*req.Body.CompletedAfter))
 	}
 	if req.Body.CompletedBefore != nil {
-		opts = append(opts, WithCompletedBefore(*req.Body.CompletedBefore))
+		opts = append(opts, WithFilterCompletedBefore(*req.Body.CompletedBefore))
 	}
 	if req.Body.DequeuedAfter != nil {
-		opts = append(opts, WithDequeuedAfter(*req.Body.DequeuedAfter))
+		opts = append(opts, WithFilterDequeuedAfter(*req.Body.DequeuedAfter))
 	}
 	if req.Body.DequeuedBefore != nil {
-		opts = append(opts, WithDequeuedBefore(*req.Body.DequeuedBefore))
+		opts = append(opts, WithFilterDequeuedBefore(*req.Body.DequeuedBefore))
 	}
 	if len(req.Body.Status) > 0 {
 		statuses := make([]WorkflowStatusType, len(req.Body.Status))
 		for i, s := range req.Body.Status {
 			statuses[i] = WorkflowStatusType(s)
 		}
-		opts = append(opts, WithStatus(statuses))
+		opts = append(opts, WithFilterStatus(statuses...))
 	}
 	if len(req.Body.ForkedFrom) > 0 {
-		opts = append(opts, WithForkedFrom(req.Body.ForkedFrom.toSlice()...))
+		opts = append(opts, WithFilterForkedFrom(req.Body.ForkedFrom.toSlice()...))
 	}
 	if len(req.Body.ParentWorkflowID) > 0 {
-		opts = append(opts, WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
+		opts = append(opts, WithFilterParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
 	}
 	if req.Body.WasForkedFrom != nil {
-		opts = append(opts, WithWasForkedFrom(*req.Body.WasForkedFrom))
+		opts = append(opts, WithFilterWasForkedFrom(*req.Body.WasForkedFrom))
 	}
 	if req.Body.HasParent != nil {
-		opts = append(opts, WithHasParent(*req.Body.HasParent))
+		opts = append(opts, WithFilterHasParent(*req.Body.HasParent))
 	}
 	if len(req.Body.QueueName) > 0 {
-		opts = append(opts, WithQueueName(req.Body.QueueName.toSlice()...))
+		opts = append(opts, WithFilterQueueName(req.Body.QueueName.toSlice()...))
 	}
 	if len(req.Body.WorkflowIDPrefix) > 0 {
-		opts = append(opts, WithWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
+		opts = append(opts, WithFilterWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
 	}
 	if len(req.Body.ExecutorID) > 0 {
-		opts = append(opts, WithExecutorIDs(req.Body.ExecutorID.toSlice()))
+		opts = append(opts, WithFilterExecutorIDs(req.Body.ExecutorID.toSlice()...))
 	}
 	if len(req.Body.Attributes) > 0 {
 		opts = append(opts, WithFilterAttributes(req.Body.Attributes))
@@ -833,11 +834,11 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 
 	// Build functional options for ListWorkflows
 	var opts []ListWorkflowsOption
-	opts = append(opts, WithLoadInput(req.Body.LoadInput))
-	opts = append(opts, WithLoadOutput(false)) // Don't load output for queued workflows
-	opts = append(opts, WithQueuesOnly())      // Only include workflows that are in queues
+	opts = append(opts, WithFilterLoadInput(req.Body.LoadInput))
+	opts = append(opts, WithFilterLoadOutput(false)) // Don't load output for queued workflows
+	opts = append(opts, WithFilterQueuesOnly())      // Only include workflows that are in queues
 	if len(req.Body.WorkflowUUIDs) > 0 {
-		opts = append(opts, WithWorkflowIDs(req.Body.WorkflowUUIDs))
+		opts = append(opts, WithFilterWorkflowIDs(req.Body.WorkflowUUIDs...))
 	}
 
 	// Add status filter for queued workflows
@@ -854,64 +855,64 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	if len(queuedStatuses) == 0 {
 		queuedStatuses = []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued, WorkflowStatusDelayed}
 	}
-	opts = append(opts, WithStatus(queuedStatuses))
+	opts = append(opts, WithFilterStatus(queuedStatuses...))
 
 	if req.Body.SortDesc {
-		opts = append(opts, WithSortDesc())
+		opts = append(opts, WithFilterSortDesc())
 	}
 	if len(req.Body.WorkflowName) > 0 {
-		opts = append(opts, WithName(req.Body.WorkflowName.toSlice()...))
+		opts = append(opts, WithFilterName(req.Body.WorkflowName.toSlice()...))
 	}
 	if req.Body.Limit != nil {
-		opts = append(opts, WithLimit(*req.Body.Limit))
+		opts = append(opts, WithFilterLimit(*req.Body.Limit))
 	}
 	if req.Body.Offset != nil {
-		opts = append(opts, WithOffset(*req.Body.Offset))
+		opts = append(opts, WithFilterOffset(*req.Body.Offset))
 	}
 	if req.Body.StartTime != nil {
-		opts = append(opts, WithStartTime(*req.Body.StartTime))
+		opts = append(opts, WithFilterCreatedAfter(*req.Body.StartTime))
 	}
 	if req.Body.EndTime != nil {
-		opts = append(opts, WithEndTime(*req.Body.EndTime))
+		opts = append(opts, WithFilterCreatedBefore(*req.Body.EndTime))
 	}
 	if req.Body.CompletedAfter != nil {
-		opts = append(opts, WithCompletedAfter(*req.Body.CompletedAfter))
+		opts = append(opts, WithFilterCompletedAfter(*req.Body.CompletedAfter))
 	}
 	if req.Body.CompletedBefore != nil {
-		opts = append(opts, WithCompletedBefore(*req.Body.CompletedBefore))
+		opts = append(opts, WithFilterCompletedBefore(*req.Body.CompletedBefore))
 	}
 	if req.Body.DequeuedAfter != nil {
-		opts = append(opts, WithDequeuedAfter(*req.Body.DequeuedAfter))
+		opts = append(opts, WithFilterDequeuedAfter(*req.Body.DequeuedAfter))
 	}
 	if req.Body.DequeuedBefore != nil {
-		opts = append(opts, WithDequeuedBefore(*req.Body.DequeuedBefore))
+		opts = append(opts, WithFilterDequeuedBefore(*req.Body.DequeuedBefore))
 	}
 	if len(req.Body.QueueName) > 0 {
-		opts = append(opts, WithQueueName(req.Body.QueueName.toSlice()...))
+		opts = append(opts, WithFilterQueueName(req.Body.QueueName.toSlice()...))
 	}
 	if len(req.Body.ExecutorID) > 0 {
-		opts = append(opts, WithExecutorIDs(req.Body.ExecutorID.toSlice()))
+		opts = append(opts, WithFilterExecutorIDs(req.Body.ExecutorID.toSlice()...))
 	}
 	if len(req.Body.WorkflowIDPrefix) > 0 {
-		opts = append(opts, WithWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
+		opts = append(opts, WithFilterWorkflowIDPrefix(req.Body.WorkflowIDPrefix.toSlice()...))
 	}
 	if len(req.Body.ForkedFrom) > 0 {
-		opts = append(opts, WithForkedFrom(req.Body.ForkedFrom.toSlice()...))
+		opts = append(opts, WithFilterForkedFrom(req.Body.ForkedFrom.toSlice()...))
 	}
 	if len(req.Body.ParentWorkflowID) > 0 {
-		opts = append(opts, WithParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
+		opts = append(opts, WithFilterParentWorkflowID(req.Body.ParentWorkflowID.toSlice()...))
 	}
 	if req.Body.WasForkedFrom != nil {
-		opts = append(opts, WithWasForkedFrom(*req.Body.WasForkedFrom))
+		opts = append(opts, WithFilterWasForkedFrom(*req.Body.WasForkedFrom))
 	}
 	if req.Body.HasParent != nil {
-		opts = append(opts, WithHasParent(*req.Body.HasParent))
+		opts = append(opts, WithFilterHasParent(*req.Body.HasParent))
 	}
 	if len(req.Body.AuthenticatedUser) > 0 {
-		opts = append(opts, WithUser(req.Body.AuthenticatedUser.toSlice()...))
+		opts = append(opts, WithFilterUser(req.Body.AuthenticatedUser.toSlice()...))
 	}
 	if len(req.Body.ApplicationVersion) > 0 {
-		opts = append(opts, WithAppVersion(req.Body.ApplicationVersion.toSlice()...))
+		opts = append(opts, WithFilterAppVersion(req.Body.ApplicationVersion.toSlice()...))
 	}
 	if len(req.Body.Attributes) > 0 {
 		opts = append(opts, WithFilterAttributes(req.Body.Attributes))
@@ -1021,9 +1022,9 @@ func (c *conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 	c.logger.Debug("Handling get workflow request", "workflow_id", req.WorkflowID)
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx,
-		WithWorkflowIDs([]string{req.WorkflowID}),
-		WithLoadInput(req.LoadInput),
-		WithLoadOutput(req.LoadOutput))
+		WithFilterWorkflowIDs(req.WorkflowID),
+		WithFilterLoadInput(req.LoadInput),
+		WithFilterLoadOutput(req.LoadOutput))
 	if err != nil {
 		c.logger.Error("Failed to get workflow", "workflow_id", req.WorkflowID, "error", err)
 		errorMsg := fmt.Sprintf("failed to get workflow: %v", err)
@@ -1180,10 +1181,10 @@ func (c *conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 	c.logger.Debug("Handling exist pending workflows request", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion)
 
 	opts := []ListWorkflowsOption{
-		WithStatus([]WorkflowStatusType{WorkflowStatusPending}),
-		WithLimit(1), // We only need to know if any exist, so limit to 1 for efficiency
-		WithExecutorIDs([]string{req.ExecutorID}),
-		WithAppVersion(req.ApplicationVersion),
+		WithFilterStatus(WorkflowStatusPending),
+		WithFilterLimit(1), // We only need to know if any exist, so limit to 1 for efficiency
+		WithFilterExecutorIDs(req.ExecutorID),
+		WithFilterAppVersion(req.ApplicationVersion),
 	}
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
@@ -1853,7 +1854,7 @@ func (c *conductor) handleGetScheduleRequest(data []byte, requestID string) erro
 	schedule, err := c.dbosCtx.GetSchedule(c.dbosCtx, req.ScheduleName)
 	var errorMsg *string
 	var output *scheduleConductorOutput
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrScheduleNotFound) {
 		c.logger.Error("Failed to get schedule", "schedule_name", req.ScheduleName, "error", err)
 		msg := fmt.Sprintf("failed to get schedule '%s': %v", req.ScheduleName, err)
 		errorMsg = &msg
@@ -1951,11 +1952,11 @@ func (c *conductor) handleBackfillScheduleRequest(data []byte, requestID string)
 			errorMsg = &msg
 		} else {
 			schedule, errGet := c.dbosCtx.GetSchedule(c.dbosCtx, req.ScheduleName)
-			if errGet != nil {
-				msg := fmt.Sprintf("failed to get schedule '%s': %v", req.ScheduleName, errGet)
-				errorMsg = &msg
-			} else if schedule == nil {
+			if errors.Is(errGet, ErrScheduleNotFound) {
 				msg := fmt.Sprintf("schedule not found: %s", req.ScheduleName)
+				errorMsg = &msg
+			} else if errGet != nil {
+				msg := fmt.Sprintf("failed to get schedule '%s': %v", req.ScheduleName, errGet)
 				errorMsg = &msg
 			} else {
 				ids, errBf := c.dbosCtx.systemDB.BackfillSchedule(c.dbosCtx, sysdb.BackfillScheduleDBInput{
@@ -2116,7 +2117,7 @@ func (c *conductor) handleGetQueueRequest(data []byte, requestID string) error {
 	queue, err := c.dbosCtx.RetrieveQueue(c.dbosCtx, req.Name)
 	var errorMsg *string
 	var output *queueConductorOutput
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrQueueNotFound) {
 		c.logger.Error("Failed to get queue", "queue_name", req.Name, "error", err)
 		msg := fmt.Sprintf("failed to get queue '%s': %v", req.Name, err)
 		errorMsg = &msg

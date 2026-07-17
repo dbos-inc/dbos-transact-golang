@@ -66,7 +66,7 @@ type CancelWorkflowInput struct {
 	CancelChildren bool
 }
 
-type CancelWorkflowOptions func(*CancelWorkflowInput)
+type CancelWorkflowOption func(*CancelWorkflowInput)
 
 // ForkWorkflowInput holds configuration parameters for forking workflows.
 // OriginalWorkflowID is required. Other fields are optional.

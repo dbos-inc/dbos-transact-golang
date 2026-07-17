@@ -710,8 +710,8 @@ func retryPredicateWorkflow(ctx Context, _ string) (string, error) {
 		return "", fmt.Errorf("transient failure")
 	},
 		WithStepMaxRetries(5),
-		WithBaseInterval(1*time.Millisecond),
-		WithRetryPredicate(func(err error) bool {
+		WithStepBaseInterval(1*time.Millisecond),
+		WithStepRetryPredicate(func(err error) bool {
 			return !strings.Contains(err.Error(), "permanent")
 		}),
 	)
@@ -729,7 +729,7 @@ func stepRetryWorkflow(dbosCtx Context, input string) (string, error) {
 
 	return RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
 		return stepRetryAlwaysFailsStep(ctx)
-	}, WithStepMaxRetries(5), WithBaseInterval(1*time.Millisecond), WithMaxInterval(10*time.Millisecond))
+	}, WithStepMaxRetries(5), WithStepBaseInterval(1*time.Millisecond), WithStepMaxInterval(10*time.Millisecond))
 }
 
 func step1(_ context.Context) (string, error) {
@@ -1873,7 +1873,7 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 
 	t.Run("Go idempotency", func(t *testing.T) {
 		goWorkflow := func(dbosCtx Context, input string) (string, error) {
-			channels := make([]chan StepOutcome[string], 0, 10)
+			channels := make([]<-chan StepOutcome[string], 0, 10)
 			for i := range 10 {
 				ch, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
 					return stepWithSleep(ctx, 1*time.Second)
@@ -2473,27 +2473,27 @@ func TestChildWorkflow(t *testing.T) {
 		require.False(t, grandParentStatus.CompletedAt.IsZero(), "completed grandparent should have CompletedAt set")
 		require.False(t, childStatus.CompletedAt.IsZero(), "completed child should have CompletedAt set")
 
-		// WithHasParent filters on the presence of a parent workflow.
-		withParent, err := ListWorkflows(dbosCtx, WithHasParent(true))
+		// WithFilterHasParent filters on the presence of a parent workflow.
+		withParent, err := ListWorkflows(dbosCtx, WithFilterHasParent(true))
 		require.NoError(t, err)
 		hasParentIDs := make(map[string]bool)
 		for _, wf := range withParent {
-			require.NotEmpty(t, wf.ParentWorkflowID, "WithHasParent(true) must only return workflows with a parent")
+			require.NotEmpty(t, wf.ParentWorkflowID, "WithFilterHasParent(true) must only return workflows with a parent")
 			hasParentIDs[wf.ID] = true
 		}
-		assert.True(t, hasParentIDs[parentID], "parent workflow should be returned by WithHasParent(true)")
-		assert.True(t, hasParentIDs[childID], "child workflow should be returned by WithHasParent(true)")
-		assert.False(t, hasParentIDs[grandParentID], "top-level grandparent must not be returned by WithHasParent(true)")
+		assert.True(t, hasParentIDs[parentID], "parent workflow should be returned by WithFilterHasParent(true)")
+		assert.True(t, hasParentIDs[childID], "child workflow should be returned by WithFilterHasParent(true)")
+		assert.False(t, hasParentIDs[grandParentID], "top-level grandparent must not be returned by WithFilterHasParent(true)")
 
-		withoutParent, err := ListWorkflows(dbosCtx, WithHasParent(false))
+		withoutParent, err := ListWorkflows(dbosCtx, WithFilterHasParent(false))
 		require.NoError(t, err)
 		noParentIDs := make(map[string]bool)
 		for _, wf := range withoutParent {
-			require.Empty(t, wf.ParentWorkflowID, "WithHasParent(false) must only return workflows without a parent")
+			require.Empty(t, wf.ParentWorkflowID, "WithFilterHasParent(false) must only return workflows without a parent")
 			noParentIDs[wf.ID] = true
 		}
-		assert.True(t, noParentIDs[grandParentID], "grandparent should be returned by WithHasParent(false)")
-		assert.False(t, noParentIDs[childID], "child workflow must be excluded by WithHasParent(false)")
+		assert.True(t, noParentIDs[grandParentID], "grandparent should be returned by WithFilterHasParent(false)")
+		assert.False(t, noParentIDs[childID], "child workflow must be excluded by WithFilterHasParent(false)")
 	})
 
 	t.Run("ChildWorkflowWithCustomID", func(t *testing.T) {
@@ -3228,8 +3228,8 @@ func infiniteDeadLetterQueueWorkflow(ctx Context, input string) (int, error) {
 }
 func TestWorkflowDeadLetterQueue(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
-	RegisterWorkflow(dbosCtx, deadLetterQueueWorkflow, WithMaxRetries(maxRecoveryAttempts))
-	RegisterWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, WithMaxRetries(-1)) // A negative value means infinite retries
+	RegisterWorkflow(dbosCtx, deadLetterQueueWorkflow, WithMaxRecoveryAttempts(maxRecoveryAttempts))
+	RegisterWorkflow(dbosCtx, infiniteDeadLetterQueueWorkflow, WithMaxRecoveryAttempts(-1)) // A negative value means infinite retries
 	dbosCtx.Launch()
 
 	t.Run("DatabaseRetryWithSameOwnerDoesNotDeadLetter", func(t *testing.T) {
@@ -3475,9 +3475,9 @@ func TestCancelWorkflows(t *testing.T) {
 		// cancel workflow without cancelling the child workflows
 		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID), "failed to cancel workflow") // first cancel without children
 		allStatuses, err := dbosCtx.ListWorkflows(dbosCtx,
-			WithWorkflowIDs(IDs),
-			WithLoadInput(false),
-			WithLoadOutput(false),
+			WithFilterWorkflowIDs(IDs...),
+			WithFilterLoadInput(false),
+			WithFilterLoadOutput(false),
 		)
 		require.NoError(t, err, "failed to list workflow statuses")
 		require.Len(t, allStatuses, 3, "expected 3 workflow statuses")
@@ -3494,9 +3494,9 @@ func TestCancelWorkflows(t *testing.T) {
 		// now cancel workflow with children
 		require.NoError(t, CancelWorkflow(dbosCtx, parentWorkflowID, WithCancelChildren()), "failed to cancel workflow") // first cancel without children
 		allStatuses, err = dbosCtx.ListWorkflows(dbosCtx,
-			WithWorkflowIDs(IDs),
-			WithLoadInput(false),
-			WithLoadOutput(false),
+			WithFilterWorkflowIDs(IDs...),
+			WithFilterLoadInput(false),
+			WithFilterLoadOutput(false),
 		)
 		require.NoError(t, err, "failed to list workflow statuses")
 		require.Len(t, allStatuses, 3, "expected 3 workflow statuses")
@@ -6737,7 +6737,7 @@ func TestGarbageCollect(t *testing.T) {
 		}
 
 		// Get timestamps for testing
-		workflows, err := ListWorkflows(dbosCtx, WithSortDesc())
+		workflows, err := ListWorkflows(dbosCtx, WithFilterSortDesc())
 		require.NoError(t, err, "failed to list workflows")
 		require.Equal(t, numWorkflows, len(workflows))
 
@@ -6758,7 +6758,7 @@ func TestGarbageCollect(t *testing.T) {
 		})
 		require.NoError(t, err, "failed to garbage collect with threshold 6 and 7th newest timestamp")
 
-		workflows, err = ListWorkflows(dbosCtx, WithSortDesc())
+		workflows, err = ListWorkflows(dbosCtx, WithFilterSortDesc())
 		require.NoError(t, err, "failed to list workflows after first GC")
 		require.Equal(t, threshold, len(workflows), "expected 6 workflows when threshold has more recent cutoff than timestamp")
 
@@ -6774,7 +6774,7 @@ func TestGarbageCollect(t *testing.T) {
 		})
 		require.NoError(t, err, "failed to garbage collect with threshold 3 and 2nd newest timestamp")
 
-		workflows, err = ListWorkflows(dbosCtx, WithSortDesc())
+		workflows, err = ListWorkflows(dbosCtx, WithFilterSortDesc())
 		require.NoError(t, err, "failed to list workflows after second GC")
 		require.Equal(t, 2, len(workflows), "expected 2 workflows after second GC")
 		require.Equal(t, workflows[0].ID, handles[numWorkflows-1].GetWorkflowID(), "expected newest workflow to remain")
@@ -6881,7 +6881,7 @@ func TestSpecialSteps(t *testing.T) {
 		}
 
 		// Step 7: Use ListWorkflows at the end to check expected count
-		workflows, err := ListWorkflows(dbosCtx, WithLimit(100))
+		workflows, err := ListWorkflows(dbosCtx, WithFilterLimit(100))
 		if err != nil {
 			return "", fmt.Errorf("ListWorkflows failed: %w", err)
 		}
@@ -7003,7 +7003,7 @@ func TestRegisteredWorkflowListing(t *testing.T) {
 
 	// Register some regular workflows
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
-	RegisterWorkflow(dbosCtx, simpleWorkflowError, WithMaxRetries(5))
+	RegisterWorkflow(dbosCtx, simpleWorkflowError, WithMaxRecoveryAttempts(5))
 	RegisterWorkflow(dbosCtx, simpleWorkflowWithStep, WithWorkflowName("CustomStepWorkflow"))
 
 	err := Launch(dbosCtx)
@@ -8206,13 +8206,13 @@ func TestStreams(t *testing.T) {
 		streamStartedEvent.Wait()
 
 		// Sync snapshot from the beginning: returns available values, reports not closed
-		values, closed, err := ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(0))
+		values, closed, err := ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot())
 		require.NoError(t, err)
 		require.False(t, closed, "snapshot of an active workflow should report not closed")
 		require.Equal(t, []string{"value1", "value2", "value3"}, values)
 
 		// Snapshot honoring a base offset: skips the first two entries
-		values, closed, err = ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(2))
+		values, closed, err = ReadStream[string](dbosCtx, writerHandle.GetWorkflowID(), streamKey, WithReadStreamSnapshot(), WithReadStreamFromOffset(2))
 		require.NoError(t, err)
 		require.False(t, closed)
 		require.Equal(t, []string{"value3"}, values)
@@ -9107,7 +9107,7 @@ func TestWorkflowAttributes(t *testing.T) {
 		assert.Equal(t, map[string]any{"customer": "acme", "tier": float64(3)}, status.Attributes)
 
 		// Child workflows do not inherit their parent's attributes
-		childStatuses, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{childID}))
+		childStatuses, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(childID))
 		require.NoError(t, err)
 		require.Len(t, childStatuses, 1)
 		assert.Nil(t, childStatuses[0].Attributes)
@@ -9180,7 +9180,7 @@ func TestWorkflowAttributes(t *testing.T) {
 				ids[s.ID] = true
 			}
 			assert.Equal(t, map[string]bool{handle.GetWorkflowID(): true, handle2.GetWorkflowID(): true}, ids)
-			queued, err := client.ListWorkflows(client, WithQueuesOnly(), WithFilterAttributes(map[string]any{"n": 2}))
+			queued, err := client.ListWorkflows(client, WithFilterQueuesOnly(), WithFilterAttributes(map[string]any{"n": 2}))
 			require.NoError(t, err)
 			require.Len(t, queued, 1)
 			assert.Equal(t, handle2.GetWorkflowID(), queued[0].ID)
@@ -9210,7 +9210,7 @@ func TestWorkflowAttributes(t *testing.T) {
 		assert.Equal(t, map[string]bool{h1.GetWorkflowID(): true}, matchedIDs(t, map[string]any{"note": nil}))
 		assert.Equal(t, map[string]bool{h2.GetWorkflowID(): true}, matchedIDs(t, map[string]any{"meta": map[string]any{"region": "us-east-1"}}))
 		// Composes with other filters
-		composed, err := ListWorkflows(dbosCtx, WithFilterAttributes(map[string]any{"tier": 1}), WithWorkflowIDs([]string{h2.GetWorkflowID()}))
+		composed, err := ListWorkflows(dbosCtx, WithFilterAttributes(map[string]any{"tier": 1}), WithFilterWorkflowIDs(h2.GetWorkflowID()))
 		require.NoError(t, err)
 		assert.Empty(t, composed)
 		// Workflows without attributes never match
@@ -9224,12 +9224,12 @@ func TestWorkflowAttributes(t *testing.T) {
 		require.NoError(t, err)
 		attrBlockingStartEvent.Wait()
 
-		queued, err := ListWorkflows(dbosCtx, WithQueuesOnly(), WithFilterAttributes(map[string]any{"side": "queued"}))
+		queued, err := ListWorkflows(dbosCtx, WithFilterQueuesOnly(), WithFilterAttributes(map[string]any{"side": "queued"}))
 		require.NoError(t, err)
 		require.Len(t, queued, 1)
 		assert.Equal(t, handle.GetWorkflowID(), queued[0].ID)
 
-		other, err := ListWorkflows(dbosCtx, WithQueuesOnly(), WithFilterAttributes(map[string]any{"side": "other"}))
+		other, err := ListWorkflows(dbosCtx, WithFilterQueuesOnly(), WithFilterAttributes(map[string]any{"side": "other"}))
 		require.NoError(t, err)
 		assert.Empty(t, other)
 
@@ -9264,7 +9264,7 @@ func TestWorkflowAttributes(t *testing.T) {
 		assert.Equal(t, map[string]any{"source": "debouncer"}, status.Attributes)
 
 		// The internal debouncer workflow itself does not get the user's attributes
-		internalStatuses, err := ListWorkflows(dbosCtx, WithName(debouncer.internalDebouncerFQN))
+		internalStatuses, err := ListWorkflows(dbosCtx, WithFilterName(debouncer.internalDebouncerFQN))
 		require.NoError(t, err)
 		require.NotEmpty(t, internalStatuses)
 		for _, s := range internalStatuses {
@@ -9283,7 +9283,7 @@ func TestWorkflowAttributes(t *testing.T) {
 		require.NoError(t, err)
 
 		// Replace the attributes entirely
-		require.NoError(t, UpdateWorkflowAttributes(dbosCtx, wfid, map[string]any{"customer": "globex-upd"}))
+		require.NoError(t, SetWorkflowAttributes(dbosCtx, wfid, map[string]any{"customer": "globex-upd"}))
 		status, err := handle.GetStatus()
 		require.NoError(t, err)
 		assert.Equal(t, map[string]any{"customer": "globex-upd"}, status.Attributes)
@@ -9295,14 +9295,14 @@ func TestWorkflowAttributes(t *testing.T) {
 		}
 
 		// Passing nil clears all attributes
-		require.NoError(t, UpdateWorkflowAttributes(dbosCtx, wfid, nil))
+		require.NoError(t, SetWorkflowAttributes(dbosCtx, wfid, nil))
 		status, err = handle.GetStatus()
 		require.NoError(t, err)
 		assert.Nil(t, status.Attributes)
 	})
 
 	t.Run("UpdateNonExistentWorkflow", func(t *testing.T) {
-		err := UpdateWorkflowAttributes(dbosCtx, "does-not-exist-"+uuid.NewString(), map[string]any{"k": "v"})
+		err := SetWorkflowAttributes(dbosCtx, "does-not-exist-"+uuid.NewString(), map[string]any{"k": "v"})
 		require.Error(t, err)
 		var dbosErr *Error
 		require.ErrorAs(t, err, &dbosErr)

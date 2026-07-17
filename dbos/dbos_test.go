@@ -475,7 +475,7 @@ func TestSystemDBStartupTimeoutBoundsSQLitePoolWait(t *testing.T) {
 	started := time.Now()
 	_, err = NewContext(context.Background(), Config{
 		AppName:                "startup-timeout-sqlite",
-		SqliteSystemDB:         db,
+		SQLiteSystemDB:         db,
 		SystemDBStartupTimeout: timeout,
 	})
 	elapsed := time.Since(started)
@@ -1707,7 +1707,7 @@ func (w testWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// TestCustomSqlitePool mirrors TestCustomPool for the SqliteSystemDB config
+// TestCustomSqlitePool mirrors TestCustomPool for the SQLiteSystemDB config
 // field: caller-supplied *sql.DB instead of *pgxpool.Pool. Always runs (does
 // not depend on DBOS_TEST_BACKEND) because every subtest constructs its own
 // sqlite handle.
@@ -1755,7 +1755,7 @@ func TestCustomSqlitePool(t *testing.T) {
 
 		config := Config{
 			AppName:        "test-custom-sqlite-db",
-			SqliteSystemDB: db,
+			SQLiteSystemDB: db,
 		}
 		customdbosContext, err := NewContext(context.Background(), config)
 		require.NoError(t, err)
@@ -1801,7 +1801,7 @@ func TestCustomSqlitePool(t *testing.T) {
 	})
 
 	t.Run("CustomSqliteDBTakesPrecedence", func(t *testing.T) {
-		// An invalid DatabaseURL is ignored when SqliteSystemDB is set.
+		// An invalid DatabaseURL is ignored when SQLiteSystemDB is set.
 		dbPath := filepath.Join(t.TempDir(), "dbos.db")
 		db, err := sql.Open("sqlite", dbPath)
 		require.NoError(t, err)
@@ -1809,7 +1809,7 @@ func TestCustomSqlitePool(t *testing.T) {
 		config := Config{
 			DatabaseURL:    "postgres://invalid:invalid@localhost:5432/invaliddb",
 			AppName:        "test-sqlite-pool-precedence",
-			SqliteSystemDB: db,
+			SQLiteSystemDB: db,
 		}
 		dbosCtx, err := NewContext(context.Background(), config)
 		require.NoError(t, err)
@@ -1822,7 +1822,7 @@ func TestCustomSqlitePool(t *testing.T) {
 	})
 
 	t.Run("MutuallyExclusivePools", func(t *testing.T) {
-		// Setting both SystemDBPool and SqliteSystemDB must be rejected by
+		// Setting both SystemDBPool and SQLiteSystemDB must be rejected by
 		// processConfig before any connection attempt.
 		dbPath := filepath.Join(t.TempDir(), "dbos.db")
 		db, err := sql.Open("sqlite", dbPath)
@@ -1841,7 +1841,7 @@ func TestCustomSqlitePool(t *testing.T) {
 		_, err = NewContext(context.Background(), Config{
 			AppName:        "test-mutually-exclusive",
 			SystemDBPool:   pool,
-			SqliteSystemDB: db,
+			SQLiteSystemDB: db,
 		})
 		require.Error(t, err)
 		dbosErr, ok := err.(*Error)

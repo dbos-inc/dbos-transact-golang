@@ -288,7 +288,7 @@ func TestMocks(t *testing.T) {
 
 	// Context lifecycle
 	mockCtx.On("Launch").Return(nil)
-	mockCtx.On("Shutdown", mock.Anything).Return()
+	mockCtx.On("Shutdown", mock.Anything).Return(nil)
 
 	// Context methods
 	mockCtx.On("Done").Return((<-chan struct{})(nil))
@@ -337,9 +337,12 @@ func TestMocks(t *testing.T) {
 	outcomeChan <- dbos.StepOutcome[any]{Result: 1, Err: nil}
 	close(outcomeChan)
 
+	// The mock type-asserts the stored return value to the interface's
+	// receive-only channel type, so hand it a <-chan.
+	var outcomeRecv <-chan dbos.StepOutcome[any] = outcomeChan
 	mockCtx.On("Go", mockCtx, mock.MatchedBy(func(fn interface{}) bool {
 		return fn != nil
-	}), mock.Anything).Return(outcomeChan, nil).Once()
+	}), mock.Anything).Return(outcomeRecv, nil).Once()
 
 	mockCtx.On("Select", mockCtx, mock.MatchedBy(func(chans []<-chan dbos.StepOutcome[any]) bool {
 		return len(chans) == 1 && chans != nil
@@ -368,7 +371,7 @@ func TestMocks(t *testing.T) {
 	// Enqueue with specific values
 	mockClientHandle.On("GetStatus").Return(dbos.WorkflowStatus{ID: "wf-123"}, nil).Once()
 	mockClient.On("Enqueue", mockClient, "my-queue", "my-workflow", "input-data", mock.Anything).Return(mockClientHandle, nil).Once()
-	mockClient.On("Shutdown", 1*time.Second).Return()
+	mockClient.On("Shutdown", 1*time.Second).Return(nil)
 
 	err = clientUsingFunction(mockClient)
 	if err != nil {

@@ -61,6 +61,8 @@ const (
 	ErrorCodePatchingNotEnabled       = models.ErrorCodePatchingNotEnabled
 	ErrorCodeTimeout                  = models.ErrorCodeTimeout
 	ErrorCodeNoApplicationVersions    = models.ErrorCodeNoApplicationVersions
+	ErrorCodeQueueNotFound            = models.ErrorCodeQueueNotFound
+	ErrorCodeScheduleNotFound         = models.ErrorCodeScheduleNotFound
 )
 
 // Driver-facing SQL surface (internal/sysdb). Future database drivers
@@ -113,7 +115,7 @@ type (
 	ListSchedulesOption        = models.ListSchedulesOption
 	GetWorkflowStepsOption     = models.GetWorkflowStepsOption
 	ResumeWorkflowOption       = models.ResumeWorkflowOption
-	CancelWorkflowOptions      = models.CancelWorkflowOptions
+	CancelWorkflowOption       = models.CancelWorkflowOption
 	ForkWorkflowInput          = models.ForkWorkflowInput
 	GetWorkflowAggregatesInput = models.GetWorkflowAggregatesInput
 	GetStepAggregatesInput     = models.GetStepAggregatesInput

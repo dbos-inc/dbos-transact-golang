@@ -553,12 +553,13 @@ const (
 	_DEFAULT_STEP_BACKOFF_FACTOR = 2.0
 )
 
-// WithMaxRetries sets the maximum number of retry attempts for workflow recovery.
-// If a workflow fails or is interrupted, it will be retried up to this many times.
-// After exceeding max retries, the workflow status becomes MAX_RECOVERY_ATTEMPTS_EXCEEDED.
-func WithMaxRetries(maxRetries int) WorkflowRegistrationOption {
+// WithMaxRecoveryAttempts sets the maximum number of times an interrupted workflow
+// is recovered (re-executed after a crash or restart). After exceeding this limit,
+// the workflow status becomes MAX_RECOVERY_ATTEMPTS_EXCEEDED. This is unrelated to
+// step retries; see WithStepMaxRetries for those.
+func WithMaxRecoveryAttempts(maxRecoveryAttempts int) WorkflowRegistrationOption {
 	return func(p *workflowRegistrationOptions) {
-		p.maxRetries = maxRetries
+		p.maxRetries = maxRecoveryAttempts
 	}
 }
 
@@ -619,7 +620,7 @@ func resolveWorkflowFunctionName[P any, R any](fn Workflow[P, R]) string {
 //     functions (closures) instead.
 //
 // Registration options include:
-//   - WithMaxRetries: Set maximum retry attempts for workflow recovery
+//   - WithMaxRecoveryAttempts: Set maximum recovery attempts for the workflow
 //   - WithWorkflowName: Set a custom name for the workflow
 //   - WithInstance: Register a method bound to a named instance
 //
@@ -634,7 +635,7 @@ func resolveWorkflowFunctionName[P any, R any](fn Workflow[P, R]) string {
 //
 //	// With options:
 //	dbos.RegisterWorkflow(ctx, MyWorkflow,
-//	    dbos.WithMaxRetries(5),
+//	    dbos.WithMaxRecoveryAttempts(5),
 //	    dbos.WithWorkflowName("MyCustomWorkflowName"))
 func RegisterWorkflow[P any, R any](ctx Context, fn Workflow[P, R], opts ...WorkflowRegistrationOption) {
 	if ctx == nil {
@@ -2107,32 +2108,32 @@ func WithStepMaxRetries(maxRetries int) StepOption {
 	}
 }
 
-// WithBackoffFactor sets the exponential backoff multiplier between retries.
+// WithStepBackoffFactor sets the exponential backoff multiplier between retries.
 // The delay between retries is calculated as: BaseInterval * (BackoffFactor^(retry-1))
 // Default value is 2.0.
-func WithBackoffFactor(factor float64) StepOption {
+func WithStepBackoffFactor(factor float64) StepOption {
 	return func(opts *stepOptions) {
 		opts.backoffFactor = factor
 	}
 }
 
-// WithBaseInterval sets the initial delay between retries.
+// WithStepBaseInterval sets the initial delay between retries.
 // Default value is 100ms.
-func WithBaseInterval(interval time.Duration) StepOption {
+func WithStepBaseInterval(interval time.Duration) StepOption {
 	return func(opts *stepOptions) {
 		opts.baseInterval = interval
 	}
 }
 
-// WithMaxInterval sets the maximum delay between retries.
+// WithStepMaxInterval sets the maximum delay between retries.
 // Default value is 5s.
-func WithMaxInterval(interval time.Duration) StepOption {
+func WithStepMaxInterval(interval time.Duration) StepOption {
 	return func(opts *stepOptions) {
 		opts.maxInterval = interval
 	}
 }
 
-// WithRetryPredicate sets a function to decide whether a step error is retryable.
+// WithStepRetryPredicate sets a function to decide whether a step error is retryable.
 // If the predicate returns false for an error, the step stops retrying immediately
 // and returns that error even if maxRetries has not been reached.
 // If not set (nil), all errors are retried up to maxRetries (default behaviour).
@@ -2144,7 +2145,7 @@ func WithMaxInterval(interval time.Duration) StepOption {
 //
 //	dbos.RunAsStep(ctx, callPaymentAPI,
 //	    dbos.WithStepMaxRetries(3),
-//	    dbos.WithRetryPredicate(func(err error) bool {
+//	    dbos.WithStepRetryPredicate(func(err error) bool {
 //	        var apiErr *APIError
 //	        if errors.As(err, &apiErr) {
 //	            return apiErr.StatusCode >= 500
@@ -2152,7 +2153,7 @@ func WithMaxInterval(interval time.Duration) StepOption {
 //	        return true
 //	    }),
 //	)
-func WithRetryPredicate(fn func(error) bool) StepOption {
+func WithStepRetryPredicate(fn func(error) bool) StepOption {
 	return func(opts *stepOptions) {
 		opts.retryPredicate = fn
 	}
@@ -2352,15 +2353,15 @@ func stepInterruptedByCancellation(stepState *workflowState, stepError error) bo
 //
 //	data, err := dbos.RunAsStep(ctx, func(ctx context.Context) ([]byte, error) {
 //	    return MyStep(ctx, "https://api.example.com/data")
-//	}, dbos.WithStepMaxRetries(3), dbos.WithBaseInterval(500*time.Millisecond))
+//	}, dbos.WithStepMaxRetries(3), dbos.WithStepBaseInterval(500*time.Millisecond))
 //
 // Available options:
 //   - WithStepName: Custom name for the step (only sets if not already set)
 //   - WithStepMaxRetries: Maximum retry attempts (default: 0)
-//   - WithBackoffFactor: Exponential backoff multiplier (default: 2.0)
-//   - WithBaseInterval: Initial delay between retries (default: 100ms)
-//   - WithMaxInterval: Maximum delay between retries (default: 5s)
-//   - WithRetryPredicate: Function called before each retry to decide whether the error is retryable.
+//   - WithStepBackoffFactor: Exponential backoff multiplier (default: 2.0)
+//   - WithStepBaseInterval: Initial delay between retries (default: 100ms)
+//   - WithStepMaxInterval: Maximum delay between retries (default: 5s)
+//   - WithStepRetryPredicate: Function called before each retry to decide whether the error is retryable.
 //     If it returns false the step stops retrying immediately, even if maxRetries has not been reached.
 //     If not set, all errors are retried up to maxRetries (default behaviour).
 //
@@ -2694,7 +2695,7 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 //   // Handle error
 // }
 
-func Go[R any](ctx Context, fn Step[R], opts ...StepOption) (chan StepOutcome[R], error) {
+func Go[R any](ctx Context, fn Step[R], opts ...StepOption) (<-chan StepOutcome[R], error) {
 	if ctx == nil {
 		return nil, models.NewStepExecutionError("", "", errors.New("ctx cannot be nil"))
 	}
@@ -2751,7 +2752,7 @@ func Go[R any](ctx Context, fn Step[R], opts ...StepOption) (chan StepOutcome[R]
 	return outcomeChan, nil
 }
 
-func (c *dbosContext) Go(ctx Context, fn StepFunc, opts ...StepOption) (chan StepOutcome[any], error) {
+func (c *dbosContext) Go(ctx Context, fn StepFunc, opts ...StepOption) (<-chan StepOutcome[any], error) {
 	// Create a deterministic step ID
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
@@ -3508,11 +3509,18 @@ type readStreamOptions struct {
 
 // WithReadStreamSnapshot makes a stream read return as soon as all currently-available
 // values have been drained, instead of blocking until the stream is closed or
-// the workflow becomes inactive. fromOffset sets the base offset to read from.
-func WithReadStreamSnapshot(fromOffset int) ReadStreamOption {
+// the workflow becomes inactive.
+func WithReadStreamSnapshot() ReadStreamOption {
 	return func(o *readStreamOptions) {
 		o.snapshot = true
-		o.fromOffset = fromOffset
+	}
+}
+
+// WithReadStreamFromOffset sets the offset (0-based index) at which the read
+// starts; values before it are skipped. Defaults to 0 (the start of the stream).
+func WithReadStreamFromOffset(offset int) ReadStreamOption {
+	return func(o *readStreamOptions) {
+		o.fromOffset = offset
 	}
 }
 
@@ -4188,13 +4196,13 @@ func RetrieveWorkflow[R any](ctx Client, workflowID string) (WorkflowHandle[R], 
 }
 
 // WithCancelChildren enables cancellation for children workflows
-func WithCancelChildren() CancelWorkflowOptions {
+func WithCancelChildren() CancelWorkflowOption {
 	return func(cwo *models.CancelWorkflowInput) {
 		cwo.CancelChildren = true
 	}
 }
 
-func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOptions) error {
+func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOption) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	var found []string
@@ -4244,7 +4252,7 @@ func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...Cancel
 //	if err != nil {
 //	    log.Printf("Failed to cancel workflow: %v", err)
 //	}
-func CancelWorkflow(ctx Client, workflowID string, opts ...CancelWorkflowOptions) error {
+func CancelWorkflow(ctx Client, workflowID string, opts ...CancelWorkflowOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
@@ -4252,13 +4260,13 @@ func CancelWorkflow(ctx Client, workflowID string, opts ...CancelWorkflowOptions
 	return ctx.CancelWorkflow(ctx, workflowID, opts...)
 }
 
-func (c *dbosContext) UpdateWorkflowAttributes(_ Client, workflowID string, attributes map[string]any) error {
+func (c *dbosContext) SetWorkflowAttributes(_ Client, workflowID string, attributes map[string]any) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (struct{}, error) {
-			return struct{}{}, c.systemDB.UpdateWorkflowAttributes(ctx, sysdb.UpdateWorkflowAttributesDBInput{
+			return struct{}{}, c.systemDB.SetWorkflowAttributes(ctx, sysdb.SetWorkflowAttributesDBInput{
 				WorkflowID: workflowID,
 				Attributes: attributes,
 				Tx:         tx,
@@ -4267,14 +4275,14 @@ func (c *dbosContext) UpdateWorkflowAttributes(_ Client, workflowID string, attr
 		return err
 	}
 	return sysdb.Retry(c, func() error {
-		return c.systemDB.UpdateWorkflowAttributes(c, sysdb.UpdateWorkflowAttributesDBInput{
+		return c.systemDB.SetWorkflowAttributes(c, sysdb.SetWorkflowAttributesDBInput{
 			WorkflowID: workflowID,
 			Attributes: attributes,
 		})
 	}, sysdb.WithRetrierLogger(c.logger))
 }
 
-// UpdateWorkflowAttributes replaces the custom attributes attached to an existing
+// SetWorkflowAttributes replaces the custom attributes attached to an existing
 // workflow, identified by workflowID. Pass a nil attributes map to clear all
 // attributes. Attributes must be JSON-serializable.
 //
@@ -4282,15 +4290,15 @@ func (c *dbosContext) UpdateWorkflowAttributes(_ Client, workflowID string, attr
 //
 // Example:
 //
-//	err := dbos.UpdateWorkflowAttributes(ctx, "my-workflow-id", map[string]any{"customer": "acme"})
-func UpdateWorkflowAttributes(ctx Client, workflowID string, attributes map[string]any) error {
+//	err := dbos.SetWorkflowAttributes(ctx, "my-workflow-id", map[string]any{"customer": "acme"})
+func SetWorkflowAttributes(ctx Client, workflowID string, attributes map[string]any) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.UpdateWorkflowAttributes(ctx, workflowID, attributes)
+	return ctx.SetWorkflowAttributes(ctx, workflowID, attributes)
 }
 
-func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOptions) error {
+func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOption) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	cwo := models.CancelWorkflowInput{}
@@ -4322,7 +4330,7 @@ func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...Ca
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-func CancelWorkflows(ctx Client, workflowIDs []string, opts ...CancelWorkflowOptions) error {
+func CancelWorkflows(ctx Client, workflowIDs []string, opts ...CancelWorkflowOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
@@ -4784,128 +4792,128 @@ func ForkWorkflows[R any](ctx Client, input ForkWorkflowsInput) ([]WorkflowHandl
 	return typedHandles, nil
 }
 
-// WithWorkflowIDs filters workflows by the specified workflow IDs.
-func WithWorkflowIDs(workflowIDs []string) ListWorkflowsOption {
+// WithFilterWorkflowIDs filters workflows by the specified workflow IDs.
+func WithFilterWorkflowIDs(workflowIDs ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.WorkflowIDs = workflowIDs
 	}
 }
 
-// WithStatus filters workflows by the specified list of statuses.
-func WithStatus(status []WorkflowStatusType) ListWorkflowsOption {
+// WithFilterStatus filters workflows by the specified list of statuses.
+func WithFilterStatus(status ...WorkflowStatusType) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.Status = status
 	}
 }
 
-// WithStartTime filters workflows created after the specified time.
-func WithStartTime(startTime time.Time) ListWorkflowsOption {
+// WithFilterCreatedAfter filters workflows created after the specified time.
+func WithFilterCreatedAfter(startTime time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.StartTime = startTime
 	}
 }
 
-// WithEndTime filters workflows created before the specified time.
-func WithEndTime(endTime time.Time) ListWorkflowsOption {
+// WithFilterCreatedBefore filters workflows created before the specified time.
+func WithFilterCreatedBefore(endTime time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.EndTime = endTime
 	}
 }
 
-// WithName filters workflows by the specified workflow function name(s).
-func WithName(name ...string) ListWorkflowsOption {
+// WithFilterName filters workflows by the specified workflow function name(s).
+func WithFilterName(name ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.Name = name
 	}
 }
 
-// WithAppVersion filters workflows by the specified application version(s).
-func WithAppVersion(appVersion ...string) ListWorkflowsOption {
+// WithFilterAppVersion filters workflows by the specified application version(s).
+func WithFilterAppVersion(appVersion ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.AppVersion = appVersion
 	}
 }
 
-// WithUser filters workflows by the specified authenticated user(s).
-func WithUser(user ...string) ListWorkflowsOption {
+// WithFilterUser filters workflows by the specified authenticated user(s).
+func WithFilterUser(user ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.User = user
 	}
 }
 
-// WithLimit limits the number of workflows returned.
-func WithLimit(limit int) ListWorkflowsOption {
+// WithFilterLimit limits the number of workflows returned.
+func WithFilterLimit(limit int) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.Limit = &limit
 	}
 }
 
-// WithOffset sets the offset for pagination.
-func WithOffset(offset int) ListWorkflowsOption {
+// WithFilterOffset sets the offset for pagination.
+func WithFilterOffset(offset int) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.Offset = &offset
 	}
 }
 
-// WithSortDesc enables descending sort by creation time (default is ascending).
-func WithSortDesc() ListWorkflowsOption {
+// WithFilterSortDesc enables descending sort by creation time (default is ascending).
+func WithFilterSortDesc() ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.SortDesc = true
 	}
 }
 
-// WithWorkflowIDPrefix filters workflows by workflow ID prefix(es).
-func WithWorkflowIDPrefix(prefix ...string) ListWorkflowsOption {
+// WithFilterWorkflowIDPrefix filters workflows by workflow ID prefix(es).
+func WithFilterWorkflowIDPrefix(prefix ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.WorkflowIDPrefix = prefix
 	}
 }
 
-// WithLoadInput controls whether to load workflow input data (default: true).
-func WithLoadInput(loadInput bool) ListWorkflowsOption {
+// WithFilterLoadInput controls whether to load workflow input data (default: true).
+func WithFilterLoadInput(loadInput bool) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.LoadInput = loadInput
 	}
 }
 
-// WithLoadOutput controls whether to load workflow output data (default: true).
-func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
+// WithFilterLoadOutput controls whether to load workflow output data (default: true).
+func WithFilterLoadOutput(loadOutput bool) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.LoadOutput = loadOutput
 	}
 }
 
-// WithQueueName filters workflows by the specified queue name(s).
+// WithFilterQueueName filters workflows by the specified queue name(s).
 // This is typically used when listing queued workflows.
-func WithQueueName(queueName ...string) ListWorkflowsOption {
+func WithFilterQueueName(queueName ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.QueueName = queueName
 	}
 }
 
-// WithQueuesOnly filters to only return workflows that are in a queue.
-func WithQueuesOnly() ListWorkflowsOption {
+// WithFilterQueuesOnly filters to only return workflows that are in a queue.
+func WithFilterQueuesOnly() ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.QueuesOnly = true
 	}
 }
 
-// WithExecutorIDs filters workflows by the specified executor IDs.
-func WithExecutorIDs(executorIDs []string) ListWorkflowsOption {
+// WithFilterExecutorIDs filters workflows by the specified executor IDs.
+func WithFilterExecutorIDs(executorIDs ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.ExecutorIDs = executorIDs
 	}
 }
 
-// WithForkedFrom filters workflows by the specified forked_from workflow ID(s).
-func WithForkedFrom(forkedFrom ...string) ListWorkflowsOption {
+// WithFilterForkedFrom filters workflows by the specified forked_from workflow ID(s).
+func WithFilterForkedFrom(forkedFrom ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.ForkedFrom = forkedFrom
 	}
 }
 
-// WithParentWorkflowID filters workflows by the specified parent workflow ID(s).
-func WithParentWorkflowID(parentWorkflowID ...string) ListWorkflowsOption {
+// WithFilterParentWorkflowID filters workflows by the specified parent workflow ID(s).
+func WithFilterParentWorkflowID(parentWorkflowID ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.ParentWorkflowID = parentWorkflowID
 	}
@@ -4918,43 +4926,43 @@ func WithFilterDeduplicationID(deduplicationID ...string) ListWorkflowsOption {
 	}
 }
 
-// WithCompletedAfter filters workflows that reached a terminal state at or after the specified time.
-func WithCompletedAfter(completedAfter time.Time) ListWorkflowsOption {
+// WithFilterCompletedAfter filters workflows that reached a terminal state at or after the specified time.
+func WithFilterCompletedAfter(completedAfter time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.CompletedAfter = completedAfter
 	}
 }
 
-// WithCompletedBefore filters workflows that reached a terminal state at or before the specified time.
-func WithCompletedBefore(completedBefore time.Time) ListWorkflowsOption {
+// WithFilterCompletedBefore filters workflows that reached a terminal state at or before the specified time.
+func WithFilterCompletedBefore(completedBefore time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.CompletedBefore = completedBefore
 	}
 }
 
-// WithDequeuedAfter filters workflows that started executing at or after the specified time.
-func WithDequeuedAfter(dequeuedAfter time.Time) ListWorkflowsOption {
+// WithFilterDequeuedAfter filters workflows that started executing at or after the specified time.
+func WithFilterDequeuedAfter(dequeuedAfter time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.DequeuedAfter = dequeuedAfter
 	}
 }
 
-// WithDequeuedBefore filters workflows that started executing at or before the specified time.
-func WithDequeuedBefore(dequeuedBefore time.Time) ListWorkflowsOption {
+// WithFilterDequeuedBefore filters workflows that started executing at or before the specified time.
+func WithFilterDequeuedBefore(dequeuedBefore time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.DequeuedBefore = dequeuedBefore
 	}
 }
 
-// WithWasForkedFrom filters workflows by whether they have been forked from (true) or not (false).
-func WithWasForkedFrom(wasForkedFrom bool) ListWorkflowsOption {
+// WithFilterWasForkedFrom filters workflows by whether they have been forked from (true) or not (false).
+func WithFilterWasForkedFrom(wasForkedFrom bool) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.WasForkedFrom = &wasForkedFrom
 	}
 }
 
-// WithHasParent filters workflows by whether they have a parent workflow (true) or not (false).
-func WithHasParent(hasParent bool) ListWorkflowsOption {
+// WithFilterHasParent filters workflows by whether they have a parent workflow (true) or not (false).
+func WithFilterHasParent(hasParent bool) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.HasParent = &hasParent
 	}
@@ -5134,10 +5142,10 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 //
 // The function supports filtering by workflow IDs, status, time ranges, names, application versions,
 // workflow ID prefixes, and more. It also supports pagination through
-// limit/offset parameters and sorting control (ascending by default, or descending with WithSortDesc).
+// limit/offset parameters and sorting control (ascending by default, or descending with WithFilterSortDesc).
 //
 // By default, both input and output data are loaded for each workflow. This can be controlled
-// using WithLoadInput(false) and WithLoadOutput(false) options for better performance when
+// using WithFilterLoadInput(false) and WithFilterLoadOutput(false) options for better performance when
 // the data is not needed.
 //
 // Parameters:
@@ -5149,28 +5157,28 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 //
 //	// List all successful workflows from the last 24 hours
 //	workflows, err := dbos.ListWorkflows(
-//	    dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess}),
-//	    dbos.WithStartTime(time.Now().Add(-24*time.Hour)),
-//	    dbos.WithLimit(100))
+//	    dbos.WithFilterStatus(dbos.WorkflowStatusSuccess),
+//	    dbos.WithFilterCreatedAfter(time.Now().Add(-24*time.Hour)),
+//	    dbos.WithFilterLimit(100))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //
 //	// List workflows by specific IDs without loading input/output data
 //	workflows, err := dbos.ListWorkflows(
-//	    dbos.WithWorkflowIDs([]string{"workflow1", "workflow2"}),
-//	    dbos.WithLoadInput(false),
-//	    dbos.WithLoadOutput(false))
+//	    dbos.WithFilterWorkflowIDs("workflow1", "workflow2"),
+//	    dbos.WithFilterLoadInput(false),
+//	    dbos.WithFilterLoadOutput(false))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //
 //	// List workflows with pagination
 //	workflows, err := dbos.ListWorkflows(
-//	    dbos.WithUser("john.doe"),
-//	    dbos.WithOffset(50),
-//	    dbos.WithLimit(25),
-//	    dbos.WithSortDesc()
+//	    dbos.WithFilterUser("john.doe"),
+//	    dbos.WithFilterOffset(50),
+//	    dbos.WithFilterLimit(25),
+//	    dbos.WithFilterSortDesc()
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -5701,12 +5709,8 @@ func (c *dbosContext) PauseSchedule(_ Client, scheduleName string) error {
 		return errors.New("schedule_name is required")
 	}
 
-	existing, err := c.GetSchedule(c, scheduleName)
-	if err != nil {
+	if _, err := c.GetSchedule(c, scheduleName); err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
-	}
-	if existing == nil {
-		return fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
 	dbInput := sysdb.UpdateScheduleDBInput{
@@ -5745,12 +5749,8 @@ func (c *dbosContext) ResumeSchedule(_ Client, scheduleName string) error {
 		return errors.New("schedule_name is required")
 	}
 
-	existing, err := c.GetSchedule(c, scheduleName)
-	if err != nil {
+	if _, err := c.GetSchedule(c, scheduleName); err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
-	}
-	if existing == nil {
-		return fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
 	dbInput := sysdb.UpdateScheduleDBInput{
@@ -5814,7 +5814,6 @@ func DeleteSchedule(ctx Client, scheduleName string) error {
 	return ctx.DeleteSchedule(ctx, scheduleName)
 }
 
-// Potentially we could return an error here, if helpful to the user, if the schedule is not found.
 func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (*WorkflowSchedule, error) {
 	if scheduleName == "" {
 		return nil, errors.New("schedule_name is required")
@@ -5843,10 +5842,11 @@ func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (*WorkflowSched
 			return &schedules[i], nil
 		}
 	}
-	return nil, nil
+	return nil, models.NewScheduleNotFoundError(scheduleName)
 }
 
-// GetSchedule gets a schedule by name.
+// GetSchedule gets a schedule by name. If no schedule with the given name
+// exists, it returns an error matching ErrScheduleNotFound.
 //
 // Example:
 //
@@ -5925,9 +5925,6 @@ func (c *dbosContext) BackfillSchedule(_ Client, scheduleName string, start time
 	existing, err := c.GetSchedule(c, scheduleName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get schedule: %w", err)
-	}
-	if existing == nil {
-		return nil, fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
 	var ids []string

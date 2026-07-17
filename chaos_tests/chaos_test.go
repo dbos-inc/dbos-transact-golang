@@ -366,12 +366,12 @@ func TestChaosWorkflow(t *testing.T) {
 
 	// Validate scheduled workflow executions using ListWorkflows
 	scheduledWorkflows, err := dbos.ListWorkflows(dbosCtx,
-		dbos.WithName("ScheduledChaosTest"),
-		dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess}),
-		dbos.WithSortDesc(),
-		dbos.WithLimit(1),
-		dbos.WithLoadInput(false),
-		dbos.WithLoadOutput(false),
+		dbos.WithFilterName("ScheduledChaosTest"),
+		dbos.WithFilterStatus(dbos.WorkflowStatusSuccess),
+		dbos.WithFilterSortDesc(),
+		dbos.WithFilterLimit(1),
+		dbos.WithFilterLoadInput(false),
+		dbos.WithFilterLoadOutput(false),
 	)
 	require.NoError(t, err, "failed to list scheduled workflows")
 

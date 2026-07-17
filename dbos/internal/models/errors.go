@@ -23,6 +23,8 @@ const (
 	ErrorCodePatchingNotEnabled                            // Patching system is not enabled in the DBOS context configuration
 	ErrorCodeTimeout                                       // Operation timed out (e.g., recv timeout)
 	ErrorCodeNoApplicationVersions                         // No application versions are registered in the system database
+	ErrorCodeQueueNotFound                                 // Referenced queue does not exist
+	ErrorCodeScheduleNotFound                              // Referenced schedule does not exist
 )
 
 // String returns the name of the error code, e.g. "NonExistentWorkflow".
@@ -62,6 +64,10 @@ func (c ErrorCode) String() string {
 		return "Timeout"
 	case ErrorCodeNoApplicationVersions:
 		return "NoApplicationVersions"
+	case ErrorCodeQueueNotFound:
+		return "QueueNotFound"
+	case ErrorCodeScheduleNotFound:
+		return "ScheduleNotFound"
 	default:
 		return fmt.Sprintf("ErrorCode(%d)", int(c))
 	}
@@ -257,6 +263,21 @@ func NewNoApplicationVersionsError() *Error {
 	return &Error{
 		Message: "No application versions are registered",
 		Code:    ErrorCodeNoApplicationVersions,
+	}
+}
+
+func NewQueueNotFoundError(queueName string) *Error {
+	return &Error{
+		Message:   fmt.Sprintf("queue %s does not exist", queueName),
+		Code:      ErrorCodeQueueNotFound,
+		QueueName: queueName,
+	}
+}
+
+func NewScheduleNotFoundError(scheduleName string) *Error {
+	return &Error{
+		Message: fmt.Sprintf("schedule %s does not exist", scheduleName),
+		Code:    ErrorCodeScheduleNotFound,
 	}
 }
 

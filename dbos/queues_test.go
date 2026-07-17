@@ -37,7 +37,7 @@ func intPtr(i int) *int { return &i }
 
 func retrieveWFQ(ctx Context, name string) (*WorkflowQueue, error) {
 	q, err := RetrieveQueue(ctx, name)
-	if err != nil || q == nil {
+	if err != nil {
 		return nil, err
 	}
 	return q.(*WorkflowQueue), nil
@@ -196,7 +196,7 @@ func TestWorkflowQueues(t *testing.T) {
 		dlqCompleteEvent.Wait()
 		return input, nil
 	}
-	RegisterWorkflow(dbosCtx, enqueueWorkflowDLQ, WithMaxRetries(dlqMaxRetries))
+	RegisterWorkflow(dbosCtx, enqueueWorkflowDLQ, WithMaxRecoveryAttempts(dlqMaxRetries))
 
 	// Create a workflow that enqueues another workflow to test step tracking
 	workflowEnqueuesAnother := func(ctx Context, input string) (string, error) {
@@ -256,26 +256,26 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Equal(t, 0, steps[0].StepID)
 
 		// Dequeue time filters: an enqueued workflow gets started_at set when it
-		// is dequeued, so WithDequeuedAfter/Before should bracket it.
+		// is dequeued, so WithFilterDequeuedAfter/Before should bracket it.
 		wfID := handle.GetWorkflowID()
 		after := time.Now()
-		listed, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{wfID}))
+		listed, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(wfID))
 		require.NoError(t, err)
 		require.Len(t, listed, 1)
 		require.False(t, listed[0].StartedAt.IsZero(), "dequeued workflow should have StartedAt set")
 
-		inRange, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{wfID}), WithDequeuedAfter(before.Add(-time.Second)))
+		inRange, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(wfID), WithFilterDequeuedAfter(before.Add(-time.Second)))
 		require.NoError(t, err)
-		assert.Len(t, inRange, 1, "WithDequeuedAfter before enqueue should include the workflow")
-		afterEmpty, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{wfID}), WithDequeuedAfter(after.Add(time.Hour)))
+		assert.Len(t, inRange, 1, "WithFilterDequeuedAfter before enqueue should include the workflow")
+		afterEmpty, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(wfID), WithFilterDequeuedAfter(after.Add(time.Hour)))
 		require.NoError(t, err)
-		assert.Len(t, afterEmpty, 0, "WithDequeuedAfter in the future should exclude the workflow")
-		beforeRange, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{wfID}), WithDequeuedBefore(after.Add(time.Second)))
+		assert.Len(t, afterEmpty, 0, "WithFilterDequeuedAfter in the future should exclude the workflow")
+		beforeRange, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(wfID), WithFilterDequeuedBefore(after.Add(time.Second)))
 		require.NoError(t, err)
-		assert.Len(t, beforeRange, 1, "WithDequeuedBefore after completion should include the workflow")
-		beforeEmpty, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{wfID}), WithDequeuedBefore(before.Add(-time.Hour)))
+		assert.Len(t, beforeRange, 1, "WithFilterDequeuedBefore after completion should include the workflow")
+		beforeEmpty, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(wfID), WithFilterDequeuedBefore(before.Add(-time.Hour)))
 		require.NoError(t, err)
-		assert.Len(t, beforeEmpty, 0, "WithDequeuedBefore in the past should exclude the workflow")
+		assert.Len(t, beforeEmpty, 0, "WithFilterDequeuedBefore in the past should exclude the workflow")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
@@ -408,7 +408,7 @@ func TestWorkflowQueues(t *testing.T) {
 		}
 
 		// ListWorkflows for this queue should show a single pending workflow
-		workflows, err := ListWorkflows(dbosCtx, WithQueueName(dlqEnqueueQueue.Name))
+		workflows, err := ListWorkflows(dbosCtx, WithFilterQueueName(dlqEnqueueQueue.Name))
 		require.NoError(t, err, "failed to list workflows for queue")
 		require.Len(t, workflows, 1, "expected single workflow on queue, got %d", len(workflows))
 		assert.Equal(t, WorkflowStatusPending, workflows[0].Status, "expected workflow to be PENDING")
@@ -827,7 +827,7 @@ func TestQueueRecovery(t *testing.T) {
 	assert.Equal(t, int64(queuedSteps), atomic.LoadInt64(&recoveryStepCounter), "expected recoveryStepCounter to match queuedSteps")
 
 	// Get child workflow IDs (they were enqueued on recoveryQueue)
-	workflowsOnQueue, err := ListWorkflows(dbosCtx, WithQueueName(recoveryQueue.Name))
+	workflowsOnQueue, err := ListWorkflows(dbosCtx, WithFilterQueueName(recoveryQueue.Name))
 	require.NoError(t, err, "failed to list workflows on recovery queue")
 	require.Len(t, workflowsOnQueue, queuedSteps, "expected %d child workflows on queue", queuedSteps)
 	childIDs := make([]string, 0, queuedSteps)
@@ -1595,10 +1595,10 @@ func TestListQueuedWorkflows(t *testing.T) {
 	testQueue2, err := registerWFQ(dbosCtx, "list-test-queue2", WithGlobalConcurrency(1))
 	require.NoError(t, err)
 
-	t.Run("WithQueuesOnly", func(t *testing.T) {
+	t.Run("WithFilterQueuesOnly", func(t *testing.T) {
 		blockEvent.Clear()
 		startEvent.Clear()
-		// Create a non-queued workflow (completed) - this should NOT appear in WithQueuesOnly results
+		// Create a non-queued workflow (completed) - this should NOT appear in WithFilterQueuesOnly results
 		nonQueuedHandle, err := RunWorkflow(dbosCtx, testWorkflow, "non-queued-test1")
 		require.NoError(t, err, "failed to start non-queued workflow")
 		_, err = nonQueuedHandle.GetResult()
@@ -1613,8 +1613,8 @@ func TestListQueuedWorkflows(t *testing.T) {
 
 		startEvent.Wait()
 
-		// List workflows with WithQueuesOnly - should only return queued workflows
-		queuedWorkflows, err := ListWorkflows(dbosCtx, WithQueuesOnly())
+		// List workflows with WithFilterQueuesOnly - should only return queued workflows
+		queuedWorkflows, err := ListWorkflows(dbosCtx, WithFilterQueuesOnly())
 		require.NoError(t, err, "failed to list queued workflows")
 
 		// Verify all returned workflows are in a queue and have pending/enqueued status
@@ -1656,7 +1656,7 @@ func TestListQueuedWorkflows(t *testing.T) {
 		startEvent.Wait()
 
 		// List queued workflows with SUCCESS status filter
-		successWorkflows, err := ListWorkflows(dbosCtx, WithQueuesOnly(), WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}), WithQueueName(testQueue2.Name))
+		successWorkflows, err := ListWorkflows(dbosCtx, WithFilterQueuesOnly(), WithFilterStatus(WorkflowStatusSuccess), WithFilterQueueName(testQueue2.Name))
 		require.NoError(t, err, "failed to list queued workflows with SUCCESS status")
 
 		require.Equal(t, 1, len(successWorkflows), "expected 1 queued workflow with SUCCESS status")
@@ -2216,7 +2216,7 @@ func TestDelayedExecution(t *testing.T) {
 		assert.Equal(t, WorkflowStatusDelayed, status.Status)
 
 		// Verify the delayed workflow appears in list queries before cancelling
-		allWorkflows, err := ListWorkflows(dbosCtx, WithStatus([]WorkflowStatusType{WorkflowStatusDelayed}))
+		allWorkflows, err := ListWorkflows(dbosCtx, WithFilterStatus(WorkflowStatusDelayed))
 		require.NoError(t, err)
 		found := false
 		for _, wf := range allWorkflows {
@@ -2227,7 +2227,7 @@ func TestDelayedExecution(t *testing.T) {
 		}
 		assert.True(t, found, "delayed workflow should appear in list_workflows")
 
-		queuedWorkflows, err := ListWorkflows(dbosCtx, WithQueuesOnly())
+		queuedWorkflows, err := ListWorkflows(dbosCtx, WithFilterQueuesOnly())
 		require.NoError(t, err)
 		found = false
 		for _, wf := range queuedWorkflows {
@@ -2358,9 +2358,9 @@ func TestDatabaseBackedQueues(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, DeleteQueue(dbosCtx, "ephemeral-queue"))
 
-		// After deletion the queue is gone (RetrieveQueue returns nil).
+		// After deletion the queue is gone (RetrieveQueue returns ErrQueueNotFound).
 		got, err := retrieveWFQ(dbosCtx, "ephemeral-queue")
-		require.NoError(t, err)
+		require.ErrorIs(t, err, ErrQueueNotFound)
 		require.Nil(t, got)
 	})
 

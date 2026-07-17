@@ -353,7 +353,7 @@ func (c *dbosContext) RegisterQueue(_ Client, name string, options ...QueueOptio
 			return c.systemDB.GetLatestApplicationVersion(c, nil)
 		}, sysdb.WithRetrierLogger(c.logger))
 		switch {
-		case errors.Is(err, &Error{Code: ErrorCodeNoApplicationVersions}):
+		case errors.Is(err, ErrNoApplicationVersions):
 			// No registered versions yet: this process is the first, hence the latest.
 			updateExisting = true
 		case err != nil:
@@ -387,8 +387,8 @@ func (c *dbosContext) RegisterQueue(_ Client, name string, options ...QueueOptio
 	return &persisted, nil
 }
 
-// RetrieveQueue returns the queue with the given name, or nil if
-// no such queue has been registered.
+// RetrieveQueue returns the queue with the given name. If no such queue
+// has been registered, it returns an error matching ErrQueueNotFound.
 func RetrieveQueue(ctx Client, name string) (Queue, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
@@ -404,8 +404,7 @@ func (c *dbosContext) RetrieveQueue(_ Client, name string) (Queue, error) {
 		return nil, err
 	}
 	if cfg == nil {
-		// Return an untyped nil interface so callers' nil checks behave as expected.
-		return nil, nil
+		return nil, models.NewQueueNotFoundError(name)
 	}
 	q := queueFromConfig(*cfg)
 	return &q, nil

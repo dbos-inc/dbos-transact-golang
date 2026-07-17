@@ -75,50 +75,50 @@ type listWorkflowsRequest struct {
 func (req *listWorkflowsRequest) toListWorkflowsOptions() []ListWorkflowsOption {
 	var opts []ListWorkflowsOption
 	if len(req.WorkflowUUIDs) > 0 {
-		opts = append(opts, WithWorkflowIDs(req.WorkflowUUIDs))
+		opts = append(opts, WithFilterWorkflowIDs(req.WorkflowUUIDs...))
 	}
 	if req.AuthenticatedUser != nil {
-		opts = append(opts, WithUser(*req.AuthenticatedUser))
+		opts = append(opts, WithFilterUser(*req.AuthenticatedUser))
 	}
 	if req.StartTime != nil {
-		opts = append(opts, WithStartTime(*req.StartTime))
+		opts = append(opts, WithFilterCreatedAfter(*req.StartTime))
 	}
 	if req.EndTime != nil {
-		opts = append(opts, WithEndTime(*req.EndTime))
+		opts = append(opts, WithFilterCreatedBefore(*req.EndTime))
 	}
 	if len(req.Status) > 0 {
 		statuses := make([]WorkflowStatusType, len(req.Status))
 		for i, s := range req.Status {
 			statuses[i] = WorkflowStatusType(s)
 		}
-		opts = append(opts, WithStatus(statuses))
+		opts = append(opts, WithFilterStatus(statuses...))
 	}
 	if req.ApplicationVersion != nil {
-		opts = append(opts, WithAppVersion(*req.ApplicationVersion))
+		opts = append(opts, WithFilterAppVersion(*req.ApplicationVersion))
 	}
 	if req.WorkflowName != nil {
-		opts = append(opts, WithName(*req.WorkflowName))
+		opts = append(opts, WithFilterName(*req.WorkflowName))
 	}
 	if req.Limit != nil {
-		opts = append(opts, WithLimit(*req.Limit))
+		opts = append(opts, WithFilterLimit(*req.Limit))
 	}
 	if req.Offset != nil {
-		opts = append(opts, WithOffset(*req.Offset))
+		opts = append(opts, WithFilterOffset(*req.Offset))
 	}
 	if req.SortDesc != nil {
-		opts = append(opts, WithSortDesc())
+		opts = append(opts, WithFilterSortDesc())
 	}
 	if req.WorkflowIDPrefix != nil {
-		opts = append(opts, WithWorkflowIDPrefix(*req.WorkflowIDPrefix))
+		opts = append(opts, WithFilterWorkflowIDPrefix(*req.WorkflowIDPrefix))
 	}
 	if req.LoadInput != nil {
-		opts = append(opts, WithLoadInput(*req.LoadInput))
+		opts = append(opts, WithFilterLoadInput(*req.LoadInput))
 	}
 	if req.LoadOutput != nil {
-		opts = append(opts, WithLoadOutput(*req.LoadOutput))
+		opts = append(opts, WithFilterLoadOutput(*req.LoadOutput))
 	}
 	if req.QueueName != nil {
-		opts = append(opts, WithQueueName(*req.QueueName))
+		opts = append(opts, WithFilterQueueName(*req.QueueName))
 	}
 	return opts
 }
@@ -384,7 +384,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 		workflowID := r.PathValue("id")
 
 		// Use ListWorkflows with the specific workflow ID filter
-		opts := []ListWorkflowsOption{WithWorkflowIDs([]string{workflowID})}
+		opts := []ListWorkflowsOption{WithFilterWorkflowIDs(workflowID)}
 		workflows, err := ListWorkflows(ctx, opts...)
 		if err != nil {
 			ctx.logger.Error("Failed to get workflow", "workflow_id", workflowID, "error", err)
@@ -425,9 +425,9 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 
 		filters := req.toListWorkflowsOptions()
 		if len(req.Status) == 0 {
-			filters = append(filters, WithStatus([]WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending, WorkflowStatusDelayed}))
+			filters = append(filters, WithFilterStatus(WorkflowStatusEnqueued, WorkflowStatusPending, WorkflowStatusDelayed))
 		}
-		filters = append(filters, WithQueuesOnly())
+		filters = append(filters, WithFilterQueuesOnly())
 		workflows, err := ListWorkflows(ctx, filters...)
 		if err != nil {
 			ctx.logger.Error("Failed to list queued workflows", "error", err)

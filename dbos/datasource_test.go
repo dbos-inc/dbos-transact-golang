@@ -881,7 +881,7 @@ func setupSharedDBOS(t *testing.T) (Context, *DataSource, *userBackend) {
 		path := filepath.Join(t.TempDir(), "shared.db")
 		db, err := sysdb.OpenSQLitePool(context.Background(), "sqlite:"+path)
 		require.NoError(t, err)
-		config = Config{AppName: "test-app", SqliteSystemDB: db}
+		config = Config{AppName: "test-app", SQLiteSystemDB: db}
 		ub = &userBackend{pool: sysdb.NewSQLPool(db), dialect: sysdb.SqliteDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 	} else {
 		url := getDatabaseURL()

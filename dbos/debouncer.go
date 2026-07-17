@@ -369,7 +369,7 @@ func (dc *DebouncerClient[P, R]) Debounce(key string, delay time.Duration, input
 		if errors.As(err, &dbosErr) && dbosErr.Code == ErrorCodeQueueDeduplicated {
 			// The internal debouncer workflow already exists, send it the new input
 			// List workflows with the deduplication ID to find the existing debouncer workflow
-			debouncerWorkflowStatus, err := dc.Client.ListWorkflows(dc.Client, WithFilterDeduplicationID(key), WithLoadInput(true))
+			debouncerWorkflowStatus, err := dc.Client.ListWorkflows(dc.Client, WithFilterDeduplicationID(key), WithFilterLoadInput(true))
 			if err != nil {
 				return nil, err
 			}

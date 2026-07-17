@@ -114,7 +114,7 @@ func TestDebouncer(t *testing.T) {
 
 		// also verify the start time step is present in the internal debouncer workflow
 		// First find it: it should be the only workflow in the internal queue
-		workflows, err := ListWorkflows(dbosCtx, WithQueueName(models.InternalQueueName))
+		workflows, err := ListWorkflows(dbosCtx, WithFilterQueueName(models.InternalQueueName))
 		require.NoError(t, err, "failed to list workflows")
 		require.Len(t, workflows, 1, "should have exactly one workflow in the internal queue")
 		// Now find the step in the workflow
@@ -373,7 +373,7 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 	assert.Equal(t, testInput, result, "result should match input")
 
 	// List the workflow to verify all options are set correctly
-	workflows, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{workflowID}))
+	workflows, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
 	require.NoError(t, err, "failed to list workflows")
 	require.Len(t, workflows, 1, "should find exactly one workflow")
 

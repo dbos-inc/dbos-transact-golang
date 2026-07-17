@@ -24,4 +24,10 @@ var (
 	// handle timeouts). A timeout error built from an expired context deadline also
 	// wraps that cause, so errors.Is(err, context.DeadlineExceeded) matches it too.
 	ErrTimeout = &Error{Code: ErrorCodeTimeout}
+	// ErrQueueNotFound matches errors referencing a queue that does not exist.
+	ErrQueueNotFound = &Error{Code: ErrorCodeQueueNotFound}
+	// ErrScheduleNotFound matches errors referencing a schedule that does not exist.
+	ErrScheduleNotFound = &Error{Code: ErrorCodeScheduleNotFound}
+	// ErrNoApplicationVersions matches errors from operations requiring a registered application version when none exists.
+	ErrNoApplicationVersions = &Error{Code: ErrorCodeNoApplicationVersions}
 )
