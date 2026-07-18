@@ -453,5 +453,18 @@ func deserializeWorkflowError(errStr *string) error {
 	if err := json.Unmarshal([]byte(*errStr), &pe); err == nil && (pe.Name != "" || pe.Message != "") {
 		return &pe
 	}
-	return errors.New(*errStr)
+	return &plainError{msg: *errStr}
+}
+
+// plainError carries a legacy or fallback stored error string. Unlike errors.New
+// (whose message field is unexported and marshals as {}), it stays readable when
+// surfaced in JSON, e.g. through WorkflowStatus.
+type plainError struct{ msg string }
+
+func (e *plainError) Error() string { return e.msg }
+
+func (e *plainError) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Message string `json:"message"`
+	}{Message: e.msg})
 }

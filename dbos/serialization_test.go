@@ -986,7 +986,7 @@ func TestGobScheduledWorkflowInput(t *testing.T) {
 	ser := NewGobSerializer()
 	in := ScheduledWorkflowInput{
 		ScheduledTime: time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC),
-		Context:       "schedule-context",
+		Context:       json.RawMessage(`"schedule-context"`),
 	}
 	encoded, err := ser.Encode(in)
 	require.NoError(t, err)
@@ -1706,19 +1706,15 @@ func TestPortableInterop(t *testing.T) {
 		assert.Equal(t, PortableSerializerName, wf.Serialization)
 
 		require.NotNil(t, wf.Input)
-		inputStr, ok := wf.Input.(string)
-		require.True(t, ok, "expected string for portable input, got %T", wf.Input)
-		assert.True(t, json.Valid([]byte(inputStr)), "input should be valid JSON")
-		var envelope PortableWorkflowArgs
-		require.NoError(t, json.Unmarshal([]byte(inputStr), &envelope))
-		assert.Len(t, envelope.PositionalArgs, 1)
+		inputMap, ok := wf.Input.(map[string]any)
+		require.True(t, ok, "expected decoded map for portable input, got %T", wf.Input)
+		posArgs, ok := inputMap["positionalArgs"].([]any)
+		require.True(t, ok, "positionalArgs should decode as a JSON array, got %T", inputMap["positionalArgs"])
+		assert.Len(t, posArgs, 1)
 
 		require.NotNil(t, wf.Output)
-		outputStr, ok := wf.Output.(string)
-		require.True(t, ok, "expected string for portable output, got %T", wf.Output)
-		assert.True(t, json.Valid([]byte(outputStr)), "output should be valid JSON")
-		var outputMap map[string]any
-		require.NoError(t, json.Unmarshal([]byte(outputStr), &outputMap))
+		outputMap, ok := wf.Output.(map[string]any)
+		require.True(t, ok, "expected decoded map for portable output, got %T", wf.Output)
 		assert.Contains(t, outputMap, "input")
 		assert.Contains(t, outputMap, "stepOutput")
 		assert.Contains(t, outputMap, "recvOutput")
@@ -2453,9 +2449,9 @@ func TestPortableWorkflowError(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
 		assert.Nil(t, steps[0].Error) // step succeeded; error is on the workflow, not the step
-		// Portable step output is returned as raw JSON string (not base64-decoded).
+		// Portable step output decodes into its JSON value.
 		require.NotNil(t, steps[0].Output)
-		assert.Equal(t, `"list-test"`, steps[0].Output)
+		assert.Equal(t, "list-test", steps[0].Output)
 	})
 }
 
@@ -2590,8 +2586,8 @@ func TestGoToGoErrorTypePreservation(t *testing.T) {
 // TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors verifies that a single
 // workflow's or step's undecodable input/output does not fail the entire
 // ListWorkflows / GetWorkflowSteps call. Other items in the batch must still be
-// returned and correctly decoded; the corrupted item's field is replaced with a
-// string describing the decode error instead of aborting the whole request.
+// returned and correctly decoded; the corrupted item's field carries the raw
+// stored payload (with a logged warning) instead of aborting the whole request.
 func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
@@ -2666,14 +2662,14 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 			byID[wf.ID] = wf
 		}
 
-		// Good entries decode to their raw JSON representation.
-		assert.Equal(t, fmt.Sprintf("%q", goodID1), byID[goodID1].Output)
-		assert.Equal(t, fmt.Sprintf("%q", goodID2), byID[goodID2].Output)
-		// The corrupted entry's output is replaced with a string describing the
-		// decode error instead of failing the whole call.
+		// Good entries decode to their values.
+		assert.Equal(t, goodID1, byID[goodID1].Output)
+		assert.Equal(t, goodID2, byID[goodID2].Output)
+		// The corrupted entry surfaces the raw stored payload instead of
+		// failing the whole call.
 		corruptOutput, ok := byID[corruptID].Output.(string)
 		require.True(t, ok, "corrupted output should be a string")
-		assert.Contains(t, corruptOutput, "failed to decode workflow output")
+		assert.Equal(t, garbage, corruptOutput)
 	})
 
 	t.Run("ListWorkflowsInputDecodeErrorIsolated", func(t *testing.T) {
@@ -2698,10 +2694,10 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 			byID[wf.ID] = wf
 		}
 
-		assert.Equal(t, fmt.Sprintf("%q", goodID), byID[goodID].Input)
+		assert.Equal(t, goodID, byID[goodID].Input)
 		corruptInput, ok := byID[corruptID].Input.(string)
 		require.True(t, ok, "corrupted input should be a string")
-		assert.Contains(t, corruptInput, "failed to decode workflow input")
+		assert.Equal(t, garbage, corruptInput)
 	})
 
 	t.Run("GetWorkflowStepsOutputDecodeErrorIsolated", func(t *testing.T) {
@@ -2717,11 +2713,11 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 		require.NoError(t, err, "one step's undecodable output should not fail the whole GetWorkflowSteps call")
 		require.Len(t, steps, 3)
 
-		assert.Equal(t, `"payload-step-0"`, steps[0].Output)
+		assert.Equal(t, "payload-step-0", steps[0].Output)
 		corruptStepOutputVal, ok := steps[1].Output.(string)
 		require.True(t, ok, "corrupted step output should be a string")
-		assert.Contains(t, corruptStepOutputVal, "failed to decode step output")
-		assert.Equal(t, `"payload-step-2"`, steps[2].Output)
+		assert.Equal(t, garbage, corruptStepOutputVal)
+		assert.Equal(t, "payload-step-2", steps[2].Output)
 	})
 }
 

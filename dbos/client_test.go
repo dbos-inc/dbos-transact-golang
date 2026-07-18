@@ -490,7 +490,7 @@ func TestClientEnqueue(t *testing.T) {
 			WithEnqueueWorkflowID(wfID),
 			WithEnqueueAuthenticatedUser("test-user"),
 			WithEnqueueAssumedRole("test-role"),
-			WithEnqueueAuthenticatedRoles([]string{"role1", "role2"}),
+			WithEnqueueAuthenticatedRoles("role1", "role2"),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
 
@@ -2011,7 +2011,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 		WithQueuePartitionKey(expectedPartitionKey),
 		WithAssumedRole(expectedAssumedRole),
 		WithAuthenticatedUser(expectedAuthenticatedUser),
-		WithAuthenticatedRoles(expectedAuthenticatedRoles),
+		WithAuthenticatedRoles(expectedAuthenticatedRoles...),
 	)
 	require.NoError(t, err, "failed to call Debounce with workflow options")
 
@@ -2248,7 +2248,7 @@ func TestClientSchedules(t *testing.T) {
 		require.NoError(t, err)
 		require.NotZero(t, a)
 		require.Equal(t, models.InternalQueueName, a.QueueName, "QueueName should default to the internal queue")
-		require.Equal(t, map[string]any{"region": "us"}, a.Context)
+		require.JSONEq(t, `{"region":"us"}`, string(a.Context))
 		scheduleIDA := a.ScheduleID
 
 		b, err := c.GetSchedule(c, nameB)
@@ -2265,7 +2265,7 @@ func TestClientSchedules(t *testing.T) {
 		require.NotZero(t, a)
 		require.Equal(t, scheduleIDA, a.ScheduleID, "client upsert must preserve schedule_id")
 		require.Equal(t, "0 0 0 * * *", a.Schedule)
-		require.Equal(t, map[string]any{"region": "eu"}, a.Context)
+		require.JSONEq(t, `{"region":"eu"}`, string(a.Context))
 	})
 
 	t.Run("BackfillSchedule", func(t *testing.T) {

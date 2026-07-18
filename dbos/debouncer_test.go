@@ -359,7 +359,7 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 		WithQueuePartitionKey(expectedPartitionKey),
 		WithAssumedRole(expectedAssumedRole),
 		WithAuthenticatedUser(expectedAuthenticatedUser),
-		WithAuthenticatedRoles(expectedAuthenticatedRoles),
+		WithAuthenticatedRoles(expectedAuthenticatedRoles...),
 	)
 	require.NoError(t, err, "failed to call Debounce with workflow options")
 

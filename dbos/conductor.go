@@ -1782,11 +1782,9 @@ func toScheduleConductorOutput(s WorkflowSchedule, loadContext bool) scheduleCon
 		v := s.QueueName
 		out.QueueName = &v
 	}
-	if loadContext && s.Context != nil {
-		if b, err := json.Marshal(s.Context); err == nil {
-			str := string(b)
-			out.Context = &str
-		}
+	if loadContext && len(s.Context) > 0 {
+		str := string(s.Context)
+		out.Context = &str
 	}
 	return out
 }

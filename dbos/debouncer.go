@@ -535,7 +535,7 @@ func internalDebouncerWF[P any, R any](ctx Context, input debouncerInput[P]) (R,
 		workflowOpts = append(workflowOpts, WithAssumedRole(input.WorkflowOptions.AssumedRole))
 	}
 	if len(input.WorkflowOptions.AuthenticatedRoles) > 0 {
-		workflowOpts = append(workflowOpts, WithAuthenticatedRoles(input.WorkflowOptions.AuthenticatedRoles))
+		workflowOpts = append(workflowOpts, WithAuthenticatedRoles(input.WorkflowOptions.AuthenticatedRoles...))
 	}
 	if input.WorkflowOptions.QueuePartitionKey != "" {
 		workflowOpts = append(workflowOpts, WithQueuePartitionKey(input.WorkflowOptions.QueuePartitionKey))

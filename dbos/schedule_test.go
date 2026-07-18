@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -88,7 +89,9 @@ func TestScheduleCRUD(t *testing.T) {
 
 		captured, _ := scheduledInputCapture.Load(firedWfID)
 		got := captured.(ScheduledWorkflowInput)
-		require.Equal(t, ctxValue, got.Context)
+		decodedCtx, err := DecodeScheduleContext[string](got)
+		require.NoError(t, err)
+		require.Equal(t, ctxValue, decodedCtx)
 		require.False(t, got.ScheduledTime.IsZero())
 
 		err = DeleteSchedule(dbosCtx, name)
@@ -410,7 +413,7 @@ func TestApplySchedulesConcurrent(t *testing.T) {
 	require.Len(t, schedules, 1)
 	require.Equal(t, name, schedules[0].ScheduleName)
 	require.Equal(t, "0 0 * * * *", schedules[0].Schedule)
-	require.Equal(t, map[string]any{"region": "us"}, schedules[0].Context)
+	require.JSONEq(t, `{"region":"us"}`, string(schedules[0].Context))
 	scheduleID := schedules[0].ScheduleID
 
 	// Re-applying updates definition in place and preserves schedule_id.
@@ -427,7 +430,7 @@ func TestApplySchedulesConcurrent(t *testing.T) {
 	require.Len(t, schedules, 1)
 	require.Equal(t, scheduleID, schedules[0].ScheduleID)
 	require.Equal(t, "0 0 0 * * *", schedules[0].Schedule)
-	require.Equal(t, map[string]any{"region": "eu"}, schedules[0].Context)
+	require.JSONEq(t, `{"region":"eu"}`, string(schedules[0].Context))
 
 	require.NoError(t, DeleteSchedule(dbosCtx, name))
 	schedules, err = ListSchedules(dbosCtx, WithScheduleNamePrefixes(name))
@@ -525,7 +528,7 @@ func TestApplySchedulesPreservesRuntimeState(t *testing.T) {
 	require.Equal(t, ScheduleStatusPaused, sched.Status, "status must be preserved")
 	require.NotNil(t, sched.LastFiredAt)
 	require.True(t, sched.LastFiredAt.Equal(lastFired), "last_fired_at must be preserved, got %v", sched.LastFiredAt)
-	require.Equal(t, map[string]any{"version": float64(2)}, sched.Context, "definition context must still update")
+	require.JSONEq(t, `{"version":2}`, string(sched.Context), "definition context must still update")
 }
 
 // TestCalculateScheduleSignature ensures definition fields affect the signature
@@ -539,7 +542,7 @@ func TestCalculateScheduleSignature(t *testing.T) {
 		WorkflowClassName: "",
 		Schedule:          "* * * * *",
 		Status:            ScheduleStatusActive,
-		Context:           "ctx",
+		Context:           json.RawMessage(`"ctx"`),
 		LastFiredAt:       nil,
 		AutomaticBackfill: false,
 		CronTimezone:      "",
@@ -561,20 +564,19 @@ func TestCalculateScheduleSignature(t *testing.T) {
 		require.Equal(t, sig, got, "case %d should not change signature", i)
 	}
 
-	// Structurally equal map contexts must produce equal signatures
-	// (encoding/json marshals map keys in sorted order).
-	mapA := base
-	mapA.Context = map[string]any{"a": float64(1), "b": "x"}
-	mapB := base
-	mapB.Context = map[string]any{"b": "x", "a": float64(1)}
-	require.Equal(t, c.calculateSignature(mapA), c.calculateSignature(mapB))
+	// Context compares as raw JSON bytes: identical bytes, equal signatures.
+	rawA := base
+	rawA.Context = json.RawMessage(`{"a":1,"b":"x"}`)
+	rawB := base
+	rawB.Context = json.RawMessage(`{"a":1,"b":"x"}`)
+	require.Equal(t, c.calculateSignature(rawA), c.calculateSignature(rawB))
 
 	// Definition fields MUST change the signature.
 	changed := []WorkflowSchedule{
 		{WorkflowName: "wf2", Schedule: base.Schedule, Context: base.Context},
 		{WorkflowName: base.WorkflowName, WorkflowClassName: "SomeClass", Schedule: base.Schedule, Context: base.Context},
 		{WorkflowName: base.WorkflowName, Schedule: "0 * * * *", Context: base.Context},
-		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: "ctx2"},
+		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: json.RawMessage(`"ctx2"`)},
 		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: base.Context, CronTimezone: "America/Los_Angeles"},
 		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: base.Context, QueueName: "q"},
 	}
@@ -772,7 +774,9 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 	captured, ok := scheduledInputCapture.Load(target)
 	require.True(t, ok, "workflow should have captured its input on recovery")
 	got := captured.(ScheduledWorkflowInput)
-	require.Equal(t, ctxValue, got.Context, "Context should round-trip through DB-encoded inputs")
+	decodedCtx, err := DecodeScheduleContext[string](got)
+	require.NoError(t, err)
+	require.Equal(t, ctxValue, decodedCtx, "Context should round-trip through DB-encoded inputs")
 	require.False(t, got.ScheduledTime.IsZero(), "ScheduledTime should be populated from DB-encoded inputs")
 	require.False(t, got.ScheduledTime.Before(start.Add(-time.Second)), "ScheduledTime should be within the backfill window")
 	require.False(t, got.ScheduledTime.After(end.Add(time.Second)), "ScheduledTime should be within the backfill window")
@@ -817,7 +821,9 @@ func TestTriggerSchedule(t *testing.T) {
 	captured, ok := scheduledInputCapture.Load(workflowID)
 	require.True(t, ok, "workflow should have captured its input")
 	got := captured.(ScheduledWorkflowInput)
-	require.Equal(t, ctxValue, got.Context, "Context should match the schedule's configured context")
+	decodedCtx, err := DecodeScheduleContext[string](got)
+	require.NoError(t, err)
+	require.Equal(t, ctxValue, decodedCtx, "Context should match the schedule's configured context")
 	require.False(t, got.ScheduledTime.Before(beforeTrigger.Add(-time.Second)), "ScheduledTime should be at or after the trigger call")
 	require.False(t, got.ScheduledTime.After(afterTrigger.Add(time.Second)), "ScheduledTime should be at or before the trigger call returns")
 
@@ -904,28 +910,34 @@ var scheduledInputCapture sync.Map
 // "version" value in the schedule context.
 var (
 	liveUpdateMu            sync.Mutex
-	liveUpdateVersionCounts = map[float64]int{}
+	liveUpdateVersionCounts = map[int]int{}
 )
 
 func resetLiveUpdateVersionCounts() {
 	liveUpdateMu.Lock()
-	liveUpdateVersionCounts = map[float64]int{}
+	liveUpdateVersionCounts = map[int]int{}
 	liveUpdateMu.Unlock()
 }
 
-func liveUpdateVersionCount(version float64) int {
+func liveUpdateVersionCount(version int) int {
 	liveUpdateMu.Lock()
 	defer liveUpdateMu.Unlock()
 	return liveUpdateVersionCounts[version]
 }
 
+type liveUpdateScheduleContext struct {
+	Version int `json:"version"`
+}
+
 func testLiveUpdateScheduledWorkflow(ctx Context, input ScheduledWorkflowInput) (any, error) {
-	if m, ok := input.Context.(map[string]any); ok {
-		if v, ok := m["version"].(float64); ok {
-			liveUpdateMu.Lock()
-			liveUpdateVersionCounts[v]++
-			liveUpdateMu.Unlock()
-		}
+	cfg, err := DecodeScheduleContext[liveUpdateScheduleContext](input)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Version != 0 {
+		liveUpdateMu.Lock()
+		liveUpdateVersionCounts[cfg.Version]++
+		liveUpdateMu.Unlock()
 	}
 	return "completed", nil
 }

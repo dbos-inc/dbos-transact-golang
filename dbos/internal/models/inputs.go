@@ -150,8 +150,8 @@ type StepInfo struct {
 	Output          any       // The output returned by the step (if any)
 	Error           error     // The error returned by the step (if any)
 	ChildWorkflowID string    // The ID of a child workflow spawned by this step (if applicable)
-	StartedAt       time.Time // When the step execution started
-	CompletedAt     time.Time // When the step execution completed
+	StartedAt       time.Time `json:",omitzero"` // When the step execution started
+	CompletedAt     time.Time `json:",omitzero"` // When the step execution completed
 }
 
 // AlertHandler is a function that handles alerts received from DBOS Conductor.

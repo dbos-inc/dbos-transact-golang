@@ -70,7 +70,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 			withIsRecovery(),
 			WithAuthenticatedUser(workflow.AuthenticatedUser),
 			WithAssumedRole(workflow.AssumedRole),
-			WithAuthenticatedRoles(workflow.AuthenticatedRoles),
+			WithAuthenticatedRoles(workflow.AuthenticatedRoles...),
 		}
 		// Create a workflow context from the executor context
 		// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type

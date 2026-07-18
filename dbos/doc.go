@@ -103,10 +103,11 @@
 //
 // # Testing
 //
-// Context is fully mockable for unit testing:
+// Context is an interface, so workflows can be unit-tested against a mock
+// generated with your mocking framework of choice (e.g. mockery):
 //
 //	func TestWorkflow(t *testing.T) {
-//	    mockCtx := mocks.NewMockContext(t)
+//	    mockCtx := NewMockContext(t) // generated from dbos.Context
 //	    mockCtx.On("RunAsStep", mockCtx, mock.Anything, mock.Anything).Return("result", nil)
 //
 //	    result, err := myWorkflow(mockCtx, "input")

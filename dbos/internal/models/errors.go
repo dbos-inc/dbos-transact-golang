@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -142,6 +143,43 @@ func (e *Error) RestoreWrappedCause() {
 // This implements the standard Go error interface.
 func (e *Error) Error() string {
 	return fmt.Sprintf("DBOS Error %s: %s", e.Code, e.Message)
+}
+
+// MarshalJSON renders the error in a stable public shape (message + symbolic code)
+// for user-facing JSON such as WorkflowStatus, instead of dumping internal fields.
+func (e *Error) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Message string `json:"message"`
+		Code    string `json:"code"`
+	}{Message: e.Message, Code: e.Code.String()})
+}
+
+// UnmarshalJSON decodes the shape produced by MarshalJSON. Reconstruction is
+// lossy: only Message and Code survive the wire (context fields and wrapped
+// causes do not). A non-string or unrecognized code leaves Code at 0.
+func (e *Error) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Message string `json:"message"`
+		Code    any    `json:"code"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	e.Message = raw.Message
+	if s, ok := raw.Code.(string); ok {
+		e.Code = parseErrorCode(s)
+	}
+	return nil
+}
+
+// parseErrorCode is the inverse of ErrorCode.String; unknown names map to 0.
+func parseErrorCode(s string) ErrorCode {
+	for c := ErrorCodeConflictingID; c <= ErrorCodeScheduleNotFound; c++ {
+		if c.String() == s {
+			return c
+		}
+	}
+	return 0
 }
 
 // Unwrap returns the underlying error, if any.

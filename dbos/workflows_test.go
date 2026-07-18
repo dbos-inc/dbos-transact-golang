@@ -7073,7 +7073,7 @@ func TestWorkflowIdentity(t *testing.T) {
 		WithWorkflowID("my-workflow-id"),
 		WithAuthenticatedUser("user123"),
 		WithAssumedRole("admin"),
-		WithAuthenticatedRoles([]string{"reader", "writer"}))
+		WithAuthenticatedRoles("reader", "writer"))
 	require.NoError(t, err, "failed to start workflow")
 
 	// Retrieve the workflow's status.
@@ -7148,7 +7148,7 @@ func authParentWithOverrideWorkflow(ctx Context, _ string) (authSnapshot, error)
 	handle, err := RunWorkflow(ctx, authChildWorkflow, "",
 		WithAuthenticatedUser("service-account"),
 		WithAssumedRole("service"),
-		WithAuthenticatedRoles([]string{"internal"}),
+		WithAuthenticatedRoles("internal"),
 	)
 	if err != nil {
 		return authSnapshot{}, err
@@ -7167,7 +7167,7 @@ func TestAuthPropagation(t *testing.T) {
 		handle, err := RunWorkflow(dbosCtx, authParentWorkflow, "",
 			WithAuthenticatedUser("alice@example.com"),
 			WithAssumedRole("customer"),
-			WithAuthenticatedRoles([]string{"read", "write"}),
+			WithAuthenticatedRoles("read", "write"),
 		)
 		require.NoError(t, err)
 		childAuth, err := handle.GetResult()
@@ -7181,7 +7181,7 @@ func TestAuthPropagation(t *testing.T) {
 		handle, err := RunWorkflow(dbosCtx, authParentWithOverrideWorkflow, "",
 			WithAuthenticatedUser("alice@example.com"),
 			WithAssumedRole("customer"),
-			WithAuthenticatedRoles([]string{"read", "write"}),
+			WithAuthenticatedRoles("read", "write"),
 		)
 		require.NoError(t, err)
 		childAuth, err := handle.GetResult()
@@ -7205,7 +7205,7 @@ func TestAuthPropagation(t *testing.T) {
 		handle, err := RunWorkflow(dbosCtx, authGrandparentWorkflow, "",
 			WithAuthenticatedUser("alice@example.com"),
 			WithAssumedRole("customer"),
-			WithAuthenticatedRoles([]string{"read", "write"}),
+			WithAuthenticatedRoles("read", "write"),
 		)
 		require.NoError(t, err)
 		grandchildAuth, err := handle.GetResult()
@@ -7222,7 +7222,7 @@ func TestAuthPropagation(t *testing.T) {
 			WithWorkflowID(wfID),
 			WithAuthenticatedUser("alice@example.com"),
 			WithAssumedRole("customer"),
-			WithAuthenticatedRoles([]string{"read", "write"}),
+			WithAuthenticatedRoles("read", "write"),
 		)
 		require.NoError(t, err)
 		_, err = handle.GetResult()

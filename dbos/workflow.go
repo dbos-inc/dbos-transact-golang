@@ -479,7 +479,7 @@ type wrappedWorkflowFunc func(ctx Context, input any, inputSerialization string,
 type WorkflowRegistryEntry struct {
 	wrappedFunction wrappedWorkflowFunc
 	workflowFn      WorkflowFunc // Type-erased registered function taking a raw (non-encoded) input. Used by RunWorkflow for direct execution.
-	MaxRetries      int // Maximum recovery attempts before dead-lettering (set via WithMaxRecoveryAttempts); not step retries
+	MaxRetries      int          // Maximum recovery attempts before dead-lettering (set via WithMaxRecoveryAttempts); not step retries
 	Name            string
 	FQN             string // Fully qualified name of the workflow function. For configured instances, qualified with the config name.
 	ClassName       string // Receiver type name for configured instance workflows
@@ -988,8 +988,8 @@ func WithAssumedRole(role string) WorkflowOption {
 	}
 }
 
-// Sets the authenticated role for the workflow
-func WithAuthenticatedRoles(roles []string) WorkflowOption {
+// WithAuthenticatedRoles sets the authenticated roles for the workflow.
+func WithAuthenticatedRoles(roles ...string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.AuthenticatedRoles = roles
 	}
@@ -1789,7 +1789,7 @@ func WithEnqueueAssumedRole(role string) EnqueueOption {
 }
 
 // WithEnqueueAuthenticatedRoles sets the authenticated roles for the enqueued workflow.
-func WithEnqueueAuthenticatedRoles(roles []string) EnqueueOption {
+func WithEnqueueAuthenticatedRoles(roles ...string) EnqueueOption {
 	return func(opts *enqueueOptions) {
 		opts.authenticatedRoles = roles
 	}

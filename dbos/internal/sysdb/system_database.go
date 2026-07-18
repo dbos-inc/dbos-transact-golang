@@ -152,7 +152,7 @@ type SysDB struct {
 	EventNotifier        *notifyRegistry // getEvent waiters, keyed by "targetWorkflowID::key"
 	streamNotifier       *notifyRegistry // stream readers, keyed by "workflowID::key"
 	logger               *slog.Logger
-	encodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (*string, string, error)
+	encodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error)
 	schema               string
 	launched             bool
 	isCockroachDB        bool
@@ -712,7 +712,7 @@ type NewSystemDatabaseInput struct {
 	// EncodeScheduledInput serializes the input of a schedule-created workflow
 	// (backfill/trigger). Injected by the caller to keep serialization concerns
 	// out of the system database.
-	EncodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (encoded *string, serialization string, err error)
+	EncodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (encoded *string, serialization string, err error)
 }
 
 func startupError(ctx context.Context, timeout time.Duration, phase string, pool *pgxpool.Pool, err error) error {
@@ -5195,8 +5195,8 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 					"schedule_name", schedule.ScheduleName, "last_fired_at", *lastFiredAtStr, "error", err)
 			}
 		}
-		if err := json.Unmarshal([]byte(contextJSON), &schedule.Context); err != nil {
-			schedule.Context = contextJSON
+		if raw := strings.TrimSpace(contextJSON); raw != "" && raw != "null" {
+			schedule.Context = json.RawMessage(contextJSON)
 		}
 
 		schedules = append(schedules, schedule)

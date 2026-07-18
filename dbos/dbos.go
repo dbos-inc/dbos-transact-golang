@@ -588,7 +588,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		CustomSqliteDB:  config.SQLiteSystemDB,
 		Logger:          initExecutor.logger,
 		ApplicationName: config.AppName,
-		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (*string, string, error) {
+		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error) {
 			ser := resolveEncoder(ctx)
 			encoded, err := ser.Encode(ScheduledWorkflowInput{
 				ScheduledTime: scheduledTime,
