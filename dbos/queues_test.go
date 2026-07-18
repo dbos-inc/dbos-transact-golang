@@ -1694,14 +1694,9 @@ func TestPartitionedQueues(t *testing.T) {
 		var dbosErr *Error
 		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *Error, got %T", err)
 
-		// Verify the error is wrapped by models.NewWorkflowExecutionError with ErrorCodeWorkflowExecution code
-		assert.True(t, errors.Is(err, &Error{Code: ErrorCodeWorkflowExecution}), "expected error to be ErrorCodeWorkflowExecution")
-
-		// Verify the unwrapped error contains the validation message
-		unwrappedErr := errors.Unwrap(dbosErr)
-		require.NotNil(t, unwrappedErr, "expected error to have an unwrapped error")
-		expectedMsgPart := "partition key provided but queue name is missing"
-		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
+		// Verify the error carries the InvalidOption code
+		assert.True(t, errors.Is(err, ErrInvalidOption), "expected error to be ErrorCodeInvalidOption")
+		assert.Contains(t, dbosErr.Message, "partition key provided but queue name is missing")
 	})
 
 	t.Run("PartitionKeyWithDeduplicationID", func(t *testing.T) {
@@ -1729,14 +1724,9 @@ func TestPartitionedQueues(t *testing.T) {
 		var dbosErr *Error
 		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *Error, got %T", err)
 
-		// Verify the error is wrapped by models.NewWorkflowExecutionError with ErrorCodeWorkflowExecution code
-		assert.True(t, errors.Is(err, &Error{Code: ErrorCodeWorkflowExecution}), "expected error to be ErrorCodeWorkflowExecution")
-
-		// Verify the unwrapped error contains the validation message
-		unwrappedErr := errors.Unwrap(dbosErr)
-		require.NotNil(t, unwrappedErr, "expected error to have an unwrapped error")
-		expectedMsgPart := "partition key and deduplication ID cannot be used together"
-		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
+		// Verify the error carries the InvalidOption code
+		assert.True(t, errors.Is(err, ErrInvalidOption), "expected error to be ErrorCodeInvalidOption")
+		assert.Contains(t, dbosErr.Message, "partition key and deduplication ID cannot be used together")
 	})
 
 	t.Run("Dequeue", func(t *testing.T) {

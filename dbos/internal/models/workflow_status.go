@@ -5,20 +5,20 @@ import (
 	"time"
 )
 
-// WorkflowStatusType represents the current execution state of a workflow.
+// Docs for the types below live on their public aliases in dbos/aliases.go.
+
 type WorkflowStatusType string
 
 const (
-	WorkflowStatusPending                     WorkflowStatusType = "PENDING"                        // Workflow is running or ready to run
-	WorkflowStatusEnqueued                    WorkflowStatusType = "ENQUEUED"                       // Workflow is queued and waiting for execution
-	WorkflowStatusDelayed                     WorkflowStatusType = "DELAYED"                        // Workflow is delayed and will transition to ENQUEUED after the delay expires
-	WorkflowStatusSuccess                     WorkflowStatusType = "SUCCESS"                        // Workflow completed successfully
-	WorkflowStatusError                       WorkflowStatusType = "ERROR"                          // Workflow completed with an error
-	WorkflowStatusCancelled                   WorkflowStatusType = "CANCELLED"                      // Workflow was cancelled (manually or due to timeout)
-	WorkflowStatusMaxRecoveryAttemptsExceeded WorkflowStatusType = "MAX_RECOVERY_ATTEMPTS_EXCEEDED" // Workflow exceeded maximum retry attempts
+	WorkflowStatusPending                     WorkflowStatusType = "PENDING"
+	WorkflowStatusEnqueued                    WorkflowStatusType = "ENQUEUED"
+	WorkflowStatusDelayed                     WorkflowStatusType = "DELAYED"
+	WorkflowStatusSuccess                     WorkflowStatusType = "SUCCESS"
+	WorkflowStatusError                       WorkflowStatusType = "ERROR"
+	WorkflowStatusCancelled                   WorkflowStatusType = "CANCELLED"
+	WorkflowStatusMaxRecoveryAttemptsExceeded WorkflowStatusType = "MAX_RECOVERY_ATTEMPTS_EXCEEDED"
 )
 
-// WorkflowStatus contains comprehensive information about a workflow's current state and execution history.
 type WorkflowStatus struct {
 	ID                 string             `json:"workflow_uuid"`                 // Unique identifier for the workflow
 	Status             WorkflowStatusType `json:"status"`                        // Current execution status

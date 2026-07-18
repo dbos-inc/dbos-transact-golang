@@ -48,6 +48,7 @@ func TestGetMetrics(t *testing.T) {
 	// Register workflows with custom names
 	RegisterWorkflow(dbosCtx, testWorkflowA, WithWorkflowName("testWorkflowA"))
 	RegisterWorkflow(dbosCtx, testWorkflowB, WithWorkflowName("testWorkflowB"))
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	// Record start time before creating workflows
 	startTime := time.Now()

@@ -44,14 +44,14 @@ const (
 
 func validateCronSchedule(spec, cronTimezone string) error {
 	if spec == "" {
-		return fmt.Errorf("schedule is required")
+		return models.NewInvalidOptionError("schedule is required")
 	}
 	full := spec
 	if cronTimezone != "" {
 		full = "CRON_TZ=" + cronTimezone + " " + spec
 	}
 	if _, err := models.NewScheduleCronParser().Parse(full); err != nil {
-		return fmt.Errorf("invalid cron schedule %q: %w", spec, err)
+		return models.NewInvalidOptionError(fmt.Sprintf("invalid cron schedule %q: %v", spec, err))
 	}
 	return nil
 }

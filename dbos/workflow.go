@@ -563,6 +563,9 @@ func WithMaxRecoveryAttempts(maxRecoveryAttempts int) WorkflowRegistrationOption
 	}
 }
 
+// WithWorkflowName registers the workflow under a custom name instead of its
+// fully qualified function name. The custom name is what workflow status
+// records show and what by-name dispatch (e.g. Client.Enqueue) resolves.
 func WithWorkflowName(name string) WorkflowRegistrationOption {
 	return func(p *workflowRegistrationOptions) {
 		p.name = name
@@ -855,7 +858,7 @@ func WithRunInstance(instance ConfiguredInstance) WorkflowOption {
 func WithQueue(queue Queue) WorkflowOption {
 	return func(p *workflowOptions) {
 		if queue == nil {
-			p.err = errors.Join(p.err, errors.New("WithQueue: queue cannot be nil"))
+			p.err = errors.Join(p.err, models.NewInvalidOptionError("WithQueue: queue cannot be nil"))
 			return
 		}
 		p.queue = queue
@@ -974,14 +977,14 @@ func WithPortableWorkflow() WorkflowOption {
 	}
 }
 
-// Sets the authenticated user for the workflow
+// WithAuthenticatedUser sets the authenticated user recorded on the workflow.
 func WithAuthenticatedUser(user string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.AuthenticatedUser = user
 	}
 }
 
-// Sets the assumed role for the workflow
+// WithAssumedRole sets the assumed role recorded on the workflow.
 func WithAssumedRole(role string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.AssumedRole = role
@@ -1150,7 +1153,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	}
 	if params.err != nil {
 		c.logger.Error("invalid workflow options", "workflow_name", params.WorkflowName, "error", params.err)
-		return nil, models.NewWorkflowExecutionError("", params.err)
+		return nil, params.err
 	}
 
 	// Lookup the registry for registration-time options
@@ -1174,28 +1177,28 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	// Validate delay is not provided without queue name
 	if params.DelayDuration > 0 && len(params.QueueName) == 0 {
 		c.logger.Error("delay provided but queue name is missing", "workflow_name", params.WorkflowName)
-		return nil, models.NewWorkflowExecutionError("", fmt.Errorf("delay provided but queue name is missing"))
+		return nil, models.NewInvalidOptionError("delay provided but queue name is missing")
 	}
 
 	// Validate partition key is not provided without queue name
 	if len(params.QueuePartitionKey) > 0 && len(params.QueueName) == 0 {
 		c.logger.Error("partition key provided but queue name is missing", "workflow_name", params.WorkflowName)
-		return nil, models.NewWorkflowExecutionError("", fmt.Errorf("partition key provided but queue name is missing"))
+		return nil, models.NewInvalidOptionError("partition key provided but queue name is missing")
 	}
 
 	// Validate partition key and deduplication ID are not both provided (they are incompatible)
 	if len(params.QueuePartitionKey) > 0 && len(params.DeduplicationID) > 0 {
 		c.logger.Error("partition key and deduplication ID cannot be used together", "workflow_name", params.WorkflowName)
-		return nil, models.NewWorkflowExecutionError("", fmt.Errorf("partition key and deduplication ID cannot be used together"))
+		return nil, models.NewInvalidOptionError("partition key and deduplication ID cannot be used together")
 	}
 
 	// A non-default deduplication policy only applies to a queued workflow with a deduplication ID
 	if params.DeduplicationPolicy != DeduplicationPolicyReject {
 		if len(params.DeduplicationID) == 0 {
-			return nil, models.NewWorkflowExecutionError("", fmt.Errorf("a deduplication policy requires a deduplication ID"))
+			return nil, models.NewInvalidOptionError("a deduplication policy requires a deduplication ID")
 		}
 		if len(params.QueueName) == 0 {
-			return nil, models.NewWorkflowExecutionError("", fmt.Errorf("a deduplication policy requires a queue name"))
+			return nil, models.NewInvalidOptionError("a deduplication policy requires a queue name")
 		}
 	}
 
@@ -1216,12 +1219,12 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		// If queue has partitions enabled, partition key must be provided
 		if partitionQueue && len(params.QueuePartitionKey) == 0 {
 			c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, models.NewWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
+			return nil, models.NewInvalidOptionError(fmt.Sprintf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
 		}
 		// If partition key is provided, queue must have partitions enabled
 		if len(params.QueuePartitionKey) > 0 && !partitionQueue {
 			c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, models.NewWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
+			return nil, models.NewInvalidOptionError(fmt.Sprintf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
 		}
 	}
 
@@ -1851,21 +1854,21 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	}
 
 	if len(queueName) == 0 {
-		return nil, fmt.Errorf("queue name is required")
+		return nil, models.NewInvalidOptionError("queue name is required")
 	}
 
 	if len(workflowName) == 0 {
-		return nil, fmt.Errorf("workflow name is required")
+		return nil, models.NewInvalidOptionError("workflow name is required")
 	}
 
 	// Validate partition key and deduplication ID are not both provided (they are incompatible)
 	if len(params.queuePartitionKey) > 0 && len(params.deduplicationID) > 0 {
-		return nil, fmt.Errorf("partition key and deduplication ID cannot be used together")
+		return nil, models.NewInvalidOptionError("partition key and deduplication ID cannot be used together")
 	}
 
 	// A non-default deduplication policy only applies with a deduplication ID
 	if params.deduplicationPolicy != DeduplicationPolicyReject && len(params.deduplicationID) == 0 {
-		return nil, fmt.Errorf("a deduplication policy requires a deduplication ID")
+		return nil, models.NewInvalidOptionError("a deduplication policy requires a deduplication ID")
 	}
 
 	workflowID := params.workflowID
@@ -1874,7 +1877,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	}
 
 	if params.priority > uint(math.MaxInt) {
-		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.priority, math.MaxInt)
+		return nil, models.NewInvalidOptionError(fmt.Sprintf("priority %d exceeds maximum allowed value %d", params.priority, math.MaxInt))
 	}
 
 	if params.workflowTimeout > 0 {
@@ -1991,9 +1994,15 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 //   - WithEnqueueWorkflowID: Custom workflow ID (auto-generated if not provided)
 //   - WithEnqueueApplicationVersion: Application version override
 //   - WithEnqueueDeduplicationID: Deduplication identifier for idempotent enqueuing
+//   - WithEnqueueDeduplicationPolicy: How a colliding deduplication ID is handled
 //   - WithEnqueuePriority: Execution priority
 //   - WithEnqueueTimeout: Maximum execution time for the workflow
+//   - WithEnqueueDelay: Delay before the workflow becomes eligible for dequeue
 //   - WithEnqueueQueuePartitionKey: Queue partition key for partitioned queues
+//   - WithEnqueueClassName: Class/namespace name for cross-language dispatch
+//   - WithEnqueueConfigName: Config/instance name for configured-instance workflows
+//   - WithEnqueueAuthenticatedUser, WithEnqueueAssumedRole, WithEnqueueAuthenticatedRoles: Auth metadata recorded on the workflow
+//   - WithEnqueueAttributes: Custom key-value attributes recorded on the workflow
 //
 // Returns a typed workflow handle that can be used to check status and retrieve results.
 // The handle uses polling to check workflow completion since the execution is asynchronous.
@@ -3512,6 +3521,7 @@ func WriteStream[P any](ctx Context, key string, value P, opts ...WriteStreamOpt
 	return ctx.WriteStream(ctx, key, value, opts...)
 }
 
+// ReadStreamOption is a functional option for ReadStream.
 type ReadStreamOption func(*readStreamOptions)
 
 type readStreamOptions struct {
@@ -4381,10 +4391,10 @@ func resolveDelayUntil(opts []SetWorkflowDelayOption) (time.Time, error) {
 	hasDelay := params.delay > 0
 	hasUntil := !params.delayUntil.IsZero()
 	if hasDelay && hasUntil {
-		return time.Time{}, errors.New("specify either WithDelayDuration or WithDelayUntil, not both")
+		return time.Time{}, models.NewInvalidOptionError("specify either WithDelayDuration or WithDelayUntil, not both")
 	}
 	if !hasDelay && !hasUntil {
-		return time.Time{}, errors.New("must specify either WithDelayDuration or WithDelayUntil")
+		return time.Time{}, models.NewInvalidOptionError("must specify either WithDelayDuration or WithDelayUntil")
 	}
 	if hasDelay {
 		return time.Now().Add(params.delay), nil
@@ -4662,10 +4672,10 @@ func (c *dbosContext) ForkWorkflow(_ Client, input ForkWorkflowInput) (WorkflowH
 
 func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]WorkflowHandle[any], error) {
 	if len(input.Workflows) == 0 {
-		return nil, errors.New("at least one workflow to fork is required")
+		return nil, models.NewInvalidOptionError("at least one workflow to fork is required")
 	}
 	if input.QueuePartitionKey != "" && input.QueueName == "" {
-		return nil, errors.New("queue partition key requires a queue name")
+		return nil, models.NewInvalidOptionError("queue partition key requires a queue name")
 	}
 
 	// Build the system database input, validating each workflow spec.
@@ -4674,10 +4684,10 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 	startSteps := make([]int, len(input.Workflows))
 	for i, wf := range input.Workflows {
 		if wf.OriginalWorkflowID == "" {
-			return nil, errors.New("original workflow ID cannot be empty")
+			return nil, models.NewInvalidOptionError("original workflow ID cannot be empty")
 		}
 		if wf.StartStep > uint(math.MaxInt) {
-			return nil, fmt.Errorf("start step too large: %d", wf.StartStep)
+			return nil, models.NewInvalidOptionError(fmt.Sprintf("start step too large: %d", wf.StartStep))
 		}
 		originalWorkflowIDs[i] = wf.OriginalWorkflowID
 		forkedWorkflowIDs[i] = wf.ForkedWorkflowID
@@ -5541,14 +5551,14 @@ func (c *dbosContext) resolveScheduleWorkflowName(spec ScheduleSpec) (string, er
 		return c.resolveWorkflowName(spec.Workflow)
 	}
 	if spec.WorkflowName == "" {
-		return "", errors.New("one of workflow_name or workflow is required")
+		return "", models.NewInvalidOptionError("one of workflow_name or workflow is required")
 	}
 	return spec.WorkflowName, nil
 }
 
 func (c *dbosContext) CreateSchedule(_ Client, spec ScheduleSpec) error {
 	if spec.ScheduleName == "" {
-		return errors.New("schedule_name is required")
+		return models.NewInvalidOptionError("schedule_name is required")
 	}
 
 	workflowName, err := c.resolveScheduleWorkflowName(spec)
@@ -5629,7 +5639,7 @@ func (c *dbosContext) ApplySchedules(_ Client, schedules []ScheduleSpec) error {
 
 	for i, spec := range schedules {
 		if spec.ScheduleName == "" {
-			return fmt.Errorf("schedule entry %d is missing required field 'schedule_name'", i)
+			return models.NewInvalidOptionError(fmt.Sprintf("schedule entry %d is missing required field 'schedule_name'", i))
 		}
 		if err := validateCronSchedule(spec.Schedule, spec.CronTimezone); err != nil {
 			return fmt.Errorf("schedule entry %d: %w", i, err)

@@ -7,29 +7,32 @@ import (
 	"fmt"
 )
 
-// ErrorCode represents the different types of errors that can occur in DBOS operations.
+// Docs for ErrorCode, Error, and the ErrorCode* constants live on their
+// public aliases in dbos/aliases.go.
+
 type ErrorCode int
 
 const (
-	ErrorCodeConflictingID            ErrorCode = iota + 1 // Workflow ID conflicts or duplicate operations
-	ErrorCodeInitialization                                // DBOS context initialization failures
-	ErrorCodeNonExistentWorkflow                           // Referenced workflow does not exist
-	ErrorCodeUnexpectedWorkflow                            // Workflow ID previously used by a different workflow function or queue (non-deterministic reuse)
-	ErrorCodeWorkflowCancelled                             // Workflow was cancelled during execution
-	ErrorCodeUnexpectedStep                                // Step function mismatch during recovery (non-deterministic workflow)
-	ErrorCodeAwaitedWorkflowCancelled                      // A workflow being awaited was cancelled
-	ErrorCodeConflictingRegistration                       // Attempting to register a workflow/queue that already exists
-	ErrorCodeWorkflowUnexpectedType                        // Type mismatch in workflow input/output
-	ErrorCodeWorkflowExecution                             // General workflow execution error
-	ErrorCodeStepExecution                                 // General step execution error
-	ErrorCodeDeadLetterQueue                               // Workflow moved to dead letter queue after max retries
-	ErrorCodeMaxStepRetriesExceeded                        // Step exceeded maximum retry attempts
-	ErrorCodeQueueDeduplicated                             // Workflow was deduplicated in the queue
-	ErrorCodePatchingNotEnabled                            // Patching system is not enabled in the DBOS context configuration
-	ErrorCodeTimeout                                       // Operation timed out (e.g., recv timeout)
-	ErrorCodeNoApplicationVersions                         // No application versions are registered in the system database
-	ErrorCodeQueueNotFound                                 // Referenced queue does not exist
-	ErrorCodeScheduleNotFound                              // Referenced schedule does not exist
+	ErrorCodeConflictingID ErrorCode = iota + 1
+	ErrorCodeInitialization
+	ErrorCodeNonExistentWorkflow
+	ErrorCodeUnexpectedWorkflow
+	ErrorCodeWorkflowCancelled
+	ErrorCodeUnexpectedStep
+	ErrorCodeAwaitedWorkflowCancelled
+	ErrorCodeConflictingRegistration
+	ErrorCodeWorkflowUnexpectedType
+	ErrorCodeWorkflowExecution
+	ErrorCodeStepExecution
+	ErrorCodeDeadLetterQueue
+	ErrorCodeMaxStepRetriesExceeded
+	ErrorCodeQueueDeduplicated
+	ErrorCodePatchingNotEnabled
+	ErrorCodeTimeout
+	ErrorCodeNoApplicationVersions
+	ErrorCodeQueueNotFound
+	ErrorCodeScheduleNotFound
+	ErrorCodeInvalidOption
 )
 
 // String returns the name of the error code, e.g. "NonExistentWorkflow".
@@ -73,14 +76,13 @@ func (c ErrorCode) String() string {
 		return "QueueNotFound"
 	case ErrorCodeScheduleNotFound:
 		return "ScheduleNotFound"
+	case ErrorCodeInvalidOption:
+		return "InvalidOption"
 	default:
 		return fmt.Sprintf("ErrorCode(%d)", int(c))
 	}
 }
 
-// Error is the unified error type for all DBOS operations.
-// It provides structured error information with context-specific fields
-// and error codes for programmatic handling.
 type Error struct {
 	Message string    // Human-readable error message
 	Code    ErrorCode // Error type code for programmatic handling
@@ -174,7 +176,7 @@ func (e *Error) UnmarshalJSON(b []byte) error {
 
 // parseErrorCode is the inverse of ErrorCode.String; unknown names map to 0.
 func parseErrorCode(s string) ErrorCode {
-	for c := ErrorCodeConflictingID; c <= ErrorCodeScheduleNotFound; c++ {
+	for c := ErrorCodeConflictingID; c <= ErrorCodeInvalidOption; c++ {
 		if c.String() == s {
 			return c
 		}
@@ -349,6 +351,14 @@ func NewQueueNotFoundError(queueName string) *Error {
 		Message:   fmt.Sprintf("queue %s does not exist", queueName),
 		Code:      ErrorCodeQueueNotFound,
 		QueueName: queueName,
+	}
+}
+
+// NewInvalidOptionError reports invalid or inconsistent options passed to a DBOS API.
+func NewInvalidOptionError(message string) *Error {
+	return &Error{
+		Message: message,
+		Code:    ErrorCodeInvalidOption,
 	}
 }
 

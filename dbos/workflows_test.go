@@ -134,6 +134,8 @@ func TestWorkflowsRegistration(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, anonymousWorkflow)
 
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
 	type testCase struct {
 		name           string
 		workflowFunc   func(Context, string, ...WorkflowOption) (any, error)
@@ -316,7 +318,9 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DoubleRegistrationWithoutName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
+		// Don't reset DB; leak checking is done by the parent test's context
+		// (its launched runtime goroutines would trip a per-subtest check).
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
 
 		// First registration should work
 		RegisterWorkflow(freshCtx, simpleWorkflow)
@@ -334,7 +338,9 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DoubleRegistrationWithCustomName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
+		// Don't reset DB; leak checking is done by the parent test's context
+		// (its launched runtime goroutines would trip a per-subtest check).
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
 
 		// First registration with custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("custom-workflow"))
@@ -352,7 +358,9 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("DifferentWorkflowsSameCustomName", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
+		// Don't reset DB; leak checking is done by the parent test's context
+		// (its launched runtime goroutines would trip a per-subtest check).
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
 
 		// First registration with custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("same-name"))
@@ -370,7 +378,9 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("SameWorkflowDifferentCustomNames", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
+		// Don't reset DB; leak checking is done by the parent test's context
+		// (its launched runtime goroutines would trip a per-subtest check).
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
 
 		// First registration with a custom name should work
 		RegisterWorkflow(freshCtx, simpleWorkflow, WithWorkflowName("name-a"))
@@ -391,7 +401,9 @@ func TestWorkflowsRegistration(t *testing.T) {
 
 	t.Run("RegisterAfterLaunchPanics", func(t *testing.T) {
 		// Create a fresh DBOS context for this test
-		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true}) // Don't reset DB but do check for leaks
+		// Don't reset DB; leak checking is done by the parent test's context
+		// (its launched runtime goroutines would trip a per-subtest check).
+		freshCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
 
 		// Launch DBOS context
 		err := Launch(freshCtx)
@@ -2919,6 +2931,7 @@ func idempotencyWorkflow(dbosCtx Context, input string) (string, error) {
 func TestWorkflowIdempotency(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, idempotencyWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	t.Run("WorkflowExecutedOnlyOnce", func(t *testing.T) {
 		idempotencyCounter = 0
@@ -2973,6 +2986,7 @@ func TestNoConcurrentWorkflowSameID(t *testing.T) {
 		return "done", nil
 	}
 	RegisterWorkflow(dbosCtx, blockingWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	workflowID := uuid.NewString()
 
@@ -3423,67 +3437,71 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 func TestCancelWorkflows(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	t.Run("CancelWorkflowsWithChildren", func(t *testing.T) {
+	// Workflows for the CancelWorkflowsWithChildren subtest, registered before
+	// Launch; the subtest itself runs after Launch (see below).
+	var (
+		parentWorkflowID     = uuid.NewString()
+		childWorkflowID      = uuid.NewString()
+		grandChildWorkflowID = uuid.NewString()
+
+		IDs = []string{parentWorkflowID, childWorkflowID, grandChildWorkflowID}
+
+		mainEvents     = make(map[string]*Event)
+		workflowEvents = make(map[string]*Event)
+	)
+
+	for i := range IDs {
+		mainEvents[IDs[i]] = NewEvent()
+		workflowEvents[IDs[i]] = NewEvent()
+	}
+
+	grandChildWorkflow := func(ctx Context, _ string) (string, error) {
+		workflowID, err := GetWorkflowID(ctx)
+		require.NoError(t, err, "failed to get workflow ID")
+
+		require.Equal(t, grandChildWorkflowID, workflowID)
+
+		mainEvents[workflowID].Set()
+		workflowEvents[workflowID].Wait()
+		return simpleStep(ctx)
+	}
+	RegisterWorkflow(dbosCtx, grandChildWorkflow)
+
+	childWorkflow := func(ctx Context, _ string) (string, error) {
+		workflowID, err := GetWorkflowID(ctx)
+		require.NoError(t, err, "failed to get workflow ID")
+
+		require.Equal(t, childWorkflowID, workflowID)
+
+		RunWorkflow(ctx, grandChildWorkflow, "test-grand-child-in", WithWorkflowID(grandChildWorkflowID))
+
+		mainEvents[workflowID].Set()
+		workflowEvents[workflowID].Wait()
+
+		return simpleStep(ctx)
+	}
+	RegisterWorkflow(dbosCtx, childWorkflow)
+
+	parentWorkflow := func(ctx Context, _ string) (string, error) {
+		workflowID, err := GetWorkflowID(ctx)
+		require.NoError(t, err, "failed to get workflow ID")
+
+		require.Equal(t, parentWorkflowID, workflowID)
+
+		RunWorkflow(ctx, childWorkflow, "test-child-input", WithWorkflowID(childWorkflowID))
+
+		mainEvents[workflowID].Set()
+		workflowEvents[workflowID].Wait()
+
+		return simpleStep(ctx)
+	}
+	RegisterWorkflow(dbosCtx, parentWorkflow)
+
+	cancelWorkflowsWithChildren := func(t *testing.T) {
 		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 
-		var (
-			parentWorkflowID     = uuid.NewString()
-			childWorkflowID      = uuid.NewString()
-			grandChildWorkflowID = uuid.NewString()
-
-			IDs = []string{parentWorkflowID, childWorkflowID, grandChildWorkflowID}
-
-			mainEvents     = make(map[string]*Event)
-			workflowEvents = make(map[string]*Event)
-		)
-
-		for i := range IDs {
-			mainEvents[IDs[i]] = NewEvent()
-			workflowEvents[IDs[i]] = NewEvent()
-		}
-
-		grandChildWorkflow := func(ctx Context, _ string) (string, error) {
-			workflowID, err := GetWorkflowID(ctx)
-			require.NoError(t, err, "failed to get workflow ID")
-
-			require.Equal(t, grandChildWorkflowID, workflowID)
-
-			mainEvents[workflowID].Set()
-			workflowEvents[workflowID].Wait()
-			return simpleStep(ctx)
-		}
-		RegisterWorkflow(dbosCtx, grandChildWorkflow)
-
-		childWorkflow := func(ctx Context, _ string) (string, error) {
-			workflowID, err := GetWorkflowID(ctx)
-			require.NoError(t, err, "failed to get workflow ID")
-
-			require.Equal(t, childWorkflowID, workflowID)
-
-			RunWorkflow(ctx, grandChildWorkflow, "test-grand-child-in", WithWorkflowID(grandChildWorkflowID))
-
-			mainEvents[workflowID].Set()
-			workflowEvents[workflowID].Wait()
-
-			return simpleStep(ctx)
-		}
-		RegisterWorkflow(dbosCtx, childWorkflow)
-
-		parentWorkflow := func(ctx Context, _ string) (string, error) {
-			workflowID, err := GetWorkflowID(ctx)
-			require.NoError(t, err, "failed to get workflow ID")
-
-			require.Equal(t, parentWorkflowID, workflowID)
-
-			RunWorkflow(ctx, childWorkflow, "test-child-input", WithWorkflowID(childWorkflowID))
-
-			mainEvents[workflowID].Set()
-			workflowEvents[workflowID].Wait()
-
-			return simpleStep(ctx)
-		}
-		RegisterWorkflow(dbosCtx, parentWorkflow)
-		RunWorkflow(dbosCtx, parentWorkflow, "test-input", WithWorkflowID(parentWorkflowID))
+		_, err := RunWorkflow(dbosCtx, parentWorkflow, "test-input", WithWorkflowID(parentWorkflowID))
+		require.NoError(t, err, "failed to start parent workflow")
 
 		// wait until whole tree is running and blocked
 		for id := range mainEvents {
@@ -3539,7 +3557,7 @@ func TestCancelWorkflows(t *testing.T) {
 			event.Set()
 		}
 		assert.Equal(t, queueEntriesAreCleanedUp(dbosCtx), true)
-	})
+	}
 
 	blockEvent := NewEvent()
 	blockingWorkflow := func(ctx Context, input string) (string, error) {
@@ -3587,6 +3605,8 @@ func TestCancelWorkflows(t *testing.T) {
 
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS instance")
+
+	t.Run("CancelWorkflowsWithChildren", cancelWorkflowsWithChildren)
 
 	startBlockedWorkflows := func(t *testing.T, n int, prefix string) []string {
 		t.Helper()
@@ -5321,6 +5341,7 @@ func TestWorkflowExecutionMismatch(t *testing.T) {
 	RegisterWorkflow(dbosCtx, conflictWorkflowA)
 	RegisterWorkflow(dbosCtx, conflictWorkflowB)
 	RegisterWorkflow(dbosCtx, workflowWithMultipleSteps)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	t.Run("WorkflowNameConflict", func(t *testing.T) {
 		workflowID := uuid.NewString()
@@ -5386,6 +5407,21 @@ func TestSleep(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, sleepRecoveryWorkflow)
 
+	// Cancelling Sleep's context mid-sleep should interrupt it and return the
+	// partial duration actually slept (less than the full requested duration).
+	sleepCancelWorkflow := func(ctx Context, _ string) (time.Duration, error) {
+		cancelCtx, cancel := WithCancel(ctx)
+		defer cancel()
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			cancel()
+		}()
+		return Sleep(cancelCtx, time.Minute)
+	}
+	RegisterWorkflow(dbosCtx, sleepCancelWorkflow)
+
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
 	t.Run("SleepDurableRecovery", func(t *testing.T) {
 		sleepDuration := 2 * time.Second
 		workflowID := uuid.NewString()
@@ -5438,19 +5474,6 @@ func TestSleep(t *testing.T) {
 	})
 
 	t.Run("SleepContextCancellation", func(t *testing.T) {
-		// Cancelling Sleep's context mid-sleep should interrupt it and return the
-		// partial duration actually slept (less than the full requested duration).
-		sleepCancelWorkflow := func(ctx Context, _ string) (time.Duration, error) {
-			cancelCtx, cancel := WithCancel(ctx)
-			defer cancel()
-			go func() {
-				time.Sleep(500 * time.Millisecond)
-				cancel()
-			}()
-			return Sleep(cancelCtx, time.Minute)
-		}
-		RegisterWorkflow(dbosCtx, sleepCancelWorkflow)
-
 		handle, err := RunWorkflow(dbosCtx, sleepCancelWorkflow, "")
 		require.NoError(t, err, "failed to start sleep workflow")
 
@@ -5472,7 +5495,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflow)
 
-	t.Run("WorkflowTimeout", func(t *testing.T) {
+	runWorkflowTimeout := func(t *testing.T) {
 		// The reason this sequence works is that the timeout is so fast that the workflow AfterFunc
 		// triggers as soon as it is set, likely even before the workflow goroutine is started
 		// So we are almost guaranteed that the workflow will be cancelled before returning, hence GetStatus will show it as cancelled
@@ -5491,7 +5514,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
-	})
+	}
 
 	wfcStart := NewEvent()
 	wfcStop := NewEvent()
@@ -5506,7 +5529,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflowManual)
 
-	t.Run("ManuallyCancelWorkflow", func(t *testing.T) {
+	runManuallyCancelWorkflow := func(t *testing.T) {
 		// This test requires an event to prevent the workflow for returning before we GetStatus
 		// This is because direct cancellation through the cancel function can happen faster than the timeout context AfterFunc
 		// This is even more likely in contended environments with few CPU resources
@@ -5533,7 +5556,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		result, err := handle.GetResult()
 		assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled error, got: %v", err)
 		assert.Equal(t, "", result, "expected result to be an empty string")
-	})
+	}
 
 	waitForCancelStep := func(ctx context.Context) (string, error) {
 		// This step will trigger cancellation of the entire workflow context
@@ -5551,7 +5574,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflowWithStep)
 
-	t.Run("WorkflowWithStepTimeout", func(t *testing.T) {
+	runWorkflowWithStepTimeout := func(t *testing.T) {
 		// Start a workflow that will run a step that triggers cancellation
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 100*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
@@ -5567,7 +5590,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
-	})
+	}
 
 	waitForCancelWorkflowWithStepAfterCancel := func(ctx Context, _ string) (string, error) {
 		uncancellableCtx := WithoutCancel(ctx)
@@ -5607,7 +5630,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflowWithStepAfterCancel)
 
-	t.Run("WorkflowWithStepAfterTimeout", func(t *testing.T) {
+	runWorkflowWithStepAfterTimeout := func(t *testing.T) {
 		// Start a workflow that waits for cancellation then tries to run a step
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
@@ -5626,7 +5649,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
-	})
+	}
 
 	shorterStepTimeoutWorkflow := func(ctx Context, _ string) (string, error) {
 		// This workflow will run a step that has a shorter timeout than the workflow itself
@@ -5641,7 +5664,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, shorterStepTimeoutWorkflow)
 
-	t.Run("ShorterStepTimeout", func(t *testing.T) {
+	runShorterStepTimeout := func(t *testing.T) {
 		// Start a workflow that runs a step with a shorter timeout than the workflow itself
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Second)
 		defer cancelFunc() // Ensure we clean up the context
@@ -5655,7 +5678,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected workflow status to be WorkflowStatusSuccess")
-	})
+	}
 
 	detachedStep := func(ctx context.Context, timeout time.Duration) (string, error) {
 		select {
@@ -5679,7 +5702,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, detachedStepWorkflow)
 
-	t.Run("DetachedStepWorkflow", func(t *testing.T) {
+	runDetachedStepWorkflow := func(t *testing.T) {
 		// Start a workflow that runs a detached (uncancelable) step.
 		// A detached step only ignores *context* cancellation; its start is still
 		// gated by checkOperationExecution, which refuses the step if the workflow
@@ -5702,7 +5725,7 @@ func TestWorkflowTimeout(t *testing.T) {
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
-	})
+	}
 
 	waitForCancelParent := func(ctx Context, childWorkflowID string) (string, error) {
 		// This workflow will run a child workflow that waits indefinitely until it is cancelled
@@ -5722,7 +5745,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelParent)
 
-	t.Run("ChildWorkflowTimesout", func(t *testing.T) {
+	runChildWorkflowTimesout := func(t *testing.T) {
 		// Start a parent workflow that runs a child workflow that waits indefinitely
 		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
 		defer cancelFunc() // Ensure we clean up the context
@@ -5748,7 +5771,7 @@ func TestWorkflowTimeout(t *testing.T) {
 			s, err := childHandle.GetStatus()
 			return err == nil && s.Status == WorkflowStatusCancelled
 		}, 5*time.Second, 50*time.Millisecond, "expected child workflow status to be WorkflowStatusCancelled")
-	})
+	}
 
 	detachedChild := func(ctx Context, timeout time.Duration) (string, error) {
 		select {
@@ -5775,6 +5798,16 @@ func TestWorkflowTimeout(t *testing.T) {
 		return result, ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, detachedChildWorkflowParent)
+
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	t.Run("WorkflowTimeout", runWorkflowTimeout)
+	t.Run("ManuallyCancelWorkflow", runManuallyCancelWorkflow)
+	t.Run("WorkflowWithStepTimeout", runWorkflowWithStepTimeout)
+	t.Run("WorkflowWithStepAfterTimeout", runWorkflowWithStepAfterTimeout)
+	t.Run("ShorterStepTimeout", runShorterStepTimeout)
+	t.Run("DetachedStepWorkflow", runDetachedStepWorkflow)
+	t.Run("ChildWorkflowTimesout", runChildWorkflowTimesout)
 
 	t.Run("ChildWorkflowDetached", func(t *testing.T) {
 		timeout := 500 * time.Millisecond
@@ -5891,6 +5924,7 @@ func TestConcurrentWorkflows(t *testing.T) {
 	RegisterWorkflow(dbosCtx, notificationSetterWorkflow)
 	RegisterWorkflow(dbosCtx, sendRecvReceiverWorkflow)
 	RegisterWorkflow(dbosCtx, sendRecvSenderWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	t.Run("SimpleWorkflow", func(t *testing.T) {
 		const numGoroutines = 500
@@ -6134,6 +6168,7 @@ func TestWorkflowAtVersion(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	version := "test-app-version-12345"
 	handle, err := RunWorkflow(dbosCtx, simpleWorkflow, "input", WithApplicationVersion(version))
@@ -6169,6 +6204,20 @@ func TestWorkflowCancel(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, blockingWorkflow)
 
+	blockingEventNoError := NewEvent()
+
+	// Workflow that waits for an event, then calls Recv(). Does NOT return error when Recv times out
+	blockingWorkflowNoError := func(ctx Context, topic string) (string, error) {
+		// Wait for the event
+		blockingEventNoError.Wait()
+		Recv[string](ctx, topic, 5*time.Second)
+		// Ignore the error
+		return "", nil
+	}
+	RegisterWorkflow(dbosCtx, blockingWorkflowNoError)
+
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
 	t.Run("TestWorkflowCancelWithRecvError", func(t *testing.T) {
 		topic := "cancel-test-topic"
 
@@ -6200,18 +6249,6 @@ func TestWorkflowCancel(t *testing.T) {
 	})
 
 	t.Run("TestWorkflowCancelWithSuccess", func(t *testing.T) {
-		blockingEventNoError := NewEvent()
-
-		// Workflow that waits for an event, then calls Recv(). Does NOT return error when Recv times out
-		blockingWorkflowNoError := func(ctx Context, topic string) (string, error) {
-			// Wait for the event
-			blockingEventNoError.Wait()
-			Recv[string](ctx, topic, 5*time.Second)
-			// Ignore the error
-			return "", nil
-		}
-		RegisterWorkflow(dbosCtx, blockingWorkflowNoError)
-
 		topic := "cancel-no-error-test-topic"
 
 		// Start the blocking workflow
@@ -6272,6 +6309,7 @@ func TestCancelAllBefore(t *testing.T) {
 	// Create a queue for testing enqueued workflows
 	queue, err := RegisterQueue(dbosCtx, "test-cancel-queue")
 	require.NoError(t, err, "failed to register queue")
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	t.Run("CancelAllBefore", func(t *testing.T) {
 		now := time.Now()
@@ -6399,6 +6437,8 @@ func TestGarbageCollect(t *testing.T) {
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
 		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
 
+		require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
 		gcTestEvent.Clear()
 		numWorkflows := 10
 
@@ -6488,6 +6528,8 @@ func TestGarbageCollect(t *testing.T) {
 
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
 		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
+
+		require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 		gcTestEvent.Clear()
 		numWorkflows := 10
@@ -6593,6 +6635,8 @@ func TestGarbageCollect(t *testing.T) {
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
 		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
 
+		require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
 		// Verify exactly 0 workflows exist initially
 		workflows, err := ListWorkflows(dbosCtx)
 		require.NoError(t, err, "failed to list workflows")
@@ -6636,6 +6680,8 @@ func TestGarbageCollect(t *testing.T) {
 
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
 		RegisterWorkflow(dbosCtx, gcBlockedWorkflow)
+
+		require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 		gcTestEvent.Clear()
 		numWorkflows := 5
@@ -6736,6 +6782,8 @@ func TestGarbageCollect(t *testing.T) {
 
 		// Register the test workflow
 		RegisterWorkflow(dbosCtx, gcTestWorkflow)
+
+		require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 		// This test verifies that when both threshold and cutoff timestamp are provided,
 		// the more stringent (restrictive) one applies - i.e., the one that keeps more workflows
@@ -6971,6 +7019,7 @@ func TestSpecialSteps(t *testing.T) {
 	RegisterWorkflow(dbosCtx, child2Workflow, WithWorkflowName("child-workflow-2"))
 	RegisterWorkflow(dbosCtx, delayedWorkflow, WithWorkflowName("delayed-workflow"))
 	RegisterWorkflow(dbosCtx, specialStepsWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	t.Run("SpecialStepsExecution", func(t *testing.T) {
 		workflowID := uuid.NewString()
@@ -7068,6 +7117,7 @@ func TestRegisteredWorkflowListing(t *testing.T) {
 func TestWorkflowIdentity(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, simpleWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 	handle, err := RunWorkflow(
 		dbosCtx,
 		simpleWorkflow,
@@ -7164,6 +7214,7 @@ func TestAuthPropagation(t *testing.T) {
 	RegisterWorkflow(dbosCtx, authParentWorkflow)
 	RegisterWorkflow(dbosCtx, authGrandparentWorkflow)
 	RegisterWorkflow(dbosCtx, authParentWithOverrideWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	t.Run("PropagatesFromParentToChild", func(t *testing.T) {
 		handle, err := RunWorkflow(dbosCtx, authParentWorkflow, "",
@@ -7252,6 +7303,7 @@ func TestAuthPropagation(t *testing.T) {
 func TestWorkflowHandles(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, slowWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	workflowSleep := 1 * time.Second
 
@@ -7296,6 +7348,7 @@ func TestWorkflowHandles(t *testing.T) {
 func TestWorkflowHandleContextCancel(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, getEventWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	t.Run("WorkflowHandleContextCancel", func(t *testing.T) {
 		getEventWorkflowStartedSignal.Clear()

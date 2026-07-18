@@ -8,16 +8,14 @@ const InternalQueueName = "_dbos_internal_queue"
 // DefaultBasePollingInterval is the default queue polling interval.
 const DefaultBasePollingInterval = 1 * time.Second
 
-// RateLimiter configures rate limiting for workflow queue execution.
-// Rate limits prevent overwhelming external services and provide backpressure.
+// RateLimiter's docs live on its public alias in dbos/aliases.go.
 type RateLimiter struct {
 	Limit  int           // Maximum number of workflows to start within the period
 	Period time.Duration // Time period for the rate limit
 }
 
 // QueueConfig is the persisted configuration of a workflow queue, as stored in
-// the queues table. The dbos package's unexported workflowQueue wraps it with runtime-only
-// registration state.
+// the queues table.
 type QueueConfig struct {
 	Name                string        `json:"name"`
 	WorkerConcurrency   *int          `json:"workerConcurrency,omitempty"`

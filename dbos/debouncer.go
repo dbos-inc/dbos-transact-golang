@@ -162,6 +162,10 @@ func NewDebouncer[P any, R any](
 	}
 }
 
+// Debounce schedules the debounced workflow to start after delay, or, if an
+// execution is already pending for key, pushes its start back by delay and
+// replaces the input it will run with. Returns a handle to the pending
+// workflow execution.
 func (d *Debouncer[P, R]) Debounce(ctx Context, key string, delay time.Duration, input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	workflowState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil

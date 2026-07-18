@@ -28,10 +28,7 @@ type WorkflowSchedule struct {
 	QueueName         string          `json:"queue_name,omitempty"`
 }
 
-// ScheduledWorkflowInput is the input type that DB-backed scheduled workflow
-// functions must accept. ScheduledTime is the cron tick time; Context carries
-// the user-defined value attached to the schedule as raw JSON (nil if none) —
-// decode it with DecodeScheduleContext.
+// ScheduledWorkflowInput's docs live on its public alias in dbos/aliases.go.
 type ScheduledWorkflowInput struct {
 	ScheduledTime time.Time       `json:"scheduled_time"`
 	Context       json.RawMessage `json:"context,omitempty"`

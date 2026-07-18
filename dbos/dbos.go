@@ -35,7 +35,8 @@ const (
 )
 
 // Config holds configuration parameters for initializing a DBOS context.
-// DatabaseURL and AppName are required.
+// AppName is required, along with exactly one of DatabaseURL, SystemDBPool,
+// or SQLiteSystemDB.
 type Config struct {
 	AppName                   string          // Application name for identification (required)
 	DatabaseURL               string          // DatabaseURL is the system-database connection string. Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
@@ -663,13 +664,16 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	return initExecutor, nil
 }
 
+// ClientConfig holds configuration parameters for NewClient. Exactly one of
+// DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
 type ClientConfig struct {
-	DatabaseURL    string          // DatabaseURL is the system-database connection string. Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
-	SystemDBPool   *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
-	SQLiteSystemDB *sql.DB         // SQLiteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
-	DatabaseSchema string          // Database schema name (defaults to "dbos")
-	Logger         *slog.Logger    // Optional custom logger
-	Serializer     Serializer[any] // Optional custom serializer (defaults to JSON)
+	DatabaseURL            string          // DatabaseURL is the system-database connection string. Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
+	SystemDBPool           *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
+	SQLiteSystemDB         *sql.DB         // SQLiteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
+	DatabaseSchema         string          // Database schema name (defaults to "dbos")
+	Logger                 *slog.Logger    // Optional custom logger
+	Serializer             Serializer[any] // Optional custom serializer (defaults to JSON)
+	SystemDBStartupTimeout time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
 }
 
 // NewClient creates a new DBOS client with the provided configuration.
@@ -689,13 +693,14 @@ type ClientConfig struct {
 //	}
 func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 	dbosCtx, err := NewContext(ctx, Config{
-		DatabaseURL:    config.DatabaseURL,
-		DatabaseSchema: config.DatabaseSchema,
-		AppName:        "dbos-client",
-		Logger:         config.Logger,
-		SystemDBPool:   config.SystemDBPool,
-		SQLiteSystemDB: config.SQLiteSystemDB,
-		Serializer:     config.Serializer,
+		DatabaseURL:            config.DatabaseURL,
+		DatabaseSchema:         config.DatabaseSchema,
+		AppName:                "dbos-client",
+		Logger:                 config.Logger,
+		SystemDBPool:           config.SystemDBPool,
+		SQLiteSystemDB:         config.SQLiteSystemDB,
+		Serializer:             config.Serializer,
+		SystemDBStartupTimeout: config.SystemDBStartupTimeout,
 	})
 	if err != nil {
 		return nil, err

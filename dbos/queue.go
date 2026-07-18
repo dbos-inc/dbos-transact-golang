@@ -277,17 +277,17 @@ func WithQueueOnConflict(policy QueueConflictResolution) QueueOption {
 // invalid input. Mirrors the cross-language validation rules.
 func validateQueueConfig(q *workflowQueue) error {
 	if q.WorkerConcurrency != nil && q.GlobalConcurrency != nil && *q.WorkerConcurrency > *q.GlobalConcurrency {
-		return fmt.Errorf("queue %s: concurrency must be greater than or equal to worker_concurrency", q.Name)
+		return models.NewInvalidOptionError(fmt.Sprintf("queue %s: concurrency must be greater than or equal to worker_concurrency", q.Name))
 	}
 	if q.basePollingInterval <= 0 {
-		return fmt.Errorf("queue %s: polling interval must be positive", q.Name)
+		return models.NewInvalidOptionError(fmt.Sprintf("queue %s: polling interval must be positive", q.Name))
 	}
 	if q.RateLimit != nil {
 		if q.RateLimit.Limit <= 0 {
-			return fmt.Errorf("queue %s: rate limiter limit must be positive", q.Name)
+			return models.NewInvalidOptionError(fmt.Sprintf("queue %s: rate limiter limit must be positive", q.Name))
 		}
 		if q.RateLimit.Period <= 0 {
-			return fmt.Errorf("queue %s: rate limiter period must be positive", q.Name)
+			return models.NewInvalidOptionError(fmt.Sprintf("queue %s: rate limiter period must be positive", q.Name))
 		}
 	}
 	return nil
@@ -315,7 +315,7 @@ func RegisterQueue(ctx Client, name string, options ...QueueOption) (Queue, erro
 
 func (c *dbosContext) RegisterQueue(_ Client, name string, options ...QueueOption) (Queue, error) {
 	if name == models.InternalQueueName {
-		err := fmt.Errorf("cannot register queue %q: the name is reserved for the DBOS internal queue", name)
+		err := models.NewInvalidOptionError(fmt.Sprintf("cannot register queue %q: the name is reserved for the DBOS internal queue", name))
 		c.logger.Error("queue name conflict", "queue_name", name, "error", err)
 		return nil, err
 	}
@@ -434,6 +434,9 @@ func (c *dbosContext) ListQueues(_ Client) ([]Queue, error) {
 	return result, nil
 }
 
+// DeleteQueue removes a database-backed queue by name from the system
+// database. Processes serving the queue stop doing so at their next reconcile
+// tick. Deleting a queue that does not exist is not an error.
 func DeleteQueue(ctx Client, name string) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")

@@ -35,4 +35,6 @@ var (
 	ErrScheduleNotFound = &Error{Code: ErrorCodeScheduleNotFound}
 	// ErrNoApplicationVersions matches errors from operations requiring a registered application version when none exists.
 	ErrNoApplicationVersions = &Error{Code: ErrorCodeNoApplicationVersions}
+	// ErrInvalidOption matches errors from invalid or inconsistent options passed to a DBOS API.
+	ErrInvalidOption = &Error{Code: ErrorCodeInvalidOption}
 )
