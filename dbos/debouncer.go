@@ -30,16 +30,15 @@ type DebounceMessage[P any] struct {
 	ID    string // Used for ACK protocol
 }
 
-// Debouncer provides workflow debouncing functionality.
-// It delays workflow execution by a configurable delay amount, with each
-// subsequent call pushing back the start time by the delay (up to an optional maximum timeout).
+// Debouncer coalesces repeated invocations of a workflow. Each Debounce call
+// with a given key pushes the workflow's start back by the given delay and
+// replaces the input it will run with; when the delay elapses without another
+// call, the workflow runs once with the latest input. If a timeout is
+// configured, the start is never pushed past timeout from the first call
+// (zero means no limit). Different keys debounce independently.
 //
-// The debouncer uses an internal workflow that collects inputs and delays
-// execution. Each call to Debounce pushes back the start time by the delay
-// amount. If a timeout is configured, the start time cannot exceed the timeout
-// from the first invocation. If timeout is zero, there is no maximum time limit.
-//
-// The same debounce can be used with different keys to debounce multiple independent groups of workflow invocations.
+// Create with NewDebouncer before Launch; use DebouncerClient to debounce
+// from outside the application.
 type Debouncer[P any, R any] struct {
 	WorkflowFQN          string        // Fully qualified name of the target workflow
 	Timeout              time.Duration // Maximum time before starting the workflow (0 = no timeout)
@@ -254,19 +253,33 @@ func (d *Debouncer[P, R]) Debounce(ctx Context, key string, delay time.Duration,
 			}
 
 			// Retrieve the user workflow ID from the input of the internal debouncer workflow
-			// The listing decode returns a generic value; JSON round-trip it into the typed input
-			inputBytes, err := json.Marshal(debouncerWorkflowStatus[0].Input)
+			decodedInput, err := decodeDebouncerListingInput[P](debouncerWorkflowStatus[0].Input)
 			if err != nil {
-				return nil, fmt.Errorf("failed to marshal debouncer workflow input: %w", err)
-			}
-			var decodedInput debouncerInput[P]
-			if err := json.Unmarshal(inputBytes, &decodedInput); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal debouncer workflow input: %w", err)
+				return nil, err
 			}
 			return newWorkflowPollingHandle[R](ctx, decodedInput.TargetWorkflowID), nil
 		}
 		return nil, err
 	}
+}
+
+// decodeDebouncerListingInput converts a listed internal debouncer workflow
+// input into its typed form. Default-JSON listings return the raw JSON text;
+// custom-serializer listings return a decoded value that is JSON round-tripped.
+func decodeDebouncerListingInput[P any](input any) (debouncerInput[P], error) {
+	var decoded debouncerInput[P]
+	raw, ok := input.(string)
+	if !ok {
+		b, err := json.Marshal(input)
+		if err != nil {
+			return decoded, fmt.Errorf("failed to marshal debouncer workflow input: %w", err)
+		}
+		raw = string(b)
+	}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return decoded, fmt.Errorf("failed to unmarshal debouncer workflow input: %w", err)
+	}
+	return decoded, nil
 }
 
 // DebouncerClient provides workflow debouncing functionality using a Client.
@@ -403,14 +416,9 @@ func (dc *DebouncerClient[R, P]) Debounce(key string, delay time.Duration, input
 			}
 
 			// Retrieve the user workflow ID from the input of the internal debouncer workflow
-			// The listing decode returns a generic value; JSON round-trip it into the typed input
-			inputBytes, err := json.Marshal(debouncerWorkflowStatus[0].Input)
+			decodedInput, err := decodeDebouncerListingInput[P](debouncerWorkflowStatus[0].Input)
 			if err != nil {
-				return nil, fmt.Errorf("failed to marshal debouncer workflow input: %w", err)
-			}
-			var decodedInput debouncerInput[P]
-			if err := json.Unmarshal(inputBytes, &decodedInput); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal debouncer workflow input: %w", err)
+				return nil, err
 			}
 			return newWorkflowPollingHandle[R](dbosCtx, decodedInput.TargetWorkflowID), nil
 		}
