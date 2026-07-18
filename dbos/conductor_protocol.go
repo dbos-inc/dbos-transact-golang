@@ -208,7 +208,7 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 		}
 	}
 
-	// input/output are decoded values; render as JSON text for the protocol
+	// input/output are raw JSON text or decoded values; render as JSON text for the protocol
 	if wf.Input != nil {
 		if s, ok := listingValueJSON(wf.Input); ok {
 			output.Input = &s
@@ -360,7 +360,7 @@ func formatWorkflowStepsResponseBody(step StepInfo) workflowStepsConductorRespon
 		FunctionName: step.StepName,
 	}
 
-	// output is a decoded value; render as JSON text for the protocol
+	// output is raw JSON text or a decoded value; render as JSON text for the protocol
 	if step.Output != nil {
 		if s, ok := listingValueJSON(step.Output); ok {
 			output.Output = &s

@@ -77,7 +77,7 @@ func recoverPendingWorkflows(ctx *dbosContext, executorIDs []string) ([]Workflow
 		handle, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, workflow.Serialization, opts...)
 		if err != nil {
 			// A dead-lettered workflow must not abort recovery of the remaining workflows
-			if errors.Is(err, &Error{Code: ErrorCodeDeadLetterQueue}) {
+			if errors.Is(err, ErrDeadLetterQueue) {
 				ctx.logger.Warn("Workflow exceeded max recovery attempts, moved to dead-letter queue", "workflow_id", workflow.ID, "name", workflow.Name)
 				continue
 			}

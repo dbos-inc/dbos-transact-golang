@@ -19,17 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// jsonRoundTrip normalizes a value to its generic JSON representation (as any),
-// matching what listing paths produce when decoding default-JSON rows.
-func jsonRoundTrip(t *testing.T, v any) any {
-	t.Helper()
-	b, err := json.Marshal(v)
-	require.NoError(t, err)
-	var out any
-	require.NoError(t, json.Unmarshal(b, &out))
-	return out
-}
-
 // testAllSerializationPaths tests workflow recovery and verifies all read paths.
 // This is the unified test function that exercises:
 // 1. Workflow recovery: starts a workflow, blocks it, recovers it, then verifies completion
@@ -134,8 +123,18 @@ func testAllSerializationPaths[T any](
 					// Custom serializer: output is already decoded to concrete type
 					assert.Equal(t, expectedOutput, lastStep.Output, "Step output should match expected output")
 				} else {
-					// Default JSON: output is decoded into any (generic JSON value)
-					assert.Equal(t, jsonRoundTrip(t, expectedOutput), lastStep.Output, "Step output should match expected output")
+					// Default JSON: output is the raw JSON string (base64-decoded)
+					strValue, ok := lastStep.Output.(string)
+					require.True(t, ok, "Step output should be a string")
+					if strValue == "" {
+						var zero T
+						assert.Equal(t, zero, expectedOutput, "Step output should be the zero value of type T")
+					} else {
+						var decodedOutput T
+						err := json.Unmarshal([]byte(strValue), &decodedOutput)
+						require.NoError(t, err, "Failed to unmarshal step output to type T")
+						assert.Equal(t, expectedOutput, decodedOutput, "Step output should match expected output")
+					}
 				}
 			}
 			assert.Nil(t, lastStep.Error)
@@ -168,9 +167,31 @@ func testAllSerializationPaths[T any](
 				assert.Equal(t, input, wf.Input, "Workflow input should match input")
 				assert.Equal(t, expectedOutput, wf.Output, "Workflow output should match expected output")
 			} else {
-				// Default JSON: input/output are decoded into any (generic JSON values)
-				assert.Equal(t, jsonRoundTrip(t, input), wf.Input, "Workflow input should match input")
-				assert.Equal(t, jsonRoundTrip(t, expectedOutput), wf.Output, "Workflow output should match expected output")
+				// Default JSON: input/output are raw JSON strings (base64-decoded)
+				inputStr, ok := wf.Input.(string)
+				require.True(t, ok, "Workflow input should be a string")
+				outputStr, ok := wf.Output.(string)
+				require.True(t, ok, "Workflow output should be a string")
+
+				if inputStr == "" {
+					var zero T
+					assert.Equal(t, zero, input, "Workflow input should be the zero value of type T")
+				} else {
+					var decodedInput T
+					err := json.Unmarshal([]byte(inputStr), &decodedInput)
+					require.NoError(t, err, "Failed to unmarshal workflow input to type T")
+					assert.Equal(t, input, decodedInput, "Workflow input should match input")
+				}
+
+				if outputStr == "" {
+					var zero T
+					assert.Equal(t, zero, expectedOutput, "Workflow output should be the zero value of type T")
+				} else {
+					var decodedOutput T
+					err = json.Unmarshal([]byte(outputStr), &decodedOutput)
+					require.NoError(t, err, "Failed to unmarshal workflow output to type T")
+					assert.Equal(t, expectedOutput, decodedOutput, "Workflow output should match expected output")
+				}
 			}
 		}
 	})
@@ -2662,9 +2683,9 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 			byID[wf.ID] = wf
 		}
 
-		// Good entries decode to their values.
-		assert.Equal(t, goodID1, byID[goodID1].Output)
-		assert.Equal(t, goodID2, byID[goodID2].Output)
+		// Good entries decode to their raw JSON representation.
+		assert.Equal(t, fmt.Sprintf("%q", goodID1), byID[goodID1].Output)
+		assert.Equal(t, fmt.Sprintf("%q", goodID2), byID[goodID2].Output)
 		// The corrupted entry surfaces the raw stored payload instead of
 		// failing the whole call.
 		corruptOutput, ok := byID[corruptID].Output.(string)
@@ -2694,7 +2715,7 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 			byID[wf.ID] = wf
 		}
 
-		assert.Equal(t, goodID, byID[goodID].Input)
+		assert.Equal(t, fmt.Sprintf("%q", goodID), byID[goodID].Input)
 		corruptInput, ok := byID[corruptID].Input.(string)
 		require.True(t, ok, "corrupted input should be a string")
 		assert.Equal(t, garbage, corruptInput)
@@ -2713,11 +2734,11 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 		require.NoError(t, err, "one step's undecodable output should not fail the whole GetWorkflowSteps call")
 		require.Len(t, steps, 3)
 
-		assert.Equal(t, "payload-step-0", steps[0].Output)
+		assert.Equal(t, `"payload-step-0"`, steps[0].Output)
 		corruptStepOutputVal, ok := steps[1].Output.(string)
 		require.True(t, ok, "corrupted step output should be a string")
 		assert.Equal(t, garbage, corruptStepOutputVal)
-		assert.Equal(t, "payload-step-2", steps[2].Output)
+		assert.Equal(t, `"payload-step-2"`, steps[2].Output)
 	})
 }
 
@@ -2898,12 +2919,11 @@ func TestListingDecodeUsesStoredSerialization(t *testing.T) {
 
 	require.NoError(t, c.decodeWorkflowsInputOutput(workflows, true, true))
 
-	// DBOS_JSON and legacy empty-format rows: decoded JSON value, spy not consulted.
-	decodedJSON := map[string]any{"count": float64(3), "name": "pre-serializer-era"}
-	assert.Equal(t, decodedJSON, workflows[0].Input)
-	assert.Equal(t, decodedJSON, workflows[0].Output)
-	assert.Equal(t, decodedJSON, workflows[1].Input)
-	assert.Equal(t, decodedJSON, workflows[1].Output)
+	// DBOS_JSON and legacy empty-format rows: raw JSON text, spy not consulted.
+	assert.Equal(t, defaultJSON, workflows[0].Input)
+	assert.Equal(t, defaultJSON, workflows[0].Output)
+	assert.Equal(t, defaultJSON, workflows[1].Input)
+	assert.Equal(t, defaultJSON, workflows[1].Output)
 
 	// Row whose stored format matches the custom serializer: decoded by it.
 	assert.Equal(t, "spy:"+spyPayload, workflows[2].Input)

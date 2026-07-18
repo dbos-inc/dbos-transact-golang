@@ -975,6 +975,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 	launched := s.launched
 	done := s.notificationLoopDone
 	s.notificationLoopMu.Unlock()
+	listenerStopped := true
 	if launched {
 		// Wait for the notification loop to exit
 		// The context should be cancelled prior to calling shutdown
@@ -983,6 +984,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 		case <-time.After(timeout):
 			s.logger.Warn("Notification listener loop did not finish in time", "timeout", timeout)
 			pending = append(pending, "notification listener")
+			listenerStopped = false
 		}
 	}
 
@@ -1006,7 +1008,11 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 	s.streamNotifier.clear()
 
 	s.notificationLoopMu.Lock()
-	s.launched = false
+	// Stay launched while the notification loop is still running so a later
+	// Shutdown call waits for it again instead of skipping the check.
+	if listenerStopped {
+		s.launched = false
+	}
 	s.notificationLoopMu.Unlock()
 	return pending
 }

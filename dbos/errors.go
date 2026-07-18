@@ -24,6 +24,9 @@ var (
 	ErrUnexpectedWorkflow = &Error{Code: ErrorCodeUnexpectedWorkflow}
 	// ErrMaxStepRetriesExceeded matches errors from steps that exhausted their retries.
 	ErrMaxStepRetriesExceeded = &Error{Code: ErrorCodeMaxStepRetriesExceeded}
+	// ErrDeadLetterQueue matches errors from workflows that exceeded their maximum
+	// recovery attempts and were moved to the dead-letter queue.
+	ErrDeadLetterQueue = &Error{Code: ErrorCodeDeadLetterQueue}
 	// ErrTimeout matches DBOS timeout errors (e.g. Recv/GetEvent timeouts, GetResult
 	// handle timeouts). A timeout error built from an expired context deadline also
 	// wraps that cause, so errors.Is(err, context.DeadlineExceeded) matches it too,

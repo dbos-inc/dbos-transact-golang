@@ -131,14 +131,24 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 	var workflowStatuses []WorkflowStatus
 	var err error
 	if isWithinWorkflow {
+		// Decode inside the step so the checkpoint records decoded values: a
+		// recovery replay returns the recorded output as-is, and the raw
+		// encoded *string columns do not survive checkpoint serialization.
 		workflowStatuses, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
+			statuses, err := sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
 				return c.systemDB.ListWorkflows(ctx, sysdb.ListWorkflowsDBInput{
 					WorkflowIDs: []string{h.workflowID},
 					LoadInput:   loadInput,
 					LoadOutput:  loadOutput,
 				})
 			}, sysdb.WithRetrierLogger(c.logger))
+			if err != nil {
+				return nil, err
+			}
+			if err := c.decodeWorkflowsInputOutput(statuses, loadInput, loadOutput); err != nil {
+				return nil, err
+			}
+			return statuses, nil
 		}, WithStepName("DBOS.getStatus"))
 	} else {
 		workflowStatuses, err = sysdb.RetryWithResult(c, func() ([]WorkflowStatus, error) {
@@ -148,15 +158,15 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 				LoadOutput:  loadOutput,
 			})
 		})
+		if err == nil {
+			err = c.decodeWorkflowsInputOutput(workflowStatuses, loadInput, loadOutput)
+		}
 	}
 	if err != nil {
 		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
 	}
 	if len(workflowStatuses) == 0 {
 		return WorkflowStatus{}, models.NewNonExistentWorkflowError(h.workflowID)
-	}
-	if err := c.decodeWorkflowsInputOutput(workflowStatuses, loadInput, loadOutput); err != nil {
-		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
 	}
 	return workflowStatuses[0], nil
 }
@@ -1940,7 +1950,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	returnExisting := params.deduplicationPolicy == DeduplicationPolicyReturnExisting
 
 	for {
-		err := sysdb.Retry(c, func() error {
+		err := func() error {
 			tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
 			if err != nil {
 				return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
@@ -1958,7 +1968,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 				return fmt.Errorf("failed to commit transaction: %w", err)
 			}
 			return nil
-		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
+		}()
 		if err != nil {
 			if returnExisting && errors.Is(err, ErrQueueDeduplicated) {
 				existingID, lookupErr := c.systemDB.GetDeduplicatedWorkflow(uncancellableCtx, queueName, params.deduplicationID)
@@ -5069,16 +5079,30 @@ func (c *dbosContext) ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]Wo
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
+		// Decode inside the step so the checkpoint records decoded values: a
+		// recovery replay returns the recorded output as-is, and the raw
+		// encoded *string columns do not survive checkpoint serialization.
 		workflows, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
+			listed, err := sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
 				return c.systemDB.ListWorkflows(ctx, dbInput)
 			}, sysdb.WithRetrierLogger(c.logger))
+			if err != nil {
+				return nil, err
+			}
+			if err := c.decodeWorkflowsInputOutput(listed, params.LoadInput, params.LoadOutput); err != nil {
+				return nil, err
+			}
+			return listed, nil
 		}, WithStepName("DBOS.listWorkflows"))
-	} else {
-		workflows, err = sysdb.RetryWithResult(c, func() ([]WorkflowStatus, error) {
-			return c.systemDB.ListWorkflows(c, dbInput)
-		}, sysdb.WithRetrierLogger(c.logger))
+		if err != nil {
+			return nil, err
+		}
+		return workflows, nil
 	}
+
+	workflows, err = sysdb.RetryWithResult(c, func() ([]WorkflowStatus, error) {
+		return c.systemDB.ListWorkflows(c, dbInput)
+	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
 	}

@@ -1255,11 +1255,13 @@ func TestSystemDBShutdownReportsPending(t *testing.T) {
 	// ctx is deliberately not cancelled, so the notification loop cannot exit
 	pending := systemDB.Shutdown(ctx, 100*time.Millisecond)
 	require.Contains(t, pending, "notification listener")
+	require.True(t, systemDB.(*sysdb.SysDB).Launched(), "a timed-out shutdown must leave the listener tracked so later calls re-check it")
 
 	cancel()
 	require.Eventually(t, func() bool {
 		return len(systemDB.Shutdown(ctx, 100*time.Millisecond)) == 0
 	}, 5*time.Second, 100*time.Millisecond, "notification loop should exit after cancel")
+	require.False(t, systemDB.(*sysdb.SysDB).Launched())
 }
 
 // TestClientShutdownReportsSystemDBTimeout verifies Client.Shutdown returns an

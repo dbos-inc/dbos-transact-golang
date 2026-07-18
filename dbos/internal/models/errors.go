@@ -33,6 +33,9 @@ const (
 	ErrorCodeQueueNotFound
 	ErrorCodeScheduleNotFound
 	ErrorCodeInvalidOption
+
+	// _errorCodeSentinel must remain the last value: it bounds parseErrorCode.
+	_errorCodeSentinel
 )
 
 // String returns the name of the error code, e.g. "NonExistentWorkflow".
@@ -176,7 +179,7 @@ func (e *Error) UnmarshalJSON(b []byte) error {
 
 // parseErrorCode is the inverse of ErrorCode.String; unknown names map to 0.
 func parseErrorCode(s string) ErrorCode {
-	for c := ErrorCodeConflictingID; c <= ErrorCodeInvalidOption; c++ {
+	for c := ErrorCodeConflictingID; c < _errorCodeSentinel; c++ {
 		if c.String() == s {
 			return c
 		}

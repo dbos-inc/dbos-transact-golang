@@ -295,25 +295,48 @@ func resolveDecoder[T any](storedSerialization string, customSer Serializer[any]
 	return nil, fmt.Errorf("unknown serialization format %q", storedSerialization)
 }
 
-// decodeListingValue decodes a persisted value for listing/display paths
-// (ListWorkflows, GetWorkflowSteps) using the decoder resolved from the
-// stored per-row format. If no decoder resolves or decoding fails, it
-// returns the raw stored string alongside the error.
+// decodeListingValue prepares a persisted value for listing/display paths
+// (ListWorkflows, GetWorkflowSteps) based on the stored per-row format:
+//   - portable rows decode into their generic JSON value
+//   - rows matching the configured custom serializer decode with it
+//   - default JSON rows return their raw JSON text (base64-decoded), leaving
+//     any further decoding to the caller
+//
+// If the format is unknown or decoding fails, it returns the raw stored
+// string alongside the error.
 func decodeListingValue(encoded *string, storedSerialization string, customSer Serializer[any]) (any, error) {
-	decoder, err := resolveDecoder[any](storedSerialization, customSer)
-	if err != nil {
-		return *encoded, err
+	switch {
+	case storedSerialization == PortableSerializerName:
+		var decoded any
+		if err := json.Unmarshal([]byte(*encoded), &decoded); err != nil {
+			return *encoded, err
+		}
+		return decoded, nil
+	case customSer != nil && customSer.Name() == storedSerialization:
+		decoded, err := customSer.Decode(encoded)
+		if err != nil {
+			return *encoded, err
+		}
+		return decoded, nil
+	case storedSerialization == "" || storedSerialization == "DBOS_JSON":
+		decodedBytes, err := base64.StdEncoding.DecodeString(*encoded)
+		if err != nil {
+			return *encoded, err
+		}
+		return string(decodedBytes), nil
+	default:
+		return *encoded, fmt.Errorf("unknown serialization format %q", storedSerialization)
 	}
-	decoded, err := decoder.Decode(encoded)
-	if err != nil {
-		return *encoded, err
-	}
-	return decoded, nil
 }
 
-// listingValueJSON renders a decoded listing value as JSON text for wire
-// protocols (conductor, admin server) that expect JSON strings.
+// listingValueJSON renders a listing value as JSON text for wire protocols
+// (conductor, admin server). Default JSON rows already carry their JSON text
+// as a string and pass through unchanged; decoded values (portable or custom
+// serializer rows) are marshaled.
 func listingValueJSON(v any) (string, bool) {
+	if s, ok := v.(string); ok && json.Valid([]byte(s)) {
+		return s, true
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		return "", false

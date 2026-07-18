@@ -1303,16 +1303,18 @@ func TestSteps(t *testing.T) {
 		require.NotNil(t, step.Output, "step output should not be nil")
 		assert.Nil(t, step.Error)
 
-		// Listing paths decode default-JSON rows into generic JSON values
-		storedOutput, ok := step.Output.(map[string]any)
-		require.True(t, ok, "expected decoded step output map, got %T", step.Output)
+		// Listing paths return default-JSON rows as raw JSON strings
+		var storedOutput StepOutput
+		err = json.Unmarshal([]byte(step.Output.(string)), &storedOutput)
+		require.NoError(t, err, "failed to decode step output to StepOutput")
 
 		// Verify all fields were correctly serialized and deserialized
-		assert.Equal(t, "Processed_TestObject", storedOutput["processed_name"], "ProcessedName not correctly serialized")
-		assert.Equal(t, float64(84), storedOutput["total_count"], "TotalCount not correctly serialized")
-		assert.Equal(t, true, storedOutput["success"], "Success flag not correctly serialized")
-		assert.Equal(t, []any{"step1", "step2", "step3"}, storedOutput["details"], "Details array not correctly serialized")
-		assert.NotEmpty(t, storedOutput["processed_at"], "ProcessedAt timestamp should not be zero")
+		assert.Equal(t, "Processed_TestObject", storedOutput.ProcessedName, "ProcessedName not correctly serialized")
+		assert.Equal(t, 84, storedOutput.TotalCount, "TotalCount not correctly serialized")
+		assert.True(t, storedOutput.Success, "Success flag not correctly serialized")
+		assert.Len(t, storedOutput.Details, 3, "Details array length incorrect")
+		assert.Equal(t, []string{"step1", "step2", "step3"}, storedOutput.Details, "Details array not correctly serialized")
+		assert.False(t, storedOutput.ProcessedAt.IsZero(), "ProcessedAt timestamp should not be zero")
 	})
 
 	t.Run("genericStepFunction", func(t *testing.T) {
@@ -1824,18 +1826,59 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		require.Contains(t, err.Error(), expectedMessagePart, "expected error message to contain %q, but got %q", expectedMessagePart, err.Error())
 	})
 
-	t.Run("Go must return step error correctly", func(t *testing.T) {
-		goWorkflow := func(dbosCtx Context, input string) (string, error) {
-			result, _ := Go(dbosCtx, func(ctx context.Context) (string, error) {
-				return "", fmt.Errorf("step error")
+	goErrWorkflow := func(dbosCtx Context, input string) (string, error) {
+		result, _ := Go(dbosCtx, func(ctx context.Context) (string, error) {
+			return "", fmt.Errorf("step error")
+		})
+
+		resultChan := <-result
+		return resultChan.Result, resultChan.Err
+	}
+	RegisterWorkflow(dbosCtx, goErrWorkflow)
+
+	const numSteps = 100
+	resultChans := make([]<-chan StepOutcome[int], 0)
+	goManyStepsWorkflow := func(dbosCtx Context, input string) (string, error) {
+		for range numSteps {
+			resultChan, err := Go(dbosCtx, func(ctx context.Context) (int, error) {
+				return stepReturningStepID(ctx)
 			})
 
-			resultChan := <-result
-			return resultChan.Result, resultChan.Err
+			if err != nil {
+				return "", err
+			}
+			resultChans = append(resultChans, resultChan)
 		}
-		RegisterWorkflow(dbosCtx, goWorkflow)
 
-		handle, err := RunWorkflow(dbosCtx, goWorkflow, "test-input")
+		return "", nil
+	}
+	RegisterWorkflow(dbosCtx, goManyStepsWorkflow)
+
+	goIdempotencyWorkflow := func(dbosCtx Context, input string) (string, error) {
+		channels := make([]<-chan StepOutcome[string], 0, 10)
+		for i := range 10 {
+			ch, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
+				return stepWithSleep(ctx, 1*time.Second)
+			}, WithStepName(fmt.Sprintf("goStep-%d", i)))
+			if err != nil {
+				return "", err
+			}
+			channels = append(channels, ch)
+		}
+		for _, ch := range channels {
+			outcome := <-ch
+			if outcome.Err != nil {
+				return "", outcome.Err
+			}
+		}
+		return "ok", nil
+	}
+	RegisterWorkflow(dbosCtx, goIdempotencyWorkflow)
+
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	t.Run("Go must return step error correctly", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, goErrWorkflow, "test-input")
 		require.NoError(t, err, "failed to run go workflow")
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error when running step, but got none")
@@ -1843,28 +1886,7 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 	})
 
 	t.Run("Go must execute 100 steps simultaneously then return the stepIDs in the correct sequence", func(t *testing.T) {
-		const numSteps = 100
-		results := make(chan string, numSteps)
-		defer close(results)
-		resultChans := make([]<-chan StepOutcome[int], 0)
-
-		goWorkflow := func(dbosCtx Context, input string) (string, error) {
-			for range numSteps {
-				resultChan, err := Go(dbosCtx, func(ctx context.Context) (int, error) {
-					return stepReturningStepID(ctx)
-				})
-
-				if err != nil {
-					return "", err
-				}
-				resultChans = append(resultChans, resultChan)
-			}
-
-			return "", nil
-		}
-		RegisterWorkflow(dbosCtx, goWorkflow)
-
-		handle, err := RunWorkflow(dbosCtx, goWorkflow, "test-input")
+		handle, err := RunWorkflow(dbosCtx, goManyStepsWorkflow, "test-input")
 		require.NoError(t, err, "failed to run go workflow")
 		_, err = handle.GetResult()
 		require.NoError(t, err, "failed to get result from go workflow")
@@ -1881,29 +1903,8 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 	})
 
 	t.Run("Go idempotency", func(t *testing.T) {
-		goWorkflow := func(dbosCtx Context, input string) (string, error) {
-			channels := make([]<-chan StepOutcome[string], 0, 10)
-			for i := range 10 {
-				ch, err := Go(dbosCtx, func(ctx context.Context) (string, error) {
-					return stepWithSleep(ctx, 1*time.Second)
-				}, WithStepName(fmt.Sprintf("goStep-%d", i)))
-				if err != nil {
-					return "", err
-				}
-				channels = append(channels, ch)
-			}
-			for _, ch := range channels {
-				outcome := <-ch
-				if outcome.Err != nil {
-					return "", outcome.Err
-				}
-			}
-			return "ok", nil
-		}
-		RegisterWorkflow(dbosCtx, goWorkflow)
-
 		workflowID := uuid.NewString()
-		handle1, err := RunWorkflow(dbosCtx, goWorkflow, "test-input", WithWorkflowID(workflowID))
+		handle1, err := RunWorkflow(dbosCtx, goIdempotencyWorkflow, "test-input", WithWorkflowID(workflowID))
 		require.NoError(t, err, "failed to run go workflow")
 		result1, err := handle1.GetResult()
 		require.NoError(t, err, "failed to get result from first run")
@@ -2083,9 +2084,18 @@ func TestSelect(t *testing.T) {
 		assert.Equal(t, 1, steps[1].StepID, "second step should have StepID 1")
 		assert.Equal(t, "DBOS.select", steps[2].StepName, "third step should be DBOS.select")
 		assert.Equal(t, 2, steps[2].StepID, "Select step should have StepID 2")
-		assert.Equal(t, "result1", steps[0].Output, "first Go step should have output 'result1'")
-		assert.Equal(t, "result2", steps[1].Output, "second Go step should have output 'result2'")
-		assert.Equal(t, result1, steps[2].Output, "Select step output should match workflow result")
+		var output0 string
+		err = json.Unmarshal([]byte(steps[0].Output.(string)), &output0)
+		require.NoError(t, err, "failed to decode step 0 output")
+		assert.Equal(t, "result1", output0, "first Go step should have output 'result1'")
+		var output1 string
+		err = json.Unmarshal([]byte(steps[1].Output.(string)), &output1)
+		require.NoError(t, err, "failed to decode step 1 output")
+		assert.Equal(t, "result2", output1, "second Go step should have output 'result2'")
+		var output2 string
+		err = json.Unmarshal([]byte(steps[2].Output.(string)), &output2)
+		require.NoError(t, err, "failed to decode step 2 output")
+		assert.Equal(t, result1, output2, "Select step output should match workflow result")
 	})
 }
 
@@ -2167,8 +2177,13 @@ func TestChildWorkflow(t *testing.T) {
 		if steps[1].StepName != "DBOS.getResult" {
 			return "", fmt.Errorf("expected second step name to be getResult, got %s", steps[1].StepName)
 		}
-		if steps[1].Output != "from step" {
-			return "", fmt.Errorf("expected second step output to be 'from step', got %v", steps[1].Output)
+		var stepOutput string
+		err = json.Unmarshal([]byte(steps[1].Output.(string)), &stepOutput)
+		if err != nil {
+			return "", fmt.Errorf("failed to unmarshal step output: %w", err)
+		}
+		if stepOutput != "from step" {
+			return "", fmt.Errorf("expected second step output to be 'from step', got %s", steps[1].Output)
 		}
 		if steps[1].Error != nil {
 			return "", fmt.Errorf("expected second step error to be nil, got %s", steps[1].Error)
@@ -2246,8 +2261,13 @@ func TestChildWorkflow(t *testing.T) {
 			if childWfStep.Output != nil {
 				return "", fmt.Errorf("expected child wf step output to be nil, got %s", childWfStep.Output)
 			}
-			if getResultStep.Output != "from step" {
-				return "", fmt.Errorf("expected get result step output to be 'from step', got %v", getResultStep.Output)
+			var stepOutput string
+			err = json.Unmarshal([]byte(getResultStep.Output.(string)), &stepOutput)
+			if err != nil {
+				return "", fmt.Errorf("failed to unmarshal step output: %w", err)
+			}
+			if stepOutput != "from step" {
+				return "", fmt.Errorf("expected get result step output to be 'from step', got %s", getResultStep.Output)
 			}
 
 			if childWfStep.Error != nil {
@@ -3282,7 +3302,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		// A genuinely new recovery owner is a new attempt and may dead-letter.
 		_, err = insert("next-recovery-owner", true, 1)
 		require.Error(t, err)
-		require.ErrorIs(t, err, &Error{Code: ErrorCodeDeadLetterQueue})
+		require.ErrorIs(t, err, ErrDeadLetterQueue)
 	})
 
 	t.Run("DeadLetterQueueBehavior", func(t *testing.T) {
@@ -3334,7 +3354,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		_, err = RunWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
 		require.Error(t, err, "expected dead letter queue error when restarting workflow with same ID but got none")
 
-		require.True(t, errors.Is(err, &Error{Code: ErrorCodeDeadLetterQueue}), "expected error to be ErrorCodeDeadLetterQueue, got %T", err)
+		require.True(t, errors.Is(err, ErrDeadLetterQueue), "expected error to be ErrorCodeDeadLetterQueue, got %T", err)
 
 		// Now resume the workflow -- this clears the DLQ status
 		resumedHandle, err := ResumeWorkflow[int](dbosCtx, wfID)
