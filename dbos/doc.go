@@ -1,7 +1,8 @@
-// Package dbos provides lightweight durable workflow orchestration with Postgres.
+// Package dbos provides lightweight durable workflow orchestration backed by SQLite or Postgres.
 //
 // DBOS Transact enables developers to write resilient distributed applications using workflows
-// and steps backed by PostgreSQL. All application state is automatically persisted, providing
+// and steps backed by a system database: SQLite for zero-setup local development, PostgreSQL
+// or CockroachDB for production. All application state is automatically persisted, providing
 // exactly-once execution guarantees and automatic recovery from failures.
 //
 // # Getting Started
@@ -100,6 +101,29 @@
 //	handle, err := dbos.ForkWorkflow[string](ctx, dbos.ForkWorkflowInput{OriginalWorkflowID: originalID, StartStep: stepNumber})
 //
 // Workflows can also be visualized and managed through the DBOS Console web UI.
+//
+// # Error Handling
+//
+// DBOS APIs return *Error values carrying an error code. Match conditions against the
+// package sentinels with errors.Is:
+//
+//	Situation                                            Sentinel
+//	Workflow cancelled via CancelWorkflow                ErrWorkflowCancelled (cause matches context.Canceled)
+//	Workflow deadline/timeout expired                    ErrWorkflowCancelled (cause matches context.DeadlineExceeded)
+//	Awaiting a workflow that was cancelled               ErrAwaitedWorkflowCancelled
+//	Recv/GetEvent/GetResult wait timeout                 ErrTimeout
+//	Enqueue rejected by deduplication ID                 ErrQueueDeduplicated
+//	Workflow ID conflict or duplicate operation          ErrConflictingWorkflowID
+//	Workflow ID reused with different function or queue  ErrUnexpectedWorkflow
+//	Step exhausted its retries                           ErrMaxStepRetriesExceeded
+//	Workflow not found                                   ErrNonExistentWorkflow
+//	Queue not found                                      ErrQueueNotFound
+//	Schedule not found                                   ErrScheduleNotFound
+//
+// For example, a parent workflow can detect a cancelled child:
+//
+//	_, err := handle.GetResult()
+//	if errors.Is(err, dbos.ErrAwaitedWorkflowCancelled) { ... }
 //
 // # Testing
 //

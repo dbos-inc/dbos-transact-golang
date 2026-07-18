@@ -38,8 +38,12 @@ const (
 // AppName is required, along with exactly one of DatabaseURL, SystemDBPool,
 // or SQLiteSystemDB.
 type Config struct {
-	AppName                   string          // Application name for identification (required)
-	DatabaseURL               string          // DatabaseURL is the system-database connection string. Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
+	AppName string // Application name for identification (required)
+	// DatabaseURL is the system-database connection string. Accepts Postgres URLs or
+	// key=value DSNs (e.g. postgres://user:pass@host:5432/dbname; CockroachDB uses the
+	// same form) and sqlite URLs (sqlite:/path/to.db, sqlite:relative.db, or
+	// sqlite::memory:). Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
+	DatabaseURL               string
 	SystemDBPool              *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
 	SQLiteSystemDB            *sql.DB         // SQLiteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
 	DatabaseSchema            string          // Database schema name (defaults to "dbos")
@@ -667,7 +671,10 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 // ClientConfig holds configuration parameters for NewClient. Exactly one of
 // DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
 type ClientConfig struct {
-	DatabaseURL            string          // DatabaseURL is the system-database connection string. Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
+	// DatabaseURL is the system-database connection string: a Postgres URL or key=value
+	// DSN, or a sqlite URL (sqlite:/path/to.db, sqlite:relative.db, or sqlite::memory:).
+	// Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
+	DatabaseURL            string
 	SystemDBPool           *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
 	SQLiteSystemDB         *sql.DB         // SQLiteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
 	DatabaseSchema         string          // Database schema name (defaults to "dbos")

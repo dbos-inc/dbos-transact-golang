@@ -807,8 +807,9 @@ func (c *dbosContext) countActiveWorkflowsForQueue(queueName, queuePartitionKey 
 type DeduplicationPolicy int
 
 const (
-	// DeduplicationPolicyReject (default) returns a ErrorCodeQueueDeduplicated error if another workflow
-	// already holds the deduplication ID on the queue.
+	// DeduplicationPolicyReject (default) rejects the enqueue with an error matching
+	// ErrQueueDeduplicated (via errors.Is) if another workflow already holds the
+	// deduplication ID on the queue.
 	DeduplicationPolicyReject DeduplicationPolicy = iota
 	// DeduplicationPolicyReturnExisting returns a handle to the existing workflow instead of an
 	// error.
@@ -1994,7 +1995,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 // This provides asynchronous workflow execution with durability guarantees.
 //
 // Parameters:
-//   - c: Client or Context instance for the operation
+//   - ctx: Client or Context instance for the operation
 //   - queueName: Name of the queue to enqueue the workflow to
 //   - workflowName: Name of the registered workflow function to execute
 //   - input: Input parameters to pass to the workflow (type P, inferred; only the result type R needs to be specified)
@@ -2054,18 +2055,18 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 //	    NamedArgs:      map[string]any{"key": "value"},
 //	}
 //	handle, err := dbos.Enqueue[any](client, "queue", "py_workflow", args)
-func Enqueue[R any, P any](c Client, queueName, workflowName string, input P, opts ...EnqueueOption) (WorkflowHandle[R], error) {
-	if c == nil {
+func Enqueue[R any, P any](ctx Client, queueName, workflowName string, input P, opts ...EnqueueOption) (WorkflowHandle[R], error) {
+	if ctx == nil {
 		return nil, errors.New("client cannot be nil")
 	}
 
 	// Call the interface method — encoding happens there
-	handle, err := c.Enqueue(c, queueName, workflowName, input, opts...)
+	handle, err := ctx.Enqueue(ctx, queueName, workflowName, input, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	return typedHandle[R](c, handle), nil
+	return typedHandle[R](ctx, handle), nil
 }
 
 /******************************/
@@ -2206,15 +2207,15 @@ func withNextStepID(stepID int) StepOption {
 	}
 }
 
-// StepOutcome holds the result and error from a step execution
-// This struct is returned as part of a channel from the Go function when running the step inside a Go routine
+// StepOutcome holds the result and error from a step execution.
+// This struct is delivered on the channel returned by Go when running the step inside a goroutine.
 type StepOutcome[R any] struct {
 	Result R
 	Err    error
 }
 
-// StreamValue holds a value, error, and closed status from a stream read operation
-// This struct is returned as part of a channel from ReadStreamAsync
+// StreamValue holds a value, error, and closed status from a stream read operation.
+// This struct is delivered on the channel returned by ReadStreamAsync.
 type StreamValue[R any] struct {
 	Value  R     // The stream value (zero value if error/closed)
 	Err    error // Error if one occurred (nil otherwise)
@@ -3733,7 +3734,7 @@ func (c *dbosContext) ReadStream(_ Client, workflowID string, key string, opts .
 
 // ReadStream reads values from a durable stream.
 // This method blocks until the stream is closed or an error occurs.
-// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
+// The stream is considered closed when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED).
 //
 // Returns the values, whether the stream is closed, and any error.
 //
@@ -3799,7 +3800,7 @@ func (c *dbosContext) ReadStreamAsync(_ Client, workflowID string, key string) (
 //
 // This method returns immediately with a channel. Values will be sent to the channel
 // as they're read from the stream. The channel will be closed when the stream is closed or an error occurs.
-// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
+// The stream is considered closed when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED).
 //
 // Example:
 //
@@ -4841,16 +4842,16 @@ func WithFilterStatus(status ...WorkflowStatusType) ListWorkflowsOption {
 }
 
 // WithFilterCreatedAfter filters workflows created after the specified time.
-func WithFilterCreatedAfter(startTime time.Time) ListWorkflowsOption {
+func WithFilterCreatedAfter(createdAfter time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
-		p.StartTime = startTime
+		p.StartTime = createdAfter
 	}
 }
 
 // WithFilterCreatedBefore filters workflows created before the specified time.
-func WithFilterCreatedBefore(endTime time.Time) ListWorkflowsOption {
+func WithFilterCreatedBefore(createdBefore time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
-		p.EndTime = endTime
+		p.EndTime = createdBefore
 	}
 }
 
