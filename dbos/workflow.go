@@ -999,8 +999,16 @@ func WithAuthenticatedRoles(roles ...string) WorkflowOption {
 // The workflow can be executed immediately or enqueued for later execution based on options.
 // Returns a typed handle that can be used to wait for completion and retrieve results.
 //
+// The context must have been launched with Launch; calling RunWorkflow before
+// Launch returns an initialization error.
+//
 // The workflow will be automatically recovered if the process crashes or is interrupted.
 // All workflow state is persisted to ensure exactly-once execution semantics.
+//
+// Workflow IDs are idempotency keys. If WithWorkflowID supplies the ID of a
+// workflow that already completed, RunWorkflow does not re-execute it: it
+// returns a handle to the recorded execution and the recorded result, and the
+// new input is ignored. To re-execute with the same ID, use ForkWorkflow.
 //
 // Example:
 //
@@ -1220,6 +1228,13 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	// Check if we are within a workflow (and thus a child workflow)
 	parentWorkflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
+
+	// Direct invocations require a launched runtime. Recovery, dequeue, and
+	// child workflow calls are internal paths that may run before Launch completes.
+	if !c.launched.Load() && !params.isRecovery && !params.isDequeue && !isChildWorkflow {
+		c.logger.Error("RunWorkflow called before Launch", "workflow_name", params.WorkflowName)
+		return nil, models.NewInitializationError("DBOS must be launched before running workflows; call Launch first")
+	}
 
 	// Prevent spawning child workflows from within a step
 	if isChildWorkflow && parentWorkflowState.isWithinStep {

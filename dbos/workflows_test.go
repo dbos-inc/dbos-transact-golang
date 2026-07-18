@@ -2810,6 +2810,8 @@ func TestChildWorkflowDeterminismCheck(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, determinismParentWf)
 
+	require.NoError(t, Launch(dbosCtx))
+
 	// Run the parent to completion so the child workflow is durably recorded in
 	// operation_outputs at step 0.
 	parentHandle, err := RunWorkflow(dbosCtx, determinismParentWf, "")

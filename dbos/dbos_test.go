@@ -570,6 +570,33 @@ func TestConcurrentLaunchOnlyStartsOnce(t *testing.T) {
 	Shutdown(ctx, 5*time.Second)
 }
 
+func TestRunWorkflowBeforeLaunchFails(t *testing.T) {
+	ctx, err := NewContext(context.Background(), Config{
+		AppName:     "test-run-before-launch",
+		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+	})
+	require.NoError(t, err)
+	defer Shutdown(ctx, 5*time.Second)
+
+	wf := func(ctx Context, in string) (string, error) { return in, nil }
+	RegisterWorkflow(ctx, wf)
+
+	_, err = RunWorkflow(ctx, wf, "hello")
+	require.Error(t, err)
+	dbosErr := &Error{}
+	require.ErrorAs(t, err, &dbosErr)
+	assert.Equal(t, ErrorCodeInitialization, dbosErr.Code)
+	assert.Contains(t, err.Error(), "DBOS must be launched before running workflows")
+
+	require.NoError(t, Launch(ctx))
+
+	handle, err := RunWorkflow(ctx, wf, "hello")
+	require.NoError(t, err)
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "hello", result)
+}
+
 func TestConcurrentShutdownDoesNotWaitTwice(t *testing.T) {
 	ctx, err := NewContext(context.Background(), Config{
 		AppName:     "test-concurrent-shutdown",
