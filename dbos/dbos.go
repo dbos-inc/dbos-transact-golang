@@ -168,7 +168,7 @@ type Client interface {
 	// Workflow operations
 	Enqueue(_ Client, queueName string, workflowName string, input any, opts ...EnqueueOption) (WorkflowHandle[any], error) // Enqueue a workflow by name to a named queue
 	Send(_ Client, destinationID string, message any, topic string, opts ...SendOption) error                               // Send a message to a workflow
-	GetEvent(_ Client, targetWorkflowID string, key string, timeout time.Duration) (any, error)                             // Get a key-value event from a target workflow
+	GetEvent(_ Client, targetWorkflowID string, key string, timeout time.Duration) (any, error)                             // Get a key-value event from a target workflow. Returns an opaque envelope; call dbos.GetEvent[R] instead to receive the decoded value
 	ReadStream(_ Client, workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error)                      // Read values from a durable stream (blocks until workflow inactive or stream closed)
 	ReadStreamAsync(_ Client, workflowID string, key string) (<-chan StreamValue[any], error)                               // Read values from a durable stream asynchronously
 
@@ -726,6 +726,8 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 // starts the queue runner and workflow scheduler.
 //
 // Returns an error if the context is already launched or if any component fails to start.
+// A failed Launch is terminal: the context is torn down (system database closed) and
+// cannot be relaunched — create a new context with NewContext and Launch that instead.
 func (c *dbosContext) Launch() error {
 	if !c.launchStarted.CompareAndSwap(false, true) {
 		return models.NewInitializationError("DBOS is already launched")
@@ -825,7 +827,9 @@ func (c *dbosContext) Launch() error {
 // Each step respects the provided timeout. If any component doesn't shut down within the timeout,
 // a warning is logged and the shutdown continues to the next component.
 //
-// Shutdown is a permanent operation and should be called when the application is terminating.
+// Shutdown is a permanent, one-shot operation and should be called once, when the
+// application is terminating: only the first call performs the shutdown and reports
+// its result; subsequent calls return nil immediately without waiting for it.
 func (c *dbosContext) Shutdown(timeout time.Duration) error {
 	if !c.shutdownStarted.CompareAndSwap(false, true) {
 		return nil

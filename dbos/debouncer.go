@@ -39,7 +39,7 @@ type DebounceMessage[P any] struct {
 //
 // Create with NewDebouncer before Launch; use DebouncerClient to debounce
 // from outside the application.
-type Debouncer[P any, R any] struct {
+type Debouncer[R any, P any] struct {
 	WorkflowFQN          string        // Fully qualified name of the target workflow
 	Timeout              time.Duration // Maximum time before starting the workflow (0 = no timeout)
 	internalDebouncerFQN string        // Fully qualified name of the internal debouncer workflow
@@ -112,11 +112,11 @@ func (o *debouncerOptions) resolveConfigName() string {
 //	// Later, use the debouncer with different keys and delays
 //	handle1, err := debouncer.Debounce(ctx, "user-123", 2*time.Second, inputData1)
 //	handle2, err := debouncer.Debounce(ctx, "user-456", 3*time.Second, inputData2)
-func NewDebouncer[P any, R any](
+func NewDebouncer[R any, P any](
 	ctx Context,
 	workflow Workflow[P, R],
 	opts ...DebouncerOption,
-) *Debouncer[P, R] {
+) *Debouncer[R, P] {
 	options := debouncerOptions{}
 	for _, opt := range opts {
 		opt(&options)
@@ -124,7 +124,7 @@ func NewDebouncer[P any, R any](
 
 	dbosCtx, ok := ctx.(*dbosContext)
 	if !ok {
-		return &Debouncer[P, R]{} // Do nothing if the concrete type is not dbosContext
+		return &Debouncer[R, P]{} // Do nothing if the concrete type is not dbosContext
 	}
 
 	// Enforce that debouncers can only be created before DBOS has launched
@@ -154,7 +154,7 @@ func NewDebouncer[P any, R any](
 		RegisterWorkflow(ctx, internalDebouncerWF[P, R])
 	}
 
-	return &Debouncer[P, R]{
+	return &Debouncer[R, P]{
 		WorkflowFQN:          fqn,
 		Timeout:              options.timeout,
 		internalDebouncerFQN: internalDebouncerFQN,
@@ -165,7 +165,7 @@ func NewDebouncer[P any, R any](
 // execution is already pending for key, pushes its start back by delay and
 // replaces the input it will run with. Returns a handle to the pending
 // workflow execution.
-func (d *Debouncer[P, R]) Debounce(ctx Context, key string, delay time.Duration, input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
+func (d *Debouncer[R, P]) Debounce(ctx Context, key string, delay time.Duration, input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	workflowState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 

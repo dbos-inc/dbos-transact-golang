@@ -179,7 +179,7 @@ func (q *workflowQueue) applyConfigChange(ctx Client, mutate func(*workflowQueue
 			*fresh = w.toConfig()
 			return nil
 		})
-	}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(sysdb.PostgresDialect{}.IsRetryableTransaction, sysdb.SqliteDialect{}.IsRetryableTransaction))
+	}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
 	if err != nil {
 		return err
 	}

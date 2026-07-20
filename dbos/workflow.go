@@ -1693,11 +1693,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				})
 			}, sysdb.WithRetrierLogger(c.logger))
 			if recordErr != nil {
-				// The write was refused because the row is already terminal or has been
-				// superseded (cancelled during the final step, or re-enqueued by a
-				// concurrent resume): end as cancelled, not complete. Deliver a
-				// cancellation outcome wrapping the workflow's own error so
-				// context.Canceled/DeadlineExceeded still match via errors.Is.
+				// A cancellation error means the write was refused because the workflow
+				// was cancelled (e.g. during the final step): end as cancelled, not
+				// complete. Deliver a cancellation outcome wrapping the workflow's own
+				// error so context.Canceled/DeadlineExceeded still match via errors.Is.
+				// Any other error is a genuine DB failure and is delivered as-is below.
 				if errors.Is(recordErr, ErrWorkflowCancelled) {
 					outcomeChan <- workflowOutcome[any]{result: result, err: models.NewWorkflowCancelledError(workflowID, err), cancelled: true}
 					close(outcomeChan)
