@@ -278,7 +278,7 @@ func clientUsingFunction(client dbos.Client) error {
 		return fmt.Errorf("expected workflow ID")
 	}
 
-	client.Shutdown(1 * time.Second)
+	client.Shutdown(client, 1 * time.Second)
 	return nil
 }
 
@@ -288,7 +288,7 @@ func TestMocks(t *testing.T) {
 
 	// Context lifecycle
 	mockCtx.On("Launch").Return(nil)
-	mockCtx.On("Shutdown", mock.Anything).Return(nil)
+	mockCtx.On("Shutdown", mock.Anything, mock.Anything).Return(nil)
 
 	// Context methods
 	mockCtx.On("Done").Return((<-chan struct{})(nil))
@@ -371,7 +371,7 @@ func TestMocks(t *testing.T) {
 	// Enqueue with specific values
 	mockClientHandle.On("GetStatus").Return(dbos.WorkflowStatus{ID: "wf-123"}, nil).Once()
 	mockClient.On("Enqueue", mockClient, "my-queue", "my-workflow", "input-data", mock.Anything).Return(mockClientHandle, nil).Once()
-	mockClient.On("Shutdown", 1*time.Second).Return(nil)
+	mockClient.On("Shutdown", mock.Anything, 1*time.Second).Return(nil)
 
 	err = clientUsingFunction(mockClient)
 	if err != nil {

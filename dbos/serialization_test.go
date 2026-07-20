@@ -1258,7 +1258,7 @@ func TestClientCustomSerializer(t *testing.T) {
 		Serializer:  customSer,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
 
 	t.Run("EnqueueWithCustomSerializer", func(t *testing.T) {
 		// The chicken serializer always encodes to fixedChicken, so regardless
@@ -1761,7 +1761,7 @@ func TestPortableInterop(t *testing.T) {
 			DatabaseURL: executor.(*dbosContext).config.DatabaseURL,
 		})
 		require.NoError(t, err)
-		t.Cleanup(func() { client.Shutdown(5 * time.Second) })
+		t.Cleanup(func() { client.Shutdown(client, 5 * time.Second) })
 
 		portableArgs := PortableWorkflowArgs{
 			PositionalArgs: []any{expectedArgs, "extra-positional", 99},

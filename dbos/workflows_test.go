@@ -7388,7 +7388,7 @@ func TestWorkflowHandleContextCancel(t *testing.T) {
 		getEventWorkflowStartedSignal.Wait()
 		getEventWorkflowStartedSignal.Clear()
 
-		dbosCtx.Shutdown(1 * time.Second)
+		dbosCtx.Shutdown(dbosCtx, 1 * time.Second)
 
 		err = <-resultChan
 		require.Error(t, err, "expected error from cancelled context")
@@ -9257,7 +9257,7 @@ func TestWorkflowAttributes(t *testing.T) {
 		client, err := NewClient(dbosCtx, config)
 		require.NoError(t, err)
 		t.Cleanup(func() {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		})
 
 		// Enqueue to a queue nothing consumes; the workflow stays ENQUEUED, which

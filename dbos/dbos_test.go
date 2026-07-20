@@ -1285,7 +1285,7 @@ func TestClientShutdownReportsSystemDBTimeout(t *testing.T) {
 	conn, err := pool.Acquire(ctx)
 	require.NoError(t, err)
 
-	err = client.Shutdown(500 * time.Millisecond)
+	err = client.Shutdown(client, 500 * time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "system database connection pool")
 
@@ -1767,7 +1767,7 @@ func TestNewContextSQLiteRoundtrip(t *testing.T) {
 		Logger:      logger,
 	})
 	require.NoError(t, err, "NewContext with sqlite URL should succeed")
-	ctx.Shutdown(0)
+	ctx.Shutdown(ctx, 0)
 }
 
 // TestNewContextRejectsUnknownScheme verifies up-front URL validation

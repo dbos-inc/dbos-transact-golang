@@ -210,7 +210,7 @@ type Client interface {
 	GetLatestApplicationVersion(_ Client) (VersionInfo, error)      // Get the latest registered application version
 	SetLatestApplicationVersion(_ Client, versionName string) error // Mark the named version as latest by bumping its timestamp to now
 
-	Shutdown(timeout time.Duration) error // Gracefully shutdown all DBOS resources; returns an error if the timeout expired before they all stopped
+	Shutdown(_ Client, timeout time.Duration) error // Gracefully shutdown all DBOS resources; returns an error if the timeout expired before they all stopped
 }
 
 // Context represents a DBOS execution context that provides workflow orchestration capabilities.
@@ -549,7 +549,7 @@ func (c *dbosContext) ListRegisteredWorkflows(_ Context) []WorkflowRegistryEntry
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	defer ctx.Shutdown(30*time.Second)
+//	defer dbos.Shutdown(ctx, 30*time.Second)
 //
 //	if err := ctx.Launch(); err != nil {
 //	    log.Fatal(err)
@@ -735,7 +735,7 @@ func (c *dbosContext) Launch() error {
 	launchCompleted := false
 	defer func() {
 		if !launchCompleted {
-			if err := c.Shutdown(_LAUNCH_ROLLBACK_TIMEOUT); err != nil {
+			if err := c.Shutdown(c, _LAUNCH_ROLLBACK_TIMEOUT); err != nil {
 				c.logger.Error("Failed to roll back launch", "error", err)
 			}
 		}
@@ -830,7 +830,7 @@ func (c *dbosContext) Launch() error {
 // Shutdown is a permanent, one-shot operation and should be called once, when the
 // application is terminating: only the first call performs the shutdown and reports
 // its result; subsequent calls return nil immediately without waiting for it.
-func (c *dbosContext) Shutdown(timeout time.Duration) error {
+func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	if !c.shutdownStarted.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -1037,7 +1037,7 @@ func Shutdown(c Client, timeout time.Duration) error {
 	if c == nil {
 		return nil
 	}
-	return c.Shutdown(timeout)
+	return c.Shutdown(c, timeout)
 }
 
 // clearRegistries clears the workflow registry,

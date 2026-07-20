@@ -119,7 +119,7 @@ func TestClientEnqueue(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		}
 	})
 
@@ -580,7 +580,7 @@ func TestCancelResume(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		}
 	})
 
@@ -773,7 +773,7 @@ func TestDeleteWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		}
 	})
 
@@ -910,7 +910,7 @@ func TestForkWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		}
 	})
 
@@ -1167,7 +1167,7 @@ func TestListWorkflows(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		}
 	})
 
@@ -1539,7 +1539,7 @@ func TestGetWorkflowSteps(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		}
 	})
 
@@ -1629,7 +1629,7 @@ func TestClientReadStream(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		}
 	})
 
@@ -1692,7 +1692,7 @@ func TestClientReadStreamAsyncGoroutineLeak(t *testing.T) {
 	databaseURL := backendDatabaseURL(t)
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
 
 	streamKey := "test-client-leak-stream"
 	handle, err := RunWorkflow(serverCtx, blockingStreamWorkflow, streamKey)
@@ -1737,7 +1737,7 @@ func TestDebouncerClient(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		}
 	})
 
@@ -1932,7 +1932,7 @@ func TestDebouncerClientConfiguredInstance(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		}
 	})
 
@@ -1984,7 +1984,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(30 * time.Second)
+			client.Shutdown(client, 30 * time.Second)
 		}
 	})
 
@@ -2063,7 +2063,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 	config := ClientConfig{DatabaseURL: databaseURL}
 	client, err := NewClient(context.Background(), config)
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
 
 	t.Run("ClientEnqueueWithDelay", func(t *testing.T) {
 		delayDuration := 2 * time.Second
@@ -2191,7 +2191,7 @@ func TestClientSchedules(t *testing.T) {
 
 	c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+	t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
 
 	const workflowFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule"
 
@@ -2343,7 +2343,7 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
-		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+		t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
 
 		latest, err := c.GetLatestApplicationVersion(c)
 		require.NoError(t, err)
@@ -2363,7 +2363,7 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
-		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+		t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
 
 		// Seed an older version directly so it sorts before the current one.
 		sysDB := serverCtx.(*dbosContext).systemDB
@@ -2392,7 +2392,7 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
-		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+		t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
 		// Launch registers the current version; clear table to simulate empty state.
 		s := serverCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 		_, err = s.Pool().Exec(serverCtx, s.RenderSQL("DELETE FROM %sapplication_versions", s.Dialect().SchemaPrefix(s.Schema())))
@@ -2411,7 +2411,7 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
-		t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+		t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
 
 		require.Error(t, c.SetLatestApplicationVersion(c, ""))
 	})
@@ -2451,7 +2451,7 @@ func TestClientCustomSqliteDB(t *testing.T) {
 
 	c, err := NewClient(context.Background(), ClientConfig{SQLiteSystemDB: clientDB})
 	require.NoError(t, err)
-	t.Cleanup(func() { c.Shutdown(10 * time.Second) })
+	t.Cleanup(func() { c.Shutdown(c, 10 * time.Second) })
 
 	dbosCtx, ok := c.(*dbosContext)
 	require.True(t, ok)
@@ -2496,7 +2496,7 @@ func TestClientCustomPool(t *testing.T) {
 
 	c, err := NewClient(context.Background(), ClientConfig{SystemDBPool: clientPool})
 	require.NoError(t, err)
-	t.Cleanup(func() { c.Shutdown(10 * time.Second) })
+	t.Cleanup(func() { c.Shutdown(c, 10 * time.Second) })
 
 	dbosCtx, ok := c.(*dbosContext)
 	require.True(t, ok)
@@ -2522,7 +2522,7 @@ func TestClientSend(t *testing.T) {
 
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
 
 	t.Run("WithIdempotencyKeyDeliversOnce", func(t *testing.T) {
 		handle, err := RunWorkflow(serverCtx, receiveTwiceShortWorkflow, "client-idem-dup-topic")
@@ -2579,7 +2579,7 @@ func TestClientGetEvent(t *testing.T) {
 
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
 
 	workflowID := "client-getevent-wf"
 	handle, err := Enqueue[string, string](client, queue.GetName(), "EventWorkflow", "",
@@ -2632,7 +2632,7 @@ func TestClientTypedHandles(t *testing.T) {
 
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
 
 	appVersion := WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion())
 
@@ -2743,7 +2743,7 @@ func TestClientListAndSteps(t *testing.T) {
 
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
 
 	workflowID := "client-list-steps-wf"
 	handle, err := Enqueue[wfOutput](client, queue.GetName(), "ListStepsWorkflow", wfInput{Name: "max"},
@@ -2806,7 +2806,7 @@ func TestClientTriggerScheduleTyped(t *testing.T) {
 
 	c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { c.Shutdown(30 * time.Second) })
+	t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
 
 	const workflowFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule"
 	const name = "client-trigger-typed"

@@ -23,14 +23,14 @@ func myWorkflow(ctx dbos.DBOSContext, input string) (string, error)
 func myWorkflow(ctx dbos.Context, input string) (string, error)
 ```
 
-`Shutdown` now returns an error (non-nil if the timeout expired before all resources stopped):
+`Shutdown` now returns an error (non-nil if the timeout expired before all resources stopped). Use the package-level functions for launch and shutdown — like the other interface methods, `Shutdown` now takes a leading `Client` receiver-argument, so method-form calls must be migrated:
 
 ```go
 // v0
+ctx.Launch()
 ctx.Shutdown(30 * time.Second)
-dbos.Shutdown(ctx, 30*time.Second)
 // v1
-err := ctx.Shutdown(30 * time.Second)
+err := dbos.Launch(ctx)
 err := dbos.Shutdown(ctx, 30*time.Second)   // accepts Client or Context
 ```
 
@@ -94,7 +94,7 @@ queue := dbos.NewWorkflowQueue(ctx, "queue", dbos.WithWorkerConcurrency(5))   //
 queue, err := dbos.RegisterQueue(ctx, "queue", dbos.WithWorkerConcurrency(5)) // works before or after Launch, and from a Client
 ```
 
-- `RegisterQueue` returns `(Queue, error)` — handle the error.
+- `RegisterQueue` returns `(Queue, error)` — handle the error. This typically ripples outward: per-module registration helpers that were `func Register(ctx dbos.Context)` become error-returning, and every host binary that calls them needs the plumbing. Budget for that in apps with per-agent registration functions.
 - `WithMaxTasksPerIteration` option removed (no replacement).
 - Field access via struct (`queue.Name`) → interface getters (`queue.GetName()`).
 - Queue `Set*` methods now take a `Client` (any `Context` works).
@@ -169,7 +169,8 @@ type ScheduleSpec struct {
 ```
 
 - `CreateSchedule(ctx, fn, req, opts...)` → `CreateSchedule(ctx, spec)`; `ApplySchedules` takes `[]ScheduleSpec`.
-- `ScheduledWorkflowInput.Context` is now `json.RawMessage`; decode with the new `dbos.DecodeScheduleContext[T](input)`.
+- Field rename: `ApplySchedulesRequest.WorkflowFn` → `ScheduleSpec.Workflow`. Renaming the *type* alone leaves `WorkflowFn:` behind at every schedule literal — rename the field too (included in the §9 sed list).
+- `ScheduledWorkflowInput.Context` is now `json.RawMessage`; decode with the new `dbos.DecodeScheduleContext[T](input)`. *Creating* schedules is unaffected — `ScheduleSpec.Context` stays `any` and still takes your struct directly; the SDK serializes it. Only code that hand-constructs a `ScheduledWorkflowInput` (test harnesses, manual-trigger paths that invoke a scheduled workflow directly to simulate a tick) must now `json.Marshal` the context into the field.
 
 > **Gob-serializer apps: drain scheduled firings before upgrading.** `ScheduledWorkflowInput.Context` changed from `any` to `json.RawMessage` under the same gob registration, and gob cannot decode the old interface-encoded field into the new concrete type. Any schedule firing still ENQUEUED (or otherwise not yet dequeued) at upgrade time in an app using `NewGobSerializer` will fail input decoding and error when it runs — those workflows do not make it through the upgrade. Let pending firings drain (or cancel them) before deploying v1. Apps on the default JSON serializer are unaffected.
 - `GetSchedule` returns `(WorkflowSchedule, error)` by value (was `*WorkflowSchedule`), with `dbos.ErrScheduleNotFound` when absent.
@@ -274,6 +275,7 @@ Slice-taking filters became variadic — call sites passing a literal slice need
 - `ClearRegistries` removed from the public API (was testing-only).
 - New package-level accessors: `dbos.GetApplicationVersion(ctx)`, `dbos.GetExecutorID(ctx)`, `dbos.GetApplicationID(ctx)`.
 - `Config.DatabaseURL` accepts Postgres/CockroachDB URLs or key=value DSNs, and sqlite URLs (`sqlite:/path/to.db`, `sqlite:relative.db`, `sqlite::memory:`).
+- **No system-database schema changes.** v1 makes no changes to the system schema relative to the last v0.x release: nothing migrates at `Launch()`, existing workflows (including long-DELAYED ones), queues, and schedule rows carry over as-is, and v0.x and v1 executors can share a system database during a rolling upgrade.
 
 ## 8. Mocks / tests
 
