@@ -148,7 +148,7 @@ func TestClientEnqueue(t *testing.T) {
 
 	t.Run("EnqueueAndGetResult", func(t *testing.T) {
 		// Client enqueues a task using the new Enqueue method
-		handle, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
+		handle, err := Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
 
@@ -178,7 +178,7 @@ func TestClientEnqueue(t *testing.T) {
 		customWorkflowID := "custom-client-workflow-id"
 
 		// Client enqueues a task with a custom workflow ID
-		_, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
+		_, err := Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(customWorkflowID))
 		require.NoError(t, err)
 
@@ -312,14 +312,14 @@ func TestClientEnqueue(t *testing.T) {
 		wfid2 := "client-dedup-wf2"
 
 		// First workflow with deduplication ID - should succeed
-		handle1, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
+		handle1, err := Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfid1),
 			WithEnqueueDeduplicationID(dedupID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue first workflow with deduplication ID")
 
 		// Second workflow with same deduplication ID but different workflow ID - should fail
-		_, err = Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
+		_, err = Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfid2),
 			WithEnqueueDeduplicationID(dedupID),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -334,13 +334,13 @@ func TestClientEnqueue(t *testing.T) {
 		assert.Contains(t, err.Error(), expectedMsgPart, "expected error message to contain deduplication information")
 
 		// Third workflow with different deduplication ID - should succeed
-		handle3, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
+		handle3, err := Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueDeduplicationID("different-dedup-id"),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow with different deduplication ID")
 
 		// Fourth workflow without deduplication ID - should succeed
-		handle4, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
+		handle4, err := Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err, "failed to enqueue workflow without deduplication ID")
 
@@ -358,7 +358,7 @@ func TestClientEnqueue(t *testing.T) {
 		assert.Equal(t, "processed: test-input", result4)
 
 		// After first workflow completes, we should be able to enqueue with same deduplication ID
-		handle5, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
+		handle5, err := Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfid2),        // Reuse the workflow ID that failed before
 			WithEnqueueDeduplicationID(dedupID), // Same deduplication ID as first workflow
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
@@ -406,7 +406,7 @@ func TestClientEnqueue(t *testing.T) {
 	})
 
 	t.Run("EnqueueWithDedupReturnExistingMissingID", func(t *testing.T) {
-		_, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "x"},
+		_, err := Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "x"},
 			WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.Error(t, err, "expected error when deduplication ID is missing")
@@ -467,7 +467,7 @@ func TestClientEnqueue(t *testing.T) {
 	t.Run("EnqueueWithEmptyQueueName", func(t *testing.T) {
 		// Attempt to enqueue with empty queue name
 		// This should return an error
-		_, err := Enqueue[wfInput, string](client, "", "ServerWorkflow", wfInput{Input: "test-input"})
+		_, err := Enqueue[string, wfInput](client, "", "ServerWorkflow", wfInput{Input: "test-input"})
 		require.Error(t, err, "expected error when enqueueing with empty queue name")
 
 		// Verify the error message contains the expected text
@@ -477,7 +477,7 @@ func TestClientEnqueue(t *testing.T) {
 	t.Run("EnqueueWithEmptyWorkflowName", func(t *testing.T) {
 		// Attempt to enqueue with empty workflow name
 		// This should return an error
-		_, err := Enqueue[wfInput, string](client, queue.GetName(), "", wfInput{Input: "test-input"})
+		_, err := Enqueue[string, wfInput](client, queue.GetName(), "", wfInput{Input: "test-input"})
 		require.Error(t, err, "expected error when enqueueing with empty workflow name")
 
 		// Verify the error message contains the expected text
@@ -486,11 +486,11 @@ func TestClientEnqueue(t *testing.T) {
 
 	t.Run("EnqueueWithAuthOptions", func(t *testing.T) {
 		wfID := "client-auth-options-wf"
-		handle, err := Enqueue[wfInput, string](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
+		handle, err := Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
 			WithEnqueueWorkflowID(wfID),
 			WithEnqueueAuthenticatedUser("test-user"),
 			WithEnqueueAssumedRole("test-role"),
-			WithEnqueueAuthenticatedRoles([]string{"role1", "role2"}),
+			WithEnqueueAuthenticatedRoles("role1", "role2"),
 			WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 		require.NoError(t, err)
 
@@ -1034,26 +1034,26 @@ func TestForkWorkflow(t *testing.T) {
 		t.Logf("Final counters after all forks - steps:%d, child1:%d, child2:%d", stepCount1, child1Count, child2Count)
 
 		// Verify the original workflow is marked as having been forked from
-		originalStatus, err := client.ListWorkflows(client, WithWorkflowIDs([]string{originalWorkflowID}))
+		originalStatus, err := client.ListWorkflows(client, WithFilterWorkflowIDs(originalWorkflowID))
 		require.NoError(t, err, "failed to list original workflow")
 		require.Len(t, originalStatus, 1)
 		assert.True(t, originalStatus[0].WasForkedFrom, "original workflow should be marked was_forked_from")
 
-		// WithWasForkedFrom(true) returns the original; WithWasForkedFrom(false) excludes it
-		forkedFromTrue, err := client.ListWorkflows(client, WithWasForkedFrom(true))
+		// WithFilterWasForkedFrom(true) returns the original; WithFilterWasForkedFrom(false) excludes it
+		forkedFromTrue, err := client.ListWorkflows(client, WithFilterWasForkedFrom(true))
 		require.NoError(t, err)
 		foundOriginal := false
 		for _, wf := range forkedFromTrue {
-			assert.True(t, wf.WasForkedFrom, "WithWasForkedFrom(true) must only return forked-from workflows")
+			assert.True(t, wf.WasForkedFrom, "WithFilterWasForkedFrom(true) must only return forked-from workflows")
 			if wf.ID == originalWorkflowID {
 				foundOriginal = true
 			}
 		}
-		assert.True(t, foundOriginal, "expected original workflow in WithWasForkedFrom(true) results")
-		forkedFromFalse, err := client.ListWorkflows(client, WithWasForkedFrom(false))
+		assert.True(t, foundOriginal, "expected original workflow in WithFilterWasForkedFrom(true) results")
+		forkedFromFalse, err := client.ListWorkflows(client, WithFilterWasForkedFrom(false))
 		require.NoError(t, err)
 		for _, wf := range forkedFromFalse {
-			assert.NotEqual(t, originalWorkflowID, wf.ID, "WithWasForkedFrom(false) must exclude forked-from workflows")
+			assert.NotEqual(t, originalWorkflowID, wf.ID, "WithFilterWasForkedFrom(false) must exclude forked-from workflows")
 		}
 	})
 
@@ -1142,7 +1142,7 @@ func TestListWorkflows(t *testing.T) {
 	RegisterWorkflow(serverCtx, simpleWorkflow, WithWorkflowName("SimpleWorkflow"))
 	RegisterWorkflow(serverCtx, otherWorkflow, WithWorkflowName("OtherWorkflow"))
 
-	// Parent/child workflows for WithParentWorkflowID filter test
+	// Parent/child workflows for WithFilterParentWorkflowID filter test
 	childWfForListTest := func(ctx Context, input string) (string, error) { return input, nil }
 	parentWfForListTest := func(ctx Context, _ string) (string, error) {
 		h, err := RunWorkflow(ctx, childWfForListTest, "child-input")
@@ -1190,7 +1190,7 @@ func TestListWorkflows(t *testing.T) {
 
 			if i == 5 {
 				firstHalfTime = time.Now()
-				// created_at is stored at millisecond resolution and WithEndTime is
+				// created_at is stored at millisecond resolution and WithFilterCreatedBefore is
 				// inclusive: keep test-other-5's stamp out of the boundary's tick.
 				time.Sleep(5 * time.Millisecond)
 			}
@@ -1198,7 +1198,7 @@ func TestListWorkflows(t *testing.T) {
 			if i < 5 {
 				// First 5 workflows: use prefix "test-batch-" and succeed
 				workflowID = fmt.Sprintf("test-batch-%d", i)
-				handle, err = Enqueue[testInput, string](client, queue.GetName(), "SimpleWorkflow", testInput{Value: i, ID: fmt.Sprintf("success-%d", i)},
+				handle, err = Enqueue[string, testInput](client, queue.GetName(), "SimpleWorkflow", testInput{Value: i, ID: fmt.Sprintf("success-%d", i)},
 					WithEnqueueWorkflowID(workflowID),
 					WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			} else {
@@ -1208,7 +1208,7 @@ func TestListWorkflows(t *testing.T) {
 				if i >= 8 {
 					value = -i // These will fail
 				}
-				handle, err = Enqueue[testInput, string](client, queue.GetName(), "SimpleWorkflow", testInput{Value: value, ID: fmt.Sprintf("test-%d", i)},
+				handle, err = Enqueue[string, testInput](client, queue.GetName(), "SimpleWorkflow", testInput{Value: value, ID: fmt.Sprintf("test-%d", i)},
 					WithEnqueueWorkflowID(workflowID),
 					WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			}
@@ -1236,7 +1236,7 @@ func TestListWorkflows(t *testing.T) {
 
 		// Run 2 workflows with different name (OtherWorkflow) for multi-name filter test
 		for i := range 2 {
-			h, err := Enqueue[testInput, string](client, queue.GetName(), "OtherWorkflow", testInput{Value: i, ID: fmt.Sprintf("other-%d", i)},
+			h, err := Enqueue[string, testInput](client, queue.GetName(), "OtherWorkflow", testInput{Value: i, ID: fmt.Sprintf("other-%d", i)},
 				WithEnqueueWorkflowID(fmt.Sprintf("test-other-name-%d", i)),
 				WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			require.NoError(t, err, "failed to enqueue OtherWorkflow %d", i)
@@ -1246,7 +1246,7 @@ func TestListWorkflows(t *testing.T) {
 
 		// Run 2 workflows on second queue for multi-queue filter test
 		for i := range 2 {
-			h, err := Enqueue[testInput, string](client, queue2.GetName(), "SimpleWorkflow", testInput{Value: 100 + i, ID: fmt.Sprintf("q2-%d", i)},
+			h, err := Enqueue[string, testInput](client, queue2.GetName(), "SimpleWorkflow", testInput{Value: 100 + i, ID: fmt.Sprintf("q2-%d", i)},
 				WithEnqueueWorkflowID(fmt.Sprintf("test-queue2-%d", i)),
 				WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 			require.NoError(t, err, "failed to enqueue to queue2 %d", i)
@@ -1272,7 +1272,7 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 2: Filter by workflow IDs
 		expectedIDs := workflowIDs[:3]
-		specificWorkflows, err := client.ListWorkflows(client, WithWorkflowIDs(expectedIDs))
+		specificWorkflows, err := client.ListWorkflows(client, WithFilterWorkflowIDs(expectedIDs...))
 		require.NoError(t, err, "failed to list workflows by IDs")
 		assert.Len(t, specificWorkflows, 3, "expected 3 workflows")
 		// Verify returned workflow IDs match expected
@@ -1285,7 +1285,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 3: Filter by workflow ID prefix
-		batchWorkflows, err := client.ListWorkflows(client, WithWorkflowIDPrefix("test-batch-"))
+		batchWorkflows, err := client.ListWorkflows(client, WithFilterWorkflowIDPrefix("test-batch-"))
 		require.NoError(t, err, "failed to list workflows by prefix")
 		assert.Len(t, batchWorkflows, 5, "expected 5 batch workflows")
 		// Verify all returned workflow IDs have the correct prefix
@@ -1295,8 +1295,8 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 4: Filter by status - SUCCESS
 		successWorkflows, err := client.ListWorkflows(client,
-			WithWorkflowIDPrefix("test-"), // Only our test workflows
-			WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}))
+			WithFilterWorkflowIDPrefix("test-"), // Only our test workflows
+			WithFilterStatus(WorkflowStatusSuccess))
 		require.NoError(t, err, "failed to list successful workflows")
 		assert.Len(t, successWorkflows, 12, "expected 12 successful workflows (8 initial + 2 OtherWorkflow + 2 queue2)")
 		// Verify all returned workflows have SUCCESS status
@@ -1306,8 +1306,8 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 5: Filter by status - ERROR
 		errorWorkflows, err := client.ListWorkflows(client,
-			WithWorkflowIDPrefix("test-"),
-			WithStatus([]WorkflowStatusType{WorkflowStatusError}))
+			WithFilterWorkflowIDPrefix("test-"),
+			WithFilterStatus(WorkflowStatusError))
 		require.NoError(t, err, "failed to list error workflows")
 		assert.Len(t, errorWorkflows, 2, "expected 2 error workflows")
 		// Verify all returned workflows have ERROR status
@@ -1317,27 +1317,27 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 6: Filter by time range - the 5 test-batch-* workflows
 		firstHalfWorkflows, err := client.ListWorkflows(client,
-			WithWorkflowIDPrefix("test-"),
-			WithEndTime(firstHalfTime))
+			WithFilterWorkflowIDPrefix("test-"),
+			WithFilterCreatedBefore(firstHalfTime))
 		require.NoError(t, err, "failed to list first half workflows by time range")
 		assert.Len(t, firstHalfWorkflows, 5, "expected 5 workflows in first half time range")
 
 		// Test 6b: Filter by time range - workflows started at or after firstHalfTime
 		secondHalfWorkflows, err := client.ListWorkflows(client,
-			WithWorkflowIDPrefix("test-"),
-			WithStartTime(firstHalfTime))
+			WithFilterWorkflowIDPrefix("test-"),
+			WithFilterCreatedAfter(firstHalfTime))
 		require.NoError(t, err, "failed to list second half workflows by time range")
 		assert.Len(t, secondHalfWorkflows, 9, "expected 9 workflows in second half (5 test-other-5..9 + 2 test-other-name + 2 test-queue2)")
 
 		// Test 7: Test sorting order (ascending - default)
 		ascWorkflows, err := client.ListWorkflows(client,
-			WithWorkflowIDPrefix("test-"))
+			WithFilterWorkflowIDPrefix("test-"))
 		require.NoError(t, err, "failed to list workflows ascending")
 
 		// Test 8: Test sorting order (descending)
 		descWorkflows, err := client.ListWorkflows(client,
-			WithWorkflowIDPrefix("test-"),
-			WithSortDesc())
+			WithFilterWorkflowIDPrefix("test-"),
+			WithFilterSortDesc())
 		require.NoError(t, err, "failed to list workflows descending")
 
 		// Verify sorting - workflows should be ordered by creation time
@@ -1358,8 +1358,8 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 9: Test limit and offset
 		limitedWorkflows, err := client.ListWorkflows(client,
-			WithWorkflowIDPrefix("test-"),
-			WithLimit(5))
+			WithFilterWorkflowIDPrefix("test-"),
+			WithFilterLimit(5))
 		require.NoError(t, err, "failed to list workflows with limit")
 		assert.Len(t, limitedWorkflows, 5, "expected 5 workflows with limit")
 		// Verify we got the first 5 workflows (earliest created)
@@ -1369,9 +1369,9 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		offsetWorkflows, err := client.ListWorkflows(client,
-			WithWorkflowIDPrefix("test-"),
-			WithOffset(5),
-			WithLimit(3))
+			WithFilterWorkflowIDPrefix("test-"),
+			WithFilterOffset(5),
+			WithFilterLimit(3))
 		require.NoError(t, err, "failed to list workflows with offset")
 		assert.Len(t, offsetWorkflows, 3, "expected 3 workflows with offset")
 		// Verify we got workflows 5, 6, 7 from the ascending list
@@ -1383,8 +1383,8 @@ func TestListWorkflows(t *testing.T) {
 		// Offset without a limit: SQLite rejects a bare OFFSET, so this exercises
 		// the dialect's "no limit" sentinel. Expect all workflows after the first 5.
 		offsetNoLimitWorkflows, err := client.ListWorkflows(client,
-			WithWorkflowIDPrefix("test-"),
-			WithOffset(5))
+			WithFilterWorkflowIDPrefix("test-"),
+			WithFilterOffset(5))
 		require.NoError(t, err, "failed to list workflows with offset and no limit")
 		expectedOffsetNoLimit := ascWorkflows[5:]
 		require.Len(t, offsetNoLimitWorkflows, len(expectedOffsetNoLimit), "unexpected workflow count with offset and no limit")
@@ -1394,9 +1394,9 @@ func TestListWorkflows(t *testing.T) {
 
 		// Test 10: Test input/output loading
 		noDataWorkflows, err := client.ListWorkflows(client,
-			WithWorkflowIDs(workflowIDs[:2]),
-			WithLoadInput(false),
-			WithLoadOutput(false))
+			WithFilterWorkflowIDs(workflowIDs[:2]...),
+			WithFilterLoadInput(false),
+			WithFilterLoadOutput(false))
 		require.NoError(t, err, "failed to list workflows without data")
 		assert.Len(t, noDataWorkflows, 2, "expected 2 workflows without data")
 
@@ -1407,7 +1407,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 11: Filter by multiple workflow ID prefixes (slice option)
-		multiPrefixWorkflows, err := client.ListWorkflows(client, WithWorkflowIDPrefix("test-batch-", "test-other-"))
+		multiPrefixWorkflows, err := client.ListWorkflows(client, WithFilterWorkflowIDPrefix("test-batch-", "test-other-"))
 		require.NoError(t, err, "failed to list workflows by multiple prefixes")
 		// Matches test-batch-0..4 (5) + test-other-5..9 (5) + test-other-name-0,1 (2) = 12
 		assert.Len(t, multiPrefixWorkflows, 12, "expected 12 workflows matching either prefix")
@@ -1417,7 +1417,7 @@ func TestListWorkflows(t *testing.T) {
 		}
 
 		// Test 12: Filter by multiple workflow names (slice option)
-		multiNameWorkflows, err := client.ListWorkflows(client, WithName("SimpleWorkflow", "OtherWorkflow"))
+		multiNameWorkflows, err := client.ListWorkflows(client, WithFilterName("SimpleWorkflow", "OtherWorkflow"))
 		require.NoError(t, err, "failed to list workflows by multiple names")
 		assert.Len(t, multiNameWorkflows, 14, "expected 14 workflows (10 SimpleWorkflow + 2 OtherWorkflow + 2 SimpleWorkflow on queue2)")
 		namesSeen := make(map[string]int)
@@ -1430,7 +1430,7 @@ func TestListWorkflows(t *testing.T) {
 		assert.GreaterOrEqual(t, namesSeen["OtherWorkflow"], 2, "expected at least 2 OtherWorkflow")
 
 		// Test 13: Filter by multiple queue names (slice option)
-		multiQueueWorkflows, err := client.ListWorkflows(client, WithQueueName(queue.GetName(), queue2.GetName()))
+		multiQueueWorkflows, err := client.ListWorkflows(client, WithFilterQueueName(queue.GetName(), queue2.GetName()))
 		require.NoError(t, err, "failed to list workflows by multiple queues")
 		assert.Len(t, multiQueueWorkflows, 14, "expected 14 workflows (12 on queue + 2 on queue2)")
 		queuesSeen := make(map[string]int)
@@ -1452,51 +1452,51 @@ func TestListWorkflows(t *testing.T) {
 		require.NoError(t, err, "parent workflow should succeed")
 		assert.Equal(t, parentID, parentHandle.GetWorkflowID(), "parent should have requested workflow ID")
 		expectedChildID := parentID + "-0"
-		childWorkflows, err := client.ListWorkflows(client, WithParentWorkflowID(parentID))
+		childWorkflows, err := client.ListWorkflows(client, WithFilterParentWorkflowID(parentID))
 		require.NoError(t, err, "failed to list workflows by parent ID")
 		assert.Len(t, childWorkflows, 1, "expected one child workflow")
 		assert.Equal(t, parentID, childWorkflows[0].ParentWorkflowID, "child should have ParentWorkflowID set")
 		assert.Equal(t, expectedChildID, childWorkflows[0].ID, "child workflow ID should be parentID-0")
 		// Filter with nonexistent parent returns empty
-		nonexistent, err := client.ListWorkflows(client, WithParentWorkflowID("nonexistent-parent-id"))
+		nonexistent, err := client.ListWorkflows(client, WithFilterParentWorkflowID("nonexistent-parent-id"))
 		require.NoError(t, err)
 		assert.Len(t, nonexistent, 0)
 
 		// Test 15: Filter by presence of a parent workflow
-		withParent, err := client.ListWorkflows(client, WithHasParent(true))
+		withParent, err := client.ListWorkflows(client, WithFilterHasParent(true))
 		require.NoError(t, err, "failed to list workflows with a parent")
 		foundChild := false
 		for _, wf := range withParent {
-			assert.NotEmpty(t, wf.ParentWorkflowID, "WithHasParent(true) must only return workflows with a parent")
+			assert.NotEmpty(t, wf.ParentWorkflowID, "WithFilterHasParent(true) must only return workflows with a parent")
 			if wf.ID == expectedChildID {
 				foundChild = true
 			}
 		}
-		assert.True(t, foundChild, "expected child workflow in WithHasParent(true) results")
-		withoutParent, err := client.ListWorkflows(client, WithHasParent(false))
+		assert.True(t, foundChild, "expected child workflow in WithFilterHasParent(true) results")
+		withoutParent, err := client.ListWorkflows(client, WithFilterHasParent(false))
 		require.NoError(t, err, "failed to list workflows without a parent")
 		for _, wf := range withoutParent {
-			assert.Empty(t, wf.ParentWorkflowID, "WithHasParent(false) must only return workflows without a parent")
+			assert.Empty(t, wf.ParentWorkflowID, "WithFilterHasParent(false) must only return workflows without a parent")
 		}
 
 		// Test 16: completed_at is populated for terminal workflows and supports range filters
-		completedChild, err := client.ListWorkflows(client, WithWorkflowIDs([]string{expectedChildID}))
+		completedChild, err := client.ListWorkflows(client, WithFilterWorkflowIDs(expectedChildID))
 		require.NoError(t, err)
 		require.Len(t, completedChild, 1)
 		require.False(t, completedChild[0].CompletedAt.IsZero(), "completed workflow should have CompletedAt set")
-		afterStart, err := client.ListWorkflows(client, WithParentWorkflowID(parentID), WithCompletedAfter(testStartTime))
+		afterStart, err := client.ListWorkflows(client, WithFilterParentWorkflowID(parentID), WithFilterCompletedAfter(testStartTime))
 		require.NoError(t, err)
 		assert.Len(t, afterStart, 1, "child completed after test start should be returned")
-		beforeStart, err := client.ListWorkflows(client, WithParentWorkflowID(parentID), WithCompletedBefore(testStartTime))
+		beforeStart, err := client.ListWorkflows(client, WithFilterParentWorkflowID(parentID), WithFilterCompletedBefore(testStartTime))
 		require.NoError(t, err)
 		assert.Len(t, beforeStart, 0, "no child completed before test start")
 
 		// Test 17: dequeued_after/before filter on started_at (the parent was
 		// enqueued, so it has a started_at; direct child workflows do not).
-		dequeuedAfter, err := client.ListWorkflows(client, WithWorkflowIDs([]string{parentID}), WithDequeuedAfter(testStartTime))
+		dequeuedAfter, err := client.ListWorkflows(client, WithFilterWorkflowIDs(parentID), WithFilterDequeuedAfter(testStartTime))
 		require.NoError(t, err)
 		assert.Len(t, dequeuedAfter, 1, "parent dequeued after test start should be returned")
-		dequeuedBefore, err := client.ListWorkflows(client, WithWorkflowIDs([]string{parentID}), WithDequeuedBefore(testStartTime))
+		dequeuedBefore, err := client.ListWorkflows(client, WithFilterWorkflowIDs(parentID), WithFilterDequeuedBefore(testStartTime))
 		require.NoError(t, err)
 		assert.Len(t, dequeuedBefore, 0, "parent not dequeued before test start")
 	})
@@ -1646,10 +1646,7 @@ func TestClientReadStream(t *testing.T) {
 			testValues := []string{"value1", "value2", "value3"}
 
 			// Enqueue and run the writer workflow
-			handle, err := Enqueue[struct {
-				StreamKey string
-				Values    []string
-			}, string](client, queue.GetName(), "StreamWriterWorkflow", struct {
+			handle, err := Enqueue[string](client, queue.GetName(), "StreamWriterWorkflow", struct {
 				StreamKey string
 				Values    []string
 			}{
@@ -1777,10 +1774,10 @@ func TestDebouncerClient(t *testing.T) {
 		var delay time.Duration
 		if isCockroach || useSqliteBackend() {
 			// CRDB and sqlite both use polling for notifications. Each Debounce
-			// call's GetEvent ACK can take >200ms, so the debouncer expires
-			// before the next call arrives. Bump the delay so the debouncer
+			// call's Send + GetEvent ACK round-trip can take ~2s, so the debouncer
+			// expires before the next call arrives. Bump the delay so the debouncer
 			// stays alive across all 5 calls.
-			delay = 2000 * time.Millisecond
+			delay = 5000 * time.Millisecond
 		} else {
 			delay = 200 * time.Millisecond
 		}
@@ -1818,7 +1815,7 @@ func TestDebouncerClient(t *testing.T) {
 		// Verify execution happened at least delay after first call
 		elapsed := time.Since(startTime)
 		assert.GreaterOrEqual(t, elapsed, delay, "execution should take at least delay")
-		assert.LessOrEqual(t, elapsed, 10*time.Second, "execution should take less than 10s")
+		assert.LessOrEqual(t, elapsed, 10*time.Second+delay, "execution should take at most the debouncer timeout plus completion slack")
 	})
 
 	t.Run("TestDelayGreaterThanTimeout", func(t *testing.T) {
@@ -2014,7 +2011,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 		WithQueuePartitionKey(expectedPartitionKey),
 		WithAssumedRole(expectedAssumedRole),
 		WithAuthenticatedUser(expectedAuthenticatedUser),
-		WithAuthenticatedRoles(expectedAuthenticatedRoles),
+		WithAuthenticatedRoles(expectedAuthenticatedRoles...),
 	)
 	require.NoError(t, err, "failed to call Debounce with workflow options")
 
@@ -2028,7 +2025,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	assert.Equal(t, testInput, result, "result should match input")
 
 	// List the workflow to verify all options are set correctly
-	workflows, err := client.ListWorkflows(client, WithWorkflowIDs([]string{workflowID}))
+	workflows, err := client.ListWorkflows(client, WithFilterWorkflowIDs(workflowID))
 	require.NoError(t, err, "failed to list workflows")
 	require.Len(t, workflows, 1, "should find exactly one workflow")
 
@@ -2209,7 +2206,7 @@ func TestClientSchedules(t *testing.T) {
 
 		got, err := c.GetSchedule(c, name)
 		require.NoError(t, err)
-		require.NotNil(t, got)
+		require.NotZero(t, got)
 		require.Equal(t, name, got.ScheduleName)
 		require.Equal(t, workflowFQN, got.WorkflowName)
 		require.Equal(t, "MyClass", got.WorkflowClassName)
@@ -2231,8 +2228,8 @@ func TestClientSchedules(t *testing.T) {
 
 		require.NoError(t, c.DeleteSchedule(c, name))
 		got, err = c.GetSchedule(c, name)
-		require.NoError(t, err)
-		require.Nil(t, got)
+		require.ErrorIs(t, err, ErrScheduleNotFound)
+		require.Zero(t, got)
 	})
 
 	t.Run("ApplySchedules", func(t *testing.T) {
@@ -2249,14 +2246,14 @@ func TestClientSchedules(t *testing.T) {
 
 		a, err := c.GetSchedule(c, nameA)
 		require.NoError(t, err)
-		require.NotNil(t, a)
+		require.NotZero(t, a)
 		require.Equal(t, models.InternalQueueName, a.QueueName, "QueueName should default to the internal queue")
-		require.Equal(t, map[string]any{"region": "us"}, a.Context)
+		require.JSONEq(t, `{"region":"us"}`, string(a.Context))
 		scheduleIDA := a.ScheduleID
 
 		b, err := c.GetSchedule(c, nameB)
 		require.NoError(t, err)
-		require.NotNil(t, b)
+		require.NotZero(t, b)
 		require.Equal(t, "MyClass", b.WorkflowClassName)
 
 		// Re-apply updates definition in place and preserves schedule_id.
@@ -2265,10 +2262,10 @@ func TestClientSchedules(t *testing.T) {
 		}))
 		a, err = c.GetSchedule(c, nameA)
 		require.NoError(t, err)
-		require.NotNil(t, a)
+		require.NotZero(t, a)
 		require.Equal(t, scheduleIDA, a.ScheduleID, "client upsert must preserve schedule_id")
 		require.Equal(t, "0 0 0 * * *", a.Schedule)
-		require.Equal(t, map[string]any{"region": "eu"}, a.Context)
+		require.JSONEq(t, `{"region":"eu"}`, string(a.Context))
 	})
 
 	t.Run("BackfillSchedule", func(t *testing.T) {
@@ -2286,7 +2283,7 @@ func TestClientSchedules(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, ids)
 
-		backfilled, err := ListWorkflows(serverCtx, WithWorkflowIDPrefix("sched-"+name+"-"))
+		backfilled, err := ListWorkflows(serverCtx, WithFilterWorkflowIDPrefix("sched-"+name+"-"))
 		require.NoError(t, err)
 		require.Equal(t, len(ids), len(backfilled))
 	})
@@ -2321,8 +2318,8 @@ func TestClientSchedules(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "invalid cron schedule")
 		got, err := c.GetSchedule(c, "client-bad-create")
-		require.NoError(t, err)
-		require.Nil(t, got)
+		require.ErrorIs(t, err, ErrScheduleNotFound)
+		require.Zero(t, got)
 
 		// ApplySchedules validates every entry before writing any row.
 		err = c.ApplySchedules(c, []ScheduleSpec{
@@ -2333,8 +2330,8 @@ func TestClientSchedules(t *testing.T) {
 		require.Contains(t, err.Error(), "invalid cron schedule")
 		for _, name := range []string{"client-apply-good", "client-apply-bad"} {
 			s, err := c.GetSchedule(c, name)
-			require.NoError(t, err)
-			require.Nil(t, s, "schedule %s should not have been created", name)
+			require.ErrorIs(t, err, ErrScheduleNotFound, "schedule %s should not have been created", name)
+			require.Zero(t, s)
 		}
 	})
 }
@@ -2350,7 +2347,7 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		latest, err := c.GetLatestApplicationVersion(c)
 		require.NoError(t, err)
-		require.NotNil(t, latest)
+		require.NotZero(t, latest)
 		require.Equal(t, serverCtx.GetApplicationVersion(), latest.Name)
 
 		versions, err := c.ListApplicationVersions(c)
@@ -2421,11 +2418,11 @@ func TestClientApplicationVersions(t *testing.T) {
 }
 
 // TestClientCustomSqliteDB verifies that NewClient accepts a caller-provided
-// *sql.DB sqlite handle via ClientConfig.SqliteSystemDB, mirroring the
+// *sql.DB sqlite handle via ClientConfig.SQLiteSystemDB, mirroring the
 // SystemDBPool path for pg/CRDB.
 func TestClientCustomSqliteDB(t *testing.T) {
 	if !useSqliteBackend() {
-		t.Skip("sqlite-only: exercises ClientConfig.SqliteSystemDB")
+		t.Skip("sqlite-only: exercises ClientConfig.SQLiteSystemDB")
 	}
 
 	dbPath := filepath.Join(t.TempDir(), "dbos.db")
@@ -2433,7 +2430,7 @@ func TestClientCustomSqliteDB(t *testing.T) {
 	require.NoError(t, err)
 	serverCtx, err := NewContext(context.Background(), Config{
 		AppName:        "test-client-custom-sqlite-db",
-		SqliteSystemDB: serverDB,
+		SQLiteSystemDB: serverDB,
 	})
 	require.NoError(t, err)
 
@@ -2452,7 +2449,7 @@ func TestClientCustomSqliteDB(t *testing.T) {
 	clientDB, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
 
-	c, err := NewClient(context.Background(), ClientConfig{SqliteSystemDB: clientDB})
+	c, err := NewClient(context.Background(), ClientConfig{SQLiteSystemDB: clientDB})
 	require.NoError(t, err)
 	t.Cleanup(func() { c.Shutdown(10 * time.Second) })
 
@@ -2463,7 +2460,7 @@ func TestClientCustomSqliteDB(t *testing.T) {
 	assert.Same(t, clientDB, SQLDB(sysDB.Pool()), "client should use the caller's sqlite *sql.DB")
 	require.Equal(t, DialectSQLite, sysDB.Dialect().Name())
 
-	handle, err := Enqueue[wfInput, string](c, queue.GetName(), "CustomSqliteClientWorkflow",
+	handle, err := Enqueue[string, wfInput](c, queue.GetName(), "CustomSqliteClientWorkflow",
 		wfInput{Input: "hello"},
 		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 	require.NoError(t, err)
@@ -2508,7 +2505,7 @@ func TestClientCustomPool(t *testing.T) {
 	assert.Same(t, clientPool, PgxPool(sysDB.Pool()), "client should use the caller's *pgxpool.Pool")
 	require.Contains(t, []DialectName{DialectPostgres, DialectCockroach}, sysDB.Dialect().Name())
 
-	handle, err := Enqueue[wfInput, string](c, queue.GetName(), "CustomPoolClientWorkflow",
+	handle, err := Enqueue[string, wfInput](c, queue.GetName(), "CustomPoolClientWorkflow",
 		wfInput{Input: "hello"},
 		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 	require.NoError(t, err)
@@ -2641,7 +2638,7 @@ func TestClientTypedHandles(t *testing.T) {
 
 	t.Run("RetrieveWorkflowTyped", func(t *testing.T) {
 		workflowID := "client-retrieve-typed"
-		_, err := Enqueue[int, sumResult](client, queue.GetName(), "SumWorkflow", 21, WithEnqueueWorkflowID(workflowID), appVersion)
+		_, err := Enqueue[sumResult](client, queue.GetName(), "SumWorkflow", 21, WithEnqueueWorkflowID(workflowID), appVersion)
 		require.NoError(t, err)
 
 		handle, err := RetrieveWorkflow[sumResult](client, workflowID)
@@ -2653,7 +2650,7 @@ func TestClientTypedHandles(t *testing.T) {
 
 	t.Run("ForkWorkflowTyped", func(t *testing.T) {
 		workflowID := "client-fork-typed"
-		h, err := Enqueue[int, sumResult](client, queue.GetName(), "SumWorkflow", 5, WithEnqueueWorkflowID(workflowID), appVersion)
+		h, err := Enqueue[sumResult](client, queue.GetName(), "SumWorkflow", 5, WithEnqueueWorkflowID(workflowID), appVersion)
 		require.NoError(t, err)
 		_, err = h.GetResult()
 		require.NoError(t, err)
@@ -2667,7 +2664,7 @@ func TestClientTypedHandles(t *testing.T) {
 
 	t.Run("ResumeWorkflowTyped", func(t *testing.T) {
 		workflowID := "client-resume-typed"
-		h, err := Enqueue[int, sumResult](client, queue.GetName(), "SumWorkflow", 8, WithEnqueueWorkflowID(workflowID), appVersion)
+		h, err := Enqueue[sumResult](client, queue.GetName(), "SumWorkflow", 8, WithEnqueueWorkflowID(workflowID), appVersion)
 		require.NoError(t, err)
 		_, err = h.GetResult()
 		require.NoError(t, err)
@@ -2684,7 +2681,7 @@ func TestClientTypedHandles(t *testing.T) {
 		ids := make([]string, 0, 2)
 		for i := range 2 {
 			workflowID := fmt.Sprintf("client-resume-multi-%d", i)
-			h, err := Enqueue[int, sumResult](client, queue.GetName(), "SumWorkflow", i+1, WithEnqueueWorkflowID(workflowID), appVersion)
+			h, err := Enqueue[sumResult](client, queue.GetName(), "SumWorkflow", i+1, WithEnqueueWorkflowID(workflowID), appVersion)
 			require.NoError(t, err)
 			_, err = h.GetResult()
 			require.NoError(t, err)
@@ -2749,7 +2746,7 @@ func TestClientListAndSteps(t *testing.T) {
 	t.Cleanup(func() { client.Shutdown(30 * time.Second) })
 
 	workflowID := "client-list-steps-wf"
-	handle, err := Enqueue[wfInput, wfOutput](client, queue.GetName(), "ListStepsWorkflow", wfInput{Name: "max"},
+	handle, err := Enqueue[wfOutput](client, queue.GetName(), "ListStepsWorkflow", wfInput{Name: "max"},
 		WithEnqueueWorkflowID(workflowID),
 		WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion()))
 	require.NoError(t, err)
@@ -2757,7 +2754,7 @@ func TestClientListAndSteps(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("ListWorkflowsNoDecodeByDefault", func(t *testing.T) {
-		workflows, err := client.ListWorkflows(client, WithWorkflowIDs([]string{workflowID}))
+		workflows, err := client.ListWorkflows(client, WithFilterWorkflowIDs(workflowID))
 		require.NoError(t, err)
 		require.Len(t, workflows, 1)
 		assert.Nil(t, workflows[0].Input, "input must not be loaded by default")
@@ -2765,7 +2762,7 @@ func TestClientListAndSteps(t *testing.T) {
 	})
 
 	t.Run("ListWorkflowsLoadsWhenRequested", func(t *testing.T) {
-		workflows, err := client.ListWorkflows(client, WithWorkflowIDs([]string{workflowID}), WithLoadInput(true), WithLoadOutput(true))
+		workflows, err := client.ListWorkflows(client, WithFilterWorkflowIDs(workflowID), WithFilterLoadInput(true), WithFilterLoadOutput(true))
 		require.NoError(t, err)
 		require.Len(t, workflows, 1)
 

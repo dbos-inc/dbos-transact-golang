@@ -18,10 +18,26 @@ var (
 	ErrNonExistentWorkflow = &Error{Code: ErrorCodeNonExistentWorkflow}
 	// ErrConflictingWorkflowID matches errors from conflicting workflow IDs.
 	ErrConflictingWorkflowID = &Error{Code: ErrorCodeConflictingID}
+	// ErrUnexpectedWorkflow matches errors raised when a workflow ID is reused with a
+	// different workflow function or a different queue, indicating non-determinism or
+	// conflicting ID reuse. Match with errors.Is(err, dbos.ErrUnexpectedWorkflow).
+	ErrUnexpectedWorkflow = &Error{Code: ErrorCodeUnexpectedWorkflow}
 	// ErrMaxStepRetriesExceeded matches errors from steps that exhausted their retries.
 	ErrMaxStepRetriesExceeded = &Error{Code: ErrorCodeMaxStepRetriesExceeded}
+	// ErrDeadLetterQueue matches errors from workflows that exceeded their maximum
+	// recovery attempts and were moved to the dead-letter queue.
+	ErrDeadLetterQueue = &Error{Code: ErrorCodeDeadLetterQueue}
 	// ErrTimeout matches DBOS timeout errors (e.g. Recv/GetEvent timeouts, GetResult
 	// handle timeouts). A timeout error built from an expired context deadline also
-	// wraps that cause, so errors.Is(err, context.DeadlineExceeded) matches it too.
+	// wraps that cause, so errors.Is(err, context.DeadlineExceeded) matches it too,
+	// including for errors read back from the database.
 	ErrTimeout = &Error{Code: ErrorCodeTimeout}
+	// ErrQueueNotFound matches errors referencing a queue that does not exist.
+	ErrQueueNotFound = &Error{Code: ErrorCodeQueueNotFound}
+	// ErrScheduleNotFound matches errors referencing a schedule that does not exist.
+	ErrScheduleNotFound = &Error{Code: ErrorCodeScheduleNotFound}
+	// ErrNoApplicationVersions matches errors from operations requiring a registered application version when none exists.
+	ErrNoApplicationVersions = &Error{Code: ErrorCodeNoApplicationVersions}
+	// ErrInvalidOption matches errors from invalid or inconsistent options passed to a DBOS API.
+	ErrInvalidOption = &Error{Code: ErrorCodeInvalidOption}
 )

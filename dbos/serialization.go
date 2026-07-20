@@ -25,6 +25,21 @@ const (
 // The type parameter T determines what types the serializer handles.
 // The built-in JSON serializer uses concrete types (Serializer[P]) for correct struct unmarshaling.
 // Custom serializers implement Serializer[any] and must embed type info in payloads (e.g., using a type envelope)
+//
+// Every implementation must honor this contract:
+//
+//  1. Decode can be called with a nil *string, even though the serializer's own
+//     Encode never produced one: some checkpoints record an error and never write
+//     an output, so the stored value is SQL NULL. Decode must tolerate nil input
+//     and choose its own nil semantics (typically returning the zero value of T).
+//  2. Encode may be called with a nil or zero value, and the nil round-trip must
+//     be lossless: Decode(Encode(nil-value)) must yield that nil value back.
+//  3. The literal string "__DBOS_NIL" is reserved by the engine and wire-frozen.
+//     A custom Encode must never emit it for non-nil data; a value stored as
+//     "__DBOS_NIL" would be misreported as nil by observability paths.
+//  4. Encode must not return a nil *string. To represent nil data, return a
+//     pointer to a sentinel string (e.g. the built-in gob serializer stores
+//     "__DBOS_NIL"; the portable JSON serializer stores "null").
 type Serializer[T any] interface {
 	// Name returns the name of the serialization format (e.g., "DBOS_JSON", "DBOS_GOB").
 	Name() string
@@ -105,21 +120,21 @@ func (j *jsonSerializer[T]) Decode(data *string) (T, error) {
 	return result, nil
 }
 
-// GobSerializer implements Serializer[any] using Go's gob encoding.
+// gobSerializer implements Serializer[any] using Go's gob encoding.
 // Users must call gob.Register(ConcreteType{}) for each concrete type
 // used in workflow inputs, outputs, events, and messages.
-type GobSerializer struct{}
+type gobSerializer struct{}
 
 // NewGobSerializer returns a new gob-based serializer.
 func NewGobSerializer() Serializer[any] {
-	return &GobSerializer{}
+	return &gobSerializer{}
 }
 
-func (g *GobSerializer) Name() string {
+func (g *gobSerializer) Name() string {
 	return "DBOS_GOB"
 }
 
-func (g *GobSerializer) Encode(data any) (*string, error) {
+func (g *gobSerializer) Encode(data any) (*string, error) {
 	if isNilValue(data) {
 		marker := string(nilMarker)
 		return &marker, nil
@@ -134,7 +149,7 @@ func (g *GobSerializer) Encode(data any) (*string, error) {
 	return &encodedStr, nil
 }
 
-func (g *GobSerializer) Decode(data *string) (any, error) {
+func (g *gobSerializer) Decode(data *string) (any, error) {
 	if data == nil || *data == nilMarker {
 		return nil, nil
 	}
@@ -192,7 +207,7 @@ func (a *typedCustomSerializerAdapter[T]) Decode(data *string) (T, error) {
 //	    PositionalArgs: []any{"hello", 42},
 //	    NamedArgs:      map[string]any{"key": "value"},
 //	}
-//	handle, err := client.Enqueue("queue", "pyWorkflow", args)
+//	handle, err := dbos.Enqueue[any](client, "queue", "pyWorkflow", args)
 type PortableWorkflowArgs struct {
 	PositionalArgs []any          `json:"positionalArgs"`
 	NamedArgs      map[string]any `json:"namedArgs"`
@@ -278,6 +293,55 @@ func resolveDecoder[T any](storedSerialization string, customSer Serializer[any]
 		return newJSONSerializer[T](), nil
 	}
 	return nil, fmt.Errorf("unknown serialization format %q", storedSerialization)
+}
+
+// decodeListingValue prepares a persisted value for listing/display paths
+// (ListWorkflows, GetWorkflowSteps) based on the stored per-row format:
+//   - portable rows decode into their generic JSON value
+//   - rows matching the configured custom serializer decode with it
+//   - default JSON rows return their raw JSON text (base64-decoded), leaving
+//     any further decoding to the caller
+//
+// If the format is unknown or decoding fails, it returns the raw stored
+// string alongside the error.
+func decodeListingValue(encoded *string, storedSerialization string, customSer Serializer[any]) (any, error) {
+	switch {
+	case storedSerialization == PortableSerializerName:
+		var decoded any
+		if err := json.Unmarshal([]byte(*encoded), &decoded); err != nil {
+			return *encoded, err
+		}
+		return decoded, nil
+	case customSer != nil && customSer.Name() == storedSerialization:
+		decoded, err := customSer.Decode(encoded)
+		if err != nil {
+			return *encoded, err
+		}
+		return decoded, nil
+	case storedSerialization == "" || storedSerialization == "DBOS_JSON":
+		decodedBytes, err := base64.StdEncoding.DecodeString(*encoded)
+		if err != nil {
+			return *encoded, err
+		}
+		return string(decodedBytes), nil
+	default:
+		return *encoded, fmt.Errorf("unknown serialization format %q", storedSerialization)
+	}
+}
+
+// listingValueJSON renders a listing value as JSON text for wire protocols
+// (conductor, admin server). Default JSON rows already carry their JSON text
+// as a string and pass through unchanged; decoded values (portable or custom
+// serializer rows) are marshaled.
+func listingValueJSON(v any) (string, bool) {
+	if s, ok := v.(string); ok && json.Valid([]byte(s)) {
+		return s, true
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
 }
 
 // getCustomSerializerFromCtx extracts the user-provided custom serializer, if set.
@@ -400,6 +464,11 @@ func deserializeWorkflowError(errStr *string) error {
 	// A portable JSON envelope or legacy plain string fails base64/gob and falls through below.
 	if decoded, gobErr := NewGobSerializer().Decode(errStr); gobErr == nil {
 		if e, ok := decoded.(error); ok {
+			if de, isDBOS := e.(*Error); isDBOS {
+				// wrappedErr is unexported and not gob-encoded; rebuild stdlib
+				// causes (context.Canceled/DeadlineExceeded) from CauseKind.
+				de.RestoreWrappedCause()
+			}
 			return e
 		}
 	}
@@ -407,5 +476,18 @@ func deserializeWorkflowError(errStr *string) error {
 	if err := json.Unmarshal([]byte(*errStr), &pe); err == nil && (pe.Name != "" || pe.Message != "") {
 		return &pe
 	}
-	return errors.New(*errStr)
+	return &plainError{msg: *errStr}
+}
+
+// plainError carries a legacy or fallback stored error string. Unlike errors.New
+// (whose message field is unexported and marshals as {}), it stays readable when
+// surfaced in JSON, e.g. through WorkflowStatus.
+type plainError struct{ msg string }
+
+func (e *plainError) Error() string { return e.msg }
+
+func (e *plainError) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Message string `json:"message"`
+	}{Message: e.msg})
 }

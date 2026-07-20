@@ -475,7 +475,7 @@ func TestSystemDBStartupTimeoutBoundsSQLitePoolWait(t *testing.T) {
 	started := time.Now()
 	_, err = NewContext(context.Background(), Config{
 		AppName:                "startup-timeout-sqlite",
-		SqliteSystemDB:         db,
+		SQLiteSystemDB:         db,
 		SystemDBStartupTimeout: timeout,
 	})
 	elapsed := time.Since(started)
@@ -568,6 +568,33 @@ func TestConcurrentLaunchOnlyStartsOnce(t *testing.T) {
 	}
 	assert.Equal(t, 1, successes)
 	Shutdown(ctx, 5*time.Second)
+}
+
+func TestRunWorkflowBeforeLaunchFails(t *testing.T) {
+	ctx, err := NewContext(context.Background(), Config{
+		AppName:     "test-run-before-launch",
+		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+	})
+	require.NoError(t, err)
+	defer Shutdown(ctx, 5*time.Second)
+
+	wf := func(ctx Context, in string) (string, error) { return in, nil }
+	RegisterWorkflow(ctx, wf)
+
+	_, err = RunWorkflow(ctx, wf, "hello")
+	require.Error(t, err)
+	dbosErr := &Error{}
+	require.ErrorAs(t, err, &dbosErr)
+	assert.Equal(t, ErrorCodeInitialization, dbosErr.Code)
+	assert.Contains(t, err.Error(), "DBOS must be launched before running workflows")
+
+	require.NoError(t, Launch(ctx))
+
+	handle, err := RunWorkflow(ctx, wf, "hello")
+	require.NoError(t, err)
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "hello", result)
 }
 
 func TestConcurrentShutdownDoesNotWaitTwice(t *testing.T) {
@@ -1205,6 +1232,69 @@ func TestCustomPool(t *testing.T) {
 	})
 }
 
+// TestSystemDBShutdownReportsPending verifies SysDB.Shutdown returns the
+// sub-components that failed to stop within the timeout.
+func TestSystemDBShutdownReportsPending(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	dbPath := filepath.Join(t.TempDir(), "dbos.db")
+	customDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer customDB.Close()
+
+	systemDB, err := sysdb.NewSystemDatabase(ctx, sysdb.NewSystemDatabaseInput{
+		DatabaseSchema: "dbos",
+		CustomSqliteDB: customDB,
+		Logger:         logger,
+	})
+	require.NoError(t, err)
+	systemDB.Launch(ctx)
+
+	// ctx is deliberately not cancelled, so the notification loop cannot exit
+	pending := systemDB.Shutdown(ctx, 100*time.Millisecond)
+	require.Contains(t, pending, "notification listener")
+	require.True(t, systemDB.(*sysdb.SysDB).Launched(), "a timed-out shutdown must leave the listener tracked so later calls re-check it")
+
+	cancel()
+	require.Eventually(t, func() bool {
+		return len(systemDB.Shutdown(ctx, 100*time.Millisecond)) == 0
+	}, 5*time.Second, 100*time.Millisecond, "notification loop should exit after cancel")
+	require.False(t, systemDB.(*sysdb.SysDB).Launched())
+}
+
+// TestClientShutdownReportsSystemDBTimeout verifies Client.Shutdown returns an
+// error when the system database fails to shut down within the timeout.
+func TestClientShutdownReportsSystemDBTimeout(t *testing.T) {
+	skipIfSqlite(t, "holds a pgx pool connection to block pool close")
+	ctx := context.Background()
+
+	poolConfig, err := pgxpool.ParseConfig(getDatabaseURL())
+	require.NoError(t, err)
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	require.NoError(t, err)
+
+	client, err := NewClient(ctx, ClientConfig{
+		SystemDBPool:   pool,
+		DatabaseSchema: "dbos_test_shutdown_client",
+	})
+	require.NoError(t, err)
+
+	// A held connection blocks pool.Close() past the timeout
+	conn, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+
+	err = client.Shutdown(500 * time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "system database connection pool")
+
+	conn.Release()
+	require.Eventually(t, func() bool {
+		return pool.Stat().TotalConns() == 0
+	}, 5*time.Second, 100*time.Millisecond, "pool should close after connection release")
+}
+
 // -----------------------------------------------------------------------------
 // SQLite-specific suite. These tests construct sqlite handles directly so they
 // run on every test invocation, regardless of DBOS_TEST_BACKEND. They cover
@@ -1707,7 +1797,7 @@ func (w testWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// TestCustomSqlitePool mirrors TestCustomPool for the SqliteSystemDB config
+// TestCustomSqlitePool mirrors TestCustomPool for the SQLiteSystemDB config
 // field: caller-supplied *sql.DB instead of *pgxpool.Pool. Always runs (does
 // not depend on DBOS_TEST_BACKEND) because every subtest constructs its own
 // sqlite handle.
@@ -1755,7 +1845,7 @@ func TestCustomSqlitePool(t *testing.T) {
 
 		config := Config{
 			AppName:        "test-custom-sqlite-db",
-			SqliteSystemDB: db,
+			SQLiteSystemDB: db,
 		}
 		customdbosContext, err := NewContext(context.Background(), config)
 		require.NoError(t, err)
@@ -1801,7 +1891,7 @@ func TestCustomSqlitePool(t *testing.T) {
 	})
 
 	t.Run("CustomSqliteDBTakesPrecedence", func(t *testing.T) {
-		// An invalid DatabaseURL is ignored when SqliteSystemDB is set.
+		// An invalid DatabaseURL is ignored when SQLiteSystemDB is set.
 		dbPath := filepath.Join(t.TempDir(), "dbos.db")
 		db, err := sql.Open("sqlite", dbPath)
 		require.NoError(t, err)
@@ -1809,7 +1899,7 @@ func TestCustomSqlitePool(t *testing.T) {
 		config := Config{
 			DatabaseURL:    "postgres://invalid:invalid@localhost:5432/invaliddb",
 			AppName:        "test-sqlite-pool-precedence",
-			SqliteSystemDB: db,
+			SQLiteSystemDB: db,
 		}
 		dbosCtx, err := NewContext(context.Background(), config)
 		require.NoError(t, err)
@@ -1822,7 +1912,7 @@ func TestCustomSqlitePool(t *testing.T) {
 	})
 
 	t.Run("MutuallyExclusivePools", func(t *testing.T) {
-		// Setting both SystemDBPool and SqliteSystemDB must be rejected by
+		// Setting both SystemDBPool and SQLiteSystemDB must be rejected by
 		// processConfig before any connection attempt.
 		dbPath := filepath.Join(t.TempDir(), "dbos.db")
 		db, err := sql.Open("sqlite", dbPath)
@@ -1841,7 +1931,7 @@ func TestCustomSqlitePool(t *testing.T) {
 		_, err = NewContext(context.Background(), Config{
 			AppName:        "test-mutually-exclusive",
 			SystemDBPool:   pool,
-			SqliteSystemDB: db,
+			SQLiteSystemDB: db,
 		})
 		require.Error(t, err)
 		dbosErr, ok := err.(*Error)

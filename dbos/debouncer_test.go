@@ -2,6 +2,8 @@ package dbos
 
 import (
 	"context"
+	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -16,6 +18,60 @@ import (
 // Global debouncer variables for test workflows
 var debouncer10sTimeout *Debouncer[string, string]
 var debouncer200msTimeout *Debouncer[string, string]
+
+// TestDecodeDebouncerListingInput covers both listing shapes the dedup-recovery
+// path can see: raw JSON text (default serializer) and decoded values (custom
+// serializer).
+func TestDecodeDebouncerListingInput(t *testing.T) {
+	typed := debouncerInput[string]{InitialInput: "in", TargetWorkflowID: "wf-1"}
+	raw, err := json.Marshal(typed)
+	require.NoError(t, err)
+
+	decoded, err := decodeDebouncerListingInput[string](string(raw))
+	require.NoError(t, err)
+	require.Equal(t, "wf-1", decoded.TargetWorkflowID)
+	require.Equal(t, "in", decoded.InitialInput)
+
+	decoded, err = decodeDebouncerListingInput[string](map[string]any{"TargetWorkflowID": "wf-2", "InitialInput": "in2"})
+	require.NoError(t, err)
+	require.Equal(t, "wf-2", decoded.TargetWorkflowID)
+	require.Equal(t, "in2", decoded.InitialInput)
+
+	_, err = decodeDebouncerListingInput[string]("not-json")
+	require.Error(t, err)
+}
+
+// TestDebouncerCustomSerializer is a regression test for the dedup-recovery
+// encoding bug: with a custom serializer configured, the internal debouncer
+// workflow's input listed during dedup recovery is a decoded value, not a JSON
+// string. Code that type-asserted Input.(string) failed here with "internal
+// debouncer workflow input is not encoded", so every Debounce call after the
+// first on a given key errored. The second call must instead succeed and
+// return a handle to the first call's target workflow.
+func TestDebouncerCustomSerializer(t *testing.T) {
+	gob.Register(debouncerInput[string]{})
+	gob.Register(DebounceMessage[string]{})
+
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: NewGobSerializer()})
+	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
+
+	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
+	deb := NewDebouncer(dbosCtx, debounceTestWorkflow)
+	require.NoError(t, Launch(dbosCtx))
+
+	h1, err := deb.Debounce(dbosCtx, "gob-debounce-key", 2*time.Second, "input-1")
+	require.NoError(t, err, "first debounce call should enqueue the internal workflow")
+
+	// Second call while the internal workflow is pending: hits the dedup
+	// recovery path, which must decode the gob-decoded listed input.
+	h2, err := deb.Debounce(dbosCtx, "gob-debounce-key", 500*time.Millisecond, "input-2")
+	require.NoError(t, err, "dedup recovery must handle custom-serializer listings")
+	require.Equal(t, h1.GetWorkflowID(), h2.GetWorkflowID(), "both handles must target the first call's workflow")
+
+	result, err := h2.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "input-2", result, "debounced workflow must run with the latest input")
+}
 
 // Helper test workflows
 func debounceTestWorkflow(ctx Context, input string) (string, error) {
@@ -114,7 +170,7 @@ func TestDebouncer(t *testing.T) {
 
 		// also verify the start time step is present in the internal debouncer workflow
 		// First find it: it should be the only workflow in the internal queue
-		workflows, err := ListWorkflows(dbosCtx, WithQueueName(models.InternalQueueName))
+		workflows, err := ListWorkflows(dbosCtx, WithFilterQueueName(models.InternalQueueName))
 		require.NoError(t, err, "failed to list workflows")
 		require.Len(t, workflows, 1, "should have exactly one workflow in the internal queue")
 		// Now find the step in the workflow
@@ -359,7 +415,7 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 		WithQueuePartitionKey(expectedPartitionKey),
 		WithAssumedRole(expectedAssumedRole),
 		WithAuthenticatedUser(expectedAuthenticatedUser),
-		WithAuthenticatedRoles(expectedAuthenticatedRoles),
+		WithAuthenticatedRoles(expectedAuthenticatedRoles...),
 	)
 	require.NoError(t, err, "failed to call Debounce with workflow options")
 
@@ -373,7 +429,7 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 	assert.Equal(t, testInput, result, "result should match input")
 
 	// List the workflow to verify all options are set correctly
-	workflows, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{workflowID}))
+	workflows, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
 	require.NoError(t, err, "failed to list workflows")
 	require.Len(t, workflows, 1, "should find exactly one workflow")
 

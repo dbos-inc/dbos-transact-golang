@@ -35,14 +35,15 @@ type SystemDatabase interface {
 	// IsContentionError reports whether err is a lock/serialization contention
 	// error for the active backend. See Dialect.IsContentionError.
 	IsContentionError(err error) bool
-	Shutdown(ctx context.Context, timeout time.Duration)
+	// Shutdown returns the names of sub-components still running when timeout expired.
+	Shutdown(ctx context.Context, timeout time.Duration) []string
 	ResetSystemDB(ctx context.Context) error
 
 	// Workflows
 	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]models.WorkflowStatus, error)
 	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error
-	UpdateWorkflowAttributes(ctx context.Context, input UpdateWorkflowAttributesDBInput) error
+	SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*AwaitWorkflowResultOutput, error)
 	CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInput) ([]string, error)
 	CancelAllBefore(ctx context.Context, cutoffTime time.Time) error
@@ -151,7 +152,7 @@ type SysDB struct {
 	EventNotifier        *notifyRegistry // getEvent waiters, keyed by "targetWorkflowID::key"
 	streamNotifier       *notifyRegistry // stream readers, keyed by "workflowID::key"
 	logger               *slog.Logger
-	encodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (*string, string, error)
+	encodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error)
 	schema               string
 	launched             bool
 	isCockroachDB        bool
@@ -711,7 +712,7 @@ type NewSystemDatabaseInput struct {
 	// EncodeScheduledInput serializes the input of a schedule-created workflow
 	// (backfill/trigger). Injected by the caller to keep serialization concerns
 	// out of the system database.
-	EncodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (encoded *string, serialization string, err error)
+	EncodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (encoded *string, serialization string, err error)
 }
 
 func startupError(ctx context.Context, timeout time.Duration, phase string, pool *pgxpool.Pool, err error) error {
@@ -966,13 +967,15 @@ func (s *SysDB) Launch(ctx context.Context) {
 	}
 }
 
-func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
+func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 	s.logger.Debug("Closing system database connection pool")
+	var pending []string
 
 	s.notificationLoopMu.Lock()
 	launched := s.launched
 	done := s.notificationLoopDone
 	s.notificationLoopMu.Unlock()
+	listenerStopped := true
 	if launched {
 		// Wait for the notification loop to exit
 		// The context should be cancelled prior to calling shutdown
@@ -980,6 +983,8 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 		case <-done:
 		case <-time.After(timeout):
 			s.logger.Warn("Notification listener loop did not finish in time", "timeout", timeout)
+			pending = append(pending, "notification listener")
+			listenerStopped = false
 		}
 	}
 
@@ -994,6 +999,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 		case <-poolClose:
 		case <-time.After(timeout):
 			s.logger.Warn("System database connection pool did not close in time", "timeout", timeout)
+			pending = append(pending, "connection pool")
 		}
 	}
 
@@ -1002,8 +1008,13 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 	s.streamNotifier.clear()
 
 	s.notificationLoopMu.Lock()
-	s.launched = false
+	// Stay launched while the notification loop is still running so a later
+	// Shutdown call waits for it again instead of skipping the check.
+	if listenerStopped {
+		s.launched = false
+	}
 	s.notificationLoopMu.Unlock()
+	return pending
 }
 
 /*******************************/
@@ -1231,10 +1242,10 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 	}
 
 	if len(input.Status.Name) > 0 && result.Name != input.Status.Name {
-		return nil, models.NewConflictingWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.Name, input.Status.Name))
+		return nil, models.NewUnexpectedWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.Name, input.Status.Name))
 	}
 	if len(input.Status.QueueName) > 0 && result.QueueName != nil && input.Status.QueueName != *result.QueueName {
-		return nil, models.NewConflictingWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists in a different queue: %s, but the provided queue is: %s", *result.QueueName, input.Status.QueueName))
+		return nil, models.NewUnexpectedWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists in a different queue: %s, but the provided queue is: %s", *result.QueueName, input.Status.QueueName))
 	}
 
 	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
@@ -1667,16 +1678,16 @@ func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowO
 	return nil
 }
 
-type UpdateWorkflowAttributesDBInput struct {
+type SetWorkflowAttributesDBInput struct {
 	WorkflowID string
 	Attributes map[string]any
 	Tx         Tx
 }
 
-// UpdateWorkflowAttributes replaces the custom attributes attached to an existing
+// SetWorkflowAttributes replaces the custom attributes attached to an existing
 // workflow. A nil/empty attributes map clears them (stored as NULL). Returns a
 // non-existent workflow error if no workflow with the given ID exists.
-func (s *SysDB) UpdateWorkflowAttributes(ctx context.Context, input UpdateWorkflowAttributesDBInput) error {
+func (s *SysDB) SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error {
 	var attributesJSON *string
 	if len(input.Attributes) > 0 {
 		marshaled, err := json.Marshal(input.Attributes)
@@ -5190,8 +5201,8 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 					"schedule_name", schedule.ScheduleName, "last_fired_at", *lastFiredAtStr, "error", err)
 			}
 		}
-		if err := json.Unmarshal([]byte(contextJSON), &schedule.Context); err != nil {
-			schedule.Context = contextJSON
+		if raw := strings.TrimSpace(contextJSON); raw != "" && raw != "null" {
+			schedule.Context = json.RawMessage(contextJSON)
 		}
 
 		schedules = append(schedules, schedule)

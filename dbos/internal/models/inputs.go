@@ -34,7 +34,9 @@ type ListWorkflowsInput struct {
 	ScheduleName     []string
 }
 
-// ListWorkflowsOption is a functional option for configuring workflow listing parameters.
+// Docs for the exported option and input types below live on their public
+// aliases in dbos/aliases.go.
+
 type ListWorkflowsOption func(*ListWorkflowsInput)
 
 type ListSchedulesInput struct {
@@ -43,7 +45,6 @@ type ListSchedulesInput struct {
 	ScheduleNamePrefixes []string
 }
 
-// ListSchedulesOption is a functional option for configuring schedule listing parameters.
 type ListSchedulesOption func(*ListSchedulesInput)
 
 type GetWorkflowStepsInput struct {
@@ -52,24 +53,20 @@ type GetWorkflowStepsInput struct {
 	Offset     *int
 }
 
-// GetWorkflowStepsOption is a functional option for GetWorkflowSteps.
 type GetWorkflowStepsOption func(*GetWorkflowStepsInput)
 
 type ResumeWorkflowInput struct {
 	QueueName string
 }
 
-// ResumeWorkflowOption is a functional option for configuring workflow resumption.
 type ResumeWorkflowOption func(*ResumeWorkflowInput)
 
 type CancelWorkflowInput struct {
 	CancelChildren bool
 }
 
-type CancelWorkflowOptions func(*CancelWorkflowInput)
+type CancelWorkflowOption func(*CancelWorkflowInput)
 
-// ForkWorkflowInput holds configuration parameters for forking workflows.
-// OriginalWorkflowID is required. Other fields are optional.
 type ForkWorkflowInput struct {
 	OriginalWorkflowID string // Required: The UUID of the original workflow to fork from
 	ForkedWorkflowID   string // Optional: Custom workflow ID for the forked workflow (auto-generated if empty)
@@ -79,9 +76,6 @@ type ForkWorkflowInput struct {
 	QueuePartitionKey  string // Optional: Partition key when enqueueing the forked workflow onto a partitioned queue
 }
 
-// GetWorkflowAggregatesInput is the input to GetWorkflowAggregates.
-//
-// At least one of the GroupBy* flags must be true, or TimeBucketSize must be > 0.
 type GetWorkflowAggregatesInput struct {
 	GroupByStatus             bool
 	GroupByName               bool
@@ -122,10 +116,6 @@ type GetWorkflowAggregatesInput struct {
 	Attributes map[string]any
 }
 
-// GetStepAggregatesInput is the input to GetStepAggregates.
-//
-// At least one of the GroupBy* flags must be true, or TimeBucketSize must be > 0.
-// At least one of the Select* flags must be true.
 type GetStepAggregatesInput struct {
 	GroupByFunctionName bool
 	GroupByStatus       bool
@@ -150,8 +140,8 @@ type StepInfo struct {
 	Output          any       // The output returned by the step (if any)
 	Error           error     // The error returned by the step (if any)
 	ChildWorkflowID string    // The ID of a child workflow spawned by this step (if applicable)
-	StartedAt       time.Time // When the step execution started
-	CompletedAt     time.Time // When the step execution completed
+	StartedAt       time.Time `json:",omitzero"` // When the step execution started
+	CompletedAt     time.Time `json:",omitzero"` // When the step execution completed
 }
 
 // AlertHandler is a function that handles alerts received from DBOS Conductor.
