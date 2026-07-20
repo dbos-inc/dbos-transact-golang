@@ -143,7 +143,7 @@ func TestAdminServer(t *testing.T) {
 				endpoint:       fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_WORKFLOW_QUEUES_METADATA_PATTERN, "GET /")),
 				expectedStatus: http.StatusOK,
 				validateResp: func(t *testing.T, resp *http.Response) {
-					var queueMetadata []WorkflowQueue
+					var queueMetadata []workflowQueue
 					err := json.NewDecoder(resp.Body).Decode(&queueMetadata)
 					require.NoError(t, err, "Failed to decode response as QueueMetadata array")
 					assert.NotNil(t, queueMetadata, "Expected non-nil queue metadata array")
@@ -586,7 +586,8 @@ func TestAdminServer(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create a workflow queue with limited concurrency to keep workflows enqueued
-		queue := NewWorkflowQueue(ctx, "test-queue", WithGlobalConcurrency(1))
+		queue, err := RegisterQueue(ctx, "test-queue", WithGlobalConcurrency(1))
+		require.NoError(t, err)
 
 		// Define a blocking workflow that will hold up the queue
 		startEvent := NewEvent()
@@ -619,13 +620,13 @@ func TestAdminServer(t *testing.T) {
 		endpoint := fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_QUEUED_WORKFLOWS_PATTERN, "POST /"))
 
 		/// Create a workflow that will not block the queue
-		h1, err := RunWorkflow(ctx, regularWorkflow, "regular", WithQueue(queue.Name))
+		h1, err := RunWorkflow(ctx, regularWorkflow, "regular", WithQueue(queue))
 		require.NoError(t, err)
 		_, err = h1.GetResult()
 		require.NoError(t, err)
 
 		// Create the first queued workflow that will start processing and block
-		firstQueueHandle, err := RunWorkflow(ctx, blockingWorkflow, "blocking", WithQueue(queue.Name))
+		firstQueueHandle, err := RunWorkflow(ctx, blockingWorkflow, "blocking", WithQueue(queue))
 		require.NoError(t, err)
 
 		startEvent.Wait()
@@ -633,7 +634,7 @@ func TestAdminServer(t *testing.T) {
 		// Create additional queued workflows that will remain in ENQUEUED status
 		var enqueuedHandles []WorkflowHandle[string]
 		for i := range 3 {
-			handle, err := RunWorkflow(ctx, blockingWorkflow, fmt.Sprintf("queued-%d", i), WithQueue(queue.Name))
+			handle, err := RunWorkflow(ctx, blockingWorkflow, fmt.Sprintf("queued-%d", i), WithQueue(queue))
 			require.NoError(t, err)
 			enqueuedHandles = append(enqueuedHandles, handle)
 		}
@@ -697,7 +698,7 @@ func TestAdminServer(t *testing.T) {
 
 		// Test 2: Query with queue_name filter (should get only workflows from specific queue)
 		reqBodyQueueName := map[string]any{
-			"queue_name": queue.Name,
+			"queue_name": queue.GetName(),
 		}
 		reqQueueName, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(mustMarshal(reqBodyQueueName)))
 		require.NoError(t, err, "Failed to create queue_name request")
@@ -720,7 +721,7 @@ func TestAdminServer(t *testing.T) {
 		for _, wf := range queueNameWorkflows {
 			queueName, ok := wf["QueueName"].(string)
 			require.True(t, ok, "QueueName should be a string")
-			assert.Equal(t, queue.Name, queueName, "Expected queue name to be 'test-queue'")
+			assert.Equal(t, queue.GetName(), queueName, "Expected queue name to be 'test-queue'")
 			id, ok := wf["WorkflowUUID"].(string)
 			require.True(t, ok, "WorkflowUUID should be a string")
 			assert.True(t, enqueuedIDs[id], "Expected workflow ID %s to be in enqueued list", id)
@@ -758,7 +759,7 @@ func TestAdminServer(t *testing.T) {
 
 		queueName, ok := pendingWorkflows[0]["QueueName"].(string)
 		require.True(t, ok, "QueueName should be a string")
-		assert.Equal(t, queue.Name, queueName, "Expected queue name to be 'test-queue'")
+		assert.Equal(t, queue.GetName(), queueName, "Expected queue name to be 'test-queue'")
 	})
 
 	t.Run("ListQueuedWorkflowsWithAdvancedFeatures", func(t *testing.T) {
@@ -773,10 +774,12 @@ func TestAdminServer(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create a partitioned queue for partition key test
-		partitionedQueue := NewWorkflowQueue(ctx, "partitioned-test-queue", WithPartitionQueue(), WithGlobalConcurrency(1))
+		partitionedQueue, err := RegisterQueue(ctx, "partitioned-test-queue", WithPartitionQueue(), WithGlobalConcurrency(1))
+		require.NoError(t, err)
 
 		// Create a priority-enabled queue for priority and deduplication tests
-		priorityQueue := NewWorkflowQueue(ctx, "priority-test-queue", WithPriorityEnabled(), WithGlobalConcurrency(1))
+		priorityQueue, err := RegisterQueue(ctx, "priority-test-queue", WithPriorityEnabled(), WithGlobalConcurrency(1))
+		require.NoError(t, err)
 
 		// Define a blocking workflow that will hold up the queue
 		blockingChan := make(chan struct{})
@@ -801,16 +804,16 @@ func TestAdminServer(t *testing.T) {
 		endpoint := fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_QUEUED_WORKFLOWS_PATTERN, "POST /"))
 
 		// Create workflow with partition key
-		partitionHandle, err := RunWorkflow(ctx, blockingWorkflow, "partition-test", WithQueue(partitionedQueue.Name), WithQueuePartitionKey("partition-1"))
+		partitionHandle, err := RunWorkflow(ctx, blockingWorkflow, "partition-test", WithQueue(partitionedQueue), WithQueuePartitionKey("partition-1"))
 		require.NoError(t, err, "Failed to create workflow with partition key")
 
 		// Create workflow with deduplication ID
 		dedupID := "test-dedup-id"
-		dedupHandle, err := RunWorkflow(ctx, blockingWorkflow, "dedup-test", WithQueue(priorityQueue.Name), WithDeduplicationID(dedupID))
+		dedupHandle, err := RunWorkflow(ctx, blockingWorkflow, "dedup-test", WithQueue(priorityQueue), WithDeduplicationID(dedupID))
 		require.NoError(t, err, "Failed to create workflow with deduplication ID")
 
 		// Create workflow with priority
-		priorityHandle, err := RunWorkflow(ctx, blockingWorkflow, "priority-test", WithQueue(priorityQueue.Name), WithPriority(5))
+		priorityHandle, err := RunWorkflow(ctx, blockingWorkflow, "priority-test", WithQueue(priorityQueue), WithPriority(5))
 		require.NoError(t, err, "Failed to create workflow with priority")
 
 		// Query with empty body to get all enqueued/pending queue workflows
@@ -1031,24 +1034,32 @@ func TestAdminServer(t *testing.T) {
 		databaseURL := backendDatabaseURL(t)
 		resetTestDatabase(t, databaseURL)
 		ctx, err := NewContext(context.Background(), Config{
-			DatabaseURL:     databaseURL,
-			AppName:         "test-app",
-			AdminServer:     true,
-			AdminServerPort: _DEFAULT_ADMIN_SERVER_PORT,
+			DatabaseURL:              databaseURL,
+			AppName:                  "test-app",
+			AdminServer:              true,
+			AdminServerPort:          _DEFAULT_ADMIN_SERVER_PORT,
+			SchedulerPollingInterval: 100 * time.Millisecond,
 		})
 		require.NoError(t, err)
 
 		// Track scheduled workflow executions
 		var executionCount atomic.Int32
 
-		// Register a scheduled workflow that runs every second
-		RegisterWorkflow(ctx, func(dbosCtx Context, scheduledTime time.Time) (string, error) {
+		// Register a workflow driven by a DB-backed schedule firing every second
+		scheduledWorkflow := func(dbosCtx Context, input ScheduledWorkflowInput) (any, error) {
 			executionCount.Add(1)
-			return fmt.Sprintf("executed at %v", scheduledTime), nil
-		}, WithSchedule("* * * * * *")) // Every second
+			return fmt.Sprintf("executed at %v", input.ScheduledTime), nil
+		}
+		RegisterWorkflow(ctx, scheduledWorkflow)
 
 		err = Launch(ctx)
 		require.NoError(t, err)
+
+		require.NoError(t, CreateSchedule(ctx, ScheduleSpec{
+			ScheduleName: "deactivate-test-schedule",
+			Schedule:     "* * * * * *", // Every second
+			Workflow:     scheduledWorkflow,
+		}))
 
 		client := &http.Client{Timeout: 5 * time.Second}
 

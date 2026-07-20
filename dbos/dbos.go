@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,12 +35,17 @@ const (
 )
 
 // Config holds configuration parameters for initializing a DBOS context.
-// DatabaseURL and AppName are required.
+// AppName is required, along with exactly one of DatabaseURL, SystemDBPool,
+// or SQLiteSystemDB.
 type Config struct {
-	AppName                   string          // Application name for identification (required)
-	DatabaseURL               string          // DatabaseURL is the system-database connection string. Exactly one of DatabaseURL, SystemDBPool, or SqliteSystemDB must be set.
-	SystemDBPool              *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SqliteSystemDB.
-	SqliteSystemDB            *sql.DB         // SqliteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
+	AppName string // Application name for identification (required)
+	// DatabaseURL is the system-database connection string. Accepts Postgres URLs or
+	// key=value DSNs (e.g. postgres://user:pass@host:5432/dbname; CockroachDB uses the
+	// same form) and sqlite URLs (sqlite:/path/to.db, sqlite:relative.db, or
+	// sqlite::memory:). Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
+	DatabaseURL               string
+	SystemDBPool              *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
+	SQLiteSystemDB            *sql.DB         // SQLiteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
 	DatabaseSchema            string          // Database schema name (defaults to "dbos")
 	Logger                    *slog.Logger    // Custom logger instance (defaults to a new slog logger)
 	AdminServer               bool            // Enable Transact admin HTTP server (disabled by default)
@@ -57,16 +63,16 @@ type Config struct {
 
 func processConfig(inputConfig *Config) (*Config, error) {
 	// First check required fields
-	if len(inputConfig.DatabaseURL) == 0 && inputConfig.SystemDBPool == nil && inputConfig.SqliteSystemDB == nil {
+	if len(inputConfig.DatabaseURL) == 0 && inputConfig.SystemDBPool == nil && inputConfig.SQLiteSystemDB == nil {
 		return nil, fmt.Errorf("one of databaseURL, systemDBPool, or sqliteSystemDB must be provided")
 	}
-	if inputConfig.SystemDBPool != nil && inputConfig.SqliteSystemDB != nil {
+	if inputConfig.SystemDBPool != nil && inputConfig.SQLiteSystemDB != nil {
 		return nil, fmt.Errorf("systemDBPool and sqliteSystemDB are mutually exclusive")
 	}
 	if len(inputConfig.AppName) == 0 {
 		return nil, fmt.Errorf("missing required config field: appName")
 	}
-	if inputConfig.SystemDBPool == nil && inputConfig.SqliteSystemDB == nil {
+	if inputConfig.SystemDBPool == nil && inputConfig.SQLiteSystemDB == nil {
 		if _, err := sysdb.DetectDialect(inputConfig.DatabaseURL); err != nil {
 			return nil, err
 		}
@@ -91,7 +97,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ApplicationVersion:        inputConfig.ApplicationVersion,
 		ExecutorID:                inputConfig.ExecutorID,
 		SystemDBPool:              inputConfig.SystemDBPool,
-		SqliteSystemDB:            inputConfig.SqliteSystemDB,
+		SQLiteSystemDB:            inputConfig.SQLiteSystemDB,
 		EnablePatching:            inputConfig.EnablePatching,
 		Serializer:                inputConfig.Serializer,
 		SchedulerPollingInterval:  inputConfig.SchedulerPollingInterval,
@@ -168,9 +174,9 @@ type Client interface {
 
 	// Workflow management
 	RetrieveWorkflow(_ Client, workflowID string) (WorkflowHandle[any], error)                                   // Get a handle to an existing workflow
-	CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOptions) error                             // Cancel a workflow by setting its status to CANCELLED
-	CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOptions) error                         // Cancel multiple workflows in a single DB round-trip
-	UpdateWorkflowAttributes(_ Client, workflowID string, attributes map[string]any) error                       // Replace the custom attributes on an existing workflow (nil clears them)
+	CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOption) error                              // Cancel a workflow by setting its status to CANCELLED
+	CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOption) error                          // Cancel multiple workflows in a single DB round-trip
+	SetWorkflowAttributes(_ Client, workflowID string, attributes map[string]any) error                          // Replace the custom attributes on an existing workflow (nil clears them)
 	SetWorkflowDelay(_ Client, workflowID string, opts ...SetWorkflowDelayOption) error                          // Set or update the delay on a DELAYED workflow
 	ResumeWorkflow(_ Client, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)       // Resume a cancelled workflow
 	ResumeWorkflows(_ Client, workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error) // Resume multiple workflows in a single DB round-trip
@@ -184,7 +190,7 @@ type Client interface {
 
 	// Queue management
 	RegisterQueue(_ Client, name string, options ...QueueOption) (Queue, error) // Register and persist a database-backed queue
-	RetrieveQueue(_ Client, name string) (Queue, error)                         // Retrieve a database-backed queue by name (nil if absent)
+	RetrieveQueue(_ Client, name string) (Queue, error)                         // Retrieve a database-backed queue by name (ErrQueueNotFound if absent)
 	ListQueues(_ Client) ([]Queue, error)                                       // List all database-backed queues
 	DeleteQueue(_ Client, name string) error                                    // Delete a database-backed queue
 
@@ -194,17 +200,17 @@ type Client interface {
 	PauseSchedule(_ Client, scheduleName string) error                                      // Pause a schedule
 	ResumeSchedule(_ Client, scheduleName string) error                                     // Resume a paused schedule
 	DeleteSchedule(_ Client, scheduleName string) error                                     // Delete a schedule
-	GetSchedule(_ Client, scheduleName string) (*WorkflowSchedule, error)                   // Get a schedule by name
+	GetSchedule(_ Client, scheduleName string) (WorkflowSchedule, error)                    // Get a schedule by name (ErrScheduleNotFound if absent)
 	ListSchedules(_ Client, opts ...ListSchedulesOption) ([]WorkflowSchedule, error)        // List schedules with optional filters
 	BackfillSchedule(_ Client, scheduleName string, start, end time.Time) ([]string, error) // Backfill a schedule, returning the IDs of the enqueued workflows
 	TriggerSchedule(_ Client, scheduleName string) (WorkflowHandle[any], error)             // Trigger a schedule immediately, returning a handle to the enqueued workflow
 
 	// Application version management
 	ListApplicationVersions(_ Client) ([]VersionInfo, error)        // List all registered application versions, newest first
-	GetLatestApplicationVersion(_ Client) (*VersionInfo, error)     // Get the latest registered application version
+	GetLatestApplicationVersion(_ Client) (VersionInfo, error)      // Get the latest registered application version
 	SetLatestApplicationVersion(_ Client, versionName string) error // Mark the named version as latest by bumping its timestamp to now
 
-	Shutdown(timeout time.Duration) // Gracefully shutdown all DBOS resources
+	Shutdown(timeout time.Duration) error // Gracefully shutdown all DBOS resources; returns an error if the timeout expired before they all stopped
 }
 
 // Context represents a DBOS execution context that provides workflow orchestration capabilities.
@@ -217,13 +223,13 @@ type Context interface {
 	Client
 
 	// Context Lifecycle
-	Launch() error // Launch the DBOS runtime including system database, queues, and perform a workflow recovery for the local executor
+	Launch() error // Launch the DBOS runtime (system database, queues, scheduler) and recover this executor's PENDING workflows: interrupted workflows resume from their last completed step; queued ones are returned to their queue
 
 	// Workflow operations
 	RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
 	RunAsTransaction(_ Context, ds *DataSource, fn TxnFunc, opts ...StepOption) (any, error)                // Execute a function as a durable transaction against a registered data source
 	RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
-	Go(_ Context, fn StepFunc, opts ...StepOption) (chan StepOutcome[any], error)                           // Starts a step inside a Go routine and returns a channel to receive the result
+	Go(_ Context, fn StepFunc, opts ...StepOption) (<-chan StepOutcome[any], error)                         // Starts a step inside a Go routine and returns a channel to receive the result
 	Select(_ Context, channels []<-chan StepOutcome[any]) (any, error)                                      // Performs a durable select over a slice of channels, checkpointing the selected channel and value
 	Recv(_ Context, topic string, timeout time.Duration) (any, error)                                       // Receive a message sent to this workflow
 	SetEvent(_ Context, key string, message any, opts ...SetEventOption) error                              // Set a key-value event for this workflow
@@ -236,10 +242,9 @@ type Context interface {
 	GetStepID() (int, error)                                                                                // Get the current step ID (only available within workflows)
 
 	// Registration
-	ListRegisteredWorkflows(_ Context, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) // List registered workflows with filtering options
-	// Deprecated: in-memory queues are deprecated; use ListQueues for database-backed queues.
-	ListRegisteredQueues(_ Context) ([]WorkflowQueue, error)
-	ListenQueues(_ Context, queues ...WorkflowQueue) // Configure which queues this process should listen to
+	ListRegisteredWorkflows(_ Context) []WorkflowRegistryEntry // List workflows registered in this process
+	ListenQueues(_ Context, names ...string)                   // Replace the set of queues this process listens to (each call replaces the whole set)
+	ListenedQueues(_ Context) []string                         // Get the current listen set (empty means every queue)
 
 	// Accessors
 	GetApplicationVersion() string // Get the application version for this context
@@ -338,16 +343,11 @@ func SetAlertHandler(ctx Context, handler AlertHandler) {
 	ctx.SetAlertHandler(handler)
 }
 
-// ClearRegistries clears the workflow and queue registries,
-// allowing re-registration of workflows and queues. Intended for testing only.
+// ClearRegistries clears the workflow registry,
+// allowing re-registration of workflows. Intended for testing only.
 func (c *dbosContext) ClearRegistries() {
 	c.workflowRegistry.Clear()
 	c.workflowCustomNametoFQN.Clear()
-	for name := range c.queueRunner.workflowQueueRegistry {
-		if name != models.InternalQueueName {
-			delete(c.queueRunner.workflowQueueRegistry, name)
-		}
-	}
 	c.alertHandler = nil
 }
 
@@ -390,9 +390,6 @@ func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 	return childCtx
 }
 
-// From returns a copy of the current Context with the underlying context.Context set to the provided ctx.
-// The provided context must be a child of a context.Context that was provided by DBOS (e.g., the first argument of RunWorkflow or RunAsStep)
-// That is because such context embeds important metadata necessary for DBOS to function correctly.
 func (c *dbosContext) From(_ Context, ctx context.Context) Context {
 	if ctx == nil {
 		return nil
@@ -400,6 +397,16 @@ func (c *dbosContext) From(_ Context, ctx context.Context) Context {
 	return c.clone(ctx)
 }
 
+// From returns a copy of dbosCtx whose embedded context.Context is replaced by ctx.
+//
+// The returned Context takes its Deadline, cancellation (Done/Err), and Values
+// entirely from ctx; dbosCtx contributes only the DBOS runtime state (system
+// database, registries, configuration, logger). ctx must descend from a
+// context.Context provided by DBOS (e.g., the first argument of RunWorkflow or
+// RunAsStep), because DBOS metadata such as the current workflow state travels
+// in context values.
+//
+// From returns nil if dbosCtx or ctx is nil.
 func From(dbosCtx Context, ctx context.Context) Context {
 	if dbosCtx == nil {
 		return nil
@@ -491,42 +498,41 @@ func (c *dbosContext) GetApplicationID() string {
 	return c.applicationID
 }
 
-// ListRegisteredQueues returns all queues in the in-memory registry.
-//
-// Deprecated: in-memory queues are deprecated; use ListQueues for database-backed queues.
-func (c *dbosContext) ListRegisteredQueues(_ Context) ([]WorkflowQueue, error) {
-	if c.queueRunner == nil {
-		return []WorkflowQueue{}, nil
+// GetApplicationVersion is the package-level wrapper for Context.GetApplicationVersion.
+// It returns the application version of the provided context, or an empty string if ctx is nil.
+func GetApplicationVersion(ctx Context) string {
+	if ctx == nil {
+		return ""
 	}
-	return c.queueRunner.listQueues(), nil
+	return ctx.GetApplicationVersion()
+}
+
+// GetExecutorID is the package-level wrapper for Context.GetExecutorID.
+// It returns the executor ID of the provided context, or an empty string if ctx is nil.
+func GetExecutorID(ctx Context) string {
+	if ctx == nil {
+		return ""
+	}
+	return ctx.GetExecutorID()
+}
+
+// GetApplicationID is the package-level wrapper for Context.GetApplicationID.
+// It returns the application ID of the provided context, or an empty string if ctx is nil.
+func GetApplicationID(ctx Context) string {
+	if ctx == nil {
+		return ""
+	}
+	return ctx.GetApplicationID()
 }
 
 // ListRegisteredWorkflows returns information about registered workflows with their registration parameters.
-// Supports filtering using functional options.
-func (c *dbosContext) ListRegisteredWorkflows(_ Context, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) {
-	// Initialize parameters with defaults
-	params := &listRegisteredWorkflowsOptions{}
-
-	// Apply all provided options
-	for _, opt := range opts {
-		opt(params)
-	}
-
-	// Get all registered workflows and apply filters
-	var filteredWorkflows []WorkflowRegistryEntry
+func (c *dbosContext) ListRegisteredWorkflows(_ Context) []WorkflowRegistryEntry {
+	var workflows []WorkflowRegistryEntry
 	c.workflowRegistry.Range(func(key, value any) bool {
-		workflow := value.(WorkflowRegistryEntry)
-
-		// Filter by scheduled only
-		if params.scheduledOnly && workflow.CronSchedule == "" {
-			return true
-		}
-
-		filteredWorkflows = append(filteredWorkflows, workflow)
+		workflows = append(workflows, value.(WorkflowRegistryEntry))
 		return true
 	})
-
-	return filteredWorkflows, nil
+	return workflows
 }
 
 // NewContext creates a new DBOS context with the provided configuration.
@@ -584,10 +590,10 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		DatabaseURL:     config.DatabaseURL,
 		DatabaseSchema:  config.DatabaseSchema,
 		CustomPool:      config.SystemDBPool,
-		CustomSqliteDB:  config.SqliteSystemDB,
+		CustomSqliteDB:  config.SQLiteSystemDB,
 		Logger:          initExecutor.logger,
 		ApplicationName: config.AppName,
-		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (*string, string, error) {
+		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error) {
 			ser := resolveEncoder(ctx)
 			encoded, err := ser.Encode(ScheduledWorkflowInput{
 				ScheduledTime: scheduledTime,
@@ -610,9 +616,8 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	initExecutor.systemDB = systemDB
 	initExecutor.logger.Debug("System database initialized")
 
-	// Initialize the queue runner and register DBOS internal queue
+	// Initialize the queue runner (which owns the DBOS internal queue)
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
-	NewWorkflowQueue(initExecutor, models.InternalQueueName)
 
 	// Register the any,any internal debouncer workflow so it's always available for execution
 	// This allows a client to debounce workflow and the server side to run them, even without knowing the actual workflow types
@@ -663,13 +668,19 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	return initExecutor, nil
 }
 
+// ClientConfig holds configuration parameters for NewClient. Exactly one of
+// DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
 type ClientConfig struct {
-	DatabaseURL    string          // DatabaseURL is the system-database connection string. Exactly one of DatabaseURL, SystemDBPool, or SqliteSystemDB must be set.
-	SystemDBPool   *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SqliteSystemDB.
-	SqliteSystemDB *sql.DB         // SqliteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
-	DatabaseSchema string          // Database schema name (defaults to "dbos")
-	Logger         *slog.Logger    // Optional custom logger
-	Serializer     Serializer[any] // Optional custom serializer (defaults to JSON)
+	// DatabaseURL is the system-database connection string: a Postgres URL or key=value
+	// DSN, or a sqlite URL (sqlite:/path/to.db, sqlite:relative.db, or sqlite::memory:).
+	// Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
+	DatabaseURL            string
+	SystemDBPool           *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
+	SQLiteSystemDB         *sql.DB         // SQLiteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
+	DatabaseSchema         string          // Database schema name (defaults to "dbos")
+	Logger                 *slog.Logger    // Optional custom logger
+	Serializer             Serializer[any] // Optional custom serializer (defaults to JSON)
+	SystemDBStartupTimeout time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
 }
 
 // NewClient creates a new DBOS client with the provided configuration.
@@ -689,13 +700,14 @@ type ClientConfig struct {
 //	}
 func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 	dbosCtx, err := NewContext(ctx, Config{
-		DatabaseURL:    config.DatabaseURL,
-		DatabaseSchema: config.DatabaseSchema,
-		AppName:        "dbos-client",
-		Logger:         config.Logger,
-		SystemDBPool:   config.SystemDBPool,
-		SqliteSystemDB: config.SqliteSystemDB,
-		Serializer:     config.Serializer,
+		DatabaseURL:            config.DatabaseURL,
+		DatabaseSchema:         config.DatabaseSchema,
+		AppName:                "dbos-client",
+		Logger:                 config.Logger,
+		SystemDBPool:           config.SystemDBPool,
+		SQLiteSystemDB:         config.SQLiteSystemDB,
+		Serializer:             config.Serializer,
+		SystemDBStartupTimeout: config.SystemDBStartupTimeout,
 	})
 	if err != nil {
 		return nil, err
@@ -709,9 +721,9 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 	return dbosCtx, nil
 }
 
-// Launch initializes and starts the DBOS runtime components including the system database,
-// admin server (if enabled), queue runner, workflow scheduler, and performs recovery
-// of any pending workflows on this executor.
+// Launch initializes and starts the DBOS runtime components including the system database
+// and admin server (if enabled), recovers any pending workflows on this executor, then
+// starts the queue runner and workflow scheduler.
 //
 // Returns an error if the context is already launched or if any component fails to start.
 func (c *dbosContext) Launch() error {
@@ -721,7 +733,9 @@ func (c *dbosContext) Launch() error {
 	launchCompleted := false
 	defer func() {
 		if !launchCompleted {
-			c.Shutdown(_LAUNCH_ROLLBACK_TIMEOUT)
+			if err := c.Shutdown(_LAUNCH_ROLLBACK_TIMEOUT); err != nil {
+				c.logger.Error("Failed to roll back launch", "error", err)
+			}
 		}
 	}()
 
@@ -753,6 +767,18 @@ func (c *dbosContext) Launch() error {
 		c.logger.Debug("Admin server started", "port", c.config.AdminServerPort)
 	}
 
+	// Recover local pending workflows before starting the queue runner so
+	// recovered workflows are not racing a fresh dequeue pass.
+	recoveryHandles, err := recoverPendingWorkflows(c, []string{c.executorID})
+	if err != nil {
+		return models.NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
+	}
+	if len(recoveryHandles) > 0 {
+		c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
+	} else {
+		c.logger.Debug("No pending workflows to recover")
+	}
+
 	// Start the queue runner in a goroutine
 	go func() {
 		c.queueRunner.run(c)
@@ -779,17 +805,6 @@ func (c *dbosContext) Launch() error {
 		c.logger.Debug("Conductor started")
 	}
 
-	// Run a round of recovery on the local executor
-	recoveryHandles, err := recoverPendingWorkflows(c, []string{c.executorID})
-	if err != nil {
-		return models.NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
-	}
-	if len(recoveryHandles) > 0 {
-		c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
-	} else {
-		c.logger.Debug("No pending workflows to recover")
-	}
-
 	c.logger.Info("DBOS launched", "app_version", c.applicationVersion, "executor_id", c.executorID)
 	c.launched.Store(true)
 	launchCompleted = true
@@ -811,11 +826,14 @@ func (c *dbosContext) Launch() error {
 // a warning is logged and the shutdown continues to the next component.
 //
 // Shutdown is a permanent operation and should be called when the application is terminating.
-func (c *dbosContext) Shutdown(timeout time.Duration) {
+func (c *dbosContext) Shutdown(timeout time.Duration) error {
 	if !c.shutdownStarted.CompareAndSwap(false, true) {
-		return
+		return nil
 	}
 	c.logger.Debug("Shutting down DBOS context")
+
+	// Resources still running when their timeout expired.
+	var pending []string
 
 	// Cancel the context to signal all resources to stop
 	c.ctxCancelFunc(errors.New("DBOS cancellation initiated"))
@@ -833,6 +851,7 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 		c.logger.Debug("Schedule reconciler completed")
 	case <-time.After(timeout):
 		c.logger.Warn("Timeout waiting for schedule reconciler to complete", "timeout", timeout)
+		pending = append(pending, "schedule reconciler")
 	}
 
 	// Wait for queue runner to finish
@@ -844,6 +863,7 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 			c.queueRunnerStarted.Store(false)
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for queue runner to complete", "timeout", timeout)
+			pending = append(pending, "queue runner")
 		}
 	}
 
@@ -858,13 +878,16 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 			c.logger.Debug("All scheduled jobs completed")
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for jobs to complete. Moving on", "timeout", timeout)
+			pending = append(pending, "workflow scheduler")
 		}
 	}
 
 	// Shutdown the conductor
 	if c.conductor != nil {
 		c.logger.Debug("Shutting down conductor")
-		c.conductor.shutdown(timeout)
+		if err := c.conductor.shutdown(timeout); err != nil {
+			pending = append(pending, "conductor")
+		}
 	}
 
 	// Shutdown the admin server
@@ -873,6 +896,7 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 		err := c.adminServer.Shutdown(timeout)
 		if err != nil {
 			c.logger.Error("Failed to shutdown admin server", "error", err)
+			pending = append(pending, "admin server")
 		} else {
 			c.logger.Debug("Admin server shutdown complete")
 		}
@@ -890,15 +914,23 @@ func (c *dbosContext) Shutdown(timeout time.Duration) {
 		c.logger.Debug("All workflows completed")
 	case <-time.After(timeout):
 		c.logger.Warn("Timeout waiting for workflows to complete", "timeout", timeout)
+		pending = append(pending, "workflows")
 	}
 
 	// Close the system database
 	if c.systemDB != nil {
 		c.logger.Debug("Shutting down system database")
-		c.systemDB.Shutdown(c, timeout)
+		for _, p := range c.systemDB.Shutdown(c, timeout) {
+			pending = append(pending, "system database "+p)
+		}
 	}
 
 	c.launched.Store(false)
+
+	if len(pending) > 0 {
+		return fmt.Errorf("shutdown timed out after %v waiting for: %s", timeout, strings.Join(pending, ", "))
+	}
+	return nil
 }
 
 // getBinaryHash computes and returns the SHA-256 hash of the current executable.
@@ -993,16 +1025,20 @@ func Launch(ctx Context) error {
 //	    log.Fatal(err)
 //	}
 //	defer dbos.Shutdown(ctx, 30*time.Second)
-func Shutdown(c Client, timeout time.Duration) {
+//
+// It returns an error if the timeout expired before all dependent resources
+// (queue runner, workflow scheduler, in-flight workflows, ...) stopped; those
+// resources may still be running when it returns.
+func Shutdown(c Client, timeout time.Duration) error {
 	if c == nil {
-		return
+		return nil
 	}
-	c.Shutdown(timeout)
+	return c.Shutdown(timeout)
 }
 
-// ClearRegistries clears the workflow and queue registries,
-// allowing re-registration of workflows and queues. Intended for testing only.
-func ClearRegistries(ctx Context) {
+// clearRegistries clears the workflow registry,
+// allowing re-registration of workflows. Intended for testing only.
+func clearRegistries(ctx Context) {
 	c, ok := ctx.(*dbosContext)
 	if !ok {
 		return

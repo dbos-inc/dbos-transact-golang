@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -84,18 +85,22 @@ func main() {
 		AdminServer: true,
 	})
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	// Register workflows
 	dbos.RegisterWorkflow(dbosCtx, ExampleWorkflow)
 
 	// Launch DBOS
-	err = dbosCtx.Launch()
+	err = dbos.Launch(dbosCtx)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	defer dbosCtx.Shutdown(10 * time.Second)
+	defer func() {
+		if err := dbos.Shutdown(dbosCtx, 10*time.Second); err != nil {
+			log.Printf("Error shutting down DBOS: %s", err)
+		}
+	}()
 
 	// Initialize Gin router
 	router := gin.Default()
@@ -109,7 +114,7 @@ func main() {
 	fmt.Println("Server starting on http://localhost:8080")
 	err = router.Run(":8080")
 	if err != nil {
-		fmt.Printf("Error starting server: %s\n", err)
+		log.Printf("Error starting server: %s", err)
 	}
 }
 

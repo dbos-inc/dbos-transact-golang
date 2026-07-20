@@ -23,6 +23,7 @@ type Config struct {
 
 // Global variables
 var dbosCtx dbos.Context
+var exampleQueue dbos.Queue
 
 /*****************************/
 /**** WORKFLOWS AND STEPS ****/
@@ -64,7 +65,7 @@ func QueueWorkflow(ctx dbos.Context, _ string) (string, error) {
 	fmt.Println("Enqueueing steps")
 	handles := make([]dbos.WorkflowHandle[int], 10)
 	for i := range 10 {
-		handle, err := dbos.RunWorkflow(ctx, QueuedStepWorkflow, i, dbos.WithQueue("example-queue"))
+		handle, err := dbos.RunWorkflow(ctx, QueuedStepWorkflow, i, dbos.WithQueue(exampleQueue))
 		if err != nil {
 			return "", fmt.Errorf("failed to enqueue step %d: %w", i, err)
 		}
@@ -78,8 +79,8 @@ func QueueWorkflow(ctx dbos.Context, _ string) (string, error) {
 /**** SCHEDULED WORKFLOWS ****/
 /*****************************/
 
-func ScheduledWorkflow(ctx dbos.Context, scheduledTime time.Time) (string, error) {
-	fmt.Printf("I am a scheduled workflow scheduled at %v and running at %v\n", scheduledTime, time.Now())
+func ScheduledWorkflow(ctx dbos.Context, input dbos.ScheduledWorkflowInput) (any, error) {
+	fmt.Printf("I am a scheduled workflow scheduled at %v and running at %v\n", input.ScheduledTime, time.Now())
 	return "", nil
 }
 
@@ -106,10 +107,13 @@ func main() {
 	dbos.RegisterWorkflow(dbosCtx, ExampleWorkflow)
 	dbos.RegisterWorkflow(dbosCtx, QueueWorkflow)
 	dbos.RegisterWorkflow(dbosCtx, QueuedStepWorkflow)
-	dbos.RegisterWorkflow(dbosCtx, ScheduledWorkflow, dbos.WithSchedule("*/15 * * * * *"))
+	dbos.RegisterWorkflow(dbosCtx, ScheduledWorkflow)
 
-	// Create queue
-	dbos.NewWorkflowQueue(dbosCtx, "example-queue")
+	// Register queue
+	exampleQueue, err = dbos.RegisterQueue(dbosCtx, "example-queue")
+	if err != nil {
+		panic(err)
+	}
 
 	// Launch DBOS
 	err = dbosCtx.Launch()
@@ -117,6 +121,16 @@ func main() {
 		panic(err)
 	}
 	defer dbosCtx.Shutdown(10 * time.Second)
+
+	// Create a DB-backed schedule for the scheduled workflow
+	err = dbos.CreateSchedule(dbosCtx, dbos.ScheduleSpec{
+		ScheduleName: "cli-test-schedule",
+		Schedule:     "*/15 * * * * *",
+		Workflow:     ScheduledWorkflow,
+	})
+	if err != nil {
+		panic(err)
+	}
 
 	// HTTP Handlers
 	http.HandleFunc("/workflow", workflowHandler)
