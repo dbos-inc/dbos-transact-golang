@@ -107,7 +107,7 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 	user_ctx := context.Background()
 
 	// Create DBOS context
-	ctx, err := createDBOSContext(user_ctx, dbURL)
+	ctx, err := createContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
@@ -116,19 +116,19 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 	var opts []dbos.ListWorkflowsOption
 
 	if limit, _ := cmd.Flags().GetInt("limit"); limit > 0 {
-		opts = append(opts, dbos.WithLimit(limit))
+		opts = append(opts, dbos.WithFilterLimit(limit))
 	}
 
 	if offset, _ := cmd.Flags().GetInt("offset"); offset > 0 {
-		opts = append(opts, dbos.WithOffset(offset))
+		opts = append(opts, dbos.WithFilterOffset(offset))
 	}
 
 	if user, _ := cmd.Flags().GetString("user"); user != "" {
-		opts = append(opts, dbos.WithUser(user))
+		opts = append(opts, dbos.WithFilterUser(user))
 	}
 
 	if name, _ := cmd.Flags().GetString("name"); name != "" {
-		opts = append(opts, dbos.WithName(name))
+		opts = append(opts, dbos.WithFilterName(name))
 	}
 
 	if status, _ := cmd.Flags().GetString("status"); status != "" {
@@ -149,23 +149,23 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 		default:
 			return fmt.Errorf("invalid status: %s", status)
 		}
-		opts = append(opts, dbos.WithStatus([]dbos.WorkflowStatusType{statusType}))
+		opts = append(opts, dbos.WithFilterStatus(statusType))
 	}
 
 	if appVersion, _ := cmd.Flags().GetString("application-version"); appVersion != "" {
-		opts = append(opts, dbos.WithAppVersion(appVersion))
+		opts = append(opts, dbos.WithFilterAppVersion(appVersion))
 	}
 
 	if queue, _ := cmd.Flags().GetString("queue"); queue != "" {
-		opts = append(opts, dbos.WithQueueName(queue))
+		opts = append(opts, dbos.WithFilterQueueName(queue))
 	}
 
 	if queuesOnly, _ := cmd.Flags().GetBool("queues-only"); queuesOnly {
-		opts = append(opts, dbos.WithQueuesOnly())
+		opts = append(opts, dbos.WithFilterQueuesOnly())
 	}
 
 	if sortDesc, _ := cmd.Flags().GetBool("sort-desc"); sortDesc {
-		opts = append(opts, dbos.WithSortDesc())
+		opts = append(opts, dbos.WithFilterSortDesc())
 	}
 
 	if startTime, _ := cmd.Flags().GetString("start-time"); startTime != "" {
@@ -173,7 +173,7 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("invalid start-time format: %w", err)
 		}
-		opts = append(opts, dbos.WithStartTime(t))
+		opts = append(opts, dbos.WithFilterCreatedAfter(t))
 	}
 
 	if endTime, _ := cmd.Flags().GetString("end-time"); endTime != "" {
@@ -181,11 +181,11 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("invalid end-time format: %w", err)
 		}
-		opts = append(opts, dbos.WithEndTime(t))
+		opts = append(opts, dbos.WithFilterCreatedBefore(t))
 	}
 
 	// Do not retrieve input and output
-	opts = append(opts, dbos.WithLoadInput(false), dbos.WithLoadOutput(false))
+	opts = append(opts, dbos.WithFilterLoadInput(false), dbos.WithFilterLoadOutput(false))
 
 	// List workflows
 	workflows, err := ctx.ListWorkflows(ctx, opts...)
@@ -214,7 +214,7 @@ func runWorkflowGet(cmd *cobra.Command, args []string) error {
 	user_ctx := context.Background()
 
 	// Create DBOS context
-	ctx, err := createDBOSContext(user_ctx, dbURL)
+	ctx, err := createContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
@@ -222,9 +222,9 @@ func runWorkflowGet(cmd *cobra.Command, args []string) error {
 	// Retrieve workflow
 	workflows, err := ctx.ListWorkflows(
 		ctx,
-		dbos.WithWorkflowIDs([]string{workflowID}),
-		dbos.WithLoadInput(false),
-		dbos.WithLoadOutput(false),
+		dbos.WithFilterWorkflowIDs(workflowID),
+		dbos.WithFilterLoadInput(false),
+		dbos.WithFilterLoadOutput(false),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve workflow: %w", err)
@@ -249,7 +249,7 @@ func runWorkflowSteps(cmd *cobra.Command, args []string) error {
 	user_ctx := context.Background()
 
 	// Create DBOS context
-	ctx, err := createDBOSContext(user_ctx, dbURL)
+	ctx, err := createContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
@@ -286,12 +286,12 @@ func runWorkflowCancel(cmd *cobra.Command, args []string) error {
 	user_ctx := context.Background()
 
 	// Create DBOS context
-	ctx, err := createDBOSContext(user_ctx, dbURL)
+	ctx, err := createContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
 
-	opts := []dbos.CancelWorkflowOptions{}
+	opts := []dbos.CancelWorkflowOption{}
 	if cancelChildren {
 		opts = append(opts, dbos.WithCancelChildren())
 	}
@@ -316,7 +316,7 @@ func runWorkflowResume(cmd *cobra.Command, args []string) error {
 	user_ctx := context.Background()
 
 	// Create DBOS context
-	ctx, err := createDBOSContext(user_ctx, dbURL)
+	ctx, err := createContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
@@ -349,7 +349,7 @@ func runWorkflowFork(cmd *cobra.Command, args []string) error {
 	user_ctx := context.Background()
 
 	// Create DBOS context
-	ctx, err := createDBOSContext(user_ctx, dbURL)
+	ctx, err := createContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}
@@ -402,7 +402,7 @@ func runWorkflowDelete(cmd *cobra.Command, args []string) error {
 	user_ctx := context.Background()
 
 	// Create DBOS context
-	ctx, err := createDBOSContext(user_ctx, dbURL)
+	ctx, err := createContext(user_ctx, dbURL)
 	if err != nil {
 		return err
 	}

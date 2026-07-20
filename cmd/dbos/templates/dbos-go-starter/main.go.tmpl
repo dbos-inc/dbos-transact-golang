@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -13,13 +14,13 @@ import (
 
 const STEPS_EVENT = "steps_event"
 
-var dbosCtx dbos.DBOSContext
+var dbosCtx dbos.Context
 
 /*****************************/
 /**** WORKFLOWS AND STEPS ****/
 /*****************************/
 
-func ExampleWorkflow(ctx dbos.DBOSContext, _ string) (string, error) {
+func ExampleWorkflow(ctx dbos.Context, _ string) (string, error) {
 	_, err := dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
 		return stepOne(stepCtx)
 	})
@@ -78,24 +79,28 @@ func stepThree(ctx context.Context) (string, error) {
 func main() {
 	// Create DBOS context
 	var err error
-	dbosCtx, err = dbos.NewDBOSContext(context.Background(), dbos.Config{
+	dbosCtx, err = dbos.NewContext(context.Background(), dbos.Config{
 		DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 		AppName: "{{.ProjectName}}",
 		AdminServer: true,
 	})
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	// Register workflows
 	dbos.RegisterWorkflow(dbosCtx, ExampleWorkflow)
 
 	// Launch DBOS
-	err = dbosCtx.Launch()
+	err = dbos.Launch(dbosCtx)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	defer dbosCtx.Shutdown(10 * time.Second)
+	defer func() {
+		if err := dbos.Shutdown(dbosCtx, 10*time.Second); err != nil {
+			log.Printf("Error shutting down DBOS: %s", err)
+		}
+	}()
 
 	// Initialize Gin router
 	router := gin.Default()
@@ -109,7 +114,7 @@ func main() {
 	fmt.Println("Server starting on http://localhost:8080")
 	err = router.Run(":8080")
 	if err != nil {
-		fmt.Printf("Error starting server: %s\n", err)
+		log.Printf("Error starting server: %s", err)
 	}
 }
 

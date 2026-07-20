@@ -2,7 +2,6 @@ package dbos
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"math"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -54,7 +54,7 @@ type workflowOutcome[R any] struct {
 	needsDecoding bool   // true if result came from awaitWorkflowResult (ID conflict path) and needs decoding
 	serialization string // serialization format of the encoded result (only used when needsDecoding is true)
 	// cancelled reports that the workflow settled in CANCELLED. An awaiting parent
-	// records it as an AwaitedWorkflowCancelled outcome for its getResult step.
+	// records it as an ErrorCodeAwaitedWorkflowCancelled outcome for its getResult step.
 	cancelled bool
 }
 
@@ -82,7 +82,7 @@ type WorkflowHandle[R any] interface {
 
 type baseWorkflowHandle struct {
 	workflowID  string
-	dbosContext DBOSContext
+	dbosContext Context
 }
 
 // GetResultOption is a functional option for configuring GetResult behavior.
@@ -117,7 +117,7 @@ func WithHandlePollingInterval(interval time.Duration) GetResultOption {
 }
 
 // GetStatus returns the current status of the workflow from the database
-// If the DBOSContext is running in client mode, do not load input and outputs
+// If the Context is running in client mode, do not load input and outputs
 func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 	loadInput := false
 	loadOutput := false
@@ -131,14 +131,24 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 	var workflowStatuses []WorkflowStatus
 	var err error
 	if isWithinWorkflow {
+		// Decode inside the step so the checkpoint records decoded values: a
+		// recovery replay returns the recorded output as-is, and the raw
+		// encoded *string columns do not survive checkpoint serialization.
 		workflowStatuses, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
+			statuses, err := sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
 				return c.systemDB.ListWorkflows(ctx, sysdb.ListWorkflowsDBInput{
 					WorkflowIDs: []string{h.workflowID},
 					LoadInput:   loadInput,
 					LoadOutput:  loadOutput,
 				})
 			}, sysdb.WithRetrierLogger(c.logger))
+			if err != nil {
+				return nil, err
+			}
+			if err := c.decodeWorkflowsInputOutput(statuses, loadInput, loadOutput); err != nil {
+				return nil, err
+			}
+			return statuses, nil
 		}, WithStepName("DBOS.getStatus"))
 	} else {
 		workflowStatuses, err = sysdb.RetryWithResult(c, func() ([]WorkflowStatus, error) {
@@ -148,15 +158,15 @@ func (h *baseWorkflowHandle) GetStatus() (WorkflowStatus, error) {
 				LoadOutput:  loadOutput,
 			})
 		})
+		if err == nil {
+			err = c.decodeWorkflowsInputOutput(workflowStatuses, loadInput, loadOutput)
+		}
 	}
 	if err != nil {
 		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
 	}
 	if len(workflowStatuses) == 0 {
 		return WorkflowStatus{}, models.NewNonExistentWorkflowError(h.workflowID)
-	}
-	if err := c.decodeWorkflowsInputOutput(workflowStatuses, loadInput, loadOutput); err != nil {
-		return WorkflowStatus{}, fmt.Errorf("failed to get workflow status: %w", err)
 	}
 	return workflowStatuses[0], nil
 }
@@ -165,7 +175,7 @@ func (h *baseWorkflowHandle) GetWorkflowID() string {
 	return h.workflowID
 }
 
-func newWorkflowHandle[R any](ctx DBOSContext, workflowID string, outcomeChan chan workflowOutcome[R]) *workflowHandle[R] {
+func newWorkflowHandle[R any](ctx Context, workflowID string, outcomeChan chan workflowOutcome[R]) *workflowHandle[R] {
 	return &workflowHandle[R]{
 		baseWorkflowHandle: baseWorkflowHandle{
 			workflowID:  workflowID,
@@ -175,7 +185,7 @@ func newWorkflowHandle[R any](ctx DBOSContext, workflowID string, outcomeChan ch
 	}
 }
 
-func newWorkflowPollingHandle[R any](ctx DBOSContext, workflowID string) *workflowPollingHandle[R] {
+func newWorkflowPollingHandle[R any](ctx Context, workflowID string) *workflowPollingHandle[R] {
 	return &workflowPollingHandle[R]{
 		baseWorkflowHandle: baseWorkflowHandle{
 			workflowID:  workflowID,
@@ -258,7 +268,7 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 	case <-h.dbosContext.Done():
 		return *new(R), context.Cause(h.dbosContext)
 	case <-timeoutChan:
-		return *new(R), fmt.Errorf("workflow result timeout after %v: %w", options.timeout, context.DeadlineExceeded)
+		return *new(R), models.NewTimeoutError(h.workflowID, "", fmt.Sprintf("workflow result timeout after %v", options.timeout), context.DeadlineExceeded)
 	}
 }
 
@@ -270,7 +280,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
 		if _, ok := h.dbosContext.(*dbosContext); !ok {
-			return *new(R), models.NewWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("invalid DBOSContext: expected *dbosContext"))
+			return *new(R), models.NewWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("invalid Context: expected *dbosContext"))
 		}
 		// A cancellation outcome delivered while the awaiting workflow is itself
 		// cancelled interrupts the getResult step: don't checkpoint it, so resume
@@ -375,7 +385,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	// A cancelled child is a terminal outcome for the awaiting parent: checkpoint
 	// it like any other child error so replay is deterministic.
 	// Resuming the child later does not change what the parent saw.
-	childCancelled := errors.Is(awaitErr, &DBOSError{Code: AwaitedWorkflowCancelled})
+	childCancelled := errors.Is(awaitErr, ErrAwaitedWorkflowCancelled)
 
 	// Deserialize the result directly into the target type
 	var typedResult R
@@ -474,20 +484,19 @@ func typedHandle[R any](c Client, handle WorkflowHandle[any]) WorkflowHandle[R] 
 /**********************************/
 /******* WORKFLOW REGISTRY *******/
 /**********************************/
-type wrappedWorkflowFunc func(ctx DBOSContext, input any, inputSerialization string, opts ...WorkflowOption) (WorkflowHandle[any], error)
+type wrappedWorkflowFunc func(ctx Context, input any, inputSerialization string, opts ...WorkflowOption) (WorkflowHandle[any], error)
 
 type WorkflowRegistryEntry struct {
 	wrappedFunction wrappedWorkflowFunc
 	workflowFn      WorkflowFunc // Type-erased registered function taking a raw (non-encoded) input. Used by RunWorkflow for direct execution.
-	MaxRetries      int
+	MaxRetries      int          // Maximum recovery attempts before dead-lettering (set via WithMaxRecoveryAttempts); not step retries
 	Name            string
 	FQN             string // Fully qualified name of the workflow function. For configured instances, qualified with the config name.
-	CronSchedule    string // Empty string for non-scheduled workflows
 	ClassName       string // Receiver type name for configured instance workflows
 	ConfigName      string // Config name for configured instance workflows
 }
 
-func registerWorkflow(ctx DBOSContext, entry WorkflowRegistryEntry) {
+func registerWorkflow(ctx Context, entry WorkflowRegistryEntry) {
 	// Skip if we don't have a concrete dbosContext
 	c, ok := ctx.(*dbosContext)
 	if !ok {
@@ -523,47 +532,6 @@ func registerWorkflow(ctx DBOSContext, entry WorkflowRegistryEntry) {
 	}
 }
 
-func registerScheduledWorkflow(ctx DBOSContext, workflowFQN, customName string, fn WorkflowFunc, cronSchedule string) {
-	// Skip if we don't have a concrete dbosContext
-	c, ok := ctx.(*dbosContext)
-	if !ok {
-		return
-	}
-
-	if c.launched.Load() {
-		panic("Cannot register scheduled workflow after DBOS has launched")
-	}
-
-	// Update the existing workflow entry with the cron schedule
-	registryEntryAny, exists := c.workflowRegistry.Load(workflowFQN)
-	if !exists {
-		panic(fmt.Sprintf("workflow %s must be registered before scheduling", workflowFQN))
-	}
-	registryEntry := registryEntryAny.(WorkflowRegistryEntry)
-	registryEntry.CronSchedule = cronSchedule
-	c.workflowRegistry.Store(workflowFQN, registryEntry)
-
-	name := workflowFQN
-	if len(customName) > 0 {
-		name = customName
-	}
-	scheduled := ScheduledWorkflowFunc(func(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
-		scheduledTime := input.ScheduledTime
-		wfID := fmt.Sprintf("sched-%s-%s", name, scheduledTime)
-		opts := []WorkflowOption{
-			WithWorkflowID(wfID),
-			WithQueue(models.InternalQueueName),
-			withWorkflowName(workflowFQN),
-		}
-		return ctx.RunWorkflow(ctx, fn, scheduledTime, opts...)
-	})
-
-	if _, err := c.addScheduleCronEntry(name, cronSchedule, scheduled, nil); err != nil {
-		panic(fmt.Sprintf("failed to register scheduled workflow: %v", err))
-	}
-	c.logger.Info("Registered scheduled workflow", "fqn", workflowFQN, "custom_name", customName, "cron_schedule", cronSchedule)
-}
-
 // ConfiguredInstance is implemented by objects whose methods are registered as workflows.
 // ConfigName must return a stable, unique name for the instance: it disambiguates method
 // values bound to different receivers (which share a function name) and is durably recorded
@@ -579,10 +547,9 @@ func instanceQualifiedName(name, configName string) string {
 }
 
 type workflowRegistrationOptions struct {
-	cronSchedule string
-	maxRetries   int
-	name         string
-	instance     ConfiguredInstance
+	maxRetries int
+	name       string
+	instance   ConfiguredInstance
 }
 
 type WorkflowRegistrationOption func(*workflowRegistrationOptions)
@@ -596,24 +563,19 @@ const (
 	_DEFAULT_STEP_BACKOFF_FACTOR = 2.0
 )
 
-// WithMaxRetries sets the maximum number of retry attempts for workflow recovery.
-// If a workflow fails or is interrupted, it will be retried up to this many times.
-// After exceeding max retries, the workflow status becomes MAX_RECOVERY_ATTEMPTS_EXCEEDED.
-func WithMaxRetries(maxRetries int) WorkflowRegistrationOption {
+// WithMaxRecoveryAttempts sets the maximum number of times an interrupted workflow
+// is recovered (re-executed after a crash or restart). After exceeding this limit,
+// the workflow status becomes MAX_RECOVERY_ATTEMPTS_EXCEEDED. This is unrelated to
+// step retries; see WithStepMaxRetries for those.
+func WithMaxRecoveryAttempts(maxRecoveryAttempts int) WorkflowRegistrationOption {
 	return func(p *workflowRegistrationOptions) {
-		p.maxRetries = maxRetries
+		p.maxRetries = maxRecoveryAttempts
 	}
 }
 
-// WithSchedule registers the workflow as a scheduled workflow using cron syntax.
-// The schedule string follows standard cron format with second precision.
-// Scheduled workflows automatically receive a time.Time input parameter.
-func WithSchedule(schedule string) WorkflowRegistrationOption {
-	return func(p *workflowRegistrationOptions) {
-		p.cronSchedule = schedule
-	}
-}
-
+// WithWorkflowName registers the workflow under a custom name instead of its
+// fully qualified function name. The custom name is what workflow status
+// records show and what by-name dispatch (e.g. Client.Enqueue) resolves.
 func WithWorkflowName(name string) WorkflowRegistrationOption {
 	return func(p *workflowRegistrationOptions) {
 		p.name = name
@@ -667,20 +629,17 @@ func resolveWorkflowFunctionName[P any, R any](fn Workflow[P, R]) string {
 //   - A closure or method value, at most ONE per source expression: all values built
 //     from the same func literal or method (e.g. a.Run and b.Run, or closures from one
 //     factory) share a name. Registering a second one panics with
-//     ConflictingRegistrationError; use WithInstance (methods) or distinct top-level
+//     ErrorCodeConflictingRegistration; use WithInstance (methods) or distinct top-level
 //     functions (closures) instead.
 //
 // Registration options include:
-//   - WithMaxRetries: Set maximum retry attempts for workflow recovery
-//   - WithSchedule: Register as a scheduled workflow with cron syntax
+//   - WithMaxRecoveryAttempts: Set maximum recovery attempts for the workflow
 //   - WithWorkflowName: Set a custom name for the workflow
 //   - WithInstance: Register a method bound to a named instance
 //
-// Scheduled workflows receive a time.Time as input representing the scheduled execution time.
-//
 // Example:
 //
-//	func MyWorkflow(ctx dbos.DBOSContext, input string) (int, error) {
+//	func MyWorkflow(ctx dbos.Context, input string) (int, error) {
 //	    // workflow implementation
 //	    return len(input), nil
 //	}
@@ -689,10 +648,9 @@ func resolveWorkflowFunctionName[P any, R any](fn Workflow[P, R]) string {
 //
 //	// With options:
 //	dbos.RegisterWorkflow(ctx, MyWorkflow,
-//	    dbos.WithMaxRetries(5),
-//	    dbos.WithSchedule("0 0 * * * *")) // daily at midnight
-//		dbos.WithWorkflowName("MyCustomWorkflowName") // Custom name for the workflow
-func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...WorkflowRegistrationOption) {
+//	    dbos.WithMaxRecoveryAttempts(5),
+//	    dbos.WithWorkflowName("MyCustomWorkflowName"))
+func RegisterWorkflow[P any, R any](ctx Context, fn Workflow[P, R], opts ...WorkflowRegistrationOption) {
 	if ctx == nil {
 		panic("ctx cannot be nil")
 	}
@@ -700,8 +658,6 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	if fn == nil {
 		panic("workflow function cannot be nil")
 	}
-
-	var p P
 
 	registrationParams := workflowRegistrationOptions{
 		maxRetries: _DEFAULT_MAX_RECOVERY_ATTEMPTS,
@@ -732,7 +688,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	// Register a type-erased version of the durable workflow for recovery and queue runner
 	// Input will always come, encoded, from the database, so we decode it into the target type (captured by this wrapped closure)
 	// inputSerialization is the DB-stored serialization format for the encoded input.
-	typedErasedWorkflow := func(ctx DBOSContext, input any, inputSerialization string) (any, error) {
+	typedErasedWorkflow := func(ctx Context, input any, inputSerialization string) (any, error) {
 		workflowID, err := GetWorkflowID(ctx)
 		if err != nil {
 			return *new(R), models.NewWorkflowExecutionError("", fmt.Errorf("getting workflow ID: %w", err))
@@ -757,8 +713,8 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		return fn(ctx, typedInput)
 	}
 
-	typeErasedWrapper := wrappedWorkflowFunc(func(ctx DBOSContext, input any, inputSerialization string, opts ...WorkflowOption) (WorkflowHandle[any], error) {
-		wfFunc := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
+	typeErasedWrapper := wrappedWorkflowFunc(func(ctx Context, input any, inputSerialization string, opts ...WorkflowOption) (WorkflowHandle[any], error) {
+		wfFunc := WorkflowFunc(func(ctx Context, input any) (any, error) {
 			return typedErasedWorkflow(ctx, input, inputSerialization)
 		})
 		opts = append(opts, withWorkflowName(fqn), withAlreadyEncodedInput()) // Append the name so ctx.RunWorkflow can look it up from the registry to apply registration-time options
@@ -773,7 +729,7 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 	})
 
 	// Wrapper for direct calls in RunWorkflow
-	registeredWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
+	registeredWorkflow := WorkflowFunc(func(ctx Context, input any) (any, error) {
 		typedInput, ok := input.(P)
 		if !ok {
 			return nil, models.NewWorkflowUnexpectedInputType(fqn, fmt.Sprintf("%T", *new(P)), fmt.Sprintf("%T", input))
@@ -791,16 +747,6 @@ func RegisterWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], opts ...
 		ConfigName:      configName,
 	})
 
-	// If this is a scheduled workflow, register a cron job
-	if registrationParams.cronSchedule != "" {
-		if reflect.TypeOf(p) != reflect.TypeFor[time.Time]() {
-			panic(fmt.Sprintf("scheduled workflow function must accept a time.Time as input, got %T", p))
-		}
-		scheduledWfFunc := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
-			return typedErasedWorkflow(ctx, input, resolveEncoder(ctx).Name())
-		})
-		registerScheduledWorkflow(ctx, fqn, registrationParams.name, scheduledWfFunc, registrationParams.cronSchedule)
-	}
 }
 
 // resolveWorkflowName returns either the FQN or the custom name of a function, if present in the workflow registry
@@ -830,11 +776,11 @@ const workflowStateKey dbosContextKey = "workflowState"
 
 // Workflow represents a type-safe workflow function with specific input and output types.
 // P is the input parameter type and R is the return type.
-// All workflow functions must accept a DBOSContext as their first parameter.
-type Workflow[P any, R any] func(ctx DBOSContext, input P) (R, error)
+// All workflow functions must accept a Context as their first parameter.
+type Workflow[P any, R any] func(ctx Context, input P) (R, error)
 
 // WorkflowFunc represents a type-erased workflow function used internally.
-type WorkflowFunc func(ctx DBOSContext, input any) (any, error)
+type WorkflowFunc func(ctx Context, input any) (any, error)
 
 type activeWorkflowEntry struct {
 	queueName         string
@@ -861,8 +807,9 @@ func (c *dbosContext) countActiveWorkflowsForQueue(queueName, queuePartitionKey 
 type DeduplicationPolicy int
 
 const (
-	// DeduplicationPolicyReject (default) returns a QueueDeduplicated error if another workflow
-	// already holds the deduplication ID on the queue.
+	// DeduplicationPolicyReject (default) rejects the enqueue with an error matching
+	// ErrQueueDeduplicated (via errors.Is) if another workflow already holds the
+	// deduplication ID on the queue.
 	DeduplicationPolicyReject DeduplicationPolicy = iota
 	// DeduplicationPolicyReturnExisting returns a handle to the existing workflow instead of an
 	// error.
@@ -873,6 +820,7 @@ type workflowOptions struct {
 	WorkflowName        string
 	WorkflowID          string
 	QueueName           string
+	queue               Queue
 	ApplicationVersion  string
 	MaxRetries          int
 	DeduplicationID     string
@@ -889,6 +837,7 @@ type workflowOptions struct {
 	isRecovery          bool
 	isPortableWorkflow  bool
 	runInstance         ConfiguredInstance
+	err                 error // invalid option usage, surfaced when options are parsed
 }
 
 // WorkflowOption is a functional option for configuring workflow execution parameters.
@@ -912,10 +861,31 @@ func WithRunInstance(instance ConfiguredInstance) WorkflowOption {
 	}
 }
 
-// WithQueue enqueues the workflow to the specified queue instead of executing immediately.
+// WithQueue enqueues the workflow to the given queue instead of executing immediately.
 // Queued workflows will be processed by the queue runner according to the queue's configuration.
-func WithQueue(queueName string) WorkflowOption {
+// The queue must be a non-nil handle from [RegisterQueue], [RetrieveQueue], or [ListQueues];
+// passing nil makes the enclosing call return an error.
+// To enqueue by name, use [Enqueue].
+func WithQueue(queue Queue) WorkflowOption {
 	return func(p *workflowOptions) {
+		if queue == nil {
+			p.err = errors.Join(p.err, models.NewInvalidOptionError("WithQueue: queue cannot be nil"))
+			return
+		}
+		p.queue = queue
+		p.QueueName = queue.GetName()
+	}
+}
+
+// withQueueName enqueues the workflow to a queue identified by name only.
+// It is a no-op if a queue handle was already set with WithQueue: an explicit
+// user choice always wins over an internally-supplied name.
+// XXX: this will be removed when we update the debouncer implementation.
+func withQueueName(queueName string) WorkflowOption {
+	return func(p *workflowOptions) {
+		if p.queue != nil {
+			return
+		}
 		p.QueueName = queueName
 	}
 }
@@ -1018,22 +988,22 @@ func WithPortableWorkflow() WorkflowOption {
 	}
 }
 
-// Sets the authenticated user for the workflow
+// WithAuthenticatedUser sets the authenticated user recorded on the workflow.
 func WithAuthenticatedUser(user string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.AuthenticatedUser = user
 	}
 }
 
-// Sets the assumed role for the workflow
+// WithAssumedRole sets the assumed role recorded on the workflow.
 func WithAssumedRole(role string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.AssumedRole = role
 	}
 }
 
-// Sets the authenticated role for the workflow
-func WithAuthenticatedRoles(roles []string) WorkflowOption {
+// WithAuthenticatedRoles sets the authenticated roles for the workflow.
+func WithAuthenticatedRoles(roles ...string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.AuthenticatedRoles = roles
 	}
@@ -1043,8 +1013,16 @@ func WithAuthenticatedRoles(roles []string) WorkflowOption {
 // The workflow can be executed immediately or enqueued for later execution based on options.
 // Returns a typed handle that can be used to wait for completion and retrieve results.
 //
+// The context must have been launched with Launch; calling RunWorkflow before
+// Launch returns an initialization error.
+//
 // The workflow will be automatically recovered if the process crashes or is interrupted.
 // All workflow state is persisted to ensure exactly-once execution semantics.
+//
+// Workflow IDs are idempotency keys. If WithWorkflowID supplies the ID of a
+// workflow that already completed, RunWorkflow does not re-execute it: it
+// returns a handle to the recorded execution and the recorded result, and the
+// new input is ignored. To re-execute with the same ID, use ForkWorkflow.
 //
 // Example:
 //
@@ -1059,7 +1037,7 @@ func WithAuthenticatedRoles(roles []string) WorkflowOption {
 //	} else {
 //	    log.Printf("Result: %v", result)
 //	}
-func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
+func RunWorkflow[P any, R any](ctx Context, fn Workflow[P, R], input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("ctx cannot be nil")
 	}
@@ -1076,11 +1054,11 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 		fqn = instanceQualifiedName(fqn, providedOpts.runInstance.ConfigName())
 	}
 
-	// Add the fn name to the options so we can communicate it with DBOSContext.RunWorkflow
+	// Add the fn name to the options so we can communicate it with Context.RunWorkflow
 	opts = append(opts, withWorkflowName(fqn))
 
 	// Execute the registered function (fallback on provided function for mocked contexts)
-	typedErasedWorkflow := WorkflowFunc(func(ctx DBOSContext, input any) (any, error) {
+	typedErasedWorkflow := WorkflowFunc(func(ctx Context, input any) (any, error) {
 		return fn(ctx, input.(P))
 	})
 	if c, ok := ctx.(*dbosContext); ok {
@@ -1176,13 +1154,17 @@ func RunWorkflow[P any, R any](ctx DBOSContext, fn Workflow[P, R], input P, opts
 	return &workflowHandleProxy[R]{wrappedHandle: handle}, nil
 }
 
-func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
+func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) {
 	// Apply options to build params
 	params := workflowOptions{
 		ApplicationVersion: c.GetApplicationVersion(),
 	}
 	for _, opt := range opts {
 		opt(&params)
+	}
+	if params.err != nil {
+		c.logger.Error("invalid workflow options", "workflow_name", params.WorkflowName, "error", params.err)
+		return nil, params.err
 	}
 
 	// Lookup the registry for registration-time options
@@ -1206,50 +1188,67 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 	// Validate delay is not provided without queue name
 	if params.DelayDuration > 0 && len(params.QueueName) == 0 {
 		c.logger.Error("delay provided but queue name is missing", "workflow_name", params.WorkflowName)
-		return nil, models.NewWorkflowExecutionError("", fmt.Errorf("delay provided but queue name is missing"))
+		return nil, models.NewInvalidOptionError("delay provided but queue name is missing")
 	}
 
 	// Validate partition key is not provided without queue name
 	if len(params.QueuePartitionKey) > 0 && len(params.QueueName) == 0 {
 		c.logger.Error("partition key provided but queue name is missing", "workflow_name", params.WorkflowName)
-		return nil, models.NewWorkflowExecutionError("", fmt.Errorf("partition key provided but queue name is missing"))
+		return nil, models.NewInvalidOptionError("partition key provided but queue name is missing")
 	}
 
 	// Validate partition key and deduplication ID are not both provided (they are incompatible)
 	if len(params.QueuePartitionKey) > 0 && len(params.DeduplicationID) > 0 {
 		c.logger.Error("partition key and deduplication ID cannot be used together", "workflow_name", params.WorkflowName)
-		return nil, models.NewWorkflowExecutionError("", fmt.Errorf("partition key and deduplication ID cannot be used together"))
+		return nil, models.NewInvalidOptionError("partition key and deduplication ID cannot be used together")
 	}
 
 	// A non-default deduplication policy only applies to a queued workflow with a deduplication ID
 	if params.DeduplicationPolicy != DeduplicationPolicyReject {
 		if len(params.DeduplicationID) == 0 {
-			return nil, models.NewWorkflowExecutionError("", fmt.Errorf("a deduplication policy requires a deduplication ID"))
+			return nil, models.NewInvalidOptionError("a deduplication policy requires a deduplication ID")
 		}
 		if len(params.QueueName) == 0 {
-			return nil, models.NewWorkflowExecutionError("", fmt.Errorf("a deduplication policy requires a queue name"))
+			return nil, models.NewInvalidOptionError("a deduplication policy requires a queue name")
 		}
 	}
 
-	// Validate queue configuration if provided and if in-memory queue.
-	if len(params.QueueName) > 0 {
-		if queue := c.queueRunner.getQueue(params.QueueName); queue != nil {
-			// If queue has partitions enabled, partition key must be provided
-			if queue.PartitionQueue && len(params.QueuePartitionKey) == 0 {
-				c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-				return nil, models.NewWorkflowExecutionError("", fmt.Errorf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
-			}
-			// If partition key is provided, queue must have partitions enabled
-			if len(params.QueuePartitionKey) > 0 && !queue.PartitionQueue {
-				c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-				return nil, models.NewWorkflowExecutionError("", fmt.Errorf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
-			}
+	// Validate partitioned-queue usage. Prefer the handle provided via WithQueue
+	// (configuration as of registration/retrieval time); for name-only enqueues,
+	// fall back to the queue runner's latest reconciled snapshot. If neither knows
+	// the queue (e.g. before launch, or a queue this process does not listen to),
+	// skip validation and let the queue runner resolve the name.
+	var partitionQueue, queueKnown bool
+	if params.queue != nil {
+		partitionQueue, queueKnown = params.queue.GetPartitionQueue(), true
+	} else if len(params.QueueName) > 0 {
+		if q, ok := c.queueRunner.currentQueueConfig(params.QueueName); ok {
+			partitionQueue, queueKnown = q.PartitionQueue, true
+		}
+	}
+	if queueKnown {
+		// If queue has partitions enabled, partition key must be provided
+		if partitionQueue && len(params.QueuePartitionKey) == 0 {
+			c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+			return nil, models.NewInvalidOptionError(fmt.Sprintf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
+		}
+		// If partition key is provided, queue must have partitions enabled
+		if len(params.QueuePartitionKey) > 0 && !partitionQueue {
+			c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
+			return nil, models.NewInvalidOptionError(fmt.Sprintf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
 		}
 	}
 
 	// Check if we are within a workflow (and thus a child workflow)
 	parentWorkflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
+
+	// Direct invocations require a launched runtime. Recovery, dequeue, and
+	// child workflow calls are internal paths that may run before Launch completes.
+	if !c.launched.Load() && !params.isRecovery && !params.isDequeue && !isChildWorkflow {
+		c.logger.Error("RunWorkflow called before Launch", "workflow_name", params.WorkflowName)
+		return nil, models.NewInitializationError("DBOS must be launched before running workflows; call Launch first")
+	}
 
 	// Prevent spawning child workflows from within a step
 	if isChildWorkflow && parentWorkflowState.isWithinStep {
@@ -1299,7 +1298,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 			// A non-determinism error (a different child workflow recorded at this
 			// step ID) is deterministic: surface it directly instead of masking it
 			// as a generic execution error.
-			if dbosErr := (*DBOSError)(nil); errors.As(err, &dbosErr) && dbosErr.Code == UnexpectedStep {
+			if dbosErr := (*Error)(nil); errors.As(err, &dbosErr) && dbosErr.Code == ErrorCodeUnexpectedStep {
 				c.logger.Error("non-deterministic child workflow invocation", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
 				return nil, err
 			}
@@ -1433,7 +1432,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		insertStatusResult, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
 			// Silence dedup error under return-existing policy.
-			if !(returnExisting && errors.Is(err, &DBOSError{Code: QueueDeduplicated})) {
+			if !(returnExisting && errors.Is(err, ErrQueueDeduplicated)) {
 				c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
 			}
 			return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to insert workflow status: %w", err))
@@ -1494,7 +1493,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		}
 		// Now handle the case where the insert failed because the deduplication ID is already held by another workflow.
 		// We must also handle the case were a parent workflow spawned a return-existing child, and record their parent-child relationship.
-		if !returnExisting || !errors.Is(err, &DBOSError{Code: QueueDeduplicated}) {
+		if !returnExisting || !errors.Is(err, ErrQueueDeduplicated) {
 			return nil, err
 		}
 		existingID, lookupErr := sysdb.RetryWithResult(c, func() (*string, error) {
@@ -1587,7 +1586,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		}
 		// Keep the encoded result - decoding will happen in RunWorkflow[P,R] when we know the target type
 		outcomeChan <- workflowOutcome[any]{result: encodedResult, err: err, needsDecoding: true, serialization: ser,
-			cancelled: errors.Is(err, &DBOSError{Code: AwaitedWorkflowCancelled})}
+			cancelled: errors.Is(err, ErrAwaitedWorkflowCancelled)}
 		close(outcomeChan)
 	}
 
@@ -1626,7 +1625,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 		result, err = fn(workflowCtx, input)
 
 		// Handle DBOS ID conflict errors by waiting workflow result
-		if errors.Is(err, &DBOSError{Code: ConflictingIDError}) {
+		if errors.Is(err, ErrConflictingWorkflowID) {
 			// This run lost the ID conflict: it does not own the workflow, so its
 			// context must no longer durably cancel it. Disarm the cancel function.
 			stopFunc()
@@ -1654,7 +1653,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				close(outcomeChan)
 				return
 			}
-			if errors.Is(err, &DBOSError{Code: WorkflowCancelled}) {
+			if errors.Is(err, ErrWorkflowCancelled) {
 				// The workflow observed its own cancellation in the DB (external
 				// cancel): the row is already CANCELLED. Skip the outcome write.
 				removeActive()
@@ -1699,7 +1698,7 @@ func (c *dbosContext) RunWorkflow(_ DBOSContext, fn WorkflowFunc, input any, opt
 				// concurrent resume): end as cancelled, not complete. Deliver a
 				// cancellation outcome wrapping the workflow's own error so
 				// context.Canceled/DeadlineExceeded still match via errors.Is.
-				if errors.Is(recordErr, &DBOSError{Code: WorkflowCancelled}) {
+				if errors.Is(recordErr, ErrWorkflowCancelled) {
 					outcomeChan <- workflowOutcome[any]{result: result, err: models.NewWorkflowCancelledError(workflowID, err), cancelled: true}
 					close(outcomeChan)
 					return
@@ -1819,7 +1818,7 @@ func WithEnqueueAssumedRole(role string) EnqueueOption {
 }
 
 // WithEnqueueAuthenticatedRoles sets the authenticated roles for the enqueued workflow.
-func WithEnqueueAuthenticatedRoles(roles []string) EnqueueOption {
+func WithEnqueueAuthenticatedRoles(roles ...string) EnqueueOption {
 	return func(opts *enqueueOptions) {
 		opts.authenticatedRoles = roles
 	}
@@ -1866,21 +1865,21 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	}
 
 	if len(queueName) == 0 {
-		return nil, fmt.Errorf("queue name is required")
+		return nil, models.NewInvalidOptionError("queue name is required")
 	}
 
 	if len(workflowName) == 0 {
-		return nil, fmt.Errorf("workflow name is required")
+		return nil, models.NewInvalidOptionError("workflow name is required")
 	}
 
 	// Validate partition key and deduplication ID are not both provided (they are incompatible)
 	if len(params.queuePartitionKey) > 0 && len(params.deduplicationID) > 0 {
-		return nil, fmt.Errorf("partition key and deduplication ID cannot be used together")
+		return nil, models.NewInvalidOptionError("partition key and deduplication ID cannot be used together")
 	}
 
 	// A non-default deduplication policy only applies with a deduplication ID
 	if params.deduplicationPolicy != DeduplicationPolicyReject && len(params.deduplicationID) == 0 {
-		return nil, fmt.Errorf("a deduplication policy requires a deduplication ID")
+		return nil, models.NewInvalidOptionError("a deduplication policy requires a deduplication ID")
 	}
 
 	workflowID := params.workflowID
@@ -1889,7 +1888,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	}
 
 	if params.priority > uint(math.MaxInt) {
-		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.priority, math.MaxInt)
+		return nil, models.NewInvalidOptionError(fmt.Sprintf("priority %d exceeds maximum allowed value %d", params.priority, math.MaxInt))
 	}
 
 	if params.workflowTimeout > 0 {
@@ -1952,22 +1951,27 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	returnExisting := params.deduplicationPolicy == DeduplicationPolicyReturnExisting
 
 	for {
-		tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
-		if err != nil {
-			return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %v", err))
-		}
-
-		// Insert workflow status with transaction
-		insertInput := sysdb.InsertWorkflowStatusDBInput{
-			Status: status,
-			Tx:     tx,
-		}
-		_, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
-		if err != nil {
-			if rbErr := tx.Rollback(uncancellableCtx); rbErr != nil {
-				c.logger.Warn("failed to roll back transaction", "error", rbErr, "workflow_id", workflowID)
+		err := func() error {
+			tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
+			if err != nil {
+				return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
 			}
-			if returnExisting && errors.Is(err, &DBOSError{Code: QueueDeduplicated}) {
+			defer tx.Rollback(uncancellableCtx)
+
+			insertInput := sysdb.InsertWorkflowStatusDBInput{
+				Status: status,
+				Tx:     tx,
+			}
+			if _, err := c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput); err != nil {
+				return err
+			}
+			if err := tx.Commit(uncancellableCtx); err != nil {
+				return fmt.Errorf("failed to commit transaction: %w", err)
+			}
+			return nil
+		}()
+		if err != nil {
+			if returnExisting && errors.Is(err, ErrQueueDeduplicated) {
 				existingID, lookupErr := c.systemDB.GetDeduplicatedWorkflow(uncancellableCtx, queueName, params.deduplicationID)
 				if lookupErr != nil {
 					return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("looking up deduplicated workflow: %w", lookupErr))
@@ -1982,13 +1986,6 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 			return nil, err
 		}
 
-		if err := tx.Commit(uncancellableCtx); err != nil {
-			if rbErr := tx.Rollback(uncancellableCtx); rbErr != nil {
-				c.logger.Warn("failed to roll back transaction", "error", rbErr, "workflow_id", workflowID)
-			}
-			return nil, fmt.Errorf("failed to commit transaction: %w", err)
-		}
-
 		return newWorkflowPollingHandle[any](uncancellableCtx, workflowID), nil
 	}
 }
@@ -1998,19 +1995,25 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 // This provides asynchronous workflow execution with durability guarantees.
 //
 // Parameters:
-//   - c: Client or DBOSContext instance for the operation
+//   - ctx: Client or Context instance for the operation
 //   - queueName: Name of the queue to enqueue the workflow to
 //   - workflowName: Name of the registered workflow function to execute
-//   - input: Input parameters to pass to the workflow (type P)
+//   - input: Input parameters to pass to the workflow (type P, inferred; only the result type R needs to be specified)
 //   - opts: Optional configuration options
 //
 // Available options:
 //   - WithEnqueueWorkflowID: Custom workflow ID (auto-generated if not provided)
 //   - WithEnqueueApplicationVersion: Application version override
 //   - WithEnqueueDeduplicationID: Deduplication identifier for idempotent enqueuing
+//   - WithEnqueueDeduplicationPolicy: How a colliding deduplication ID is handled
 //   - WithEnqueuePriority: Execution priority
 //   - WithEnqueueTimeout: Maximum execution time for the workflow
+//   - WithEnqueueDelay: Delay before the workflow becomes eligible for dequeue
 //   - WithEnqueueQueuePartitionKey: Queue partition key for partitioned queues
+//   - WithEnqueueClassName: Class/namespace name for cross-language dispatch
+//   - WithEnqueueConfigName: Config/instance name for configured-instance workflows
+//   - WithEnqueueAuthenticatedUser, WithEnqueueAssumedRole, WithEnqueueAuthenticatedRoles: Auth metadata recorded on the workflow
+//   - WithEnqueueAttributes: Custom key-value attributes recorded on the workflow
 //
 // Returns a typed workflow handle that can be used to check status and retrieve results.
 // The handle uses polling to check workflow completion since the execution is asynchronous.
@@ -2018,7 +2021,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 // Example usage:
 //
 //	// Enqueue a workflow with string input and int output
-//	handle, err := dbos.Enqueue[string, int](client, "data-processing", "ProcessDataWorkflow", "input data",
+//	handle, err := dbos.Enqueue[int](client, "data-processing", "ProcessDataWorkflow", "input data",
 //	    dbos.WithEnqueueTimeout(30 * time.Minute))
 //	if err != nil {
 //	    log.Fatal(err)
@@ -2039,7 +2042,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 //	}
 //
 //	// Enqueue with deduplication and custom workflow ID
-//	handle, err := dbos.Enqueue[MyInputType, MyOutputType](client, "my-queue", "MyWorkflow", MyInputType{Field: "value"},
+//	handle, err := dbos.Enqueue[MyOutputType](client, "my-queue", "MyWorkflow", MyInputType{Field: "value"},
 //	    dbos.WithEnqueueWorkflowID("custom-workflow-id"),
 //	    dbos.WithEnqueueDeduplicationID("unique-operation-id"))
 //
@@ -2051,19 +2054,19 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 //	    PositionalArgs: []any{"hello", 42},
 //	    NamedArgs:      map[string]any{"key": "value"},
 //	}
-//	handle, err := dbos.Enqueue[dbos.PortableWorkflowArgs, any](client, "queue", "py_workflow", args)
-func Enqueue[P any, R any](c Client, queueName, workflowName string, input P, opts ...EnqueueOption) (WorkflowHandle[R], error) {
-	if c == nil {
+//	handle, err := dbos.Enqueue[any](client, "queue", "py_workflow", args)
+func Enqueue[R any, P any](ctx Client, queueName, workflowName string, input P, opts ...EnqueueOption) (WorkflowHandle[R], error) {
+	if ctx == nil {
 		return nil, errors.New("client cannot be nil")
 	}
 
 	// Call the interface method — encoding happens there
-	handle, err := c.Enqueue(c, queueName, workflowName, input, opts...)
+	handle, err := ctx.Enqueue(ctx, queueName, workflowName, input, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	return typedHandle[R](c, handle), nil
+	return typedHandle[R](ctx, handle), nil
 }
 
 /******************************/
@@ -2138,32 +2141,32 @@ func WithStepMaxRetries(maxRetries int) StepOption {
 	}
 }
 
-// WithBackoffFactor sets the exponential backoff multiplier between retries.
+// WithStepBackoffFactor sets the exponential backoff multiplier between retries.
 // The delay between retries is calculated as: BaseInterval * (BackoffFactor^(retry-1))
 // Default value is 2.0.
-func WithBackoffFactor(factor float64) StepOption {
+func WithStepBackoffFactor(factor float64) StepOption {
 	return func(opts *stepOptions) {
 		opts.backoffFactor = factor
 	}
 }
 
-// WithBaseInterval sets the initial delay between retries.
+// WithStepBaseInterval sets the initial delay between retries.
 // Default value is 100ms.
-func WithBaseInterval(interval time.Duration) StepOption {
+func WithStepBaseInterval(interval time.Duration) StepOption {
 	return func(opts *stepOptions) {
 		opts.baseInterval = interval
 	}
 }
 
-// WithMaxInterval sets the maximum delay between retries.
+// WithStepMaxInterval sets the maximum delay between retries.
 // Default value is 5s.
-func WithMaxInterval(interval time.Duration) StepOption {
+func WithStepMaxInterval(interval time.Duration) StepOption {
 	return func(opts *stepOptions) {
 		opts.maxInterval = interval
 	}
 }
 
-// WithRetryPredicate sets a function to decide whether a step error is retryable.
+// WithStepRetryPredicate sets a function to decide whether a step error is retryable.
 // If the predicate returns false for an error, the step stops retrying immediately
 // and returns that error even if maxRetries has not been reached.
 // If not set (nil), all errors are retried up to maxRetries (default behaviour).
@@ -2175,7 +2178,7 @@ func WithMaxInterval(interval time.Duration) StepOption {
 //
 //	dbos.RunAsStep(ctx, callPaymentAPI,
 //	    dbos.WithStepMaxRetries(3),
-//	    dbos.WithRetryPredicate(func(err error) bool {
+//	    dbos.WithStepRetryPredicate(func(err error) bool {
 //	        var apiErr *APIError
 //	        if errors.As(err, &apiErr) {
 //	            return apiErr.StatusCode >= 500
@@ -2183,9 +2186,18 @@ func WithMaxInterval(interval time.Duration) StepOption {
 //	        return true
 //	    }),
 //	)
-func WithRetryPredicate(fn func(error) bool) StepOption {
+func WithStepRetryPredicate(fn func(error) bool) StepOption {
 	return func(opts *stepOptions) {
 		opts.retryPredicate = fn
+	}
+}
+
+// WithTxIsolation sets the transaction isolation level used by [RunAsTransaction].
+// It has no effect outside a transaction: RunAsStep and Go ignore it.
+// If not set, the data source's default isolation level is used.
+func WithTxIsolation(level IsoLevel) StepOption {
+	return func(opts *stepOptions) {
+		opts.txIsoLevel = &level
 	}
 }
 
@@ -2195,15 +2207,15 @@ func withNextStepID(stepID int) StepOption {
 	}
 }
 
-// StepOutcome holds the result and error from a step execution
-// This struct is returned as part of a channel from the Go function when running the step inside a Go routine
+// StepOutcome holds the result and error from a step execution.
+// This struct is delivered on the channel returned by Go when running the step inside a goroutine.
 type StepOutcome[R any] struct {
-	Result R     `json:"result"`
-	Err    error `json:"err"`
+	Result R
+	Err    error
 }
 
-// StreamValue holds a value, error, and closed status from a stream read operation
-// This struct is returned as part of a channel from ReadStreamAsync
+// StreamValue holds a value, error, and closed status from a stream read operation.
+// This struct is delivered on the channel returned by ReadStreamAsync.
 type StreamValue[R any] struct {
 	Value  R     // The stream value (zero value if error/closed)
 	Err    error // Error if one occurred (nil otherwise)
@@ -2213,7 +2225,7 @@ type StreamValue[R any] struct {
 // convertStepResult converts a generic step result to a typed result R.
 // It handles both checkpointed outcomes (encoded values from database) and direct type conversions.
 // Supports both real DBOS contexts and testing/mocking scenarios.
-func convertStepResult[R any](ctx DBOSContext, result any) (R, error) {
+func convertStepResult[R any](ctx Context, result any) (R, error) {
 	var typedResult R
 	// Check if we're in a real DBOS context (not a mock)
 	if _, ok := ctx.(*dbosContext); ok {
@@ -2301,8 +2313,8 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 // checkStepContext verifies that ctx carries workflow state marked as within a step.
 // DBOS invokes step bodies with a dedicated step context (isWithinStep == true); if that
 // invariant is broken (e.g. the raw workflow context is passed instead of the step context),
-// return a clear StepExecutionError rather than running the step body with a mis-wired context.
-func checkStepContext(ctx DBOSContext, workflowID, stepName string) error {
+// return a clear ErrorCodeStepExecution rather than running the step body with a mis-wired context.
+func checkStepContext(ctx Context, workflowID, stepName string) error {
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil || !wfState.isWithinStep {
 		return models.NewStepExecutionError(workflowID, stepName, fmt.Errorf("step must use the context.Context received from its dbos.Func closure."))
@@ -2355,7 +2367,7 @@ func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptio
 
 func isCancellationError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, &DBOSError{Code: WorkflowCancelled}) || errors.Is(err, &DBOSError{Code: AwaitedWorkflowCancelled})
+		errors.Is(err, ErrWorkflowCancelled) || errors.Is(err, ErrAwaitedWorkflowCancelled)
 }
 
 func stepInterruptedByCancellation(stepState *workflowState, stepError error) bool {
@@ -2374,15 +2386,15 @@ func stepInterruptedByCancellation(stepState *workflowState, stepError error) bo
 //
 //	data, err := dbos.RunAsStep(ctx, func(ctx context.Context) ([]byte, error) {
 //	    return MyStep(ctx, "https://api.example.com/data")
-//	}, dbos.WithStepMaxRetries(3), dbos.WithBaseInterval(500*time.Millisecond))
+//	}, dbos.WithStepMaxRetries(3), dbos.WithStepBaseInterval(500*time.Millisecond))
 //
 // Available options:
 //   - WithStepName: Custom name for the step (only sets if not already set)
 //   - WithStepMaxRetries: Maximum retry attempts (default: 0)
-//   - WithBackoffFactor: Exponential backoff multiplier (default: 2.0)
-//   - WithBaseInterval: Initial delay between retries (default: 100ms)
-//   - WithMaxInterval: Maximum delay between retries (default: 5s)
-//   - WithRetryPredicate: Function called before each retry to decide whether the error is retryable.
+//   - WithStepBackoffFactor: Exponential backoff multiplier (default: 2.0)
+//   - WithStepBaseInterval: Initial delay between retries (default: 100ms)
+//   - WithStepMaxInterval: Maximum delay between retries (default: 5s)
+//   - WithStepRetryPredicate: Function called before each retry to decide whether the error is retryable.
 //     If it returns false the step stops retrying immediately, even if maxRetries has not been reached.
 //     If not set, all errors are retried up to maxRetries (default behaviour).
 //
@@ -2410,13 +2422,13 @@ func stepInterruptedByCancellation(stepState *workflowState, stepError error) bo
 // Under the hood, DBOS uses the provided context to manage durable execution.
 //
 // Context cancellation: if the workflow's context is cancelled while the step is running,
-// the step's outcome is not checkpointed and RunAsStep returns a *DBOSError with code
-// WorkflowCancelled, wrapping the underlying context error. The workflow should return
+// the step's outcome is not checkpointed and RunAsStep returns a *Error with code
+// ErrorCodeWorkflowCancelled, wrapping the underlying context error. The workflow should return
 // promptly: it is marked CANCELLED and, when resumed, re-executes the interrupted step.
 // Do not swallow this error to run further durable work — replay after resume would diverge.
 // By contrast, cancelling a context that wraps only the step (e.g. a per-step timeout)
 // records the step's error as its durable outcome and the workflow continues normally.
-func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error) {
+func RunAsStep[R any](ctx Context, fn Step[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), models.NewStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
 	}
@@ -2444,7 +2456,7 @@ func RunAsStep[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (R, error
 	return typedResult, err
 }
 
-func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) (any, error) {
+func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any, error) {
 	prep, err := prepareStepExecution(c, opts)
 	if err != nil {
 		return nil, err
@@ -2527,7 +2539,7 @@ func (c *dbosContext) RunAsStep(_ DBOSContext, fn StepFunc, opts ...StepOption) 
 // runAsTxn executes a step function that receives a transaction when run on its own.
 // The step body and checkpoint share one transaction, so system DB writes and recordOperationResult commit together.
 // Like RunAsStep but uses txn[R] / TxnFunc; transaction is begun and committed inside this function.
-func runAsTxn[R any](ctx DBOSContext, fn Txn[R], opts ...StepOption) (R, error) {
+func runAsTxn[R any](ctx Context, fn Txn[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), models.NewStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
 	}
@@ -2559,7 +2571,7 @@ func runAsTxn[R any](ctx DBOSContext, fn Txn[R], opts ...StepOption) (R, error) 
 
 // withinTransactionContext returns a child context whose workflow state is
 // flagged as executing inside a data source transaction.
-func withinTransactionContext(c *dbosContext) DBOSContext {
+func withinTransactionContext(c *dbosContext) Context {
 	var state workflowState
 	if existing, ok := c.Value(workflowStateKey).(*workflowState); ok && existing != nil {
 		state = *existing
@@ -2569,7 +2581,7 @@ func withinTransactionContext(c *dbosContext) DBOSContext {
 	return WithValue(c, workflowStateKey, &state)
 }
 
-func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (any, error) {
+func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, error) {
 	prep, err := prepareStepExecution(c, opts)
 	if err != nil {
 		return nil, err
@@ -2707,16 +2719,15 @@ func (c *dbosContext) runAsTxn(_ DBOSContext, fn TxnFunc, opts ...StepOption) (a
 // Go generates a deterministic step ID for the step before running the step in a routine, since goroutines are not deterministic.
 // Example:
 //
-// resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
-//   return "Hello, World!", nil
-// })
+//	resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
+//	    return "Hello, World!", nil
+//	})
 //
-// resultChan := <-resultChan // wait for the channel to receive
-// if resultChan.err != nil {
-//   // Handle error
-// }
-
-func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcome[R], error) {
+//	outcome := <-resultChan // wait for the channel to receive
+//	if outcome.Err != nil {
+//	    // Handle error
+//	}
+func Go[R any](ctx Context, fn Step[R], opts ...StepOption) (<-chan StepOutcome[R], error) {
 	if ctx == nil {
 		return nil, models.NewStepExecutionError("", "", errors.New("ctx cannot be nil"))
 	}
@@ -2773,7 +2784,7 @@ func Go[R any](ctx DBOSContext, fn Step[R], opts ...StepOption) (chan StepOutcom
 	return outcomeChan, nil
 }
 
-func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (chan StepOutcome[any], error) {
+func (c *dbosContext) Go(ctx Context, fn StepFunc, opts ...StepOption) (<-chan StepOutcome[any], error) {
 	// Create a deterministic step ID
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
@@ -2803,13 +2814,13 @@ func (c *dbosContext) Go(ctx DBOSContext, fn StepFunc, opts ...StepOption) (chan
 //
 //	ch1, _ := dbos.Go(ctx, func(ctx context.Context) (string, error) { return "result1", nil })
 //	ch2, _ := dbos.Go(ctx, func(ctx context.Context) (string, error) { return "result2", nil })
-//	outcome, err := dbos.Select(ctx, []<-chan dbos.StepOutcome[string]{ch1, ch2})
+//	result, err := dbos.Select(ctx, []<-chan dbos.StepOutcome[string]{ch1, ch2})
 //	if err != nil {
 //	    // Handle error
 //	    return err
 //	}
-//	log.Printf("Selected result: %v, error: %v", outcome.result, outcome.err)
-func Select[R any](ctx DBOSContext, channels []<-chan StepOutcome[R]) (R, error) {
+//	log.Printf("Selected result: %v", result)
+func Select[R any](ctx Context, channels []<-chan StepOutcome[R]) (R, error) {
 	if ctx == nil {
 		var zero R
 		return zero, errors.New("ctx cannot be nil")
@@ -2871,7 +2882,7 @@ func Select[R any](ctx DBOSContext, channels []<-chan StepOutcome[R]) (R, error)
 	return typedResult, err
 }
 
-func (c *dbosContext) Select(_ DBOSContext, channels []<-chan StepOutcome[any]) (any, error) {
+func (c *dbosContext) Select(_ Context, channels []<-chan StepOutcome[any]) (any, error) {
 	// If channels slice is empty, log warning and return zero value
 	if len(channels) == 0 {
 		c.logger.Warn("Select called with empty channels slice, returning zero value")
@@ -3038,7 +3049,7 @@ type recvResult struct {
 	serialization string
 }
 
-func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (any, error) {
+func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration) (any, error) {
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return nil, models.NewStepExecutionError("", "DBOS.recv", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
@@ -3109,7 +3120,7 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 		}
 		output := rawStepOutput{value: message, serialization: serialization}
 		if message == nil && timeoutOccurred {
-			return output, models.NewTimeoutError(workflowID, "DBOS.recv", fmt.Sprintf("no message received within %v", timeout))
+			return output, models.NewTimeoutError(workflowID, "DBOS.recv", fmt.Sprintf("no message received within %v", timeout), nil)
 		}
 		return output, nil
 	}, WithStepName("DBOS.recv"), withNextStepID(stepID))
@@ -3144,7 +3155,7 @@ func (c *dbosContext) Recv(_ DBOSContext, topic string, timeout time.Duration) (
 //	    return err
 //	}
 //	log.Printf("Received: %s", message)
-func Recv[R any](ctx DBOSContext, topic string, timeout time.Duration) (R, error) {
+func Recv[R any](ctx Context, topic string, timeout time.Duration) (R, error) {
 	if ctx == nil {
 		return *new(R), errors.New("ctx cannot be nil")
 	}
@@ -3207,7 +3218,7 @@ func WithPortableSetEvent() SetEventOption {
 	}
 }
 
-func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any, opts ...SetEventOption) error {
+func (c *dbosContext) SetEvent(_ Context, key string, message any, opts ...SetEventOption) error {
 	options := &setEventOptions{}
 	for _, opt := range opts {
 		opt(options)
@@ -3251,7 +3262,7 @@ func (c *dbosContext) SetEvent(_ DBOSContext, key string, message any, opts ...S
 // Example:
 //
 //	err := dbos.SetEvent(ctx, "status", "processing-complete")
-func SetEvent[P any](ctx DBOSContext, key string, message P, opts ...SetEventOption) error {
+func SetEvent[P any](ctx Context, key string, message P, opts ...SetEventOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
@@ -3348,7 +3359,7 @@ func (c *dbosContext) GetEvent(_ Client, targetWorkflowID, key string, timeout t
 			serialization = *evtSerialization
 		}
 		if value == nil && timeoutOccurred {
-			return nil, models.NewTimeoutError("", "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout))
+			return nil, models.NewTimeoutError("", "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout), nil)
 		}
 		return &getEventResult{value: value, serialization: serialization}, nil
 	}
@@ -3366,7 +3377,7 @@ func (c *dbosContext) GetEvent(_ Client, targetWorkflowID, key string, timeout t
 		}
 		output := rawStepOutput{value: value, serialization: serialization}
 		if value == nil && timeoutOccurred {
-			return output, models.NewTimeoutError(workflowID, "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout))
+			return output, models.NewTimeoutError(workflowID, "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout), nil)
 		}
 		return output, nil
 	}, WithStepName("DBOS.getEvent"), withNextStepID(stepID))
@@ -3442,7 +3453,7 @@ func GetEvent[R any](ctx Client, targetWorkflowID, key string, timeout time.Dura
 		typedValue, ok = value.(R)
 		if !ok {
 			var workflowID string
-			if dc, isDBOSCtx := ctx.(DBOSContext); isDBOSCtx {
+			if dc, isDBOSCtx := ctx.(Context); isDBOSCtx {
 				var wfIDErr error
 				workflowID, wfIDErr = dc.GetWorkflowID()
 				if wfIDErr != nil {
@@ -3471,7 +3482,7 @@ func WithPortableWriteStream() WriteStreamOption {
 	}
 }
 
-func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any, opts ...WriteStreamOption) error {
+func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...WriteStreamOption) error {
 	options := &writeStreamOptions{}
 	for _, opt := range opts {
 		opt(options)
@@ -3514,13 +3525,14 @@ func (c *dbosContext) WriteStream(_ DBOSContext, key string, value any, opts ...
 // Example:
 //
 //	err := dbos.WriteStream(ctx, "my-stream", "stream-value")
-func WriteStream[P any](ctx DBOSContext, key string, value P, opts ...WriteStreamOption) error {
+func WriteStream[P any](ctx Context, key string, value P, opts ...WriteStreamOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
 	return ctx.WriteStream(ctx, key, value, opts...)
 }
 
+// ReadStreamOption is a functional option for ReadStream.
 type ReadStreamOption func(*readStreamOptions)
 
 type readStreamOptions struct {
@@ -3530,11 +3542,18 @@ type readStreamOptions struct {
 
 // WithReadStreamSnapshot makes a stream read return as soon as all currently-available
 // values have been drained, instead of blocking until the stream is closed or
-// the workflow becomes inactive. fromOffset sets the base offset to read from.
-func WithReadStreamSnapshot(fromOffset int) ReadStreamOption {
+// the workflow becomes inactive.
+func WithReadStreamSnapshot() ReadStreamOption {
 	return func(o *readStreamOptions) {
 		o.snapshot = true
-		o.fromOffset = fromOffset
+	}
+}
+
+// WithReadStreamFromOffset sets the offset (0-based index) at which the read
+// starts; values before it are skipped. Defaults to 0 (the start of the stream).
+func WithReadStreamFromOffset(offset int) ReadStreamOption {
+	return func(o *readStreamOptions) {
+		o.fromOffset = offset
 	}
 }
 
@@ -3715,7 +3734,7 @@ func (c *dbosContext) ReadStream(_ Client, workflowID string, key string, opts .
 
 // ReadStream reads values from a durable stream.
 // This method blocks until the stream is closed or an error occurs.
-// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
+// The stream is considered closed when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED).
 //
 // Returns the values, whether the stream is closed, and any error.
 //
@@ -3781,7 +3800,7 @@ func (c *dbosContext) ReadStreamAsync(_ Client, workflowID string, key string) (
 //
 // This method returns immediately with a channel. Values will be sent to the channel
 // as they're read from the stream. The channel will be closed when the stream is closed or an error occurs.
-// The stream is considered close when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED)
+// The stream is considered closed when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED).
 //
 // Example:
 //
@@ -3878,7 +3897,7 @@ func ReadStreamAsync[R any](ctx Client, workflowID string, key string) (<-chan S
 	return typedCh, nil
 }
 
-func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
+func (c *dbosContext) CloseStream(_ Context, key string) error {
 	_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 		sentinel := sysdb.StreamClosedSentinel
 		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
@@ -3906,14 +3925,14 @@ func (c *dbosContext) CloseStream(_ DBOSContext, key string) error {
 //	if err != nil {
 //	    return err
 //	}
-func CloseStream(ctx DBOSContext, key string) error {
+func CloseStream(ctx Context, key string) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
 	return ctx.CloseStream(ctx, key)
 }
 
-func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duration, error) {
+func (c *dbosContext) Sleep(_ Context, duration time.Duration) (time.Duration, error) {
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return 0, models.NewStepExecutionError("", "DBOS.sleep", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
@@ -3955,7 +3974,7 @@ func (c *dbosContext) Sleep(_ DBOSContext, duration time.Duration) (time.Duratio
 //	if err != nil {
 //	    return err
 //	}
-func Sleep(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
+func Sleep(ctx Context, duration time.Duration) (time.Duration, error) {
 	if ctx == nil {
 		return 0, errors.New("ctx cannot be nil")
 	}
@@ -3964,7 +3983,7 @@ func Sleep(ctx DBOSContext, duration time.Duration) (time.Duration, error) {
 
 const _DBOS_PATCH_PREFIX = "DBOS.patch-"
 
-func (c *dbosContext) Patch(_ DBOSContext, patchName string) (bool, error) {
+func (c *dbosContext) Patch(_ Context, patchName string) (bool, error) {
 	if !c.config.EnablePatching {
 		return false, models.NewPatchingNotEnabledError()
 	}
@@ -4012,19 +4031,23 @@ func (c *dbosContext) Patch(_ DBOSContext, patchName string) (bool, error) {
 //
 // Example:
 //
-//	if dbos.Patch(ctx, "my-patch") {
+//	patched, err := dbos.Patch(ctx, "my-patch")
+//	if err != nil {
+//	    return err
+//	}
+//	if patched {
 //	    // New code path
 //	} else {
 //	    // Old code path
 //	}
-func Patch(ctx DBOSContext, patchName string) (bool, error) {
+func Patch(ctx Context, patchName string) (bool, error) {
 	if ctx == nil {
 		return false, errors.New("ctx cannot be nil")
 	}
 	return ctx.Patch(ctx, patchName)
 }
 
-func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) error {
+func (c *dbosContext) DeprecatePatch(_ Context, patchName string) error {
 	if !c.config.EnablePatching {
 		return models.NewPatchingNotEnabledError()
 	}
@@ -4074,14 +4097,12 @@ func (c *dbosContext) DeprecatePatch(_ DBOSContext, patchName string) error {
 //
 // Example:
 //
-// err := dbos.DeprecatePatch(ctx, "my-patch")
-//
+//	err := dbos.DeprecatePatch(ctx, "my-patch")
 //	if err != nil {
 //	    return err
 //	}
-//
-// // New code path
-func DeprecatePatch(ctx DBOSContext, patchName string) error {
+//	// New code path
+func DeprecatePatch(ctx Context, patchName string) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
@@ -4119,7 +4140,7 @@ func (c *dbosContext) GetStepID() (int, error) {
 //	} else {
 //	    log.Printf("Current workflow ID: %s", workflowID)
 //	}
-func GetWorkflowID(ctx DBOSContext) (string, error) {
+func GetWorkflowID(ctx Context) (string, error) {
 	if ctx == nil {
 		return "", errors.New("ctx cannot be nil")
 	}
@@ -4137,7 +4158,7 @@ func GetWorkflowID(ctx DBOSContext) (string, error) {
 //	} else {
 //	    log.Printf("Current step ID: %d", stepID)
 //	}
-func GetStepID(ctx DBOSContext) (int, error) {
+func GetStepID(ctx Context) (int, error) {
 	if ctx == nil {
 		return -1, errors.New("ctx cannot be nil")
 	}
@@ -4210,13 +4231,13 @@ func RetrieveWorkflow[R any](ctx Client, workflowID string) (WorkflowHandle[R], 
 }
 
 // WithCancelChildren enables cancellation for children workflows
-func WithCancelChildren() CancelWorkflowOptions {
+func WithCancelChildren() CancelWorkflowOption {
 	return func(cwo *models.CancelWorkflowInput) {
 		cwo.CancelChildren = true
 	}
 }
 
-func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOptions) error {
+func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOption) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	var found []string
@@ -4266,7 +4287,7 @@ func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...Cancel
 //	if err != nil {
 //	    log.Printf("Failed to cancel workflow: %v", err)
 //	}
-func CancelWorkflow(ctx Client, workflowID string, opts ...CancelWorkflowOptions) error {
+func CancelWorkflow(ctx Client, workflowID string, opts ...CancelWorkflowOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
@@ -4274,13 +4295,13 @@ func CancelWorkflow(ctx Client, workflowID string, opts ...CancelWorkflowOptions
 	return ctx.CancelWorkflow(ctx, workflowID, opts...)
 }
 
-func (c *dbosContext) UpdateWorkflowAttributes(_ Client, workflowID string, attributes map[string]any) error {
+func (c *dbosContext) SetWorkflowAttributes(_ Client, workflowID string, attributes map[string]any) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (struct{}, error) {
-			return struct{}{}, c.systemDB.UpdateWorkflowAttributes(ctx, sysdb.UpdateWorkflowAttributesDBInput{
+			return struct{}{}, c.systemDB.SetWorkflowAttributes(ctx, sysdb.SetWorkflowAttributesDBInput{
 				WorkflowID: workflowID,
 				Attributes: attributes,
 				Tx:         tx,
@@ -4289,14 +4310,14 @@ func (c *dbosContext) UpdateWorkflowAttributes(_ Client, workflowID string, attr
 		return err
 	}
 	return sysdb.Retry(c, func() error {
-		return c.systemDB.UpdateWorkflowAttributes(c, sysdb.UpdateWorkflowAttributesDBInput{
+		return c.systemDB.SetWorkflowAttributes(c, sysdb.SetWorkflowAttributesDBInput{
 			WorkflowID: workflowID,
 			Attributes: attributes,
 		})
 	}, sysdb.WithRetrierLogger(c.logger))
 }
 
-// UpdateWorkflowAttributes replaces the custom attributes attached to an existing
+// SetWorkflowAttributes replaces the custom attributes attached to an existing
 // workflow, identified by workflowID. Pass a nil attributes map to clear all
 // attributes. Attributes must be JSON-serializable.
 //
@@ -4304,15 +4325,15 @@ func (c *dbosContext) UpdateWorkflowAttributes(_ Client, workflowID string, attr
 //
 // Example:
 //
-//	err := dbos.UpdateWorkflowAttributes(ctx, "my-workflow-id", map[string]any{"customer": "acme"})
-func UpdateWorkflowAttributes(ctx Client, workflowID string, attributes map[string]any) error {
+//	err := dbos.SetWorkflowAttributes(ctx, "my-workflow-id", map[string]any{"customer": "acme"})
+func SetWorkflowAttributes(ctx Client, workflowID string, attributes map[string]any) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.UpdateWorkflowAttributes(ctx, workflowID, attributes)
+	return ctx.SetWorkflowAttributes(ctx, workflowID, attributes)
 }
 
-func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOptions) error {
+func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOption) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	cwo := models.CancelWorkflowInput{}
@@ -4336,7 +4357,7 @@ func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...Ca
 // Each workflow that exists and is not already in a terminal state (SUCCESS, ERROR, CANCELLED)
 // is moved to CANCELLED and removed from its queue. Missing or already-terminal IDs are silently
 // skipped. Unlike the singular CancelWorkflow, this function does not return
-// NonExistentWorkflowError when some IDs are missing.
+// ErrorCodeNonExistentWorkflow when some IDs are missing.
 //
 // Example:
 //
@@ -4344,7 +4365,7 @@ func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...Ca
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-func CancelWorkflows(ctx Client, workflowIDs []string, opts ...CancelWorkflowOptions) error {
+func CancelWorkflows(ctx Client, workflowIDs []string, opts ...CancelWorkflowOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
@@ -4381,10 +4402,10 @@ func resolveDelayUntil(opts []SetWorkflowDelayOption) (time.Time, error) {
 	hasDelay := params.delay > 0
 	hasUntil := !params.delayUntil.IsZero()
 	if hasDelay && hasUntil {
-		return time.Time{}, errors.New("specify either WithDelayDuration or WithDelayUntil, not both")
+		return time.Time{}, models.NewInvalidOptionError("specify either WithDelayDuration or WithDelayUntil, not both")
 	}
 	if !hasDelay && !hasUntil {
-		return time.Time{}, errors.New("must specify either WithDelayDuration or WithDelayUntil")
+		return time.Time{}, models.NewInvalidOptionError("must specify either WithDelayDuration or WithDelayUntil")
 	}
 	if hasDelay {
 		return time.Now().Add(params.delay), nil
@@ -4596,7 +4617,7 @@ func ResumeWorkflow[R any](ctx Client, workflowID string, opts ...ResumeWorkflow
 // that exists and is not in a terminal state is re-enqueued; completed or missing workflows
 // are skipped.
 //
-// Unlike the singular ResumeWorkflow, this function does not return NonExistentWorkflowError
+// Unlike the singular ResumeWorkflow, this function does not return ErrorCodeNonExistentWorkflow
 // when some IDs are missing.
 //
 // Options:
@@ -4662,10 +4683,10 @@ func (c *dbosContext) ForkWorkflow(_ Client, input ForkWorkflowInput) (WorkflowH
 
 func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]WorkflowHandle[any], error) {
 	if len(input.Workflows) == 0 {
-		return nil, errors.New("at least one workflow to fork is required")
+		return nil, models.NewInvalidOptionError("at least one workflow to fork is required")
 	}
 	if input.QueuePartitionKey != "" && input.QueueName == "" {
-		return nil, errors.New("queue partition key requires a queue name")
+		return nil, models.NewInvalidOptionError("queue partition key requires a queue name")
 	}
 
 	// Build the system database input, validating each workflow spec.
@@ -4674,10 +4695,10 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 	startSteps := make([]int, len(input.Workflows))
 	for i, wf := range input.Workflows {
 		if wf.OriginalWorkflowID == "" {
-			return nil, errors.New("original workflow ID cannot be empty")
+			return nil, models.NewInvalidOptionError("original workflow ID cannot be empty")
 		}
 		if wf.StartStep > uint(math.MaxInt) {
-			return nil, fmt.Errorf("start step too large: %d", wf.StartStep)
+			return nil, models.NewInvalidOptionError(fmt.Sprintf("start step too large: %d", wf.StartStep))
 		}
 		originalWorkflowIDs[i] = wf.OriginalWorkflowID
 		forkedWorkflowIDs[i] = wf.ForkedWorkflowID
@@ -4806,128 +4827,128 @@ func ForkWorkflows[R any](ctx Client, input ForkWorkflowsInput) ([]WorkflowHandl
 	return typedHandles, nil
 }
 
-// WithWorkflowIDs filters workflows by the specified workflow IDs.
-func WithWorkflowIDs(workflowIDs []string) ListWorkflowsOption {
+// WithFilterWorkflowIDs filters workflows by the specified workflow IDs.
+func WithFilterWorkflowIDs(workflowIDs ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.WorkflowIDs = workflowIDs
 	}
 }
 
-// WithStatus filters workflows by the specified list of statuses.
-func WithStatus(status []WorkflowStatusType) ListWorkflowsOption {
+// WithFilterStatus filters workflows by the specified list of statuses.
+func WithFilterStatus(status ...WorkflowStatusType) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.Status = status
 	}
 }
 
-// WithStartTime filters workflows created after the specified time.
-func WithStartTime(startTime time.Time) ListWorkflowsOption {
+// WithFilterCreatedAfter filters workflows created after the specified time.
+func WithFilterCreatedAfter(createdAfter time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
-		p.StartTime = startTime
+		p.StartTime = createdAfter
 	}
 }
 
-// WithEndTime filters workflows created before the specified time.
-func WithEndTime(endTime time.Time) ListWorkflowsOption {
+// WithFilterCreatedBefore filters workflows created before the specified time.
+func WithFilterCreatedBefore(createdBefore time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
-		p.EndTime = endTime
+		p.EndTime = createdBefore
 	}
 }
 
-// WithName filters workflows by the specified workflow function name(s).
-func WithName(name ...string) ListWorkflowsOption {
+// WithFilterName filters workflows by the specified workflow function name(s).
+func WithFilterName(name ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.Name = name
 	}
 }
 
-// WithAppVersion filters workflows by the specified application version(s).
-func WithAppVersion(appVersion ...string) ListWorkflowsOption {
+// WithFilterAppVersion filters workflows by the specified application version(s).
+func WithFilterAppVersion(appVersion ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.AppVersion = appVersion
 	}
 }
 
-// WithUser filters workflows by the specified authenticated user(s).
-func WithUser(user ...string) ListWorkflowsOption {
+// WithFilterUser filters workflows by the specified authenticated user(s).
+func WithFilterUser(user ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.User = user
 	}
 }
 
-// WithLimit limits the number of workflows returned.
-func WithLimit(limit int) ListWorkflowsOption {
+// WithFilterLimit limits the number of workflows returned.
+func WithFilterLimit(limit int) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.Limit = &limit
 	}
 }
 
-// WithOffset sets the offset for pagination.
-func WithOffset(offset int) ListWorkflowsOption {
+// WithFilterOffset sets the offset for pagination.
+func WithFilterOffset(offset int) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.Offset = &offset
 	}
 }
 
-// WithSortDesc enables descending sort by creation time (default is ascending).
-func WithSortDesc() ListWorkflowsOption {
+// WithFilterSortDesc enables descending sort by creation time (default is ascending).
+func WithFilterSortDesc() ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.SortDesc = true
 	}
 }
 
-// WithWorkflowIDPrefix filters workflows by workflow ID prefix(es).
-func WithWorkflowIDPrefix(prefix ...string) ListWorkflowsOption {
+// WithFilterWorkflowIDPrefix filters workflows by workflow ID prefix(es).
+func WithFilterWorkflowIDPrefix(prefix ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.WorkflowIDPrefix = prefix
 	}
 }
 
-// WithLoadInput controls whether to load workflow input data (default: true).
-func WithLoadInput(loadInput bool) ListWorkflowsOption {
+// WithFilterLoadInput controls whether to load workflow input data (default: true).
+func WithFilterLoadInput(loadInput bool) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.LoadInput = loadInput
 	}
 }
 
-// WithLoadOutput controls whether to load workflow output data (default: true).
-func WithLoadOutput(loadOutput bool) ListWorkflowsOption {
+// WithFilterLoadOutput controls whether to load workflow output data (default: true).
+func WithFilterLoadOutput(loadOutput bool) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.LoadOutput = loadOutput
 	}
 }
 
-// WithQueueName filters workflows by the specified queue name(s).
+// WithFilterQueueName filters workflows by the specified queue name(s).
 // This is typically used when listing queued workflows.
-func WithQueueName(queueName ...string) ListWorkflowsOption {
+func WithFilterQueueName(queueName ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.QueueName = queueName
 	}
 }
 
-// WithQueuesOnly filters to only return workflows that are in a queue.
-func WithQueuesOnly() ListWorkflowsOption {
+// WithFilterQueuesOnly filters to only return workflows that are in a queue.
+func WithFilterQueuesOnly() ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.QueuesOnly = true
 	}
 }
 
-// WithExecutorIDs filters workflows by the specified executor IDs.
-func WithExecutorIDs(executorIDs []string) ListWorkflowsOption {
+// WithFilterExecutorIDs filters workflows by the specified executor IDs.
+func WithFilterExecutorIDs(executorIDs ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.ExecutorIDs = executorIDs
 	}
 }
 
-// WithForkedFrom filters workflows by the specified forked_from workflow ID(s).
-func WithForkedFrom(forkedFrom ...string) ListWorkflowsOption {
+// WithFilterForkedFrom filters workflows by the specified forked_from workflow ID(s).
+func WithFilterForkedFrom(forkedFrom ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.ForkedFrom = forkedFrom
 	}
 }
 
-// WithParentWorkflowID filters workflows by the specified parent workflow ID(s).
-func WithParentWorkflowID(parentWorkflowID ...string) ListWorkflowsOption {
+// WithFilterParentWorkflowID filters workflows by the specified parent workflow ID(s).
+func WithFilterParentWorkflowID(parentWorkflowID ...string) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.ParentWorkflowID = parentWorkflowID
 	}
@@ -4940,43 +4961,43 @@ func WithFilterDeduplicationID(deduplicationID ...string) ListWorkflowsOption {
 	}
 }
 
-// WithCompletedAfter filters workflows that reached a terminal state at or after the specified time.
-func WithCompletedAfter(completedAfter time.Time) ListWorkflowsOption {
+// WithFilterCompletedAfter filters workflows that reached a terminal state at or after the specified time.
+func WithFilterCompletedAfter(completedAfter time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.CompletedAfter = completedAfter
 	}
 }
 
-// WithCompletedBefore filters workflows that reached a terminal state at or before the specified time.
-func WithCompletedBefore(completedBefore time.Time) ListWorkflowsOption {
+// WithFilterCompletedBefore filters workflows that reached a terminal state at or before the specified time.
+func WithFilterCompletedBefore(completedBefore time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.CompletedBefore = completedBefore
 	}
 }
 
-// WithDequeuedAfter filters workflows that started executing at or after the specified time.
-func WithDequeuedAfter(dequeuedAfter time.Time) ListWorkflowsOption {
+// WithFilterDequeuedAfter filters workflows that started executing at or after the specified time.
+func WithFilterDequeuedAfter(dequeuedAfter time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.DequeuedAfter = dequeuedAfter
 	}
 }
 
-// WithDequeuedBefore filters workflows that started executing at or before the specified time.
-func WithDequeuedBefore(dequeuedBefore time.Time) ListWorkflowsOption {
+// WithFilterDequeuedBefore filters workflows that started executing at or before the specified time.
+func WithFilterDequeuedBefore(dequeuedBefore time.Time) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.DequeuedBefore = dequeuedBefore
 	}
 }
 
-// WithWasForkedFrom filters workflows by whether they have been forked from (true) or not (false).
-func WithWasForkedFrom(wasForkedFrom bool) ListWorkflowsOption {
+// WithFilterWasForkedFrom filters workflows by whether they have been forked from (true) or not (false).
+func WithFilterWasForkedFrom(wasForkedFrom bool) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.WasForkedFrom = &wasForkedFrom
 	}
 }
 
-// WithHasParent filters workflows by whether they have a parent workflow (true) or not (false).
-func WithHasParent(hasParent bool) ListWorkflowsOption {
+// WithFilterHasParent filters workflows by whether they have a parent workflow (true) or not (false).
+func WithFilterHasParent(hasParent bool) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
 		p.HasParent = &hasParent
 	}
@@ -5059,16 +5080,30 @@ func (c *dbosContext) ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]Wo
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
+		// Decode inside the step so the checkpoint records decoded values: a
+		// recovery replay returns the recorded output as-is, and the raw
+		// encoded *string columns do not survive checkpoint serialization.
 		workflows, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
-			return sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
+			listed, err := sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
 				return c.systemDB.ListWorkflows(ctx, dbInput)
 			}, sysdb.WithRetrierLogger(c.logger))
+			if err != nil {
+				return nil, err
+			}
+			if err := c.decodeWorkflowsInputOutput(listed, params.LoadInput, params.LoadOutput); err != nil {
+				return nil, err
+			}
+			return listed, nil
 		}, WithStepName("DBOS.listWorkflows"))
-	} else {
-		workflows, err = sysdb.RetryWithResult(c, func() ([]WorkflowStatus, error) {
-			return c.systemDB.ListWorkflows(c, dbInput)
-		}, sysdb.WithRetrierLogger(c.logger))
+		if err != nil {
+			return nil, err
+		}
+		return workflows, nil
 	}
+
+	workflows, err = sysdb.RetryWithResult(c, func() ([]WorkflowStatus, error) {
+		return c.systemDB.ListWorkflows(c, dbInput)
+	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
 		return nil, err
 	}
@@ -5092,26 +5127,12 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 				}
 				if encodedInput == nil || *encodedInput == nilMarker {
 					workflows[i].Input = nil
-				} else if workflows[i].Serialization == PortableSerializerName {
-					// Portable inputs are stored as plain JSON (possibly with envelope from other languages).
-					// Return the raw JSON string as-is.
-					workflows[i].Input = *encodedInput
-				} else if c.serializer != nil {
-					decoded, err := c.serializer.Decode(encodedInput)
-					if err != nil {
-						c.logger.Warn("failed to decode workflow input, storing error instead", "workflow_id", workflows[i].ID, "error", err)
-						workflows[i].Input = fmt.Sprintf("failed to decode workflow input: %v", err)
-					} else {
-						workflows[i].Input = decoded
-					}
 				} else {
-					decodedBytes, err := base64.StdEncoding.DecodeString(*encodedInput)
+					decoded, err := decodeListingValue(encodedInput, workflows[i].Serialization, c.serializer)
 					if err != nil {
-						c.logger.Warn("failed to decode base64 workflow input, storing error instead", "workflow_id", workflows[i].ID, "error", err)
-						workflows[i].Input = fmt.Sprintf("failed to decode workflow input: %v", err)
-					} else {
-						workflows[i].Input = string(decodedBytes)
+						c.logger.Warn("failed to decode workflow input, storing raw value", "workflow_id", workflows[i].ID, "error", err)
 					}
+					workflows[i].Input = decoded
 				}
 			}
 			if loadOutput && workflows[i].Output != nil {
@@ -5121,25 +5142,12 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 				}
 				if encodedOutput == nil || *encodedOutput == nilMarker {
 					workflows[i].Output = nil
-				} else if workflows[i].Serialization == PortableSerializerName {
-					// Portable outputs are stored as plain JSON. Return raw string.
-					workflows[i].Output = *encodedOutput
-				} else if c.serializer != nil {
-					decoded, err := c.serializer.Decode(encodedOutput)
-					if err != nil {
-						c.logger.Warn("failed to decode workflow output, storing error instead", "workflow_id", workflows[i].ID, "error", err)
-						workflows[i].Output = fmt.Sprintf("failed to decode workflow output: %v", err)
-					} else {
-						workflows[i].Output = decoded
-					}
 				} else {
-					decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
+					decoded, err := decodeListingValue(encodedOutput, workflows[i].Serialization, c.serializer)
 					if err != nil {
-						c.logger.Warn("failed to decode base64 workflow output, storing error instead", "workflow_id", workflows[i].ID, "error", err)
-						workflows[i].Output = fmt.Sprintf("failed to decode workflow output: %v", err)
-					} else {
-						workflows[i].Output = string(decodedBytes)
+						c.logger.Warn("failed to decode workflow output, storing raw value", "workflow_id", workflows[i].ID, "error", err)
 					}
+					workflows[i].Output = decoded
 				}
 			}
 			if loadOutput && workflows[i].Error != nil {
@@ -5156,10 +5164,10 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 //
 // The function supports filtering by workflow IDs, status, time ranges, names, application versions,
 // workflow ID prefixes, and more. It also supports pagination through
-// limit/offset parameters and sorting control (ascending by default, or descending with WithSortDesc).
+// limit/offset parameters and sorting control (ascending by default, or descending with WithFilterSortDesc).
 //
 // By default, both input and output data are loaded for each workflow. This can be controlled
-// using WithLoadInput(false) and WithLoadOutput(false) options for better performance when
+// using WithFilterLoadInput(false) and WithFilterLoadOutput(false) options for better performance when
 // the data is not needed.
 //
 // Parameters:
@@ -5170,29 +5178,29 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 // Example usage:
 //
 //	// List all successful workflows from the last 24 hours
-//	workflows, err := dbos.ListWorkflows(
-//	    dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusSuccess}),
-//	    dbos.WithStartTime(time.Now().Add(-24*time.Hour)),
-//	    dbos.WithLimit(100))
+//	workflows, err := dbos.ListWorkflows(ctx,
+//	    dbos.WithFilterStatus(dbos.WorkflowStatusSuccess),
+//	    dbos.WithFilterCreatedAfter(time.Now().Add(-24*time.Hour)),
+//	    dbos.WithFilterLimit(100))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //
 //	// List workflows by specific IDs without loading input/output data
-//	workflows, err := dbos.ListWorkflows(
-//	    dbos.WithWorkflowIDs([]string{"workflow1", "workflow2"}),
-//	    dbos.WithLoadInput(false),
-//	    dbos.WithLoadOutput(false))
+//	workflows, err := dbos.ListWorkflows(ctx,
+//	    dbos.WithFilterWorkflowIDs("workflow1", "workflow2"),
+//	    dbos.WithFilterLoadInput(false),
+//	    dbos.WithFilterLoadOutput(false))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //
 //	// List workflows with pagination
-//	workflows, err := dbos.ListWorkflows(
-//	    dbos.WithUser("john.doe"),
-//	    dbos.WithOffset(50),
-//	    dbos.WithLimit(25),
-//	    dbos.WithSortDesc()
+//	workflows, err := dbos.ListWorkflows(ctx,
+//	    dbos.WithFilterUser("john.doe"),
+//	    dbos.WithFilterOffset(50),
+//	    dbos.WithFilterLimit(25),
+//	    dbos.WithFilterSortDesc())
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -5286,28 +5294,11 @@ func (c *dbosContext) GetWorkflowSteps(_ Client, workflowID string, opts ...GetW
 				stepInfos[i].Output = nil
 				continue
 			}
-			if steps[i].Serialization == PortableSerializerName {
-				// Portable outputs are plain JSON — return raw string as-is.
-				stepInfos[i].Output = *encodedOutput
-			} else if c.serializer != nil {
-				// Custom serializer: fully decode using the serializer
-				decoded, err := c.serializer.Decode(encodedOutput)
-				if err != nil {
-					c.logger.Warn("failed to decode step output, storing error instead", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
-					stepInfos[i].Output = fmt.Sprintf("failed to decode step output: %v", err)
-				} else {
-					stepInfos[i].Output = decoded
-				}
-			} else {
-				// Default JSON: base64 decode to get the JSON string
-				decodedBytes, err := base64.StdEncoding.DecodeString(*encodedOutput)
-				if err != nil {
-					c.logger.Warn("failed to decode base64 step output, storing error instead", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
-					stepInfos[i].Output = fmt.Sprintf("failed to decode step output: %v", err)
-				} else {
-					stepInfos[i].Output = string(decodedBytes)
-				}
+			decoded, err := decodeListingValue(encodedOutput, steps[i].Serialization, c.serializer)
+			if err != nil {
+				c.logger.Warn("failed to decode step output, storing raw value", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
 			}
+			stepInfos[i].Output = decoded
 		}
 	}
 
@@ -5474,87 +5465,57 @@ func GetStepAggregates(ctx Client, input GetStepAggregatesInput) ([]StepAggregat
 	return ctx.GetStepAggregates(ctx, input)
 }
 
-// listRegisteredWorkflowsOptions holds configuration parameters for listing registered workflows
-type listRegisteredWorkflowsOptions struct {
-	scheduledOnly bool
-}
-
-// ListRegisteredWorkflowsOption is a functional option for configuring registered workflow listing parameters.
-type ListRegisteredWorkflowsOption func(*listRegisteredWorkflowsOptions)
-
-// WithScheduledOnly filters to only return scheduled workflows (those with a cron schedule).
-func WithScheduledOnly() ListRegisteredWorkflowsOption {
-	return func(p *listRegisteredWorkflowsOptions) {
-		p.scheduledOnly = true
-	}
-}
-
 // ListRegisteredWorkflows returns information about workflows registered with DBOS.
 // Each WorkflowRegistryEntry contains:
-// - MaxRetries: Maximum number of retry attempts for workflow recovery
+// - MaxRetries: Maximum recovery attempts before dead-lettering (WithMaxRecoveryAttempts)
 // - Name: Custom name if provided during registration, otherwise empty
 // - FQN: Fully qualified name of the workflow function (always present)
-// - CronSchedule: Empty string for non-scheduled workflows
-//
-// The function supports filtering using functional options:
-// - WithScheduledOnly(): Return only scheduled workflows
 //
 // Example:
 //
-//	// List all registered workflows
-//	workflows, err := dbos.ListRegisteredWorkflows(ctx)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//
-//	// List only scheduled workflows
-//	scheduled, err := dbos.ListRegisteredWorkflows(ctx, dbos.WithScheduledOnly())
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-func ListRegisteredWorkflows(ctx DBOSContext, opts ...ListRegisteredWorkflowsOption) ([]WorkflowRegistryEntry, error) {
+//	workflows := dbos.ListRegisteredWorkflows(ctx)
+func ListRegisteredWorkflows(ctx Context) []WorkflowRegistryEntry {
 	if ctx == nil {
-		return nil, errors.New("ctx cannot be nil")
+		panic("ctx cannot be nil")
 	}
-	return ctx.ListRegisteredWorkflows(ctx, opts...)
+	return ctx.ListRegisteredWorkflows(ctx)
 }
 
-// ListRegisteredQueues returns all queues in the in-memory registry.
-//
-// Deprecated: in-memory queues are deprecated. Use [ListQueues] to list
-// database-backed queues registered with [RegisterQueue].
-func ListRegisteredQueues(ctx DBOSContext) ([]WorkflowQueue, error) {
-	if ctx == nil {
-		return []WorkflowQueue{}, errors.New("ctx cannot be nil")
+func (c *dbosContext) ListenQueues(_ Context, names ...string) {
+	newSet := make(map[string]bool, len(names))
+	for _, name := range names {
+		newSet[name] = true
 	}
-	return ctx.ListRegisteredQueues(ctx)
-}
-
-func (c *dbosContext) ListenQueues(_ DBOSContext, queues ...WorkflowQueue) {
-	launched := c.launched.Load()
 	c.queueRunner.listenMu.Lock()
-	defer c.queueRunner.listenMu.Unlock()
-	for _, queue := range queues {
-		// In-memory queues are fixed at launch, so listening to one after launch is rejected
-		if _, inMemory := c.queueRunner.workflowQueueRegistry[queue.Name]; launched && inMemory {
-			panic("Cannot call ListenQueues for an in-memory queue after DBOS has launched")
-		}
-		c.queueRunner.listenedQueues[queue.Name] = true
+	c.queueRunner.listenedQueues = newSet
+	c.queueRunner.listenMu.Unlock()
+}
+
+func (c *dbosContext) ListenedQueues(_ Context) []string {
+	c.queueRunner.listenMu.Lock()
+	names := make([]string, 0, len(c.queueRunner.listenedQueues))
+	for name := range c.queueRunner.listenedQueues {
+		names = append(names, name)
 	}
+	c.queueRunner.listenMu.Unlock()
+	slices.Sort(names)
+	return names
 }
 
 // ListenQueues configures which queues the current DBOS process should listen to.
-// By default, all registered queues are listened to. Once ListenQueues has been
-// called, only the named queues (and the internal DBOS queue) are listened to.
-// This lets multiple DBOS processes share the same queues but listen to different
-// subsets.
+// By default, all queues are listened to. Once ListenQueues has been called, only
+// the named queues (and the internal DBOS queue) are listened to. This lets
+// multiple DBOS processes share the same queues but listen to different subsets.
 //
-// A queue is identified by name, so a database-backed queue can be listened to by
-// passing a WorkflowQueue with its Name set (or a handle from RetrieveQueue),
-// even before the queue exists in the database — the supervisor resolves names
-// against the database on each reconcile tick. Database-backed queue names may be
-// added to the listen set at any time, including after Launch, allowing the
-// listen set to change dynamically.
+// Each call REPLACES the entire listen set. Calling with a
+// reduced set unlistens the removed queues; calling with no names clears the
+// filter, restoring the default of listening to every queue.
+// To add or remove a queue incrementally, read the current set with
+// ListenedQueues and pass the modified set back.
+//
+// Names are resolved against the queues table on each reconcile tick, so a queue
+// can be listened to before it exists in the database. The set may be replaced
+// at any time, including after Launch, allowing it to change dynamically.
 //
 // Example:
 //
@@ -5562,14 +5523,25 @@ func (c *dbosContext) ListenQueues(_ DBOSContext, queues ...WorkflowQueue) {
 //	dbos.RegisterQueue(ctx, "queue-2")
 //
 //	// Only listen to queue-1 and queue-2.
-//	dbos.ListenQueues(ctx,
-//	    dbos.WorkflowQueue{Name: "queue-1"},
-//	    dbos.WorkflowQueue{Name: "queue-2"})
-func ListenQueues(ctx DBOSContext, queues ...WorkflowQueue) {
+//	dbos.ListenQueues(ctx, "queue-1", "queue-2")
+func ListenQueues(ctx Context, names ...string) {
 	if ctx == nil {
 		panic("ctx cannot be nil")
 	}
-	ctx.ListenQueues(ctx, queues...)
+	ctx.ListenQueues(ctx, names...)
+}
+
+// ListenedQueues returns the current listen set as a sorted slice. An empty
+// slice means the process listens to every queue. Use it to modify the set
+// incrementally:
+//
+//	queues := dbos.ListenedQueues(ctx)
+//	dbos.ListenQueues(ctx, append(queues, "new-queue")...)
+func ListenedQueues(ctx Context) []string {
+	if ctx == nil {
+		panic("ctx cannot be nil")
+	}
+	return ctx.ListenedQueues(ctx)
 }
 
 /*******************************/
@@ -5577,7 +5549,7 @@ func ListenQueues(ctx DBOSContext, queues ...WorkflowQueue) {
 /*******************************/
 
 // validateScheduledWorkflowFn ensures fn has signature
-// func(DBOSContext, ScheduledWorkflowInput) (any, error). Used by
+// func(Context, ScheduledWorkflowInput) (any, error). Used by
 // ApplySchedules where each entry's WorkflowFn is type-erased.
 func validateScheduledWorkflowFn(fn any) error {
 	t := reflect.TypeOf(fn)
@@ -5585,7 +5557,7 @@ func validateScheduledWorkflowFn(fn any) error {
 		return errors.New("workflow function must be a function")
 	}
 	if t.NumIn() < 2 {
-		return errors.New("workflow function must accept (DBOSContext, ScheduledWorkflowInput)")
+		return errors.New("workflow function must accept (Context, ScheduledWorkflowInput)")
 	}
 	if t.In(1) != reflect.TypeFor[ScheduledWorkflowInput]() {
 		return fmt.Errorf("scheduled workflow function must accept a ScheduledWorkflowInput as input, got %v", t.In(1))
@@ -5604,14 +5576,14 @@ func (c *dbosContext) resolveScheduleWorkflowName(spec ScheduleSpec) (string, er
 		return c.resolveWorkflowName(spec.Workflow)
 	}
 	if spec.WorkflowName == "" {
-		return "", errors.New("one of workflow_name or workflow is required")
+		return "", models.NewInvalidOptionError("one of workflow_name or workflow is required")
 	}
 	return spec.WorkflowName, nil
 }
 
 func (c *dbosContext) CreateSchedule(_ Client, spec ScheduleSpec) error {
 	if spec.ScheduleName == "" {
-		return errors.New("schedule_name is required")
+		return models.NewInvalidOptionError("schedule_name is required")
 	}
 
 	workflowName, err := c.resolveScheduleWorkflowName(spec)
@@ -5654,7 +5626,7 @@ func (c *dbosContext) CreateSchedule(_ Client, spec ScheduleSpec) error {
 	uncancellableCtx := WithoutCancel(c)
 	return sysdb.Retry(c, func() error {
 		return c.systemDB.CreateSchedule(uncancellableCtx, dbInput)
-	}, sysdb.WithRetrierLogger(c.logger))
+	}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
 }
 
 // CreateSchedule creates a new schedule for a workflow. The reconciler loop
@@ -5663,7 +5635,7 @@ func (c *dbosContext) CreateSchedule(_ Client, spec ScheduleSpec) error {
 //
 // The target workflow is identified by spec.WorkflowName, so schedules can be
 // created from a Client for workflows owned by any process or language. From a
-// DBOSContext, spec.Workflow can reference a registered Go workflow function
+// Context, spec.Workflow can reference a registered Go workflow function
 // directly instead.
 //
 // Example:
@@ -5692,7 +5664,7 @@ func (c *dbosContext) ApplySchedules(_ Client, schedules []ScheduleSpec) error {
 
 	for i, spec := range schedules {
 		if spec.ScheduleName == "" {
-			return fmt.Errorf("schedule entry %d is missing required field 'schedule_name'", i)
+			return models.NewInvalidOptionError(fmt.Sprintf("schedule entry %d is missing required field 'schedule_name'", i))
 		}
 		if err := validateCronSchedule(spec.Schedule, spec.CronTimezone); err != nil {
 			return fmt.Errorf("schedule entry %d: %w", i, err)
@@ -5747,7 +5719,7 @@ func (c *dbosContext) ApplySchedules(_ Client, schedules []ScheduleSpec) error {
 			return fmt.Errorf("failed to commit transaction: %w", err)
 		}
 		return nil
-	}, sysdb.WithRetrierLogger(c.logger))
+	}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
 }
 
 // ApplySchedules applies a list of schedules, creating new ones or updating existing ones.
@@ -5773,12 +5745,8 @@ func (c *dbosContext) PauseSchedule(_ Client, scheduleName string) error {
 		return errors.New("schedule_name is required")
 	}
 
-	existing, err := c.GetSchedule(c, scheduleName)
-	if err != nil {
+	if _, err := c.GetSchedule(c, scheduleName); err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
-	}
-	if existing == nil {
-		return fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
 	dbInput := sysdb.UpdateScheduleDBInput{
@@ -5817,12 +5785,8 @@ func (c *dbosContext) ResumeSchedule(_ Client, scheduleName string) error {
 		return errors.New("schedule_name is required")
 	}
 
-	existing, err := c.GetSchedule(c, scheduleName)
-	if err != nil {
+	if _, err := c.GetSchedule(c, scheduleName); err != nil {
 		return fmt.Errorf("failed to get schedule: %w", err)
-	}
-	if existing == nil {
-		return fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
 	dbInput := sysdb.UpdateScheduleDBInput{
@@ -5886,10 +5850,9 @@ func DeleteSchedule(ctx Client, scheduleName string) error {
 	return ctx.DeleteSchedule(ctx, scheduleName)
 }
 
-// Potentially we could return an error here, if helpful to the user, if the schedule is not found.
-func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (*WorkflowSchedule, error) {
+func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (WorkflowSchedule, error) {
 	if scheduleName == "" {
-		return nil, errors.New("schedule_name is required")
+		return WorkflowSchedule{}, errors.New("schedule_name is required")
 	}
 
 	dbInput := sysdb.ListSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}}
@@ -5908,24 +5871,25 @@ func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (*WorkflowSched
 		}, sysdb.WithRetrierLogger(c.logger))
 	}
 	if err != nil {
-		return nil, err
+		return WorkflowSchedule{}, err
 	}
 	for i := range schedules {
 		if schedules[i].ScheduleName == scheduleName {
-			return &schedules[i], nil
+			return schedules[i], nil
 		}
 	}
-	return nil, nil
+	return WorkflowSchedule{}, models.NewScheduleNotFoundError(scheduleName)
 }
 
-// GetSchedule gets a schedule by name.
+// GetSchedule gets a schedule by name. If no schedule with the given name
+// exists, it returns an error matching ErrScheduleNotFound.
 //
 // Example:
 //
 //	schedule, err := dbos.GetSchedule(ctx, "my-schedule")
-func GetSchedule(ctx Client, scheduleName string) (*WorkflowSchedule, error) {
+func GetSchedule(ctx Client, scheduleName string) (WorkflowSchedule, error) {
 	if ctx == nil {
-		return nil, errors.New("ctx cannot be nil")
+		return WorkflowSchedule{}, errors.New("ctx cannot be nil")
 	}
 	return ctx.GetSchedule(ctx, scheduleName)
 }
@@ -5997,9 +5961,6 @@ func (c *dbosContext) BackfillSchedule(_ Client, scheduleName string, start time
 	existing, err := c.GetSchedule(c, scheduleName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get schedule: %w", err)
-	}
-	if existing == nil {
-		return nil, fmt.Errorf("schedule not found: %s", scheduleName)
 	}
 
 	var ids []string
@@ -6075,7 +6036,7 @@ func (c *dbosContext) ListApplicationVersions(_ Client) ([]VersionInfo, error) {
 	}, sysdb.WithRetrierLogger(c.logger))
 }
 
-// ListApplicationVersions is the package-level wrapper for DBOSContext.ListApplicationVersions.
+// ListApplicationVersions is the package-level wrapper for Context.ListApplicationVersions.
 func ListApplicationVersions(ctx Client) ([]VersionInfo, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
@@ -6085,16 +6046,20 @@ func ListApplicationVersions(ctx Client) ([]VersionInfo, error) {
 
 // GetLatestApplicationVersion returns the application version with the most
 // recent timestamp.
-func (c *dbosContext) GetLatestApplicationVersion(_ Client) (*VersionInfo, error) {
-	return sysdb.RetryWithResult(c, func() (*VersionInfo, error) {
+func (c *dbosContext) GetLatestApplicationVersion(_ Client) (VersionInfo, error) {
+	latest, err := sysdb.RetryWithResult(c, func() (*VersionInfo, error) {
 		return c.systemDB.GetLatestApplicationVersion(c, nil)
 	}, sysdb.WithRetrierLogger(c.logger))
+	if err != nil {
+		return VersionInfo{}, err
+	}
+	return *latest, nil
 }
 
-// GetLatestApplicationVersion is the package-level wrapper for DBOSContext.GetLatestApplicationVersion.
-func GetLatestApplicationVersion(ctx Client) (*VersionInfo, error) {
+// GetLatestApplicationVersion is the package-level wrapper for Context.GetLatestApplicationVersion.
+func GetLatestApplicationVersion(ctx Client) (VersionInfo, error) {
 	if ctx == nil {
-		return nil, errors.New("ctx cannot be nil")
+		return VersionInfo{}, errors.New("ctx cannot be nil")
 	}
 	return ctx.GetLatestApplicationVersion(ctx)
 }
@@ -6110,7 +6075,7 @@ func (c *dbosContext) SetLatestApplicationVersion(_ Client, versionName string) 
 	}, sysdb.WithRetrierLogger(c.logger))
 }
 
-// SetLatestApplicationVersion is the package-level wrapper for DBOSContext.SetLatestApplicationVersion.
+// SetLatestApplicationVersion is the package-level wrapper for Context.SetLatestApplicationVersion.
 func SetLatestApplicationVersion(ctx Client, versionName string) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")

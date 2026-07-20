@@ -44,7 +44,7 @@ func TestCancellationChaos(t *testing.T) {
 	}
 	var trackers sync.Map
 
-	workflow := func(ctx dbos.DBOSContext, numSteps int) (int, error) {
+	workflow := func(ctx dbos.Context, numSteps int) (int, error) {
 		wfID, err := dbos.GetWorkflowID(ctx)
 		if err != nil {
 			return 0, err
@@ -81,8 +81,8 @@ func TestCancellationChaos(t *testing.T) {
 
 	isCancellationErr := func(err error) bool {
 		return errors.Is(err, context.Canceled) ||
-			errors.Is(err, &dbos.DBOSError{Code: dbos.WorkflowCancelled}) ||
-			errors.Is(err, &dbos.DBOSError{Code: dbos.AwaitedWorkflowCancelled})
+			errors.Is(err, dbos.ErrWorkflowCancelled) ||
+			errors.Is(err, dbos.ErrAwaitedWorkflowCancelled)
 	}
 
 	// Recorded steps must be unique and form a contiguous prefix 0..k-1.

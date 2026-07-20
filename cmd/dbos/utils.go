@@ -85,8 +85,8 @@ func getDBURL() (string, error) {
 	return resolvedURL, nil
 }
 
-// createDBOSContext creates a new DBOS context with the provided database URL
-func createDBOSContext(ctx context.Context, dbURL string) (dbos.DBOSContext, error) {
+// createContext creates a new DBOS context with the provided database URL
+func createContext(ctx context.Context, dbURL string) (dbos.Context, error) {
 	appName := "dbos-cli"
 
 	config := dbos.Config{
@@ -101,7 +101,7 @@ func createDBOSContext(ctx context.Context, dbURL string) (dbos.DBOSContext, err
 		logger.Debug("Using database schema", "schema", schema)
 	}
 
-	dbosCtx, err := dbos.NewDBOSContext(ctx, config)
+	dbosCtx, err := dbos.NewContext(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DBOS context: %w", err)
 	}

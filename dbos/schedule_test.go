@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -25,7 +26,8 @@ func TestScheduleCRUD(t *testing.T) {
 
 	// Custom queue used by CreateDelete to verify WithScheduleQueueName routes
 	// scheduled workflows to the configured queue.
-	customQueue := NewWorkflowQueue(dbosCtx, "schedule-crud-custom-queue")
+	customQueue, err := RegisterQueue(dbosCtx, "schedule-crud-custom-queue")
+	require.NoError(t, err)
 
 	require.NoError(t, dbosCtx.Launch())
 
@@ -43,18 +45,18 @@ func TestScheduleCRUD(t *testing.T) {
 			Schedule:     "*/1 * * * * *",
 			Workflow:     testCapturingScheduledWorkflow,
 			Context:      ctxValue,
-			QueueName:    customQueue.Name,
+			QueueName:    customQueue.GetName(),
 		})
 		require.NoError(t, err)
 
 		schedule, err := GetSchedule(dbosCtx, name)
 		require.NoError(t, err)
-		require.NotNil(t, schedule)
+		require.NotZero(t, schedule)
 		require.Equal(t, name, schedule.ScheduleName)
 		require.Equal(t, capturingFQN, schedule.WorkflowName)
 		require.Equal(t, "*/1 * * * * *", schedule.Schedule)
 		require.Equal(t, ScheduleStatusActive, schedule.Status)
-		require.Equal(t, customQueue.Name, schedule.QueueName)
+		require.Equal(t, customQueue.GetName(), schedule.QueueName)
 
 		// Reconciler should install a cron entry for the new schedule.
 		require.Eventually(t, func() bool {
@@ -70,8 +72,8 @@ func TestScheduleCRUD(t *testing.T) {
 		var firedWfID string
 		require.Eventually(t, func() bool {
 			wfs, err := ListWorkflows(dbosCtx,
-				WithWorkflowIDPrefix("sched-"+name+"-"),
-				WithQueueName(customQueue.Name),
+				WithFilterWorkflowIDPrefix("sched-"+name+"-"),
+				WithFilterQueueName(customQueue.GetName()),
 			)
 			if err != nil || len(wfs) == 0 {
 				return false
@@ -87,15 +89,17 @@ func TestScheduleCRUD(t *testing.T) {
 
 		captured, _ := scheduledInputCapture.Load(firedWfID)
 		got := captured.(ScheduledWorkflowInput)
-		require.Equal(t, ctxValue, got.Context)
+		decodedCtx, err := DecodeScheduleContext[string](got)
+		require.NoError(t, err)
+		require.Equal(t, ctxValue, decodedCtx)
 		require.False(t, got.ScheduledTime.IsZero())
 
 		err = DeleteSchedule(dbosCtx, name)
 		require.NoError(t, err)
 
 		schedule, err = GetSchedule(dbosCtx, name)
-		require.NoError(t, err)
-		require.Nil(t, schedule)
+		require.ErrorIs(t, err, ErrScheduleNotFound)
+		require.Zero(t, schedule)
 
 		// Reconciler should drop the cron entry once the schedule is gone.
 		require.Eventually(t, func() bool {
@@ -245,12 +249,10 @@ func TestScheduleCRUD(t *testing.T) {
 
 		// Pausing or resuming a non-existent schedule must error.
 		err = PauseSchedule(dbosCtx, "does-not-exist")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "schedule not found")
+		require.ErrorIs(t, err, ErrScheduleNotFound)
 
 		err = ResumeSchedule(dbosCtx, "does-not-exist")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "schedule not found")
+		require.ErrorIs(t, err, ErrScheduleNotFound)
 	})
 }
 
@@ -263,8 +265,10 @@ func TestApplySchedules(t *testing.T) {
 
 	// Two queues so we can verify that re-applying a schedule with a different
 	// QueueName routes future ticks to the new queue.
-	queueA := NewWorkflowQueue(dbosCtx, "apply-queue-a")
-	queueB := NewWorkflowQueue(dbosCtx, "apply-queue-b")
+	queueA, err := RegisterQueue(dbosCtx, "apply-queue-a")
+	require.NoError(t, err)
+	queueB, err := RegisterQueue(dbosCtx, "apply-queue-b")
+	require.NoError(t, err)
 
 	require.NoError(t, dbosCtx.Launch())
 
@@ -286,9 +290,9 @@ func TestApplySchedules(t *testing.T) {
 
 	// Round 1: apply three active schedules. toKeep fires every second on
 	// queueA so we can observe that a queue change takes effect on re-apply.
-	err := ApplySchedules(dbosCtx, []ScheduleSpec{
+	err = ApplySchedules(dbosCtx, []ScheduleSpec{
 		{ScheduleName: toPause, Workflow: testWorkflowForSchedule, Schedule: "*/10 * * * * *"},
-		{ScheduleName: toKeep, Workflow: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueA.Name},
+		{ScheduleName: toKeep, Workflow: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueA.GetName()},
 		{ScheduleName: toDrop, Workflow: testWorkflowForSchedule, Schedule: "0 30 * * * *"},
 	})
 	require.NoError(t, err)
@@ -305,8 +309,8 @@ func TestApplySchedules(t *testing.T) {
 	// toKeep should enqueue at least one workflow on queueA before the re-apply.
 	require.Eventually(t, func() bool {
 		wfs, err := ListWorkflows(dbosCtx,
-			WithWorkflowIDPrefix("sched-"+toKeep+"-"),
-			WithQueueName(queueA.Name),
+			WithFilterWorkflowIDPrefix("sched-"+toKeep+"-"),
+			WithFilterQueueName(queueA.GetName()),
 		)
 		return err == nil && len(wfs) > 0
 	}, 5*time.Second, 100*time.Millisecond, "toKeep should enqueue on queueA before re-apply")
@@ -314,46 +318,46 @@ func TestApplySchedules(t *testing.T) {
 	// Snapshot schedule_id: re-apply must update definition in place, not replace the row.
 	beforeKeep, err := GetSchedule(dbosCtx, toKeep)
 	require.NoError(t, err)
-	require.NotNil(t, beforeKeep)
+	require.NotZero(t, beforeKeep)
 	keepScheduleID := beforeKeep.ScheduleID
 
 	// Round 2: pause one, delete one, re-apply the third to change its queue.
 	require.NoError(t, PauseSchedule(dbosCtx, toPause))
 	require.NoError(t, DeleteSchedule(dbosCtx, toDrop))
 	require.NoError(t, ApplySchedules(dbosCtx, []ScheduleSpec{
-		{ScheduleName: toKeep, Workflow: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueB.Name},
+		{ScheduleName: toKeep, Workflow: testWorkflowForSchedule, Schedule: "*/1 * * * * *", QueueName: queueB.GetName()},
 	}))
 
 	// Paused: schedule still exists but its cron entry is removed.
 	paused, err := GetSchedule(dbosCtx, toPause)
 	require.NoError(t, err)
-	require.NotNil(t, paused)
+	require.NotZero(t, paused)
 	require.Equal(t, ScheduleStatusPaused, paused.Status)
 	require.Eventually(t, func() bool { return !hasEntry(toPause) },
 		3*time.Second, 50*time.Millisecond, "reconciler should drop the cron entry for paused %s", toPause)
 
 	// Deleted: schedule is gone and its cron entry is removed.
 	dropped, err := GetSchedule(dbosCtx, toDrop)
-	require.NoError(t, err)
-	require.Nil(t, dropped)
+	require.ErrorIs(t, err, ErrScheduleNotFound)
+	require.Zero(t, dropped)
 	require.Eventually(t, func() bool { return !hasEntry(toDrop) },
 		3*time.Second, 50*time.Millisecond, "reconciler should drop the cron entry for deleted %s", toDrop)
 
 	// Kept: still active, same schedule_id, cron entry installed, queue updated to queueB.
 	kept, err := GetSchedule(dbosCtx, toKeep)
 	require.NoError(t, err)
-	require.NotNil(t, kept)
+	require.NotZero(t, kept)
 	require.Equal(t, ScheduleStatusActive, kept.Status)
 	require.Equal(t, keepScheduleID, kept.ScheduleID, "upsert must preserve schedule_id on re-apply")
-	require.Equal(t, queueB.Name, kept.QueueName)
+	require.Equal(t, queueB.GetName(), kept.QueueName)
 	require.Eventually(t, func() bool { return hasEntry(toKeep) },
 		3*time.Second, 50*time.Millisecond, "re-applied toKeep should have a cron entry")
 
 	// Ticks fired after the re-apply should enqueue on queueB.
 	require.Eventually(t, func() bool {
 		wfs, err := ListWorkflows(dbosCtx,
-			WithWorkflowIDPrefix("sched-"+toKeep+"-"),
-			WithQueueName(queueB.Name),
+			WithFilterWorkflowIDPrefix("sched-"+toKeep+"-"),
+			WithFilterQueueName(queueB.GetName()),
 		)
 		return err == nil && len(wfs) > 0
 	}, 5*time.Second, 100*time.Millisecond, "re-applied toKeep should enqueue on queueB")
@@ -409,7 +413,7 @@ func TestApplySchedulesConcurrent(t *testing.T) {
 	require.Len(t, schedules, 1)
 	require.Equal(t, name, schedules[0].ScheduleName)
 	require.Equal(t, "0 0 * * * *", schedules[0].Schedule)
-	require.Equal(t, map[string]any{"region": "us"}, schedules[0].Context)
+	require.JSONEq(t, `{"region":"us"}`, string(schedules[0].Context))
 	scheduleID := schedules[0].ScheduleID
 
 	// Re-applying updates definition in place and preserves schedule_id.
@@ -426,7 +430,7 @@ func TestApplySchedulesConcurrent(t *testing.T) {
 	require.Len(t, schedules, 1)
 	require.Equal(t, scheduleID, schedules[0].ScheduleID)
 	require.Equal(t, "0 0 0 * * *", schedules[0].Schedule)
-	require.Equal(t, map[string]any{"region": "eu"}, schedules[0].Context)
+	require.JSONEq(t, `{"region":"eu"}`, string(schedules[0].Context))
 
 	require.NoError(t, DeleteSchedule(dbosCtx, name))
 	schedules, err = ListSchedules(dbosCtx, WithScheduleNamePrefixes(name))
@@ -457,7 +461,7 @@ func TestApplySchedulesLiveUpdate(t *testing.T) {
 
 	before, err := GetSchedule(dbosCtx, name)
 	require.NoError(t, err)
-	require.NotNil(t, before)
+	require.NotZero(t, before)
 
 	require.Eventually(t, func() bool {
 		return liveUpdateVersionCount(1) >= 1
@@ -474,7 +478,7 @@ func TestApplySchedulesLiveUpdate(t *testing.T) {
 
 	after, err := GetSchedule(dbosCtx, name)
 	require.NoError(t, err)
-	require.NotNil(t, after)
+	require.NotZero(t, after)
 	require.Equal(t, before.ScheduleID, after.ScheduleID, "live update must preserve schedule_id")
 
 	// Reconciler should restart the entry and fire with the new context.
@@ -520,11 +524,11 @@ func TestApplySchedulesPreservesRuntimeState(t *testing.T) {
 
 	sched, err := GetSchedule(dbosCtx, name)
 	require.NoError(t, err)
-	require.NotNil(t, sched)
+	require.NotZero(t, sched)
 	require.Equal(t, ScheduleStatusPaused, sched.Status, "status must be preserved")
 	require.NotNil(t, sched.LastFiredAt)
 	require.True(t, sched.LastFiredAt.Equal(lastFired), "last_fired_at must be preserved, got %v", sched.LastFiredAt)
-	require.Equal(t, map[string]any{"version": float64(2)}, sched.Context, "definition context must still update")
+	require.JSONEq(t, `{"version":2}`, string(sched.Context), "definition context must still update")
 }
 
 // TestCalculateScheduleSignature ensures definition fields affect the signature
@@ -538,7 +542,7 @@ func TestCalculateScheduleSignature(t *testing.T) {
 		WorkflowClassName: "",
 		Schedule:          "* * * * *",
 		Status:            ScheduleStatusActive,
-		Context:           "ctx",
+		Context:           json.RawMessage(`"ctx"`),
 		LastFiredAt:       nil,
 		AutomaticBackfill: false,
 		CronTimezone:      "",
@@ -560,20 +564,19 @@ func TestCalculateScheduleSignature(t *testing.T) {
 		require.Equal(t, sig, got, "case %d should not change signature", i)
 	}
 
-	// Structurally equal map contexts must produce equal signatures
-	// (encoding/json marshals map keys in sorted order).
-	mapA := base
-	mapA.Context = map[string]any{"a": float64(1), "b": "x"}
-	mapB := base
-	mapB.Context = map[string]any{"b": "x", "a": float64(1)}
-	require.Equal(t, c.calculateSignature(mapA), c.calculateSignature(mapB))
+	// Context compares as raw JSON bytes: identical bytes, equal signatures.
+	rawA := base
+	rawA.Context = json.RawMessage(`{"a":1,"b":"x"}`)
+	rawB := base
+	rawB.Context = json.RawMessage(`{"a":1,"b":"x"}`)
+	require.Equal(t, c.calculateSignature(rawA), c.calculateSignature(rawB))
 
 	// Definition fields MUST change the signature.
 	changed := []WorkflowSchedule{
 		{WorkflowName: "wf2", Schedule: base.Schedule, Context: base.Context},
 		{WorkflowName: base.WorkflowName, WorkflowClassName: "SomeClass", Schedule: base.Schedule, Context: base.Context},
 		{WorkflowName: base.WorkflowName, Schedule: "0 * * * *", Context: base.Context},
-		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: "ctx2"},
+		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: json.RawMessage(`"ctx2"`)},
 		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: base.Context, CronTimezone: "America/Los_Angeles"},
 		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: base.Context, QueueName: "q"},
 	}
@@ -590,7 +593,7 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 	require.NoError(t, dbosCtx.Launch())
 
 	// Second argument is not ScheduledWorkflowInput.
-	badInputType := func(ctx DBOSContext, input string) (any, error) { return nil, nil }
+	badInputType := func(ctx Context, input string) (any, error) { return nil, nil }
 	err := ApplySchedules(dbosCtx, []ScheduleSpec{
 		{ScheduleName: "bad-input", Workflow: badInputType, Schedule: "0 0 * * * *"},
 	})
@@ -604,7 +607,7 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 	require.Error(t, err)
 
 	// Too few parameters.
-	tooFewParams := func(ctx DBOSContext) (any, error) { return nil, nil }
+	tooFewParams := func(ctx Context) (any, error) { return nil, nil }
 	err = ApplySchedules(dbosCtx, []ScheduleSpec{
 		{ScheduleName: "too-few", Workflow: tooFewParams, Schedule: "0 0 * * * *"},
 	})
@@ -613,8 +616,8 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 	// None of the above schedules should have been persisted.
 	for _, name := range []string{"bad-input", "not-a-func", "too-few"} {
 		s, err := GetSchedule(dbosCtx, name)
-		require.NoError(t, err)
-		require.Nil(t, s, "schedule %s should not have been created", name)
+		require.ErrorIs(t, err, ErrScheduleNotFound, "schedule %s should not have been created", name)
+		require.Zero(t, s)
 	}
 }
 
@@ -634,8 +637,8 @@ func TestScheduleCronValidation(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid cron schedule")
 	got, err := GetSchedule(dbosCtx, "bad-cron-create")
-	require.NoError(t, err)
-	require.Nil(t, got, "invalid-cron schedule must not be persisted")
+	require.ErrorIs(t, err, ErrScheduleNotFound, "invalid-cron schedule must not be persisted")
+	require.Zero(t, got)
 
 	// ApplySchedules rejects invalid cron before writing any row (atomicity).
 	err = ApplySchedules(dbosCtx, []ScheduleSpec{
@@ -646,8 +649,8 @@ func TestScheduleCronValidation(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid cron schedule")
 	for _, name := range []string{"apply-good", "apply-bad"} {
 		s, err := GetSchedule(dbosCtx, name)
-		require.NoError(t, err)
-		require.Nil(t, s, "schedule %s should not have been created", name)
+		require.ErrorIs(t, err, ErrScheduleNotFound, "schedule %s should not have been created", name)
+		require.Zero(t, s)
 	}
 
 	// Invalid timezone also surfaces at validate time.
@@ -685,7 +688,7 @@ func TestBackfillSchedule(t *testing.T) {
 	// A `*/1 * * * * *` schedule over a one-minute window should enqueue
 	// roughly 60 workflows; allow some slack for clock alignment.
 	require.GreaterOrEqual(t, len(ids), 50, "backfill should have returned ~60 IDs, got %d", len(ids))
-	backfilled, err := ListWorkflows(dbosCtx, WithWorkflowIDPrefix("sched-backfill-schedule-"))
+	backfilled, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDPrefix("sched-backfill-schedule-"))
 	require.NoError(t, err)
 	require.Equal(t, len(ids), len(backfilled), "returned IDs should match enqueued workflows")
 	for _, wf := range backfilled {
@@ -698,7 +701,7 @@ func TestBackfillSchedule(t *testing.T) {
 	idsAgain, err := BackfillSchedule(dbosCtx, "backfill-schedule", start, end)
 	require.NoError(t, err)
 	require.Equal(t, len(ids), len(idsAgain), "second backfill must return the same IDs")
-	again, err := ListWorkflows(dbosCtx, WithWorkflowIDPrefix("sched-backfill-schedule-"))
+	again, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDPrefix("sched-backfill-schedule-"))
 	require.NoError(t, err)
 	require.Equal(t, len(backfilled), len(again), "second backfill must not enqueue duplicates")
 	for _, wf := range again {
@@ -744,7 +747,7 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 
 	target := ids[0]
 	require.Eventually(t, func() bool {
-		statuses, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{target}))
+		statuses, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(target))
 		return err == nil && len(statuses) == 1 && statuses[0].Status == WorkflowStatusSuccess
 	}, 10*time.Second, 50*time.Millisecond, "queue runner should run the backfilled workflow before recovery")
 
@@ -771,7 +774,9 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 	captured, ok := scheduledInputCapture.Load(target)
 	require.True(t, ok, "workflow should have captured its input on recovery")
 	got := captured.(ScheduledWorkflowInput)
-	require.Equal(t, ctxValue, got.Context, "Context should round-trip through DB-encoded inputs")
+	decodedCtx, err := DecodeScheduleContext[string](got)
+	require.NoError(t, err)
+	require.Equal(t, ctxValue, decodedCtx, "Context should round-trip through DB-encoded inputs")
 	require.False(t, got.ScheduledTime.IsZero(), "ScheduledTime should be populated from DB-encoded inputs")
 	require.False(t, got.ScheduledTime.Before(start.Add(-time.Second)), "ScheduledTime should be within the backfill window")
 	require.False(t, got.ScheduledTime.After(end.Add(time.Second)), "ScheduledTime should be within the backfill window")
@@ -816,7 +821,9 @@ func TestTriggerSchedule(t *testing.T) {
 	captured, ok := scheduledInputCapture.Load(workflowID)
 	require.True(t, ok, "workflow should have captured its input")
 	got := captured.(ScheduledWorkflowInput)
-	require.Equal(t, ctxValue, got.Context, "Context should match the schedule's configured context")
+	decodedCtx, err := DecodeScheduleContext[string](got)
+	require.NoError(t, err)
+	require.Equal(t, ctxValue, decodedCtx, "Context should match the schedule's configured context")
 	require.False(t, got.ScheduledTime.Before(beforeTrigger.Add(-time.Second)), "ScheduledTime should be at or after the trigger call")
 	require.False(t, got.ScheduledTime.After(afterTrigger.Add(time.Second)), "ScheduledTime should be at or before the trigger call returns")
 
@@ -889,11 +896,11 @@ func TestScheduleWithOptions(t *testing.T) {
 	require.Equal(t, "my-queue", schedule.QueueName)
 }
 
-func testWorkflowForSchedule(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+func testWorkflowForSchedule(ctx Context, input ScheduledWorkflowInput) (any, error) {
 	return "completed", nil
 }
 
-func testWorkflowForScheduleCustomName(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+func testWorkflowForScheduleCustomName(ctx Context, input ScheduledWorkflowInput) (any, error) {
 	return "completed", nil
 }
 
@@ -903,33 +910,39 @@ var scheduledInputCapture sync.Map
 // "version" value in the schedule context.
 var (
 	liveUpdateMu            sync.Mutex
-	liveUpdateVersionCounts = map[float64]int{}
+	liveUpdateVersionCounts = map[int]int{}
 )
 
 func resetLiveUpdateVersionCounts() {
 	liveUpdateMu.Lock()
-	liveUpdateVersionCounts = map[float64]int{}
+	liveUpdateVersionCounts = map[int]int{}
 	liveUpdateMu.Unlock()
 }
 
-func liveUpdateVersionCount(version float64) int {
+func liveUpdateVersionCount(version int) int {
 	liveUpdateMu.Lock()
 	defer liveUpdateMu.Unlock()
 	return liveUpdateVersionCounts[version]
 }
 
-func testLiveUpdateScheduledWorkflow(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
-	if m, ok := input.Context.(map[string]any); ok {
-		if v, ok := m["version"].(float64); ok {
-			liveUpdateMu.Lock()
-			liveUpdateVersionCounts[v]++
-			liveUpdateMu.Unlock()
-		}
+type liveUpdateScheduleContext struct {
+	Version int `json:"version"`
+}
+
+func testLiveUpdateScheduledWorkflow(ctx Context, input ScheduledWorkflowInput) (any, error) {
+	cfg, err := DecodeScheduleContext[liveUpdateScheduleContext](input)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Version != 0 {
+		liveUpdateMu.Lock()
+		liveUpdateVersionCounts[cfg.Version]++
+		liveUpdateMu.Unlock()
 	}
 	return "completed", nil
 }
 
-func testCapturingScheduledWorkflow(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+func testCapturingScheduledWorkflow(ctx Context, input ScheduledWorkflowInput) (any, error) {
 	wfID, _ := GetWorkflowID(ctx)
 	scheduledInputCapture.Store(wfID, input)
 	// CreateSchedule is wrapped as a step via runAsTxn when called inside a
@@ -946,7 +959,7 @@ func testCapturingScheduledWorkflow(ctx DBOSContext, input ScheduledWorkflowInpu
 
 var backfillRestartFiredEvent *Event
 
-func testWorkflowForBackfillRestart(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+func testWorkflowForBackfillRestart(ctx Context, input ScheduledWorkflowInput) (any, error) {
 	if backfillRestartFiredEvent != nil {
 		backfillRestartFiredEvent.Set()
 	}
@@ -979,8 +992,8 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 	var before []WorkflowStatus
 	require.Eventually(t, func() bool {
 		before, err = ListWorkflows(dbosCtx,
-			WithName(wfFQN),
-			WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}),
+			WithFilterName(wfFQN),
+			WithFilterStatus(WorkflowStatusSuccess),
 		)
 		return err == nil && len(before) >= 1
 	}, 3*time.Second, 50*time.Millisecond, "expected at least one successful run before shutdown")
@@ -1005,14 +1018,14 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 	// After backfill, the success count should have grown by more than one.
 	require.Eventually(t, func() bool {
 		after, err := ListWorkflows(dbosCtx2,
-			WithName(wfFQN),
-			WithStatus([]WorkflowStatusType{WorkflowStatusSuccess}),
+			WithFilterName(wfFQN),
+			WithFilterStatus(WorkflowStatusSuccess),
 		)
 		return err == nil && len(after)-len(before) > 2
 	}, 5*time.Second, 100*time.Millisecond, "expected backfill to produce more than one additional successful workflow")
 }
 
-func testWorkflowExpectingApplySchedulesError(ctx DBOSContext, _ string) (string, error) {
+func testWorkflowExpectingApplySchedulesError(ctx Context, _ string) (string, error) {
 	err := ApplySchedules(ctx, []ScheduleSpec{
 		{ScheduleName: "x", Workflow: testWorkflowForSchedule, Schedule: "0 0 * * * *"},
 	})
@@ -1022,7 +1035,7 @@ func testWorkflowExpectingApplySchedulesError(ctx DBOSContext, _ string) (string
 	return err.Error(), nil
 }
 
-func testWorkflowExpectingBackfillScheduleError(ctx DBOSContext, _ string) (string, error) {
+func testWorkflowExpectingBackfillScheduleError(ctx Context, _ string) (string, error) {
 	_, err := BackfillSchedule(ctx, "any", time.Now().Add(-time.Minute), time.Now())
 	if err == nil {
 		return "", nil
@@ -1030,7 +1043,7 @@ func testWorkflowExpectingBackfillScheduleError(ctx DBOSContext, _ string) (stri
 	return err.Error(), nil
 }
 
-func testWorkflowExpectingTriggerScheduleError(ctx DBOSContext, _ string) (string, error) {
+func testWorkflowExpectingTriggerScheduleError(ctx Context, _ string) (string, error) {
 	_, err := TriggerSchedule[any](ctx, "any")
 	if err == nil {
 		return "", nil
@@ -1133,7 +1146,7 @@ func TestScheduleNameSurvivesExportImport(t *testing.T) {
 	require.NoError(t, err)
 	workflowID := handle.GetWorkflowID()
 
-	original, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{workflowID}))
+	original, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
 	require.NoError(t, err)
 	require.Len(t, original, 1)
 	require.Equal(t, "export-test", original[0].ScheduleName)
@@ -1143,12 +1156,12 @@ func TestScheduleNameSurvivesExportImport(t *testing.T) {
 	exported, err := sdb.ExportWorkflow(dbosCtx, workflowID, true)
 	require.NoError(t, err)
 	require.NoError(t, DeleteWorkflows(dbosCtx, []string{workflowID}))
-	gone, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{workflowID}))
+	gone, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
 	require.NoError(t, err)
 	require.Empty(t, gone)
 
 	require.NoError(t, sdb.ImportWorkflow(dbosCtx, exported))
-	imported, err := ListWorkflows(dbosCtx, WithWorkflowIDs([]string{workflowID}))
+	imported, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
 	require.NoError(t, err)
 	require.Len(t, imported, 1)
 	require.Equal(t, "export-test", imported[0].ScheduleName)
@@ -1185,7 +1198,7 @@ func TestScheduleFiresWithoutLocalRegistration(t *testing.T) {
 
 	var enqueued WorkflowStatus
 	require.Eventually(t, func() bool {
-		wfs, err := ListWorkflows(dbosCtx, WithWorkflowIDPrefix("sched-"+scheduleName+"-"))
+		wfs, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDPrefix("sched-"+scheduleName+"-"))
 		if err != nil || len(wfs) == 0 {
 			return false
 		}
@@ -1200,6 +1213,6 @@ func TestScheduleFiresWithoutLocalRegistration(t *testing.T) {
 
 	sched, err := client.GetSchedule(client, scheduleName)
 	require.NoError(t, err)
-	require.NotNil(t, sched)
+	require.NotZero(t, sched)
 	require.NotNil(t, sched.LastFiredAt, "last_fired_at should be updated after the tick")
 }
