@@ -120,7 +120,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer dbosCtx.Shutdown(10 * time.Second)
+	defer dbos.Shutdown(dbosCtx, 10*time.Second)
 
 	// Create a DB-backed schedule for the scheduled workflow
 	err = dbos.CreateSchedule(dbosCtx, dbos.ScheduleSpec{
