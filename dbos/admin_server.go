@@ -167,19 +167,16 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 	result["StartedAt"] = formatEpochMs(ws.StartedAt)
 
 	if ws.Input != nil {
-		// If there is a value, it should be a JSON string
-		jsonInput, ok := ws.Input.(string)
-		if ok {
-			result["Input"] = jsonInput
+		if s, ok := listingValueJSON(ws.Input); ok {
+			result["Input"] = s
 		} else {
 			result["Input"] = ""
 		}
 	}
 
 	if ws.Output != nil {
-		jsonOutput, ok := ws.Output.(string)
-		if ok {
-			result["Output"] = jsonOutput
+		if s, ok := listingValueJSON(ws.Output); ok {
+			result["Output"] = s
 		} else {
 			result["Output"] = ""
 		}
@@ -280,7 +277,7 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_QUEUES_METADATA_PATTERN)
 	mux.HandleFunc(_WORKFLOW_QUEUES_METADATA_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		// The internal queue plus all database-backed queues.
-		queueMetadataArray := []WorkflowQueue{ctx.queueRunner.internalQueue}
+		queueMetadataArray := []workflowQueue{ctx.queueRunner.internalQueue}
 		if dbQueueCfgs, err := ctx.systemDB.ListQueues(ctx); err != nil {
 			ctx.logger.Error("Error listing database-backed queues", "error", err)
 		} else {
@@ -482,10 +479,8 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 			}
 
 			if step.Output != nil {
-				// If there is a value, it should be a JSON string
-				jsonOutput, ok := step.Output.(string)
-				if ok {
-					formattedStep["output"] = jsonOutput
+				if s, ok := listingValueJSON(step.Output); ok {
+					formattedStep["output"] = s
 				} else {
 					formattedStep["output"] = ""
 				}

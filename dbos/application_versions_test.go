@@ -17,7 +17,7 @@ func TestApplicationVersions(t *testing.T) {
 
 		latest, err := GetLatestApplicationVersion(dbosCtx)
 		require.NoError(t, err)
-		require.NotNil(t, latest)
+		require.NotZero(t, latest)
 		require.Equal(t, dbosCtx.GetApplicationVersion(), latest.Name)
 
 		versions, err := ListApplicationVersions(dbosCtx)

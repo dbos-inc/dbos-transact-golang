@@ -2,6 +2,7 @@ package dbos
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -50,7 +51,7 @@ func TestScheduleCRUD(t *testing.T) {
 
 		schedule, err := GetSchedule(dbosCtx, name)
 		require.NoError(t, err)
-		require.NotNil(t, schedule)
+		require.NotZero(t, schedule)
 		require.Equal(t, name, schedule.ScheduleName)
 		require.Equal(t, capturingFQN, schedule.WorkflowName)
 		require.Equal(t, "*/1 * * * * *", schedule.Schedule)
@@ -88,7 +89,9 @@ func TestScheduleCRUD(t *testing.T) {
 
 		captured, _ := scheduledInputCapture.Load(firedWfID)
 		got := captured.(ScheduledWorkflowInput)
-		require.Equal(t, ctxValue, got.Context)
+		decodedCtx, err := DecodeScheduleContext[string](got)
+		require.NoError(t, err)
+		require.Equal(t, ctxValue, decodedCtx)
 		require.False(t, got.ScheduledTime.IsZero())
 
 		err = DeleteSchedule(dbosCtx, name)
@@ -96,7 +99,7 @@ func TestScheduleCRUD(t *testing.T) {
 
 		schedule, err = GetSchedule(dbosCtx, name)
 		require.ErrorIs(t, err, ErrScheduleNotFound)
-		require.Nil(t, schedule)
+		require.Zero(t, schedule)
 
 		// Reconciler should drop the cron entry once the schedule is gone.
 		require.Eventually(t, func() bool {
@@ -315,7 +318,7 @@ func TestApplySchedules(t *testing.T) {
 	// Snapshot schedule_id: re-apply must update definition in place, not replace the row.
 	beforeKeep, err := GetSchedule(dbosCtx, toKeep)
 	require.NoError(t, err)
-	require.NotNil(t, beforeKeep)
+	require.NotZero(t, beforeKeep)
 	keepScheduleID := beforeKeep.ScheduleID
 
 	// Round 2: pause one, delete one, re-apply the third to change its queue.
@@ -328,7 +331,7 @@ func TestApplySchedules(t *testing.T) {
 	// Paused: schedule still exists but its cron entry is removed.
 	paused, err := GetSchedule(dbosCtx, toPause)
 	require.NoError(t, err)
-	require.NotNil(t, paused)
+	require.NotZero(t, paused)
 	require.Equal(t, ScheduleStatusPaused, paused.Status)
 	require.Eventually(t, func() bool { return !hasEntry(toPause) },
 		3*time.Second, 50*time.Millisecond, "reconciler should drop the cron entry for paused %s", toPause)
@@ -336,14 +339,14 @@ func TestApplySchedules(t *testing.T) {
 	// Deleted: schedule is gone and its cron entry is removed.
 	dropped, err := GetSchedule(dbosCtx, toDrop)
 	require.ErrorIs(t, err, ErrScheduleNotFound)
-	require.Nil(t, dropped)
+	require.Zero(t, dropped)
 	require.Eventually(t, func() bool { return !hasEntry(toDrop) },
 		3*time.Second, 50*time.Millisecond, "reconciler should drop the cron entry for deleted %s", toDrop)
 
 	// Kept: still active, same schedule_id, cron entry installed, queue updated to queueB.
 	kept, err := GetSchedule(dbosCtx, toKeep)
 	require.NoError(t, err)
-	require.NotNil(t, kept)
+	require.NotZero(t, kept)
 	require.Equal(t, ScheduleStatusActive, kept.Status)
 	require.Equal(t, keepScheduleID, kept.ScheduleID, "upsert must preserve schedule_id on re-apply")
 	require.Equal(t, queueB.GetName(), kept.QueueName)
@@ -410,7 +413,7 @@ func TestApplySchedulesConcurrent(t *testing.T) {
 	require.Len(t, schedules, 1)
 	require.Equal(t, name, schedules[0].ScheduleName)
 	require.Equal(t, "0 0 * * * *", schedules[0].Schedule)
-	require.Equal(t, map[string]any{"region": "us"}, schedules[0].Context)
+	require.JSONEq(t, `{"region":"us"}`, string(schedules[0].Context))
 	scheduleID := schedules[0].ScheduleID
 
 	// Re-applying updates definition in place and preserves schedule_id.
@@ -427,7 +430,7 @@ func TestApplySchedulesConcurrent(t *testing.T) {
 	require.Len(t, schedules, 1)
 	require.Equal(t, scheduleID, schedules[0].ScheduleID)
 	require.Equal(t, "0 0 0 * * *", schedules[0].Schedule)
-	require.Equal(t, map[string]any{"region": "eu"}, schedules[0].Context)
+	require.JSONEq(t, `{"region":"eu"}`, string(schedules[0].Context))
 
 	require.NoError(t, DeleteSchedule(dbosCtx, name))
 	schedules, err = ListSchedules(dbosCtx, WithScheduleNamePrefixes(name))
@@ -458,7 +461,7 @@ func TestApplySchedulesLiveUpdate(t *testing.T) {
 
 	before, err := GetSchedule(dbosCtx, name)
 	require.NoError(t, err)
-	require.NotNil(t, before)
+	require.NotZero(t, before)
 
 	require.Eventually(t, func() bool {
 		return liveUpdateVersionCount(1) >= 1
@@ -475,7 +478,7 @@ func TestApplySchedulesLiveUpdate(t *testing.T) {
 
 	after, err := GetSchedule(dbosCtx, name)
 	require.NoError(t, err)
-	require.NotNil(t, after)
+	require.NotZero(t, after)
 	require.Equal(t, before.ScheduleID, after.ScheduleID, "live update must preserve schedule_id")
 
 	// Reconciler should restart the entry and fire with the new context.
@@ -521,11 +524,11 @@ func TestApplySchedulesPreservesRuntimeState(t *testing.T) {
 
 	sched, err := GetSchedule(dbosCtx, name)
 	require.NoError(t, err)
-	require.NotNil(t, sched)
+	require.NotZero(t, sched)
 	require.Equal(t, ScheduleStatusPaused, sched.Status, "status must be preserved")
 	require.NotNil(t, sched.LastFiredAt)
 	require.True(t, sched.LastFiredAt.Equal(lastFired), "last_fired_at must be preserved, got %v", sched.LastFiredAt)
-	require.Equal(t, map[string]any{"version": float64(2)}, sched.Context, "definition context must still update")
+	require.JSONEq(t, `{"version":2}`, string(sched.Context), "definition context must still update")
 }
 
 // TestCalculateScheduleSignature ensures definition fields affect the signature
@@ -539,7 +542,7 @@ func TestCalculateScheduleSignature(t *testing.T) {
 		WorkflowClassName: "",
 		Schedule:          "* * * * *",
 		Status:            ScheduleStatusActive,
-		Context:           "ctx",
+		Context:           json.RawMessage(`"ctx"`),
 		LastFiredAt:       nil,
 		AutomaticBackfill: false,
 		CronTimezone:      "",
@@ -561,20 +564,19 @@ func TestCalculateScheduleSignature(t *testing.T) {
 		require.Equal(t, sig, got, "case %d should not change signature", i)
 	}
 
-	// Structurally equal map contexts must produce equal signatures
-	// (encoding/json marshals map keys in sorted order).
-	mapA := base
-	mapA.Context = map[string]any{"a": float64(1), "b": "x"}
-	mapB := base
-	mapB.Context = map[string]any{"b": "x", "a": float64(1)}
-	require.Equal(t, c.calculateSignature(mapA), c.calculateSignature(mapB))
+	// Context compares as raw JSON bytes: identical bytes, equal signatures.
+	rawA := base
+	rawA.Context = json.RawMessage(`{"a":1,"b":"x"}`)
+	rawB := base
+	rawB.Context = json.RawMessage(`{"a":1,"b":"x"}`)
+	require.Equal(t, c.calculateSignature(rawA), c.calculateSignature(rawB))
 
 	// Definition fields MUST change the signature.
 	changed := []WorkflowSchedule{
 		{WorkflowName: "wf2", Schedule: base.Schedule, Context: base.Context},
 		{WorkflowName: base.WorkflowName, WorkflowClassName: "SomeClass", Schedule: base.Schedule, Context: base.Context},
 		{WorkflowName: base.WorkflowName, Schedule: "0 * * * *", Context: base.Context},
-		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: "ctx2"},
+		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: json.RawMessage(`"ctx2"`)},
 		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: base.Context, CronTimezone: "America/Los_Angeles"},
 		{WorkflowName: base.WorkflowName, Schedule: base.Schedule, Context: base.Context, QueueName: "q"},
 	}
@@ -615,7 +617,7 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 	for _, name := range []string{"bad-input", "not-a-func", "too-few"} {
 		s, err := GetSchedule(dbosCtx, name)
 		require.ErrorIs(t, err, ErrScheduleNotFound, "schedule %s should not have been created", name)
-		require.Nil(t, s)
+		require.Zero(t, s)
 	}
 }
 
@@ -636,7 +638,7 @@ func TestScheduleCronValidation(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid cron schedule")
 	got, err := GetSchedule(dbosCtx, "bad-cron-create")
 	require.ErrorIs(t, err, ErrScheduleNotFound, "invalid-cron schedule must not be persisted")
-	require.Nil(t, got)
+	require.Zero(t, got)
 
 	// ApplySchedules rejects invalid cron before writing any row (atomicity).
 	err = ApplySchedules(dbosCtx, []ScheduleSpec{
@@ -648,7 +650,7 @@ func TestScheduleCronValidation(t *testing.T) {
 	for _, name := range []string{"apply-good", "apply-bad"} {
 		s, err := GetSchedule(dbosCtx, name)
 		require.ErrorIs(t, err, ErrScheduleNotFound, "schedule %s should not have been created", name)
-		require.Nil(t, s)
+		require.Zero(t, s)
 	}
 
 	// Invalid timezone also surfaces at validate time.
@@ -772,7 +774,9 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 	captured, ok := scheduledInputCapture.Load(target)
 	require.True(t, ok, "workflow should have captured its input on recovery")
 	got := captured.(ScheduledWorkflowInput)
-	require.Equal(t, ctxValue, got.Context, "Context should round-trip through DB-encoded inputs")
+	decodedCtx, err := DecodeScheduleContext[string](got)
+	require.NoError(t, err)
+	require.Equal(t, ctxValue, decodedCtx, "Context should round-trip through DB-encoded inputs")
 	require.False(t, got.ScheduledTime.IsZero(), "ScheduledTime should be populated from DB-encoded inputs")
 	require.False(t, got.ScheduledTime.Before(start.Add(-time.Second)), "ScheduledTime should be within the backfill window")
 	require.False(t, got.ScheduledTime.After(end.Add(time.Second)), "ScheduledTime should be within the backfill window")
@@ -817,7 +821,9 @@ func TestTriggerSchedule(t *testing.T) {
 	captured, ok := scheduledInputCapture.Load(workflowID)
 	require.True(t, ok, "workflow should have captured its input")
 	got := captured.(ScheduledWorkflowInput)
-	require.Equal(t, ctxValue, got.Context, "Context should match the schedule's configured context")
+	decodedCtx, err := DecodeScheduleContext[string](got)
+	require.NoError(t, err)
+	require.Equal(t, ctxValue, decodedCtx, "Context should match the schedule's configured context")
 	require.False(t, got.ScheduledTime.Before(beforeTrigger.Add(-time.Second)), "ScheduledTime should be at or after the trigger call")
 	require.False(t, got.ScheduledTime.After(afterTrigger.Add(time.Second)), "ScheduledTime should be at or before the trigger call returns")
 
@@ -904,28 +910,34 @@ var scheduledInputCapture sync.Map
 // "version" value in the schedule context.
 var (
 	liveUpdateMu            sync.Mutex
-	liveUpdateVersionCounts = map[float64]int{}
+	liveUpdateVersionCounts = map[int]int{}
 )
 
 func resetLiveUpdateVersionCounts() {
 	liveUpdateMu.Lock()
-	liveUpdateVersionCounts = map[float64]int{}
+	liveUpdateVersionCounts = map[int]int{}
 	liveUpdateMu.Unlock()
 }
 
-func liveUpdateVersionCount(version float64) int {
+func liveUpdateVersionCount(version int) int {
 	liveUpdateMu.Lock()
 	defer liveUpdateMu.Unlock()
 	return liveUpdateVersionCounts[version]
 }
 
+type liveUpdateScheduleContext struct {
+	Version int `json:"version"`
+}
+
 func testLiveUpdateScheduledWorkflow(ctx Context, input ScheduledWorkflowInput) (any, error) {
-	if m, ok := input.Context.(map[string]any); ok {
-		if v, ok := m["version"].(float64); ok {
-			liveUpdateMu.Lock()
-			liveUpdateVersionCounts[v]++
-			liveUpdateMu.Unlock()
-		}
+	cfg, err := DecodeScheduleContext[liveUpdateScheduleContext](input)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Version != 0 {
+		liveUpdateMu.Lock()
+		liveUpdateVersionCounts[cfg.Version]++
+		liveUpdateMu.Unlock()
 	}
 	return "completed", nil
 }
@@ -1201,6 +1213,6 @@ func TestScheduleFiresWithoutLocalRegistration(t *testing.T) {
 
 	sched, err := client.GetSchedule(client, scheduleName)
 	require.NoError(t, err)
-	require.NotNil(t, sched)
+	require.NotZero(t, sched)
 	require.NotNil(t, sched.LastFiredAt, "last_fired_at should be updated after the tick")
 }

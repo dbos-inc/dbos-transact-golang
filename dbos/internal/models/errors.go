@@ -1,30 +1,41 @@
 package models
 
-import "fmt"
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+)
 
-// ErrorCode represents the different types of errors that can occur in DBOS operations.
+// Docs for ErrorCode, Error, and the ErrorCode* constants live on their
+// public aliases in dbos/aliases.go.
+
 type ErrorCode int
 
 const (
-	ErrorCodeConflictingID            ErrorCode = iota + 1 // Workflow ID conflicts or duplicate operations
-	ErrorCodeInitialization                                // DBOS context initialization failures
-	ErrorCodeNonExistentWorkflow                           // Referenced workflow does not exist
-	ErrorCodeConflictingWorkflow                           // Workflow with same ID already exists with different parameters
-	ErrorCodeWorkflowCancelled                             // Workflow was cancelled during execution
-	ErrorCodeUnexpectedStep                                // Step function mismatch during recovery (non-deterministic workflow)
-	ErrorCodeAwaitedWorkflowCancelled                      // A workflow being awaited was cancelled
-	ErrorCodeConflictingRegistration                       // Attempting to register a workflow/queue that already exists
-	ErrorCodeWorkflowUnexpectedType                        // Type mismatch in workflow input/output
-	ErrorCodeWorkflowExecution                             // General workflow execution error
-	ErrorCodeStepExecution                                 // General step execution error
-	ErrorCodeDeadLetterQueue                               // Workflow moved to dead letter queue after max retries
-	ErrorCodeMaxStepRetriesExceeded                        // Step exceeded maximum retry attempts
-	ErrorCodeQueueDeduplicated                             // Workflow was deduplicated in the queue
-	ErrorCodePatchingNotEnabled                            // Patching system is not enabled in the DBOS context configuration
-	ErrorCodeTimeout                                       // Operation timed out (e.g., recv timeout)
-	ErrorCodeNoApplicationVersions                         // No application versions are registered in the system database
-	ErrorCodeQueueNotFound                                 // Referenced queue does not exist
-	ErrorCodeScheduleNotFound                              // Referenced schedule does not exist
+	ErrorCodeConflictingID ErrorCode = iota + 1
+	ErrorCodeInitialization
+	ErrorCodeNonExistentWorkflow
+	ErrorCodeUnexpectedWorkflow
+	ErrorCodeWorkflowCancelled
+	ErrorCodeUnexpectedStep
+	ErrorCodeAwaitedWorkflowCancelled
+	ErrorCodeConflictingRegistration
+	ErrorCodeWorkflowUnexpectedType
+	ErrorCodeWorkflowExecution
+	ErrorCodeStepExecution
+	ErrorCodeDeadLetterQueue
+	ErrorCodeMaxStepRetriesExceeded
+	ErrorCodeQueueDeduplicated
+	ErrorCodePatchingNotEnabled
+	ErrorCodeTimeout
+	ErrorCodeNoApplicationVersions
+	ErrorCodeQueueNotFound
+	ErrorCodeScheduleNotFound
+	ErrorCodeInvalidOption
+
+	// _errorCodeSentinel must remain the last value: it bounds parseErrorCode.
+	_errorCodeSentinel
 )
 
 // String returns the name of the error code, e.g. "NonExistentWorkflow".
@@ -36,8 +47,8 @@ func (c ErrorCode) String() string {
 		return "Initialization"
 	case ErrorCodeNonExistentWorkflow:
 		return "NonExistentWorkflow"
-	case ErrorCodeConflictingWorkflow:
-		return "ConflictingWorkflow"
+	case ErrorCodeUnexpectedWorkflow:
+		return "UnexpectedWorkflow"
 	case ErrorCodeWorkflowCancelled:
 		return "WorkflowCancelled"
 	case ErrorCodeUnexpectedStep:
@@ -68,14 +79,13 @@ func (c ErrorCode) String() string {
 		return "QueueNotFound"
 	case ErrorCodeScheduleNotFound:
 		return "ScheduleNotFound"
+	case ErrorCodeInvalidOption:
+		return "InvalidOption"
 	default:
 		return fmt.Sprintf("ErrorCode(%d)", int(c))
 	}
 }
 
-// Error is the unified error type for all DBOS operations.
-// It provides structured error information with context-specific fields
-// and error codes for programmatic handling.
 type Error struct {
 	Message string    // Human-readable error message
 	Code    ErrorCode // Error type code for programmatic handling
@@ -91,13 +101,90 @@ type Error struct {
 	RecordedName    string // Actually recorded function name (for determinism errors)
 	MaxRetries      int    // Maximum retry limit (for retry-related errors)
 
+	// CauseKind marks well-known stdlib wrapped causes ("canceled", "deadline")
+	// so they survive serialization (wrappedErr is unexported and not encoded).
+	// Set by constructors; not intended for direct use.
+	CauseKind string
+
 	wrappedErr error // Underlying error being wrapped (for error unwrapping)
+}
+
+const (
+	causeKindCanceled = "canceled"
+	causeKindDeadline = "deadline"
+)
+
+// withCause records cause for unwrapping and stamps CauseKind for the closed
+// set of stdlib causes that must survive a DB round trip.
+func (e *Error) withCause(cause error) *Error {
+	e.wrappedErr = cause
+	switch {
+	case cause == nil:
+	case errors.Is(cause, context.Canceled):
+		e.CauseKind = causeKindCanceled
+	case errors.Is(cause, context.DeadlineExceeded):
+		e.CauseKind = causeKindDeadline
+	}
+	return e
+}
+
+// RestoreWrappedCause reconstructs the wrapped stdlib cause from CauseKind after
+// decoding a persisted Error, so errors.Is(err, context.Canceled) and
+// errors.Is(err, context.DeadlineExceeded) keep matching. No-op if a wrapped
+// error is already present.
+func (e *Error) RestoreWrappedCause() {
+	if e.wrappedErr != nil {
+		return
+	}
+	switch e.CauseKind {
+	case causeKindCanceled:
+		e.wrappedErr = context.Canceled
+	case causeKindDeadline:
+		e.wrappedErr = context.DeadlineExceeded
+	}
 }
 
 // Error returns a formatted error message including the error code.
 // This implements the standard Go error interface.
 func (e *Error) Error() string {
 	return fmt.Sprintf("DBOS Error %s: %s", e.Code, e.Message)
+}
+
+// MarshalJSON renders the error in a stable public shape (message + symbolic code)
+// for user-facing JSON such as WorkflowStatus, instead of dumping internal fields.
+func (e *Error) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Message string `json:"message"`
+		Code    string `json:"code"`
+	}{Message: e.Message, Code: e.Code.String()})
+}
+
+// UnmarshalJSON decodes the shape produced by MarshalJSON. Reconstruction is
+// lossy: only Message and Code survive the wire (context fields and wrapped
+// causes do not). A non-string or unrecognized code leaves Code at 0.
+func (e *Error) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Message string `json:"message"`
+		Code    any    `json:"code"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	e.Message = raw.Message
+	if s, ok := raw.Code.(string); ok {
+		e.Code = parseErrorCode(s)
+	}
+	return nil
+}
+
+// parseErrorCode is the inverse of ErrorCode.String; unknown names map to 0.
+func parseErrorCode(s string) ErrorCode {
+	for c := ErrorCodeConflictingID; c < _errorCodeSentinel; c++ {
+		if c.String() == s {
+			return c
+		}
+	}
+	return 0
 }
 
 // Unwrap returns the underlying error, if any.
@@ -116,14 +203,14 @@ func (e *Error) Is(target error) bool {
 	return t.Code != 0 && e.Code == t.Code
 }
 
-func NewConflictingWorkflowError(workflowID, message string) *Error {
-	msg := fmt.Sprintf("Conflicting workflow invocation with the same ID (%s)", workflowID)
+func NewUnexpectedWorkflowError(workflowID, message string) *Error {
+	msg := fmt.Sprintf("Workflow ID %s was previously used by a different workflow. Check that your workflow is deterministic.", workflowID)
 	if message != "" {
-		msg += ": " + message
+		msg += " " + message
 	}
 	return &Error{
 		Message:    msg,
-		Code:       ErrorCodeConflictingWorkflow,
+		Code:       ErrorCodeUnexpectedWorkflow,
 		WorkflowID: workflowID,
 	}
 }
@@ -172,12 +259,11 @@ func NewAwaitedWorkflowCancelledError(workflowID string) *Error {
 // NewWorkflowCancelledError wraps the cancellation cause (e.g. the context error that
 // interrupted a step), so errors.Is still matches context.Canceled / context.DeadlineExceeded.
 func NewWorkflowCancelledError(workflowID string, cause error) *Error {
-	return &Error{
+	return (&Error{
 		Message:    fmt.Sprintf("Workflow %s was cancelled", workflowID),
 		Code:       ErrorCodeWorkflowCancelled,
 		WorkflowID: workflowID,
-		wrappedErr: cause,
-	}
+	}).withCause(cause)
 }
 
 func NewWorkflowConflictIDError(workflowID string) *Error {
@@ -204,22 +290,20 @@ func NewWorkflowUnexpectedInputType(workflowName, expectedType, actualType strin
 }
 
 func NewWorkflowExecutionError(workflowID string, err error) *Error {
-	return &Error{
+	return (&Error{
 		Message:    fmt.Sprintf("Workflow %s execution error: %s", workflowID, err.Error()),
 		Code:       ErrorCodeWorkflowExecution,
 		WorkflowID: workflowID,
-		wrappedErr: err,
-	}
+	}).withCause(err)
 }
 
 func NewStepExecutionError(workflowID, stepName string, err error) *Error {
-	return &Error{
+	return (&Error{
 		Message:    fmt.Sprintf("Step %s in workflow %s execution error: %v", stepName, workflowID, err),
 		Code:       ErrorCodeStepExecution,
 		WorkflowID: workflowID,
 		StepName:   stepName,
-		wrappedErr: err,
-	}
+	}).withCause(err)
 }
 
 func NewDeadLetterQueueError(workflowID string, maxRetries int) *Error {
@@ -232,14 +316,13 @@ func NewDeadLetterQueueError(workflowID string, maxRetries int) *Error {
 }
 
 func NewMaxStepRetriesExceededError(workflowID, stepName string, maxRetries int, err error) *Error {
-	return &Error{
+	return (&Error{
 		Message:    fmt.Sprintf("Step %s has exceeded its maximum of %d retries: %v", stepName, maxRetries, err),
 		Code:       ErrorCodeMaxStepRetriesExceeded,
 		WorkflowID: workflowID,
 		StepName:   stepName,
 		MaxRetries: maxRetries,
-		wrappedErr: err,
-	}
+	}).withCause(err)
 }
 
 func NewQueueDeduplicatedError(workflowID, queueName, deduplicationID string) *Error {
@@ -274,6 +357,14 @@ func NewQueueNotFoundError(queueName string) *Error {
 	}
 }
 
+// NewInvalidOptionError reports invalid or inconsistent options passed to a DBOS API.
+func NewInvalidOptionError(message string) *Error {
+	return &Error{
+		Message: message,
+		Code:    ErrorCodeInvalidOption,
+	}
+}
+
 func NewScheduleNotFoundError(scheduleName string) *Error {
 	return &Error{
 		Message: fmt.Sprintf("schedule %s does not exist", scheduleName),
@@ -295,11 +386,10 @@ func NewTimeoutError(workflowID, stepName, message string, cause error) *Error {
 	if message != "" {
 		msg += ": " + message
 	}
-	return &Error{
+	return (&Error{
 		Message:    msg,
 		Code:       ErrorCodeTimeout,
 		WorkflowID: workflowID,
 		StepName:   stepName,
-		wrappedErr: cause,
-	}
+	}).withCause(cause)
 }

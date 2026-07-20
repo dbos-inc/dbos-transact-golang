@@ -123,7 +123,7 @@ func testAllSerializationPaths[T any](
 					// Custom serializer: output is already decoded to concrete type
 					assert.Equal(t, expectedOutput, lastStep.Output, "Step output should match expected output")
 				} else {
-					// Default JSON: output is a base64-decoded JSON string
+					// Default JSON: output is the raw JSON string (base64-decoded)
 					strValue, ok := lastStep.Output.(string)
 					require.True(t, ok, "Step output should be a string")
 					if strValue == "" {
@@ -167,7 +167,7 @@ func testAllSerializationPaths[T any](
 				assert.Equal(t, input, wf.Input, "Workflow input should match input")
 				assert.Equal(t, expectedOutput, wf.Output, "Workflow output should match expected output")
 			} else {
-				// Default JSON: input/output are base64-decoded JSON strings
+				// Default JSON: input/output are raw JSON strings (base64-decoded)
 				inputStr, ok := wf.Input.(string)
 				require.True(t, ok, "Workflow input should be a string")
 				outputStr, ok := wf.Output.(string)
@@ -1007,7 +1007,7 @@ func TestGobScheduledWorkflowInput(t *testing.T) {
 	ser := NewGobSerializer()
 	in := ScheduledWorkflowInput{
 		ScheduledTime: time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC),
-		Context:       "schedule-context",
+		Context:       json.RawMessage(`"schedule-context"`),
 	}
 	encoded, err := ser.Encode(in)
 	require.NoError(t, err)
@@ -1727,19 +1727,15 @@ func TestPortableInterop(t *testing.T) {
 		assert.Equal(t, PortableSerializerName, wf.Serialization)
 
 		require.NotNil(t, wf.Input)
-		inputStr, ok := wf.Input.(string)
-		require.True(t, ok, "expected string for portable input, got %T", wf.Input)
-		assert.True(t, json.Valid([]byte(inputStr)), "input should be valid JSON")
-		var envelope PortableWorkflowArgs
-		require.NoError(t, json.Unmarshal([]byte(inputStr), &envelope))
-		assert.Len(t, envelope.PositionalArgs, 1)
+		inputMap, ok := wf.Input.(map[string]any)
+		require.True(t, ok, "expected decoded map for portable input, got %T", wf.Input)
+		posArgs, ok := inputMap["positionalArgs"].([]any)
+		require.True(t, ok, "positionalArgs should decode as a JSON array, got %T", inputMap["positionalArgs"])
+		assert.Len(t, posArgs, 1)
 
 		require.NotNil(t, wf.Output)
-		outputStr, ok := wf.Output.(string)
-		require.True(t, ok, "expected string for portable output, got %T", wf.Output)
-		assert.True(t, json.Valid([]byte(outputStr)), "output should be valid JSON")
-		var outputMap map[string]any
-		require.NoError(t, json.Unmarshal([]byte(outputStr), &outputMap))
+		outputMap, ok := wf.Output.(map[string]any)
+		require.True(t, ok, "expected decoded map for portable output, got %T", wf.Output)
 		assert.Contains(t, outputMap, "input")
 		assert.Contains(t, outputMap, "stepOutput")
 		assert.Contains(t, outputMap, "recvOutput")
@@ -1771,7 +1767,7 @@ func TestPortableInterop(t *testing.T) {
 			PositionalArgs: []any{expectedArgs, "extra-positional", 99},
 			NamedArgs:      map[string]any{"lang": "python", "debug": true},
 		}
-		handle, err := Enqueue[PortableWorkflowArgs, InteropResult](client, "portable-interop-queue", "interop_workflow", portableArgs)
+		handle, err := Enqueue[InteropResult, PortableWorkflowArgs](client, "portable-interop-queue", "interop_workflow", portableArgs)
 		require.NoError(t, err)
 		require.NotEmpty(t, handle.GetWorkflowID())
 
@@ -2474,9 +2470,9 @@ func TestPortableWorkflowError(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, steps, 1)
 		assert.Nil(t, steps[0].Error) // step succeeded; error is on the workflow, not the step
-		// Portable step output is returned as raw JSON string (not base64-decoded).
+		// Portable step output decodes into its JSON value.
 		require.NotNil(t, steps[0].Output)
-		assert.Equal(t, `"list-test"`, steps[0].Output)
+		assert.Equal(t, "list-test", steps[0].Output)
 	})
 }
 
@@ -2611,8 +2607,8 @@ func TestGoToGoErrorTypePreservation(t *testing.T) {
 // TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors verifies that a single
 // workflow's or step's undecodable input/output does not fail the entire
 // ListWorkflows / GetWorkflowSteps call. Other items in the batch must still be
-// returned and correctly decoded; the corrupted item's field is replaced with a
-// string describing the decode error instead of aborting the whole request.
+// returned and correctly decoded; the corrupted item's field carries the raw
+// stored payload (with a logged warning) instead of aborting the whole request.
 func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
@@ -2690,11 +2686,11 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 		// Good entries decode to their raw JSON representation.
 		assert.Equal(t, fmt.Sprintf("%q", goodID1), byID[goodID1].Output)
 		assert.Equal(t, fmt.Sprintf("%q", goodID2), byID[goodID2].Output)
-		// The corrupted entry's output is replaced with a string describing the
-		// decode error instead of failing the whole call.
+		// The corrupted entry surfaces the raw stored payload instead of
+		// failing the whole call.
 		corruptOutput, ok := byID[corruptID].Output.(string)
 		require.True(t, ok, "corrupted output should be a string")
-		assert.Contains(t, corruptOutput, "failed to decode workflow output")
+		assert.Equal(t, garbage, corruptOutput)
 	})
 
 	t.Run("ListWorkflowsInputDecodeErrorIsolated", func(t *testing.T) {
@@ -2722,7 +2718,7 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 		assert.Equal(t, fmt.Sprintf("%q", goodID), byID[goodID].Input)
 		corruptInput, ok := byID[corruptID].Input.(string)
 		require.True(t, ok, "corrupted input should be a string")
-		assert.Contains(t, corruptInput, "failed to decode workflow input")
+		assert.Equal(t, garbage, corruptInput)
 	})
 
 	t.Run("GetWorkflowStepsOutputDecodeErrorIsolated", func(t *testing.T) {
@@ -2741,7 +2737,7 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 		assert.Equal(t, `"payload-step-0"`, steps[0].Output)
 		corruptStepOutputVal, ok := steps[1].Output.(string)
 		require.True(t, ok, "corrupted step output should be a string")
-		assert.Contains(t, corruptStepOutputVal, "failed to decode step output")
+		assert.Equal(t, garbage, corruptStepOutputVal)
 		assert.Equal(t, `"payload-step-2"`, steps[2].Output)
 	})
 }
@@ -2883,4 +2879,64 @@ func TestExportImportPreservesSerialization(t *testing.T) {
 	forkResult, err := forkHandle.GetResult()
 	require.NoError(t, err, "replay of reimported checkpoints must decode with their recorded serializer")
 	assert.Equal(t, input, forkResult)
+}
+
+// listingSpySerializer records whether its Decode was consulted.
+type listingSpySerializer struct{ decodeCalls int }
+
+func (s *listingSpySerializer) Name() string { return "listing-spy" }
+func (s *listingSpySerializer) Encode(data any) (*string, error) {
+	str := fmt.Sprintf("%v", data)
+	return &str, nil
+}
+func (s *listingSpySerializer) Decode(data *string) (any, error) {
+	s.decodeCalls++
+	return "spy:" + *data, nil
+}
+
+// TestListingDecodeUsesStoredSerialization verifies the listing decode path picks
+// the decoder from each row's persisted serialization format, not from the currently
+// configured serializer: a DBOS_JSON row must never be routed through a custom serializer.
+func TestListingDecodeUsesStoredSerialization(t *testing.T) {
+	spy := &listingSpySerializer{}
+	c := &dbosContext{
+		logger:     slog.Default(),
+		serializer: spy,
+	}
+
+	defaultJSON := `{"count":3,"name":"pre-serializer-era"}`
+	b64 := base64.StdEncoding.EncodeToString([]byte(defaultJSON))
+	spyPayload := "spy-payload"
+	portableJSON := `{"positionalArgs":["x"]}`
+
+	workflows := []WorkflowStatus{
+		{ID: "wf-json", Serialization: "DBOS_JSON", Input: &b64, Output: &b64},
+		{ID: "wf-empty", Serialization: "", Input: &b64, Output: &b64},
+		{ID: "wf-custom", Serialization: "listing-spy", Input: &spyPayload, Output: &spyPayload},
+		{ID: "wf-portable", Serialization: PortableSerializerName, Input: &portableJSON, Output: &portableJSON},
+		{ID: "wf-unknown", Serialization: "DBOS_GOB", Input: &b64, Output: &b64},
+	}
+
+	require.NoError(t, c.decodeWorkflowsInputOutput(workflows, true, true))
+
+	// DBOS_JSON and legacy empty-format rows: raw JSON text, spy not consulted.
+	assert.Equal(t, defaultJSON, workflows[0].Input)
+	assert.Equal(t, defaultJSON, workflows[0].Output)
+	assert.Equal(t, defaultJSON, workflows[1].Input)
+	assert.Equal(t, defaultJSON, workflows[1].Output)
+
+	// Row whose stored format matches the custom serializer: decoded by it.
+	assert.Equal(t, "spy:"+spyPayload, workflows[2].Input)
+	assert.Equal(t, "spy:"+spyPayload, workflows[2].Output)
+
+	// Portable rows: decoded JSON value.
+	decodedPortable := map[string]any{"positionalArgs": []any{"x"}}
+	assert.Equal(t, decodedPortable, workflows[3].Input)
+	assert.Equal(t, decodedPortable, workflows[3].Output)
+
+	// Unknown format: raw stored string kept as-is, spy not consulted.
+	assert.Equal(t, b64, workflows[4].Input)
+	assert.Equal(t, b64, workflows[4].Output)
+
+	assert.Equal(t, 2, spy.decodeCalls, "custom serializer must only decode rows tagged with its format")
 }

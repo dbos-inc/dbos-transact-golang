@@ -1,5 +1,5 @@
 all: false
-dir: './mocks'
+dir: './internal/mocks'
 filename: '{{.InterfaceName}}_mock.go'
 force-file-write: true
 formatter: goimports

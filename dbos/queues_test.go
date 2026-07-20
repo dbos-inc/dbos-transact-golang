@@ -24,33 +24,33 @@ import (
 
 // registerWFQ / retrieveWFQ / listWFQ are test helpers that call the public
 // queue API (which returns the Queue interface) and unwrap the concrete
-// *WorkflowQueue, so existing tests can keep reading struct fields directly.
-func registerWFQ(ctx Context, name string, options ...QueueOption) (*WorkflowQueue, error) {
+// *workflowQueue, so existing tests can keep reading struct fields directly.
+func registerWFQ(ctx Context, name string, options ...QueueOption) (*workflowQueue, error) {
 	q, err := RegisterQueue(ctx, name, options...)
 	if err != nil {
 		return nil, err
 	}
-	return q.(*WorkflowQueue), nil
+	return q.(*workflowQueue), nil
 }
 
 func intPtr(i int) *int { return &i }
 
-func retrieveWFQ(ctx Context, name string) (*WorkflowQueue, error) {
+func retrieveWFQ(ctx Context, name string) (*workflowQueue, error) {
 	q, err := RetrieveQueue(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	return q.(*WorkflowQueue), nil
+	return q.(*workflowQueue), nil
 }
 
-func listWFQ(ctx Context) ([]WorkflowQueue, error) {
+func listWFQ(ctx Context) ([]workflowQueue, error) {
 	qs, err := ListQueues(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]WorkflowQueue, len(qs))
+	out := make([]workflowQueue, len(qs))
 	for i, q := range qs {
-		out[i] = *q.(*WorkflowQueue)
+		out[i] = *q.(*workflowQueue)
 	}
 	return out, nil
 }
@@ -76,11 +76,11 @@ func TestWorkflowQueues(t *testing.T) {
 	// handles up front so the workflow closures registered before launch can
 	// reference their names; they are assigned before any closure runs.
 	var (
-		queue           *WorkflowQueue
-		dlqEnqueueQueue *WorkflowQueue
-		conflictQueue1  *WorkflowQueue
-		conflictQueue2  *WorkflowQueue
-		dedupQueue      *WorkflowQueue
+		queue           *workflowQueue
+		dlqEnqueueQueue *workflowQueue
+		conflictQueue1  *workflowQueue
+		conflictQueue2  *workflowQueue
+		dedupQueue      *workflowQueue
 	)
 
 	dlqStartEvent := NewEvent()
@@ -466,7 +466,7 @@ func TestWorkflowQueues(t *testing.T) {
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after successive enqueues test")
 	})
 
-	t.Run("ConflictingWorkflowOnDifferentQueues", func(t *testing.T) {
+	t.Run("UnexpectedWorkflowOnDifferentQueues", func(t *testing.T) {
 		workflowID := "conflicting-workflow-id"
 
 		// Enqueue the same workflow ID on the first queue
@@ -479,12 +479,12 @@ func TestWorkflowQueues(t *testing.T) {
 		assert.Equal(t, "test-input-1", result, "expected 'test-input-1'")
 
 		// Now try to enqueue the same workflow ID on a different queue
-		// This should trigger a ErrorCodeConflictingWorkflow
+		// This should trigger a ErrorCodeUnexpectedWorkflow
 		_, err = RunWorkflow(dbosCtx, queueWorkflow, "test-input-2", WithQueue(conflictQueue2), WithWorkflowID(workflowID))
-		require.Error(t, err, "expected ErrorCodeConflictingWorkflow when enqueueing same workflow ID on different queue, but got none")
+		require.Error(t, err, "expected ErrorCodeUnexpectedWorkflow when enqueueing same workflow ID on different queue, but got none")
 
 		// Check that it's the correct error type
-		require.True(t, errors.Is(err, &Error{Code: ErrorCodeConflictingWorkflow}), "expected error to be ErrorCodeConflictingWorkflow, got %T", err)
+		require.True(t, errors.Is(err, ErrUnexpectedWorkflow), "expected error to be ErrorCodeUnexpectedWorkflow, got %T", err)
 
 		// Check that the error message contains queue information
 		expectedMsgPart := "Workflow already exists in a different queue"
@@ -757,7 +757,7 @@ func TestWorkflowQueues(t *testing.T) {
 func TestQueueRecovery(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	var recoveryQueue *WorkflowQueue // database-backed; registered after Launch
+	var recoveryQueue *workflowQueue // database-backed; registered after Launch
 	var recoveryStepCounter int64
 
 	recoveryStepWorkflowFunc := func(ctx Context, i int) (int, error) {
@@ -891,7 +891,7 @@ func TestQueueRecovery(t *testing.T) {
 func TestGlobalConcurrency(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	var globalConcurrencyQueue *WorkflowQueue // database-backed; registered after Launch
+	var globalConcurrencyQueue *workflowQueue // database-backed; registered after Launch
 	workflowEvent1 := NewEvent()
 	workflowEvent2 := NewEvent()
 	workflowDoneEvent := NewEvent()
@@ -986,7 +986,7 @@ func TestVersionlessDequeueRequiresLatestVersion(t *testing.T) {
 	require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), "versionless-newer", time.Now().Add(time.Hour).UnixMilli()))
 
 	// Enqueue a version-less workflow: an empty application version is persisted as NULL.
-	versionlessHandle, err := Enqueue[string, string](client, queue.Name, "VersionlessWorkflow", "versionless",
+	versionlessHandle, err := Enqueue[string](client, queue.Name, "VersionlessWorkflow", "versionless",
 		WithEnqueueApplicationVersion(""))
 	require.NoError(t, err)
 
@@ -1030,7 +1030,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	assert.Equal(t, "worker1", dbosCtx1.GetExecutorID(), "expected first executor ID to be 'worker1'")
 	assert.Equal(t, "worker2", dbosCtx2.GetExecutorID(), "expected second executor ID to be 'worker2'")
 
-	var workerConcurrencyQueue *WorkflowQueue // database-backed; registered after Launch
+	var workerConcurrencyQueue *workflowQueue // database-backed; registered after Launch
 	startEvents := []*Event{
 		NewEvent(),
 		NewEvent(),
@@ -1233,7 +1233,7 @@ func TestQueueRateLimiter(t *testing.T) {
 func TestQueueTimeouts(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	var timeoutQueue *WorkflowQueue // database-backed; registered after Launch
+	var timeoutQueue *workflowQueue // database-backed; registered after Launch
 
 	queuedWaitForCancelWorkflow := func(ctx Context, _ string) (string, error) {
 		// This workflow will wait indefinitely until it is cancelled
@@ -1286,7 +1286,7 @@ func TestQueueTimeouts(t *testing.T) {
 	RegisterWorkflow(dbosCtx, detachedWorkflow)
 	RegisterWorkflow(dbosCtx, enqueuedWorkflowEnqueuesADetachedWorkflow)
 
-	var timeoutOnDequeueQueue *WorkflowQueue // database-backed; registered after Launch
+	var timeoutOnDequeueQueue *workflowQueue // database-backed; registered after Launch
 	blockingEvent := NewEvent()
 	blockingWorkflow := func(ctx Context, _ string) (string, error) {
 		blockingEvent.Wait()
@@ -1471,7 +1471,7 @@ func TestPriorityQueue(t *testing.T) {
 
 	// Priority-enabled queue with max concurrency of 1, plus a child queue.
 	// Database-backed; registered after Launch.
-	var priorityQueue, childQueue *WorkflowQueue
+	var priorityQueue, childQueue *workflowQueue
 
 	workflowEvent := NewEvent()
 	var wfPriorityList []int
@@ -1694,14 +1694,9 @@ func TestPartitionedQueues(t *testing.T) {
 		var dbosErr *Error
 		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *Error, got %T", err)
 
-		// Verify the error is wrapped by models.NewWorkflowExecutionError with ErrorCodeWorkflowExecution code
-		assert.True(t, errors.Is(err, &Error{Code: ErrorCodeWorkflowExecution}), "expected error to be ErrorCodeWorkflowExecution")
-
-		// Verify the unwrapped error contains the validation message
-		unwrappedErr := errors.Unwrap(dbosErr)
-		require.NotNil(t, unwrappedErr, "expected error to have an unwrapped error")
-		expectedMsgPart := "partition key provided but queue name is missing"
-		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
+		// Verify the error carries the InvalidOption code
+		assert.True(t, errors.Is(err, ErrInvalidOption), "expected error to be ErrorCodeInvalidOption")
+		assert.Contains(t, dbosErr.Message, "partition key provided but queue name is missing")
 	})
 
 	t.Run("PartitionKeyWithDeduplicationID", func(t *testing.T) {
@@ -1729,14 +1724,9 @@ func TestPartitionedQueues(t *testing.T) {
 		var dbosErr *Error
 		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *Error, got %T", err)
 
-		// Verify the error is wrapped by models.NewWorkflowExecutionError with ErrorCodeWorkflowExecution code
-		assert.True(t, errors.Is(err, &Error{Code: ErrorCodeWorkflowExecution}), "expected error to be ErrorCodeWorkflowExecution")
-
-		// Verify the unwrapped error contains the validation message
-		unwrappedErr := errors.Unwrap(dbosErr)
-		require.NotNil(t, unwrappedErr, "expected error to have an unwrapped error")
-		expectedMsgPart := "partition key and deduplication ID cannot be used together"
-		assert.Contains(t, unwrappedErr.Error(), expectedMsgPart, "expected unwrapped error message to contain expected part")
+		// Verify the error carries the InvalidOption code
+		assert.True(t, errors.Is(err, ErrInvalidOption), "expected error to be ErrorCodeInvalidOption")
+		assert.Contains(t, dbosErr.Message, "partition key and deduplication ID cannot be used together")
 	})
 
 	t.Run("Dequeue", func(t *testing.T) {
@@ -1884,7 +1874,7 @@ func TestQueuePollingIntervals(t *testing.T) {
 		require.Equal(t, 250*time.Millisecond, qi.GetPollingInterval())
 
 		// Setters only apply to database-backed queues.
-		notDBBacked := &WorkflowQueue{Name: "not-db-backed"}
+		notDBBacked := &workflowQueue{Name: "not-db-backed"}
 		require.Error(t, notDBBacked.SetPollingInterval(ctx, time.Second))
 	})
 }
@@ -1899,9 +1889,9 @@ func TestListenQueues(t *testing.T) {
 		}
 		RegisterWorkflow(dbosCtx, testWorkflow)
 
-		// Call ListenQueues twice, each time with a list of one queue (so we want to listen to only 2 out of 3 queues)
-		ListenQueues(dbosCtx, "listen-test-queue-1")
-		ListenQueues(dbosCtx, "listen-test-queue-2")
+		// Listen to only 2 out of 3 queues. Each ListenQueues call replaces the
+		// whole set, so both names must be passed in one call.
+		ListenQueues(dbosCtx, "listen-test-queue-1", "listen-test-queue-2")
 
 		// Launch DBOS
 		err := Launch(dbosCtx)
@@ -2143,12 +2133,81 @@ func TestListenQueues(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, WorkflowStatusEnqueued, st.Status)
 
-		// Add the database-backed queue to the listen set after launch; the supervisor
-		// picks it up on its next reconcile tick and the workflow completes.
+		// Replace the listen set after launch; the supervisor picks it up on its
+		// next reconcile tick and the workflow completes.
 		ListenQueues(dbosCtx, "dynamic-db-queue")
 		r, err := h.GetResult()
 		require.NoError(t, err)
 		require.Equal(t, "c", r)
+	})
+
+	t.Run("EachCallReplacesTheListenSet", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		qr := dbosCtx.(*dbosContext).queueRunner
+
+		snapshot := func() map[string]bool {
+			qr.listenMu.Lock()
+			defer qr.listenMu.Unlock()
+			out := make(map[string]bool, len(qr.listenedQueues))
+			for k, v := range qr.listenedQueues {
+				out[k] = v
+			}
+			return out
+		}
+
+		ListenQueues(dbosCtx, "a", "b")
+		require.Equal(t, map[string]bool{"a": true, "b": true}, snapshot())
+		require.Equal(t, []string{"a", "b"}, ListenedQueues(dbosCtx))
+
+		// A second call replaces the whole set: "a" and "b" are unlistened.
+		ListenQueues(dbosCtx, "c")
+		require.Equal(t, map[string]bool{"c": true}, snapshot())
+
+		// Incremental add: read the current set, append, listen again.
+		ListenQueues(dbosCtx, append(ListenedQueues(dbosCtx), "d")...)
+		require.Equal(t, map[string]bool{"c": true, "d": true}, snapshot())
+
+		// Zero names clears the filter (back to listening to every queue).
+		ListenQueues(dbosCtx)
+		require.Empty(t, snapshot())
+		require.Empty(t, ListenedQueues(dbosCtx))
+	})
+
+	t.Run("ReplaceListenSetUnlistensQueue", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		RegisterWorkflow(dbosCtx, queueWorkflow)
+
+		ListenQueues(dbosCtx, "replace-queue-a")
+		require.NoError(t, Launch(dbosCtx))
+
+		queueA, err := registerWFQ(dbosCtx, "replace-queue-a", WithQueueBasePollingInterval(50*time.Millisecond))
+		require.NoError(t, err)
+		queueB, err := registerWFQ(dbosCtx, "replace-queue-b", WithQueueBasePollingInterval(50*time.Millisecond))
+		require.NoError(t, err)
+
+		// A is listened: its workflow completes.
+		hA, err := RunWorkflow(dbosCtx, queueWorkflow, "a1", WithQueue(queueA))
+		require.NoError(t, err)
+		rA, err := hA.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "a1", rA)
+
+		// Replace the set with B only: A is unlistened, B starts dispatching.
+		ListenQueues(dbosCtx, "replace-queue-b")
+
+		hB, err := RunWorkflow(dbosCtx, queueWorkflow, "b1", WithQueue(queueB))
+		require.NoError(t, err)
+		rB, err := hB.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "b1", rB)
+
+		// A no longer dispatches: its workflow stays ENQUEUED.
+		hA2, err := RunWorkflow(dbosCtx, queueWorkflow, "a2", WithQueue(queueA))
+		require.NoError(t, err)
+		time.Sleep(3 * time.Second)
+		stA2, err := hA2.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, WorkflowStatusEnqueued, stA2.Status)
 	})
 }
 

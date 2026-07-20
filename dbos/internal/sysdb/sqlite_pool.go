@@ -3,6 +3,7 @@ package sysdb
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -122,7 +123,7 @@ func OpenSQLitePool(ctx context.Context, databaseURL string) (*sql.DB, error) {
 // owns its lifecycle and PRAGMA configuration); otherwise the function opens
 // a fresh pool from databaseURL and applies default PRAGMAs.
 // Either way it runs SQLite migrations and returns a sysDB.
-func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Time, any) (*string, string, error),
+func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Time, json.RawMessage) (*string, string, error),
 
 	ctx context.Context,
 	databaseURL, databaseSchema string,

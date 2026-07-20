@@ -570,6 +570,33 @@ func TestConcurrentLaunchOnlyStartsOnce(t *testing.T) {
 	Shutdown(ctx, 5*time.Second)
 }
 
+func TestRunWorkflowBeforeLaunchFails(t *testing.T) {
+	ctx, err := NewContext(context.Background(), Config{
+		AppName:     "test-run-before-launch",
+		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+	})
+	require.NoError(t, err)
+	defer Shutdown(ctx, 5*time.Second)
+
+	wf := func(ctx Context, in string) (string, error) { return in, nil }
+	RegisterWorkflow(ctx, wf)
+
+	_, err = RunWorkflow(ctx, wf, "hello")
+	require.Error(t, err)
+	dbosErr := &Error{}
+	require.ErrorAs(t, err, &dbosErr)
+	assert.Equal(t, ErrorCodeInitialization, dbosErr.Code)
+	assert.Contains(t, err.Error(), "DBOS must be launched before running workflows")
+
+	require.NoError(t, Launch(ctx))
+
+	handle, err := RunWorkflow(ctx, wf, "hello")
+	require.NoError(t, err)
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "hello", result)
+}
+
 func TestConcurrentShutdownDoesNotWaitTwice(t *testing.T) {
 	ctx, err := NewContext(context.Background(), Config{
 		AppName:     "test-concurrent-shutdown",
@@ -1203,6 +1230,69 @@ func TestCustomPool(t *testing.T) {
 		systemDB.Shutdown(ctx, shutdownTimeout)
 		assert.False(t, systemDB.(*sysdb.SysDB).Launched())
 	})
+}
+
+// TestSystemDBShutdownReportsPending verifies SysDB.Shutdown returns the
+// sub-components that failed to stop within the timeout.
+func TestSystemDBShutdownReportsPending(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	dbPath := filepath.Join(t.TempDir(), "dbos.db")
+	customDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer customDB.Close()
+
+	systemDB, err := sysdb.NewSystemDatabase(ctx, sysdb.NewSystemDatabaseInput{
+		DatabaseSchema: "dbos",
+		CustomSqliteDB: customDB,
+		Logger:         logger,
+	})
+	require.NoError(t, err)
+	systemDB.Launch(ctx)
+
+	// ctx is deliberately not cancelled, so the notification loop cannot exit
+	pending := systemDB.Shutdown(ctx, 100*time.Millisecond)
+	require.Contains(t, pending, "notification listener")
+	require.True(t, systemDB.(*sysdb.SysDB).Launched(), "a timed-out shutdown must leave the listener tracked so later calls re-check it")
+
+	cancel()
+	require.Eventually(t, func() bool {
+		return len(systemDB.Shutdown(ctx, 100*time.Millisecond)) == 0
+	}, 5*time.Second, 100*time.Millisecond, "notification loop should exit after cancel")
+	require.False(t, systemDB.(*sysdb.SysDB).Launched())
+}
+
+// TestClientShutdownReportsSystemDBTimeout verifies Client.Shutdown returns an
+// error when the system database fails to shut down within the timeout.
+func TestClientShutdownReportsSystemDBTimeout(t *testing.T) {
+	skipIfSqlite(t, "holds a pgx pool connection to block pool close")
+	ctx := context.Background()
+
+	poolConfig, err := pgxpool.ParseConfig(getDatabaseURL())
+	require.NoError(t, err)
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	require.NoError(t, err)
+
+	client, err := NewClient(ctx, ClientConfig{
+		SystemDBPool:   pool,
+		DatabaseSchema: "dbos_test_shutdown_client",
+	})
+	require.NoError(t, err)
+
+	// A held connection blocks pool.Close() past the timeout
+	conn, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+
+	err = client.Shutdown(500 * time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "system database connection pool")
+
+	conn.Release()
+	require.Eventually(t, func() bool {
+		return pool.Stat().TotalConns() == 0
+	}, 5*time.Second, 100*time.Millisecond, "pool should close after connection release")
 }
 
 // -----------------------------------------------------------------------------
