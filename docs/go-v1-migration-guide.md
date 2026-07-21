@@ -275,7 +275,16 @@ Slice-taking filters became variadic — call sites passing a literal slice need
 - `ClearRegistries` removed from the public API (was testing-only).
 - New package-level accessors: `dbos.GetApplicationVersion(ctx)`, `dbos.GetExecutorID(ctx)`, `dbos.GetApplicationID(ctx)`.
 - `Config.DatabaseURL` accepts Postgres/CockroachDB URLs or key=value DSNs, and sqlite URLs (`sqlite:/path/to.db`, `sqlite:relative.db`, `sqlite::memory:`).
+- **SQLite now requires a driver import.** The SQLite driver moved out of the core package into `dbos/sqlite`, registered database/sql-style. Apps using a sqlite URL or `Config.SQLiteSystemDB` must add `import _ "github.com/dbos-inc/dbos-transact-golang/dbos/sqlite"` (one blank import, anywhere in the binary); without it, startup fails with an error naming this import. Postgres-only apps need no change and no longer compile or link `modernc.org/sqlite`.
 - **No system-database schema changes.** v1 makes no changes to the system schema relative to the last v0.x release: nothing migrates at `Launch()`, existing workflows (including long-DELAYED ones), queues, and schedule rows carry over as-is, and v0.x and v1 executors can share a system database during a rolling upgrade.
+
+### Custom serializers must handle non-user values
+
+Every checkpoint written to the system database is encoded with the configured custom serializer — including engine-internal step outputs: the `int64` deadline recorded by `DBOS.sleep` (written by `Sleep` and, new in v1, by `Recv`/`GetEvent` timeouts), `DBOS.writeStream`'s empty-string step output, and the `ScheduledWorkflowInput` struct for DB-backed schedule firings. This keeps every row in one format when inspecting the database from another program.
+
+A `Serializer[any]` must therefore be total: it must encode and decode arbitrary Go values, and decoding must preserve concrete types (decoded step results are type-asserted, so an `int64` must round-trip as `int64`, not `float64`). Strictly-typed serializers need a mapping for bare Go scalars — see `golang/protobuf-serializer` in dbos-demo-apps, which packs `proto.Message` values into `anypb.Any` directly and wraps scalars in the protobuf well-known wrapper types (`wrapperspb.Int64Value`, `StringValue`, …), unwrapping them back to native scalars on decode. This keeps every stored row decodable by standard proto tooling in any language.
+
+One deliberate exception: `Recv` and `GetEvent` checkpoint the *sender's* encoded payload verbatim under the sender's recorded format — the receiver's serializer is never asked to re-encode a message or event it didn't produce.
 
 ## 8. Mocks / tests
 

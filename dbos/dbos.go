@@ -43,9 +43,11 @@ type Config struct {
 	// key=value DSNs (e.g. postgres://user:pass@host:5432/dbname; CockroachDB uses the
 	// same form) and sqlite URLs (sqlite:/path/to.db, sqlite:relative.db, or
 	// sqlite::memory:). Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
+	// SQLite URLs additionally require importing the driver package:
+	// import _ "github.com/dbos-inc/dbos-transact-golang/dbos/sqlite"
 	DatabaseURL               string
 	SystemDBPool              *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
-	SQLiteSystemDB            *sql.DB         // SQLiteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
+	SQLiteSystemDB            *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/sqlite.
 	DatabaseSchema            string          // Database schema name (defaults to "dbos")
 	Logger                    *slog.Logger    // Custom logger instance (defaults to a new slog logger)
 	AdminServer               bool            // Enable Transact admin HTTP server (disabled by default)
@@ -674,9 +676,11 @@ type ClientConfig struct {
 	// DatabaseURL is the system-database connection string: a Postgres URL or key=value
 	// DSN, or a sqlite URL (sqlite:/path/to.db, sqlite:relative.db, or sqlite::memory:).
 	// Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
+	// SQLite URLs additionally require importing the driver package:
+	// import _ "github.com/dbos-inc/dbos-transact-golang/dbos/sqlite"
 	DatabaseURL            string
 	SystemDBPool           *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
-	SQLiteSystemDB         *sql.DB         // SQLiteSystemDB is a custom sqlite handle (e.g. from modernc.org/sqlite). Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool.
+	SQLiteSystemDB         *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/sqlite.
 	DatabaseSchema         string          // Database schema name (defaults to "dbos")
 	Logger                 *slog.Logger    // Optional custom logger
 	Serializer             Serializer[any] // Optional custom serializer (defaults to JSON)
