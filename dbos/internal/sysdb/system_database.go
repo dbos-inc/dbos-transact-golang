@@ -1119,6 +1119,12 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		scheduleName = &input.Status.ScheduleName
 	}
 
+	var debounceDeadlineEpochMs *int64
+	if !input.Status.DebounceDeadline.IsZero() {
+		millis := input.Status.DebounceDeadline.UnixMilli()
+		debounceDeadlineEpochMs = &millis
+	}
+
 	query := s.RenderSQL(`INSERT INTO %sworkflow_status (
         workflow_uuid,
         status,
@@ -1146,17 +1152,19 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
         serialization,
         delay_until_epoch_ms,
         attributes,
-        schedule_name
-    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+        schedule_name,
+        debounce_deadline_epoch_ms,
+        is_debounced
+    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
 			recovery_attempts = CASE
-                WHEN EXCLUDED.status NOT IN ($28, $29) THEN workflow_status.recovery_attempts + $30
+                WHEN EXCLUDED.status NOT IN ($30, $31) THEN workflow_status.recovery_attempts + $32
                 ELSE workflow_status.recovery_attempts
             END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status IN ($28, $29) THEN workflow_status.executor_id
+                WHEN EXCLUDED.status IN ($30, $31) THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
         RETURNING recovery_attempts, status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema))
@@ -1205,6 +1213,8 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		delayUntilEpochMs,
 		attributesJSON,
 		scheduleName,
+		debounceDeadlineEpochMs,
+		input.Status.IsDebounced,
 		models.WorkflowStatusEnqueued,
 		models.WorkflowStatusDelayed,
 		recoveryIncrement,
@@ -1306,6 +1316,7 @@ type ListWorkflowsDBInput struct {
 	HasParent          *bool
 	Attributes         map[string]any
 	ScheduleName       []string
+	IsDebounced        *bool
 	Limit              *int
 	Offset             *int
 	SortDesc           bool
@@ -1325,7 +1336,7 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 		"recovery_attempts", "queue_name", "workflow_timeout_ms", "workflow_deadline_epoch_ms", "started_at_epoch_ms",
 		"deduplication_id", "priority", "queue_partition_key", "forked_from", "parent_workflow_id",
 		"serialization", "delay_until_epoch_ms", "was_forked_from", "completed_at", "class_name", "config_name",
-		"attributes", "schedule_name",
+		"attributes", "schedule_name", "debounce_deadline_epoch_ms", "is_debounced",
 	}
 
 	if input.LoadOutput {
@@ -1399,6 +1410,9 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 	}
 	if input.WasForkedFrom != nil {
 		qb.addWhere("was_forked_from", *input.WasForkedFrom)
+	}
+	if input.IsDebounced != nil {
+		qb.addWhere("is_debounced", *input.IsDebounced)
 	}
 	if input.HasParent != nil {
 		if *input.HasParent {
@@ -1491,6 +1505,7 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 		var className *string
 		var attributesJSON *string
 		var scheduleName *string
+		var debounceDeadlineEpochMs *int64
 
 		// Build scan arguments dynamically based on loaded columns.
 		scanArgs := []any{
@@ -1500,7 +1515,7 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 			&wf.Attempts, &queueName, &timeoutMs,
 			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey, &forkedFrom, &parentWorkflowID,
 			&serialization, &delayUntilEpochMs, &wf.WasForkedFrom, &completedAtMs, &className, &wf.ConfigName,
-			&attributesJSON, &scheduleName,
+			&attributesJSON, &scheduleName, &debounceDeadlineEpochMs, &wf.IsDebounced,
 		}
 
 		if input.LoadOutput {
@@ -1598,6 +1613,11 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 		// Convert delay_until_epoch_ms to time.Time
 		if delayUntilEpochMs != nil {
 			wf.DelayUntil = time.Unix(0, *delayUntilEpochMs*int64(time.Millisecond))
+		}
+
+		// Convert debounce_deadline_epoch_ms to time.Time
+		if debounceDeadlineEpochMs != nil {
+			wf.DebounceDeadline = time.Unix(0, *debounceDeadlineEpochMs*int64(time.Millisecond))
 		}
 
 		// Convert completed_at milliseconds to time.Time
@@ -4336,18 +4356,130 @@ func (s *SysDB) SetWorkflowDelay(ctx context.Context, input SetWorkflowDelayDBIn
 }
 
 // TransitionDelayedWorkflows transitions DELAYED workflows whose delay has expired to ENQUEUED.
+// For debounced workflows, the deduplication ID is cleared in the same atomic update: it is a
+// debounce key held only while DELAYED, so a later same-key debounce starts a fresh workflow.
 func (s *SysDB) TransitionDelayedWorkflows(ctx context.Context) error {
 	nowMs := time.Now().UnixMilli()
 	query := s.RenderSQL(`UPDATE %sworkflow_status
-		SET status = $1
-		WHERE status = $2
-		  AND delay_until_epoch_ms <= $3`, s.dialect.SchemaPrefix(s.schema))
+		SET status = $1, updated_at = $2,
+		    deduplication_id = CASE WHEN is_debounced THEN NULL ELSE deduplication_id END
+		WHERE status = $3
+		  AND delay_until_epoch_ms <= $2`, s.dialect.SchemaPrefix(s.schema))
 
-	_, err := s.pool.Exec(ctx, query, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, nowMs)
+	_, err := s.pool.Exec(ctx, query, models.WorkflowStatusEnqueued, nowMs, models.WorkflowStatusDelayed)
 	if err != nil {
 		return fmt.Errorf("failed to transition delayed workflows: %w", err)
 	}
 	return nil
+}
+
+// DebounceDelayedWorkflowDBInput identifies a debounced workflow by
+// (name, queue, deduplication ID) and carries the new delay and inputs.
+type DebounceDelayedWorkflowDBInput struct {
+	WorkflowName    string
+	QueueName       string
+	DeduplicationID string
+	DelayUntil      time.Time
+	Input           *string // encoded
+	Serialization   string
+	Tx              Tx
+}
+
+// DebounceResult reports the outcome of a bounce attempt.
+type DebounceResult struct {
+	BouncedWorkflowID  *string // The extended workflow's ID if an existing debounced DELAYED workflow was bounced; nil if no bounce occurred
+	HolderWorkflowID   *string // The workflow currently holding the deduplication ID, if any, when no bounce occurred
+	HolderIsDebounced  bool    // Whether the holder is itself a debounced workflow
+	HolderWorkflowName string  // The holder's workflow name; a mismatch with the caller's means a debounce-key collision between workflows
+}
+
+// DebounceDelayedWorkflow extends an existing debounced DELAYED workflow's delay and
+// updates its inputs, atomically. The new delay is capped at the workflow's
+// debounce_deadline_epoch_ms, if one is set. Matching on workflow name ensures a
+// debounce-key collision between different workflows (e.g. "a"+"b-c" vs "a-b"+"c")
+// never overwrites another workflow's inputs. If nothing matched, returns the current
+// holder (or that the key is unheld) so the caller can start fresh or surface a conflict.
+// Runs on input.Tx if given, joining its transaction (e.g. a checkpointed step's);
+// otherwise in its own retried transaction.
+func (s *SysDB) DebounceDelayedWorkflow(ctx context.Context, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error) {
+	if input.Tx != nil {
+		return s.debounceDelayedWorkflowInternal(ctx, input.Tx, input)
+	}
+	return RetryWithResult(ctx, func() (*DebounceResult, error) {
+		tx, err := s.pool.BeginTx(ctx, TxOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to begin debounce transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+		result, err := s.debounceDelayedWorkflowInternal(ctx, tx, input)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("failed to commit debounce transaction: %w", err)
+		}
+		return result, nil
+	}, WithRetrierLogger(s.logger), WithRetryCondition(s.dialect.IsRetryableTransaction))
+}
+
+func (s *SysDB) debounceDelayedWorkflowInternal(ctx context.Context, tx Tx, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error) {
+	// Cap the new delay at the debounce deadline, if any (CASE not LEAST, for Postgres/SQLite portability).
+	updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
+		SET delay_until_epoch_ms = CASE
+		      WHEN debounce_deadline_epoch_ms IS NOT NULL AND debounce_deadline_epoch_ms < $1
+		      THEN debounce_deadline_epoch_ms
+		      ELSE $1
+		    END,
+		    inputs = $2, serialization = $3, updated_at = $4
+		WHERE name = $5 AND queue_name = $6 AND deduplication_id = $7
+		  AND status = $8 AND is_debounced = TRUE
+		RETURNING workflow_uuid`, s.dialect.SchemaPrefix(s.schema))
+
+	var bouncedWorkflowID string
+	err := tx.QueryRow(ctx, updateQuery,
+		input.DelayUntil.UnixMilli(),
+		input.Input,
+		input.Serialization,
+		time.Now().UnixMilli(),
+		input.WorkflowName,
+		input.QueueName,
+		input.DeduplicationID,
+		models.WorkflowStatusDelayed,
+	).Scan(&bouncedWorkflowID)
+	if err == nil {
+		return &DebounceResult{BouncedWorkflowID: &bouncedWorkflowID}, nil
+	}
+	if !errors.Is(err, ErrNoRows) {
+		return nil, fmt.Errorf("failed to bounce delayed workflow: %w", err)
+	}
+
+	// We didn't update any row. We want to distinguish which situation led to this.
+	// Specifically: create a new debounced workflow, report an existing debounced workflow, or handle a workflow name conflict.
+	// The (queue_name, dedup ID) constraint tells us that there can be at most one workflow holding a particular deduplication ID in the given queue.
+	// Finding no rows means we can create a fresh debounced workflow. (There might be a previous debounced workflow for the debouncer already running.)
+	// Find a row can mean three things:
+	// 1. A workflow exists but is_debounced is false: there is a name conflict, the user did a regular enqueue with the same dedup ID. We can't update this workflow input and report the conflict.
+	// 2. A workflow exists, is_debounced is true, but the name differ: likely a conflict with another debouncer (due to how dedup keys are crafted, name + key). Report the conflict.
+	// 3. A workflow exists, is_debounced is true, and the name matches: the debounced workflow exists and its status isn't DELAYED anymore. Let's retry.
+	holderQuery := s.RenderSQL(`SELECT workflow_uuid, is_debounced, name
+		FROM %sworkflow_status
+		WHERE queue_name = $1 AND deduplication_id = $2`, s.dialect.SchemaPrefix(s.schema))
+
+	var holderWorkflowID, holderWorkflowName string
+	var holderIsDebounced bool
+	err = tx.QueryRow(ctx, holderQuery, input.QueueName, input.DeduplicationID).Scan(&holderWorkflowID, &holderIsDebounced, &holderWorkflowName)
+	// No result means we should create a new debounced workflow.
+	if errors.Is(err, ErrNoRows) {
+		return &DebounceResult{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query deduplication ID holder: %w", err)
+	}
+	return &DebounceResult{
+		HolderWorkflowID:   &holderWorkflowID,
+		HolderIsDebounced:  holderIsDebounced,
+		HolderWorkflowName: holderWorkflowName,
+	}, nil
 }
 
 type DequeuedWorkflow struct {
@@ -5940,7 +6072,8 @@ func (s *SysDB) ExportWorkflow(ctx context.Context, workflowID string, exportChi
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
 				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization,
-				was_forked_from, rate_limited, completed_at, attributes, schedule_name
+				was_forked_from, rate_limited, completed_at, attributes, schedule_name,
+				debounce_deadline_epoch_ms, is_debounced
 			FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
 
 		row := tx.QueryRow(ctx, statusQuery, wfID)
@@ -5955,8 +6088,8 @@ func (s *SysDB) ExportWorkflow(ctx context.Context, workflowID string, exportChi
 			priority                                                     *int
 			delayUntilEpochMs                                            *int64
 			serialization                                                *string
-			wasForkedFrom, rateLimited                                   *bool
-			completedAt                                                  *int64
+			wasForkedFrom, rateLimited, isDebounced                      *bool
+			completedAt, debounceDeadlineEpochMs                         *int64
 			attributes, wfScheduleName                                   *string
 		)
 		err := row.Scan(
@@ -5966,6 +6099,7 @@ func (s *SysDB) ExportWorkflow(ctx context.Context, workflowID string, exportChi
 			&workflowDeadlineEpochMs, &startedAtEpochMs, &dedupID, &inputs, &priority,
 			&queuePartitionKey, &forkedFrom, &parentWorkflowID, &delayUntilEpochMs, &serialization,
 			&wasForkedFrom, &rateLimited, &completedAt, &attributes, &wfScheduleName,
+			&debounceDeadlineEpochMs, &isDebounced,
 		)
 		if err != nil {
 			if err == pgx.ErrNoRows {
@@ -6008,6 +6142,8 @@ func (s *SysDB) ExportWorkflow(ctx context.Context, workflowID string, exportChi
 			"completed_at":               completedAt,
 			"attributes":                 attributes,
 			"schedule_name":              wfScheduleName,
+			"debounce_deadline_epoch_ms": debounceDeadlineEpochMs,
+			"is_debounced":               isDebounced,
 		}
 
 		// Export operation_outputs
@@ -6185,8 +6321,9 @@ func (s *SysDB) ImportWorkflow(ctx context.Context, workflows []ExportedWorkflow
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
 				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization,
-				was_forked_from, rate_limited, completed_at, attributes, schedule_name
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)`,
+				was_forked_from, rate_limited, completed_at, attributes, schedule_name,
+				debounce_deadline_epoch_ms, is_debounced
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)`,
 			s.dialect.SchemaPrefix(s.schema))
 
 		// was_forked_from and rate_limited are NOT NULL; default them to false
@@ -6206,6 +6343,7 @@ func (s *SysDB) ImportWorkflow(ctx context.Context, workflows []ExportedWorkflow
 		}
 		wasForkedFrom := boolOrFalse(status["was_forked_from"])
 		rateLimited := boolOrFalse(status["rate_limited"])
+		isDebounced := boolOrFalse(status["is_debounced"])
 
 		_, err := tx.Exec(ctx, insertStatusQuery,
 			status["workflow_uuid"], status["status"], status["name"],
@@ -6218,6 +6356,7 @@ func (s *SysDB) ImportWorkflow(ctx context.Context, workflows []ExportedWorkflow
 			status["queue_partition_key"], status["forked_from"], status["parent_workflow_id"],
 			status["delay_until_epoch_ms"], status["serialization"], wasForkedFrom,
 			rateLimited, status["completed_at"], status["attributes"], status["schedule_name"],
+			status["debounce_deadline_epoch_ms"], isDebounced,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to import workflow_status: %w", err)

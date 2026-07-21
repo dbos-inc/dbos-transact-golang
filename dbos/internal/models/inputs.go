@@ -32,6 +32,7 @@ type ListWorkflowsInput struct {
 	HasParent        *bool
 	Attributes       map[string]any
 	ScheduleName     []string
+	IsDebounced      *bool
 }
 
 // Docs for the exported option and input types below live on their public

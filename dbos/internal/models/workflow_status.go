@@ -52,6 +52,8 @@ type WorkflowStatus struct {
 	DelayUntil         time.Time          `json:"delay_until,omitzero"`          // The time before which the workflow should not be dequeued
 	Attributes         map[string]any     `json:"attributes,omitempty"`          // Custom key-value attributes attached to the workflow at creation
 	ScheduleName       string             `json:"schedule_name,omitempty"`       // Name of the schedule that enqueued this workflow (if any)
+	DebounceDeadline   time.Time          `json:"debounce_deadline,omitzero"`    // Absolute cap beyond which debounce calls may not extend the delay (zero = no cap)
+	IsDebounced        bool               `json:"is_debounced,omitempty"`        // Whether the deduplication ID is a debounce key to clear on the DELAYED->ENQUEUED transition
 }
 
 // MarshalJSON renders Timeout as integer milliseconds (timeout_ms), matching the

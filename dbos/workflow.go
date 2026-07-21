@@ -5003,6 +5003,13 @@ func WithFilterHasParent(hasParent bool) ListWorkflowsOption {
 	}
 }
 
+// WithFilterIsDebounced filters workflows by whether they are debounced (true) or not (false).
+func WithFilterIsDebounced(isDebounced bool) ListWorkflowsOption {
+	return func(p *models.ListWorkflowsInput) {
+		p.IsDebounced = &isDebounced
+	}
+}
+
 // WithFilterAttributes filters workflows whose attributes contain all the given
 // key-value pairs (JSONB containment). Requires a Postgres system database;
 // listing fails with an error on SQLite.
@@ -5072,6 +5079,7 @@ func (c *dbosContext) ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]Wo
 		HasParent:          params.HasParent,
 		Attributes:         params.Attributes,
 		ScheduleName:       params.ScheduleName,
+		IsDebounced:        params.IsDebounced,
 	}
 
 	// Call the context method to list workflows
