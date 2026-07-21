@@ -337,6 +337,9 @@ var migration40SQL string
 //go:embed migrations/41_add_schedule_name.sql
 var migration41SQL string
 
+//go:embed migrations/42_add_debounce_columns.sql
+var migration42SQL string
+
 type MigrationFile struct {
 	Version int64
 	SQL     string
@@ -462,6 +465,7 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		{Version: 39, SQL: migration39SQLProcessed},
 		{Version: 40, SQL: fmt.Sprintf(migration40SQL, sanitizedSchema, sanitizedSchema)},
 		{Version: 41, SQL: fmt.Sprintf(migration41SQL, sanitizedSchema, sanitizedSchema)},
+		{Version: 42, SQL: fmt.Sprintf(migration42SQL, sanitizedSchema, sanitizedSchema)},
 	}
 }
 
