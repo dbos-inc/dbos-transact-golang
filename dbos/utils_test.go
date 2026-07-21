@@ -12,7 +12,7 @@ import (
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
-	_ "github.com/dbos-inc/dbos-transact-golang/dbos/sqlite"
+	_ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"

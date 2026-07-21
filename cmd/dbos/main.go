@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	_ "github.com/dbos-inc/dbos-transact-golang/dbos/sqlite"
+	_ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
 )
 
 func main() {

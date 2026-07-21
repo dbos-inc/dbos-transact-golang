@@ -11,7 +11,7 @@ import (
 // package. SQLite support is linked in only when the user blank-imports the
 // public driver package, whose init() calls RegisterSQLiteDriver:
 //
-//	import _ "github.com/dbos-inc/dbos-transact-golang/dbos/sqlite"
+//	import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
 //
 // PostgreSQL-only builds therefore never compile or link the SQLite driver.
 
@@ -48,7 +48,7 @@ func registeredSQLiteDriver() (*SQLiteDriver, error) {
 	sqliteDriverMu.RLock()
 	defer sqliteDriverMu.RUnlock()
 	if sqliteDriver == nil {
-		return nil, fmt.Errorf(`SQLite support is not linked into this binary: add import _ "github.com/dbos-inc/dbos-transact-golang/dbos/sqlite" to register the SQLite driver`)
+		return nil, fmt.Errorf(`SQLite support is not linked into this binary: add import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite" to register the SQLite driver`)
 	}
 	return sqliteDriver, nil
 }

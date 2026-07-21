@@ -3,7 +3,7 @@
 //
 // It is imported for its side effects only, like a database/sql driver:
 //
-//	import _ "github.com/dbos-inc/dbos-transact-golang/dbos/sqlite"
+//	import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
 //
 // With this import in place, sqlite: database URLs (and the SQLiteSystemDB
 // config field) work everywhere in dbos. Without it, SQLite is not compiled
