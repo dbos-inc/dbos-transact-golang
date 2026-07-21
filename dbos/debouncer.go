@@ -110,7 +110,7 @@ func (o *debouncerOptions) resolveConfigName() string {
 // keys are rejected because they cannot apply to a debounced enqueue, and a
 // deduplication policy because a debounce owns the deduplication behavior.
 func rejectConflictingDebounceOptions(options *workflowOptions) error {
-	if options.QueueName != "" || options.queue != nil {
+	if options.queue != nil {
 		return models.NewInvalidOptionError("cannot debounce a workflow with a queue set: the queue is configured on the debouncer (WithDebouncerQueue)")
 	}
 	if options.DeduplicationID != "" {
