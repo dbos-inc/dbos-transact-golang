@@ -169,7 +169,7 @@ type ScheduleSpec struct {
 ```
 
 - `CreateSchedule(ctx, fn, req, opts...)` → `CreateSchedule(ctx, spec)`; `ApplySchedules` takes `[]ScheduleSpec`.
-- Field rename: `ApplySchedulesRequest.WorkflowFn` → `ScheduleSpec.Workflow`. Renaming the *type* alone leaves `WorkflowFn:` behind at every schedule literal — rename the field too (included in the §9 sed list).
+- Field rename: `ApplySchedulesRequest.WorkflowFn` → `ScheduleSpec.Workflow`. Renaming the *type* alone leaves `WorkflowFn:` behind at every schedule literal — rename the field too (included in the §10 sed list).
 - `ScheduledWorkflowInput.Context` is now `json.RawMessage`; decode with the new `dbos.DecodeScheduleContext[T](input)`. *Creating* schedules is unaffected — `ScheduleSpec.Context` stays `any` and still takes your struct directly; the SDK serializes it. Only code that hand-constructs a `ScheduledWorkflowInput` (test harnesses, manual-trigger paths that invoke a scheduled workflow directly to simulate a tick) must now `json.Marshal` the context into the field.
 
 > **Gob-serializer apps: drain scheduled firings before upgrading.** `ScheduledWorkflowInput.Context` changed from `any` to `json.RawMessage` under the same gob registration, and gob cannot decode the old interface-encoded field into the new concrete type. Any schedule firing still ENQUEUED (or otherwise not yet dequeued) at upgrade time in an app using `NewGobSerializer` will fail input decoding and error when it runs — those workflows do not make it through the upgrade. Let pending firings drain (or cancel them) before deploying v1. Apps on the default JSON serializer are unaffected.
@@ -276,7 +276,7 @@ Slice-taking filters became variadic — call sites passing a literal slice need
 - New package-level accessors: `dbos.GetApplicationVersion(ctx)`, `dbos.GetExecutorID(ctx)`, `dbos.GetApplicationID(ctx)`.
 - `Config.DatabaseURL` accepts Postgres/CockroachDB URLs or key=value DSNs, and sqlite URLs (`sqlite:/path/to.db`, `sqlite:relative.db`, `sqlite::memory:`).
 - **SQLite now requires a driver import.** The SQLite driver moved out of the core package into `dbos/driver/sqlite`, registered database/sql-style. Apps using a sqlite URL or `Config.SQLiteSystemDB` must add `import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"` (one blank import, anywhere in the binary); without it, startup fails with an error naming this import. Postgres-only apps need no change and no longer compile or link `modernc.org/sqlite`.
-- **No system-database schema changes.** v1 makes no changes to the system schema relative to the last v0.x release: nothing migrates at `Launch()`, existing workflows (including long-DELAYED ones), queues, and schedule rows carry over as-is, and v0.x and v1 executors can share a system database during a rolling upgrade.
+- **One additive system-database schema change.** The first v1 `Launch()` runs migration 42, adding two defaulted columns to `workflow_status` (`is_debounced`, `debounce_deadline_epoch_ms`) for the debouncer redesign (§8). Existing workflows (including long-DELAYED ones), queues, and schedule rows carry over as-is, and v0.x and v1 executors can still share a system database during a rolling upgrade: old executors ignore the new columns and skip migration versions they don't know.
 
 ### Custom serializers must handle non-user values
 
@@ -286,11 +286,23 @@ A `Serializer[any]` must therefore be total: it must encode and decode arbitrary
 
 One deliberate exception: `Recv` and `GetEvent` checkpoint the *sender's* encoded payload verbatim under the sender's recorded format — the receiver's serializer is never asked to re-encode a message or event it didn't produce.
 
-## 8. Mocks / tests
+## 8. Debouncer redesign
+
+Debouncing no longer runs through an internal coordinator workflow. A debounced workflow is now enqueued directly in the `DELAYED` status, holding its debounce key as its deduplication ID; each `Debounce` call atomically pushes back its start time and replaces its input, and the key is released when the delay elapses and the workflow is released to its queue. The `Debouncer` / `DebouncerClient` API is unchanged apart from the §2 type-parameter reorder, with these differences:
+
+- New `WithDebouncerQueue(name)` runs the debounced workflow on a named queue instead of the DBOS internal queue. The queue is fixed per debouncer (debounce keys are scoped to it); `Debounce` calls cannot override it.
+- `Debounce` rejects options a debounce owns or cannot support: `WithQueue`, `WithDeduplicationID`, `WithDelay`, `WithPriority`, `WithQueuePartitionKey`, `WithDeduplicationPolicy`.
+- Debouncers can be created at any time, including after `Launch()` (v0 required creation before launch).
+- The debounce timeout is captured when the first call for a key enqueues the workflow; later calls extend the delay up to that fixed deadline but never move it.
+- Pending debounced workflows are visible to workflow management: they appear as `DELAYED` on their queue with `IsDebounced` set, and can be listed with `dbos.WithFilterIsDebounced(true)`.
+
+**Upgrade note: drain debouncers before upgrading.** v0 debouncing ran through internal `internalDebouncerWF` workflow registrations that v1 removes, so a v0 debouncer workflow still `PENDING` at upgrade cannot be recovered by a v1 executor — recovery logs "Workflow not found in registry" and leaves it `PENDING`, and its target workflow never starts. Before upgrading, stop calling `Debounce` and let in-flight debounces fire (at most the debounce delay or timeout); cancel any stragglers left after the upgrade with `CancelWorkflow`.
+
+## 9. Mocks / tests
 
 Mocks of the old `DBOSContext` must be regenerated from `dbos.Context` (which now embeds `Client`). With mockery, point the config at `Context` (see `integration/.mockery.yml` upstream for reference config). Assertions on error types/codes need the §5 renames.
 
-## 9. Suggested migration order per app
+## 10. Suggested migration order per app
 
 1. `go mod edit -replace` to the local `go/` checkout; `go build ./...` to enumerate breakage.
 2. Mechanical renames (safe to sed, word-boundary matched):

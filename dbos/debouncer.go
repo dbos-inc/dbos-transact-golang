@@ -16,7 +16,10 @@ import (
 // replaces the input it will run with; when the delay elapses without another
 // call, the workflow runs once with the latest input. If a timeout is
 // configured, the start is never pushed past timeout from the first call
-// (zero means no limit). Different keys debounce independently.
+// (zero means no limit). The timeout is captured when the first call enqueues
+// the workflow: changing it afterwards only affects the next debounce
+// generation, once the pending workflow has started. Different keys debounce
+// independently.
 //
 // A debounced workflow is enqueued in the DELAYED status holding the debounce
 // key as its deduplication ID; each subsequent Debounce call atomically extends
@@ -55,6 +58,9 @@ type debouncerOptions struct {
 
 // WithDebouncerTimeout sets the maximum time before starting the workflow.
 // If timeout is zero (the default), there is no maximum time limit.
+// The deadline is fixed when the first Debounce call for a key enqueues the
+// workflow; subsequent calls extend the delay up to that deadline but never
+// move it, even if the debouncer's timeout has changed in the meantime.
 func WithDebouncerTimeout(timeout time.Duration) DebouncerOption {
 	return func(o *debouncerOptions) {
 		o.timeout = timeout
