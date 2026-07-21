@@ -877,19 +877,6 @@ func WithQueue(queue Queue) WorkflowOption {
 	}
 }
 
-// withQueueName enqueues the workflow to a queue identified by name only.
-// It is a no-op if a queue handle was already set with WithQueue: an explicit
-// user choice always wins over an internally-supplied name.
-// XXX: this will be removed when we update the debouncer implementation.
-func withQueueName(queueName string) WorkflowOption {
-	return func(p *workflowOptions) {
-		if p.queue != nil {
-			return
-		}
-		p.QueueName = queueName
-	}
-}
-
 // WithApplicationVersion overrides the DBOS Context application version for this workflow.
 // This affects workflow recovery.
 func WithApplicationVersion(version string) WorkflowOption {
@@ -1850,6 +1837,17 @@ type enqueueOptions struct {
 	assumedRole         string
 	authenticatedRoles  []string
 	attributes          map[string]any
+	debounceDeadline    time.Time
+	isDebounced         bool
+}
+
+// Internal option set by the client debouncer: marks the enqueue as debounced and
+// carries the optional absolute deadline capping delay extensions (zero = no cap).
+func withEnqueueDebounce(deadline time.Time) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.isDebounced = true
+		opts.debounceDeadline = deadline
+	}
 }
 
 // Enqueue enqueues a workflow by name to a named queue for deferred execution.
@@ -1916,9 +1914,11 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 		serialization = ser.Name()
 	}
 
+	// A debounced enqueue is always DELAYED, even with a zero delay: the debounce key
+	// is released on the DELAYED->ENQUEUED transition.
 	var wfStatus WorkflowStatusType
 	var delayUntil time.Time
-	if params.delayDuration > 0 {
+	if params.delayDuration > 0 || params.isDebounced {
 		wfStatus = WorkflowStatusDelayed
 		delayUntil = time.Now().Add(params.delayDuration)
 	} else {
@@ -1945,6 +1945,8 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 		AssumedRole:        params.assumedRole,
 		AuthenticatedRoles: params.authenticatedRoles,
 		Attributes:         params.attributes,
+		DebounceDeadline:   params.debounceDeadline,
+		IsDebounced:        params.isDebounced,
 	}
 
 	uncancellableCtx := WithoutCancel(c)

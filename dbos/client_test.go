@@ -1962,7 +1962,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
 	// Create test queue
-	testQueue, err := RegisterQueue(serverCtx, "debouncer-client-options-test-queue", WithPriorityEnabled(), WithPartitionQueue())
+	testQueue, err := RegisterQueue(serverCtx, "debouncer-client-options-test-queue")
 	require.NoError(t, err)
 
 	// Register test workflow with a custom name
@@ -1989,26 +1989,21 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	})
 
 	// Create debouncer client
-	debouncer := NewDebouncerClient[string, string]("DebounceTestWorkflow", client, WithDebouncerTimeout(10*time.Second))
+	debouncer := NewDebouncerClient[string, string]("DebounceTestWorkflow", client, WithDebouncerTimeout(10*time.Second), WithDebouncerQueue(testQueue.GetName()))
 
 	// Test workflow options
 	expectedWorkflowID := "test-workflow-id-12345"
-	expectedPriority := uint(5)
-	expectedPartitionKey := "partition-key-123"
 	expectedAssumedRole := "test-assumed-role"
 	expectedAuthenticatedUser := "test-user"
 	expectedAuthenticatedRoles := []string{"role1", "role2", "role3"}
 	testInput := "test-input-with-options"
 
-	// Call Debounce with all workflow options
+	// Call Debounce with supported workflow options
 	handle, err := debouncer.Debounce(
 		"workflow-options-key",
 		200*time.Millisecond,
 		testInput,
 		WithWorkflowID(expectedWorkflowID),
-		WithQueue(testQueue),
-		WithPriority(expectedPriority),
-		WithQueuePartitionKey(expectedPartitionKey),
 		WithAssumedRole(expectedAssumedRole),
 		WithAuthenticatedUser(expectedAuthenticatedUser),
 		WithAuthenticatedRoles(expectedAuthenticatedRoles...),
@@ -2034,12 +2029,26 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	// Verify all workflow options are set correctly
 	assert.Equal(t, expectedWorkflowID, workflow.ID, "workflow ID should match")
 	assert.Equal(t, testQueue.GetName(), workflow.QueueName, "queue name should match")
-	assert.Equal(t, int(expectedPriority), workflow.Priority, "priority should match")
-	assert.Equal(t, expectedPartitionKey, workflow.QueuePartitionKey, "queue partition key should match")
 	assert.Equal(t, expectedAssumedRole, workflow.AssumedRole, "assumed role should match")
 	assert.Equal(t, expectedAuthenticatedUser, workflow.AuthenticatedUser, "authenticated user should match")
 	assert.Equal(t, expectedAuthenticatedRoles, workflow.AuthenticatedRoles, "authenticated roles should match")
 	assert.Equal(t, WorkflowStatusSuccess, workflow.Status, "workflow should have succeeded")
+
+	// Options a debounce owns or cannot support are rejected
+	for _, tc := range []struct {
+		name string
+		opt  WorkflowOption
+	}{
+		{"Queue", WithQueue(testQueue)},
+		{"DeduplicationID", WithDeduplicationID("user-dedup")},
+		{"Delay", WithDelay(time.Second)},
+		{"Priority", WithPriority(5)},
+		{"QueuePartitionKey", WithQueuePartitionKey("pk")},
+		{"DeduplicationPolicy", WithDeduplicationPolicy(DeduplicationPolicyReturnExisting)},
+	} {
+		_, err := debouncer.Debounce("rejected-options-key", 200*time.Millisecond, testInput, tc.opt)
+		assert.Error(t, err, "option %s should be rejected", tc.name)
+	}
 }
 
 func TestClientEnqueueDelay(t *testing.T) {

@@ -621,10 +621,6 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	// Initialize the queue runner (which owns the DBOS internal queue)
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
 
-	// Register the any,any internal debouncer workflow so it's always available for execution
-	// This allows a client to debounce workflow and the server side to run them, even without knowing the actual workflow types
-	RegisterWorkflow(initExecutor, internalDebouncerWF[any, any])
-
 	// Initialize conductor. In DBOS Cloud, connect to Conductor for observability
 	// using the cloud-provided environment variables. Otherwise, connect if a
 	// Conductor API key was configured.
