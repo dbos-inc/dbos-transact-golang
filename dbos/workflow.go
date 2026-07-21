@@ -819,7 +819,6 @@ const (
 type workflowOptions struct {
 	WorkflowName        string
 	WorkflowID          string
-	QueueName           string
 	queue               Queue
 	ApplicationVersion  string
 	MaxRetries          int
@@ -873,7 +872,6 @@ func WithQueue(queue Queue) WorkflowOption {
 			return
 		}
 		p.queue = queue
-		p.QueueName = queue.GetName()
 	}
 }
 
@@ -1172,14 +1170,20 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		params.WorkflowName = registeredWorkflow.Name
 	}
 
-	// Validate delay is not provided without queue name
-	if params.DelayDuration > 0 && len(params.QueueName) == 0 {
+	// The queue, if any, comes from the WithQueue handle (Enqueue is the name-only path)
+	var queueName string
+	if params.queue != nil {
+		queueName = params.queue.GetName()
+	}
+
+	// Validate delay is not provided without a queue
+	if params.DelayDuration > 0 && params.queue == nil {
 		c.logger.Error("delay provided but queue name is missing", "workflow_name", params.WorkflowName)
 		return nil, models.NewInvalidOptionError("delay provided but queue name is missing")
 	}
 
-	// Validate partition key is not provided without queue name
-	if len(params.QueuePartitionKey) > 0 && len(params.QueueName) == 0 {
+	// Validate partition key is not provided without a queue
+	if len(params.QueuePartitionKey) > 0 && params.queue == nil {
 		c.logger.Error("partition key provided but queue name is missing", "workflow_name", params.WorkflowName)
 		return nil, models.NewInvalidOptionError("partition key provided but queue name is missing")
 	}
@@ -1195,34 +1199,23 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		if len(params.DeduplicationID) == 0 {
 			return nil, models.NewInvalidOptionError("a deduplication policy requires a deduplication ID")
 		}
-		if len(params.QueueName) == 0 {
+		if params.queue == nil {
 			return nil, models.NewInvalidOptionError("a deduplication policy requires a queue name")
 		}
 	}
 
-	// Validate partitioned-queue usage. Prefer the handle provided via WithQueue
-	// (configuration as of registration/retrieval time); for name-only enqueues,
-	// fall back to the queue runner's latest reconciled snapshot. If neither knows
-	// the queue (e.g. before launch, or a queue this process does not listen to),
-	// skip validation and let the queue runner resolve the name.
-	var partitionQueue, queueKnown bool
+	// Validate partitioned-queue usage against the queue handle's configuration
 	if params.queue != nil {
-		partitionQueue, queueKnown = params.queue.GetPartitionQueue(), true
-	} else if len(params.QueueName) > 0 {
-		if q, ok := c.queueRunner.currentQueueConfig(params.QueueName); ok {
-			partitionQueue, queueKnown = q.PartitionQueue, true
-		}
-	}
-	if queueKnown {
+		partitionQueue := params.queue.GetPartitionQueue()
 		// If queue has partitions enabled, partition key must be provided
 		if partitionQueue && len(params.QueuePartitionKey) == 0 {
-			c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, models.NewInvalidOptionError(fmt.Sprintf("queue %s has partitions enabled, but no partition key was provided", params.QueueName))
+			c.logger.Error("queue has partitions enabled but no partition key was provided", "workflow_name", params.WorkflowName, "queue_name", queueName)
+			return nil, models.NewInvalidOptionError(fmt.Sprintf("queue %s has partitions enabled, but no partition key was provided", queueName))
 		}
 		// If partition key is provided, queue must have partitions enabled
 		if len(params.QueuePartitionKey) > 0 && !partitionQueue {
-			c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", params.QueueName)
-			return nil, models.NewInvalidOptionError(fmt.Sprintf("queue %s is not a partitioned queue, but a partition key was provided", params.QueueName))
+			c.logger.Error("queue is not a partitioned queue but a partition key was provided", "workflow_name", params.WorkflowName, "queue_name", queueName)
+			return nil, models.NewInvalidOptionError(fmt.Sprintf("queue %s is not a partitioned queue, but a partition key was provided", queueName))
 		}
 	}
 
@@ -1299,7 +1292,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	}
 
 	var status WorkflowStatusType
-	if params.QueueName != "" {
+	if queueName != "" {
 		if params.DelayDuration > 0 {
 			status = WorkflowStatusDelayed
 		} else {
@@ -1375,7 +1368,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		Timeout:            timeout,
 		Input:              encodedInput,
 		ApplicationID:      c.GetApplicationID(),
-		QueueName:          params.QueueName,
+		QueueName:          queueName,
 		DeduplicationID:    params.DeduplicationID,
 		Priority:           int(params.Priority),
 		AuthenticatedUser:  params.AuthenticatedUser,
@@ -1449,7 +1442,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		}
 
 		shouldSkip :=
-			len(params.QueueName) > 0 || // We are enqueueing OR
+			len(queueName) > 0 || // We are enqueueing OR
 				insertStatusResult.Status == WorkflowStatusSuccess || // workflow is in a terminal state (success) OR
 				insertStatusResult.Status == WorkflowStatusError || // workflow is in a terminal state (error) OR
 				(!params.isDequeue && !params.isRecovery && insertStatusResult.OwnerXID != ownerXID) || // another executor, not us dequeueing or being instructed to recover, is already owning the workflow OR
@@ -1484,7 +1477,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			return nil, err
 		}
 		existingID, lookupErr := sysdb.RetryWithResult(c, func() (*string, error) {
-			return c.systemDB.GetDeduplicatedWorkflow(uncancellableCtx, params.QueueName, params.DeduplicationID)
+			return c.systemDB.GetDeduplicatedWorkflow(uncancellableCtx, queueName, params.DeduplicationID)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if lookupErr != nil {
 			return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("looking up deduplicated workflow: %w", lookupErr))
@@ -1505,7 +1498,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				return nil, models.NewWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
 			}
 		}
-		c.logger.Info("returning handle to existing deduplicated workflow", "workflow_name", params.WorkflowName, "queue_name", params.QueueName, "deduplication_id", params.DeduplicationID, "existing_workflow_id", *existingID)
+		c.logger.Info("returning handle to existing deduplicated workflow", "workflow_name", params.WorkflowName, "queue_name", queueName, "deduplication_id", params.DeduplicationID, "existing_workflow_id", *existingID)
 		return newWorkflowPollingHandle[any](uncancellableCtx, *existingID), nil
 	}
 	if earlyReturnPollingHandle != nil {
