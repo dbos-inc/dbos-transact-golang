@@ -1,14 +1,5 @@
 // Package sqlite registers SQLite support for DBOS, backed by the pure-Go
 // modernc.org/sqlite driver.
-//
-// It is imported for its side effects only, like a database/sql driver:
-//
-//	import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
-//
-// With this import in place, sqlite: database URLs (and the SQLiteSystemDB
-// config field) work everywhere in dbos. Without it, SQLite is not compiled
-// into the binary — PostgreSQL-only applications need nothing but the dbos
-// package and stay free of the SQLite dependency.
 package sqlite
 
 import (
