@@ -83,6 +83,27 @@ func workflowThatCallsDebounce(ctx Context, input debounceCallInput) (string, er
 	return result, nil
 }
 
+// assertDebounceCallerSteps verifies the exact step sequence of a workflow that
+// called Debounce numCalls times: the first call assigns the workflow ID, bounces,
+// and enqueues the debounced workflow; subsequent calls only assign and bounce;
+// then the caller awaits the result.
+func assertDebounceCallerSteps(t *testing.T, ctx Context, workflowID string, numCalls int) {
+	t.Helper()
+	expected := []string{"DBOS.debounce.assignWorkflowID", "DBOS.debounceDelayedWorkflow", "DBOS.enqueue"}
+	for range numCalls - 1 {
+		expected = append(expected, "DBOS.debounce.assignWorkflowID", "DBOS.debounceDelayedWorkflow")
+	}
+	expected = append(expected, "DBOS.getResult")
+
+	steps, err := GetWorkflowSteps(ctx, workflowID)
+	require.NoError(t, err, "failed to get workflow steps")
+	require.Len(t, steps, len(expected), "unexpected step count for %d debounce calls", numCalls)
+	for i, name := range expected {
+		assert.Equal(t, name, steps[i].StepName, "step %d", i)
+		assert.Nil(t, steps[i].Error, "step %d should not have an error", i)
+	}
+}
+
 func TestDebouncer(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
@@ -120,24 +141,8 @@ func TestDebouncer(t *testing.T) {
 		assert.GreaterOrEqual(t, elapsed, 500*time.Millisecond, "execution should take at least 450ms")
 		assert.LessOrEqual(t, elapsed, 10*time.Second, "execution should take less than 10s")
 
-		// Verify the workflow ID assignment and the bounce are checkpointed as steps
-		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
-		require.NoError(t, err, "failed to get workflow steps")
-
-		foundWorkflowIDStep := false
-		foundBounceStep := false
-		for _, step := range steps {
-			if step.StepName == "DBOS.debounce.assignWorkflowID" {
-				foundWorkflowIDStep = true
-				assert.Nil(t, step.Error, "workflow ID step should not have error")
-			}
-			if step.StepName == "DBOS.debounceDelayedWorkflow" {
-				foundBounceStep = true
-				assert.Nil(t, step.Error, "bounce step should not have error")
-			}
-		}
-		assert.True(t, foundWorkflowIDStep, "should have DBOS.debounce.assignWorkflowID step")
-		assert.True(t, foundBounceStep, "should have DBOS.debounceDelayedWorkflow step")
+		// Verify the exact step sequence checkpointed by the caller
+		assertDebounceCallerSteps(t, dbosCtx, handle.GetWorkflowID(), 1)
 
 		// The debounced workflow itself is the only workflow on the internal queue
 		workflows, err := ListWorkflows(dbosCtx, WithFilterQueueName(models.InternalQueueName))
@@ -172,6 +177,9 @@ func TestDebouncer(t *testing.T) {
 		elapsed := time.Since(startTime)
 		assert.GreaterOrEqual(t, elapsed, 200*time.Millisecond, "execution should take at least 200ms")
 		assert.LessOrEqual(t, elapsed, 10*time.Second, "execution should take less than 10s")
+
+		// Each of the five calls checkpoints its two steps
+		assertDebounceCallerSteps(t, dbosCtx, handle.GetWorkflowID(), 5)
 	})
 
 	t.Run("TestDelayGreaterThanTimeout", func(t *testing.T) {
@@ -294,6 +302,45 @@ func TestDebouncer(t *testing.T) {
 		recoveredHandle := newWorkflowPollingHandle[any](dbosCtx, handle1.GetWorkflowID())
 		_, err = recoveredHandle.GetResult()
 		require.NoError(t, err, "shouldn't have errored")
+	})
+
+	t.Run("TestCallerRecoveryReplay", func(t *testing.T) {
+		parentInput := debounceCallInput{
+			Key:    "caller-replay-key",
+			Delay:  200 * time.Millisecond,
+			Inputs: []string{"replay-1", "replay-2", "replay-3"},
+		}
+		handle, err := RunWorkflow(dbosCtx, workflowThatCallsDebounce, parentInput)
+		require.NoError(t, err, "failed to start workflow that calls debounce")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result")
+		assert.Equal(t, "replay-3", result, "result should match latest input")
+		assertDebounceCallerSteps(t, dbosCtx, handle.GetWorkflowID(), 3)
+
+		debouncedBefore, err := ListWorkflows(dbosCtx, WithFilterIsDebounced(true))
+		require.NoError(t, err, "failed to list debounced workflows")
+
+		// Replay the caller from scratch: every Debounce call must come back from
+		// its checkpoints without minting new steps or a new debounced workflow.
+		setWorkflowStatusPending(t, dbosCtx, handle.GetWorkflowID())
+		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		var recovered WorkflowHandle[any]
+		for _, h := range recoveredHandles {
+			if h.GetWorkflowID() == handle.GetWorkflowID() {
+				recovered = h
+			}
+		}
+		require.NotNil(t, recovered, "the caller workflow should have been recovered")
+
+		replayResult, err := recovered.GetResult()
+		require.NoError(t, err, "the replayed caller should complete")
+		assert.Equal(t, "replay-3", replayResult, "the replay must return the recorded result")
+
+		assertDebounceCallerSteps(t, dbosCtx, handle.GetWorkflowID(), 3)
+		debouncedAfter, err := ListWorkflows(dbosCtx, WithFilterIsDebounced(true))
+		require.NoError(t, err, "failed to list debounced workflows")
+		assert.Len(t, debouncedAfter, len(debouncedBefore), "replay must not enqueue a new debounced workflow")
 	})
 }
 

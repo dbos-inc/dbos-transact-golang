@@ -1873,6 +1873,16 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 		return nil, models.NewInvalidOptionError("a deduplication policy requires a deduplication ID")
 	}
 
+	// Within a workflow, the enqueue is checkpointed as a step; it cannot run inside a step
+	isWithinWorkflow := false
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if ok && wfState != nil {
+		isWithinWorkflow = true
+		if wfState.isWithinStep {
+			return nil, models.NewStepExecutionError(wfState.workflowID, "DBOS.enqueue", fmt.Errorf("cannot call Enqueue within a step"))
+		}
+	}
+
 	workflowID := params.workflowID
 	if workflowID == "" {
 		workflowID = uuid.New().String()
@@ -1946,43 +1956,64 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	returnExisting := params.deduplicationPolicy == DeduplicationPolicyReturnExisting
 
 	for {
-		err := func() error {
-			tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
-			if err != nil {
-				return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
-			}
-			defer tx.Rollback(uncancellableCtx)
-
-			insertInput := sysdb.InsertWorkflowStatusDBInput{
-				Status: status,
-				Tx:     tx,
-			}
-			if _, err := c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput); err != nil {
-				return err
-			}
-			if err := tx.Commit(uncancellableCtx); err != nil {
-				return fmt.Errorf("failed to commit transaction: %w", err)
-			}
-			return nil
-		}()
+		var enqueuedID string
+		var err error
+		if isWithinWorkflow {
+			enqueuedID, err = runAsTxn(c, func(ctx context.Context, tx Tx) (string, error) {
+				return c.insertEnqueuedWorkflow(ctx, tx, status, queueName, params, returnExisting)
+			}, WithStepName("DBOS.enqueue"))
+		} else {
+			enqueuedID, err = func() (string, error) {
+				tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
+				if err != nil {
+					return "", models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
+				}
+				defer tx.Rollback(uncancellableCtx)
+				enqueuedID, err := c.insertEnqueuedWorkflow(uncancellableCtx, tx, status, queueName, params, returnExisting)
+				if err != nil {
+					return enqueuedID, err
+				}
+				if err := tx.Commit(uncancellableCtx); err != nil {
+					return "", fmt.Errorf("failed to commit transaction: %w", err)
+				}
+				return enqueuedID, nil
+			}()
+		}
 		if err != nil {
 			if returnExisting && errors.Is(err, ErrQueueDeduplicated) {
-				existingID, lookupErr := c.systemDB.GetDeduplicatedWorkflow(uncancellableCtx, queueName, params.deduplicationID)
-				if lookupErr != nil {
-					return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("looking up deduplicated workflow: %w", lookupErr))
+				if enqueuedID != "" {
+					return newWorkflowPollingHandle[any](uncancellableCtx, enqueuedID), nil
 				}
-				if existingID != nil {
-					return newWorkflowPollingHandle[any](uncancellableCtx, *existingID), nil
-				}
-				// Try again if the deduplication record was not found. Means that the dedup slot was freed.
+				// The dedup slot was freed before the holder lookup; enqueue again
 				continue
 			}
 			c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
 			return nil, err
 		}
-
-		return newWorkflowPollingHandle[any](uncancellableCtx, workflowID), nil
+		return newWorkflowPollingHandle[any](uncancellableCtx, enqueuedID), nil
 	}
+}
+
+// Insert the enqueued workflow and lookup any existing deduplicated workflow if
+// a serialization error is raised AND the policy is return existing.
+func (c *dbosContext) insertEnqueuedWorkflow(ctx context.Context, tx Tx, status WorkflowStatus, queueName string, params *enqueueOptions, returnExisting bool) (string, error) {
+	insertInput := sysdb.InsertWorkflowStatusDBInput{
+		Status: status,
+		Tx:     tx,
+	}
+	if _, err := c.systemDB.InsertWorkflowStatus(ctx, insertInput); err != nil {
+		if returnExisting && errors.Is(err, ErrQueueDeduplicated) {
+			existingID, lookupErr := c.systemDB.GetDeduplicatedWorkflow(ctx, queueName, params.deduplicationID)
+			if lookupErr != nil {
+				return "", models.NewWorkflowExecutionError(status.ID, fmt.Errorf("looking up deduplicated workflow: %w", lookupErr))
+			}
+			if existingID != nil {
+				return *existingID, err
+			}
+		}
+		return "", err
+	}
+	return status.ID, nil
 }
 
 // Enqueue adds a workflow to a named queue for later execution with type safety.
