@@ -4448,20 +4448,16 @@ func (s *SysDB) debounceDelayedWorkflowInternal(ctx context.Context, tx Tx, inpu
 		models.WorkflowStatusDelayed,
 	).Scan(&bouncedWorkflowID)
 	if err == nil {
+		// We updated a debounced workflow
 		return &DebounceResult{BouncedWorkflowID: &bouncedWorkflowID}, nil
 	}
 	if !errors.Is(err, ErrNoRows) {
 		return nil, fmt.Errorf("failed to bounce delayed workflow: %w", err)
 	}
 
-	// We didn't update any row. We want to distinguish which situation led to this.
-	// Specifically: create a new debounced workflow, report an existing debounced workflow, or handle a workflow name conflict.
-	// The (queue_name, dedup ID) constraint tells us that there can be at most one workflow holding a particular deduplication ID in the given queue.
-	// Finding no rows means we can create a fresh debounced workflow. (There might be a previous debounced workflow for the debouncer already running.)
-	// Find a row can mean three things:
-	// 1. A workflow exists but is_debounced is false: there is a name conflict, the user did a regular enqueue with the same dedup ID. We can't update this workflow input and report the conflict.
-	// 2. A workflow exists, is_debounced is true, but the name differ: likely a conflict with another debouncer (due to how dedup keys are crafted, name + key). Report the conflict.
-	// 3. A workflow exists, is_debounced is true, and the name matches: the debounced workflow exists and its status isn't DELAYED anymore. Let's retry.
+	// We didn't update any row. We want to distinguish which situation led to this:
+	// 1. A workflow exists but is_debounced is false: the user is using the same dedup key than the debouncer on the queue. We report the conflict.
+	// 2. A workflow exists, is_debounced is true: this can be a deduplication key collision, maybe due a name + key collision or some other rare situation.
 	holderQuery := s.RenderSQL(`SELECT workflow_uuid, is_debounced, name
 		FROM %sworkflow_status
 		WHERE queue_name = $1 AND deduplication_id = $2`, s.dialect.SchemaPrefix(s.schema))

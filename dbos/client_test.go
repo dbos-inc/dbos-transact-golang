@@ -1989,7 +1989,10 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	})
 
 	// Create debouncer client
-	debouncer := NewDebouncerClient[string, string]("DebounceTestWorkflow", client, WithDebouncerTimeout(10*time.Second), WithDebouncerQueue(testQueue.GetName()))
+	debouncer := NewDebouncerClient[string, string]("DebounceTestWorkflow", client,
+		WithDebouncerTimeout(10*time.Second),
+		WithDebouncerQueue(testQueue.GetName()),
+		WithDebouncerClassName("DebounceTestClass"))
 
 	// Test workflow options
 	expectedWorkflowID := "test-workflow-id-12345"
@@ -2032,6 +2035,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	assert.Equal(t, expectedAssumedRole, workflow.AssumedRole, "assumed role should match")
 	assert.Equal(t, expectedAuthenticatedUser, workflow.AuthenticatedUser, "authenticated user should match")
 	assert.Equal(t, expectedAuthenticatedRoles, workflow.AuthenticatedRoles, "authenticated roles should match")
+	assert.Equal(t, "DebounceTestClass", workflow.ClassName, "class name should be recorded on the debounced workflow")
 	assert.Equal(t, WorkflowStatusSuccess, workflow.Status, "workflow should have succeeded")
 
 	// Options a debounce owns or cannot support are rejected

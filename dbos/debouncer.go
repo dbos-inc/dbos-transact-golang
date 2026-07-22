@@ -53,6 +53,7 @@ type debouncerOptions struct {
 	timeout    time.Duration
 	instance   ConfiguredInstance
 	configName string
+	className  string
 	queueName  string
 }
 
@@ -93,6 +94,17 @@ func WithDebouncerInstance(instance ConfiguredInstance) DebouncerOption {
 func WithDebouncerConfigName(configName string) DebouncerOption {
 	return func(o *debouncerOptions) {
 		o.configName = configName
+	}
+}
+
+// WithDebouncerClassName sets the class name recorded on the debounced
+// workflow. Use with NewDebouncerClient when the target workflow is registered
+// under a class name, for example by another language's runtime, which may
+// resolve dequeued workflows by class name. NewDebouncer derives the class
+// name from the workflow registry and ignores this option.
+func WithDebouncerClassName(className string) DebouncerOption {
+	return func(o *debouncerOptions) {
+		o.className = className
 	}
 }
 
@@ -416,6 +428,7 @@ type DebouncerClient[R any, P any] struct {
 //   - WithDebouncerTimeout: Maximum time before starting the workflow (0 = no timeout) [optional]
 //   - WithDebouncerQueue: Queue the debounced workflow runs on (default: the DBOS internal queue) [optional]
 //   - WithDebouncerConfigName: Config name of the configured instance the workflow is bound to [required for instance methods]
+//   - WithDebouncerClassName: Class name recorded on the debounced workflow [required for workflows other runtimes resolve by class name]
 //
 // Returns a pointer to a DebouncerClient instance that can be used to call Debounce.
 func NewDebouncerClient[R any, P any](
@@ -444,6 +457,7 @@ func NewDebouncerClient[R any, P any](
 		params: debouncerParams{
 			workflowName: workflowName,
 			dedupPrefix:  dedupPrefix,
+			className:    options.className,
 			configName:   configName,
 			queueName:    options.queueName,
 		},
