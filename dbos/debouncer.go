@@ -211,6 +211,10 @@ func debounce[R any, P any](c *dbosContext, params debouncerParams, key string, 
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && wfState != nil
 
+	if isWithinWorkflow && wfState.isWithinStep {
+		return nil, models.NewStepExecutionError(wfState.workflowID, "DBOS.debounce", fmt.Errorf("cannot call Debounce within a step"))
+	}
+
 	// Serialize new inputs with the same encoder Enqueue uses, so a bounce stays
 	// consistent with the initial enqueue.
 	var encodedInput *string

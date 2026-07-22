@@ -84,6 +84,17 @@ func workflowThatCallsDebounce(ctx Context, input debounceCallInput) (string, er
 	return result, nil
 }
 
+// workflowThatCallsDebounceInStep calls Debounce from within a step, which is not allowed.
+func workflowThatCallsDebounceInStep(ctx Context, input debounceCallInput) (string, error) {
+	return RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+		h, err := debouncer10sTimeout.Debounce(stepCtx.(Context), input.Key, input.Delay, input.Inputs[0])
+		if err != nil {
+			return "", err
+		}
+		return h.GetWorkflowID(), nil
+	})
+}
+
 // assertDebounceCallerSteps verifies the exact step sequence of a workflow that
 // called Debounce numCalls times: the first call assigns the workflow ID, bounces,
 // and enqueues the debounced workflow; subsequent calls only assign and bounce;
@@ -114,6 +125,7 @@ func TestDebouncer(t *testing.T) {
 	// Register test workflows
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
 	RegisterWorkflow(dbosCtx, workflowThatCallsDebounce)
+	RegisterWorkflow(dbosCtx, workflowThatCallsDebounceInStep)
 
 	// Create debouncers after Launch (each workflow debouncer can only be registered once)
 	var err error
@@ -346,6 +358,23 @@ func TestDebouncer(t *testing.T) {
 		debouncedAfter, err := ListWorkflows(dbosCtx, WithFilterIsDebounced(true))
 		require.NoError(t, err, "failed to list debounced workflows")
 		assert.Len(t, debouncedAfter, len(debouncedBefore), "replay must not enqueue a new debounced workflow")
+	})
+
+	t.Run("DebounceCannotBeCalledWithinStep", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, workflowThatCallsDebounceInStep, debounceCallInput{
+			Key:    "within-step-key",
+			Delay:  200 * time.Millisecond,
+			Inputs: []string{"within-step-input"},
+		})
+		require.NoError(t, err, "failed to start workflow")
+
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected error when calling Debounce within a step")
+
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected error to be of type *Error, got %T", err)
+		require.Equal(t, ErrorCodeStepExecution, dbosErr.Code)
+		require.Contains(t, err.Error(), "cannot call Debounce within a step")
 	})
 }
 
