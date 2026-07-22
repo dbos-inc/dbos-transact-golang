@@ -70,7 +70,8 @@ func WithDebouncerTimeout(timeout time.Duration) DebouncerOption {
 
 // WithDebouncerQueue runs the debounced workflow on the named queue instead of
 // the DBOS internal queue. Debounce keys are scoped to the queue. The queue is
-// fixed per debouncer; Debounce calls cannot override it.
+// fixed per debouncer; Debounce calls cannot override it. NewDebouncer requires
+// the queue to be registered (see RegisterQueue).
 func WithDebouncerQueue(queueName string) DebouncerOption {
 	return func(o *debouncerOptions) {
 		o.queueName = queueName
@@ -81,7 +82,7 @@ func WithDebouncerQueue(queueName string) DebouncerOption {
 // instance (see WithInstance). Required when the debounced workflow is a method of a
 // configured instance:
 //
-//	debouncer := dbos.NewDebouncer(ctx, slack.Send, dbos.WithDebouncerInstance(slack))
+//	debouncer, err := dbos.NewDebouncer(ctx, slack.Send, dbos.WithDebouncerInstance(slack))
 func WithDebouncerInstance(instance ConfiguredInstance) DebouncerOption {
 	return func(o *debouncerOptions) {
 		o.instance = instance
@@ -343,12 +344,16 @@ func debounce[R any, P any](c *dbosContext, params debouncerParams, key string, 
 //   - WithDebouncerQueue: Queue the debounced workflow runs on (default: the DBOS internal queue) [optional]
 //   - WithDebouncerInstance: The configured instance the workflow method is bound to [required for instance methods]
 //
-// Returns a pointer to a Debouncer instance that can be used to call Debounce.
+// Returns a Debouncer that can be used to call Debounce. It returns an error if
+// the workflow is not registered or the configured queue does not exist.
 //
 // Example:
 //
 //	// Create a debouncer with maximum timeout of 10 seconds
-//	debouncer := dbos.NewDebouncer(ctx, MyWorkflowFunction, WithDebouncerTimeout(10*time.Second))
+//	debouncer, err := dbos.NewDebouncer(ctx, MyWorkflowFunction, WithDebouncerTimeout(10*time.Second))
+//	if err != nil {
+//		return err
+//	}
 //
 //	// Later, use the debouncer with different keys and delays
 //	handle1, err := debouncer.Debounce(ctx, "user-123", 2*time.Second, inputData1)
@@ -357,7 +362,7 @@ func NewDebouncer[R any, P any](
 	ctx Context,
 	workflow Workflow[P, R],
 	opts ...DebouncerOption,
-) *Debouncer[R, P] {
+) (*Debouncer[R, P], error) {
 	options := debouncerOptions{}
 	for _, opt := range opts {
 		opt(&options)
@@ -365,7 +370,7 @@ func NewDebouncer[R any, P any](
 
 	dbosCtx, ok := ctx.(*dbosContext)
 	if !ok {
-		return &Debouncer[R, P]{} // Do nothing if the concrete type is not dbosContext
+		return nil, errors.New("ctx must be a DBOS context")
 	}
 
 	// Configured instance workflows are registered under a name qualified with their config name.
@@ -378,14 +383,21 @@ func NewDebouncer[R any, P any](
 	dbosCtx.logger.Debug("Creating new debouncer", "workflow_fqn", fqn)
 
 	// Validate that the workflow is registered in the registry
-	// Assertively panic if the workflow is not registered, as a sign of highly unexpected behavior
 	entryAny, exists := dbosCtx.workflowRegistry.Load(fqn)
 	if !exists {
-		panic(models.NewNonExistentWorkflowError(fqn))
+		return nil, models.NewNonExistentWorkflowError(fqn)
 	}
 	entry, ok := entryAny.(WorkflowRegistryEntry)
 	if !ok {
-		panic(fmt.Sprintf("invalid workflow registry entry type for workflow %s", fqn))
+		return nil, fmt.Errorf("invalid workflow registry entry type for workflow %s", fqn)
+	}
+
+	// The debounced workflow is enqueued on a database-backed queue, so require it to
+	// exist: a debounce onto an unknown queue would strand workflows nothing dequeues.
+	if options.queueName != "" {
+		if _, err := dbosCtx.RetrieveQueue(dbosCtx, options.queueName); err != nil {
+			return nil, err
+		}
 	}
 
 	// The recorded workflow name (custom name if one was registered; unqualified for
@@ -411,7 +423,7 @@ func NewDebouncer[R any, P any](
 			configName:   configName,
 			queueName:    options.queueName,
 		},
-	}
+	}, nil
 }
 
 // Debounce schedules the debounced workflow to start after delay, or, if an

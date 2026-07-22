@@ -1203,7 +1203,8 @@ func TestGobDebounceInsideWorkflow(t *testing.T) {
 	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
 
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
-	deb := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
+	deb, err := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
+	require.NoError(t, err, "failed to create the debouncer")
 
 	parent := func(ctx Context, in string) (string, error) {
 		h, err := deb.Debounce(ctx, "gob-in-wf-key", 100*time.Millisecond, in)

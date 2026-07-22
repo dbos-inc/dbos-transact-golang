@@ -9175,7 +9175,8 @@ func TestWorkflowAttributes(t *testing.T) {
 	queue, err := RegisterQueue(dbosCtx, "attr-test-queue")
 	require.NoError(t, err)
 
-	debouncer := NewDebouncer(dbosCtx, attrDebouncedWorkflow)
+	debouncer, err := NewDebouncer(dbosCtx, attrDebouncedWorkflow)
+	require.NoError(t, err, "failed to create the debouncer")
 
 	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 

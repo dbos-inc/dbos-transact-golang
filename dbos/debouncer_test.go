@@ -28,7 +28,8 @@ func TestDebouncerCustomSerializer(t *testing.T) {
 	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
 
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
-	deb := NewDebouncer(dbosCtx, debounceTestWorkflow)
+	deb, err := NewDebouncer(dbosCtx, debounceTestWorkflow)
+	require.NoError(t, err, "failed to create the debouncer")
 	require.NoError(t, Launch(dbosCtx))
 
 	h1, err := deb.Debounce(dbosCtx, "gob-debounce-key", 2*time.Second, "input-1")
@@ -115,9 +116,13 @@ func TestDebouncer(t *testing.T) {
 	RegisterWorkflow(dbosCtx, workflowThatCallsDebounce)
 
 	// Create debouncers after Launch (each workflow debouncer can only be registered once)
-	debouncer10sTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
-	debouncer200msTimeout = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(200*time.Millisecond))
-	debouncer2sTimeout := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(2*time.Second))
+	var err error
+	debouncer10sTimeout, err = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
+	require.NoError(t, err, "failed to create the 10s debouncer")
+	debouncer200msTimeout, err = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(200*time.Millisecond))
+	require.NoError(t, err, "failed to create the 200ms debouncer")
+	debouncer2sTimeout, err := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(2*time.Second))
+	require.NoError(t, err, "failed to create the 2s debouncer")
 
 	Launch(dbosCtx)
 	t.Run("TestSingleDebounceCall", func(t *testing.T) {
@@ -357,17 +362,23 @@ func TestDebouncerCreatedAfterLaunch(t *testing.T) {
 
 	// Debouncers no longer register an internal workflow, so creating one after
 	// launch works.
-	deb := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
+	deb, err := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
+	require.NoError(t, err, "failed to create a debouncer after launch")
 	handle, err := deb.Debounce(dbosCtx, "after-launch-key", 100*time.Millisecond, "after-launch-input")
 	require.NoError(t, err, "failed to debounce with a debouncer created after launch")
 	result, err := handle.GetResult()
 	require.NoError(t, err, "failed to get result")
 	assert.Equal(t, "after-launch-input", result)
 
-	// Creating a debouncer for an unregistered workflow still panics
-	assert.Panics(t, func() {
-		NewDebouncer(dbosCtx, func(ctx Context, input string) (string, error) { return input, nil })
-	}, "creating a debouncer for an unregistered workflow should panic")
+	// Creating a debouncer for an unregistered workflow fails
+	_, err = NewDebouncer(dbosCtx, func(ctx Context, input string) (string, error) { return input, nil })
+	require.Error(t, err, "creating a debouncer for an unregistered workflow should fail")
+	assert.ErrorIs(t, err, ErrNonExistentWorkflow)
+
+	// So does creating one for a queue that is not registered in the database
+	_, err = NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerQueue("no-such-queue"))
+	require.Error(t, err, "creating a debouncer for an unregistered queue should fail")
+	assert.ErrorIs(t, err, ErrQueueNotFound)
 }
 
 func TestDebouncerWorkflowOptions(t *testing.T) {
@@ -378,7 +389,8 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
 
-	debouncer := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second), WithDebouncerQueue(testQueue.GetName()))
+	debouncer, err := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second), WithDebouncerQueue(testQueue.GetName()))
+	require.NoError(t, err, "failed to create the debouncer")
 
 	Launch(dbosCtx)
 
@@ -457,11 +469,13 @@ func TestDebouncerConfiguredInstance(t *testing.T) {
 	RegisterWorkflow(dbosCtx, email.Send, WithInstance(email))
 
 	// Without the instance, the bare (colliding) FQN was never registered: fail loudly
-	require.Panics(t, func() { NewDebouncer(dbosCtx, slack.Send) },
-		"creating a debouncer for an instance method without WithDebouncerInstance should panic")
+	_, err := NewDebouncer(dbosCtx, slack.Send)
+	require.Error(t, err, "creating a debouncer for an instance method without WithDebouncerInstance should fail")
 
-	slackDebouncer := NewDebouncer(dbosCtx, slack.Send, WithDebouncerInstance(slack))
-	emailDebouncer := NewDebouncer(dbosCtx, email.Send, WithDebouncerInstance(email))
+	slackDebouncer, err := NewDebouncer(dbosCtx, slack.Send, WithDebouncerInstance(slack))
+	require.NoError(t, err, "failed to create the slack debouncer")
+	emailDebouncer, err := NewDebouncer(dbosCtx, email.Send, WithDebouncerInstance(email))
+	require.NoError(t, err, "failed to create the email debouncer")
 
 	require.NoError(t, Launch(dbosCtx))
 
@@ -499,7 +513,8 @@ func TestDebounceDeadlineCapsBounce(t *testing.T) {
 	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
 
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
-	deb := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(2*time.Second))
+	deb, err := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(2*time.Second))
+	require.NoError(t, err, "failed to create the debouncer")
 	require.NoError(t, Launch(dbosCtx))
 
 	start := time.Now()
@@ -554,7 +569,8 @@ func TestDebounceKeyConflicts(t *testing.T) {
 			WithEnqueueDelay(time.Minute))
 		require.NoError(t, err, "failed to enqueue the conflicting holder")
 
-		deb := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerQueue(testQueue.GetName()))
+		deb, err := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerQueue(testQueue.GetName()))
+		require.NoError(t, err, "failed to create the debouncer")
 		_, err = deb.Debounce(dbosCtx, "conflict-key", 100*time.Millisecond, "debounced-input")
 		require.Error(t, err, "debouncing over a non-debounced holder of the key must fail")
 		assert.True(t, errors.Is(err, ErrQueueDeduplicated), "expected ErrQueueDeduplicated, got %v", err)
@@ -563,8 +579,10 @@ func TestDebounceKeyConflicts(t *testing.T) {
 	})
 
 	t.Run("CollidingDebouncers", func(t *testing.T) {
-		debA := NewDebouncer(dbosCtx, debounceCollideWorkflowA)
-		debAX := NewDebouncer(dbosCtx, debounceCollideWorkflowAX)
+		debA, err := NewDebouncer(dbosCtx, debounceCollideWorkflowA)
+		require.NoError(t, err, "failed to create the first debouncer")
+		debAX, err := NewDebouncer(dbosCtx, debounceCollideWorkflowAX)
+		require.NoError(t, err, "failed to create the second debouncer")
 
 		holder, err := debA.Debounce(dbosCtx, "x-k", time.Minute, "a-input")
 		require.NoError(t, err, "failed to debounce the first workflow")
@@ -585,7 +603,8 @@ func TestConcurrentDebounce(t *testing.T) {
 	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
 
 	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
-	deb := NewDebouncer(dbosCtx, debounceTestWorkflow)
+	deb, err := NewDebouncer(dbosCtx, debounceTestWorkflow)
+	require.NoError(t, err, "failed to create the debouncer")
 	require.NoError(t, Launch(dbosCtx))
 
 	const callers = 8
@@ -632,7 +651,8 @@ func TestDebouncerWorkflowTimeout(t *testing.T) {
 	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
 
 	RegisterWorkflow(dbosCtx, debounceBlockingWorkflow)
-	deb := NewDebouncer(dbosCtx, debounceBlockingWorkflow)
+	deb, err := NewDebouncer(dbosCtx, debounceBlockingWorkflow)
+	require.NoError(t, err, "failed to create the debouncer")
 	require.NoError(t, Launch(dbosCtx))
 
 	timeoutCtx, cancelFunc := WithTimeout(dbosCtx, time.Second)
