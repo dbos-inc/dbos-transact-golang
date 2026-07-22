@@ -143,6 +143,9 @@ func rejectConflictingDebounceOptions(options *workflowOptions) error {
 	return nil
 }
 
+// How long to wait before retrying a bounce that hit a transient race.
+const _DEBOUNCE_RETRY_INTERVAL = 100 * time.Millisecond
+
 // The action a debounce caller should take after a bounce attempt.
 type bounceAction int
 
@@ -257,6 +260,9 @@ func debounce[R any, P any](c *dbosContext, params debouncerParams, key string, 
 		case bounceRaise:
 			return nil, models.NewQueueDeduplicatedError(*result.HolderWorkflowID, queueName, deduplicationID)
 		case bounceRetry:
+			// The holder is mid-transition; pause briefly so the loop doesn't spin hot
+			// (in a workflow, each attempt also checkpoints a step).
+			time.Sleep(_DEBOUNCE_RETRY_INTERVAL)
 			continue
 		}
 
