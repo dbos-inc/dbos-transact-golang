@@ -188,6 +188,17 @@ func debounce[R any, P any](c *dbosContext, params debouncerParams, key string, 
 		return nil, err
 	}
 
+	// A deadline on the caller's context becomes the workflow's execution timeout,
+	// recorded in the DB but never as an absolute deadline: the clock starts at
+	// dequeue, so the debounce delay does not count against it.
+	var workflowTimeout time.Duration
+	if ctxDeadline, ok := c.Deadline(); ok {
+		workflowTimeout = time.Until(ctxDeadline)
+		if workflowTimeout <= 0 {
+			return nil, models.NewInvalidOptionError("cannot debounce a workflow with an already-expired context deadline")
+		}
+	}
+
 	// Run on the debouncer's configured queue, else the internal queue.
 	// Debounce keys are scoped to the queue.
 	queueName := params.queueName
@@ -305,6 +316,9 @@ func debounce[R any, P any](c *dbosContext, params debouncerParams, key string, 
 		if params.configName != "" {
 			enqueueOpts = append(enqueueOpts, WithEnqueueConfigName(params.configName))
 		}
+		if workflowTimeout > 0 {
+			enqueueOpts = append(enqueueOpts, WithEnqueueTimeout(workflowTimeout))
+		}
 
 		handle, err := Enqueue[R](c, queueName, params.workflowName, input, enqueueOpts...)
 		if err != nil {
@@ -404,6 +418,11 @@ func NewDebouncer[R any, P any](
 // execution is already pending for key, pushes its start back by delay and
 // replaces the input it will run with. Returns a handle to the pending
 // workflow execution.
+//
+// A deadline on ctx becomes the debounced workflow's execution timeout: the
+// clock starts when the workflow is dequeued, so the debounce delay does not
+// count against it. The timeout is captured by the call that enqueues the
+// workflow; later calls coalescing on the same pending workflow do not change it.
 func (d *Debouncer[R, P]) Debounce(ctx Context, key string, delay time.Duration, input P, opts ...WorkflowOption) (WorkflowHandle[R], error) {
 	c, ok := ctx.(*dbosContext)
 	if !ok {

@@ -571,3 +571,52 @@ func TestConcurrentDebounce(t *testing.T) {
 	require.NoError(t, err, "failed to get result of the new generation")
 	assert.Equal(t, "next-generation", result)
 }
+
+func debounceBlockingWorkflow(ctx Context, input string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestDebouncerWorkflowTimeout verifies a deadline on the Debounce context is
+// recorded as the debounced workflow's execution timeout (never an absolute
+// deadline) and cancels the workflow once it runs.
+func TestDebouncerWorkflowTimeout(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
+
+	RegisterWorkflow(dbosCtx, debounceBlockingWorkflow)
+	deb := NewDebouncer(dbosCtx, debounceBlockingWorkflow)
+	require.NoError(t, Launch(dbosCtx))
+
+	timeoutCtx, cancelFunc := WithTimeout(dbosCtx, time.Second)
+	defer cancelFunc()
+	handle, err := deb.Debounce(timeoutCtx, "wf-timeout-key", 100*time.Millisecond, "blocking-input")
+	require.NoError(t, err, "failed to debounce")
+
+	// The deadline is recorded as a timeout whose clock starts at dequeue, so
+	// the debounce delay does not count against it. No absolute deadline is set.
+	status, err := handle.GetStatus()
+	require.NoError(t, err, "failed to get status")
+	assert.Greater(t, status.Timeout, time.Duration(0), "the context deadline should be recorded as a timeout")
+	assert.LessOrEqual(t, status.Timeout, time.Second, "the recorded timeout cannot exceed the context deadline")
+	assert.True(t, status.Deadline.IsZero(), "no absolute deadline should be set on the debounced workflow")
+
+	// Poll from the parent context: timeoutCtx expires before the workflow ends.
+	pollingHandle := newWorkflowPollingHandle[string](dbosCtx, handle.GetWorkflowID())
+	_, err = pollingHandle.GetResult()
+	require.Error(t, err, "the debounced workflow should be cancelled by its execution timeout")
+	dbosErr, ok := err.(*Error)
+	require.True(t, ok, "expected *Error, got %T (%v)", err, err)
+	assert.Equal(t, ErrorCodeAwaitedWorkflowCancelled, dbosErr.Code)
+
+	status, err = pollingHandle.GetStatus()
+	require.NoError(t, err, "failed to get status")
+	assert.Equal(t, WorkflowStatusCancelled, status.Status, "the debounced workflow should be cancelled")
+
+	// An already-expired context deadline is rejected
+	expiredCtx, expiredCancel := WithTimeout(dbosCtx, time.Nanosecond)
+	defer expiredCancel()
+	time.Sleep(time.Millisecond)
+	_, err = deb.Debounce(expiredCtx, "wf-timeout-expired-key", 100*time.Millisecond, "input")
+	require.Error(t, err, "an expired context deadline must be rejected")
+}
