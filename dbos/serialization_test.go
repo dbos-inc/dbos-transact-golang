@@ -1194,6 +1194,43 @@ func TestGobSerializer(t *testing.T) {
 	})
 }
 
+// TestGobDebounceInsideWorkflow verifies Debounce called from within a workflow
+// works with the gob serializer, live and on replay. The bounce step checkpoints
+// an internal result type, so the SDK must pre-register it with gob: users cannot
+// register internal types themselves.
+func TestGobDebounceInsideWorkflow(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: NewGobSerializer()})
+	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
+
+	RegisterWorkflow(dbosCtx, debounceTestWorkflow)
+	deb := NewDebouncer(dbosCtx, debounceTestWorkflow, WithDebouncerTimeout(10*time.Second))
+
+	parent := func(ctx Context, in string) (string, error) {
+		h, err := deb.Debounce(ctx, "gob-in-wf-key", 100*time.Millisecond, in)
+		if err != nil {
+			return "", err
+		}
+		return h.GetResult()
+	}
+	RegisterWorkflow(dbosCtx, parent, WithWorkflowName("gob-debounce-parent"))
+	require.NoError(t, Launch(dbosCtx))
+
+	handle, err := RunWorkflow(dbosCtx, parent, "gob-input")
+	require.NoError(t, err, "failed to start the caller workflow")
+	result, err := handle.GetResult()
+	require.NoError(t, err, "debounce inside a workflow must work with the gob serializer")
+	assert.Equal(t, "gob-input", result)
+
+	// Replay the caller: the gob-encoded bounce checkpoint must decode back
+	setWorkflowStatusPending(t, dbosCtx, handle.GetWorkflowID())
+	recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+	require.NoError(t, err, "failed to recover pending workflows")
+	require.Len(t, recoveredHandles, 1, "the caller workflow should have been recovered")
+	replayResult, err := recoveredHandles[0].GetResult()
+	require.NoError(t, err, "the replayed caller must decode the gob-encoded bounce checkpoint")
+	assert.Equal(t, "gob-input", replayResult)
+}
+
 // ===== Chicken Serializer Tests =====
 
 // TestClientCustomSerializer tests that a Client created with a custom serializer

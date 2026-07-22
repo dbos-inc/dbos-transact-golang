@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"reflect"
 	"time"
+
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 )
 
 const (
@@ -412,6 +414,9 @@ func init() {
 	// Register the scheduled workflow input so gob-serialized schedule firings
 	// round-trip without users having to register it themselves.
 	gob.Register(ScheduledWorkflowInput{})
+	// Register the bounce step's checkpointed output: it is an internal type users
+	// cannot register, and Debounce inside a workflow records it as a step result.
+	gob.Register(&sysdb.DebounceResult{})
 }
 
 // serializeWorkflowError encodes an error for DB storage.
