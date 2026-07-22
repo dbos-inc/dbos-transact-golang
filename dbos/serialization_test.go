@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -1860,7 +1861,9 @@ func TestPortableInterop(t *testing.T) {
 		require.Error(t, err)
 		var pe *PortableWorkflowError
 		require.ErrorAs(t, err, &pe)
-		assert.Equal(t, "Portable Error", pe.Name)
+		// A DBOS *Error now projects its symbolic code into the portable envelope's
+		// Name (instead of the generic "Portable Error"), so errors.Is still matches.
+		assert.Equal(t, ErrorCodeWorkflowExecution.String(), pe.Name)
 		assert.Contains(t, err.Error(), fmt.Sprintf("DBOS Error %s", ErrorCodeWorkflowExecution))
 	})
 }
@@ -2552,6 +2555,47 @@ func TestWorkflowErrorSerializationRoundTrip(t *testing.T) {
 		assert.Equal(t, "boom", got.Error())
 		var de *Error
 		assert.NotErrorAs(t, got, &de)
+	})
+
+	t.Run("DBOSErrorPreservedPortable", func(t *testing.T) {
+		// Portable (cross-language JSON) is the lossy path: the concrete *Error type
+		// is not carried, but its code and context are projected into the envelope so
+		// errors.Is against a DBOS sentinel still matches after the round trip.
+		orig := models.NewMaxStepRetriesExceededError("wf-7", "my-step", 3, fmt.Errorf("underlying"))
+		s := serializeWorkflowError(nil, orig, PortableSerializerName)
+
+		// Wire format is the JSON envelope, not gob.
+		var envelope PortableWorkflowError
+		require.NoError(t, json.Unmarshal([]byte(s), &envelope))
+		assert.Equal(t, ErrorCodeMaxStepRetriesExceeded.String(), envelope.Name)
+		assert.EqualValues(t, int(ErrorCodeMaxStepRetriesExceeded), envelope.Code)
+		data, ok := envelope.Data.(map[string]any)
+		require.True(t, ok, "context fields must be captured in Data")
+		assert.Equal(t, "wf-7", data["workflowID"])
+		assert.Equal(t, "my-step", data["stepName"])
+		assert.EqualValues(t, 3, data["maxRetries"])
+
+		// Decode yields a *PortableWorkflowError (not *Error), but errors.Is still matches.
+		got := deserializeWorkflowError(&s)
+		require.Error(t, got)
+		var pe *PortableWorkflowError
+		require.ErrorAs(t, got, &pe)
+		assert.Equal(t, orig.Error(), got.Error())
+		require.ErrorIs(t, got, ErrMaxStepRetriesExceeded)
+
+		// It matches only its own code, not an unrelated DBOS sentinel.
+		assert.False(t, errors.Is(got, ErrAwaitedWorkflowCancelled))
+	})
+
+	t.Run("PlainErrorPortableDoesNotMatchSentinel", func(t *testing.T) {
+		// A non-DBOS error keeps the generic name and matches no DBOS sentinel.
+		s := serializeWorkflowError(nil, fmt.Errorf("boom"), PortableSerializerName)
+		got := deserializeWorkflowError(&s)
+		require.Error(t, got)
+		var pe *PortableWorkflowError
+		require.ErrorAs(t, got, &pe)
+		assert.Equal(t, "Portable Error", pe.Name)
+		assert.False(t, errors.Is(got, ErrAwaitedWorkflowCancelled))
 	})
 
 	t.Run("WarnsOnPlainStringFallback", func(t *testing.T) {

@@ -402,6 +402,18 @@ func (e *PortableWorkflowError) Error() string {
 	return e.Message
 }
 
+// Is lets errors.Is match a portable error against a DBOS error.
+// serializeWorkflowError records a DBOS *Error's symbolic
+// code (Code.String()) in Name; this compares that to the target sentinel's code,
+// so the match survives a portable (cross-language JSON) round trip.
+func (e *PortableWorkflowError) Is(target error) bool {
+	t, ok := target.(*Error)
+	if !ok || t.Code == 0 {
+		return false
+	}
+	return e.Name == t.Code.String()
+}
+
 func init() {
 	// Register the DBOS error types so they can be gob-encoded with their concrete
 	// type preserved on the Go <-> Go error path (see serializeWorkflowError).
@@ -417,6 +429,48 @@ func init() {
 	// Register the bounce step's checkpointed output: it is an internal type users
 	// cannot register, and Debounce inside a workflow records it as a step result.
 	gob.Register(&sysdb.DebounceResult{})
+}
+
+// portableFromDBOSError projects a DBOS *Error into the cross-language envelope,
+// preserving as much as the portable JSON format allows:
+//   - Name  = the symbolic code (Code.String()), which
+//     (*PortableWorkflowError).Is matches against DBOS sentinels so errors.Is(err,
+//     ErrQueueDeduplicated) still holds after a round trip.
+//   - Code  = the numeric error code.
+//   - Data  = every set context field (workflow/step/queue identifiers, retry
+//     counts, wrapped-cause kind), so nothing readable is lost.
+func portableFromDBOSError(e *Error) PortableWorkflowError {
+	data := map[string]any{}
+	putStr := func(k, v string) {
+		if v != "" {
+			data[k] = v
+		}
+	}
+	putInt := func(k string, v int) {
+		if v != 0 {
+			data[k] = v
+		}
+	}
+	putStr("workflowID", e.WorkflowID)
+	putStr("destinationID", e.DestinationID)
+	putStr("stepName", e.StepName)
+	putStr("queueName", e.QueueName)
+	putStr("deduplicationID", e.DeduplicationID)
+	putStr("expectedName", e.ExpectedName)
+	putStr("recordedName", e.RecordedName)
+	putStr("causeKind", e.CauseKind)
+	putInt("stepID", e.StepID)
+	putInt("maxRetries", e.MaxRetries)
+
+	pe := PortableWorkflowError{
+		Name:    e.Code.String(),
+		Message: e.Error(),
+		Code:    int(e.Code),
+	}
+	if len(data) > 0 {
+		pe.Data = data
+	}
+	return pe
 }
 
 // serializeWorkflowError encodes an error for DB storage.
@@ -443,6 +497,8 @@ func serializeWorkflowError(logger *slog.Logger, err error, serialization string
 	var errData PortableWorkflowError
 	if pe := (*PortableWorkflowError)(nil); errors.As(err, &pe) {
 		errData = *pe
+	} else if de := (*Error)(nil); errors.As(err, &de) {
+		errData = portableFromDBOSError(de)
 	} else {
 		errData = PortableWorkflowError{
 			Name:    "Portable Error",
