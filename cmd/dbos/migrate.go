@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
@@ -22,12 +26,14 @@ var migrateCmd = &cobra.Command{
 
 var (
 	applicationRole string
-	printOnly       bool
+	printMigrations string
+	printUserRole   bool
 )
 
 func init() {
 	migrateCmd.Flags().StringVarP(&applicationRole, "app-role", "r", "", "The role with which you will run your DBOS application")
-	migrateCmd.Flags().BoolVar(&printOnly, "print-only", false, "Print the migration SQL to stdout without executing anything")
+	migrateCmd.Flags().StringVar(&printMigrations, "print-migrations", "", "Print the SQL of all migrations ('all') or of migrations from a number onward ('3') instead of running them")
+	migrateCmd.Flags().BoolVar(&printUserRole, "print-user-role", false, "Print the SQL granting the application role (--app-role) access to DBOS system tables instead of executing it")
 }
 
 func runMigrate(cmd *cobra.Command, args []string) error {
@@ -37,8 +43,13 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 		dbSchema = schema
 	}
 
-	if printOnly {
-		return printMigrationSQL(dbSchema)
+	if printMigrations != "" || printUserRole {
+		// Print modes never touch a database; stdout is pure SQL and comments.
+		if err := runMigratePrint(dbSchema); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return nil
 	}
 
 	// Get database URL
@@ -88,24 +99,70 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// printMigrationSQL writes the full migration SQL to stdout without touching
-// the database. Logging goes to stderr.
-func printMigrationSQL(schemaName string) error {
-	if config != nil && len(config.Database.Migrate) > 0 {
-		logger.Warn("Skipping migration commands from 'dbos-config.yaml' in print-only mode", "commands", config.Database.Migrate)
+func runMigratePrint(schemaName string) error {
+	if printMigrations != "" && printUserRole {
+		return errors.New("--print-user-role cannot be combined with --print-migrations")
 	}
-
-	fmt.Println("-- DBOS system database migration")
-	fmt.Printf("-- Schema: %s\n", schemaName)
-	for _, stmt := range dbos.MigrationStatements(schemaName) {
-		fmt.Println(stmt)
-	}
-
-	if applicationRole != "" {
-		fmt.Printf("-- Permissions for application role: %s\n", applicationRole)
+	if printUserRole {
+		if applicationRole == "" {
+			return errors.New("--print-user-role requires --app-role")
+		}
+		if strings.ContainsAny(schemaName, `"'`) {
+			return errors.New("Schema names containing quotes are not supported")
+		}
+		if strings.ContainsAny(applicationRole, `"'`) {
+			return errors.New("Role names containing quotes are not supported")
+		}
+		fmt.Printf("-- Permissions on DBOS schema %s for role %s\n", schemaName, applicationRole)
 		for _, query := range grantQueries(applicationRole, schemaName) {
 			fmt.Printf("%s;\n", query)
 		}
+		return nil
+	}
+	return printDBOSMigrations(schemaName, printMigrations)
+}
+
+func printDBOSMigrations(schemaName, value string) error {
+	dbURL, err := getDBURL()
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(dbURL, "sqlite") {
+		return errors.New("--print-migrations is only supported for Postgres databases")
+	}
+	if strings.ContainsAny(schemaName, `"'`) {
+		return errors.New("Schema names containing quotes are not supported")
+	}
+
+	latest := dbos.NumMigrations()
+	from := 1
+	if value != "all" {
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("Invalid --print-migrations value '%s': expected 'all' or a migration number", value)
+		}
+		if n < 1 || n > latest {
+			return fmt.Errorf("Migration %d does not exist: valid migrations are 1 through %d", n, latest)
+		}
+		from = n
+	}
+
+	statements, err := dbos.MigrationStatements(schemaName, from)
+	if err != nil {
+		return err
+	}
+
+	maskedURL, err := maskPassword(dbURL)
+	if err != nil {
+		maskedURL = dbURL
+	}
+	fmt.Printf("-- DBOS system database migrations for %s\n", maskedURL)
+	fmt.Println("-- Contains CREATE/DROP INDEX CONCURRENTLY: run outside a transaction block (e.g. plain psql, not psql --single-transaction).")
+	if from == 1 {
+		fmt.Println("-- This script is for FRESH databases only.")
+	}
+	for _, stmt := range statements {
+		fmt.Println(stmt)
 	}
 	return nil
 }
