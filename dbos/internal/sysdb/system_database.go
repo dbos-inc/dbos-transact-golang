@@ -2611,6 +2611,7 @@ type RecordOperationResultDBInput struct {
 	StartedAt       time.Time
 	CompletedAt     time.Time
 	Serialization   string
+	ExecutorID      string
 }
 
 // RecordOperationResult checkpoints a step outcome. A checkpoint already
@@ -2660,6 +2661,7 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 		return fmt.Errorf("failed to read rows affected after recording operation result: %w", err)
 	}
 	if n > 0 {
+		s.refreshExecutorID(ctx, querier, input.WorkflowID, input.ExecutorID)
 		return nil
 	}
 
@@ -2701,6 +2703,19 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 	// A concurrent execution's row differs (at minimum in its timestamps):
 	// report the conflict so the caller parks this run.
 	return models.NewWorkflowConflictIDError(input.WorkflowID)
+}
+
+func (s *SysDB) refreshExecutorID(ctx context.Context, querier Querier, workflowID, executorID string) {
+	if executorID == "" { // Shouldn't happen!
+		return
+	}
+	query := s.RenderSQL(`UPDATE %sworkflow_status SET executor_id = $1
+		WHERE workflow_uuid = $2 AND (executor_id IS NULL OR executor_id <> $1)`,
+		s.dialect.SchemaPrefix(s.schema))
+	if _, err := querier.Exec(ctx, query, executorID, workflowID); err != nil {
+		s.logger.Warn("failed to refresh workflow executor ID after checkpoint",
+			"workflow_id", workflowID, "executor_id", executorID, "error", err)
+	}
 }
 
 // nullableStrEq compares two nullable strings, treating NULL and "" as equal.

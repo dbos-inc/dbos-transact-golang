@@ -315,6 +315,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			CompletedAt:     completedTime,
 			StepName:        "DBOS.getResult",
 			Serialization:   ser.Name(),
+			ExecutorID:      GetExecutorID(h.dbosContext),
 		}
 		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := sysdb.Retry(h.dbosContext, func() error {
@@ -428,6 +429,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 			CompletedAt:     completedTime,
 			StepName:        "DBOS.getResult",
 			Serialization:   serialization,
+			ExecutorID:      GetExecutorID(h.dbosContext),
 		}
 		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := sysdb.Retry(h.dbosContext, func() error {
@@ -2551,6 +2553,7 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 		CompletedAt:   stepCompletedTime,
 		Output:        encodedStepOutput,
 		Serialization: ser.Name(),
+		ExecutorID:    c.GetExecutorID(),
 	}
 	recErr := sysdb.Retry(c, func() error {
 		return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
@@ -2726,6 +2729,7 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 			Output:        encodedStepOutput,
 			Tx:            tx,
 			Serialization: serialization,
+			ExecutorID:    c.GetExecutorID(),
 		}
 		recErr := c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
 		if recErr != nil {

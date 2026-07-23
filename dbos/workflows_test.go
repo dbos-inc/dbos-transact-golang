@@ -9897,3 +9897,119 @@ func TestConcurrentStartRaceSameExecutor(t *testing.T) {
 		require.Equal(t, WorkflowStatusSuccess, status.Status, "attempt %d: workflow must end SUCCESS", i)
 	}
 }
+
+// TestStepCheckpointReclaimsExecutorID verifies that recording a step checkpoint
+// re-stamps workflow_status.executor_id to the executor that wins the checkpoint,
+// so the "most recently executed by" marker follows the executor actually making
+// progress rather than lagging on a stale owner.
+//
+// It reproduces the zombie/recovery race: executor A starts a workflow and blocks
+// inside its only step; executor B recovers the still-PENDING workflow, which
+// transfers the marker to B via the recovery status insert. Both executions are
+// now live in the step body. The still-running A ("zombie") is released first: its
+// step checkpoint must reclaim the marker for A. The recovery insert is not what
+// is under test here — A never re-inserts its status, so only the step-checkpoint
+// re-stamp can flip executor_id back to A. B is released last; losing the
+// checkpoint race, it must not re-stamp.
+func TestStepCheckpointReclaimsExecutorID(t *testing.T) {
+	const (
+		executorA = "executor-a"
+		executorB = "executor-b"
+		appVer    = "restamp-test-v1"
+	)
+
+	dbURL := backendDatabaseURL(t)
+	if !useSqliteBackend() {
+		resetTestDatabase(t, dbURL)
+	}
+
+	// Per-executor gates: the test controls the order in which the two live
+	// executions leave the step body, making the checkpoint race deterministic.
+	aInStep := NewEvent()
+	bInStep := NewEvent()
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	var execCount atomic.Int64
+
+	blockingWorkflow := func(ctx Context, _ string) (string, error) {
+		return RunAsStep(ctx, func(context.Context) (string, error) {
+			execCount.Add(1)
+			// Route on the executor running this execution (captured outer ctx).
+			if GetExecutorID(ctx) == executorB {
+				bInStep.Set()
+				<-releaseB
+			} else {
+				aInStep.Set()
+				<-releaseA
+			}
+			return "done", nil
+		})
+	}
+
+	newExecutor := func(executorID string) Context {
+		c, err := NewContext(context.Background(), Config{
+			DatabaseURL:        dbURL,
+			AppName:            "restamp-test",
+			ApplicationVersion: appVer, // pin so recovery's version filter matches across executors
+			ExecutorID:         executorID,
+		})
+		require.NoError(t, err, "failed to create executor %s", executorID)
+		RegisterWorkflow(c, blockingWorkflow, WithWorkflowName("restamp-blocking-workflow"))
+		require.NoError(t, Launch(c), "failed to launch executor %s", executorID)
+		t.Cleanup(func() { Shutdown(c, 30*time.Second) })
+		return c
+	}
+
+	ctxA := newExecutor(executorA)
+	ctxB := newExecutor(executorB)
+
+	sysDB := ctxA.(*dbosContext).systemDB.(*sysdb.SysDB)
+	wfID := uuid.NewString()
+	readExecutorID := func() string {
+		query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(
+			`SELECT executor_id FROM %sworkflow_status WHERE workflow_uuid = $1`,
+			sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+		var executorID *string
+		require.NoError(t, sysDB.Pool().QueryRow(context.Background(), query, wfID).Scan(&executorID))
+		if executorID == nil {
+			return ""
+		}
+		return *executorID
+	}
+
+	// A starts the workflow and blocks inside the step. Baseline: A owns the marker.
+	handleA, err := RunWorkflow(ctxA, blockingWorkflow, "", WithWorkflowID(wfID))
+	require.NoError(t, err, "failed to start workflow on executor A")
+	aInStep.Wait()
+	require.Equal(t, executorA, readExecutorID(), "precondition: A owns the workflow after starting it")
+
+	// B recovers the still-PENDING workflow: the recovery status insert transfers
+	// the marker to B. B now runs the step body concurrently with A and blocks.
+	recovered, err := recoverPendingWorkflows(ctxB.(*dbosContext), []string{executorA})
+	require.NoError(t, err, "failed to recover the workflow on executor B")
+	require.Len(t, recovered, 1, "expected exactly one pending workflow to recover")
+	require.Equal(t, wfID, recovered[0].GetWorkflowID())
+	bInStep.Wait()
+	require.Equal(t, executorB, readExecutorID(),
+		"recovery must transfer the executor_id marker to B via its status insert")
+
+	// Release the still-running A. Its step checkpoint is the ONLY thing that can
+	// flip the marker back to A (A never re-inserts its status): this is the
+	// behavior under test.
+	close(releaseA)
+	resA, err := handleA.GetResult()
+	require.NoError(t, err, "A's original execution should complete successfully")
+	require.Equal(t, "done", resA)
+	require.Equal(t, executorA, readExecutorID(),
+		"the winning step checkpoint must re-stamp executor_id back to the executor that recorded it")
+
+	// Release B. It loses the checkpoint race (A already recorded the step), so it
+	// must observe the conflict, park, and NOT re-stamp the marker.
+	close(releaseB)
+	resB, err := recovered[0].GetResult()
+	require.NoError(t, err, "the losing execution should resolve to the winner's result via polling")
+	require.Equal(t, "done", resB)
+	require.EqualValues(t, 2, execCount.Load(), "both executions must have genuinely run the step body")
+	require.Equal(t, executorA, readExecutorID(),
+		"a losing checkpoint must not re-stamp executor_id")
+}
