@@ -46,9 +46,76 @@ func TestDebouncerCustomSerializer(t *testing.T) {
 	require.Equal(t, "input-2", result, "debounced workflow must run with the latest input")
 }
 
+// debouncePortableEchoWorkflow takes a portable args envelope and echoes the
+// first positional arg, so a debounce coalescing test can assert the latest
+// input survived the bounce.
+func debouncePortableEchoWorkflow(ctx Context, args PortableWorkflowArgs) (string, error) {
+	if len(args.PositionalArgs) == 0 {
+		return "", fmt.Errorf("expected a positional arg")
+	}
+	s, ok := args.PositionalArgs[0].(string)
+	if !ok {
+		return "", fmt.Errorf("expected string positional arg, got %T", args.PositionalArgs[0])
+	}
+	return s, nil
+}
+
+// TestDebouncerPortableSerializer is the portable (cross-language) analog of
+// TestDebouncerCustomSerializer: with portable (PortableWorkflowArgs) inputs the
+// bounce must re-encode the new envelope with the same serializer as the initial
+// enqueue so the coalesced workflow decodes and runs with the latest input.
+func TestDebouncerPortableSerializer(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	dbosCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
+
+	RegisterWorkflow(dbosCtx, debouncePortableEchoWorkflow)
+	deb, err := NewDebouncer(dbosCtx, debouncePortableEchoWorkflow)
+	require.NoError(t, err, "failed to create the debouncer")
+	require.NoError(t, Launch(dbosCtx))
+
+	args1 := PortableWorkflowArgs{PositionalArgs: []any{"input-1"}}
+	args2 := PortableWorkflowArgs{PositionalArgs: []any{"input-2"}}
+
+	h1, err := deb.Debounce(dbosCtx, "portable-debounce-key", 10*time.Second, args1)
+	require.NoError(t, err, "first debounce call should enqueue the debounced workflow")
+
+	// Second call while the debounced workflow is pending: bounces it with the
+	// portable-encoded envelope.
+	h2, err := deb.Debounce(dbosCtx, "portable-debounce-key", 500*time.Millisecond, args2)
+	require.NoError(t, err, "bounce must handle portable-envelope inputs")
+	require.Equal(t, h1.GetWorkflowID(), h2.GetWorkflowID(), "both handles must target the first call's workflow")
+
+	result, err := h2.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "input-2", result, "debounced workflow must run with the latest input")
+}
+
 // Helper test workflows
 func debounceTestWorkflow(ctx Context, input string) (string, error) {
 	return input, nil
+}
+
+// enqueueDedupInput carries the target coordinates for workflowEnqueuesWithDedup.
+type enqueueDedupInput struct {
+	QueueName string
+	WfName    string
+	DedupID   string
+}
+
+// workflowEnqueuesWithDedup enqueues a workflow under a deduplication ID from
+// within a workflow. When the ID is already held, the DBOS.enqueue step fails
+// with ErrQueueDeduplicated and that outcome is checkpointed, so a recovery
+// replay decodes the error from the database instead of re-running the insert.
+func workflowEnqueuesWithDedup(ctx Context, in enqueueDedupInput) (string, error) {
+	_, err := Enqueue[string](ctx, in.QueueName, in.WfName, "conflicting-input",
+		WithEnqueueDeduplicationID(in.DedupID))
+	if err != nil {
+		if errors.Is(err, ErrQueueDeduplicated) {
+			return "dedup-detected", nil
+		}
+		return "unexpected: " + err.Error(), nil
+	}
+	return "no-conflict", nil
 }
 
 // Helper workflow that calls Debounce from within a workflow
@@ -376,6 +443,13 @@ func TestDebouncer(t *testing.T) {
 		require.Equal(t, ErrorCodeStepExecution, dbosErr.Code)
 		require.Contains(t, err.Error(), "cannot call Debounce within a step")
 	})
+
+	t.Run("NegativeDelayRejected", func(t *testing.T) {
+		_, err := debouncer10sTimeout.Debounce(dbosCtx, "negative-delay-key", -time.Second, "input")
+		require.Error(t, err, "a negative debounce delay must be rejected")
+		assert.ErrorIs(t, err, ErrInvalidOption)
+		assert.Contains(t, err.Error(), "cannot be negative")
+	})
 }
 
 func TestDebouncerCreatedAfterLaunch(t *testing.T) {
@@ -622,6 +696,74 @@ func TestDebounceKeyConflicts(t *testing.T) {
 
 		require.NoError(t, CancelWorkflow(dbosCtx, holder.GetWorkflowID()))
 	})
+}
+
+// TestRecoveryEnqueueWithDedupID exercises the Enqueue deduplication-conflict
+// path where the error is read back from the database and deserialized rather
+// than produced live. A workflow enqueues under a held dedup ID; the DBOS.enqueue
+// step records the ErrQueueDeduplicated outcome. The holder is then removed and
+// the caller recovered: on replay the enqueue step is served from its checkpoint,
+// so a surviving "dedup-detected" result proves the persisted error decoded back
+// into a value that still matches ErrQueueDeduplicated. A live re-run (holder
+// gone) would instead succeed and return "no-conflict". Both the gob (Go<->Go)
+// and portable (cross-language) error encodings are covered.
+func TestRecoveryEnqueueWithDedupID(t *testing.T) {
+	run := func(t *testing.T, portable bool) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+		queue, err := RegisterQueue(dbosCtx, "recovery-dedup-queue")
+		require.NoError(t, err)
+		RegisterWorkflow(dbosCtx, debounceTestWorkflow)
+		RegisterWorkflow(dbosCtx, workflowEnqueuesWithDedup)
+		require.NoError(t, Launch(dbosCtx))
+
+		fqn := resolveWorkflowFunctionName(debounceTestWorkflow)
+		dedupID := "recovery-dedup-id"
+
+		// A delayed enqueue holds the dedup slot the workflow will collide with.
+		holder, err := Enqueue[string](dbosCtx, queue.GetName(), fqn, "holder-input",
+			WithEnqueueDeduplicationID(dedupID),
+			WithEnqueueDelay(time.Minute))
+		require.NoError(t, err, "failed to enqueue the holder")
+
+		var wfOpts []WorkflowOption
+		if portable {
+			wfOpts = append(wfOpts, WithPortableWorkflow())
+		}
+		in := enqueueDedupInput{QueueName: queue.GetName(), WfName: fqn, DedupID: dedupID}
+		handle, err := RunWorkflow(dbosCtx, workflowEnqueuesWithDedup, in, wfOpts...)
+		require.NoError(t, err, "failed to start the enqueueing workflow")
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "the workflow itself should not error")
+		require.Equal(t, "dedup-detected", result, "the live enqueue should hit the dedup conflict")
+
+		// Free the dedup slot: a live re-execution of the enqueue step would now
+		// succeed, so any surviving "dedup-detected" after recovery must come from
+		// the checkpointed (and decoded) step error, not a fresh insert.
+		require.NoError(t, CancelWorkflow(dbosCtx, holder.GetWorkflowID()))
+
+		// Recover the caller from scratch; the enqueue step replays from its
+		// checkpoint, decoding the persisted ErrQueueDeduplicated.
+		setWorkflowStatusPending(t, dbosCtx, handle.GetWorkflowID())
+		recovered, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		var replayed WorkflowHandle[any]
+		for _, h := range recovered {
+			if h.GetWorkflowID() == handle.GetWorkflowID() {
+				replayed = h
+			}
+		}
+		require.NotNil(t, replayed, "the caller workflow should have been recovered")
+
+		replayResult, err := replayed.GetResult()
+		require.NoError(t, err, "the replayed caller should complete")
+		assert.Equal(t, "dedup-detected", replayResult,
+			"the checkpointed dedup error must decode back into an ErrQueueDeduplicated match")
+	}
+
+	t.Run("Gob", func(t *testing.T) { run(t, false) })
+	t.Run("Portable", func(t *testing.T) { run(t, true) })
 }
 
 // TestConcurrentDebounce races concurrent Debounce calls on one key: every call
