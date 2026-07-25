@@ -125,6 +125,9 @@ var sqliteMigration40SQL string
 //go:embed migrations/sqlite/41_add_schedule_name.sql
 var sqliteMigration41SQL string
 
+//go:embed migrations/sqlite/42_add_debounce_columns.sql
+var sqliteMigration42SQL string
+
 // BuildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
 // 38, and 39 have no SQLite counterpart and are omitted.
@@ -166,6 +169,7 @@ func BuildSqliteMigrations() []MigrationFile {
 		{Version: 37, SQL: sqliteMigration37SQL},
 		{Version: 40, SQL: sqliteMigration40SQL},
 		{Version: 41, SQL: sqliteMigration41SQL},
+		{Version: 42, SQL: sqliteMigration42SQL},
 	}
 }
 

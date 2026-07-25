@@ -52,7 +52,7 @@ func openUserBackend(t *testing.T) *userBackend {
 // WithDataSourceName. The two concrete branches instantiate the generic
 // NewDataSource with the real engine type. NewDataSource creates the completion
 // table eagerly, so any failure is surfaced here.
-func (u *userBackend) register(t *testing.T, ctx DBOSContext, name string, opts ...DataSourceOption) *DataSource {
+func (u *userBackend) register(t *testing.T, ctx Context, name string, opts ...DataSourceOption) *DataSource {
 	t.Helper()
 	opts = append(opts, WithDataSourceName(name))
 	var (
@@ -351,7 +351,7 @@ func TestNewDataSourceNoDDLPrivileges(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, ds)
 
-		wf := func(dctx DBOSContext, item string) (int64, error) {
+		wf := func(dctx Context, item string) (int64, error) {
 			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
 				_, e := tx.Exec(c, fmt.Sprintf(`INSERT INTO %q.kv (k, v) VALUES ($1, $2)`, schema), "k1", item)
 				return 7, e
@@ -385,7 +385,7 @@ func TestRunAsTransaction(t *testing.T) {
 		ds := ub.register(t, ctx, "app")
 
 		var runs atomic.Int32
-		wf := func(dctx DBOSContext, item string) (int64, error) {
+		wf := func(dctx Context, item string) (int64, error) {
 			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
 				runs.Add(1)
 				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", item); err != nil {
@@ -426,7 +426,7 @@ func TestRunAsTransaction(t *testing.T) {
 		ds := ub.register(t, ctx, "app")
 
 		var runs atomic.Int32
-		wf := func(dctx DBOSContext, _ string) (int64, error) {
+		wf := func(dctx Context, _ string) (int64, error) {
 			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
 				n := runs.Add(1)
 				// Insert on every attempt; failing attempts must roll back.
@@ -465,7 +465,7 @@ func TestRunAsTransaction(t *testing.T) {
 
 		var attempts atomic.Int32
 		started := NewEvent()
-		wf := func(dctx DBOSContext, _ string) (string, error) {
+		wf := func(dctx Context, _ string) (string, error) {
 			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
 				if attempts.Add(1) == 1 {
 					started.Set()
@@ -493,7 +493,7 @@ func TestRunAsTransaction(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error from cancelled workflow")
-		require.True(t, errors.Is(err, &DBOSError{Code: WorkflowCancelled}), "expected WorkflowCancelled error, got: %v", err)
+		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled error, got: %v", err)
 
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()
@@ -530,7 +530,7 @@ func TestRunAsTransaction(t *testing.T) {
 		ds := ub.register(t, ctx, "app")
 
 		var runs atomic.Int32
-		wf := func(dctx DBOSContext, _ string) (int64, error) {
+		wf := func(dctx Context, _ string) (int64, error) {
 			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
 				runs.Add(1)
 				_, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "v")
@@ -566,7 +566,7 @@ func TestRunAsTransaction(t *testing.T) {
 		ds := ub.register(t, ctx, "app")
 
 		var runs atomic.Int32
-		wf := func(dctx DBOSContext, _ string) (int64, error) {
+		wf := func(dctx Context, _ string) (int64, error) {
 			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
 				runs.Add(1)
 				_, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "v")
@@ -628,7 +628,7 @@ func TestRunAsTransaction(t *testing.T) {
 				return 0, err
 			}
 		}
-		wf := func(dctx DBOSContext, _ string) (string, error) {
+		wf := func(dctx Context, _ string) (string, error) {
 			if _, err := RunAsTransaction(dctx, ds, insert("a")); err != nil { // step 0
 				return "", err
 			}
@@ -688,7 +688,7 @@ func TestRunAsTransaction(t *testing.T) {
 		ub := openUserBackend(t)
 		ds := ub.register(t, ctx, "app")
 
-		insertTxn := func(dctx DBOSContext, key string) (string, error) {
+		insertTxn := func(dctx Context, key string) (string, error) {
 			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
 				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), key, "inner"); err != nil {
 					return "", err
@@ -696,10 +696,10 @@ func TestRunAsTransaction(t *testing.T) {
 				return "inner-ok", nil
 			})
 		}
-		wf := func(dctx DBOSContext, _ string) (string, error) {
+		wf := func(dctx Context, _ string) (string, error) {
 			// Durable step 0: a RunAsStep wrapping a within-step transaction (allowed).
 			if _, err := RunAsStep(dctx, func(c context.Context) (string, error) {
-				return insertTxn(c.(DBOSContext), "k_step")
+				return insertTxn(c.(Context), "k_step")
 			}); err != nil {
 				return "", err
 			}
@@ -710,7 +710,7 @@ func TestRunAsTransaction(t *testing.T) {
 				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_outer", "outer"); err != nil {
 					return "", err
 				}
-				if _, nerr := insertTxn(c.(DBOSContext), "k_inner"); nerr != nil {
+				if _, nerr := insertTxn(c.(Context), "k_inner"); nerr != nil {
 					return nerr.Error(), nil
 				}
 				return "unexpected", nil
@@ -763,11 +763,11 @@ func TestRunAsTransaction(t *testing.T) {
 		require.True(t, sharedDS.sameAsSystemDB)
 
 		const wantErr = "permanent app failure"
-		wf := func(dctx DBOSContext, _ string) (string, error) {
+		wf := func(dctx Context, _ string) (string, error) {
 			// Step 0: a within-step transaction that errors. It rolls back and,
 			// because the enclosing step owns durability, records nothing itself.
 			if _, err := RunAsStep(dctx, func(c context.Context) (string, error) {
-				_, terr := RunAsTransaction(c.(DBOSContext), ds, func(c context.Context, tx Tx) (string, error) {
+				_, terr := RunAsTransaction(c.(Context), ds, func(c context.Context, tx Tx) (string, error) {
 					if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_step", "rollback"); err != nil {
 						return "", err
 					}
@@ -868,7 +868,7 @@ func TestRunAsTransaction(t *testing.T) {
 // Returns the context, the registered data source, and a userBackend over the
 // shared pool for assertions. The context is unlaunched (caller registers
 // workflows then calls Launch).
-func setupSharedDBOS(t *testing.T) (DBOSContext, *DataSource, *userBackend) {
+func setupSharedDBOS(t *testing.T) (Context, *DataSource, *userBackend) {
 	t.Helper()
 	var (
 		config Config
@@ -881,7 +881,7 @@ func setupSharedDBOS(t *testing.T) (DBOSContext, *DataSource, *userBackend) {
 		path := filepath.Join(t.TempDir(), "shared.db")
 		db, err := sysdb.OpenSQLitePool(context.Background(), "sqlite:"+path)
 		require.NoError(t, err)
-		config = Config{AppName: "test-app", SqliteSystemDB: db}
+		config = Config{AppName: "test-app", SQLiteSystemDB: db}
 		ub = &userBackend{pool: sysdb.NewSQLPool(db), dialect: sysdb.SqliteDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 	} else {
 		url := getDatabaseURL()
@@ -894,7 +894,7 @@ func setupSharedDBOS(t *testing.T) (DBOSContext, *DataSource, *userBackend) {
 		ub = &userBackend{pool: sysdb.NewPgxPool(pool), dialect: sysdb.PostgresDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 	}
 
-	ctx, err := NewDBOSContext(context.Background(), config)
+	ctx, err := NewContext(context.Background(), config)
 	require.NoError(t, err)
 	// Shutdown owns the shared pool (sysDB.shutdown closes it); don't close it
 	// separately here.
@@ -920,7 +920,7 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 		ctx, ds, ub := setupSharedDBOS(t)
 
 		var runs atomic.Int32
-		wf := func(dctx DBOSContext, item string) (int64, error) {
+		wf := func(dctx Context, item string) (int64, error) {
 			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
 				runs.Add(1)
 				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", item); err != nil {
@@ -975,9 +975,9 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 		ctx, ds, ub := setupSharedDBOS(t)
 
 		var txRuns atomic.Int32
-		wf := func(dctx DBOSContext, _ string) (string, error) {
+		wf := func(dctx Context, _ string) (string, error) {
 			return RunAsStep(dctx, func(c context.Context) (string, error) {
-				return RunAsTransaction(c.(DBOSContext), ds, func(c context.Context, tx Tx) (string, error) {
+				return RunAsTransaction(c.(Context), ds, func(c context.Context, tx Tx) (string, error) {
 					txRuns.Add(1)
 					if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "inner"); err != nil {
 						return "", err
@@ -1015,12 +1015,12 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 	t.Run("RejectsNested", func(t *testing.T) {
 		ctx, ds, ub := setupSharedDBOS(t)
 
-		wf := func(dctx DBOSContext, _ string) (string, error) {
+		wf := func(dctx Context, _ string) (string, error) {
 			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
 				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_outer", "outer"); err != nil {
 					return "", err
 				}
-				_, nerr := RunAsTransaction(c.(DBOSContext), ds, func(c context.Context, tx Tx) (string, error) {
+				_, nerr := RunAsTransaction(c.(Context), ds, func(c context.Context, tx Tx) (string, error) {
 					_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_inner", "inner")
 					return "", e
 				})

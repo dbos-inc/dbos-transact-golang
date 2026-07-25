@@ -21,7 +21,7 @@ func TestLogger(t *testing.T) {
 	databaseURL := backendDatabaseURL(t)
 
 	t.Run("Default logger", func(t *testing.T) {
-		dbosCtx, err := NewDBOSContext(context.Background(), Config{
+		dbosCtx, err := NewContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 		}) // Create executor with default logger
@@ -53,7 +53,7 @@ func TestLogger(t *testing.T) {
 		// Add some context to the slog logger
 		slogLogger = slogLogger.With("service", "dbos-test", "environment", "test")
 
-		dbosCtx, err := NewDBOSContext(context.Background(), Config{
+		dbosCtx, err := NewContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-app",
 			Logger:      slogLogger,

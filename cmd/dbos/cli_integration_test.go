@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -235,13 +236,18 @@ func TestCLIWorkflow(t *testing.T) {
 			stdout, _ := cmd.StdoutPipe()
 			stderr, _ := cmd.StderrPipe()
 			require.NoError(t, cmd.Start(), "Failed to start application")
+			// Joined in the cleanup below so no t.Logf races test teardown
+			var logWg sync.WaitGroup
+			logWg.Add(2)
 			go func() {
+				defer logWg.Done()
 				scanner := bufio.NewScanner(stdout)
 				for scanner.Scan() {
 					t.Logf("[app stdout] %s", scanner.Text())
 				}
 			}()
 			go func() {
+				defer logWg.Done()
 				scanner := bufio.NewScanner(stderr)
 				for scanner.Scan() {
 					t.Logf("[app stderr] %s", scanner.Text())
@@ -262,6 +268,7 @@ func TestCLIWorkflow(t *testing.T) {
 				fmt.Printf("Cleaning up application process %d\n", cmd.Process.Pid)
 				err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
 				require.NoError(t, err, "Failed to send interrupt signal to application process")
+				logWg.Wait()
 				_ = cmd.Wait()
 			})
 

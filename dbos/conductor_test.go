@@ -1050,10 +1050,12 @@ func TestConductorScheduleHandlers(t *testing.T) {
 	require.NoError(t, dbosCtx.Launch())
 
 	const baseSchedule = "cond-base-schedule"
-	require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+	require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: baseSchedule,
 		Schedule:     "0 0 0 1 1 *",
-	}, WithScheduleContext("hello")))
+		Workflow:     testWorkflowForSchedule,
+		Context:      "hello",
+	}))
 
 	mockServer := newMockWebSocketServer()
 	t.Cleanup(mockServer.shutdown)
@@ -1150,9 +1152,10 @@ func TestConductorScheduleHandlers(t *testing.T) {
 	t.Run("backfill_schedule", func(t *testing.T) {
 		// Create a fast-cron schedule so backfill produces multiple ticks.
 		const fastSchedule = "cond-backfill-schedule"
-		require.NoError(t, CreateSchedule(dbosCtx, testWorkflowForSchedule, CreateScheduleRequest{
+		require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
 			ScheduleName: fastSchedule,
 			Schedule:     "*/1 * * * * *",
+			Workflow:     testWorkflowForSchedule,
 		}))
 		t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, fastSchedule) })
 
@@ -1289,7 +1292,7 @@ func TestConductorQueueHandlers(t *testing.T) {
 }
 
 // conductorAggregatesWorkflow is a no-op workflow used by TestConductorWorkflowAggregatesHandler.
-func conductorAggregatesWorkflow(_ DBOSContext, in string) (string, error) {
+func conductorAggregatesWorkflow(_ Context, in string) (string, error) {
 	return in, nil
 }
 
@@ -1366,7 +1369,7 @@ func TestConductorWorkflowAggregatesHandler(t *testing.T) {
 }
 
 // conductorStepAggWorkflow runs a single named step for the conductor handler test.
-func conductorStepAggWorkflow(ctx DBOSContext, _ string) (string, error) {
+func conductorStepAggWorkflow(ctx Context, _ string) (string, error) {
 	return RunAsStep(ctx, stepAggOK, WithStepName("condAggStep"))
 }
 
@@ -1445,7 +1448,7 @@ func conductorPrivateModeStep(_ context.Context, in string) (string, error) {
 }
 
 // conductorPrivateModeWorkflow runs a single step and returns its output.
-func conductorPrivateModeWorkflow(ctx DBOSContext, in string) (string, error) {
+func conductorPrivateModeWorkflow(ctx Context, in string) (string, error) {
 	return RunAsStep(ctx, func(c context.Context) (string, error) {
 		return conductorPrivateModeStep(c, in)
 	})
@@ -1544,7 +1547,7 @@ func TestConductorPrivateMode(t *testing.T) {
 
 // conductorPaginationWorkflow runs five named steps so list_steps pagination
 // can be exercised against a stable, ordered set of function IDs (0..4).
-func conductorPaginationWorkflow(ctx DBOSContext, _ string) (string, error) {
+func conductorPaginationWorkflow(ctx Context, _ string) (string, error) {
 	for i := 0; i < 5; i++ {
 		_, err := RunAsStep(ctx, func(c context.Context) (string, error) {
 			return "ok", nil

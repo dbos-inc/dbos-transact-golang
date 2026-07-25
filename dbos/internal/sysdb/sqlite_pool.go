@@ -3,6 +3,7 @@ package sysdb
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -63,10 +64,15 @@ func SqliteDSN(raw string) (string, error) {
 	return dsn, nil
 }
 
-// OpenSQLitePool opens a *sql.DB backed by modernc.org/sqlite, ensures the
-// parent directory of file-backed databases exists, applies recommended
-// PRAGMAs, and returns the pool. The caller owns Close.
+// OpenSQLitePool opens a *sql.DB backed by the registered SQLite driver,
+// ensures the parent directory of file-backed databases exists, applies
+// recommended PRAGMAs, and returns the pool. The caller owns Close. It
+// errors if no SQLite driver is registered (see RegisterSQLiteDriver).
 func OpenSQLitePool(ctx context.Context, databaseURL string) (*sql.DB, error) {
+	driver, err := registeredSQLiteDriver()
+	if err != nil {
+		return nil, err
+	}
 	dsn, err := SqliteDSN(databaseURL)
 	if err != nil {
 		return nil, err
@@ -102,7 +108,7 @@ func OpenSQLitePool(ctx context.Context, databaseURL string) (*sql.DB, error) {
 	dsn = withSqlitePragma(dsn, "foreign_keys(ON)")
 	dsn = withSqlitePragma(dsn, "synchronous(NORMAL)")
 
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open(driver.DriverName, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database %q: %v", dsn, err)
 	}
@@ -122,13 +128,18 @@ func OpenSQLitePool(ctx context.Context, databaseURL string) (*sql.DB, error) {
 // owns its lifecycle and PRAGMA configuration); otherwise the function opens
 // a fresh pool from databaseURL and applies default PRAGMAs.
 // Either way it runs SQLite migrations and returns a sysDB.
-func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Time, any) (*string, string, error),
+func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Time, json.RawMessage) (*string, string, error),
 
 	ctx context.Context,
 	databaseURL, databaseSchema string,
 	customDB *sql.DB,
 	logger *slog.Logger,
 ) (SystemDatabase, error) {
+	// The driver is required even with a custom handle: error classification
+	// (retryable/contention/constraint) needs its ErrorCode extractor.
+	if _, err := registeredSQLiteDriver(); err != nil {
+		return nil, err
+	}
 	var (
 		db    *sql.DB
 		owned bool

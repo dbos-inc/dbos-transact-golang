@@ -33,11 +33,11 @@ func TestConfig(t *testing.T) {
 	)
 	databaseURL := backendDatabaseURL(t)
 
-	t.Run("CreatesDBOSContext", func(t *testing.T) {
+	t.Run("CreatesContext", func(t *testing.T) {
 		t.Setenv("DBOS__APPVERSION", "v1.0.0")
 		t.Setenv("DBOS__APPID", "test-app-id")
 		t.Setenv("DBOS__VMID", "test-executor-id")
-		ctx, err := NewDBOSContext(context.Background(), Config{
+		ctx, err := NewContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-initialize",
 		})
@@ -50,8 +50,8 @@ func TestConfig(t *testing.T) {
 
 		require.NotNil(t, ctx)
 
-		// Test that executor implements DBOSContext interface
-		var _ DBOSContext = ctx
+		// Test that executor implements Context interface
+		var _ Context = ctx
 
 		// Test that we can call methods on the executor
 		appVersion := ctx.GetApplicationVersion()
@@ -67,13 +67,13 @@ func TestConfig(t *testing.T) {
 			DatabaseURL: databaseURL,
 		}
 
-		_, err := NewDBOSContext(context.Background(), config)
+		_, err := NewContext(context.Background(), config)
 		require.Error(t, err)
 
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected DBOSError, got %T", err)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected Error, got %T", err)
 
-		assert.Equal(t, InitializationError, dbosErr.Code)
+		assert.Equal(t, ErrorCodeInitialization, dbosErr.Code)
 
 		expectedMsg := "Error initializing DBOS Transact: missing required config field: appName"
 		assert.Equal(t, expectedMsg, dbosErr.Message)
@@ -84,13 +84,13 @@ func TestConfig(t *testing.T) {
 			AppName: "test-app",
 		}
 
-		_, err := NewDBOSContext(context.Background(), config)
+		_, err := NewContext(context.Background(), config)
 		require.Error(t, err)
 
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected DBOSError, got %T", err)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected Error, got %T", err)
 
-		assert.Equal(t, InitializationError, dbosErr.Code)
+		assert.Equal(t, ErrorCodeInitialization, dbosErr.Code)
 
 		expectedMsg := "Error initializing DBOS Transact: one of databaseURL, systemDBPool, or sqliteSystemDB must be provided"
 		assert.Equal(t, expectedMsg, dbosErr.Message)
@@ -102,7 +102,7 @@ func TestConfig(t *testing.T) {
 			t.Setenv("DBOS__APPVERSION", "")
 			t.Setenv("DBOS__VMID", "")
 
-			ctx, err := NewDBOSContext(context.Background(), Config{
+			ctx, err := NewContext(context.Background(), Config{
 				DatabaseURL:        databaseURL,
 				AppName:            "test-config-values",
 				ApplicationVersion: "config-v1.2.3",
@@ -123,7 +123,7 @@ func TestConfig(t *testing.T) {
 			t.Setenv("DBOS__APPVERSION", "env-v2.0.0")
 			t.Setenv("DBOS__VMID", "env-executor-456")
 
-			ctx, err := NewDBOSContext(context.Background(), Config{
+			ctx, err := NewContext(context.Background(), Config{
 				DatabaseURL:        databaseURL,
 				AppName:            "test-env-override",
 				ApplicationVersion: "config-v1.2.3",
@@ -146,7 +146,7 @@ func TestConfig(t *testing.T) {
 			t.Setenv("DBOS__APPVERSION", "")
 			t.Setenv("DBOS__VMID", "")
 
-			ctx, err := NewDBOSContext(context.Background(), Config{
+			ctx, err := NewContext(context.Background(), Config{
 				DatabaseURL: databaseURL,
 				AppName:     "test-defaults",
 				// ApplicationVersion and ExecutorID left empty
@@ -171,7 +171,7 @@ func TestConfig(t *testing.T) {
 			t.Setenv("DBOS__APPVERSION", "env-only-v3.0.0")
 			t.Setenv("DBOS__VMID", "env-only-executor")
 
-			ctx, err := NewDBOSContext(context.Background(), Config{
+			ctx, err := NewContext(context.Background(), Config{
 				DatabaseURL: databaseURL,
 				AppName:     "test-env-only",
 				// ApplicationVersion and ExecutorID left empty
@@ -191,7 +191,7 @@ func TestConfig(t *testing.T) {
 
 	t.Run("ConductorExecutorMetadata", func(t *testing.T) {
 		t.Run("AcceptsJSONSerializable", func(t *testing.T) {
-			ctx, err := NewDBOSContext(context.Background(), Config{
+			ctx, err := NewContext(context.Background(), Config{
 				DatabaseURL: databaseURL,
 				AppName:     "test-conductor-metadata-valid",
 				ConductorExecutorMetadata: map[string]any{
@@ -215,7 +215,7 @@ func TestConfig(t *testing.T) {
 		})
 
 		t.Run("RejectsNonSerializable", func(t *testing.T) {
-			_, err := NewDBOSContext(context.Background(), Config{
+			_, err := NewContext(context.Background(), Config{
 				DatabaseURL: databaseURL,
 				AppName:     "test-conductor-metadata-invalid",
 				ConductorExecutorMetadata: map[string]any{
@@ -233,7 +233,7 @@ func TestConfig(t *testing.T) {
 		t.Setenv("DBOS__APPID", "test-migration")
 		t.Setenv("DBOS__VMID", "test-executor-id")
 
-		ctx, err := NewDBOSContext(context.Background(), Config{
+		ctx, err := NewContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-migration",
 		})
@@ -309,13 +309,13 @@ func TestConfig(t *testing.T) {
 
 		err = sysDB.Pool().QueryRow(dbCtx, "SELECT version FROM dbos.dbos_migrations").Scan(&version)
 		require.NoError(t, err)
-		assert.Equal(t, int64(41), version, "migration version should be 41 (after all migrations including the schedule_name column)")
+		assert.Equal(t, int64(42), version, "migration version should be 42 (after all migrations including the debounce columns)")
 
 		// Test manual shutdown and recreate
 		Shutdown(ctx, 1*time.Minute)
 
 		// Recreate context - should have no error since DB is already migrated
-		ctx2, err := NewDBOSContext(context.Background(), Config{
+		ctx2, err := NewContext(context.Background(), Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-migration-recreate",
 		})
@@ -384,7 +384,7 @@ func TestConfig(t *testing.T) {
 		}
 
 		// Integration test: verify DBOS context works with key-value format
-		t.Run("DBOSContextCreation", func(t *testing.T) {
+		t.Run("ContextCreation", func(t *testing.T) {
 			// Use the actual password from config for integration test
 			actualPassword := parsedURL.ConnConfig.Password
 			var keyValueConnStr string
@@ -394,7 +394,7 @@ func TestConfig(t *testing.T) {
 				keyValueConnStr = fmt.Sprintf("user='%s' password='%s' database=%s host=%s%s", user, actualPassword, database, host, portSSL)
 			}
 
-			ctx, err := NewDBOSContext(context.Background(), Config{
+			ctx, err := NewContext(context.Background(), Config{
 				DatabaseURL: keyValueConnStr,
 				AppName:     "test-keyvalue-format",
 			})
@@ -473,9 +473,9 @@ func TestSystemDBStartupTimeoutBoundsSQLitePoolWait(t *testing.T) {
 
 	const timeout = 50 * time.Millisecond
 	started := time.Now()
-	_, err = NewDBOSContext(context.Background(), Config{
+	_, err = NewContext(context.Background(), Config{
 		AppName:                "startup-timeout-sqlite",
-		SqliteSystemDB:         db,
+		SQLiteSystemDB:         db,
 		SystemDBStartupTimeout: timeout,
 	})
 	elapsed := time.Since(started)
@@ -497,7 +497,7 @@ func TestSystemDBStartupTimeoutDiagnosesExhaustedPostgresPool(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Release()
 
-	_, err = NewDBOSContext(context.Background(), Config{
+	_, err = NewContext(context.Background(), Config{
 		AppName:                "startup-timeout-exhausted-pool",
 		SystemDBPool:           pool,
 		SystemDBStartupTimeout: 50 * time.Millisecond,
@@ -518,7 +518,7 @@ func (p *launchRecoveryFaultPool) Query(ctx context.Context, query string, args 
 }
 
 func TestLaunchFailureCleansUpStartedComponents(t *testing.T) {
-	ctx, err := NewDBOSContext(context.Background(), Config{
+	ctx, err := NewContext(context.Background(), Config{
 		AppName:     "test-launch-cleanup",
 		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
 	})
@@ -542,7 +542,7 @@ func TestLaunchFailureCleansUpStartedComponents(t *testing.T) {
 }
 
 func TestConcurrentLaunchOnlyStartsOnce(t *testing.T) {
-	ctx, err := NewDBOSContext(context.Background(), Config{
+	ctx, err := NewContext(context.Background(), Config{
 		AppName:     "test-concurrent-launch",
 		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
 	})
@@ -570,8 +570,35 @@ func TestConcurrentLaunchOnlyStartsOnce(t *testing.T) {
 	Shutdown(ctx, 5*time.Second)
 }
 
+func TestRunWorkflowBeforeLaunchFails(t *testing.T) {
+	ctx, err := NewContext(context.Background(), Config{
+		AppName:     "test-run-before-launch",
+		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+	})
+	require.NoError(t, err)
+	defer Shutdown(ctx, 5*time.Second)
+
+	wf := func(ctx Context, in string) (string, error) { return in, nil }
+	RegisterWorkflow(ctx, wf)
+
+	_, err = RunWorkflow(ctx, wf, "hello")
+	require.Error(t, err)
+	dbosErr := &Error{}
+	require.ErrorAs(t, err, &dbosErr)
+	assert.Equal(t, ErrorCodeInitialization, dbosErr.Code)
+	assert.Contains(t, err.Error(), "DBOS must be launched before running workflows")
+
+	require.NoError(t, Launch(ctx))
+
+	handle, err := RunWorkflow(ctx, wf, "hello")
+	require.NoError(t, err)
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "hello", result)
+}
+
 func TestConcurrentShutdownDoesNotWaitTwice(t *testing.T) {
-	ctx, err := NewDBOSContext(context.Background(), Config{
+	ctx, err := NewContext(context.Background(), Config{
 		AppName:     "test-concurrent-shutdown",
 		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
 	})
@@ -617,7 +644,7 @@ func (s *blockingScheduleListDB) ListSchedules(context.Context, sysdb.ListSchedu
 }
 
 func TestShutdownJoinsScheduleReconciler(t *testing.T) {
-	ctx, err := NewDBOSContext(context.Background(), Config{
+	ctx, err := NewContext(context.Background(), Config{
 		AppName:                  "test-reconciler-shutdown",
 		DatabaseURL:              "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
 		SchedulerPollingInterval: time.Hour,
@@ -676,8 +703,8 @@ func TestContext(t *testing.T) {
 		ctxWithValues := context.WithValue(baseCtx, key1, value1)
 		ctxWithValues = context.WithValue(ctxWithValues, key2, value2)
 
-		// Create DBOSContext with the seeded context
-		dbosCtx, err := NewDBOSContext(ctxWithValues, Config{
+		// Create Context with the seeded context
+		dbosCtx, err := NewContext(ctxWithValues, Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-context-values",
 		})
@@ -690,13 +717,13 @@ func TestContext(t *testing.T) {
 
 		require.NotNil(t, dbosCtx)
 
-		// Verify that the context values are preserved in DBOSContext
-		assert.Equal(t, value1, dbosCtx.Value(key1), "DBOSContext should preserve context value for key1")
-		assert.Equal(t, value2, dbosCtx.Value(key2), "DBOSContext should preserve context value for key2")
+		// Verify that the context values are preserved in Context
+		assert.Equal(t, value1, dbosCtx.Value(key1), "Context should preserve context value for key1")
+		assert.Equal(t, value2, dbosCtx.Value(key2), "Context should preserve context value for key2")
 
 		// Verify that non-existent keys return nil
 		nonExistentKey := contextKey("non-existent-key")
-		assert.Nil(t, dbosCtx.Value(nonExistentKey), "DBOSContext should return nil for non-existent keys")
+		assert.Nil(t, dbosCtx.Value(nonExistentKey), "Context should return nil for non-existent keys")
 	})
 
 	t.Run("FromPreservesDerivedContextValues", func(t *testing.T) {
@@ -714,8 +741,8 @@ func TestContext(t *testing.T) {
 		baseCtx = context.WithValue(baseCtx, key2, value2)
 		derivedCtx := context.WithValue(baseCtx, key3, value3)
 
-		// Create DBOSContext with the base context
-		dbosCtx, err := NewDBOSContext(baseCtx, Config{
+		// Create Context with the base context
+		dbosCtx, err := NewContext(baseCtx, Config{
 			DatabaseURL: databaseURL,
 			AppName:     "test-context-from",
 		})
@@ -752,7 +779,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 	databaseURL := getDatabaseURL()
 	customSchema := "dbos_custom_test"
 
-	ctx, err := NewDBOSContext(context.Background(), Config{
+	ctx, err := NewContext(context.Background(), Config{
 		DatabaseURL:    databaseURL,
 		AppName:        "test-custom-schema-migration",
 		DatabaseSchema: customSchema,
@@ -833,7 +860,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 
 		err = sysDB.Pool().QueryRow(dbCtx, fmt.Sprintf("SELECT version FROM %s.dbos_migrations", customSchema)).Scan(&version)
 		require.NoError(t, err)
-		assert.Equal(t, int64(41), version, "migration version should be 41 (after all migrations including the schedule_name column)")
+		assert.Equal(t, int64(42), version, "migration version should be 42 (after all migrations including the debounce columns)")
 	})
 
 	// Test workflows for exercising Send/Recv and SetEvent/GetEvent
@@ -846,7 +873,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 	var workflowBReadyEvent *Event
 
 	// Workflow A: Uses Send() and GetEvent() - waits for workflow B
-	sendGetEventWorkflow := func(ctx DBOSContext, input testWorkflowInput) (string, error) {
+	sendGetEventWorkflow := func(ctx Context, input testWorkflowInput) (string, error) {
 		// Send a message to the partner workflow
 		err := Send(ctx, input.PartnerWorkflowID, input.Message, "test-topic")
 		if err != nil {
@@ -863,7 +890,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 	}
 
 	// Workflow B: Uses Recv() and SetEvent() - waits for workflow A
-	recvSetEventWorkflow := func(ctx DBOSContext, input testWorkflowInput) (string, error) {
+	recvSetEventWorkflow := func(ctx Context, input testWorkflowInput) (string, error) {
 		// Signal that this workflow has started and is ready to receive
 		if workflowBReadyEvent != nil {
 			workflowBReadyEvent.Set()
@@ -972,7 +999,7 @@ func TestCustomPool(t *testing.T) {
 	}
 
 	// Workflow A: Uses Send() and GetEvent() - waits for workflow B
-	sendGetEventWorkflowCustom := func(ctx DBOSContext, input customPoolWorkflowInput) (string, error) {
+	sendGetEventWorkflowCustom := func(ctx Context, input customPoolWorkflowInput) (string, error) {
 		// Send a message to the partner workflow
 		err := Send(ctx, input.PartnerWorkflowID, input.Message, "custom-pool-topic")
 		if err != nil {
@@ -989,7 +1016,7 @@ func TestCustomPool(t *testing.T) {
 	}
 
 	// Workflow B: Uses Recv() and SetEvent() - waits for workflow A
-	recvSetEventWorkflowCustom := func(ctx DBOSContext, input customPoolWorkflowInput) (string, error) {
+	recvSetEventWorkflowCustom := func(ctx Context, input customPoolWorkflowInput) (string, error) {
 		// Receive a message from the partner workflow
 		receivedMsg, err := Recv[string](ctx, "custom-pool-topic", 5*time.Hour)
 		if err != nil {
@@ -1028,7 +1055,7 @@ func TestCustomPool(t *testing.T) {
 			SystemDBPool: pool,
 		}
 
-		customdbosContext, err := NewDBOSContext(context.Background(), config)
+		customdbosContext, err := NewContext(context.Background(), config)
 		require.NoError(t, err)
 		require.NotNil(t, customdbosContext)
 
@@ -1105,7 +1132,7 @@ func TestCustomPool(t *testing.T) {
 		assert.Equal(t, "DBOS.setEvent", stepsB[2].StepName, "third step should be SetEvent")
 	})
 
-	wf := func(ctx DBOSContext, input string) (string, error) {
+	wf := func(ctx Context, input string) (string, error) {
 		return input, nil
 	}
 
@@ -1122,7 +1149,7 @@ func TestCustomPool(t *testing.T) {
 			AppName:      "test-invalid-db-url",
 			SystemDBPool: pool,
 		}
-		dbosCtx, err := NewDBOSContext(context.Background(), config)
+		dbosCtx, err := NewContext(context.Background(), config)
 		require.NoError(t, err)
 
 		RegisterWorkflow(dbosCtx, wf)
@@ -1150,11 +1177,11 @@ func TestCustomPool(t *testing.T) {
 			AppName:      "test-invalid-custom-pool",
 			SystemDBPool: pool,
 		}
-		_, err = NewDBOSContext(context.Background(), config)
+		_, err = NewContext(context.Background(), config)
 		require.Error(t, err)
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected DBOSError, got %T", err)
-		assert.Equal(t, InitializationError, dbosErr.Code)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected Error, got %T", err)
+		assert.Equal(t, ErrorCodeInitialization, dbosErr.Code)
 		expectedMsg := "Error initializing DBOS Transact: failed to validate custom pool"
 		assert.Contains(t, dbosErr.Message, expectedMsg)
 	})
@@ -1203,6 +1230,69 @@ func TestCustomPool(t *testing.T) {
 		systemDB.Shutdown(ctx, shutdownTimeout)
 		assert.False(t, systemDB.(*sysdb.SysDB).Launched())
 	})
+}
+
+// TestSystemDBShutdownReportsPending verifies SysDB.Shutdown returns the
+// sub-components that failed to stop within the timeout.
+func TestSystemDBShutdownReportsPending(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	dbPath := filepath.Join(t.TempDir(), "dbos.db")
+	customDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer customDB.Close()
+
+	systemDB, err := sysdb.NewSystemDatabase(ctx, sysdb.NewSystemDatabaseInput{
+		DatabaseSchema: "dbos",
+		CustomSqliteDB: customDB,
+		Logger:         logger,
+	})
+	require.NoError(t, err)
+	systemDB.Launch(ctx)
+
+	// ctx is deliberately not cancelled, so the notification loop cannot exit
+	pending := systemDB.Shutdown(ctx, 100*time.Millisecond)
+	require.Contains(t, pending, "notification listener")
+	require.True(t, systemDB.(*sysdb.SysDB).Launched(), "a timed-out shutdown must leave the listener tracked so later calls re-check it")
+
+	cancel()
+	require.Eventually(t, func() bool {
+		return len(systemDB.Shutdown(ctx, 100*time.Millisecond)) == 0
+	}, 5*time.Second, 100*time.Millisecond, "notification loop should exit after cancel")
+	require.False(t, systemDB.(*sysdb.SysDB).Launched())
+}
+
+// TestClientShutdownReportsSystemDBTimeout verifies Client.Shutdown returns an
+// error when the system database fails to shut down within the timeout.
+func TestClientShutdownReportsSystemDBTimeout(t *testing.T) {
+	skipIfSqlite(t, "holds a pgx pool connection to block pool close")
+	ctx := context.Background()
+
+	poolConfig, err := pgxpool.ParseConfig(getDatabaseURL())
+	require.NoError(t, err)
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	require.NoError(t, err)
+
+	client, err := NewClient(ctx, ClientConfig{
+		SystemDBPool:   pool,
+		DatabaseSchema: "dbos_test_shutdown_client",
+	})
+	require.NoError(t, err)
+
+	// A held connection blocks pool.Close() past the timeout
+	conn, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+
+	err = client.Shutdown(client, 500 * time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "system database connection pool")
+
+	conn.Release()
+	require.Eventually(t, func() bool {
+		return pool.Stat().TotalConns() == 0
+	}, 5*time.Second, 100*time.Millisecond, "pool should close after connection release")
 }
 
 // -----------------------------------------------------------------------------
@@ -1664,25 +1754,25 @@ func TestSQLiteDialectClassification(t *testing.T) {
 	}
 }
 
-// TestNewDBOSContextSQLiteRoundtrip exercises the user-facing Config path with
-// a sqlite: URL. NewDBOSContext + Shutdown should succeed.
-func TestNewDBOSContextSQLiteRoundtrip(t *testing.T) {
+// TestNewContextSQLiteRoundtrip exercises the user-facing Config path with
+// a sqlite: URL. NewContext + Shutdown should succeed.
+func TestNewContextSQLiteRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "dbos.db")
 	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	ctx, err := NewDBOSContext(context.Background(), Config{
+	ctx, err := NewContext(context.Background(), Config{
 		AppName:     "test-sqlite",
 		DatabaseURL: "sqlite:" + dbPath,
 		Logger:      logger,
 	})
-	require.NoError(t, err, "NewDBOSContext with sqlite URL should succeed")
-	ctx.Shutdown(0)
+	require.NoError(t, err, "NewContext with sqlite URL should succeed")
+	ctx.Shutdown(ctx, 0)
 }
 
-// TestNewDBOSContextRejectsUnknownScheme verifies up-front URL validation
+// TestNewContextRejectsUnknownScheme verifies up-front URL validation
 // fires for unsupported / mistyped schemes (backend-agnostic).
-func TestNewDBOSContextRejectsUnknownScheme(t *testing.T) {
+func TestNewContextRejectsUnknownScheme(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelError}))
 	cases := []string{
 		"mysql://h/d",
@@ -1690,12 +1780,12 @@ func TestNewDBOSContextRejectsUnknownScheme(t *testing.T) {
 		"justastring",
 	}
 	for _, bad := range cases {
-		_, err := NewDBOSContext(context.Background(), Config{
+		_, err := NewContext(context.Background(), Config{
 			AppName:     "test",
 			DatabaseURL: bad,
 			Logger:      logger,
 		})
-		assert.Errorf(t, err, "expected NewDBOSContext to reject %q", bad)
+		assert.Errorf(t, err, "expected NewContext to reject %q", bad)
 	}
 }
 
@@ -1707,7 +1797,7 @@ func (w testWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// TestCustomSqlitePool mirrors TestCustomPool for the SqliteSystemDB config
+// TestCustomSqlitePool mirrors TestCustomPool for the SQLiteSystemDB config
 // field: caller-supplied *sql.DB instead of *pgxpool.Pool. Always runs (does
 // not depend on DBOS_TEST_BACKEND) because every subtest constructs its own
 // sqlite handle.
@@ -1727,13 +1817,13 @@ func TestCustomSqlitePool(t *testing.T) {
 		Message           string
 	}
 
-	sendGetEventWorkflowCustom := func(ctx DBOSContext, input customPoolWorkflowInput) (string, error) {
+	sendGetEventWorkflowCustom := func(ctx Context, input customPoolWorkflowInput) (string, error) {
 		if err := Send(ctx, input.PartnerWorkflowID, input.Message, "sqlite-custom-pool-topic"); err != nil {
 			return "", err
 		}
 		return GetEvent[string](ctx, input.PartnerWorkflowID, "sqlite-custom-response-key", 5*time.Hour)
 	}
-	recvSetEventWorkflowCustom := func(ctx DBOSContext, input customPoolWorkflowInput) (string, error) {
+	recvSetEventWorkflowCustom := func(ctx Context, input customPoolWorkflowInput) (string, error) {
 		msg, err := Recv[string](ctx, "sqlite-custom-pool-topic", 5*time.Hour)
 		if err != nil {
 			return "", err
@@ -1755,9 +1845,9 @@ func TestCustomSqlitePool(t *testing.T) {
 
 		config := Config{
 			AppName:        "test-custom-sqlite-db",
-			SqliteSystemDB: db,
+			SQLiteSystemDB: db,
 		}
-		customdbosContext, err := NewDBOSContext(context.Background(), config)
+		customdbosContext, err := NewContext(context.Background(), config)
 		require.NoError(t, err)
 		require.NotNil(t, customdbosContext)
 
@@ -1801,7 +1891,7 @@ func TestCustomSqlitePool(t *testing.T) {
 	})
 
 	t.Run("CustomSqliteDBTakesPrecedence", func(t *testing.T) {
-		// An invalid DatabaseURL is ignored when SqliteSystemDB is set.
+		// An invalid DatabaseURL is ignored when SQLiteSystemDB is set.
 		dbPath := filepath.Join(t.TempDir(), "dbos.db")
 		db, err := sql.Open("sqlite", dbPath)
 		require.NoError(t, err)
@@ -1809,9 +1899,9 @@ func TestCustomSqlitePool(t *testing.T) {
 		config := Config{
 			DatabaseURL:    "postgres://invalid:invalid@localhost:5432/invaliddb",
 			AppName:        "test-sqlite-pool-precedence",
-			SqliteSystemDB: db,
+			SQLiteSystemDB: db,
 		}
-		dbosCtx, err := NewDBOSContext(context.Background(), config)
+		dbosCtx, err := NewContext(context.Background(), config)
 		require.NoError(t, err)
 		require.NotNil(t, dbosCtx)
 		defer Shutdown(dbosCtx, 5*time.Second)
@@ -1822,7 +1912,7 @@ func TestCustomSqlitePool(t *testing.T) {
 	})
 
 	t.Run("MutuallyExclusivePools", func(t *testing.T) {
-		// Setting both SystemDBPool and SqliteSystemDB must be rejected by
+		// Setting both SystemDBPool and SQLiteSystemDB must be rejected by
 		// processConfig before any connection attempt.
 		dbPath := filepath.Join(t.TempDir(), "dbos.db")
 		db, err := sql.Open("sqlite", dbPath)
@@ -1838,14 +1928,14 @@ func TestCustomSqlitePool(t *testing.T) {
 		require.NoError(t, err)
 		defer pool.Close()
 
-		_, err = NewDBOSContext(context.Background(), Config{
+		_, err = NewContext(context.Background(), Config{
 			AppName:        "test-mutually-exclusive",
 			SystemDBPool:   pool,
-			SqliteSystemDB: db,
+			SQLiteSystemDB: db,
 		})
 		require.Error(t, err)
-		dbosErr, ok := err.(*DBOSError)
-		require.True(t, ok, "expected DBOSError, got %T", err)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected Error, got %T", err)
 		assert.Contains(t, dbosErr.Message, "mutually exclusive")
 	})
 

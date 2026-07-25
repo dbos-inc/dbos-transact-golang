@@ -84,7 +84,7 @@ type Engine interface {
 //
 //	pool, _ := pgxpool.New(ctx, appDatabaseURL)
 //	ds, err := dbos.NewDataSource(ctx, pool, dbos.WithDataSourceName("app"))
-func NewDataSource[E Engine](ctx DBOSContext, engine E, opts ...DataSourceOption) (*DataSource, error) {
+func NewDataSource[E Engine](ctx Context, engine E, opts ...DataSourceOption) (*DataSource, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
@@ -328,7 +328,7 @@ func (ds *DataSource) recordCompletion(ctx context.Context, q Querier, workflowI
 //	    }
 //	    return res.RowsAffected()
 //	})
-func RunAsTransaction[R any](ctx DBOSContext, ds *DataSource, fn Txn[R], opts ...StepOption) (R, error) {
+func RunAsTransaction[R any](ctx Context, ds *DataSource, fn Txn[R], opts ...StepOption) (R, error) {
 	if ctx == nil {
 		return *new(R), models.NewStepExecutionError("", "", fmt.Errorf("ctx cannot be nil"))
 	}
@@ -362,7 +362,7 @@ func RunAsTransaction[R any](ctx DBOSContext, ds *DataSource, fn Txn[R], opts ..
 // output without re-running fn when the user transaction already committed.
 //
 // When the data source shares the system database's pool, the call collapses onto runAsTxn.
-func (c *dbosContext) RunAsTransaction(dbosCtx DBOSContext, ds *DataSource, fn TxnFunc, opts ...StepOption) (any, error) {
+func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFunc, opts ...StepOption) (any, error) {
 	// Reject a transaction nested inside another transaction.
 	// (A transaction nested inside a plain RunAsStep is fine)
 	if ws, ok := c.Value(workflowStateKey).(*workflowState); ok && ws != nil && ws.isWithinTransaction {

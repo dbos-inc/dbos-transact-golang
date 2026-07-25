@@ -1,14 +1,15 @@
-// Package dbos provides lightweight durable workflow orchestration with Postgres.
+// Package dbos provides lightweight durable workflow orchestration backed by SQLite or Postgres.
 //
 // DBOS Transact enables developers to write resilient distributed applications using workflows
-// and steps backed by PostgreSQL. All application state is automatically persisted, providing
+// and steps backed by a system database: SQLite for zero-setup local development, PostgreSQL
+// or CockroachDB for production. All application state is automatically persisted, providing
 // exactly-once execution guarantees and automatic recovery from failures.
 //
 // # Getting Started
 //
 // Create a DBOS context to start building durable applications:
 //
-//	dbosContext, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
+//	dbosContext, err := dbos.NewContext(context.Background(), dbos.Config{
 //	    AppName:     "my-app",
 //	    DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 //	})
@@ -23,10 +24,10 @@
 // # Workflows
 //
 // Workflows provide durable execution, automatically resuming from the last completed step
-// after any failure. Write workflows as normal Go functions that take a DBOSContext and
+// after any failure. Write workflows as normal Go functions that take a Context and
 // return serializable values:
 //
-//	func myWorkflow(ctx dbos.DBOSContext, input string) (string, error) {
+//	func myWorkflow(ctx dbos.Context, input string) (string, error) {
 //	    // Workflow logic here
 //	    result, err := dbos.RunAsStep(ctx, someOperation)
 //	    if err != nil {
@@ -53,7 +54,7 @@
 //	    return data, nil
 //	}
 //
-//	func workflow(ctx dbos.DBOSContext, input string) (string, error) {
+//	func workflow(ctx dbos.Context, input string) (string, error) {
 //	    data, err := dbos.RunAsStep(ctx, fetchData,
 //	        dbos.WithStepName("fetchData"),
 //	        dbos.WithStepMaxRetries(3))
@@ -79,7 +80,7 @@
 //
 //	// Enqueue workflows with optional deduplication and priority
 //	handle, err := dbos.RunWorkflow(ctx, taskWorkflow, input,
-//	    dbos.WithQueue(queue.Name),
+//	    dbos.WithQueue(queue),
 //	    dbos.WithDeduplicationID("unique-id"),
 //	    dbos.WithPriority(10))
 //
@@ -97,16 +98,40 @@
 //	err = dbos.ResumeWorkflow(ctx, workflowID)
 //
 //	// Fork a workflow from a specific step
-//	newID, err := dbos.ForkWorkflow(ctx, originalID, stepNumber)
+//	handle, err := dbos.ForkWorkflow[string](ctx, dbos.ForkWorkflowInput{OriginalWorkflowID: originalID, StartStep: stepNumber})
 //
 // Workflows can also be visualized and managed through the DBOS Console web UI.
 //
+// # Error Handling
+//
+// DBOS APIs return *Error values carrying an error code. Match conditions against the
+// package sentinels with errors.Is:
+//
+//	Situation                                            Sentinel
+//	Workflow cancelled via CancelWorkflow                ErrWorkflowCancelled (cause matches context.Canceled)
+//	Workflow deadline/timeout expired                    ErrWorkflowCancelled (cause matches context.DeadlineExceeded)
+//	Awaiting a workflow that was cancelled               ErrAwaitedWorkflowCancelled
+//	Recv/GetEvent/GetResult wait timeout                 ErrTimeout
+//	Enqueue rejected by deduplication ID                 ErrQueueDeduplicated
+//	Workflow ID conflict or duplicate operation          ErrConflictingWorkflowID
+//	Workflow ID reused with different function or queue  ErrUnexpectedWorkflow
+//	Step exhausted its retries                           ErrMaxStepRetriesExceeded
+//	Workflow not found                                   ErrNonExistentWorkflow
+//	Queue not found                                      ErrQueueNotFound
+//	Schedule not found                                   ErrScheduleNotFound
+//
+// For example, a parent workflow can detect a cancelled child:
+//
+//	_, err := handle.GetResult()
+//	if errors.Is(err, dbos.ErrAwaitedWorkflowCancelled) { ... }
+//
 // # Testing
 //
-// DBOSContext is fully mockable for unit testing:
+// Context is an interface, so workflows can be unit-tested against a mock
+// generated with your mocking framework of choice (e.g. mockery):
 //
 //	func TestWorkflow(t *testing.T) {
-//	    mockCtx := mocks.NewMockDBOSContext(t)
+//	    mockCtx := NewMockContext(t) // generated from dbos.Context
 //	    mockCtx.On("RunAsStep", mockCtx, mock.Anything, mock.Anything).Return("result", nil)
 //
 //	    result, err := myWorkflow(mockCtx, "input")

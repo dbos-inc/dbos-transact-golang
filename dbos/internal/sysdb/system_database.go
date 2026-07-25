@@ -35,14 +35,15 @@ type SystemDatabase interface {
 	// IsContentionError reports whether err is a lock/serialization contention
 	// error for the active backend. See Dialect.IsContentionError.
 	IsContentionError(err error) bool
-	Shutdown(ctx context.Context, timeout time.Duration)
+	// Shutdown returns the names of sub-components still running when timeout expired.
+	Shutdown(ctx context.Context, timeout time.Duration) []string
 	ResetSystemDB(ctx context.Context) error
 
 	// Workflows
 	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]models.WorkflowStatus, error)
 	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error
-	UpdateWorkflowAttributes(ctx context.Context, input UpdateWorkflowAttributesDBInput) error
+	SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*AwaitWorkflowResultOutput, error)
 	CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInput) ([]string, error)
 	CancelAllBefore(ctx context.Context, cutoffTime time.Time) error
@@ -94,6 +95,7 @@ type SystemDatabase interface {
 	// Queues
 	SetWorkflowDelay(ctx context.Context, input SetWorkflowDelayDBInput) error
 	TransitionDelayedWorkflows(ctx context.Context) error
+	DebounceDelayedWorkflow(ctx context.Context, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error)
 	DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]DequeuedWorkflow, error)
 	ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
 	GetQueuePartitions(ctx context.Context, queueName string) ([]string, error)
@@ -151,7 +153,7 @@ type SysDB struct {
 	EventNotifier        *notifyRegistry // getEvent waiters, keyed by "targetWorkflowID::key"
 	streamNotifier       *notifyRegistry // stream readers, keyed by "workflowID::key"
 	logger               *slog.Logger
-	encodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (*string, string, error)
+	encodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error)
 	schema               string
 	launched             bool
 	isCockroachDB        bool
@@ -336,6 +338,9 @@ var migration40SQL string
 //go:embed migrations/41_add_schedule_name.sql
 var migration41SQL string
 
+//go:embed migrations/42_add_debounce_columns.sql
+var migration42SQL string
+
 type MigrationFile struct {
 	Version int64
 	SQL     string
@@ -461,6 +466,7 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		{Version: 39, SQL: migration39SQLProcessed},
 		{Version: 40, SQL: fmt.Sprintf(migration40SQL, sanitizedSchema, sanitizedSchema)},
 		{Version: 41, SQL: fmt.Sprintf(migration41SQL, sanitizedSchema, sanitizedSchema)},
+		{Version: 42, SQL: fmt.Sprintf(migration42SQL, sanitizedSchema, sanitizedSchema)},
 	}
 }
 
@@ -711,7 +717,7 @@ type NewSystemDatabaseInput struct {
 	// EncodeScheduledInput serializes the input of a schedule-created workflow
 	// (backfill/trigger). Injected by the caller to keep serialization concerns
 	// out of the system database.
-	EncodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext any) (encoded *string, serialization string, err error)
+	EncodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (encoded *string, serialization string, err error)
 }
 
 func startupError(ctx context.Context, timeout time.Duration, phase string, pool *pgxpool.Pool, err error) error {
@@ -966,13 +972,15 @@ func (s *SysDB) Launch(ctx context.Context) {
 	}
 }
 
-func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
+func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 	s.logger.Debug("Closing system database connection pool")
+	var pending []string
 
 	s.notificationLoopMu.Lock()
 	launched := s.launched
 	done := s.notificationLoopDone
 	s.notificationLoopMu.Unlock()
+	listenerStopped := true
 	if launched {
 		// Wait for the notification loop to exit
 		// The context should be cancelled prior to calling shutdown
@@ -980,6 +988,8 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 		case <-done:
 		case <-time.After(timeout):
 			s.logger.Warn("Notification listener loop did not finish in time", "timeout", timeout)
+			pending = append(pending, "notification listener")
+			listenerStopped = false
 		}
 	}
 
@@ -994,6 +1004,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 		case <-poolClose:
 		case <-time.After(timeout):
 			s.logger.Warn("System database connection pool did not close in time", "timeout", timeout)
+			pending = append(pending, "connection pool")
 		}
 	}
 
@@ -1002,8 +1013,13 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) {
 	s.streamNotifier.clear()
 
 	s.notificationLoopMu.Lock()
-	s.launched = false
+	// Stay launched while the notification loop is still running so a later
+	// Shutdown call waits for it again instead of skipping the check.
+	if listenerStopped {
+		s.launched = false
+	}
 	s.notificationLoopMu.Unlock()
+	return pending
 }
 
 /*******************************/
@@ -1104,6 +1120,12 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		scheduleName = &input.Status.ScheduleName
 	}
 
+	var debounceDeadlineEpochMs *int64
+	if !input.Status.DebounceDeadline.IsZero() {
+		millis := input.Status.DebounceDeadline.UnixMilli()
+		debounceDeadlineEpochMs = &millis
+	}
+
 	query := s.RenderSQL(`INSERT INTO %sworkflow_status (
         workflow_uuid,
         status,
@@ -1131,17 +1153,19 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
         serialization,
         delay_until_epoch_ms,
         attributes,
-        schedule_name
-    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+        schedule_name,
+        debounce_deadline_epoch_ms,
+        is_debounced
+    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
 			recovery_attempts = CASE
-                WHEN EXCLUDED.status NOT IN ($28, $29) THEN workflow_status.recovery_attempts + $30
+                WHEN EXCLUDED.status NOT IN ($30, $31) THEN workflow_status.recovery_attempts + $32
                 ELSE workflow_status.recovery_attempts
             END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status IN ($28, $29) THEN workflow_status.executor_id
+                WHEN EXCLUDED.status IN ($30, $31) THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
         RETURNING recovery_attempts, status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema))
@@ -1190,6 +1214,8 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		delayUntilEpochMs,
 		attributesJSON,
 		scheduleName,
+		debounceDeadlineEpochMs,
+		input.Status.IsDebounced,
 		models.WorkflowStatusEnqueued,
 		models.WorkflowStatusDelayed,
 		recoveryIncrement,
@@ -1231,10 +1257,10 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 	}
 
 	if len(input.Status.Name) > 0 && result.Name != input.Status.Name {
-		return nil, models.NewConflictingWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.Name, input.Status.Name))
+		return nil, models.NewUnexpectedWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists with a different name: %s, but the provided name is: %s", result.Name, input.Status.Name))
 	}
 	if len(input.Status.QueueName) > 0 && result.QueueName != nil && input.Status.QueueName != *result.QueueName {
-		return nil, models.NewConflictingWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists in a different queue: %s, but the provided queue is: %s", *result.QueueName, input.Status.QueueName))
+		return nil, models.NewUnexpectedWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists in a different queue: %s, but the provided queue is: %s", *result.QueueName, input.Status.QueueName))
 	}
 
 	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
@@ -1291,6 +1317,7 @@ type ListWorkflowsDBInput struct {
 	HasParent          *bool
 	Attributes         map[string]any
 	ScheduleName       []string
+	IsDebounced        *bool
 	Limit              *int
 	Offset             *int
 	SortDesc           bool
@@ -1310,7 +1337,7 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 		"recovery_attempts", "queue_name", "workflow_timeout_ms", "workflow_deadline_epoch_ms", "started_at_epoch_ms",
 		"deduplication_id", "priority", "queue_partition_key", "forked_from", "parent_workflow_id",
 		"serialization", "delay_until_epoch_ms", "was_forked_from", "completed_at", "class_name", "config_name",
-		"attributes", "schedule_name",
+		"attributes", "schedule_name", "debounce_deadline_epoch_ms", "is_debounced",
 	}
 
 	if input.LoadOutput {
@@ -1384,6 +1411,9 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 	}
 	if input.WasForkedFrom != nil {
 		qb.addWhere("was_forked_from", *input.WasForkedFrom)
+	}
+	if input.IsDebounced != nil {
+		qb.addWhere("is_debounced", *input.IsDebounced)
 	}
 	if input.HasParent != nil {
 		if *input.HasParent {
@@ -1476,6 +1506,7 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 		var className *string
 		var attributesJSON *string
 		var scheduleName *string
+		var debounceDeadlineEpochMs *int64
 
 		// Build scan arguments dynamically based on loaded columns.
 		scanArgs := []any{
@@ -1485,7 +1516,7 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 			&wf.Attempts, &queueName, &timeoutMs,
 			&deadlineMs, &startedAtMs, &deduplicationID, &wf.Priority, &queuePartitionKey, &forkedFrom, &parentWorkflowID,
 			&serialization, &delayUntilEpochMs, &wf.WasForkedFrom, &completedAtMs, &className, &wf.ConfigName,
-			&attributesJSON, &scheduleName,
+			&attributesJSON, &scheduleName, &debounceDeadlineEpochMs, &wf.IsDebounced,
 		}
 
 		if input.LoadOutput {
@@ -1585,6 +1616,11 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 			wf.DelayUntil = time.Unix(0, *delayUntilEpochMs*int64(time.Millisecond))
 		}
 
+		// Convert debounce_deadline_epoch_ms to time.Time
+		if debounceDeadlineEpochMs != nil {
+			wf.DebounceDeadline = time.Unix(0, *debounceDeadlineEpochMs*int64(time.Millisecond))
+		}
+
 		// Convert completed_at milliseconds to time.Time
 		if completedAtMs != nil {
 			wf.CompletedAt = time.Unix(0, *completedAtMs*int64(time.Millisecond))
@@ -1624,14 +1660,14 @@ type UpdateWorkflowOutcomeDBInput struct {
 	Tx         Tx
 }
 
-// UpdateWorkflowOutcome records a workflow's terminal outcome. Only a PENDING row can
-// receive an outcome: any other status means the run was superseded (already terminal,
-// re-enqueued by a resume, ...). If the write is refused for any reason other than the workflow having
-// completed (SUCCESS/ERROR), returns a models.WorkflowCancelled error.
+// UpdateWorkflowOutcome records a workflow's terminal outcome. The write is refused
+// when the row is already terminal (CANCELLED/SUCCESS/ERROR). A refusal is an error
+// only when the workflow was cancelled, so the caller ends as cancelled instead of
+// reporting a completion that was never recorded; other refusals are silent no-ops.
 func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error {
 	query := s.RenderSQL(`UPDATE %sworkflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, completed_at = $4, deduplication_id = NULL
-			  WHERE workflow_uuid = $5 AND status = $6`, s.dialect.SchemaPrefix(s.schema))
+			  WHERE workflow_uuid = $5 AND status NOT IN ($6, $7, $8)`, s.dialect.SchemaPrefix(s.schema))
 
 	var runner Querier = s.pool
 	if input.Tx != nil {
@@ -1639,7 +1675,7 @@ func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowO
 	}
 
 	// input.output is already a *string from the database layer
-	res, err := runner.Exec(ctx, query, input.Status, input.Output, input.ErrStr, time.Now().UnixMilli(), input.WorkflowID, models.WorkflowStatusPending)
+	res, err := runner.Exec(ctx, query, input.Status, input.Output, input.ErrStr, time.Now().UnixMilli(), input.WorkflowID, models.WorkflowStatusCancelled, models.WorkflowStatusSuccess, models.WorkflowStatusError)
 	if err != nil {
 		return fmt.Errorf("failed to update workflow status: %w", err)
 	}
@@ -1649,9 +1685,7 @@ func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowO
 	}
 	if rowsAffected == 0 {
 		// The guarded UPDATE matched no rows. Re-read the status (only on this rare
-		// no-op path): if the workflow completed (SUCCESS/ERROR) the refusal is a
-		// no-op; otherwise the run was cancelled or superseded and is reported as
-		// cancelled to the caller.
+		// no-op path): only a cancelled workflow surfaces an error to the caller.
 		statusQuery := s.RenderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
 		var currentStatus models.WorkflowStatusType
 		if err := runner.QueryRow(ctx, statusQuery, input.WorkflowID).Scan(&currentStatus); err != nil {
@@ -1660,23 +1694,23 @@ func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowO
 			}
 			return fmt.Errorf("failed to read workflow status after refused outcome update: %w", err)
 		}
-		if currentStatus != models.WorkflowStatusSuccess && currentStatus != models.WorkflowStatusError {
+		if currentStatus == models.WorkflowStatusCancelled {
 			return models.NewWorkflowCancelledError(input.WorkflowID, nil)
 		}
 	}
 	return nil
 }
 
-type UpdateWorkflowAttributesDBInput struct {
+type SetWorkflowAttributesDBInput struct {
 	WorkflowID string
 	Attributes map[string]any
 	Tx         Tx
 }
 
-// UpdateWorkflowAttributes replaces the custom attributes attached to an existing
+// SetWorkflowAttributes replaces the custom attributes attached to an existing
 // workflow. A nil/empty attributes map clears them (stored as NULL). Returns a
 // non-existent workflow error if no workflow with the given ID exists.
-func (s *SysDB) UpdateWorkflowAttributes(ctx context.Context, input UpdateWorkflowAttributesDBInput) error {
+func (s *SysDB) SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error {
 	var attributesJSON *string
 	if len(input.Attributes) > 0 {
 		marshaled, err := json.Marshal(input.Attributes)
@@ -2577,15 +2611,16 @@ type RecordOperationResultDBInput struct {
 	StartedAt       time.Time
 	CompletedAt     time.Time
 	Serialization   string
+	ExecutorID      string
 }
 
 // RecordOperationResult checkpoints a step outcome. A checkpoint already
 // existing at (workflow_uuid, function_id) is disambiguated by content:
 //   - identical to input (including the caller's timestamps) → our own earlier
 //     write whose commit ack was lost; the retry is a no-op success.
-//   - different function name → determinism violation (UnexpectedStep).
+//   - different function name → determinism violation (ErrorCodeUnexpectedStep).
 //   - anything else → a concurrent execution of this workflow checkpointed the
-//     step first → ConflictingIDError. Callers must surface it as the step
+//     step first → ErrorCodeConflictingID. Callers must surface it as the step
 //     error so the workflow-level handler parks this run in polling mode
 //     rather than racing the other execution step by step.
 //
@@ -2626,6 +2661,7 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 		return fmt.Errorf("failed to read rows affected after recording operation result: %w", err)
 	}
 	if n > 0 {
+		s.refreshExecutorID(ctx, querier, input.WorkflowID, input.ExecutorID)
 		return nil
 	}
 
@@ -2667,6 +2703,19 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 	// A concurrent execution's row differs (at minimum in its timestamps):
 	// report the conflict so the caller parks this run.
 	return models.NewWorkflowConflictIDError(input.WorkflowID)
+}
+
+func (s *SysDB) refreshExecutorID(ctx context.Context, querier Querier, workflowID, executorID string) {
+	if executorID == "" { // Shouldn't happen!
+		return
+	}
+	query := s.RenderSQL(`UPDATE %sworkflow_status SET executor_id = $1
+		WHERE workflow_uuid = $2 AND (executor_id IS NULL OR executor_id <> $1)`,
+		s.dialect.SchemaPrefix(s.schema))
+	if _, err := querier.Exec(ctx, query, executorID, workflowID); err != nil {
+		s.logger.Warn("failed to refresh workflow executor ID after checkpoint",
+			"workflow_id", workflowID, "executor_id", executorID, "error", err)
+	}
 }
 
 // nullableStrEq compares two nullable strings, treating NULL and "" as equal.
@@ -4323,18 +4372,126 @@ func (s *SysDB) SetWorkflowDelay(ctx context.Context, input SetWorkflowDelayDBIn
 }
 
 // TransitionDelayedWorkflows transitions DELAYED workflows whose delay has expired to ENQUEUED.
+// For debounced workflows, the deduplication ID is cleared in the same atomic update: it is a
+// debounce key held only while DELAYED, so a later same-key debounce starts a fresh workflow.
 func (s *SysDB) TransitionDelayedWorkflows(ctx context.Context) error {
 	nowMs := time.Now().UnixMilli()
 	query := s.RenderSQL(`UPDATE %sworkflow_status
-		SET status = $1
-		WHERE status = $2
-		  AND delay_until_epoch_ms <= $3`, s.dialect.SchemaPrefix(s.schema))
+		SET status = $1, updated_at = $2,
+		    deduplication_id = CASE WHEN is_debounced THEN NULL ELSE deduplication_id END
+		WHERE status = $3
+		  AND delay_until_epoch_ms <= $2`, s.dialect.SchemaPrefix(s.schema))
 
-	_, err := s.pool.Exec(ctx, query, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, nowMs)
+	_, err := s.pool.Exec(ctx, query, models.WorkflowStatusEnqueued, nowMs, models.WorkflowStatusDelayed)
 	if err != nil {
 		return fmt.Errorf("failed to transition delayed workflows: %w", err)
 	}
 	return nil
+}
+
+// DebounceDelayedWorkflowDBInput identifies a debounced workflow by
+// (name, queue, deduplication ID) and carries the new delay and inputs.
+type DebounceDelayedWorkflowDBInput struct {
+	WorkflowName    string
+	QueueName       string
+	DeduplicationID string
+	DelayUntil      time.Time
+	Input           *string // encoded
+	Serialization   string
+	Tx              Tx
+}
+
+// DebounceResult reports the outcome of a bounce attempt.
+type DebounceResult struct {
+	BouncedWorkflowID  *string // The extended workflow's ID if an existing debounced DELAYED workflow was bounced; nil if no bounce occurred
+	HolderWorkflowID   *string // The workflow currently holding the deduplication ID, if any, when no bounce occurred
+	HolderIsDebounced  bool    // Whether the holder is itself a debounced workflow
+	HolderWorkflowName string  // The holder's workflow name; a mismatch with the caller's means a debounce-key collision between workflows
+}
+
+// DebounceDelayedWorkflow extends an existing debounced DELAYED workflow's delay and
+// updates its inputs, atomically. The new delay is capped at the workflow's
+// debounce_deadline_epoch_ms, if one is set. Matching on workflow name ensures a
+// debounce-key collision between different workflows (e.g. "a"+"b-c" vs "a-b"+"c")
+// never overwrites another workflow's inputs. If nothing matched, returns the current
+// holder (or that the key is unheld) so the caller can start fresh or surface a conflict.
+// Runs on input.Tx if given, joining its transaction (e.g. a checkpointed step's);
+// otherwise in its own retried transaction.
+func (s *SysDB) DebounceDelayedWorkflow(ctx context.Context, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error) {
+	if input.Tx != nil {
+		return s.debounceDelayedWorkflowInternal(ctx, input.Tx, input)
+	}
+	return RetryWithResult(ctx, func() (*DebounceResult, error) {
+		tx, err := s.pool.BeginTx(ctx, TxOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to begin debounce transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+		result, err := s.debounceDelayedWorkflowInternal(ctx, tx, input)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("failed to commit debounce transaction: %w", err)
+		}
+		return result, nil
+	}, WithRetrierLogger(s.logger), WithRetryCondition(s.dialect.IsRetryableTransaction))
+}
+
+func (s *SysDB) debounceDelayedWorkflowInternal(ctx context.Context, tx Tx, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error) {
+	// Cap the new delay at the debounce deadline, if any (CASE not LEAST, for Postgres/SQLite portability).
+	updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
+		SET delay_until_epoch_ms = CASE
+		      WHEN debounce_deadline_epoch_ms IS NOT NULL AND debounce_deadline_epoch_ms < $1
+		      THEN debounce_deadline_epoch_ms
+		      ELSE $1
+		    END,
+		    inputs = $2, serialization = $3, updated_at = $4
+		WHERE name = $5 AND queue_name = $6 AND deduplication_id = $7
+		  AND status = $8 AND is_debounced = TRUE
+		RETURNING workflow_uuid`, s.dialect.SchemaPrefix(s.schema))
+
+	var bouncedWorkflowID string
+	err := tx.QueryRow(ctx, updateQuery,
+		input.DelayUntil.UnixMilli(),
+		input.Input,
+		input.Serialization,
+		time.Now().UnixMilli(),
+		input.WorkflowName,
+		input.QueueName,
+		input.DeduplicationID,
+		models.WorkflowStatusDelayed,
+	).Scan(&bouncedWorkflowID)
+	if err == nil {
+		// We updated a debounced workflow
+		return &DebounceResult{BouncedWorkflowID: &bouncedWorkflowID}, nil
+	}
+	if !errors.Is(err, ErrNoRows) {
+		return nil, fmt.Errorf("failed to bounce delayed workflow: %w", err)
+	}
+
+	// We didn't update any row. We want to distinguish which situation led to this:
+	// 1. A workflow exists but is_debounced is false: the user is using the same dedup key than the debouncer on the queue. We report the conflict.
+	// 2. A workflow exists, is_debounced is true: this can be a deduplication key collision, maybe due a name + key collision or some other rare situation.
+	holderQuery := s.RenderSQL(`SELECT workflow_uuid, is_debounced, name
+		FROM %sworkflow_status
+		WHERE queue_name = $1 AND deduplication_id = $2`, s.dialect.SchemaPrefix(s.schema))
+
+	var holderWorkflowID, holderWorkflowName string
+	var holderIsDebounced bool
+	err = tx.QueryRow(ctx, holderQuery, input.QueueName, input.DeduplicationID).Scan(&holderWorkflowID, &holderIsDebounced, &holderWorkflowName)
+	// No result means we should create a new debounced workflow.
+	if errors.Is(err, ErrNoRows) {
+		return &DebounceResult{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query deduplication ID holder: %w", err)
+	}
+	return &DebounceResult{
+		HolderWorkflowID:   &holderWorkflowID,
+		HolderIsDebounced:  holderIsDebounced,
+		HolderWorkflowName: holderWorkflowName,
+	}, nil
 }
 
 type DequeuedWorkflow struct {
@@ -4395,14 +4552,16 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	}
 
 	// Calculate max_tasks based on concurrency limits
-	maxTasks := input.Queue.MaxTasksPerIteration
-
+	// maxTasks < 0 means this dequeue is unbounded.
+	maxTasks := -1
 	if input.Queue.WorkerConcurrency != nil {
 		workerConcurrency := *input.Queue.WorkerConcurrency
 		if input.LocalRunningCount > workerConcurrency {
 			s.logger.Warn("Local running workflows on queue exceeds worker concurrency limit", "local_running", input.LocalRunningCount, "queue_name", input.Queue.Name, "concurrency_limit", workerConcurrency)
 		}
-		maxTasks = max(workerConcurrency-input.LocalRunningCount, 0)
+		if available := max(workerConcurrency-input.LocalRunningCount, 0); maxTasks < 0 || available < maxTasks {
+			maxTasks = available
+		}
 	}
 
 	if input.Queue.GlobalConcurrency != nil {
@@ -4426,13 +4585,12 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		if globalCount > concurrency {
 			s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalCount, "queue_name", input.Queue.Name, "concurrency_limit", concurrency)
 		}
-		availableTasks := max(concurrency-globalCount, 0)
-		if availableTasks < maxTasks {
+		if availableTasks := max(concurrency-globalCount, 0); maxTasks < 0 || availableTasks < maxTasks {
 			maxTasks = availableTasks
 		}
 	}
 
-	if maxTasks <= 0 {
+	if maxTasks == 0 {
 		return nil, nil
 	}
 
@@ -4443,7 +4601,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	switch latest, err := s.GetLatestApplicationVersion(ctx, tx); {
 	case err == nil:
 		isLatestVersion = latest.Name == input.ApplicationVersion
-	case errors.Is(err, &models.DBOSError{Code: models.NoApplicationVersions}):
+	case errors.Is(err, &models.Error{Code: models.ErrorCodeNoApplicationVersions}):
 		// No versions registered yet: treat this worker as the latest.
 	default:
 		return nil, fmt.Errorf("failed to query latest application version: %w", err)
@@ -4647,13 +4805,12 @@ func scanQueueRow(row Row) (*models.QueueConfig, error) {
 		return nil, err
 	}
 	q := &models.QueueConfig{
-		Name:                 name,
-		GlobalConcurrency:    concurrency,
-		WorkerConcurrency:    workerConcurrency,
-		PriorityEnabled:      priorityEnabled,
-		PartitionQueue:       partitionQueue,
-		MaxTasksPerIteration: models.DefaultMaxTasksPerIteration, // not persisted; queue table has no such column
-		DatabaseBacked:       true,
+		Name:              name,
+		GlobalConcurrency: concurrency,
+		WorkerConcurrency: workerConcurrency,
+		PriorityEnabled:   priorityEnabled,
+		PartitionQueue:    partitionQueue,
+		DatabaseBacked:    true,
 	}
 	if rateLimitMax != nil {
 		var period time.Duration
@@ -5190,8 +5347,8 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 					"schedule_name", schedule.ScheduleName, "last_fired_at", *lastFiredAtStr, "error", err)
 			}
 		}
-		if err := json.Unmarshal([]byte(contextJSON), &schedule.Context); err != nil {
-			schedule.Context = contextJSON
+		if raw := strings.TrimSpace(contextJSON); raw != "" && raw != "null" {
+			schedule.Context = json.RawMessage(contextJSON)
 		}
 
 		schedules = append(schedules, schedule)
@@ -5927,7 +6084,8 @@ func (s *SysDB) ExportWorkflow(ctx context.Context, workflowID string, exportChi
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
 				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization,
-				was_forked_from, rate_limited, completed_at, attributes, schedule_name
+				was_forked_from, rate_limited, completed_at, attributes, schedule_name,
+				debounce_deadline_epoch_ms, is_debounced
 			FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
 
 		row := tx.QueryRow(ctx, statusQuery, wfID)
@@ -5942,8 +6100,8 @@ func (s *SysDB) ExportWorkflow(ctx context.Context, workflowID string, exportChi
 			priority                                                     *int
 			delayUntilEpochMs                                            *int64
 			serialization                                                *string
-			wasForkedFrom, rateLimited                                   *bool
-			completedAt                                                  *int64
+			wasForkedFrom, rateLimited, isDebounced                      *bool
+			completedAt, debounceDeadlineEpochMs                         *int64
 			attributes, wfScheduleName                                   *string
 		)
 		err := row.Scan(
@@ -5953,6 +6111,7 @@ func (s *SysDB) ExportWorkflow(ctx context.Context, workflowID string, exportChi
 			&workflowDeadlineEpochMs, &startedAtEpochMs, &dedupID, &inputs, &priority,
 			&queuePartitionKey, &forkedFrom, &parentWorkflowID, &delayUntilEpochMs, &serialization,
 			&wasForkedFrom, &rateLimited, &completedAt, &attributes, &wfScheduleName,
+			&debounceDeadlineEpochMs, &isDebounced,
 		)
 		if err != nil {
 			if err == pgx.ErrNoRows {
@@ -5995,6 +6154,8 @@ func (s *SysDB) ExportWorkflow(ctx context.Context, workflowID string, exportChi
 			"completed_at":               completedAt,
 			"attributes":                 attributes,
 			"schedule_name":              wfScheduleName,
+			"debounce_deadline_epoch_ms": debounceDeadlineEpochMs,
+			"is_debounced":               isDebounced,
 		}
 
 		// Export operation_outputs
@@ -6172,8 +6333,9 @@ func (s *SysDB) ImportWorkflow(ctx context.Context, workflows []ExportedWorkflow
 				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
 				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, inputs, priority,
 				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization,
-				was_forked_from, rate_limited, completed_at, attributes, schedule_name
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)`,
+				was_forked_from, rate_limited, completed_at, attributes, schedule_name,
+				debounce_deadline_epoch_ms, is_debounced
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)`,
 			s.dialect.SchemaPrefix(s.schema))
 
 		// was_forked_from and rate_limited are NOT NULL; default them to false
@@ -6193,6 +6355,7 @@ func (s *SysDB) ImportWorkflow(ctx context.Context, workflows []ExportedWorkflow
 		}
 		wasForkedFrom := boolOrFalse(status["was_forked_from"])
 		rateLimited := boolOrFalse(status["rate_limited"])
+		isDebounced := boolOrFalse(status["is_debounced"])
 
 		_, err := tx.Exec(ctx, insertStatusQuery,
 			status["workflow_uuid"], status["status"], status["name"],
@@ -6205,6 +6368,7 @@ func (s *SysDB) ImportWorkflow(ctx context.Context, workflows []ExportedWorkflow
 			status["queue_partition_key"], status["forked_from"], status["parent_workflow_id"],
 			status["delay_until_epoch_ms"], status["serialization"], wasForkedFrom,
 			rateLimited, status["completed_at"], status["attributes"], status["schedule_name"],
+			status["debounce_deadline_epoch_ms"], isDebounced,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to import workflow_status: %w", err)

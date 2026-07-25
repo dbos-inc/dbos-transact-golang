@@ -16,14 +16,25 @@ import (
 /******* SCHEDULE TYPES ********/
 /*******************************/
 
-type ApplySchedulesRequest struct {
-	ScheduleName      string
-	WorkflowFn        any
-	Schedule          string
-	Context           any
-	AutomaticBackfill bool
-	CronTimezone      string
-	QueueName         string
+// ScheduleSpec describes a workflow schedule. It is the input to
+// CreateSchedule and ApplySchedules, usable from both a Context and a
+// Client.
+//
+// The target workflow is identified by WorkflowName — the name under which the
+// workflow is registered — allowing schedules to be managed for workflows
+// owned by any process or language. From a Context, Workflow can be set
+// instead to reference a registered Go workflow function directly; when set,
+// it takes precedence over WorkflowName.
+type ScheduleSpec struct {
+	ScheduleName      string // Required: unique name of the schedule
+	Schedule          string // Required: cron expression driving the schedule
+	WorkflowName      string // Name of the target workflow (required unless Workflow is set)
+	Workflow          any    // Registered scheduled workflow function (Context only; takes precedence over WorkflowName)
+	WorkflowClassName string // Optional class/namespace name for cross-language dispatch
+	Context           any    // Optional user-defined context (serialized as JSON) passed to each scheduled invocation; decode with DecodeScheduleContext
+	AutomaticBackfill bool   // Backfill missed ticks when the schedule is reloaded after downtime
+	CronTimezone      string // Optional IANA timezone used to interpret the cron expression
+	QueueName         string // Optional queue to route scheduled invocations to (defaults to the internal queue)
 }
 
 const (
@@ -33,14 +44,14 @@ const (
 
 func validateCronSchedule(spec, cronTimezone string) error {
 	if spec == "" {
-		return fmt.Errorf("schedule is required")
+		return models.NewInvalidOptionError("schedule is required")
 	}
 	full := spec
 	if cronTimezone != "" {
 		full = "CRON_TZ=" + cronTimezone + " " + spec
 	}
 	if _, err := models.NewScheduleCronParser().Parse(full); err != nil {
-		return fmt.Errorf("invalid cron schedule %q: %w", spec, err)
+		return models.NewInvalidOptionError(fmt.Sprintf("invalid cron schedule %q: %v", spec, err))
 	}
 	return nil
 }
@@ -60,7 +71,34 @@ func jitterCap(sched cron.Schedule, scheduledTime time.Time) time.Duration {
 // functions must conform to. Each tick the scheduler invokes the function
 // with a ScheduledWorkflowInput carrying the cron tick time and the
 // user-defined context attached to the schedule.
-type ScheduledWorkflowFunc func(ctx DBOSContext, input ScheduledWorkflowInput) (any, error)
+type ScheduledWorkflowFunc func(ctx Context, input ScheduledWorkflowInput) (any, error)
+
+// DecodeScheduleContext decodes the schedule's user-defined context carried by
+// a ScheduledWorkflowInput into T — typically the same type that was set as
+// ScheduleSpec.Context when the schedule was created. Returns the zero value
+// of T if the schedule has no context.
+//
+// Example:
+//
+//	type ReportConfig struct {
+//	    Region    string `json:"region"`
+//	    BatchSize int    `json:"batch_size"`
+//	}
+//
+//	func reportWorkflow(ctx dbos.Context, input dbos.ScheduledWorkflowInput) (any, error) {
+//	    cfg, err := dbos.DecodeScheduleContext[ReportConfig](input)
+//	    ...
+//	}
+func DecodeScheduleContext[T any](input ScheduledWorkflowInput) (T, error) {
+	var v T
+	if len(input.Context) == 0 {
+		return v, nil
+	}
+	if err := json.Unmarshal(input.Context, &v); err != nil {
+		return v, fmt.Errorf("failed to decode schedule context: %w", err)
+	}
+	return v, nil
+}
 
 /************************************/
 /******* SCHEDULE MANAGEMENT ********/
@@ -70,7 +108,7 @@ type ScheduledWorkflowFunc func(ctx DBOSContext, input ScheduledWorkflowInput) (
 func (c *dbosContext) addScheduleCronEntry(
 	scheduleName, cronSchedule string,
 	fn ScheduledWorkflowFunc,
-	scheduleContext any,
+	scheduleContext json.RawMessage,
 ) (cron.EntryID, error) {
 	// A tick can fire before the entryID is published below; wait for it so the
 	// Entry lookup never runs with a bogus zero ID.
@@ -128,7 +166,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 		queueName = models.InternalQueueName
 	}
 
-	return func(ctx DBOSContext, input ScheduledWorkflowInput) (any, error) {
+	return func(ctx Context, input ScheduledWorkflowInput) (any, error) {
 		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, input.ScheduledTime.Format(time.RFC3339))
 
 		// Skip if this tick's workflow already exists. Another executor may have enqueued it.
@@ -188,14 +226,14 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 				return err
 			}
 			return tx.Commit(uncancellableCtx)
-		}, sysdb.WithRetrierLogger(c.logger)); err != nil {
+		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction)); err != nil {
 			c.logger.Error("failed to enqueue scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
 			return nil, err
 		}
 
 		if err := sysdb.Retry(c, func() error {
 			return c.systemDB.UpdateScheduleLastFiredAt(uncancellableCtx, scheduleName, time.Now())
-		}, sysdb.WithRetrierLogger(c.logger)); err != nil {
+		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction)); err != nil {
 			c.logger.Error("failed to update schedule last fired time after retries", "schedule", scheduleName, "error", err)
 		}
 
@@ -284,18 +322,11 @@ type scheduleSignature struct {
 }
 
 func (c *dbosContext) calculateSignature(s WorkflowSchedule) scheduleSignature {
-	ctxJSON, err := json.Marshal(s.Context)
-	if err != nil {
-		// Context is a JSON-decoded value, so this should be unreachable. Fall
-		// back to fmt, which prints maps with sorted keys, keeping the
-		// signature deterministic.
-		ctxJSON = fmt.Appendf(nil, "%+v", s.Context)
-	}
 	return scheduleSignature{
 		WorkflowName:      s.WorkflowName,
 		WorkflowClassName: s.WorkflowClassName,
 		Schedule:          s.Schedule,
-		ContextJSON:       string(ctxJSON),
+		ContextJSON:       string(s.Context),
 		CronTimezone:      s.CronTimezone,
 		QueueName:         s.QueueName,
 	}
