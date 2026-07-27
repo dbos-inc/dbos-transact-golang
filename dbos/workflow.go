@@ -1666,7 +1666,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			// visible, a resume→dequeue can re-dispatch this workflow to this executor,
 			// marking it PENDING. But a stale activeID entry would prevent the workflow from running.
 			removeActive()
-			recordAction, recordErr := sysdb.RetryWithResult(c, func() (sysdb.OutcomeWriteAction, error) {
+			recorded, recordErr := sysdb.RetryWithResult(c, func() (bool, error) {
 				return c.systemDB.UpdateWorkflowOutcome(uncancellableCtx, sysdb.UpdateWorkflowOutcomeDBInput{
 					WorkflowID: workflowID,
 					Status:     status,
@@ -1675,35 +1675,16 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				})
 			}, sysdb.WithRetrierLogger(c.logger))
 			if recordErr != nil {
-				// A cancellation error means the write was refused because the workflow
-				// was cancelled (e.g. during the final step): end as cancelled, not
-				// complete.
-				if errors.Is(recordErr, ErrWorkflowCancelled) {
-					outcomeChan <- workflowOutcome[any]{result: result, err: recordErr, cancelled: true}
-					close(outcomeChan)
-					return
-				}
-				// The workflow was moved to the dead-letter queue while this run was
-				// executing (it exceeded its maximum recovery attempts). Report that
-				// rather than a completion that was never recorded.
-				if errors.Is(recordErr, ErrDeadLetterQueue) {
-					c.logger.Warn("Workflow outcome not recorded: workflow exceeded its maximum recovery attempts", "workflow_id", workflowID)
-					outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
-					close(outcomeChan)
-					return
-				}
-				// Rare not found error or some other DB failure: deliver it as-is.
 				c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
 				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
 				close(outcomeChan)
 				return
 			}
-			if recordAction == sysdb.OutcomeWriteDeferred {
+			if !recorded {
 				// The row was not PENDING: this run no longer owns the workflow's
-				// outcome. Either another execution is running or about to run it (a
-				// concurrent resume re-enqueued it, or a recovery raced us), or a
-				// terminal outcome is already recorded. The recorded outcome wins:
-				// adopt it, waiting for it if it is not terminal yet.
+				// outcome. It may have been cancelled, dead-lettered, completed by a
+				// concurrent execution, or handed back to the queue by a resume.
+				// Park the execution and wait for the recorded outcome to become visible.
 				c.logger.Warn("Workflow outcome was not recorded: the workflow is no longer owned by this execution. Waiting for the recorded outcome", "workflow_id", workflowID)
 				awaitExistingOutcome()
 				return

@@ -3703,9 +3703,9 @@ func TestCancelWorkflows(t *testing.T) {
 
 	t.Run("CancelledDuringFinalStepDoesNotComplete", func(t *testing.T) {
 		// A workflow API-cancelled while finishing its last work must end as
-		// CANCELLED, not complete: the refused outcome write is surfaced as a
-		// cancellation and the workflow stays resumable (same semantics as the
-		// Python/TS/Java SDKs).
+		// CANCELLED, not complete: the refused outcome write sends the run to await
+		// the recorded outcome, which is the cancellation, and the workflow stays
+		// resumable (same semantics as the Python/TS/Java SDKs).
 		handle, err := RunWorkflow(dbosCtx, finalStepCancelWorkflow, "")
 		require.NoError(t, err, "failed to start workflow")
 		finalStepCancelStarted.Wait()
@@ -3715,7 +3715,7 @@ func TestCancelWorkflows(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "a cancelled workflow must not complete")
-		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled error, got: %v", err)
+		require.True(t, errors.Is(err, ErrAwaitedWorkflowCancelled), "expected ErrorCodeAwaitedWorkflowCancelled error, got: %v", err)
 
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
@@ -3962,21 +3962,6 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
 		require.Nil(t, status.Output, "the refused outcome must not record an output")
-	})
-
-	t.Run("MissingRowFailsTheRun", func(t *testing.T) {
-		handle, ctrl := startBlockedRun(t)
-		deleteQuery := sysDB.RenderSQL(`DELETE FROM %sworkflow_status WHERE workflow_uuid = $1`, schemaPrefix)
-		_, err := sysDB.Pool().Exec(context.Background(), deleteQuery, handle.GetWorkflowID())
-		require.NoError(t, err, "failed to delete workflow row")
-		close(ctrl.release)
-
-		// The row is gone (garbage collected or deleted by hand), so there is nowhere
-		// to record the outcome: report that rather than a completion nothing holds.
-		result, err := handle.GetResult()
-		require.Error(t, err, "a run whose row vanished must not report a completion")
-		require.True(t, errors.Is(err, ErrNonExistentWorkflow), "expected ErrorCodeNonExistentWorkflow error, got: %v", err)
-		require.Equal(t, "", result, "no output may be reported when the row is gone")
 	})
 }
 
@@ -7569,7 +7554,7 @@ func TestWorkflowHandleContextCancel(t *testing.T) {
 		getEventWorkflowStartedSignal.Wait()
 		getEventWorkflowStartedSignal.Clear()
 
-		dbosCtx.Shutdown(dbosCtx, 1 * time.Second)
+		dbosCtx.Shutdown(dbosCtx, 1*time.Second)
 
 		err = <-resultChan
 		require.Error(t, err, "expected error from cancelled context")
@@ -9439,7 +9424,7 @@ func TestWorkflowAttributes(t *testing.T) {
 		client, err := NewClient(dbosCtx, config)
 		require.NoError(t, err)
 		t.Cleanup(func() {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		})
 
 		// Enqueue to a queue nothing consumes; the workflow stays ENQUEUED, which

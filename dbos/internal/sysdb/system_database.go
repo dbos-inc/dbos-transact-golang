@@ -42,7 +42,7 @@ type SystemDatabase interface {
 	// Workflows
 	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]models.WorkflowStatus, error)
-	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) (OutcomeWriteAction, error)
+	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) (bool, error)
 	SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*AwaitWorkflowResultOutput, error)
 	CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInput) ([]string, error)
@@ -1660,34 +1660,16 @@ type UpdateWorkflowOutcomeDBInput struct {
 	Tx         Tx
 }
 
-type OutcomeWriteAction int
-
-const (
-	// OutcomeWriteUnknown is the zero value, returned only together with an error.
-	OutcomeWriteUnknown OutcomeWriteAction = iota
-	// OutcomeWriteRecorded means the write landed: the caller's outcome is durable.
-	OutcomeWriteRecorded
-	// OutcomeWriteDeferred means the row was not PENDING, so the caller no longer
-	// owns the outcome: either another execution is running or is about to run the
-	// workflow (ENQUEUED/DELAYED, e.g. a concurrent resume), or a terminal outcome
-	// (SUCCESS/ERROR) is already recorded. Either way the recorded outcome wins and
-	// the caller must adopt it, waiting for it to become terminal if it isn't yet.
-	OutcomeWriteDeferred
-)
-
-// UpdateWorkflowOutcome records a workflow's terminal outcome. The write applies
-// only to a PENDING row: a run owns its workflow's outcome exactly as long as the
-// row says that run is what the workflow is doing. (Note: this does not prevent
-// a write when another concurrent execution is already running and the status is PENDING.
-// However, both execution should be deterministic and idempotent.)
+// UpdateWorkflowOutcome records a workflow's terminal outcome, reporting whether
+// the write landed. The write applies only to a PENDING row: a run owns its
+// workflow's outcome exactly as long as the row says that run is what the workflow
+// is doing. (Note: this does not prevent a write when another concurrent execution
+// is already running and the status is PENDING. However, both execution should be
+// deterministic and idempotent.)
 //
-// When the guarded UPDATE matches no row, the current status decides what the caller must do:
-//   - CANCELLED: a cancellation error.
-//   - MAX_RECOVERY_ATTEMPTS_EXCEEDED: a dead-letter-queue error.
-//   - the row is gone: a non-existent-workflow error (this can only happen when the
-//     workflow was garbage collected or manually deleted.)
-//   - anything else: OutcomeWriteDeferred (see above).
-func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) (OutcomeWriteAction, error) {
+// Returning false means the row was CANCELLED, dead-lettered, already terminal, or
+// handed to another execution (ENQUEUED/DELAYED, e.g. by a concurrent resume).
+func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) (bool, error) {
 	query := s.RenderSQL(`UPDATE %sworkflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, completed_at = $4, deduplication_id = NULL
 			  WHERE workflow_uuid = $5 AND status = $6`, s.dialect.SchemaPrefix(s.schema))
@@ -1700,35 +1682,13 @@ func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowO
 	// input.output is already a *string from the database layer
 	res, err := runner.Exec(ctx, query, input.Status, input.Output, input.ErrStr, time.Now().UnixMilli(), input.WorkflowID, models.WorkflowStatusPending)
 	if err != nil {
-		return OutcomeWriteUnknown, fmt.Errorf("failed to update workflow status: %w", err)
+		return false, fmt.Errorf("failed to update workflow status: %w", err)
 	}
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
-		return OutcomeWriteUnknown, fmt.Errorf("failed to check workflow status update: %w", err)
+		return false, fmt.Errorf("failed to check workflow status update: %w", err)
 	}
-	if rowsAffected > 0 {
-		return OutcomeWriteRecorded, nil
-	}
-
-	// The guarded UPDATE matched no rows. Re-read the status to tell the caller what to do with the outcome it computed.
-	statusQuery := s.RenderSQL(`SELECT status, recovery_attempts FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
-	var currentStatus models.WorkflowStatusType
-	var attempts int
-	if err := runner.QueryRow(ctx, statusQuery, input.WorkflowID).Scan(&currentStatus, &attempts); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			// This can only happen if the workflow was garbage collected or manually deleted.
-			return OutcomeWriteUnknown, models.NewNonExistentWorkflowError(input.WorkflowID)
-		}
-		return OutcomeWriteUnknown, fmt.Errorf("failed to read workflow status after refused outcome update: %w", err)
-	}
-	switch currentStatus {
-	case models.WorkflowStatusCancelled:
-		return OutcomeWriteUnknown, models.NewWorkflowCancelledError(input.WorkflowID, nil)
-	case models.WorkflowStatusMaxRecoveryAttemptsExceeded:
-		return OutcomeWriteUnknown, models.NewDeadLetterQueueError(input.WorkflowID, attempts-2)
-	}
-	// This means status is ENQUEUED/DELAYED or already SUCCESS/ERROR
-	return OutcomeWriteDeferred, nil
+	return rowsAffected > 0, nil
 }
 
 type SetWorkflowAttributesDBInput struct {
