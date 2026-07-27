@@ -1673,9 +1673,6 @@ const (
 	// (SUCCESS/ERROR) is already recorded. Either way the recorded outcome wins and
 	// the caller must adopt it, waiting for it to become terminal if it isn't yet.
 	OutcomeWriteDeferred
-	// OutcomeWriteNoRow means the workflow_status row no longer exists: there is
-	// nothing to record and nothing to wait for, so the caller keeps its outcome.
-	OutcomeWriteNoRow
 )
 
 // UpdateWorkflowOutcome records a workflow's terminal outcome. The write applies
@@ -1687,8 +1684,9 @@ const (
 // When the guarded UPDATE matches no row, the current status decides what the caller must do:
 //   - CANCELLED: a cancellation error.
 //   - MAX_RECOVERY_ATTEMPTS_EXCEEDED: a dead-letter-queue error.
-//   - anything else: OutcomeWriteDeferred (see above) or, if the row is gone,
-//     OutcomeWriteNoRow (this can only happen when the workflow was garbage collected or manually deleted.)
+//   - the row is gone: a non-existent-workflow error (this can only happen when the
+//     workflow was garbage collected or manually deleted.)
+//   - anything else: OutcomeWriteDeferred (see above).
 func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) (OutcomeWriteAction, error) {
 	query := s.RenderSQL(`UPDATE %sworkflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, completed_at = $4, deduplication_id = NULL
@@ -1719,7 +1717,7 @@ func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowO
 	if err := runner.QueryRow(ctx, statusQuery, input.WorkflowID).Scan(&currentStatus, &attempts); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			// This can only happen if the workflow was garbage collected or manually deleted.
-			return OutcomeWriteNoRow, nil
+			return OutcomeWriteUnknown, models.NewNonExistentWorkflowError(input.WorkflowID)
 		}
 		return OutcomeWriteUnknown, fmt.Errorf("failed to read workflow status after refused outcome update: %w", err)
 	}

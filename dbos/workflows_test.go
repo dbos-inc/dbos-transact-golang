@@ -3964,17 +3964,19 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 		require.Nil(t, status.Output, "the refused outcome must not record an output")
 	})
 
-	t.Run("MissingRowLeavesTheRunResultIntact", func(t *testing.T) {
+	t.Run("MissingRowFailsTheRun", func(t *testing.T) {
 		handle, ctrl := startBlockedRun(t)
 		deleteQuery := sysDB.RenderSQL(`DELETE FROM %sworkflow_status WHERE workflow_uuid = $1`, schemaPrefix)
 		_, err := sysDB.Pool().Exec(context.Background(), deleteQuery, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to delete workflow row")
 		close(ctrl.release)
 
-		// Nothing to adopt and nothing to wait for: the run keeps its own result.
+		// The row is gone (garbage collected or deleted by hand), so there is nowhere
+		// to record the outcome: report that rather than a completion nothing holds.
 		result, err := handle.GetResult()
-		require.NoError(t, err, "a missing row must not fail the run")
-		require.Equal(t, "own-result", result)
+		require.Error(t, err, "a run whose row vanished must not report a completion")
+		require.True(t, errors.Is(err, ErrNonExistentWorkflow), "expected ErrorCodeNonExistentWorkflow error, got: %v", err)
+		require.Equal(t, "", result, "no output may be reported when the row is gone")
 	})
 }
 
