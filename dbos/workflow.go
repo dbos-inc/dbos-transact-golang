@@ -1566,9 +1566,16 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			encodedResult = awaitOut.Output
 			ser = awaitOut.Serialization
 		}
+		cancelled := errors.Is(err, ErrAwaitedWorkflowCancelled)
+		if cancelled {
+			// AwaitWorkflowResult reports a CANCELLED row from an awaiter's point of
+			// view, but this outcome is delivered to the workflow's own handle: report
+			// the workflow's cancellation.
+			err = models.NewWorkflowCancelledError(workflowID, nil)
+		}
 		// Keep the encoded result - decoding will happen in RunWorkflow[P,R] when we know the target type
 		outcomeChan <- workflowOutcome[any]{result: encodedResult, err: err, needsDecoding: true, serialization: ser,
-			cancelled: errors.Is(err, ErrAwaitedWorkflowCancelled)}
+			cancelled: cancelled}
 		close(outcomeChan)
 	}
 

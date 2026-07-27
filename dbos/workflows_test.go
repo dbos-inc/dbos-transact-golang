@@ -3704,8 +3704,9 @@ func TestCancelWorkflows(t *testing.T) {
 	t.Run("CancelledDuringFinalStepDoesNotComplete", func(t *testing.T) {
 		// A workflow API-cancelled while finishing its last work must end as
 		// CANCELLED, not complete: the refused outcome write sends the run to await
-		// the recorded outcome, which is the cancellation, and the workflow stays
-		// resumable (same semantics as the Python/TS/Java SDKs).
+		// the recorded outcome, which is the cancellation, so its own handle reports
+		// the workflow's cancellation and the workflow stays resumable (same
+		// semantics as the Python/TS/Java SDKs).
 		handle, err := RunWorkflow(dbosCtx, finalStepCancelWorkflow, "")
 		require.NoError(t, err, "failed to start workflow")
 		finalStepCancelStarted.Wait()
@@ -3715,7 +3716,7 @@ func TestCancelWorkflows(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "a cancelled workflow must not complete")
-		require.True(t, errors.Is(err, ErrAwaitedWorkflowCancelled), "expected ErrorCodeAwaitedWorkflowCancelled error, got: %v", err)
+		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled error, got: %v", err)
 
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
