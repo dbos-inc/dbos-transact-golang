@@ -1677,8 +1677,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			if recordErr != nil {
 				// A cancellation error means the write was refused because the workflow
 				// was cancelled (e.g. during the final step): end as cancelled, not
-				// complete. The refusal is already a cancellation error for this
-				// workflow, so surface it as-is.
+				// complete.
 				if errors.Is(recordErr, ErrWorkflowCancelled) {
 					outcomeChan <- workflowOutcome[any]{result: result, err: recordErr, cancelled: true}
 					close(outcomeChan)
@@ -1693,7 +1692,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 					close(outcomeChan)
 					return
 				}
-				// Any other error is a genuine DB failure: deliver it as-is.
+				// Rare not found error or some other DB failure: deliver it as-is.
 				c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
 				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
 				close(outcomeChan)
