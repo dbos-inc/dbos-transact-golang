@@ -1666,7 +1666,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			// visible, a resume→dequeue can re-dispatch this workflow to this executor,
 			// marking it PENDING. But a stale activeID entry would prevent the workflow from running.
 			removeActive()
-			recordErr := sysdb.Retry(c, func() error {
+			recordAction, recordErr := sysdb.RetryWithResult(c, func() (sysdb.OutcomeWriteAction, error) {
 				return c.systemDB.UpdateWorkflowOutcome(uncancellableCtx, sysdb.UpdateWorkflowOutcomeDBInput{
 					WorkflowID: workflowID,
 					Status:     status,
@@ -1677,17 +1677,36 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			if recordErr != nil {
 				// A cancellation error means the write was refused because the workflow
 				// was cancelled (e.g. during the final step): end as cancelled, not
-				// complete. Deliver a cancellation outcome wrapping the workflow's own
-				// error so context.Canceled/DeadlineExceeded still match via errors.Is.
-				// Any other error is a genuine DB failure and is delivered as-is below.
+				// complete. The refusal is already a cancellation error for this
+				// workflow, so surface it as-is.
 				if errors.Is(recordErr, ErrWorkflowCancelled) {
-					outcomeChan <- workflowOutcome[any]{result: result, err: models.NewWorkflowCancelledError(workflowID, err), cancelled: true}
+					outcomeChan <- workflowOutcome[any]{result: result, err: recordErr, cancelled: true}
 					close(outcomeChan)
 					return
 				}
+				// The workflow was moved to the dead-letter queue while this run was
+				// executing (it exceeded its maximum recovery attempts). Report that
+				// rather than a completion that was never recorded.
+				if errors.Is(recordErr, ErrDeadLetterQueue) {
+					c.logger.Warn("Workflow outcome not recorded: workflow exceeded its maximum recovery attempts", "workflow_id", workflowID)
+					outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
+					close(outcomeChan)
+					return
+				}
+				// Any other error is a genuine DB failure: deliver it as-is.
 				c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
 				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}
 				close(outcomeChan)
+				return
+			}
+			if recordAction == sysdb.OutcomeWriteDeferred {
+				// The row was not PENDING: this run no longer owns the workflow's
+				// outcome. Either another execution is running or about to run it (a
+				// concurrent resume re-enqueued it, or a recovery raced us), or a
+				// terminal outcome is already recorded. The recorded outcome wins:
+				// adopt it, waiting for it if it is not terminal yet.
+				c.logger.Warn("Workflow outcome was not recorded: the workflow is no longer owned by this execution. Waiting for the recorded outcome", "workflow_id", workflowID)
+				awaitExistingOutcome()
 				return
 			}
 		}

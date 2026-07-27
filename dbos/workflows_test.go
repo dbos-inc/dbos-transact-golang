@@ -3,6 +3,7 @@ package dbos
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3796,6 +3797,184 @@ func TestCancelWorkflows(t *testing.T) {
 		require.NoError(t, err, "resumed workflow should complete successfully")
 		require.Equal(t, "swallowed", result)
 		require.EqualValues(t, 2, swallowCancelAttempts.Load(), "expected the workflow to re-execute on resume")
+	})
+}
+
+// A run may record its outcome only while its workflow_status row is still
+// PENDING: that row is what says "this run is what the workflow is doing". Every
+// other status means the run lost ownership (a concurrent resume re-enqueued it,
+// a recovery raced it, it was cancelled or dead-lettered) and the recorded
+// outcome, not the one the run computed, is the workflow's outcome.
+func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// Each run blocks until the subtest has rewritten its row, then returns a
+	// result the subtest can tell apart from anything recorded out-of-band.
+	type runControl struct {
+		started *Event
+		release chan struct{}
+	}
+	var controls sync.Map
+	blockedWorkflow := func(ctx Context, id string) (string, error) {
+		v, ok := controls.Load(id)
+		if !ok {
+			return "", fmt.Errorf("no control registered for workflow %s", id)
+		}
+		ctrl := v.(*runControl)
+		ctrl.started.Set()
+		<-ctrl.release
+		return "own-result", nil
+	}
+	RegisterWorkflow(dbosCtx, blockedWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	require.True(t, ok, "expected systemDB to be *sysdb.SysDB")
+	schemaPrefix := sysDB.Dialect().SchemaPrefix(sysDB.Schema())
+
+	// startBlockedRun starts a run and returns once it is blocked inside the
+	// workflow function, with its row PENDING.
+	startBlockedRun := func(t *testing.T) (WorkflowHandle[string], *runControl) {
+		t.Helper()
+		id := "outcome-ownership-" + uuid.NewString()
+		ctrl := &runControl{started: NewEvent(), release: make(chan struct{})}
+		controls.Store(id, ctrl)
+		handle, err := RunWorkflow(dbosCtx, blockedWorkflow, id, WithWorkflowID(id))
+		require.NoError(t, err, "failed to start workflow")
+		ctrl.started.Wait()
+		return handle, ctrl
+	}
+
+	// encodeOutput mirrors the default (non-portable) workflow serializer.
+	encodeOutput := func(t *testing.T, value string) *string {
+		t.Helper()
+		jsonBytes, err := json.Marshal(value)
+		require.NoError(t, err, "failed to encode output")
+		encoded := base64.StdEncoding.EncodeToString(jsonBytes)
+		return &encoded
+	}
+
+	// rewriteRow takes the row away from the blocked run, standing in for the
+	// concurrent resume/recovery/cancel that would do it in production.
+	rewriteRow := func(t *testing.T, workflowID string, status WorkflowStatusType, output *string, errStr string) {
+		t.Helper()
+		q := sysDB.RenderSQL(`UPDATE %sworkflow_status SET status = $1, output = $2, error = $3 WHERE workflow_uuid = $4`, schemaPrefix)
+		_, err := sysDB.Pool().Exec(context.Background(), q, status, output, errStr, workflowID)
+		require.NoError(t, err, "failed to rewrite workflow row")
+	}
+
+	t.Run("RecordedSuccessSupersedesTheRunResult", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t)
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusSuccess, encodeOutput(t, "recorded-elsewhere"), "")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "the recorded success must be adopted")
+		require.Equal(t, "recorded-elsewhere", result, "the run must report the recorded output, not its own")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusSuccess, status.Status)
+		require.Equal(t, `"recorded-elsewhere"`, status.Output, "the recorded output must not be overwritten")
+	})
+
+	t.Run("RecordedErrorSupersedesTheRunResult", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t)
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusError, nil, "recorded failure")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.Error(t, err, "the recorded error must be adopted")
+		require.Contains(t, err.Error(), "recorded failure")
+		require.Equal(t, "", result, "no output may be reported for a recorded failure")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusError, status.Status)
+	})
+
+	t.Run("NonTerminalRowParksTheRunUntilAnOutcomeIsRecorded", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t)
+		// ENQUEUED with no queue name: nothing dequeues it, so the run stays parked
+		// until this subtest records the outcome itself.
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusEnqueued, nil, "")
+		close(ctrl.release)
+
+		type outcome struct {
+			result string
+			err    error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			result, err := handle.GetResult()
+			done <- outcome{result: result, err: err}
+		}()
+
+		// The run leaves the active set immediately before it tries to record its
+		// outcome. Waiting for that makes the check below assert that the run parked,
+		// rather than merely that it had not gotten around to the write yet.
+		activeWorkflowIDs := dbosCtx.(*dbosContext).activeWorkflowIDs
+		require.Eventually(t, func() bool {
+			_, active := activeWorkflowIDs.Load(handle.GetWorkflowID())
+			return !active
+		}, 30*time.Second, 10*time.Millisecond, "the run never reached its outcome write")
+
+		select {
+		case got := <-done:
+			t.Fatalf("the run must wait for the owning execution, got result %q (err: %v)", got.result, got.err)
+		case <-time.After(2 * time.Second):
+		}
+
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusSuccess, encodeOutput(t, "recorded-by-owner"), "")
+
+		select {
+		case got := <-done:
+			require.NoError(t, got.err, "the parked run must adopt the recorded outcome")
+			require.Equal(t, "recorded-by-owner", got.result, "the run must report the recorded output, not its own")
+		case <-time.After(30 * time.Second):
+			t.Fatal("the parked run did not pick up the recorded outcome in time")
+		}
+	})
+
+	t.Run("DeadLetteredRowFailsTheRun", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t)
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusMaxRecoveryAttemptsExceeded, nil, "")
+		// A workflow is dead-lettered by the attempt that pushes recovery_attempts
+		// past maxRetries+1, so a dead-lettered row carries maxRetries+2 attempts.
+		// The retry budget is recovered from the row the same way AwaitWorkflowResult
+		// does it, by subtracting those two.
+		const maxRetries = 3
+		attemptsQuery := sysDB.RenderSQL(`UPDATE %sworkflow_status SET recovery_attempts = $1 WHERE workflow_uuid = $2`, schemaPrefix)
+		_, err := sysDB.Pool().Exec(context.Background(), attemptsQuery, maxRetries+2, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to set recovery attempts")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.Error(t, err, "a dead-lettered workflow must not report a completion")
+		require.True(t, errors.Is(err, ErrDeadLetterQueue), "expected ErrorCodeDeadLetterQueue error, got: %v", err)
+		require.Equal(t, "", result, "no output may be reported for a dead-lettered workflow")
+
+		var dbosErr *Error
+		require.True(t, errors.As(err, &dbosErr), "expected a *dbos.Error")
+		require.Equal(t, maxRetries, dbosErr.MaxRetries, "the error must report the exhausted retry budget")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
+		require.Nil(t, status.Output, "the refused outcome must not record an output")
+	})
+
+	t.Run("MissingRowLeavesTheRunResultIntact", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t)
+		deleteQuery := sysDB.RenderSQL(`DELETE FROM %sworkflow_status WHERE workflow_uuid = $1`, schemaPrefix)
+		_, err := sysDB.Pool().Exec(context.Background(), deleteQuery, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to delete workflow row")
+		close(ctrl.release)
+
+		// Nothing to adopt and nothing to wait for: the run keeps its own result.
+		result, err := handle.GetResult()
+		require.NoError(t, err, "a missing row must not fail the run")
+		require.Equal(t, "own-result", result)
 	})
 }
 
