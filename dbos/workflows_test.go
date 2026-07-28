@@ -5964,7 +5964,9 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
 		assert.True(t, errors.Is(err, context.DeadlineExceeded), "Expected deadline exceeded error, got: %v", err)
-		assert.Equal(t, "detached-step-completed", result, "expected result to be 'detached-step-completed'")
+		// A cancelled workflow delivers no result, even one it computed: the
+		// CANCELLED row stores no outcome, and the run adopts the recorded outcome.
+		assert.Equal(t, "", result, "expected no result for a cancelled workflow")
 		// Check the workflow status: should be cancelled
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
@@ -6063,7 +6065,9 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Wait for the parent workflow to complete and get the result
 		result, err := handle.GetResult()
 		assert.True(t, errors.Is(err, context.DeadlineExceeded), "Expected deadline exceeded error, got: %v", err)
-		assert.Equal(t, "detached-step-completed", result, "expected result to be 'detached-step-completed'")
+		// A cancelled workflow delivers no result, even one it computed: the
+		// CANCELLED row stores no outcome, and the run adopts the recorded outcome.
+		assert.Equal(t, "", result, "expected no result for a cancelled workflow")
 
 		// Check the workflow status: should be cancelled
 		status, err := handle.GetStatus()
