@@ -3827,20 +3827,34 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 		return "own-result", nil
 	}
 	RegisterWorkflow(dbosCtx, blockedWorkflow)
+
+	// Stands in for a run that observes its own cancellation mid-flight: the
+	// cancellation is returned only after the subtest has rewritten the row.
+	selfCancellingWorkflow := func(ctx Context, id string) (string, error) {
+		v, ok := controls.Load(id)
+		if !ok {
+			return "", fmt.Errorf("no control registered for workflow %s", id)
+		}
+		ctrl := v.(*runControl)
+		ctrl.started.Set()
+		<-ctrl.release
+		return "", models.NewWorkflowCancelledError(id, nil)
+	}
+	RegisterWorkflow(dbosCtx, selfCancellingWorkflow)
 	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 	require.True(t, ok, "expected systemDB to be *sysdb.SysDB")
 	schemaPrefix := sysDB.Dialect().SchemaPrefix(sysDB.Schema())
 
-	// startBlockedRun starts a run and returns once it is blocked inside the
-	// workflow function, with its row PENDING.
-	startBlockedRun := func(t *testing.T) (WorkflowHandle[string], *runControl) {
+	// startBlockedRun starts a run of the given workflow and returns once it is
+	// blocked inside the workflow function, with its row PENDING.
+	startBlockedRun := func(t *testing.T, workflow func(Context, string) (string, error)) (WorkflowHandle[string], *runControl) {
 		t.Helper()
 		id := "outcome-ownership-" + uuid.NewString()
 		ctrl := &runControl{started: NewEvent(), release: make(chan struct{})}
 		controls.Store(id, ctrl)
-		handle, err := RunWorkflow(dbosCtx, blockedWorkflow, id, WithWorkflowID(id))
+		handle, err := RunWorkflow(dbosCtx, workflow, id, WithWorkflowID(id))
 		require.NoError(t, err, "failed to start workflow")
 		ctrl.started.Wait()
 		return handle, ctrl
@@ -3865,7 +3879,7 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 	}
 
 	t.Run("RecordedSuccessSupersedesTheRunResult", func(t *testing.T) {
-		handle, ctrl := startBlockedRun(t)
+		handle, ctrl := startBlockedRun(t, blockedWorkflow)
 		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusSuccess, encodeOutput(t, "recorded-elsewhere"), "")
 		close(ctrl.release)
 
@@ -3880,7 +3894,7 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 	})
 
 	t.Run("RecordedErrorSupersedesTheRunResult", func(t *testing.T) {
-		handle, ctrl := startBlockedRun(t)
+		handle, ctrl := startBlockedRun(t, blockedWorkflow)
 		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusError, nil, "recorded failure")
 		close(ctrl.release)
 
@@ -3895,7 +3909,7 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 	})
 
 	t.Run("NonTerminalRowParksTheRunUntilAnOutcomeIsRecorded", func(t *testing.T) {
-		handle, ctrl := startBlockedRun(t)
+		handle, ctrl := startBlockedRun(t, blockedWorkflow)
 		// ENQUEUED with no queue name: nothing dequeues it, so the run stays parked
 		// until this subtest records the outcome itself.
 		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusEnqueued, nil, "")
@@ -3938,7 +3952,7 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 	})
 
 	t.Run("DeadLetteredRowFailsTheRun", func(t *testing.T) {
-		handle, ctrl := startBlockedRun(t)
+		handle, ctrl := startBlockedRun(t, blockedWorkflow)
 		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusMaxRecoveryAttemptsExceeded, nil, "")
 		// A workflow is dead-lettered by the attempt that pushes recovery_attempts
 		// past maxRetries+1, so a dead-lettered row carries maxRetries+2 attempts.
@@ -3966,7 +3980,7 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 	})
 
 	t.Run("DeletedRowFailsTheRunWithNonExistentWorkflow", func(t *testing.T) {
-		handle, ctrl := startBlockedRun(t)
+		handle, ctrl := startBlockedRun(t, blockedWorkflow)
 		q := sysDB.RenderSQL(`DELETE FROM %sworkflow_status WHERE workflow_uuid = $1`, schemaPrefix)
 		_, err := sysDB.Pool().Exec(context.Background(), q, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to delete workflow row")
@@ -3976,6 +3990,35 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 		require.Error(t, err, "a run whose row vanished must not report a completion")
 		require.True(t, errors.Is(err, ErrNonExistentWorkflow), "expected ErrorCodeNonExistentWorkflow error, got: %v", err)
 		require.Equal(t, "", result, "no output may be reported for a deleted workflow")
+	})
+
+	t.Run("CancelledRunAdoptsARecordedOutcome", func(t *testing.T) {
+		// A run that observes its own cancellation adopts the recorded outcome
+		// rather than trusting its local view: here a concurrent "resume" already
+		// rewrote the row to SUCCESS, so the handle reports that outcome instead
+		// of a cancellation that is no longer the workflow's state.
+		handle, ctrl := startBlockedRun(t, selfCancellingWorkflow)
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusSuccess, encodeOutput(t, "recorded-after-cancel"), "")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "the run must adopt the recorded outcome, not report its cancellation")
+		require.Equal(t, "recorded-after-cancel", result, "the run must report the recorded output, not its own")
+	})
+
+	t.Run("CancelledRunStillReportsCancellationForACancelledRow", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t, selfCancellingWorkflow)
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusCancelled, nil, "")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.Error(t, err, "a genuinely cancelled workflow must still report its cancellation")
+		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected cancellation error, got: %v", err)
+		require.Equal(t, "", result, "no output may be reported for a cancelled workflow")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusCancelled, status.Status)
 	})
 }
 
