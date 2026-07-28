@@ -3964,6 +3964,19 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
 		require.Nil(t, status.Output, "the refused outcome must not record an output")
 	})
+
+	t.Run("DeletedRowFailsTheRunWithNonExistentWorkflow", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t)
+		q := sysDB.RenderSQL(`DELETE FROM %sworkflow_status WHERE workflow_uuid = $1`, schemaPrefix)
+		_, err := sysDB.Pool().Exec(context.Background(), q, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to delete workflow row")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.Error(t, err, "a run whose row vanished must not report a completion")
+		require.True(t, errors.Is(err, ErrNonExistentWorkflow), "expected ErrorCodeNonExistentWorkflow error, got: %v", err)
+		require.Equal(t, "", result, "no output may be reported for a deleted workflow")
+	})
 }
 
 func TestResumeWorkflows(t *testing.T) {
