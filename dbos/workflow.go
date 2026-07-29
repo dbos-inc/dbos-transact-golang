@@ -1555,6 +1555,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	// The row is known to have existed (this run inserted or read it), so a missing
 	// row means it was deleted: fail fast with a NonExistentWorkflow error rather
 	// than polling for a row that will never reappear.
+	// Parking is unbounded and relies on the outcome being eventually settled.
 	awaitExistingOutcome := func(cancelCause error) {
 		awaitOut, awaitErr := sysdb.RetryWithResult(c, func() (*sysdb.AwaitWorkflowResultOutput, error) {
 			return c.systemDB.AwaitWorkflowResult(uncancellableCtx, workflowID, sysdb.DBRetryInterval, true)
@@ -1625,12 +1626,12 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			awaitExistingOutcome(nil)
 			return
 		} else {
-			// A cancelled run skips updateWorkflowOutcome entirely so it can never
-			// clobber the row (e.g., ENQUEUED written by a concurrent resume). It
-			// parks instead of trusting its local view: normally the row is CANCELLED
-			// and the parked await reports the workflow's cancellation (wrapping the
-			// run's own error), but a concurrent resume may have taken the workflow
-			// back, in which case the recorded outcome is the truth.
+			// A run whose context was cancelled skips updateWorkflowOutcome entirely so
+			// it can never clobber the row (e.g., ENQUEUED written by a concurrent
+			// resume). It parks instead of trusting its local view: normally the row is
+			// CANCELLED and the parked await reports the workflow's cancellation
+			// (wrapping the run's own error), but a concurrent resume may have taken the
+			// workflow back, in which case the recorded outcome is the truth.
 			if !stopFunc() {
 				// AfterFunc fired => context is cancelled. Wait for the DB cancel to
 				// finish so the row is settled before parking.
@@ -1648,14 +1649,6 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				awaitExistingOutcome(err)
 				return
 			}
-			if errors.Is(err, ErrWorkflowCancelled) {
-				// The workflow observed its own cancellation in the DB (external
-				// cancel): the row is already CANCELLED. Skip the outcome write.
-				removeActive()
-				awaitExistingOutcome(err)
-				return
-			}
-
 			status := WorkflowStatusSuccess
 			if err != nil {
 				status = WorkflowStatusError
@@ -1698,7 +1691,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				// concurrent execution, or handed back to the queue by a resume.
 				// Park the execution and wait for the recorded outcome to become visible.
 				c.logger.Warn("Workflow outcome was not recorded: the workflow is no longer owned by this execution. Waiting for the recorded outcome", "workflow_id", workflowID)
-				awaitExistingOutcome(nil)
+				awaitExistingOutcome(err)
 				return
 			}
 		}
