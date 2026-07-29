@@ -3,6 +3,7 @@ package dbos
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1396,8 +1397,9 @@ func TestSteps(t *testing.T) {
 	t.Run("CancelledParentCancelsChild", func(t *testing.T) {
 		// Cancelling the parent durably cancels the child too: a cancelled run
 		// never writes its outcome, even if its function ignores cancellation and
-		// returns successfully. The parent checkpoints the child's cancellation
-		// via getResult; resuming the parent replays it deterministically.
+		// returns successfully. A cancelled parent never checkpoints the await:
+		// it reports its own cancellation, and only a later resume observes (and
+		// then checkpoints) the child's settled cancellation.
 		cancelCtx, cancelFunc := WithCancel(dbosCtx)
 		defer cancelFunc()
 		handle, err := RunWorkflow(cancelCtx, stubbornParentWorkflow, "")
@@ -1409,7 +1411,7 @@ func TestSteps(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error from cancelled parent")
-		require.True(t, errors.Is(err, ErrAwaitedWorkflowCancelled), "expected ErrorCodeAwaitedWorkflowCancelled, got: %v", err)
+		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled, got: %v", err)
 
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()
@@ -1419,11 +1421,9 @@ func TestSteps(t *testing.T) {
 
 		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
-		require.Len(t, steps, 2, "expected child spawn and getResult recorded")
+		require.Len(t, steps, 1, "only the child spawn must be recorded, not the interrupted await")
 		childID := steps[0].ChildWorkflowID
-		require.NotEmpty(t, childID, "expected the first step to be the child spawn")
-		require.Equal(t, "DBOS.getResult", steps[1].StepName)
-		require.NotNil(t, steps[1].Error, "the child's cancellation must be checkpointed")
+		require.NotEmpty(t, childID, "expected the recorded step to be the child spawn")
 
 		childHandle, err := RetrieveWorkflow[string](dbosCtx, childID)
 		require.NoError(t, err, "failed to retrieve child workflow")
@@ -1431,18 +1431,25 @@ func TestSteps(t *testing.T) {
 		require.NoError(t, err, "failed to get child workflow status")
 		require.Equal(t, WorkflowStatusCancelled, childStatus.Status, "child cannot outlive the parent's cancellation")
 
-		// The checkpointed child cancellation is a terminal outcome for the
-		// parent: resuming replays it.
+		// Resuming the parent re-executes the await against the child's settled
+		// CANCELLED row: the parent is no longer cancelled, so the child's
+		// cancellation is now checkpointed as the await's terminal outcome.
 		resumedHandle, err := ResumeWorkflow[string](dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to resume parent workflow")
 		_, err = resumedHandle.GetResult()
-		require.Error(t, err, "resumed parent must replay the checkpointed child cancellation")
-		require.True(t, errors.Is(err, ErrAwaitedWorkflowCancelled), "expected ErrorCodeAwaitedWorkflowCancelled on replay, got: %v", err)
+		require.Error(t, err, "resumed parent must observe the child's cancellation")
+		require.True(t, errors.Is(err, ErrAwaitedWorkflowCancelled), "expected ErrorCodeAwaitedWorkflowCancelled on resume, got: %v", err)
 		require.EqualValues(t, 1, stubbornChildExecutions.Load(), "child must not re-execute on parent resume")
+
+		steps, err = GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps after resume")
+		require.Len(t, steps, 2, "the re-executed await checkpoints the child's cancellation")
+		require.Equal(t, "DBOS.getResult", steps[1].StepName)
+		require.NotNil(t, steps[1].Error, "the child's cancellation must be checkpointed")
 
 		status, err := resumedHandle.GetStatus()
 		require.NoError(t, err, "failed to get resumed workflow status")
-		require.Equal(t, WorkflowStatusError, status.Status, "replayed child cancellation is a terminal error outcome")
+		require.Equal(t, WorkflowStatusError, status.Status, "the child cancellation observed on resume is a terminal error outcome")
 	})
 
 	t.Run("PreemptedChildCancellationNotCheckpointed", func(t *testing.T) {
@@ -2017,10 +2024,11 @@ func TestSelect(t *testing.T) {
 		// Wait for the workflow to reach the Select call (step has started and set the event)
 		selectBlockStartEvent.Wait()
 		selectBlockStartEvent.Clear()
-		// Wait for the Go step body to start: once it runs, its outcome is delivered
-		// and checkpointed even though the workflow is cancelled. Cancelling earlier
-		// would race the durable cancel against the step's checkpoint lookup, which
-		// can refuse to start the step at all (a valid outcome, but not this test's).
+		// Wait for the Go step body to start: the test cancels while it runs, and
+		// its outcome — delivered after the cancel — must be discarded, not
+		// checkpointed. Cancelling earlier would race the durable cancel against
+		// the step's checkpoint lookup, which can refuse to start the step at all
+		// (a valid outcome, but not the path this test pins).
 		selectGoStepStarted.Wait()
 		selectGoStepStarted.Clear()
 
@@ -2046,15 +2054,14 @@ func TestSelect(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 
-		// The cancelled Select step must not be checkpointed (it would replay its
-		// cancellation error on resume); only the Go step, unblocked above, records.
-		require.Eventually(t, func() bool {
+		// The cancelled workflow must not checkpoint any step: neither the
+		// interrupted Select nor the Go step unblocked above, whose outcome is
+		// discarded at the checkpoint site because the workflow context is
+		// cancelled. On resume, both would replay.
+		require.Never(t, func() bool {
 			steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
-			if err != nil {
-				return false
-			}
-			return len(steps) == 1 && steps[0].StepID == 0
-		}, 5*time.Second, 100*time.Millisecond, "expected only the Go step to be recorded")
+			return err == nil && len(steps) > 0
+		}, 2*time.Second, 100*time.Millisecond, "no step may be checkpointed after the workflow is cancelled")
 	})
 
 	t.Run("Select idempotency", func(t *testing.T) {
@@ -3702,9 +3709,10 @@ func TestCancelWorkflows(t *testing.T) {
 
 	t.Run("CancelledDuringFinalStepDoesNotComplete", func(t *testing.T) {
 		// A workflow API-cancelled while finishing its last work must end as
-		// CANCELLED, not complete: the refused outcome write is surfaced as a
-		// cancellation and the workflow stays resumable (same semantics as the
-		// Python/TS/Java SDKs).
+		// CANCELLED, not complete: the refused outcome write sends the run to await
+		// the recorded outcome, which is the cancellation, so its own handle reports
+		// the workflow's cancellation and the workflow stays resumable (same
+		// semantics as the Python/TS/Java SDKs).
 		handle, err := RunWorkflow(dbosCtx, finalStepCancelWorkflow, "")
 		require.NoError(t, err, "failed to start workflow")
 		finalStepCancelStarted.Wait()
@@ -3796,6 +3804,227 @@ func TestCancelWorkflows(t *testing.T) {
 		require.NoError(t, err, "resumed workflow should complete successfully")
 		require.Equal(t, "swallowed", result)
 		require.EqualValues(t, 2, swallowCancelAttempts.Load(), "expected the workflow to re-execute on resume")
+	})
+}
+
+// A run may record its outcome only while its workflow_status row is still
+// PENDING: that row is what says "this run is what the workflow is doing". Every
+// other status means the run lost ownership (a concurrent resume re-enqueued it,
+// a recovery raced it, it was cancelled or dead-lettered) and the recorded
+// outcome, not the one the run computed, is the workflow's outcome.
+func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// Each run blocks until the subtest has rewritten its row, then returns a
+	// result the subtest can tell apart from anything recorded out-of-band.
+	type runControl struct {
+		started *Event
+		release chan struct{}
+	}
+	var controls sync.Map
+	blockedWorkflow := func(ctx Context, id string) (string, error) {
+		v, ok := controls.Load(id)
+		if !ok {
+			return "", fmt.Errorf("no control registered for workflow %s", id)
+		}
+		ctrl := v.(*runControl)
+		ctrl.started.Set()
+		<-ctrl.release
+		return "own-result", nil
+	}
+	RegisterWorkflow(dbosCtx, blockedWorkflow)
+
+	// Stands in for a run that observes its own cancellation mid-flight: the
+	// cancellation is returned only after the subtest has rewritten the row.
+	selfCancellingWorkflow := func(ctx Context, id string) (string, error) {
+		v, ok := controls.Load(id)
+		if !ok {
+			return "", fmt.Errorf("no control registered for workflow %s", id)
+		}
+		ctrl := v.(*runControl)
+		ctrl.started.Set()
+		<-ctrl.release
+		return "", models.NewWorkflowCancelledError(id, nil)
+	}
+	RegisterWorkflow(dbosCtx, selfCancellingWorkflow)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	sysDB, ok := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	require.True(t, ok, "expected systemDB to be *sysdb.SysDB")
+	schemaPrefix := sysDB.Dialect().SchemaPrefix(sysDB.Schema())
+
+	// startBlockedRun starts a run of the given workflow and returns once it is
+	// blocked inside the workflow function, with its row PENDING.
+	startBlockedRun := func(t *testing.T, workflow func(Context, string) (string, error)) (WorkflowHandle[string], *runControl) {
+		t.Helper()
+		id := "outcome-ownership-" + uuid.NewString()
+		ctrl := &runControl{started: NewEvent(), release: make(chan struct{})}
+		controls.Store(id, ctrl)
+		handle, err := RunWorkflow(dbosCtx, workflow, id, WithWorkflowID(id))
+		require.NoError(t, err, "failed to start workflow")
+		ctrl.started.Wait()
+		return handle, ctrl
+	}
+
+	// encodeOutput mirrors the default (non-portable) workflow serializer.
+	encodeOutput := func(t *testing.T, value string) *string {
+		t.Helper()
+		jsonBytes, err := json.Marshal(value)
+		require.NoError(t, err, "failed to encode output")
+		encoded := base64.StdEncoding.EncodeToString(jsonBytes)
+		return &encoded
+	}
+
+	// rewriteRow takes the row away from the blocked run, standing in for the
+	// concurrent resume/recovery/cancel that would do it in production.
+	rewriteRow := func(t *testing.T, workflowID string, status WorkflowStatusType, output *string, errStr string) {
+		t.Helper()
+		q := sysDB.RenderSQL(`UPDATE %sworkflow_status SET status = $1, output = $2, error = $3 WHERE workflow_uuid = $4`, schemaPrefix)
+		_, err := sysDB.Pool().Exec(context.Background(), q, status, output, errStr, workflowID)
+		require.NoError(t, err, "failed to rewrite workflow row")
+	}
+
+	t.Run("RecordedSuccessSupersedesTheRunResult", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t, blockedWorkflow)
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusSuccess, encodeOutput(t, "recorded-elsewhere"), "")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "the recorded success must be adopted")
+		require.Equal(t, "recorded-elsewhere", result, "the run must report the recorded output, not its own")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusSuccess, status.Status)
+		require.Equal(t, `"recorded-elsewhere"`, status.Output, "the recorded output must not be overwritten")
+	})
+
+	t.Run("RecordedErrorSupersedesTheRunResult", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t, blockedWorkflow)
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusError, nil, "recorded failure")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.Error(t, err, "the recorded error must be adopted")
+		require.Contains(t, err.Error(), "recorded failure")
+		require.Equal(t, "", result, "no output may be reported for a recorded failure")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusError, status.Status)
+	})
+
+	t.Run("NonTerminalRowParksTheRunUntilAnOutcomeIsRecorded", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t, blockedWorkflow)
+		// ENQUEUED with no queue name: nothing dequeues it, so the run stays parked
+		// until this subtest records the outcome itself.
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusEnqueued, nil, "")
+		close(ctrl.release)
+
+		type outcome struct {
+			result string
+			err    error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			result, err := handle.GetResult()
+			done <- outcome{result: result, err: err}
+		}()
+
+		// The run leaves the active set immediately before it tries to record its
+		// outcome. Waiting for that makes the check below assert that the run parked,
+		// rather than merely that it had not gotten around to the write yet.
+		activeWorkflowIDs := dbosCtx.(*dbosContext).activeWorkflowIDs
+		require.Eventually(t, func() bool {
+			_, active := activeWorkflowIDs.Load(handle.GetWorkflowID())
+			return !active
+		}, 30*time.Second, 10*time.Millisecond, "the run never reached its outcome write")
+
+		select {
+		case got := <-done:
+			t.Fatalf("the run must wait for the owning execution, got result %q (err: %v)", got.result, got.err)
+		case <-time.After(2 * time.Second):
+		}
+
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusSuccess, encodeOutput(t, "recorded-by-owner"), "")
+
+		select {
+		case got := <-done:
+			require.NoError(t, got.err, "the parked run must adopt the recorded outcome")
+			require.Equal(t, "recorded-by-owner", got.result, "the run must report the recorded output, not its own")
+		case <-time.After(30 * time.Second):
+			t.Fatal("the parked run did not pick up the recorded outcome in time")
+		}
+	})
+
+	t.Run("DeadLetteredRowFailsTheRun", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t, blockedWorkflow)
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusMaxRecoveryAttemptsExceeded, nil, "")
+		// A workflow is dead-lettered by the attempt that pushes recovery_attempts
+		// past maxRetries+1, so a dead-lettered row carries maxRetries+2 attempts.
+		// The retry budget is recovered from the row the same way AwaitWorkflowResult
+		// does it, by subtracting those two.
+		const maxRetries = 3
+		attemptsQuery := sysDB.RenderSQL(`UPDATE %sworkflow_status SET recovery_attempts = $1 WHERE workflow_uuid = $2`, schemaPrefix)
+		_, err := sysDB.Pool().Exec(context.Background(), attemptsQuery, maxRetries+2, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to set recovery attempts")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.Error(t, err, "a dead-lettered workflow must not report a completion")
+		require.True(t, errors.Is(err, ErrDeadLetterQueue), "expected ErrorCodeDeadLetterQueue error, got: %v", err)
+		require.Equal(t, "", result, "no output may be reported for a dead-lettered workflow")
+
+		var dbosErr *Error
+		require.True(t, errors.As(err, &dbosErr), "expected a *dbos.Error")
+		require.Equal(t, maxRetries, dbosErr.MaxRetries, "the error must report the exhausted retry budget")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
+		require.Nil(t, status.Output, "the refused outcome must not record an output")
+	})
+
+	t.Run("DeletedRowFailsTheRunWithNonExistentWorkflow", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t, blockedWorkflow)
+		q := sysDB.RenderSQL(`DELETE FROM %sworkflow_status WHERE workflow_uuid = $1`, schemaPrefix)
+		_, err := sysDB.Pool().Exec(context.Background(), q, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to delete workflow row")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.Error(t, err, "a run whose row vanished must not report a completion")
+		require.True(t, errors.Is(err, ErrNonExistentWorkflow), "expected ErrorCodeNonExistentWorkflow error, got: %v", err)
+		require.Equal(t, "", result, "no output may be reported for a deleted workflow")
+	})
+
+	t.Run("CancelledRunAdoptsARecordedOutcome", func(t *testing.T) {
+		// A run that observes its own cancellation adopts the recorded outcome
+		// rather than trusting its local view: here a concurrent "resume" already
+		// rewrote the row to SUCCESS, so the handle reports that outcome instead
+		// of a cancellation that is no longer the workflow's state.
+		handle, ctrl := startBlockedRun(t, selfCancellingWorkflow)
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusSuccess, encodeOutput(t, "recorded-after-cancel"), "")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err, "the run must adopt the recorded outcome, not report its cancellation")
+		require.Equal(t, "recorded-after-cancel", result, "the run must report the recorded output, not its own")
+	})
+
+	t.Run("CancelledRunStillReportsCancellationForACancelledRow", func(t *testing.T) {
+		handle, ctrl := startBlockedRun(t, selfCancellingWorkflow)
+		rewriteRow(t, handle.GetWorkflowID(), WorkflowStatusCancelled, nil, "")
+		close(ctrl.release)
+
+		result, err := handle.GetResult()
+		require.Error(t, err, "a genuinely cancelled workflow must still report its cancellation")
+		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected cancellation error, got: %v", err)
+		require.Equal(t, "", result, "no output may be reported for a cancelled workflow")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		require.Equal(t, WorkflowStatusCancelled, status.Status)
 	})
 }
 
@@ -5712,12 +5941,17 @@ func TestWorkflowTimeout(t *testing.T) {
 
 	detachedStepWorkflow := func(ctx Context, timeout time.Duration) (string, error) {
 		// This workflow will run a step that is not cancelable.
-		// What this means is the workflow *will* be cancelled, but the step will run normally
+		// What this means is the workflow *will* be cancelled, but the step will run normally.
+		// The workflow being cancelled mid-step interrupts the step checkpoint,
+		// so the step's success is reported as the workflow's cancellation; a
+		// resume would re-execute the step.
 		stepCtx := WithoutCancel(ctx)
 		res, err := RunAsStep(stepCtx, func(context context.Context) (string, error) {
 			return detachedStep(context, timeout*2)
 		})
-		require.NoError(t, err, "failed to run detached step")
+		if err != nil {
+			return "", err
+		}
 		assert.Equal(t, "detached-step-completed", res, "expected detached step result to be 'detached-step-completed'")
 		return res, ctx.Err()
 	}
@@ -5741,7 +5975,9 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
 		assert.True(t, errors.Is(err, context.DeadlineExceeded), "Expected deadline exceeded error, got: %v", err)
-		assert.Equal(t, "detached-step-completed", result, "expected result to be 'detached-step-completed'")
+		// A cancelled workflow delivers no result, even one it computed: the
+		// CANCELLED row stores no outcome, and the run adopts the recorded outcome.
+		assert.Equal(t, "", result, "expected no result for a cancelled workflow")
 		// Check the workflow status: should be cancelled
 		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
@@ -5794,7 +6030,9 @@ func TestWorkflowTimeout(t *testing.T) {
 		}, 5*time.Second, 50*time.Millisecond, "expected child workflow status to be WorkflowStatusCancelled")
 	}
 
+	var detachedChildExecutions atomic.Int64
 	detachedChild := func(ctx Context, timeout time.Duration) (string, error) {
+		detachedChildExecutions.Add(1)
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -5812,10 +6050,14 @@ func TestWorkflowTimeout(t *testing.T) {
 		childHandle, err := RunWorkflow(childCtx, detachedChild, timeout*2, WithWorkflowID(childWorkflowID))
 		require.NoError(t, err, "failed to start child workflow")
 
-		// Wait for the child workflow to complete
+		// Wait for the child workflow to complete. On the first execution the
+		// parent is cancelled mid-await, so getResult is interrupted (not
+		// checkpointed) even though the detached child succeeds; a resume
+		// replays the await and adopts the child's recorded success.
 		result, err := childHandle.GetResult()
-		require.NoError(t, err, "failed to get result from child workflow")
-		// The child spun for timeout*2 so ctx.Err() should be context.DeadlineExceeded
+		if err != nil {
+			return "", err
+		}
 		return result, ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, detachedChildWorkflowParent)
@@ -5840,7 +6082,9 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Wait for the parent workflow to complete and get the result
 		result, err := handle.GetResult()
 		assert.True(t, errors.Is(err, context.DeadlineExceeded), "Expected deadline exceeded error, got: %v", err)
-		assert.Equal(t, "detached-step-completed", result, "expected result to be 'detached-step-completed'")
+		// A cancelled workflow delivers no result, even one it computed: the
+		// CANCELLED row stores no outcome, and the run adopts the recorded outcome.
+		assert.Equal(t, "", result, "expected no result for a cancelled workflow")
 
 		// Check the workflow status: should be cancelled
 		status, err := handle.GetStatus()
@@ -5853,6 +6097,15 @@ func TestWorkflowTimeout(t *testing.T) {
 		status, err = childHandle.GetStatus()
 		require.NoError(t, err, "failed to get child workflow status")
 		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected child workflow status to be WorkflowStatusSuccess")
+
+		// Resuming the parent replays the interrupted getResult step: this time
+		// it finds the detached child's recorded success and checkpoints it.
+		resumedHandle, err := ResumeWorkflow[string](dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to resume parent workflow")
+		result, err = resumedHandle.GetResult()
+		require.NoError(t, err, "resumed parent should adopt the detached child's recorded success")
+		assert.Equal(t, "detached-step-completed", result, "expected the resumed parent to report the child's result")
+		require.EqualValues(t, 1, detachedChildExecutions.Load(), "child must not re-execute on parent resume")
 	})
 
 	t.Run("RecoverWaitForCancelWorkflow", func(t *testing.T) {
@@ -7388,7 +7641,7 @@ func TestWorkflowHandleContextCancel(t *testing.T) {
 		getEventWorkflowStartedSignal.Wait()
 		getEventWorkflowStartedSignal.Clear()
 
-		dbosCtx.Shutdown(dbosCtx, 1 * time.Second)
+		dbosCtx.Shutdown(dbosCtx, 1*time.Second)
 
 		err = <-resultChan
 		require.Error(t, err, "expected error from cancelled context")
@@ -9258,7 +9511,7 @@ func TestWorkflowAttributes(t *testing.T) {
 		client, err := NewClient(dbosCtx, config)
 		require.NoError(t, err)
 		t.Cleanup(func() {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		})
 
 		// Enqueue to a queue nothing consumes; the workflow stays ENQUEUED, which

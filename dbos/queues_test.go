@@ -1276,10 +1276,14 @@ func TestQueueTimeouts(t *testing.T) {
 		handle, err := RunWorkflow(childCtx, detachedWorkflow, timeout*2, WithQueue(timeoutQueue), WithWorkflowID(childID))
 		require.NoError(t, err, "failed to start enqueued detached workflow")
 
-		// Wait for the enqueued workflow to complete
+		// Wait for the enqueued workflow to complete. The parent is cancelled
+		// mid-await, so getResult is interrupted (not checkpointed) even though
+		// the detached child completes successfully; a resume would replay the
+		// await and adopt the child's recorded success.
 		result, err := handle.GetResult()
-		require.NoError(t, err, "failed to get result from enqueued detached workflow")
-		assert.Equal(t, "detached-workflow-completed", result, "expected result to be 'detached-workflow-completed'")
+		if err != nil {
+			return "", err
+		}
 		return result, nil
 	}
 

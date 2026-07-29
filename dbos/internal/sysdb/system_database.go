@@ -42,9 +42,9 @@ type SystemDatabase interface {
 	// Workflows
 	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]models.WorkflowStatus, error)
-	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error
+	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) (bool, error)
 	SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error
-	AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*AwaitWorkflowResultOutput, error)
+	AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration, failIfMissing bool) (*AwaitWorkflowResultOutput, error)
 	CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInput) ([]string, error)
 	CancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInput) error
@@ -1660,14 +1660,20 @@ type UpdateWorkflowOutcomeDBInput struct {
 	Tx         Tx
 }
 
-// UpdateWorkflowOutcome records a workflow's terminal outcome. The write is refused
-// when the row is already terminal (CANCELLED/SUCCESS/ERROR). A refusal is an error
-// only when the workflow was cancelled, so the caller ends as cancelled instead of
-// reporting a completion that was never recorded; other refusals are silent no-ops.
-func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) error {
+// UpdateWorkflowOutcome records a workflow's terminal outcome, reporting whether
+// the write landed. The write applies only to a PENDING row: a run owns its
+// workflow's outcome exactly as long as the row says that run is what the workflow
+// is doing. (Note: this does not prevent a write when another concurrent execution
+// is already running and the status is PENDING. However, both execution should be
+// deterministic and idempotent.)
+//
+// Returning false means the row was CANCELLED, dead-lettered, already terminal,
+// handed to another execution (ENQUEUED/DELAYED, e.g. by a concurrent resume), or
+// gone entirely.
+func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) (bool, error) {
 	query := s.RenderSQL(`UPDATE %sworkflow_status
 			  SET status = $1, output = $2, error = $3, updated_at = $4, completed_at = $4, deduplication_id = NULL
-			  WHERE workflow_uuid = $5 AND status NOT IN ($6, $7, $8)`, s.dialect.SchemaPrefix(s.schema))
+			  WHERE workflow_uuid = $5 AND status = $6`, s.dialect.SchemaPrefix(s.schema))
 
 	var runner Querier = s.pool
 	if input.Tx != nil {
@@ -1675,30 +1681,15 @@ func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowO
 	}
 
 	// input.output is already a *string from the database layer
-	res, err := runner.Exec(ctx, query, input.Status, input.Output, input.ErrStr, time.Now().UnixMilli(), input.WorkflowID, models.WorkflowStatusCancelled, models.WorkflowStatusSuccess, models.WorkflowStatusError)
+	res, err := runner.Exec(ctx, query, input.Status, input.Output, input.ErrStr, time.Now().UnixMilli(), input.WorkflowID, models.WorkflowStatusPending)
 	if err != nil {
-		return fmt.Errorf("failed to update workflow status: %w", err)
+		return false, fmt.Errorf("failed to update workflow status: %w", err)
 	}
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("failed to check workflow status update: %w", err)
+		return false, fmt.Errorf("failed to check workflow status update: %w", err)
 	}
-	if rowsAffected == 0 {
-		// The guarded UPDATE matched no rows. Re-read the status (only on this rare
-		// no-op path): only a cancelled workflow surfaces an error to the caller.
-		statusQuery := s.RenderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
-		var currentStatus models.WorkflowStatusType
-		if err := runner.QueryRow(ctx, statusQuery, input.WorkflowID).Scan(&currentStatus); err != nil {
-			if errors.Is(err, ErrNoRows) {
-				return nil
-			}
-			return fmt.Errorf("failed to read workflow status after refused outcome update: %w", err)
-		}
-		if currentStatus == models.WorkflowStatusCancelled {
-			return models.NewWorkflowCancelledError(input.WorkflowID, nil)
-		}
-	}
-	return nil
+	return rowsAffected > 0, nil
 }
 
 type SetWorkflowAttributesDBInput struct {
@@ -2551,7 +2542,12 @@ type AwaitWorkflowResultOutput struct {
 	ErrStr        *string
 }
 
-func (s *SysDB) AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration) (*AwaitWorkflowResultOutput, error) {
+// AwaitWorkflowResult polls the workflow's row until it reaches a terminal
+// status. A missing row normally means the workflow has not been inserted yet,
+// so the poll keeps waiting for it to appear. Callers that know the row must
+// already exist (e.g. a run parking on an outcome it just failed to write) pass
+// failIfMissing to get a NonExistentWorkflow error instead of polling forever.
+func (s *SysDB) AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration, failIfMissing bool) (*AwaitWorkflowResultOutput, error) {
 	query := s.RenderSQL(`SELECT status, output, error, recovery_attempts, serialization FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
 	var status models.WorkflowStatusType
 	if pollInterval <= 0 {
@@ -2572,6 +2568,9 @@ func (s *SysDB) AwaitWorkflowResult(ctx context.Context, workflowID string, poll
 		err := row.Scan(&status, &outputString, &errorStr, &attempts, &serialization)
 		if err != nil {
 			if err == pgx.ErrNoRows {
+				if failIfMissing {
+					return nil, models.NewNonExistentWorkflowError(workflowID)
+				}
 				time.Sleep(pollInterval)
 				continue
 			}
