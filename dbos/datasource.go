@@ -363,14 +363,16 @@ func RunAsTransaction[R any](ctx Context, ds *DataSource, fn Txn[R], opts ...Ste
 //
 // When the data source shares the system database's pool, the call collapses onto runAsTxn.
 func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFunc, opts ...StepOption) (any, error) {
-	// Reject a transaction nested inside another transaction.
-	// (A transaction nested inside a plain RunAsStep is fine)
-	if ws, ok := c.Value(workflowStateKey).(*workflowState); ok && ws != nil && ws.isWithinTransaction {
+	if ws, ok := c.Value(workflowStateKey).(*workflowState); ok && ws != nil && (ws.isWithinTransaction || ws.isWithinStep) {
 		stepOpts := &stepOptions{}
 		for _, opt := range opts {
 			opt(stepOpts)
 		}
-		return nil, models.NewStepExecutionError(ws.workflowID, stepOpts.stepName, fmt.Errorf("cannot call RunAsTransaction within a transaction"))
+		enclosing := "a step"
+		if ws.isWithinTransaction {
+			enclosing = "a transaction"
+		}
+		return nil, models.NewStepExecutionError(ws.workflowID, stepOpts.stepName, fmt.Errorf("cannot call RunAsTransaction within %s", enclosing))
 	}
 
 	if ds.sameAsSystemDB {
@@ -385,29 +387,6 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 	}
 	if fn == nil {
 		return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("transaction function cannot be nil"))
-	}
-
-	if prep.IsWithinStep {
-		// Invoked inside an enclosing step: open a real transaction on the user
-		// pool and manage its commit/rollback, but record no durability row.
-		txOpts := TxOptions{IsoLevel: IsoLevelReadCommitted}
-		if prep.StepOpts.txIsoLevel != nil {
-			txOpts.IsoLevel = *prep.StepOpts.txIsoLevel
-		}
-		uncancellableCtx := WithoutCancel(c)
-		tx, err := ds.pool.BeginTx(uncancellableCtx, txOpts)
-		if err != nil {
-			return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
-		}
-		defer tx.Rollback(uncancellableCtx)
-		output, err := fn(withinTransactionContext(c), tx)
-		if err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(uncancellableCtx); err != nil {
-			return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
-		}
-		return output, nil
 	}
 
 	uncancellableCtx := WithoutCancel(c)

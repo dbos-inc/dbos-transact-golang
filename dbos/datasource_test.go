@@ -671,18 +671,20 @@ func TestRunAsTransaction(t *testing.T) {
 			fmt.Sprintf(`SELECT count(*) FROM %s WHERE step_id = 2`, ub.completionTable())))
 	})
 
-	// One workflow exercises both ways a RunAsTransaction can be nested:
-	//   - inside a RunAsStep (allowed): the enclosing step holds no transaction,
-	//     so the within-step transaction is the only writer; it commits its
-	//     application write but records no durability row or step of its own.
-	//   - inside another RunAsTransaction (rejected): the inner would open a
-	//     second connection on the same database — deadlocking SQLite's single
-	//     writer, and committing independently of the outer elsewhere — so
-	//     RunAsTransaction returns an error instead. The outer reports it and
-	//     still commits its own write.
-	// The workflow therefore has two durable steps (the RunAsStep and the
-	// top-level transaction) and the user database holds a single completion row
-	// (the top-level transaction's).
+	// One workflow exercises both ways a RunAsTransaction can be nested, and both
+	// are rejected:
+	//   - inside a RunAsStep: passing through would open a real transaction and
+	//     commit its application write while recording no durability row, so the
+	//     enclosing step would re-run the write on every replay. RunAsTransaction
+	//     promises durable-transaction semantics; a position where it cannot
+	//     deliver them is an error rather than a silent downgrade.
+	//   - inside another RunAsTransaction: the inner would open a second
+	//     connection on the same database — deadlocking SQLite's single writer,
+	//     and committing independently of the outer elsewhere.
+	// Both rejections happen before the inner writes anything, and neither
+	// consumes a step ID. The workflow still has two durable steps (the RunAsStep
+	// and the top-level transaction), and the user database holds a single
+	// completion row (the top-level transaction's).
 	t.Run("Nesting", func(t *testing.T) {
 		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 		ub := openUserBackend(t)
@@ -697,16 +699,21 @@ func TestRunAsTransaction(t *testing.T) {
 			})
 		}
 		wf := func(dctx Context, _ string) (string, error) {
-			// Durable step 0: a RunAsStep wrapping a within-step transaction (allowed).
-			if _, err := RunAsStep(dctx, func(c context.Context) (string, error) {
-				return insertTxn(c.(Context), "k_step")
-			}); err != nil {
+			// Durable step 0: a RunAsStep whose body nests a transaction. The
+			// nested call is rejected; the step reports the error and succeeds.
+			stepRes, err := RunAsStep(dctx, func(c context.Context) (string, error) {
+				if _, nerr := insertTxn(c.(Context), "k_step"); nerr != nil {
+					return nerr.Error(), nil
+				}
+				return "unexpected", nil
+			})
+			if err != nil {
 				return "", err
 			}
 			// Durable step 1: a top-level transaction whose fn nests another
 			// transaction. The nested call is rejected; the outer reports the
 			// error but still commits its own write.
-			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+			txnRes, err := RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
 				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k_outer", "outer"); err != nil {
 					return "", err
 				}
@@ -715,6 +722,10 @@ func TestRunAsTransaction(t *testing.T) {
 				}
 				return "unexpected", nil
 			})
+			if err != nil {
+				return "", err
+			}
+			return stepRes + "|" + txnRes, nil
 		}
 		RegisterWorkflow(ctx, wf)
 		require.NoError(t, Launch(ctx))
@@ -725,16 +736,17 @@ func TestRunAsTransaction(t *testing.T) {
 		require.NoError(t, err)
 		res, err := h.GetResult()
 		require.NoError(t, err)
+		require.Contains(t, res, "cannot call RunAsTransaction within a step")
 		require.Contains(t, res, "cannot call RunAsTransaction within a transaction")
 
-		// The RunAsStep-nested transaction and the top-level transaction committed;
-		// the transaction-nested one was rejected before it could write.
-		require.Equal(t, "inner", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k_step'`))
+		// Only the top-level transaction committed; both rejected nested calls were
+		// stopped before they could write.
+		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv WHERE k = 'k_step'`))
 		require.Equal(t, "outer", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k_outer'`))
 		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv WHERE k = 'k_inner'`))
 
-		// Two durable steps (RunAsStep + top-level transaction); the within-step
-		// transaction recorded none, and the rejected nested call consumed no step ID.
+		// Two durable steps (RunAsStep + top-level transaction); neither rejected
+		// nested call consumed a step ID.
 		steps, err := GetWorkflowSteps(ctx, wfID)
 		require.NoError(t, err)
 		require.Len(t, steps, 2)
@@ -965,25 +977,29 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 		require.Equal(t, 1, ub.countRows(t, `SELECT count(*) FROM kv`))
 	})
 
-	// When a shared-pool data source's RunAsTransaction is invoked inside an
-	// enclosing step, the call routes through runAsTxn's within-step path: it must
-	// still give the user fn a real transaction (on the shared pool) and manage
-	// commit/rollback, while recording no durability row of its own. Runs on every
-	// backend — the enclosing step holds no transaction, so the within-step
-	// transaction is the only writer (no SQLite single-writer contention).
-	t.Run("WithinStep", func(t *testing.T) {
+	// A shared-pool data source's RunAsTransaction invoked inside an enclosing step
+	// is rejected, like the non-shared path. It used to route through runAsTxn's
+	// within-step path, which gave the user fn a real transaction but recorded no
+	// durability row, so the enclosing step re-ran the application write on every
+	// replay. The user fn never runs, so nothing is written and no step is
+	// recorded beyond the enclosing one. Runs on every backend.
+	t.Run("WithinStepRejected", func(t *testing.T) {
 		ctx, ds, ub := setupSharedDBOS(t)
 
 		var txRuns atomic.Int32
 		wf := func(dctx Context, _ string) (string, error) {
 			return RunAsStep(dctx, func(c context.Context) (string, error) {
-				return RunAsTransaction(c.(Context), ds, func(c context.Context, tx Tx) (string, error) {
+				_, nerr := RunAsTransaction(c.(Context), ds, func(c context.Context, tx Tx) (string, error) {
 					txRuns.Add(1)
 					if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "inner"); err != nil {
 						return "", err
 					}
 					return "ok", nil
 				})
+				if nerr != nil {
+					return nerr.Error(), nil
+				}
+				return "unexpected", nil
 			})
 		}
 		RegisterWorkflow(ctx, wf)
@@ -996,13 +1012,14 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 		require.NoError(t, err)
 		res, err := h.GetResult()
 		require.NoError(t, err)
-		require.Equal(t, "ok", res)
-		require.Equal(t, int32(1), txRuns.Load())
+		require.Contains(t, res, "cannot call RunAsTransaction within a step")
 
-		// The within-step transaction committed the application write on the shared pool.
-		require.Equal(t, "inner", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k1'`))
+		// The guard fires before the transaction is opened: the user fn never ran
+		// and nothing was written.
+		require.Equal(t, int32(0), txRuns.Load())
+		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv WHERE k = 'k1'`))
 
-		// Only the enclosing RunAsStep is durable; the within-step transaction recorded none.
+		// Only the enclosing RunAsStep is durable; the rejected call recorded none.
 		steps, err := GetWorkflowSteps(ctx, wfID)
 		require.NoError(t, err)
 		require.Len(t, steps, 1)

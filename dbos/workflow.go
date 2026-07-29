@@ -2615,18 +2615,6 @@ func runAsTxn[R any](ctx Context, fn Txn[R], opts ...StepOption) (R, error) {
 	return typedResult, err
 }
 
-// withinTransactionContext returns a child context whose workflow state is
-// flagged as executing inside a data source transaction.
-func withinTransactionContext(c *dbosContext) Context {
-	var state workflowState
-	if existing, ok := c.Value(workflowStateKey).(*workflowState); ok && existing != nil {
-		state = *existing
-	}
-	state.isWithinStep = true
-	state.isWithinTransaction = true
-	return WithValue(c, workflowStateKey, &state)
-}
-
 func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, error) {
 	prep, err := prepareStepExecution(c, opts)
 	if err != nil {
@@ -2635,26 +2623,9 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 	if fn == nil {
 		return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("step function cannot be nil"))
 	}
+
 	if prep.IsWithinStep {
-		// Invoked inside an enclosing step: manage the transaction but record no durability
-		txOpts := TxOptions{IsoLevel: IsoLevelReadCommitted}
-		if prep.StepOpts.txIsoLevel != nil {
-			txOpts.IsoLevel = *prep.StepOpts.txIsoLevel
-		}
-		uncancellableCtx := WithoutCancel(c)
-		tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, txOpts)
-		if err != nil {
-			return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
-		}
-		defer tx.Rollback(uncancellableCtx)
-		output, err := fn(withinTransactionContext(c), tx)
-		if err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(uncancellableCtx); err != nil {
-			return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
-		}
-		return output, nil
+		return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("cannot call %s within a step", prep.StepOpts.stepName))
 	}
 
 	uncancellableCtx := WithoutCancel(c)
