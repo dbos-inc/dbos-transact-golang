@@ -199,6 +199,9 @@ func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
 	if !isWithinWorkflow {
 		return *new(R), false, nil
 	}
+	if workflowState.isWithinStep {
+		return *new(R), false, models.NewStepExecutionError(workflowState.workflowID, "DBOS.getResult", fmt.Errorf("cannot call GetResult within a step"))
+	}
 	recordedOutputs, err := sysdb.RetryWithResult(dbosCtx, func() (*sysdb.RecordedResult, error) {
 		uncancellableCtx := context.WithoutCancel(dbosCtx)
 		return dbosCtx.(*dbosContext).systemDB.CheckOperationExecution(uncancellableCtx, sysdb.CheckOperationExecutionDBInput{

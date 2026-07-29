@@ -880,6 +880,43 @@ func TestSteps(t *testing.T) {
 
 	RegisterWorkflow(dbosCtx, customNameWorkflow)
 
+	// Fixtures for GetResultWithinStepIsNotACheckpoint: getResultTargetWf is the
+	// workflow whose result is awaited from inside a step body; awaitInStepWf does
+	// the awaiting and then runs an ordinary sibling step after it.
+	getResultTargetWf := func(_ Context, input string) (string, error) {
+		return input + "-done", nil
+	}
+	RegisterWorkflow(dbosCtx, getResultTargetWf)
+
+	awaitInStepWf := func(ctx Context, targetID string) (string, error) {
+		awaited, err := RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+			// A step body only receives a context.Context; reaching a DBOS
+			// operation from there means asserting it back to dbos.Context,
+			// which hands RetrieveWorkflow the step-scoped workflow state.
+			dbosStepCtx, ok := stepCtx.(Context)
+			if !ok {
+				return "", fmt.Errorf("expected step context to be a dbos.Context, got %T", stepCtx)
+			}
+			handle, err := RetrieveWorkflow[string](dbosStepCtx, targetID)
+			if err != nil {
+				return "", fmt.Errorf("failed to retrieve target workflow: %w", err)
+			}
+			return handle.GetResult()
+		}, WithStepName("awaitInStep"))
+		if err != nil {
+			return "", fmt.Errorf("awaitInStep failed: %w", err)
+		}
+
+		sibling, err := RunAsStep(ctx, func(_ context.Context) (string, error) {
+			return "sibling", nil
+		}, WithStepName("siblingStep"))
+		if err != nil {
+			return "", fmt.Errorf("siblingStep failed: %w", err)
+		}
+		return awaited + "/" + sibling, nil
+	}
+	RegisterWorkflow(dbosCtx, awaitInStepWf)
+
 	// A workflow that mistakenly runs its step with the outer executor context
 	// (captured from the closure) instead of the workflow context it is handed.
 	wrongCtxWorkflow := func(_ Context, input string) (string, error) {
@@ -1163,6 +1200,54 @@ func TestSteps(t *testing.T) {
 		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to list steps")
 		require.Len(t, steps, 1, "expected 1 step, got %d", len(steps))
+	})
+
+	// Awaiting a workflow handle from inside a step body is rejected, like Send,
+	// Recv and Debounce are.
+	//
+	// Spawning a child from within a step is blocked, but RetrieveWorkflow is
+	// allowed -- RunAsStep passes straight through when isWithinStep -- and the
+	// polling handle it returns is bound to the context it was called with. Called
+	// with the step context, that handle's workflow state is the *step's* own
+	// state, whose stepID is the enclosing step's function_id, not the workflow's
+	// step counter. Checkpointing DBOS.getResult at stepID+1 from there would
+	// collide twice over:
+	//
+	//   - nextStepID() mutates the step's own stepID in place from N to N+1, and
+	//     RunAsStep reads it only after the body returns, so the enclosing step
+	//     would checkpoint itself at N+1, on top of the DBOS.getResult row.
+	//   - N+1 is also the ID the next sibling step of the workflow claims.
+	//
+	// Rejecting the await keeps both IDs intact, so the workflow fails with a clear
+	// ErrorCodeStepExecution instead of an ErrorCodeUnexpectedStep determinism
+	// error from the collision.
+	t.Run("GetResultWithinStepIsRejected", func(t *testing.T) {
+		targetHandle, err := RunWorkflow(dbosCtx, getResultTargetWf, "target")
+		require.NoError(t, err, "failed to start target workflow")
+		targetResult, err := targetHandle.GetResult()
+		require.NoError(t, err, "failed to get target workflow result")
+		require.Equal(t, "target-done", targetResult)
+
+		handle, err := RunWorkflow(dbosCtx, awaitInStepWf, targetHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to start awaiting workflow")
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected awaiting a handle inside a step to be rejected")
+
+		var dbosErr *Error
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, ErrorCodeStepExecution, dbosErr.Code)
+		require.ErrorContains(t, err, "cannot call GetResult within a step")
+
+		// The guard fires before any checkpoint, so the only recorded step is the
+		// enclosing one, still at function_id 0 and carrying the error. Nothing was
+		// written at function_id 1: no DBOS.getResult row, and the sibling step is
+		// never reached because the workflow fails first.
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 1, "expected exactly 1 recorded step, got %+v", steps)
+		require.Equal(t, 0, steps[0].StepID)
+		require.Equal(t, "awaitInStep", steps[0].StepName)
+		require.NotNil(t, steps[0].Error, "expected the enclosing step to record the guard error")
 	})
 
 	t.Run("StepRetryWithExponentialBackoff", func(t *testing.T) {
