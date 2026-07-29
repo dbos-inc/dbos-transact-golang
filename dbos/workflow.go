@@ -282,18 +282,18 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		if _, ok := h.dbosContext.(*dbosContext); !ok {
 			return *new(R), models.NewWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("invalid Context: expected *dbosContext"))
 		}
-		// A cancellation outcome delivered while the awaiting workflow is itself
-		// cancelled interrupts the getResult step: don't checkpoint it, so resume
-		// re-executes the await.
-		if stepInterruptedByCancellation(workflowState, outcome.err) {
-			return *new(R), models.NewWorkflowCancelledError(workflowState.workflowID, outcome.err)
-		}
-		// A cancelled child is a terminal outcome for the awaiting parent: checkpoint
-		// it like any other child error so replay is deterministic.
-		// Resuming the child later does not change what the parent saw.
+		// A cancelled child is a terminal outcome for the awaiting parent, even if
+		// the parent is itself cancelled: the outcome came from the child's settled
+		// CANCELLED row, so checkpoint it like any other child error so replay is
+		// deterministic. Resuming the child later does not change what the parent saw.
 		if outcome.cancelled {
 			decodedResult = *new(R)
 			outcome.err = models.NewAwaitedWorkflowCancelledError(h.workflowID)
+		} else if stepInterruptedByCancellation(workflowState, outcome.err) {
+			// A cancellation error delivered while the awaiting workflow is itself
+			// cancelled — without a settled cancelled outcome — interrupts the
+			// getResult step: don't checkpoint it, so resume re-executes the await.
+			return *new(R), models.NewWorkflowCancelledError(workflowState.workflowID, outcome.err)
 		}
 		ser := resolveEncoder(h.dbosContext)
 		encodedOutput, encErr := ser.Encode(decodedResult)
