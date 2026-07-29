@@ -522,8 +522,10 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 	// OUTER: the user-facing step retry policy (maxRetries + predicate).
 	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, runTxnResilient)
 
-	if stepInterruptedByCancellation(stepState, stepError) {
-		return stepOutput, models.NewWorkflowCancelledError(stepState.workflowID, stepError)
+	// The workflow being cancelled mid-step interrupts the step, whatever its
+	// outcome: nothing is checkpointed, so a resume re-executes the step.
+	if isWorkflowCtxCancelled(stepState) {
+		return stepOutput, interruptedStepError(stepState, stepError)
 	}
 
 	// txn2: checkpoint the outcome into the system database.

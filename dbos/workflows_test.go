@@ -2024,10 +2024,11 @@ func TestSelect(t *testing.T) {
 		// Wait for the workflow to reach the Select call (step has started and set the event)
 		selectBlockStartEvent.Wait()
 		selectBlockStartEvent.Clear()
-		// Wait for the Go step body to start: once it runs, its outcome is delivered
-		// and checkpointed even though the workflow is cancelled. Cancelling earlier
-		// would race the durable cancel against the step's checkpoint lookup, which
-		// can refuse to start the step at all (a valid outcome, but not this test's).
+		// Wait for the Go step body to start: the test cancels while it runs, and
+		// its outcome — delivered after the cancel — must be discarded, not
+		// checkpointed. Cancelling earlier would race the durable cancel against
+		// the step's checkpoint lookup, which can refuse to start the step at all
+		// (a valid outcome, but not the path this test pins).
 		selectGoStepStarted.Wait()
 		selectGoStepStarted.Clear()
 
@@ -2053,15 +2054,14 @@ func TestSelect(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 
-		// The cancelled Select step must not be checkpointed (it would replay its
-		// cancellation error on resume); only the Go step, unblocked above, records.
-		require.Eventually(t, func() bool {
+		// The cancelled workflow must not checkpoint any step: neither the
+		// interrupted Select nor the Go step unblocked above, whose outcome is
+		// discarded at the checkpoint site because the workflow context is
+		// cancelled. On resume, both would replay.
+		require.Never(t, func() bool {
 			steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
-			if err != nil {
-				return false
-			}
-			return len(steps) == 1 && steps[0].StepID == 0
-		}, 5*time.Second, 100*time.Millisecond, "expected only the Go step to be recorded")
+			return err == nil && len(steps) > 0
+		}, 2*time.Second, 100*time.Millisecond, "no step may be checkpointed after the workflow is cancelled")
 	})
 
 	t.Run("Select idempotency", func(t *testing.T) {
@@ -5941,12 +5941,17 @@ func TestWorkflowTimeout(t *testing.T) {
 
 	detachedStepWorkflow := func(ctx Context, timeout time.Duration) (string, error) {
 		// This workflow will run a step that is not cancelable.
-		// What this means is the workflow *will* be cancelled, but the step will run normally
+		// What this means is the workflow *will* be cancelled, but the step will run normally.
+		// The workflow being cancelled mid-step interrupts the step checkpoint,
+		// so the step's success is reported as the workflow's cancellation; a
+		// resume would re-execute the step.
 		stepCtx := WithoutCancel(ctx)
 		res, err := RunAsStep(stepCtx, func(context context.Context) (string, error) {
 			return detachedStep(context, timeout*2)
 		})
-		require.NoError(t, err, "failed to run detached step")
+		if err != nil {
+			return "", err
+		}
 		assert.Equal(t, "detached-step-completed", res, "expected detached step result to be 'detached-step-completed'")
 		return res, ctx.Err()
 	}
@@ -6025,7 +6030,9 @@ func TestWorkflowTimeout(t *testing.T) {
 		}, 5*time.Second, 50*time.Millisecond, "expected child workflow status to be WorkflowStatusCancelled")
 	}
 
+	var detachedChildExecutions atomic.Int64
 	detachedChild := func(ctx Context, timeout time.Duration) (string, error) {
+		detachedChildExecutions.Add(1)
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -6043,10 +6050,14 @@ func TestWorkflowTimeout(t *testing.T) {
 		childHandle, err := RunWorkflow(childCtx, detachedChild, timeout*2, WithWorkflowID(childWorkflowID))
 		require.NoError(t, err, "failed to start child workflow")
 
-		// Wait for the child workflow to complete
+		// Wait for the child workflow to complete. On the first execution the
+		// parent is cancelled mid-await, so getResult is interrupted (not
+		// checkpointed) even though the detached child succeeds; a resume
+		// replays the await and adopts the child's recorded success.
 		result, err := childHandle.GetResult()
-		require.NoError(t, err, "failed to get result from child workflow")
-		// The child spun for timeout*2 so ctx.Err() should be context.DeadlineExceeded
+		if err != nil {
+			return "", err
+		}
 		return result, ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, detachedChildWorkflowParent)
@@ -6086,6 +6097,15 @@ func TestWorkflowTimeout(t *testing.T) {
 		status, err = childHandle.GetStatus()
 		require.NoError(t, err, "failed to get child workflow status")
 		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected child workflow status to be WorkflowStatusSuccess")
+
+		// Resuming the parent replays the interrupted getResult step: this time
+		// it finds the detached child's recorded success and checkpoints it.
+		resumedHandle, err := ResumeWorkflow[string](dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to resume parent workflow")
+		result, err = resumedHandle.GetResult()
+		require.NoError(t, err, "resumed parent should adopt the detached child's recorded success")
+		assert.Equal(t, "detached-step-completed", result, "expected the resumed parent to report the child's result")
+		require.EqualValues(t, 1, detachedChildExecutions.Load(), "child must not re-execute on parent resume")
 	})
 
 	t.Run("RecoverWaitForCancelWorkflow", func(t *testing.T) {

@@ -53,9 +53,6 @@ type workflowOutcome[R any] struct {
 	err           error
 	needsDecoding bool   // true if result came from awaitWorkflowResult (ID conflict path) and needs decoding
 	serialization string // serialization format of the encoded result (only used when needsDecoding is true)
-	// cancelled reports that the workflow settled in CANCELLED. An awaiting parent
-	// records it as an ErrorCodeAwaitedWorkflowCancelled outcome for its getResult step.
-	cancelled bool
 }
 
 type stepCheckpointedOutcome struct {
@@ -282,23 +279,29 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		if _, ok := h.dbosContext.(*dbosContext); !ok {
 			return *new(R), models.NewWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("invalid Context: expected *dbosContext"))
 		}
-		// A parent that is itself cancelled never checkpoints the await, whatever
-		// the child's outcome: it reports its own cancellation, so a resume
-		// re-executes the await and observes the child's then-settled outcome.
+		// The awaiting workflow being cancelled interrupts the getResult step,
+		// whatever the child's outcome: nothing is checkpointed, so a resume
+		// re-executes the await against the child's then-settled row (a
+		// detached child's recorded success is adopted then).
 		if isWorkflowCtxCancelled(workflowState) {
-			return *new(R), models.NewWorkflowCancelledError(workflowState.workflowID, outcome.err)
+			return *new(R), interruptedStepError(workflowState, outcome.err)
 		}
-		// A cancelled child is a terminal outcome for the awaiting parent:
-		// checkpoint it like any other child error so replay is deterministic.
-		// Resuming the child later does not change what the parent saw.
-		if outcome.cancelled {
+		// Return "Awaited workflow cancelled" error when the child is cancelled.
+		// A cancelled child has no output value: record a NULL output, like the
+		// polling handle does.
+		childCancelled := errors.Is(outcome.err, ErrWorkflowCancelled)
+		if childCancelled {
 			decodedResult = *new(R)
 			outcome.err = models.NewAwaitedWorkflowCancelledError(h.workflowID)
 		}
 		ser := resolveEncoder(h.dbosContext)
-		encodedOutput, encErr := ser.Encode(decodedResult)
-		if encErr != nil {
-			return *new(R), models.NewWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
+		var encodedOutput *string
+		if !childCancelled {
+			var encErr error
+			encodedOutput, encErr = ser.Encode(decodedResult)
+			if encErr != nil {
+				return *new(R), models.NewWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("serializing child workflow result: %w", encErr))
+			}
 		}
 		var serializedOutcomeErr *string
 		if outcome.err != nil {
@@ -325,11 +328,6 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			h.dbosContext.(*dbosContext).logger.Error("failed to record get result", "error", recordResultErr)
 			return *new(R), models.NewWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("recording child workflow result: %w", recordResultErr))
 		}
-	} else if outcome.cancelled && !isCancellationError(outcome.err) {
-		// The workflow swallowed its cancellation (returned normally or with an
-		// unrelated error) but we triggered durable cancel and no output was
-		// recorded: report cancellation, not success.
-		return *new(R), models.NewWorkflowCancelledError(h.workflowID, outcome.err)
 	}
 	return decodedResult, outcome.err
 }
@@ -376,11 +374,12 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 
 	workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
-	// A parent that is itself cancelled never checkpoints the await, whatever
-	// outcome arrived: it reports its own cancellation, so a resume re-executes
-	// the await and observes the child's then-settled outcome.
+	// The awaiting workflow being cancelled interrupts the getResult step,
+	// whatever outcome arrived: nothing is checkpointed, so a resume
+	// re-executes the await against the child's then-settled row (a detached
+	// child's recorded success is adopted then).
 	if isWithinWorkflow && isWorkflowCtxCancelled(workflowState) {
-		return *new(R), models.NewWorkflowCancelledError(workflowState.workflowID, err)
+		return *new(R), interruptedStepError(workflowState, err)
 	}
 
 	// A cancelled child is a terminal outcome for the awaiting parent: checkpoint
@@ -388,11 +387,12 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	// Resuming the child later does not change what the parent saw.
 	childCancelled := errors.Is(awaitErr, ErrAwaitedWorkflowCancelled)
 
-	// Deserialize the result directly into the target type
+	// Deserialize the result directly into the target type. A cancelled child has
+	// no output value: return and checkpoint the zero value alongside the error.
 	var typedResult R
 	var encodedStr *string
 	var storedSerialization string
-	if awaitResult != nil {
+	if awaitResult != nil && !childCancelled {
 		encodedStr = awaitResult.Output
 		storedSerialization = awaitResult.Serialization
 	}
@@ -1082,9 +1082,8 @@ func RunWorkflow[P any, R any](ctx Context, fn Workflow[P, R], input P, opts ...
 			// Handle nil results - nil cannot be type-asserted to any interface
 			if outcome.result == nil {
 				typedOutcomeChan <- workflowOutcome[R]{
-					result:    typedResult,
-					err:       resultErr,
-					cancelled: outcome.cancelled,
+					result: typedResult,
+					err:    resultErr,
 				}
 				return
 			}
@@ -1092,9 +1091,8 @@ func RunWorkflow[P any, R any](ctx Context, fn Workflow[P, R], input P, opts ...
 			// Check if this is a mocked path
 			if _, ok := handle.dbosContext.(*dbosContext); !ok {
 				typedOutcomeChan <- workflowOutcome[R]{
-					result:    outcome.result.(R),
-					err:       resultErr,
-					cancelled: outcome.cancelled,
+					result: outcome.result.(R),
+					err:    resultErr,
 				}
 				return
 			}
@@ -1126,9 +1124,8 @@ func RunWorkflow[P any, R any](ctx Context, fn Workflow[P, R], input P, opts ...
 			}
 
 			typedOutcomeChan <- workflowOutcome[R]{
-				result:    typedResult,
-				err:       resultErr,
-				cancelled: outcome.cancelled,
+				result: typedResult,
+				err:    resultErr,
 			}
 		}()
 
@@ -1569,7 +1566,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			// AwaitWorkflowResult reports a CANCELLED row from an awaiter's point of
 			// view, but this outcome is delivered to the workflow's own handle: report
 			// the workflow's cancellation.
-			outcomeChan <- workflowOutcome[any]{err: models.NewWorkflowCancelledError(workflowID, cancelCause), cancelled: true}
+			outcomeChan <- workflowOutcome[any]{err: models.NewWorkflowCancelledError(workflowID, cancelCause)}
 			close(outcomeChan)
 			return
 		}
@@ -2415,8 +2412,15 @@ func isWorkflowCtxCancelled(stepState *workflowState) bool {
 	return stepState.workflowCtx != nil && stepState.workflowCtx.Err() != nil
 }
 
-func stepInterruptedByCancellation(stepState *workflowState, stepError error) bool {
-	return isWorkflowCtxCancelled(stepState) && isCancellationError(stepError)
+// interruptedStepError builds the cancellation returned in place of a step
+// checkpoint when the workflow is cancelled mid-step. The step's own error is
+// the cause when it has one; fallback on the workflow context error otherwise.
+func interruptedStepError(stepState *workflowState, stepError error) error {
+	cause := stepError
+	if cause == nil {
+		cause = stepState.workflowCtx.Err()
+	}
+	return models.NewWorkflowCancelledError(stepState.workflowID, cause)
 }
 
 // RunAsStep executes a function as a durable step within a workflow.
@@ -2540,8 +2544,10 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 		return fn(stepCtx)
 	})
 
-	if stepInterruptedByCancellation(stepState, stepError) {
-		return stepOutput, models.NewWorkflowCancelledError(stepState.workflowID, stepError)
+	// The workflow being cancelled mid-step interrupts the step, whatever its
+	// outcome: nothing is checkpointed, so a resume re-executes the step.
+	if isWorkflowCtxCancelled(stepState) {
+		return stepOutput, interruptedStepError(stepState, stepError)
 	}
 
 	// Serialize step output before recording
@@ -2709,8 +2715,10 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 			return output, nil
 		})
 
-		if stepInterruptedByCancellation(stepState, stepError) {
-			return stepOutput, models.NewWorkflowCancelledError(stepState.workflowID, stepError)
+		// The workflow being cancelled mid-step interrupts the step, whatever
+		// its outcome: nothing is checkpointed, so a resume re-executes the step.
+		if isWorkflowCtxCancelled(stepState) {
+			return stepOutput, interruptedStepError(stepState, stepError)
 		}
 
 		txnSer := resolveEncoder(c)
