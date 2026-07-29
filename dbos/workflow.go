@@ -363,7 +363,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	}
 
 	awaitResult, awaitErr := sysdb.RetryWithResult(ctx, func() (*sysdb.AwaitWorkflowResultOutput, error) {
-		return h.dbosContext.(*dbosContext).systemDB.AwaitWorkflowResult(ctx, h.workflowID, options.pollInterval)
+		return h.dbosContext.(*dbosContext).systemDB.AwaitWorkflowResult(ctx, h.workflowID, options.pollInterval, false)
 	}, sysdb.WithRetrierLogger(h.dbosContext.(*dbosContext).logger))
 
 	completedTime := time.Now()
@@ -1554,9 +1554,12 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	// (one this run does not own) to the outcome channel. cancelCause is the run's
 	// own cancellation error, if it parked because it observed one: a CANCELLED row
 	// wraps it so context.Canceled/DeadlineExceeded still match via errors.Is.
+	// The row is known to have existed (this run inserted or read it), so a missing
+	// row means it was deleted: fail fast with a NonExistentWorkflow error rather
+	// than polling for a row that will never reappear.
 	awaitExistingOutcome := func(cancelCause error) {
 		awaitOut, awaitErr := sysdb.RetryWithResult(c, func() (*sysdb.AwaitWorkflowResultOutput, error) {
-			return c.systemDB.AwaitWorkflowResult(uncancellableCtx, workflowID, sysdb.DBRetryInterval)
+			return c.systemDB.AwaitWorkflowResult(uncancellableCtx, workflowID, sysdb.DBRetryInterval, true)
 		}, sysdb.WithRetrierLogger(c.logger))
 		err := awaitErr
 		if awaitErr == nil && awaitOut != nil && awaitOut.ErrStr != nil {
