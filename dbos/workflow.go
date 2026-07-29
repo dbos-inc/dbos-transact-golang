@@ -289,7 +289,8 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		// Return "Awaited workflow cancelled" error when the child is cancelled.
 		// A cancelled child has no output value: record a NULL output, like the
 		// polling handle does.
-		childCancelled := errors.Is(outcome.err, ErrWorkflowCancelled)
+		childErr, isDBOSErr := outcome.err.(*Error)
+		childCancelled := isDBOSErr && childErr.Code == ErrorCodeWorkflowCancelled
 		if childCancelled {
 			decodedResult = *new(R)
 			outcome.err = models.NewAwaitedWorkflowCancelledError(h.workflowID)
