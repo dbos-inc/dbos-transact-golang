@@ -282,18 +282,18 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 		if _, ok := h.dbosContext.(*dbosContext); !ok {
 			return *new(R), models.NewWorkflowExecutionError(workflowState.workflowID, fmt.Errorf("invalid Context: expected *dbosContext"))
 		}
-		// A cancelled child is a terminal outcome for the awaiting parent, even if
-		// the parent is itself cancelled: the outcome came from the child's settled
-		// CANCELLED row, so checkpoint it like any other child error so replay is
-		// deterministic. Resuming the child later does not change what the parent saw.
+		// A parent that is itself cancelled never checkpoints the await, whatever
+		// the child's outcome: it reports its own cancellation, so a resume
+		// re-executes the await and observes the child's then-settled outcome.
+		if isWorkflowCtxCancelled(workflowState) {
+			return *new(R), models.NewWorkflowCancelledError(workflowState.workflowID, outcome.err)
+		}
+		// A cancelled child is a terminal outcome for the awaiting parent:
+		// checkpoint it like any other child error so replay is deterministic.
+		// Resuming the child later does not change what the parent saw.
 		if outcome.cancelled {
 			decodedResult = *new(R)
 			outcome.err = models.NewAwaitedWorkflowCancelledError(h.workflowID)
-		} else if stepInterruptedByCancellation(workflowState, outcome.err) {
-			// A cancellation error delivered while the awaiting workflow is itself
-			// cancelled — without a settled cancelled outcome — interrupts the
-			// getResult step: don't checkpoint it, so resume re-executes the await.
-			return *new(R), models.NewWorkflowCancelledError(workflowState.workflowID, outcome.err)
 		}
 		ser := resolveEncoder(h.dbosContext)
 		encodedOutput, encErr := ser.Encode(decodedResult)
@@ -376,10 +376,10 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 
 	workflowState, ok := h.dbosContext.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
-	// A cancellation outcome delivered while the awaiting workflow is itself
-	// cancelled interrupts the getResult step: don't checkpoint it, so resume
-	// re-executes the await.
-	if isWithinWorkflow && stepInterruptedByCancellation(workflowState, err) {
+	// A parent that is itself cancelled never checkpoints the await, whatever
+	// outcome arrived: it reports its own cancellation, so a resume re-executes
+	// the await and observes the child's then-settled outcome.
+	if isWithinWorkflow && isWorkflowCtxCancelled(workflowState) {
 		return *new(R), models.NewWorkflowCancelledError(workflowState.workflowID, err)
 	}
 
@@ -2411,11 +2411,12 @@ func isCancellationError(err error) bool {
 		errors.Is(err, ErrWorkflowCancelled) || errors.Is(err, ErrAwaitedWorkflowCancelled)
 }
 
+func isWorkflowCtxCancelled(stepState *workflowState) bool {
+	return stepState.workflowCtx != nil && stepState.workflowCtx.Err() != nil
+}
+
 func stepInterruptedByCancellation(stepState *workflowState, stepError error) bool {
-	if stepState.workflowCtx == nil || stepState.workflowCtx.Err() == nil {
-		return false
-	}
-	return isCancellationError(stepError)
+	return isWorkflowCtxCancelled(stepState) && isCancellationError(stepError)
 }
 
 // RunAsStep executes a function as a durable step within a workflow.

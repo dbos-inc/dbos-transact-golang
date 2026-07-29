@@ -1397,8 +1397,9 @@ func TestSteps(t *testing.T) {
 	t.Run("CancelledParentCancelsChild", func(t *testing.T) {
 		// Cancelling the parent durably cancels the child too: a cancelled run
 		// never writes its outcome, even if its function ignores cancellation and
-		// returns successfully. The parent checkpoints the child's cancellation
-		// via getResult; resuming the parent replays it deterministically.
+		// returns successfully. A cancelled parent never checkpoints the await:
+		// it reports its own cancellation, and only a later resume observes (and
+		// then checkpoints) the child's settled cancellation.
 		cancelCtx, cancelFunc := WithCancel(dbosCtx)
 		defer cancelFunc()
 		handle, err := RunWorkflow(cancelCtx, stubbornParentWorkflow, "")
@@ -1410,7 +1411,7 @@ func TestSteps(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error from cancelled parent")
-		require.True(t, errors.Is(err, ErrAwaitedWorkflowCancelled), "expected ErrorCodeAwaitedWorkflowCancelled, got: %v", err)
+		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled, got: %v", err)
 
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()
@@ -1420,11 +1421,9 @@ func TestSteps(t *testing.T) {
 
 		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to get workflow steps")
-		require.Len(t, steps, 2, "expected child spawn and getResult recorded")
+		require.Len(t, steps, 1, "only the child spawn must be recorded, not the interrupted await")
 		childID := steps[0].ChildWorkflowID
-		require.NotEmpty(t, childID, "expected the first step to be the child spawn")
-		require.Equal(t, "DBOS.getResult", steps[1].StepName)
-		require.NotNil(t, steps[1].Error, "the child's cancellation must be checkpointed")
+		require.NotEmpty(t, childID, "expected the recorded step to be the child spawn")
 
 		childHandle, err := RetrieveWorkflow[string](dbosCtx, childID)
 		require.NoError(t, err, "failed to retrieve child workflow")
@@ -1432,18 +1431,25 @@ func TestSteps(t *testing.T) {
 		require.NoError(t, err, "failed to get child workflow status")
 		require.Equal(t, WorkflowStatusCancelled, childStatus.Status, "child cannot outlive the parent's cancellation")
 
-		// The checkpointed child cancellation is a terminal outcome for the
-		// parent: resuming replays it.
+		// Resuming the parent re-executes the await against the child's settled
+		// CANCELLED row: the parent is no longer cancelled, so the child's
+		// cancellation is now checkpointed as the await's terminal outcome.
 		resumedHandle, err := ResumeWorkflow[string](dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to resume parent workflow")
 		_, err = resumedHandle.GetResult()
-		require.Error(t, err, "resumed parent must replay the checkpointed child cancellation")
-		require.True(t, errors.Is(err, ErrAwaitedWorkflowCancelled), "expected ErrorCodeAwaitedWorkflowCancelled on replay, got: %v", err)
+		require.Error(t, err, "resumed parent must observe the child's cancellation")
+		require.True(t, errors.Is(err, ErrAwaitedWorkflowCancelled), "expected ErrorCodeAwaitedWorkflowCancelled on resume, got: %v", err)
 		require.EqualValues(t, 1, stubbornChildExecutions.Load(), "child must not re-execute on parent resume")
+
+		steps, err = GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps after resume")
+		require.Len(t, steps, 2, "the re-executed await checkpoints the child's cancellation")
+		require.Equal(t, "DBOS.getResult", steps[1].StepName)
+		require.NotNil(t, steps[1].Error, "the child's cancellation must be checkpointed")
 
 		status, err := resumedHandle.GetStatus()
 		require.NoError(t, err, "failed to get resumed workflow status")
-		require.Equal(t, WorkflowStatusError, status.Status, "replayed child cancellation is a terminal error outcome")
+		require.Equal(t, WorkflowStatusError, status.Status, "the child cancellation observed on resume is a terminal error outcome")
 	})
 
 	t.Run("PreemptedChildCancellationNotCheckpointed", func(t *testing.T) {
