@@ -3520,6 +3520,19 @@ func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...Writ
 		return fmt.Errorf("failed to serialize stream value: %w", err)
 	}
 
+	if wfState, ok := c.Value(workflowStateKey).(*workflowState); ok && wfState != nil && wfState.isWithinStep {
+		uncancellableCtx := WithoutCancel(c)
+		return sysdb.Retry(c, func() error {
+			return c.systemDB.WriteStream(uncancellableCtx, sysdb.WriteStreamDBInput{
+				Key:           key,
+				Value:         encodedValue,
+				Serialization: ser.Name(),
+				WorkflowID:    wfState.workflowID,
+				StepID:        wfState.stepID,
+			})
+		}, sysdb.WithRetrierLogger(c.logger))
+	}
+
 	_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 		if !ok || wfState == nil {

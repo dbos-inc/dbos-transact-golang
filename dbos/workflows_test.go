@@ -940,8 +940,6 @@ func TestSteps(t *testing.T) {
 			switch input.Op {
 			case "setEvent":
 				err = SetEvent(dbosStepCtx, "evt-key", "evt-value")
-			case "writeStream":
-				err = WriteStream(dbosStepCtx, "stream-key", "stream-value")
 			case "closeStream":
 				err = CloseStream(dbosStepCtx, "stream-key")
 			case "cancelWorkflow":
@@ -1020,6 +1018,9 @@ func TestSteps(t *testing.T) {
 			}
 			if _, err := GetSchedule(dbosStepCtx, scheduleForStepTests); err != nil {
 				return "", fmt.Errorf("getSchedule: %w", err)
+			}
+			if err := WriteStream(dbosStepCtx, "stream-from-step", "v"); err != nil {
+				return "", fmt.Errorf("writeStream: %w", err)
 			}
 			return "reads-ok", nil
 		}, WithStepName("readsInStep"))
@@ -1366,9 +1367,10 @@ func TestSteps(t *testing.T) {
 		require.NotNil(t, steps[0].Error, "expected the enclosing step to record the guard error")
 	})
 
-	// Read-only system-database operations all go through RunAsStep, so nesting one
-	// inside a step body is a plain function call: it runs, records no checkpoint of
-	// its own, and consumes no step ID -- exactly like a step within a step.
+	// Operations that are allowed inside a step body: every read (they go through
+	// RunAsStep) plus WriteStream (a dedicated from-step path). Nesting one is a
+	// plain function call: it runs, records no checkpoint of its own, and consumes
+	// no step ID -- exactly like a step within a step.
 	t.Run("ReadOnlyOpsAllowedWithinStep", func(t *testing.T) {
 		handle, err := RunWorkflow(dbosCtx, readsInStepWf, "")
 		require.NoError(t, err, "failed to start workflow")
@@ -1394,7 +1396,6 @@ func TestSteps(t *testing.T) {
 
 		for _, tc := range []struct{ op, stepName string }{
 			{"setEvent", "DBOS.setEvent"},
-			{"writeStream", "DBOS.writeStream"},
 			{"closeStream", "DBOS.closeStream"},
 			{"cancelWorkflow", "DBOS.cancelWorkflow"},
 			{"cancelWorkflows", "DBOS.cancelWorkflows"},
