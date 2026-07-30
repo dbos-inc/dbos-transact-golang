@@ -1840,11 +1840,9 @@ func TestQueuePollingIntervals(t *testing.T) {
 		basePollingInterval := 2 * time.Second
 		// Database-backed queues persist only the base polling interval. The max
 		// polling interval is a worker-local backoff ceiling the queue worker derives
-		// from the base at runtime, so RegisterQueue ignores WithQueueMaxPollingInterval
-		// (logging a warning) and it never surfaces on the handle.
+		// from the base at runtime, so it never surfaces on the handle.
 		queue, err := registerWFQ(ctx, "polling-custom-queue",
-			WithQueueBasePollingInterval(basePollingInterval),
-			WithQueueMaxPollingInterval(5*time.Second))
+			WithQueueBasePollingInterval(basePollingInterval))
 		require.NoError(t, err)
 		require.Equal(t, basePollingInterval, queue.basePollingInterval)
 		require.Zero(t, queue.maxPollingInterval)

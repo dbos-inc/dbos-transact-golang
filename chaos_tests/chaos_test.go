@@ -203,6 +203,13 @@ func PostgresChaosMonkey(t *testing.T, ctx context.Context, wg *sync.WaitGroup) 
 			retryCLI(t, "stop postgres", func() error { return stopPostgres(cliPath) }, 60*time.Second)
 		}
 
+		// Let the caller launch DBOS and settle before the first kill.
+		select {
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+
 		for {
 			// Check for context cancellation first
 			select {
@@ -271,9 +278,10 @@ func setupDBOS(t *testing.T) dbos.Context {
 	require.NoError(t, err)
 
 	dbosCtx, err := dbos.NewContext(context.Background(), dbos.Config{
-		DatabaseURL: databaseURL,
-		AppName:     "chaos-test",
-		Logger:      slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		DatabaseURL:              databaseURL,
+		AppName:                  "chaos-test",
+		Logger:                   slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		SchedulerPollingInterval: time.Second,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, dbosCtx)
@@ -375,7 +383,9 @@ func TestChaosWorkflow(t *testing.T) {
 	)
 	require.NoError(t, err, "failed to list scheduled workflows")
 
-	assert.Equal(t, len(scheduledWorkflows), 1, "Expected exactly one scheduled workflow execution")
+	// require, not assert: the dereference below panics on an empty list, which
+	// aborts the whole test binary and takes the other chaos tests with it.
+	require.Len(t, scheduledWorkflows, 1, "Expected exactly one scheduled workflow execution")
 
 	// Check the last execution was within 10 seconds -- reasonable for a 1 second schedule and 2 seconds postgres downtime
 	latestWorkflow := scheduledWorkflows[0] // Sorted descending

@@ -471,8 +471,10 @@ func WithCancelCause(ctx Context) (Context, context.CancelCauseFunc) {
 	return ctx.WithCancelCause()
 }
 
+var errDBOSContextTimeout = fmt.Errorf("DBOS context timeout: %w", context.DeadlineExceeded)
+
 func (c *dbosContext) WithTimeout(_ Context, timeout time.Duration) (Context, context.CancelFunc) {
-	newCtx, cancelFunc := context.WithTimeoutCause(c.ctx, timeout, errors.New("DBOS context timeout"))
+	newCtx, cancelFunc := context.WithTimeoutCause(c.ctx, timeout, errDBOSContextTimeout)
 	return c.clone(newCtx), cancelFunc
 }
 

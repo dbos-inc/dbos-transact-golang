@@ -880,6 +880,158 @@ func TestSteps(t *testing.T) {
 
 	RegisterWorkflow(dbosCtx, customNameWorkflow)
 
+	// Fixtures for GetResultWithinStepIsNotACheckpoint: getResultTargetWf is the
+	// workflow whose result is awaited from inside a step body; awaitInStepWf does
+	// the awaiting and then runs an ordinary sibling step after it.
+	getResultTargetWf := func(_ Context, input string) (string, error) {
+		return input + "-done", nil
+	}
+	RegisterWorkflow(dbosCtx, getResultTargetWf)
+
+	awaitInStepWf := func(ctx Context, targetID string) (string, error) {
+		awaited, err := RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+			// A step body only receives a context.Context; reaching a DBOS
+			// operation from there means asserting it back to dbos.Context,
+			// which hands RetrieveWorkflow the step-scoped workflow state.
+			dbosStepCtx, ok := stepCtx.(Context)
+			if !ok {
+				return "", fmt.Errorf("expected step context to be a dbos.Context, got %T", stepCtx)
+			}
+			handle, err := RetrieveWorkflow[string](dbosStepCtx, targetID)
+			if err != nil {
+				return "", fmt.Errorf("failed to retrieve target workflow: %w", err)
+			}
+			return handle.GetResult()
+		}, WithStepName("awaitInStep"))
+		if err != nil {
+			return "", fmt.Errorf("awaitInStep failed: %w", err)
+		}
+
+		sibling, err := RunAsStep(ctx, func(_ context.Context) (string, error) {
+			return "sibling", nil
+		}, WithStepName("siblingStep"))
+		if err != nil {
+			return "", fmt.Errorf("siblingStep failed: %w", err)
+		}
+		return awaited + "/" + sibling, nil
+	}
+	RegisterWorkflow(dbosCtx, awaitInStepWf)
+
+	// A schedule the within-step tests can read and update. PauseSchedule and
+	// ResumeSchedule read it before writing, and GetSchedule needs a real target, so
+	// it must exist before either test runs. The cron is a once-a-year date so the
+	// scheduler never fires it during the test.
+	const scheduleForStepTests = "sched-in-step"
+
+	// Fixture for OpsRejectedWithinStep: invokes one rejected operation from inside
+	// a step body and reports the error it gets back, so the step itself succeeds
+	// and the assertions can read the message.
+	type opInStepInput struct {
+		Op       string
+		TargetID string
+	}
+	opInStepWf := func(ctx Context, input opInStepInput) (string, error) {
+		return RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+			dbosStepCtx, ok := stepCtx.(Context)
+			if !ok {
+				return "", fmt.Errorf("expected step context to be a dbos.Context, got %T", stepCtx)
+			}
+			var err error
+			switch input.Op {
+			case "closeStream":
+				err = CloseStream(dbosStepCtx, "stream-key")
+			case "cancelWorkflow":
+				err = CancelWorkflow(dbosStepCtx, input.TargetID)
+			case "cancelWorkflows":
+				err = CancelWorkflows(dbosStepCtx, []string{input.TargetID})
+			case "setWorkflowAttributes":
+				err = SetWorkflowAttributes(dbosStepCtx, input.TargetID, map[string]any{"k": "v"})
+			case "setWorkflowDelay":
+				err = SetWorkflowDelay(dbosStepCtx, input.TargetID, WithDelayDuration(time.Second))
+			case "deleteWorkflows":
+				err = DeleteWorkflows(dbosStepCtx, []string{input.TargetID})
+			case "resumeWorkflow":
+				_, err = ResumeWorkflow[string](dbosStepCtx, input.TargetID)
+			case "forkWorkflow":
+				_, err = ForkWorkflow[string](dbosStepCtx, ForkWorkflowInput{OriginalWorkflowID: input.TargetID})
+			case "createSchedule":
+				err = CreateSchedule(dbosStepCtx, ScheduleSpec{
+					ScheduleName: scheduleForStepTests,
+					Schedule:     "*/1 * * * * *",
+					WorkflowName: "some-workflow",
+				})
+			case "pauseSchedule":
+				err = PauseSchedule(dbosStepCtx, scheduleForStepTests)
+			case "resumeSchedule":
+				err = ResumeSchedule(dbosStepCtx, scheduleForStepTests)
+			case "deleteSchedule":
+				err = DeleteSchedule(dbosStepCtx, scheduleForStepTests)
+			case "go":
+				_, err = Go(dbosStepCtx, func(context.Context) (string, error) {
+					return "nested", nil
+				})
+			default:
+				return "", fmt.Errorf("unknown op %q", input.Op)
+			}
+			if err != nil {
+				return err.Error(), nil
+			}
+			return "unexpected: no error", nil
+		}, WithStepName("opInStep"))
+	}
+	RegisterWorkflow(dbosCtx, opInStepWf)
+
+	// Fixture for ReadOnlyOpsAllowedWithinStep: calls every read-only system-database
+	// operation from inside a step body. All go through RunAsStep, so nesting them is
+	// a plain function call.
+	readsInStepWf := func(ctx Context, _ string) (string, error) {
+		return RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+			dbosStepCtx, ok := stepCtx.(Context)
+			if !ok {
+				return "", fmt.Errorf("expected step context to be a dbos.Context, got %T", stepCtx)
+			}
+			wfID, err := GetWorkflowID(dbosStepCtx)
+			if err != nil {
+				return "", err
+			}
+			if _, err := ListWorkflows(dbosStepCtx, WithFilterWorkflowIDs(wfID)); err != nil {
+				return "", fmt.Errorf("listWorkflows: %w", err)
+			}
+			if _, err := GetWorkflowSteps(dbosStepCtx, wfID); err != nil {
+				return "", fmt.Errorf("getWorkflowSteps: %w", err)
+			}
+			if _, err := RetrieveWorkflow[string](dbosStepCtx, wfID); err != nil {
+				return "", fmt.Errorf("retrieveWorkflow: %w", err)
+			}
+			if _, err := GetWorkflowAggregates(dbosStepCtx, GetWorkflowAggregatesInput{
+				GroupByStatus: true,
+				SelectCount:   true,
+			}); err != nil {
+				return "", fmt.Errorf("getWorkflowAggregates: %w", err)
+			}
+			if _, err := GetStepAggregates(dbosStepCtx, GetStepAggregatesInput{
+				GroupByFunctionName: true,
+				SelectCount:         true,
+			}); err != nil {
+				return "", fmt.Errorf("getStepAggregates: %w", err)
+			}
+			if _, err := ListSchedules(dbosStepCtx); err != nil {
+				return "", fmt.Errorf("listSchedules: %w", err)
+			}
+			if _, err := GetSchedule(dbosStepCtx, scheduleForStepTests); err != nil {
+				return "", fmt.Errorf("getSchedule: %w", err)
+			}
+			if err := WriteStream(dbosStepCtx, "stream-from-step", "v"); err != nil {
+				return "", fmt.Errorf("writeStream: %w", err)
+			}
+			if err := SetEvent(dbosStepCtx, "event-from-step", "v"); err != nil {
+				return "", fmt.Errorf("setEvent: %w", err)
+			}
+			return "reads-ok", nil
+		}, WithStepName("readsInStep"))
+	}
+	RegisterWorkflow(dbosCtx, readsInStepWf)
+
 	// A workflow that mistakenly runs its step with the outer executor context
 	// (captured from the closure) instead of the workflow context it is handed.
 	wrongCtxWorkflow := func(_ Context, input string) (string, error) {
@@ -1099,6 +1251,13 @@ func TestSteps(t *testing.T) {
 	err := Launch(dbosCtx)
 	require.NoError(t, err, "failed to launch DBOS")
 
+	// Once-a-year cron, so the scheduler never fires it while the tests run.
+	require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
+		ScheduleName: scheduleForStepTests,
+		Schedule:     "0 0 0 1 1 *",
+		WorkflowName: "some-workflow",
+	}), "failed to create the schedule the within-step tests read")
+
 	t.Run("StepsMustRunInsideWorkflows", func(t *testing.T) {
 		// Attempt to run a step outside of a workflow context
 		_, err := RunAsStep(dbosCtx, func(ctx context.Context) (string, error) {
@@ -1163,6 +1322,127 @@ func TestSteps(t *testing.T) {
 		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 		require.NoError(t, err, "failed to list steps")
 		require.Len(t, steps, 1, "expected 1 step, got %d", len(steps))
+	})
+
+	// Awaiting a workflow handle from inside a step body is rejected, like Send,
+	// Recv and Debounce are.
+	//
+	// Spawning a child from within a step is blocked, but RetrieveWorkflow is
+	// allowed -- RunAsStep passes straight through when isWithinStep -- and the
+	// polling handle it returns is bound to the context it was called with. Called
+	// with the step context, that handle's workflow state is the *step's* own
+	// state, whose stepID is the enclosing step's function_id, not the workflow's
+	// step counter. Checkpointing DBOS.getResult at stepID+1 from there would
+	// collide twice over:
+	//
+	//   - nextStepID() mutates the step's own stepID in place from N to N+1, and
+	//     RunAsStep reads it only after the body returns, so the enclosing step
+	//     would checkpoint itself at N+1, on top of the DBOS.getResult row.
+	//   - N+1 is also the ID the next sibling step of the workflow claims.
+	//
+	// Rejecting the await keeps both IDs intact, so the workflow fails with a clear
+	// ErrorCodeStepExecution instead of an ErrorCodeUnexpectedStep determinism
+	// error from the collision.
+	t.Run("GetResultWithinStepIsRejected", func(t *testing.T) {
+		targetHandle, err := RunWorkflow(dbosCtx, getResultTargetWf, "target")
+		require.NoError(t, err, "failed to start target workflow")
+		targetResult, err := targetHandle.GetResult()
+		require.NoError(t, err, "failed to get target workflow result")
+		require.Equal(t, "target-done", targetResult)
+
+		handle, err := RunWorkflow(dbosCtx, awaitInStepWf, targetHandle.GetWorkflowID())
+		require.NoError(t, err, "failed to start awaiting workflow")
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected awaiting a handle inside a step to be rejected")
+
+		var dbosErr *Error
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, ErrorCodeStepExecution, dbosErr.Code)
+		require.ErrorContains(t, err, "cannot call GetResult within a step")
+
+		// The guard fires before any checkpoint, so the only recorded step is the
+		// enclosing one, still at function_id 0 and carrying the error. Nothing was
+		// written at function_id 1: no DBOS.getResult row, and the sibling step is
+		// never reached because the workflow fails first.
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 1, "expected exactly 1 recorded step, got %+v", steps)
+		require.Equal(t, 0, steps[0].StepID)
+		require.Equal(t, "awaitInStep", steps[0].StepName)
+		require.NotNil(t, steps[0].Error, "expected the enclosing step to record the guard error")
+	})
+
+	// Operations that are allowed inside a step body: every read (they go through
+	// RunAsStep) plus WriteStream and SetEvent (dedicated from-step paths). Nesting
+	// one is a plain function call: it runs, records no checkpoint of its own, and
+	// consumes no step ID -- exactly like a step within a step.
+	t.Run("ReadOnlyOpsAllowedWithinStep", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, readsInStepWf, "")
+		require.NoError(t, err, "failed to start workflow")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "read-only operations must be callable from inside a step")
+		require.Equal(t, "reads-ok", result)
+
+		// Only the enclosing step is recorded: the nested reads checkpointed nothing.
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 1, "expected exactly 1 recorded step, got %+v", steps)
+		require.Equal(t, 0, steps[0].StepID)
+		require.Equal(t, "readsInStep", steps[0].StepName)
+	})
+
+	// Operations that are refused inside a step body rather than passing through
+	// like the reads above. Writes to the system database go through runAsTxn,
+	// which rejects them; Go is rejected because the workflow state it would
+	// allocate a step ID from is the enclosing step's own, so nextStepID() would
+	// shift that step's function_id from N to N+1 -- away from the N its
+	// CheckOperationExecution looked up, and onto the ID its next sibling claims.
+	// Either way the operation records nothing and consumes no step ID.
+	t.Run("OpsRejectedWithinStep", func(t *testing.T) {
+		forkTarget, err := RunWorkflow(dbosCtx, getResultTargetWf, "fork-target")
+		require.NoError(t, err, "failed to start fork target workflow")
+		_, err = forkTarget.GetResult()
+		require.NoError(t, err, "failed to complete fork target workflow")
+
+		// opName is the name the rejection message reports: the internal step name
+		// for the runAsTxn ops, the exported API name for Go.
+		for _, tc := range []struct{ op, opName string }{
+			{"closeStream", "DBOS.closeStream"},
+			{"cancelWorkflow", "DBOS.cancelWorkflow"},
+			{"cancelWorkflows", "DBOS.cancelWorkflows"},
+			{"setWorkflowAttributes", "DBOS.updateWorkflowAttributes"},
+			{"setWorkflowDelay", "DBOS.setWorkflowDelay"},
+			{"deleteWorkflows", "DBOS.deleteWorkflows"},
+			{"resumeWorkflow", "DBOS.resumeWorkflow"},
+			{"forkWorkflow", "DBOS.forkWorkflow"},
+			{"createSchedule", "DBOS.createSchedule"},
+			{"pauseSchedule", "DBOS.pauseSchedule"},
+			{"resumeSchedule", "DBOS.resumeSchedule"},
+			{"deleteSchedule", "DBOS.deleteSchedule"},
+			{"go", "Go"},
+		} {
+			t.Run(tc.op, func(t *testing.T) {
+				handle, err := RunWorkflow(dbosCtx, opInStepWf, opInStepInput{
+					Op:       tc.op,
+					TargetID: forkTarget.GetWorkflowID(),
+				})
+				require.NoError(t, err, "failed to start workflow")
+				result, err := handle.GetResult()
+				require.NoError(t, err, "the enclosing step reports the error, so the workflow succeeds")
+				require.Contains(t, result, fmt.Sprintf("cannot call %s within a step", tc.opName),
+					"expected %s to be rejected inside a step", tc.op)
+
+				// The rejection is the enclosing step's only outcome: the operation
+				// itself never got a checkpoint, and consumed no step ID. For Go this
+				// is also what proves the enclosing step still checkpoints at its own
+				// function_id 0 rather than the 1 an allocation would have shifted it to.
+				steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+				require.NoError(t, err, "failed to get workflow steps")
+				require.Len(t, steps, 1, "expected exactly 1 recorded step, got %+v", steps)
+				require.Equal(t, 0, steps[0].StepID)
+				require.Equal(t, "opInStep", steps[0].StepName)
+			})
+		}
 	})
 
 	t.Run("StepRetryWithExponentialBackoff", func(t *testing.T) {
@@ -7581,42 +7861,64 @@ func TestWorkflowHandles(t *testing.T) {
 
 	workflowSleep := 1 * time.Second
 
-	t.Run("WorkflowHandleTimeout", func(t *testing.T) {
-		handle, err := RunWorkflow(dbosCtx, slowWorkflow, workflowSleep)
-		require.NoError(t, err, "failed to start workflow")
+	// A handle timeout must look the same to a caller whichever flavor of handle
+	// produced it: the two are meant to be interchangeable, and doc.go documents
+	// ErrTimeout for GetResult without qualifying which one you hold. Table-driven
+	// over both so the assertions cannot drift apart again.
+	timeoutHandleFlavors := []struct {
+		name       string
+		makeHandle func(t *testing.T) WorkflowHandle[string]
+	}{
+		{
+			name: "InMemoryHandle",
+			makeHandle: func(t *testing.T) WorkflowHandle[string] {
+				handle, err := RunWorkflow(dbosCtx, slowWorkflow, workflowSleep)
+				require.NoError(t, err, "failed to start workflow")
+				require.IsType(t, &workflowHandle[string]{}, handle, "expected an in-memory handle")
+				return handle
+			},
+		},
+		{
+			name: "PollingHandle",
+			makeHandle: func(t *testing.T) WorkflowHandle[string] {
+				originalHandle, err := RunWorkflow(dbosCtx, slowWorkflow, workflowSleep)
+				require.NoError(t, err, "failed to start workflow")
+				pollingHandle, err := RetrieveWorkflow[string](dbosCtx, originalHandle.GetWorkflowID())
+				require.NoError(t, err, "failed to retrieve workflow")
+				require.IsType(t, &workflowPollingHandle[string]{}, pollingHandle, "expected a polling handle")
+				return pollingHandle
+			},
+		},
+	}
 
-		start := time.Now()
-		_, err = handle.GetResult(WithHandleTimeout(10*time.Millisecond), WithHandlePollingInterval(1*time.Millisecond))
-		duration := time.Since(start)
+	for _, flavor := range timeoutHandleFlavors {
+		t.Run("WorkflowHandleTimeout/"+flavor.name, func(t *testing.T) {
+			handle := flavor.makeHandle(t)
 
-		require.Error(t, err, "expected timeout error")
-		assert.Contains(t, err.Error(), "workflow result timeout")
-		assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
-		assert.True(t, errors.Is(err, ErrTimeout), "expected a DBOS timeout error, got: %v", err)
-		assert.True(t, errors.Is(err, context.DeadlineExceeded),
-			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
-	})
+			start := time.Now()
+			_, err := handle.GetResult(WithHandleTimeout(10*time.Millisecond), WithHandlePollingInterval(1*time.Millisecond))
+			duration := time.Since(start)
 
-	t.Run("WorkflowPollingHandleTimeout", func(t *testing.T) {
-		// Start a workflow that will block on the first signal
-		originalHandle, err := RunWorkflow(dbosCtx, slowWorkflow, workflowSleep)
-		require.NoError(t, err, "failed to start workflow")
+			require.Error(t, err, "expected timeout error")
+			assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
+			// Only the shared prefix is asserted: the polling handle can exit
+			// through either the poll loop or the retrier's backoff depending on
+			// which notices the expiry first, and the two word it differently.
+			assert.Contains(t, err.Error(), "Operation timed out")
+			assert.True(t, errors.Is(err, ErrTimeout), "expected a DBOS timeout error, got: %v", err)
+			assert.True(t, errors.Is(err, context.DeadlineExceeded),
+				"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
 
-		pollingHandle, err := RetrieveWorkflow[string](dbosCtx, originalHandle.GetWorkflowID())
-		require.NoError(t, err, "failed to retrieve workflow")
-
-		_, ok := pollingHandle.(*workflowPollingHandle[string])
-		require.True(t, ok, "expected polling handle, got %T", pollingHandle)
-
-		start := time.Now()
-		_, err = pollingHandle.GetResult(WithHandleTimeout(10*time.Millisecond), WithHandlePollingInterval(1*time.Millisecond))
-		duration := time.Since(start)
-
-		assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
-		require.Error(t, err, "expected timeout error")
-		assert.True(t, errors.Is(err, context.DeadlineExceeded),
-			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
-	})
+			// The coded error exists so it survives being checkpointed: a bare
+			// context sentinel degrades to a plain string and stops matching.
+			encoded := serializeWorkflowError(nil, err, NewGobSerializer().Name())
+			roundTripped := deserializeWorkflowError(&encoded)
+			assert.True(t, errors.Is(roundTripped, ErrTimeout),
+				"expected ErrTimeout to survive a DB round trip, got: %v", roundTripped)
+			assert.True(t, errors.Is(roundTripped, context.DeadlineExceeded),
+				"expected the cause to survive a DB round trip, got: %v", roundTripped)
+		})
+	}
 }
 
 func TestWorkflowHandleContextCancel(t *testing.T) {

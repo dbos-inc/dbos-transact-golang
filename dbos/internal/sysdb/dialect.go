@@ -1,6 +1,7 @@
 package sysdb
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -232,6 +233,15 @@ func (PostgresDialect) IsForeignKeyViolation(err error) bool {
 // entire transaction and are opted in per call site via IsRetryableTransaction.
 func (PostgresDialect) IsRetryable(err error, logger *slog.Logger) bool {
 	if err == nil {
+		return false
+	}
+	// context.DeadlineExceeded satisfies net.Error, so it would fall through to the
+	// net.Error check below and read as a transient driver failure. It is not one:
+	// either a caller's context expired (retrying can only fail again), or a DBOS
+	// timeout error wraps it as its cause -- Recv/GetEvent/handle timeouts are
+	// semantic outcomes on their own deadline, and retrying them loops forever
+	// against a live context. context.Canceled is excluded for the same reason.
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
 	// pgx surfaces ErrTxClosed for ops on a tx that has already finalized

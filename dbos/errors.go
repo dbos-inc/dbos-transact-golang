@@ -28,9 +28,10 @@ var (
 	// recovery attempts and were moved to the dead-letter queue.
 	ErrDeadLetterQueue = &Error{Code: ErrorCodeDeadLetterQueue}
 	// ErrTimeout matches DBOS timeout errors (e.g. Recv/GetEvent timeouts, GetResult
-	// handle timeouts). A timeout error built from an expired context deadline also
-	// wraps that cause, so errors.Is(err, context.DeadlineExceeded) matches it too,
-	// including for errors read back from the database.
+	// handle timeouts on either handle flavor). Every such error also wraps a stdlib
+	// cause, so errors.Is(err, context.DeadlineExceeded) matches it too -- and
+	// errors.Is(err, context.Canceled) for a wait ended by cancellation rather than
+	// by a deadline -- including for errors read back from the database.
 	ErrTimeout = &Error{Code: ErrorCodeTimeout}
 	// ErrQueueNotFound matches errors referencing a queue that does not exist.
 	ErrQueueNotFound = &Error{Code: ErrorCodeQueueNotFound}

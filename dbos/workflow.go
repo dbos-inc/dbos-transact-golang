@@ -199,6 +199,9 @@ func checkGetResultExecution[R any](dbosCtx context.Context) (R, bool, error) {
 	if !isWithinWorkflow {
 		return *new(R), false, nil
 	}
+	if workflowState.isWithinStep {
+		return *new(R), false, models.NewStepExecutionError(workflowState.workflowID, "DBOS.getResult", fmt.Errorf("cannot call GetResult within a step"))
+	}
 	recordedOutputs, err := sysdb.RetryWithResult(dbosCtx, func() (*sysdb.RecordedResult, error) {
 		uncancellableCtx := context.WithoutCancel(dbosCtx)
 		return dbosCtx.(*dbosContext).systemDB.CheckOperationExecution(uncancellableCtx, sysdb.CheckOperationExecutionDBInput{
@@ -361,6 +364,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		defer cancel()
 	}
 
+	// Here, both the transient DB errors and awaiting the workflow can timeout
 	awaitResult, awaitErr := sysdb.RetryWithResult(ctx, func() (*sysdb.AwaitWorkflowResultOutput, error) {
 		return h.dbosContext.(*dbosContext).systemDB.AwaitWorkflowResult(ctx, h.workflowID, options.pollInterval, false)
 	}, sysdb.WithRetrierLogger(h.dbosContext.(*dbosContext).logger))
@@ -1638,7 +1642,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				c.logger.Info("Workflow was cancelled. Waiting for cancel function to complete", "workflow_id", workflowID)
 				<-cancelFuncCompleted
 				removeActive()
-				awaitExistingOutcome(err)
+				// Join the context error into the cause: fn may have learned about the
+				// cancellation by reading the CANCELLED row (a status carries no cause)
+				// rather than from the context, and the run's own reason must not depend
+				// on which of the two noticed first.
+				awaitExistingOutcome(errors.Join(err, workflowCtx.Err()))
 				return
 			}
 			if workflowCtx.Err() != nil && isCancellationError(err) {
@@ -2612,18 +2620,6 @@ func runAsTxn[R any](ctx Context, fn Txn[R], opts ...StepOption) (R, error) {
 	return typedResult, err
 }
 
-// withinTransactionContext returns a child context whose workflow state is
-// flagged as executing inside a data source transaction.
-func withinTransactionContext(c *dbosContext) Context {
-	var state workflowState
-	if existing, ok := c.Value(workflowStateKey).(*workflowState); ok && existing != nil {
-		state = *existing
-	}
-	state.isWithinStep = true
-	state.isWithinTransaction = true
-	return WithValue(c, workflowStateKey, &state)
-}
-
 func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, error) {
 	prep, err := prepareStepExecution(c, opts)
 	if err != nil {
@@ -2632,26 +2628,9 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 	if fn == nil {
 		return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("step function cannot be nil"))
 	}
+
 	if prep.IsWithinStep {
-		// Invoked inside an enclosing step: manage the transaction but record no durability
-		txOpts := TxOptions{IsoLevel: IsoLevelReadCommitted}
-		if prep.StepOpts.txIsoLevel != nil {
-			txOpts.IsoLevel = *prep.StepOpts.txIsoLevel
-		}
-		uncancellableCtx := WithoutCancel(c)
-		tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, txOpts)
-		if err != nil {
-			return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to begin transaction: %w", err))
-		}
-		defer tx.Rollback(uncancellableCtx)
-		output, err := fn(withinTransactionContext(c), tx)
-		if err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(uncancellableCtx); err != nil {
-			return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", err))
-		}
-		return output, nil
+		return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("cannot call %s within a step", prep.StepOpts.stepName))
 	}
 
 	uncancellableCtx := WithoutCancel(c)
@@ -2763,6 +2742,7 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 
 // Go runs a step inside a Go routine and returns a channel to receive the result.
 // Go generates a deterministic step ID for the step before running the step in a routine, since goroutines are not deterministic.
+// Go must be called from a workflow, not from inside a step body.
 // Example:
 //
 //	resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
@@ -2835,6 +2815,9 @@ func (c *dbosContext) Go(ctx Context, fn StepFunc, opts ...StepOption) (<-chan S
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return nil, models.NewStepExecutionError("", "", errors.New("workflow state not found in context: are you running this step within a workflow?"))
+	}
+	if wfState.isWithinStep {
+		return nil, models.NewStepExecutionError(wfState.workflowID, "DBOS.go", errors.New("cannot call Go within a step"))
 	}
 	opts = append(opts, withNextStepID(wfState.nextStepID()))
 
@@ -3166,7 +3149,7 @@ func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration) (any,
 		}
 		output := rawStepOutput{value: message, serialization: serialization}
 		if message == nil && timeoutOccurred {
-			return output, models.NewTimeoutError(workflowID, "DBOS.recv", fmt.Sprintf("no message received within %v", timeout), nil)
+			return output, models.NewTimeoutError(workflowID, "DBOS.recv", fmt.Sprintf("no message received within %v", timeout), context.DeadlineExceeded)
 		}
 		return output, nil
 	}, WithStepName("DBOS.recv"), withNextStepID(stepID))
@@ -3280,6 +3263,19 @@ func (c *dbosContext) SetEvent(_ Context, key string, message any, opts ...SetEv
 	encodedMessage, err := evtSer.Encode(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize event value: %w", err)
+	}
+
+	if wfState, ok := c.Value(workflowStateKey).(*workflowState); ok && wfState != nil && wfState.isWithinStep {
+		uncancellableCtx := WithoutCancel(c)
+		return sysdb.Retry(c, func() error {
+			return c.systemDB.SetEvent(uncancellableCtx, sysdb.WorkflowSetEventInput{
+				Key:           key,
+				Message:       encodedMessage,
+				Serialization: evtSer.Name(),
+				WorkflowID:    wfState.workflowID,
+				StepID:        wfState.stepID,
+			})
+		}, sysdb.WithRetrierLogger(c.logger))
 	}
 
 	_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
@@ -3405,7 +3401,7 @@ func (c *dbosContext) GetEvent(_ Client, targetWorkflowID, key string, timeout t
 			serialization = *evtSerialization
 		}
 		if value == nil && timeoutOccurred {
-			return nil, models.NewTimeoutError("", "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout), nil)
+			return nil, models.NewTimeoutError("", "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout), context.DeadlineExceeded)
 		}
 		return &getEventResult{value: value, serialization: serialization}, nil
 	}
@@ -3423,7 +3419,7 @@ func (c *dbosContext) GetEvent(_ Client, targetWorkflowID, key string, timeout t
 		}
 		output := rawStepOutput{value: value, serialization: serialization}
 		if value == nil && timeoutOccurred {
-			return output, models.NewTimeoutError(workflowID, "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout), nil)
+			return output, models.NewTimeoutError(workflowID, "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout), context.DeadlineExceeded)
 		}
 		return output, nil
 	}, WithStepName("DBOS.getEvent"), withNextStepID(stepID))
@@ -3544,6 +3540,19 @@ func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...Writ
 	encodedValue, err := ser.Encode(value)
 	if err != nil {
 		return fmt.Errorf("failed to serialize stream value: %w", err)
+	}
+
+	if wfState, ok := c.Value(workflowStateKey).(*workflowState); ok && wfState != nil && wfState.isWithinStep {
+		uncancellableCtx := WithoutCancel(c)
+		return sysdb.Retry(c, func() error {
+			return c.systemDB.WriteStream(uncancellableCtx, sysdb.WriteStreamDBInput{
+				Key:           key,
+				Value:         encodedValue,
+				Serialization: ser.Name(),
+				WorkflowID:    wfState.workflowID,
+				StepID:        wfState.stepID,
+			})
+		}, sysdb.WithRetrierLogger(c.logger))
 	}
 
 	_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
@@ -5424,10 +5433,10 @@ func (c *dbosContext) GetWorkflowAggregates(_ Client, input GetWorkflowAggregate
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]WorkflowAggregateRow, error) {
-			in := dbInput
-			in.Tx = tx
-			return c.systemDB.GetWorkflowAggregates(ctx, in)
+		return RunAsStep(c, func(ctx context.Context) ([]WorkflowAggregateRow, error) {
+			return sysdb.RetryWithResult(ctx, func() ([]WorkflowAggregateRow, error) {
+				return c.systemDB.GetWorkflowAggregates(ctx, dbInput)
+			}, sysdb.WithRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getWorkflowAggregates"))
 	}
 	return sysdb.RetryWithResult(c, func() ([]WorkflowAggregateRow, error) {
@@ -5491,10 +5500,10 @@ func (c *dbosContext) GetStepAggregates(_ Client, input GetStepAggregatesInput) 
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]StepAggregateRow, error) {
-			in := dbInput
-			in.Tx = tx
-			return c.systemDB.GetStepAggregates(ctx, in)
+		return RunAsStep(c, func(ctx context.Context) ([]StepAggregateRow, error) {
+			return sysdb.RetryWithResult(ctx, func() ([]StepAggregateRow, error) {
+				return c.systemDB.GetStepAggregates(ctx, dbInput)
+			}, sysdb.WithRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getStepAggregates"))
 	}
 	return sysdb.RetryWithResult(c, func() ([]StepAggregateRow, error) {
@@ -5914,10 +5923,10 @@ func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (WorkflowSchedu
 	var schedules []WorkflowSchedule
 	var err error
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
-		schedules, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]WorkflowSchedule, error) {
-			in := dbInput
-			in.Tx = tx
-			return c.systemDB.ListSchedules(ctx, in)
+		schedules, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowSchedule, error) {
+			return sysdb.RetryWithResult(ctx, func() ([]WorkflowSchedule, error) {
+				return c.systemDB.ListSchedules(ctx, dbInput)
+			}, sysdb.WithRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getSchedule"))
 	} else {
 		schedules, err = sysdb.RetryWithResult(c, func() ([]WorkflowSchedule, error) {
@@ -5959,10 +5968,10 @@ func (c *dbosContext) ListSchedules(_ Client, opts ...ListSchedulesOption) ([]Wo
 		ScheduleNamePrefixes: o.ScheduleNamePrefixes,
 	}
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
-		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]WorkflowSchedule, error) {
-			in := dbInput
-			in.Tx = tx
-			return c.systemDB.ListSchedules(ctx, in)
+		return RunAsStep(c, func(ctx context.Context) ([]WorkflowSchedule, error) {
+			return sysdb.RetryWithResult(ctx, func() ([]WorkflowSchedule, error) {
+				return c.systemDB.ListSchedules(ctx, dbInput)
+			}, sysdb.WithRetrierLogger(c.logger))
 		}, WithStepName("DBOS.listSchedules"))
 	}
 	return sysdb.RetryWithResult(c, func() ([]WorkflowSchedule, error) {

@@ -73,7 +73,7 @@ handle, err := dbos.Enqueue[string, int](client, "queue", "MyWorkflow", "input")
 handle, err := dbos.Enqueue[int](client, "queue", "MyWorkflow", "input")
 ```
 
-Same reorder applies to both debouncer types: `Debouncer[P, R]` / `NewDebouncer[P, R]` → `Debouncer[R, P]` / `NewDebouncer[R, P]`, and `DebouncerClient[P, R]` / `NewDebouncerClient[P, R]` → `DebouncerClient[R, P]` / `NewDebouncerClient[R, P]`. `NewDebouncer` call sites are unaffected (both parameters are inferred from the workflow function), but explicitly-typed variables must swap: `var d *dbos.Debouncer[string, int]` → `*dbos.Debouncer[int, string]`. `NewDebouncerClient` cannot infer its parameters — every call site must swap them by hand; watch for cases where input and result types are mutually assignable (e.g. both `string`), which compile unchanged with swapped meaning.
+Same reorder applies to both debouncer types: `Debouncer[P, R]` / `NewDebouncer[P, R]` → `Debouncer[R, P]` / `NewDebouncer[R, P]`, and `DebouncerClient[P, R]` / `NewDebouncerClient[P, R]` → `DebouncerClient[R, P]` / `NewDebouncerClient[R, P]`. `NewDebouncer`'s type parameters are still inferred from the workflow function, but it now also returns an error (see §7), and explicitly-typed variables must swap: `var d *dbos.Debouncer[string, int]` → `*dbos.Debouncer[int, string]`. `NewDebouncerClient` cannot infer its parameters — every call site must swap them by hand; watch for cases where input and result types are mutually assignable (e.g. both `string`), which compile unchanged with swapped meaning.
 
 ### Functions that widened from `Context` to `Client`
 
@@ -276,7 +276,9 @@ Slice-taking filters became variadic — call sites passing a literal slice need
 - New package-level accessors: `dbos.GetApplicationVersion(ctx)`, `dbos.GetExecutorID(ctx)`, `dbos.GetApplicationID(ctx)`.
 - `Config.DatabaseURL` accepts Postgres/CockroachDB URLs or key=value DSNs, and sqlite URLs (`sqlite:/path/to.db`, `sqlite:relative.db`, `sqlite::memory:`).
 - **SQLite now requires a driver import.** The SQLite driver moved out of the core package into `dbos/driver/sqlite`, registered database/sql-style. Apps using a sqlite URL or `Config.SQLiteSystemDB` must add `import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"` (one blank import, anywhere in the binary); without it, startup fails with an error naming this import. Postgres-only apps need no change and no longer compile or link `modernc.org/sqlite`.
-- **One additive system-database schema change.** The first v1 `Launch()` runs migration 42, adding two defaulted columns to `workflow_status` (`is_debounced`, `debounce_deadline_epoch_ms`) for the debouncer redesign (§8). Existing workflows (including long-DELAYED ones), queues, and schedule rows carry over as-is, and v0.x and v1 executors can still share a system database during a rolling upgrade: old executors ignore the new columns and skip migration versions they don't know.
+- **One additive system-database schema change.** The first v1 `Launch()` runs migration 42, adding two defaulted columns to `workflow_status` (`is_debounced`, `debounce_deadline_epoch_ms`) for the debouncer. Existing workflows (including long-DELAYED ones), queues, and schedule rows carry over as-is, and v0.x and v1 executors can still share a system database during a rolling upgrade: old executors ignore the new columns and skip migration versions they don't know.
+- **Debouncer changes.** `NewDebouncer` now returns `(*Debouncer[R, P], error)` — call sites gain error handling (type parameters are still inferred); `NewDebouncerClient` still returns the client directly. Debouncers can be created at any time, including after `Launch()` (v0 required creation before launch). New options: `WithDebouncerQueue(name)` runs the debounced workflow on a named registered queue instead of the DBOS internal queue (fixed per debouncer, since debounce keys are scoped to it), and client-side `WithDebouncerClassName(name)` targets workflows another runtime registers under a class name. `Debounce` now rejects options a debounce owns or cannot support (`WithQueue`, `WithDeduplicationID`, `WithDelay`, `WithPriority`, `WithQueuePartitionKey`, `WithDeduplicationPolicy`) with an error matching `dbos.ErrInvalidOption`. Pending debounced workflows are now visible to workflow management: they appear as `DELAYED` on their queue with `IsDebounced` set and can be listed with `dbos.WithFilterIsDebounced(true)`. The debounce timeout is captured by the call that enqueues the workflow — later calls coalescing on the same pending workflow extend the delay up to that fixed deadline but never move it — and a deadline on the `Debounce` context is recorded as the debounced workflow's execution timeout (the clock starts at dequeue), never as an absolute deadline.
+- **Drain debouncers before upgrading.** A debounce still pending when you deploy v1 will not fire under the new version. Before upgrading, stop calling `Debounce` and let in-flight debounces fire (at most the debounce delay or timeout); cancel any stragglers left after the upgrade with `CancelWorkflow`.
 
 ### Custom serializers must handle non-user values
 
@@ -286,18 +288,26 @@ A `Serializer[any]` must therefore be total: it must encode and decode arbitrary
 
 One deliberate exception: `Recv` and `GetEvent` checkpoint the *sender's* encoded payload verbatim under the sender's recorded format — the receiver's serializer is never asked to re-encode a message or event it didn't produce.
 
-## 8. Debouncer redesign
+## 8. DBOS calls are rejected inside step bodies
 
-Debouncing no longer runs through an internal coordinator workflow. A debounced workflow is now enqueued directly in the `DELAYED` status, holding its debounce key as its deduplication ID; each `Debounce` call atomically pushes back its start time and replaces its input, and the key is released when the delay elapses and the workflow is released to its queue. The `Debouncer` / `DebouncerClient` API is unchanged apart from the §2 type-parameter reorder, with these differences:
+v0 let most DBOS operations run inside a step body and silently dropped their durability guarantees: `CloseStream`, workflow-management writes, and `RunAsTransaction` invoked from inside a step executed in a real database transaction but recorded **no checkpoint**, so recovery could repeat them. v1 rejects them instead with an `ErrorCodeStepExecution` error (`cannot call <X> within a step`). Newly rejected inside a step (v0 already rejected `Send`, `Recv`, `GetEvent`, `Sleep`, `Patch`, `DeprecatePatch`, and spawning a child workflow with `RunWorkflow`):
 
-- New `WithDebouncerQueue(name)` runs the debounced workflow on a named queue instead of the DBOS internal queue. The queue is fixed per debouncer (debounce keys are scoped to it); `Debounce` calls cannot override it.
-- A deadline on the `Debounce` context is recorded as the debounced workflow's execution timeout, never as an absolute deadline: like an enqueue timeout, the clock starts when the workflow is dequeued, so the debounce delay does not count against it. The timeout is captured by the call that enqueues the workflow; later calls coalescing on the same pending workflow do not change it.
-- `Debounce` rejects options a debounce owns or cannot support: `WithQueue`, `WithDeduplicationID`, `WithDelay`, `WithPriority`, `WithQueuePartitionKey`, `WithDeduplicationPolicy`.
-- Debouncers can be created at any time, including after `Launch()` (v0 required creation before launch).
-- The debounce timeout is captured when the first call for a key enqueues the workflow; later calls extend the delay up to that fixed deadline but never move it.
-- Pending debounced workflows are visible to workflow management: they appear as `DELAYED` on their queue with `IsDebounced` set, and can be listed with `dbos.WithFilterIsDebounced(true)`.
+- `RunAsTransaction`
+- `Enqueue`
+- `Go`
+- `handle.GetResult()` — awaiting another workflow's result from inside a step
+- `CloseStream`
+- Workflow-management writes: `CancelWorkflow(s)`, `ResumeWorkflow(s)`, `ForkWorkflow(s)`, `DeleteWorkflows`, `SetWorkflowAttributes`, `SetWorkflowDelay`
+- Schedule writes: `CreateSchedule`, `PauseSchedule`, `ResumeSchedule`, `DeleteSchedule`
+- `Debounce` (v0 already rejected this indirectly, via the child-workflow guard)
 
-**Upgrade note: drain debouncers before upgrading.** v0 debouncing ran through internal `internalDebouncerWF` workflow registrations that v1 removes, so a v0 debouncer workflow still `PENDING` at upgrade cannot be recovered by a v1 executor — recovery logs "Workflow not found in registry" and leaves it `PENDING`, and its target workflow never starts. Before upgrading, stop calling `Debounce` and let in-flight debounces fire (at most the debounce delay or timeout); cancel any stragglers left after the upgrade with `CancelWorkflow`.
+Still allowed inside a step:
+
+- `SetEvent` and `WriteStream` — at-least-once, attributed to the enclosing step (a retried step may write again).
+- Read/list operations — `ListWorkflows`, `GetWorkflowSteps`, `RetrieveWorkflow`, `ReadStream`, `GetWorkflowAggregates`, `GetStepAggregates`, `GetSchedule`, `ListSchedules`, queue reads, app-version reads. Called from a step they run within the enclosing step's durability scope, without their own checkpoint; called from workflow code they are checkpointed as steps, as before.
+- Nested `RunAsStep` — the inner function runs inline as part of the enclosing step, without its own checkpoint (unchanged from v0).
+
+Migration: hoist rejected calls out of step bodies into the surrounding workflow code. If a step needs another workflow's result, return from the step and await the handle in the workflow.
 
 ## 9. Mocks / tests
 
@@ -308,5 +318,5 @@ Mocks of the old `DBOSContext` must be regenerated from `dbos.Context` (which no
 1. `go mod edit -replace` to the local `go/` checkout; `go build ./...` to enumerate breakage.
 2. Mechanical renames (safe to sed, word-boundary matched):
    `DBOSContext`→`Context`, `NewDBOSContext`→`NewContext`, `DBOSError`→`Error`, `DBOSErrorCode`→`ErrorCode`, `SqliteSystemDB`→`SQLiteSystemDB`, `UpdateWorkflowAttributes`→`SetWorkflowAttributes`, `CancelWorkflowOptions`→`CancelWorkflowOption`, step-retry `With*`→`WithStep*`, list-filter `With*`→`WithFilter*` (per §6 table — names collide with unrelated options, so match exact identifiers), error-code constants per §5, `Client<Fn>`→`<Fn>` per §2, `WorkflowFn:`→`Workflow:` (schedule-spec literals, per §4).
-3. Structural fixes by hand: queue registration (`NewWorkflowQueue`→`RegisterQueue` + error handling + `WithQueue(queue)`), scheduled workflows (`WithSchedule`→`CreateSchedule`+`ScheduleSpec`, input signature), `Enqueue` type-param reorder, `RetrieveQueue`/`GetSchedule`/`GetLatestApplicationVersion` return-shape changes, `Shutdown` error handling.
+3. Structural fixes by hand: queue registration (`NewWorkflowQueue`→`RegisterQueue` + error handling + `WithQueue(queue)`), scheduled workflows (`WithSchedule`→`CreateSchedule`+`ScheduleSpec`, input signature), `Enqueue` type-param reorder, `RetrieveQueue`/`GetSchedule`/`GetLatestApplicationVersion`/`NewDebouncer` return-shape changes, `Shutdown` error handling, hoisting DBOS calls out of step bodies (§8).
 4. `go vet ./...` && `go build ./...` && run tests.
