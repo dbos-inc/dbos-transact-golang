@@ -7861,42 +7861,64 @@ func TestWorkflowHandles(t *testing.T) {
 
 	workflowSleep := 1 * time.Second
 
-	t.Run("WorkflowHandleTimeout", func(t *testing.T) {
-		handle, err := RunWorkflow(dbosCtx, slowWorkflow, workflowSleep)
-		require.NoError(t, err, "failed to start workflow")
+	// A handle timeout must look the same to a caller whichever flavor of handle
+	// produced it: the two are meant to be interchangeable, and doc.go documents
+	// ErrTimeout for GetResult without qualifying which one you hold. Table-driven
+	// over both so the assertions cannot drift apart again.
+	timeoutHandleFlavors := []struct {
+		name       string
+		makeHandle func(t *testing.T) WorkflowHandle[string]
+	}{
+		{
+			name: "InMemoryHandle",
+			makeHandle: func(t *testing.T) WorkflowHandle[string] {
+				handle, err := RunWorkflow(dbosCtx, slowWorkflow, workflowSleep)
+				require.NoError(t, err, "failed to start workflow")
+				require.IsType(t, &workflowHandle[string]{}, handle, "expected an in-memory handle")
+				return handle
+			},
+		},
+		{
+			name: "PollingHandle",
+			makeHandle: func(t *testing.T) WorkflowHandle[string] {
+				originalHandle, err := RunWorkflow(dbosCtx, slowWorkflow, workflowSleep)
+				require.NoError(t, err, "failed to start workflow")
+				pollingHandle, err := RetrieveWorkflow[string](dbosCtx, originalHandle.GetWorkflowID())
+				require.NoError(t, err, "failed to retrieve workflow")
+				require.IsType(t, &workflowPollingHandle[string]{}, pollingHandle, "expected a polling handle")
+				return pollingHandle
+			},
+		},
+	}
 
-		start := time.Now()
-		_, err = handle.GetResult(WithHandleTimeout(10*time.Millisecond), WithHandlePollingInterval(1*time.Millisecond))
-		duration := time.Since(start)
+	for _, flavor := range timeoutHandleFlavors {
+		t.Run("WorkflowHandleTimeout/"+flavor.name, func(t *testing.T) {
+			handle := flavor.makeHandle(t)
 
-		require.Error(t, err, "expected timeout error")
-		assert.Contains(t, err.Error(), "workflow result timeout")
-		assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
-		assert.True(t, errors.Is(err, ErrTimeout), "expected a DBOS timeout error, got: %v", err)
-		assert.True(t, errors.Is(err, context.DeadlineExceeded),
-			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
-	})
+			start := time.Now()
+			_, err := handle.GetResult(WithHandleTimeout(10*time.Millisecond), WithHandlePollingInterval(1*time.Millisecond))
+			duration := time.Since(start)
 
-	t.Run("WorkflowPollingHandleTimeout", func(t *testing.T) {
-		// Start a workflow that will block on the first signal
-		originalHandle, err := RunWorkflow(dbosCtx, slowWorkflow, workflowSleep)
-		require.NoError(t, err, "failed to start workflow")
+			require.Error(t, err, "expected timeout error")
+			assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
+			// Only the shared prefix is asserted: the polling handle can exit
+			// through either the poll loop or the retrier's backoff depending on
+			// which notices the expiry first, and the two word it differently.
+			assert.Contains(t, err.Error(), "Operation timed out")
+			assert.True(t, errors.Is(err, ErrTimeout), "expected a DBOS timeout error, got: %v", err)
+			assert.True(t, errors.Is(err, context.DeadlineExceeded),
+				"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
 
-		pollingHandle, err := RetrieveWorkflow[string](dbosCtx, originalHandle.GetWorkflowID())
-		require.NoError(t, err, "failed to retrieve workflow")
-
-		_, ok := pollingHandle.(*workflowPollingHandle[string])
-		require.True(t, ok, "expected polling handle, got %T", pollingHandle)
-
-		start := time.Now()
-		_, err = pollingHandle.GetResult(WithHandleTimeout(10*time.Millisecond), WithHandlePollingInterval(1*time.Millisecond))
-		duration := time.Since(start)
-
-		assert.True(t, duration < 100*time.Millisecond, "timeout should occur quickly")
-		require.Error(t, err, "expected timeout error")
-		assert.True(t, errors.Is(err, context.DeadlineExceeded),
-			"expected error to be detectable as context.DeadlineExceeded, got: %v", err)
-	})
+			// The coded error exists so it survives being checkpointed: a bare
+			// context sentinel degrades to a plain string and stops matching.
+			encoded := serializeWorkflowError(nil, err, NewGobSerializer().Name())
+			roundTripped := deserializeWorkflowError(&encoded)
+			assert.True(t, errors.Is(roundTripped, ErrTimeout),
+				"expected ErrTimeout to survive a DB round trip, got: %v", roundTripped)
+			assert.True(t, errors.Is(roundTripped, context.DeadlineExceeded),
+				"expected the cause to survive a DB round trip, got: %v", roundTripped)
+		})
+	}
 }
 
 func TestWorkflowHandleContextCancel(t *testing.T) {

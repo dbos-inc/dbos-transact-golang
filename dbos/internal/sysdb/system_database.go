@@ -2542,6 +2542,19 @@ type AwaitWorkflowResultOutput struct {
 	ErrStr        *string
 }
 
+// contextInterruptionError restates a context interruption as a DBOS *Error that
+// carries a cause (ctx.Err() and context.Cause(ctx) in the message if it exists).
+func contextInterruptionError(ctx context.Context, workflowID, message string) error {
+	ctxErr := ctx.Err()
+	if ctxErr == nil {
+		return nil
+	}
+	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, ctxErr) {
+		message = fmt.Sprintf("%s (%s)", message, cause)
+	}
+	return models.NewTimeoutError(workflowID, "", message, ctxErr)
+}
+
 // AwaitWorkflowResult polls the workflow's row until it reaches a terminal
 // status. A missing row normally means the workflow has not been inserted yet,
 // so the poll keeps waiting for it to appear. Callers that know the row must
@@ -2556,7 +2569,7 @@ func (s *SysDB) AwaitWorkflowResult(ctx context.Context, workflowID string, poll
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, contextInterruptionError(ctx, workflowID, "timed out awaiting workflow result")
 		default:
 		}
 
@@ -2573,6 +2586,9 @@ func (s *SysDB) AwaitWorkflowResult(ctx context.Context, workflowID string, poll
 				}
 				time.Sleep(pollInterval)
 				continue
+			}
+			if ctx.Err() != nil {
+				return nil, contextInterruptionError(ctx, workflowID, "timed out awaiting workflow result")
 			}
 			return nil, fmt.Errorf("failed to query workflow status: %w", err)
 		}
@@ -6028,9 +6044,10 @@ func Retry(ctx context.Context, fn func() error, options ...RetryOption) error {
 
 	onCancel := func() error {
 		if config.logger != nil {
-			config.logger.Debug("Retry operation cancelled", "error", ctx.Err())
+			config.logger.Debug("Retry operation cancelled", "error", ctx.Err(), "cause", context.Cause(ctx))
 		}
-		return ctx.Err()
+		// Coded error rather than a bare ctx.Err(), so we can store the cause and restore it after a DB roundtrip
+		return contextInterruptionError(ctx, "", "retried operation interrupted")
 	}
 
 	return RetryLoop(ctx, sched, fn, decide, onRetry, onCancel)
