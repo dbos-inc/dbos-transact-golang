@@ -1642,7 +1642,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				c.logger.Info("Workflow was cancelled. Waiting for cancel function to complete", "workflow_id", workflowID)
 				<-cancelFuncCompleted
 				removeActive()
-				awaitExistingOutcome(err)
+				// Join the context error into the cause: fn may have learned about the
+				// cancellation by reading the CANCELLED row (a status carries no cause)
+				// rather than from the context, and the run's own reason must not depend
+				// on which of the two noticed first.
+				awaitExistingOutcome(errors.Join(err, workflowCtx.Err()))
 				return
 			}
 			if workflowCtx.Err() != nil && isCancellationError(err) {
