@@ -2737,6 +2737,7 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 
 // Go runs a step inside a Go routine and returns a channel to receive the result.
 // Go generates a deterministic step ID for the step before running the step in a routine, since goroutines are not deterministic.
+// Go must be called from a workflow, not from inside a step body.
 // Example:
 //
 //	resultChan, err := dbos.Go(ctx, func(ctx context.Context) (string, error) {
@@ -2809,6 +2810,9 @@ func (c *dbosContext) Go(ctx Context, fn StepFunc, opts ...StepOption) (<-chan S
 	wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return nil, models.NewStepExecutionError("", "", errors.New("workflow state not found in context: are you running this step within a workflow?"))
+	}
+	if wfState.isWithinStep {
+		return nil, models.NewStepExecutionError(wfState.workflowID, "DBOS.go", errors.New("cannot call Go within a step"))
 	}
 	opts = append(opts, withNextStepID(wfState.nextStepID()))
 

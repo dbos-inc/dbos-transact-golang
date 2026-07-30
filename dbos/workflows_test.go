@@ -923,9 +923,9 @@ func TestSteps(t *testing.T) {
 	// scheduler never fires it during the test.
 	const scheduleForStepTests = "sched-in-step"
 
-	// Fixture for TransactionalOpsRejectedWithinStep: invokes one system-database
-	// operation from inside a step body and reports the error it gets back, so the
-	// step itself succeeds and the assertions can read the message.
+	// Fixture for OpsRejectedWithinStep: invokes one rejected operation from inside
+	// a step body and reports the error it gets back, so the step itself succeeds
+	// and the assertions can read the message.
 	type opInStepInput struct {
 		Op       string
 		TargetID string
@@ -968,6 +968,10 @@ func TestSteps(t *testing.T) {
 				err = ResumeSchedule(dbosStepCtx, scheduleForStepTests)
 			case "deleteSchedule":
 				err = DeleteSchedule(dbosStepCtx, scheduleForStepTests)
+			case "go":
+				_, err = Go(dbosStepCtx, func(context.Context) (string, error) {
+					return "nested", nil
+				})
 			default:
 				return "", fmt.Errorf("unknown op %q", input.Op)
 			}
@@ -1386,15 +1390,22 @@ func TestSteps(t *testing.T) {
 		require.Equal(t, "readsInStep", steps[0].StepName)
 	})
 
-	// Operations that write to the system database go through runAsTxn, which
-	// rejects them inside a step body rather than passing through.
-	t.Run("TransactionalOpsRejectedWithinStep", func(t *testing.T) {
+	// Operations that are refused inside a step body rather than passing through
+	// like the reads above. Writes to the system database go through runAsTxn,
+	// which rejects them; Go is rejected because the workflow state it would
+	// allocate a step ID from is the enclosing step's own, so nextStepID() would
+	// shift that step's function_id from N to N+1 -- away from the N its
+	// CheckOperationExecution looked up, and onto the ID its next sibling claims.
+	// Either way the operation records nothing and consumes no step ID.
+	t.Run("OpsRejectedWithinStep", func(t *testing.T) {
 		forkTarget, err := RunWorkflow(dbosCtx, getResultTargetWf, "fork-target")
 		require.NoError(t, err, "failed to start fork target workflow")
 		_, err = forkTarget.GetResult()
 		require.NoError(t, err, "failed to complete fork target workflow")
 
-		for _, tc := range []struct{ op, stepName string }{
+		// opName is the name the rejection message reports: the internal step name
+		// for the runAsTxn ops, the exported API name for Go.
+		for _, tc := range []struct{ op, opName string }{
 			{"setEvent", "DBOS.setEvent"},
 			{"closeStream", "DBOS.closeStream"},
 			{"cancelWorkflow", "DBOS.cancelWorkflow"},
@@ -1408,6 +1419,7 @@ func TestSteps(t *testing.T) {
 			{"pauseSchedule", "DBOS.pauseSchedule"},
 			{"resumeSchedule", "DBOS.resumeSchedule"},
 			{"deleteSchedule", "DBOS.deleteSchedule"},
+			{"go", "Go"},
 		} {
 			t.Run(tc.op, func(t *testing.T) {
 				handle, err := RunWorkflow(dbosCtx, opInStepWf, opInStepInput{
@@ -1417,11 +1429,13 @@ func TestSteps(t *testing.T) {
 				require.NoError(t, err, "failed to start workflow")
 				result, err := handle.GetResult()
 				require.NoError(t, err, "the enclosing step reports the error, so the workflow succeeds")
-				require.Contains(t, result, fmt.Sprintf("cannot call %s within a step", tc.stepName),
+				require.Contains(t, result, fmt.Sprintf("cannot call %s within a step", tc.opName),
 					"expected %s to be rejected inside a step", tc.op)
 
 				// The rejection is the enclosing step's only outcome: the operation
-				// itself never got a checkpoint, and consumed no step ID.
+				// itself never got a checkpoint, and consumed no step ID. For Go this
+				// is also what proves the enclosing step still checkpoints at its own
+				// function_id 0 rather than the 1 an allocation would have shifted it to.
 				steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
 				require.NoError(t, err, "failed to get workflow steps")
 				require.Len(t, steps, 1, "expected exactly 1 recorded step, got %+v", steps)
