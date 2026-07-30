@@ -5398,10 +5398,10 @@ func (c *dbosContext) GetWorkflowAggregates(_ Client, input GetWorkflowAggregate
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]WorkflowAggregateRow, error) {
-			in := dbInput
-			in.Tx = tx
-			return c.systemDB.GetWorkflowAggregates(ctx, in)
+		return RunAsStep(c, func(ctx context.Context) ([]WorkflowAggregateRow, error) {
+			return sysdb.RetryWithResult(ctx, func() ([]WorkflowAggregateRow, error) {
+				return c.systemDB.GetWorkflowAggregates(ctx, dbInput)
+			}, sysdb.WithRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getWorkflowAggregates"))
 	}
 	return sysdb.RetryWithResult(c, func() ([]WorkflowAggregateRow, error) {
@@ -5465,10 +5465,10 @@ func (c *dbosContext) GetStepAggregates(_ Client, input GetStepAggregatesInput) 
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]StepAggregateRow, error) {
-			in := dbInput
-			in.Tx = tx
-			return c.systemDB.GetStepAggregates(ctx, in)
+		return RunAsStep(c, func(ctx context.Context) ([]StepAggregateRow, error) {
+			return sysdb.RetryWithResult(ctx, func() ([]StepAggregateRow, error) {
+				return c.systemDB.GetStepAggregates(ctx, dbInput)
+			}, sysdb.WithRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getStepAggregates"))
 	}
 	return sysdb.RetryWithResult(c, func() ([]StepAggregateRow, error) {
@@ -5888,10 +5888,10 @@ func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (WorkflowSchedu
 	var schedules []WorkflowSchedule
 	var err error
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
-		schedules, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]WorkflowSchedule, error) {
-			in := dbInput
-			in.Tx = tx
-			return c.systemDB.ListSchedules(ctx, in)
+		schedules, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowSchedule, error) {
+			return sysdb.RetryWithResult(ctx, func() ([]WorkflowSchedule, error) {
+				return c.systemDB.ListSchedules(ctx, dbInput)
+			}, sysdb.WithRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getSchedule"))
 	} else {
 		schedules, err = sysdb.RetryWithResult(c, func() ([]WorkflowSchedule, error) {
@@ -5933,10 +5933,10 @@ func (c *dbosContext) ListSchedules(_ Client, opts ...ListSchedulesOption) ([]Wo
 		ScheduleNamePrefixes: o.ScheduleNamePrefixes,
 	}
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
-		return runAsTxn(c, func(ctx context.Context, tx Tx) ([]WorkflowSchedule, error) {
-			in := dbInput
-			in.Tx = tx
-			return c.systemDB.ListSchedules(ctx, in)
+		return RunAsStep(c, func(ctx context.Context) ([]WorkflowSchedule, error) {
+			return sysdb.RetryWithResult(ctx, func() ([]WorkflowSchedule, error) {
+				return c.systemDB.ListSchedules(ctx, dbInput)
+			}, sysdb.WithRetrierLogger(c.logger))
 		}, WithStepName("DBOS.listSchedules"))
 	}
 	return sysdb.RetryWithResult(c, func() ([]WorkflowSchedule, error) {
