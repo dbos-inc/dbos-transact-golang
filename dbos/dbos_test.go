@@ -15,6 +15,8 @@ import (
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -685,6 +687,60 @@ func TestShutdownJoinsScheduleReconciler(t *testing.T) {
 		t.Fatal("Shutdown did not complete after the schedule reconciler exited")
 	}
 	assert.False(t, dbosCtx.workflowSchedulerStarted.Load())
+}
+
+// flakyScheduleListDB fails the first failures calls to ListSchedules with a
+// retryable connection error, mimicking a Postgres restart, then delegates.
+type flakyScheduleListDB struct {
+	sysdb.SystemDatabase
+	mu       sync.Mutex
+	failures int
+	calls    int
+}
+
+func (s *flakyScheduleListDB) ListSchedules(ctx context.Context, input sysdb.ListSchedulesDBInput) ([]WorkflowSchedule, error) {
+	s.mu.Lock()
+	s.calls++
+	fail := s.calls <= s.failures
+	s.mu.Unlock()
+	if fail {
+		return nil, fmt.Errorf("failed to list schedules: %w", &pgconn.PgError{Code: pgerrcode.AdminShutdown})
+	}
+	return s.SystemDatabase.ListSchedules(ctx, input)
+}
+
+// A database outage overlapping a reconciler pass must not delay installing a
+// schedule until the next poll: with the 30s default interval, a chaos-style
+// restart could otherwise leave a schedule installed on no executor for a long
+// time. The polling interval here is an hour, so the entry can only appear if
+// the single pass retried through the failures itself.
+func TestScheduleReconcilerRetriesTransientListErrors(t *testing.T) {
+	ctx, err := NewContext(context.Background(), Config{
+		AppName:                  "test-reconciler-retry",
+		DatabaseURL:              "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+		SchedulerPollingInterval: time.Hour,
+	})
+	require.NoError(t, err)
+	dbosCtx := ctx.(*dbosContext)
+	t.Cleanup(func() { Shutdown(ctx, time.Second) })
+
+	require.NoError(t, dbosCtx.systemDB.CreateSchedule(dbosCtx, sysdb.CreateScheduleDBInput{
+		ScheduleID:   uuid.New().String(),
+		ScheduleName: "retry-schedule",
+		WorkflowName: "someWorkflow",
+		Schedule:     "* * * * * *",
+		Context:      "null",
+		Status:       ScheduleStatusActive,
+	}))
+
+	flakyDB := &flakyScheduleListDB{SystemDatabase: dbosCtx.systemDB, failures: 2}
+	dbosCtx.systemDB = flakyDB
+
+	dbosCtx.reconcileSchedules()
+
+	_, installed := dbosCtx.installedScheduleEntryID("retry-schedule")
+	assert.True(t, installed, "schedule was not installed after transient list failures")
+	assert.Equal(t, 3, flakyDB.calls, "expected two failed list attempts followed by a success")
 }
 
 func TestContext(t *testing.T) {
