@@ -182,3 +182,27 @@ func TestGetQueuePartitionsSurfacesRowsErr(t *testing.T) {
 		t.Fatalf("GetQueuePartitions error = %v; want wrapped %v", err, connErr)
 	}
 }
+
+// context.DeadlineExceeded satisfies net.Error, so IsRetryable's trailing
+// net.Error check used to classify it -- and anything wrapping it -- as a
+// transient driver failure. DBOS builds its own timeout errors on top of that
+// cause, so a Recv/GetEvent timeout would be retried forever by the infinite
+// system-database retrier while the workflow context was still live.
+func TestIsRetryableRejectsContextErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"deadline", context.DeadlineExceeded},
+		{"canceled", context.Canceled},
+		{"wrapped deadline", models.NewTimeoutError("wf", "DBOS.recv", "no message received", context.DeadlineExceeded)},
+		{"wrapped canceled", models.NewTimeoutError("wf", "", "interrupted", context.Canceled)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if (PostgresDialect{}).IsRetryable(tc.err, nil) {
+				t.Fatalf("IsRetryable(%v) = true; want false", tc.err)
+			}
+		})
+	}
+}

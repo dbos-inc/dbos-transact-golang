@@ -342,19 +342,26 @@ func (c *dbosContext) maybeAutomaticBackfill(sched *WorkflowSchedule) {
 		return
 	}
 	c.logger.Info("performing automatic backfill", "schedule", sched.ScheduleName, "start", start, "end", end)
-	if _, err := c.systemDB.BackfillSchedule(c, sysdb.BackfillScheduleDBInput{
-		ScheduleName: sched.ScheduleName,
-		Schedule:     sched.Schedule,
-		StartTime:    start,
-		EndTime:      end,
-	}); err != nil {
+	if _, err := sysdb.RetryWithResult(c, func() ([]string, error) {
+		return c.systemDB.BackfillSchedule(c, sysdb.BackfillScheduleDBInput{
+			ScheduleName: sched.ScheduleName,
+			Schedule:     sched.Schedule,
+			StartTime:    start,
+			EndTime:      end,
+		})
+	}, sysdb.WithRetrierLogger(c.logger)); err != nil {
 		c.logger.Error("automatic backfill failed", "schedule", sched.ScheduleName, "error", err)
 	}
 }
 
 func (c *dbosContext) reconcileSchedules() {
-	schedules, err := c.systemDB.ListSchedules(c, sysdb.ListSchedulesDBInput{})
+	schedules, err := sysdb.RetryWithResult(c, func() ([]WorkflowSchedule, error) {
+		return c.systemDB.ListSchedules(c, sysdb.ListSchedulesDBInput{})
+	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
+		if c.Err() != nil {
+			return // shutting down
+		}
 		c.logger.Warn("failed to list schedules for reconciler", "error", err)
 		return
 	}

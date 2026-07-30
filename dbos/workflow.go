@@ -364,6 +364,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		defer cancel()
 	}
 
+	// Here, both the transient DB errors and awaiting the workflow can timeout
 	awaitResult, awaitErr := sysdb.RetryWithResult(ctx, func() (*sysdb.AwaitWorkflowResultOutput, error) {
 		return h.dbosContext.(*dbosContext).systemDB.AwaitWorkflowResult(ctx, h.workflowID, options.pollInterval, false)
 	}, sysdb.WithRetrierLogger(h.dbosContext.(*dbosContext).logger))
@@ -3144,7 +3145,7 @@ func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration) (any,
 		}
 		output := rawStepOutput{value: message, serialization: serialization}
 		if message == nil && timeoutOccurred {
-			return output, models.NewTimeoutError(workflowID, "DBOS.recv", fmt.Sprintf("no message received within %v", timeout), nil)
+			return output, models.NewTimeoutError(workflowID, "DBOS.recv", fmt.Sprintf("no message received within %v", timeout), context.DeadlineExceeded)
 		}
 		return output, nil
 	}, WithStepName("DBOS.recv"), withNextStepID(stepID))
@@ -3396,7 +3397,7 @@ func (c *dbosContext) GetEvent(_ Client, targetWorkflowID, key string, timeout t
 			serialization = *evtSerialization
 		}
 		if value == nil && timeoutOccurred {
-			return nil, models.NewTimeoutError("", "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout), nil)
+			return nil, models.NewTimeoutError("", "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout), context.DeadlineExceeded)
 		}
 		return &getEventResult{value: value, serialization: serialization}, nil
 	}
@@ -3414,7 +3415,7 @@ func (c *dbosContext) GetEvent(_ Client, targetWorkflowID, key string, timeout t
 		}
 		output := rawStepOutput{value: value, serialization: serialization}
 		if value == nil && timeoutOccurred {
-			return output, models.NewTimeoutError(workflowID, "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout), nil)
+			return output, models.NewTimeoutError(workflowID, "DBOS.getEvent", fmt.Sprintf("no event found for key '%s' within %v", key, timeout), context.DeadlineExceeded)
 		}
 		return output, nil
 	}, WithStepName("DBOS.getEvent"), withNextStepID(stepID))

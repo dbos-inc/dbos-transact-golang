@@ -372,9 +372,10 @@ func NewScheduleNotFoundError(scheduleName string) *Error {
 	}
 }
 
-// NewTimeoutError builds a timeout error. When the timeout came from an expired
-// context, pass context.Cause(ctx) as cause so errors.Is(err, context.DeadlineExceeded)
-// matches via Unwrap; pass nil for timeouts with no context deadline behind them.
+// NewTimeoutError builds a timeout error. Always pass a cause: it is what makes
+// errors.Is(err, context.DeadlineExceeded) match via Unwrap, and every DBOS
+// timeout is expected to match both ErrTimeout and a stdlib sentinel.
+// The causes considered are context.DeadlineExceeded or context.Canceled.
 func NewTimeoutError(workflowID, stepName, message string, cause error) *Error {
 	msg := "Operation timed out"
 	if stepName != "" {
