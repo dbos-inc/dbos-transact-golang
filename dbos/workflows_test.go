@@ -938,8 +938,6 @@ func TestSteps(t *testing.T) {
 			}
 			var err error
 			switch input.Op {
-			case "setEvent":
-				err = SetEvent(dbosStepCtx, "evt-key", "evt-value")
 			case "closeStream":
 				err = CloseStream(dbosStepCtx, "stream-key")
 			case "cancelWorkflow":
@@ -1025,6 +1023,9 @@ func TestSteps(t *testing.T) {
 			}
 			if err := WriteStream(dbosStepCtx, "stream-from-step", "v"); err != nil {
 				return "", fmt.Errorf("writeStream: %w", err)
+			}
+			if err := SetEvent(dbosStepCtx, "event-from-step", "v"); err != nil {
+				return "", fmt.Errorf("setEvent: %w", err)
 			}
 			return "reads-ok", nil
 		}, WithStepName("readsInStep"))
@@ -1372,9 +1373,9 @@ func TestSteps(t *testing.T) {
 	})
 
 	// Operations that are allowed inside a step body: every read (they go through
-	// RunAsStep) plus WriteStream (a dedicated from-step path). Nesting one is a
-	// plain function call: it runs, records no checkpoint of its own, and consumes
-	// no step ID -- exactly like a step within a step.
+	// RunAsStep) plus WriteStream and SetEvent (dedicated from-step paths). Nesting
+	// one is a plain function call: it runs, records no checkpoint of its own, and
+	// consumes no step ID -- exactly like a step within a step.
 	t.Run("ReadOnlyOpsAllowedWithinStep", func(t *testing.T) {
 		handle, err := RunWorkflow(dbosCtx, readsInStepWf, "")
 		require.NoError(t, err, "failed to start workflow")
@@ -1406,7 +1407,6 @@ func TestSteps(t *testing.T) {
 		// opName is the name the rejection message reports: the internal step name
 		// for the runAsTxn ops, the exported API name for Go.
 		for _, tc := range []struct{ op, opName string }{
-			{"setEvent", "DBOS.setEvent"},
 			{"closeStream", "DBOS.closeStream"},
 			{"cancelWorkflow", "DBOS.cancelWorkflow"},
 			{"cancelWorkflows", "DBOS.cancelWorkflows"},
