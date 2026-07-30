@@ -290,21 +290,21 @@ One deliberate exception: `Recv` and `GetEvent` checkpoint the *sender's* encode
 
 ## 8. DBOS calls are rejected inside step bodies
 
-v0 let most DBOS operations run inside a step body and silently dropped their durability guarantees: `SetEvent`, `CloseStream`, workflow-management writes, and `RunAsTransaction` invoked from inside a step executed in a real database transaction but recorded **no checkpoint**, so recovery could repeat them. v1 rejects them instead with an `ErrorCodeStepExecution` error (`cannot call <X> within a step`). Newly rejected inside a step (v0 already rejected `Send`, `Recv`, `GetEvent`, `Sleep`, `Patch`, `DeprecatePatch`, and spawning a child workflow with `RunWorkflow`):
+v0 let most DBOS operations run inside a step body and silently dropped their durability guarantees: `CloseStream`, workflow-management writes, and `RunAsTransaction` invoked from inside a step executed in a real database transaction but recorded **no checkpoint**, so recovery could repeat them. v1 rejects them instead with an `ErrorCodeStepExecution` error (`cannot call <X> within a step`). Newly rejected inside a step (v0 already rejected `Send`, `Recv`, `GetEvent`, `Sleep`, `Patch`, `DeprecatePatch`, and spawning a child workflow with `RunWorkflow`):
 
 - `RunAsTransaction`
 - `Enqueue`
 - `Go`
 - `handle.GetResult()` — awaiting another workflow's result from inside a step
-- `SetEvent`, `CloseStream`
+- `CloseStream`
 - Workflow-management writes: `CancelWorkflow(s)`, `ResumeWorkflow(s)`, `ForkWorkflow(s)`, `DeleteWorkflows`, `SetWorkflowAttributes`, `SetWorkflowDelay`
 - Schedule writes: `CreateSchedule`, `PauseSchedule`, `ResumeSchedule`, `DeleteSchedule`
 - `Debounce` (v0 already rejected this indirectly, via the child-workflow guard)
 
 Still allowed inside a step:
 
-- `WriteStream` — at-least-once, attributed to the enclosing step (a retried step may write duplicates).
-- Read/list operations — `ListWorkflows`, `GetWorkflowSteps`, `RetrieveWorkflow`, `ReadStream`, `GetWorkflowAggregates`, `GetStepAggregates`, `GetSchedule`, `ListSchedules`, queue reads, app-version reads. Called from a step they run directly with no checkpoint; called from workflow code they are checkpointed as steps, as before.
+- `SetEvent` and `WriteStream` — at-least-once, attributed to the enclosing step (a retried step may write again).
+- Read/list operations — `ListWorkflows`, `GetWorkflowSteps`, `RetrieveWorkflow`, `ReadStream`, `GetWorkflowAggregates`, `GetStepAggregates`, `GetSchedule`, `ListSchedules`, queue reads, app-version reads. Called from a step they run within the enclosing step's durability scope, without their own checkpoint; called from workflow code they are checkpointed as steps, as before.
 - Nested `RunAsStep` — the inner function runs inline as part of the enclosing step, without its own checkpoint (unchanged from v0).
 
 Migration: hoist rejected calls out of step bodies into the surrounding workflow code. If a step needs another workflow's result, return from the step and await the handle in the workflow.

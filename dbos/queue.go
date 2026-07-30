@@ -256,15 +256,6 @@ func WithQueueBasePollingInterval(interval time.Duration) QueueOption {
 	}
 }
 
-// WithQueueMaxPollingInterval sets the maximum polling interval for the queue.
-// The queue will never poll slower than this value, even when backing off due to errors.
-// If not set (0), the queue will use the default max polling interval during creation.
-func WithQueueMaxPollingInterval(interval time.Duration) QueueOption {
-	return func(q *workflowQueue) {
-		q.maxPollingInterval = interval
-	}
-}
-
 // WithQueueOnConflict sets the conflict resolution policy used by RegisterQueue
 // when a queue with the same name already exists in the system database.
 func WithQueueOnConflict(policy QueueConflictResolution) QueueOption {
@@ -329,13 +320,6 @@ func (c *dbosContext) RegisterQueue(_ Client, name string, options ...QueueOptio
 	}
 	for _, option := range options {
 		option(&q)
-	}
-	// The maximum polling interval is a worker-local backoff ceiling that is not
-	// persisted for database-backed queues (the worker derives it from the base
-	// interval). Ignore an explicit WithQueueMaxPollingInterval override and warn.
-	if q.maxPollingInterval != _DEFAULT_MAX_POLLING_INTERVAL {
-		c.logger.Warn("WithQueueMaxPollingInterval is ignored for database-backed queues; the maximum polling interval is derived from the base polling interval", "queue_name", name)
-		q.maxPollingInterval = _DEFAULT_MAX_POLLING_INTERVAL
 	}
 	if err := validateQueueConfig(&q); err != nil {
 		return nil, err
