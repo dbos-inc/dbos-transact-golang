@@ -4529,6 +4529,15 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	// Calculate max_tasks based on concurrency limits
 	// maxTasks < 0 means this dequeue is unbounded.
 	maxTasks := -1
+
+	if input.Queue.RateLimit != nil {
+		remaining_limit := input.Queue.RateLimit.Limit - numRecentQueries
+
+		if maxTasks < 0 || remaining_limit < maxTasks {
+			maxTasks = remaining_limit
+		}
+	}
+
 	if input.Queue.WorkerConcurrency != nil {
 		workerConcurrency := *input.Queue.WorkerConcurrency
 		if input.LocalRunningCount > workerConcurrency {
