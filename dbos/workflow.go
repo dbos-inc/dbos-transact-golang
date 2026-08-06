@@ -1537,9 +1537,8 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	cancelFuncCompleted := make(chan struct{})
 	workflowCancelFunction := func() {
 		defer close(cancelFuncCompleted)
-		if errors.Is(context.Cause(workflowCtx), errShutdownTeardown) {
-			// Shutdown teardown, not a cancellation request: leave the row
-			// PENDING so the workflow is recovered on the next launch.
+		if errors.Is(context.Cause(workflowCtx), errShutdown) {
+			// Shutdown, not a cancellation request.
 			return
 		}
 		c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
@@ -1564,10 +1563,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	// The row is known to have existed (this run inserted or read it), so a missing
 	// row means it was deleted: fail fast with a NonExistentWorkflow error rather
 	// than polling for a row that will never reappear.
-	// Parking is unbounded and relies on the outcome being eventually settled.
+	// Parking relies on the outcome being eventually settled; it aborts if c is
+	// cancelled (shutdown).
 	awaitExistingOutcome := func(cancelCause error) {
 		awaitOut, awaitErr := sysdb.RetryWithResult(c, func() (*sysdb.AwaitWorkflowResultOutput, error) {
-			return c.systemDB.AwaitWorkflowResult(uncancellableCtx, workflowID, sysdb.DBRetryInterval, true)
+			return c.systemDB.AwaitWorkflowResult(c, workflowID, sysdb.DBRetryInterval, true)
 		}, sysdb.WithRetrierLogger(c.logger))
 		err := awaitErr
 		if awaitErr == nil && awaitOut != nil && awaitOut.ErrStr != nil {

@@ -269,11 +269,6 @@ type dbosContext struct {
 	ctx           context.Context
 	ctxCancelFunc context.CancelCauseFunc
 
-	resourcesCtx           *dbosContext
-	resourcesCancel        context.CancelCauseFunc
-	notificationLoopCtx    context.Context
-	notificationLoopCancel context.CancelCauseFunc
-
 	launched atomic.Bool
 	// Launch and shutdown are permanent, one-shot lifecycle transitions.
 	launchStarted   atomic.Bool
@@ -380,7 +375,6 @@ func (c *dbosContext) Value(key any) any {
 func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 	childCtx := &dbosContext{
 		ctx:                     ctx,
-		resourcesCtx:            c.resourcesCtx,
 		config:                  c.config,
 		logger:                  c.logger,
 		systemDB:                c.systemDB,
@@ -396,13 +390,6 @@ func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 	}
 	childCtx.launched.Store(c.launched.Load())
 	return childCtx
-}
-
-func (c *dbosContext) resourcesContext() context.Context {
-	if c.resourcesCtx != nil {
-		return c.resourcesCtx
-	}
-	return c
 }
 
 func (c *dbosContext) From(_ Context, ctx context.Context) Context {
@@ -486,7 +473,7 @@ func WithCancelCause(ctx Context) (Context, context.CancelCauseFunc) {
 
 var errDBOSContextTimeout = fmt.Errorf("DBOS context timeout: %w", context.DeadlineExceeded)
 
-var errShutdownTeardown = errors.New("DBOS context has been shut down")
+var errShutdown = errors.New("DBOS is shutting down")
 
 func (c *dbosContext) WithTimeout(_ Context, timeout time.Duration) (Context, context.CancelFunc) {
 	newCtx, cancelFunc := context.WithTimeoutCause(c.ctx, timeout, errDBOSContextTimeout)
@@ -575,13 +562,10 @@ func (c *dbosContext) ListRegisteredWorkflows(_ Context) []WorkflowRegistryEntry
 //	}
 func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	dbosBaseCtx, cancelFunc := context.WithCancelCause(ctx)
-	notificationLoopCtx, notificationLoopCancel := context.WithCancelCause(dbosBaseCtx)
 	initExecutor := &dbosContext{
 		workflowsWg:                 &sync.WaitGroup{},
 		ctx:                         dbosBaseCtx,
 		ctxCancelFunc:               cancelFunc,
-		notificationLoopCtx:         notificationLoopCtx,
-		notificationLoopCancel:      notificationLoopCancel,
 		workflowRegistry:            &sync.Map{},
 		workflowCustomNametoFQN:     &sync.Map{},
 		activeWorkflowIDs:           &sync.Map{},
@@ -674,16 +658,6 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		}
 	}
 
-	// Background resources (queue runner, scheduler, conductor, and their
-	// database calls) run on a dedicated clone of this context so Shutdown can
-	// stop them without cancelling the workflow-facing context. Workflows must
-	// never be spawned from it.
-	resourcesBaseCtx, resourcesCancel := context.WithCancelCause(dbosBaseCtx)
-	resourcesCtx := initExecutor.clone(resourcesBaseCtx)
-	resourcesCtx.resourcesCtx = resourcesCtx
-	initExecutor.resourcesCtx = resourcesCtx
-	initExecutor.resourcesCancel = resourcesCancel
-
 	if conductorCfg != nil {
 		conductor, err := newConductor(initExecutor, *conductorCfg)
 		if err != nil {
@@ -745,7 +719,7 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 
 	asDBOSCtx, ok := dbosCtx.(*dbosContext)
 	if ok {
-		asDBOSCtx.systemDB.Launch(asDBOSCtx.notificationLoopCtx)
+		asDBOSCtx.systemDB.Launch(asDBOSCtx)
 	}
 
 	return dbosCtx, nil
@@ -772,7 +746,7 @@ func (c *dbosContext) Launch() error {
 	}()
 
 	// Start the system database
-	c.systemDB.Launch(c.notificationLoopCtx)
+	c.systemDB.Launch(c)
 
 	// Register the current application version and warn if it is not the latest.
 	if err := sysdb.Retry(c, func() error {
@@ -846,19 +820,17 @@ func (c *dbosContext) Launch() error {
 // Shutdown gracefully shuts down the DBOS runtime by performing a complete, ordered cleanup
 // of all system components. The shutdown sequence includes:
 //
-// 1. Cancels the background-resources context to stop workflow producers
-// (queue runner, workflow scheduler, conductor). In-flight workflows are
-// deliberately not cancelled: they get the timeout to finish.
+// 1. Cancels the context to signal all resources and workflows to stop.
+// In-flight workflows observe the cancellation and unwind, but are not
+// durably cancelled: their status rows are left PENDING so they are
+// recovered on the next launch rather than marked CANCELLED.
 // 2. Waits for the queue runner to complete processing
 // 3. Stops the workflow scheduler and waits for scheduled jobs to finish
 // 4. Shuts down conductor
 // 5. Shuts down the admin server
-// 6. Waits for in-flight workflows to finish
+// 6. Waits for in-flight workflows to finish unwinding
 // 7. Shuts down the system database connection pool and notification listener
-// 8. Marks the context as not launched and cancels the workflow-facing context.
-// A workflow still running past the timeout observes the cancellation and
-// unwinds, but its status row is left PENDING so it is recovered on the next
-// launch rather than durably CANCELLED.
+// 8. Marks the context as not launched
 //
 // Each step respects the provided timeout. If any component doesn't shut down within the timeout,
 // a warning is logged and the shutdown continues to the next component.
@@ -875,10 +847,7 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	// Resources still running when their timeout expired.
 	var pending []string
 
-	// Stop background resources
-	if c.resourcesCancel != nil {
-		c.resourcesCancel(errors.New("DBOS shutdown initiated"))
-	}
+	c.ctxCancelFunc(errShutdown)
 
 	// Stop workflow producers before draining in-flight workflows. Producers
 	// (.e.g, queue runner) call RunWorkflow, which calls workflowsWg.Add(1);
@@ -959,13 +928,6 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		pending = append(pending, "workflows")
 	}
 
-	// Stop the notification loop only after the workflow drain window: draining
-	// workflows may still need Recv/GetEvent/stream wakeups. Must precede
-	// systemDB.Shutdown, which waits for the loop to exit.
-	if c.notificationLoopCancel != nil {
-		c.notificationLoopCancel(errors.New("DBOS shutdown initiated"))
-	}
-
 	// Close the system database
 	if c.systemDB != nil {
 		c.logger.Debug("Shutting down system database")
@@ -975,13 +937,6 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	}
 
 	c.launched.Store(false)
-
-	// Tear down the workflow-facing context. Workflows still running past the
-	// drain window observe the cancellation and unwind, but the cause tells the
-	// durable-cancel hook to leave their rows PENDING for recovery.
-	if c.ctxCancelFunc != nil {
-		c.ctxCancelFunc(errShutdownTeardown)
-	}
 
 	if len(pending) > 0 {
 		return fmt.Errorf("shutdown timed out after %v waiting for: %s", timeout, strings.Join(pending, ", "))

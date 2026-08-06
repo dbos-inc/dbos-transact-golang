@@ -171,10 +171,10 @@ func (c *conductor) run() {
 	defer c.wg.Done()
 
 	for {
-		// Check if we are shutting down
+		// Check if the context has been cancelled
 		select {
-		case <-c.dbosCtx.resourcesContext().Done():
-			c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx.resourcesContext()))
+		case <-c.dbosCtx.Done():
+			c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
 			c.closeConn()
 			return
 		default:
@@ -185,8 +185,8 @@ func (c *conductor) run() {
 			if err := c.connect(); err != nil {
 				c.logger.Warn("Failed to connect to conductor", "error", err)
 				select {
-				case <-c.dbosCtx.resourcesContext().Done():
-					c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx.resourcesContext()))
+				case <-c.dbosCtx.Done():
+					c.logger.Info("DBOS context done, stopping conductor", "cause", context.Cause(c.dbosCtx))
 					return
 				case <-time.After(c.reconnectWaitWithJitter()):
 					// Exponential backoff with jitter up to max wait
@@ -297,7 +297,7 @@ func (c *conductor) connect() error {
 	})
 
 	// Create a cancellable context for the ping goroutine
-	pingCtx, pingCancel := context.WithCancel(c.dbosCtx.resourcesContext())
+	pingCtx, pingCancel := context.WithCancel(c.dbosCtx)
 
 	// Store the connection and ping cancel func under the write mutex
 	c.writeMu.Lock()

@@ -7946,10 +7946,12 @@ func TestWorkflowHandleContextCancel(t *testing.T) {
 
 		dbosCtx.Shutdown(dbosCtx, 1*time.Second)
 
-		// The workflow overran the drain window: the handle cannot produce a
-		// result from a torn-down runtime.
+		// The workflow was interrupted by shutdown: the handle reports the
+		// cancellation without a durable outcome.
 		err = <-resultChan
-		require.Error(t, err, "expected error from a shut-down runtime")
+		require.Error(t, err, "expected error from cancelled context")
+		assert.True(t, errors.Is(err, context.Canceled),
+			"expected error to be detectable as context.Canceled, got: %v", err)
 
 		// Shutdown must not durably cancel the in-flight workflow: its row
 		// stays PENDING so the next launch recovers it.
