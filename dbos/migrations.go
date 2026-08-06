@@ -9,11 +9,6 @@ import (
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 )
 
-// NumMigrations returns the number of DBOS system database migrations.
-func NumMigrations() int {
-	return len(sysdb.BuildMigrations(_DEFAULT_SYSTEM_DB_SCHEMA, false))
-}
-
 // MigrationStatements returns the SQL the system database migrations execute
 // against a PostgreSQL database for the given schema, as an ordered list of
 // semicolon-terminated statements and "--" comment lines suitable for
@@ -21,18 +16,19 @@ func NumMigrations() int {
 //
 // from is a 1-based migration number: pass 1 for the full fresh-database
 // script (including schema creation, the dbos_migrations table, and the
-// initial version row), or a later number for migrations from through
-// NumMigrations() only. Each migration is followed by its version
-// bookkeeping, mirroring the runner. The SQL contains CREATE/DROP INDEX
-// CONCURRENTLY, so it must run outside a transaction block. An empty
-// schemaName uses the default ("dbos").
+// initial version row), or a later number for migrations from through the
+// latest only. Each migration is followed by its version bookkeeping,
+// mirroring the runner. The SQL contains CREATE/DROP INDEX CONCURRENTLY, so it
+// must run outside a transaction block. An empty schemaName uses the default
+// ("dbos").
 func MigrationStatements(schemaName string, from int) ([]string, error) {
 	if schemaName == "" {
 		schemaName = _DEFAULT_SYSTEM_DB_SCHEMA
 	}
 	migrations := sysdb.BuildMigrations(schemaName, false)
 	if from < 1 || from > len(migrations) {
-		return nil, fmt.Errorf("migration %d does not exist: valid migrations are 1 through %d", from, len(migrations))
+		// Printed verbatim by the CLI, so worded for the end user.
+		return nil, fmt.Errorf("Migration %d does not exist: valid migrations are 1 through %d", from, len(migrations))
 	}
 	sanitizedSchema := pgx.Identifier{schemaName}.Sanitize()
 

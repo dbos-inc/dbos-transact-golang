@@ -1141,6 +1141,28 @@ func TestMigratePrintFlags(t *testing.T) {
 		assert.Equal(t, 1, code)
 		assert.Contains(t, errOut, "Invalid --print-migrations value 'nope': expected 'all' or a migration number")
 		assert.Empty(t, out)
+
+		// An empty value is supplied-but-invalid, not unset: it must never fall
+		// through to the connect-and-migrate path.
+		out, errOut, code = run(t, env, "--print-migrations", "")
+		assert.Equal(t, 1, code)
+		assert.Contains(t, errOut, "Invalid --print-migrations value '': expected 'all' or a migration number")
+		assert.Empty(t, out)
+	})
+
+	t.Run("PrintMigrationsWithoutDatabaseURL", func(t *testing.T) {
+		noURL := []string{}
+		for _, e := range os.Environ() {
+			if !strings.HasPrefix(e, "DBOS_SYSTEM_DATABASE_URL=") {
+				noURL = append(noURL, e)
+			}
+		}
+		out, errOut, code := run(t, noURL, "--print-migrations", "all")
+		require.Equal(t, 0, code, "stderr: %s", errOut)
+		assert.Empty(t, errOut)
+		assert.Contains(t, out, "-- DBOS system database migrations\n")
+		assert.NotContains(t, out, "-- DBOS system database migrations for")
+		assert.Contains(t, out, `CREATE SCHEMA IF NOT EXISTS "dbos";`)
 	})
 
 	t.Run("PrintMigrationsFunnySchema", func(t *testing.T) {
