@@ -489,7 +489,8 @@ func newQueueRunner(logger *slog.Logger) *queueRunner {
 // the queues table), starts a worker goroutine for any queue that lacks a live
 // one, and transitions delayed workflows centrally. This lets database-backed
 // queues registered after launch be picked up without a restart. run blocks
-// until the context is cancelled, then waits for all workers to stop.
+// until the background-resources context is cancelled (Shutdown), then waits
+// for all workers to stop.
 func (qr *queueRunner) run(ctx *dbosContext) {
 	defer func() {
 		// Workers stop on context cancellation; wait for them before signalling.
@@ -503,11 +504,12 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 	// if the queue reappears.
 	workerDone := make(map[string]chan struct{})
 
+	rctx := ctx.resourcesContext()
 	const reconcileInterval = 1 * time.Second
-	for ctx.Err() == nil { // While ctx is not cancelled
+	for rctx.Err() == nil { // While the resources context is not cancelled
 		// Transition any DELAYED workflows whose delay has expired to ENQUEUED.
-		if err := sysdb.Retry(ctx, func() error {
-			return ctx.systemDB.TransitionDelayedWorkflows(ctx)
+		if err := sysdb.Retry(rctx, func() error {
+			return ctx.systemDB.TransitionDelayedWorkflows(rctx)
 		}, sysdb.WithRetrierLogger(qr.logger)); err != nil {
 			qr.logger.Warn("Exception transitioning delayed workflows", "error", err)
 		}
@@ -533,11 +535,11 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 		}
 
 		select {
-		case <-ctx.Done():
+		case <-rctx.Done():
 		case <-time.After(reconcileInterval):
 		}
 	}
-	qr.logger.Debug("Queue supervisor stopping due to context cancellation", "cause", context.Cause(ctx))
+	qr.logger.Debug("Queue supervisor stopping due to context cancellation", "cause", context.Cause(rctx))
 }
 
 // queuesToListen rebuilds and publishes the set of queues (qr.currentQueues) this process should
@@ -560,8 +562,9 @@ func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]workflowQueue
 	// The internal queue is always listened to, regardless of the listen filter.
 	current[models.InternalQueueName] = qr.internalQueue
 
-	dbQueueCfgs, err := sysdb.RetryWithResult(ctx, func() ([]models.QueueConfig, error) {
-		return ctx.systemDB.ListQueues(ctx)
+	rctx := ctx.resourcesContext()
+	dbQueueCfgs, err := sysdb.RetryWithResult(rctx, func() ([]models.QueueConfig, error) {
+		return ctx.systemDB.ListQueues(rctx)
 	}, sysdb.WithRetrierLogger(qr.logger))
 	dbQueues := queuesFromConfigs(dbQueueCfgs)
 	if err != nil {
@@ -608,6 +611,7 @@ func (qr *queueRunner) currentQueueConfig(name string) (workflowQueue, bool) {
 }
 
 func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
+	rctx := ctx.resourcesContext()
 	queueLogger := qr.logger.With("queue_name", queue.Name)
 	// Current polling interval starts at the base interval and adjusts based on errors
 	currentPollingInterval := queue.basePollingInterval
@@ -639,8 +643,8 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 		// Default to empty string for non-partitioned queues
 		partitionKeys := []string{""}
 		if queue.PartitionQueue {
-			partitions, err := sysdb.RetryWithResult(ctx, func() ([]string, error) {
-				return ctx.systemDB.GetQueuePartitions(ctx, queue.Name)
+			partitions, err := sysdb.RetryWithResult(rctx, func() ([]string, error) {
+				return ctx.systemDB.GetQueuePartitions(rctx, queue.Name)
 			}, sysdb.WithRetrierLogger(queueLogger))
 			if err != nil {
 				skipDequeue = true
@@ -715,10 +719,10 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 		jitter := qr.jitterMin + rand.Float64()*(qr.jitterMax-qr.jitterMin) // #nosec G404 -- non-crypto jitter; acceptable
 		sleepDuration := time.Duration(float64(currentPollingInterval) * jitter)
 
-		// Sleep with jittered interval, but allow early exit on context cancellation
+		// Sleep with jittered interval, but allow early exit on shutdown
 		select {
-		case <-ctx.Done():
-			queueLogger.Debug("Queue goroutine stopping due to context cancellation", "cause", context.Cause(ctx))
+		case <-rctx.Done():
+			queueLogger.Debug("Queue goroutine stopping due to context cancellation", "cause", context.Cause(rctx))
 			return
 		case <-time.After(sleepDuration):
 			// Continue to next iteration
@@ -729,8 +733,9 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 // dequeueWorkflows dequeues workflows from a specific partition and handles errors.
 // Returns the dequeued workflows and a boolean indicating whether to continue to the next iteration.
 func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, hasBackoffError *bool) ([]sysdb.DequeuedWorkflow, bool) {
-	dequeuedWorkflows, err := sysdb.RetryWithResult(ctx, func() ([]sysdb.DequeuedWorkflow, error) {
-		return ctx.systemDB.DequeueWorkflows(ctx, sysdb.DequeueWorkflowsInput{
+	rctx := ctx.resourcesContext()
+	dequeuedWorkflows, err := sysdb.RetryWithResult(rctx, func() ([]sysdb.DequeuedWorkflow, error) {
+		return ctx.systemDB.DequeueWorkflows(rctx, sysdb.DequeueWorkflowsInput{
 			Queue:              queue.toConfig(),
 			ExecutorID:         ctx.executorID,
 			ApplicationVersion: ctx.applicationVersion,

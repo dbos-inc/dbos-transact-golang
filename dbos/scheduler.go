@@ -120,7 +120,7 @@ func (c *dbosContext) addScheduleCronEntry(
 		}
 		select {
 		case <-ready:
-		case <-c.Done():
+		case <-c.resourcesContext().Done():
 			return
 		}
 		entry := c.getWorkflowScheduler().Entry(entryID)
@@ -134,7 +134,7 @@ func (c *dbosContext) addScheduleCronEntry(
 		if cap := jitterCap(entry.Schedule, scheduledTime); cap > 0 {
 			select {
 			case <-time.After(rand.N(cap)): // #nosec G404 -- jitter is non-security; weak RNG is fine
-			case <-c.Done():
+			case <-c.resourcesContext().Done():
 				return
 			}
 		}
@@ -168,10 +168,11 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 
 	return func(ctx Context, input ScheduledWorkflowInput) (any, error) {
 		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, input.ScheduledTime.Format(time.RFC3339))
+		rctx := c.resourcesContext()
 
 		// Skip if this tick's workflow already exists. Another executor may have enqueued it.
-		existing, err := sysdb.RetryWithResult(c, func() ([]WorkflowStatus, error) {
-			return c.systemDB.ListWorkflows(c, sysdb.ListWorkflowsDBInput{WorkflowIDs: []string{wfID}})
+		existing, err := sysdb.RetryWithResult(rctx, func() ([]WorkflowStatus, error) {
+			return c.systemDB.ListWorkflows(rctx, sysdb.ListWorkflowsDBInput{WorkflowIDs: []string{wfID}})
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to check existing scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
@@ -191,8 +192,8 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 		// Scheduled workflows always run against the latest registered application version, so a stale executor does not pick them up after a new deploy.
 		// If lookup fails, leave the version unset: NULL rows are only dequeued by executors on the latest version.
 		var appVersion string
-		latest, err := sysdb.RetryWithResult(c, func() (*VersionInfo, error) {
-			return c.systemDB.GetLatestApplicationVersion(c, nil)
+		latest, err := sysdb.RetryWithResult(rctx, func() (*VersionInfo, error) {
+			return c.systemDB.GetLatestApplicationVersion(rctx, nil)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to fetch latest application version for scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
@@ -216,7 +217,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 		}
 
 		uncancellableCtx := WithoutCancel(c)
-		if err := sysdb.Retry(c, func() error {
+		if err := sysdb.Retry(rctx, func() error {
 			tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
 			if err != nil {
 				return fmt.Errorf("failed to begin transaction: %w", err)
@@ -231,7 +232,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 			return nil, err
 		}
 
-		if err := sysdb.Retry(c, func() error {
+		if err := sysdb.Retry(rctx, func() error {
 			return c.systemDB.UpdateScheduleLastFiredAt(uncancellableCtx, scheduleName, time.Now())
 		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction)); err != nil {
 			c.logger.Error("failed to update schedule last fired time after retries", "schedule", scheduleName, "error", err)
@@ -301,7 +302,7 @@ func (c *dbosContext) runScheduleReconciler() {
 		c.reconcileSchedules()
 
 		select {
-		case <-c.Done():
+		case <-c.resourcesContext().Done():
 			return
 		case <-ticker.C:
 		}
@@ -342,8 +343,9 @@ func (c *dbosContext) maybeAutomaticBackfill(sched *WorkflowSchedule) {
 		return
 	}
 	c.logger.Info("performing automatic backfill", "schedule", sched.ScheduleName, "start", start, "end", end)
-	if _, err := sysdb.RetryWithResult(c, func() ([]string, error) {
-		return c.systemDB.BackfillSchedule(c, sysdb.BackfillScheduleDBInput{
+	rctx := c.resourcesContext()
+	if _, err := sysdb.RetryWithResult(rctx, func() ([]string, error) {
+		return c.systemDB.BackfillSchedule(rctx, sysdb.BackfillScheduleDBInput{
 			ScheduleName: sched.ScheduleName,
 			Schedule:     sched.Schedule,
 			StartTime:    start,
@@ -355,11 +357,12 @@ func (c *dbosContext) maybeAutomaticBackfill(sched *WorkflowSchedule) {
 }
 
 func (c *dbosContext) reconcileSchedules() {
-	schedules, err := sysdb.RetryWithResult(c, func() ([]WorkflowSchedule, error) {
-		return c.systemDB.ListSchedules(c, sysdb.ListSchedulesDBInput{})
+	rctx := c.resourcesContext()
+	schedules, err := sysdb.RetryWithResult(rctx, func() ([]WorkflowSchedule, error) {
+		return c.systemDB.ListSchedules(rctx, sysdb.ListSchedulesDBInput{})
 	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
-		if c.Err() != nil {
+		if rctx.Err() != nil {
 			return // shutting down
 		}
 		c.logger.Warn("failed to list schedules for reconciler", "error", err)

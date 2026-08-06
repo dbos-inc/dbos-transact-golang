@@ -7923,6 +7923,7 @@ func TestWorkflowHandles(t *testing.T) {
 
 func TestWorkflowHandleContextCancel(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	databaseURL := backendDatabaseURL(t)
 	RegisterWorkflow(dbosCtx, getEventWorkflow)
 	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
@@ -7945,10 +7946,22 @@ func TestWorkflowHandleContextCancel(t *testing.T) {
 
 		dbosCtx.Shutdown(dbosCtx, 1*time.Second)
 
+		// The workflow overran the drain window: the handle cannot produce a
+		// result from a torn-down runtime.
 		err = <-resultChan
-		require.Error(t, err, "expected error from cancelled context")
-		assert.True(t, errors.Is(err, context.Canceled),
-			"expected error to be detectable as context.Canceled, got: %v", err)
+		require.Error(t, err, "expected error from a shut-down runtime")
+
+		// Shutdown must not durably cancel the in-flight workflow: its row
+		// stays PENDING so the next launch recovers it.
+		client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL})
+		require.NoError(t, err, "failed to create client")
+		defer client.Shutdown(client, 10*time.Second)
+		statusHandle, err := client.RetrieveWorkflow(client, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to retrieve workflow")
+		status, err := statusHandle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		assert.Equal(t, WorkflowStatusPending, status.Status,
+			"workflow interrupted by shutdown must remain PENDING for recovery")
 	})
 }
 

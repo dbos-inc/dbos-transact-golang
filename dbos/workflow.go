@@ -1536,6 +1536,12 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	// the context is cancelled (durable deadline, user cancel, or parent cancellation).
 	cancelFuncCompleted := make(chan struct{})
 	workflowCancelFunction := func() {
+		defer close(cancelFuncCompleted)
+		if errors.Is(context.Cause(workflowCtx), errShutdownTeardown) {
+			// Shutdown teardown, not a cancellation request: leave the row
+			// PENDING so the workflow is recovered on the next launch.
+			return
+		}
 		c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
 		err := sysdb.Retry(c, func() error {
 			_, err := c.systemDB.CancelWorkflows(uncancellableCtx, sysdb.CancelWorkflowsDBInput{WorkflowIDs: []string{workflowID}})
@@ -1544,7 +1550,6 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		if err != nil {
 			c.logger.Error("Failed to cancel workflow", "error", err)
 		}
-		close(cancelFuncCompleted)
 	}
 	stopFunc := context.AfterFunc(workflowCtx, workflowCancelFunction)
 	wfState.workflowCtx = workflowCtx
