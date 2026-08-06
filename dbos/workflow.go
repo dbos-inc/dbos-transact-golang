@@ -1563,12 +1563,14 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	// The row is known to have existed (this run inserted or read it), so a missing
 	// row means it was deleted: fail fast with a NonExistentWorkflow error rather
 	// than polling for a row that will never reappear.
-	// Parking relies on the outcome being eventually settled; it aborts if c is
-	// cancelled (shutdown).
+	// The park follows c's cancellation; a plain cancellation is reported as context.Canceled.
 	awaitExistingOutcome := func(cancelCause error) {
 		awaitOut, awaitErr := sysdb.RetryWithResult(c, func() (*sysdb.AwaitWorkflowResultOutput, error) {
 			return c.systemDB.AwaitWorkflowResult(c, workflowID, sysdb.DBRetryInterval, true)
 		}, sysdb.WithRetrierLogger(c.logger))
+		if awaitErr != nil && errors.Is(c.Err(), context.Canceled) {
+			awaitErr = c.Err()
+		}
 		err := awaitErr
 		if awaitErr == nil && awaitOut != nil && awaitOut.ErrStr != nil {
 			err = deserializeWorkflowError(awaitOut.ErrStr)
