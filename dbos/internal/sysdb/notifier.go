@@ -131,7 +131,12 @@ func (n *notifyRegistry) signal(payload string) {
 
 // pushes reports whether payloads signaled here are pushed to other processes.
 func (n *notifyRegistry) pushes() bool {
-	return n != nil && n.pending != nil
+	if n == nil {
+		return false
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.pending != nil
 }
 
 // drainPending removes and returns the payloads queued for the next push.
@@ -146,7 +151,7 @@ func (n *notifyRegistry) drainPending() []string {
 	for payload := range n.pending {
 		payloads = append(payloads, payload)
 	}
-	n.pending = make(map[string]struct{})
+	clear(n.pending)
 	return payloads
 }
 
