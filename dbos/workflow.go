@@ -3272,9 +3272,10 @@ func (c *dbosContext) SetEvent(_ Context, key string, message any, opts ...SetEv
 		return fmt.Errorf("failed to serialize event value: %w", err)
 	}
 
+	// Raw call within a step
 	if wfState, ok := c.Value(workflowStateKey).(*workflowState); ok && wfState != nil && wfState.isWithinStep {
 		uncancellableCtx := WithoutCancel(c)
-		return sysdb.Retry(c, func() error {
+		err = sysdb.Retry(c, func() error {
 			return c.systemDB.SetEvent(uncancellableCtx, sysdb.WorkflowSetEventInput{
 				Key:           key,
 				Message:       encodedMessage,
@@ -3283,13 +3284,19 @@ func (c *dbosContext) SetEvent(_ Context, key string, message any, opts ...SetEv
 				StepID:        wfState.stepID,
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
+		if err == nil {
+			c.systemDB.SignalEventSet(wfState.workflowID, key)
+		}
+		return err
 	}
 
+	var setWorkflowID string
 	_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 		if !ok || wfState == nil {
 			return nil, models.NewStepExecutionError("", "DBOS.setEvent", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
 		}
+		setWorkflowID = wfState.workflowID
 		return nil, c.systemDB.SetEvent(ctx, sysdb.WorkflowSetEventInput{
 			Key:           key,
 			Message:       encodedMessage,
@@ -3299,6 +3306,10 @@ func (c *dbosContext) SetEvent(_ Context, key string, message any, opts ...SetEv
 			StepID:        wfState.stepID,
 		})
 	}, WithStepName("DBOS.setEvent"))
+	// Signal only once the transaction has committed.
+	if err == nil && setWorkflowID != "" {
+		c.systemDB.SignalEventSet(setWorkflowID, key)
+	}
 	return err
 }
 
@@ -3551,7 +3562,7 @@ func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...Writ
 
 	if wfState, ok := c.Value(workflowStateKey).(*workflowState); ok && wfState != nil && wfState.isWithinStep {
 		uncancellableCtx := WithoutCancel(c)
-		return sysdb.Retry(c, func() error {
+		err = sysdb.Retry(c, func() error {
 			return c.systemDB.WriteStream(uncancellableCtx, sysdb.WriteStreamDBInput{
 				Key:           key,
 				Value:         encodedValue,
@@ -3560,13 +3571,19 @@ func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...Writ
 				StepID:        wfState.stepID,
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
+		if err == nil {
+			c.systemDB.SignalStreamWrite(wfState.workflowID, key)
+		}
+		return err
 	}
 
+	var writtenWorkflowID string
 	_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 		if !ok || wfState == nil {
 			return "", fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
 		}
+		writtenWorkflowID = wfState.workflowID
 		return "", c.systemDB.WriteStream(ctx, sysdb.WriteStreamDBInput{
 			Key:           key,
 			Value:         encodedValue,
@@ -3576,6 +3593,11 @@ func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...Writ
 			StepID:        wfState.stepID,
 		})
 	}, WithStepName("DBOS.writeStream"))
+	// Signal only once the transaction has committed, so a woken reader finds
+	// the value instead of going back to sleep.
+	if err == nil && writtenWorkflowID != "" {
+		c.systemDB.SignalStreamWrite(writtenWorkflowID, key)
+	}
 	return err
 }
 
@@ -3710,6 +3732,11 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 				return
 			}
 
+			// We got data so expect more instead of checking stream liveliness now.
+			if len(entries) > 0 {
+				continue
+			}
+
 			// Check if workflow is still active (PENDING or ENQUEUED)
 			status, err := sysdb.RetryWithResult(c, func() (WorkflowStatusType, error) {
 				workflows, err := c.systemDB.ListWorkflows(c, sysdb.ListWorkflowsDBInput{
@@ -3741,18 +3768,17 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 				continue
 			}
 
-			// If no new entries, wait for a write notification, with a bounded
-			// fallback to poll for workflow termination and missed notifications
-			if len(entries) == 0 {
-				select {
-				case <-c.Done():
-					send(StreamValue[any]{Err: c.Err()})
-					return
-				case <-wakeCh:
-					// A value was written; read again immediately
-				case <-time.After(sysdb.DBRetryInterval):
-					// Continue loop to read again
-				}
+			// Nothing to read and the producer is still running: wait for a write
+			// notification, with a bounded fallback to poll for workflow
+			// termination and missed notifications
+			select {
+			case <-c.Done():
+				send(StreamValue[any]{Err: c.Err()})
+				return
+			case <-wakeCh:
+				// A value was written; read again immediately
+			case <-time.After(sysdb.DBRetryInterval):
+				// Continue loop to read again
 			}
 		}
 	}()
@@ -3960,12 +3986,14 @@ func ReadStreamAsync[R any](ctx Client, workflowID string, key string) (<-chan S
 }
 
 func (c *dbosContext) CloseStream(_ Context, key string) error {
+	var closedWorkflowID string
 	_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 		sentinel := sysdb.StreamClosedSentinel
 		wfState, ok := ctx.Value(workflowStateKey).(*workflowState)
 		if !ok || wfState == nil {
 			return "", fmt.Errorf("workflow state not found in context: are you running this within a workflow?")
 		}
+		closedWorkflowID = wfState.workflowID
 		return "", c.systemDB.WriteStream(ctx, sysdb.WriteStreamDBInput{
 			Key:        key,
 			Value:      &sentinel,
@@ -3974,6 +4002,9 @@ func (c *dbosContext) CloseStream(_ Context, key string) error {
 			StepID:     wfState.stepID,
 		})
 	}, WithStepName("DBOS.closeStream"))
+	if err == nil && closedWorkflowID != "" {
+		c.systemDB.SignalStreamWrite(closedWorkflowID, key)
+	}
 	return err
 }
 

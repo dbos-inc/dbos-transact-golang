@@ -177,9 +177,9 @@ func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Tim
 	return &SysDB{
 		pool:                 NewSQLPool(db),
 		dialect:              SqliteDialect{},
-		RecvNotifier:         newNotifyRegistry(),
-		EventNotifier:        newNotifyRegistry(),
-		streamNotifier:       newNotifyRegistry(),
+		RecvNotifier:         newNotifyRegistry(_DBOS_NOTIFICATIONS_CHANNEL, false),
+		EventNotifier:        newNotifyRegistry(_DBOS_WORKFLOW_EVENTS_CHANNEL, false),
+		streamNotifier:       newNotifyRegistry(_DBOS_STREAMS_CHANNEL, false),
 		notificationLoopDone: make(chan struct{}),
 		logger:               logger.With("service", "system_database"),
 		schema:               databaseSchema,

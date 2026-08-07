@@ -42,7 +42,7 @@ func TestNotificationLoopCompletionDoesNotRequireShutdownWaiter(t *testing.T) {
 }
 
 func TestStreamWakeChannelCleanupPreservesConcurrentReaders(t *testing.T) {
-	s := &SysDB{streamNotifier: newNotifyRegistry()}
+	s := &SysDB{streamNotifier: newNotifyRegistry(_DBOS_STREAMS_CHANNEL, true)}
 	const readers = 32
 
 	type subscription struct {

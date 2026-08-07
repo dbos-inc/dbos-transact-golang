@@ -8986,6 +8986,166 @@ func collectStreamValues[R any](ch <-chan StreamValue[R]) ([]R, bool, error) {
 	return values, closed, err
 }
 
+const (
+	notifyTestStreamKey = "notify-test-stream"
+	notifyTestEventKey  = "notify-test-event"
+	// Each round is measured from a waiter that is already blocked. A waiter
+	// woken by its own fallback instead of a notification takes most of that
+	// interval, so several rounds separate the two cases by seconds.
+	notifyTestRounds = 5
+	// The budget every round must fit in when the wakeup is pushed. Falling back
+	// costs ~(fallback interval - notifyTestSettle) per round, an order of
+	// magnitude more.
+	notifyTestBudget = time.Second
+	// Time for a waiter to drain what is already written and block.
+	notifyTestSettle = 100 * time.Millisecond
+)
+
+// gatedNotifyWorkflow parks before each write, so every measurement below
+// starts with the waiter already blocked and nothing yet written.
+func gatedNotifyWorkflow(gate chan struct{}) func(Context, string) (string, error) {
+	return func(ctx Context, _ string) (string, error) {
+		for i := range notifyTestRounds {
+			<-gate
+			if err := WriteStream(ctx, notifyTestStreamKey, fmt.Sprintf("streamed-%d", i)); err != nil {
+				return "", err
+			}
+		}
+		for i := range notifyTestRounds {
+			<-gate
+			if err := SetEvent(ctx, fmt.Sprintf("%s-%d", notifyTestEventKey, i), "evented"); err != nil {
+				return "", err
+			}
+		}
+		return "done", nil
+	}
+}
+
+// awaitStreamValues returns how long a blocked reader took, in total, to
+// receive notifyTestRounds values written one gate opening at a time.
+func awaitStreamValues(t *testing.T, reader Client, workflowID string, gate chan struct{}) time.Duration {
+	t.Helper()
+	ch, err := ReadStreamAsync[string](reader, workflowID, notifyTestStreamKey)
+	require.NoError(t, err)
+
+	var total time.Duration
+	for i := range notifyTestRounds {
+		// Let the reader drain what it has and block, so the value written below
+		// reaches it as a wakeup rather than as part of a read already in flight.
+		time.Sleep(notifyTestSettle)
+		start := time.Now()
+		gate <- struct{}{}
+
+		select {
+		case value := <-ch:
+			require.NoError(t, value.Err)
+			require.Equal(t, fmt.Sprintf("streamed-%d", i), value.Value)
+		case <-time.After(30 * time.Second):
+			t.Fatal("reader never received the stream value")
+		}
+		total += time.Since(start)
+	}
+	return total
+}
+
+// awaitEvents returns how long blocked GetEvent calls took, in total, to see
+// notifyTestRounds values set one gate opening at a time.
+func awaitEvents(t *testing.T, reader Client, workflowID string, gate chan struct{}) time.Duration {
+	t.Helper()
+	type eventResult struct {
+		value string
+		err   error
+	}
+
+	var total time.Duration
+	for i := range notifyTestRounds {
+		results := make(chan eventResult, 1)
+		go func() {
+			value, err := GetEvent[string](reader, workflowID, fmt.Sprintf("%s-%d", notifyTestEventKey, i), 30*time.Second)
+			results <- eventResult{value, err}
+		}()
+
+		// Let GetEvent register its listener and block.
+		time.Sleep(notifyTestSettle)
+		start := time.Now()
+		gate <- struct{}{}
+
+		select {
+		case result := <-results:
+			require.NoError(t, result.err)
+			require.Equal(t, "evented", result.value)
+		case <-time.After(30 * time.Second):
+			t.Fatal("waiter never received the event")
+		}
+		total += time.Since(start)
+	}
+	return total
+}
+
+// With the triggers gone, a write only reaches waiters in other processes if
+// the writing process pushes the notification itself. A second DBOS context,
+// with its own pool, listener, and notifier, stands in for that process.
+func TestNotificationsReachOtherProcesses(t *testing.T) {
+	skipIfSqlite(t, "coalesced notifications require LISTEN/NOTIFY; sqlite waiters poll")
+	skipIfCockroach(t, "coalesced notifications require LISTEN/NOTIFY; CockroachDB waiters poll")
+
+	writerCtx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+
+	gate := make(chan struct{})
+	writerWorkflow := gatedNotifyWorkflow(gate)
+	RegisterWorkflow(writerCtx, writerWorkflow, WithWorkflowName("CrossProcessNotifyWorkflow"))
+	require.NoError(t, Launch(writerCtx))
+
+	reader, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { reader.Shutdown(reader, 30*time.Second) })
+
+	handle, err := RunWorkflow(writerCtx, writerWorkflow, "")
+	require.NoError(t, err)
+
+	// A reader that missed the notification would only re-read on its fallback
+	// poll, one sysdb.DBRetryInterval later; a GetEvent waiter that missed it
+	// would only re-check on its own fallback tick a minute later.
+	require.Less(t, awaitStreamValues(t, reader, handle.GetWorkflowID(), gate), notifyTestBudget,
+		"stream writes should have been pushed to the other process, not found by its fallback poll")
+	require.Less(t, awaitEvents(t, reader, handle.GetWorkflowID(), gate), notifyTestBudget,
+		"events should have been pushed to the other process, not found by its fallback re-check")
+
+	_, err = handle.GetResult()
+	require.NoError(t, err)
+}
+
+// Waiters in the writing process are woken directly, without waiting for the
+// coalescing flush or a round trip through the database. The interval below is
+// set far out so that any wakeup arriving in time can only be the local one.
+func TestLocalWaitersAreWokenWithoutTheDatabase(t *testing.T) {
+	databaseURL := backendDatabaseURL(t)
+	resetTestDatabase(t, databaseURL)
+	dbosCtx, err := NewContext(context.Background(), Config{
+		DatabaseURL:                  databaseURL,
+		AppName:                      "test-app",
+		NotificationCoalesceInterval: time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { Shutdown(dbosCtx, 30*time.Second) })
+
+	gate := make(chan struct{})
+	writerWorkflow := gatedNotifyWorkflow(gate)
+	RegisterWorkflow(dbosCtx, writerWorkflow, WithWorkflowName("LocalNotifyWorkflow"))
+	require.NoError(t, Launch(dbosCtx))
+
+	handle, err := RunWorkflow(dbosCtx, writerWorkflow, "")
+	require.NoError(t, err)
+
+	require.Less(t, awaitStreamValues(t, dbosCtx, handle.GetWorkflowID(), gate), notifyTestBudget,
+		"a local reader should be woken directly, not by its fallback poll")
+	require.Less(t, awaitEvents(t, dbosCtx, handle.GetWorkflowID(), gate), notifyTestBudget,
+		"a local waiter should be woken directly, not by its fallback re-check")
+
+	_, err = handle.GetResult()
+	require.NoError(t, err)
+}
+
 // Complex nested struct for testing rich input/output serialization in export/import
 type exportTestAddress struct {
 	Street  string `json:"street"`
