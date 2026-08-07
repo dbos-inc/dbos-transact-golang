@@ -1536,6 +1536,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	// the context is cancelled (durable deadline, user cancel, or parent cancellation).
 	cancelFuncCompleted := make(chan struct{})
 	workflowCancelFunction := func() {
+		defer close(cancelFuncCompleted)
+		if errors.Is(context.Cause(workflowCtx), errShutdown) {
+			// Shutdown, not a cancellation request.
+			return
+		}
 		c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
 		err := sysdb.Retry(c, func() error {
 			_, err := c.systemDB.CancelWorkflows(uncancellableCtx, sysdb.CancelWorkflowsDBInput{WorkflowIDs: []string{workflowID}})
@@ -1544,7 +1549,6 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		if err != nil {
 			c.logger.Error("Failed to cancel workflow", "error", err)
 		}
-		close(cancelFuncCompleted)
 	}
 	stopFunc := context.AfterFunc(workflowCtx, workflowCancelFunction)
 	wfState.workflowCtx = workflowCtx
@@ -1559,11 +1563,14 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	// The row is known to have existed (this run inserted or read it), so a missing
 	// row means it was deleted: fail fast with a NonExistentWorkflow error rather
 	// than polling for a row that will never reappear.
-	// Parking is unbounded and relies on the outcome being eventually settled.
+	// The park follows c's cancellation; a plain cancellation is reported as context.Canceled.
 	awaitExistingOutcome := func(cancelCause error) {
 		awaitOut, awaitErr := sysdb.RetryWithResult(c, func() (*sysdb.AwaitWorkflowResultOutput, error) {
-			return c.systemDB.AwaitWorkflowResult(uncancellableCtx, workflowID, sysdb.DBRetryInterval, true)
+			return c.systemDB.AwaitWorkflowResult(c, workflowID, sysdb.DBRetryInterval, true)
 		}, sysdb.WithRetrierLogger(c.logger))
+		if awaitErr != nil && errors.Is(c.Err(), context.Canceled) {
+			awaitErr = c.Err()
+		}
 		err := awaitErr
 		if awaitErr == nil && awaitOut != nil && awaitOut.ErrStr != nil {
 			err = deserializeWorkflowError(awaitOut.ErrStr)

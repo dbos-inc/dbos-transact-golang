@@ -493,7 +493,7 @@ func TestRunAsTransaction(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error from cancelled workflow")
-		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled error, got: %v", err)
+		require.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got: %v", err)
 
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()

@@ -1649,8 +1649,7 @@ func TestSteps(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error from cancelled workflow")
-		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled error, got: %v", err)
-		require.True(t, errors.Is(err, context.Canceled), "expected wrapped context.Canceled, got: %v", err)
+		require.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got: %v", err)
 
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()
@@ -1691,7 +1690,7 @@ func TestSteps(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error from cancelled parent")
-		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled, got: %v", err)
+		require.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got: %v", err)
 
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()
@@ -1747,10 +1746,7 @@ func TestSteps(t *testing.T) {
 
 		_, err = handle.GetResult()
 		require.Error(t, err, "expected error from cancelled parent")
-		// The durable cancel lands in the DB as soon as the context is cancelled,
-		// so the parent is interrupted either by the delivered child cancellation
-		// or by observing its own CANCELLED status at the step boundary.
-		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled error, got: %v", err)
+		require.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got: %v", err)
 
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()
@@ -2320,19 +2316,17 @@ func TestSelect(t *testing.T) {
 		require.Error(t, err, "expected error from cancelled workflow")
 		assert.Equal(t, "", result, "expected zero value string when cancelled")
 
-		// Verify the error is a cancellation error. The durable cancel lands in the
-		// DB as soon as the context is cancelled, so Select is interrupted either
-		// mid-wait (wrapping context.Canceled) or at its step boundary by observing
-		// the CANCELLED status; both wrap ErrorCodeWorkflowCancelled.
-		assert.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled error, got: %v", err)
+		assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got: %v", err)
 
 		// Set the event to unblock the goroutine (cleanup)
 		selectBlockEvent.Set()
 
-		// Verify workflow status is cancelled (the workflow was interrupted by context cancellation)
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get workflow status")
-		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+		// Verify the durable cancel landed in the DB
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			require.NoError(t, err, "failed to get workflow status")
+			return status.Status == WorkflowStatusCancelled
+		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
 
 		// The cancelled workflow must not checkpoint any step: neither the
 		// interrupted Select nor the Go step unblocked above, whose outcome is
@@ -4047,9 +4041,8 @@ func TestCancelWorkflows(t *testing.T) {
 
 	t.Run("SwallowedCancellationIsNotSuccess", func(t *testing.T) {
 		// A workflow that ignores its cancellation and returns (result, nil) must
-		// not report success on the in-process handle: the durable row is CANCELLED
-		// and no output was recorded, so GetResult surfaces ErrorCodeWorkflowCancelled —
-		// consistent with what a polling handle for the same workflow returns.
+		// not report success on the in-process handle: the run lost outcome
+		// ownership, so GetResult reports the cancellation.
 		cancelCtx, cancelFunc := WithCancel(dbosCtx)
 		defer cancelFunc()
 		handle, err := RunWorkflow(cancelCtx, swallowCancelWorkflow, "")
@@ -4069,7 +4062,7 @@ func TestCancelWorkflows(t *testing.T) {
 
 		result, err := handle.GetResult()
 		require.Error(t, err, "a cancelled workflow must not report success")
-		require.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled error, got: %v", err)
+		require.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got: %v", err)
 		require.Equal(t, "", result, "no output may be reported for a cancelled workflow")
 
 		status, err := handle.GetStatus()
@@ -6041,9 +6034,11 @@ func TestWorkflowTimeout(t *testing.T) {
 		assert.Equal(t, "", result, "expected result to be an empty string")
 
 		// Check the workflow status: should be cancelled
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get workflow status")
-		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			require.NoError(t, err, "failed to get workflow status")
+			return status.Status == WorkflowStatusCancelled
+		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
 	}
 
 	wfcStart := NewEvent()
@@ -6117,9 +6112,11 @@ func TestWorkflowTimeout(t *testing.T) {
 		assert.Equal(t, "", result, "expected result to be an empty string")
 
 		// Check the workflow status: should be cancelled
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get workflow status")
-		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			require.NoError(t, err, "failed to get workflow status")
+			return status.Status == WorkflowStatusCancelled
+		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
 	}
 
 	waitForCancelWorkflowWithStepAfterCancel := func(ctx Context, _ string) (string, error) {
@@ -6169,10 +6166,9 @@ func TestWorkflowTimeout(t *testing.T) {
 
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
-		// The workflow should return a ErrorCodeWorkflowCancelled error from the step
 		require.Error(t, err, "expected error from workflow")
 
-		assert.True(t, errors.Is(err, ErrWorkflowCancelled), "expected ErrorCodeWorkflowCancelled error, got: %v", err)
+		assert.True(t, errors.Is(err, context.DeadlineExceeded), "expected context.DeadlineExceeded, got: %v", err)
 		assert.Equal(t, "", result, "expected result to be an empty string")
 
 		// Check the workflow status: should be cancelled
@@ -6297,9 +6293,11 @@ func TestWorkflowTimeout(t *testing.T) {
 		assert.Equal(t, "", result, "expected result to be an empty string")
 
 		// Check the workflow status: should be cancelled
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get workflow status")
-		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			require.NoError(t, err, "failed to get workflow status")
+			return status.Status == WorkflowStatusCancelled
+		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
 
 		// Check the child workflow status: should be cancelled
 		childHandle, err := RetrieveWorkflow[string](dbosCtx, childWorkflowID)
@@ -6400,9 +6398,13 @@ func TestWorkflowTimeout(t *testing.T) {
 		_, err = handle.GetResult()
 		require.True(t, errors.Is(err, context.DeadlineExceeded), "expected context.DeadlineExceeded, got: %v", err)
 		// Check the workflow status: should be cancelled
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get workflow status")
-		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
+		var status WorkflowStatus
+		require.Eventually(t, func() bool {
+			var err error
+			status, err = handle.GetStatus()
+			require.NoError(t, err, "failed to get workflow status")
+			return status.Status == WorkflowStatusCancelled
+		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
 
 		// Flip the state
 		setWorkflowStatusPending(t, dbosCtx, handle.GetWorkflowID())
@@ -7923,6 +7925,7 @@ func TestWorkflowHandles(t *testing.T) {
 
 func TestWorkflowHandleContextCancel(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	databaseURL := backendDatabaseURL(t)
 	RegisterWorkflow(dbosCtx, getEventWorkflow)
 	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
@@ -7945,10 +7948,23 @@ func TestWorkflowHandleContextCancel(t *testing.T) {
 
 		dbosCtx.Shutdown(dbosCtx, 1*time.Second)
 
+		// The interrupted workflow's park exits with the shutdown cancellation.
 		err = <-resultChan
-		require.Error(t, err, "expected error from cancelled context")
+		require.Error(t, err, "expected error from a shut-down runtime")
 		assert.True(t, errors.Is(err, context.Canceled),
-			"expected error to be detectable as context.Canceled, got: %v", err)
+			"expected the shutdown cancellation, got: %v", err)
+
+		// Shutdown must not durably cancel the in-flight workflow: its row
+		// stays PENDING so the next launch recovers it.
+		client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL})
+		require.NoError(t, err, "failed to create client")
+		defer client.Shutdown(client, 10*time.Second)
+		statusHandle, err := client.RetrieveWorkflow(client, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to retrieve workflow")
+		status, err := statusHandle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		assert.Equal(t, WorkflowStatusPending, status.Status,
+			"workflow interrupted by shutdown must remain PENDING for recovery")
 	})
 }
 

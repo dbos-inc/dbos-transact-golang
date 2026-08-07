@@ -473,6 +473,8 @@ func WithCancelCause(ctx Context) (Context, context.CancelCauseFunc) {
 
 var errDBOSContextTimeout = fmt.Errorf("DBOS context timeout: %w", context.DeadlineExceeded)
 
+var errShutdown = errors.New("DBOS is shutting down")
+
 func (c *dbosContext) WithTimeout(_ Context, timeout time.Duration) (Context, context.CancelFunc) {
 	newCtx, cancelFunc := context.WithTimeoutCause(c.ctx, timeout, errDBOSContextTimeout)
 	return c.clone(newCtx), cancelFunc
@@ -818,13 +820,17 @@ func (c *dbosContext) Launch() error {
 // Shutdown gracefully shuts down the DBOS runtime by performing a complete, ordered cleanup
 // of all system components. The shutdown sequence includes:
 //
-// 1. Calls Cancel to stop workflows and cancel the context
+// 1. Cancels the context to signal all resources and workflows to stop.
+// In-flight workflows observe the cancellation and unwind, but are not
+// durably cancelled: their status rows are left PENDING so they are
+// recovered on the next launch rather than marked CANCELLED.
 // 2. Waits for the queue runner to complete processing
 // 3. Stops the workflow scheduler and waits for scheduled jobs to finish
-// 4. Shuts down the system database connection pool and notification listener
-// 5. Shuts down conductor
-// 6. Shuts down the admin server
-// 7. Marks the context as not launched
+// 4. Shuts down conductor
+// 5. Shuts down the admin server
+// 6. Waits for in-flight workflows to finish unwinding
+// 7. Shuts down the system database connection pool and notification listener
+// 8. Marks the context as not launched
 //
 // Each step respects the provided timeout. If any component doesn't shut down within the timeout,
 // a warning is logged and the shutdown continues to the next component.
@@ -841,8 +847,7 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	// Resources still running when their timeout expired.
 	var pending []string
 
-	// Cancel the context to signal all resources to stop
-	c.ctxCancelFunc(errors.New("DBOS cancellation initiated"))
+	c.ctxCancelFunc(errShutdown)
 
 	// Stop workflow producers before draining in-flight workflows. Producers
 	// (.e.g, queue runner) call RunWorkflow, which calls workflowsWg.Add(1);
