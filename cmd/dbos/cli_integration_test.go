@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	_ "embed"
@@ -1060,4 +1061,159 @@ func buildCLI(t *testing.T) string {
 	absPath, err := filepath.Abs(cliPath)
 	require.NoError(t, err, "Failed to get absolute path")
 	return absPath
+}
+
+// TestMigratePrintFlags verifies `dbos migrate --print-migrations` and
+// `--print-user-role` print clean SQL to stdout without connecting to a
+// database. The DB URL points at an unreachable host so any connection
+// attempt would fail the test.
+func TestMigratePrintFlags(t *testing.T) {
+	cliPath := buildCLI(t)
+	dir := t.TempDir()
+	env := append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL=postgres://nouser:nopass@unreachable-host.invalid:5432/nodb")
+
+	run := func(t *testing.T, env []string, args ...string) (stdout, stderr string, exitCode int) {
+		t.Helper()
+		cmd := exec.Command(cliPath, append([]string{"migrate"}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = env
+		var out, errOut bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &errOut
+		if err := cmd.Run(); err != nil {
+			exitErr, ok := err.(*exec.ExitError)
+			require.True(t, ok, "unexpected error: %v", err)
+			exitCode = exitErr.ExitCode()
+		}
+		return out.String(), errOut.String(), exitCode
+	}
+
+	t.Run("PrintMigrationsAll", func(t *testing.T) {
+		out, errOut, code := run(t, env, "--print-migrations", "all")
+		require.Equal(t, 0, code, "stderr: %s", errOut)
+		assert.Empty(t, errOut)
+		assert.Contains(t, out, "-- DBOS system database migrations for postgres://nouser:***@unreachable-host.invalid:5432/nodb")
+		assert.Contains(t, out, "-- Contains CREATE/DROP INDEX CONCURRENTLY: run outside a transaction block (e.g. plain psql, not psql --single-transaction).")
+		assert.Contains(t, out, "-- This script is for FRESH databases only.")
+		assert.Contains(t, out, `CREATE SCHEMA IF NOT EXISTS "dbos";`)
+		assert.Contains(t, out, `CREATE TABLE IF NOT EXISTS "dbos".dbos_migrations (version BIGINT NOT NULL PRIMARY KEY);`)
+		assert.Contains(t, out, `INSERT INTO "dbos".dbos_migrations (version) VALUES (1);`)
+		assert.Regexp(t, `UPDATE "dbos"\.dbos_migrations SET version = \d+;`, out)
+		assert.Contains(t, out, "-- Migration 10 skipped: not applicable on fresh databases")
+		assert.NotContains(t, out, "ADD PRIMARY KEY (message_uuid)")
+		assert.NotContains(t, out, "DO $$")
+		// Role grants are only printed by --print-user-role
+		assert.NotContains(t, out, "GRANT")
+		// stdout must be SQL only: no JSON log lines, no raw password
+		assert.NotContains(t, out, `{"time"`)
+		assert.NotContains(t, out, "nopass")
+	})
+
+	t.Run("PrintMigrationsFromOneEqualsAll", func(t *testing.T) {
+		all, _, code := run(t, env, "--print-migrations", "all")
+		require.Equal(t, 0, code)
+		fromOne, _, code := run(t, env, "--print-migrations", "1")
+		require.Equal(t, 0, code)
+		assert.Equal(t, all, fromOne)
+	})
+
+	t.Run("PrintMigrationsMidway", func(t *testing.T) {
+		out, errOut, code := run(t, env, "--print-migrations", "10")
+		require.Equal(t, 0, code, "stderr: %s", errOut)
+		assert.Empty(t, errOut)
+		assert.NotContains(t, out, "CREATE SCHEMA")
+		assert.NotContains(t, out, "FRESH databases only")
+		assert.NotContains(t, out, "-- Migration 9\n")
+		assert.NotContains(t, out, `INSERT INTO "dbos".dbos_migrations`)
+		assert.Contains(t, out, "-- Migration 10 skipped: not applicable on fresh databases")
+		assert.Contains(t, out, `UPDATE "dbos".dbos_migrations SET version = 10;`)
+		assert.Contains(t, out, "-- Migration 11\n")
+	})
+
+	t.Run("PrintMigrationsInvalidValues", func(t *testing.T) {
+		for _, bad := range []string{"0", "9999", "-1"} {
+			out, errOut, code := run(t, env, "--print-migrations", bad)
+			assert.Equal(t, 1, code)
+			assert.Contains(t, errOut, "does not exist: valid migrations are 1 through")
+			assert.Empty(t, out)
+		}
+		out, errOut, code := run(t, env, "--print-migrations", "nope")
+		assert.Equal(t, 1, code)
+		assert.Contains(t, errOut, "Invalid --print-migrations value 'nope': expected 'all' or a migration number")
+		assert.Empty(t, out)
+
+		// An empty value is supplied-but-invalid, not unset: it must never fall
+		// through to the connect-and-migrate path.
+		out, errOut, code = run(t, env, "--print-migrations", "")
+		assert.Equal(t, 1, code)
+		assert.Contains(t, errOut, "Invalid --print-migrations value '': expected 'all' or a migration number")
+		assert.Empty(t, out)
+	})
+
+	t.Run("PrintMigrationsWithoutDatabaseURL", func(t *testing.T) {
+		noURL := []string{}
+		for _, e := range os.Environ() {
+			if !strings.HasPrefix(e, "DBOS_SYSTEM_DATABASE_URL=") {
+				noURL = append(noURL, e)
+			}
+		}
+		out, errOut, code := run(t, noURL, "--print-migrations", "all")
+		require.Equal(t, 0, code, "stderr: %s", errOut)
+		assert.Empty(t, errOut)
+		assert.Contains(t, out, "-- DBOS system database migrations\n")
+		assert.NotContains(t, out, "-- DBOS system database migrations for")
+		assert.Contains(t, out, `CREATE SCHEMA IF NOT EXISTS "dbos";`)
+	})
+
+	t.Run("PrintMigrationsFunnySchema", func(t *testing.T) {
+		out, _, code := run(t, env, "--schema", "F8nny_sCHem@-n@m3", "--print-migrations", "all")
+		require.Equal(t, 0, code)
+		assert.Contains(t, out, `CREATE SCHEMA IF NOT EXISTS "F8nny_sCHem@-n@m3";`)
+		assert.NotContains(t, out, "CREATE TABLE F8nny_sCHem@-n@m3.")
+	})
+
+	t.Run("PrintUserRole", func(t *testing.T) {
+		out, errOut, code := run(t, env, "--schema", "F8nny_sCHem@-n@m3", "--print-user-role", "-r", "my-app-role")
+		require.Equal(t, 0, code, "stderr: %s", errOut)
+		assert.Empty(t, errOut)
+		assert.Contains(t, out, "-- Permissions on DBOS schema F8nny_sCHem@-n@m3 for role my-app-role")
+		assert.Contains(t, out, `GRANT USAGE ON SCHEMA "F8nny_sCHem@-n@m3" TO "my-app-role";`)
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			assert.True(t, strings.HasPrefix(line, "--") || strings.HasPrefix(line, "GRANT") || strings.HasPrefix(line, "ALTER"), "unexpected line: %s", line)
+		}
+	})
+
+	t.Run("PrintUserRoleRequiresAppRole", func(t *testing.T) {
+		out, errOut, code := run(t, env, "--print-user-role")
+		assert.Equal(t, 1, code)
+		assert.Contains(t, errOut, "--print-user-role requires --app-role")
+		assert.Empty(t, out)
+	})
+
+	t.Run("MutuallyExclusive", func(t *testing.T) {
+		out, errOut, code := run(t, env, "--print-migrations", "all", "--print-user-role", "-r", "my-app-role")
+		assert.Equal(t, 1, code)
+		assert.Contains(t, errOut, "--print-user-role cannot be combined with --print-migrations")
+		assert.Empty(t, out)
+	})
+
+	t.Run("QuotedNamesRejected", func(t *testing.T) {
+		out, errOut, code := run(t, env, "--schema", `bad"schema`, "--print-migrations", "all")
+		assert.Equal(t, 1, code)
+		assert.Contains(t, errOut, "Schema names containing quotes are not supported")
+		assert.Empty(t, out)
+
+		out, errOut, code = run(t, env, "--print-user-role", "-r", "bad'role")
+		assert.Equal(t, 1, code)
+		assert.Contains(t, errOut, "Role names containing quotes are not supported")
+		assert.Empty(t, out)
+	})
+
+	t.Run("SqliteRejected", func(t *testing.T) {
+		sqliteEnv := append(os.Environ(), "DBOS_SYSTEM_DATABASE_URL=sqlite:"+filepath.Join(t.TempDir(), "dbos.db"))
+		out, errOut, code := run(t, sqliteEnv, "--print-migrations", "all")
+		assert.Equal(t, 1, code)
+		assert.Contains(t, errOut, "--print-migrations is only supported for Postgres databases")
+		assert.Empty(t, out)
+	})
 }

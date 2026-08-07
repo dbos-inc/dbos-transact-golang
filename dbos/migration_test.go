@@ -245,3 +245,78 @@ func TestNewSystemDatabaseErrorPathNoDeadlock(t *testing.T) {
 		t.Fatal("newSystemDatabase deadlocked on its error path: pool.Close() waits on the still-acquired CockroachDB-detection connection")
 	}
 }
+
+// TestMigrationStatements verifies the printable migration SQL (used by
+// `dbos migrate --print-migrations`) is complete: executing it on a fresh
+// database leaves the schema fully migrated.
+func TestMigrationStatements(t *testing.T) {
+	skipIfSqlite(t, "printable migration SQL targets Postgres")
+	skipIfCockroach(t, "printable migration SQL is built with isCockroach=false")
+	ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+	pool := poolFromContext(t, ctx)
+	bg := context.Background()
+
+	migs := sysdb.BuildMigrations("dbos", false)
+	latest := migs[len(migs)-1].Version
+
+	// Invalid migration numbers are rejected.
+	_, err := MigrationStatements("", 0)
+	require.Error(t, err)
+	_, err = MigrationStatements("", int(latest)+1)
+	require.Error(t, err)
+
+	stmts, err := MigrationStatements("", 1)
+	require.NoError(t, err)
+	require.Greater(t, len(stmts), 2)
+	assert.Equal(t, `CREATE SCHEMA IF NOT EXISTS "dbos";`, stmts[0])
+	assert.Equal(t, `CREATE TABLE IF NOT EXISTS "dbos".dbos_migrations (version BIGINT NOT NULL PRIMARY KEY);`, stmts[1])
+	assert.Contains(t, stmts, `INSERT INTO "dbos".dbos_migrations (version) VALUES (1);`)
+	assert.Equal(t, fmt.Sprintf(`UPDATE "dbos".dbos_migrations SET version = %d;`, latest), stmts[len(stmts)-1])
+	assert.Contains(t, stmts, "-- Migration 10 skipped: not applicable on fresh databases")
+	for _, stmt := range stmts {
+		assert.NotContains(t, stmt, "DO $$")
+		assert.NotContains(t, stmt, "ADD PRIMARY KEY (message_uuid)")
+	}
+
+	// Starting mid-way omits the prelude and earlier migrations.
+	mid, err := MigrationStatements("", 10)
+	require.NoError(t, err)
+	assert.Equal(t, "-- Migration 10 skipped: not applicable on fresh databases", mid[0])
+	assert.Equal(t, `UPDATE "dbos".dbos_migrations SET version = 10;`, mid[1])
+	assert.Contains(t, mid, "-- Migration 11")
+	assert.NotContains(t, mid, stmts[0])
+	assert.NotContains(t, mid, "-- Migration 9")
+
+	_, err = pool.Exec(bg, "DROP SCHEMA dbos CASCADE")
+	require.NoError(t, err)
+
+	for _, stmt := range stmts {
+		_, err := pool.Exec(bg, stmt)
+		require.NoError(t, err, "statement failed: %s", stmt)
+	}
+
+	need, err := sysdb.ShouldMigrate(bg, pool, "dbos", false)
+	require.NoError(t, err)
+	assert.False(t, need, "SQL from MigrationStatements should leave the schema fully migrated")
+	var version int64
+	require.NoError(t, pool.QueryRow(bg, "SELECT version FROM dbos.dbos_migrations").Scan(&version))
+	assert.Equal(t, latest, version)
+
+	// A funny schema name is quoted throughout and applies cleanly.
+	funny := "F8nny_sCHem@-n@m3"
+	fstmts, err := MigrationStatements(funny, 1)
+	require.NoError(t, err)
+	assert.Equal(t, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s";`, funny), fstmts[0])
+	for _, stmt := range fstmts {
+		assert.NotContains(t, stmt, "CREATE TABLE "+funny+".")
+	}
+	for _, stmt := range fstmts {
+		_, err := pool.Exec(bg, stmt)
+		require.NoError(t, err, "statement failed: %s", stmt)
+	}
+	need, err = sysdb.ShouldMigrate(bg, pool, funny, false)
+	require.NoError(t, err)
+	assert.False(t, need)
+	_, err = pool.Exec(bg, fmt.Sprintf(`DROP SCHEMA "%s" CASCADE`, funny))
+	require.NoError(t, err)
+}
