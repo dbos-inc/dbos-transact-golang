@@ -8917,7 +8917,7 @@ func TestStreams(t *testing.T) {
 
 	t.Run("NotificationLatency", func(t *testing.T) {
 		// A blocked reader must be woken by the streams LISTEN/NOTIFY trigger,
-		// not the bounded-wait fallback that fires every sysdb.DBRetryInterval (1s).
+		// not the bounded-wait fallback that fires every _READ_STREAM_POLL_INTERVAL (1s).
 		if dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB).ListenNotifyPool() == nil {
 			t.Skip("backend does not support LISTEN/NOTIFY")
 		}

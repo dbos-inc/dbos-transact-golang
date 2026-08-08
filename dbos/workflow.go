@@ -3593,8 +3593,6 @@ func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...Writ
 			StepID:        wfState.stepID,
 		})
 	}, WithStepName("DBOS.writeStream"))
-	// Signal only once the transaction has committed, so a woken reader finds
-	// the value instead of going back to sleep.
 	if err == nil && writtenWorkflowID != "" {
 		c.systemDB.SignalStreamWrite(writtenWorkflowID, key)
 	}
@@ -3615,6 +3613,8 @@ func WriteStream[P any](ctx Context, key string, value P, opts ...WriteStreamOpt
 	}
 	return ctx.WriteStream(ctx, key, value, opts...)
 }
+
+const _READ_STREAM_POLL_INTERVAL = 1 * time.Second
 
 // ReadStreamOption is a functional option for ReadStream.
 type ReadStreamOption func(*readStreamOptions)
@@ -3777,7 +3777,7 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 				return
 			case <-wakeCh:
 				// A value was written; read again immediately
-			case <-time.After(sysdb.DBRetryInterval):
+			case <-time.After(_READ_STREAM_POLL_INTERVAL):
 				// Continue loop to read again
 			}
 		}
