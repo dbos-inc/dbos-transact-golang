@@ -975,7 +975,7 @@ func TestVersionlessDequeueRequiresLatestVersion(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -1228,6 +1228,39 @@ func TestQueueRateLimiter(t *testing.T) {
 
 	// Verify all queue entries eventually get cleaned up.
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after rate limiter test")
+}
+
+func TestDequeueWorkflowsRespectsRateLimitBatchSize(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// creating workflow with dbos context
+	RegisterWorkflow(dbosCtx, rateLimiterTestWorkflow)
+
+	ListenQueues(dbosCtx, "placeholder")
+	require.NoError(t, Launch(dbosCtx))
+
+	limit := 3
+	queue, err := registerWFQ(dbosCtx, "rate-limit-batch-queue",
+		WithRateLimiter(&RateLimiter{Limit: limit, Period: time.Minute}))
+	require.NoError(t, err)
+
+	// Enqueue far more workflows than the rate limit allows in one period.
+	enqueued := limit * 5
+	for i := 0; i < enqueued; i++ {
+		_, err := RunWorkflow(dbosCtx, rateLimiterTestWorkflow, "", WithQueue(queue))
+		require.NoError(t, err, "failed to enqueue workflow %d", i)
+	}
+
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	dequeued, err := sysDB.DequeueWorkflows(context.Background(), sysdb.DequeueWorkflowsInput{
+		Queue:              queue.toConfig(),
+		ExecutorID:         dbosCtx.(*dbosContext).executorID,
+		ApplicationVersion: dbosCtx.(*dbosContext).applicationVersion,
+	})
+	require.NoError(t, err)
+
+	assert.LessOrEqual(t, len(dequeued), limit,
+		"a single dequeue must not exceed the rate limiter's remaining budget of %d, got %d", limit, len(dequeued))
 }
 
 func TestQueueTimeouts(t *testing.T) {
