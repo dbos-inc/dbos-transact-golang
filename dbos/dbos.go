@@ -45,22 +45,23 @@ type Config struct {
 	// sqlite::memory:). Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
 	// SQLite URLs additionally require importing the driver package:
 	// import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
-	DatabaseURL               string
-	SystemDBPool              *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
-	SQLiteSystemDB            *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
-	DatabaseSchema            string          // Database schema name (defaults to "dbos")
-	Logger                    *slog.Logger    // Custom logger instance (defaults to a new slog logger)
-	AdminServer               bool            // Enable Transact admin HTTP server (disabled by default)
-	AdminServerPort           int             // Port for the admin HTTP server (default: 3001)
-	ConductorURL              string          // DBOS conductor service URL (optional)
-	ConductorAPIKey           string          // DBOS conductor API key (optional)
-	ConductorExecutorMetadata map[string]any  // Metadata associated with this executor that may be used to identify it on the Conductor dashboard. Must be JSON-serializable.
-	ApplicationVersion        string          // Application version (optional, overridden by DBOS__APPVERSION env var)
-	ExecutorID                string          // Executor ID (optional, overridden by DBOS__VMID env var)
-	EnablePatching            bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
-	Serializer                Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
-	SchedulerPollingInterval  time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
-	SystemDBStartupTimeout    time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
+	DatabaseURL                  string
+	SystemDBPool                 *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
+	SQLiteSystemDB               *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
+	DatabaseSchema               string          // Database schema name (defaults to "dbos")
+	Logger                       *slog.Logger    // Custom logger instance (defaults to a new slog logger)
+	AdminServer                  bool            // Enable Transact admin HTTP server (disabled by default)
+	AdminServerPort              int             // Port for the admin HTTP server (default: 3001)
+	ConductorURL                 string          // DBOS conductor service URL (optional)
+	ConductorAPIKey              string          // DBOS conductor API key (optional)
+	ConductorExecutorMetadata    map[string]any  // Metadata associated with this executor that may be used to identify it on the Conductor dashboard. Must be JSON-serializable.
+	ApplicationVersion           string          // Application version (optional, overridden by DBOS__APPVERSION env var)
+	ExecutorID                   string          // Executor ID (optional, overridden by DBOS__VMID env var)
+	EnablePatching               bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
+	Serializer                   Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
+	SchedulerPollingInterval     time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
+	SystemDBStartupTimeout       time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
+	NotificationCoalesceInterval time.Duration   // Controls how often stream-write and set-event notifications are batched
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -85,25 +86,29 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	if inputConfig.SystemDBStartupTimeout < 0 {
 		return nil, fmt.Errorf("systemDBStartupTimeout cannot be negative")
 	}
+	if inputConfig.NotificationCoalesceInterval < 0 || (inputConfig.NotificationCoalesceInterval > 0 && inputConfig.NotificationCoalesceInterval < sysdb.MinNotificationCoalesceInterval) {
+		return nil, fmt.Errorf("notificationCoalesceInterval must be at least %s, got %s", sysdb.MinNotificationCoalesceInterval, inputConfig.NotificationCoalesceInterval)
+	}
 
 	dbosConfig := &Config{
-		DatabaseURL:               inputConfig.DatabaseURL,
-		AppName:                   inputConfig.AppName,
-		DatabaseSchema:            inputConfig.DatabaseSchema,
-		Logger:                    inputConfig.Logger,
-		AdminServer:               inputConfig.AdminServer,
-		AdminServerPort:           inputConfig.AdminServerPort,
-		ConductorURL:              inputConfig.ConductorURL,
-		ConductorAPIKey:           inputConfig.ConductorAPIKey,
-		ConductorExecutorMetadata: inputConfig.ConductorExecutorMetadata,
-		ApplicationVersion:        inputConfig.ApplicationVersion,
-		ExecutorID:                inputConfig.ExecutorID,
-		SystemDBPool:              inputConfig.SystemDBPool,
-		SQLiteSystemDB:            inputConfig.SQLiteSystemDB,
-		EnablePatching:            inputConfig.EnablePatching,
-		Serializer:                inputConfig.Serializer,
-		SchedulerPollingInterval:  inputConfig.SchedulerPollingInterval,
-		SystemDBStartupTimeout:    inputConfig.SystemDBStartupTimeout,
+		DatabaseURL:                  inputConfig.DatabaseURL,
+		AppName:                      inputConfig.AppName,
+		DatabaseSchema:               inputConfig.DatabaseSchema,
+		Logger:                       inputConfig.Logger,
+		AdminServer:                  inputConfig.AdminServer,
+		AdminServerPort:              inputConfig.AdminServerPort,
+		ConductorURL:                 inputConfig.ConductorURL,
+		ConductorAPIKey:              inputConfig.ConductorAPIKey,
+		ConductorExecutorMetadata:    inputConfig.ConductorExecutorMetadata,
+		ApplicationVersion:           inputConfig.ApplicationVersion,
+		ExecutorID:                   inputConfig.ExecutorID,
+		SystemDBPool:                 inputConfig.SystemDBPool,
+		SQLiteSystemDB:               inputConfig.SQLiteSystemDB,
+		EnablePatching:               inputConfig.EnablePatching,
+		Serializer:                   inputConfig.Serializer,
+		SchedulerPollingInterval:     inputConfig.SchedulerPollingInterval,
+		SystemDBStartupTimeout:       inputConfig.SystemDBStartupTimeout,
+		NotificationCoalesceInterval: inputConfig.NotificationCoalesceInterval,
 	}
 
 	if dbosConfig.ConductorExecutorMetadata != nil {
@@ -121,6 +126,9 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 	if dbosConfig.SystemDBStartupTimeout == 0 {
 		dbosConfig.SystemDBStartupTimeout = _DEFAULT_SYSTEM_DB_STARTUP_TIMEOUT
+	}
+	if dbosConfig.NotificationCoalesceInterval == 0 {
+		dbosConfig.NotificationCoalesceInterval = sysdb.DefaultNotificationCoalesceInterval
 	}
 
 	// If patching is enabled and application version is not set, fix the application version
@@ -593,12 +601,13 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	initExecutor.serializer = config.Serializer
 
 	newSystemDatabaseInputs := sysdb.NewSystemDatabaseInput{
-		DatabaseURL:     config.DatabaseURL,
-		DatabaseSchema:  config.DatabaseSchema,
-		CustomPool:      config.SystemDBPool,
-		CustomSqliteDB:  config.SQLiteSystemDB,
-		Logger:          initExecutor.logger,
-		ApplicationName: config.AppName,
+		DatabaseURL:                  config.DatabaseURL,
+		DatabaseSchema:               config.DatabaseSchema,
+		CustomPool:                   config.SystemDBPool,
+		CustomSqliteDB:               config.SQLiteSystemDB,
+		Logger:                       initExecutor.logger,
+		ApplicationName:              config.AppName,
+		NotificationCoalesceInterval: config.NotificationCoalesceInterval,
 		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error) {
 			ser := resolveEncoder(ctx)
 			encoded, err := ser.Encode(ScheduledWorkflowInput{

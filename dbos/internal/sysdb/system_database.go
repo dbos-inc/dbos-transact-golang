@@ -88,6 +88,11 @@ type SystemDatabase interface {
 	// the given workflow's stream, plus a cleanup func to drop the registration.
 	StreamWakeChannel(workflowID, key string) (chan struct{}, func())
 
+	// Wakeups for readers in other goroutines. Also queue a coalesced NOTIFY
+	// periodically flushed into a pg_notify call.
+	SignalStreamWrite(workflowID, key string)
+	SignalEventSet(workflowID, key string)
+
 	// Patches
 	Patch(ctx context.Context, input PatchDBInput) (bool, error)
 	DoesPatchExists(ctx context.Context, input PatchDBInput) (string, error)
@@ -152,6 +157,10 @@ type SysDB struct {
 	RecvNotifier         *notifyRegistry // recv waiters, keyed by "destinationID::topic"
 	EventNotifier        *notifyRegistry // getEvent waiters, keyed by "targetWorkflowID::key"
 	streamNotifier       *notifyRegistry // stream readers, keyed by "workflowID::key"
+	notifierDone         chan struct{}   // closed when the notifier loop has made its final push
+
+	notificationCoalesceInterval time.Duration
+
 	logger               *slog.Logger
 	encodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error)
 	schema               string
@@ -341,6 +350,12 @@ var migration41SQL string
 //go:embed migrations/42_add_debounce_columns.sql
 var migration42SQL string
 
+//go:embed migrations/43_drop_streams_trigger.sql
+var migration43SQL string
+
+//go:embed migrations/44_drop_workflow_events_trigger.sql
+var migration44SQL string
+
 type MigrationFile struct {
 	Version int64
 	SQL     string
@@ -357,6 +372,10 @@ const (
 
 	// Stream sentinel value for closure
 	StreamClosedSentinel = "__DBOS_STREAM_CLOSED__"
+
+	// How often a blocked recv/getEvent waiter re-checks the database for a row
+	// whose notification it may have missed.
+	_NOTIFICATION_FALLBACK_RECHECK_INTERVAL = 60 * time.Second
 
 	// Database retry timeouts
 	_DB_CONNECTION_RETRY_BASE_DELAY = 1 * time.Second
@@ -424,6 +443,16 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 			sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema, sanitizedSchema)
 	}
 
+	// Migrations 43 and 44 drop the streams and workflow_events triggers
+	// installed by migrations 39 and 1. Both are gated like the triggers they
+	// remove: on CockroachDB they were never created, so this is a no-op (the
+	// version row still advances).
+	migration43SQLProcessed, migration44SQLProcessed := "", ""
+	if !isCockroach {
+		migration43SQLProcessed = fmt.Sprintf(migration43SQL, sanitizedSchema, sanitizedSchema)
+		migration44SQLProcessed = fmt.Sprintf(migration44SQL, sanitizedSchema, sanitizedSchema)
+	}
+
 	return []MigrationFile{
 		{Version: 1, SQL: migration1SQLProcessed},
 		{Version: 2, SQL: fmt.Sprintf(migration2SQL, sanitizedSchema)},
@@ -467,6 +496,8 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		{Version: 40, SQL: fmt.Sprintf(migration40SQL, sanitizedSchema, sanitizedSchema)},
 		{Version: 41, SQL: fmt.Sprintf(migration41SQL, sanitizedSchema, sanitizedSchema)},
 		{Version: 42, SQL: fmt.Sprintf(migration42SQL, sanitizedSchema, sanitizedSchema)},
+		{Version: 43, SQL: migration43SQLProcessed},
+		{Version: 44, SQL: migration44SQLProcessed},
 	}
 }
 
@@ -707,13 +738,14 @@ func applyCockroachMigration10(ctx context.Context, tx pgx.Tx, schema, sanitized
 }
 
 type NewSystemDatabaseInput struct {
-	DatabaseURL     string
-	DatabaseSchema  string
-	CustomPool      *pgxpool.Pool
-	CustomSqliteDB  *sql.DB
-	Logger          *slog.Logger
-	ApplicationName string
-	StartupTimeout  time.Duration
+	DatabaseURL                  string
+	DatabaseSchema               string
+	CustomPool                   *pgxpool.Pool
+	CustomSqliteDB               *sql.DB
+	Logger                       *slog.Logger
+	ApplicationName              string
+	StartupTimeout               time.Duration
+	NotificationCoalesceInterval time.Duration
 	// EncodeScheduledInput serializes the input of a schedule-created workflow
 	// (backfill/trigger). Injected by the caller to keep serialization concerns
 	// out of the system database.
@@ -897,17 +929,24 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		dialect = CockroachDialect{}
 	}
 
+	push := dialect.SupportsListenNotify()
+	coalesceInterval := inputs.NotificationCoalesceInterval
+	if coalesceInterval <= 0 {
+		coalesceInterval = DefaultNotificationCoalesceInterval
+	}
+
 	return &SysDB{
-		pool:                 NewPgxPool(pool),
-		dialect:              dialect,
-		RecvNotifier:         newNotifyRegistry(),
-		EventNotifier:        newNotifyRegistry(),
-		streamNotifier:       newNotifyRegistry(),
-		encodeScheduledInput: inputs.EncodeScheduledInput,
-		notificationLoopDone: make(chan struct{}),
-		logger:               logger.With("service", "system_database"),
-		schema:               databaseSchema,
-		isCockroachDB:        isCockroach,
+		pool:                         NewPgxPool(pool),
+		dialect:                      dialect,
+		RecvNotifier:                 newNotifyRegistry(_DBOS_NOTIFICATIONS_CHANNEL, false),
+		EventNotifier:                newNotifyRegistry(_DBOS_WORKFLOW_EVENTS_CHANNEL, push),
+		streamNotifier:               newNotifyRegistry(_DBOS_STREAMS_CHANNEL, push),
+		notificationCoalesceInterval: coalesceInterval,
+		encodeScheduledInput:         inputs.EncodeScheduledInput,
+		notificationLoopDone:         make(chan struct{}),
+		logger:                       logger.With("service", "system_database"),
+		schema:                       databaseSchema,
+		isCockroachDB:                isCockroach,
 	}, nil
 }
 
@@ -954,10 +993,22 @@ func (s *SysDB) StreamWakeChannel(workflowID, key string) (chan struct{}, func()
 
 func (s *SysDB) Launch(ctx context.Context) {
 	done := make(chan struct{})
+	var notifierDone chan struct{}
+	if s.pushesNotifications() {
+		notifierDone = make(chan struct{})
+	}
 	s.notificationLoopMu.Lock()
 	s.notificationLoopDone = done
+	s.notifierDone = notifierDone
 	s.launched = true
 	s.notificationLoopMu.Unlock()
+
+	if notifierDone != nil {
+		go func() {
+			s.notifierLoop(ctx)
+			close(notifierDone)
+		}()
+	}
 
 	if s.ListenNotifyPool() == nil {
 		go func() {
@@ -979,8 +1030,9 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 	s.notificationLoopMu.Lock()
 	launched := s.launched
 	done := s.notificationLoopDone
+	notifierDone := s.notifierDone
 	s.notificationLoopMu.Unlock()
-	listenerStopped := true
+	loopsStopped := true
 	if launched {
 		// Wait for the notification loop to exit
 		// The context should be cancelled prior to calling shutdown
@@ -989,7 +1041,18 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 		case <-time.After(timeout):
 			s.logger.Warn("Notification listener loop did not finish in time", "timeout", timeout)
 			pending = append(pending, "notification listener")
-			listenerStopped = false
+			loopsStopped = false
+		}
+		// Wait for the notifier's final flush before closing the pool, so
+		// writes made just before shutdown still wake their waiters.
+		if notifierDone != nil {
+			select {
+			case <-notifierDone:
+			case <-time.After(timeout):
+				s.logger.Warn("Notifier loop did not finish in time", "timeout", timeout)
+				pending = append(pending, "notifier")
+				loopsStopped = false
+			}
 		}
 	}
 
@@ -1013,9 +1076,9 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 	s.streamNotifier.clear()
 
 	s.notificationLoopMu.Lock()
-	// Stay launched while the notification loop is still running so a later
+	// Stay launched while a background loop is still running so a later
 	// Shutdown call waits for it again instead of skipping the check.
-	if listenerStopped {
+	if loopsStopped {
 		s.launched = false
 	}
 	s.notificationLoopMu.Unlock()
@@ -3804,119 +3867,6 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 	return nil
 }
 
-// notifyRegistry delivers per-payload wake-ups to notification waiters (recv and
-// getEvent).
-type notifyRegistry struct {
-	mu   sync.Mutex
-	subs map[string]map[chan struct{}]struct{} // payload -> set of waiter channels
-}
-
-func newNotifyRegistry() *notifyRegistry {
-	return &notifyRegistry{subs: make(map[string]map[chan struct{}]struct{})}
-}
-
-func (n *notifyRegistry) addLocked(payload string, ch chan struct{}) {
-	set := n.subs[payload]
-	if set == nil {
-		set = make(map[chan struct{}]struct{})
-		n.subs[payload] = set
-	}
-	set[ch] = struct{}{}
-}
-
-// subscribe registers a new waiter for payload and returns its wake channel.
-func (n *notifyRegistry) subscribe(payload string) chan struct{} {
-	ch := make(chan struct{}, 1)
-	n.mu.Lock()
-	n.addLocked(payload, ch)
-	n.mu.Unlock()
-	return ch
-}
-
-// subscribeExclusive registers the sole waiter for payload, returning false if one
-// already exists.
-func (n *notifyRegistry) subscribeExclusive(payload string) (chan struct{}, bool) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if len(n.subs[payload]) > 0 {
-		return nil, false
-	}
-	ch := make(chan struct{}, 1)
-	n.addLocked(payload, ch)
-	return ch, true
-}
-
-// unsubscribe removes a waiter; the payload entry is dropped once its last waiter leaves.
-func (n *notifyRegistry) unsubscribe(payload string, ch chan struct{}) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	set := n.subs[payload]
-	delete(set, ch)
-	if len(set) == 0 {
-		delete(n.subs, payload)
-	}
-}
-
-// notify wakes every waiter for payload.
-func (n *notifyRegistry) notify(payload string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	for ch := range n.subs[payload] {
-		select {
-		case ch <- struct{}{}:
-		default: // Do not block (coalesce multiple notifications into one)
-		}
-	}
-}
-
-// notifyAll wakes every waiter regardless of payload; used after a listener
-// reconnect so waiters re-poll for a value whose notification may have been missed.
-func (n *notifyRegistry) notifyAll() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	for _, set := range n.subs {
-		for ch := range set {
-			select {
-			case ch <- struct{}{}:
-			default:
-			}
-		}
-	}
-}
-
-// payloads returns a snapshot of the currently registered payloads (used by the
-// polling fallback to know which rows to check).
-func (n *notifyRegistry) payloads() []string {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	out := make([]string, 0, len(n.subs))
-	for payload := range n.subs {
-		out = append(out, payload)
-	}
-	return out
-}
-
-// has reports whether any waiter is registered for payload.
-func (n *notifyRegistry) Has(payload string) bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return len(n.subs[payload]) > 0
-}
-
-// waiterCount reports the number of waiters registered for payload.
-func (n *notifyRegistry) WaiterCount(payload string) int {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return len(n.subs[payload])
-}
-
-// clear drops all registrations (used on shutdown).
-func (n *notifyRegistry) clear() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.subs = make(map[string]map[chan struct{}]struct{})
-}
-
 // NotificationWaiter tracks a waiter registered for a notification (recv message or workflow event).
 type NotificationWaiter struct {
 	Pending bool                                   // the awaited row already existed at registration time
@@ -3924,17 +3874,27 @@ type NotificationWaiter struct {
 	Release func()                                 // unregister the waiter; must be called after the result is read (or on abandonment)
 }
 
-func (s *SysDB) notificationWait(ctx context.Context, opName, payload string, ch <-chan struct{}, recheck func(context.Context) (bool, error)) func(deadline time.Time) (bool, error) {
+func (s *SysDB) notificationWait(ctx context.Context, opName, payload string, registry *notifyRegistry, ch <-chan struct{}, recheck func(context.Context) (bool, error)) func(deadline time.Time) (bool, error) {
 	return func(deadline time.Time) (bool, error) {
 		// The caller has already probed and found nothing; any notify since then is
 		// buffered in ch, so wait for a wake before rechecking. The deadline bounds
 		// recheck's retries so a DB outage cannot block past the timeout.
 		waitCtx, cancel := context.WithDeadline(ctx, deadline)
 		defer cancel()
+		// Safety net for a wakeup that never arrives (needed only on a channel with batch pg_notify)
+		// The NOTIFY is emitted by the notifier loop after the write commits, so a writer dying in between leaves none behind.
+		var fallback <-chan time.Time
+		if registry.pushes() {
+			ticker := time.NewTicker(_NOTIFICATION_FALLBACK_RECHECK_INTERVAL)
+			defer ticker.Stop()
+			fallback = ticker.C
+		}
 		for {
 			select {
 			case <-ch:
 				// A notification or reconnect repoll fired; re-check.
+			case <-fallback:
+				// Fallback re-check; see above.
 			case <-waitCtx.Done():
 				if err := ctx.Err(); err != nil {
 					s.logger.Warn(opName+" context cancelled", "payload", payload, "cause", context.Cause(ctx))
@@ -3991,7 +3951,7 @@ func (s *SysDB) StartRecvListener(ctx context.Context, destinationID, topic stri
 		release()
 		return nil, err
 	}
-	wait := s.notificationWait(ctx, "Recv()", payload, ch, recheck)
+	wait := s.notificationWait(ctx, "Recv()", payload, s.RecvNotifier, ch, recheck)
 
 	return &NotificationWaiter{Pending: exists, Wait: wait, Release: release}, nil
 }
@@ -4092,7 +4052,7 @@ func (s *SysDB) StartEventListener(ctx context.Context, targetWorkflowID, key st
 		release()
 		return nil, err
 	}
-	wait := s.notificationWait(ctx, "GetEvent()", payload, ch, recheck)
+	wait := s.notificationWait(ctx, "GetEvent()", payload, s.EventNotifier, ch, recheck)
 
 	return &NotificationWaiter{Pending: exists, Wait: wait, Release: release}, nil
 }

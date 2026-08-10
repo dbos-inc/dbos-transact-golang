@@ -14,6 +14,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// triggerExists reports whether a trigger of the given name is installed on a
+// table in the dbos schema.
+func triggerExists(t *testing.T, pool *pgxpool.Pool, table, trigger string) bool {
+	t.Helper()
+	var found bool
+	err := pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_trigger tg
+			JOIN pg_class cl ON tg.tgrelid = cl.oid
+			JOIN pg_namespace ns ON cl.relnamespace = ns.oid
+			WHERE ns.nspname = 'dbos' AND cl.relname = $1 AND tg.tgname = $2)`,
+		table, trigger).Scan(&found)
+	require.NoError(t, err)
+	return found
+}
+
 // poolFromContext extracts the underlying pgxpool from a Context that was
 // set up via setupDBOS.
 func poolFromContext(t *testing.T, ctx Context) *pgxpool.Pool {
@@ -301,6 +317,15 @@ func TestMigrationStatements(t *testing.T) {
 	var version int64
 	require.NoError(t, pool.QueryRow(bg, "SELECT version FROM dbos.dbos_migrations").Scan(&version))
 	assert.Equal(t, latest, version)
+
+	// A notifying transaction takes a global lock, so the streams and
+	// workflow_events triggers were replaced by coalesced notifications pushed off
+	// the write path. The notifications trigger stays: DBOS.Send may run in a
+	// process with no notifier loop to flush a notification for it.
+	assert.False(t, triggerExists(t, pool, "streams", "dbos_streams_trigger"))
+	assert.False(t, triggerExists(t, pool, "workflow_events", "dbos_workflow_events_trigger"))
+	assert.True(t, triggerExists(t, pool, "notifications", "dbos_notifications_trigger"),
+		"the notifications trigger must be kept for senders with no notifier loop")
 
 	// A funny schema name is quoted throughout and applies cleanly.
 	funny := "F8nny_sCHem@-n@m3"

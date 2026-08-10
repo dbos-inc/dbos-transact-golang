@@ -130,7 +130,7 @@ var sqliteMigration42SQL string
 
 // BuildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
-// 38, and 39 have no SQLite counterpart and are omitted.
+// 38, 39, 43, and 44 have no SQLite counterpart and are omitted.
 func BuildSqliteMigrations() []MigrationFile {
 	return []MigrationFile{
 		{Version: 1, SQL: sqliteMigration1SQL},
