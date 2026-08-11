@@ -771,8 +771,8 @@ func TestRunAsTransaction(t *testing.T) {
 		ctx, sharedDS, sharedUB := setupSharedDBOS(t)
 		ub := openUserBackend(t)
 		ds := ub.register(t, ctx, "app")
-		require.False(t, ds.sameAsSystemDB)
-		require.True(t, sharedDS.sameAsSystemDB)
+		require.True(t, ds.setupDone)
+		require.False(t, sharedDS.setupDone)
 
 		const wantErr = "permanent app failure"
 		wf := func(dctx Context, _ string) (string, error) {
@@ -860,7 +860,7 @@ func TestRunAsTransaction(t *testing.T) {
 		ds := ub.register(t, ctx, "app")
 		require.NoError(t, Launch(ctx))
 		ub.createAppTable(t)
-		require.False(t, ds.sameAsSystemDB)
+		require.True(t, ds.setupDone)
 
 		_, err := RunAsTransaction(ctx, ds, func(c context.Context, tx Tx) (string, error) {
 			_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "v1")
@@ -946,7 +946,7 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 		ub.createAppTable(t)
 
 		// The optimization is detected at NewDataSource and skips the durability table.
-		require.True(t, ds.sameAsSystemDB)
+		require.False(t, ds.setupDone)
 		require.False(t, ub.completionTableExists(t))
 
 		wfID := uuid.NewString()
@@ -1005,7 +1005,7 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 		RegisterWorkflow(ctx, wf)
 		require.NoError(t, Launch(ctx))
 		ub.createAppTable(t)
-		require.True(t, ds.sameAsSystemDB)
+		require.False(t, ds.setupDone)
 
 		wfID := uuid.NewString()
 		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
@@ -1050,7 +1050,7 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 		RegisterWorkflow(ctx, wf)
 		require.NoError(t, Launch(ctx))
 		ub.createAppTable(t)
-		require.True(t, ds.sameAsSystemDB)
+		require.False(t, ds.setupDone)
 
 		wfID := uuid.NewString()
 		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
@@ -1069,6 +1069,55 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 		require.Len(t, steps, 1)
 	})
 
+	// The same-database decision is per call, against the system database of the
+	// context RunAsTransaction runs with — not cached from the constructing
+	// context (issue #429). A data source built sharing ctx1's system pool, when
+	// used in a workflow on ctx2 (different engine), must take the two-database
+	// path: fn runs on the data source's own engine, the completion table is
+	// created lazily there, and the checkpoint lands in ctx2's system DB.
+	t.Run("RecomputedPerContext", func(t *testing.T) {
+		_, ds, ub := setupSharedDBOS(t) // ctx1: constructs ds over its own system pool; never launched
+		ctx2 := setupDBOS(t, setupDBOSOptions{dropDB: true})
+
+		wf := func(dctx Context, item string) (int64, error) {
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int64, error) {
+				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", item); err != nil {
+					return 0, err
+				}
+				return 7, nil
+			})
+		}
+		RegisterWorkflow(ctx2, wf)
+		require.NoError(t, Launch(ctx2))
+		ub.createAppTable(t)
+
+		// Construction skipped setup: shared with ctx1's system database.
+		require.False(t, ds.setupDone)
+		require.False(t, ub.completionTableExists(t))
+
+		wfID := uuid.NewString()
+		h, err := RunWorkflow(ctx2, wf, "hello", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		res, err := h.GetResult()
+		require.NoError(t, err)
+		require.EqualValues(t, 7, res)
+
+		// Two-database path under ctx2: the write went through ds's engine and a
+		// completion row was recorded in a lazily created table beside it.
+		require.Equal(t, "hello", ub.queryString(t, `SELECT v FROM kv WHERE k = 'k1'`))
+		require.True(t, ds.setupDone)
+		require.True(t, ub.completionTableExists(t))
+		output, errStr := ub.completionCells(t, wfID, 0)
+		require.NotNil(t, output)
+		require.Nil(t, errStr)
+
+		// And the checkpoint landed in ctx2's system database.
+		steps, err := GetWorkflowSteps(ctx2, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		require.Equal(t, 0, steps[0].StepID)
+	})
+
 	// On the shared-pool path too, RunAsTransaction must be called from within a
 	// workflow. The same-database optimization routes to runAsTxn, which reaches
 	// prepareStepExecution and returns the same error when no workflow state is in
@@ -1077,7 +1126,7 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 		ctx, ds, ub := setupSharedDBOS(t)
 		require.NoError(t, Launch(ctx))
 		ub.createAppTable(t)
-		require.True(t, ds.sameAsSystemDB)
+		require.False(t, ds.setupDone)
 
 		_, err := RunAsTransaction(ctx, ds, func(c context.Context, tx Tx) (string, error) {
 			_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "v1")

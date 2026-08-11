@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
@@ -35,9 +36,9 @@ type DataSource struct {
 	dialect Dialect
 	schema  string
 
-	// sameAsSystemDB is set when this data source's pool is the very same engine
-	// handle as the DBOS system database.
-	sameAsSystemDB bool
+	// Guard setup (dialect resolution + completion-table creation).
+	setupMu   sync.Mutex
+	setupDone bool
 }
 
 // Name returns the data source's name (WithDataSourceName, default "datasource").
@@ -127,25 +128,37 @@ func NewDataSource[E Engine](ctx Context, engine E, opts ...DataSourceOption) (*
 		schema:  options.schema,
 	}
 
-	// A data source whose pool is the very same engine as the system database
-	// needs no durability table: RunAsTransaction collapses onto the single
-	// system transaction (runAsTxn), so skip dialect resolution and table
-	// creation entirely.
+	// A data source whose pool is the very same engine as this context's system
+	// database needs no durability table: RunAsTransaction collapses onto the
+	// single system transaction (runAsTxn), so defer dialect resolution and
+	// table creation until the source is used with a different system database.
 	if sysdb.SameEngine(ds.pool, c.systemDB.Pool()) {
-		ds.sameAsSystemDB = true
 		c.logger.Debug("Data source shares the system database; using single-transaction durability", "datasource", ds.name)
 		return ds, nil
 	}
 
-	if err := ds.resolveDialect(c); err != nil {
+	if err := ds.setup(c); err != nil {
 		return nil, fmt.Errorf("data source %q: %w", ds.name, err)
+	}
+	return ds, nil
+}
+
+// setup resolves the dialect and ensures the transaction_completion table exists.
+func (ds *DataSource) setup(c *dbosContext) error {
+	ds.setupMu.Lock()
+	defer ds.setupMu.Unlock()
+	if ds.setupDone {
+		return nil
+	}
+	if err := ds.resolveDialect(c); err != nil {
+		return err
 	}
 	if err := ds.ensureCompletionTable(c); err != nil {
-		return nil, fmt.Errorf("data source %q: %w", ds.name, err)
+		return err
 	}
-
+	ds.setupDone = true
 	c.logger.Debug("Created data source", "datasource", ds.name, "dialect", ds.dialect.Name(), "schema", ds.schema)
-	return ds, nil
+	return nil
 }
 
 // qualifiedCompletionTable returns the schema-qualified transaction_completion
@@ -375,7 +388,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 		return nil, models.NewStepExecutionError(ws.workflowID, stepOpts.stepName, fmt.Errorf("cannot call RunAsTransaction within %s", enclosing))
 	}
 
-	if ds.sameAsSystemDB {
+	if sysdb.SameEngine(ds.pool, c.systemDB.Pool()) {
 		// runAsTxn manages a transaction for the user function.
 		// reuse our internal path used for all DBOS "special" steps (e.g., setEvent)
 		return c.runAsTxn(dbosCtx, fn, opts...)
@@ -387,6 +400,9 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 	}
 	if fn == nil {
 		return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("transaction function cannot be nil"))
+	}
+	if err := ds.setup(c); err != nil {
+		return nil, models.NewStepExecutionError(prep.WorkflowID, prep.StepOpts.stepName, fmt.Errorf("data source %q: %w", ds.name, err))
 	}
 
 	uncancellableCtx := WithoutCancel(c)
