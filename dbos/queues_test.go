@@ -975,7 +975,7 @@ func TestVersionlessDequeueRequiresLatestVersion(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
