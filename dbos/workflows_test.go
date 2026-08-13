@@ -3614,15 +3614,16 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			setWorkflowStatusPending(t, dbosCtx, wfID)
 		}
 
-		// Verify an additional attempt dead-letters the workflow; recovery skips it without error
-		dlqHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		// Verify an additional attempt dead-letters the workflow.
+		// Recovery re-enqueues, so the DLQ transition happens when the queue dequeues the workflow.
+		_, err = recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.NoError(t, err, "recovery should not fail on a dead-lettered workflow")
-		require.Empty(t, dlqHandles, "dead-lettered workflow should not be recovered")
 
-		// Verify workflow status is MAX_RECOVERY_ATTEMPTS_EXCEEDED
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get workflow status")
-		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
+		// Verify workflow status eventually becomes MAX_RECOVERY_ATTEMPTS_EXCEEDED
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			return err == nil && status.Status == WorkflowStatusMaxRecoveryAttemptsExceeded
+		}, 10*time.Second, 100*time.Millisecond, "expected workflow to be dead-lettered")
 
 		// Verify that getResult returns the DLQ error. Need a new handle
 		retrievedHandle, err := RetrieveWorkflow[int](dbosCtx, wfID)
@@ -3659,7 +3660,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		require.Equal(t, result1, int(result3.(float64)))
 
 		// Verify workflow status is SUCCESS
-		status, err = handle.GetStatus()
+		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get final workflow status")
 		require.Equal(t, WorkflowStatusSuccess, status.Status)
 
@@ -3699,7 +3700,8 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 	t.Run("DeadLetterDoesNotAbortRecovery", func(t *testing.T) {
 		// One poisoned (max attempts already reached) and one healthy pending workflow:
-		// recovery must skip the poisoned one and still recover the healthy one.
+		// recovery re-enqueues both; the poisoned one is dead-lettered at dequeue
+		// while the healthy one still recovers to completion.
 		poisonedID := uuid.NewString()
 		poisonedHandle, err := RunWorkflow(dbosCtx, poisonedDLQWorkflow, "test", WithWorkflowID(poisonedID))
 		require.NoError(t, err, "failed to start poisoned workflow")
@@ -3725,14 +3727,21 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		handles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.NoError(t, err, "dead-lettered workflow must not abort recovery")
-		require.Len(t, handles, 1, "expected only the healthy workflow to be recovered")
-		require.Equal(t, healthyID, handles[0].GetWorkflowID())
-		_, err = handles[0].GetResult()
+		require.Len(t, handles, 2, "expected both pending workflows to be re-enqueued")
+		var healthyRecovered WorkflowHandle[any]
+		for _, h := range handles {
+			if h.GetWorkflowID() == healthyID {
+				healthyRecovered = h
+			}
+		}
+		require.NotNil(t, healthyRecovered, "expected a handle for the healthy workflow")
+		_, err = healthyRecovered.GetResult()
 		require.NoError(t, err, "failed to get result from recovered healthy workflow")
 
-		status, err := poisonedHandle.GetStatus()
-		require.NoError(t, err, "failed to get status of poisoned workflow")
-		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
+		require.Eventually(t, func() bool {
+			status, err := poisonedHandle.GetStatus()
+			return err == nil && status.Status == WorkflowStatusMaxRecoveryAttemptsExceeded
+		}, 10*time.Second, 100*time.Millisecond, "expected poisoned workflow to be dead-lettered")
 	})
 }
 

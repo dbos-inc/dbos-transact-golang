@@ -102,7 +102,7 @@ type SystemDatabase interface {
 	TransitionDelayedWorkflows(ctx context.Context) error
 	DebounceDelayedWorkflow(ctx context.Context, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error)
 	DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]DequeuedWorkflow, error)
-	ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error)
+	ReenqueueForRecovery(ctx context.Context, executorIDs []string, appVersion string, recoveryQueueName string) ([]string, error)
 	GetQueuePartitions(ctx context.Context, queueName string) ([]string, error)
 
 	// Database-backed queue registry (the queues table)
@@ -4709,28 +4709,55 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	return retWorkflows, nil
 }
 
-func (s *SysDB) ClearQueueAssignment(ctx context.Context, workflowID string) (bool, error) {
-	query := s.RenderSQL(`UPDATE %sworkflow_status
-			  SET status = $1, started_at_epoch_ms = NULL
-			  WHERE workflow_uuid = $2
-			    AND queue_name IS NOT NULL
-			    AND status = $3`, s.dialect.SchemaPrefix(s.schema))
-
-	commandTag, err := s.pool.Exec(ctx, query,
+// ReenqueueForRecovery returns the PENDING workflows of the given executors
+// to a queue so they are re-dispatched, and returns the re-enqueued workflow IDs.
+// Non-queued workflows are placed on recoveryQueueName.
+func (s *SysDB) ReenqueueForRecovery(ctx context.Context, executorIDs []string, appVersion string, recoveryQueueName string) ([]string, error) {
+	if len(executorIDs) == 0 {
+		return nil, nil
+	}
+	encodedExecutorIDs, err := encodeArrayParam(s.dialect, executorIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode executor IDs for recovery: %w", err)
+	}
+	executorClause := dialectAnyClause(s.dialect, "executor_id", 5)
+	args := []any{
 		models.WorkflowStatusEnqueued,
-		workflowID,
-		models.WorkflowStatusPending)
-
-	if err != nil {
-		return false, fmt.Errorf("failed to clear queue assignment for workflow %s: %w", workflowID, err)
+		time.Now().UnixMilli(),
+		recoveryQueueName,
+		models.WorkflowStatusPending,
+		encodedExecutorIDs,
 	}
-
-	// If no rows were affected, the workflow is not anymore in the queue or was already completed
-	n, err := commandTag.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("failed to read rows affected after clearing queue assignment for workflow %s: %w", workflowID, err)
+	versionClause := ""
+	if appVersion != "" { // appVersion should never be an empty string, but be defensive.
+		versionClause = " AND application_version = $6"
+		args = append(args, appVersion)
 	}
-	return n > 0, nil
+	query := s.RenderSQL(`UPDATE %sworkflow_status
+			  SET status = $1, started_at_epoch_ms = NULL, updated_at = $2,
+			      queue_name = COALESCE(NULLIF(queue_name, ''), $3)
+			  WHERE status = $4
+			    AND %s%s
+			  RETURNING workflow_uuid`, s.dialect.SchemaPrefix(s.schema), executorClause, versionClause)
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to re-enqueue workflows for recovery: %w", err)
+	}
+	defer rows.Close()
+
+	var workflowIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan re-enqueued workflow id: %w", err)
+		}
+		workflowIDs = append(workflowIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read re-enqueued workflow ids: %w", err)
+	}
+	return workflowIDs, nil
 }
 
 // GetQueuePartitions returns all unique partition keys for enqueued workflows in a queue.
