@@ -513,7 +513,7 @@ type launchRecoveryFaultPool struct {
 }
 
 func (p *launchRecoveryFaultPool) Query(ctx context.Context, query string, args ...any) (sysdb.Rows, error) {
-	if strings.Contains(query, "SELECT workflow_uuid, status, name") {
+	if strings.Contains(query, "NULLIF(queue_name, '')") {
 		return nil, errors.New("injected recovery failure")
 	}
 	return p.Pool.Query(ctx, query, args...)
