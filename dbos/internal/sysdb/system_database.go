@@ -1142,7 +1142,6 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		timeoutMs = &millis
 	}
 
-	// Our DB works with NULL values
 	var applicationVersion *string
 	if len(input.Status.ApplicationVersion) > 0 {
 		applicationVersion = &input.Status.ApplicationVersion
@@ -1187,6 +1186,11 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 	if !input.Status.DebounceDeadline.IsZero() {
 		millis := input.Status.DebounceDeadline.UnixMilli()
 		debounceDeadlineEpochMs = &millis
+	}
+
+	var queueName *string
+	if input.Status.QueueName != "" {
+		queueName = &input.Status.QueueName
 	}
 
 	query := s.RenderSQL(`INSERT INTO %sworkflow_status (
@@ -1253,7 +1257,7 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		input.Status.ID,
 		input.Status.Status,
 		input.Status.Name,
-		input.Status.QueueName,
+		queueName,
 		input.Status.AuthenticatedUser,
 		input.Status.AssumedRole,
 		authenticatedRoles,
@@ -4733,6 +4737,7 @@ func (s *SysDB) ReenqueueForRecovery(ctx context.Context, executorIDs []string, 
 		versionClause = " AND application_version = $6"
 		args = append(args, appVersion)
 	}
+	// NULLIF: legacy rows stored not-enqueued as '' rather than NULL
 	query := s.RenderSQL(`UPDATE %sworkflow_status
 			  SET status = $1, started_at_epoch_ms = NULL, updated_at = $2,
 			      queue_name = COALESCE(NULLIF(queue_name, ''), $3)
