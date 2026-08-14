@@ -704,10 +704,15 @@ func TestWorkflowQueues(t *testing.T) {
 	})
 
 	t.Run("ReturnExistingValidation", func(t *testing.T) {
-		// Missing queue name
+		// Missing queue name (the deduplication ID check fires first)
 		_, err := RunWorkflow(dbosCtx, testWorkflow, "x", WithDeduplicationID("id"), WithDeduplicationPolicy(DeduplicationPolicyReturnExisting))
 		require.Error(t, err, "expected error when queue name is missing")
-		assert.Contains(t, err.Error(), "requires a queue name")
+		assert.Contains(t, err.Error(), "deduplication ID provided but queue name is missing")
+
+		// A policy alone (no dedup ID, no queue) still hits the policy check
+		_, err = RunWorkflow(dbosCtx, testWorkflow, "x", WithDeduplicationPolicy(DeduplicationPolicyReturnExisting))
+		require.Error(t, err, "expected error when deduplication ID and queue are missing")
+		assert.Contains(t, err.Error(), "requires a deduplication ID")
 
 		// Missing deduplication ID
 		_, err = RunWorkflow(dbosCtx, testWorkflow, "x", WithQueue(dedupQueue), WithDeduplicationPolicy(DeduplicationPolicyReturnExisting))

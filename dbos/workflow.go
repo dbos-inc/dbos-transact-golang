@@ -6170,13 +6170,18 @@ func GetLatestApplicationVersion(ctx Client) (VersionInfo, error) {
 }
 
 // SetLatestApplicationVersion marks the named application version as latest by
-// updating its timestamp to the current time.
+// updating its timestamp to the current time, bumped past the current latest so
+// the promoted version sorts strictly ahead even on same-millisecond ties.
 func (c *dbosContext) SetLatestApplicationVersion(_ Client, versionName string) error {
 	if versionName == "" {
 		return errors.New("version_name is required")
 	}
 	return sysdb.Retry(c, func() error {
-		return c.systemDB.UpdateApplicationVersionTimestamp(c, versionName, time.Now().UnixMilli())
+		ts := time.Now().UnixMilli()
+		if latest, err := c.systemDB.GetLatestApplicationVersion(c, nil); err == nil && latest.Timestamp >= ts {
+			ts = latest.Timestamp + 1
+		}
+		return c.systemDB.UpdateApplicationVersionTimestamp(c, versionName, ts)
 	}, sysdb.WithRetrierLogger(c.logger))
 }
 
