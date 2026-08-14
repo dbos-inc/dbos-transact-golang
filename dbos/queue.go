@@ -693,7 +693,15 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 				}
 
 				// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
-				_, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, workflow.Serialization, WithWorkflowID(workflow.Id), withIsDequeue())
+				// Auth identity is re-attached so child workflows spawned during
+				// the dequeued execution inherit the same identity as the original run.
+				_, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, workflow.Serialization,
+					WithWorkflowID(workflow.Id),
+					withIsDequeue(),
+					WithAuthenticatedUser(workflow.AuthenticatedUser),
+					WithAssumedRole(workflow.AssumedRole),
+					WithAuthenticatedRoles(workflow.AuthenticatedRoles...),
+				)
 				if err != nil {
 					queueLogger.Error("Error running queued workflow", "error", err)
 				}

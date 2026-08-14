@@ -4474,11 +4474,14 @@ func (s *SysDB) debounceDelayedWorkflowInternal(ctx context.Context, tx Tx, inpu
 }
 
 type DequeuedWorkflow struct {
-	Id            string
-	Name          string
-	Input         *string
-	Serialization string
-	ConfigName    *string
+	Id                 string
+	Name               string
+	Input              *string
+	Serialization      string
+	ConfigName         *string
+	AuthenticatedUser  string
+	AssumedRole        string
+	AuthenticatedRoles []string
 }
 
 type DequeueWorkflowsInput struct {
@@ -4670,7 +4673,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		        ELSE workflow_deadline_epoch_ms
 		    END
 		WHERE workflow_uuid = $6 AND status = $7
-		RETURNING name, inputs, serialization, config_name`, schemaPrefix)
+		RETURNING name, inputs, serialization, config_name, authenticated_user, assumed_role, authenticated_roles`, schemaPrefix)
 
 	var retWorkflows []DequeuedWorkflow
 	for _, id := range dequeuedIDs {
@@ -4681,7 +4684,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		}
 		retWorkflow := DequeuedWorkflow{Id: id}
 
-		var serialization *string
+		var serialization, authenticatedUser, assumedRole, authenticatedRoles *string
 		err := tx.QueryRow(ctx, updateQuery,
 			models.WorkflowStatusPending,
 			input.ApplicationVersion,
@@ -4689,7 +4692,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 			time.Now().UnixMilli(),
 			input.Queue.RateLimit != nil,
 			id,
-			models.WorkflowStatusEnqueued).Scan(&retWorkflow.Name, &retWorkflow.Input, &serialization, &retWorkflow.ConfigName)
+			models.WorkflowStatusEnqueued).Scan(&retWorkflow.Name, &retWorkflow.Input, &serialization, &retWorkflow.ConfigName, &authenticatedUser, &assumedRole, &authenticatedRoles)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				continue
@@ -4698,6 +4701,17 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		}
 		if serialization != nil {
 			retWorkflow.Serialization = *serialization
+		}
+		if authenticatedUser != nil {
+			retWorkflow.AuthenticatedUser = *authenticatedUser
+		}
+		if assumedRole != nil {
+			retWorkflow.AssumedRole = *assumedRole
+		}
+		if authenticatedRoles != nil {
+			if err := json.Unmarshal([]byte(*authenticatedRoles), &retWorkflow.AuthenticatedRoles); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal authenticated roles for workflow %s: %w", id, err)
+			}
 		}
 
 		retWorkflows = append(retWorkflows, retWorkflow)

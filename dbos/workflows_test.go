@@ -7753,6 +7753,22 @@ func authParentWorkflow(ctx Context, _ string) (authSnapshot, error) {
 	return handle.GetResult()
 }
 
+// authRecoveryParentWorkflow spawns its child only on re-execution, so the child
+// spawn is not checkpointed by the first run: after recovery, the child can only
+// inherit its identity from the auth context re-attached on the dequeue path.
+var authRecoveryRuns atomic.Int64
+
+func authRecoveryParentWorkflow(ctx Context, _ string) (authSnapshot, error) {
+	if authRecoveryRuns.Add(1) == 1 {
+		return authSnapshot{}, nil
+	}
+	handle, err := RunWorkflow(ctx, authChildWorkflow, "")
+	if err != nil {
+		return authSnapshot{}, err
+	}
+	return handle.GetResult()
+}
+
 // authGrandparentWorkflow tests three-level propagation.
 func authGrandparentWorkflow(ctx Context, _ string) (authSnapshot, error) {
 	handle, err := RunWorkflow(ctx, authParentWorkflow, "")
@@ -7781,6 +7797,7 @@ func TestAuthPropagation(t *testing.T) {
 	RegisterWorkflow(dbosCtx, authParentWorkflow)
 	RegisterWorkflow(dbosCtx, authGrandparentWorkflow)
 	RegisterWorkflow(dbosCtx, authParentWithOverrideWorkflow)
+	RegisterWorkflow(dbosCtx, authRecoveryParentWorkflow)
 	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	t.Run("PropagatesFromParentToChild", func(t *testing.T) {
@@ -7837,8 +7854,9 @@ func TestAuthPropagation(t *testing.T) {
 
 	t.Run("PropagatesAfterRecovery", func(t *testing.T) {
 		const wfID = "auth-recovery-test-wf"
+		authRecoveryRuns.Store(0)
 
-		handle, err := RunWorkflow(dbosCtx, authParentWorkflow, "",
+		handle, err := RunWorkflow(dbosCtx, authRecoveryParentWorkflow, "",
 			WithWorkflowID(wfID),
 			WithAuthenticatedUser("alice@example.com"),
 			WithAssumedRole("customer"),
@@ -7848,7 +7866,9 @@ func TestAuthPropagation(t *testing.T) {
 		_, err = handle.GetResult()
 		require.NoError(t, err)
 
-		// Simulate crash: reset parent to PENDING so recovery re-runs it.
+		// Simulate crash: reset parent to PENDING so recovery re-runs it. The
+		// re-run spawns the child fresh (nothing checkpointed), so the child's
+		// identity must come from the re-attached auth context.
 		setWorkflowStatusPending(t, dbosCtx, wfID)
 
 		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
