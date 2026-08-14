@@ -840,7 +840,6 @@ type workflowOptions struct {
 	WorkflowAttributes  map[string]any
 	alreadyEncodedInput bool
 	isDequeue           bool
-	isRecovery          bool
 	isPortableWorkflow  bool
 	runInstance         ConfiguredInstance
 	err                 error // invalid option usage, surfaced when options are parsed
@@ -961,13 +960,6 @@ func withAlreadyEncodedInput() WorkflowOption {
 func withIsDequeue() WorkflowOption {
 	return func(p *workflowOptions) {
 		p.isDequeue = true
-	}
-}
-
-// Private option set when RunWorkflow is invoked from the recovery path (dbos/recovery.go).
-func withIsRecovery() WorkflowOption {
-	return func(p *workflowOptions) {
-		p.isRecovery = true
 	}
 }
 
@@ -1192,6 +1184,18 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		return nil, models.NewInvalidOptionError("partition key provided but queue name is missing")
 	}
 
+	// Validate deduplication ID is not provided without a queue
+	if len(params.DeduplicationID) > 0 && params.queue == nil {
+		c.logger.Error("deduplication ID provided but queue name is missing", "workflow_name", params.WorkflowName)
+		return nil, models.NewInvalidOptionError("deduplication ID provided but queue name is missing")
+	}
+
+	// Validate priority is not provided without a queue
+	if params.Priority > 0 && params.queue == nil {
+		c.logger.Error("priority provided but queue name is missing", "workflow_name", params.WorkflowName)
+		return nil, models.NewInvalidOptionError("priority provided but queue name is missing")
+	}
+
 	// Validate partition key and deduplication ID are not both provided (they are incompatible)
 	if len(params.QueuePartitionKey) > 0 && len(params.DeduplicationID) > 0 {
 		c.logger.Error("partition key and deduplication ID cannot be used together", "workflow_name", params.WorkflowName)
@@ -1227,9 +1231,9 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	parentWorkflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
 
-	// Direct invocations require a launched runtime. Recovery, dequeue, and
-	// child workflow calls are internal paths that may run before Launch completes.
-	if !c.launched.Load() && !params.isRecovery && !params.isDequeue && !isChildWorkflow {
+	// Direct invocations require a launched runtime. Dequeue and child workflow
+	// calls are internal paths that may run before Launch completes.
+	if !c.launched.Load() && !params.isDequeue && !isChildWorkflow {
 		c.logger.Error("RunWorkflow called before Launch", "workflow_name", params.WorkflowName)
 		return nil, models.NewInitializationError("DBOS must be launched before running workflows; call Launch first")
 	}
@@ -1411,7 +1415,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			MaxRetries:        params.MaxRetries,
 			Tx:                tx,
 			OwnerXID:          &ownerXID,
-			IncrementAttempts: params.isDequeue || params.isRecovery,
+			IncrementAttempts: params.isDequeue,
 		}
 		insertStatusResult, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
@@ -1449,7 +1453,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			len(queueName) > 0 || // We are enqueueing OR
 				insertStatusResult.Status == WorkflowStatusSuccess || // workflow is in a terminal state (success) OR
 				insertStatusResult.Status == WorkflowStatusError || // workflow is in a terminal state (error) OR
-				(!params.isDequeue && !params.isRecovery && insertStatusResult.OwnerXID != ownerXID) || // another executor, not us dequeueing or being instructed to recover, is already owning the workflow OR
+				(!params.isDequeue && insertStatusResult.OwnerXID != ownerXID) || // another executor, not us dequeueing, is already owning the workflow OR
 				loaded // this executor is already running the workflow
 
 		if shouldSkip {
@@ -6166,13 +6170,18 @@ func GetLatestApplicationVersion(ctx Client) (VersionInfo, error) {
 }
 
 // SetLatestApplicationVersion marks the named application version as latest by
-// updating its timestamp to the current time.
+// updating its timestamp to the current time, bumped past the current latest so
+// the promoted version sorts strictly ahead even on same-millisecond ties.
 func (c *dbosContext) SetLatestApplicationVersion(_ Client, versionName string) error {
 	if versionName == "" {
 		return errors.New("version_name is required")
 	}
 	return sysdb.Retry(c, func() error {
-		return c.systemDB.UpdateApplicationVersionTimestamp(c, versionName, time.Now().UnixMilli())
+		ts := time.Now().UnixMilli()
+		if latest, err := c.systemDB.GetLatestApplicationVersion(c, nil); err == nil && latest.Timestamp >= ts {
+			ts = latest.Timestamp + 1
+		}
+		return c.systemDB.UpdateApplicationVersionTimestamp(c, versionName, ts)
 	}, sysdb.WithRetrierLogger(c.logger))
 }
 

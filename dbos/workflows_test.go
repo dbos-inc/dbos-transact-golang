@@ -3614,15 +3614,16 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 			setWorkflowStatusPending(t, dbosCtx, wfID)
 		}
 
-		// Verify an additional attempt dead-letters the workflow; recovery skips it without error
-		dlqHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		// Verify an additional attempt dead-letters the workflow.
+		// Recovery re-enqueues, so the DLQ transition happens when the queue dequeues the workflow.
+		_, err = recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.NoError(t, err, "recovery should not fail on a dead-lettered workflow")
-		require.Empty(t, dlqHandles, "dead-lettered workflow should not be recovered")
 
-		// Verify workflow status is MAX_RECOVERY_ATTEMPTS_EXCEEDED
-		status, err := handle.GetStatus()
-		require.NoError(t, err, "failed to get workflow status")
-		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
+		// Verify workflow status eventually becomes MAX_RECOVERY_ATTEMPTS_EXCEEDED
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			return err == nil && status.Status == WorkflowStatusMaxRecoveryAttemptsExceeded
+		}, 10*time.Second, 100*time.Millisecond, "expected workflow to be dead-lettered")
 
 		// Verify that getResult returns the DLQ error. Need a new handle
 		retrievedHandle, err := RetrieveWorkflow[int](dbosCtx, wfID)
@@ -3659,7 +3660,7 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		require.Equal(t, result1, int(result3.(float64)))
 
 		// Verify workflow status is SUCCESS
-		status, err = handle.GetStatus()
+		status, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get final workflow status")
 		require.Equal(t, WorkflowStatusSuccess, status.Status)
 
@@ -3699,7 +3700,8 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 	t.Run("DeadLetterDoesNotAbortRecovery", func(t *testing.T) {
 		// One poisoned (max attempts already reached) and one healthy pending workflow:
-		// recovery must skip the poisoned one and still recover the healthy one.
+		// recovery re-enqueues both; the poisoned one is dead-lettered at dequeue
+		// while the healthy one still recovers to completion.
 		poisonedID := uuid.NewString()
 		poisonedHandle, err := RunWorkflow(dbosCtx, poisonedDLQWorkflow, "test", WithWorkflowID(poisonedID))
 		require.NoError(t, err, "failed to start poisoned workflow")
@@ -3725,14 +3727,21 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 
 		handles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
 		require.NoError(t, err, "dead-lettered workflow must not abort recovery")
-		require.Len(t, handles, 1, "expected only the healthy workflow to be recovered")
-		require.Equal(t, healthyID, handles[0].GetWorkflowID())
-		_, err = handles[0].GetResult()
+		require.Len(t, handles, 2, "expected both pending workflows to be re-enqueued")
+		var healthyRecovered WorkflowHandle[any]
+		for _, h := range handles {
+			if h.GetWorkflowID() == healthyID {
+				healthyRecovered = h
+			}
+		}
+		require.NotNil(t, healthyRecovered, "expected a handle for the healthy workflow")
+		_, err = healthyRecovered.GetResult()
 		require.NoError(t, err, "failed to get result from recovered healthy workflow")
 
-		status, err := poisonedHandle.GetStatus()
-		require.NoError(t, err, "failed to get status of poisoned workflow")
-		require.Equal(t, WorkflowStatusMaxRecoveryAttemptsExceeded, status.Status)
+		require.Eventually(t, func() bool {
+			status, err := poisonedHandle.GetStatus()
+			return err == nil && status.Status == WorkflowStatusMaxRecoveryAttemptsExceeded
+		}, 10*time.Second, 100*time.Millisecond, "expected poisoned workflow to be dead-lettered")
 	})
 }
 
@@ -5046,14 +5055,14 @@ func TestRecvStepConflict(t *testing.T) {
 		return sysA.RecvNotifier.Has(payload)
 	}, 5*time.Second, 10*time.Millisecond, "executor A never registered as receiver")
 
-	// Executor B recovers the same workflow: a genuinely concurrent second
+	// Executor B runs the same workflow concurrently: a genuinely concurrent second
 	// execution with its own in-memory receiver map, so it proceeds to wait and
-	// later races A to consume+checkpoint the message.
-	setWorkflowStatusPending(t, ctxA, workflowID)
-	recovered, err := recoverPendingWorkflows(ctxB.(*dbosContext), []string{"local"})
-	require.NoError(t, err, "failed to recover workflow on executor B")
-	require.Len(t, recovered, 1, "expected one recovered handle")
-	require.Equal(t, workflowID, recovered[0].GetWorkflowID())
+	// later races A to consume+checkpoint the message. Recovery re-enqueues and the
+	// queue's atomic dequeue admits exactly one runner (either executor could win),
+	// so deterministically force the duplicate dequeue-execution on B, as if B had
+	// dequeued the re-enqueued row while the zombie A still runs.
+	handleB, err := RunWorkflow(ctxB, recvConflictWorkflow, topic, WithWorkflowID(workflowID), withIsDequeue())
+	require.NoError(t, err, "failed to run duplicate execution on executor B")
 
 	// Executor B must actually run the body (register as receiver), not
 	// short-circuit; its separate map confirms a real concurrent execution.
@@ -5070,8 +5079,8 @@ func TestRecvStepConflict(t *testing.T) {
 	require.NoError(t, err, "executor A workflow should succeed")
 	require.Equal(t, "delivered", gotA)
 
-	gotB, err := recovered[0].GetResult()
-	require.NoError(t, err, "the concurrent recovery must converge on the result, not fail")
+	gotB, err := handleB.GetResult()
+	require.NoError(t, err, "the concurrent duplicate must converge on the result, not fail")
 	require.Equal(t, "delivered", gotB)
 }
 
@@ -5946,7 +5955,9 @@ func TestSleep(t *testing.T) {
 	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	t.Run("SleepDurableRecovery", func(t *testing.T) {
-		sleepDuration := 2 * time.Second
+		// Generous duration: recovery dispatches through the internal queue, so the
+		// elapsed bound must absorb queue polling latency on top of the replay.
+		sleepDuration := 5 * time.Second
 		workflowID := uuid.NewString()
 
 		handle1, err := RunWorkflow(dbosCtx, sleepRecoveryWorkflow, sleepDuration, WithWorkflowID(workflowID))
@@ -7010,6 +7021,9 @@ func TestGarbageCollect(t *testing.T) {
 			require.NoError(t, err, "failed to get result from test workflow %d", i)
 			require.Equal(t, i, result, "expected result %d, got %d", i, result)
 			completedHandles = append(completedHandles, handle)
+			// Keep created_at distinct: GC's rows-threshold cutoff uses strict
+			// created_at comparison, so millisecond ties spare extra rows.
+			time.Sleep(2 * time.Millisecond)
 		}
 
 		// Verify exactly 11 workflows exist before GC (1 blocked + 10 completed)
@@ -7742,6 +7756,22 @@ func authParentWorkflow(ctx Context, _ string) (authSnapshot, error) {
 	return handle.GetResult()
 }
 
+// authRecoveryParentWorkflow spawns its child only on re-execution, so the child
+// spawn is not checkpointed by the first run: after recovery, the child can only
+// inherit its identity from the auth context re-attached on the dequeue path.
+var authRecoveryRuns atomic.Int64
+
+func authRecoveryParentWorkflow(ctx Context, _ string) (authSnapshot, error) {
+	if authRecoveryRuns.Add(1) == 1 {
+		return authSnapshot{}, nil
+	}
+	handle, err := RunWorkflow(ctx, authChildWorkflow, "")
+	if err != nil {
+		return authSnapshot{}, err
+	}
+	return handle.GetResult()
+}
+
 // authGrandparentWorkflow tests three-level propagation.
 func authGrandparentWorkflow(ctx Context, _ string) (authSnapshot, error) {
 	handle, err := RunWorkflow(ctx, authParentWorkflow, "")
@@ -7770,6 +7800,7 @@ func TestAuthPropagation(t *testing.T) {
 	RegisterWorkflow(dbosCtx, authParentWorkflow)
 	RegisterWorkflow(dbosCtx, authGrandparentWorkflow)
 	RegisterWorkflow(dbosCtx, authParentWithOverrideWorkflow)
+	RegisterWorkflow(dbosCtx, authRecoveryParentWorkflow)
 	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
 
 	t.Run("PropagatesFromParentToChild", func(t *testing.T) {
@@ -7826,8 +7857,9 @@ func TestAuthPropagation(t *testing.T) {
 
 	t.Run("PropagatesAfterRecovery", func(t *testing.T) {
 		const wfID = "auth-recovery-test-wf"
+		authRecoveryRuns.Store(0)
 
-		handle, err := RunWorkflow(dbosCtx, authParentWorkflow, "",
+		handle, err := RunWorkflow(dbosCtx, authRecoveryParentWorkflow, "",
 			WithWorkflowID(wfID),
 			WithAuthenticatedUser("alice@example.com"),
 			WithAssumedRole("customer"),
@@ -7837,7 +7869,9 @@ func TestAuthPropagation(t *testing.T) {
 		_, err = handle.GetResult()
 		require.NoError(t, err)
 
-		// Simulate crash: reset parent to PENDING so recovery re-runs it.
+		// Simulate crash: reset parent to PENDING so recovery re-runs it. The
+		// re-run spawns the child fresh (nothing checkpointed), so the child's
+		// identity must come from the re-attached auth context.
 		setWorkflowStatusPending(t, dbosCtx, wfID)
 
 		recoveredHandles, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
@@ -10635,13 +10669,14 @@ func TestConcurrentStartRaceSameExecutor(t *testing.T) {
 // progress rather than lagging on a stale owner.
 //
 // It reproduces the zombie/recovery race: executor A starts a workflow and blocks
-// inside its only step; executor B recovers the still-PENDING workflow, which
-// transfers the marker to B via the recovery status insert. Both executions are
-// now live in the step body. The still-running A ("zombie") is released first: its
-// step checkpoint must reclaim the marker for A. The recovery insert is not what
-// is under test here — A never re-inserts its status, so only the step-checkpoint
-// re-stamp can flip executor_id back to A. B is released last; losing the
-// checkpoint race, it must not re-stamp.
+// inside its only step; executor B runs a duplicate execution of the still-PENDING
+// workflow (as if it had dequeued the row recovery re-enqueued), which transfers
+// the marker to B via its status insert. Both executions are now live in the step
+// body. The still-running A ("zombie") is released first: its step checkpoint must
+// reclaim the marker for A. The duplicate's insert is not what is under test here —
+// A never re-inserts its status, so only the step-checkpoint re-stamp can flip
+// executor_id back to A. B is released last; losing the checkpoint race, it must
+// not re-stamp.
 func TestStepCheckpointReclaimsExecutorID(t *testing.T) {
 	const (
 		executorA = "executor-a"
@@ -10714,15 +10749,16 @@ func TestStepCheckpointReclaimsExecutorID(t *testing.T) {
 	aInStep.Wait()
 	require.Equal(t, executorA, readExecutorID(), "precondition: A owns the workflow after starting it")
 
-	// B recovers the still-PENDING workflow: the recovery status insert transfers
-	// the marker to B. B now runs the step body concurrently with A and blocks.
-	recovered, err := recoverPendingWorkflows(ctxB.(*dbosContext), []string{executorA})
-	require.NoError(t, err, "failed to recover the workflow on executor B")
-	require.Len(t, recovered, 1, "expected exactly one pending workflow to recover")
-	require.Equal(t, wfID, recovered[0].GetWorkflowID())
+	// B runs the still-PENDING workflow concurrently, as if it had dequeued the
+	// row recovery re-enqueued (the shared queue's dequeue is not deterministic
+	// about which executor wins, so force the duplicate dequeue-execution on B):
+	// the duplicate's status insert transfers the marker to B. B now runs the
+	// step body concurrently with A and blocks.
+	handleB, err := RunWorkflow(ctxB, blockingWorkflow, "", WithWorkflowID(wfID), withIsDequeue())
+	require.NoError(t, err, "failed to run duplicate execution on executor B")
 	bInStep.Wait()
 	require.Equal(t, executorB, readExecutorID(),
-		"recovery must transfer the executor_id marker to B via its status insert")
+		"the duplicate execution must transfer the executor_id marker to B via its status insert")
 
 	// Release the still-running A. Its step checkpoint is the ONLY thing that can
 	// flip the marker back to A (A never re-inserts its status): this is the
@@ -10737,7 +10773,7 @@ func TestStepCheckpointReclaimsExecutorID(t *testing.T) {
 	// Release B. It loses the checkpoint race (A already recorded the step), so it
 	// must observe the conflict, park, and NOT re-stamp the marker.
 	close(releaseB)
-	resB, err := recovered[0].GetResult()
+	resB, err := handleB.GetResult()
 	require.NoError(t, err, "the losing execution should resolve to the winner's result via polling")
 	require.Equal(t, "done", resB)
 	require.EqualValues(t, 2, execCount.Load(), "both executions must have genuinely run the step body")

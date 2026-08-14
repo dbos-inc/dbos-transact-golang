@@ -379,9 +379,9 @@ func TestDebouncer(t *testing.T) {
 		// recovers to completion like any queued workflow.
 		setWorkflowStatusPending(t, dbosCtx, handle1.GetWorkflowID())
 
-		cleared, err := dbosCtxInstance.systemDB.ClearQueueAssignment(context.Background(), handle1.GetWorkflowID())
-		require.NoError(t, err, "failed to clear queue assignment")
-		require.True(t, cleared, "should have cleared queue assignment")
+		reenqueuedIDs, err := dbosCtxInstance.systemDB.ReenqueueForRecovery(context.Background(), []string{dbosCtxInstance.executorID}, dbosCtxInstance.applicationVersion, models.InternalQueueName)
+		require.NoError(t, err, "failed to re-enqueue workflow for recovery")
+		require.Contains(t, reenqueuedIDs, handle1.GetWorkflowID(), "should have re-enqueued workflow")
 
 		recoveredHandle := newWorkflowPollingHandle[any](dbosCtx, handle1.GetWorkflowID())
 		_, err = recoveredHandle.GetResult()
