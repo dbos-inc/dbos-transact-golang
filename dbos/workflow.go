@@ -1184,6 +1184,18 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		return nil, models.NewInvalidOptionError("partition key provided but queue name is missing")
 	}
 
+	// Validate deduplication ID is not provided without a queue
+	if len(params.DeduplicationID) > 0 && params.queue == nil {
+		c.logger.Error("deduplication ID provided but queue name is missing", "workflow_name", params.WorkflowName)
+		return nil, models.NewInvalidOptionError("deduplication ID provided but queue name is missing")
+	}
+
+	// Validate priority is not provided without a queue
+	if params.Priority > 0 && params.queue == nil {
+		c.logger.Error("priority provided but queue name is missing", "workflow_name", params.WorkflowName)
+		return nil, models.NewInvalidOptionError("priority provided but queue name is missing")
+	}
+
 	// Validate partition key and deduplication ID are not both provided (they are incompatible)
 	if len(params.QueuePartitionKey) > 0 && len(params.DeduplicationID) > 0 {
 		c.logger.Error("partition key and deduplication ID cannot be used together", "workflow_name", params.WorkflowName)

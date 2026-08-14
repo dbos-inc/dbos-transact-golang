@@ -1703,6 +1703,33 @@ func TestPartitionedQueues(t *testing.T) {
 		assert.Contains(t, dbosErr.Message, "partition key provided but queue name is missing")
 	})
 
+	t.Run("DeduplicationIDWithoutQueue", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+		simpleWorkflow := func(ctx Context, input string) (string, error) {
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, simpleWorkflow)
+
+		err := Launch(dbosCtx)
+		require.NoError(t, err, "failed to launch DBOS instance")
+
+		// A dedup ID on a non-queued workflow would be silently persisted and
+		// collide on the internal queue once recovery re-enqueues the workflow.
+		_, err = RunWorkflow(dbosCtx, simpleWorkflow, "test-input", WithDeduplicationID("dedup-without-queue"))
+		require.Error(t, err, "expected error when running with deduplication ID but no queue name")
+		var dbosErr *Error
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *Error, got %T", err)
+		assert.True(t, errors.Is(err, ErrInvalidOption), "expected error to be ErrorCodeInvalidOption")
+		assert.Contains(t, dbosErr.Message, "deduplication ID provided but queue name is missing")
+
+		_, err = RunWorkflow(dbosCtx, simpleWorkflow, "test-input", WithPriority(5))
+		require.Error(t, err, "expected error when running with priority but no queue name")
+		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *Error, got %T", err)
+		assert.True(t, errors.Is(err, ErrInvalidOption), "expected error to be ErrorCodeInvalidOption")
+		assert.Contains(t, dbosErr.Message, "priority provided but queue name is missing")
+	})
+
 	t.Run("PartitionKeyWithDeduplicationID", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
