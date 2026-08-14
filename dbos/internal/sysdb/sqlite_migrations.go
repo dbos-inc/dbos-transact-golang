@@ -128,6 +128,18 @@ var sqliteMigration41SQL string
 //go:embed migrations/sqlite/42_add_debounce_columns.sql
 var sqliteMigration42SQL string
 
+// pg migrations 43 and 44 (dropping plpgsql triggers) have no SQLite
+// counterpart and are omitted.
+
+//go:embed migrations/sqlite/45_create_partition_dequeue_index.sql
+var sqliteMigration45SQL string
+
+//go:embed migrations/sqlite/46_create_partition_dequeue_index_v2.sql
+var sqliteMigration46SQL string
+
+//go:embed migrations/sqlite/47_drop_partition_dequeue_index.sql
+var sqliteMigration47SQL string
+
 // BuildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
 // 38, 39, 43, and 44 have no SQLite counterpart and are omitted.
@@ -170,6 +182,9 @@ func BuildSqliteMigrations() []MigrationFile {
 		{Version: 40, SQL: sqliteMigration40SQL},
 		{Version: 41, SQL: sqliteMigration41SQL},
 		{Version: 42, SQL: sqliteMigration42SQL},
+		{Version: 45, SQL: sqliteMigration45SQL},
+		{Version: 46, SQL: sqliteMigration46SQL},
+		{Version: 47, SQL: sqliteMigration47SQL},
 	}
 }
 

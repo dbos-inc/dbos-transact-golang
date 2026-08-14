@@ -311,7 +311,7 @@ func TestConfig(t *testing.T) {
 
 		err = sysDB.Pool().QueryRow(dbCtx, "SELECT version FROM dbos.dbos_migrations").Scan(&version)
 		require.NoError(t, err)
-		assert.Equal(t, int64(44), version, "migration version should be 44 (after all migrations including dropping the streams and workflow_events triggers)")
+		assert.Equal(t, int64(47), version, "migration version should be 47 (after all migrations including the partition dequeue index)")
 
 		// Test manual shutdown and recreate
 		Shutdown(ctx, 1*time.Minute)
@@ -916,7 +916,7 @@ func TestCustomSystemDBSchema(t *testing.T) {
 
 		err = sysDB.Pool().QueryRow(dbCtx, fmt.Sprintf("SELECT version FROM %s.dbos_migrations", customSchema)).Scan(&version)
 		require.NoError(t, err)
-		assert.Equal(t, int64(44), version, "migration version should be 44 (after all migrations including dropping the streams and workflow_events triggers)")
+		assert.Equal(t, int64(47), version, "migration version should be 47 (after all migrations including the partition dequeue index)")
 	})
 
 	// Test workflows for exercising Send/Recv and SetEvent/GetEvent
