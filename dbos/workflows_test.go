@@ -1241,6 +1241,8 @@ func TestSteps(t *testing.T) {
 		})
 	}
 	RegisterWorkflow(dbosCtx, conflictCancelWorkflow, WithWorkflowName("conflict-cancel-workflow"))
+	RegisterWorkflow(dbosCtx, stepTimingParentWorkflow)
+	RegisterWorkflow(dbosCtx, stepTimingChildWorkflow)
 
 	// Installed before Launch so no goroutine reads sysDB.Pool() concurrently
 	// with the swap; armed on demand by StepIDNotReallocatedOnDBRetry.
@@ -2083,6 +2085,39 @@ func TestSteps(t *testing.T) {
 				require.Equal(t, tt.wantWarning, strings.Contains(logOutput.String(), "increasing max interval"))
 			})
 		}
+	})
+
+	// Verifies the timing checkpoints hoisted to callers: the child-spawn row
+	// records the launch time only, DBOS.getResult spans the await (not just
+	// the checkpoint write), and DBOS.sleep projects its wake time as the
+	// completion so the recorded duration is the sleep itself.
+	t.Run("StepTimingRecords", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, stepTimingParentWorkflow, "")
+		require.NoError(t, err, "failed to run parent workflow")
+		_, err = handle.GetResult()
+		require.NoError(t, err, "failed to get parent workflow result")
+
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 3, "expected child spawn, getResult, and sleep steps")
+
+		// Child spawn: records the launch time only, no completion.
+		spawn := steps[0]
+		require.NotEmpty(t, spawn.ChildWorkflowID, "expected step 0 to be the child spawn")
+		require.False(t, spawn.StartedAt.IsZero(), "expected child spawn StartedAt to be set")
+		require.True(t, spawn.CompletedAt.IsZero(), "the child spawn row must not record a completion time")
+
+		// getResult: the span covers the await of the child's result.
+		getResult := steps[1]
+		require.Equal(t, "DBOS.getResult", getResult.StepName)
+		require.GreaterOrEqual(t, getResult.CompletedAt.Sub(getResult.StartedAt), 100*time.Millisecond,
+			"expected the getResult span to cover the await of the child, not just the checkpoint write")
+
+		// sleep: the wake time is projected as the completion.
+		sleep := steps[2]
+		require.Equal(t, "DBOS.sleep", sleep.StepName)
+		require.GreaterOrEqual(t, sleep.CompletedAt.Sub(sleep.StartedAt), 400*time.Millisecond,
+			"expected the sleep span to be the sleep duration, not the checkpoint write")
 	})
 }
 
@@ -10779,4 +10814,40 @@ func TestStepCheckpointReclaimsExecutorID(t *testing.T) {
 	require.EqualValues(t, 2, execCount.Load(), "both executions must have genuinely run the step body")
 	require.Equal(t, executorA, readExecutorID(),
 		"a losing checkpoint must not re-stamp executor_id")
+}
+
+func stepTimingChildWorkflow(ctx Context, _ string) (string, error) {
+	time.Sleep(300 * time.Millisecond)
+	return "child-done", nil
+}
+
+func stepTimingParentWorkflow(ctx Context, _ string) (string, error) {
+	handle, err := RunWorkflow(ctx, stepTimingChildWorkflow, "")
+	if err != nil {
+		return "", err
+	}
+	if _, err := handle.GetResult(); err != nil {
+		return "", err
+	}
+	if _, err := Sleep(ctx, 500*time.Millisecond); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+func TestStepInfoJSONShape(t *testing.T) {
+	info := StepInfo{
+		StepID:          3,
+		StepName:        "my-step",
+		ChildWorkflowID: "child-id",
+		StartedAt:       time.UnixMilli(1000).UTC(),
+		CompletedAt:     time.UnixMilli(2000).UTC(),
+	}
+	b, err := json.Marshal(info)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(b, &m))
+	for _, key := range []string{"function_id", "function_name", "child_workflow_id", "started_at", "completed_at"} {
+		require.Contains(t, m, key)
+	}
 }

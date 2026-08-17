@@ -2833,6 +2833,7 @@ type RecordChildWorkflowDBInput struct {
 	ChildWorkflowID  string
 	StepID           int
 	StepName         string
+	StartedAt        time.Time
 	Tx               Tx
 }
 
@@ -2843,8 +2844,8 @@ func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkfl
 	// so a duplicate never aborts the caller's transaction; on conflict, read
 	// back the recorded child and compare.
 	query := s.RenderSQL(`INSERT INTO %soperation_outputs
-            (workflow_uuid, function_id, function_name, child_workflow_id)
-            VALUES ($1, $2, $3, $4)
+            (workflow_uuid, function_id, function_name, child_workflow_id, started_at_epoch_ms)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (workflow_uuid, function_id) DO NOTHING`, s.dialect.SchemaPrefix(s.schema))
 
 	var querier Querier = s.pool
@@ -2853,7 +2854,8 @@ func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkfl
 	}
 
 	result, err := querier.Exec(ctx, query,
-		input.ParentWorkflowID, input.StepID, input.StepName, input.ChildWorkflowID)
+		input.ParentWorkflowID, input.StepID, input.StepName, input.ChildWorkflowID,
+		input.StartedAt.UnixMilli())
 	if err != nil {
 		return fmt.Errorf("failed to record child workflow: %w", err)
 	}
