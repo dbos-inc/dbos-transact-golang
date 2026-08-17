@@ -365,11 +365,40 @@ var migration46SQL string
 //go:embed migrations/47_drop_partition_dequeue_index.sql
 var migration47SQL string
 
+//go:embed migrations/100_add_workflow_status_application_name.sql
+var migration100SQL string
+
+//go:embed migrations/101_add_queues_application_name.sql
+var migration101SQL string
+
+//go:embed migrations/102_add_workflow_schedules_application_name.sql
+var migration102SQL string
+
+//go:embed migrations/103_add_application_versions_application_name.sql
+var migration103SQL string
+
+//go:embed migrations/104_add_operation_outputs_application_name.sql
+var migration104SQL string
+
+//go:embed migrations/105_update_enqueue_workflow.sql
+var migration105SQL string
+
+//go:embed migrations/105_set_enqueue_workflow_search_path.sql
+var migration105SearchPathSQL string
+
+//go:embed migrations/106_create_application_versions_owner_index.sql
+var migration106SQL string
+
+//go:embed migrations/107_create_application_versions_unclaimed_index.sql
+var migration107SQL string
+
 type MigrationFile struct {
 	Version int64
 	SQL     string
 	Online  bool
 }
+
+const SharedMigrationBase = 100
 
 const (
 	MigrationTable = "dbos_migrations"
@@ -462,6 +491,14 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		migration44SQLProcessed = fmt.Sprintf(migration44SQL, sanitizedSchema, sanitizedSchema)
 	}
 
+	// Migration 105 replaces enqueue_workflow with a signature adding a
+	// trailing application_name. Like migration 38, the DROP/CREATE base runs
+	// everywhere and the search_path hardening is Postgres-only.
+	migration105SQLProcessed := fmt.Sprintf(migration105SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+	if !isCockroach {
+		migration105SQLProcessed = migration105SQLProcessed + "\n" + fmt.Sprintf(migration105SearchPathSQL, sanitizedSchema)
+	}
+
 	return []MigrationFile{
 		{Version: 1, SQL: migration1SQLProcessed},
 		{Version: 2, SQL: fmt.Sprintf(migration2SQL, sanitizedSchema)},
@@ -510,6 +547,16 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		{Version: 45, SQL: fmt.Sprintf(migration45SQL, c, sanitizedSchema), Online: !isCockroach},
 		{Version: 46, SQL: fmt.Sprintf(migration46SQL, c, sanitizedSchema), Online: !isCockroach},
 		{Version: 47, SQL: fmt.Sprintf(migration47SQL, c, sanitizedSchema), Online: !isCockroach},
+		// Versions from SharedMigrationBase on are defined identically by
+		// every DBOS SDK; new migrations must be added to all of them.
+		{Version: 100, SQL: fmt.Sprintf(migration100SQL, sanitizedSchema)},
+		{Version: 101, SQL: fmt.Sprintf(migration101SQL, sanitizedSchema)},
+		{Version: 102, SQL: fmt.Sprintf(migration102SQL, sanitizedSchema)},
+		{Version: 103, SQL: fmt.Sprintf(migration103SQL, sanitizedSchema)},
+		{Version: 104, SQL: fmt.Sprintf(migration104SQL, sanitizedSchema)},
+		{Version: 105, SQL: migration105SQLProcessed},
+		{Version: 106, SQL: fmt.Sprintf(migration106SQL, sanitizedSchema)},
+		{Version: 107, SQL: fmt.Sprintf(migration107SQL, c, sanitizedSchema), Online: !isCockroach},
 	}
 }
 

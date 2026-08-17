@@ -14,10 +14,12 @@ import (
 // semicolon-terminated statements and "--" comment lines suitable for
 // execution with psql. It never connects to a database.
 //
-// from is a 1-based migration number: pass 1 for the full fresh-database
+// from is a migration version number: pass 1 for the full fresh-database
 // script (including schema creation, the dbos_migrations table, and the
 // initial version row), or a later number for migrations from through the
-// latest only. Each migration is followed by its version bookkeeping,
+// latest only. Version numbers are not contiguous: versions between the end
+// of the Go-specific history and the cross-SDK shared base (100) are unused
+// and emit nothing. Each migration is followed by its version bookkeeping,
 // mirroring the runner. The SQL contains CREATE/DROP INDEX CONCURRENTLY, so it
 // must run outside a transaction block. An empty schemaName uses the default
 // ("dbos").
@@ -26,9 +28,10 @@ func MigrationStatements(schemaName string, from int) ([]string, error) {
 		schemaName = _DEFAULT_SYSTEM_DB_SCHEMA
 	}
 	migrations := sysdb.BuildMigrations(schemaName, false)
-	if from < 1 || from > len(migrations) {
+	latest := migrations[len(migrations)-1].Version
+	if from < 1 || int64(from) > latest {
 		// Printed verbatim by the CLI, so worded for the end user.
-		return nil, fmt.Errorf("Migration %d does not exist: valid migrations are 1 through %d", from, len(migrations))
+		return nil, fmt.Errorf("Migration %d does not exist: valid migrations are 1 through %d", from, latest)
 	}
 	sanitizedSchema := pgx.Identifier{schemaName}.Sanitize()
 
@@ -41,7 +44,10 @@ func MigrationStatements(schemaName string, from int) ([]string, error) {
 	}
 
 	versionRowExists := from > 1
-	for _, migration := range migrations[from-1:] {
+	for _, migration := range migrations {
+		if migration.Version < int64(from) {
+			continue
+		}
 		if migration.Version == 10 {
 			// Migration 10 backfills the notifications primary key, which
 			// migration 1 already creates on a fresh database.

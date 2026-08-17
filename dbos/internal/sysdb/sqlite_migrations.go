@@ -11,8 +11,8 @@ import (
 )
 
 // SQLite migration numbering mirrors pg numbering (matching Python's
-// sqlite_migrations list). pg migrations 10, 14, 20, 38, and 39 have no SQLite
-// counterpart, so those version numbers are skipped rather than renumbered.
+// sqlite_migrations list). pg migrations with no SQLite counterpart (see
+// BuildSqliteMigrations) have their version numbers skipped, not renumbered.
 
 //go:embed migrations/sqlite/1_initial_dbos_schema.sql
 var sqliteMigration1SQL string
@@ -140,9 +140,33 @@ var sqliteMigration46SQL string
 //go:embed migrations/sqlite/47_drop_partition_dequeue_index.sql
 var sqliteMigration47SQL string
 
+//go:embed migrations/sqlite/100_add_workflow_status_application_name.sql
+var sqliteMigration100SQL string
+
+//go:embed migrations/sqlite/101_add_queues_application_name.sql
+var sqliteMigration101SQL string
+
+//go:embed migrations/sqlite/102_add_workflow_schedules_application_name.sql
+var sqliteMigration102SQL string
+
+//go:embed migrations/sqlite/103_add_application_versions_application_name.sql
+var sqliteMigration103SQL string
+
+//go:embed migrations/sqlite/104_add_operation_outputs_application_name.sql
+var sqliteMigration104SQL string
+
+// pg migration 105 rewrites the enqueue_workflow stored function; SQLite has
+// none and omits the version.
+
+//go:embed migrations/sqlite/106_create_application_versions_owner_index.sql
+var sqliteMigration106SQL string
+
+//go:embed migrations/sqlite/107_create_application_versions_unclaimed_index.sql
+var sqliteMigration107SQL string
+
 // BuildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
-// 38, 39, 43, and 44 have no SQLite counterpart and are omitted.
+// 38, 39, 43, 44, and 105 have no SQLite counterpart and are omitted.
 func BuildSqliteMigrations() []MigrationFile {
 	return []MigrationFile{
 		{Version: 1, SQL: sqliteMigration1SQL},
@@ -185,6 +209,15 @@ func BuildSqliteMigrations() []MigrationFile {
 		{Version: 45, SQL: sqliteMigration45SQL},
 		{Version: 46, SQL: sqliteMigration46SQL},
 		{Version: 47, SQL: sqliteMigration47SQL},
+		// Versions from SharedMigrationBase on are defined identically by
+		// every DBOS SDK; new migrations must be added to all of them.
+		{Version: 100, SQL: sqliteMigration100SQL},
+		{Version: 101, SQL: sqliteMigration101SQL},
+		{Version: 102, SQL: sqliteMigration102SQL},
+		{Version: 103, SQL: sqliteMigration103SQL},
+		{Version: 104, SQL: sqliteMigration104SQL},
+		{Version: 106, SQL: sqliteMigration106SQL},
+		{Version: 107, SQL: sqliteMigration107SQL},
 	}
 }
 
