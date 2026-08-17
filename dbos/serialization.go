@@ -36,12 +36,12 @@ const (
 //     and choose its own nil semantics (typically returning the zero value of T).
 //  2. Encode may be called with a nil or zero value, and the nil round-trip must
 //     be lossless: Decode(Encode(nil-value)) must yield that nil value back.
-//  3. The literal string "__DBOS_NIL" is reserved by the engine and wire-frozen.
-//     A custom Encode must never emit it for non-nil data; a value stored as
-//     "__DBOS_NIL" would be misreported as nil by observability paths.
-//  4. Encode must not return a nil *string. To represent nil data, return a
-//     pointer to a sentinel string (e.g. the built-in gob serializer stores
-//     "__DBOS_NIL"; the portable JSON serializer stores "null").
+//  3. Encode must not return a nil *string. To represent nil data, return a
+//     pointer to a sentinel string of the serializer's choosing (e.g. the
+//     built-in gob serializer stores "__DBOS_NIL"; the portable JSON serializer
+//     stores "null"). The engine never interprets the sentinel: nil detection
+//     always goes through the serializer that wrote the row, so no string is
+//     reserved across formats.
 type Serializer[T any] interface {
 	// Name returns the name of the serialization format (e.g., "DBOS_JSON", "DBOS_GOB").
 	Name() string
@@ -301,12 +301,21 @@ func resolveDecoder[T any](storedSerialization string, customSer Serializer[any]
 // (ListWorkflows, GetWorkflowSteps) based on the stored per-row format:
 //   - portable rows decode into their generic JSON value
 //   - rows matching the configured custom serializer decode with it
+//   - gob rows decode with the built-in gob serializer, so they remain
+//     readable even from a context that has no custom serializer configured
 //   - default JSON rows return their raw JSON text (base64-decoded), leaving
 //     any further decoding to the caller
+//
+// Nil detection is format-aware: each branch applies its own format's nil
+// convention (SQL NULL is nil for every format), so no marker string is
+// reserved across formats.
 //
 // If the format is unknown or decoding fails, it returns the raw stored
 // string alongside the error.
 func decodeListingValue(encoded *string, storedSerialization string, customSer Serializer[any]) (any, error) {
+	if encoded == nil {
+		return nil, nil
+	}
 	switch {
 	case storedSerialization == PortableSerializerName:
 		var decoded any
@@ -320,7 +329,18 @@ func decodeListingValue(encoded *string, storedSerialization string, customSer S
 			return *encoded, err
 		}
 		return decoded, nil
+	case storedSerialization == "DBOS_GOB":
+		decoded, err := NewGobSerializer().Decode(encoded)
+		if err != nil {
+			return *encoded, err
+		}
+		return decoded, nil
 	case storedSerialization == "" || storedSerialization == "DBOS_JSON":
+		// This is not really a decode: because we don't know the concrete type of the list item being decoded
+		// we simply return the raw JSON string and let the user unmarshall themselves.
+		if *encoded == nilMarker {
+			return nil, nil
+		}
 		decodedBytes, err := base64.StdEncoding.DecodeString(*encoded)
 		if err != nil {
 			return *encoded, err

@@ -5253,30 +5253,22 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 				if !ok {
 					return fmt.Errorf("workflow input must be encoded string, got %T", workflows[i].Input)
 				}
-				if encodedInput == nil || *encodedInput == nilMarker {
-					workflows[i].Input = nil
-				} else {
-					decoded, err := decodeListingValue(encodedInput, workflows[i].Serialization, c.serializer)
-					if err != nil {
-						c.logger.Warn("failed to decode workflow input, storing raw value", "workflow_id", workflows[i].ID, "error", err)
-					}
-					workflows[i].Input = decoded
+				decoded, err := decodeListingValue(encodedInput, workflows[i].Serialization, c.serializer)
+				if err != nil {
+					c.logger.Warn("failed to decode workflow input, storing raw value", "workflow_id", workflows[i].ID, "error", err)
 				}
+				workflows[i].Input = decoded
 			}
 			if loadOutput && workflows[i].Output != nil {
 				encodedOutput, ok := workflows[i].Output.(*string)
 				if !ok {
 					return fmt.Errorf("workflow output must be encoded *string, got %T", workflows[i].Output)
 				}
-				if encodedOutput == nil || *encodedOutput == nilMarker {
-					workflows[i].Output = nil
-				} else {
-					decoded, err := decodeListingValue(encodedOutput, workflows[i].Serialization, c.serializer)
-					if err != nil {
-						c.logger.Warn("failed to decode workflow output, storing raw value", "workflow_id", workflows[i].ID, "error", err)
-					}
-					workflows[i].Output = decoded
+				decoded, err := decodeListingValue(encodedOutput, workflows[i].Serialization, c.serializer)
+				if err != nil {
+					c.logger.Warn("failed to decode workflow output, storing raw value", "workflow_id", workflows[i].ID, "error", err)
 				}
+				workflows[i].Output = decoded
 			}
 			if loadOutput && workflows[i].Error != nil {
 				s := workflows[i].Error.Error()
@@ -5417,12 +5409,7 @@ func (c *dbosContext) GetWorkflowSteps(_ Client, workflowID string, opts ...GetW
 	// Deserialize outputs if asked to
 	if loadOutput {
 		for i := range steps {
-			encodedOutput := steps[i].Output
-			if encodedOutput == nil || *encodedOutput == nilMarker {
-				stepInfos[i].Output = nil
-				continue
-			}
-			decoded, err := decodeListingValue(encodedOutput, steps[i].Serialization, c.serializer)
+			decoded, err := decodeListingValue(steps[i].Output, steps[i].Serialization, c.serializer)
 			if err != nil {
 				c.logger.Warn("failed to decode step output, storing raw value", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
 			}

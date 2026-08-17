@@ -1297,7 +1297,7 @@ func TestClientCustomSerializer(t *testing.T) {
 		Serializer:  customSer,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
 
 	t.Run("EnqueueWithCustomSerializer", func(t *testing.T) {
 		// The chicken serializer always encodes to fixedChicken, so regardless
@@ -1430,11 +1430,14 @@ func makeStreamWorkflow[T any]() Workflow[T, T] {
 
 var (
 	chickenRecoveryWorkflow = makeRecoveryWorkflow[Chicken]()
-	chickenSenderWorkflow   = makeSenderWorkflow[Chicken]()
-	chickenReceiverWorkflow = makeReceiverWorkflow[Chicken]()
-	chickenSetEventWorkflow = makeSetEventWorkflow[Chicken]()
-	chickenGetEventWorkflow = makeGetEventWorkflow[Chicken]()
-	chickenStreamWorkflow   = makeStreamWorkflow[Chicken]()
+	// Pointer-typed variant used to exercise the custom serializer's nil
+	// convention end-to-end (checkpointing, recovery, and listing paths).
+	chickenNilRecoveryWorkflow = makeRecoveryWorkflow[*Chicken]()
+	chickenSenderWorkflow      = makeSenderWorkflow[Chicken]()
+	chickenReceiverWorkflow    = makeReceiverWorkflow[Chicken]()
+	chickenSetEventWorkflow    = makeSetEventWorkflow[Chicken]()
+	chickenGetEventWorkflow    = makeGetEventWorkflow[Chicken]()
+	chickenStreamWorkflow      = makeStreamWorkflow[Chicken]()
 )
 
 // TestChickenSerializer tests a fully custom user-provided serializer.
@@ -1446,6 +1449,7 @@ func TestChickenSerializer(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, serializer: &chickenSerializer{}})
 
 	RegisterWorkflow(executor, chickenRecoveryWorkflow)
+	RegisterWorkflow(executor, chickenNilRecoveryWorkflow)
 	RegisterWorkflow(executor, chickenSenderWorkflow)
 	RegisterWorkflow(executor, chickenReceiverWorkflow)
 	RegisterWorkflow(executor, chickenSetEventWorkflow)
@@ -1460,6 +1464,12 @@ func TestChickenSerializer(t *testing.T) {
 	// The recovery workflow returns its input, so the result should be fixedChicken.
 	t.Run("RecoveryReturnsFixedChicken", func(t *testing.T) {
 		testAllSerializationPaths(t, executor, chickenRecoveryWorkflow, fixedChicken, "chicken-wf")
+	})
+
+	// A nil input/output must round-trip as nil through the custom serializer's
+	// own nil convention, including on the ListWorkflows/GetWorkflowSteps paths.
+	t.Run("NilPointer", func(t *testing.T) {
+		testAllSerializationPaths(t, executor, chickenNilRecoveryWorkflow, (*Chicken)(nil), "chicken-nil-wf")
 	})
 
 	t.Run("SendRecv", func(t *testing.T) {
@@ -1485,6 +1495,45 @@ func TestChickenSerializer(t *testing.T) {
 		assert.True(t, closed)
 		require.Len(t, values, 1)
 		assert.Equal(t, fixedChicken, values[0])
+	})
+}
+
+// TestDecodeListingValueGob exercises the dedicated DBOS_GOB branch of
+// decodeListingValue: rows written by the built-in gob serializer must decode
+// in listing paths even when the listing context has no custom serializer
+// configured (e.g. a Client without a serializer reading rows written by an
+// app configured with NewGobSerializer).
+func TestDecodeListingValueGob(t *testing.T) {
+	ser := NewGobSerializer()
+
+	t.Run("ValueDecodesWithoutConfiguredSerializer", func(t *testing.T) {
+		encoded, err := ser.Encode("gob-listing-value")
+		require.NoError(t, err)
+		decoded, err := decodeListingValue(encoded, "DBOS_GOB", nil)
+		require.NoError(t, err)
+		assert.Equal(t, "gob-listing-value", decoded)
+	})
+
+	t.Run("NilSentinelDecodesToNil", func(t *testing.T) {
+		encoded, err := ser.Encode(nil)
+		require.NoError(t, err)
+		require.Equal(t, nilMarker, *encoded, "gob serializer stores its nil sentinel")
+		decoded, err := decodeListingValue(encoded, "DBOS_GOB", nil)
+		require.NoError(t, err)
+		assert.Nil(t, decoded)
+	})
+
+	t.Run("SQLNullDecodesToNil", func(t *testing.T) {
+		decoded, err := decodeListingValue(nil, "DBOS_GOB", nil)
+		require.NoError(t, err)
+		assert.Nil(t, decoded)
+	})
+
+	t.Run("UndecodableReturnsRawAndError", func(t *testing.T) {
+		bad := "not!base64"
+		decoded, err := decodeListingValue(&bad, "DBOS_GOB", nil)
+		require.Error(t, err)
+		assert.Equal(t, bad, decoded)
 	})
 }
 
@@ -1800,7 +1849,7 @@ func TestPortableInterop(t *testing.T) {
 			DatabaseURL: executor.(*dbosContext).config.DatabaseURL,
 		})
 		require.NoError(t, err)
-		t.Cleanup(func() { client.Shutdown(client, 5 * time.Second) })
+		t.Cleanup(func() { client.Shutdown(client, 5*time.Second) })
 
 		portableArgs := PortableWorkflowArgs{
 			PositionalArgs: []any{expectedArgs, "extra-positional", 99},
