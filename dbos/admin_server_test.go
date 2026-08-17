@@ -143,15 +143,15 @@ func TestAdminServer(t *testing.T) {
 				endpoint:       fmt.Sprintf("http://localhost:%d/%s", _DEFAULT_ADMIN_SERVER_PORT, strings.TrimPrefix(_WORKFLOW_QUEUES_METADATA_PATTERN, "GET /")),
 				expectedStatus: http.StatusOK,
 				validateResp: func(t *testing.T, resp *http.Response) {
-					var queueMetadata []workflowQueue
-					err := json.NewDecoder(resp.Body).Decode(&queueMetadata)
+					var queues []queueMetadata
+					err := json.NewDecoder(resp.Body).Decode(&queues)
 					require.NoError(t, err, "Failed to decode response as QueueMetadata array")
-					assert.NotNil(t, queueMetadata, "Expected non-nil queue metadata array")
+					assert.NotNil(t, queues, "Expected non-nil queue metadata array")
 					// Should contain at least the internal queue
-					assert.Greater(t, len(queueMetadata), 0, "Expected at least one queue in metadata")
+					assert.Greater(t, len(queues), 0, "Expected at least one queue in metadata")
 					// Verify internal queue fields
 					foundInternalQueue := false
-					for _, queue := range queueMetadata {
+					for _, queue := range queues {
 						if queue.Name == models.InternalQueueName { // Internal queue name
 							foundInternalQueue = true
 							assert.Nil(t, queue.GlobalConcurrency, "Expected internal queue to have no concurrency limit")

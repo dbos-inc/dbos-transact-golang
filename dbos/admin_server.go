@@ -71,6 +71,18 @@ type listWorkflowsRequest struct {
 	QueueName          *string       `json:"queue_name"`          // Filter by queue name (for queued workflows)
 }
 
+// queueMetadata is the wire shape of the queues-metadata endpoint. Its
+// camelCase keys match the other SDKs; the rate limit renders as
+// {"limit": n, "period": seconds} via RateLimiter.MarshalJSON.
+type queueMetadata struct {
+	Name              string       `json:"name"`
+	WorkerConcurrency *int         `json:"workerConcurrency,omitempty"`
+	GlobalConcurrency *int         `json:"concurrency,omitempty"`
+	PriorityEnabled   bool         `json:"priorityEnabled,omitempty"`
+	RateLimit         *RateLimiter `json:"rateLimit,omitempty"`
+	PartitionQueue    bool         `json:"partitionQueue,omitempty"`
+}
+
 // buildOptions converts the request struct into a slice of ListWorkflowsOption
 func (req *listWorkflowsRequest) toListWorkflowsOptions() []ListWorkflowsOption {
 	var opts []ListWorkflowsOption
@@ -277,11 +289,22 @@ func newAdminServer(ctx *dbosContext, port int) *adminServer {
 	ctx.logger.Debug("Registering admin server endpoint", "pattern", _WORKFLOW_QUEUES_METADATA_PATTERN)
 	mux.HandleFunc(_WORKFLOW_QUEUES_METADATA_PATTERN, func(w http.ResponseWriter, r *http.Request) {
 		// The internal queue plus all database-backed queues.
-		queueMetadataArray := []workflowQueue{ctx.queueRunner.internalQueue}
+		queues := []workflowQueue{ctx.queueRunner.internalQueue}
 		if dbQueueCfgs, err := ctx.systemDB.ListQueues(ctx); err != nil {
 			ctx.logger.Error("Error listing database-backed queues", "error", err)
 		} else {
-			queueMetadataArray = append(queueMetadataArray, queuesFromConfigs(dbQueueCfgs)...)
+			queues = append(queues, queuesFromConfigs(dbQueueCfgs)...)
+		}
+		queueMetadataArray := make([]queueMetadata, len(queues))
+		for i, q := range queues {
+			queueMetadataArray[i] = queueMetadata{
+				Name:              q.Name,
+				WorkerConcurrency: q.WorkerConcurrency,
+				GlobalConcurrency: q.GlobalConcurrency,
+				PriorityEnabled:   q.PriorityEnabled,
+				RateLimit:         q.RateLimit,
+				PartitionQueue:    q.PartitionQueue,
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")

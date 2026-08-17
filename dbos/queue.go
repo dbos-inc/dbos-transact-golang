@@ -18,12 +18,12 @@ const _DEFAULT_MAX_POLLING_INTERVAL = 120 * time.Second
 // workflowQueue is the concrete implementation behind the Queue handle: a
 // queue's configuration plus runtime-only registration state.
 type workflowQueue struct {
-	Name                string        `json:"name"`                        // Unique queue name
-	WorkerConcurrency   *int          `json:"workerConcurrency,omitempty"` // Max concurrent workflows per executor
-	GlobalConcurrency   *int          `json:"concurrency,omitempty"`       // Max concurrent workflows across all executors
-	PriorityEnabled     bool          `json:"priorityEnabled,omitempty"`   // Enable priority-based scheduling
-	RateLimit           *RateLimiter  `json:"rateLimit,omitempty"`         // Rate limiting configuration
-	PartitionQueue      bool          `json:"partitionQueue,omitempty"`    // Enable partitioned queue mode
+	Name                string        `json:"name"`                         // Unique queue name
+	WorkerConcurrency   *int          `json:"worker_concurrency,omitempty"` // Max concurrent workflows per executor
+	GlobalConcurrency   *int          `json:"concurrency,omitempty"`        // Max concurrent workflows across all executors
+	PriorityEnabled     bool          `json:"priority_enabled,omitempty"`   // Enable priority-based scheduling
+	RateLimit           *RateLimiter  `json:"rate_limit,omitempty"`         // Rate limiting configuration
+	PartitionQueue      bool          `json:"partition_queue,omitempty"`    // Enable partitioned queue mode
 	basePollingInterval time.Duration // Base polling interval (minimum, never poll faster)
 	maxPollingInterval  time.Duration // Maximum polling interval (never poll slower)
 

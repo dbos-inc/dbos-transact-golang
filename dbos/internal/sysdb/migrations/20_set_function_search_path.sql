@@ -8,7 +8,7 @@
 -- ALTER FUNCTION ... SET. The runner passes the empty string in that case.
 
 ALTER FUNCTION %s.enqueue_workflow(
-    TEXT, TEXT, JSON[], JSON, TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, TEXT, INTEGER, TEXT
+    TEXT, TEXT, JSON[], JSON, TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, TEXT, INT4, TEXT
 ) SET search_path = pg_catalog, pg_temp;
 
 ALTER FUNCTION %s.send_message(

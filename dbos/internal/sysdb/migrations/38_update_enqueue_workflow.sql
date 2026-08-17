@@ -4,7 +4,7 @@
 -- function is dropped first so only the new signature remains.
 
 DROP FUNCTION IF EXISTS %s.enqueue_workflow(
-    TEXT, TEXT, JSON[], JSON, TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, TEXT, INTEGER, TEXT
+    TEXT, TEXT, JSON[], JSON, TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, TEXT, INT4, TEXT
 );
 
 CREATE OR REPLACE FUNCTION %s.enqueue_workflow(

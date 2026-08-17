@@ -6,9 +6,9 @@
 CREATE TABLE %s.queues (
     queue_id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
     name TEXT NOT NULL UNIQUE,
-    concurrency INTEGER,
-    worker_concurrency INTEGER,
-    rate_limit_max INTEGER,
+    concurrency INT4,
+    worker_concurrency INT4,
+    rate_limit_max INT4,
     rate_limit_period_sec DOUBLE PRECISION,
     priority_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     partition_queue BOOLEAN NOT NULL DEFAULT FALSE,

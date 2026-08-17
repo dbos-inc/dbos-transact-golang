@@ -3,7 +3,7 @@
 
 CREATE TABLE %s.workflow_events_history (
     workflow_uuid TEXT NOT NULL,
-    function_id INTEGER NOT NULL,
+    function_id INT4 NOT NULL,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
     PRIMARY KEY (workflow_uuid, function_id, key),
@@ -11,5 +11,5 @@ CREATE TABLE %s.workflow_events_history (
         ON UPDATE CASCADE ON DELETE CASCADE
 );
 
-ALTER TABLE %s.streams ADD COLUMN function_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE %s.streams ADD COLUMN function_id INT4 NOT NULL DEFAULT 0;
 

@@ -242,6 +242,8 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 		opt(options)
 	}
 
+	startTime := time.Now()
+
 	// If within a workflow, check if we already ran that step
 	result, found, err := checkGetResultExecution[R](h.dbosContext)
 	if found {
@@ -250,7 +252,6 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 	if err != nil { // not found and err means err is an infrastructure error
 		return *new(R), err
 	}
-	startTime := time.Now()
 
 	var timeoutChan <-chan time.Time
 	if options.timeout > 0 {
@@ -346,6 +347,8 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 		opt(options)
 	}
 
+	startTime := time.Now()
+
 	// If within a workflow, check if we already ran that step
 	result, found, err := checkGetResultExecution[R](h.dbosContext)
 	if found {
@@ -354,7 +357,6 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 	if err != nil {
 		return *new(R), err
 	}
-	startTime := time.Now()
 
 	// Use timeout if specified, otherwise use DBOS context directly
 	ctx := h.dbosContext
@@ -1277,6 +1279,8 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	// This detaches it from any deadline or cancellation signal set by the user
 	uncancellableCtx := WithoutCancel(c)
 
+	childStartTime := time.Now()
+
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
 		childWorkflowID, err := sysdb.RetryWithResult(c, func() (*string, error) {
@@ -1435,6 +1439,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				ChildWorkflowID:  workflowID,
 				StepName:         params.WorkflowName,
 				StepID:           parentWorkflowState.stepID,
+				StartedAt:        childStartTime,
 				Tx:               tx,
 			}
 			err = c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput)
@@ -1501,6 +1506,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				ChildWorkflowID:  *existingID,
 				StepName:         params.WorkflowName,
 				StepID:           parentWorkflowState.stepID,
+				StartedAt:        childStartTime,
 			}
 			if err := c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput); err != nil {
 				return nil, models.NewWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
@@ -2146,6 +2152,7 @@ type stepOptions struct {
 	preGeneratedStepID *int             // Pre generated stepID
 	txIsoLevel         *IsoLevel        // Transaction isolation level for runAsTxn (nil = ReadCommitted)
 	retryPredicate     func(error) bool // Optional predicate: nil = retry all errors up to maxRetries
+	completedAt        *time.Time       // Overrides the recorded completion time (see withCompletedAt)
 }
 
 // setDefaults applies default values to stepOptions
@@ -2255,6 +2262,14 @@ func WithTxIsolation(level IsoLevel) StepOption {
 func withNextStepID(stepID int) StepOption {
 	return func(opts *stepOptions) {
 		opts.preGeneratedStepID = &stepID
+	}
+}
+
+// withCompletedAt records the given time as the step's completion instead of
+// the checkpoint time.
+func withCompletedAt(t time.Time) StepOption {
+	return func(opts *stepOptions) {
+		opts.completedAt = &t
 	}
 }
 
@@ -2530,6 +2545,7 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 	uncancellableCtx := WithoutCancel(c)
 	stepState := prep.StepState
 	stepOpts := prep.StepOpts
+	stepStartTime := time.Now()
 
 	// Check the step is cancelled, has already completed, or is called with a different name
 	recordedOutput, err := sysdb.RetryWithResult(c, func() (*sysdb.RecordedResult, error) {
@@ -2549,7 +2565,6 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 	}
 
 	stepCtx := WithValue(c, workflowStateKey, stepState)
-	stepStartTime := time.Now()
 	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) {
 		if err := checkStepContext(stepCtx, stepState.workflowID, stepOpts.stepName); err != nil {
 			return nil, err
@@ -2572,6 +2587,9 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 
 	// Record the final result
 	stepCompletedTime := time.Now()
+	if stepOpts.completedAt != nil {
+		stepCompletedTime = *stepOpts.completedAt
+	}
 	var serializedStepErr *string
 	if stepError != nil {
 		s := serializeWorkflowError(c.logger, stepError, ser.Name())
@@ -2725,13 +2743,17 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 			s := serializeWorkflowError(c.logger, stepError, txnSer.Name())
 			serializedTxnErr = &s
 		}
+		stepCompletedTime := time.Now()
+		if stepOpts.completedAt != nil {
+			stepCompletedTime = *stepOpts.completedAt
+		}
 		dbInput := sysdb.RecordOperationResultDBInput{
 			WorkflowID:    stepState.workflowID,
 			StepName:      stepOpts.stepName,
 			StepID:        stepState.stepID,
 			ErrStr:        serializedTxnErr,
 			StartedAt:     stepStartTime,
-			CompletedAt:   time.Now(),
+			CompletedAt:   stepCompletedTime,
 			Output:        encodedStepOutput,
 			Tx:            tx,
 			Serialization: serialization,
@@ -4039,9 +4061,10 @@ func (c *dbosContext) Sleep(_ Context, duration time.Duration) (time.Duration, e
 	}
 	// Checkpoint the wakeup time as a "DBOS.sleep" step; on re-execution the
 	// recorded deadline is returned, so only the remaining duration is slept.
+	deadline := time.Now().Add(duration)
 	deadlineMs, err := runAsTxn(c, func(ctx context.Context, tx Tx) (int64, error) {
-		return time.Now().Add(duration).UnixMilli(), nil
-	}, WithStepName("DBOS.sleep"))
+		return deadline.UnixMilli(), nil
+	}, WithStepName("DBOS.sleep"), withCompletedAt(deadline))
 	if err != nil {
 		return 0, err
 	}
@@ -5230,30 +5253,22 @@ func (c *dbosContext) decodeWorkflowsInputOutput(workflows []WorkflowStatus, loa
 				if !ok {
 					return fmt.Errorf("workflow input must be encoded string, got %T", workflows[i].Input)
 				}
-				if encodedInput == nil || *encodedInput == nilMarker {
-					workflows[i].Input = nil
-				} else {
-					decoded, err := decodeListingValue(encodedInput, workflows[i].Serialization, c.serializer)
-					if err != nil {
-						c.logger.Warn("failed to decode workflow input, storing raw value", "workflow_id", workflows[i].ID, "error", err)
-					}
-					workflows[i].Input = decoded
+				decoded, err := decodeListingValue(encodedInput, workflows[i].Serialization, c.serializer)
+				if err != nil {
+					c.logger.Warn("failed to decode workflow input, storing raw value", "workflow_id", workflows[i].ID, "error", err)
 				}
+				workflows[i].Input = decoded
 			}
 			if loadOutput && workflows[i].Output != nil {
 				encodedOutput, ok := workflows[i].Output.(*string)
 				if !ok {
 					return fmt.Errorf("workflow output must be encoded *string, got %T", workflows[i].Output)
 				}
-				if encodedOutput == nil || *encodedOutput == nilMarker {
-					workflows[i].Output = nil
-				} else {
-					decoded, err := decodeListingValue(encodedOutput, workflows[i].Serialization, c.serializer)
-					if err != nil {
-						c.logger.Warn("failed to decode workflow output, storing raw value", "workflow_id", workflows[i].ID, "error", err)
-					}
-					workflows[i].Output = decoded
+				decoded, err := decodeListingValue(encodedOutput, workflows[i].Serialization, c.serializer)
+				if err != nil {
+					c.logger.Warn("failed to decode workflow output, storing raw value", "workflow_id", workflows[i].ID, "error", err)
 				}
+				workflows[i].Output = decoded
 			}
 			if loadOutput && workflows[i].Error != nil {
 				s := workflows[i].Error.Error()
@@ -5394,12 +5409,7 @@ func (c *dbosContext) GetWorkflowSteps(_ Client, workflowID string, opts ...GetW
 	// Deserialize outputs if asked to
 	if loadOutput {
 		for i := range steps {
-			encodedOutput := steps[i].Output
-			if encodedOutput == nil || *encodedOutput == nilMarker {
-				stepInfos[i].Output = nil
-				continue
-			}
-			decoded, err := decodeListingValue(encodedOutput, steps[i].Serialization, c.serializer)
+			decoded, err := decodeListingValue(steps[i].Output, steps[i].Serialization, c.serializer)
 			if err != nil {
 				c.logger.Warn("failed to decode step output, storing raw value", "workflow_id", workflowID, "step_id", steps[i].StepID, "error", err)
 			}

@@ -136,13 +136,13 @@ type GetStepAggregatesInput struct {
 }
 
 type StepInfo struct {
-	StepID          int       // The sequential ID of the step within the workflow
-	StepName        string    // The name of the step function
-	Output          any       // The output returned by the step (if any)
-	Error           error     // The error returned by the step (if any)
-	ChildWorkflowID string    // The ID of a child workflow spawned by this step (if applicable)
-	StartedAt       time.Time `json:",omitzero"` // When the step execution started
-	CompletedAt     time.Time `json:",omitzero"` // When the step execution completed
+	StepID          int       `json:"function_id"`                 // The sequential ID of the step within the workflow
+	StepName        string    `json:"function_name"`               // The name of the step function
+	Output          any       `json:"output,omitempty"`            // The output returned by the step (if any)
+	Error           error     `json:"error,omitempty"`             // The error returned by the step (if any)
+	ChildWorkflowID string    `json:"child_workflow_id,omitempty"` // The ID of a child workflow spawned by this step (if applicable)
+	StartedAt       time.Time `json:"started_at,omitzero"`         // When the step execution started
+	CompletedAt     time.Time `json:"completed_at,omitzero"`       // When the step execution completed
 }
 
 // AlertHandler is a function that handles alerts received from DBOS Conductor.

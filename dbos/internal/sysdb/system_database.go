@@ -786,6 +786,19 @@ func (s *SysDB) RenderSQL(format string, args ...any) string {
 	return s.dialect.RewriteQuery(fmt.Sprintf(format, args...))
 }
 
+// reports whether the connection string specifies pool_max_conns
+func connStringSetsPoolMaxConns(connString string) bool {
+	if u, err := url.Parse(connString); err == nil && u.Scheme != "" {
+		return u.Query().Has("pool_max_conns")
+	}
+	for field := range strings.FieldsSeq(connString) {
+		if strings.HasPrefix(field, "pool_max_conns=") {
+			return true
+		}
+	}
+	return false
+}
+
 // NewSystemDatabase creates a new SystemDatabase instance and runs migrations.
 func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (SystemDatabase, error) {
 	// Dereference fields from inputs
@@ -847,8 +860,11 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 			return nil, fmt.Errorf("failed to parse database URL: %v", err)
 		}
 
-		// Set pool configuration
-		config.MaxConns = 20
+		// Set pool configuration. pgxpool.ParseConfig already applied a
+		// pool_max_conns given in the URL; only default it when absent.
+		if !connStringSetsPoolMaxConns(databaseURL) {
+			config.MaxConns = 20
+		}
 		config.MinConns = 0
 		config.MaxConnLifetime = time.Hour
 		config.MaxConnIdleTime = time.Minute * 5
@@ -2833,6 +2849,7 @@ type RecordChildWorkflowDBInput struct {
 	ChildWorkflowID  string
 	StepID           int
 	StepName         string
+	StartedAt        time.Time
 	Tx               Tx
 }
 
@@ -2843,8 +2860,8 @@ func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkfl
 	// so a duplicate never aborts the caller's transaction; on conflict, read
 	// back the recorded child and compare.
 	query := s.RenderSQL(`INSERT INTO %soperation_outputs
-            (workflow_uuid, function_id, function_name, child_workflow_id)
-            VALUES ($1, $2, $3, $4)
+            (workflow_uuid, function_id, function_name, child_workflow_id, started_at_epoch_ms)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (workflow_uuid, function_id) DO NOTHING`, s.dialect.SchemaPrefix(s.schema))
 
 	var querier Querier = s.pool
@@ -2853,7 +2870,8 @@ func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkfl
 	}
 
 	result, err := querier.Exec(ctx, query,
-		input.ParentWorkflowID, input.StepID, input.StepName, input.ChildWorkflowID)
+		input.ParentWorkflowID, input.StepID, input.StepName, input.ChildWorkflowID,
+		input.StartedAt.UnixMilli())
 	if err != nil {
 		return fmt.Errorf("failed to record child workflow: %w", err)
 	}
@@ -3020,14 +3038,14 @@ func (s *SysDB) CheckOperationExecution(ctx context.Context, input CheckOperatio
 
 // StepInfo contains information about a workflow step execution.
 type StepRow struct {
-	StepID          int       // The sequential ID of the step within the workflow
-	StepName        string    // The name of the step function
-	Output          *string   // The output returned by the step (if any)
-	Error           error     // The error returned by the step (if any)
-	ChildWorkflowID string    // The ID of a child workflow spawned by this step (if applicable)
-	StartedAt       time.Time // When the step execution started
-	CompletedAt     time.Time // When the step execution completed
-	Serialization   string    // The serialization format used for this step
+	StepID          int       `json:"function_id"`                 // The sequential ID of the step within the workflow
+	StepName        string    `json:"function_name"`               // The name of the step function
+	Output          *string   `json:"output,omitempty"`            // The output returned by the step (if any)
+	Error           error     `json:"error,omitempty"`             // The error returned by the step (if any)
+	ChildWorkflowID string    `json:"child_workflow_id,omitempty"` // The ID of a child workflow spawned by this step (if applicable)
+	StartedAt       time.Time `json:"started_at,omitzero"`         // When the step execution started
+	CompletedAt     time.Time `json:"completed_at,omitzero"`       // When the step execution completed
+	Serialization   string    `json:"serialization,omitempty"`     // The serialization format used for this step
 }
 
 type GetWorkflowStepsInput struct {
@@ -4394,10 +4412,10 @@ type DebounceDelayedWorkflowDBInput struct {
 
 // DebounceResult reports the outcome of a bounce attempt.
 type DebounceResult struct {
-	BouncedWorkflowID  *string // The extended workflow's ID if an existing debounced DELAYED workflow was bounced; nil if no bounce occurred
-	HolderWorkflowID   *string // The workflow currently holding the deduplication ID, if any, when no bounce occurred
-	HolderIsDebounced  bool    // Whether the holder is itself a debounced workflow
-	HolderWorkflowName string  // The holder's workflow name; a mismatch with the caller's means a debounce-key collision between workflows
+	BouncedWorkflowID  *string `json:"bounced_workflow_id"`  // The extended workflow's ID if an existing debounced DELAYED workflow was bounced; nil if no bounce occurred
+	HolderWorkflowID   *string `json:"holder_workflow_id"`   // The workflow currently holding the deduplication ID, if any, when no bounce occurred
+	HolderIsDebounced  bool    `json:"holder_is_debounced"`  // Whether the holder is itself a debounced workflow
+	HolderWorkflowName string  `json:"holder_workflow_name"` // The holder's workflow name; a mismatch with the caller's means a debounce-key collision between workflows
 }
 
 // DebounceDelayedWorkflow extends an existing debounced DELAYED workflow's delay and

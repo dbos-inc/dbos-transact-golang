@@ -206,3 +206,21 @@ func TestIsRetryableRejectsContextErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestConnStringSetsPoolMaxConns(t *testing.T) {
+	cases := []struct {
+		connString string
+		want       bool
+	}{
+		{"postgres://user:pass@localhost:5432/dbos?sslmode=disable&pool_max_conns=7", true},
+		{"postgres://user:pass@localhost:5432/dbos?pool_max_conns=7", true},
+		{"postgres://user:pass@localhost:5432/dbos?sslmode=disable", false},
+		{"host=localhost port=5432 dbname=dbos pool_max_conns=7", true},
+		{"host=localhost port=5432 dbname=dbos", false},
+	}
+	for _, c := range cases {
+		if got := connStringSetsPoolMaxConns(c.connString); got != c.want {
+			t.Errorf("connStringSetsPoolMaxConns(%q) = %v, want %v", c.connString, got, c.want)
+		}
+	}
+}

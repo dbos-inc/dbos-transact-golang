@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -2022,4 +2023,36 @@ func TestCustomSqlitePool(t *testing.T) {
 		systemDB.Shutdown(ctx, 2*time.Second)
 		assert.False(t, systemDB.(*sysdb.SysDB).Launched())
 	})
+}
+
+func TestPoolMaxConnsFromURL(t *testing.T) {
+	skipIfSqlite(t, "pool sizing applies to the Postgres pool")
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	u, err := url.Parse(getDatabaseURL())
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("pool_max_conns", "7")
+	u.RawQuery = q.Encode()
+
+	systemDB, err := sysdb.NewSystemDatabase(ctx, sysdb.NewSystemDatabaseInput{
+		DatabaseURL:    u.String(),
+		DatabaseSchema: "dbos",
+		Logger:         logger,
+	})
+	require.NoError(t, err)
+	defer systemDB.Shutdown(ctx, 2*time.Second)
+	require.EqualValues(t, 7, PgxPool(systemDB.(*sysdb.SysDB).Pool()).Config().MaxConns,
+		"pool_max_conns from the database URL should be honored")
+
+	systemDB2, err := sysdb.NewSystemDatabase(ctx, sysdb.NewSystemDatabaseInput{
+		DatabaseURL:    getDatabaseURL(),
+		DatabaseSchema: "dbos",
+		Logger:         logger,
+	})
+	require.NoError(t, err)
+	defer systemDB2.Shutdown(ctx, 2*time.Second)
+	require.EqualValues(t, 20, PgxPool(systemDB2.(*sysdb.SysDB).Pool()).Config().MaxConns,
+		"the default pool size should apply when the URL does not set pool_max_conns")
 }
