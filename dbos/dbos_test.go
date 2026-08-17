@@ -303,16 +303,17 @@ func TestConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, exists, "dbos_migrations table should exist")
 
-		// Verify migration version is 14 (after initial migration through pgsql_client_functions)
+		// Verify the recorded version is the latest migration's
 		var version int64
 		var count int
 		err = sysDB.Pool().QueryRow(dbCtx, "SELECT COUNT(*) FROM dbos.dbos_migrations").Scan(&count)
 		require.NoError(t, err)
 		assert.Equal(t, 1, count, "dbos_migrations table should have exactly one row")
 
+		migs := sysdb.BuildMigrations("dbos", false)
 		err = sysDB.Pool().QueryRow(dbCtx, "SELECT version FROM dbos.dbos_migrations").Scan(&version)
 		require.NoError(t, err)
-		assert.Equal(t, int64(47), version, "migration version should be 47 (after all migrations including the partition dequeue index)")
+		assert.Equal(t, migs[len(migs)-1].Version, version, "migration version should be the latest migration's")
 
 		// Test manual shutdown and recreate
 		Shutdown(ctx, 1*time.Minute)
@@ -908,16 +909,17 @@ func TestCustomSystemDBSchema(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, exists, "dbos_migrations table should exist in custom schema")
 
-		// Verify migration version is 14 (after initial migration through pgsql_client_functions)
+		// Verify the recorded version is the latest migration's
 		var version int64
 		var count int
 		err = sysDB.Pool().QueryRow(dbCtx, fmt.Sprintf("SELECT COUNT(*) FROM %s.dbos_migrations", customSchema)).Scan(&count)
 		require.NoError(t, err)
 		assert.Equal(t, 1, count, "dbos_migrations table should have exactly one row")
 
+		migs := sysdb.BuildMigrations(customSchema, false)
 		err = sysDB.Pool().QueryRow(dbCtx, fmt.Sprintf("SELECT version FROM %s.dbos_migrations", customSchema)).Scan(&version)
 		require.NoError(t, err)
-		assert.Equal(t, int64(47), version, "migration version should be 47 (after all migrations including the partition dequeue index)")
+		assert.Equal(t, migs[len(migs)-1].Version, version, "migration version should be the latest migration's")
 	})
 
 	// Test workflows for exercising Send/Recv and SetEvent/GetEvent
