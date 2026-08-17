@@ -786,6 +786,19 @@ func (s *SysDB) RenderSQL(format string, args ...any) string {
 	return s.dialect.RewriteQuery(fmt.Sprintf(format, args...))
 }
 
+// reports whether the connection string specifies pool_max_conns
+func connStringSetsPoolMaxConns(connString string) bool {
+	if u, err := url.Parse(connString); err == nil && u.Scheme != "" {
+		return u.Query().Has("pool_max_conns")
+	}
+	for field := range strings.FieldsSeq(connString) {
+		if strings.HasPrefix(field, "pool_max_conns=") {
+			return true
+		}
+	}
+	return false
+}
+
 // NewSystemDatabase creates a new SystemDatabase instance and runs migrations.
 func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (SystemDatabase, error) {
 	// Dereference fields from inputs
@@ -847,8 +860,11 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 			return nil, fmt.Errorf("failed to parse database URL: %v", err)
 		}
 
-		// Set pool configuration
-		config.MaxConns = 20
+		// Set pool configuration. pgxpool.ParseConfig already applied a
+		// pool_max_conns given in the URL; only default it when absent.
+		if !connStringSetsPoolMaxConns(databaseURL) {
+			config.MaxConns = 20
+		}
 		config.MinConns = 0
 		config.MaxConnLifetime = time.Hour
 		config.MaxConnIdleTime = time.Minute * 5
