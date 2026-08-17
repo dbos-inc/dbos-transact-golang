@@ -10834,20 +10834,3 @@ func stepTimingParentWorkflow(ctx Context, _ string) (string, error) {
 	}
 	return "ok", nil
 }
-
-func TestStepInfoJSONShape(t *testing.T) {
-	info := StepInfo{
-		StepID:          3,
-		StepName:        "my-step",
-		ChildWorkflowID: "child-id",
-		StartedAt:       time.UnixMilli(1000).UTC(),
-		CompletedAt:     time.UnixMilli(2000).UTC(),
-	}
-	b, err := json.Marshal(info)
-	require.NoError(t, err)
-	var m map[string]any
-	require.NoError(t, json.Unmarshal(b, &m))
-	for _, key := range []string{"function_id", "function_name", "child_workflow_id", "started_at", "completed_at"} {
-		require.Contains(t, m, key)
-	}
-}

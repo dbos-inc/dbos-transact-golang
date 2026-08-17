@@ -3022,14 +3022,14 @@ func (s *SysDB) CheckOperationExecution(ctx context.Context, input CheckOperatio
 
 // StepInfo contains information about a workflow step execution.
 type StepRow struct {
-	StepID          int       // The sequential ID of the step within the workflow
-	StepName        string    // The name of the step function
-	Output          *string   // The output returned by the step (if any)
-	Error           error     // The error returned by the step (if any)
-	ChildWorkflowID string    // The ID of a child workflow spawned by this step (if applicable)
-	StartedAt       time.Time // When the step execution started
-	CompletedAt     time.Time // When the step execution completed
-	Serialization   string    // The serialization format used for this step
+	StepID          int       `json:"function_id"`                 // The sequential ID of the step within the workflow
+	StepName        string    `json:"function_name"`               // The name of the step function
+	Output          *string   `json:"output,omitempty"`            // The output returned by the step (if any)
+	Error           error     `json:"error,omitempty"`             // The error returned by the step (if any)
+	ChildWorkflowID string    `json:"child_workflow_id,omitempty"` // The ID of a child workflow spawned by this step (if applicable)
+	StartedAt       time.Time `json:"started_at,omitzero"`         // When the step execution started
+	CompletedAt     time.Time `json:"completed_at,omitzero"`       // When the step execution completed
+	Serialization   string    `json:"serialization,omitempty"`     // The serialization format used for this step
 }
 
 type GetWorkflowStepsInput struct {
@@ -4396,10 +4396,10 @@ type DebounceDelayedWorkflowDBInput struct {
 
 // DebounceResult reports the outcome of a bounce attempt.
 type DebounceResult struct {
-	BouncedWorkflowID  *string // The extended workflow's ID if an existing debounced DELAYED workflow was bounced; nil if no bounce occurred
-	HolderWorkflowID   *string // The workflow currently holding the deduplication ID, if any, when no bounce occurred
-	HolderIsDebounced  bool    // Whether the holder is itself a debounced workflow
-	HolderWorkflowName string  // The holder's workflow name; a mismatch with the caller's means a debounce-key collision between workflows
+	BouncedWorkflowID  *string `json:"bounced_workflow_id"`  // The extended workflow's ID if an existing debounced DELAYED workflow was bounced; nil if no bounce occurred
+	HolderWorkflowID   *string `json:"holder_workflow_id"`   // The workflow currently holding the deduplication ID, if any, when no bounce occurred
+	HolderIsDebounced  bool    `json:"holder_is_debounced"`  // Whether the holder is itself a debounced workflow
+	HolderWorkflowName string  `json:"holder_workflow_name"` // The holder's workflow name; a mismatch with the caller's means a debounce-key collision between workflows
 }
 
 // DebounceDelayedWorkflow extends an existing debounced DELAYED workflow's delay and
