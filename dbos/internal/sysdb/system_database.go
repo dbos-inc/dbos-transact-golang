@@ -356,6 +356,15 @@ var migration43SQL string
 //go:embed migrations/44_drop_workflow_events_trigger.sql
 var migration44SQL string
 
+//go:embed migrations/45_create_partition_dequeue_index.sql
+var migration45SQL string
+
+//go:embed migrations/46_create_partition_dequeue_index_v2.sql
+var migration46SQL string
+
+//go:embed migrations/47_drop_partition_dequeue_index.sql
+var migration47SQL string
+
 type MigrationFile struct {
 	Version int64
 	SQL     string
@@ -498,6 +507,9 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		{Version: 42, SQL: fmt.Sprintf(migration42SQL, sanitizedSchema, sanitizedSchema)},
 		{Version: 43, SQL: migration43SQLProcessed},
 		{Version: 44, SQL: migration44SQLProcessed},
+		{Version: 45, SQL: fmt.Sprintf(migration45SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 46, SQL: fmt.Sprintf(migration46SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 47, SQL: fmt.Sprintf(migration47SQL, c, sanitizedSchema), Online: !isCockroach},
 	}
 }
 
