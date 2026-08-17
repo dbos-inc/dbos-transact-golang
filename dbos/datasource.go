@@ -187,7 +187,7 @@ func (ds *DataSource) completionTableStatements() []string {
 		fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, pgx.Identifier{ds.schema}.Sanitize()),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 	workflow_id TEXT NOT NULL,
-	step_id INT NOT NULL,
+	step_id INT4 NOT NULL,
 	output TEXT,
 	error TEXT,
 	serialization TEXT,
