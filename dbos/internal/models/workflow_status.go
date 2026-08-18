@@ -54,6 +54,7 @@ type WorkflowStatus struct {
 	ScheduleName       string             `json:"schedule_name,omitempty"`       // Name of the schedule that enqueued this workflow (if any)
 	DebounceDeadline   time.Time          `json:"debounce_deadline,omitzero"`    // Absolute cap beyond which debounce calls may not extend the delay (zero = no cap)
 	IsDebounced        bool               `json:"is_debounced,omitempty"`        // Whether the deduplication ID is a debounce key to clear on the DELAYED->ENQUEUED transition
+	ApplicationName    string             `json:"application_name,omitempty"`    // Owning application; empty if unclaimed (any application may run it)
 }
 
 // MarshalJSON renders Timeout as integer milliseconds (timeout_ms), matching the

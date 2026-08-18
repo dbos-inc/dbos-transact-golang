@@ -134,6 +134,7 @@ func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Tim
 	databaseURL, databaseSchema string,
 	customDB *sql.DB,
 	logger *slog.Logger,
+	appName string,
 ) (SystemDatabase, error) {
 	// The driver is required even with a custom handle: error classification
 	// (retryable/contention/constraint) needs its ErrorCode extractor.
@@ -177,6 +178,7 @@ func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Tim
 	return &SysDB{
 		pool:                 NewSQLPool(db),
 		dialect:              SqliteDialect{},
+		appName:              appName,
 		RecvNotifier:         newNotifyRegistry(_DBOS_NOTIFICATIONS_CHANNEL, false),
 		EventNotifier:        newNotifyRegistry(_DBOS_WORKFLOW_EVENTS_CHANNEL, false),
 		streamNotifier:       newNotifyRegistry(_DBOS_STREAMS_CHANNEL, false),

@@ -1876,10 +1876,15 @@ func withEnqueueDebounce(deadline time.Time) EnqueueOption {
 
 // Enqueue enqueues a workflow by name to a named queue for deferred execution.
 func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input any, opts ...EnqueueOption) (WorkflowHandle[any], error) {
+	// A nameless handle leaves the version unset, to be dequeued at the owning application's latest version.
+	defaultVersion := c.GetApplicationVersion()
+	if c.ownerAppName() == "" {
+		defaultVersion = ""
+	}
 	// Process options
 	params := &enqueueOptions{
 		workflowName:       workflowName,
-		applicationVersion: c.GetApplicationVersion(),
+		applicationVersion: defaultVersion,
 		workflowInput:      input,
 	}
 	for _, opt := range opts {

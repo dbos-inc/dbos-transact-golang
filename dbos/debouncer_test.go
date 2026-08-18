@@ -599,14 +599,19 @@ func TestDebouncerConfiguredInstance(t *testing.T) {
 // transient-race retry that is impractical to reproduce end-to-end.
 func TestClassifyBounce(t *testing.T) {
 	id := "holder-id"
-	assert.Equal(t, bounceReturn, classifyBounce(&sysdb.DebounceResult{BouncedWorkflowID: &id}, "wf"))
-	assert.Equal(t, bounceEnqueue, classifyBounce(&sysdb.DebounceResult{}, "wf"))
-	assert.Equal(t, bounceRaise, classifyBounce(&sysdb.DebounceResult{HolderWorkflowID: &id, HolderIsDebounced: false, HolderWorkflowName: "wf"}, "wf"),
+	appA, appB := "app-a", "app-b"
+	assert.Equal(t, bounceReturn, classifyBounce(&sysdb.DebounceResult{BouncedWorkflowID: &id}, "wf", appA))
+	assert.Equal(t, bounceEnqueue, classifyBounce(&sysdb.DebounceResult{}, "wf", appA))
+	assert.Equal(t, bounceRaise, classifyBounce(&sysdb.DebounceResult{HolderWorkflowID: &id, HolderIsDebounced: false, HolderWorkflowName: "wf"}, "wf", appA),
 		"a non-debounced holder of the key is a conflict")
-	assert.Equal(t, bounceRaise, classifyBounce(&sysdb.DebounceResult{HolderWorkflowID: &id, HolderIsDebounced: true, HolderWorkflowName: "other"}, "wf"),
+	assert.Equal(t, bounceRaise, classifyBounce(&sysdb.DebounceResult{HolderWorkflowID: &id, HolderIsDebounced: true, HolderWorkflowName: "other"}, "wf", appA),
 		"a debounced holder for another workflow is a key collision")
-	assert.Equal(t, bounceRetry, classifyBounce(&sysdb.DebounceResult{HolderWorkflowID: &id, HolderIsDebounced: true, HolderWorkflowName: "wf"}, "wf"),
+	assert.Equal(t, bounceRaise, classifyBounce(&sysdb.DebounceResult{HolderWorkflowID: &id, HolderIsDebounced: true, HolderWorkflowName: "wf", HolderApplicationName: &appB}, "wf", appA),
+		"a foreign holder never leaves DELAYED on this application's account, so retrying would spin")
+	assert.Equal(t, bounceRetry, classifyBounce(&sysdb.DebounceResult{HolderWorkflowID: &id, HolderIsDebounced: true, HolderWorkflowName: "wf", HolderApplicationName: &appA}, "wf", appA),
 		"a same-name debounced holder that left DELAYED mid-bounce is retried")
+	assert.Equal(t, bounceRetry, classifyBounce(&sysdb.DebounceResult{HolderWorkflowID: &id, HolderIsDebounced: true, HolderWorkflowName: "wf"}, "wf", appA),
+		"an unclaimed same-name debounced holder is extendable, so the miss was a transient race")
 }
 
 // TestDebounceDeadlineCapsBounce verifies a bounce cannot push the start past

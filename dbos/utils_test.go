@@ -202,6 +202,7 @@ type setupDBOSOptions struct {
 	serializer               Serializer[any]
 	schedulerPollingInterval time.Duration
 	databaseURL              string // share another test's database (sqlite URLs are per-*testing.T otherwise)
+	appName                  string // application name (defaults to "test-app")
 }
 
 /* Test database setup */
@@ -219,9 +220,13 @@ func setupDBOS(t *testing.T, opts setupDBOSOptions) Context {
 		}
 	}
 
+	appName := opts.appName
+	if appName == "" {
+		appName = "test-app"
+	}
 	config := Config{
 		DatabaseURL:              databaseURL,
-		AppName:                  "test-app",
+		AppName:                  appName,
 		Serializer:               opts.serializer,
 		SchedulerPollingInterval: opts.schedulerPollingInterval,
 	}
@@ -320,14 +325,16 @@ func queueEntriesAreCleanedUp(ctx Context) bool {
 			return false
 		}
 
+		// Scoped so a peer context sharing the database doesn't fail the check.
 		query := sdb.Dialect().RewriteQuery(fmt.Sprintf(`SELECT COUNT(*)
 				  FROM %sworkflow_status
 				  WHERE queue_name IS NOT NULL
 					AND queue_name != $1
-					AND status IN ('ENQUEUED', 'PENDING')`, sdb.Dialect().SchemaPrefix(sdb.Schema())))
+					AND status IN ('ENQUEUED', 'PENDING')
+					AND (application_name = $2 OR application_name IS NULL)`, sdb.Dialect().SchemaPrefix(sdb.Schema())))
 
 		var count int
-		err = tx.QueryRow(ctx, query, models.InternalQueueName).Scan(&count)
+		err = tx.QueryRow(ctx, query, models.InternalQueueName, exec.config.AppName).Scan(&count)
 		tx.Rollback(ctx)
 
 		if err != nil {
