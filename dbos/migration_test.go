@@ -303,6 +303,15 @@ func TestMigrationStatements(t *testing.T) {
 	assert.NotContains(t, mid, stmts[0])
 	assert.NotContains(t, mid, "-- Migration 9")
 
+	// The unused versions between the Go history and the shared base emit no
+	// bookkeeping, and a from inside the gap starts at the shared base.
+	assert.Contains(t, stmts, "-- Migration 100")
+	assert.Contains(t, stmts, fmt.Sprintf("-- Migration %d", latest))
+	assert.NotContains(t, stmts, `UPDATE "dbos".dbos_migrations SET version = 48;`)
+	gap, err := MigrationStatements("", int(sysdb.SharedMigrationBase)-1)
+	require.NoError(t, err)
+	assert.Equal(t, "-- Migration 100", gap[0])
+
 	_, err = pool.Exec(bg, "DROP SCHEMA dbos CASCADE")
 	require.NoError(t, err)
 
