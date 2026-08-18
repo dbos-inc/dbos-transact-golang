@@ -157,7 +157,7 @@ const (
 	bounceRetry                       // a same-name debounced holder flipped out of DELAYED mid-bounce (a rare race); retry the bounce
 )
 
-func classifyBounce(result *sysdb.DebounceResult, workflowName string) bounceAction {
+func classifyBounce(result *sysdb.DebounceResult, workflowName string, appName string) bounceAction {
 	switch {
 	case result.BouncedWorkflowID != nil:
 		return bounceReturn
@@ -166,6 +166,8 @@ func classifyBounce(result *sysdb.DebounceResult, workflowName string) bounceAct
 	case !result.HolderIsDebounced:
 		return bounceRaise
 	case result.HolderWorkflowName != workflowName:
+		return bounceRaise
+	case result.HolderApplicationName != nil && *result.HolderApplicationName != appName:
 		return bounceRaise
 	default:
 		return bounceRetry
@@ -270,7 +272,7 @@ func debounce[R any, P any](c *dbosContext, params debouncerParams, key string, 
 			return nil, err
 		}
 
-		switch classifyBounce(result, params.workflowName) {
+		switch classifyBounce(result, params.workflowName, c.ownerAppName()) {
 		case bounceReturn:
 			return newWorkflowPollingHandle[R](c, *result.BouncedWorkflowID), nil
 		case bounceRaise:

@@ -62,6 +62,7 @@ type Config struct {
 	SchedulerPollingInterval     time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
 	SystemDBStartupTimeout       time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
 	NotificationCoalesceInterval time.Duration   // Controls how often stream-write and set-event notifications are batched
+	namelessOwner                bool            // Act for no specific application: write unclaimed rows, matches all. Used by client contexts.
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -109,6 +110,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		SchedulerPollingInterval:     inputConfig.SchedulerPollingInterval,
 		SystemDBStartupTimeout:       inputConfig.SystemDBStartupTimeout,
 		NotificationCoalesceInterval: inputConfig.NotificationCoalesceInterval,
+		namelessOwner:                inputConfig.namelessOwner,
 	}
 
 	if dbosConfig.ConductorExecutorMetadata != nil {
@@ -146,7 +148,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 
 	// Apply defaults for empty values
 	if dbosConfig.ApplicationVersion == "" {
-		dbosConfig.ApplicationVersion = computeApplicationVersion()
+		dbosConfig.ApplicationVersion = computeApplicationVersion(dbosConfig.AppName)
 	}
 	if dbosConfig.ExecutorID == "" {
 		dbosConfig.ExecutorID = "local"
@@ -600,13 +602,18 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 	initExecutor.serializer = config.Serializer
 
+	ownerAppName := config.AppName
+	if config.namelessOwner {
+		ownerAppName = ""
+	}
 	newSystemDatabaseInputs := sysdb.NewSystemDatabaseInput{
 		DatabaseURL:                  config.DatabaseURL,
 		DatabaseSchema:               config.DatabaseSchema,
 		CustomPool:                   config.SystemDBPool,
 		CustomSqliteDB:               config.SQLiteSystemDB,
 		Logger:                       initExecutor.logger,
-		ApplicationName:              config.AppName,
+		AppName:                      ownerAppName,
+		ConnectionAppName:            config.AppName,
 		NotificationCoalesceInterval: config.NotificationCoalesceInterval,
 		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error) {
 			ser := resolveEncoder(ctx)
@@ -721,6 +728,7 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 		SQLiteSystemDB:         config.SQLiteSystemDB,
 		Serializer:             config.Serializer,
 		SystemDBStartupTimeout: config.SystemDBStartupTimeout,
+		namelessOwner:          true,
 	})
 	if err != nil {
 		return nil, err
@@ -732,6 +740,14 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 	}
 
 	return dbosCtx, nil
+}
+
+// ownerAppName is the application this handle acts for; empty if nameless.
+func (c *dbosContext) ownerAppName() string {
+	if c.config.namelessOwner {
+		return ""
+	}
+	return c.config.AppName
 }
 
 // Launch initializes and starts the DBOS runtime components including the system database
@@ -989,13 +1005,17 @@ func getBinaryHash() (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func computeApplicationVersion() string {
+func computeApplicationVersion(appName string) string {
 	hash, err := getBinaryHash()
 	if err != nil {
 		fmt.Printf("DBOS: Failed to compute binary hash: %v\n", err)
 		return ""
 	}
-	return hash
+	// Include the app name so same-binary peers under different names get distinct versions.
+	hasher := sha256.New()
+	hasher.Write([]byte(hash))
+	hasher.Write([]byte(appName))
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 // getDBOSVersion returns the version of the DBOS module
