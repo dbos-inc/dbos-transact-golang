@@ -54,4 +54,5 @@ type QueueConfig struct {
 	BasePollingInterval time.Duration `json:"-"`
 	MaxPollingInterval  time.Duration `json:"-"`
 	DatabaseBacked      bool          `json:"-"`
+	ApplicationName     string        `json:"application_name,omitempty"`
 }

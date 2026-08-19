@@ -1835,6 +1835,15 @@ func WithEnqueueAuthenticatedRoles(roles ...string) EnqueueOption {
 	}
 }
 
+// WithEnqueueApplicationName sets the application that owns the enqueued
+// workflow, which dequeues and runs it. Unset defaults to the enqueuing
+// handle's application.
+func WithEnqueueApplicationName(name string) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.applicationName = name
+	}
+}
+
 // WithEnqueueAttributes attaches custom key-value attributes to the enqueued workflow.
 // Attributes are recorded in the workflow status at creation, must be
 // JSON-serializable, and can be searched with WithFilterAttributes on Postgres.
@@ -1848,6 +1857,7 @@ type enqueueOptions struct {
 	workflowName        string
 	workflowID          string
 	applicationVersion  string
+	applicationName     string
 	deduplicationID     string
 	deduplicationPolicy DeduplicationPolicy
 	priority            uint
@@ -1876,19 +1886,21 @@ func withEnqueueDebounce(deadline time.Time) EnqueueOption {
 
 // Enqueue enqueues a workflow by name to a named queue for deferred execution.
 func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input any, opts ...EnqueueOption) (WorkflowHandle[any], error) {
-	// A nameless handle leaves the version unset, to be dequeued at the owning application's latest version.
-	defaultVersion := c.GetApplicationVersion()
-	if c.ownerAppName() == "" {
-		defaultVersion = ""
-	}
 	// Process options
 	params := &enqueueOptions{
-		workflowName:       workflowName,
-		applicationVersion: defaultVersion,
-		workflowInput:      input,
+		workflowName:  workflowName,
+		workflowInput: input,
 	}
 	for _, opt := range opts {
 		opt(params)
+	}
+
+	// Default the version to this context's own only when the enqueueing context runs
+	// workflows (not a client) and the workflow is aimed at the enqueueing context's application;
+	// otherwise leave it unset, to be dequeued at the owning application's latest version.
+	if params.applicationVersion == "" && !c.config.isClient &&
+		(params.applicationName == "" || params.applicationName == c.ownerAppName()) {
+		params.applicationVersion = c.GetApplicationVersion()
 	}
 
 	if len(queueName) == 0 {
@@ -1967,6 +1979,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	status := WorkflowStatus{
 		Name:               params.workflowName,
 		ApplicationVersion: params.applicationVersion,
+		ApplicationName:    params.applicationName,
 		Status:             wfStatus,
 		ID:                 workflowID,
 		CreatedAt:          time.Now(),
@@ -5152,6 +5165,15 @@ func WithFilterScheduleName(scheduleName ...string) ListWorkflowsOption {
 	}
 }
 
+// WithFilterApplicationName lists workflows owned by these applications (plus
+// unclaimed ones). By default only this handle's own application's workflows
+// are listed.
+func WithFilterApplicationName(applicationName ...string) ListWorkflowsOption {
+	return func(p *models.ListWorkflowsInput) {
+		p.ApplicationName = applicationName
+	}
+}
+
 func (c *dbosContext) ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]WorkflowStatus, error) {
 	// Initialize parameters with defaults
 	loadInput := true
@@ -5204,6 +5226,7 @@ func (c *dbosContext) ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]Wo
 		HasParent:          params.HasParent,
 		Attributes:         params.Attributes,
 		ScheduleName:       params.ScheduleName,
+		ApplicationName:    params.ApplicationName,
 		IsDebounced:        params.IsDebounced,
 	}
 
@@ -5461,6 +5484,7 @@ func (c *dbosContext) GetWorkflowAggregates(_ Client, input GetWorkflowAggregate
 		GroupByQueueName:          input.GroupByQueueName,
 		GroupByExecutorID:         input.GroupByExecutorID,
 		GroupByApplicationVersion: input.GroupByApplicationVersion,
+		GroupByApplicationName:    input.GroupByApplicationName,
 		SelectCount:               input.SelectCount,
 		SelectMinCreatedAt:        input.SelectMinCreatedAt,
 		SelectMaxQueueWaitMs:      input.SelectMaxQueueWaitMs,
@@ -5482,6 +5506,7 @@ func (c *dbosContext) GetWorkflowAggregates(_ Client, input GetWorkflowAggregate
 		AuthenticatedUser:         input.AuthenticatedUser,
 		ForkedFrom:                input.ForkedFrom,
 		ParentWorkflowID:          input.ParentWorkflowID,
+		ApplicationName:           input.ApplicationName,
 		WasForkedFrom:             input.WasForkedFrom,
 		HasParent:                 input.HasParent,
 		Attributes:                input.Attributes,
@@ -5512,7 +5537,8 @@ func (c *dbosContext) GetWorkflowAggregates(_ Client, input GetWorkflowAggregate
 //
 // At least one Select* flag must be true. Returns one WorkflowAggregateRow per non-empty
 // group. Each row's Group map contains an entry per enabled grouping column ("status",
-// "name", "queue_name", "executor_id", "application_version", "time_bucket"). Map values are
+// "name", "queue_name", "executor_id", "application_version", "application_name",
+// "time_bucket"). Map values are
 // pointers to allow representing NULL grouping values (e.g. workflows without a queue_name).
 // Count, MinCreatedAt, MaxQueueWaitMs and MaxTotalLatencyMs are populated only for the
 // corresponding enabled Select* flag; the rest are nil.
@@ -5552,6 +5578,7 @@ func (c *dbosContext) GetStepAggregates(_ Client, input GetStepAggregatesInput) 
 		WorkflowIDPrefix:    input.WorkflowIDPrefix,
 		CompletedAfter:      input.CompletedAfter,
 		CompletedBefore:     input.CompletedBefore,
+		ApplicationName:     input.ApplicationName,
 	}
 
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
@@ -5732,6 +5759,7 @@ func (c *dbosContext) CreateSchedule(_ Client, spec ScheduleSpec) error {
 		AutomaticBackfill: spec.AutomaticBackfill,
 		CronTimezone:      spec.CronTimezone,
 		QueueName:         spec.QueueName,
+		ApplicationName:   c.requestedOwner(spec.ApplicationName),
 	}
 
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
@@ -5829,6 +5857,7 @@ func (c *dbosContext) ApplySchedules(_ Client, schedules []ScheduleSpec) error {
 				AutomaticBackfill: spec.AutomaticBackfill,
 				CronTimezone:      spec.CronTimezone,
 				QueueName:         queueName,
+				ApplicationName:   c.requestedOwner(spec.ApplicationName),
 				Tx:                tx,
 			}); err != nil {
 				return fmt.Errorf("failed to upsert schedule: %w", err)
@@ -5975,30 +6004,26 @@ func (c *dbosContext) GetSchedule(_ Client, scheduleName string) (WorkflowSchedu
 		return WorkflowSchedule{}, errors.New("schedule_name is required")
 	}
 
-	dbInput := sysdb.ListSchedulesDBInput{ScheduleNamePrefixes: []string{scheduleName}}
-
-	var schedules []WorkflowSchedule
+	var schedule *WorkflowSchedule
 	var err error
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
-		schedules, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowSchedule, error) {
-			return sysdb.RetryWithResult(ctx, func() ([]WorkflowSchedule, error) {
-				return c.systemDB.ListSchedules(ctx, dbInput)
+		schedule, err = RunAsStep(c, func(ctx context.Context) (*WorkflowSchedule, error) {
+			return sysdb.RetryWithResult(ctx, func() (*WorkflowSchedule, error) {
+				return c.systemDB.GetSchedule(ctx, sysdb.GetScheduleDBInput{ScheduleName: scheduleName})
 			}, sysdb.WithRetrierLogger(c.logger))
 		}, WithStepName("DBOS.getSchedule"))
 	} else {
-		schedules, err = sysdb.RetryWithResult(c, func() ([]WorkflowSchedule, error) {
-			return c.systemDB.ListSchedules(c, dbInput)
+		schedule, err = sysdb.RetryWithResult(c, func() (*WorkflowSchedule, error) {
+			return c.systemDB.GetSchedule(c, sysdb.GetScheduleDBInput{ScheduleName: scheduleName})
 		}, sysdb.WithRetrierLogger(c.logger))
 	}
 	if err != nil {
 		return WorkflowSchedule{}, err
 	}
-	for i := range schedules {
-		if schedules[i].ScheduleName == scheduleName {
-			return schedules[i], nil
-		}
+	if schedule == nil {
+		return WorkflowSchedule{}, models.NewScheduleNotFoundError(scheduleName)
 	}
-	return WorkflowSchedule{}, models.NewScheduleNotFoundError(scheduleName)
+	return *schedule, nil
 }
 
 // GetSchedule gets a schedule by name. If no schedule with the given name
@@ -6022,7 +6047,9 @@ func (c *dbosContext) ListSchedules(_ Client, opts ...ListSchedulesOption) ([]Wo
 	dbInput := sysdb.ListSchedulesDBInput{
 		Statuses:             o.Statuses,
 		WorkflowNames:        o.WorkflowNames,
+		ScheduleNames:        o.ScheduleNames,
 		ScheduleNamePrefixes: o.ScheduleNamePrefixes,
+		ApplicationName:      o.ApplicationNames,
 	}
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
 		return RunAsStep(c, func(ctx context.Context) ([]WorkflowSchedule, error) {
@@ -6050,10 +6077,26 @@ func WithScheduleWorkflowNames(names ...string) ListSchedulesOption {
 	}
 }
 
+// WithScheduleNames filters schedules by exact schedule name(s).
+func WithScheduleNames(names ...string) ListSchedulesOption {
+	return func(o *models.ListSchedulesInput) {
+		o.ScheduleNames = names
+	}
+}
+
 // WithScheduleNamePrefixes filters schedules by schedule name prefix(es).
 func WithScheduleNamePrefixes(prefixes ...string) ListSchedulesOption {
 	return func(o *models.ListSchedulesInput) {
 		o.ScheduleNamePrefixes = prefixes
+	}
+}
+
+// WithScheduleApplicationNames lists schedules owned by these
+// applications, plus unclaimed ones. By default, only the calling
+// application's schedules (plus unclaimed ones) are listed.
+func WithScheduleApplicationNames(names ...string) ListSchedulesOption {
+	return func(o *models.ListSchedulesInput) {
+		o.ApplicationNames = names
 	}
 }
 
@@ -6078,17 +6121,11 @@ func (c *dbosContext) BackfillSchedule(_ Client, scheduleName string, start time
 		return nil, errors.New("schedule_name is required")
 	}
 
-	existing, err := c.GetSchedule(c, scheduleName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get schedule: %w", err)
-	}
-
 	var ids []string
-	err = sysdb.Retry(c, func() error {
+	err := sysdb.Retry(c, func() error {
 		var bfErr error
 		ids, bfErr = c.systemDB.BackfillSchedule(c, sysdb.BackfillScheduleDBInput{
 			ScheduleName: scheduleName,
-			Schedule:     existing.Schedule,
 			StartTime:    start,
 			EndTime:      end,
 		})
@@ -6168,7 +6205,7 @@ func ListApplicationVersions(ctx Client) ([]VersionInfo, error) {
 // recent timestamp.
 func (c *dbosContext) GetLatestApplicationVersion(_ Client) (VersionInfo, error) {
 	latest, err := sysdb.RetryWithResult(c, func() (*VersionInfo, error) {
-		return c.systemDB.GetLatestApplicationVersion(c, nil)
+		return c.systemDB.GetLatestApplicationVersion(c, nil, "")
 	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
 		return VersionInfo{}, err
@@ -6193,10 +6230,10 @@ func (c *dbosContext) SetLatestApplicationVersion(_ Client, versionName string) 
 	}
 	return sysdb.Retry(c, func() error {
 		ts := time.Now().UnixMilli()
-		if latest, err := c.systemDB.GetLatestApplicationVersion(c, nil); err == nil && latest.Timestamp >= ts {
+		if latest, err := c.systemDB.GetLatestApplicationVersion(c, nil, ""); err == nil && latest.Timestamp >= ts {
 			ts = latest.Timestamp + 1
 		}
-		return c.systemDB.UpdateApplicationVersionTimestamp(c, versionName, ts)
+		return c.systemDB.UpdateApplicationVersionTimestamp(c, versionName, ts, c.requestedOwner(""))
 	}, sysdb.WithRetrierLogger(c.logger))
 }
 

@@ -35,6 +35,7 @@ type ScheduleSpec struct {
 	AutomaticBackfill bool   // Backfill missed ticks when the schedule is reloaded after downtime
 	CronTimezone      string // Optional IANA timezone used to interpret the cron expression
 	QueueName         string // Optional queue to route scheduled invocations to (defaults to the internal queue)
+	ApplicationName   string // Optional application that owns the schedule and runs its workflows (defaults to the caller's application)
 }
 
 const (
@@ -165,6 +166,10 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 	if queueName == "" {
 		queueName = models.InternalQueueName
 	}
+	scheduleOwner := schedule.ApplicationName
+	if scheduleOwner == "" {
+		scheduleOwner = c.ownerAppName()
+	}
 
 	return func(ctx Context, input ScheduledWorkflowInput) (any, error) {
 		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, input.ScheduledTime.Format(time.RFC3339))
@@ -188,11 +193,11 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 			return nil, fmt.Errorf("failed to encode scheduled workflow input: %w", err)
 		}
 
-		// Scheduled workflows always run against the latest registered application version, so a stale executor does not pick them up after a new deploy.
+		// Scheduled workflows always run against the owner's latest registered application version, so a stale executor does not pick them up after a new deploy.
 		// If lookup fails, leave the version unset: NULL rows are only dequeued by executors on the latest version.
 		var appVersion string
 		latest, err := sysdb.RetryWithResult(c, func() (*VersionInfo, error) {
-			return c.systemDB.GetLatestApplicationVersion(c, nil)
+			return c.systemDB.GetLatestApplicationVersion(c, nil, scheduleOwner)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to fetch latest application version for scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
@@ -213,6 +218,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 			QueueName:          queueName,
 			Serialization:      ser.Name(),
 			ScheduleName:       scheduleName,
+			ApplicationName:    scheduleOwner,
 		}
 
 		uncancellableCtx := WithoutCancel(c)
@@ -345,7 +351,6 @@ func (c *dbosContext) maybeAutomaticBackfill(sched *WorkflowSchedule) {
 	if _, err := sysdb.RetryWithResult(c, func() ([]string, error) {
 		return c.systemDB.BackfillSchedule(c, sysdb.BackfillScheduleDBInput{
 			ScheduleName: sched.ScheduleName,
-			Schedule:     sched.Schedule,
 			StartTime:    start,
 			EndTime:      end,
 		})

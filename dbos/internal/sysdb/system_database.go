@@ -107,7 +107,7 @@ type SystemDatabase interface {
 
 	// Database-backed queue registry (the queues table)
 	GetQueue(ctx context.Context, name string) (*models.QueueConfig, error) // returns nil if the queue does not exist
-	ListQueues(ctx context.Context) ([]models.QueueConfig, error)
+	ListQueues(ctx context.Context, applicationNames []string) ([]models.QueueConfig, error)
 	UpsertQueue(ctx context.Context, input UpsertQueueDBInput) (bool, error)
 	UpdateQueueConfig(ctx context.Context, name string, mutate func(*models.QueueConfig) error) (*models.QueueConfig, error)
 	DeleteQueue(ctx context.Context, name string) error
@@ -116,12 +116,13 @@ type SystemDatabase interface {
 	GarbageCollectWorkflows(ctx context.Context, input GarbageCollectWorkflowsInput) error
 
 	// Metrics
-	GetMetrics(ctx context.Context, startTime string, endTime string) ([]MetricData, error)
+	GetMetrics(ctx context.Context, startTime string, endTime string, applicationNames []string) ([]MetricData, error)
 
 	// Schedules
 	CreateSchedule(ctx context.Context, input CreateScheduleDBInput) error
 	UpsertSchedule(ctx context.Context, input UpsertScheduleDBInput) error
 	ListSchedules(ctx context.Context, input ListSchedulesDBInput) ([]models.WorkflowSchedule, error)
+	GetSchedule(ctx context.Context, input GetScheduleDBInput) (*models.WorkflowSchedule, error)
 	UpdateSchedule(ctx context.Context, input UpdateScheduleDBInput) error
 	UpdateScheduleLastFiredAt(ctx context.Context, scheduleName string, lastFiredAt time.Time) error
 	DeleteSchedule(ctx context.Context, input DeleteScheduleDBInput) error
@@ -129,10 +130,10 @@ type SystemDatabase interface {
 	TriggerSchedule(ctx context.Context, scheduleName string) (string, error)
 
 	// Application versions
-	CreateApplicationVersion(ctx context.Context, versionName string) error
-	UpdateApplicationVersionTimestamp(ctx context.Context, versionName string, newTimestamp int64) error
+	CreateApplicationVersion(ctx context.Context, versionName string, owner *string) error
+	UpdateApplicationVersionTimestamp(ctx context.Context, versionName string, newTimestamp int64, owner *string) error
 	ListApplicationVersions(ctx context.Context) ([]VersionInfo, error)
-	GetLatestApplicationVersion(ctx context.Context, tx Tx) (*VersionInfo, error)
+	GetLatestApplicationVersion(ctx context.Context, tx Tx, applicationName string) (*VersionInfo, error)
 
 	// Workflow export/import
 	ExportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error)
@@ -189,6 +190,39 @@ func (s *SysDB) observabilityNames(names []string) []string {
 // Match rows owned by the application plus unclaimed ones.
 func nameFilterSQL(column string, argNum int) string {
 	return fmt.Sprintf("(%s = $%d OR %s IS NULL)", column, argNum, column)
+}
+
+// This method is used to check whether reading/writing a queue/schedule/application version row
+// with a specified application name, is valid.
+// For example, when we upsert a schedule, the request can come from a context that operates for a specific application
+// But it is possible that a eponymous entry is owned by another application
+// This method validates whether the "requested" owner is valid for a row.
+func (s *SysDB) resolveRowOwner(ctx context.Context, q Querier, table, nameColumn, name string, owner *string, kind string) (*string, error) {
+	// Read the current application name for the object
+	query := s.RenderSQL(`SELECT application_name FROM %s`+table+` WHERE `+nameColumn+` = $1`, s.dialect.SchemaPrefix(s.schema))
+	var current *string
+	err := q.QueryRow(ctx, s.dialect.RewriteQuery(query), name).Scan(&current)
+	// If no entry is found, this is the insert path and we return the requested owning application name
+	if errors.Is(err, ErrNoRows) {
+		return owner, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up the owner of %s %s: %w", strings.ToLower(kind), name, err)
+	}
+	// If there is an entry (upsert path), but there is no application name, this row predates system DB sharing
+	// And we allow the requested owner to claim the row.
+	if current == nil {
+		return owner, nil
+	}
+	// If there is an entry with an owner already, and there is no requested owner (the path of a client operating on behalf of all apps)
+	// Or the requested owner is the current owner
+	// Return the current owner
+	if owner == nil || *current == *owner {
+		return current, nil
+	}
+	// If we reach this point, there already exists an owner for the row, and it is different than the requested one
+	// This means the object name is already in use by another application, and we return an error.
+	return nil, models.NewNameOwnedByPeerError(kind, name, *current, *owner)
 }
 
 /*******************************/
@@ -3280,6 +3314,7 @@ type GetWorkflowAggregatesDBInput struct {
 	GroupByQueueName          bool
 	GroupByExecutorID         bool
 	GroupByApplicationVersion bool
+	GroupByApplicationName    bool
 	SelectCount               bool
 	SelectMinCreatedAt        bool
 	SelectMaxQueueWaitMs      bool
@@ -3334,6 +3369,9 @@ func (s *SysDB) GetWorkflowAggregates(ctx context.Context, input GetWorkflowAggr
 	}
 	if input.GroupByApplicationVersion {
 		groups = append(groups, groupCol{name: "application_version", expr: "application_version"})
+	}
+	if input.GroupByApplicationName {
+		groups = append(groups, groupCol{name: "application_name", expr: "application_name"})
 	}
 
 	qb := newQueryBuilder(s.dialect)
@@ -4764,7 +4802,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	// (priority, created_at) so the planner can satisfy the dequeue scan from
 	// idx_workflow_status_in_flight (queue_name, status, priority, created_at).
 	isLatestVersion := true
-	switch latest, err := s.GetLatestApplicationVersion(ctx, tx); {
+	switch latest, err := s.GetLatestApplicationVersion(ctx, tx, ""); {
 	case err == nil:
 		isLatestVersion = latest.Name == input.ApplicationVersion
 	case errors.Is(err, &models.Error{Code: models.ErrorCodeNoApplicationVersions}):
@@ -5015,11 +5053,12 @@ func (s *SysDB) GetQueuePartitions(ctx context.Context, queueName string) ([]str
 /******* QUEUE REGISTRY ********/
 /*******************************/
 
-const _QUEUE_SELECT_COLUMNS = "name, concurrency, worker_concurrency, rate_limit_max, rate_limit_period_sec, priority_enabled, partition_queue, polling_interval_sec"
+const _QUEUE_SELECT_COLUMNS = "name, concurrency, worker_concurrency, rate_limit_max, rate_limit_period_sec, priority_enabled, partition_queue, polling_interval_sec, application_name"
 
 type UpsertQueueDBInput struct {
-	Queue          models.QueueConfig
-	UpdateExisting bool
+	Queue           models.QueueConfig
+	UpdateExisting  bool
+	ApplicationName *string
 }
 
 // scanQueueRow builds a database-backed models.QueueConfig from a row selecting
@@ -5032,8 +5071,9 @@ func scanQueueRow(row Row) (*models.QueueConfig, error) {
 		rateLimitPeriodSec              *float64
 		priorityEnabled, partitionQueue bool
 		pollingIntervalSec              float64
+		applicationName                 *string
 	)
-	if err := row.Scan(&name, &concurrency, &workerConcurrency, &rateLimitMax, &rateLimitPeriodSec, &priorityEnabled, &partitionQueue, &pollingIntervalSec); err != nil {
+	if err := row.Scan(&name, &concurrency, &workerConcurrency, &rateLimitMax, &rateLimitPeriodSec, &priorityEnabled, &partitionQueue, &pollingIntervalSec, &applicationName); err != nil {
 		return nil, err
 	}
 	q := &models.QueueConfig{
@@ -5043,6 +5083,9 @@ func scanQueueRow(row Row) (*models.QueueConfig, error) {
 		PriorityEnabled:   priorityEnabled,
 		PartitionQueue:    partitionQueue,
 		DatabaseBacked:    true,
+	}
+	if applicationName != nil {
+		q.ApplicationName = *applicationName
 	}
 	if rateLimitMax != nil {
 		var period time.Duration
@@ -5077,10 +5120,20 @@ func (s *SysDB) getQueueRow(ctx context.Context, db Querier, name string) (*mode
 	return q, nil
 }
 
-// ListQueues returns all database-backed queues registered in the queues table.
-func (s *SysDB) ListQueues(ctx context.Context) ([]models.QueueConfig, error) {
+// ListQueues returns database-backed queues owned by these applications plus
+// unclaimed ones; nil defaults to this handle's own application.
+func (s *SysDB) ListQueues(ctx context.Context, applicationNames []string) ([]models.QueueConfig, error) {
 	query := s.RenderSQL(`SELECT `+_QUEUE_SELECT_COLUMNS+` FROM %squeues`, s.dialect.SchemaPrefix(s.schema))
-	rows, err := s.pool.Query(ctx, query)
+	var args []any
+	if names := s.observabilityNames(applicationNames); len(names) > 0 {
+		encoded, err := encodeArrayParam(s.dialect, names)
+		if err != nil {
+			return nil, fmt.Errorf("list queues: %w", err)
+		}
+		args = append(args, encoded)
+		query += " WHERE (" + dialectAnyClause(s.dialect, "application_name", len(args)) + " OR application_name IS NULL)"
+	}
+	rows, err := s.pool.Query(ctx, s.dialect.RewriteQuery(query), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list queues: %w", err)
 	}
@@ -5134,14 +5187,19 @@ func (s *SysDB) UpsertQueue(ctx context.Context, input UpsertQueueDBInput) (bool
 	}
 	defer tx.Rollback(ctx)
 
+	owner, err := s.resolveRowOwner(ctx, tx, "queues", "name", q.Name, input.ApplicationName, "Queue")
+	if err != nil {
+		return false, err
+	}
+
 	// Supply queue_id and created_at explicitly: the SQLite schema has no
 	// defaults for them (only the Postgres schema does).
 	insertQuery := s.RenderSQL(`INSERT INTO %squeues
-		(queue_id, name, concurrency, worker_concurrency, rate_limit_max, rate_limit_period_sec, priority_enabled, partition_queue, polling_interval_sec, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		(queue_id, name, concurrency, worker_concurrency, rate_limit_max, rate_limit_period_sec, priority_enabled, partition_queue, polling_interval_sec, created_at, updated_at, application_name)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (name) DO NOTHING`, schemaPrefix)
 	res, err := tx.Exec(ctx, s.dialect.RewriteQuery(insertQuery),
-		uuid.New().String(), q.Name, q.GlobalConcurrency, q.WorkerConcurrency, rateLimitMax, rateLimitPeriodSec, q.PriorityEnabled, q.PartitionQueue, pollingSec, nowMs, nowMs)
+		uuid.New().String(), q.Name, q.GlobalConcurrency, q.WorkerConcurrency, rateLimitMax, rateLimitPeriodSec, q.PriorityEnabled, q.PartitionQueue, pollingSec, nowMs, nowMs, owner)
 	if err != nil {
 		return false, fmt.Errorf("failed to insert queue %s: %w", q.Name, err)
 	}
@@ -5153,6 +5211,25 @@ func (s *SysDB) UpsertQueue(ctx context.Context, input UpsertQueueDBInput) (bool
 
 	if !inserted && input.UpdateExisting {
 		if err := s.updateQueueRow(ctx, tx, q); err != nil {
+			return false, err
+		}
+		// Claim only an unclaimed row, so a registration landing between the
+		// check above and this write keeps the name it just took.
+		if owner != nil {
+			claimQuery := s.RenderSQL(`UPDATE %squeues SET application_name = COALESCE(application_name, $2) WHERE name = $1`, schemaPrefix)
+			if _, err := tx.Exec(ctx, s.dialect.RewriteQuery(claimQuery), q.Name, owner); err != nil {
+				return false, fmt.Errorf("failed to claim queue %s: %w", q.Name, err)
+			}
+		}
+	}
+
+	// Re-read, as a concurrent application could have claimed the queue. The
+	// loser of that race would otherwise return success: the COALESCE claim
+	// reports 1 row updated even when it kept the existing owner, and a lost
+	// insert (ON CONFLICT DO NOTHING) is equally silent.
+	// A successful insert needs no check: the unique index arbitrated it.
+	if !inserted {
+		if _, err := s.resolveRowOwner(ctx, tx, "queues", "name", q.Name, input.ApplicationName, "Queue"); err != nil {
 			return false, err
 		}
 	}
@@ -5239,7 +5316,7 @@ type MetricData struct {
 	Value      float64 `json:"value"`
 }
 
-func (s *SysDB) GetMetrics(ctx context.Context, startTime, endTime string) ([]MetricData, error) {
+func (s *SysDB) GetMetrics(ctx context.Context, startTime, endTime string, applicationNames []string) ([]MetricData, error) {
 	// Parse ISO timestamp strings to time.Time
 	startTimeParsed, err := time.Parse(time.RFC3339, startTime)
 	if err != nil {
@@ -5257,14 +5334,14 @@ func (s *SysDB) GetMetrics(ctx context.Context, startTime, endTime string) ([]Me
 	var metrics []MetricData
 
 	// Query workflow metrics
-	workflowMetrics, err := s.getMetricWorkflowCount(ctx, startEpochMs, endEpochMs)
+	workflowMetrics, err := s.getMetricWorkflowCount(ctx, startEpochMs, endEpochMs, applicationNames)
 	if err != nil {
 		return nil, err
 	}
 	metrics = append(metrics, workflowMetrics...)
 
 	// Query step metrics
-	stepMetrics, err := s.getMetricStepCount(ctx, startEpochMs, endEpochMs)
+	stepMetrics, err := s.getMetricStepCount(ctx, startEpochMs, endEpochMs, applicationNames)
 	if err != nil {
 		return nil, err
 	}
@@ -5273,12 +5350,16 @@ func (s *SysDB) GetMetrics(ctx context.Context, startTime, endTime string) ([]Me
 	return metrics, nil
 }
 
-func (s *SysDB) getMetricWorkflowCount(ctx context.Context, startEpochMs, endEpochMs int64) ([]MetricData, error) {
+func (s *SysDB) getMetricWorkflowCount(ctx context.Context, startEpochMs, endEpochMs int64, applicationNames []string) ([]MetricData, error) {
 	appNameClause := ""
 	args := []any{startEpochMs, endEpochMs}
-	if s.appName != "" {
-		appNameClause = " AND " + nameFilterSQL("application_name", 3)
-		args = append(args, s.appName)
+	if names := s.observabilityNames(applicationNames); len(names) > 0 {
+		encoded, err := encodeArrayParam(s.dialect, names)
+		if err != nil {
+			return nil, fmt.Errorf("workflow metrics: %w", err)
+		}
+		args = append(args, encoded)
+		appNameClause = " AND (" + dialectAnyClause(s.dialect, "application_name", len(args)) + " OR application_name IS NULL)"
 	}
 	workflowQuery := s.RenderSQL(`
 		SELECT name, COUNT(workflow_uuid) as count
@@ -5313,12 +5394,16 @@ func (s *SysDB) getMetricWorkflowCount(ctx context.Context, startEpochMs, endEpo
 	return metrics, nil
 }
 
-func (s *SysDB) getMetricStepCount(ctx context.Context, startEpochMs, endEpochMs int64) ([]MetricData, error) {
+func (s *SysDB) getMetricStepCount(ctx context.Context, startEpochMs, endEpochMs int64, applicationNames []string) ([]MetricData, error) {
 	appNameClause := ""
 	args := []any{startEpochMs, endEpochMs}
-	if s.appName != "" {
-		appNameClause = " AND " + nameFilterSQL("application_name", 3)
-		args = append(args, s.appName)
+	if names := s.observabilityNames(applicationNames); len(names) > 0 {
+		encoded, err := encodeArrayParam(s.dialect, names)
+		if err != nil {
+			return nil, fmt.Errorf("step metrics: %w", err)
+		}
+		args = append(args, encoded)
+		appNameClause = " AND (" + dialectAnyClause(s.dialect, "application_name", len(args)) + " OR application_name IS NULL)"
 	}
 	stepQuery := s.RenderSQL(`
 		SELECT function_name, COUNT(*) as count
@@ -5368,58 +5453,83 @@ type UpsertScheduleDBInput struct {
 	AutomaticBackfill bool
 	CronTimezone      string
 	QueueName         string
+	ApplicationName   *string
 	Tx                Tx // optional: run inside an existing transaction
 }
 
+func (s *SysDB) scheduleOwner(ctx context.Context, q Querier, scheduleName string, applicationName *string) (*string, error) {
+	return s.resolveRowOwner(ctx, q, "workflow_schedules", "schedule_name", scheduleName, applicationName, "Schedule")
+}
+
 func (s *SysDB) UpsertSchedule(ctx context.Context, input UpsertScheduleDBInput) error {
-	query := s.RenderSQL(`
-		INSERT INTO %sworkflow_schedules (
-			schedule_id, schedule_name, workflow_name, workflow_class_name,
-			schedule, context, status, automatic_backfill, cron_timezone, queue_name
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (schedule_name) DO UPDATE SET
-			workflow_name = EXCLUDED.workflow_name,
-			workflow_class_name = EXCLUDED.workflow_class_name,
-			schedule = EXCLUDED.schedule,
-			context = EXCLUDED.context,
-			cron_timezone = EXCLUDED.cron_timezone,
-			queue_name = EXCLUDED.queue_name,
-			automatic_backfill = EXCLUDED.automatic_backfill
-	`, s.dialect.SchemaPrefix(s.schema))
+	do := func(tx Tx) error {
+		owner, err := s.scheduleOwner(ctx, tx, input.ScheduleName, input.ApplicationName)
+		if err != nil {
+			return err
+		}
 
-	var queueNameVal any
-	if input.QueueName != "" {
-		queueNameVal = input.QueueName
+		query := s.RenderSQL(`
+			INSERT INTO %sworkflow_schedules (
+				schedule_id, schedule_name, workflow_name, workflow_class_name,
+				schedule, context, status, automatic_backfill, cron_timezone, queue_name, application_name
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			ON CONFLICT (schedule_name) DO UPDATE SET
+				workflow_name = EXCLUDED.workflow_name,
+				workflow_class_name = EXCLUDED.workflow_class_name,
+				schedule = EXCLUDED.schedule,
+				context = EXCLUDED.context,
+				cron_timezone = EXCLUDED.cron_timezone,
+				queue_name = EXCLUDED.queue_name,
+				automatic_backfill = EXCLUDED.automatic_backfill,
+				application_name = COALESCE(workflow_schedules.application_name, EXCLUDED.application_name)
+		`, s.dialect.SchemaPrefix(s.schema))
+
+		var queueNameVal any
+		if input.QueueName != "" {
+			queueNameVal = input.QueueName
+		}
+
+		var workflowClassNameVal any
+		if input.WorkflowClassName != "" {
+			workflowClassNameVal = input.WorkflowClassName
+		}
+
+		args := []any{
+			input.ScheduleID,
+			input.ScheduleName,
+			input.WorkflowName,
+			workflowClassNameVal,
+			input.Schedule,
+			input.Context,
+			input.Status,
+			input.AutomaticBackfill,
+			input.CronTimezone,
+			queueNameVal,
+			owner,
+		}
+
+		if _, err := tx.Exec(ctx, query, args...); err != nil {
+			return fmt.Errorf("failed to upsert schedule: %w", err)
+		}
+		// Read back, since the claim above is silent about why it declined, if it did.
+		if _, err := s.scheduleOwner(ctx, tx, input.ScheduleName, input.ApplicationName); err != nil {
+			return err
+		}
+		return nil
 	}
 
-	var workflowClassNameVal any
-	if input.WorkflowClassName != "" {
-		workflowClassNameVal = input.WorkflowClassName
-	}
-
-	args := []any{
-		input.ScheduleID,
-		input.ScheduleName,
-		input.WorkflowName,
-		workflowClassNameVal,
-		input.Schedule,
-		input.Context,
-		input.Status,
-		input.AutomaticBackfill,
-		input.CronTimezone,
-		queueNameVal,
-	}
-
-	var err error
 	if input.Tx != nil {
-		_, err = input.Tx.Exec(ctx, query, args...)
-	} else {
-		_, err = s.pool.Exec(ctx, query, args...)
+		return do(input.Tx)
 	}
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to upsert schedule: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	return nil
+	defer tx.Rollback(ctx)
+	if err := do(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 type CreateScheduleDBInput struct {
@@ -5433,69 +5543,93 @@ type CreateScheduleDBInput struct {
 	AutomaticBackfill bool
 	CronTimezone      string
 	QueueName         string
+	ApplicationName   *string
 	Tx                Tx // optional: run inside an existing transaction
 }
 
 func (s *SysDB) CreateSchedule(ctx context.Context, input CreateScheduleDBInput) error {
-	query := s.RenderSQL(`
-		INSERT INTO %sworkflow_schedules (
-			schedule_id, schedule_name, workflow_name, workflow_class_name,
-			schedule, context, status, automatic_backfill, cron_timezone, queue_name
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, s.dialect.SchemaPrefix(s.schema))
+	do := func(q Querier) error {
+		owner, err := s.scheduleOwner(ctx, q, input.ScheduleName, input.ApplicationName)
+		if err != nil {
+			return err
+		}
 
-	var queueNameVal any
-	if input.QueueName != "" {
-		queueNameVal = input.QueueName
+		query := s.RenderSQL(`
+			INSERT INTO %sworkflow_schedules (
+				schedule_id, schedule_name, workflow_name, workflow_class_name,
+				schedule, context, status, automatic_backfill, cron_timezone, queue_name, application_name
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`, s.dialect.SchemaPrefix(s.schema))
+
+		var queueNameVal any
+		if input.QueueName != "" {
+			queueNameVal = input.QueueName
+		}
+
+		var workflowClassNameVal any
+		if input.WorkflowClassName != "" {
+			workflowClassNameVal = input.WorkflowClassName
+		}
+
+		args := []any{
+			input.ScheduleID,
+			input.ScheduleName,
+			input.WorkflowName,
+			workflowClassNameVal,
+			input.Schedule,
+			input.Context,
+			input.Status,
+			input.AutomaticBackfill,
+			input.CronTimezone,
+			queueNameVal,
+			owner,
+		}
+
+		if _, err := q.Exec(ctx, query, args...); err != nil {
+			return fmt.Errorf("failed to create schedule: %w", err)
+		}
+		return nil
 	}
 
-	var workflowClassNameVal any
-	if input.WorkflowClassName != "" {
-		workflowClassNameVal = input.WorkflowClassName
-	}
-
-	args := []any{
-		input.ScheduleID,
-		input.ScheduleName,
-		input.WorkflowName,
-		workflowClassNameVal,
-		input.Schedule,
-		input.Context,
-		input.Status,
-		input.AutomaticBackfill,
-		input.CronTimezone,
-		queueNameVal,
-	}
-
-	var err error
 	if input.Tx != nil {
-		_, err = input.Tx.Exec(ctx, query, args...)
-	} else {
-		_, err = s.pool.Exec(ctx, query, args...)
+		return do(input.Tx)
 	}
-	if err != nil {
-		return fmt.Errorf("failed to create schedule: %w", err)
-	}
-	return nil
+	return do(s.pool)
 }
 
 type ListSchedulesDBInput struct {
 	Statuses             []models.ScheduleStatus
 	WorkflowNames        []string
+	ScheduleNames        []string
 	ScheduleNamePrefixes []string
+	ApplicationName      []string
 	Tx                   Tx // optional: run inside an existing transaction
 }
 
-func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) ([]models.WorkflowSchedule, error) {
-	query := s.RenderSQL(`
+func (s *SysDB) selectSchedulesSQL() string {
+	return s.RenderSQL(`
 		SELECT schedule_id, schedule_name, workflow_name, workflow_class_name,
 		       schedule, status, context, last_fired_at, automatic_backfill,
-		       cron_timezone, queue_name
+		       cron_timezone, queue_name, application_name
 		FROM %sworkflow_schedules
 	`, s.dialect.SchemaPrefix(s.schema))
+}
+
+func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) ([]models.WorkflowSchedule, error) {
+	query := s.selectSchedulesSQL()
 
 	var args []any
 	var conds []string
+
+	// Either the context's application name (which can be empty => all applications), or the provided filters
+	if names := s.observabilityNames(input.ApplicationName); len(names) > 0 {
+		encoded, err := encodeArrayParam(s.dialect, names)
+		if err != nil {
+			return nil, fmt.Errorf("list schedules: %w", err)
+		}
+		args = append(args, encoded)
+		conds = append(conds, "("+dialectAnyClause(s.dialect, "application_name", len(args))+" OR application_name IS NULL)")
+	}
 
 	if len(input.Statuses) > 0 {
 		statuses := make([]string, len(input.Statuses))
@@ -5516,6 +5650,14 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 		}
 		args = append(args, encoded)
 		conds = append(conds, dialectAnyClause(s.dialect, "workflow_name", len(args)))
+	}
+	if len(input.ScheduleNames) > 0 {
+		encoded, err := encodeArrayParam(s.dialect, input.ScheduleNames)
+		if err != nil {
+			return nil, fmt.Errorf("list schedules: %w", err)
+		}
+		args = append(args, encoded)
+		conds = append(conds, dialectAnyClause(s.dialect, "schedule_name", len(args)))
 	}
 	if len(input.ScheduleNamePrefixes) > 0 {
 		patterns := make([]string, len(input.ScheduleNamePrefixes))
@@ -5544,7 +5686,36 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 		return nil, fmt.Errorf("failed to list schedules: %w", err)
 	}
 	defer rows.Close()
+	return s.scanSchedules(rows)
+}
 
+type GetScheduleDBInput struct {
+	ScheduleName string
+	Tx           Tx // optional: run inside an existing transaction
+}
+
+func (s *SysDB) GetSchedule(ctx context.Context, input GetScheduleDBInput) (*models.WorkflowSchedule, error) {
+	var q Querier = s.pool
+	if input.Tx != nil {
+		q = input.Tx
+	}
+	query := s.selectSchedulesSQL() + " WHERE schedule_name = $1"
+	rows, err := q.Query(ctx, s.dialect.RewriteQuery(query), input.ScheduleName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get schedule: %w", err)
+	}
+	defer rows.Close()
+	schedules, err := s.scanSchedules(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(schedules) == 0 {
+		return nil, nil
+	}
+	return &schedules[0], nil
+}
+
+func (s *SysDB) scanSchedules(rows Rows) ([]models.WorkflowSchedule, error) {
 	var schedules []models.WorkflowSchedule
 	for rows.Next() {
 		var schedule models.WorkflowSchedule
@@ -5553,6 +5724,7 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 
 		var queueName *string
 		var workflowClassName *string
+		var applicationName *string
 		err := rows.Scan(
 			&schedule.ScheduleID,
 			&schedule.ScheduleName,
@@ -5565,6 +5737,7 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 			&schedule.AutomaticBackfill,
 			&schedule.CronTimezone,
 			&queueName,
+			&applicationName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan schedule: %w", err)
@@ -5576,6 +5749,9 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 		}
 		if workflowClassName != nil {
 			schedule.WorkflowClassName = *workflowClassName
+		}
+		if applicationName != nil {
+			schedule.ApplicationName = *applicationName
 		}
 
 		if lastFiredAtStr != nil {
@@ -5670,7 +5846,6 @@ func (s *SysDB) DeleteSchedule(ctx context.Context, input DeleteScheduleDBInput)
 
 type BackfillScheduleDBInput struct {
 	ScheduleName string
-	Schedule     string
 	StartTime    time.Time
 	EndTime      time.Time
 }
@@ -5679,22 +5854,15 @@ func (s *SysDB) BackfillSchedule(ctx context.Context, input BackfillScheduleDBIn
 	if s.encodeScheduledInput == nil {
 		return nil, errors.New("scheduled input encoder is not configured")
 	}
-	schedules, err := s.ListSchedules(ctx, ListSchedulesDBInput{ScheduleNamePrefixes: []string{input.ScheduleName}})
+	schedule, err := s.GetSchedule(ctx, GetScheduleDBInput{ScheduleName: input.ScheduleName})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get schedule: %w", err)
-	}
-	var schedule *models.WorkflowSchedule
-	for i := range schedules {
-		if schedules[i].ScheduleName == input.ScheduleName {
-			schedule = &schedules[i]
-			break
-		}
+		return nil, err
 	}
 	if schedule == nil {
-		return nil, fmt.Errorf("schedule not found: %s", input.ScheduleName)
+		return nil, models.NewScheduleNotFoundError(input.ScheduleName)
 	}
 
-	spec := input.Schedule
+	spec := schedule.Schedule
 	if schedule.CronTimezone != "" {
 		spec = "CRON_TZ=" + schedule.CronTimezone + " " + spec
 	}
@@ -5709,11 +5877,17 @@ func (s *SysDB) BackfillSchedule(ctx context.Context, input BackfillScheduleDBIn
 		queueName = schedule.QueueName
 	}
 
-	// Backfilled workflows always run against the latest registered application
+	// Claim the schedule if it doesn't have a registered app name
+	scheduleOwner := schedule.ApplicationName
+	if scheduleOwner == "" {
+		scheduleOwner = s.appName
+	}
+
+	// Backfilled workflows always run against the owner's latest registered
 	// version. If lookup fails (e.g. no versions registered yet) leave it unset.
 	var backfillAppVersion string
 	backfillLatest, err := RetryWithResult(ctx, func() (*VersionInfo, error) {
-		return s.GetLatestApplicationVersion(ctx, nil)
+		return s.GetLatestApplicationVersion(ctx, nil, scheduleOwner)
 	}, WithRetrierLogger(s.logger))
 	if err != nil {
 		s.logger.Error("failed to fetch latest application version for schedule backfill", "schedule", input.ScheduleName, "error", err)
@@ -5763,6 +5937,7 @@ func (s *SysDB) BackfillSchedule(ctx context.Context, input BackfillScheduleDBIn
 			Serialization:      serName,
 			ApplicationVersion: backfillAppVersion,
 			ScheduleName:       input.ScheduleName,
+			ApplicationName:    scheduleOwner,
 		}
 		if _, err := s.InsertWorkflowStatus(ctx, InsertWorkflowStatusDBInput{Status: status, Tx: tx}); err != nil {
 			return nil, fmt.Errorf("failed to enqueue backfill workflow %s: %w", workflowID, err)
@@ -5794,19 +5969,9 @@ func (s *SysDB) TriggerSchedule(ctx context.Context, scheduleName string) (strin
 	}
 	defer tx.Rollback(ctx)
 
-	schedules, err := s.ListSchedules(ctx, ListSchedulesDBInput{
-		ScheduleNamePrefixes: []string{scheduleName},
-		Tx:                   tx,
-	})
+	schedule, err := s.GetSchedule(ctx, GetScheduleDBInput{ScheduleName: scheduleName, Tx: tx})
 	if err != nil {
-		return "", fmt.Errorf("failed to get schedule: %w", err)
-	}
-	var schedule *models.WorkflowSchedule
-	for i := range schedules {
-		if schedules[i].ScheduleName == scheduleName {
-			schedule = &schedules[i]
-			break
-		}
+		return "", err
 	}
 	if schedule == nil {
 		return "", fmt.Errorf("schedule not found: %s", scheduleName)
@@ -5825,11 +5990,18 @@ func (s *SysDB) TriggerSchedule(ctx context.Context, scheduleName string) (strin
 		return "", fmt.Errorf("failed to encode scheduled workflow input: %w", err)
 	}
 
-	// Triggered scheduled workflows run against the latest registered application
+	// The schedule's owner routes its runs, whoever fires them; an unclaimed
+	// one falls back to the firing handle.
+	scheduleOwner := schedule.ApplicationName
+	if scheduleOwner == "" {
+		scheduleOwner = s.appName
+	}
+
+	// Triggered scheduled workflows run against the owner's latest registered
 	// version. If lookup fails (e.g. no versions registered yet) leave it unset.
 	var triggerAppVersion string
 	triggerLatest, err := RetryWithResult(ctx, func() (*VersionInfo, error) {
-		return s.GetLatestApplicationVersion(ctx, nil)
+		return s.GetLatestApplicationVersion(ctx, nil, scheduleOwner)
 	}, WithRetrierLogger(s.logger))
 	if err != nil {
 		s.logger.Error("failed to fetch latest application version for schedule trigger", "schedule", scheduleName, "error", err)
@@ -5848,6 +6020,7 @@ func (s *SysDB) TriggerSchedule(ctx context.Context, scheduleName string) (strin
 		Serialization:      serName,
 		ApplicationVersion: triggerAppVersion,
 		ScheduleName:       scheduleName,
+		ApplicationName:    scheduleOwner,
 	}
 
 	if _, err := s.InsertWorkflowStatus(ctx, InsertWorkflowStatusDBInput{Status: status, Tx: tx}); err != nil {
@@ -5867,44 +6040,102 @@ func (s *SysDB) TriggerSchedule(ctx context.Context, scheduleName string) (strin
 
 // VersionInfo describes a registered application version.
 type VersionInfo struct {
-	ID        string `json:"version_id"`
-	Name      string `json:"version_name"`
-	Timestamp int64  `json:"version_timestamp"` // epoch milliseconds
-	CreatedAt int64  `json:"created_at"`        // epoch milliseconds
+	ID              string `json:"version_id"`
+	Name            string `json:"version_name"`
+	Timestamp       int64  `json:"version_timestamp"` // epoch milliseconds
+	CreatedAt       int64  `json:"created_at"`        // epoch milliseconds
+	ApplicationName string `json:"application_name,omitempty"`
 }
 
-func (s *SysDB) CreateApplicationVersion(ctx context.Context, versionName string) error {
-	query := s.RenderSQL(`
-		INSERT INTO %sapplication_versions (version_id, version_name, version_timestamp, created_at)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (version_name) DO NOTHING
-	`, s.dialect.SchemaPrefix(s.schema))
-	nowMs := time.Now().UnixMilli()
-	if _, err := s.pool.Exec(ctx, query, uuid.New().String(), versionName, nowMs, nowMs); err != nil {
-		return fmt.Errorf("failed to create application version: %w", err)
+func (s *SysDB) versionOwner(ctx context.Context, q Querier, versionName string, owner *string) (*string, error) {
+	return s.resolveRowOwner(ctx, q, "application_versions", "version_name", versionName, owner, "Application version")
+}
+
+func (s *SysDB) CreateApplicationVersion(ctx context.Context, versionName string, owner *string) error {
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	return nil
+	defer tx.Rollback(ctx)
+
+	// Claim a pre-upgrade row in place, so the version is not recreated or retimed.
+	claimQuery := s.RenderSQL(`UPDATE %sapplication_versions SET application_name = $2 WHERE version_name = $1 AND application_name IS NULL`, schemaPrefix)
+	res, err := tx.Exec(ctx, s.dialect.RewriteQuery(claimQuery), versionName, owner)
+	if err != nil {
+		return fmt.Errorf("failed to claim application version: %w", err)
+	}
+	claimed, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to read rows affected for application version %s: %w", versionName, err)
+	}
+	if claimed == 0 {
+		// The version genuinely didn't exist, so let's try to create it and claim it for ``owner` application.
+		// But on conflict, do nothing, as a competing application could be attempting to claim that version name.
+		insertQuery := s.RenderSQL(`
+			INSERT INTO %sapplication_versions (version_id, version_name, version_timestamp, created_at, application_name)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT DO NOTHING
+		`, schemaPrefix)
+		nowMs := time.Now().UnixMilli()
+		if _, err := tx.Exec(ctx, s.dialect.RewriteQuery(insertQuery), uuid.New().String(), versionName, nowMs, nowMs, owner); err != nil {
+			return fmt.Errorf("failed to create application version: %w", err)
+		}
+	}
+
+	// Read back, since the writes above are silent about why they declined to claim, if they did.
+	if _, err := s.versionOwner(ctx, tx, versionName, owner); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
-func (s *SysDB) UpdateApplicationVersionTimestamp(ctx context.Context, versionName string, newTimestamp int64) error {
+func (s *SysDB) UpdateApplicationVersionTimestamp(ctx context.Context, versionName string, newTimestamp int64, owner *string) error {
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	resolved, err := s.versionOwner(ctx, tx, versionName, owner)
+	if err != nil {
+		return err
+	}
+
 	query := s.RenderSQL(`
 		UPDATE %sapplication_versions
-		SET version_timestamp = $1
-		WHERE version_name = $2
-	`, s.dialect.SchemaPrefix(s.schema))
-	if _, err := s.pool.Exec(ctx, query, newTimestamp, versionName); err != nil {
+		SET version_timestamp = $1, application_name = $3
+		WHERE version_name = $2 AND `, schemaPrefix)
+	args := []any{newTimestamp, versionName, resolved}
+	if resolved != nil {
+		query += "(application_name = $4 OR application_name IS NULL)"
+		args = append(args, *resolved)
+	} else { // This happens when the calling context has no application name (e.g., client context). Leave the row unclaimed.
+		query += "application_name IS NULL"
+	}
+	if _, err := tx.Exec(ctx, s.dialect.RewriteQuery(query), args...); err != nil {
 		return fmt.Errorf("failed to update application version timestamp: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
+// ListApplicationVersions returns versions registered by this handle's
+// application plus unclaimed ones; a nameless handle lists every one.
 func (s *SysDB) ListApplicationVersions(ctx context.Context) ([]VersionInfo, error) {
 	query := s.RenderSQL(`
-		SELECT version_id, version_name, version_timestamp, created_at
+		SELECT version_id, version_name, version_timestamp, created_at, application_name
 		FROM %sapplication_versions
-		ORDER BY version_timestamp DESC
 	`, s.dialect.SchemaPrefix(s.schema))
-	rows, err := s.pool.Query(ctx, query)
+	var args []any
+	if s.appName != "" {
+		args = append(args, s.appName)
+		query += " WHERE " + nameFilterSQL("application_name", 1)
+	}
+	query += " ORDER BY version_timestamp DESC"
+	rows, err := s.pool.Query(ctx, s.dialect.RewriteQuery(query), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list application versions: %w", err)
 	}
@@ -5913,8 +6144,12 @@ func (s *SysDB) ListApplicationVersions(ctx context.Context) ([]VersionInfo, err
 	var versions []VersionInfo
 	for rows.Next() {
 		var v VersionInfo
-		if err := rows.Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt); err != nil {
+		var applicationName *string
+		if err := rows.Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt, &applicationName); err != nil {
 			return nil, fmt.Errorf("failed to scan application version: %w", err)
+		}
+		if applicationName != nil {
+			v.ApplicationName = *applicationName
 		}
 		versions = append(versions, v)
 	}
@@ -5924,24 +6159,39 @@ func (s *SysDB) ListApplicationVersions(ctx context.Context) ([]VersionInfo, err
 	return versions, nil
 }
 
-func (s *SysDB) GetLatestApplicationVersion(ctx context.Context, tx Tx) (*VersionInfo, error) {
+// GetLatestApplicationVersion returns the latest version registered by an
+// application, plus unclaimed ones. applicationName defaults to this handle's
+// own; a nameless handle with no explicit name matches every application's.
+func (s *SysDB) GetLatestApplicationVersion(ctx context.Context, tx Tx, applicationName string) (*VersionInfo, error) {
+	owner := applicationName
+	if owner == "" {
+		owner = s.appName
+	}
 	query := s.RenderSQL(`
-		SELECT version_id, version_name, version_timestamp, created_at
+		SELECT version_id, version_name, version_timestamp, created_at, application_name
 		FROM %sapplication_versions
-		ORDER BY version_timestamp DESC
-		LIMIT 1
 	`, s.dialect.SchemaPrefix(s.schema))
+	var args []any
+	if owner != "" {
+		args = append(args, owner)
+		query += " WHERE " + nameFilterSQL("application_name", 1)
+	}
+	query += " ORDER BY version_timestamp DESC LIMIT 1"
 	var q Querier = s.pool
 	if tx != nil {
 		q = tx
 	}
 	var v VersionInfo
-	err := q.QueryRow(ctx, query).Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt)
+	var rowOwner *string
+	err := q.QueryRow(ctx, s.dialect.RewriteQuery(query), args...).Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt, &rowOwner)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, models.NewNoApplicationVersionsError()
 		}
 		return nil, fmt.Errorf("failed to get latest application version: %w", err)
+	}
+	if rowOwner != nil {
+		v.ApplicationName = *rowOwner
 	}
 	return &v, nil
 }

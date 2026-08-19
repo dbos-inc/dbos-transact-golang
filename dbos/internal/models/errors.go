@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Docs for ErrorCode, Error, and the ErrorCode* constants live on their
@@ -346,6 +347,23 @@ func NewNoApplicationVersionsError() *Error {
 	return &Error{
 		Message: "No application versions are registered",
 		Code:    ErrorCodeNoApplicationVersions,
+	}
+}
+
+// NewNameOwnedByPeerError reports a queue, schedule, or version name already
+// registered by another application sharing the system database.
+func NewNameOwnedByPeerError(kind, name, currentOwner, owner string) *Error {
+	// A version name is computed or pinned, so "pick another" is config advice, not a rename.
+	takeANewName := fmt.Sprintf("give '%s' a different %s name", owner, strings.ToLower(kind))
+	if kind == "Application version" {
+		takeANewName = fmt.Sprintf("set a distinct application_version for '%s'", owner)
+	}
+	return &Error{
+		Message: fmt.Sprintf("%s '%s' is already registered by application '%s' in this system database. "+
+			"%s names must be unique across applications sharing a system database. Either %s, or, "+
+			"if '%s' was renamed to '%s', re-own its rows first with dbos rename-application",
+			kind, name, currentOwner, kind, takeANewName, currentOwner, owner),
+		Code: ErrorCodeConflictingRegistration,
 	}
 }
 

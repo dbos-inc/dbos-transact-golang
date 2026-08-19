@@ -677,7 +677,7 @@ func (c *conductor) handleGetMetricsRequest(data []byte, requestID string) error
 	if req.MetricClass == "workflow_step_count" {
 		var err error
 		metricsData, err = sysdb.RetryWithResult(c.dbosCtx, func() ([]sysdb.MetricData, error) {
-			return c.dbosCtx.systemDB.GetMetrics(c.dbosCtx, req.StartTime, req.EndTime)
+			return c.dbosCtx.systemDB.GetMetrics(c.dbosCtx, req.StartTime, req.EndTime, req.ApplicationName)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("Failed to get metrics", "error", err)
@@ -790,6 +790,9 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	}
 	if len(req.Body.ScheduleName) > 0 {
 		opts = append(opts, WithFilterScheduleName(req.Body.ScheduleName.toSlice()...))
+	}
+	if len(req.Body.ApplicationName) > 0 {
+		opts = append(opts, WithFilterApplicationName(req.Body.ApplicationName.toSlice()...))
 	}
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
@@ -922,6 +925,9 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	}
 	if len(req.Body.ScheduleName) > 0 {
 		opts = append(opts, WithFilterScheduleName(req.Body.ScheduleName.toSlice()...))
+	}
+	if len(req.Body.ApplicationName) > 0 {
+		opts = append(opts, WithFilterApplicationName(req.Body.ApplicationName.toSlice()...))
 	}
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
@@ -1603,6 +1609,7 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 		GroupByQueueName:          req.Body.GroupByQueueName,
 		GroupByExecutorID:         req.Body.GroupByExecutorID,
 		GroupByApplicationVersion: req.Body.GroupByApplicationVersion,
+		GroupByApplicationName:    req.Body.GroupByApplicationName,
 		SelectCount:               req.Body.SelectCount,
 		SelectMinCreatedAt:        req.Body.SelectMinCreatedAt,
 		SelectMaxQueueWaitMs:      req.Body.SelectMaxQueueWaitMs,
@@ -1616,6 +1623,7 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 		AuthenticatedUser:         req.Body.User.toSlice(),
 		ForkedFrom:                req.Body.ForkedFrom.toSlice(),
 		ParentWorkflowID:          req.Body.ParentWorkflowID.toSlice(),
+		ApplicationName:           req.Body.ApplicationName.toSlice(),
 		WasForkedFrom:             req.Body.WasForkedFrom,
 		HasParent:                 req.Body.HasParent,
 		Attributes:                req.Body.Attributes,
@@ -1697,6 +1705,7 @@ func (c *conductor) handleGetStepAggregatesRequest(data []byte, requestID string
 		Status:              req.Body.Status.toSlice(),
 		FunctionName:        req.Body.FunctionName.toSlice(),
 		WorkflowIDPrefix:    req.Body.WorkflowIDPrefix.toSlice(),
+		ApplicationName:     req.Body.ApplicationName.toSlice(),
 	}
 	// Default to count when nothing is selected: the admin aggregates API omits select
 	// flags when it only wants counts, and forwards the body verbatim. Without this the
@@ -1782,6 +1791,10 @@ func toScheduleConductorOutput(s WorkflowSchedule, loadContext bool) scheduleCon
 		v := s.QueueName
 		out.QueueName = &v
 	}
+	if s.ApplicationName != "" {
+		v := s.ApplicationName
+		out.ApplicationName = &v
+	}
 	if loadContext && len(s.Context) > 0 {
 		str := string(s.Context)
 		out.Context = &str
@@ -1814,6 +1827,9 @@ func (c *conductor) handleListSchedulesRequest(data []byte, requestID string) er
 	}
 	if len(req.Body.ScheduleNamePrefix) > 0 {
 		opts = append(opts, WithScheduleNamePrefixes(req.Body.ScheduleNamePrefix.toSlice()...))
+	}
+	if len(req.Body.ApplicationName) > 0 {
+		opts = append(opts, WithScheduleApplicationNames(req.Body.ApplicationName.toSlice()...))
 	}
 
 	schedules, err := c.dbosCtx.ListSchedules(c.dbosCtx, opts...)
@@ -1952,26 +1968,16 @@ func (c *conductor) handleBackfillScheduleRequest(data []byte, requestID string)
 			msg := fmt.Sprintf("failed to parse end time '%s': %v", req.End, errEnd)
 			errorMsg = &msg
 		} else {
-			schedule, errGet := c.dbosCtx.GetSchedule(c.dbosCtx, req.ScheduleName)
-			if errors.Is(errGet, ErrScheduleNotFound) {
-				msg := fmt.Sprintf("schedule not found: %s", req.ScheduleName)
-				errorMsg = &msg
-			} else if errGet != nil {
-				msg := fmt.Sprintf("failed to get schedule '%s': %v", req.ScheduleName, errGet)
+			ids, errBf := c.dbosCtx.systemDB.BackfillSchedule(c.dbosCtx, sysdb.BackfillScheduleDBInput{
+				ScheduleName: req.ScheduleName,
+				StartTime:    start,
+				EndTime:      end,
+			})
+			if errBf != nil {
+				msg := fmt.Sprintf("failed to backfill schedule '%s': %v", req.ScheduleName, errBf)
 				errorMsg = &msg
 			} else {
-				ids, errBf := c.dbosCtx.systemDB.BackfillSchedule(c.dbosCtx, sysdb.BackfillScheduleDBInput{
-					ScheduleName: req.ScheduleName,
-					Schedule:     schedule.Schedule,
-					StartTime:    start,
-					EndTime:      end,
-				})
-				if errBf != nil {
-					msg := fmt.Sprintf("failed to backfill schedule '%s': %v", req.ScheduleName, errBf)
-					errorMsg = &msg
-				} else {
-					workflowIDs = ids
-				}
+				workflowIDs = ids
 			}
 		}
 	}
@@ -2059,7 +2065,7 @@ func (c *conductor) handleSetLatestApplicationVersionRequest(data []byte, reques
 	success := true
 	var errorMsg *string
 	if err := sysdb.Retry(c.dbosCtx, func() error {
-		return c.dbosCtx.systemDB.UpdateApplicationVersionTimestamp(c.dbosCtx, req.VersionName, time.Now().UnixMilli())
+		return c.dbosCtx.systemDB.UpdateApplicationVersionTimestamp(c.dbosCtx, req.VersionName, time.Now().UnixMilli(), c.dbosCtx.requestedOwner(""))
 	}, sysdb.WithRetrierLogger(c.logger)); err != nil {
 		c.logger.Error("Failed to set latest application version", "version_name", req.VersionName, "error", err)
 		msg := fmt.Sprintf("failed to set latest application version '%s': %v", req.VersionName, err)
@@ -2084,7 +2090,11 @@ func (c *conductor) handleListQueuesRequest(data []byte, requestID string) error
 		return fmt.Errorf("failed to parse list queues request: %w", err)
 	}
 
-	queues, err := c.dbosCtx.ListQueues(c.dbosCtx)
+	var opts []ListQueuesOption
+	if len(req.Body.ApplicationName) > 0 {
+		opts = append(opts, WithListQueuesApplicationNames(req.Body.ApplicationName.toSlice()...))
+	}
+	queues, err := c.dbosCtx.ListQueues(c.dbosCtx, opts...)
 	output := []queueConductorOutput{}
 	var errorMsg *string
 	if err != nil {

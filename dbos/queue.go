@@ -24,6 +24,7 @@ type workflowQueue struct {
 	PriorityEnabled     bool          `json:"priority_enabled,omitempty"`   // Enable priority-based scheduling
 	RateLimit           *RateLimiter  `json:"rate_limit,omitempty"`         // Rate limiting configuration
 	PartitionQueue      bool          `json:"partition_queue,omitempty"`    // Enable partitioned queue mode
+	ApplicationName     string        `json:"application_name,omitempty"`   // Owning application; empty if unclaimed
 	basePollingInterval time.Duration // Base polling interval (minimum, never poll faster)
 	maxPollingInterval  time.Duration // Maximum polling interval (never poll slower)
 
@@ -40,6 +41,7 @@ func (q workflowQueue) toConfig() models.QueueConfig {
 		PriorityEnabled:     q.PriorityEnabled,
 		RateLimit:           q.RateLimit,
 		PartitionQueue:      q.PartitionQueue,
+		ApplicationName:     q.ApplicationName,
 		BasePollingInterval: q.basePollingInterval,
 		MaxPollingInterval:  q.maxPollingInterval,
 		DatabaseBacked:      q.databaseBacked,
@@ -56,6 +58,7 @@ func queueFromConfig(cfg models.QueueConfig) workflowQueue {
 		PriorityEnabled:     cfg.PriorityEnabled,
 		RateLimit:           cfg.RateLimit,
 		PartitionQueue:      cfg.PartitionQueue,
+		ApplicationName:     cfg.ApplicationName,
 		basePollingInterval: cfg.BasePollingInterval,
 		maxPollingInterval:  cfg.MaxPollingInterval,
 		databaseBacked:      cfg.DatabaseBacked,
@@ -86,6 +89,7 @@ type Queue interface {
 	GetPriorityEnabled() bool
 	GetPartitionQueue() bool
 	GetPollingInterval() time.Duration
+	GetApplicationName() string
 
 	SetGlobalConcurrency(ctx Client, value *int) error
 	SetWorkerConcurrency(ctx Client, value *int) error
@@ -106,6 +110,8 @@ func (q *workflowQueue) GetPriorityEnabled() bool   { return q.PriorityEnabled }
 func (q *workflowQueue) GetPartitionQueue() bool    { return q.PartitionQueue }
 
 func (q *workflowQueue) GetPollingInterval() time.Duration { return q.basePollingInterval }
+
+func (q *workflowQueue) GetApplicationName() string { return q.ApplicationName }
 
 // SetGlobalConcurrency updates the queue's global concurrency limit. Pass nil to clear it.
 func (q *workflowQueue) SetGlobalConcurrency(ctx Client, value *int) error {
@@ -256,6 +262,15 @@ func WithQueueBasePollingInterval(interval time.Duration) QueueOption {
 	}
 }
 
+// WithQueueApplicationName sets the application that owns the queue and polls
+// it. It defaults to the registering handle's application; registering a queue
+// owned by a different application fails.
+func WithQueueApplicationName(name string) QueueOption {
+	return func(q *workflowQueue) {
+		q.ApplicationName = name
+	}
+}
+
 // WithQueueOnConflict sets the conflict resolution policy used by RegisterQueue
 // when a queue with the same name already exists in the system database.
 func WithQueueOnConflict(policy QueueConflictResolution) QueueOption {
@@ -334,7 +349,7 @@ func (c *dbosContext) RegisterQueue(_ Client, name string, options ...QueueOptio
 		updateExisting = false
 	default: // QueueConflictUpdateIfLatestVersion
 		latest, err := sysdb.RetryWithResult(c, func() (*VersionInfo, error) {
-			return c.systemDB.GetLatestApplicationVersion(c, nil)
+			return c.systemDB.GetLatestApplicationVersion(c, nil, "")
 		}, sysdb.WithRetrierLogger(c.logger))
 		switch {
 		case errors.Is(err, ErrNoApplicationVersions):
@@ -350,7 +365,7 @@ func (c *dbosContext) RegisterQueue(_ Client, name string, options ...QueueOptio
 	}
 
 	inserted, err := sysdb.RetryWithResult(c, func() (bool, error) {
-		return c.systemDB.UpsertQueue(c, sysdb.UpsertQueueDBInput{Queue: q.toConfig(), UpdateExisting: updateExisting})
+		return c.systemDB.UpsertQueue(c, sysdb.UpsertQueueDBInput{Queue: q.toConfig(), UpdateExisting: updateExisting, ApplicationName: c.requestedOwner(q.ApplicationName)})
 	}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
 	if err != nil {
 		return nil, err
@@ -394,17 +409,39 @@ func (c *dbosContext) RetrieveQueue(_ Client, name string) (Queue, error) {
 	return &q, nil
 }
 
-// ListQueues returns all queues registered in the system database.
-func ListQueues(ctx Client) ([]Queue, error) {
+// ListQueuesOption is a functional option for filtering ListQueues.
+type ListQueuesOption func(*listQueuesOptions)
+
+type listQueuesOptions struct {
+	applicationNames []string
+}
+
+// WithListQueuesApplicationNames lists queues owned by these applications
+// (plus unclaimed ones). By default only this handle's own application's
+// queues are listed.
+func WithListQueuesApplicationNames(names ...string) ListQueuesOption {
+	return func(o *listQueuesOptions) {
+		o.applicationNames = append(o.applicationNames, names...)
+	}
+}
+
+// ListQueues returns database-backed queues owned by this application plus
+// unclaimed ones. Use WithQueueApplicationNames to list other applications'
+// queues.
+func ListQueues(ctx Client, opts ...ListQueuesOption) ([]Queue, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
-	return ctx.ListQueues(ctx)
+	return ctx.ListQueues(ctx, opts...)
 }
 
-func (c *dbosContext) ListQueues(_ Client) ([]Queue, error) {
+func (c *dbosContext) ListQueues(_ Client, opts ...ListQueuesOption) ([]Queue, error) {
+	var options listQueuesOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	cfgs, err := sysdb.RetryWithResult(c, func() ([]models.QueueConfig, error) {
-		return c.systemDB.ListQueues(c)
+		return c.systemDB.ListQueues(c, options.applicationNames)
 	}, sysdb.WithRetrierLogger(c.logger))
 	queues := queuesFromConfigs(cfgs)
 	if err != nil {
@@ -561,7 +598,7 @@ func (qr *queueRunner) queuesToListen(ctx *dbosContext) map[string]workflowQueue
 	current[models.InternalQueueName] = qr.internalQueue
 
 	dbQueueCfgs, err := sysdb.RetryWithResult(ctx, func() ([]models.QueueConfig, error) {
-		return ctx.systemDB.ListQueues(ctx)
+		return ctx.systemDB.ListQueues(ctx, nil)
 	}, sysdb.WithRetrierLogger(qr.logger))
 	dbQueues := queuesFromConfigs(dbQueueCfgs)
 	if err != nil {
