@@ -128,6 +128,7 @@ type listWorkflowsConductorRequestBody struct {
 	QueuesOnly         bool           `json:"queues_only"`
 	Attributes         map[string]any `json:"attributes,omitempty"`
 	ScheduleName       stringOrList   `json:"schedule_name,omitempty"`
+	ApplicationName    stringOrList   `json:"application_name,omitempty"`
 }
 
 // listWorkflowsConductorRequest is sent by the conductor to list workflows
@@ -167,6 +168,7 @@ type listWorkflowsConductorResponseBody struct {
 	CompletedAt             *string `json:"CompletedAt,omitempty"`
 	Attributes              *string `json:"Attributes,omitempty"`
 	ScheduleName            *string `json:"ScheduleName,omitempty"`
+	ApplicationName         *string `json:"ApplicationName,omitempty"`
 }
 
 // listWorkflowsConductorResponse is sent in response to list workflows requests
@@ -322,6 +324,11 @@ func formatListWorkflowsResponseBody(wf WorkflowStatus) listWorkflowsConductorRe
 	// Copy schedule name
 	if wf.ScheduleName != "" {
 		output.ScheduleName = &wf.ScheduleName
+	}
+
+	// Copy owning application; absent when unclaimed
+	if wf.ApplicationName != "" {
+		output.ApplicationName = &wf.ApplicationName
 	}
 
 	return output
@@ -529,6 +536,8 @@ type getMetricsConductorRequest struct {
 	StartTime   string `json:"start_time"`
 	EndTime     string `json:"end_time"`
 	MetricClass string `json:"metric_class"`
+	// Absent on Conductors predating the field; nil defaults to this application's own scope.
+	ApplicationName []string `json:"application_name,omitempty"`
 }
 
 // getMetricsConductorResponse is sent in response to metrics requests
@@ -604,6 +613,7 @@ type scheduleConductorOutput struct {
 	AutomaticBackfill bool    `json:"automatic_backfill"`
 	CronTimezone      *string `json:"cron_timezone"`
 	QueueName         *string `json:"queue_name"`
+	ApplicationName   *string `json:"application_name"`
 }
 
 // listSchedulesConductorRequestBody contains filter parameters for listing schedules.
@@ -611,6 +621,7 @@ type listSchedulesConductorRequestBody struct {
 	Status             stringOrList `json:"status,omitempty"`
 	WorkflowName       stringOrList `json:"workflow_name,omitempty"`
 	ScheduleNamePrefix stringOrList `json:"schedule_name_prefix,omitempty"`
+	ApplicationName    stringOrList `json:"application_name,omitempty"`
 	LoadContext        *bool        `json:"load_context,omitempty"`
 }
 
@@ -687,6 +698,7 @@ type queueConductorOutput struct {
 	PriorityEnabled    bool     `json:"priority_enabled"`
 	PartitionQueue     bool     `json:"partition_queue"`
 	PollingIntervalSec float64  `json:"polling_interval_sec"`
+	ApplicationName    *string  `json:"application_name"`
 }
 
 // toQueueConductorOutput renders a workflowQueue into its conductor wire shape.
@@ -707,11 +719,20 @@ func toQueueConductorOutput(q Queue) queueConductorOutput {
 		out.RateLimitMax = &limit
 		out.RateLimitPeriodSec = &period
 	}
+	if name := q.GetApplicationName(); name != "" {
+		out.ApplicationName = &name
+	}
 	return out
+}
+
+type listQueuesConductorRequestBody struct {
+	ApplicationName stringOrList `json:"application_name,omitempty"`
 }
 
 type listQueuesConductorRequest struct {
 	baseMessage
+	// Absent on Conductors predating the filter: defaults to this application's own scope.
+	Body listQueuesConductorRequestBody `json:"body,omitempty"`
 }
 
 type listQueuesConductorResponse struct {
@@ -790,6 +811,7 @@ type getWorkflowAggregatesConductorRequestBody struct {
 	GroupByQueueName          bool           `json:"group_by_queue_name"`
 	GroupByExecutorID         bool           `json:"group_by_executor_id"`
 	GroupByApplicationVersion bool           `json:"group_by_application_version"`
+	GroupByApplicationName    bool           `json:"group_by_application_name"`
 	SelectCount               bool           `json:"select_count"`
 	SelectMinCreatedAt        bool           `json:"select_min_created_at"`
 	SelectMaxQueueWaitMs      bool           `json:"select_max_queue_wait_ms"`
@@ -811,6 +833,7 @@ type getWorkflowAggregatesConductorRequestBody struct {
 	ForkedFrom                stringOrList   `json:"forked_from,omitempty"`
 	ParentWorkflowID          stringOrList   `json:"parent_workflow_id,omitempty"`
 	User                      stringOrList   `json:"user,omitempty"`
+	ApplicationName           stringOrList   `json:"application_name,omitempty"`
 	WasForkedFrom             *bool          `json:"was_forked_from,omitempty"`
 	HasParent                 *bool          `json:"has_parent,omitempty"`
 	Attributes                map[string]any `json:"attributes,omitempty"`
@@ -842,6 +865,7 @@ type getStepAggregatesConductorRequestBody struct {
 	WorkflowIDPrefix    stringOrList `json:"workflow_id_prefix,omitempty"`
 	CompletedAfter      *time.Time   `json:"completed_after,omitempty"`  // ISO 8601
 	CompletedBefore     *time.Time   `json:"completed_before,omitempty"` // ISO 8601
+	ApplicationName     stringOrList `json:"application_name,omitempty"`
 }
 
 // getStepAggregatesConductorRequest is sent by the conductor to fetch step aggregates.

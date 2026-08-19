@@ -987,8 +987,9 @@ func TestVersionlessDequeueRequiresLatestVersion(t *testing.T) {
 	// Register a newer application version and make it the latest, so this worker is no
 	// longer running the latest version (simulating a rolling deploy).
 	sysdb := serverCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
-	require.NoError(t, sysdb.CreateApplicationVersion(context.Background(), "versionless-newer"))
-	require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), "versionless-newer", time.Now().Add(time.Hour).UnixMilli()))
+	owner := serverCtx.(*dbosContext).requestedOwner("")
+	require.NoError(t, sysdb.CreateApplicationVersion(context.Background(), "versionless-newer", owner))
+	require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), "versionless-newer", time.Now().Add(time.Hour).UnixMilli(), owner))
 
 	// Enqueue a version-less workflow: an empty application version is persisted as NULL.
 	versionlessHandle, err := Enqueue[string](client, queue.Name, "VersionlessWorkflow", "versionless",
@@ -1014,7 +1015,7 @@ func TestVersionlessDequeueRequiresLatestVersion(t *testing.T) {
 		"version-less workflow must stay ENQUEUED while this worker is not the latest version")
 
 	// Promote this worker's version back to the latest.
-	require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), currentVersion, time.Now().Add(2*time.Hour).UnixMilli()))
+	require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), currentVersion, time.Now().Add(2*time.Hour).UnixMilli(), owner))
 
 	// Now that this worker is the latest again, the version-less workflow is dequeued and completes.
 	versionlessResult, err := versionlessHandle.GetResult()
@@ -2485,8 +2486,9 @@ func TestDatabaseBackedQueues(t *testing.T) {
 
 		// ...but not once a newer application version is the latest (rolling deploy).
 		sysdb := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
-		require.NoError(t, sysdb.CreateApplicationVersion(context.Background(), "v-newer"))
-		require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), "v-newer", time.Now().Add(time.Hour).UnixMilli()))
+		owner := dbosCtx.(*dbosContext).requestedOwner("")
+		require.NoError(t, sysdb.CreateApplicationVersion(context.Background(), "v-newer", owner))
+		require.NoError(t, sysdb.UpdateApplicationVersionTimestamp(context.Background(), "v-newer", time.Now().Add(time.Hour).UnixMilli(), owner))
 		_, err = registerWFQ(dbosCtx, "conflict-q", WithGlobalConcurrency(1000))
 		require.NoError(t, err)
 		got, err = retrieveWFQ(dbosCtx, "conflict-q")

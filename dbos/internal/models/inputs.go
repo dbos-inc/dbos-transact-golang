@@ -32,6 +32,7 @@ type ListWorkflowsInput struct {
 	HasParent        *bool
 	Attributes       map[string]any
 	ScheduleName     []string
+	ApplicationName  []string
 	IsDebounced      *bool
 }
 
@@ -43,7 +44,9 @@ type ListWorkflowsOption func(*ListWorkflowsInput)
 type ListSchedulesInput struct {
 	Statuses             []ScheduleStatus
 	WorkflowNames        []string
+	ScheduleNames        []string
 	ScheduleNamePrefixes []string
+	ApplicationNames     []string
 }
 
 type ListSchedulesOption func(*ListSchedulesInput)
@@ -83,6 +86,7 @@ type GetWorkflowAggregatesInput struct {
 	GroupByQueueName          bool
 	GroupByExecutorID         bool
 	GroupByApplicationVersion bool
+	GroupByApplicationName    bool
 
 	// Select* flags choose which aggregates to compute. At least one must be true.
 	// MinCreatedAt is an epoch-ms timestamp; the latency fields are in milliseconds.
@@ -111,6 +115,7 @@ type GetWorkflowAggregatesInput struct {
 	AuthenticatedUser  []string
 	ForkedFrom         []string
 	ParentWorkflowID   []string
+	ApplicationName    []string
 	WasForkedFrom      *bool
 	HasParent          *bool
 
@@ -133,6 +138,7 @@ type GetStepAggregatesInput struct {
 	WorkflowIDPrefix []string
 	CompletedAfter   time.Time
 	CompletedBefore  time.Time
+	ApplicationName  []string
 }
 
 type StepInfo struct {

@@ -26,6 +26,7 @@ type WorkflowSchedule struct {
 	AutomaticBackfill bool            `json:"automatic_backfill"`
 	CronTimezone      string          `json:"cron_timezone,omitempty"`
 	QueueName         string          `json:"queue_name,omitempty"`
+	ApplicationName   string          `json:"application_name,omitempty"`
 }
 
 // ScheduledWorkflowInput's docs live on its public alias in dbos/aliases.go.

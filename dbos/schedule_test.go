@@ -714,19 +714,20 @@ func TestBackfillSchedule(t *testing.T) {
 // recovered via recoverPendingWorkflows. The recovered workflow must decode
 // the ScheduledWorkflowInput written at backfill time and run it correctly.
 func TestBackfillScheduleRecovery(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
+	// A one-hour polling interval keeps the live scheduler from ever installing
+	// the every-second cron; backfill and recovery don't need it.
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: time.Hour})
 	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
 
 	scheduledInputCapture = sync.Map{}
 	RegisterWorkflow(dbosCtx, testCapturingScheduledWorkflow)
 	require.NoError(t, dbosCtx.Launch())
 
-	// Use a far-future cron so the live scheduler doesn't fire while the test runs.
 	const ctxValue = "backfill-recovery-context"
 	const scheduleName = "backfill-recovery-schedule"
 	err := CreateSchedule(dbosCtx, ScheduleSpec{
 		ScheduleName: scheduleName,
-		Schedule:     "0 0 0 1 1 *", // Once a year,
+		Schedule:     "*/1 * * * * *",
 		Workflow:     testCapturingScheduledWorkflow,
 		Context:      ctxValue,
 	})
@@ -738,7 +739,6 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 	c := dbosCtx.(*dbosContext)
 	ids, err := c.systemDB.BackfillSchedule(c, sysdb.BackfillScheduleDBInput{
 		ScheduleName: scheduleName,
-		Schedule:     "*/1 * * * * *",
 		StartTime:    start,
 		EndTime:      end,
 	})

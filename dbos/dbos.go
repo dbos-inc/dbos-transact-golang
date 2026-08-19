@@ -62,7 +62,8 @@ type Config struct {
 	SchedulerPollingInterval     time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
 	SystemDBStartupTimeout       time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
 	NotificationCoalesceInterval time.Duration   // Controls how often stream-write and set-event notifications are batched
-	namelessOwner                bool            // Act for no specific application: write unclaimed rows, matches all. Used by client contexts.
+	namelessOwner                bool            // Act for no specific application: write unclaimed rows, matches all. Used by clients without an AppName.
+	isClient                     bool            // Client handle: runs no workflows, so enqueues leave the version unset by default.
 }
 
 func processConfig(inputConfig *Config) (*Config, error) {
@@ -111,6 +112,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		SystemDBStartupTimeout:       inputConfig.SystemDBStartupTimeout,
 		NotificationCoalesceInterval: inputConfig.NotificationCoalesceInterval,
 		namelessOwner:                inputConfig.namelessOwner,
+		isClient:                     inputConfig.isClient,
 	}
 
 	if dbosConfig.ConductorExecutorMetadata != nil {
@@ -203,7 +205,7 @@ type Client interface {
 	// Queue management
 	RegisterQueue(_ Client, name string, options ...QueueOption) (Queue, error) // Register and persist a database-backed queue
 	RetrieveQueue(_ Client, name string) (Queue, error)                         // Retrieve a database-backed queue by name (ErrQueueNotFound if absent)
-	ListQueues(_ Client) ([]Queue, error)                                       // List all database-backed queues
+	ListQueues(_ Client, opts ...ListQueuesOption) ([]Queue, error)             // List database-backed queues (own + unclaimed by default)
 	DeleteQueue(_ Client, name string) error                                    // Delete a database-backed queue
 
 	// Schedule management
@@ -695,6 +697,7 @@ type ClientConfig struct {
 	// SQLite URLs additionally require importing the driver package:
 	// import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
 	DatabaseURL            string
+	AppName                string          // The application this client acts on behalf of. Leave empty to list all workflows, but beware that writing will serve all applications.
 	SystemDBPool           *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
 	SQLiteSystemDB         *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
 	DatabaseSchema         string          // Database schema name (defaults to "dbos")
@@ -719,16 +722,21 @@ type ClientConfig struct {
 //	    log.Fatal(err)
 //	}
 func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
+	appName := config.AppName
+	if appName == "" {
+		appName = "dbos-client" // Connection label only
+	}
 	dbosCtx, err := NewContext(ctx, Config{
 		DatabaseURL:            config.DatabaseURL,
 		DatabaseSchema:         config.DatabaseSchema,
-		AppName:                "dbos-client",
+		AppName:                appName,
 		Logger:                 config.Logger,
 		SystemDBPool:           config.SystemDBPool,
 		SQLiteSystemDB:         config.SQLiteSystemDB,
 		Serializer:             config.Serializer,
 		SystemDBStartupTimeout: config.SystemDBStartupTimeout,
-		namelessOwner:          true,
+		namelessOwner:          config.AppName == "",
+		isClient:               true,
 	})
 	if err != nil {
 		return nil, err
@@ -748,6 +756,19 @@ func (c *dbosContext) ownerAppName() string {
 		return ""
 	}
 	return c.config.AppName
+}
+
+// Resolve an owning application name: explicit if provided, otherwise this context's.
+// This is mostly a backward-compatibility solver. Functions like CreateSchedule
+// which previously didn't, now accept an application name.
+func (c *dbosContext) requestedOwner(explicit string) *string {
+	if explicit != "" {
+		return &explicit
+	}
+	if name := c.ownerAppName(); name != "" {
+		return &name
+	}
+	return nil
 }
 
 // Launch initializes and starts the DBOS runtime components including the system database
@@ -775,11 +796,11 @@ func (c *dbosContext) Launch() error {
 
 	// Register the current application version and warn if it is not the latest.
 	if err := sysdb.Retry(c, func() error {
-		return c.systemDB.CreateApplicationVersion(c, c.applicationVersion)
+		return c.systemDB.CreateApplicationVersion(c, c.applicationVersion, c.requestedOwner(""))
 	}, sysdb.WithRetrierLogger(c.logger)); err != nil {
 		c.logger.Warn("Failed to register application version", "version", c.applicationVersion, "error", err)
 	} else if latest, err := sysdb.RetryWithResult(c, func() (*VersionInfo, error) {
-		return c.systemDB.GetLatestApplicationVersion(c, nil)
+		return c.systemDB.GetLatestApplicationVersion(c, nil, "")
 	}, sysdb.WithRetrierLogger(c.logger)); err != nil {
 		c.logger.Warn("Failed to fetch latest application version", "error", err)
 	} else if latest.Name != c.applicationVersion {
