@@ -44,6 +44,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(postgresCmd)
 	rootCmd.AddCommand(workflowCmd)
+	rootCmd.AddCommand(renameApplicationCmd)
 }
 
 func initConfig() {

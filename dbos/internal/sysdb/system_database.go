@@ -129,11 +129,12 @@ type SystemDatabase interface {
 	BackfillSchedule(ctx context.Context, input BackfillScheduleDBInput) ([]string, error)
 	TriggerSchedule(ctx context.Context, scheduleName string) (string, error)
 
-	// Application versions
+	// Applications
 	CreateApplicationVersion(ctx context.Context, versionName string, owner *string) error
 	UpdateApplicationVersionTimestamp(ctx context.Context, versionName string, newTimestamp int64, owner *string) error
 	ListApplicationVersions(ctx context.Context) ([]VersionInfo, error)
 	GetLatestApplicationVersion(ctx context.Context, tx Tx, applicationName string) (*VersionInfo, error)
+	RenameApplication(ctx context.Context, input RenameApplicationDBInput) (ApplicationRowCounts, error)
 
 	// Workflow export/import
 	ExportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error)
@@ -6230,6 +6231,184 @@ func (s *SysDB) GetLatestApplicationVersion(ctx context.Context, tx Tx, applicat
 		v.ApplicationName = *rowOwner
 	}
 	return &v, nil
+}
+
+/*******************************/
+/**** APPLICATION RENAME *******/
+/*******************************/
+
+// Workflows and steps re-owned per transaction by a rename.
+const DefaultRenameBatchSize = 10_000
+
+// ApplicationRowCounts reports the rows a rename moved, by table.
+type ApplicationRowCounts struct {
+	Queues    int64 `json:"queues"`
+	Schedules int64 `json:"schedules"`
+	Versions  int64 `json:"versions"`
+	Workflows int64 `json:"workflows"`
+	Steps     int64 `json:"steps"`
+}
+
+type RenameApplicationDBInput struct {
+	OldName            string // Previous owner; empty moves only the unclaimed rows.
+	NewName            string
+	BatchSize          int // Terminal workflows and steps re-owned per transaction.
+	AdoptUnclaimedRows bool
+}
+
+// renameSourceSQL matches the rows a rename moves: an application's own, unclaimed
+// ones, or both. Unclaimed rows are not implied and move only when asked.
+// Callers validate that at least one source is named.
+func renameSourceSQL(oldName string, adoptUnclaimedRows bool, args *[]any) string {
+	var clauses []string
+	if oldName != "" {
+		*args = append(*args, oldName)
+		clauses = append(clauses, fmt.Sprintf("application_name = $%d", len(*args)))
+	}
+	if adoptUnclaimedRows {
+		clauses = append(clauses, "application_name IS NULL")
+	}
+	return "(" + strings.Join(clauses, " OR ") + ")"
+}
+
+// renameRowsInBatches re-owns a table's rows in half-open key ranges, so a long
+// history neither moves in one transaction nor rescans what it already moved; a
+// re-run resumes.
+func (s *SysDB) renameRowsInBatches(ctx context.Context, table, keyColumn string, input RenameApplicationDBInput) (int64, error) {
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+	var total int64
+	// Ranges, not LIMIT: a LIMIT repages every row already moved, and an IN list
+	// of keys plans as a whole-table hash join.
+	var watermark *string
+	for {
+		moved, upper, err := func() (int64, *string, error) {
+			tx, err := s.pool.BeginTx(ctx, TxOptions{})
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to begin transaction: %w", err)
+			}
+			defer tx.Rollback(ctx)
+
+			args := []any{}
+			predicate := renameSourceSQL(input.OldName, input.AdoptUnclaimedRows, &args)
+			scope := predicate
+			if watermark != nil {
+				args = append(args, *watermark)
+				scope = fmt.Sprintf("%s AND %s > $%d", predicate, keyColumn, len(args))
+			}
+			// The batch-size-th matching key bounds this range; distinct, so a
+			// key's rows are never split across batches.
+			args = append(args, input.BatchSize-1)
+			query := s.RenderSQL(`SELECT DISTINCT `+keyColumn+` FROM %s`+table+
+				` WHERE `+scope+` ORDER BY `+keyColumn+fmt.Sprintf(` LIMIT 1 OFFSET $%d`, len(args)), schemaPrefix)
+			var upper *string
+			if err := tx.QueryRow(ctx, s.dialect.RewriteQuery(query), args...).Scan(&upper); err != nil && !errors.Is(err, ErrNoRows) {
+				return 0, nil, fmt.Errorf("failed to bound a %s rename batch: %w", table, err)
+			}
+
+			updateArgs := []any{input.NewName}
+			// The final batch drops the watermark, so rows that appeared below it still move.
+			batch := renameSourceSQL(input.OldName, input.AdoptUnclaimedRows, &updateArgs)
+			if upper != nil {
+				if watermark != nil {
+					updateArgs = append(updateArgs, *watermark)
+					batch = fmt.Sprintf("%s AND %s > $%d", batch, keyColumn, len(updateArgs))
+				}
+				updateArgs = append(updateArgs, *upper)
+				batch = fmt.Sprintf("%s AND %s <= $%d", batch, keyColumn, len(updateArgs))
+			}
+			updateQuery := s.RenderSQL(`UPDATE %s`+table+` SET application_name = $1 WHERE `+batch, schemaPrefix)
+			tag, err := tx.Exec(ctx, s.dialect.RewriteQuery(updateQuery), updateArgs...)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to re-own %s rows: %w", table, err)
+			}
+			moved, err := tag.RowsAffected()
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to count re-owned %s rows: %w", table, err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return 0, nil, fmt.Errorf("failed to commit a %s rename batch: %w", table, err)
+			}
+			return moved, upper, nil
+		}()
+		if err != nil {
+			return total, err
+		}
+		total += moved
+		// Fewer than a full batch remained, so that update took the rest.
+		if upper == nil {
+			return total, nil
+		}
+		watermark = upper
+	}
+}
+
+// RenameApplication gives NewName ownership of the rows OldName holds, of the
+// unclaimed rows, or of both. The renamed application must be stopped, or its
+// dequeues race this. Callers validate the input.
+func (s *SysDB) RenameApplication(ctx context.Context, input RenameApplicationDBInput) (ApplicationRowCounts, error) {
+	var counts ApplicationRowCounts
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
+	if err != nil {
+		return counts, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	move := func(table string) (int64, error) {
+		args := []any{input.NewName}
+		predicate := renameSourceSQL(input.OldName, input.AdoptUnclaimedRows, &args)
+		query := s.RenderSQL(`UPDATE %s`+table+` SET application_name = $1 WHERE `+predicate, schemaPrefix)
+		tag, err := tx.Exec(ctx, s.dialect.RewriteQuery(query), args...)
+		if err != nil {
+			return 0, fmt.Errorf("failed to re-own %s rows: %w", table, err)
+		}
+		moved, err := tag.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("failed to count re-owned %s rows: %w", table, err)
+		}
+		return moved, nil
+	}
+
+	if counts.Queues, err = move("queues"); err != nil {
+		return counts, err
+	}
+	if counts.Schedules, err = move("workflow_schedules"); err != nil {
+		return counts, err
+	}
+	if counts.Versions, err = move("application_versions"); err != nil {
+		return counts, err
+	}
+
+	// Rows a rename must move atomically with the versions above: a half-owned
+	// application dequeues work whose version row it can no longer see.
+	args := []any{input.NewName}
+	predicate := renameSourceSQL(input.OldName, input.AdoptUnclaimedRows, &args)
+	statusClause := fmt.Sprintf(" AND status IN ($%d, $%d, $%d)", len(args)+1, len(args)+2, len(args)+3)
+	args = append(args, models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed)
+	query := s.RenderSQL(`UPDATE %sworkflow_status SET application_name = $1 WHERE `+predicate+statusClause, schemaPrefix)
+	tag, err := tx.Exec(ctx, s.dialect.RewriteQuery(query), args...)
+	if err != nil {
+		return counts, fmt.Errorf("failed to re-own in-flight workflow rows: %w", err)
+	}
+	inFlight, err := tag.RowsAffected()
+	if err != nil {
+		return counts, fmt.Errorf("failed to count re-owned in-flight workflow rows: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return counts, fmt.Errorf("failed to commit the rename transaction: %w", err)
+	}
+
+	terminal, err := s.renameRowsInBatches(ctx, "workflow_status", "workflow_uuid", input)
+	if err != nil {
+		return counts, err
+	}
+	counts.Workflows = inFlight + terminal
+	if counts.Steps, err = s.renameRowsInBatches(ctx, "operation_outputs", "workflow_uuid", input); err != nil {
+		return counts, err
+	}
+	return counts, nil
 }
 
 /*******************************/
