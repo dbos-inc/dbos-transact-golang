@@ -125,7 +125,7 @@ func TestApplicationNameClaimsUnclaimed(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
 
-	handle, err := Enqueue[string, string](client, queueName, "claimable-workflow", "x")
+	handle, err := Enqueue[string](client, queueName, "claimable-workflow", "x")
 	require.NoError(t, err)
 
 	// The client wrote an unclaimed row.
@@ -159,7 +159,7 @@ func TestApplicationNameRecoveryIsolation(t *testing.T) {
 	RegisterWorkflow(ctxB, simple, WithWorkflowName("recovery-workflow"))
 
 	// Nothing is launched, so rows stay where the test puts them.
-	handle, err := Enqueue[string, string](ctxA, "recovery-isolation-queue", "recovery-workflow", "x")
+	handle, err := Enqueue[string](ctxA, "recovery-isolation-queue", "recovery-workflow", "x")
 	require.NoError(t, err)
 	workflowID := handle.GetWorkflowID()
 
