@@ -966,9 +966,6 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		c.logger.Warn("Timeout waiting for workflows to complete", "timeout", timeout)
 		pending = append(pending, "workflows")
 	}
-	if len(pending) > 0 {
-		return fmt.Errorf("shutdown timed out after %v waiting for: %s", timeout, strings.Join(pending, ", "))
-	}
 
 	// Close the system database
 	if c.systemDB != nil {
@@ -988,6 +985,10 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 
 	c.launched.Store(false)
 
+	if len(pending) > 0 {
+		c.shutdownStarted.Store(false)
+		return fmt.Errorf("shutdown timed out after %v waiting for: %s", timeout, strings.Join(pending, ", "))
+	}
 	return nil
 }
 

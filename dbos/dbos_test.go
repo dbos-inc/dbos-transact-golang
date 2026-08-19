@@ -632,6 +632,11 @@ func TestConcurrentShutdownDoesNotWaitTwice(t *testing.T) {
 	first := <-durations
 	second := <-durations
 	assert.Less(t, min(first, second), timeout/2)
+
+	// Undo the simulated stuck queue runner and close for real: the timed-out
+	// Shutdown returned (unlatched) before closing the system database.
+	dbosCtx.queueRunnerStarted.Store(false)
+	Shutdown(ctx, 5*time.Second)
 }
 
 type blockingScheduleListDB struct {
@@ -1343,6 +1348,7 @@ func TestClientShutdownReportsSystemDBTimeout(t *testing.T) {
 	// A held connection blocks pool.Close() past the timeout
 	conn, err := pool.Acquire(ctx)
 	require.NoError(t, err)
+	defer conn.Release()
 
 	err = client.Shutdown(client, 500 * time.Millisecond)
 	require.Error(t, err)
