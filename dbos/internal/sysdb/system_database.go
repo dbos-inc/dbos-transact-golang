@@ -196,10 +196,14 @@ func nameFilterSQL(column string, argNum int) string {
 // with a specified application name, is valid.
 // For example, when we upsert a schedule, the request can come from a context that operates for a specific application
 <<<<<<< HEAD
+<<<<<<< HEAD
 // But it is possible that an eponymous entry is owned by another application
 =======
 // But it is possible that a eponymous entry is owned by another application
 >>>>>>> fe48b63 (shared sysdb public api)
+=======
+// But it is possible that an eponymous entry is owned by another application
+>>>>>>> 0f09464 (nits)
 // This method validates whether the "requested" owner is valid for a row.
 func (s *SysDB) resolveRowOwner(ctx context.Context, q Querier, table, nameColumn, name string, owner *string, kind string) (*string, error) {
 	// Read the current application name for the object
@@ -5126,10 +5130,14 @@ func (s *SysDB) getQueueRow(ctx context.Context, db Querier, name string) (*mode
 
 // ListQueues returns database-backed queues owned by these applications plus
 <<<<<<< HEAD
+<<<<<<< HEAD
 // unclaimed ones. An empty or nil `applicationName` falls back to this context's application.
 =======
 // unclaimed ones; nil defaults to this handle's own application.
 >>>>>>> fe48b63 (shared sysdb public api)
+=======
+// unclaimed ones. An empty or nil `applicationName` falls back to this context's application.
+>>>>>>> 0f09464 (nits)
 func (s *SysDB) ListQueues(ctx context.Context, applicationNames []string) ([]models.QueueConfig, error) {
 	query := s.RenderSQL(`SELECT `+_QUEUE_SELECT_COLUMNS+` FROM %squeues`, s.dialect.SchemaPrefix(s.schema))
 	var args []any
@@ -6131,12 +6139,17 @@ func (s *SysDB) UpdateApplicationVersionTimestamp(ctx context.Context, versionNa
 }
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 // ListApplicationVersions returns versions registered by this context's
 // application plus unclaimed ones; an application-less context lists every one.
 =======
 // ListApplicationVersions returns versions registered by this handle's
 // application plus unclaimed ones; a nameless handle lists every one.
 >>>>>>> fe48b63 (shared sysdb public api)
+=======
+// ListApplicationVersions returns versions registered by this context's
+// application plus unclaimed ones; an application-less context lists every one.
+>>>>>>> 0f09464 (nits)
 func (s *SysDB) ListApplicationVersions(ctx context.Context) ([]VersionInfo, error) {
 	query := s.RenderSQL(`
 		SELECT version_id, version_name, version_timestamp, created_at, application_name
@@ -6174,12 +6187,17 @@ func (s *SysDB) ListApplicationVersions(ctx context.Context) ([]VersionInfo, err
 
 // GetLatestApplicationVersion returns the latest version registered by an
 <<<<<<< HEAD
+<<<<<<< HEAD
 // application, plus unclaimed ones. applicationName defaults to this context's.
 // An application-less context with no explicit name matches every application.
 =======
 // application, plus unclaimed ones. applicationName defaults to this handle's
 // own; a nameless handle with no explicit name matches every application's.
 >>>>>>> fe48b63 (shared sysdb public api)
+=======
+// application, plus unclaimed ones. applicationName defaults to this context's.
+// An application-less context with no explicit name matches every application.
+>>>>>>> 0f09464 (nits)
 func (s *SysDB) GetLatestApplicationVersion(ctx context.Context, tx Tx, applicationName string) (*VersionInfo, error) {
 	owner := applicationName
 	if owner == "" {
