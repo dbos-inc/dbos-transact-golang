@@ -2812,12 +2812,13 @@ func TestEnqueueWithinWorkflowDeduplication(t *testing.T) {
 
 	// assertEnqueueStep checks the caller recorded exactly one enqueue step and
 	// that the conflict was checkpointed on it.
-	assertEnqueueStep := func(t *testing.T, workflowID string) {
+	assertEnqueueStep := func(t *testing.T, workflowID, wantChildID string) {
 		t.Helper()
 		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
 		require.NoError(t, err, "failed to get workflow steps")
 		require.Len(t, steps, 1, "the caller should record a single enqueue step")
 		assert.Equal(t, "DBOS.enqueue", steps[0].StepName)
+		assert.Equal(t, wantChildID, steps[0].ChildWorkflowID)
 		require.Error(t, steps[0].Error, "the conflict must be checkpointed as the step's error")
 		assert.True(t, errors.Is(steps[0].Error, ErrQueueDeduplicated), "expected ErrQueueDeduplicated, got %v", steps[0].Error)
 	}
@@ -2852,7 +2853,7 @@ func TestEnqueueWithinWorkflowDeduplication(t *testing.T) {
 		result, err := handle.GetResult()
 		require.NoError(t, err, "the caller should swallow the conflict")
 		assert.Equal(t, "deduplicated", result, "the enqueue should have been deduplicated")
-		assertEnqueueStep(t, handle.GetWorkflowID())
+		assertEnqueueStep(t, handle.GetWorkflowID(), "")
 
 		// Free the key: an enqueue re-executed on replay would now succeed.
 		require.NoError(t, CancelWorkflow(dbosCtx, holder.GetWorkflowID()), "failed to cancel the holder")
@@ -2860,7 +2861,7 @@ func TestEnqueueWithinWorkflowDeduplication(t *testing.T) {
 		require.NoError(t, err, "failed to list workflows")
 
 		assert.Equal(t, "deduplicated", replayCaller(t, handle.GetWorkflowID()), "the replay must return the checkpointed conflict")
-		assertEnqueueStep(t, handle.GetWorkflowID())
+		assertEnqueueStep(t, handle.GetWorkflowID(), "")
 		after, err := ListWorkflows(dbosCtx)
 		require.NoError(t, err, "failed to list workflows")
 		assert.Len(t, after, len(before), "the replay must not enqueue a new workflow")
@@ -2881,7 +2882,7 @@ func TestEnqueueWithinWorkflowDeduplication(t *testing.T) {
 		require.NoError(t, err, "the caller should attach to the existing holder")
 		assert.Equal(t, holder.GetWorkflowID(), result, "the caller should return the existing holder's ID")
 		// The step records the holder ID alongside the conflict error
-		assertEnqueueStep(t, handle.GetWorkflowID())
+		assertEnqueueStep(t, handle.GetWorkflowID(), holder.GetWorkflowID())
 
 		// Free the key: a re-executed enqueue would mint a new workflow ID.
 		require.NoError(t, CancelWorkflow(dbosCtx, holder.GetWorkflowID()), "failed to cancel the holder")
@@ -2889,9 +2890,56 @@ func TestEnqueueWithinWorkflowDeduplication(t *testing.T) {
 		require.NoError(t, err, "failed to list workflows")
 
 		assert.Equal(t, holder.GetWorkflowID(), replayCaller(t, handle.GetWorkflowID()), "the replay must resolve the same holder from the checkpoint")
-		assertEnqueueStep(t, handle.GetWorkflowID())
+		assertEnqueueStep(t, handle.GetWorkflowID(), holder.GetWorkflowID())
 		after, err := ListWorkflows(dbosCtx)
 		require.NoError(t, err, "failed to list workflows")
 		assert.Len(t, after, len(before), "the replay must not enqueue a new workflow")
 	})
+}
+
+func enqueueChildCaller(ctx Context, in enqueueDedupCallerInput) (string, error) {
+	handle, err := Enqueue[string](ctx, in.Queue, in.WorkflowName, in.Input)
+	if err != nil {
+		return "", err
+	}
+	return handle.GetWorkflowID(), nil
+}
+
+func TestEnqueueWithinWorkflowRecordsParentChild(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	queue, err := RegisterQueue(dbosCtx, "enqueue-in-workflow-parent-queue")
+	require.NoError(t, err, "failed to register queue")
+
+	RegisterWorkflow(dbosCtx, enqueueDedupTarget)
+	RegisterWorkflow(dbosCtx, enqueueChildCaller)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	handle, err := RunWorkflow(dbosCtx, enqueueChildCaller, enqueueDedupCallerInput{
+		Queue:        queue.GetName(),
+		WorkflowName: resolveWorkflowFunctionName(enqueueDedupTarget),
+		Input:        "child",
+	})
+	require.NoError(t, err, "failed to start the caller workflow")
+	childID, err := handle.GetResult()
+	require.NoError(t, err, "the caller should complete")
+
+	childHandle, err := RetrieveWorkflow[string](dbosCtx, childID)
+	require.NoError(t, err, "failed to retrieve the enqueued workflow")
+	childResult, err := childHandle.GetResult()
+	require.NoError(t, err, "the enqueued workflow should complete")
+	assert.Equal(t, "child-done", childResult)
+
+	childStatus, err := childHandle.GetStatus()
+	require.NoError(t, err, "failed to get the enqueued workflow's status")
+	assert.Equal(t, handle.GetWorkflowID(), childStatus.ParentWorkflowID, "the enqueued workflow should record the caller as its parent")
+
+	steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+	require.NoError(t, err, "failed to get workflow steps")
+	require.Len(t, steps, 1, "the caller should record a single enqueue step")
+	assert.Equal(t, "DBOS.enqueue", steps[0].StepName)
+	assert.Equal(t, childID, steps[0].ChildWorkflowID, "the enqueue step should record the enqueued workflow as its child")
+	require.NoError(t, steps[0].Error)
+
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up")
 }
