@@ -730,3 +730,117 @@ func TestClientAppName(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "x-ran", result)
 }
+
+// TestRenameApplication verifies RenameApplication re-owns every table's rows —
+// atomically for the registries and in-flight workflows, in batches for the
+// history — leaving other applications' rows alone.
+func TestRenameApplication(t *testing.T) {
+	ctxA := setupDBOS(t, setupDBOSOptions{dropDB: true, appName: "app-a"})
+	ctxB := setupDBOS(t, setupDBOSOptions{appName: "app-b"})
+
+	twoSteps := func(app string) func(ctx Context, input string) (string, error) {
+		return func(ctx Context, input string) (string, error) {
+			for range 2 {
+				if _, err := RunAsStep(ctx, func(context.Context) (string, error) { return "s", nil }); err != nil {
+					return "", err
+				}
+			}
+			return app + ":" + input, nil
+		}
+	}
+	RegisterWorkflow(ctxA, twoSteps("app-a"), WithWorkflowName("rename-wf"))
+	RegisterWorkflow(ctxB, twoSteps("app-b"), WithWorkflowName("rename-wf"))
+	require.NoError(t, Launch(ctxA))
+	require.NoError(t, Launch(ctxB))
+
+	_, err := RegisterQueue(ctxA, "rename-queue")
+	require.NoError(t, err)
+	require.NoError(t, CreateSchedule(ctxA, ScheduleSpec{
+		ScheduleName: "rename-sched",
+		Schedule:     "0 0 0 1 1 *",
+		WorkflowName: "rename-wf",
+	}))
+
+	// Three completed workflows with two steps each, and one of app-b's for contrast.
+	var done []WorkflowHandle[string]
+	for range 3 {
+		h, err := Enqueue[string, string](ctxA, "rename-queue", "rename-wf", "x")
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+		done = append(done, h)
+	}
+	hB, err := Enqueue[string, string](ctxB, models.InternalQueueName, "rename-wf", "x")
+	require.NoError(t, err)
+	_, err = hB.GetResult()
+	require.NoError(t, err)
+
+	// Stop the application being renamed: its dequeues race the rename.
+	require.NoError(t, Shutdown(ctxA, 30*time.Second))
+
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
+
+	// An ENQUEUED workflow left behind by the stopped app-a: the atomic path.
+	pending, err := Enqueue[string, string](client, "rename-queue", "rename-wf", "x",
+		WithEnqueueApplicationName("app-a"))
+	require.NoError(t, err)
+
+	// Batch size 1 forces the range loop over the terminal history.
+	counts, err := RenameApplication(client, RenameApplicationInput{OldName: "app-a", NewName: "app-c", BatchSize: 1})
+	require.NoError(t, err)
+	assert.Equal(t, ApplicationRowCounts{Queues: 1, Schedules: 1, Versions: 1, Workflows: 4, Steps: 6}, counts)
+
+	for _, h := range done {
+		owner := rowApplicationName(t, ctxB, h.GetWorkflowID())
+		require.NotNil(t, owner)
+		assert.Equal(t, "app-c", *owner)
+		for _, stepOwner := range stepApplicationNames(t, ctxB, h.GetWorkflowID()) {
+			require.NotNil(t, stepOwner)
+			assert.Equal(t, "app-c", *stepOwner)
+		}
+	}
+	ownerB := rowApplicationName(t, ctxB, hB.GetWorkflowID())
+	require.NotNil(t, ownerB)
+	assert.Equal(t, "app-b", *ownerB)
+
+	// Adoption moves only unclaimed rows, and only when asked.
+	unclaimed, err := Enqueue[string, string](client, "rename-queue", "unclaimed-wf", "y")
+	require.NoError(t, err)
+	noAdopt, err := RenameApplication(client, RenameApplicationInput{OldName: "no-such-app", NewName: "app-d"})
+	require.NoError(t, err)
+	assert.Equal(t, ApplicationRowCounts{}, noAdopt)
+	adopted, err := RenameApplication(client, RenameApplicationInput{NewName: "app-d", AdoptUnclaimedRows: true})
+	require.NoError(t, err)
+	assert.Equal(t, ApplicationRowCounts{Workflows: 1}, adopted)
+	adoptedOwner := rowApplicationName(t, ctxB, unclaimed.GetWorkflowID())
+	require.NotNil(t, adoptedOwner)
+	assert.Equal(t, "app-d", *adoptedOwner)
+
+	_, err = RenameApplication(client, RenameApplicationInput{NewName: "app-e"})
+	require.ErrorContains(t, err, "nothing to re-own")
+	_, err = RenameApplication(client, RenameApplicationInput{OldName: "app-e", NewName: "app-e"})
+	require.ErrorContains(t, err, "already holds that name")
+	_, err = RenameApplication(client, RenameApplicationInput{OldName: "app-x", NewName: ""})
+	require.ErrorContains(t, err, "new application name is required")
+	_, err = RenameApplication(client, RenameApplicationInput{OldName: "app-x", NewName: "app-e", BatchSize: -1})
+	require.ErrorContains(t, err, "batch size")
+
+	// app-c owns the moved registries and runs the moved in-flight workflow,
+	// whose version was left unset by the client enqueue.
+	ctxC := setupDBOS(t, setupDBOSOptions{appName: "app-c"})
+	RegisterWorkflow(ctxC, twoSteps("app-c"), WithWorkflowName("rename-wf"))
+	require.NoError(t, Launch(ctxC))
+
+	q, err := RetrieveQueue(ctxC, "rename-queue")
+	require.NoError(t, err)
+	assert.Equal(t, "app-c", q.GetApplicationName())
+	sched, err := GetSchedule(ctxC, "rename-sched")
+	require.NoError(t, err)
+	assert.Equal(t, "app-c", sched.ApplicationName)
+
+	result, err := pending.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "app-c:x", result)
+}

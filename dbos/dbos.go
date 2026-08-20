@@ -219,10 +219,11 @@ type Client interface {
 	BackfillSchedule(_ Client, scheduleName string, start, end time.Time) ([]string, error) // Backfill a schedule, returning the IDs of the enqueued workflows
 	TriggerSchedule(_ Client, scheduleName string) (WorkflowHandle[any], error)             // Trigger a schedule immediately, returning a handle to the enqueued workflow
 
-	// Application version management
-	ListApplicationVersions(_ Client) ([]VersionInfo, error)        // List all registered application versions, newest first
-	GetLatestApplicationVersion(_ Client) (VersionInfo, error)      // Get the latest registered application version
-	SetLatestApplicationVersion(_ Client, versionName string) error // Mark the named version as latest by bumping its timestamp to now
+	// Application management
+	ListApplicationVersions(_ Client) ([]VersionInfo, error)                                // List all registered application versions, newest first
+	GetLatestApplicationVersion(_ Client) (VersionInfo, error)                              // Get the latest registered application version
+	SetLatestApplicationVersion(_ Client, versionName string) error                         // Mark the named version as latest by bumping its timestamp to now
+	RenameApplication(_ Client, input RenameApplicationInput) (ApplicationRowCounts, error) // Re-own system database rows after an application is renamed
 
 	Shutdown(_ Client, timeout time.Duration) error // Gracefully shutdown all DBOS resources; returns an error if the timeout expired before they all stopped
 }
@@ -872,10 +873,10 @@ func (c *dbosContext) Launch() error {
 // recovered on the next launch rather than marked CANCELLED.
 // 2. Waits for the queue runner to complete processing
 // 3. Stops the workflow scheduler and waits for scheduled jobs to finish
-// 4. Shuts down conductor
-// 5. Shuts down the admin server
-// 6. Waits for in-flight workflows to finish unwinding
-// 7. Shuts down the system database connection pool and notification listener
+// 4. Shuts down the admin server
+// 5. Waits for in-flight workflows to finish unwinding
+// 6. Shuts down the system database connection pool and notification listener
+// 7. Shuts down conductor
 // 8. Marks the context as not launched
 //
 // Each step respects the provided timeout. If any component doesn't shut down within the timeout,
@@ -939,14 +940,6 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		}
 	}
 
-	// Shutdown the conductor
-	if c.conductor != nil {
-		c.logger.Debug("Shutting down conductor")
-		if err := c.conductor.shutdown(timeout); err != nil {
-			pending = append(pending, "conductor")
-		}
-	}
-
 	// Shutdown the admin server
 	if c.adminServer != nil {
 		c.logger.Debug("Shutting down admin server")
@@ -974,6 +967,14 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		pending = append(pending, "workflows")
 	}
 
+	// Shutdown the conductor
+	if c.conductor != nil {
+		c.logger.Debug("Shutting down conductor")
+		if err := c.conductor.shutdown(timeout); err != nil {
+			pending = append(pending, "conductor")
+		}
+	}
+
 	// Close the system database
 	if c.systemDB != nil {
 		c.logger.Debug("Shutting down system database")
@@ -985,6 +986,7 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	c.launched.Store(false)
 
 	if len(pending) > 0 {
+		c.shutdownStarted.Store(false)
 		return fmt.Errorf("shutdown timed out after %v waiting for: %s", timeout, strings.Join(pending, ", "))
 	}
 	return nil

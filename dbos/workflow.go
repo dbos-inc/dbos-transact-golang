@@ -6244,3 +6244,50 @@ func SetLatestApplicationVersion(ctx Client, versionName string) error {
 	}
 	return ctx.SetLatestApplicationVersion(ctx, versionName)
 }
+
+const DefaultRenameBatchSize = sysdb.DefaultRenameBatchSize
+
+type ApplicationRowCounts = sysdb.ApplicationRowCounts
+
+type RenameApplicationInput struct {
+	OldName            string // The application's previous name. Empty moves nothing but the unclaimed rows, so it requires AdoptUnclaimedRows.
+	NewName            string // The application that ends up owning the rows.
+	BatchSize          int    // Terminal workflows and steps re-owned per transaction. Zero defaults to DefaultRenameBatchSize.
+	AdoptUnclaimedRows bool   // Also take rows no application owns (application_name = NULL).
+}
+
+func (c *dbosContext) RenameApplication(_ Client, input RenameApplicationInput) (ApplicationRowCounts, error) {
+	if input.OldName == "" && !input.AdoptUnclaimedRows {
+		return ApplicationRowCounts{}, errors.New("nothing to re-own: name the application to rename, adopt unclaimed rows, or both")
+	}
+	if input.NewName == "" {
+		return ApplicationRowCounts{}, errors.New("the new application name is required")
+	}
+	if input.OldName == input.NewName {
+		return ApplicationRowCounts{}, fmt.Errorf("application '%s' already holds that name; nothing to rename", input.NewName)
+	}
+	if input.BatchSize < 0 {
+		return ApplicationRowCounts{}, fmt.Errorf("batch size must be a positive integer, got %d", input.BatchSize)
+	}
+	dbInput := sysdb.RenameApplicationDBInput{
+		OldName:            input.OldName,
+		NewName:            input.NewName,
+		BatchSize:          input.BatchSize,
+		AdoptUnclaimedRows: input.AdoptUnclaimedRows,
+	}
+	if dbInput.BatchSize == 0 {
+		dbInput.BatchSize = DefaultRenameBatchSize
+	}
+	return c.systemDB.RenameApplication(c, dbInput)
+}
+
+// RenameApplication gives an application ownership of the rows another name
+// holds, of the rows nobody holds, or of both. It returns the rows moved, by
+// table. Do not run it while the application being renamed is running: its
+// dequeues race the rename. A re-run resumes after an interruption, where it left off.
+func RenameApplication(ctx Client, input RenameApplicationInput) (ApplicationRowCounts, error) {
+	if ctx == nil {
+		return ApplicationRowCounts{}, errors.New("ctx cannot be nil")
+	}
+	return ctx.RenameApplication(ctx, input)
+}
