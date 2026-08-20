@@ -967,19 +967,19 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		pending = append(pending, "workflows")
 	}
 
-	// Close the system database
-	if c.systemDB != nil {
-		c.logger.Debug("Shutting down system database")
-		for _, p := range c.systemDB.Shutdown(c, timeout) {
-			pending = append(pending, "system database "+p)
-		}
-	}
-
 	// Shutdown the conductor
 	if c.conductor != nil {
 		c.logger.Debug("Shutting down conductor")
 		if err := c.conductor.shutdown(timeout); err != nil {
 			pending = append(pending, "conductor")
+		}
+	}
+
+	// Close the system database
+	if c.systemDB != nil {
+		c.logger.Debug("Shutting down system database")
+		for _, p := range c.systemDB.Shutdown(c, timeout) {
+			pending = append(pending, "system database "+p)
 		}
 	}
 
