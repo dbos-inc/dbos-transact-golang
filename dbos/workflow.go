@@ -2000,6 +2000,9 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 		DebounceDeadline:   params.debounceDeadline,
 		IsDebounced:        params.isDebounced,
 	}
+	if isWithinWorkflow {
+		status.ParentWorkflowID = wfState.workflowID
+	}
 
 	uncancellableCtx := WithoutCancel(c)
 	returnExisting := params.deduplicationPolicy == DeduplicationPolicyReturnExisting
@@ -2010,7 +2013,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 		if isWithinWorkflow {
 			enqueuedID, err = runAsTxn(c, func(ctx context.Context, tx Tx) (string, error) {
 				return c.insertEnqueuedWorkflow(ctx, tx, status, queueName, params, returnExisting)
-			}, WithStepName("DBOS.enqueue"))
+			}, WithStepName("DBOS.enqueue"), withChildWorkflowIDOutput())
 		} else {
 			enqueuedID, err = func() (string, error) {
 				tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
@@ -2171,6 +2174,7 @@ type stepOptions struct {
 	txIsoLevel         *IsoLevel        // Transaction isolation level for runAsTxn (nil = ReadCommitted)
 	retryPredicate     func(error) bool // Optional predicate: nil = retry all errors up to maxRetries
 	completedAt        *time.Time       // Overrides the recorded completion time (see withCompletedAt)
+	outputIsChildID    bool             // Record the step's string output as its child workflow ID
 }
 
 // setDefaults applies default values to stepOptions
@@ -2288,6 +2292,12 @@ func withNextStepID(stepID int) StepOption {
 func withCompletedAt(t time.Time) StepOption {
 	return func(opts *stepOptions) {
 		opts.completedAt = &t
+	}
+}
+
+func withChildWorkflowIDOutput() StepOption {
+	return func(opts *stepOptions) {
+		opts.outputIsChildID = true
 	}
 }
 
@@ -2776,6 +2786,11 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 			Tx:            tx,
 			Serialization: serialization,
 			ExecutorID:    c.GetExecutorID(),
+		}
+		if stepOpts.outputIsChildID {
+			if childID, ok := stepOutput.(string); ok {
+				dbInput.ChildWorkflowID = childID
+			}
 		}
 		recErr := c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
 		if recErr != nil {
