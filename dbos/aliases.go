@@ -91,14 +91,17 @@ const (
 	ErrorCodeInvalidOption            = models.ErrorCodeInvalidOption            // Invalid or inconsistent options passed to a DBOS API
 )
 
-// Driver-facing SQL surface: custom database drivers implement Pool and
-// Dialect; the remaining types are what those implementations return.
+// The portable SQL surface DBOS writes through, one implementation per backend
+// (pgx for Postgres/CockroachDB, database/sql for SQLite). Tx is the type a
+// RunAsTransaction callback receives; the rest are what its queries return.
 type (
 	// Querier is the subset of SQL operations available on both a pool and a
 	// transaction.
 	Querier = sysdb.Querier
 
-	// Tx is a transaction that can also execute queries.
+	// Tx is a transaction that can also execute queries. A RunAsTransaction
+	// callback receives one; WithEnqueueTransaction and WithSendTransaction
+	// also accept the underlying pgx.Tx or *sql.Tx directly.
 	Tx = sysdb.Tx
 
 	// Pool is a connection pool that can begin transactions.

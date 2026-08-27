@@ -135,6 +135,9 @@ func PgxPool(p Pool) *pgxpool.Pool {
 	return nil
 }
 
+// NewPgxTx wraps a pgx transaction the caller owns so it satisfies Tx.
+func NewPgxTx(tx pgx.Tx) Tx { return &pgxTxAdapter{tx: tx} }
+
 type pgxTxAdapter struct{ tx pgx.Tx }
 
 func (t *pgxTxAdapter) Exec(ctx context.Context, q string, args ...any) (Result, error) {
@@ -272,6 +275,9 @@ func SameEngine(a, b Pool) bool {
 	}
 	return false
 }
+
+// NewSQLTx wraps a database/sql transaction the caller owns so it satisfies Tx.
+func NewSQLTx(tx *sql.Tx) Tx { return &sqlTxAdapter{tx: tx} }
 
 type sqlTxAdapter struct{ tx *sql.Tx }
 
