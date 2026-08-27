@@ -224,3 +224,136 @@ func TestConnStringSetsPoolMaxConns(t *testing.T) {
 		}
 	}
 }
+
+// gcFakePool scripts the two statements one garbage collection batch issues: the
+// bound query picking the batch's upper watermark, and the delete removing it.
+type gcFakePool struct {
+	steps      []int64 // bounds returned by successive bound queries; exhausted means the final batch
+	failDelete int     // 1-based delete to fail, 0 for none
+	bounds     [][]any // args of each bound query, in order
+	deletes    [][]any // args of each delete, in order
+	commits    int
+	rollbacks  int
+}
+
+type gcFakeTx struct {
+	pool *gcFakePool
+	done bool
+}
+
+type gcFakeRow struct {
+	step *int64
+}
+
+func (r gcFakeRow) Scan(dest ...any) error {
+	if r.step == nil {
+		return ErrNoRows
+	}
+	*(dest[0].(*int64)) = *r.step
+	return nil
+}
+
+type gcFakeResult struct{}
+
+func (gcFakeResult) RowsAffected() (int64, error) { return 0, nil }
+
+func (t *gcFakeTx) QueryRow(_ context.Context, _ string, args ...any) Row {
+	t.pool.bounds = append(t.pool.bounds, args)
+	if len(t.pool.steps) == 0 {
+		return gcFakeRow{}
+	}
+	step := t.pool.steps[0]
+	t.pool.steps = t.pool.steps[1:]
+	return gcFakeRow{step: &step}
+}
+
+func (t *gcFakeTx) Exec(_ context.Context, _ string, args ...any) (Result, error) {
+	t.pool.deletes = append(t.pool.deletes, args)
+	if t.pool.failDelete == len(t.pool.deletes) {
+		return nil, errors.New("injected garbage collection failure")
+	}
+	return gcFakeResult{}, nil
+}
+
+func (t *gcFakeTx) Query(context.Context, string, ...any) (Rows, error) {
+	return nil, errors.New("unexpected Query")
+}
+
+func (t *gcFakeTx) Commit(context.Context) error {
+	t.done = true
+	t.pool.commits++
+	return nil
+}
+
+func (t *gcFakeTx) Rollback(context.Context) error {
+	if !t.done {
+		t.pool.rollbacks++
+	}
+	return nil
+}
+
+func (p *gcFakePool) BeginTx(context.Context, TxOptions) (Tx, error) { return &gcFakeTx{pool: p}, nil }
+func (p *gcFakePool) Exec(context.Context, string, ...any) (Result, error) {
+	return nil, errors.New("unexpected Exec outside a batch transaction")
+}
+func (p *gcFakePool) Query(context.Context, string, ...any) (Rows, error) {
+	return nil, errors.New("unexpected Query")
+}
+func (p *gcFakePool) QueryRow(context.Context, string, ...any) Row {
+	return gcFakeRow{}
+}
+func (p *gcFakePool) Ping(context.Context) error { return nil }
+func (p *gcFakePool) Close()                     {}
+
+func TestGarbageCollectBatches(t *testing.T) {
+	cutoff, batchSize := int64(100), 3
+	newSysDB := func(pool Pool) *SysDB {
+		return &SysDB{pool: pool, dialect: SqliteDialect{}, logger: slog.New(slog.DiscardHandler)}
+	}
+	input := GarbageCollectWorkflowsInput{CutoffEpochTimestampMs: &cutoff, BatchSize: &batchSize}
+
+	t.Run("advances a watermark, one committed transaction per batch", func(t *testing.T) {
+		pool := &gcFakePool{steps: []int64{3, 6, 9}}
+		if err := newSysDB(pool).GarbageCollectWorkflows(context.Background(), input); err != nil {
+			t.Fatalf("GarbageCollectWorkflows: %v", err)
+		}
+		wantBounds := [][]any{
+			{cutoff, int64(0), batchSize - 1},
+			{cutoff, int64(3), batchSize - 1},
+			{cutoff, int64(6), batchSize - 1},
+			{cutoff, int64(9), batchSize - 1},
+		}
+		if !reflect.DeepEqual(pool.bounds, wantBounds) {
+			t.Errorf("bound queries = %v, want %v", pool.bounds, wantBounds)
+		}
+		// The final delete drops the upper bound, taking the whole tail above the watermark
+		wantDeletes := [][]any{
+			{cutoff, int64(0), int64(3)},
+			{cutoff, int64(3), int64(6)},
+			{cutoff, int64(6), int64(9)},
+			{cutoff, int64(9)},
+		}
+		if !reflect.DeepEqual(pool.deletes, wantDeletes) {
+			t.Errorf("deletes = %v, want %v", pool.deletes, wantDeletes)
+		}
+		if pool.commits != len(wantDeletes) {
+			t.Errorf("commits = %d, want %d", pool.commits, len(wantDeletes))
+		}
+	})
+
+	t.Run("leaves batches committed before a failure", func(t *testing.T) {
+		pool := &gcFakePool{steps: []int64{3, 6, 9}, failDelete: 2}
+		if err := newSysDB(pool).GarbageCollectWorkflows(context.Background(), input); err == nil {
+			t.Fatal("GarbageCollectWorkflows: expected the injected failure to surface")
+		}
+		if pool.commits != 1 {
+			t.Errorf("commits = %d, want 1", pool.commits)
+		}
+		if pool.rollbacks != 1 {
+			t.Errorf("rollbacks = %d, want 1", pool.rollbacks)
+		}
+		if len(pool.deletes) != 2 {
+			t.Errorf("deletes = %d, want 2", len(pool.deletes))
+		}
+	})
+}

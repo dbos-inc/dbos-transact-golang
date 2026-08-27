@@ -2238,12 +2238,16 @@ func (s *SysDB) CancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 type GarbageCollectWorkflowsInput struct {
 	CutoffEpochTimestampMs *int64
 	RowsThreshold          *int
+	BatchSize              *int
 }
 
 func (s *SysDB) GarbageCollectWorkflows(ctx context.Context, input GarbageCollectWorkflowsInput) error {
 	// Validate input parameters
 	if input.RowsThreshold != nil && *input.RowsThreshold <= 0 {
 		return fmt.Errorf("rowsThreshold must be greater than 0, got %d", *input.RowsThreshold)
+	}
+	if input.BatchSize != nil && *input.BatchSize <= 0 {
+		return fmt.Errorf("batchSize must be greater than 0, got %d", *input.BatchSize)
 	}
 
 	cutoffTimestamp := input.CutoffEpochTimestampMs
@@ -2280,29 +2284,115 @@ func (s *SysDB) GarbageCollectWorkflows(ctx context.Context, input GarbageCollec
 		return nil
 	}
 
-	// completed_at is set on every terminal transition and cleared on resume, so one
-	// predicate covers eligibility: in-flight rows hold NULL and never compare true.
-	deleteAppNameClause := ""
-	deleteArgs := []any{*cutoffTimestamp}
+	// completed_at is set on every terminal transition and cleared on resume,
+	// so in-flight rows hold NULL and never compare true.
+	// Unclaimed rows are included.
+	gcFilter := "completed_at < $1"
+	gcArgs := []any{*cutoffTimestamp}
 	if s.appName != "" {
-		deleteAppNameClause = " AND " + nameFilterSQL("application_name", 2)
-		deleteArgs = append(deleteArgs, s.appName)
+		gcArgs = append(gcArgs, s.appName)
+		gcFilter += " AND " + nameFilterSQL("application_name", len(gcArgs))
 	}
-	query := s.RenderSQL(`DELETE FROM %sworkflow_status
-			  WHERE completed_at < $1`+deleteAppNameClause, s.dialect.SchemaPrefix(s.schema))
+	// Replay batches that lost a deadlock or serialization race.
+	retryOpts := []RetryOption{WithRetrierLogger(s.logger), WithRetryCondition(s.dialect.IsRetryableTransaction)}
 
-	commandTag, err := s.pool.Exec(ctx, query, deleteArgs...)
-
-	if err != nil {
-		return fmt.Errorf("failed to garbage collect workflows: %w", err)
+	var deletedCount int64
+	if input.BatchSize == nil { // delete all at once
+		query := s.RenderSQL(`DELETE FROM %sworkflow_status WHERE `+gcFilter, s.dialect.SchemaPrefix(s.schema))
+		count, err := RetryWithResult(ctx, func() (int64, error) {
+			commandTag, err := s.pool.Exec(ctx, query, gcArgs...)
+			if err != nil {
+				return 0, err
+			}
+			affected, _ := commandTag.RowsAffected()
+			return affected, nil
+		}, retryOpts...)
+		if err != nil {
+			return fmt.Errorf("failed to garbage collect workflows: %w", err)
+		}
+		deletedCount = count
+	} else {
+		count, err := s.garbageCollectInBatches(ctx, gcFilter, gcArgs, *input.BatchSize, retryOpts)
+		if err != nil {
+			return err
+		}
+		deletedCount = count
 	}
 
-	deletedCount, _ := commandTag.RowsAffected()
 	s.logger.Info("Garbage collected workflows",
 		"cutoff_timestamp", *cutoffTimestamp,
 		"deleted_count", deletedCount)
 
 	return nil
+}
+
+// delete in batch, one transaction per batch
+func (s *SysDB) garbageCollectInBatches(ctx context.Context, gcFilter string, gcArgs []any, batchSize int, retryOpts []RetryOption) (int64, error) {
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+	watermarkArg, offsetArg, stepArg := len(gcArgs)+1, len(gcArgs)+2, len(gcArgs)+2
+
+	// The completed_at of the batchSize-th oldest eligible row above the watermark
+	stepQuery := s.RenderSQL(fmt.Sprintf(`SELECT completed_at
+			  FROM %%sworkflow_status
+			  WHERE %s AND completed_at > $%d
+			  ORDER BY completed_at
+			  LIMIT 1 OFFSET $%d`, gcFilter, watermarkArg, offsetArg), schemaPrefix)
+	// completed_at ties may push a batch slightly over batchSize
+	batchQuery := s.RenderSQL(fmt.Sprintf(`DELETE FROM %%sworkflow_status
+			  WHERE %s AND completed_at > $%d AND completed_at <= $%d`, gcFilter, watermarkArg, stepArg), schemaPrefix)
+	// A row that terminalizes mid-pass takes completed_at > cutoff, so it can never
+	// fall below the watermark: the tail above it is all that remains.
+	finalQuery := s.RenderSQL(fmt.Sprintf(`DELETE FROM %%sworkflow_status
+			  WHERE %s AND completed_at > $%d`, gcFilter, watermarkArg), schemaPrefix)
+
+	var deletedCount int64
+	watermark := int64(0)
+	for {
+		// Deletes one batch, returning the watermark to resume from, or nil when done
+		step, err := RetryWithResult(ctx, func() (*int64, error) {
+			tx, err := s.pool.BeginTx(ctx, TxOptions{})
+			if err != nil {
+				return nil, fmt.Errorf("failed to begin garbage collection batch: %w", err)
+			}
+			defer tx.Rollback(ctx)
+
+			// First find the completed_at of the batchSize-th oldest eligible row above the watermark
+			args := append(append([]any{}, gcArgs...), watermark, batchSize-1)
+			var step int64
+			err = tx.QueryRow(ctx, stepQuery, args...).Scan(&step)
+			final := errors.Is(err, ErrNoRows)
+			if err != nil && !final {
+				return nil, fmt.Errorf("failed to query garbage collection batch bound: %w", err)
+			}
+
+			// Then delete all eligible rows with completed_at <= step (or all remaining if final)
+			query, deleteArgs := batchQuery, append(append([]any{}, gcArgs...), watermark, step)
+			if final {
+				query, deleteArgs = finalQuery, append(append([]any{}, gcArgs...), watermark)
+			}
+			commandTag, err := tx.Exec(ctx, query, deleteArgs...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to garbage collect workflows: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("failed to commit garbage collection batch: %w", err)
+			}
+
+			affected, _ := commandTag.RowsAffected()
+			deletedCount += affected
+			if final {
+				return nil, nil
+			}
+			return &step, nil
+		}, retryOpts...)
+		if err != nil {
+			return deletedCount, err
+		}
+		if step == nil {
+			return deletedCount, nil
+		}
+		watermark = *step
+	}
 }
 
 type ResumeWorkflowsDBInput struct {
