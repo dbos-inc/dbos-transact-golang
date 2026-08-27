@@ -279,27 +279,42 @@ func TestApplicationNameGarbageCollectionScoping(t *testing.T) {
 	require.NoError(t, Launch(ctxA))
 	require.NoError(t, Launch(ctxB))
 
-	handleA, err := RunWorkflow(ctxA, simple, "a")
+	// Three app-a rows against a batch size of two: one bounded batch, then the tail.
+	for range 3 {
+		handleA, err := RunWorkflow(ctxA, simple, "a")
+		require.NoError(t, err)
+		_, err = handleA.GetResult()
+		require.NoError(t, err)
+	}
+	handleB, err := RunWorkflow(ctxB, simple, "b")
 	require.NoError(t, err)
-	_, err = handleA.GetResult()
+	_, err = handleB.GetResult()
 	require.NoError(t, err)
 
+	batchSize := 2
 	cutoff := time.Now().Add(time.Hour).UnixMilli()
-	gcInput := sysdb.GarbageCollectWorkflowsInput{CutoffEpochTimestampMs: &cutoff}
+	gcInput := sysdb.GarbageCollectWorkflowsInput{CutoffEpochTimestampMs: &cutoff, BatchSize: &batchSize}
 
-	// app-b's GC spares app-a's completed workflow.
+	// app-b's GC collects its own row and spares every app-a row.
 	require.NoError(t, ctxB.(*dbosContext).systemDB.GarbageCollectWorkflows(ctxB, gcInput))
-	require.NotNil(t, rowApplicationName(t, ctxA, handleA.GetWorkflowID()))
+	assert.Equal(t, 3, ownedRowCount(t, ctxA, "app-a"))
+	assert.Equal(t, 0, ownedRowCount(t, ctxA, "app-b"))
 
-	// app-a's GC deletes it.
+	// app-a's GC then collects its own three, across two batches.
 	require.NoError(t, ctxA.(*dbosContext).systemDB.GarbageCollectWorkflows(ctxA, gcInput))
-	sdb := ctxA.(*dbosContext).systemDB.(*sysdb.SysDB)
+	assert.Equal(t, 0, ownedRowCount(t, ctxA, "app-a"))
+}
+
+// ownedRowCount counts the workflow_status rows an application owns.
+func ownedRowCount(t *testing.T, ctx Context, appName string) int {
+	t.Helper()
+	sdb := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
 	query := sdb.Dialect().RewriteQuery(fmt.Sprintf(
-		`SELECT COUNT(*) FROM %sworkflow_status WHERE workflow_uuid = $1`,
+		`SELECT COUNT(*) FROM %sworkflow_status WHERE application_name = $1`,
 		sdb.Dialect().SchemaPrefix(sdb.Schema())))
 	var count int
-	require.NoError(t, sdb.Pool().QueryRow(context.Background(), query, handleA.GetWorkflowID()).Scan(&count))
-	assert.Equal(t, 0, count)
+	require.NoError(t, sdb.Pool().QueryRow(context.Background(), query, appName).Scan(&count))
+	return count
 }
 
 // TestApplicationVersionIncludesAppName verifies same-binary peers under

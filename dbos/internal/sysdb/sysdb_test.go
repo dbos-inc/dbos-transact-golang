@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestNotificationLoopCompletionDoesNotRequireShutdownWaiter(t *testing.T) {
@@ -225,20 +228,51 @@ func TestConnStringSetsPoolMaxConns(t *testing.T) {
 	}
 }
 
-// gcFakePool scripts the two statements one garbage collection batch issues: the
-// bound query picking the batch's upper watermark, and the delete removing it.
+// gcFakePool models the rows a garbage collection pass walks: each batch runs a
+// bound query for its upper watermark and a delete, and only a committed batch
+// removes rows, so a replayed batch sees exactly what it saw before.
 type gcFakePool struct {
-	steps      []int64 // bounds returned by successive bound queries; exhausted means the final batch
-	failDelete int     // 1-based delete to fail, 0 for none
-	bounds     [][]any // args of each bound query, in order
-	deletes    [][]any // args of each delete, in order
-	commits    int
-	rollbacks  int
+	rows           []int64 // remaining completed_at values, ascending
+	cutoff         int64
+	failDelete     int   // 1-based delete attempt to fail, 0 for none
+	failCommit     int   // 1-based commit attempt to fail, 0 for none
+	failErr        error // error the failed attempt returns; a retryable one is replayed
+	bounds         [][]any
+	deletes        [][]any
+	commits        int
+	commitAttempts int
+	rollbacks      int
+}
+
+// eligible returns the rows a batch starting at watermark would collect.
+func (p *gcFakePool) eligible(watermark int64) []int64 {
+	var out []int64
+	for _, v := range p.rows {
+		if v > watermark && v < p.cutoff {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func (p *gcFakePool) remove(deleted []int64) {
+	gone := make(map[int64]bool, len(deleted))
+	for _, v := range deleted {
+		gone[v] = true
+	}
+	kept := make([]int64, 0, len(p.rows))
+	for _, v := range p.rows {
+		if !gone[v] {
+			kept = append(kept, v)
+		}
+	}
+	p.rows = kept
 }
 
 type gcFakeTx struct {
-	pool *gcFakePool
-	done bool
+	pool   *gcFakePool
+	staged []int64 // rows this batch deleted, dropped on rollback
+	done   bool
 }
 
 type gcFakeRow struct {
@@ -253,26 +287,39 @@ func (r gcFakeRow) Scan(dest ...any) error {
 	return nil
 }
 
-type gcFakeResult struct{}
+type gcFakeResult struct{ rows int64 }
 
-func (gcFakeResult) RowsAffected() (int64, error) { return 0, nil }
+func (r gcFakeResult) RowsAffected() (int64, error) { return r.rows, nil }
 
 func (t *gcFakeTx) QueryRow(_ context.Context, _ string, args ...any) Row {
 	t.pool.bounds = append(t.pool.bounds, args)
-	if len(t.pool.steps) == 0 {
+	eligible := t.pool.eligible(args[1].(int64))
+	offset := args[2].(int)
+	if offset >= len(eligible) {
 		return gcFakeRow{}
 	}
-	step := t.pool.steps[0]
-	t.pool.steps = t.pool.steps[1:]
-	return gcFakeRow{step: &step}
+	return gcFakeRow{step: &eligible[offset]}
 }
 
 func (t *gcFakeTx) Exec(_ context.Context, _ string, args ...any) (Result, error) {
 	t.pool.deletes = append(t.pool.deletes, args)
-	if t.pool.failDelete == len(t.pool.deletes) {
+	if len(t.pool.deletes) == t.pool.failDelete {
+		if t.pool.failErr != nil {
+			return nil, t.pool.failErr
+		}
 		return nil, errors.New("injected garbage collection failure")
 	}
-	return gcFakeResult{}, nil
+	// The final batch drops the upper bound and takes the whole tail
+	upper := int64(math.MaxInt64)
+	if len(args) > 2 {
+		upper = args[2].(int64)
+	}
+	for _, v := range t.pool.eligible(args[1].(int64)) {
+		if v <= upper {
+			t.staged = append(t.staged, v)
+		}
+	}
+	return gcFakeResult{rows: int64(len(t.staged))}, nil
 }
 
 func (t *gcFakeTx) Query(context.Context, string, ...any) (Rows, error) {
@@ -280,6 +327,11 @@ func (t *gcFakeTx) Query(context.Context, string, ...any) (Rows, error) {
 }
 
 func (t *gcFakeTx) Commit(context.Context) error {
+	t.pool.commitAttempts++
+	if t.pool.commitAttempts == t.pool.failCommit {
+		return t.pool.failErr
+	}
+	t.pool.remove(t.staged)
 	t.done = true
 	t.pool.commits++
 	return nil
@@ -293,8 +345,13 @@ func (t *gcFakeTx) Rollback(context.Context) error {
 }
 
 func (p *gcFakePool) BeginTx(context.Context, TxOptions) (Tx, error) { return &gcFakeTx{pool: p}, nil }
-func (p *gcFakePool) Exec(context.Context, string, ...any) (Result, error) {
-	return nil, errors.New("unexpected Exec outside a batch transaction")
+
+// The unbatched path deletes everything eligible in one statement off the pool.
+func (p *gcFakePool) Exec(_ context.Context, _ string, args ...any) (Result, error) {
+	p.deletes = append(p.deletes, args)
+	deleted := p.eligible(0)
+	p.remove(deleted)
+	return gcFakeResult{rows: int64(len(deleted))}, nil
 }
 func (p *gcFakePool) Query(context.Context, string, ...any) (Rows, error) {
 	return nil, errors.New("unexpected Query")
@@ -305,16 +362,41 @@ func (p *gcFakePool) QueryRow(context.Context, string, ...any) Row {
 func (p *gcFakePool) Ping(context.Context) error { return nil }
 func (p *gcFakePool) Close()                     {}
 
+// gcLogSink captures the deleted_count the collector logs, the only place the
+// total surfaces.
+type gcLogSink struct {
+	slog.Handler
+	deleted *int64
+}
+
+func (gcLogSink) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h gcLogSink) Handle(_ context.Context, r slog.Record) error {
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "deleted_count" {
+			*h.deleted = a.Value.Int64()
+		}
+		return true
+	})
+	return nil
+}
+
 func TestGarbageCollectBatches(t *testing.T) {
 	cutoff, batchSize := int64(100), 3
-	newSysDB := func(pool Pool) *SysDB {
-		return &SysDB{pool: pool, dialect: SqliteDialect{}, logger: slog.New(slog.DiscardHandler)}
+	newPool := func() *gcFakePool {
+		return &gcFakePool{rows: []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, cutoff: cutoff}
+	}
+	// deleted holds the count the pass logged, 0 if it never got there
+	newSysDB := func(pool Pool) (*SysDB, *int64) {
+		var deleted int64
+		return &SysDB{pool: pool, dialect: PostgresDialect{}, logger: slog.New(gcLogSink{slog.DiscardHandler, &deleted})}, &deleted
 	}
 	input := GarbageCollectWorkflowsInput{CutoffEpochTimestampMs: &cutoff, BatchSize: &batchSize}
 
 	t.Run("advances a watermark, one committed transaction per batch", func(t *testing.T) {
-		pool := &gcFakePool{steps: []int64{3, 6, 9}}
-		if err := newSysDB(pool).GarbageCollectWorkflows(context.Background(), input); err != nil {
+		pool := newPool()
+		sysDB, deleted := newSysDB(pool)
+		if err := sysDB.GarbageCollectWorkflows(context.Background(), input); err != nil {
 			t.Fatalf("GarbageCollectWorkflows: %v", err)
 		}
 		wantBounds := [][]any{
@@ -339,11 +421,19 @@ func TestGarbageCollectBatches(t *testing.T) {
 		if pool.commits != len(wantDeletes) {
 			t.Errorf("commits = %d, want %d", pool.commits, len(wantDeletes))
 		}
+		if len(pool.rows) != 0 {
+			t.Errorf("rows left = %v, want none", pool.rows)
+		}
+		if *deleted != 9 {
+			t.Errorf("logged deleted_count = %d, want 9", *deleted)
+		}
 	})
 
 	t.Run("leaves batches committed before a failure", func(t *testing.T) {
-		pool := &gcFakePool{steps: []int64{3, 6, 9}, failDelete: 2}
-		if err := newSysDB(pool).GarbageCollectWorkflows(context.Background(), input); err == nil {
+		pool := newPool()
+		pool.failDelete = 2
+		sysDB, _ := newSysDB(pool)
+		if err := sysDB.GarbageCollectWorkflows(context.Background(), input); err == nil {
 			t.Fatal("GarbageCollectWorkflows: expected the injected failure to surface")
 		}
 		if pool.commits != 1 {
@@ -354,6 +444,53 @@ func TestGarbageCollectBatches(t *testing.T) {
 		}
 		if len(pool.deletes) != 2 {
 			t.Errorf("deletes = %d, want 2", len(pool.deletes))
+		}
+		// Only the first batch's rows are gone
+		if !reflect.DeepEqual(pool.rows, []int64{4, 5, 6, 7, 8, 9}) {
+			t.Errorf("rows left = %v, want 4..9", pool.rows)
+		}
+	})
+
+	// A batch whose commit loses a serialization race is replayed whole, so its
+	// rows must be counted on commit and not a statement earlier.
+	t.Run("replays a conflicted batch without double counting", func(t *testing.T) {
+		pool := newPool()
+		pool.failCommit = 2
+		pool.failErr = &pgconn.PgError{Code: pgerrcode.SerializationFailure}
+		sysDB, deleted := newSysDB(pool)
+		if err := sysDB.GarbageCollectWorkflows(context.Background(), input); err != nil {
+			t.Fatalf("GarbageCollectWorkflows: %v", err)
+		}
+		// The replayed batch re-runs its delete, but only a commit counts rows
+		if len(pool.deletes) != 5 {
+			t.Errorf("deletes = %d, want 5", len(pool.deletes))
+		}
+		if pool.commits != 4 || pool.rollbacks != 1 {
+			t.Errorf("commits/rollbacks = %d/%d, want 4/1", pool.commits, pool.rollbacks)
+		}
+		if len(pool.rows) != 0 {
+			t.Errorf("rows left = %v, want none", pool.rows)
+		}
+		if *deleted != 9 {
+			t.Errorf("logged deleted_count = %d, want 9", *deleted)
+		}
+	})
+
+	t.Run("deletes in one statement when unbatched", func(t *testing.T) {
+		pool := newPool()
+		sysDB, deleted := newSysDB(pool)
+		unbatched := GarbageCollectWorkflowsInput{CutoffEpochTimestampMs: &cutoff}
+		if err := sysDB.GarbageCollectWorkflows(context.Background(), unbatched); err != nil {
+			t.Fatalf("GarbageCollectWorkflows: %v", err)
+		}
+		if len(pool.deletes) != 1 || pool.commits != 0 {
+			t.Errorf("deletes/commits = %d/%d, want 1/0", len(pool.deletes), pool.commits)
+		}
+		if len(pool.rows) != 0 {
+			t.Errorf("rows left = %v, want none", pool.rows)
+		}
+		if *deleted != 9 {
+			t.Errorf("logged deleted_count = %d, want 9", *deleted)
 		}
 	})
 }
