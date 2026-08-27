@@ -101,7 +101,8 @@ type SystemDatabase interface {
 	SetWorkflowDelay(ctx context.Context, input SetWorkflowDelayDBInput) error
 	TransitionDelayedWorkflows(ctx context.Context) error
 	DebounceDelayedWorkflow(ctx context.Context, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error)
-	DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]DequeuedWorkflow, error)
+	DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]string, error)
+	DeadLetterWorkflows(ctx context.Context, workflowIDs []string, minAttempts int) error
 	ReenqueueForRecovery(ctx context.Context, executorIDs []string, appVersion string, recoveryQueueName string) ([]string, error)
 	GetQueuePartitions(ctx context.Context, queueName string) ([]string, error)
 
@@ -1225,7 +1226,6 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 /*******************************/
 
 type InsertWorkflowResult struct {
-	Attempts          int
 	Status            models.WorkflowStatusType
 	Name              string
 	QueueName         *string
@@ -1236,11 +1236,9 @@ type InsertWorkflowResult struct {
 }
 
 type InsertWorkflowStatusDBInput struct {
-	Status            models.WorkflowStatus
-	MaxRetries        int
-	Tx                Tx
-	OwnerXID          *string
-	IncrementAttempts bool
+	Status   models.WorkflowStatus
+	Tx       Tx
+	OwnerXID *string
 }
 
 func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error) {
@@ -1362,16 +1360,12 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
     ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
-			recovery_attempts = CASE
-                WHEN EXCLUDED.status NOT IN ($31, $32) THEN workflow_status.recovery_attempts + $33
-                ELSE workflow_status.recovery_attempts
-            END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
                 WHEN EXCLUDED.status IN ($31, $32) THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
-        RETURNING recovery_attempts, status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema))
+        RETURNING status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema))
 
 	var result InsertWorkflowResult
 	var timeoutMSResult *int64
@@ -1383,11 +1377,6 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal the authenticated roles: %w", err)
-	}
-
-	recoveryIncrement := 0
-	if input.IncrementAttempts {
-		recoveryIncrement = 1
 	}
 
 	owner := s.owner()
@@ -1428,9 +1417,7 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		owner,
 		models.WorkflowStatusEnqueued,
 		models.WorkflowStatusDelayed,
-		recoveryIncrement,
 	).Scan(
-		&result.Attempts,
 		&result.Status,
 		&result.Name,
 		&result.QueueName,
@@ -1442,8 +1429,6 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 	if ownerXIDReturn != nil {
 		result.OwnerXID = *ownerXIDReturn
 	}
-	ownerXIDMatches := (input.OwnerXID == nil && ownerXIDReturn == nil) ||
-		(input.OwnerXID != nil && ownerXIDReturn != nil && *input.OwnerXID == *ownerXIDReturn)
 	if err != nil {
 		// Handle unique constraint violation for the deduplication ID (this should be the only case)
 		if s.dialect.IsUniqueViolation(err) {
@@ -1471,33 +1456,6 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 	}
 	if len(input.Status.QueueName) > 0 && result.QueueName != nil && input.Status.QueueName != *result.QueueName {
 		return nil, models.NewUnexpectedWorkflowError(input.Status.ID, fmt.Sprintf("Workflow already exists in a different queue: %s, but the provided queue is: %s", *result.QueueName, input.Status.QueueName))
-	}
-
-	// Every time we start executing a workflow (and thus attempt to insert its status), we increment `recovery_attempts` by 1.
-	// When this number becomes equal to `maxRetries + 1`, we mark the workflow as `MAX_RECOVERY_ATTEMPTS_EXCEEDED`.
-	if result.Status != models.WorkflowStatusSuccess && result.Status != models.WorkflowStatusError &&
-		input.MaxRetries > 0 && result.Attempts > input.MaxRetries+1 && !ownerXIDMatches {
-
-		// Update workflow status to MAX_RECOVERY_ATTEMPTS_EXCEEDED and clear queue-related fields
-		dlqQuery := s.RenderSQL(`UPDATE %sworkflow_status
-					 SET status = $1, deduplication_id = NULL, started_at_epoch_ms = NULL, queue_name = NULL
-					 WHERE workflow_uuid = $2 AND status = $3`, s.dialect.SchemaPrefix(s.schema))
-
-		_, err = input.Tx.Exec(ctx, dlqQuery,
-			models.WorkflowStatusMaxRecoveryAttemptsExceeded,
-			input.Status.ID,
-			models.WorkflowStatusPending)
-
-		if err != nil {
-			return nil, fmt.Errorf("failed to update workflow to %s: %w", models.WorkflowStatusMaxRecoveryAttemptsExceeded, err)
-		}
-
-		// Commit the transaction before throwing the error
-		if err := input.Tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("failed to commit transaction after marking workflow as %s: %w", models.WorkflowStatusMaxRecoveryAttemptsExceeded, err)
-		}
-
-		return nil, models.NewDeadLetterQueueError(input.Status.ID, input.MaxRetries)
 	}
 
 	return &result, nil
@@ -4679,17 +4637,6 @@ func (s *SysDB) debounceDelayedWorkflowInternal(ctx context.Context, tx Tx, inpu
 	}, nil
 }
 
-type DequeuedWorkflow struct {
-	Id                 string
-	Name               string
-	Input              *string
-	Serialization      string
-	ConfigName         *string
-	AuthenticatedUser  string
-	AssumedRole        string
-	AuthenticatedRoles []string
-}
-
 type DequeueWorkflowsInput struct {
 	Queue              models.QueueConfig
 	ExecutorID         string
@@ -4698,7 +4645,9 @@ type DequeueWorkflowsInput struct {
 	LocalRunningCount  int
 }
 
-func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]DequeuedWorkflow, error) {
+// DequeueWorkflows claims enqueued workflows for this executor and returns their IDs,
+// in the order the queue selected them.
+func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]string, error) {
 	// Snapshot isolation is only required for global concurrency or rate limiting.
 	// Otherwise read committed suffices: worker concurrency is enforced in-memory.
 	snapshot := input.Queue.GlobalConcurrency != nil || input.Queue.RateLimit != nil
@@ -4739,7 +4688,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		}
 
 		if numRecentQueries >= input.Queue.RateLimit.Limit {
-			return []DequeuedWorkflow{}, nil
+			return nil, nil
 		}
 	}
 
@@ -4836,9 +4785,10 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 
 	query += ` ORDER BY priority ASC, created_at ASC`
 
-	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
-	// otherwise use NOWAIT to ensure consistent view across processes
-	if input.Queue.GlobalConcurrency == nil {
+	// Without a global budget (rate limiting, global concurrency),
+	// use SKIP LOCKED to only select rows that can be locked.
+	// With one, use NOWAIT so all processes see a consistent table.
+	if input.Queue.GlobalConcurrency == nil && input.Queue.RateLimit == nil {
 		if lock := s.dialect.LockSkipLocked(); lock != "" {
 			query += " " + lock
 		}
@@ -4877,8 +4827,8 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		s.logger.Debug("attempting to dequeue task(s)", "queue_name", input.Queue.Name, "num_tasks", len(dequeuedIDs))
 	}
 
-	// Update workflows to PENDING status and get their details, claiming
-	// unclaimed rows for this application.
+	// Claim the candidates in one statement: flip them to PENDING and count the
+	// dispatch, claiming unclaimed rows for this application.
 	claimSet, claimClause := "", ""
 	if s.appName != "" {
 		claimSet = `,
@@ -4891,70 +4841,98 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		    application_version = $2,
 		    executor_id = $3,
 		    started_at_epoch_ms = $4,
+		    updated_at = $4,
 		    rate_limited = $5,
+		    recovery_attempts = recovery_attempts + 1,
 		    workflow_deadline_epoch_ms = CASE
 		        WHEN workflow_timeout_ms IS NOT NULL AND workflow_deadline_epoch_ms IS NULL
 		        THEN $4 + workflow_timeout_ms
 		        ELSE workflow_deadline_epoch_ms
 		    END`+claimSet+`
-		WHERE workflow_uuid = $6 AND status = $7`+claimClause+`
-		RETURNING name, inputs, serialization, config_name, authenticated_user, assumed_role, authenticated_roles`, schemaPrefix)
+		WHERE `+dialectAnyClause(s.dialect, "workflow_uuid", 6)+` AND status = $7`+claimClause+`
+		RETURNING workflow_uuid`, schemaPrefix)
 
-	var retWorkflows []DequeuedWorkflow
+	encodedIDs, err := encodeArrayParam(s.dialect, dequeuedIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode dequeued workflow IDs: %w", err)
+	}
+	claimArgs := []any{
+		models.WorkflowStatusPending,
+		input.ApplicationVersion,
+		input.ExecutorID,
+		time.Now().UnixMilli(),
+		input.Queue.RateLimit != nil,
+		encodedIDs,
+		models.WorkflowStatusEnqueued,
+	}
+	if s.appName != "" {
+		claimArgs = append(claimArgs, s.appName)
+	}
+
+	claimedRows, err := tx.Query(ctx, s.dialect.RewriteQuery(updateQuery), claimArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update workflows during dequeue: %w", err)
+	}
+	defer claimedRows.Close()
+
+	claimed := make(map[string]struct{}, len(dequeuedIDs))
+	for claimedRows.Next() {
+		var id string
+		if err := claimedRows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan claimed workflow ID: %w", err)
+		}
+		claimed[id] = struct{}{}
+	}
+	if err := claimedRows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read claimed workflow IDs: %w", err)
+	}
+
+	// RETURNING order is unspecified: report the workflows in the order they were selected.
+	claimedIDs := make([]string, 0, len(claimed))
 	for _, id := range dequeuedIDs {
-		if input.Queue.RateLimit != nil {
-			if len(retWorkflows)+numRecentQueries >= input.Queue.RateLimit.Limit {
-				break
-			}
+		if _, ok := claimed[id]; ok {
+			claimedIDs = append(claimedIDs, id)
 		}
-		retWorkflow := DequeuedWorkflow{Id: id}
-
-		claimArgs := []any{
-			models.WorkflowStatusPending,
-			input.ApplicationVersion,
-			input.ExecutorID,
-			time.Now().UnixMilli(),
-			input.Queue.RateLimit != nil,
-			id,
-			models.WorkflowStatusEnqueued,
-		}
-		if s.appName != "" {
-			claimArgs = append(claimArgs, s.appName)
-		}
-		var serialization, authenticatedUser, assumedRole, authenticatedRoles *string
-		err := tx.QueryRow(ctx, updateQuery, claimArgs...).Scan(&retWorkflow.Name, &retWorkflow.Input, &serialization, &retWorkflow.ConfigName, &authenticatedUser, &assumedRole, &authenticatedRoles)
-		if err != nil {
-			if err == pgx.ErrNoRows {
-				continue
-			}
-			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
-		}
-		if serialization != nil {
-			retWorkflow.Serialization = *serialization
-		}
-		if authenticatedUser != nil {
-			retWorkflow.AuthenticatedUser = *authenticatedUser
-		}
-		if assumedRole != nil {
-			retWorkflow.AssumedRole = *assumedRole
-		}
-		if authenticatedRoles != nil {
-			if err := json.Unmarshal([]byte(*authenticatedRoles), &retWorkflow.AuthenticatedRoles); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal authenticated roles for workflow %s: %w", id, err)
-			}
-		}
-
-		retWorkflows = append(retWorkflows, retWorkflow)
 	}
 
 	// Commit only if workflows were dequeued. Avoids WAL bloat / XID advance.
-	if len(retWorkflows) > 0 {
+	if len(claimedIDs) > 0 {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("failed to commit transaction: %w", err)
 		}
 	}
 
-	return retWorkflows, nil
+	return claimedIDs, nil
+}
+
+// DeadLetterWorkflows moves claimed workflows that exhausted their attempts off the queue.
+// Guarded on PENDING like every other claim-owning write, and on the attempt count the
+// decision was read from, so a row someone else already moved on, or resume gave a fresh
+// budget, is left alone.
+func (s *SysDB) DeadLetterWorkflows(ctx context.Context, workflowIDs []string, minAttempts int) error {
+	if len(workflowIDs) == 0 {
+		return nil
+	}
+	encodedIDs, err := encodeArrayParam(s.dialect, workflowIDs)
+	if err != nil {
+		return fmt.Errorf("failed to encode workflow IDs for dead lettering: %w", err)
+	}
+	nowMs := time.Now().UnixMilli()
+	args := []any{
+		models.WorkflowStatusMaxRecoveryAttemptsExceeded,
+		nowMs,
+		encodedIDs,
+		models.WorkflowStatusPending,
+		minAttempts,
+	}
+	query := s.RenderSQL(`UPDATE %sworkflow_status
+		SET status = $1, deduplication_id = NULL, started_at_epoch_ms = NULL, queue_name = NULL,
+		    updated_at = $2, completed_at = $2
+		WHERE `+dialectAnyClause(s.dialect, "workflow_uuid", 3)+` AND status = $4 AND recovery_attempts >= $5`, s.dialect.SchemaPrefix(s.schema))
+	if _, err := s.pool.Exec(ctx, s.dialect.RewriteQuery(query), args...); err != nil {
+		return fmt.Errorf("failed to dead letter workflows: %w", err)
+	}
+	return nil
 }
 
 // ReenqueueForRecovery returns the PENDING workflows of the given executors

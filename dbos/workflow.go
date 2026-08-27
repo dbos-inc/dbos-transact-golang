@@ -493,16 +493,18 @@ func typedHandle[R any](c Client, handle WorkflowHandle[any]) WorkflowHandle[R] 
 /**********************************/
 /******* WORKFLOW REGISTRY *******/
 /**********************************/
-type wrappedWorkflowFunc func(ctx Context, input any, inputSerialization string, opts ...WorkflowOption) (WorkflowHandle[any], error)
+// typeErasedWorkflowFunc runs a registered workflow from its encoded input, decoding it
+// with the serialization format the input was stored under.
+type typeErasedWorkflowFunc func(ctx Context, input any, inputSerialization string) (any, error)
 
 type WorkflowRegistryEntry struct {
-	wrappedFunction wrappedWorkflowFunc
-	workflowFn      WorkflowFunc // Type-erased registered function taking a raw (non-encoded) input. Used by RunWorkflow for direct execution.
-	MaxRetries      int          // Maximum recovery attempts before dead-lettering (set via WithMaxRecoveryAttempts); not step retries
-	Name            string
-	FQN             string // Fully qualified name of the workflow function. For configured instances, qualified with the config name.
-	ClassName       string // Receiver type name for configured instance workflows
-	ConfigName      string // Config name for configured instance workflows
+	typeErasedFn typeErasedWorkflowFunc // Runs the workflow from a database-encoded input. Used by the queue runner to dispatch a claimed workflow.
+	workflowFn   WorkflowFunc           // Type-erased registered function taking a raw (non-encoded) input. Used by RunWorkflow for direct execution.
+	MaxRetries   int                    // Maximum recovery attempts before dead-lettering (set via WithMaxRecoveryAttempts); not step retries
+	Name         string
+	FQN          string // Fully qualified name of the workflow function. For configured instances, qualified with the config name.
+	ClassName    string // Receiver type name for configured instance workflows
+	ConfigName   string // Config name for configured instance workflows
 }
 
 func registerWorkflow(ctx Context, entry WorkflowRegistryEntry) {
@@ -694,7 +696,7 @@ func RegisterWorkflow[P any, R any](ctx Context, fn Workflow[P, R], opts ...Work
 		fqn = instanceQualifiedName(fqn, configName)
 	}
 
-	// Register a type-erased version of the durable workflow for recovery and queue runner
+	// Register a type-erased version of the durable workflow for the queue runner.
 	// Input will always come, encoded, from the database, so we decode it into the target type (captured by this wrapped closure)
 	// inputSerialization is the DB-stored serialization format for the encoded input.
 	typedErasedWorkflow := func(ctx Context, input any, inputSerialization string) (any, error) {
@@ -722,21 +724,6 @@ func RegisterWorkflow[P any, R any](ctx Context, fn Workflow[P, R], opts ...Work
 		return fn(ctx, typedInput)
 	}
 
-	typeErasedWrapper := wrappedWorkflowFunc(func(ctx Context, input any, inputSerialization string, opts ...WorkflowOption) (WorkflowHandle[any], error) {
-		wfFunc := WorkflowFunc(func(ctx Context, input any) (any, error) {
-			return typedErasedWorkflow(ctx, input, inputSerialization)
-		})
-		opts = append(opts, withWorkflowName(fqn), withAlreadyEncodedInput()) // Append the name so ctx.RunWorkflow can look it up from the registry to apply registration-time options
-		if inputSerialization == PortableSerializerName {
-			opts = append(opts, WithPortableWorkflow())
-		}
-		handle, err := ctx.RunWorkflow(ctx, wfFunc, input, opts...)
-		if err != nil {
-			return nil, err
-		}
-		return newWorkflowPollingHandle[any](ctx, handle.GetWorkflowID()), nil // this is only used by recovery -- the queue runner dismisses it
-	})
-
 	// Wrapper for direct calls in RunWorkflow
 	registeredWorkflow := WorkflowFunc(func(ctx Context, input any) (any, error) {
 		typedInput, ok := input.(P)
@@ -747,13 +734,13 @@ func RegisterWorkflow[P any, R any](ctx Context, fn Workflow[P, R], opts ...Work
 	})
 
 	registerWorkflow(ctx, WorkflowRegistryEntry{
-		wrappedFunction: typeErasedWrapper,
-		workflowFn:      registeredWorkflow,
-		FQN:             fqn,
-		MaxRetries:      registrationParams.maxRetries,
-		Name:            registrationParams.name,
-		ClassName:       className,
-		ConfigName:      configName,
+		typeErasedFn: typedErasedWorkflow,
+		workflowFn:   registeredWorkflow,
+		FQN:          fqn,
+		MaxRetries:   registrationParams.maxRetries,
+		Name:         registrationParams.name,
+		ClassName:    className,
+		ConfigName:   configName,
 	})
 
 }
@@ -830,7 +817,6 @@ type workflowOptions struct {
 	WorkflowID          string
 	queue               Queue
 	ApplicationVersion  string
-	MaxRetries          int
 	DeduplicationID     string
 	DeduplicationPolicy DeduplicationPolicy
 	Priority            uint
@@ -840,8 +826,6 @@ type workflowOptions struct {
 	QueuePartitionKey   string
 	DelayDuration       time.Duration
 	WorkflowAttributes  map[string]any
-	alreadyEncodedInput bool
-	isDequeue           bool
 	isPortableWorkflow  bool
 	runInstance         ConfiguredInstance
 	err                 error // invalid option usage, surfaced when options are parsed
@@ -948,20 +932,6 @@ func withWorkflowName(name string) WorkflowOption {
 		if p.WorkflowName == "" {
 			p.WorkflowName = name
 		}
-	}
-}
-
-// An internal option we use to indicate that the input is already encoded, so we don't need to encode it again
-func withAlreadyEncodedInput() WorkflowOption {
-	return func(p *workflowOptions) {
-		p.alreadyEncodedInput = true
-	}
-}
-
-// Private option set when RunWorkflow is invoked from the queue runner (dbos/queue.go).
-func withIsDequeue() WorkflowOption {
-	return func(p *workflowOptions) {
-		p.isDequeue = true
 	}
 }
 
@@ -1161,9 +1131,6 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		c.logger.Error("invalid workflow registry entry type for workflow", "workflow_name", params.WorkflowName)
 		return nil, fmt.Errorf("invalid workflow registry entry type for workflow %s", params.WorkflowName)
 	}
-	if registeredWorkflow.MaxRetries > 0 {
-		params.MaxRetries = registeredWorkflow.MaxRetries
-	}
 	if len(registeredWorkflow.Name) > 0 {
 		params.WorkflowName = registeredWorkflow.Name
 	}
@@ -1233,9 +1200,9 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	parentWorkflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isChildWorkflow := ok && parentWorkflowState != nil
 
-	// Direct invocations require a launched runtime. Dequeue and child workflow
-	// calls are internal paths that may run before Launch completes.
-	if !c.launched.Load() && !params.isDequeue && !isChildWorkflow {
+	// Direct invocations require a launched runtime. Child workflow calls are an
+	// internal path that may run before Launch completes.
+	if !c.launched.Load() && !isChildWorkflow {
 		c.logger.Error("RunWorkflow called before Launch", "workflow_name", params.WorkflowName)
 		return nil, models.NewInitializationError("DBOS must be launched before running workflows; call Launch first")
 	}
@@ -1344,9 +1311,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 	// Serialize input before storing in workflow status
 	var encodedInput any
-	if params.alreadyEncodedInput { // Comes from the queue runner, or the recovery path
-		encodedInput = input
-	} else if params.isPortableWorkflow { // Direct call to a portable workflow
+	if params.isPortableWorkflow { // Direct call to a portable workflow
 		var serErr error
 		encodedInput, serErr = encodePortableArgs(input)
 		if serErr != nil {
@@ -1415,11 +1380,9 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 		// Insert workflow status with transaction
 		insertInput := sysdb.InsertWorkflowStatusDBInput{
-			Status:            workflowStatus,
-			MaxRetries:        params.MaxRetries,
-			Tx:                tx,
-			OwnerXID:          &ownerXID,
-			IncrementAttempts: params.isDequeue,
+			Status:   workflowStatus,
+			Tx:       tx,
+			OwnerXID: &ownerXID,
 		}
 		insertStatusResult, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
@@ -1458,7 +1421,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			len(queueName) > 0 || // We are enqueueing OR
 				insertStatusResult.Status == WorkflowStatusSuccess || // workflow is in a terminal state (success) OR
 				insertStatusResult.Status == WorkflowStatusError || // workflow is in a terminal state (error) OR
-				(!params.isDequeue && insertStatusResult.OwnerXID != ownerXID) || // another executor, not us dequeueing, is already owning the workflow OR
+				insertStatusResult.OwnerXID != ownerXID || // another execution is already owning the workflow OR
 				loaded // this executor is already running the workflow
 
 		if shouldSkip {
@@ -1519,24 +1482,66 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		return earlyReturnPollingHandle, nil
 	}
 
+	exec := workflowExecution{
+		workflowID:         workflowID,
+		timeout:            insertStatusResult.Timeout,
+		deadline:           insertStatusResult.WorkflowDeadline,
+		authenticatedUser:  params.AuthenticatedUser,
+		assumedRole:        params.AssumedRole,
+		authenticatedRoles: params.AuthenticatedRoles,
+		isPortableWorkflow: params.isPortableWorkflow,
+	}
+	if insertStatusResult.QueueName != nil {
+		exec.queueName = *insertStatusResult.QueueName
+	}
+	if insertStatusResult.QueuePartitionKey != nil {
+		exec.queuePartitionKey = *insertStatusResult.QueuePartitionKey
+	}
+	return c.executeWorkflow(fn, input, exec), nil
+}
+
+// workflowExecution is the durable state a run needs to execute: what the status insert,
+// or the queue's claim, wrote and this phase reads back.
+type workflowExecution struct {
+	workflowID         string
+	queueName          string
+	queuePartitionKey  string
+	timeout            time.Duration
+	deadline           time.Time
+	authenticatedUser  string
+	assumedRole        string
+	authenticatedRoles []string
+	isPortableWorkflow bool
+}
+
+// executeWorkflow runs a workflow whose status row is already PENDING and owned by this
+// execution, and returns a handle to it. Acquiring that ownership is the caller's job:
+// RunWorkflow does it with the status insert.
+func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowExecution) WorkflowHandle[any] {
+	// Create an uncancellable context for the DBOS operations
+	// This detaches it from any deadline or cancellation signal set by the user
+	uncancellableCtx := WithoutCancel(c)
+
+	workflowID := exec.workflowID
+
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID:         workflowID,
 		stepID:             -1, // Steps are O-indexed
-		isPortableWorkflow: params.isPortableWorkflow,
-		authenticatedUser:  params.AuthenticatedUser,
-		assumedRole:        params.AssumedRole,
-		authenticatedRoles: params.AuthenticatedRoles,
+		isPortableWorkflow: exec.isPortableWorkflow,
+		authenticatedUser:  exec.authenticatedUser,
+		assumedRole:        exec.assumedRole,
+		authenticatedRoles: exec.authenticatedRoles,
 	}
 	workflowCtx := WithValue(c, workflowStateKey, wfState)
 
 	// If the workflow has a timeout but no deadline, compute the deadline from the timeout.
 	// Else use the durable deadline.
 	durableDeadline := time.Time{}
-	if insertStatusResult.Timeout > 0 && insertStatusResult.WorkflowDeadline.IsZero() {
-		durableDeadline = time.Now().Add(insertStatusResult.Timeout)
-	} else if !insertStatusResult.WorkflowDeadline.IsZero() {
-		durableDeadline = insertStatusResult.WorkflowDeadline
+	if exec.timeout > 0 && exec.deadline.IsZero() {
+		durableDeadline = time.Now().Add(exec.timeout)
+	} else if !exec.deadline.IsZero() {
+		durableDeadline = exec.deadline
 	}
 
 	if !durableDeadline.IsZero() {
@@ -1610,19 +1615,13 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 		removeActive := func() {}
 		if c.activeWorkflowIDs != nil {
-			entry := activeWorkflowEntry{}
-			if insertStatusResult.QueueName != nil {
-				entry.queueName = *insertStatusResult.QueueName
-			}
-			if insertStatusResult.QueuePartitionKey != nil {
-				entry.queuePartitionKey = *insertStatusResult.QueuePartitionKey
-			}
+			entry := activeWorkflowEntry{queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey}
 			_, loaded := c.activeWorkflowIDs.LoadOrStore(workflowID, entry)
 			if loaded {
-				// Lost a start race: a concurrent start of this workflow (recovery and
-				// dequeue bypass the ownerXID guard) activated itself between this run's
-				// active-ID check and here. The winner owns the active entry, so leave it
-				// alone, disarm the durable cancel, and await the winner's result.
+				// Lost a start race: a concurrent start of this workflow
+				// activated itself between this run's active-ID
+				// check and here. The winner owns the active entry, so leave it alone,
+				// disarm the durable cancel, and await the winner's result.
 				stopFunc()
 				c.logger.Warn("Workflow is already executing on this executor. Waiting for the existing execution to complete", "workflow_id", workflowID)
 				awaitExistingOutcome(nil)
@@ -1724,7 +1723,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		close(outcomeChan)
 	}()
 
-	return newWorkflowHandle(uncancellableCtx, workflowID, outcomeChan), nil
+	return newWorkflowHandle(uncancellableCtx, workflowID, outcomeChan)
 }
 
 /******************************/

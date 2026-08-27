@@ -693,55 +693,18 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 
 		// Dequeue from each partition (or once for non-partitioned queues)
 		if !skipDequeue {
-			var dequeuedWorkflows []sysdb.DequeuedWorkflow
+			var dequeuedIDs []string
 			for _, partitionKey := range partitionKeys {
-				workflows, shouldContinue := qr.dequeueWorkflows(ctx, queue, partitionKey, &hasBackoffError)
+				ids, shouldContinue := qr.dequeueWorkflows(ctx, queue, partitionKey, &hasBackoffError)
 				if shouldContinue {
 					continue
 				}
-				dequeuedWorkflows = append(dequeuedWorkflows, workflows...)
+				dequeuedIDs = append(dequeuedIDs, ids...)
 			}
 
-			if len(dequeuedWorkflows) > 0 {
-				queueLogger.Debug("Dequeued workflows from queue", "workflows", len(dequeuedWorkflows))
-			}
-			for _, workflow := range dequeuedWorkflows {
-				// Find the workflow in the registry. Configured instance workflows are
-				// registered under a name qualified with their config name.
-				lookupName := workflow.Name
-				if workflow.ConfigName != nil && *workflow.ConfigName != "" {
-					lookupName = instanceQualifiedName(workflow.Name, *workflow.ConfigName)
-				}
-				wfName, ok := ctx.workflowCustomNametoFQN.Load(lookupName)
-				if !ok {
-					queueLogger.Error("Workflow not found in registry", "workflow_name", workflow.Name)
-					continue
-				}
-
-				registeredWorkflowAny, exists := ctx.workflowRegistry.Load(wfName.(string))
-				if !exists {
-					queueLogger.Error("workflow function not found in registry", "workflow_name", workflow.Name)
-					continue
-				}
-				registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
-				if !ok {
-					queueLogger.Error("invalid workflow registry entry type", "workflow_name", workflow.Name)
-					continue
-				}
-
-				// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
-				// Auth identity is re-attached so child workflows spawned during
-				// the dequeued execution inherit the same identity as the original run.
-				_, err := registeredWorkflow.wrappedFunction(ctx, workflow.Input, workflow.Serialization,
-					WithWorkflowID(workflow.Id),
-					withIsDequeue(),
-					WithAuthenticatedUser(workflow.AuthenticatedUser),
-					WithAssumedRole(workflow.AssumedRole),
-					WithAuthenticatedRoles(workflow.AuthenticatedRoles...),
-				)
-				if err != nil {
-					queueLogger.Error("Error running queued workflow", "error", err)
-				}
+			if len(dequeuedIDs) > 0 {
+				queueLogger.Debug("Dequeued workflows from queue", "workflows", len(dequeuedIDs))
+				qr.startDequeuedWorkflows(ctx, queueLogger, dequeuedIDs)
 			}
 		}
 
@@ -771,10 +734,97 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 	}
 }
 
+// startDequeuedWorkflows reads the claimed workflows' statuses in one round trip and
+// starts each of them. The claim already wrote everything a status insert would
+// (PENDING, executor, deadline, attempts), so the dispatch writes nothing.
+func (qr *queueRunner) startDequeuedWorkflows(ctx *dbosContext, queueLogger *slog.Logger, workflowIDs []string) {
+	statuses, err := sysdb.RetryWithResult(ctx, func() ([]models.WorkflowStatus, error) {
+		return ctx.systemDB.ListWorkflows(ctx, sysdb.ListWorkflowsDBInput{WorkflowIDs: workflowIDs, LoadInput: true})
+	}, sysdb.WithRetrierLogger(queueLogger))
+	if err != nil {
+		queueLogger.Error("Error listing dequeued workflows", "error", err)
+		return
+	}
+	found := make(map[string]models.WorkflowStatus, len(statuses))
+	for _, status := range statuses {
+		found[status.ID] = status
+	}
+
+	// ListWorkflows sorts by creation time: start the workflows in dequeue order.
+	for _, id := range workflowIDs {
+		status, ok := found[id]
+		if !ok {
+			queueLogger.Error("Dequeued workflow not found", "workflow_id", id)
+			continue
+		}
+
+		// Find the workflow in the registry. Configured instance workflows are
+		// registered under a name qualified with their config name.
+		lookupName := status.Name
+		if status.ConfigName != nil && *status.ConfigName != "" {
+			lookupName = instanceQualifiedName(status.Name, *status.ConfigName)
+		}
+		wfName, ok := ctx.workflowCustomNametoFQN.Load(lookupName)
+		if !ok {
+			queueLogger.Error("Workflow not found in registry", "workflow_name", status.Name)
+			continue
+		}
+		registeredWorkflowAny, exists := ctx.workflowRegistry.Load(wfName.(string))
+		if !exists {
+			queueLogger.Error("workflow function not found in registry", "workflow_name", status.Name)
+			continue
+		}
+		registeredWorkflow, ok := registeredWorkflowAny.(WorkflowRegistryEntry)
+		if !ok {
+			queueLogger.Error("invalid workflow registry entry type", "workflow_name", status.Name)
+			continue
+		}
+
+		// The claim counted this dispatch: dead-letter the workflow if that exhausted its attempts.
+		if registeredWorkflow.MaxRetries > 0 && status.Attempts > registeredWorkflow.MaxRetries+1 {
+			err := sysdb.Retry(ctx, func() error {
+				return ctx.systemDB.DeadLetterWorkflows(ctx, []string{id}, status.Attempts)
+			}, sysdb.WithRetrierLogger(queueLogger))
+			if err != nil {
+				queueLogger.Error("Error dead lettering workflow", "workflow_id", id, "error", err)
+				continue
+			}
+			queueLogger.Warn("Workflow exceeded its maximum recovery attempts and was dead lettered", "workflow_id", id, "max_retries", registeredWorkflow.MaxRetries)
+			continue
+		}
+
+		// Only a PENDING row can own its outcome: a row that moved on since the claim
+		// (cancelled, resumed) would run for nothing.
+		if status.Status != WorkflowStatusPending {
+			queueLogger.Warn("Dequeued workflow is no longer pending, skipping", "workflow_id", id, "status", status.Status)
+			continue
+		}
+
+		// The input is passed encoded: it is decoded once the target type is known.
+		// The auth identity is re-attached so child workflows spawned during the
+		// dequeued execution inherit the same identity as the original run.
+		serialization := status.Serialization
+		fn := WorkflowFunc(func(ctx Context, input any) (any, error) {
+			return registeredWorkflow.typeErasedFn(ctx, input, serialization)
+		})
+		ctx.executeWorkflow(fn, status.Input, workflowExecution{
+			workflowID:         id,
+			queueName:          status.QueueName,
+			queuePartitionKey:  status.QueuePartitionKey,
+			timeout:            status.Timeout,
+			deadline:           status.Deadline,
+			authenticatedUser:  status.AuthenticatedUser,
+			assumedRole:        status.AssumedRole,
+			authenticatedRoles: status.AuthenticatedRoles,
+			isPortableWorkflow: serialization == PortableSerializerName,
+		})
+	}
+}
+
 // dequeueWorkflows dequeues workflows from a specific partition and handles errors.
-// Returns the dequeued workflows and a boolean indicating whether to continue to the next iteration.
-func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, hasBackoffError *bool) ([]sysdb.DequeuedWorkflow, bool) {
-	dequeuedWorkflows, err := sysdb.RetryWithResult(ctx, func() ([]sysdb.DequeuedWorkflow, error) {
+// Returns the dequeued workflow IDs and a boolean indicating whether to continue to the next iteration.
+func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, hasBackoffError *bool) ([]string, bool) {
+	dequeuedIDs, err := sysdb.RetryWithResult(ctx, func() ([]string, error) {
 		return ctx.systemDB.DequeueWorkflows(ctx, sysdb.DequeueWorkflowsInput{
 			Queue:              queue.toConfig(),
 			ExecutorID:         ctx.executorID,
@@ -793,5 +843,5 @@ func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, p
 		return nil, true // Indicate to continue to next iteration
 	}
 
-	return dequeuedWorkflows, false // Success, don't continue
+	return dequeuedIDs, false // Success, don't continue
 }
