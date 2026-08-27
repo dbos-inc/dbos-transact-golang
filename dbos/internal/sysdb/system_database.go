@@ -4878,8 +4878,9 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		s.logger.Debug("attempting to dequeue task(s)", "queue_name", input.Queue.Name, "num_tasks", len(dequeuedIDs))
 	}
 
-	// Update workflows to PENDING status and get their details, claiming
-	// unclaimed rows for this application.
+	// Claim the candidates in one statement: flip them to PENDING and read back what
+	// the queue runner needs to dispatch them, claiming unclaimed rows for this
+	// application. RETURNING reports exactly the rows this statement flipped.
 	claimSet, claimClause := "", ""
 	if s.appName != "" {
 		claimSet = `,
@@ -4898,54 +4899,65 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		        THEN $4 + workflow_timeout_ms
 		        ELSE workflow_deadline_epoch_ms
 		    END`+claimSet+`
-		WHERE workflow_uuid = $6 AND status = $7`+claimClause+`
-		RETURNING name, inputs, serialization, config_name, authenticated_user, assumed_role, authenticated_roles`, schemaPrefix)
+		WHERE `+dialectAnyClause(s.dialect, "workflow_uuid", 6)+` AND status = $7`+claimClause+`
+		RETURNING workflow_uuid, name, inputs, serialization, config_name, authenticated_user, assumed_role, authenticated_roles`, schemaPrefix)
 
-	var retWorkflows []DequeuedWorkflow
-	for _, id := range dequeuedIDs {
-		if input.Queue.RateLimit != nil {
-			if len(retWorkflows)+numRecentQueries >= input.Queue.RateLimit.Limit {
-				break
-			}
-		}
-		retWorkflow := DequeuedWorkflow{Id: id}
+	encodedIDs, err := encodeArrayParam(s.dialect, dequeuedIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode dequeued workflow IDs: %w", err)
+	}
+	claimArgs := []any{
+		models.WorkflowStatusPending,
+		input.ApplicationVersion,
+		input.ExecutorID,
+		time.Now().UnixMilli(),
+		input.Queue.RateLimit != nil,
+		encodedIDs,
+		models.WorkflowStatusEnqueued,
+	}
+	if s.appName != "" {
+		claimArgs = append(claimArgs, s.appName)
+	}
 
-		claimArgs := []any{
-			models.WorkflowStatusPending,
-			input.ApplicationVersion,
-			input.ExecutorID,
-			time.Now().UnixMilli(),
-			input.Queue.RateLimit != nil,
-			id,
-			models.WorkflowStatusEnqueued,
-		}
-		if s.appName != "" {
-			claimArgs = append(claimArgs, s.appName)
-		}
+	claimedRows, err := tx.Query(ctx, s.dialect.RewriteQuery(updateQuery), claimArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update workflows during dequeue: %w", err)
+	}
+	defer claimedRows.Close()
+
+	claimed := make(map[string]DequeuedWorkflow, len(dequeuedIDs))
+	for claimedRows.Next() {
+		var wf DequeuedWorkflow
 		var serialization, authenticatedUser, assumedRole, authenticatedRoles *string
-		err := tx.QueryRow(ctx, updateQuery, claimArgs...).Scan(&retWorkflow.Name, &retWorkflow.Input, &serialization, &retWorkflow.ConfigName, &authenticatedUser, &assumedRole, &authenticatedRoles)
-		if err != nil {
-			if err == pgx.ErrNoRows {
-				continue
-			}
-			return nil, fmt.Errorf("failed to update workflow %s during dequeue: %w", id, err)
+		if err := claimedRows.Scan(&wf.Id, &wf.Name, &wf.Input, &serialization, &wf.ConfigName, &authenticatedUser, &assumedRole, &authenticatedRoles); err != nil {
+			return nil, fmt.Errorf("failed to scan claimed workflow: %w", err)
 		}
 		if serialization != nil {
-			retWorkflow.Serialization = *serialization
+			wf.Serialization = *serialization
 		}
 		if authenticatedUser != nil {
-			retWorkflow.AuthenticatedUser = *authenticatedUser
+			wf.AuthenticatedUser = *authenticatedUser
 		}
 		if assumedRole != nil {
-			retWorkflow.AssumedRole = *assumedRole
+			wf.AssumedRole = *assumedRole
 		}
 		if authenticatedRoles != nil {
-			if err := json.Unmarshal([]byte(*authenticatedRoles), &retWorkflow.AuthenticatedRoles); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal authenticated roles for workflow %s: %w", id, err)
+			if err := json.Unmarshal([]byte(*authenticatedRoles), &wf.AuthenticatedRoles); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal authenticated roles for workflow %s: %w", wf.Id, err)
 			}
 		}
+		claimed[wf.Id] = wf
+	}
+	if err := claimedRows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read claimed workflows: %w", err)
+	}
 
-		retWorkflows = append(retWorkflows, retWorkflow)
+	// RETURNING order is unspecified: report the workflows in the order they were selected.
+	retWorkflows := make([]DequeuedWorkflow, 0, len(claimed))
+	for _, id := range dequeuedIDs {
+		if wf, ok := claimed[id]; ok {
+			retWorkflows = append(retWorkflows, wf)
+		}
 	}
 
 	// Commit only if workflows were dequeued. Avoids WAL bloat / XID advance.
