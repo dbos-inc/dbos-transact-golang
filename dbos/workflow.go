@@ -1519,24 +1519,66 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		return earlyReturnPollingHandle, nil
 	}
 
+	exec := workflowExecution{
+		workflowID:         workflowID,
+		timeout:            insertStatusResult.Timeout,
+		deadline:           insertStatusResult.WorkflowDeadline,
+		authenticatedUser:  params.AuthenticatedUser,
+		assumedRole:        params.AssumedRole,
+		authenticatedRoles: params.AuthenticatedRoles,
+		isPortableWorkflow: params.isPortableWorkflow,
+	}
+	if insertStatusResult.QueueName != nil {
+		exec.queueName = *insertStatusResult.QueueName
+	}
+	if insertStatusResult.QueuePartitionKey != nil {
+		exec.queuePartitionKey = *insertStatusResult.QueuePartitionKey
+	}
+	return c.executeWorkflow(fn, input, exec), nil
+}
+
+// workflowExecution is the durable state a run needs to execute: what the status insert,
+// or the queue's claim, wrote and this phase reads back.
+type workflowExecution struct {
+	workflowID         string
+	queueName          string
+	queuePartitionKey  string
+	timeout            time.Duration
+	deadline           time.Time
+	authenticatedUser  string
+	assumedRole        string
+	authenticatedRoles []string
+	isPortableWorkflow bool
+}
+
+// executeWorkflow runs a workflow whose status row is already PENDING and owned by this
+// execution, and returns a handle to it. Acquiring that ownership is the caller's job:
+// RunWorkflow does it with the status insert.
+func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowExecution) WorkflowHandle[any] {
+	// Create an uncancellable context for the DBOS operations
+	// This detaches it from any deadline or cancellation signal set by the user
+	uncancellableCtx := WithoutCancel(c)
+
+	workflowID := exec.workflowID
+
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID:         workflowID,
 		stepID:             -1, // Steps are O-indexed
-		isPortableWorkflow: params.isPortableWorkflow,
-		authenticatedUser:  params.AuthenticatedUser,
-		assumedRole:        params.AssumedRole,
-		authenticatedRoles: params.AuthenticatedRoles,
+		isPortableWorkflow: exec.isPortableWorkflow,
+		authenticatedUser:  exec.authenticatedUser,
+		assumedRole:        exec.assumedRole,
+		authenticatedRoles: exec.authenticatedRoles,
 	}
 	workflowCtx := WithValue(c, workflowStateKey, wfState)
 
 	// If the workflow has a timeout but no deadline, compute the deadline from the timeout.
 	// Else use the durable deadline.
 	durableDeadline := time.Time{}
-	if insertStatusResult.Timeout > 0 && insertStatusResult.WorkflowDeadline.IsZero() {
-		durableDeadline = time.Now().Add(insertStatusResult.Timeout)
-	} else if !insertStatusResult.WorkflowDeadline.IsZero() {
-		durableDeadline = insertStatusResult.WorkflowDeadline
+	if exec.timeout > 0 && exec.deadline.IsZero() {
+		durableDeadline = time.Now().Add(exec.timeout)
+	} else if !exec.deadline.IsZero() {
+		durableDeadline = exec.deadline
 	}
 
 	if !durableDeadline.IsZero() {
@@ -1610,13 +1652,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 		removeActive := func() {}
 		if c.activeWorkflowIDs != nil {
-			entry := activeWorkflowEntry{}
-			if insertStatusResult.QueueName != nil {
-				entry.queueName = *insertStatusResult.QueueName
-			}
-			if insertStatusResult.QueuePartitionKey != nil {
-				entry.queuePartitionKey = *insertStatusResult.QueuePartitionKey
-			}
+			entry := activeWorkflowEntry{queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey}
 			_, loaded := c.activeWorkflowIDs.LoadOrStore(workflowID, entry)
 			if loaded {
 				// Lost a start race: a concurrent start of this workflow (recovery and
@@ -1724,7 +1760,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		close(outcomeChan)
 	}()
 
-	return newWorkflowHandle(uncancellableCtx, workflowID, outcomeChan), nil
+	return newWorkflowHandle(uncancellableCtx, workflowID, outcomeChan)
 }
 
 /******************************/
