@@ -2248,17 +2248,18 @@ func (s *SysDB) GarbageCollectWorkflows(ctx context.Context, input GarbageCollec
 
 	cutoffTimestamp := input.CutoffEpochTimestampMs
 
-	// If rowsThreshold is provided, get the timestamp of the Nth newest workflow
+	// If rowsThreshold is provided, get the completion timestamp of the Nth newest completed workflow
 	if input.RowsThreshold != nil {
-		appNameWhere := ""
+		appNameClause := ""
 		args := []any{*input.RowsThreshold - 1}
 		if s.appName != "" {
-			appNameWhere = " WHERE " + nameFilterSQL("application_name", 2)
+			appNameClause = " AND " + nameFilterSQL("application_name", 2)
 			args = append(args, s.appName)
 		}
-		query := s.RenderSQL(`SELECT created_at
-				  FROM %sworkflow_status`+appNameWhere+`
-				  ORDER BY created_at DESC
+		query := s.RenderSQL(`SELECT completed_at
+				  FROM %sworkflow_status
+				  WHERE completed_at IS NOT NULL`+appNameClause+`
+				  ORDER BY completed_at DESC
 				  LIMIT 1 OFFSET $1`, s.dialect.SchemaPrefix(s.schema))
 
 		var rowsBasedCutoff int64
@@ -2279,21 +2280,16 @@ func (s *SysDB) GarbageCollectWorkflows(ctx context.Context, input GarbageCollec
 		return nil
 	}
 
-	// Delete all workflows older than cutoff that are NOT PENDING, ENQUEUED, or DELAYED
+	// completed_at is set on every terminal transition and cleared on resume, so one
+	// predicate covers eligibility: in-flight rows hold NULL and never compare true.
 	deleteAppNameClause := ""
-	deleteArgs := []any{
-		*cutoffTimestamp,
-		models.WorkflowStatusPending,
-		models.WorkflowStatusEnqueued,
-		models.WorkflowStatusDelayed,
-	}
+	deleteArgs := []any{*cutoffTimestamp}
 	if s.appName != "" {
-		deleteAppNameClause = " AND " + nameFilterSQL("application_name", 5)
+		deleteAppNameClause = " AND " + nameFilterSQL("application_name", 2)
 		deleteArgs = append(deleteArgs, s.appName)
 	}
 	query := s.RenderSQL(`DELETE FROM %sworkflow_status
-			  WHERE created_at < $1
-			    AND status NOT IN ($2, $3, $4)`+deleteAppNameClause, s.dialect.SchemaPrefix(s.schema))
+			  WHERE completed_at < $1`+deleteAppNameClause, s.dialect.SchemaPrefix(s.schema))
 
 	commandTag, err := s.pool.Exec(ctx, query, deleteArgs...)
 

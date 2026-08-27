@@ -7003,8 +7003,8 @@ func TestGarbageCollect(t *testing.T) {
 			require.NoError(t, err, "failed to get result from test workflow %d", i)
 			require.Equal(t, i, result, "expected result %d, got %d", i, result)
 			completedHandles = append(completedHandles, handle)
-			// Keep created_at distinct: GC's rows-threshold cutoff uses strict
-			// created_at comparison, so millisecond ties spare extra rows.
+			// Keep completed_at distinct: GC's rows-threshold cutoff uses strict
+			// completed_at comparison, so millisecond ties spare extra rows.
 			time.Sleep(2 * time.Millisecond)
 		}
 
@@ -7369,8 +7369,8 @@ func TestGarbageCollect(t *testing.T) {
 		var cutoff1 int64 // Will keep 5 newest when used as cutoff
 		var cutoff2 int64 // Will keep 8 newest when used as cutoff
 
-		cutoff1 = workflows[7].CreatedAt.UnixMilli() // 3rd oldest workflow
-		cutoff2 = workflows[1].CreatedAt.UnixMilli() // 9th oldest workflow
+		cutoff1 = workflows[7].CompletedAt.UnixMilli() // 3rd oldest workflow
+		cutoff2 = workflows[1].CompletedAt.UnixMilli() // 9th oldest workflow
 
 		// Case 1: Threshold is more restrictive (higher/more recent cutoff)
 		// Threshold would keep 6 newest, timestamp would keep 8 newest
