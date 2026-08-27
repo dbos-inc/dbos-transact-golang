@@ -2891,6 +2891,15 @@ func TestClientTransactionalOps(t *testing.T) {
 	ctx := context.Background()
 	appVersion := WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion())
 
+	// Only pg backends expose a *pgxpool.Pool we can sniff; sqlite is never CRDB.
+	isCockroach := false
+	if pgxPool := PgxPool(pool); pgxPool != nil {
+		conn, err := pgxPool.Acquire(ctx)
+		require.NoError(t, err)
+		isCockroach = sysdb.IsCockroachDB(conn.Conn())
+		conn.Release()
+	}
+
 	t.Run("EnqueueCommits", func(t *testing.T) {
 		tx, err := pool.BeginTx(ctx, TxOptions{})
 		require.NoError(t, err)
@@ -2901,9 +2910,13 @@ func TestClientTransactionalOps(t *testing.T) {
 		require.NoError(t, err)
 
 		// sqlite runs in WAL mode, so this read is served from another
-		// connection's snapshot instead of blocking on the open write.
-		_, err = client.RetrieveWorkflow(client, handle.GetWorkflowID())
-		require.ErrorIs(t, err, ErrNonExistentWorkflow, "workflow must not be visible before commit")
+		// connection's snapshot instead of blocking on the open write. CRDB
+		// instead parks the reader on the uncommitted row's write intent until
+		// the transaction resolves, which never happens before the commit below.
+		if !isCockroach {
+			_, err = client.RetrieveWorkflow(client, handle.GetWorkflowID())
+			require.ErrorIs(t, err, ErrNonExistentWorkflow, "workflow must not be visible before commit")
+		}
 
 		require.NoError(t, tx.Commit(ctx))
 
