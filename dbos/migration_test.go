@@ -4,11 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -353,4 +357,174 @@ func TestMigrationStatements(t *testing.T) {
 	assert.False(t, need)
 	_, err = pool.Exec(bg, fmt.Sprintf(`DROP SCHEMA "%s" CASCADE`, funny))
 	require.NoError(t, err)
+}
+
+// TestSkipMigrationsVerifiesMigratedDatabase launches against an already-migrated database.
+func TestSkipMigrationsVerifiesMigratedDatabase(t *testing.T) {
+	setupDBOS(t, setupDBOSOptions{dropDB: true})
+
+	verifyingCtx, err := NewContext(context.Background(), Config{
+		DatabaseURL:    backendDatabaseURL(t),
+		AppName:        "test-app",
+		SkipMigrations: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { Shutdown(verifyingCtx, 30*time.Second) })
+
+	workflow := func(ctx Context, _ string) (string, error) { return "migrated", nil }
+	RegisterWorkflow(verifyingCtx, workflow, WithWorkflowName("SkipMigrationsWorkflow"))
+	require.NoError(t, verifyingCtx.Launch())
+
+	handle, err := RunWorkflow(verifyingCtx, workflow, "")
+	require.NoError(t, err)
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "migrated", result)
+}
+
+// TestSkipMigrationsRejectsUnmigratedSchema fails launch on an unmigrated schema,
+// without creating anything on the way past.
+func TestSkipMigrationsRejectsUnmigratedSchema(t *testing.T) {
+	skipIfSqlite(t, "pg schema semantics; sqlite has no schemas")
+	databaseURL := getDatabaseURL()
+	bg := context.Background()
+
+	pool, err := pgxpool.New(bg, databaseURL)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	const schema = "skip_migrations_unmigrated"
+	_, err = pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+	})
+
+	migs := sysdb.BuildMigrations(schema, detectCockroach(t, pool))
+	latest := migs[len(migs)-1].Version
+
+	_, err = NewContext(bg, Config{
+		DatabaseURL:    databaseURL,
+		AppName:        "test-app",
+		DatabaseSchema: schema,
+		SkipMigrations: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), fmt.Sprintf("is at schema version 0, but this version of DBOS requires %d", latest))
+
+	var schemaExists bool
+	require.NoError(t, pool.QueryRow(bg,
+		`SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`,
+		schema).Scan(&schemaExists))
+	assert.False(t, schemaExists, "verification must not create the schema")
+}
+
+// TestSkipMigrationsVersionComparison rejects a database behind this build and
+// tolerates one ahead of it.
+func TestSkipMigrationsVersionComparison(t *testing.T) {
+	skipIfSqlite(t, "pg schema semantics; sqlite has no schemas")
+	databaseURL := getDatabaseURL()
+	bg := context.Background()
+
+	pool, err := pgxpool.New(bg, databaseURL)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	const schema = "skip_migrations_versioned"
+	_, err = pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+	})
+
+	isCockroach := detectCockroach(t, pool)
+	require.NoError(t, sysdb.RunMigrations(bg, pool, schema, isCockroach, slog.Default()))
+	migs := sysdb.BuildMigrations(schema, isCockroach)
+	latest := migs[len(migs)-1].Version
+
+	setVersion := func(version int64) {
+		t.Helper()
+		_, err := pool.Exec(bg, fmt.Sprintf("UPDATE %s.%s SET version = $1", schema, sysdb.MigrationTable), version)
+		require.NoError(t, err)
+	}
+	newVerifyingContext := func() (Context, error) {
+		return NewContext(bg, Config{
+			DatabaseURL:    databaseURL,
+			AppName:        "test-app",
+			DatabaseSchema: schema,
+			SkipMigrations: true,
+		})
+	}
+
+	setVersion(latest - 1)
+	_, err = newVerifyingContext()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), fmt.Sprintf("is at schema version %d, but this version of DBOS requires %d", latest-1, latest))
+
+	setVersion(latest + 1)
+	aheadCtx, err := newVerifyingContext()
+	require.NoError(t, err, "a database ahead of this build belongs to a newer peer")
+	require.NoError(t, Shutdown(aheadCtx, 30*time.Second))
+}
+
+// TestSkipMigrationsDoesNotCreateDatabase fails on a missing system database.
+func TestSkipMigrationsDoesNotCreateDatabase(t *testing.T) {
+	skipIfSqlite(t, "pg database creation; sqlite is covered by TestSkipMigrationsSqlite")
+	bg := context.Background()
+	parsedURL, err := url.Parse(getDatabaseURL())
+	require.NoError(t, err)
+	if parsedURL.Scheme == "" {
+		t.Skip("DBOS_SYSTEM_DATABASE_URL is not in URL form")
+	}
+
+	const databaseName = "dbos_skip_migrations_missing"
+	adminURL := *parsedURL
+	adminURL.Path = "/postgres"
+	adminConn, err := pgx.Connect(bg, adminURL.String())
+	require.NoError(t, err)
+	defer adminConn.Close(bg)
+	require.NoError(t, sysdb.DropDatabaseIfExists(bg, adminConn, databaseName))
+
+	missingURL := *parsedURL
+	missingURL.Path = "/" + databaseName
+	_, err = NewContext(bg, Config{
+		DatabaseURL:    missingURL.String(),
+		AppName:        "test-app",
+		SkipMigrations: true,
+	})
+	require.Error(t, err)
+
+	var exists bool
+	require.NoError(t, adminConn.QueryRow(bg, "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", databaseName).Scan(&exists))
+	assert.False(t, exists, "verification must not create the system database")
+}
+
+// TestSkipMigrationsSqlite covers the sqlite paths: a missing file and an unmigrated one.
+func TestSkipMigrationsSqlite(t *testing.T) {
+	bg := context.Background()
+	migs := sysdb.BuildSqliteMigrations()
+	latest := migs[len(migs)-1].Version
+
+	missingPath := filepath.Join(t.TempDir(), "missing.db")
+	_, err := NewContext(bg, Config{
+		DatabaseURL:    "sqlite:" + missingPath,
+		AppName:        "test-app",
+		SkipMigrations: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not exist")
+	_, statErr := os.Stat(missingPath)
+	assert.True(t, os.IsNotExist(statErr), "verification must not create the database file")
+
+	unmigratedPath := filepath.Join(t.TempDir(), "unmigrated.db")
+	file, err := os.Create(unmigratedPath)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	_, err = NewContext(bg, Config{
+		DatabaseURL:    "sqlite:" + unmigratedPath,
+		AppName:        "test-app",
+		SkipMigrations: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), fmt.Sprintf("is at schema version 0, but this version of DBOS requires %d", latest))
 }

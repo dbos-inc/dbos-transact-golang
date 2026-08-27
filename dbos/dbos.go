@@ -62,6 +62,7 @@ type Config struct {
 	SchedulerPollingInterval     time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
 	SystemDBStartupTimeout       time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
 	NotificationCoalesceInterval time.Duration   // Controls how often stream-write and set-event notifications are batched
+	SkipMigrations               bool            // Verify the system database schema on launch instead of creating and migrating it
 	namelessOwner                bool            // Act for no specific application: write unclaimed rows, matches all. Used by clients without an AppName.
 	isClient                     bool            // Client handle: runs no workflows, so enqueues leave the version unset by default.
 }
@@ -96,6 +97,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		DatabaseURL:                  inputConfig.DatabaseURL,
 		AppName:                      inputConfig.AppName,
 		DatabaseSchema:               inputConfig.DatabaseSchema,
+		SkipMigrations:               inputConfig.SkipMigrations,
 		Logger:                       inputConfig.Logger,
 		AdminServer:                  inputConfig.AdminServer,
 		AdminServerPort:              inputConfig.AdminServerPort,
@@ -612,6 +614,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	newSystemDatabaseInputs := sysdb.NewSystemDatabaseInput{
 		DatabaseURL:                  config.DatabaseURL,
 		DatabaseSchema:               config.DatabaseSchema,
+		SkipMigrations:               config.SkipMigrations,
 		CustomPool:                   config.SystemDBPool,
 		CustomSqliteDB:               config.SQLiteSystemDB,
 		Logger:                       initExecutor.logger,
@@ -704,10 +707,11 @@ type ClientConfig struct {
 	DatabaseSchema         string          // Database schema name (defaults to "dbos")
 	Logger                 *slog.Logger    // Optional custom logger
 	Serializer             Serializer[any] // Optional custom serializer (defaults to JSON)
-	SystemDBStartupTimeout time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
+	SystemDBStartupTimeout time.Duration   // Maximum time for system-database connection and schema verification (defaults to 2 minutes)
 }
 
 // NewClient creates a new DBOS client with the provided configuration.
+// A client verifies the system database schema instead of migrating it.
 // It connects to the system database and starts its notification listener —
 // or a poller on backends without listen/notify support — so every Client
 // operation, including blocking ones like GetEvent, works without launching
@@ -736,6 +740,7 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 		SQLiteSystemDB:         config.SQLiteSystemDB,
 		Serializer:             config.Serializer,
 		SystemDBStartupTimeout: config.SystemDBStartupTimeout,
+		SkipMigrations:         true, // Clients never own the schema
 		namelessOwner:          config.AppName == "",
 		isClient:               true,
 	})

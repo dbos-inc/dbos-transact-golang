@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 )
 
 // SQLite migration numbering mirrors pg numbering (matching Python's
@@ -219,6 +221,36 @@ func BuildSqliteMigrations() []MigrationFile {
 		{Version: 106, SQL: sqliteMigration106SQL},
 		{Version: 107, SQL: sqliteMigration107SQL},
 	}
+}
+
+// VerifySqliteMigrations checks the schema is at the version this build requires,
+// creating and changing nothing.
+func VerifySqliteMigrations(ctx context.Context, db *sql.DB, databaseLabel string, logger *slog.Logger) error {
+	migrations := BuildSqliteMigrations()
+	requiredVersion := migrations[len(migrations)-1].Version
+
+	var currentVersion int64
+	var exists int
+	err := db.QueryRowContext(ctx,
+		`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
+		MigrationTable).Scan(&exists)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("failed to probe sqlite_master: %v", err)
+	}
+	if err == nil {
+		if err := db.QueryRowContext(ctx,
+			fmt.Sprintf(`SELECT version FROM %s LIMIT 1`, MigrationTable)).Scan(&currentVersion); err != nil &&
+			!errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("failed to read current migration version: %v", err)
+		}
+	}
+
+	// A database ahead of this build belongs to a newer peer, which the migration runner also tolerates.
+	if currentVersion < requiredVersion {
+		return models.NewUnmigratedDatabaseError(databaseLabel, currentVersion, requiredVersion)
+	}
+	logger.Debug("System database schema version satisfies the required version", "current_version", currentVersion, "required_version", requiredVersion)
+	return nil
 }
 
 func RunSqliteMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) error {

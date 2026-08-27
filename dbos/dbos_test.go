@@ -1339,9 +1339,13 @@ func TestClientShutdownReportsSystemDBTimeout(t *testing.T) {
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	require.NoError(t, err)
 
+	// A client verifies the schema instead of migrating it, so migrate it here.
+	const schema = "dbos_test_shutdown_client"
+	require.NoError(t, sysdb.RunMigrations(ctx, pool, schema, detectCockroach(t, pool), slog.Default()))
+
 	client, err := NewClient(ctx, ClientConfig{
 		SystemDBPool:   pool,
-		DatabaseSchema: "dbos_test_shutdown_client",
+		DatabaseSchema: schema,
 	})
 	require.NoError(t, err)
 

@@ -3034,3 +3034,35 @@ func TestClientTransactionalOps(t *testing.T) {
 		require.Contains(t, result, "WithSendTransaction cannot be used within a workflow")
 	})
 }
+
+// TestClientDoesNotMigrate: a client verifies the schema instead of creating it.
+func TestClientDoesNotMigrate(t *testing.T) {
+	skipIfSqlite(t, "pg schema semantics; sqlite has no schemas")
+	databaseURL := getDatabaseURL()
+	bg := context.Background()
+
+	pool, err := pgxpool.New(bg, databaseURL)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	const schema = "client_unmigrated_schema"
+	_, err = pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+	})
+
+	_, err = NewClient(bg, ClientConfig{
+		DatabaseURL:    databaseURL,
+		AppName:        "test-app",
+		DatabaseSchema: schema,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is at schema version 0")
+
+	var schemaExists bool
+	require.NoError(t, pool.QueryRow(bg,
+		`SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`,
+		schema).Scan(&schemaExists))
+	assert.False(t, schemaExists, "a client must not create the schema")
+}

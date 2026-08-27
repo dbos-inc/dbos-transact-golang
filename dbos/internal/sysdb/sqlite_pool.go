@@ -64,6 +64,47 @@ func SqliteDSN(raw string) (string, error) {
 	return dsn, nil
 }
 
+// sqliteFilePath returns the on-disk path a DSN refers to, or "" for in-memory databases.
+func sqliteFilePath(dsn string) string {
+	if dsn == ":memory:" || strings.HasPrefix(dsn, ":memory:") || strings.HasPrefix(dsn, "file::memory:") {
+		return ""
+	}
+	path := dsn
+	if strings.HasPrefix(path, "file:") {
+		// Extract the file path from a file:URI.
+		if u, err := url.Parse(path); err == nil {
+			path = u.Opaque
+			if path == "" {
+				path = u.Path
+			}
+		}
+	} else if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	return path
+}
+
+// requireExistingSqliteFile fails on a missing file: opening one creates it.
+func requireExistingSqliteFile(databaseURL string) error {
+	dsn, err := SqliteDSN(databaseURL)
+	if err != nil {
+		return err
+	}
+	path := sqliteFilePath(dsn)
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("system database file %s does not exist. This process is configured with skipMigrations, "+
+				"so it will not create it: either create and migrate the system database out of band "+
+				"(`dbos migrate`) or launch with migrations enabled", path)
+		}
+		return fmt.Errorf("failed to check sqlite database file %s: %v", path, err)
+	}
+	return nil
+}
+
 // OpenSQLitePool opens a *sql.DB backed by the registered SQLite driver,
 // ensures the parent directory of file-backed databases exists, applies
 // recommended PRAGMAs, and returns the pool. The caller owns Close. It
@@ -79,17 +120,7 @@ func OpenSQLitePool(ctx context.Context, databaseURL string) (*sql.DB, error) {
 	}
 
 	// Ensure the parent directory exists for file-backed databases.
-	if dsn != ":memory:" && !strings.HasPrefix(dsn, ":memory:") && !strings.HasPrefix(dsn, "file::memory:") {
-		path := dsn
-		if strings.HasPrefix(path, "file:") {
-			// Extract the file path from a file:URI.
-			if u, err := url.Parse(path); err == nil {
-				path = u.Opaque
-				if path == "" {
-					path = u.Path
-				}
-			}
-		}
+	if path := sqliteFilePath(dsn); path != "" {
 		// Skip directory creation if the path is empty or only a name.
 		if dir := filepath.Dir(path); dir != "" && dir != "." {
 			if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -127,7 +158,7 @@ func OpenSQLitePool(ctx context.Context, databaseURL string) (*sql.DB, error) {
 // When customDB is non-nil it is used as-is (the caller
 // owns its lifecycle and PRAGMA configuration); otherwise the function opens
 // a fresh pool from databaseURL and applies default PRAGMAs.
-// Either way it runs SQLite migrations and returns a sysDB.
+// Either way it runs SQLite migrations, or verifies them under skipMigrations.
 func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Time, json.RawMessage) (*string, string, error),
 
 	ctx context.Context,
@@ -135,6 +166,7 @@ func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Tim
 	customDB *sql.DB,
 	logger *slog.Logger,
 	appName string,
+	skipMigrations bool,
 ) (SystemDatabase, error) {
 	// The driver is required even with a custom handle: error classification
 	// (retryable/contention/constraint) needs its ErrorCode extractor.
@@ -150,6 +182,13 @@ func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Tim
 		db = customDB
 	} else {
 		logger.Info("Connecting to SQLite system database", "database_url", databaseURL)
+		if skipMigrations {
+			// Skip migrations implies the database file must already exist, because opening a
+			// non-existent file creates it.
+			if err := requireExistingSqliteFile(databaseURL); err != nil {
+				return nil, err
+			}
+		}
 		opened, err := OpenSQLitePool(ctx, databaseURL)
 		if err != nil {
 			return nil, err
@@ -165,7 +204,16 @@ func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Tim
 			logger.Warn("Failed to close sqlite database during cleanup", "error", err)
 		}
 	}
-	if err := Retry(ctx, func() error {
+	if skipMigrations {
+		label := databaseURL
+		if label == "" {
+			label = "(custom sqlite handle)"
+		}
+		if err := VerifySqliteMigrations(ctx, db, label, logger); err != nil {
+			closeIfOwned()
+			return nil, err
+		}
+	} else if err := Retry(ctx, func() error {
 		return RunSqliteMigrations(ctx, db, logger)
 	}, WithRetrierLogger(logger)); err != nil {
 		closeIfOwned()
