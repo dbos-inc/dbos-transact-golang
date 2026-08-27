@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"runtime"
@@ -61,11 +62,20 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 
 	ctx := context.Background()
 
-	// Create DBOS context which will run migrations automatically for the system DB
-	_, err = createContext(ctx, dbURL)
+	migrateCtx, err := dbos.NewContext(ctx, dbos.Config{
+		DatabaseURL:    dbURL,
+		DatabaseSchema: schema,
+		AppName:        "dbos-cli",
+		Logger:         initLogger(slog.LevelError),
+	})
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err := dbos.Shutdown(migrateCtx, 30*time.Second); err != nil {
+			logger.Debug("Failed to shut down migration context", "error", err)
+		}
+	}()
 
 	// Grant permissions to application role if specified
 	if applicationRole != "" {

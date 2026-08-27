@@ -619,19 +619,18 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 	}
 }
 
-// ShouldMigrate reports whether any migration work remains for the schema.
-// Returns true if the schema is missing, the dbos_migrations table is missing,
-// or the recorded version is behind the latest.
-func ShouldMigrate(ctx context.Context, pool *pgxpool.Pool, schema string, isCockroach bool) (bool, error) {
+// currentMigrationVersion reports the version recorded for the schema, or 0 if
+// the schema, the migration table, or its version row is missing.
+func currentMigrationVersion(ctx context.Context, pool *pgxpool.Pool, schema string) (int64, error) {
 	var schemaExists bool
 	err := pool.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`,
 		schema).Scan(&schemaExists)
 	if err != nil {
-		return false, fmt.Errorf("failed to check if schema %s exists: %v", schema, err)
+		return 0, fmt.Errorf("failed to check if schema %s exists: %v", schema, err)
 	}
 	if !schemaExists {
-		return true, nil
+		return 0, nil
 	}
 
 	var tableExists bool
@@ -639,20 +638,52 @@ func ShouldMigrate(ctx context.Context, pool *pgxpool.Pool, schema string, isCoc
 		`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`,
 		schema, MigrationTable).Scan(&tableExists)
 	if err != nil {
-		return false, fmt.Errorf("failed to check if migration table exists: %v", err)
+		return 0, fmt.Errorf("failed to check if migration table exists: %v", err)
 	}
 	if !tableExists {
-		return true, nil
+		return 0, nil
 	}
 
 	var currentVersion int64
 	q := fmt.Sprintf("SELECT version FROM %s.%s LIMIT 1", pgx.Identifier{schema}.Sanitize(), MigrationTable)
 	err = pool.QueryRow(ctx, q).Scan(&currentVersion)
 	if err != nil && err != pgx.ErrNoRows {
-		return false, fmt.Errorf("failed to get current migration version: %v", err)
+		return 0, fmt.Errorf("failed to get current migration version: %v", err)
+	}
+	return currentVersion, nil
+}
+
+// ShouldMigrate reports whether any migration work remains for the schema.
+// Returns true if the schema is missing, the dbos_migrations table is missing,
+// or the recorded version is behind the latest.
+func ShouldMigrate(ctx context.Context, pool *pgxpool.Pool, schema string, isCockroach bool) (bool, error) {
+	currentVersion, err := currentMigrationVersion(ctx, pool, schema)
+	if err != nil {
+		return false, err
 	}
 	migrations := BuildMigrations(schema, isCockroach)
 	return currentVersion < migrations[len(migrations)-1].Version, nil
+}
+
+// VerifyMigrations checks the schema is at the version this build requires,
+// creating and changing nothing.
+func VerifyMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, isCockroach bool, logger *slog.Logger) error {
+	currentVersion, err := currentMigrationVersion(ctx, pool, schema)
+	if err != nil {
+		return err
+	}
+	migrations := BuildMigrations(schema, isCockroach)
+	requiredVersion := migrations[len(migrations)-1].Version
+	// A database ahead of this build belongs to a newer peer, which the migration runner also tolerates.
+	if currentVersion < requiredVersion {
+		databaseLabel := pool.Config().ConnConfig.Database
+		if masked, maskErr := MaskPassword(pool.Config().ConnString()); maskErr == nil {
+			databaseLabel = masked
+		}
+		return models.NewUnmigratedDatabaseError(databaseLabel, currentVersion, requiredVersion)
+	}
+	logger.Debug("System database schema version satisfies the required version", "current_version", currentVersion, "required_version", requiredVersion)
+	return nil
 }
 
 // CleanupInvalidIndexes drops indexes left in an INVALID state by a prior
@@ -865,6 +896,7 @@ type NewSystemDatabaseInput struct {
 	ConnectionAppName            string
 	StartupTimeout               time.Duration
 	NotificationCoalesceInterval time.Duration
+	SkipMigrations               bool
 	// EncodeScheduledInput serializes the input of a schedule-created workflow
 	// (backfill/trigger). Injected by the caller to keep serialization concerns
 	// out of the system database.
@@ -906,7 +938,8 @@ func connStringSetsPoolMaxConns(connString string) bool {
 	return false
 }
 
-// NewSystemDatabase creates a new SystemDatabase instance and runs migrations.
+// NewSystemDatabase creates a new SystemDatabase instance and runs migrations,
+// or verifies them under SkipMigrations.
 func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (SystemDatabase, error) {
 	// Dereference fields from inputs
 	databaseURL := inputs.DatabaseURL
@@ -925,7 +958,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 
 	// Dispatch sqlite first
 	if customSqliteDB != nil {
-		systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, customSqliteDB, logger, inputs.AppName)
+		systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, customSqliteDB, logger, inputs.AppName, inputs.SkipMigrations)
 		if err != nil {
 			return nil, startupError(ctx, inputs.StartupTimeout, "initializing the SQLite system database", nil, err)
 		}
@@ -937,7 +970,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 			return nil, err
 		}
 		if dialectName == DialectSQLite {
-			systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, nil, logger, inputs.AppName)
+			systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, nil, logger, inputs.AppName, inputs.SkipMigrations)
 			if err != nil {
 				return nil, startupError(ctx, inputs.StartupTimeout, "initializing the SQLite system database", nil, err)
 			}
@@ -1003,7 +1036,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 	}
 	logger.Info("Connecting to system database", "database_url", maskedDatabaseURL, "schema", databaseSchema)
 
-	if customPool == nil {
+	if customPool == nil && !inputs.SkipMigrations {
 		// Create the database if it doesn't exist
 		if err := Retry(ctx, func() error {
 			return createDatabaseIfNotExists(ctx, pool, logger)
@@ -1030,24 +1063,35 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		logger.Info("Detected CockroachDB")
 	}
 
-	needsMigration, smErr := ShouldMigrate(ctx, pool, databaseSchema, isCockroach)
-	if smErr != nil {
-		if customPool == nil {
-			pool.Close()
-		}
-		return nil, startupError(ctx, inputs.StartupTimeout, "checking system database migration status", pool, fmt.Errorf("failed to determine migration status: %w", smErr))
-	}
-	if needsMigration {
+	if inputs.SkipMigrations {
 		if err := Retry(ctx, func() error {
-			return RunMigrations(ctx, pool, databaseSchema, isCockroach, logger)
+			return VerifyMigrations(ctx, pool, databaseSchema, isCockroach, logger)
 		}, WithRetrierLogger(logger)); err != nil {
 			if customPool == nil {
 				pool.Close()
 			}
-			if errors.Is(err, context.DeadlineExceeded) {
-				return nil, err
+			return nil, startupError(ctx, inputs.StartupTimeout, "verifying system database migrations", pool, err)
+		}
+	} else {
+		needsMigration, smErr := ShouldMigrate(ctx, pool, databaseSchema, isCockroach)
+		if smErr != nil {
+			if customPool == nil {
+				pool.Close()
 			}
-			return nil, startupError(ctx, inputs.StartupTimeout, "running system database migrations", pool, fmt.Errorf("failed to run migrations: %w", err))
+			return nil, startupError(ctx, inputs.StartupTimeout, "checking system database migration status", pool, fmt.Errorf("failed to determine migration status: %w", smErr))
+		}
+		if needsMigration {
+			if err := Retry(ctx, func() error {
+				return RunMigrations(ctx, pool, databaseSchema, isCockroach, logger)
+			}, WithRetrierLogger(logger)); err != nil {
+				if customPool == nil {
+					pool.Close()
+				}
+				if errors.Is(err, context.DeadlineExceeded) {
+					return nil, err
+				}
+				return nil, startupError(ctx, inputs.StartupTimeout, "running system database migrations", pool, fmt.Errorf("failed to run migrations: %w", err))
+			}
 		}
 	}
 

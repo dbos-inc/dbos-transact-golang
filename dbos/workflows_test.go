@@ -9912,6 +9912,7 @@ func attrDebouncedWorkflow(dbosCtx Context, x int) (int, error) {
 
 func TestWorkflowAttributes(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	databaseURL := backendDatabaseURL(t) // resolve here: a subtest's t gets its own sqlite file
 
 	RegisterWorkflow(dbosCtx, attrParentWorkflow)
 	RegisterWorkflow(dbosCtx, attrChildWorkflow)
@@ -10000,7 +10001,7 @@ func TestWorkflowAttributes(t *testing.T) {
 
 	t.Run("ClientEnqueue", func(t *testing.T) {
 		config := ClientConfig{
-			DatabaseURL: backendDatabaseURL(t),
+			DatabaseURL: databaseURL,
 		}
 		client, err := NewClient(dbosCtx, config)
 		require.NoError(t, err)

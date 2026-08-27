@@ -223,6 +223,17 @@ func NewInitializationError(message string) *Error {
 	}
 }
 
+// NewUnmigratedDatabaseError reports a system database this process may not migrate.
+func NewUnmigratedDatabaseError(databaseLabel string, currentVersion, requiredVersion int64) *Error {
+	return &Error{
+		Message: fmt.Sprintf("system database %s is at schema version %d, but this version of DBOS requires %d. "+
+			"This process is configured with skipMigrations, so it will not migrate it: either migrate the "+
+			"system database out of band (`dbos migrate`) or launch with migrations enabled",
+			databaseLabel, currentVersion, requiredVersion),
+		Code: ErrorCodeInitialization,
+	}
+}
+
 func NewNonExistentWorkflowError(workflowID string) *Error {
 	return &Error{
 		Message:    fmt.Sprintf("workflow %s does not exist", workflowID),
