@@ -5042,10 +5042,9 @@ func TestRecvStepConflict(t *testing.T) {
 	// execution with its own in-memory receiver map, so it proceeds to wait and
 	// later races A to consume+checkpoint the message. Recovery re-enqueues and the
 	// queue's atomic dequeue admits exactly one runner (either executor could win),
-	// so deterministically force the duplicate dequeue-execution on B, as if B had
-	// dequeued the re-enqueued row while the zombie A still runs.
-	handleB, err := RunWorkflow(ctxB, recvConflictWorkflow, topic, WithWorkflowID(workflowID), withIsDequeue())
-	require.NoError(t, err, "failed to run duplicate execution on executor B")
+	// so dispatch the duplicate on B directly, as if B had claimed the re-enqueued
+	// row while the zombie A still runs.
+	handleB := startDuplicateExecution(ctxB, recvConflictWorkflow, topic, workflowID)
 
 	// Executor B must actually run the body (register as receiver), not
 	// short-circuit; its separate map confirms a real concurrent execution.
@@ -10653,11 +10652,11 @@ func TestConcurrentStartRaceSameExecutor(t *testing.T) {
 //
 // It reproduces the zombie/recovery race: executor A starts a workflow and blocks
 // inside its only step; executor B runs a duplicate execution of the still-PENDING
-// workflow (as if it had dequeued the row recovery re-enqueued), which transfers
-// the marker to B via its status insert. Both executions are now live in the step
+// workflow (as if it had dequeued the row recovery re-enqueued), whose claim
+// transfers the marker to B. Both executions are now live in the step
 // body. The still-running A ("zombie") is released first: its step checkpoint must
-// reclaim the marker for A. The duplicate's insert is not what is under test here —
-// A never re-inserts its status, so only the step-checkpoint re-stamp can flip
+// reclaim the marker for A. The duplicate's claim is not what is under test here —
+// A never re-stamps the marker itself, so only the step-checkpoint re-stamp can flip
 // executor_id back to A. B is released last; losing the checkpoint race, it must
 // not re-stamp.
 func TestStepCheckpointReclaimsExecutorID(t *testing.T) {
@@ -10726,25 +10725,32 @@ func TestStepCheckpointReclaimsExecutorID(t *testing.T) {
 		return *executorID
 	}
 
+	setExecutorID := func(executorID string) {
+		query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(
+			`UPDATE %sworkflow_status SET executor_id = $1 WHERE workflow_uuid = $2`,
+			sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+		_, err := sysDB.Pool().Exec(context.Background(), query, executorID, wfID)
+		require.NoError(t, err)
+	}
+
 	// A starts the workflow and blocks inside the step. Baseline: A owns the marker.
 	handleA, err := RunWorkflow(ctxA, blockingWorkflow, "", WithWorkflowID(wfID))
 	require.NoError(t, err, "failed to start workflow on executor A")
 	aInStep.Wait()
 	require.Equal(t, executorA, readExecutorID(), "precondition: A owns the workflow after starting it")
 
-	// B runs the still-PENDING workflow concurrently, as if it had dequeued the
-	// row recovery re-enqueued (the shared queue's dequeue is not deterministic
-	// about which executor wins, so force the duplicate dequeue-execution on B):
-	// the duplicate's status insert transfers the marker to B. B now runs the
-	// step body concurrently with A and blocks.
-	handleB, err := RunWorkflow(ctxB, blockingWorkflow, "", WithWorkflowID(wfID), withIsDequeue())
-	require.NoError(t, err, "failed to run duplicate execution on executor B")
+	// B runs the still-PENDING workflow concurrently, as if it had dequeued the row
+	// recovery re-enqueued (the shared queue's dequeue is not deterministic about
+	// which executor wins, so dispatch the duplicate on B directly). The claim is
+	// what transfers the marker to B, so stamp it the way the claim does. B now runs
+	// the step body concurrently with A and blocks.
+	setExecutorID(executorB)
+	handleB := startDuplicateExecution(ctxB, blockingWorkflow, "", wfID)
 	bInStep.Wait()
-	require.Equal(t, executorB, readExecutorID(),
-		"the duplicate execution must transfer the executor_id marker to B via its status insert")
+	require.Equal(t, executorB, readExecutorID(), "precondition: B's claim owns the marker")
 
 	// Release the still-running A. Its step checkpoint is the ONLY thing that can
-	// flip the marker back to A (A never re-inserts its status): this is the
+	// flip the marker back to A (nothing else re-stamps it): this is the
 	// behavior under test.
 	close(releaseA)
 	resA, err := handleA.GetResult()

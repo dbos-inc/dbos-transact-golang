@@ -101,7 +101,7 @@ type SystemDatabase interface {
 	SetWorkflowDelay(ctx context.Context, input SetWorkflowDelayDBInput) error
 	TransitionDelayedWorkflows(ctx context.Context) error
 	DebounceDelayedWorkflow(ctx context.Context, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error)
-	DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]DequeuedWorkflow, error)
+	DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]string, error)
 	DeadLetterWorkflows(ctx context.Context, workflowIDs []string, minAttempts int) error
 	ReenqueueForRecovery(ctx context.Context, executorIDs []string, appVersion string, recoveryQueueName string) ([]string, error)
 	GetQueuePartitions(ctx context.Context, queueName string) ([]string, error)
@@ -4637,18 +4637,6 @@ func (s *SysDB) debounceDelayedWorkflowInternal(ctx context.Context, tx Tx, inpu
 	}, nil
 }
 
-type DequeuedWorkflow struct {
-	Id                 string
-	Name               string
-	Input              *string
-	Serialization      string
-	ConfigName         *string
-	AuthenticatedUser  string
-	AssumedRole        string
-	AuthenticatedRoles []string
-	Attempts           int
-}
-
 type DequeueWorkflowsInput struct {
 	Queue              models.QueueConfig
 	ExecutorID         string
@@ -4657,7 +4645,9 @@ type DequeueWorkflowsInput struct {
 	LocalRunningCount  int
 }
 
-func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]DequeuedWorkflow, error) {
+// DequeueWorkflows claims enqueued workflows for this executor and returns their IDs,
+// in the order the queue selected them.
+func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]string, error) {
 	// Snapshot isolation is only required for global concurrency or rate limiting.
 	// Otherwise read committed suffices: worker concurrency is enforced in-memory.
 	snapshot := input.Queue.GlobalConcurrency != nil || input.Queue.RateLimit != nil
@@ -4698,7 +4688,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		}
 
 		if numRecentQueries >= input.Queue.RateLimit.Limit {
-			return []DequeuedWorkflow{}, nil
+			return nil, nil
 		}
 	}
 
@@ -4837,9 +4827,8 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		s.logger.Debug("attempting to dequeue task(s)", "queue_name", input.Queue.Name, "num_tasks", len(dequeuedIDs))
 	}
 
-	// Claim the candidates in one statement: flip them to PENDING and read back what
-	// the queue runner needs to dispatch them, claiming unclaimed rows for this
-	// application. RETURNING reports exactly the rows this statement flipped.
+	// Claim the candidates in one statement: flip them to PENDING and count the
+	// dispatch, claiming unclaimed rows for this application.
 	claimSet, claimClause := "", ""
 	if s.appName != "" {
 		claimSet = `,
@@ -4861,7 +4850,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		        ELSE workflow_deadline_epoch_ms
 		    END`+claimSet+`
 		WHERE `+dialectAnyClause(s.dialect, "workflow_uuid", 6)+` AND status = $7`+claimClause+`
-		RETURNING workflow_uuid, name, inputs, serialization, config_name, authenticated_user, assumed_role, authenticated_roles, recovery_attempts`, schemaPrefix)
+		RETURNING workflow_uuid`, schemaPrefix)
 
 	encodedIDs, err := encodeArrayParam(s.dialect, dequeuedIDs)
 	if err != nil {
@@ -4886,49 +4875,34 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	}
 	defer claimedRows.Close()
 
-	claimed := make(map[string]DequeuedWorkflow, len(dequeuedIDs))
+	claimed := make(map[string]struct{}, len(dequeuedIDs))
 	for claimedRows.Next() {
-		var wf DequeuedWorkflow
-		var serialization, authenticatedUser, assumedRole, authenticatedRoles *string
-		if err := claimedRows.Scan(&wf.Id, &wf.Name, &wf.Input, &serialization, &wf.ConfigName, &authenticatedUser, &assumedRole, &authenticatedRoles, &wf.Attempts); err != nil {
-			return nil, fmt.Errorf("failed to scan claimed workflow: %w", err)
+		var id string
+		if err := claimedRows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan claimed workflow ID: %w", err)
 		}
-		if serialization != nil {
-			wf.Serialization = *serialization
-		}
-		if authenticatedUser != nil {
-			wf.AuthenticatedUser = *authenticatedUser
-		}
-		if assumedRole != nil {
-			wf.AssumedRole = *assumedRole
-		}
-		if authenticatedRoles != nil {
-			if err := json.Unmarshal([]byte(*authenticatedRoles), &wf.AuthenticatedRoles); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal authenticated roles for workflow %s: %w", wf.Id, err)
-			}
-		}
-		claimed[wf.Id] = wf
+		claimed[id] = struct{}{}
 	}
 	if err := claimedRows.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read claimed workflows: %w", err)
+		return nil, fmt.Errorf("failed to read claimed workflow IDs: %w", err)
 	}
 
 	// RETURNING order is unspecified: report the workflows in the order they were selected.
-	retWorkflows := make([]DequeuedWorkflow, 0, len(claimed))
+	claimedIDs := make([]string, 0, len(claimed))
 	for _, id := range dequeuedIDs {
-		if wf, ok := claimed[id]; ok {
-			retWorkflows = append(retWorkflows, wf)
+		if _, ok := claimed[id]; ok {
+			claimedIDs = append(claimedIDs, id)
 		}
 	}
 
 	// Commit only if workflows were dequeued. Avoids WAL bloat / XID advance.
-	if len(retWorkflows) > 0 {
+	if len(claimedIDs) > 0 {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("failed to commit transaction: %w", err)
 		}
 	}
 
-	return retWorkflows, nil
+	return claimedIDs, nil
 }
 
 // DeadLetterWorkflows moves claimed workflows that exhausted their attempts off the queue.

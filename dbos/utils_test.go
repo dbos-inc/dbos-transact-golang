@@ -350,3 +350,15 @@ func queueEntriesAreCleanedUp(ctx Context) bool {
 	}
 	return success
 }
+
+// startDuplicateExecution starts a second, concurrent execution of an already-PENDING
+// workflow the way the queue runner dispatches a workflow it has claimed: straight to
+// the execution phase, with no status insert. The queue runner discards the execution's
+// handle, so the caller gets a polling handle on the workflow's recorded outcome.
+func startDuplicateExecution[P any, R any](ctx Context, fn Workflow[P, R], input P, workflowID string) WorkflowHandle[R] {
+	c := ctx.(*dbosContext)
+	handle := c.executeWorkflow(func(ctx Context, in any) (any, error) {
+		return fn(ctx, in.(P))
+	}, input, workflowExecution{workflowID: workflowID})
+	return typedHandle[R](c, handle)
+}
