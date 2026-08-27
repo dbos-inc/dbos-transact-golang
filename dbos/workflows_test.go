@@ -3569,59 +3569,6 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 	RegisterWorkflow(dbosCtx, poisonedDLQWorkflow, WithMaxRecoveryAttempts(1))
 	dbosCtx.Launch()
 
-	t.Run("DatabaseRetryWithSameOwnerDoesNotDeadLetter", func(t *testing.T) {
-		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
-		workflowID := uuid.NewString()
-		status := models.WorkflowStatus{
-			ID:            workflowID,
-			Status:        models.WorkflowStatusPending,
-			Name:          "dead-letter-owner-test",
-			ExecutorID:    "local",
-			CreatedAt:     time.Now(),
-			Serialization: "DBOS_JSON",
-		}
-
-		insert := func(ownerXID string, incrementAttempts bool, maxRetries int) (*sysdb.InsertWorkflowResult, error) {
-			tx, err := sysDB.Pool().BeginTx(context.Background(), TxOptions{})
-			require.NoError(t, err)
-			defer tx.Rollback(context.Background())
-			result, err := sysDB.InsertWorkflowStatus(context.Background(), sysdb.InsertWorkflowStatusDBInput{
-				Status:            status,
-				MaxRetries:        maxRetries,
-				Tx:                tx,
-				OwnerXID:          &ownerXID,
-				IncrementAttempts: incrementAttempts,
-			})
-			if err != nil {
-				return nil, err
-			}
-			require.NoError(t, tx.Commit(context.Background()))
-			return result, nil
-		}
-
-		_, err := insert("initial-owner", false, 1)
-		require.NoError(t, err)
-		result, err := insert("recovery-owner-1", true, 100)
-		require.NoError(t, err)
-		require.Equal(t, 2, result.Attempts)
-		result, err = insert("recovery-owner-2", true, 100)
-		require.NoError(t, err)
-		require.Equal(t, 3, result.Attempts)
-
-		// Replay the original initialization after a lost commit acknowledgement.
-		// Concurrent recoveries raised the counter, but this replay is not a new
-		// recovery attempt and must not dead-letter the workflow.
-		result, err = insert("initial-owner", false, 1)
-		require.NoError(t, err)
-		require.Equal(t, 3, result.Attempts)
-		require.Equal(t, models.WorkflowStatusPending, result.Status)
-
-		// A genuinely new recovery owner is a new attempt and may dead-letter.
-		_, err = insert("next-recovery-owner", true, 1)
-		require.Error(t, err)
-		require.ErrorIs(t, err, ErrDeadLetterQueue)
-	})
-
 	t.Run("DeadLetterQueueBehavior", func(t *testing.T) {
 		recoveryCount = 0
 
@@ -3668,10 +3615,11 @@ func TestWorkflowDeadLetterQueue(t *testing.T) {
 		expectedDLQMsg := fmt.Sprintf("Workflow %s has been moved to the dead-letter queue after exceeding the maximum of %d retries", wfID, maxRecoveryAttempts)
 		require.Contains(t, err.Error(), expectedDLQMsg, "expected error to mention dead-letter queue, got: %v", err)
 
-		// Verify that attempting to start a workflow with the same ID throws a DLQ error
-		_, err = RunWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
+		// A direct call does not re-run the body: it awaits the row and surfaces its terminal status
+		dlqHandle, err := RunWorkflow(dbosCtx, deadLetterQueueWorkflow, "test", WithWorkflowID(wfID))
+		require.NoError(t, err, "starting a dead-lettered workflow must return a handle to it")
+		_, err = dlqHandle.GetResult()
 		require.Error(t, err, "expected dead letter queue error when restarting workflow with same ID but got none")
-
 		require.True(t, errors.Is(err, ErrDeadLetterQueue), "expected error to be ErrorCodeDeadLetterQueue, got %T", err)
 
 		// Now resume the workflow -- this clears the DLQ status

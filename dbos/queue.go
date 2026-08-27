@@ -729,6 +729,19 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 					continue
 				}
 
+				// The claim counted this dispatch: dead-letter the workflow if that exhausted its attempts.
+				if registeredWorkflow.MaxRetries > 0 && workflow.Attempts > registeredWorkflow.MaxRetries+1 {
+					err := sysdb.Retry(ctx, func() error {
+						return ctx.systemDB.DeadLetterWorkflows(ctx, []string{workflow.Id}, workflow.Attempts)
+					}, sysdb.WithRetrierLogger(queueLogger))
+					if err != nil {
+						queueLogger.Error("Error dead lettering workflow", "workflow_id", workflow.Id, "error", err)
+						continue
+					}
+					queueLogger.Warn("Workflow exceeded its maximum recovery attempts and was dead lettered", "workflow_id", workflow.Id, "max_retries", registeredWorkflow.MaxRetries)
+					continue
+				}
+
 				// Pass encoded input directly - decoding will happen in workflow wrapper when we know the target type
 				// Auth identity is re-attached so child workflows spawned during
 				// the dequeued execution inherit the same identity as the original run.

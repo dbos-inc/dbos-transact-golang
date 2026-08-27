@@ -830,7 +830,6 @@ type workflowOptions struct {
 	WorkflowID          string
 	queue               Queue
 	ApplicationVersion  string
-	MaxRetries          int
 	DeduplicationID     string
 	DeduplicationPolicy DeduplicationPolicy
 	Priority            uint
@@ -1161,9 +1160,6 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		c.logger.Error("invalid workflow registry entry type for workflow", "workflow_name", params.WorkflowName)
 		return nil, fmt.Errorf("invalid workflow registry entry type for workflow %s", params.WorkflowName)
 	}
-	if registeredWorkflow.MaxRetries > 0 {
-		params.MaxRetries = registeredWorkflow.MaxRetries
-	}
 	if len(registeredWorkflow.Name) > 0 {
 		params.WorkflowName = registeredWorkflow.Name
 	}
@@ -1415,11 +1411,9 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 		// Insert workflow status with transaction
 		insertInput := sysdb.InsertWorkflowStatusDBInput{
-			Status:            workflowStatus,
-			MaxRetries:        params.MaxRetries,
-			Tx:                tx,
-			OwnerXID:          &ownerXID,
-			IncrementAttempts: params.isDequeue,
+			Status:   workflowStatus,
+			Tx:       tx,
+			OwnerXID: &ownerXID,
 		}
 		insertStatusResult, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
