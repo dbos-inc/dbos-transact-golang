@@ -278,6 +278,30 @@ func (ds *DataSource) ensureCompletionTable(c *dbosContext) error {
 	return nil
 }
 
+// resolveUserTx adapts a caller-owned transaction to the portable Tx the system
+// database writes through. It accepts a Tx (as handed to a RunAsTransaction
+// callback), a pgx.Tx, or a *sql.Tx.
+func resolveUserTx(tx any) (Tx, error) {
+	switch t := tx.(type) {
+	case Tx:
+		if t != nil {
+			return t, nil
+		}
+	case pgx.Tx:
+		if t != nil {
+			return sysdb.NewPgxTx(t), nil
+		}
+	case *sql.Tx:
+		if t != nil {
+			return sysdb.NewSQLTx(t), nil
+		}
+	case nil:
+	default:
+		return nil, models.NewInvalidOptionError(fmt.Sprintf("unsupported transaction type %T: expected pgx.Tx, *sql.Tx or dbos.Tx", tx))
+	}
+	return nil, models.NewInvalidOptionError("transaction cannot be nil")
+}
+
 // completionRecord is a row from the transaction_completion table. A success row
 // stores output (error nil); a permanently failed transaction stores a serialized
 // error (output nil) written in a standalone insert after fn's transaction rolls

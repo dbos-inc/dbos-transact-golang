@@ -2840,3 +2840,197 @@ func TestClientTriggerScheduleTyped(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "completed", result)
 }
+
+// txInWorkflowTopic is the topic the in-workflow rejection workflow sends to.
+const txInWorkflowTopic = "client-tx-in-workflow-topic"
+
+// enqueueInWorkflowWithTx tries both transactional client options from inside a
+// workflow, where they are not allowed, and returns the two error messages.
+func enqueueInWorkflowWithTx(ctx Context, queueName string) (string, error) {
+	pool := ctx.(*dbosContext).systemDB.Pool()
+	tx, err := pool.BeginTx(context.Background(), TxOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(context.Background())
+
+	_, enqueueErr := Enqueue[string](ctx, queueName, "TxClientWorkflow", "in-workflow", WithEnqueueTransaction(tx))
+	if enqueueErr == nil {
+		return "", errors.New("expected Enqueue with a transaction to be rejected within a workflow")
+	}
+	sendErr := Send(ctx, "some-workflow-id", "in-workflow", txInWorkflowTopic, WithSendTransaction(tx))
+	if sendErr == nil {
+		return "", errors.New("expected Send with a transaction to be rejected within a workflow")
+	}
+	return enqueueErr.Error() + "|" + sendErr.Error(), nil
+}
+
+func txClientWorkflow(ctx Context, input string) (string, error) {
+	return "processed: " + input, nil
+}
+
+// TestClientTransactionalOps covers WithEnqueueTransaction and WithSendTransaction:
+// the operation joins a transaction the caller owns, so it lands only if that
+// transaction commits.
+func TestClientTransactionalOps(t *testing.T) {
+	serverCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	queue, err := RegisterQueue(serverCtx, "client-tx-queue")
+	require.NoError(t, err)
+
+	RegisterWorkflow(serverCtx, txClientWorkflow, WithWorkflowName("TxClientWorkflow"))
+	RegisterWorkflow(serverCtx, receiveOneShortWorkflow)
+	RegisterWorkflow(serverCtx, enqueueInWorkflowWithTx)
+	require.NoError(t, Launch(serverCtx))
+
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
+
+	pool := client.(*dbosContext).systemDB.Pool()
+	ctx := context.Background()
+	appVersion := WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion())
+
+	// Only pg backends expose a *pgxpool.Pool we can sniff; sqlite is never CRDB.
+	isCockroach := false
+	if pgxPool := PgxPool(pool); pgxPool != nil {
+		conn, err := pgxPool.Acquire(ctx)
+		require.NoError(t, err)
+		isCockroach = sysdb.IsCockroachDB(conn.Conn())
+		conn.Release()
+	}
+
+	t.Run("EnqueueCommits", func(t *testing.T) {
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+
+		handle, err := Enqueue[string](client, queue.GetName(), "TxClientWorkflow", "committed",
+			appVersion, WithEnqueueTransaction(tx))
+		require.NoError(t, err)
+
+		// sqlite runs in WAL mode, so this read is served from another
+		// connection's snapshot instead of blocking on the open write. CRDB
+		// instead parks the reader on the uncommitted row's write intent until
+		// the transaction resolves, which never happens before the commit below.
+		if !isCockroach {
+			_, err = client.RetrieveWorkflow(client, handle.GetWorkflowID())
+			require.ErrorIs(t, err, ErrNonExistentWorkflow, "workflow must not be visible before commit")
+		}
+
+		require.NoError(t, tx.Commit(ctx))
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "processed: committed", result)
+	})
+
+	t.Run("EnqueueRollsBack", func(t *testing.T) {
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+
+		handle, err := Enqueue[string](client, queue.GetName(), "TxClientWorkflow", "rolled-back",
+			appVersion, WithEnqueueTransaction(tx))
+		require.NoError(t, err)
+		require.NoError(t, tx.Rollback(ctx))
+
+		_, err = client.RetrieveWorkflow(client, handle.GetWorkflowID())
+		require.ErrorIs(t, err, ErrNonExistentWorkflow, "rolled back workflow must not exist")
+	})
+
+	t.Run("EnqueueWithNativeDriverTransaction", func(t *testing.T) {
+		var (
+			handle WorkflowHandle[string]
+			commit func() error
+		)
+		if pgxPool := PgxPool(pool); pgxPool != nil {
+			pgxTx, err := pgxPool.Begin(ctx)
+			require.NoError(t, err)
+			defer pgxTx.Rollback(ctx)
+			handle, err = Enqueue[string](client, queue.GetName(), "TxClientWorkflow", "native",
+				appVersion, WithEnqueueTransaction(pgxTx))
+			require.NoError(t, err)
+			commit = func() error { return pgxTx.Commit(ctx) }
+		} else {
+			sqlTx, err := SQLDB(pool).Begin()
+			require.NoError(t, err)
+			defer sqlTx.Rollback()
+			handle, err = Enqueue[string](client, queue.GetName(), "TxClientWorkflow", "native",
+				appVersion, WithEnqueueTransaction(sqlTx))
+			require.NoError(t, err)
+			commit = sqlTx.Commit
+		}
+
+		require.NoError(t, commit())
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "processed: native", result)
+	})
+
+	t.Run("SendCommits", func(t *testing.T) {
+		receiver, err := RunWorkflow(serverCtx, receiveOneShortWorkflow, "client-tx-send-commit")
+		require.NoError(t, err)
+
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+
+		require.NoError(t, Send(client, receiver.GetWorkflowID(), "in-transaction", "client-tx-send-commit",
+			WithSendTransaction(tx)))
+		require.NoError(t, tx.Commit(ctx))
+
+		result, err := receiver.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "in-transaction", result)
+	})
+
+	t.Run("SendRollsBack", func(t *testing.T) {
+		receiver, err := RunWorkflow(serverCtx, receiveOneShortWorkflow, "client-tx-send-rollback")
+		require.NoError(t, err)
+
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+
+		require.NoError(t, Send(client, receiver.GetWorkflowID(), "never-delivered", "client-tx-send-rollback",
+			WithSendTransaction(tx)))
+		require.NoError(t, tx.Rollback(ctx))
+
+		result, err := receiver.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "<timeout>", result, "rolled back message must not be delivered")
+	})
+
+	t.Run("RejectsReturnExistingDeduplication", func(t *testing.T) {
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+
+		_, err = Enqueue[string](client, queue.GetName(), "TxClientWorkflow", "dedup",
+			appVersion,
+			WithEnqueueDeduplicationID("client-tx-dedup"),
+			WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting),
+			WithEnqueueTransaction(tx))
+		require.ErrorIs(t, err, ErrInvalidOption)
+		require.Contains(t, err.Error(), "return-existing")
+	})
+
+	t.Run("RejectsUnsupportedTransaction", func(t *testing.T) {
+		_, err := Enqueue[string](client, queue.GetName(), "TxClientWorkflow", "bad-tx",
+			appVersion, WithEnqueueTransaction("not a transaction"))
+		require.ErrorIs(t, err, ErrInvalidOption)
+
+		err = Send(client, "some-workflow-id", "bad-tx", "client-tx-topic", WithSendTransaction(nil))
+		require.ErrorIs(t, err, ErrInvalidOption)
+	})
+
+	t.Run("RejectsWithinWorkflow", func(t *testing.T) {
+		handle, err := RunWorkflow(serverCtx, enqueueInWorkflowWithTx, queue.GetName())
+		require.NoError(t, err)
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Contains(t, result, "WithEnqueueTransaction cannot be used within a workflow")
+		require.Contains(t, result, "WithSendTransaction cannot be used within a workflow")
+	})
+}

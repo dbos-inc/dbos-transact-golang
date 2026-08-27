@@ -1873,6 +1873,35 @@ type enqueueOptions struct {
 	attributes          map[string]any
 	debounceDeadline    time.Time
 	isDebounced         bool
+	tx                  any
+	txSet               bool
+}
+
+// WithEnqueueTransaction enqueues the workflow on a transaction the caller owns
+// rather than on a transaction DBOS opens, so the enqueue commits atomically with
+// the caller's own writes. tx must be a pgx.Tx, a *sql.Tx, or a [Tx], and must run
+// against the DBOS system database.
+//
+// The caller commits or rolls back: the workflow is not enqueued, and the returned
+// handle does not resolve, until the transaction commits. A failed enqueue leaves
+// the transaction in an aborted state, so roll it back rather than retrying the
+// call on it.
+//
+// Not available inside a workflow, where an enqueue is checkpointed as a step, nor
+// with [WithEnqueueDeduplicationPolicy] set to [DeduplicationPolicyReturnExisting],
+// which retries the insert on collision and so would abort the caller's transaction.
+//
+//	tx, _ := pool.Begin(ctx)
+//	defer tx.Rollback(ctx)
+//	tx.Exec(ctx, "INSERT INTO orders (id) VALUES ($1)", orderID)
+//	handle, err := dbos.Enqueue[Result](client, "queue", "Workflow", input,
+//	    dbos.WithEnqueueTransaction(tx))
+//	tx.Commit(ctx)
+func WithEnqueueTransaction(tx any) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.tx = tx
+		opts.txSet = true
+	}
 }
 
 // Internal option set by the client debouncer: marks the enqueue as debounced and
@@ -1928,6 +1957,20 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 		isWithinWorkflow = true
 		if wfState.isWithinStep {
 			return nil, models.NewStepExecutionError(wfState.workflowID, "DBOS.enqueue", fmt.Errorf("cannot call Enqueue within a step"))
+		}
+	}
+
+	var userTx Tx
+	if params.txSet {
+		if isWithinWorkflow {
+			return nil, models.NewInvalidOptionError("WithEnqueueTransaction cannot be used within a workflow")
+		}
+		if params.deduplicationPolicy == DeduplicationPolicyReturnExisting {
+			return nil, models.NewInvalidOptionError("deduplication policy 'return-existing' is not supported with WithEnqueueTransaction")
+		}
+		var err error
+		if userTx, err = resolveUserTx(params.tx); err != nil {
+			return nil, err
 		}
 	}
 
@@ -2014,6 +2057,9 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 			enqueuedID, err = runAsTxn(c, func(ctx context.Context, tx Tx) (string, error) {
 				return c.insertEnqueuedWorkflow(ctx, tx, status, queueName, params, returnExisting)
 			}, WithStepName("DBOS.enqueue"), withChildWorkflowIDOutput())
+		} else if userTx != nil {
+			// The caller owns the transaction: no commit, no retry.
+			enqueuedID, err = c.insertEnqueuedWorkflow(uncancellableCtx, userTx, status, queueName, params, false)
 		} else {
 			enqueuedID, err = func() (string, error) {
 				tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
@@ -3049,6 +3095,8 @@ func (c *dbosContext) Select(_ Context, channels []<-chan StepOutcome[any]) (any
 type sendOptions struct {
 	usePortableSerializer bool
 	idempotencyKey        string
+	tx                    any
+	txSet                 bool
 }
 
 // SendOption is a functional option for configuring a Send call.
@@ -3073,6 +3121,29 @@ func WithIdempotencyKey(key string) SendOption {
 	}
 }
 
+// WithSendTransaction sends the message on a transaction the caller owns rather
+// than on a transaction DBOS opens, so the message commits atomically with the
+// caller's own writes. tx must be a pgx.Tx, a *sql.Tx, or a [Tx], and must run
+// against the DBOS system database.
+//
+// The caller commits or rolls back: the message is not visible to the destination
+// workflow until the transaction commits. A failed send leaves the transaction in
+// an aborted state, so roll it back rather than retrying the call on it.
+//
+// Not available inside a workflow, where a send is checkpointed as a step.
+//
+//	tx, _ := pool.Begin(ctx)
+//	defer tx.Rollback(ctx)
+//	tx.Exec(ctx, "INSERT INTO orders (id) VALUES ($1)", orderID)
+//	err := dbos.Send(client, workflowID, orderID, "orders", dbos.WithSendTransaction(tx))
+//	tx.Commit(ctx)
+func WithSendTransaction(tx any) SendOption {
+	return func(opts *sendOptions) {
+		opts.tx = tx
+		opts.txSet = true
+	}
+}
+
 func (c *dbosContext) Send(_ Client, destinationID string, message any, topic string, opts ...SendOption) error {
 	// Send cannot be sent from within a step if used within a workflow
 	isWithinWorkflow := false
@@ -3087,6 +3158,17 @@ func (c *dbosContext) Send(_ Client, destinationID string, message any, topic st
 	options := &sendOptions{}
 	for _, opt := range opts {
 		opt(options)
+	}
+
+	var userTx Tx
+	if options.txSet {
+		if isWithinWorkflow {
+			return models.NewInvalidOptionError("WithSendTransaction cannot be used within a workflow")
+		}
+		var err error
+		if userTx, err = resolveUserTx(options.tx); err != nil {
+			return err
+		}
 	}
 
 	var sendSer Serializer[any]
@@ -3109,7 +3191,11 @@ func (c *dbosContext) Send(_ Client, destinationID string, message any, topic st
 		IdempotencyKey: options.idempotencyKey,
 	}
 
-	if isWithinWorkflow {
+	if options.txSet {
+		// The caller owns the transaction: no commit, no retry.
+		input.Tx = userTx
+		err = c.systemDB.Send(WithoutCancel(c), input)
+	} else if isWithinWorkflow {
 		_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 			input.Tx = tx
 			return nil, ctx.(*dbosContext).systemDB.Send(ctx, input)
