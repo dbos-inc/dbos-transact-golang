@@ -4836,9 +4836,10 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 
 	query += ` ORDER BY priority ASC, created_at ASC`
 
-	// Use SKIP LOCKED when no global concurrency is set to avoid blocking,
-	// otherwise use NOWAIT to ensure consistent view across processes
-	if input.Queue.GlobalConcurrency == nil {
+	// Without a global budget (rate limiting, global concurrency),
+	// use SKIP LOCKED to only select rows that can be locked.
+	// With one, use NOWAIT so all processes see a consistent table.
+	if input.Queue.GlobalConcurrency == nil && input.Queue.RateLimit == nil {
 		if lock := s.dialect.LockSkipLocked(); lock != "" {
 			query += " " + lock
 		}
