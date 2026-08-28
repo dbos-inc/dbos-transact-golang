@@ -72,12 +72,13 @@ type CancelWorkflowInput struct {
 type CancelWorkflowOption func(*CancelWorkflowInput)
 
 type ForkWorkflowInput struct {
-	OriginalWorkflowID string // Required: The UUID of the original workflow to fork from
-	ForkedWorkflowID   string // Optional: Custom workflow ID for the forked workflow (auto-generated if empty)
-	StartStep          uint   // Optional: Step to start the forked workflow from (default: 0)
-	ApplicationVersion string // Optional: Application version for the forked workflow (inherits from original if empty)
-	QueueName          string // Optional: Queue to enqueue the forked workflow on (defaults to the internal queue)
-	QueuePartitionKey  string // Optional: Partition key when enqueueing the forked workflow onto a partitioned queue
+	OriginalWorkflowID string        // Required: The UUID of the original workflow to fork from
+	ForkedWorkflowID   string        // Optional: Custom workflow ID for the forked workflow (auto-generated if empty)
+	StartStep          uint          // Optional: Step to start the forked workflow from (default: 0)
+	ApplicationVersion string        // Optional: Application version for the forked workflow (inherits from original if empty)
+	QueueName          string        // Optional: Queue to enqueue the forked workflow on (defaults to the internal queue)
+	QueuePartitionKey  string        // Optional: Partition key when enqueueing the forked workflow onto a partitioned queue
+	Timeout            time.Duration // Optional: Timeout for the forked workflow (inherits from original if zero)
 }
 
 type GetWorkflowAggregatesInput struct {

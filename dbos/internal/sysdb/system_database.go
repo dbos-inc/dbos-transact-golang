@@ -2535,6 +2535,7 @@ type ForkWorkflowsDBInput struct {
 	ApplicationVersion  string
 	QueueName           string
 	QueuePartitionKey   string
+	Timeout             time.Duration
 	Tx                  Tx
 }
 
@@ -2615,6 +2616,13 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 		"forked_from", "serialization", "class_name", "config_name", "attributes",
 		"application_name",
 	}
+	// Compute the timeout. Deadline is set on dequeue
+	var timeoutMs *int64
+	if input.Timeout > 0 {
+		millis := input.Timeout.Round(time.Millisecond).Milliseconds()
+		timeoutMs = &millis
+		insertColumns = append(insertColumns, "workflow_timeout_ms")
+	}
 	forkOwners := make(map[string]*string, len(input.OriginalWorkflowIDs))
 	valueRows := make([]string, len(input.OriginalWorkflowIDs))
 	insertArgs := make([]any, 0, len(input.OriginalWorkflowIDs)*len(insertColumns))
@@ -2682,6 +2690,9 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 			originalWorkflow.ConfigName,
 			attributesJSON,
 			forkOwner)
+		if timeoutMs != nil {
+			insertArgs = append(insertArgs, *timeoutMs)
+		}
 	}
 	insertQuery := s.RenderSQL(`INSERT INTO %sworkflow_status (`+strings.Join(insertColumns, ", ")+`)
 		VALUES `+strings.Join(valueRows, ", "), s.dialect.SchemaPrefix(s.schema))

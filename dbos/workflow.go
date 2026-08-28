@@ -4900,6 +4900,7 @@ type ForkWorkflowsInput struct {
 	ApplicationVersion string             // Optional: Application version for the forked workflows (inherits from originals if empty)
 	QueueName          string             // Optional: Queue to enqueue the forked workflows on (defaults to the internal queue)
 	QueuePartitionKey  string             // Optional: Partition key when enqueueing the forked workflows onto a partitioned queue
+	Timeout            time.Duration      // Optional: Maximum execution time for each forked workflow
 }
 
 func (c *dbosContext) ForkWorkflow(_ Client, input ForkWorkflowInput) (WorkflowHandle[any], error) {
@@ -4912,6 +4913,7 @@ func (c *dbosContext) ForkWorkflow(_ Client, input ForkWorkflowInput) (WorkflowH
 		ApplicationVersion: input.ApplicationVersion,
 		QueueName:          input.QueueName,
 		QueuePartitionKey:  input.QueuePartitionKey,
+		Timeout:            input.Timeout,
 	})
 	if err != nil {
 		return nil, err
@@ -4925,6 +4927,9 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 	}
 	if input.QueuePartitionKey != "" && input.QueueName == "" {
 		return nil, models.NewInvalidOptionError("queue partition key requires a queue name")
+	}
+	if input.Timeout < 0 {
+		return nil, models.NewInvalidOptionError("fork timeout cannot be negative")
 	}
 
 	// Build the system database input, validating each workflow spec.
@@ -4949,6 +4954,7 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 		ApplicationVersion:  input.ApplicationVersion,
 		QueueName:           input.QueueName,
 		QueuePartitionKey:   input.QueuePartitionKey,
+		Timeout:             input.Timeout,
 	}
 
 	// Call system database method
@@ -5018,6 +5024,12 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 //	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
 //	    OriginalWorkflowID: "original-workflow-id",
 //	    QueueName:          "priority",
+//	})
+//
+//	// Fork with an execution timeout. The clock starts when the fork is dequeued.
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
+//	    OriginalWorkflowID: "original-workflow-id",
+//	    Timeout:            30 * time.Minute,
 //	})
 func ForkWorkflow[R any](ctx Client, input ForkWorkflowInput) (WorkflowHandle[R], error) {
 	if ctx == nil {
