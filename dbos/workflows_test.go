@@ -10514,9 +10514,20 @@ func TestFork(t *testing.T) {
 		return one + two + three, nil
 	}
 
+	// Completes on its first run so it can be forked; every fork blocks until cancelled.
+	var blockingRuns atomic.Int64
+	blockingWorkflow := func(ctx Context, _ string) (int, error) {
+		if blockingRuns.Add(1) == 1 {
+			return 1, nil
+		}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+
 	RegisterWorkflow(dbosCtx, failableWorkflow, WithWorkflowName("failableThreeStepWorkflow"))
 	RegisterWorkflow(dbosCtx, threeStepWorkflow, WithWorkflowName("bulkForkWorkflow"))
 	RegisterWorkflow(dbosCtx, caughtFailureWorkflow, WithWorkflowName("caughtFailureWorkflow"))
+	RegisterWorkflow(dbosCtx, blockingWorkflow, WithWorkflowName("forkTimeoutWorkflow"))
 	require.NoError(t, Launch(dbosCtx))
 
 	sysDB := dbosCtx.(*dbosContext).systemDB
@@ -10847,6 +10858,64 @@ func TestFork(t *testing.T) {
 			})
 			require.ErrorContains(t, err, "nonexistent-workflow-id does not exist")
 			require.Equal(t, forksBefore, listForks())
+		})
+	})
+
+	t.Run("Timeout", func(t *testing.T) {
+		// Run the original under a generous deadline so it records a timeout of its own.
+		originalCtx, cancel := WithTimeout(dbosCtx, time.Hour)
+		defer cancel()
+		handle, err := RunWorkflow(originalCtx, blockingWorkflow, "")
+		require.NoError(t, err)
+		res, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, 1, res)
+
+		timeout := time.Second
+		forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID: handle.GetWorkflowID(),
+			Timeout:            timeout,
+		})
+		require.NoError(t, err)
+
+		// Every fork of this workflow blocks, so it must be cancelled once its timeout elapses.
+		_, err = forkHandle.GetResult()
+		var dbosErr *Error
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, ErrorCodeAwaitedWorkflowCancelled, dbosErr.Code)
+
+		status, err := forkHandle.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, WorkflowStatusCancelled, status.Status)
+		require.Equal(t, timeout, status.Timeout)
+		// The deadline was computed at dequeue
+		require.False(t, status.Deadline.IsZero())
+
+		t.Run("NotInherited", func(t *testing.T) {
+			// A fork without a timeout runs unbounded, even though its original had one.
+			forkHandle, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: handle.GetWorkflowID()})
+			require.NoError(t, err)
+			require.Eventually(t, func() bool {
+				status, err := forkHandle.GetStatus()
+				return err == nil && status.Status == WorkflowStatusPending
+			}, 10*time.Second, 50*time.Millisecond, "fork never started")
+
+			status, err := forkHandle.GetStatus()
+			require.NoError(t, err)
+			require.Zero(t, status.Timeout)
+			require.True(t, status.Deadline.IsZero())
+
+			require.NoError(t, CancelWorkflow(dbosCtx, forkHandle.GetWorkflowID()))
+			_, err = forkHandle.GetResult()
+			require.Error(t, err)
+		})
+
+		t.Run("Validation", func(t *testing.T) {
+			_, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+				OriginalWorkflowID: handle.GetWorkflowID(),
+				Timeout:            -time.Second,
+			})
+			require.ErrorContains(t, err, "fork timeout cannot be negative")
 		})
 	})
 }
