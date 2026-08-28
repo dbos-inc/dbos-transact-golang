@@ -515,6 +515,7 @@ type resumeWorkflowConductorResponse struct {
 type retentionConductorRequestBody struct {
 	GCCutoffEpochMs      *int `json:"gc_cutoff_epoch_ms,omitempty"`
 	GCRowsThreshold      *int `json:"gc_rows_threshold,omitempty"`
+	GCBatchSize          *int `json:"gc_batch_size,omitempty"`
 	TimeoutCutoffEpochMs *int `json:"timeout_cutoff_epoch_ms,omitempty"`
 }
 

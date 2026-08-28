@@ -31,6 +31,7 @@ const (
 	_MAX_RECONNECT_WAIT     = 30 * time.Second
 	_HANDSHAKE_TIMEOUT      = 10 * time.Second
 	_WRITE_DEADLINE         = 5 * time.Second
+	_DEFAULT_GC_BATCH_SIZE  = 10_000
 )
 
 // conductorConfig contains configuration for the conductor
@@ -611,9 +612,16 @@ func (c *conductor) handleRetentionRequest(data []byte, requestID string) error 
 			rowsThreshold = req.Body.GCRowsThreshold
 		}
 
+		// Older Conductor versions may not send gc_batch_size
+		batchSize := _DEFAULT_GC_BATCH_SIZE
+		if req.Body.GCBatchSize != nil {
+			batchSize = *req.Body.GCBatchSize
+		}
+
 		input := sysdb.GarbageCollectWorkflowsInput{
 			CutoffEpochTimestampMs: cutoffMs,
 			RowsThreshold:          rowsThreshold,
+			BatchSize:              &batchSize,
 		}
 
 		err := sysdb.Retry(c.dbosCtx, func() error {
