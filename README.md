@@ -269,6 +269,15 @@ _, err = sendHandle.GetResult()
 recvResult, err := recvHandle.GetResult()
 ```
 
+Send many messages in one database round-trip with `SendBulk`. Destinations may differ; the batch is atomic.
+
+```golang
+err := dbos.SendBulk(ctx, []dbos.SendMessage{
+    {DestinationID: orderWF, Message: "confirmed", Topic: "orders"},
+    {DestinationID: inventoryWF, Message: order, Topic: "reserve"},
+})
+```
+
 </details>
 
 ## Getting Started

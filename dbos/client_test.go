@@ -119,7 +119,7 @@ func TestClientEnqueue(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -580,7 +580,7 @@ func TestCancelResume(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -773,7 +773,7 @@ func TestDeleteWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -910,7 +910,7 @@ func TestForkWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -1167,7 +1167,7 @@ func TestListWorkflows(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -1539,7 +1539,7 @@ func TestGetWorkflowSteps(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -1629,7 +1629,7 @@ func TestClientReadStream(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -1692,7 +1692,7 @@ func TestClientReadStreamAsyncGoroutineLeak(t *testing.T) {
 	databaseURL := backendDatabaseURL(t)
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
 
 	streamKey := "test-client-leak-stream"
 	handle, err := RunWorkflow(serverCtx, blockingStreamWorkflow, streamKey)
@@ -1737,7 +1737,7 @@ func TestDebouncerClient(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -1932,7 +1932,7 @@ func TestDebouncerClientConfiguredInstance(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -1984,7 +1984,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if client != nil {
-			client.Shutdown(client, 30 * time.Second)
+			client.Shutdown(client, 30*time.Second)
 		}
 	})
 
@@ -2076,7 +2076,7 @@ func TestClientEnqueueDelay(t *testing.T) {
 	config := ClientConfig{DatabaseURL: databaseURL}
 	client, err := NewClient(context.Background(), config)
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
 
 	t.Run("ClientEnqueueWithDelay", func(t *testing.T) {
 		delayDuration := 2 * time.Second
@@ -2204,7 +2204,7 @@ func TestClientSchedules(t *testing.T) {
 
 	c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
+	t.Cleanup(func() { c.Shutdown(c, 30*time.Second) })
 
 	const workflowFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule"
 
@@ -2356,7 +2356,7 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
-		t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
+		t.Cleanup(func() { c.Shutdown(c, 30*time.Second) })
 
 		latest, err := c.GetLatestApplicationVersion(c)
 		require.NoError(t, err)
@@ -2376,7 +2376,7 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
-		t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
+		t.Cleanup(func() { c.Shutdown(c, 30*time.Second) })
 
 		// Seed an older version directly so it sorts before the current one.
 		sysDB := serverCtx.(*dbosContext).systemDB
@@ -2406,7 +2406,7 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
-		t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
+		t.Cleanup(func() { c.Shutdown(c, 30*time.Second) })
 		// Launch registers the current version; clear table to simulate empty state.
 		s := serverCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 		_, err = s.Pool().Exec(serverCtx, s.RenderSQL("DELETE FROM %sapplication_versions", s.Dialect().SchemaPrefix(s.Schema())))
@@ -2425,7 +2425,7 @@ func TestClientApplicationVersions(t *testing.T) {
 
 		c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 		require.NoError(t, err)
-		t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
+		t.Cleanup(func() { c.Shutdown(c, 30*time.Second) })
 
 		require.Error(t, c.SetLatestApplicationVersion(c, ""))
 	})
@@ -2465,7 +2465,7 @@ func TestClientCustomSqliteDB(t *testing.T) {
 
 	c, err := NewClient(context.Background(), ClientConfig{SQLiteSystemDB: clientDB})
 	require.NoError(t, err)
-	t.Cleanup(func() { c.Shutdown(c, 10 * time.Second) })
+	t.Cleanup(func() { c.Shutdown(c, 10*time.Second) })
 
 	dbosCtx, ok := c.(*dbosContext)
 	require.True(t, ok)
@@ -2510,7 +2510,7 @@ func TestClientCustomPool(t *testing.T) {
 
 	c, err := NewClient(context.Background(), ClientConfig{SystemDBPool: clientPool})
 	require.NoError(t, err)
-	t.Cleanup(func() { c.Shutdown(c, 10 * time.Second) })
+	t.Cleanup(func() { c.Shutdown(c, 10*time.Second) })
 
 	dbosCtx, ok := c.(*dbosContext)
 	require.True(t, ok)
@@ -2536,7 +2536,7 @@ func TestClientSend(t *testing.T) {
 
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
 
 	t.Run("WithIdempotencyKeyDeliversOnce", func(t *testing.T) {
 		handle, err := RunWorkflow(serverCtx, receiveTwiceShortWorkflow, "client-idem-dup-topic")
@@ -2593,7 +2593,7 @@ func TestClientGetEvent(t *testing.T) {
 
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
 
 	workflowID := "client-getevent-wf"
 	handle, err := Enqueue[string, string](client, queue.GetName(), "EventWorkflow", "",
@@ -2646,7 +2646,7 @@ func TestClientTypedHandles(t *testing.T) {
 
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
 
 	appVersion := WithEnqueueApplicationVersion(serverCtx.GetApplicationVersion())
 
@@ -2757,7 +2757,7 @@ func TestClientListAndSteps(t *testing.T) {
 
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
 
 	workflowID := "client-list-steps-wf"
 	handle, err := Enqueue[wfOutput](client, queue.GetName(), "ListStepsWorkflow", wfInput{Name: "max"},
@@ -2820,7 +2820,7 @@ func TestClientTriggerScheduleTyped(t *testing.T) {
 
 	c, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { c.Shutdown(c, 30 * time.Second) })
+	t.Cleanup(func() { c.Shutdown(c, 30*time.Second) })
 
 	const workflowFQN = "github.com/dbos-inc/dbos-transact-golang/dbos.testWorkflowForSchedule"
 	const name = "client-trigger-typed"
@@ -2862,7 +2862,13 @@ func enqueueInWorkflowWithTx(ctx Context, queueName string) (string, error) {
 	if sendErr == nil {
 		return "", errors.New("expected Send with a transaction to be rejected within a workflow")
 	}
-	return enqueueErr.Error() + "|" + sendErr.Error(), nil
+	sendBulkErr := SendBulk(ctx, []SendMessage{
+		{DestinationID: "some-workflow-id", Message: "in-workflow", Topic: txInWorkflowTopic},
+	}, WithSendTransaction(tx))
+	if sendBulkErr == nil {
+		return "", errors.New("expected SendBulk with a transaction to be rejected within a workflow")
+	}
+	return enqueueErr.Error() + "|" + sendErr.Error() + "|" + sendBulkErr.Error(), nil
 }
 
 func txClientWorkflow(ctx Context, input string) (string, error) {
@@ -3001,6 +3007,41 @@ func TestClientTransactionalOps(t *testing.T) {
 		require.Equal(t, "<timeout>", result, "rolled back message must not be delivered")
 	})
 
+	t.Run("SendBulkCommits", func(t *testing.T) {
+		receiver, err := RunWorkflow(serverCtx, receiveOneShortWorkflow, "client-tx-bulk-commit")
+		require.NoError(t, err)
+
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+
+		require.NoError(t, SendBulk(client, []SendMessage{
+			{DestinationID: receiver.GetWorkflowID(), Message: "in-transaction", Topic: "client-tx-bulk-commit"},
+		}, WithSendTransaction(tx)))
+		require.NoError(t, tx.Commit(ctx))
+
+		result, err := receiver.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "in-transaction", result)
+	})
+
+	t.Run("SendBulkRollsBack", func(t *testing.T) {
+		receiver, err := RunWorkflow(serverCtx, receiveOneShortWorkflow, "client-tx-bulk-rollback")
+		require.NoError(t, err)
+
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+
+		require.NoError(t, SendBulk(client, []SendMessage{
+			{DestinationID: receiver.GetWorkflowID(), Message: "never-delivered", Topic: "client-tx-bulk-rollback"},
+		}, WithSendTransaction(tx)))
+		require.NoError(t, tx.Rollback(ctx))
+
+		result, err := receiver.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "<timeout>", result, "rolled back message must not be delivered")
+	})
+
 	t.Run("RejectsReturnExistingDeduplication", func(t *testing.T) {
 		tx, err := pool.BeginTx(ctx, TxOptions{})
 		require.NoError(t, err)
@@ -3021,6 +3062,11 @@ func TestClientTransactionalOps(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidOption)
 
 		err = Send(client, "some-workflow-id", "bad-tx", "client-tx-topic", WithSendTransaction(nil))
+		require.ErrorIs(t, err, ErrInvalidOption)
+
+		err = SendBulk(client, []SendMessage{
+			{DestinationID: "some-workflow-id", Message: "bad-tx", Topic: "client-tx-topic"},
+		}, WithSendTransaction(nil))
 		require.ErrorIs(t, err, ErrInvalidOption)
 	})
 

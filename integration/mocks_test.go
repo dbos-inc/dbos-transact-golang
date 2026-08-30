@@ -51,6 +51,12 @@ func workflow(ctx dbos.Context, i int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	err = dbos.SendBulk(ctx, []dbos.SendMessage{
+		{DestinationID: "dst", Message: 2, Topic: "topic"},
+	})
+	if err != nil {
+		return 0, err
+	}
 
 	// Test SetEvent
 	err = dbos.SetEvent(ctx, "test_key", "test_value")
@@ -278,7 +284,7 @@ func clientUsingFunction(client dbos.Client) error {
 		return fmt.Errorf("expected workflow ID")
 	}
 
-	client.Shutdown(client, 1 * time.Second)
+	client.Shutdown(client, 1*time.Second)
 	return nil
 }
 
@@ -305,6 +311,9 @@ func TestMocks(t *testing.T) {
 	mockCtx.On("Recv", mockCtx, "chan1", 1*time.Second).Return(1, nil)
 	mockCtx.On("GetEvent", mockCtx, "tgw", "event1", 1*time.Second).Return(1, nil)
 	mockCtx.On("Send", mockCtx, "dst", 1, "topic").Return(nil)
+	mockCtx.On("SendBulk", mockCtx, []dbos.SendMessage{
+		{DestinationID: "dst", Message: 2, Topic: "topic"},
+	}).Return(nil)
 	mockCtx.On("SetEvent", mockCtx, "test_key", "test_value").Return(nil)
 
 	mockCtx.On("Sleep", mockCtx, 100*time.Millisecond).Return(100*time.Millisecond, nil)
@@ -553,6 +562,13 @@ func TestClientTypedHelpersWithMock(t *testing.T) {
 	mockClient.On("CancelWorkflows", mockClient, batchIDs).Return(nil).Once()
 	if err := dbos.CancelWorkflows(mockClient, batchIDs); err != nil {
 		t.Fatalf("CancelWorkflows failed: %v", err)
+	}
+
+	mockClient.On("SendBulk", mockClient, mock.Anything).Return(nil).Once()
+	if err := dbos.SendBulk(mockClient, []dbos.SendMessage{
+		{DestinationID: "dst", Message: 1, Topic: "t"},
+	}); err != nil {
+		t.Fatalf("SendBulk failed: %v", err)
 	}
 
 	// Queue management round-trips through a MockQueue.

@@ -197,6 +197,7 @@ type Client interface {
 	// Workflow operations
 	Enqueue(_ Client, queueName string, workflowName string, input any, opts ...EnqueueOption) (WorkflowHandle[any], error) // Enqueue a workflow by name to a named queue
 	Send(_ Client, destinationID string, message any, topic string, opts ...SendOption) error                               // Send a message to a workflow
+	SendBulk(_ Client, messages []SendMessage, opts ...SendOption) error                                                    // Send messages to workflows in one round-trip
 	GetEvent(_ Client, targetWorkflowID string, key string, timeout time.Duration) (any, error)                             // Get a key-value event from a target workflow. Returns an opaque envelope; call dbos.GetEvent[R] instead to receive the decoded value
 	ReadStream(_ Client, workflowID string, key string, opts ...ReadStreamOption) ([]any, bool, error)                      // Read values from a durable stream (blocks until workflow inactive or stream closed)
 	ReadStreamAsync(_ Client, workflowID string, key string) (<-chan StreamValue[any], error)                               // Read values from a durable stream asynchronously
