@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -2536,6 +2537,7 @@ type ForkWorkflowsDBInput struct {
 	QueueName           string
 	QueuePartitionKey   string
 	Timeout             time.Duration
+	ReplacementChildren map[string]string
 	Tx                  Tx
 }
 
@@ -2719,13 +2721,27 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 	if len(mappingBranches) > 0 {
 		mapping := "(" + strings.Join(mappingBranches, " UNION ALL ") + ") AS m"
 
+		// Redirect recorded child workflow IDs to their replacements, if any.
+		childWorkflowIDExpr := "oo.child_workflow_id"
+		outputArgs := mappingArgs
+		if len(input.ReplacementChildren) > 0 {
+			outputArgs = slices.Clone(mappingArgs)
+			whenClauses := make([]string, 0, len(input.ReplacementChildren))
+			for oldID, newID := range input.ReplacementChildren {
+				base := len(outputArgs)
+				whenClauses = append(whenClauses, fmt.Sprintf("WHEN oo.child_workflow_id = $%d THEN CAST($%d AS TEXT)", base+1, base+2))
+				outputArgs = append(outputArgs, oldID, newID)
+			}
+			childWorkflowIDExpr = "CASE " + strings.Join(whenClauses, " ") + " ELSE oo.child_workflow_id END"
+		}
+
 		copyOutputsQuery := s.RenderSQL(`INSERT INTO %soperation_outputs
 			(workflow_uuid, function_id, output, error, function_name, child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms, serialization, application_name)
-			SELECT m.fork_id, oo.function_id, oo.output, oo.error, oo.function_name, oo.child_workflow_id, oo.started_at_epoch_ms, oo.completed_at_epoch_ms, oo.serialization, m.owner
+			SELECT m.fork_id, oo.function_id, oo.output, oo.error, oo.function_name, `+childWorkflowIDExpr+`, oo.started_at_epoch_ms, oo.completed_at_epoch_ms, oo.serialization, m.owner
 			FROM `+mapping+`
 			JOIN %soperation_outputs oo ON oo.workflow_uuid = m.orig_id AND oo.function_id < m.start_step`,
 			s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
-		if _, err = execCtx(ctx, copyOutputsQuery, mappingArgs...); err != nil {
+		if _, err = execCtx(ctx, copyOutputsQuery, outputArgs...); err != nil {
 			return nil, fmt.Errorf("failed to copy operation outputs: %w", err)
 		}
 
