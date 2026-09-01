@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -66,6 +67,8 @@ type Config struct {
 	namelessOwner                bool            // Act for no specific application: write unclaimed rows, matches all. Used by clients without an AppName.
 	isClient                     bool            // Client handle: runs no workflows, so enqueues leave the version unset by default.
 }
+
+var applicationNamePattern = regexp.MustCompile(`^[a-z0-9-_]{3,256}$`)
 
 func processConfig(inputConfig *Config) (*Config, error) {
 	// First check required fields
@@ -126,6 +129,16 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	// Load defaults
 	if dbosConfig.Logger == nil {
 		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+
+	// Conductor addresses the application by name and refuses one outside its rule, so an
+	// application about to connect cannot usefully launch. A self-hosted one is told and left alone.
+	if !dbosConfig.namelessOwner && !applicationNamePattern.MatchString(dbosConfig.AppName) {
+		msg := fmt.Sprintf("invalid application name '%s': application names must be between 3 and 256 characters long and contain only lowercase letters, numbers, dashes, and underscores", dbosConfig.AppName)
+		if dbosConfig.ConductorAPIKey != "" || os.Getenv("DBOS__CLOUD") == "true" {
+			return nil, errors.New(msg)
+		}
+		dbosConfig.Logger.Warn(msg + "; it cannot register with DBOS Conductor")
 	}
 	if dbosConfig.DatabaseSchema == "" {
 		dbosConfig.DatabaseSchema = _DEFAULT_SYSTEM_DB_SCHEMA

@@ -24,6 +24,15 @@ import (
 	"go.uber.org/goleak"
 )
 
+func TestApplicationNamePattern(t *testing.T) {
+	for _, name := range []string{"abc", "my-app_1", strings.Repeat("a", 256)} {
+		assert.True(t, applicationNamePattern.MatchString(name), name)
+	}
+	for _, name := range []string{"", "ab", strings.Repeat("a", 257), "MyApp", "my app", "my.app"} {
+		assert.False(t, applicationNamePattern.MatchString(name), name)
+	}
+}
+
 func TestConfig(t *testing.T) {
 	defer goleak.VerifyNone(t,
 		goleak.IgnoreAnyFunction("github.com/jackc/pgx/v5/pgxpool.(*Pool).backgroundHealthCheck"),
@@ -80,6 +89,29 @@ func TestConfig(t *testing.T) {
 
 		expectedMsg := "Error initializing DBOS Transact: missing required config field: appName"
 		assert.Equal(t, expectedMsg, dbosErr.Message)
+	})
+
+	t.Run("WarnsOnNameConductorWouldReject", func(t *testing.T) {
+		ctx, err := NewContext(context.Background(), Config{
+			DatabaseURL: databaseURL,
+			AppName:     "My App",
+		})
+		require.NoError(t, err)
+		Shutdown(ctx, 1*time.Minute)
+	})
+
+	t.Run("FailsOnNameConductorWouldRejectWithConductorKey", func(t *testing.T) {
+		_, err := NewContext(context.Background(), Config{
+			DatabaseURL:     databaseURL,
+			AppName:         "My App",
+			ConductorAPIKey: "test-key",
+		})
+		require.Error(t, err)
+
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected Error, got %T", err)
+		assert.Equal(t, ErrorCodeInitialization, dbosErr.Code)
+		assert.Equal(t, "Error initializing DBOS Transact: invalid application name 'My App': application names must be between 3 and 256 characters long and contain only lowercase letters, numbers, dashes, and underscores", dbosErr.Message)
 	})
 
 	t.Run("FailsWithoutDatabaseURLOrSystemDBPool", func(t *testing.T) {
