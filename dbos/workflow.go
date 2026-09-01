@@ -6385,6 +6385,9 @@ func (c *dbosContext) RenameApplication(_ Client, input RenameApplicationInput) 
 	if input.NewName == "" {
 		return ApplicationRowCounts{}, errors.New("the new application name is required")
 	}
+	if !applicationNamePattern.MatchString(input.NewName) {
+		return ApplicationRowCounts{}, fmt.Errorf("invalid application name '%s': application names must be between 3 and 256 characters long and contain only lowercase letters, numbers, dashes, and underscores", input.NewName)
+	}
 	if input.OldName == input.NewName {
 		return ApplicationRowCounts{}, fmt.Errorf("application '%s' already holds that name; nothing to rename", input.NewName)
 	}

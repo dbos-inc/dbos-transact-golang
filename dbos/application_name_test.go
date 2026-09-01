@@ -839,6 +839,8 @@ func TestRenameApplication(t *testing.T) {
 	require.ErrorContains(t, err, "already holds that name")
 	_, err = RenameApplication(client, RenameApplicationInput{OldName: "app-x", NewName: ""})
 	require.ErrorContains(t, err, "new application name is required")
+	_, err = RenameApplication(client, RenameApplicationInput{OldName: "app-x", NewName: "App-E"})
+	require.ErrorContains(t, err, "invalid application name")
 	_, err = RenameApplication(client, RenameApplicationInput{OldName: "app-x", NewName: "app-e", BatchSize: -1})
 	require.ErrorContains(t, err, "batch size")
 
