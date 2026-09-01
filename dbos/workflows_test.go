@@ -10734,10 +10734,52 @@ func TestFork(t *testing.T) {
 		return 0, ctx.Err()
 	}
 
+	// Parent/child pair for replacement-children forks. The child's result depends on a
+	// multiplier the test changes between runs, so a replaced child is visible in the sum.
+	childMultiplier := atomic.Int64{}
+	childMultiplier.Store(2)
+	multiplyChild := func(ctx Context, x int) (int, error) {
+		return RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			return x * int(childMultiplier.Load()), nil
+		}, WithStepName("multiply"))
+	}
+	var lastChildIDs atomic.Value
+	sumParent := func(ctx Context, _ string) (int, error) {
+		inputs := []int{10, 20, 30, 40, 50}
+		handles := make([]WorkflowHandle[int], 0, len(inputs))
+		childIDs := make([]string, 0, len(inputs))
+		for _, x := range inputs {
+			h, err := RunWorkflow(ctx, multiplyChild, x)
+			if err != nil {
+				return 0, err
+			}
+			handles = append(handles, h)
+			childIDs = append(childIDs, h.GetWorkflowID())
+		}
+		lastChildIDs.Store(childIDs)
+		results := make([]int, 0, len(handles))
+		for _, h := range handles {
+			r, err := h.GetResult()
+			if err != nil {
+				return 0, err
+			}
+			results = append(results, r)
+		}
+		return RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			sum := 0
+			for _, r := range results {
+				sum += r
+			}
+			return sum, nil
+		}, WithStepName("combine"))
+	}
+
 	RegisterWorkflow(dbosCtx, failableWorkflow, WithWorkflowName("failableThreeStepWorkflow"))
 	RegisterWorkflow(dbosCtx, threeStepWorkflow, WithWorkflowName("bulkForkWorkflow"))
 	RegisterWorkflow(dbosCtx, caughtFailureWorkflow, WithWorkflowName("caughtFailureWorkflow"))
 	RegisterWorkflow(dbosCtx, blockingWorkflow, WithWorkflowName("forkTimeoutWorkflow"))
+	RegisterWorkflow(dbosCtx, multiplyChild, WithWorkflowName("replacementChildWorkflow"))
+	RegisterWorkflow(dbosCtx, sumParent, WithWorkflowName("replacementParentWorkflow"))
 	require.NoError(t, Launch(dbosCtx))
 
 	sysDB := dbosCtx.(*dbosContext).systemDB
@@ -11126,6 +11168,78 @@ func TestFork(t *testing.T) {
 				Timeout:            -time.Second,
 			})
 			require.ErrorContains(t, err, "fork timeout cannot be negative")
+		})
+	})
+
+	t.Run("ReplacementChildren", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, sumParent, "")
+		require.NoError(t, err)
+		res, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, 300, res) // (10+20+30+40+50) * 2
+		originalChildIDs, ok := lastChildIDs.Load().([]string)
+		require.True(t, ok)
+		require.Len(t, originalChildIDs, 5)
+
+		// Re-run children 0, 2 and 4 from their only step, with a larger multiplier.
+		childMultiplier.Store(10)
+		replacements := make(map[string]string, 3)
+		for _, i := range []int{0, 2, 4} {
+			childFork, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+				OriginalWorkflowID: originalChildIDs[i],
+				StartStep:          0,
+			})
+			require.NoError(t, err)
+			childRes, err := childFork.GetResult()
+			require.NoError(t, err)
+			require.Equal(t, (i+1)*10*10, childRes)
+			replacements[originalChildIDs[i]] = childFork.GetWorkflowID()
+		}
+
+		// Fork the parent past its five child-start steps but before it awaits them:
+		// the copied checkpoints point at the forked children, so the parent re-reads
+		// their results and re-runs combine.
+		parentFork, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+			OriginalWorkflowID:  handle.GetWorkflowID(),
+			StartStep:           5,
+			ReplacementChildren: replacements,
+		})
+		require.NoError(t, err)
+		forkedRes, err := parentFork.GetResult()
+		require.NoError(t, err)
+		// [10*10, 20*2, 30*10, 40*2, 50*10] = [100, 40, 300, 80, 500]
+		require.Equal(t, 1020, forkedRes)
+
+		// The copied child-start checkpoints record the replacements.
+		steps, err := GetWorkflowSteps(dbosCtx, parentFork.GetWorkflowID())
+		require.NoError(t, err)
+		recorded := make([]string, 0, 5)
+		for _, step := range steps {
+			if step.StepName == "replacementChildWorkflow" {
+				recorded = append(recorded, step.ChildWorkflowID)
+			}
+		}
+		expected := make([]string, 0, 5)
+		for _, id := range originalChildIDs {
+			if replaced, ok := replacements[id]; ok {
+				expected = append(expected, replaced)
+			} else {
+				expected = append(expected, id)
+			}
+		}
+		require.Equal(t, expected, recorded)
+
+		t.Run("UnmatchedIDsIgnored", func(t *testing.T) {
+			// A replacement for a child the workflow never started leaves the copies untouched.
+			plainFork, err := ForkWorkflow[int](dbosCtx, ForkWorkflowInput{
+				OriginalWorkflowID:  handle.GetWorkflowID(),
+				StartStep:           5,
+				ReplacementChildren: map[string]string{uuid.NewString(): uuid.NewString()},
+			})
+			require.NoError(t, err)
+			plainRes, err := plainFork.GetResult()
+			require.NoError(t, err)
+			require.Equal(t, 300, plainRes)
 		})
 	})
 }

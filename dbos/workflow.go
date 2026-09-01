@@ -4984,11 +4984,12 @@ type ForkWorkflowSpec struct {
 // ApplicationVersion, QueueName, and QueuePartitionKey fields apply to every
 // forked workflow in the batch.
 type ForkWorkflowsInput struct {
-	Workflows          []ForkWorkflowSpec // Required: The workflows to fork
-	ApplicationVersion string             // Optional: Application version for the forked workflows (inherits from originals if empty)
-	QueueName          string             // Optional: Queue to enqueue the forked workflows on (defaults to the internal queue)
-	QueuePartitionKey  string             // Optional: Partition key when enqueueing the forked workflows onto a partitioned queue
-	Timeout            time.Duration      // Optional: Maximum execution time for each forked workflow
+	Workflows           []ForkWorkflowSpec // Required: The workflows to fork
+	ApplicationVersion  string             // Optional: Application version for the forked workflows (inherits from originals if empty)
+	QueueName           string             // Optional: Queue to enqueue the forked workflows on (defaults to the internal queue)
+	QueuePartitionKey   string             // Optional: Partition key when enqueueing the forked workflows onto a partitioned queue
+	Timeout             time.Duration      // Optional: Maximum execution time for each forked workflow
+	ReplacementChildren map[string]string  // Optional: maps original child workflow IDs to replacement IDs
 }
 
 func (c *dbosContext) ForkWorkflow(_ Client, input ForkWorkflowInput) (WorkflowHandle[any], error) {
@@ -4998,10 +4999,11 @@ func (c *dbosContext) ForkWorkflow(_ Client, input ForkWorkflowInput) (WorkflowH
 			ForkedWorkflowID:   input.ForkedWorkflowID,
 			StartStep:          input.StartStep,
 		}},
-		ApplicationVersion: input.ApplicationVersion,
-		QueueName:          input.QueueName,
-		QueuePartitionKey:  input.QueuePartitionKey,
-		Timeout:            input.Timeout,
+		ApplicationVersion:  input.ApplicationVersion,
+		QueueName:           input.QueueName,
+		QueuePartitionKey:   input.QueuePartitionKey,
+		Timeout:             input.Timeout,
+		ReplacementChildren: input.ReplacementChildren,
 	})
 	if err != nil {
 		return nil, err
@@ -5043,6 +5045,7 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 		QueueName:           input.QueueName,
 		QueuePartitionKey:   input.QueuePartitionKey,
 		Timeout:             input.Timeout,
+		ReplacementChildren: input.ReplacementChildren,
 	}
 
 	// Call system database method
@@ -5118,6 +5121,13 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 //	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
 //	    OriginalWorkflowID: "original-workflow-id",
 //	    Timeout:            30 * time.Minute,
+//	})
+//
+//	// Fork a parent, redirecting its copied child workflow checkpoints at forked children.
+//	handle, err := dbos.ForkWorkflow[MyResultType](ctx, dbos.ForkWorkflowInput{
+//	    OriginalWorkflowID:  "parent-workflow-id",
+//	    StartStep:           6,
+//	    ReplacementChildren: map[string]string{"old-child-id": "new-child-id"},
 //	})
 func ForkWorkflow[R any](ctx Client, input ForkWorkflowInput) (WorkflowHandle[R], error) {
 	if ctx == nil {
