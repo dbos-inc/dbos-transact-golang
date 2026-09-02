@@ -993,7 +993,6 @@ func TestForkWorkflow(t *testing.T) {
 			query := sysDB.RenderSQL(`SELECT function_id, key, value FROM %sworkflow_events_history WHERE workflow_uuid = $1 ORDER BY function_id, key`, sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
 			rows, err := sysDB.Pool().Query(context.Background(), query, forkedWorkflowID)
 			require.NoError(t, err, "failed to query workflow_events_history for forked workflow at step %d", startStep)
-			defer rows.Close()
 
 			// Collect all events as (function_id, key, value) tuples
 
@@ -1010,6 +1009,7 @@ func TestForkWorkflow(t *testing.T) {
 				require.NoError(t, err, "failed to unmarshal value")
 				actualEventTuples = append(actualEventTuples, eventTuple{functionID, key, value})
 			}
+			rows.Close()
 			require.NoError(t, rows.Err(), "error iterating workflow_events_history rows")
 
 			// Verify all 4 events are present and match
