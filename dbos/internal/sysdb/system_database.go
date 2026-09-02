@@ -4125,49 +4125,90 @@ func (s *SysDB) pollEvents(ctx context.Context) {
 
 const NullTopic = "__null__topic__"
 
-type WorkflowSendInput struct {
+const (
+	sendInsertCols  = 6
+	sendInsertChunk = 1000 // 1000*6 bind params, under Postgres 65535
+)
+
+// WorkflowSendRow is one notification to insert. Message must be *string (already encoded).
+type WorkflowSendRow struct {
 	DestinationID  string
 	Message        any
 	Topic          string
-	Tx             Tx
 	Serialization  string
 	IdempotencyKey string
 }
 
-// Send is a special type of step that sends a message to another workflow.
+type WorkflowSendInput struct {
+	Messages []WorkflowSendRow
+	Tx       Tx
+}
+
+// Send inserts one or more notifications in a single round-trip.
 // Can be called both within a workflow (as a step) or outside a workflow (directly).
-// When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution
+// When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution.
 func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
-	if _, ok := input.Message.(*string); !ok {
-		return fmt.Errorf("message must be a pointer to a string")
+	if len(input.Messages) == 0 {
+		return nil
+	}
+	for i, m := range input.Messages {
+		if _, ok := m.Message.(*string); !ok {
+			return fmt.Errorf("message[%d] must be a pointer to a string", i)
+		}
 	}
 
-	// Set default topic if not provided
-	topic := NullTopic
-	if len(input.Topic) > 0 {
-		topic = input.Topic
+	exec := Querier(s.pool)
+	if input.Tx != nil {
+		exec = input.Tx
+	}
+
+	baseMs := time.Now().UnixMilli()
+	for start := 0; start < len(input.Messages); start += sendInsertChunk {
+		end := min(start+sendInsertChunk, len(input.Messages))
+		if err := s.insertNotificationChunk(ctx, exec, input.Messages[start:end], baseMs+int64(start)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *SysDB) insertNotificationChunk(ctx context.Context, exec Querier, msgs []WorkflowSendRow, baseMs int64) error {
+	valueRows := make([]string, 0, len(msgs))
+	args := make([]any, 0, len(msgs)*sendInsertCols)
+	destIDs := make([]string, 0, len(msgs))
+	seenDest := map[string]struct{}{}
+
+	for i, m := range msgs {
+		topic := NullTopic
+		if len(m.Topic) > 0 {
+			topic = m.Topic
+		}
+		messageUUID := uuid.NewString()
+		if m.IdempotencyKey != "" {
+			messageUUID = fmt.Sprintf("%s::%s", m.IdempotencyKey, m.DestinationID)
+		}
+		base := len(args)
+		valueRows = append(valueRows, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)",
+			base+1, base+2, base+3, base+4, base+5, base+6))
+		args = append(args, m.DestinationID, topic, m.Message, m.Serialization, messageUUID, baseMs+int64(i))
+		if _, ok := seenDest[m.DestinationID]; !ok {
+			seenDest[m.DestinationID] = struct{}{}
+			destIDs = append(destIDs, m.DestinationID)
+		}
 	}
 
 	// ON CONFLICT DO NOTHING makes Send idempotent: with an idempotency key the
 	// message_uuid is deterministic, so a retried Send inserts at most once. Without
 	// a key the random UUID never collides, so the clause is a no-op.
-	insertQuery := s.RenderSQL(`INSERT INTO %snotifications (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (message_uuid) DO NOTHING`, s.dialect.SchemaPrefix(s.schema))
-	messageUUID := uuid.NewString()
-	if input.IdempotencyKey != "" {
-		messageUUID = fmt.Sprintf("%s::%s", input.IdempotencyKey, input.DestinationID)
-	}
-	createdAtMs := time.Now().UnixMilli()
-	var err error
-	if input.Tx != nil {
-		_, err = input.Tx.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message, input.Serialization, messageUUID, createdAtMs)
-	} else {
-		_, err = s.pool.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message, input.Serialization, messageUUID, createdAtMs)
-	}
-	if err != nil {
-		s.logger.Error("failed to insert notification", "error", err, "query", insertQuery, "destination_id", input.DestinationID, "topic", topic, "message", input.Message)
-		// Check for foreign key violation (destination workflow doesn't exist)
+	insertQuery := s.RenderSQL(
+		`INSERT INTO %snotifications (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms) VALUES `+
+			strings.Join(valueRows, ", ")+` ON CONFLICT (message_uuid) DO NOTHING`,
+		s.dialect.SchemaPrefix(s.schema))
+
+	if _, err := exec.Exec(ctx, insertQuery, args...); err != nil {
+		s.logger.Error("failed to insert notification", "error", err, "query", insertQuery)
 		if s.dialect.IsForeignKeyViolation(err) {
-			return models.NewNonExistentWorkflowError(input.DestinationID)
+			return models.NewNonExistentWorkflowError(strings.Join(destIDs, ", "))
 		}
 		return fmt.Errorf("failed to insert notification: %w", err)
 	}

@@ -5159,6 +5159,216 @@ func TestSendIdempotencyKey(t *testing.T) {
 	})
 }
 
+type sendBulkWorkflowInput struct {
+	DestinationID string
+	Topic         string
+	Messages      []string
+}
+
+func sendBulkMessages(input sendBulkWorkflowInput) []SendMessage {
+	msgs := make([]SendMessage, len(input.Messages))
+	for i, m := range input.Messages {
+		msgs[i] = SendMessage{
+			DestinationID: input.DestinationID,
+			Message:       m,
+			Topic:         input.Topic,
+		}
+	}
+	return msgs
+}
+
+func sendBulkWorkflow(ctx Context, input sendBulkWorkflowInput) (string, error) {
+	if err := SendBulk(ctx, sendBulkMessages(input)); err != nil {
+		return "", err
+	}
+	return "sent", nil
+}
+
+func sendBulkInStepWorkflow(ctx Context, input sendBulkWorkflowInput) (string, error) {
+	return RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+		return "", SendBulk(stepCtx.(Context), sendBulkMessages(input))
+	})
+}
+
+func TestSendBulk(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	RegisterWorkflow(dbosCtx, sendBulkWorkflow)
+	RegisterWorkflow(dbosCtx, sendBulkInStepWorkflow)
+	RegisterWorkflow(dbosCtx, receiveOneShortWorkflow)
+	RegisterWorkflow(dbosCtx, receiveTwiceShortWorkflow)
+	Launch(dbosCtx)
+
+	t.Run("MultiDestination", func(t *testing.T) {
+		a, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-multi-a")
+		require.NoError(t, err)
+		b, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-multi-b")
+		require.NoError(t, err)
+
+		require.NoError(t, SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: a.GetWorkflowID(), Message: "to-a", Topic: "bulk-multi-a"},
+			{DestinationID: b.GetWorkflowID(), Message: "to-b", Topic: "bulk-multi-b"},
+		}))
+
+		gotA, err := a.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "to-a", gotA)
+		gotB, err := b.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "to-b", gotB)
+	})
+
+	t.Run("SameDestinationFIFO", func(t *testing.T) {
+		h, err := RunWorkflow(dbosCtx, receiveTwiceShortWorkflow, "bulk-fifo")
+		require.NoError(t, err)
+
+		require.NoError(t, SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: h.GetWorkflowID(), Message: "a", Topic: "bulk-fifo"},
+			{DestinationID: h.GetWorkflowID(), Message: "b", Topic: "bulk-fifo"},
+		}))
+
+		got, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "a|b", got)
+	})
+
+	t.Run("MissingDestinationIsAtomic", func(t *testing.T) {
+		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-atomic")
+		require.NoError(t, err)
+
+		err = SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: h.GetWorkflowID(), Message: "should-rollback", Topic: "bulk-atomic"},
+			{DestinationID: "does-not-exist", Message: "x", Topic: "bulk-atomic"},
+		})
+		require.ErrorIs(t, err, ErrNonExistentWorkflow)
+
+		got, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "<timeout>", got, "valid destination must also roll back")
+	})
+
+	t.Run("DuplicateIdempotencyKeyRejected", func(t *testing.T) {
+		err := SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: "dest", Message: "a", Topic: "t", IdempotencyKey: "dup"},
+			{DestinationID: "dest", Message: "b", Topic: "t", IdempotencyKey: "dup"},
+		})
+		require.ErrorIs(t, err, ErrInvalidOption)
+		require.Contains(t, err.Error(), "duplicate idempotency keys")
+	})
+
+	t.Run("SameKeyTwoDestsRejected", func(t *testing.T) {
+		err := SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: "dest-a", Message: "a", Topic: "t", IdempotencyKey: "shared"},
+			{DestinationID: "dest-b", Message: "b", Topic: "t", IdempotencyKey: "shared"},
+		})
+		require.ErrorIs(t, err, ErrInvalidOption)
+		require.Contains(t, err.Error(), "duplicate idempotency keys")
+	})
+
+	t.Run("EmptySlice", func(t *testing.T) {
+		require.NoError(t, SendBulk(dbosCtx, nil))
+		require.NoError(t, SendBulk(dbosCtx, []SendMessage{}))
+
+		h, err := RunWorkflow(dbosCtx, sendBulkWorkflow, sendBulkWorkflowInput{})
+		require.NoError(t, err)
+		got, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "sent", got)
+		steps, err := GetWorkflowSteps(dbosCtx, h.GetWorkflowID())
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		require.Equal(t, "DBOS.sendBulk", steps[0].StepName)
+	})
+
+	t.Run("RecordsOneStep", func(t *testing.T) {
+		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-step")
+		require.NoError(t, err)
+
+		sendH, err := RunWorkflow(dbosCtx, sendBulkWorkflow, sendBulkWorkflowInput{
+			DestinationID: h.GetWorkflowID(),
+			Topic:         "bulk-step",
+			Messages:      []string{"1", "2", "3"},
+		})
+		require.NoError(t, err)
+		got, err := sendH.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "sent", got)
+
+		steps, err := GetWorkflowSteps(dbosCtx, sendH.GetWorkflowID())
+		require.NoError(t, err)
+		require.Len(t, steps, 1, "expected one DBOS.sendBulk step for the whole batch")
+		require.Equal(t, "DBOS.sendBulk", steps[0].StepName)
+
+		gotRecv, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "1", gotRecv)
+	})
+
+	t.Run("CannotCallFromStep", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, sendBulkInStepWorkflow, sendBulkWorkflowInput{
+			DestinationID: "unused",
+			Topic:         "bulk-in-step",
+			Messages:      []string{"x"},
+		})
+		require.NoError(t, err)
+
+		_, err = handle.GetResult()
+		require.Error(t, err)
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected *Error, got %T", err)
+		require.Equal(t, ErrorCodeStepExecution, dbosErr.Code)
+		require.Contains(t, err.Error(), "cannot call SendBulk within a step")
+	})
+
+	t.Run("RejectsWithIdempotencyKeyOption", func(t *testing.T) {
+		err := SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: "dest", Message: "m", Topic: "t"},
+		}, WithIdempotencyKey("k"))
+		require.ErrorIs(t, err, ErrInvalidOption)
+		require.Contains(t, err.Error(), "WithIdempotencyKey is per-message")
+	})
+
+	t.Run("ReplayDoesNotResend", func(t *testing.T) {
+		h, err := RunWorkflow(dbosCtx, receiveTwiceShortWorkflow, "bulk-replay")
+		require.NoError(t, err)
+
+		sendH, err := RunWorkflow(dbosCtx, sendBulkWorkflow, sendBulkWorkflowInput{
+			DestinationID: h.GetWorkflowID(),
+			Topic:         "bulk-replay",
+			Messages:      []string{"a", "b"},
+		})
+		require.NoError(t, err)
+		_, err = sendH.GetResult()
+		require.NoError(t, err)
+
+		sysDB := dbosCtx.(*dbosContext).systemDB
+		before, err := sysDB.GetAllNotifications(context.Background(), h.GetWorkflowID())
+		require.NoError(t, err)
+		require.Len(t, before, 2)
+
+		setWorkflowStatusPending(t, dbosCtx, sendH.GetWorkflowID())
+		recovered, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err)
+		var recoveredSend WorkflowHandle[any]
+		for _, handle := range recovered {
+			if handle.GetWorkflowID() == sendH.GetWorkflowID() {
+				recoveredSend = handle
+				break
+			}
+		}
+		require.NotNil(t, recoveredSend, "expected recovered send workflow")
+		_, err = recoveredSend.GetResult()
+		require.NoError(t, err)
+
+		after, err := sysDB.GetAllNotifications(context.Background(), h.GetWorkflowID())
+		require.NoError(t, err)
+		require.Len(t, after, 2, "recovery must not insert the batch again")
+
+		got, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "a|b", got)
+	})
+}
+
 var (
 	setEventStart                 = NewEvent()
 	setSecondEventSignal          = NewEvent()

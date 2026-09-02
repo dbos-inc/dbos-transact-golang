@@ -3114,6 +3114,8 @@ func WithPortableSend() SendOption {
 // Send with the same key (after a crash, timeout, or network failure) inserts the
 // message only once. Keys are scoped per destination. Without a key, every Send
 // delivers a new message.
+//
+// Not valid on SendBulk: set SendMessage.IdempotencyKey on each message instead.
 func WithIdempotencyKey(key string) SendOption {
 	return func(opts *sendOptions) {
 		opts.idempotencyKey = key
@@ -3143,20 +3145,81 @@ func WithSendTransaction(tx any) SendOption {
 	}
 }
 
+const (
+	sendStepName     = "DBOS.send"
+	sendBulkStepName = "DBOS.sendBulk"
+)
+
+// SendMessage is one entry in a SendBulk batch. Message must be serializable.
+// Topic "" is stored as the null topic, same as Send. If IdempotencyKey is set,
+// the message's primary key is key::DestinationID so a retry inserts at most once.
+type SendMessage struct {
+	DestinationID  string
+	Message        any
+	Topic          string
+	IdempotencyKey string
+}
+
 func (c *dbosContext) Send(_ Client, destinationID string, message any, topic string, opts ...SendOption) error {
-	// Send cannot be sent from within a step if used within a workflow
+	options := &sendOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+	return c.sendMessages([]SendMessage{{
+		DestinationID:  destinationID,
+		Message:        message,
+		Topic:          topic,
+		IdempotencyKey: options.idempotencyKey,
+	}}, sendStepName, options)
+}
+
+func (c *dbosContext) SendBulk(_ Client, messages []SendMessage, opts ...SendOption) error {
+	options := &sendOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+	if options.idempotencyKey != "" {
+		return models.NewInvalidOptionError("WithIdempotencyKey is per-message; set SendMessage.IdempotencyKey")
+	}
+	if dups := duplicateIdempotencyKeys(messages); len(dups) > 0 {
+		return models.NewInvalidOptionError("send_bulk received duplicate idempotency keys: " + strings.Join(dups, ", "))
+	}
+	return c.sendMessages(messages, sendBulkStepName, options)
+}
+
+func duplicateIdempotencyKeys(messages []SendMessage) []string {
+	counts := make(map[string]int)
+	for _, m := range messages {
+		if m.IdempotencyKey == "" {
+			continue
+		}
+		counts[m.IdempotencyKey]++
+	}
+	var dups []string
+	for key, n := range counts {
+		if n > 1 {
+			dups = append(dups, key)
+		}
+	}
+	slices.Sort(dups)
+	return dups
+}
+
+func sendOpName(stepName string) string {
+	if stepName == sendBulkStepName {
+		return "SendBulk"
+	}
+	return "Send"
+}
+
+func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, options *sendOptions) error {
 	isWithinWorkflow := false
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if ok && wfState != nil {
 		isWithinWorkflow = true
 		if wfState.isWithinStep {
-			return models.NewStepExecutionError(wfState.workflowID, "DBOS.send", fmt.Errorf("cannot call Send within a step"))
+			return models.NewStepExecutionError(wfState.workflowID, stepName, fmt.Errorf("cannot call %s within a step", sendOpName(stepName)))
 		}
-	}
-
-	options := &sendOptions{}
-	for _, opt := range opts {
-		opt(options)
 	}
 
 	var userTx Tx
@@ -3177,19 +3240,23 @@ func (c *dbosContext) Send(_ Client, destinationID string, message any, topic st
 		sendSer = resolveEncoder(c)
 	}
 
-	encodedMessage, err := sendSer.Encode(message)
-	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
+	rows := make([]sysdb.WorkflowSendRow, len(messages))
+	for i, m := range messages {
+		encoded, err := sendSer.Encode(m.Message)
+		if err != nil {
+			return fmt.Errorf("failed to serialize message[%d]: %w", i, err)
+		}
+		rows[i] = sysdb.WorkflowSendRow{
+			DestinationID:  m.DestinationID,
+			Message:        encoded,
+			Topic:          m.Topic,
+			Serialization:  sendSer.Name(),
+			IdempotencyKey: m.IdempotencyKey,
+		}
 	}
+	input := sysdb.WorkflowSendInput{Messages: rows}
 
-	input := sysdb.WorkflowSendInput{
-		DestinationID:  destinationID,
-		Message:        encodedMessage,
-		Topic:          topic,
-		Serialization:  sendSer.Name(),
-		IdempotencyKey: options.idempotencyKey,
-	}
-
+	var err error
 	if options.txSet {
 		// The caller owns the transaction: no commit, no retry.
 		input.Tx = userTx
@@ -3198,7 +3265,7 @@ func (c *dbosContext) Send(_ Client, destinationID string, message any, topic st
 		_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
 			input.Tx = tx
 			return nil, ctx.(*dbosContext).systemDB.Send(ctx, input)
-		}, WithStepName("DBOS.send"))
+		}, WithStepName(stepName))
 	} else {
 		uncancellableCtx := WithoutCancel(c)
 		err = sysdb.Retry(c, func() error {
@@ -3221,6 +3288,27 @@ func Send[P any](ctx Client, destinationID string, message P, topic string, opts
 		return errors.New("ctx cannot be nil")
 	}
 	return ctx.Send(ctx, destinationID, message, topic, opts...)
+}
+
+// SendBulk sends many messages in one database round-trip. Destinations may differ.
+// The batch is atomic: if any destination does not exist, no message is sent.
+// Inside a workflow the batch is one durable step ("DBOS.sendBulk"); replay does not re-insert.
+//
+// WithPortableSend and WithSendTransaction apply to the whole batch. WithIdempotencyKey
+// is per-message: set SendMessage.IdempotencyKey. Two messages in the same call may not
+// share an idempotency key.
+//
+// Example:
+//
+//	err := dbos.SendBulk(ctx, []dbos.SendMessage{
+//	    {DestinationID: orderWF, Message: "confirmed", Topic: "orders"},
+//	    {DestinationID: inventoryWF, Message: order, Topic: "reserve", IdempotencyKey: "reserve-42"},
+//	})
+func SendBulk(ctx Client, messages []SendMessage, opts ...SendOption) error {
+	if ctx == nil {
+		return errors.New("ctx cannot be nil")
+	}
+	return ctx.SendBulk(ctx, messages, opts...)
 }
 
 // recvResult carries the received message along with its serialization format from the notifications table.
