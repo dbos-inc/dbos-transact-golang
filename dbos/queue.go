@@ -857,9 +857,10 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 
 		// Dequeue from each partition (or once for non-partitioned queues)
 		if !skipDequeue {
+			running := ctx.countActiveWorkflowsForQueue(queue.Name)
 			var dequeuedIDs []string
 			for _, partitionKey := range partitionKeys {
-				ids, shouldContinue := qr.dequeueWorkflows(ctx, queue, partitionKey, &hasBackoffError)
+				ids, shouldContinue := qr.dequeueWorkflows(ctx, queue, partitionKey, running+len(dequeuedIDs), &hasBackoffError)
 				if shouldContinue {
 					continue
 				}
@@ -987,20 +988,19 @@ func (qr *queueRunner) startDequeuedWorkflows(ctx *dbosContext, queueLogger *slo
 
 // dequeueWorkflows dequeues workflows from a specific partition and handles errors.
 // Returns the dequeued workflow IDs and a boolean indicating whether to continue to the next iteration.
-func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, hasBackoffError *bool) ([]string, bool) {
-	localRunning := func() int {
-		if partitionKey == "" {
-			return ctx.countActiveWorkflowsForQueue(queue.Name)
-		}
-		return ctx.countActiveWorkflowsForPartition(queue.Name, partitionKey)
+func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, localRunning int, hasBackoffError *bool) ([]string, bool) {
+	partitionRunning := 0
+	if partitionKey != "" {
+		partitionRunning = ctx.countActiveWorkflowsForPartition(queue.Name, partitionKey)
 	}
 	dequeuedIDs, err := sysdb.RetryWithResult(ctx, func() ([]string, error) {
 		return ctx.systemDB.DequeueWorkflows(ctx, sysdb.DequeueWorkflowsInput{
-			Queue:              queue.toConfig(),
-			ExecutorID:         ctx.executorID,
-			ApplicationVersion: ctx.applicationVersion,
-			QueuePartitionKey:  partitionKey,
-			LocalRunningCount:  localRunning(),
+			Queue:                      queue.toConfig(),
+			ExecutorID:                 ctx.executorID,
+			ApplicationVersion:         ctx.applicationVersion,
+			QueuePartitionKey:          partitionKey,
+			LocalRunningCount:          localRunning,
+			PartitionLocalRunningCount: partitionRunning,
 		})
 	}, sysdb.WithRetrierLogger(qr.logger))
 

@@ -4799,20 +4799,27 @@ func (s *SysDB) debounceDelayedWorkflowInternal(ctx context.Context, tx Tx, inpu
 }
 
 type DequeueWorkflowsInput struct {
-	Queue              models.QueueConfig
-	ExecutorID         string
-	ApplicationVersion string
-	QueuePartitionKey  string
-	LocalRunningCount  int
+	Queue                      models.QueueConfig
+	ExecutorID                 string
+	ApplicationVersion         string
+	QueuePartitionKey          string
+	LocalRunningCount          int
+	PartitionLocalRunningCount int
 }
 
 // DequeueWorkflows claims enqueued workflows for this executor and returns their IDs,
 // in the order the queue selected them.
 func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]string, error) {
-	// Snapshot isolation is only required for global concurrency or rate limiting.
-	// Otherwise read committed suffices: worker concurrency is enforced in-memory.
-	snapshot := input.Queue.GlobalConcurrency != nil || input.Queue.RateLimit != nil
-	tx, err := s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.QueueDequeueIsolation(snapshot)})
+	limits := input.Queue.ResolveLimits()
+	queueWide := limits.GlobalConcurrency != nil || limits.RateLimit != nil
+	budget := DequeueBudgetLocal // read committed
+	switch {
+	case queueWide && input.QueuePartitionKey != "":
+		budget = DequeueBudgetCrossPartition // Global limits on a partitioned queue: serializable
+	case queueWide || limits.PartitionConcurrency != nil || limits.PartitionRateLimit != nil:
+		budget = DequeueBudgetShared // Global limits on a non-partitioned queue, or partition limits on a partitioned queue: repeatable read
+	}
+	tx, err := s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.QueueDequeueIsolation(budget)})
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -4820,10 +4827,8 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 
 	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
 
-	// Rate limiter: count workflows started within the limiter period.
-	var numRecentQueries int
-	if input.Queue.RateLimit != nil {
-		limiterQuery := s.RenderSQL(`
+	rateLimitRemaining := func(limiter *models.RateLimiter, partitionScoped bool) (int, error) {
+		query := s.RenderSQL(`
 		SELECT COUNT(*)
 		FROM %sworkflow_status
 		WHERE queue_name = $1
@@ -4831,78 +4836,106 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		  AND status NOT IN ($2, $3)
 		  AND started_at_epoch_ms > `+s.dialect.NowMsSQL()+` - $4`, schemaPrefix)
 
-		limiterArgs := []any{input.Queue.Name, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, input.Queue.RateLimit.Period.Milliseconds()}
+		args := []any{input.Queue.Name, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, limiter.Period.Milliseconds()}
 		if s.appName != "" {
-			limiterArgs = append(limiterArgs, s.appName)
-			limiterQuery += ` AND ` + nameFilterSQL("application_name", len(limiterArgs))
+			args = append(args, s.appName)
+			query += ` AND ` + nameFilterSQL("application_name", len(args))
 		}
-		if len(input.QueuePartitionKey) > 0 {
-			limiterArgs = append(limiterArgs, input.QueuePartitionKey)
-			limiterQuery += fmt.Sprintf(` AND queue_partition_key = $%d`, len(limiterArgs))
-		}
-
-		err := tx.QueryRow(ctx, s.dialect.RewriteQuery(limiterQuery), limiterArgs...).Scan(&numRecentQueries)
-		if err != nil {
-			return nil, fmt.Errorf("failed to query rate limiter: %w", err)
+		if partitionScoped {
+			args = append(args, input.QueuePartitionKey)
+			query += fmt.Sprintf(` AND queue_partition_key = $%d`, len(args))
 		}
 
-		if numRecentQueries >= input.Queue.RateLimit.Limit {
-			return nil, nil
+		var recent int
+		if err := tx.QueryRow(ctx, s.dialect.RewriteQuery(query), args...).Scan(&recent); err != nil {
+			return 0, fmt.Errorf("failed to query rate limiter: %w", err)
 		}
+		return limiter.Limit - recent, nil
 	}
 
-	// Calculate max_tasks based on concurrency limits
-	// maxTasks < 0 means this dequeue is unbounded.
-	maxTasks := -1
-
-	if input.Queue.RateLimit != nil {
-		remaining_limit := input.Queue.RateLimit.Limit - numRecentQueries
-
-		if maxTasks < 0 || remaining_limit < maxTasks {
-			maxTasks = remaining_limit
-		}
-	}
-
-	if input.Queue.WorkerConcurrency != nil {
-		workerConcurrency := *input.Queue.WorkerConcurrency
-		if input.LocalRunningCount > workerConcurrency {
-			s.logger.Warn("Local running workflows on queue exceeds worker concurrency limit", "local_running", input.LocalRunningCount, "queue_name", input.Queue.Name, "concurrency_limit", workerConcurrency)
-		}
-		if available := max(workerConcurrency-input.LocalRunningCount, 0); maxTasks < 0 || available < maxTasks {
-			maxTasks = available
-		}
-	}
-
-	if input.Queue.GlobalConcurrency != nil {
-		pendingQuery := s.RenderSQL(`
+	pendingCount := func(partitionScoped bool) (int, error) {
+		query := s.RenderSQL(`
 			SELECT COUNT(*)
 			FROM %sworkflow_status
 			WHERE queue_name = $1 AND status = $2`, schemaPrefix)
 
-		pendingArgs := []any{input.Queue.Name, models.WorkflowStatusPending}
+		args := []any{input.Queue.Name, models.WorkflowStatusPending}
 		if s.appName != "" {
-			pendingArgs = append(pendingArgs, s.appName)
-			pendingQuery += ` AND ` + nameFilterSQL("application_name", len(pendingArgs))
+			args = append(args, s.appName)
+			query += ` AND ` + nameFilterSQL("application_name", len(args))
 		}
-		if len(input.QueuePartitionKey) > 0 {
-			pendingArgs = append(pendingArgs, input.QueuePartitionKey)
-			pendingQuery += fmt.Sprintf(` AND queue_partition_key = $%d`, len(pendingArgs))
-		}
-
-		var globalCount int
-		if err := tx.QueryRow(ctx, s.dialect.RewriteQuery(pendingQuery), pendingArgs...).Scan(&globalCount); err != nil {
-			return nil, fmt.Errorf("failed to query pending workflows: %w", err)
+		if partitionScoped {
+			args = append(args, input.QueuePartitionKey)
+			query += fmt.Sprintf(` AND queue_partition_key = $%d`, len(args))
 		}
 
-		concurrency := *input.Queue.GlobalConcurrency
-		if globalCount > concurrency {
-			s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", globalCount, "queue_name", input.Queue.Name, "concurrency_limit", concurrency)
+		var pending int
+		if err := tx.QueryRow(ctx, s.dialect.RewriteQuery(query), args...).Scan(&pending); err != nil {
+			return 0, fmt.Errorf("failed to query pending workflows: %w", err)
 		}
-		if availableTasks := max(concurrency-globalCount, 0); maxTasks < 0 || availableTasks < maxTasks {
-			maxTasks = availableTasks
+		return pending, nil
+	}
+
+	// maxTasks < 0 means this dequeue is unbounded.
+	maxTasks := -1
+	bound := func(available int) {
+		available = max(available, 0)
+		if maxTasks < 0 || available < maxTasks {
+			maxTasks = available
 		}
 	}
 
+	if limits.WorkerConcurrency != nil {
+		if input.LocalRunningCount > *limits.WorkerConcurrency {
+			s.logger.Warn("Local running workflows on queue exceeds worker concurrency limit", "local_running", input.LocalRunningCount, "queue_name", input.Queue.Name, "concurrency_limit", *limits.WorkerConcurrency)
+		}
+		bound(*limits.WorkerConcurrency - input.LocalRunningCount)
+	}
+	if limits.PartitionWorkerConcurrency != nil {
+		bound(*limits.PartitionWorkerConcurrency - input.PartitionLocalRunningCount)
+	}
+	if maxTasks == 0 {
+		return nil, nil
+	}
+
+	if limits.RateLimit != nil {
+		remaining, err := rateLimitRemaining(limits.RateLimit, false)
+		if err != nil {
+			return nil, err
+		}
+		bound(remaining)
+	}
+	if limits.PartitionRateLimit != nil {
+		remaining, err := rateLimitRemaining(limits.PartitionRateLimit, true)
+		if err != nil {
+			return nil, err
+		}
+		bound(remaining)
+	}
+	if maxTasks == 0 {
+		return nil, nil
+	}
+
+	if limits.GlobalConcurrency != nil {
+		pending, err := pendingCount(false)
+		if err != nil {
+			return nil, err
+		}
+		if pending > *limits.GlobalConcurrency {
+			s.logger.Warn("Total pending workflows on queue exceeds global concurrency limit", "total_pending", pending, "queue_name", input.Queue.Name, "concurrency_limit", *limits.GlobalConcurrency)
+		}
+		bound(*limits.GlobalConcurrency - pending)
+	}
+	if limits.PartitionConcurrency != nil {
+		pending, err := pendingCount(true)
+		if err != nil {
+			return nil, err
+		}
+		if pending > *limits.PartitionConcurrency {
+			s.logger.Warn("Total pending workflows on partition exceeds partition concurrency limit", "total_pending", pending, "queue_name", input.Queue.Name, "partition_key", input.QueuePartitionKey, "concurrency_limit", *limits.PartitionConcurrency)
+		}
+		bound(*limits.PartitionConcurrency - pending)
+	}
 	if maxTasks == 0 {
 		return nil, nil
 	}
@@ -4944,10 +4977,9 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 
 	query += ` ORDER BY priority ASC, created_at ASC`
 
-	// Without a global budget (rate limiting, global concurrency),
-	// use SKIP LOCKED to only select rows that can be locked.
+	// Without a shared budget, use SKIP LOCKED to only select rows that can be locked.
 	// With one, use NOWAIT so all processes see a consistent table.
-	if input.Queue.GlobalConcurrency == nil && input.Queue.RateLimit == nil {
+	if budget == DequeueBudgetLocal {
 		if lock := s.dialect.LockSkipLocked(); lock != "" {
 			query += " " + lock
 		}
@@ -5021,7 +5053,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		input.ApplicationVersion,
 		input.ExecutorID,
 		time.Now().UnixMilli(),
-		input.Queue.RateLimit != nil,
+		limits.RateLimit != nil || limits.PartitionRateLimit != nil,
 		encodedIDs,
 		models.WorkflowStatusEnqueued,
 	}

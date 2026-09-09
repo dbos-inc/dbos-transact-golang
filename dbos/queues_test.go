@@ -1867,6 +1867,242 @@ func TestPartitionedQueues(t *testing.T) {
 	})
 }
 
+// A per-partition limit caps each partition while the queue-wide limit caps them
+// together: the queue saturates at the queue-wide limit, no partition ever exceeds
+// its own, and every workflow still completes.
+func TestPartitionLimitsBoundBothScopes(t *testing.T) {
+	cases := []struct {
+		name                    string
+		options                 []QueueOption
+		perPartition, queueWide int
+	}{
+		{"partition-and-worker", []QueueOption{WithPartitionConcurrency(1), WithWorkerConcurrency(3)}, 1, 3},
+		{"partition-and-global", []QueueOption{WithPartitionConcurrency(2), WithGlobalConcurrency(3)}, 2, 3},
+		{"partition-and-worker-axis", []QueueOption{WithPartitionWorkerConcurrency(2), WithWorkerConcurrency(3)}, 2, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+			partitions := []string{"partition-0", "partition-1", "partition-2", "partition-3"}
+			unblock := NewEvent()
+			var mu sync.Mutex
+			running := map[string]int{}
+			maxRunning := map[string]int{}
+			totalRunning, maxTotalRunning := 0, 0
+
+			blockingWorkflow := func(ctx Context, partition string) (string, error) {
+				mu.Lock()
+				running[partition]++
+				totalRunning++
+				maxRunning[partition] = max(maxRunning[partition], running[partition])
+				maxTotalRunning = max(maxTotalRunning, totalRunning)
+				mu.Unlock()
+				unblock.Wait()
+				mu.Lock()
+				running[partition]--
+				totalRunning--
+				mu.Unlock()
+				return partition, nil
+			}
+			RegisterWorkflow(dbosCtx, blockingWorkflow)
+			require.NoError(t, Launch(dbosCtx))
+
+			pollingInterval := 500 * time.Millisecond
+			queue, err := registerWFQ(dbosCtx, "partition-limits-"+tc.name, append(tc.options, WithQueueBasePollingInterval(pollingInterval))...)
+			require.NoError(t, err)
+
+			var handles []WorkflowHandle[string]
+			for _, partition := range partitions {
+				for range 3 {
+					handle, err := RunWorkflow(dbosCtx, blockingWorkflow, partition, WithQueue(queue), WithQueuePartitionKey(partition))
+					require.NoError(t, err)
+					handles = append(handles, handle)
+				}
+			}
+
+			require.Eventually(t, func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return totalRunning == tc.queueWide
+			}, 15*time.Second, 50*time.Millisecond, "queue never saturated at %d", tc.queueWide)
+
+			// Several polling intervals: neither limit is exceeded, and the full partitions stay blocked rather than borrowing another's room.
+			time.Sleep(4 * pollingInterval)
+			mu.Lock()
+			assert.Equal(t, tc.queueWide, maxTotalRunning)
+			for _, partition := range partitions {
+				assert.LessOrEqual(t, maxRunning[partition], tc.perPartition, partition)
+			}
+			mu.Unlock()
+
+			unblock.Set()
+			for _, handle := range handles {
+				_, err := handle.GetResult()
+				require.NoError(t, err)
+			}
+
+			mu.Lock()
+			assert.Equal(t, tc.queueWide, maxTotalRunning)
+			for _, partition := range partitions {
+				assert.LessOrEqual(t, maxRunning[partition], tc.perPartition, partition)
+			}
+			mu.Unlock()
+			require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up")
+		})
+	}
+}
+
+// A queue-wide limit on a partitioned queue binds the whole queue, so two executors
+// sweeping different partitions cannot each spend it.
+func TestQueueWideLimitHoldsAcrossExecutors(t *testing.T) {
+	skipIfSqlite(t, "a single writer never races itself")
+	cases := []struct {
+		name    string
+		options []QueueOption
+	}{
+		{"global-concurrency", []QueueOption{WithGlobalConcurrency(1), WithPartitionConcurrency(1)}},
+		{"limiter", []QueueOption{WithRateLimiter(&RateLimiter{Limit: 1, Period: time.Minute}), WithPartitionConcurrency(1)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+			noop := func(ctx Context, _ string) (string, error) { return "done", nil }
+			RegisterWorkflow(dbosCtx, noop)
+			require.NoError(t, Launch(dbosCtx))
+
+			// Park the live worker: its own serializable sweeps read the predicate these
+			// goroutines write, so it could join their conflict graph and abort one of them.
+			queue, err := registerWFQ(dbosCtx, "cross-executor-"+tc.name, append(tc.options, WithQueueBasePollingInterval(time.Hour))...)
+			require.NoError(t, err)
+			// A version this executor never runs, so the live worker leaves these rows alone.
+			parkedVersion := "parked-version"
+
+			sdb := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+			prefix := sdb.Dialect().SchemaPrefix(sdb.Schema())
+			pendingCount := func() int {
+				var pending int
+				query := fmt.Sprintf(`SELECT COUNT(*) FROM %sworkflow_status WHERE queue_name = $1 AND status = $2`, prefix)
+				require.NoError(t, sdb.Pool().QueryRow(context.Background(), query, queue.Name, WorkflowStatusPending).Scan(&pending))
+				return pending
+			}
+
+			// Repeat: the two sweeps must interleave inside the window the guard protects, which a single trial can miss.
+			for trial := range 3 {
+				partitions := []string{fmt.Sprintf("a%d", trial), fmt.Sprintf("b%d", trial)}
+				for _, partition := range partitions {
+					_, err := RunWorkflow(dbosCtx, noop, "", WithQueue(queue), WithQueuePartitionKey(partition), WithApplicationVersion(parkedVersion))
+					require.NoError(t, err)
+				}
+
+				// Losing the race admits nothing, but an attempt where neither admits anything raced
+				// an already-spent budget rather than a free one, so it tested nothing. Serializable
+				// isolation can abort both sweeps, so re-race until one wins. The guard is checked
+				// on every attempt regardless of who won.
+				var claimed [][]string
+				admitted := false
+				for attempt := 0; attempt < 10 && !admitted; attempt++ {
+					claimed = make([][]string, len(partitions))
+					errs := make([]error, len(partitions))
+					start := make(chan struct{})
+					var wg sync.WaitGroup
+					for i, partition := range partitions {
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							<-start
+							claimed[i], errs[i] = sdb.DequeueWorkflows(context.Background(), sysdb.DequeueWorkflowsInput{
+								Queue:              queue.toConfig(),
+								ExecutorID:         fmt.Sprintf("executor-%d", i),
+								ApplicationVersion: parkedVersion,
+								QueuePartitionKey:  partition,
+							})
+						}()
+					}
+					close(start)
+					wg.Wait()
+					for _, err := range errs {
+						// Losing the race is the correct outcome; admitting is not.
+						if err != nil {
+							require.True(t, sdb.IsContentionError(err), "unexpected dequeue error: %v", err)
+						}
+					}
+					require.LessOrEqual(t, pendingCount(), 1, "trial %d: two executors each spent the queue-wide budget, claiming %v", trial, claimed)
+					for _, ids := range claimed {
+						admitted = admitted || len(ids) > 0
+					}
+				}
+				require.True(t, admitted, "trial %d: no sweep ever admitted a workflow, so every attempt raced an already-spent budget", trial)
+
+				// Retire this trial's claim so the next starts from a free budget. A rate-limit slot is
+				// retired by its window, not by status, so clear the flag too.
+				var claimedIDs []string
+				for _, ids := range claimed {
+					claimedIDs = append(claimedIDs, ids...)
+				}
+				query := fmt.Sprintf(`UPDATE %sworkflow_status SET status = $1, rate_limited = FALSE WHERE workflow_uuid = ANY($2)`, prefix)
+				_, err = sdb.Pool().Exec(context.Background(), query, WorkflowStatusSuccess, claimedIDs)
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// Both rate limits bind at once: each partition spends its own window, and the
+// queue-wide window caps the total across partitions.
+func TestPartitionLimiterWithQueueWideLimiter(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	noop := func(ctx Context, tag string) (string, error) { return tag, nil }
+	RegisterWorkflow(dbosCtx, noop)
+	require.NoError(t, Launch(dbosCtx))
+
+	queueLimit, partitionLimit := 3, 1
+	pollingInterval := 250 * time.Millisecond
+	queue, err := registerWFQ(dbosCtx, "partition-and-queue-limiter",
+		WithRateLimiter(&RateLimiter{Limit: queueLimit, Period: time.Minute}),
+		WithPartitionRateLimiter(&RateLimiter{Limit: partitionLimit, Period: time.Minute}),
+		WithQueueBasePollingInterval(pollingInterval))
+	require.NoError(t, err)
+
+	var ids []string
+	for i := range 4 {
+		partition := fmt.Sprintf("p%d", i)
+		for range 2 {
+			handle, err := RunWorkflow(dbosCtx, noop, partition, WithQueue(queue), WithQueuePartitionKey(partition))
+			require.NoError(t, err)
+			ids = append(ids, handle.GetWorkflowID())
+		}
+	}
+
+	// Successes, and the partitions that admitted anything.
+	progress := func() (int, map[string]struct{}) {
+		workflows, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(ids...))
+		require.NoError(t, err)
+		succeeded, started := 0, map[string]struct{}{}
+		for _, wf := range workflows {
+			if wf.Status == WorkflowStatusSuccess {
+				succeeded++
+			}
+			if wf.Status != WorkflowStatusEnqueued {
+				started[wf.QueuePartitionKey] = struct{}{}
+			}
+		}
+		return succeeded, started
+	}
+
+	// The queue-wide window caps the total at three, one from each of three partitions: the per-partition window admits only one apiece.
+	require.Eventually(t, func() bool {
+		succeeded, _ := progress()
+		return succeeded == queueLimit
+	}, 15*time.Second, 50*time.Millisecond)
+
+	// Several polling intervals with no further admission: both windows stay spent.
+	time.Sleep(4 * pollingInterval)
+	succeeded, started := progress()
+	assert.Equal(t, queueLimit, succeeded)
+	assert.Len(t, started, queueLimit)
+}
+
 func TestCountActiveWorkflows(t *testing.T) {
 	ctx := &dbosContext{activeWorkflowIDs: &sync.Map{}}
 	ctx.activeWorkflowIDs.Store("a", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})

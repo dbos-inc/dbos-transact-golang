@@ -72,10 +72,8 @@ type Dialect interface {
 	// RepeatableRead; SQLite returns Default (the IMMEDIATE BEGIN handles it).
 	SnapshotIsolation() IsoLevel
 
-	// QueueDequeueIsolation returns the IsoLevel for the queue dequeue
-	// transaction. snapshot=true requests snapshot semantics
-	// snapshot=false allows the lighter read-committed path.
-	QueueDequeueIsolation(snapshot bool) IsoLevel
+	// QueueDequeueIsolation returns the IsoLevel for the queue dequeue transaction.
+	QueueDequeueIsolation(budget DequeueBudget) IsoLevel
 
 	// SupportsListenNotify reports whether the dialect supports
 	// LISTEN/NOTIFY. False for CockroachDB and SQLite, which both fall back
@@ -126,6 +124,15 @@ type Dialect interface {
 	// method value drops into the retry condition chain directly.
 	IsRetryableTransaction(err error, logger *slog.Logger) bool
 }
+
+// DequeueBudget is what a dequeue shares with other sweeps, which sets its isolation.
+type DequeueBudget int
+
+const (
+	DequeueBudgetLocal DequeueBudget = iota
+	DequeueBudgetShared
+	DequeueBudgetCrossPartition
+)
 
 // DetectDialect identifies the backend from a DBOS database URL by parsing
 // the scheme.
@@ -202,8 +209,11 @@ func (PostgresDialect) LockSkipLocked() string       { return "FOR UPDATE SKIP L
 func (PostgresDialect) LockNoWait() string           { return "FOR UPDATE NOWAIT" }
 func (PostgresDialect) NowMsSQL() string             { return "(EXTRACT(EPOCH FROM now()) * 1000)::bigint" }
 func (PostgresDialect) SnapshotIsolation() IsoLevel  { return IsoLevelRepeatableRead }
-func (PostgresDialect) QueueDequeueIsolation(snapshot bool) IsoLevel {
-	if snapshot {
+func (PostgresDialect) QueueDequeueIsolation(budget DequeueBudget) IsoLevel {
+	switch budget {
+	case DequeueBudgetCrossPartition:
+		return IsoLevelSerializable
+	case DequeueBudgetShared:
 		return IsoLevelRepeatableRead
 	}
 	return IsoLevelReadCommitted
@@ -354,12 +364,12 @@ func (SqliteDialect) NowMsSQL() string {
 	// julianday keeps millisecond precision on every SQLite version, unlike unixepoch('subsec') (3.42+).
 	return "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
 }
-func (SqliteDialect) SnapshotIsolation() IsoLevel           { return IsoLevelDefault }
-func (SqliteDialect) QueueDequeueIsolation(_ bool) IsoLevel { return IsoLevelDefault }
-func (SqliteDialect) SupportsListenNotify() bool            { return false }
-func (SqliteDialect) SupportsArrayParameters() bool         { return false }
-func (SqliteDialect) SupportsDataModifyingCTE() bool        { return false }
-func (SqliteDialect) SupportsAttributesContainment() bool   { return false }
+func (SqliteDialect) SnapshotIsolation() IsoLevel                  { return IsoLevelDefault }
+func (SqliteDialect) QueueDequeueIsolation(DequeueBudget) IsoLevel { return IsoLevelDefault }
+func (SqliteDialect) SupportsListenNotify() bool                   { return false }
+func (SqliteDialect) SupportsArrayParameters() bool                { return false }
+func (SqliteDialect) SupportsDataModifyingCTE() bool               { return false }
+func (SqliteDialect) SupportsAttributesContainment() bool          { return false }
 
 // Classify sqlite errors via the registered driver's ErrorCode extractor
 // (see sqlite_driver.go). The extracted value is the extended result code
