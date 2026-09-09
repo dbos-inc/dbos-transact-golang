@@ -2103,6 +2103,74 @@ func TestPartitionLimiterWithQueueWideLimiter(t *testing.T) {
 	assert.Len(t, started, queueLimit)
 }
 
+// A partition with a little work is not starved by partitions with a lot, even when
+// the queue-wide limit is too small to serve every partition at once. Measured in
+// units of work rather than time: the small partitions must be served while the busy
+// ones still have a backlog. A fixed order would drain the busy ones first, since they
+// hold every slot and reclaim it the moment one frees up.
+func TestPartitionedQueueDoesNotStarvePartitions(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	busyBacklog := 60
+	// The busy partitions sort first, so a fixed order would always prefer them.
+	busyPartitions := []string{"aaa-busy-1", "aaa-busy-2"}
+	smallPartitions := []string{"zzz-small-0", "zzz-small-1", "zzz-small-2", "zzz-small-3"}
+
+	var mu sync.Mutex
+	completed := map[string]int{}
+	quickWorkflow := func(ctx Context, partition string) (string, error) {
+		mu.Lock()
+		completed[partition]++
+		mu.Unlock()
+		return partition, nil
+	}
+	RegisterWorkflow(dbosCtx, quickWorkflow)
+	require.NoError(t, Launch(dbosCtx))
+
+	// A workflow can only be enqueued on a registered queue, so the worker
+	// drains a little of the busy backlog while the small partitions are still being enqueued.
+	queue, err := registerWFQ(dbosCtx, "starvation-queue", WithPartitionConcurrency(1), WithWorkerConcurrency(2), WithQueueBasePollingInterval(100*time.Millisecond))
+	require.NoError(t, err)
+	for _, partition := range busyPartitions {
+		for range busyBacklog {
+			_, err := RunWorkflow(dbosCtx, quickWorkflow, partition, WithQueue(queue), WithQueuePartitionKey(partition))
+			require.NoError(t, err)
+		}
+	}
+	for _, partition := range smallPartitions {
+		_, err := RunWorkflow(dbosCtx, quickWorkflow, partition, WithQueue(queue), WithQueuePartitionKey(partition))
+		require.NoError(t, err)
+	}
+
+	busyDone := 0
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, partition := range smallPartitions {
+			if completed[partition] == 0 {
+				return false
+			}
+		}
+		busyDone = completed[busyPartitions[0]] + completed[busyPartitions[1]]
+		return true
+	}, 20*time.Second, 200*time.Millisecond, "small partitions were never served")
+	// The busy partitions drain at roughly the queue-wide limit per poll, so serving the
+	// small ones promptly leaves most of that backlog outstanding. A fixed order would leave none.
+	assert.Less(t, busyDone, busyBacklog*len(busyPartitions)/2)
+
+	total := busyBacklog*len(busyPartitions) + len(smallPartitions)
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		done := 0
+		for _, n := range completed {
+			done += n
+		}
+		return done == total
+	}, 30*time.Second, 200*time.Millisecond, "backlog never drained")
+	require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up")
+}
+
 func TestCountActiveWorkflows(t *testing.T) {
 	ctx := &dbosContext{activeWorkflowIDs: &sync.Map{}}
 	ctx.activeWorkflowIDs.Store("a", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})

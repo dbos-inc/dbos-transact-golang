@@ -857,11 +857,26 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 
 		// Dequeue from each partition (or once for non-partitioned queues)
 		if !skipDequeue {
+			// Give an equal chance to each partition to be dequeued to avoid starvation.
+			rand.Shuffle(len(partitionKeys), func(i, j int) { partitionKeys[i], partitionKeys[j] = partitionKeys[j], partitionKeys[i] })
+			limits := queue.resolveLimits()
 			running := ctx.countActiveWorkflowsForQueue(queue.Name)
 			var dequeuedIDs []string
 			for _, partitionKey := range partitionKeys {
-				ids, shouldContinue := qr.dequeueWorkflows(ctx, queue, partitionKey, running+len(dequeuedIDs), &hasBackoffError)
-				if shouldContinue {
+				if limits.WorkerConcurrency != nil && running+len(dequeuedIDs) >= *limits.WorkerConcurrency {
+					break
+				}
+				ids, err := qr.dequeueWorkflows(ctx, queue, partitionKey, running+len(dequeuedIDs))
+				if err != nil {
+					switch {
+					case !ctx.systemDB.IsContentionError(err):
+						queueLogger.Error("Error dequeuing workflows from queue", "partition_key", partitionKey, "error", err)
+					case partitionKey == "":
+						hasBackoffError = true
+					default:
+						// Another worker holds this partition or won its claim: skip it, no queue-wide backoff.
+						queueLogger.Debug("Partition is contended, skipping", "partition_key", partitionKey)
+					}
 					continue
 				}
 				dequeuedIDs = append(dequeuedIDs, ids...)
@@ -986,14 +1001,13 @@ func (qr *queueRunner) startDequeuedWorkflows(ctx *dbosContext, queueLogger *slo
 	}
 }
 
-// dequeueWorkflows dequeues workflows from a specific partition and handles errors.
-// Returns the dequeued workflow IDs and a boolean indicating whether to continue to the next iteration.
-func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, localRunning int, hasBackoffError *bool) ([]string, bool) {
+// dequeueWorkflows claims workflows from one partition, or from the whole queue when partitionKey is empty.
+func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, localRunning int) ([]string, error) {
 	partitionRunning := 0
 	if partitionKey != "" {
 		partitionRunning = ctx.countActiveWorkflowsForPartition(queue.Name, partitionKey)
 	}
-	dequeuedIDs, err := sysdb.RetryWithResult(ctx, func() ([]string, error) {
+	return sysdb.RetryWithResult(ctx, func() ([]string, error) {
 		return ctx.systemDB.DequeueWorkflows(ctx, sysdb.DequeueWorkflowsInput{
 			Queue:                      queue.toConfig(),
 			ExecutorID:                 ctx.executorID,
@@ -1003,15 +1017,4 @@ func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, p
 			PartitionLocalRunningCount: partitionRunning,
 		})
 	}, sysdb.WithRetrierLogger(qr.logger))
-
-	if err != nil {
-		if ctx.systemDB.IsContentionError(err) {
-			*hasBackoffError = true
-		} else {
-			qr.logger.Error("Error dequeuing workflows from queue", "queue_name", queue.Name, "partition_key", partitionKey, "error", err)
-		}
-		return nil, true // Indicate to continue to next iteration
-	}
-
-	return dequeuedIDs, false // Success, don't continue
 }
