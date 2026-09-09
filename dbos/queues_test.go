@@ -1766,6 +1766,28 @@ func TestPartitionedQueues(t *testing.T) {
 		assert.Contains(t, dbosErr.Message, "partition key and deduplication ID cannot be used together")
 	})
 
+	t.Run("PartitionLimitRequiresKey", func(t *testing.T) {
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+		simpleWorkflow := func(ctx Context, input string) (string, error) {
+			return input, nil
+		}
+		RegisterWorkflow(dbosCtx, simpleWorkflow)
+		require.NoError(t, Launch(dbosCtx))
+
+		q, err := registerWFQ(dbosCtx, "partition-limit-queue", WithPartitionConcurrency(1))
+		require.NoError(t, err)
+		_, err = RunWorkflow(dbosCtx, simpleWorkflow, "no-key", WithQueue(q))
+		require.ErrorIs(t, err, ErrInvalidOption)
+		require.Contains(t, err.Error(), "no partition key was provided")
+
+		handle, err := RunWorkflow(dbosCtx, simpleWorkflow, "keyed", WithQueue(q), WithQueuePartitionKey("p1"))
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "keyed", result)
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up")
+	})
+
 	t.Run("Dequeue", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
@@ -2531,6 +2553,91 @@ func TestDatabaseBackedQueues(t *testing.T) {
 		require.ErrorIs(t, err, ErrQueueNotFound)
 		require.Nil(t, got)
 	})
+
+	t.Run("ValidationRejectsBadPartitionLimits", func(t *testing.T) {
+		cases := []struct {
+			name string
+			opts []QueueOption
+			want string
+		}{
+			{"deprecated flag with a partition limit", []QueueOption{WithPartitionQueue(), WithPartitionConcurrency(1)}, "set only one of them"},
+			{"partition concurrency below 1", []QueueOption{WithPartitionConcurrency(0)}, "partition concurrency must be at least 1"},
+			{"partition worker concurrency below 1", []QueueOption{WithPartitionWorkerConcurrency(0)}, "partition worker concurrency must be at least 1"},
+			{"partition worker concurrency above partition concurrency", []QueueOption{WithPartitionConcurrency(1), WithPartitionWorkerConcurrency(2)}, "partition concurrency must be greater than or equal to partition worker concurrency"},
+			{"partition worker concurrency above worker concurrency", []QueueOption{WithWorkerConcurrency(1), WithPartitionWorkerConcurrency(2)}, "worker concurrency must be greater than or equal to partition worker concurrency"},
+			{"partition concurrency above global concurrency", []QueueOption{WithGlobalConcurrency(1), WithPartitionConcurrency(2)}, "global concurrency must be greater than or equal to partition concurrency"},
+			{"partition worker concurrency above global concurrency", []QueueOption{WithGlobalConcurrency(1), WithPartitionWorkerConcurrency(2)}, "concurrency must be greater than or equal to partition worker concurrency"},
+			{"partition rate limiter without a limit", []QueueOption{WithPartitionRateLimiter(&RateLimiter{Limit: 0, Period: time.Second})}, "partition rate limiter limit must be positive"},
+			{"partition rate limiter without a period", []QueueOption{WithPartitionRateLimiter(&RateLimiter{Limit: 5, Period: 0})}, "partition rate limiter period must be positive"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := registerWFQ(dbosCtx, "bad-partition-queue", tc.opts...)
+				require.ErrorIs(t, err, ErrInvalidOption)
+				require.Contains(t, err.Error(), tc.want)
+				_, err = retrieveWFQ(dbosCtx, "bad-partition-queue")
+				require.ErrorIs(t, err, ErrQueueNotFound, "nothing must be persisted")
+			})
+		}
+
+		// Consistent limits register and read back at their own scope.
+		limiter := &RateLimiter{Limit: 5, Period: 1500 * time.Millisecond}
+		q, err := registerWFQ(dbosCtx, "partition-limits-queue",
+			WithGlobalConcurrency(4), WithWorkerConcurrency(2),
+			WithPartitionConcurrency(2), WithPartitionWorkerConcurrency(1),
+			WithPartitionRateLimiter(limiter))
+		require.NoError(t, err)
+		require.True(t, q.GetPartitionQueue())
+		require.Equal(t, 4, *q.GetGlobalConcurrency())
+		require.Equal(t, 2, *q.GetWorkerConcurrency())
+		require.Nil(t, q.GetRateLimit())
+		require.Equal(t, 2, *q.GetPartitionConcurrency())
+		require.Equal(t, 1, *q.GetPartitionWorkerConcurrency())
+		require.Equal(t, *limiter, *q.GetPartitionRateLimit())
+		got, err := retrieveWFQ(dbosCtx, "partition-limits-queue")
+		require.NoError(t, err)
+		require.True(t, got.PartitionQueue)
+		require.Equal(t, 2, *got.PartitionConcurrency)
+		require.Equal(t, 1, *got.PartitionWorkerConcurrency)
+		require.Equal(t, *limiter, *got.PartitionRateLimit)
+	})
+
+	t.Run("LegacyPartitionedQueue", func(t *testing.T) {
+		// Legacy mode: limits are reported per partition, columns keep their values, re-scoping writes are rejected.
+		q, err := registerWFQ(dbosCtx, "legacy-partitioned-queue",
+			WithPartitionQueue(), WithGlobalConcurrency(2), WithWorkerConcurrency(1),
+			WithRateLimiter(&RateLimiter{Limit: 5, Period: time.Second}))
+		require.NoError(t, err)
+		require.True(t, q.GetPartitionQueue())
+		require.Nil(t, q.GetGlobalConcurrency())
+		require.Nil(t, q.GetWorkerConcurrency())
+		require.Nil(t, q.GetRateLimit())
+		require.Equal(t, 2, *q.GetPartitionConcurrency())
+		require.Equal(t, 1, *q.GetPartitionWorkerConcurrency())
+		require.Equal(t, 5, q.GetPartitionRateLimit().Limit)
+		require.Equal(t, 2, *q.GlobalConcurrency)
+		require.Nil(t, q.PartitionConcurrency)
+
+		var qi Queue = q
+		for name, set := range map[string]func() error{
+			"global concurrency":           func() error { return qi.SetGlobalConcurrency(dbosCtx, intPtr(3)) },
+			"worker concurrency":           func() error { return qi.SetWorkerConcurrency(dbosCtx, intPtr(1)) },
+			"rate limit":                   func() error { return qi.SetRateLimit(dbosCtx, nil) },
+			"partition concurrency":        func() error { return qi.SetPartitionConcurrency(dbosCtx, intPtr(1)) },
+			"partition worker concurrency": func() error { return qi.SetPartitionWorkerConcurrency(dbosCtx, intPtr(1)) },
+			"partition rate limit":         func() error { return qi.SetPartitionRateLimit(dbosCtx, nil) },
+		} {
+			err := set()
+			require.ErrorIs(t, err, ErrInvalidOption, name)
+			require.Contains(t, err.Error(), "deprecated WithPartitionQueue", name)
+		}
+		// Leaving the deprecated mode returns the limits to queue scope.
+		require.NoError(t, qi.SetPriorityEnabled(dbosCtx, true))
+		require.NoError(t, qi.SetPartitionQueue(dbosCtx, false))
+		require.False(t, qi.GetPartitionQueue())
+		require.Equal(t, 2, *qi.GetGlobalConcurrency())
+		require.Nil(t, qi.GetPartitionConcurrency())
+	})
 }
 
 // TestDatabaseBackedQueueConfigReload verifies that a running queue worker picks
@@ -2646,6 +2753,42 @@ func TestDatabaseBackedQueueConfigReload(t *testing.T) {
 	require.NotNil(t, persisted.RateLimit)
 	require.Equal(t, 50, persisted.RateLimit.Limit)
 	require.Equal(t, 250*time.Millisecond, persisted.basePollingInterval)
+
+	// Partition limits partition the queue; queue-wide limits keep their scope.
+	partitionLimiter := RateLimiter{Limit: 5, Period: 1500 * time.Millisecond}
+	require.NoError(t, qi.SetPartitionConcurrency(dbosCtx, intPtr(2)))
+	require.NoError(t, qi.SetPartitionWorkerConcurrency(dbosCtx, intPtr(1)))
+	require.NoError(t, qi.SetPartitionRateLimit(dbosCtx, &partitionLimiter))
+	require.True(t, qi.GetPartitionQueue())
+	require.Equal(t, 2, *qi.GetPartitionConcurrency())
+	require.Equal(t, 1, *qi.GetPartitionWorkerConcurrency())
+	require.Equal(t, partitionLimiter, *qi.GetPartitionRateLimit())
+	require.Equal(t, 2, *qi.GetGlobalConcurrency())
+	persisted, err = retrieveWFQ(dbosCtx, "reload-queue")
+	require.NoError(t, err)
+	require.True(t, persisted.PartitionQueue)
+	require.Equal(t, 2, *persisted.PartitionConcurrency)
+	require.Equal(t, 1, *persisted.PartitionWorkerConcurrency)
+	require.Equal(t, partitionLimiter, *persisted.PartitionRateLimit)
+
+	// Validated against the fresh row; the flag is owned by the limits while any is set.
+	require.Error(t, qi.SetPartitionConcurrency(dbosCtx, intPtr(3)),
+		"expected partition concurrency above global concurrency to be rejected")
+	require.Error(t, qi.SetPartitionQueue(dbosCtx, false))
+	require.True(t, qi.GetPartitionQueue())
+
+	// Clearing the last partition limit unpartitions the queue again.
+	require.NoError(t, qi.SetPartitionConcurrency(dbosCtx, nil))
+	require.NoError(t, qi.SetPartitionWorkerConcurrency(dbosCtx, nil))
+	require.True(t, qi.GetPartitionQueue())
+	require.NoError(t, qi.SetPartitionRateLimit(dbosCtx, nil))
+	require.False(t, qi.GetPartitionQueue())
+	persisted, err = retrieveWFQ(dbosCtx, "reload-queue")
+	require.NoError(t, err)
+	require.False(t, persisted.PartitionQueue)
+	require.Nil(t, persisted.PartitionConcurrency)
+	require.Nil(t, persisted.PartitionWorkerConcurrency)
+	require.Nil(t, persisted.PartitionRateLimit)
 
 	// Cross-field validation runs against the freshly persisted values: worker
 	// concurrency may not exceed the global concurrency (2).

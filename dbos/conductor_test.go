@@ -1207,6 +1207,14 @@ func TestConductorQueueHandlers(t *testing.T) {
 		WithQueueBasePollingInterval(2*time.Second),
 	)
 	require.NoError(t, err)
+	const partitionedQueue = "cond-queue-partitioned"
+	_, err = RegisterQueue(dbosCtx, partitionedQueue,
+		WithGlobalConcurrency(4),
+		WithPartitionConcurrency(2),
+		WithPartitionWorkerConcurrency(1),
+		WithPartitionRateLimiter(&RateLimiter{Limit: 7, Period: 15 * time.Second}),
+	)
+	require.NoError(t, err)
 
 	mockServer := newMockWebSocketServer()
 	t.Cleanup(mockServer.shutdown)
@@ -1267,6 +1275,17 @@ func TestConductorQueueHandlers(t *testing.T) {
 		require.True(t, full.PriorityEnabled)
 		require.True(t, full.PartitionQueue)
 		require.Equal(t, 2.0, full.PollingIntervalSec)
+		require.Nil(t, full.PartitionConcurrency)
+		require.Nil(t, full.PartitionRateLimitMax)
+
+		require.Contains(t, byName, partitionedQueue)
+		partitioned := byName[partitionedQueue]
+		require.True(t, partitioned.PartitionQueue)
+		require.Equal(t, 4, *partitioned.Concurrency)
+		require.Equal(t, 2, *partitioned.PartitionConcurrency)
+		require.Equal(t, 1, *partitioned.PartitionWorkerConcurrency)
+		require.Equal(t, 7, *partitioned.PartitionRateLimitMax)
+		require.Equal(t, 15.0, *partitioned.PartitionRateLimitPeriodSec)
 	})
 
 	t.Run("get_queue", func(t *testing.T) {

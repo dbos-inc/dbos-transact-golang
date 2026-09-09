@@ -18,15 +18,18 @@ const _DEFAULT_MAX_POLLING_INTERVAL = 120 * time.Second
 // workflowQueue is the concrete implementation behind the Queue handle: a
 // queue's configuration plus runtime-only registration state.
 type workflowQueue struct {
-	Name                string        `json:"name"`                         // Unique queue name
-	WorkerConcurrency   *int          `json:"worker_concurrency,omitempty"` // Max concurrent workflows per executor
-	GlobalConcurrency   *int          `json:"concurrency,omitempty"`        // Max concurrent workflows across all executors
-	PriorityEnabled     bool          `json:"priority_enabled,omitempty"`   // Enable priority-based scheduling
-	RateLimit           *RateLimiter  `json:"rate_limit,omitempty"`         // Rate limiting configuration
-	PartitionQueue      bool          `json:"partition_queue,omitempty"`    // Enable partitioned queue mode
-	ApplicationName     string        `json:"application_name,omitempty"`   // Owning application; empty if unclaimed
-	basePollingInterval time.Duration // Base polling interval (minimum, never poll faster)
-	maxPollingInterval  time.Duration // Maximum polling interval (never poll slower)
+	Name                       string        `json:"name"`                                   // Unique queue name
+	WorkerConcurrency          *int          `json:"worker_concurrency,omitempty"`           // Max concurrent workflows per executor
+	GlobalConcurrency          *int          `json:"concurrency,omitempty"`                  // Max concurrent workflows across all executors
+	PriorityEnabled            bool          `json:"priority_enabled,omitempty"`             // Enable priority-based scheduling
+	RateLimit                  *RateLimiter  `json:"rate_limit,omitempty"`                   // Rate limiting configuration
+	PartitionQueue             bool          `json:"partition_queue,omitempty"`              // Partitioned: dequeues per partition key
+	ApplicationName            string        `json:"application_name,omitempty"`             // Owning application; empty if unclaimed
+	PartitionConcurrency       *int          `json:"partition_concurrency,omitempty"`        // Max concurrent workflows per partition across all executors
+	PartitionWorkerConcurrency *int          `json:"partition_worker_concurrency,omitempty"` // Max concurrent workflows per partition per executor
+	PartitionRateLimit         *RateLimiter  `json:"partition_rate_limit,omitempty"`         // Rate limit applied to each partition separately
+	basePollingInterval        time.Duration // Base polling interval (minimum, never poll faster)
+	maxPollingInterval         time.Duration // Maximum polling interval (never poll slower)
 
 	databaseBacked bool                    // Whether this queue's config lives in the queues table
 	onConflict     QueueConflictResolution // Registration conflict policy
@@ -35,33 +38,46 @@ type workflowQueue struct {
 // toConfig converts to the persisted representation used by internal/sysdb.
 func (q workflowQueue) toConfig() models.QueueConfig {
 	return models.QueueConfig{
-		Name:                q.Name,
-		WorkerConcurrency:   q.WorkerConcurrency,
-		GlobalConcurrency:   q.GlobalConcurrency,
-		PriorityEnabled:     q.PriorityEnabled,
-		RateLimit:           q.RateLimit,
-		PartitionQueue:      q.PartitionQueue,
-		ApplicationName:     q.ApplicationName,
-		BasePollingInterval: q.basePollingInterval,
-		MaxPollingInterval:  q.maxPollingInterval,
-		DatabaseBacked:      q.databaseBacked,
+		Name:                       q.Name,
+		WorkerConcurrency:          q.WorkerConcurrency,
+		GlobalConcurrency:          q.GlobalConcurrency,
+		PriorityEnabled:            q.PriorityEnabled,
+		RateLimit:                  q.RateLimit,
+		PartitionQueue:             q.PartitionQueue,
+		ApplicationName:            q.ApplicationName,
+		BasePollingInterval:        q.basePollingInterval,
+		MaxPollingInterval:         q.maxPollingInterval,
+		DatabaseBacked:             q.databaseBacked,
+		PartitionConcurrency:       q.PartitionConcurrency,
+		PartitionWorkerConcurrency: q.PartitionWorkerConcurrency,
+		PartitionRateLimit:         q.PartitionRateLimit,
 	}
+}
+
+func (q workflowQueue) hasPartitionLimits() bool  { return q.toConfig().HasPartitionLimits() }
+func (q workflowQueue) isLegacyPartitioned() bool { return q.toConfig().IsLegacyPartitioned() }
+func (q workflowQueue) resolveLimits() models.ResolvedQueueLimits {
+	return q.toConfig().ResolveLimits()
 }
 
 // queueFromConfig builds a workflowQueue from its persisted representation.
 // Registration-only state (onConflict) is not persisted and stays zero.
+// PartitionQueue is set whenever a partition limit is, whatever the stored column says.
 func queueFromConfig(cfg models.QueueConfig) workflowQueue {
 	return workflowQueue{
-		Name:                cfg.Name,
-		WorkerConcurrency:   cfg.WorkerConcurrency,
-		GlobalConcurrency:   cfg.GlobalConcurrency,
-		PriorityEnabled:     cfg.PriorityEnabled,
-		RateLimit:           cfg.RateLimit,
-		PartitionQueue:      cfg.PartitionQueue,
-		ApplicationName:     cfg.ApplicationName,
-		basePollingInterval: cfg.BasePollingInterval,
-		maxPollingInterval:  cfg.MaxPollingInterval,
-		databaseBacked:      cfg.DatabaseBacked,
+		Name:                       cfg.Name,
+		WorkerConcurrency:          cfg.WorkerConcurrency,
+		GlobalConcurrency:          cfg.GlobalConcurrency,
+		PriorityEnabled:            cfg.PriorityEnabled,
+		RateLimit:                  cfg.RateLimit,
+		PartitionQueue:             cfg.IsPartitioned(),
+		ApplicationName:            cfg.ApplicationName,
+		basePollingInterval:        cfg.BasePollingInterval,
+		maxPollingInterval:         cfg.MaxPollingInterval,
+		databaseBacked:             cfg.DatabaseBacked,
+		PartitionConcurrency:       cfg.PartitionConcurrency,
+		PartitionWorkerConcurrency: cfg.PartitionWorkerConcurrency,
+		PartitionRateLimit:         cfg.PartitionRateLimit,
 	}
 }
 
@@ -81,11 +97,17 @@ func queuesFromConfigs(cfgs []models.QueueConfig) []workflowQueue {
 // change to the queues table; live workers pick it up on their next reconcile
 // without a restart. The Set* methods return an error for queues that are not
 // database-backed.
+//
+// Limit getters report each limit at its enforced scope: under the deprecated
+// WithPartitionQueue option the queue-wide limits are reported as partition limits.
 type Queue interface {
 	GetName() string
 	GetGlobalConcurrency() *int
 	GetWorkerConcurrency() *int
 	GetRateLimit() *RateLimiter
+	GetPartitionConcurrency() *int
+	GetPartitionWorkerConcurrency() *int
+	GetPartitionRateLimit() *RateLimiter
 	GetPriorityEnabled() bool
 	GetPartitionQueue() bool
 	GetPollingInterval() time.Duration
@@ -94,6 +116,9 @@ type Queue interface {
 	SetGlobalConcurrency(ctx Client, value *int) error
 	SetWorkerConcurrency(ctx Client, value *int) error
 	SetRateLimit(ctx Client, value *RateLimiter) error
+	SetPartitionConcurrency(ctx Client, value *int) error
+	SetPartitionWorkerConcurrency(ctx Client, value *int) error
+	SetPartitionRateLimit(ctx Client, value *RateLimiter) error
 	SetPriorityEnabled(ctx Client, value bool) error
 	SetPartitionQueue(ctx Client, value bool) error
 	SetPollingInterval(ctx Client, value time.Duration) error
@@ -102,12 +127,19 @@ type Queue interface {
 // Compile-time check that *workflowQueue satisfies the Queue interface.
 var _ Queue = (*workflowQueue)(nil)
 
-func (q *workflowQueue) GetName() string            { return q.Name }
-func (q *workflowQueue) GetGlobalConcurrency() *int { return q.GlobalConcurrency }
-func (q *workflowQueue) GetWorkerConcurrency() *int { return q.WorkerConcurrency }
-func (q *workflowQueue) GetRateLimit() *RateLimiter { return q.RateLimit }
-func (q *workflowQueue) GetPriorityEnabled() bool   { return q.PriorityEnabled }
-func (q *workflowQueue) GetPartitionQueue() bool    { return q.PartitionQueue }
+func (q *workflowQueue) GetName() string               { return q.Name }
+func (q *workflowQueue) GetGlobalConcurrency() *int    { return q.resolveLimits().GlobalConcurrency }
+func (q *workflowQueue) GetWorkerConcurrency() *int    { return q.resolveLimits().WorkerConcurrency }
+func (q *workflowQueue) GetRateLimit() *RateLimiter    { return q.resolveLimits().RateLimit }
+func (q *workflowQueue) GetPartitionConcurrency() *int { return q.resolveLimits().PartitionConcurrency }
+func (q *workflowQueue) GetPartitionWorkerConcurrency() *int {
+	return q.resolveLimits().PartitionWorkerConcurrency
+}
+func (q *workflowQueue) GetPartitionRateLimit() *RateLimiter {
+	return q.resolveLimits().PartitionRateLimit
+}
+func (q *workflowQueue) GetPriorityEnabled() bool { return q.PriorityEnabled }
+func (q *workflowQueue) GetPartitionQueue() bool  { return q.PartitionQueue }
 
 func (q *workflowQueue) GetPollingInterval() time.Duration { return q.basePollingInterval }
 
@@ -115,41 +147,106 @@ func (q *workflowQueue) GetApplicationName() string { return q.ApplicationName }
 
 // SetGlobalConcurrency updates the queue's global concurrency limit. Pass nil to clear it.
 func (q *workflowQueue) SetGlobalConcurrency(ctx Client, value *int) error {
-	return q.applyConfigChange(ctx, func(c *workflowQueue) { c.GlobalConcurrency = value })
+	return q.applyLimitChange(ctx, "global concurrency", func(c *workflowQueue) { c.GlobalConcurrency = value })
 }
 
 // SetWorkerConcurrency updates the queue's per-executor concurrency limit. Pass nil to clear it.
 func (q *workflowQueue) SetWorkerConcurrency(ctx Client, value *int) error {
-	return q.applyConfigChange(ctx, func(c *workflowQueue) { c.WorkerConcurrency = value })
+	return q.applyLimitChange(ctx, "worker concurrency", func(c *workflowQueue) { c.WorkerConcurrency = value })
 }
 
 // SetRateLimit updates the queue's rate limiter. Pass nil to clear it.
 func (q *workflowQueue) SetRateLimit(ctx Client, value *RateLimiter) error {
-	return q.applyConfigChange(ctx, func(c *workflowQueue) { c.RateLimit = value })
+	return q.applyLimitChange(ctx, "rate limit", func(c *workflowQueue) { c.RateLimit = value })
+}
+
+// SetPartitionConcurrency updates the per-partition concurrency limit. Pass nil to clear it.
+// Setting any partition limit partitions the queue; clearing the last one unpartitions it.
+func (q *workflowQueue) SetPartitionConcurrency(ctx Client, value *int) error {
+	return q.applyPartitionLimitChange(ctx, "partition concurrency", func(c *workflowQueue) { c.PartitionConcurrency = value })
+}
+
+// SetPartitionWorkerConcurrency updates the per-partition, per-executor concurrency limit. Pass nil to clear it.
+func (q *workflowQueue) SetPartitionWorkerConcurrency(ctx Client, value *int) error {
+	return q.applyPartitionLimitChange(ctx, "partition worker concurrency", func(c *workflowQueue) { c.PartitionWorkerConcurrency = value })
+}
+
+// SetPartitionRateLimit updates the per-partition rate limiter. Pass nil to clear it.
+func (q *workflowQueue) SetPartitionRateLimit(ctx Client, value *RateLimiter) error {
+	return q.applyPartitionLimitChange(ctx, "partition rate limit", func(c *workflowQueue) { c.PartitionRateLimit = value })
 }
 
 // SetPriorityEnabled toggles priority-based scheduling for the queue.
 func (q *workflowQueue) SetPriorityEnabled(ctx Client, value bool) error {
-	return q.applyConfigChange(ctx, func(c *workflowQueue) { c.PriorityEnabled = value })
+	return q.applyConfigChange(ctx, func(c *workflowQueue) error { c.PriorityEnabled = value; return nil })
 }
 
-// SetPartitionQueue toggles partitioned queue mode.
+// SetPartitionQueue toggles the deprecated partitioned queue mode; a queue
+// partitioned by its partition limits rejects it.
 //
 // Switching an existing queue from unpartitioned to partitioned abandons any
 // workflows already enqueued on it: they were enqueued without a partition key,
 // and a partitioned queue only dequeues from its partitions, so they will never
 // be dequeued.
 func (q *workflowQueue) SetPartitionQueue(ctx Client, value bool) error {
-	wasUnpartitioned := !q.PartitionQueue
-	if err := q.applyConfigChange(ctx, func(c *workflowQueue) { c.PartitionQueue = value }); err != nil {
+	wasPartitioned := q.PartitionQueue
+	err := q.applyConfigChange(ctx, func(c *workflowQueue) error {
+		if c.hasPartitionLimits() {
+			return models.NewInvalidOptionError(fmt.Sprintf("cannot set partition queue mode on queue %s: it is partitioned by its partition limits; clear those instead", c.Name))
+		}
+		c.PartitionQueue = value
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	if value && wasUnpartitioned {
-		if c, ok := ctx.(*dbosContext); ok {
-			c.logger.Warn("Switched queue to partitioned mode; workflows already enqueued without a partition key will be abandoned and never dequeued", "queue_name", q.Name)
-		}
-	}
+	q.warnIfNewlyPartitioned(ctx, wasPartitioned)
 	return nil
+}
+
+// applyLimitChange persists a queue-wide limit; the deprecated partition mode rejects it.
+func (q *workflowQueue) applyLimitChange(ctx Client, field string, mutate func(*workflowQueue)) error {
+	return q.applyConfigChange(ctx, func(c *workflowQueue) error {
+		if err := c.requireNotLegacyPartitioned(field); err != nil {
+			return err
+		}
+		mutate(c)
+		return nil
+	})
+}
+
+// applyPartitionLimitChange persists a partition limit and keeps the flag in step.
+func (q *workflowQueue) applyPartitionLimitChange(ctx Client, field string, mutate func(*workflowQueue)) error {
+	wasPartitioned := q.PartitionQueue
+	err := q.applyConfigChange(ctx, func(c *workflowQueue) error {
+		if err := c.requireNotLegacyPartitioned(field); err != nil {
+			return err
+		}
+		mutate(c)
+		c.PartitionQueue = c.hasPartitionLimits()
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	q.warnIfNewlyPartitioned(ctx, wasPartitioned)
+	return nil
+}
+
+func (q *workflowQueue) requireNotLegacyPartitioned(field string) error {
+	if !q.isLegacyPartitioned() {
+		return nil
+	}
+	return models.NewInvalidOptionError(fmt.Sprintf("cannot set %s on queue %s: it is registered with the deprecated WithPartitionQueue option, under which the global concurrency, worker concurrency, and rate limit apply per partition; re-register the queue with the partition limits instead", field, q.Name))
+}
+
+func (q *workflowQueue) warnIfNewlyPartitioned(ctx Client, wasPartitioned bool) {
+	if wasPartitioned || !q.PartitionQueue {
+		return
+	}
+	if c, ok := ctx.(*dbosContext); ok {
+		c.logger.Warn("Switched queue to partitioned mode; workflows already enqueued without a partition key will be abandoned and never dequeued", "queue_name", q.Name)
+	}
 }
 
 // SetPollingInterval updates the queue's base polling interval: the cadence at
@@ -158,16 +255,16 @@ func (q *workflowQueue) SetPartitionQueue(ctx Client, value bool) error {
 // takes effect immediately only when it raises the floor above the current
 // interval, otherwise as the worker scales back down on successful iterations.
 func (q *workflowQueue) SetPollingInterval(ctx Client, value time.Duration) error {
-	return q.applyConfigChange(ctx, func(c *workflowQueue) { c.basePollingInterval = value })
+	return q.applyConfigChange(ctx, func(c *workflowQueue) error { c.basePollingInterval = value; return nil })
 }
 
 // applyConfigChange persists a single configuration change for a database-backed
 // queue. The read-modify-write runs in one transaction (see
 // systemDatabase.updateQueueConfig): the latest persisted row is read, mutate
 // applies the change, cross-field validation runs against the fresh values, and
-// the row is written. On success the change is reflected on the receiver so its
-// getters return the updated value.
-func (q *workflowQueue) applyConfigChange(ctx Client, mutate func(*workflowQueue)) error {
+// the row is written. On success the receiver is refreshed from the persisted
+// row so its getters return the updated values.
+func (q *workflowQueue) applyConfigChange(ctx Client, mutate func(*workflowQueue) error) error {
 	if !q.databaseBacked {
 		return fmt.Errorf("queue %s: configuration can only be updated on database-backed queues registered via RegisterQueue", q.Name)
 	}
@@ -175,10 +272,12 @@ func (q *workflowQueue) applyConfigChange(ctx Client, mutate func(*workflowQueue
 	if !ok {
 		return errors.New("invalid DBOS context")
 	}
-	_, err := sysdb.RetryWithResult(c, func() (*models.QueueConfig, error) {
+	cfg, err := sysdb.RetryWithResult(c, func() (*models.QueueConfig, error) {
 		return c.systemDB.UpdateQueueConfig(c, q.Name, func(fresh *models.QueueConfig) error {
 			w := queueFromConfig(*fresh)
-			mutate(&w)
+			if err := mutate(&w); err != nil {
+				return err
+			}
 			if err := validateQueueConfig(&w); err != nil {
 				return err
 			}
@@ -189,7 +288,11 @@ func (q *workflowQueue) applyConfigChange(ctx Client, mutate func(*workflowQueue
 	if err != nil {
 		return err
 	}
-	mutate(q)
+	// Keep the handle's value for non db-backed fields
+	updated := queueFromConfig(*cfg)
+	updated.maxPollingInterval = q.maxPollingInterval
+	updated.onConflict = q.onConflict
+	*q = updated
 	return nil
 }
 
@@ -243,13 +346,37 @@ func WithRateLimiter(limiter *RateLimiter) QueueOption {
 	}
 }
 
-// WithPartitionQueue enables partitioned queue mode.
-// When enabled, workflows can be enqueued with a partition key, and each partition
-// has its own concurrency limits. This allows distributing work across dynamically
-// created queue partitions.
+// WithPartitionQueue enables partitioned queue mode, under which the global
+// concurrency, worker concurrency, and rate limiter each apply per partition.
+//
+// Deprecated: use a partition limit (WithPartitionConcurrency,
+// WithPartitionWorkerConcurrency, WithPartitionRateLimiter) instead, which
+// partitions the queue while the queue-wide limits keep their scope.
 func WithPartitionQueue() QueueOption {
 	return func(q *workflowQueue) {
 		q.PartitionQueue = true
+	}
+}
+
+// WithPartitionConcurrency limits the workflows from any one partition running
+// concurrently across all executors. Any partition limit partitions the queue.
+func WithPartitionConcurrency(concurrency int) QueueOption {
+	return func(q *workflowQueue) {
+		q.PartitionConcurrency = &concurrency
+	}
+}
+
+// WithPartitionWorkerConcurrency limits the workflows from any one partition running concurrently on this executor.
+func WithPartitionWorkerConcurrency(concurrency int) QueueOption {
+	return func(q *workflowQueue) {
+		q.PartitionWorkerConcurrency = &concurrency
+	}
+}
+
+// WithPartitionRateLimiter rate limits workflow starts on each partition separately.
+func WithPartitionRateLimiter(limiter *RateLimiter) QueueOption {
+	return func(q *workflowQueue) {
+		q.PartitionRateLimit = limiter
 	}
 }
 
@@ -282,19 +409,52 @@ func WithQueueOnConflict(policy QueueConflictResolution) QueueOption {
 // validateQueueConfig validates a queue's configuration, returning an error on
 // invalid input. Mirrors the cross-language validation rules.
 func validateQueueConfig(q *workflowQueue) error {
-	if q.WorkerConcurrency != nil && q.GlobalConcurrency != nil && *q.WorkerConcurrency > *q.GlobalConcurrency {
-		return models.NewInvalidOptionError(fmt.Sprintf("queue %s: concurrency must be greater than or equal to worker_concurrency", q.Name))
+	fail := func(msg string) error {
+		return models.NewInvalidOptionError(fmt.Sprintf("queue %s: %s", q.Name, msg))
+	}
+	gc, wc, pc, pwc := q.GlobalConcurrency, q.WorkerConcurrency, q.PartitionConcurrency, q.PartitionWorkerConcurrency
+	if pc != nil && *pc < 1 {
+		return fail("partition concurrency must be at least 1")
+	}
+	if pwc != nil && *pwc < 1 {
+		return fail("partition worker concurrency must be at least 1")
+	}
+	if pwc != nil && pc != nil && *pwc > *pc {
+		return fail("partition concurrency must be greater than or equal to partition worker concurrency")
+	}
+	if pwc != nil && wc != nil && *pwc > *wc {
+		return fail("worker concurrency must be greater than or equal to partition worker concurrency")
+	}
+	if wc != nil && gc != nil && *wc > *gc {
+		return fail("concurrency must be greater than or equal to worker_concurrency")
+	}
+	if pc != nil && gc != nil && *pc > *gc {
+		return fail("global concurrency must be greater than or equal to partition concurrency")
+	}
+	if pwc != nil && gc != nil && *pwc > *gc {
+		return fail("concurrency must be greater than or equal to partition worker concurrency")
 	}
 	if q.basePollingInterval <= 0 {
-		return models.NewInvalidOptionError(fmt.Sprintf("queue %s: polling interval must be positive", q.Name))
+		return fail("polling interval must be positive")
 	}
-	if q.RateLimit != nil {
-		if q.RateLimit.Limit <= 0 {
-			return models.NewInvalidOptionError(fmt.Sprintf("queue %s: rate limiter limit must be positive", q.Name))
-		}
-		if q.RateLimit.Period <= 0 {
-			return models.NewInvalidOptionError(fmt.Sprintf("queue %s: rate limiter period must be positive", q.Name))
-		}
+	if err := validateRateLimiter("rate limiter", q.RateLimit); err != nil {
+		return fail(err.Error())
+	}
+	if err := validateRateLimiter("partition rate limiter", q.PartitionRateLimit); err != nil {
+		return fail(err.Error())
+	}
+	return nil
+}
+
+func validateRateLimiter(name string, rl *RateLimiter) error {
+	if rl == nil {
+		return nil
+	}
+	if rl.Limit <= 0 {
+		return fmt.Errorf("%s limit must be positive", name)
+	}
+	if rl.Period <= 0 {
+		return fmt.Errorf("%s period must be positive", name)
 	}
 	return nil
 }
@@ -336,9 +496,13 @@ func (c *dbosContext) RegisterQueue(_ Client, name string, options ...QueueOptio
 	for _, option := range options {
 		option(&q)
 	}
+	if q.PartitionQueue && q.hasPartitionLimits() {
+		return nil, models.NewInvalidOptionError(fmt.Sprintf("queue %s: WithPartitionQueue is deprecated in favor of the partition limits; set only one of them", name))
+	}
 	if err := validateQueueConfig(&q); err != nil {
 		return nil, err
 	}
+	q.PartitionQueue = q.PartitionQueue || q.hasPartitionLimits()
 
 	// Resolve the conflict policy into whether an existing row should be overwritten.
 	var updateExisting bool

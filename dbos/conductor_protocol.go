@@ -700,30 +700,41 @@ type queueConductorOutput struct {
 	PartitionQueue     bool     `json:"partition_queue"`
 	PollingIntervalSec float64  `json:"polling_interval_sec"`
 	ApplicationName    *string  `json:"application_name"`
+
+	PartitionConcurrency        *int     `json:"partition_concurrency"`
+	PartitionWorkerConcurrency  *int     `json:"partition_worker_concurrency"`
+	PartitionRateLimitMax       *int     `json:"partition_rate_limit_max"`
+	PartitionRateLimitPeriodSec *float64 `json:"partition_rate_limit_period_sec"`
 }
 
-// toQueueConductorOutput renders a workflowQueue into its conductor wire shape.
+// toQueueConductorOutput renders the persisted columns, not the resolved limits.
 func toQueueConductorOutput(q Queue) queueConductorOutput {
+	wq := q.(*workflowQueue)
 	out := queueConductorOutput{
-		Name:              q.GetName(),
-		Concurrency:       q.GetGlobalConcurrency(),
-		WorkerConcurrency: q.GetWorkerConcurrency(),
-		PriorityEnabled:   q.GetPriorityEnabled(),
-		PartitionQueue:    q.GetPartitionQueue(),
+		Name:                       wq.Name,
+		Concurrency:                wq.GlobalConcurrency,
+		WorkerConcurrency:          wq.WorkerConcurrency,
+		PriorityEnabled:            wq.PriorityEnabled,
+		PartitionQueue:             wq.PartitionQueue,
+		PollingIntervalSec:         wq.basePollingInterval.Seconds(),
+		PartitionConcurrency:       wq.PartitionConcurrency,
+		PartitionWorkerConcurrency: wq.PartitionWorkerConcurrency,
 	}
-	if wq, ok := q.(*workflowQueue); ok {
-		out.PollingIntervalSec = wq.basePollingInterval.Seconds()
-	}
-	if rl := q.GetRateLimit(); rl != nil {
-		limit := rl.Limit
-		period := rl.Period.Seconds()
-		out.RateLimitMax = &limit
-		out.RateLimitPeriodSec = &period
-	}
-	if name := q.GetApplicationName(); name != "" {
-		out.ApplicationName = &name
+	out.RateLimitMax, out.RateLimitPeriodSec = rateLimitWire(wq.RateLimit)
+	out.PartitionRateLimitMax, out.PartitionRateLimitPeriodSec = rateLimitWire(wq.PartitionRateLimit)
+	if wq.ApplicationName != "" {
+		out.ApplicationName = &wq.ApplicationName
 	}
 	return out
+}
+
+func rateLimitWire(rl *RateLimiter) (*int, *float64) {
+	if rl == nil {
+		return nil, nil
+	}
+	limit := rl.Limit
+	period := rl.Period.Seconds()
+	return &limit, &period
 }
 
 type listQueuesConductorRequestBody struct {

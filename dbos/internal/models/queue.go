@@ -59,3 +59,47 @@ type QueueConfig struct {
 	DatabaseBacked             bool          `json:"-"`
 	ApplicationName            string        `json:"application_name,omitempty"`
 }
+
+// ResolvedQueueLimits holds every limit on a queue at the scope it is enforced at.
+type ResolvedQueueLimits struct {
+	GlobalConcurrency          *int
+	WorkerConcurrency          *int
+	RateLimit                  *RateLimiter
+	PartitionConcurrency       *int
+	PartitionWorkerConcurrency *int
+	PartitionRateLimit         *RateLimiter
+}
+
+// HasPartitionLimits reports whether any per-partition limit is set.
+func (q QueueConfig) HasPartitionLimits() bool {
+	return q.PartitionConcurrency != nil || q.PartitionWorkerConcurrency != nil || q.PartitionRateLimit != nil
+}
+
+// IsPartitioned reports whether the queue dequeues per partition key.
+func (q QueueConfig) IsPartitioned() bool {
+	return q.PartitionQueue || q.HasPartitionLimits()
+}
+
+// IsLegacyPartitioned reports the deprecated mode where the queue-wide limits apply per partition.
+func (q QueueConfig) IsLegacyPartitioned() bool {
+	return q.PartitionQueue && !q.HasPartitionLimits()
+}
+
+// ResolveLimits maps each limit to the scope it is enforced at.
+func (q QueueConfig) ResolveLimits() ResolvedQueueLimits {
+	if q.IsLegacyPartitioned() {
+		return ResolvedQueueLimits{
+			PartitionConcurrency:       q.GlobalConcurrency,
+			PartitionWorkerConcurrency: q.WorkerConcurrency,
+			PartitionRateLimit:         q.RateLimit,
+		}
+	}
+	return ResolvedQueueLimits{
+		GlobalConcurrency:          q.GlobalConcurrency,
+		WorkerConcurrency:          q.WorkerConcurrency,
+		RateLimit:                  q.RateLimit,
+		PartitionConcurrency:       q.PartitionConcurrency,
+		PartitionWorkerConcurrency: q.PartitionWorkerConcurrency,
+		PartitionRateLimit:         q.PartitionRateLimit,
+	}
+}
