@@ -5013,10 +5013,13 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		}
 		dequeuedIDs = append(dequeuedIDs, workflowID)
 	}
-
-	if len(dequeuedIDs) > 0 {
-		s.logger.Debug("attempting to dequeue task(s)", "queue_name", input.Queue.Name, "num_tasks", len(dequeuedIDs))
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read enqueued workflows: %w", err)
 	}
+	if len(dequeuedIDs) == 0 {
+		return nil, nil
+	}
+	s.logger.Debug("attempting to dequeue task(s)", "queue_name", input.Queue.Name, "num_tasks", len(dequeuedIDs))
 
 	// Claim the candidates in one statement: flip them to PENDING and count the
 	// dispatch, claiming unclaimed rows for this application.
