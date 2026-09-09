@@ -45,14 +45,17 @@ func (r *RateLimiter) UnmarshalJSON(data []byte) error {
 // QueueConfig is the persisted configuration of a workflow queue, as stored in
 // the queues table.
 type QueueConfig struct {
-	Name                string        `json:"name"`
-	WorkerConcurrency   *int          `json:"worker_concurrency,omitempty"`
-	GlobalConcurrency   *int          `json:"concurrency,omitempty"`
-	PriorityEnabled     bool          `json:"priority_enabled,omitempty"`
-	RateLimit           *RateLimiter  `json:"rate_limit,omitempty"`
-	PartitionQueue      bool          `json:"partition_queue,omitempty"`
-	BasePollingInterval time.Duration `json:"-"`
-	MaxPollingInterval  time.Duration `json:"-"`
-	DatabaseBacked      bool          `json:"-"`
-	ApplicationName     string        `json:"application_name,omitempty"`
+	Name                       string        `json:"name"`
+	WorkerConcurrency          *int          `json:"worker_concurrency,omitempty"`
+	GlobalConcurrency          *int          `json:"concurrency,omitempty"`
+	PriorityEnabled            bool          `json:"priority_enabled,omitempty"`
+	RateLimit                  *RateLimiter  `json:"rate_limit,omitempty"`
+	PartitionQueue             bool          `json:"partition_queue,omitempty"`
+	PartitionConcurrency       *int          `json:"partition_concurrency,omitempty"`
+	PartitionWorkerConcurrency *int          `json:"partition_worker_concurrency,omitempty"`
+	PartitionRateLimit         *RateLimiter  `json:"partition_rate_limit,omitempty"`
+	BasePollingInterval        time.Duration `json:"-"`
+	MaxPollingInterval         time.Duration `json:"-"`
+	DatabaseBacked             bool          `json:"-"`
+	ApplicationName            string        `json:"application_name,omitempty"`
 }
