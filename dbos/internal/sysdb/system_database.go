@@ -5186,20 +5186,28 @@ func (s *SysDB) ReenqueueForRecovery(ctx context.Context, executorIDs []string, 
 
 // GetQueuePartitions returns all unique partition keys for enqueued workflows in a queue.
 func (s *SysDB) GetQueuePartitions(ctx context.Context, queueName string) ([]string, error) {
-	appNameClause := ""
 	args := []any{queueName, models.WorkflowStatusEnqueued}
+	filter := fmt.Sprintf(`queue_name = $1 AND status = $2 AND status IN ('%s', '%s')`, models.WorkflowStatusEnqueued, models.WorkflowStatusPending)
 	if s.appName != "" {
 		args = append(args, s.appName)
-		appNameClause = ` AND ` + nameFilterSQL("application_name", len(args))
+		filter += ` AND ` + nameFilterSQL("application_name", len(args))
 	}
-	query := s.RenderSQL(`
-		SELECT DISTINCT queue_partition_key
-		FROM %sworkflow_status
-		WHERE queue_name = $1
-		  AND status = $2
-		  AND queue_partition_key IS NOT NULL`+appNameClause, s.dialect.SchemaPrefix(s.schema))
+	// Recursive-CTE to perform one index seek per distinct key, so the cost scales
+	// with the number of partitions rather than the backlog depth.
+	// note: queue_partition_key > partitions.pk simulates "IS NOT NULL".
+	table := s.dialect.SchemaPrefix(s.schema) + "workflow_status"
+	query := `
+		WITH RECURSIVE partitions(pk) AS (
+			SELECT MIN(queue_partition_key) FROM ` + table + `
+			WHERE ` + filter + ` AND queue_partition_key IS NOT NULL
+			UNION ALL
+			SELECT (SELECT MIN(queue_partition_key) FROM ` + table + `
+			        WHERE ` + filter + ` AND queue_partition_key > partitions.pk)
+			FROM partitions WHERE partitions.pk IS NOT NULL
+		)
+		SELECT pk FROM partitions WHERE pk IS NOT NULL`
 
-	rows, err := s.pool.Query(ctx, query, args...)
+	rows, err := s.pool.Query(ctx, s.dialect.RewriteQuery(query), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query queue partitions: %w", err)
 	}
