@@ -29,9 +29,9 @@ import (
 //     placeholders and a "%s" schema-prefix slot rendered via fmt.Sprintf.
 //     SQLite-flavor methods that diverge enough call dialect.RewriteQuery to
 //     convert $N → ?
-//   - SQL-level functions that don't exist in SQLite (gen_random_uuid,
-//     now()-epoch math) are not used in canonical queries; Go callers supply
-//     explicit values (uuid.NewString(), time.Now().UnixMilli()).
+//   - SQL-level functions that don't exist in SQLite (gen_random_uuid) are not
+//     used in canonical queries; Go callers supply explicit values. The database
+//     clock is the exception: NowMsSQL renders it per dialect.
 
 // DialectName identifies the backend. Stable string suitable for logging.
 type DialectName string
@@ -63,6 +63,9 @@ type Dialect interface {
 
 	// LockNoWait returns the "FOR UPDATE NOWAIT" fragment, or "".
 	LockNoWait() string
+
+	// NowMsSQL returns an expression for the database clock in epoch milliseconds.
+	NowMsSQL() string
 
 	// SnapshotIsolation returns the IsoLevel to request when a transaction
 	// needs snapshot-style semantics for queue dequeue. Postgres returns
@@ -197,6 +200,7 @@ func (PostgresDialect) SchemaPrefix(schema string) string {
 func (PostgresDialect) RewriteQuery(q string) string { return q }
 func (PostgresDialect) LockSkipLocked() string       { return "FOR UPDATE SKIP LOCKED" }
 func (PostgresDialect) LockNoWait() string           { return "FOR UPDATE NOWAIT" }
+func (PostgresDialect) NowMsSQL() string             { return "(EXTRACT(EPOCH FROM now()) * 1000)::bigint" }
 func (PostgresDialect) SnapshotIsolation() IsoLevel  { return IsoLevelRepeatableRead }
 func (PostgresDialect) QueueDequeueIsolation(snapshot bool) IsoLevel {
 	if snapshot {
@@ -344,8 +348,12 @@ func (SqliteDialect) RewriteQuery(q string) string {
 	return sqlitePlaceholderRe.ReplaceAllString(q, "?$1")
 }
 
-func (SqliteDialect) LockSkipLocked() string                { return "" }
-func (SqliteDialect) LockNoWait() string                    { return "" }
+func (SqliteDialect) LockSkipLocked() string { return "" }
+func (SqliteDialect) LockNoWait() string     { return "" }
+func (SqliteDialect) NowMsSQL() string {
+	// julianday keeps millisecond precision on every SQLite version, unlike unixepoch('subsec') (3.42+).
+	return "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
+}
 func (SqliteDialect) SnapshotIsolation() IsoLevel           { return IsoLevelDefault }
 func (SqliteDialect) QueueDequeueIsolation(_ bool) IsoLevel { return IsoLevelDefault }
 func (SqliteDialect) SupportsListenNotify() bool            { return false }

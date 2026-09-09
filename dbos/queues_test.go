@@ -1867,6 +1867,22 @@ func TestPartitionedQueues(t *testing.T) {
 	})
 }
 
+func TestCountActiveWorkflows(t *testing.T) {
+	ctx := &dbosContext{activeWorkflowIDs: &sync.Map{}}
+	ctx.activeWorkflowIDs.Store("a", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})
+	ctx.activeWorkflowIDs.Store("b", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})
+	ctx.activeWorkflowIDs.Store("c", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p2"})
+	ctx.activeWorkflowIDs.Store("d", activeWorkflowEntry{queueName: "q"})
+	ctx.activeWorkflowIDs.Store("e", activeWorkflowEntry{queueName: "other", queuePartitionKey: "p1"})
+
+	require.Equal(t, 4, ctx.countActiveWorkflowsForQueue("q"))
+	require.Equal(t, 2, ctx.countActiveWorkflowsForPartition("q", "p1"))
+	require.Equal(t, 1, ctx.countActiveWorkflowsForPartition("q", "p2"))
+	require.Equal(t, 1, ctx.countActiveWorkflowsForPartition("q", ""))
+	require.Equal(t, 0, ctx.countActiveWorkflowsForQueue("missing"))
+	require.Equal(t, 0, (&dbosContext{}).countActiveWorkflowsForQueue("q"))
+}
+
 func TestNewQueueRunner(t *testing.T) {
 	t.Run("init queue runner", func(t *testing.T) {
 		runner := newQueueRunner(slog.New(slog.NewTextHandler(os.Stdout, nil)))

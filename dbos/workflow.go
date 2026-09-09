@@ -783,16 +783,26 @@ type activeWorkflowEntry struct {
 	queuePartitionKey string
 }
 
-func (c *dbosContext) countActiveWorkflowsForQueue(queueName, queuePartitionKey string) int {
+// countActiveWorkflowsForQueue counts this executor's running workflows on a queue, across every partition.
+func (c *dbosContext) countActiveWorkflowsForQueue(queueName string) int {
+	return c.countActiveWorkflows(func(e activeWorkflowEntry) bool { return e.queueName == queueName })
+}
+
+// countActiveWorkflowsForPartition counts this executor's running workflows on one partition of a queue.
+func (c *dbosContext) countActiveWorkflowsForPartition(queueName, queuePartitionKey string) int {
+	return c.countActiveWorkflows(func(e activeWorkflowEntry) bool {
+		return e.queueName == queueName && e.queuePartitionKey == queuePartitionKey
+	})
+}
+
+func (c *dbosContext) countActiveWorkflows(match func(activeWorkflowEntry) bool) int {
 	if c.activeWorkflowIDs == nil {
 		return 0
 	}
 	count := 0
 	c.activeWorkflowIDs.Range(func(_, value any) bool {
-		if entry, ok := value.(activeWorkflowEntry); ok {
-			if entry.queueName == queueName && entry.queuePartitionKey == queuePartitionKey {
-				count++
-			}
+		if entry, ok := value.(activeWorkflowEntry); ok && match(entry) {
+			count++
 		}
 		return true
 	})

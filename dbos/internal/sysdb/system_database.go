@@ -4823,17 +4823,15 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	// Rate limiter: count workflows started within the limiter period.
 	var numRecentQueries int
 	if input.Queue.RateLimit != nil {
-		cutoffTimeMs := time.Now().Add(-input.Queue.RateLimit.Period).UnixMilli()
-
 		limiterQuery := s.RenderSQL(`
 		SELECT COUNT(*)
 		FROM %sworkflow_status
 		WHERE queue_name = $1
 		  AND rate_limited = TRUE
 		  AND status NOT IN ($2, $3)
-		  AND started_at_epoch_ms > $4`, schemaPrefix)
+		  AND started_at_epoch_ms > `+s.dialect.NowMsSQL()+` - $4`, schemaPrefix)
 
-		limiterArgs := []any{input.Queue.Name, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, cutoffTimeMs}
+		limiterArgs := []any{input.Queue.Name, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, input.Queue.RateLimit.Period.Milliseconds()}
 		if s.appName != "" {
 			limiterArgs = append(limiterArgs, s.appName)
 			limiterQuery += ` AND ` + nameFilterSQL("application_name", len(limiterArgs))
@@ -4996,13 +4994,14 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		    application_name = COALESCE(application_name, $8)`
 		claimClause = ` AND ` + nameFilterSQL("application_name", 8)
 	}
+	nowMs := s.dialect.NowMsSQL()
 	updateQuery := s.RenderSQL(`
 		UPDATE %sworkflow_status
 		SET status = $1,
 		    application_version = $2,
 		    executor_id = $3,
-		    started_at_epoch_ms = $4,
-		    updated_at = $4,
+		    started_at_epoch_ms = `+nowMs+`,
+		    updated_at = `+nowMs+`,
 		    rate_limited = $5,
 		    recovery_attempts = recovery_attempts + 1,
 		    workflow_deadline_epoch_ms = CASE
