@@ -4129,10 +4129,9 @@ func (s *SysDB) pollEvents(ctx context.Context) {
 
 const NullTopic = "__null__topic__"
 
-const (
-	sendInsertCols  = 6
-	sendInsertChunk = 1000 // 1000*6 bind params, under Postgres 65535
-)
+// Default stays under sqlite (32766) and postgres (65535) bind-parameter limits
+// at 6 columns per row.
+const _DEFAULT_BULK_SEND_BATCH_SIZE = 5000
 
 // WorkflowSendRow is one notification to insert. Message must be *string (already encoded).
 type WorkflowSendRow struct {
@@ -4144,11 +4143,13 @@ type WorkflowSendRow struct {
 }
 
 type WorkflowSendInput struct {
-	Messages []WorkflowSendRow
-	Tx       Tx
+	Messages  []WorkflowSendRow
+	Tx        Tx
+	BatchSize int // rows per INSERT; 0 means _DEFAULT_BULK_SEND_BATCH_SIZE
 }
 
-// Send inserts one or more notifications in a single round-trip.
+// Send inserts one or more notifications. Multiple INSERT chunks run in one
+// transaction so a later-chunk failure rolls back the whole batch.
 // Can be called both within a workflow (as a step) or outside a workflow (directly).
 // When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution.
 func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
@@ -4161,24 +4162,48 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		}
 	}
 
-	exec := Querier(s.pool)
-	if input.Tx != nil {
-		exec = input.Tx
+	batchSize := input.BatchSize
+	if batchSize <= 0 {
+		batchSize = _DEFAULT_BULK_SEND_BATCH_SIZE
+	}
+
+	tx := input.Tx
+	if tx == nil && len(input.Messages) > batchSize {
+		var err error
+		tx, err = s.pool.BeginTx(ctx, TxOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for send: %w", err)
+		}
+		defer tx.Rollback(ctx)
+	}
+
+	var exec Querier = s.pool
+	if tx != nil {
+		exec = tx
 	}
 
 	baseMs := time.Now().UnixMilli()
-	for start := 0; start < len(input.Messages); start += sendInsertChunk {
-		end := min(start+sendInsertChunk, len(input.Messages))
+	for start := 0; start < len(input.Messages); start += batchSize {
+		end := min(start+batchSize, len(input.Messages))
 		if err := s.insertNotificationChunk(ctx, exec, input.Messages[start:end], baseMs+int64(start)); err != nil {
 			return err
+		}
+	}
+
+	if input.Tx == nil && tx != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit send transaction: %w", err)
 		}
 	}
 	return nil
 }
 
 func (s *SysDB) insertNotificationChunk(ctx context.Context, exec Querier, msgs []WorkflowSendRow, baseMs int64) error {
+	cols := []string{"destination_uuid", "topic", "message", "serialization", "message_uuid", "created_at_epoch_ms"}
+	nCols := len(cols)
+
 	valueRows := make([]string, 0, len(msgs))
-	args := make([]any, 0, len(msgs)*sendInsertCols)
+	args := make([]any, 0, len(msgs)*nCols)
 	destIDs := make([]string, 0, len(msgs))
 	seenDest := map[string]struct{}{}
 
@@ -4192,8 +4217,11 @@ func (s *SysDB) insertNotificationChunk(ctx context.Context, exec Querier, msgs 
 			messageUUID = fmt.Sprintf("%s::%s", m.IdempotencyKey, m.DestinationID)
 		}
 		base := len(args)
-		valueRows = append(valueRows, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)",
-			base+1, base+2, base+3, base+4, base+5, base+6))
+		placeholders := make([]string, nCols)
+		for j := range nCols {
+			placeholders[j] = fmt.Sprintf("$%d", base+j+1)
+		}
+		valueRows = append(valueRows, "("+strings.Join(placeholders, ", ")+")")
 		args = append(args, m.DestinationID, topic, m.Message, m.Serialization, messageUUID, baseMs+int64(i))
 		if _, ok := seenDest[m.DestinationID]; !ok {
 			seenDest[m.DestinationID] = struct{}{}
@@ -4205,7 +4233,7 @@ func (s *SysDB) insertNotificationChunk(ctx context.Context, exec Querier, msgs 
 	// message_uuid is deterministic, so a retried Send inserts at most once. Without
 	// a key the random UUID never collides, so the clause is a no-op.
 	insertQuery := s.RenderSQL(
-		`INSERT INTO %snotifications (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms) VALUES `+
+		`INSERT INTO %snotifications (`+strings.Join(cols, ", ")+`) VALUES `+
 			strings.Join(valueRows, ", ")+` ON CONFLICT (message_uuid) DO NOTHING`,
 		s.dialect.SchemaPrefix(s.schema))
 

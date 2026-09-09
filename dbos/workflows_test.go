@@ -5246,6 +5246,40 @@ func TestSendBulk(t *testing.T) {
 		require.Equal(t, "<timeout>", got, "valid destination must also roll back")
 	})
 
+	t.Run("MultiBatchSucceeds", func(t *testing.T) {
+		h, err := RunWorkflow(dbosCtx, receiveTwiceShortWorkflow, "bulk-multibatch")
+		require.NoError(t, err)
+
+		require.NoError(t, SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: h.GetWorkflowID(), Message: "a", Topic: "bulk-multibatch"},
+			{DestinationID: h.GetWorkflowID(), Message: "b", Topic: "bulk-multibatch"},
+		}, WithSendBulkBatchSize(1)))
+
+		got, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "a|b", got)
+	})
+
+	t.Run("MultiBatchFailureIsAtomic", func(t *testing.T) {
+		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-multibatch-atomic")
+		require.NoError(t, err)
+
+		err = SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: h.GetWorkflowID(), Message: "should-rollback", Topic: "bulk-multibatch-atomic"},
+			{DestinationID: "does-not-exist", Message: "x", Topic: "bulk-multibatch-atomic"},
+		}, WithSendBulkBatchSize(1))
+		require.ErrorIs(t, err, ErrNonExistentWorkflow)
+
+		sysDB := dbosCtx.(*dbosContext).systemDB
+		rows, err := sysDB.GetAllNotifications(context.Background(), h.GetWorkflowID())
+		require.NoError(t, err)
+		require.Empty(t, rows, "first batch must roll back when a later batch fails")
+
+		got, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "<timeout>", got, "valid destination must also roll back")
+	})
+
 	t.Run("DuplicateIdempotencyKeyRejected", func(t *testing.T) {
 		err := SendBulk(dbosCtx, []SendMessage{
 			{DestinationID: "dest", Message: "a", Topic: "t", IdempotencyKey: "dup"},
@@ -5324,7 +5358,38 @@ func TestSendBulk(t *testing.T) {
 			{DestinationID: "dest", Message: "m", Topic: "t"},
 		}, WithIdempotencyKey("k"))
 		require.ErrorIs(t, err, ErrInvalidOption)
-		require.Contains(t, err.Error(), "WithIdempotencyKey is per-message")
+		require.Contains(t, err.Error(), "WithIdempotencyKey is per-message; set SendMessage.IdempotencyKey when using SendBulk")
+	})
+
+	t.Run("RejectsNonPositiveBatchSize", func(t *testing.T) {
+		err := SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: "dest", Message: "m", Topic: "t"},
+		}, WithSendBulkBatchSize(0))
+		require.ErrorIs(t, err, ErrInvalidOption)
+		require.Contains(t, err.Error(), "WithSendBulkBatchSize must be positive")
+
+		err = SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: "dest", Message: "m", Topic: "t"},
+		}, WithSendBulkBatchSize(-1))
+		require.ErrorIs(t, err, ErrInvalidOption)
+	})
+
+	t.Run("WithSendBulkBatchSizeOnSendWarns", func(t *testing.T) {
+		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-size-on-send")
+		require.NoError(t, err)
+
+		ctx := dbosCtx.(*dbosContext)
+		var buf bytes.Buffer
+		prev := ctx.logger
+		ctx.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		t.Cleanup(func() { ctx.logger = prev })
+
+		require.NoError(t, Send(dbosCtx, h.GetWorkflowID(), "ok", "bulk-size-on-send", WithSendBulkBatchSize(1)))
+		require.Contains(t, buf.String(), "WithSendBulkBatchSize is a bulk-only option")
+
+		got, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "ok", got)
 	})
 
 	t.Run("ReplayDoesNotResend", func(t *testing.T) {
