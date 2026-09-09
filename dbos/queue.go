@@ -858,7 +858,7 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 		// Dequeue from each partition (or once for non-partitioned queues)
 		if !skipDequeue {
 			// Give an equal chance to each partition to be dequeued to avoid starvation.
-			rand.Shuffle(len(partitionKeys), func(i, j int) { partitionKeys[i], partitionKeys[j] = partitionKeys[j], partitionKeys[i] })
+			rand.Shuffle(len(partitionKeys), func(i, j int) { partitionKeys[i], partitionKeys[j] = partitionKeys[j], partitionKeys[i] }) // #nosec G404 -- non-crypto shuffle; acceptable
 			limits := queue.resolveLimits()
 			running := ctx.countActiveWorkflowsForQueue(queue.Name)
 			var dequeuedIDs []string
