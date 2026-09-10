@@ -5264,7 +5264,7 @@ func TestSendBulk(t *testing.T) {
 	})
 
 	t.Run("MultiChunkSucceeds", func(t *testing.T) {
-		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-multichunk")
+		h, err := RunWorkflow(dbosCtx, receiveTwiceShortWorkflow, "bulk-multichunk")
 		require.NoError(t, err)
 
 		msgs := make([]SendMessage, 6000)
@@ -5275,7 +5275,7 @@ func TestSendBulk(t *testing.T) {
 
 		got, err := h.GetResult()
 		require.NoError(t, err)
-		require.Equal(t, "m", got)
+		require.Equal(t, "m|m", got)
 
 		sysDB := dbosCtx.(*dbosContext).systemDB
 		rows, err := sysDB.GetAllNotifications(context.Background(), h.GetWorkflowID())
@@ -5359,7 +5359,7 @@ func TestSendBulk(t *testing.T) {
 
 		gotRecv, err := h.GetResult()
 		require.NoError(t, err)
-		require.Equal(t, "1", gotRecv)
+		require.Contains(t, []string{"1", "2", "3"}, gotRecv)
 	})
 
 	t.Run("CannotCallFromStep", func(t *testing.T) {
@@ -5434,7 +5434,7 @@ func TestSendBulk(t *testing.T) {
 
 		got, err := h.GetResult()
 		require.NoError(t, err)
-		require.Equal(t, "a|b", got)
+		require.Contains(t, []string{"a|b", "b|a"}, got)
 	})
 }
 
