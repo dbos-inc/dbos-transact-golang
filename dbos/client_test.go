@@ -2564,6 +2564,20 @@ func TestClientSend(t *testing.T) {
 		require.Contains(t, result, "c-a")
 		require.Contains(t, result, "c-b")
 	})
+
+	t.Run("SendBulkDelivers", func(t *testing.T) {
+		handle, err := RunWorkflow(serverCtx, receiveTwiceShortWorkflow, "client-bulk-topic")
+		require.NoError(t, err)
+
+		require.NoError(t, client.SendBulk(client, []SendMessage{
+			{DestinationID: handle.GetWorkflowID(), Message: "bulk-a", Topic: "client-bulk-topic"},
+			{DestinationID: handle.GetWorkflowID(), Message: "bulk-b", Topic: "client-bulk-topic"},
+		}))
+
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Contains(t, []string{"bulk-a|bulk-b", "bulk-b|bulk-a"}, result)
+	})
 }
 
 // TestClientGetEvent verifies ClientGetEvent decodes an event value into the

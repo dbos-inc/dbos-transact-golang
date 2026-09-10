@@ -4545,6 +4545,7 @@ func TestSendRecv(t *testing.T) {
 	RegisterWorkflow(dbosCtx, receiveIdempotencyWorkflow)
 	RegisterWorkflow(dbosCtx, workflowThatCallsSendInStep)
 	RegisterWorkflow(dbosCtx, recvContextCancelWorkflow)
+	RegisterWorkflow(dbosCtx, receiveOneShortWorkflow)
 
 	Launch(dbosCtx)
 
@@ -4607,6 +4608,17 @@ func TestSendRecv(t *testing.T) {
 			require.True(t, step.CompletedAt.After(step.StartedAt) || step.CompletedAt.Equal(step.StartedAt),
 				"expected recv step %d CompletedAt to be after or equal to StartedAt", i)
 		}
+	})
+
+	t.Run("SendRecvNullTopic", func(t *testing.T) {
+		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "")
+		require.NoError(t, err)
+
+		require.NoError(t, Send(dbosCtx, h.GetWorkflowID(), "no-topic", ""))
+
+		got, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "no-topic", got)
 	})
 
 	t.Run("SendRecvCustomStruct", func(t *testing.T) {
