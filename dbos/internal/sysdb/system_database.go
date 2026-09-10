@@ -4129,53 +4129,157 @@ func (s *SysDB) pollEvents(ctx context.Context) {
 
 const NullTopic = "__null__topic__"
 
-type WorkflowSendInput struct {
+const (
+	_NOTIFICATION_COLUMNS = 6
+	_SEND_CHUNK_SIZE      = 5000
+)
+
+// WorkflowSendRow is one notification to insert. Message must be *string (already encoded).
+type WorkflowSendRow struct {
 	DestinationID  string
 	Message        any
 	Topic          string
-	Tx             Tx
 	Serialization  string
 	IdempotencyKey string
 }
 
-// Send is a special type of step that sends a message to another workflow.
+type WorkflowSendInput struct {
+	Messages []WorkflowSendRow
+	Tx       Tx
+}
+
+// Send inserts one or more notifications. SQLite chunks them in one transaction.
 // Can be called both within a workflow (as a step) or outside a workflow (directly).
-// When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution
+// When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution.
 func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
-	if _, ok := input.Message.(*string); !ok {
-		return fmt.Errorf("message must be a pointer to a string")
+	if len(input.Messages) == 0 {
+		return nil
 	}
-
-	// Set default topic if not provided
-	topic := NullTopic
-	if len(input.Topic) > 0 {
-		topic = input.Topic
-	}
-
-	// ON CONFLICT DO NOTHING makes Send idempotent: with an idempotency key the
-	// message_uuid is deterministic, so a retried Send inserts at most once. Without
-	// a key the random UUID never collides, so the clause is a no-op.
-	insertQuery := s.RenderSQL(`INSERT INTO %snotifications (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (message_uuid) DO NOTHING`, s.dialect.SchemaPrefix(s.schema))
-	messageUUID := uuid.NewString()
-	if input.IdempotencyKey != "" {
-		messageUUID = fmt.Sprintf("%s::%s", input.IdempotencyKey, input.DestinationID)
-	}
-	createdAtMs := time.Now().UnixMilli()
-	var err error
-	if input.Tx != nil {
-		_, err = input.Tx.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message, input.Serialization, messageUUID, createdAtMs)
-	} else {
-		_, err = s.pool.Exec(ctx, insertQuery, input.DestinationID, topic, input.Message, input.Serialization, messageUUID, createdAtMs)
-	}
-	if err != nil {
-		s.logger.Error("failed to insert notification", "error", err, "query", insertQuery, "destination_id", input.DestinationID, "topic", topic, "message", input.Message)
-		// Check for foreign key violation (destination workflow doesn't exist)
-		if s.dialect.IsForeignKeyViolation(err) {
-			return models.NewNonExistentWorkflowError(input.DestinationID)
+	for i, m := range input.Messages {
+		if _, ok := m.Message.(*string); !ok {
+			return fmt.Errorf("message[%d] must be a pointer to a string", i)
 		}
-		return fmt.Errorf("failed to insert notification: %w", err)
+	}
+
+	createdAtMs := time.Now().UnixMilli()
+
+	// PG and CockroachDB support array parameters, so we can insert all notifications in one query.
+	if s.dialect.SupportsArrayParameters() {
+		var exec Querier = s.pool
+		if input.Tx != nil {
+			exec = input.Tx
+		}
+		return s.insertNotificationsArrays(ctx, exec, input.Messages, createdAtMs)
+	}
+
+	tx := input.Tx
+	if tx == nil && len(input.Messages) > _SEND_CHUNK_SIZE {
+		var err error
+		tx, err = s.pool.BeginTx(ctx, TxOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for send: %w", err)
+		}
+		defer tx.Rollback(ctx)
+	}
+
+	var exec Querier = s.pool
+	if tx != nil {
+		exec = tx
+	}
+
+	for start := 0; start < len(input.Messages); start += _SEND_CHUNK_SIZE {
+		end := min(start+_SEND_CHUNK_SIZE, len(input.Messages))
+		if err := s.insertNotificationChunk(ctx, exec, input.Messages[start:end], createdAtMs); err != nil {
+			return err
+		}
+	}
+
+	if input.Tx == nil && tx != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit send transaction: %w", err)
+		}
 	}
 	return nil
+}
+
+func notificationKey(m WorkflowSendRow) (topic, messageUUID string) {
+	topic = NullTopic
+	if len(m.Topic) > 0 {
+		topic = m.Topic
+	}
+	messageUUID = uuid.NewString()
+	if m.IdempotencyKey != "" {
+		messageUUID = fmt.Sprintf("%s::%s", m.IdempotencyKey, m.DestinationID)
+	}
+	return topic, messageUUID
+}
+
+func (s *SysDB) insertNotificationsArrays(ctx context.Context, exec Querier, msgs []WorkflowSendRow, createdAtMs int64) error {
+	n := len(msgs)
+	dests := make([]string, n)
+	topics := make([]string, n)
+	messages := make([]string, n)
+	serializations := make([]string, n)
+	uuids := make([]string, n)
+	createdAts := make([]int64, n)
+	for i, m := range msgs {
+		dests[i] = m.DestinationID
+		topics[i], uuids[i] = notificationKey(m)
+		messages[i] = *m.Message.(*string)
+		serializations[i] = m.Serialization
+		createdAts[i] = createdAtMs
+	}
+
+	insertQuery := s.RenderSQL(`INSERT INTO %snotifications (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms)
+		SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[])
+		ON CONFLICT (message_uuid) DO NOTHING`, s.dialect.SchemaPrefix(s.schema))
+
+	if _, err := exec.Exec(ctx, insertQuery, dests, topics, messages, serializations, uuids, createdAts); err != nil {
+		return s.notificationInsertError(err, msgs)
+	}
+	return nil
+}
+
+func (s *SysDB) insertNotificationChunk(ctx context.Context, exec Querier, msgs []WorkflowSendRow, createdAtMs int64) error {
+	const nCols = _NOTIFICATION_COLUMNS
+	valueRows := make([]string, 0, len(msgs))
+	args := make([]any, 0, len(msgs)*nCols)
+	for _, m := range msgs {
+		topic, messageUUID := notificationKey(m)
+		base := len(args)
+		placeholders := make([]string, nCols)
+		for j := range nCols {
+			placeholders[j] = fmt.Sprintf("$%d", base+j+1)
+		}
+		valueRows = append(valueRows, "("+strings.Join(placeholders, ", ")+")")
+		args = append(args, m.DestinationID, topic, m.Message, m.Serialization, messageUUID, createdAtMs)
+	}
+
+	insertQuery := s.RenderSQL(
+		`INSERT INTO %snotifications (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms) VALUES `+
+			strings.Join(valueRows, ", ")+` ON CONFLICT (message_uuid) DO NOTHING`,
+		s.dialect.SchemaPrefix(s.schema))
+
+	if _, err := exec.Exec(ctx, insertQuery, args...); err != nil {
+		return s.notificationInsertError(err, msgs)
+	}
+	return nil
+}
+
+func (s *SysDB) notificationInsertError(err error, msgs []WorkflowSendRow) error {
+	if !s.dialect.IsForeignKeyViolation(err) {
+		s.logger.Error("failed to insert notifications", "error", err, "count", len(msgs))
+		return fmt.Errorf("failed to insert notification: %w", err)
+	}
+	dests := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		dests = append(dests, m.DestinationID)
+	}
+	slices.Sort(dests)
+	return &models.Error{
+		Message: fmt.Sprintf("one of the workflows %s does not exist", strings.Join(slices.Compact(dests), ", ")),
+		Code:    models.ErrorCodeNonExistentWorkflow,
+	}
 }
 
 // NotificationWaiter tracks a waiter registered for a notification (recv message or workflow event).
