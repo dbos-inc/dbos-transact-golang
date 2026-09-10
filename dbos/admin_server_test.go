@@ -1117,6 +1117,23 @@ func mustMarshal(v any) []byte {
 	return data
 }
 
+func TestToListWorkflowResponseIncludesAttributes(t *testing.T) {
+	response, err := toListWorkflowResponse(WorkflowStatus{
+		ID:     "test-workflow-id",
+		Status: WorkflowStatusSuccess,
+		Attributes: map[string]any{
+			"customer": "acme",
+			"tier":     1,
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"customer": "acme",
+		"tier":     1,
+	}, response["Attributes"])
+}
+
 // TestListWorkflowsRequestStatusDecoding verifies the status filter accepts both
 // a single string ("X") and an array of strings (["X","Y"]), matching the
 // contract used by the DBOS console and the Python/TypeScript SDKs.

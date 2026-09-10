@@ -165,6 +165,9 @@ func toListWorkflowResponse(ws WorkflowStatus) (map[string]any, error) {
 		"QueuePartitionKey":  ws.QueuePartitionKey,
 		"Input":              ws.Input,
 	}
+	if len(ws.Attributes) > 0 {
+		result["Attributes"] = ws.Attributes
+	}
 
 	formatEpochMs := func(t time.Time) any {
 		if t.IsZero() {
