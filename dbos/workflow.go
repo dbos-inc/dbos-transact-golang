@@ -3306,7 +3306,7 @@ func Send[P any](ctx Client, destinationID string, message P, topic string, opts
 	return ctx.Send(ctx, destinationID, message, topic, opts...)
 }
 
-// SendBulk sends many messages in one database round-trip. Destinations may differ.
+// SendBulk sends many messages at once. Destinations may differ.
 // The batch is atomic: if any destination does not exist, no message is sent.
 // Inside a workflow the batch is one durable step ("DBOS.sendBulk"); replay does not re-insert.
 //
