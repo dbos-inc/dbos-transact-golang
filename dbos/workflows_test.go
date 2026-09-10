@@ -4676,7 +4676,7 @@ func TestSendRecv(t *testing.T) {
 		require.Error(t, err, "expected error when sending to non-existent UUID but got none")
 		require.True(t, errors.Is(err, ErrNonExistentWorkflow), "expected error to be ErrorCodeNonExistentWorkflow, got %T", err)
 
-		expectedErrorMsg := fmt.Sprintf("workflow %s does not exist", destUUID)
+		expectedErrorMsg := fmt.Sprintf("one of the workflows %s does not exist", destUUID)
 		require.Contains(t, err.Error(), expectedErrorMsg)
 	})
 
@@ -5217,7 +5217,7 @@ func TestSendBulk(t *testing.T) {
 		require.Equal(t, "to-b", gotB)
 	})
 
-	t.Run("SameDestinationFIFO", func(t *testing.T) {
+	t.Run("SameDestinationBothDelivered", func(t *testing.T) {
 		h, err := RunWorkflow(dbosCtx, receiveTwiceShortWorkflow, "bulk-fifo")
 		require.NoError(t, err)
 
@@ -5228,52 +5228,65 @@ func TestSendBulk(t *testing.T) {
 
 		got, err := h.GetResult()
 		require.NoError(t, err)
-		require.Equal(t, "a|b", got)
+		require.Contains(t, []string{"a|b", "b|a"}, got)
 	})
 
 	t.Run("MissingDestinationIsAtomic", func(t *testing.T) {
 		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-atomic")
 		require.NoError(t, err)
 
+		other, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-atomic-other")
+		require.NoError(t, err)
+
 		err = SendBulk(dbosCtx, []SendMessage{
 			{DestinationID: h.GetWorkflowID(), Message: "should-rollback", Topic: "bulk-atomic"},
+			{DestinationID: other.GetWorkflowID(), Message: "should-rollback", Topic: "bulk-atomic-other"},
 			{DestinationID: "does-not-exist", Message: "x", Topic: "bulk-atomic"},
 		})
 		require.ErrorIs(t, err, ErrNonExistentWorkflow)
+		require.Contains(t, err.Error(), "does-not-exist")
 
 		got, err := h.GetResult()
 		require.NoError(t, err)
 		require.Equal(t, "<timeout>", got, "valid destination must also roll back")
 	})
 
-	t.Run("MultiBatchSucceeds", func(t *testing.T) {
-		h, err := RunWorkflow(dbosCtx, receiveTwiceShortWorkflow, "bulk-multibatch")
+	t.Run("MultiChunkSucceeds", func(t *testing.T) {
+		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-multichunk")
 		require.NoError(t, err)
 
-		require.NoError(t, SendBulk(dbosCtx, []SendMessage{
-			{DestinationID: h.GetWorkflowID(), Message: "a", Topic: "bulk-multibatch"},
-			{DestinationID: h.GetWorkflowID(), Message: "b", Topic: "bulk-multibatch"},
-		}, WithSendBulkBatchSize(1)))
+		msgs := make([]SendMessage, 6000)
+		for i := range msgs {
+			msgs[i] = SendMessage{DestinationID: h.GetWorkflowID(), Message: "m", Topic: "bulk-multichunk"}
+		}
+		require.NoError(t, SendBulk(dbosCtx, msgs))
 
 		got, err := h.GetResult()
 		require.NoError(t, err)
-		require.Equal(t, "a|b", got)
+		require.Equal(t, "m", got)
+
+		sysDB := dbosCtx.(*dbosContext).systemDB
+		rows, err := sysDB.GetAllNotifications(context.Background(), h.GetWorkflowID())
+		require.NoError(t, err)
+		require.Len(t, rows, 6000)
 	})
 
-	t.Run("MultiBatchFailureIsAtomic", func(t *testing.T) {
-		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-multibatch-atomic")
+	t.Run("MultiChunkFailureIsAtomic", func(t *testing.T) {
+		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-multichunk-atomic")
 		require.NoError(t, err)
 
-		err = SendBulk(dbosCtx, []SendMessage{
-			{DestinationID: h.GetWorkflowID(), Message: "should-rollback", Topic: "bulk-multibatch-atomic"},
-			{DestinationID: "does-not-exist", Message: "x", Topic: "bulk-multibatch-atomic"},
-		}, WithSendBulkBatchSize(1))
+		msgs := make([]SendMessage, 6000)
+		for i := range msgs {
+			msgs[i] = SendMessage{DestinationID: h.GetWorkflowID(), Message: "should-rollback", Topic: "bulk-multichunk-atomic"}
+		}
+		msgs[len(msgs)-1].DestinationID = "does-not-exist"
+		err = SendBulk(dbosCtx, msgs)
 		require.ErrorIs(t, err, ErrNonExistentWorkflow)
 
 		sysDB := dbosCtx.(*dbosContext).systemDB
 		rows, err := sysDB.GetAllNotifications(context.Background(), h.GetWorkflowID())
 		require.NoError(t, err)
-		require.Empty(t, rows, "first batch must roll back when a later batch fails")
+		require.Empty(t, rows, "first chunk must roll back when a later chunk fails")
 
 		got, err := h.GetResult()
 		require.NoError(t, err)
@@ -5361,35 +5374,14 @@ func TestSendBulk(t *testing.T) {
 		require.Contains(t, err.Error(), "WithIdempotencyKey is per-message; set SendMessage.IdempotencyKey when using SendBulk")
 	})
 
-	t.Run("RejectsNonPositiveBatchSize", func(t *testing.T) {
-		err := SendBulk(dbosCtx, []SendMessage{
-			{DestinationID: "dest", Message: "m", Topic: "t"},
-		}, WithSendBulkBatchSize(0))
+	t.Run("RejectsTooManyMessages", func(t *testing.T) {
+		msgs := make([]SendMessage, MaxSendBulkMessages+1)
+		for i := range msgs {
+			msgs[i] = SendMessage{DestinationID: "does-not-exist", Message: "m", Topic: "t"}
+		}
+		err := SendBulk(dbosCtx, msgs)
 		require.ErrorIs(t, err, ErrInvalidOption)
-		require.Contains(t, err.Error(), "WithSendBulkBatchSize must be positive")
-
-		err = SendBulk(dbosCtx, []SendMessage{
-			{DestinationID: "dest", Message: "m", Topic: "t"},
-		}, WithSendBulkBatchSize(-1))
-		require.ErrorIs(t, err, ErrInvalidOption)
-	})
-
-	t.Run("WithSendBulkBatchSizeOnSendWarns", func(t *testing.T) {
-		h, err := RunWorkflow(dbosCtx, receiveOneShortWorkflow, "bulk-size-on-send")
-		require.NoError(t, err)
-
-		ctx := dbosCtx.(*dbosContext)
-		var buf bytes.Buffer
-		prev := ctx.logger
-		ctx.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-		t.Cleanup(func() { ctx.logger = prev })
-
-		require.NoError(t, Send(dbosCtx, h.GetWorkflowID(), "ok", "bulk-size-on-send", WithSendBulkBatchSize(1)))
-		require.Contains(t, buf.String(), "WithSendBulkBatchSize is a bulk-only option")
-
-		got, err := h.GetResult()
-		require.NoError(t, err)
-		require.Equal(t, "ok", got)
+		require.Contains(t, err.Error(), fmt.Sprintf("SendBulk accepts at most %d messages", MaxSendBulkMessages))
 	})
 
 	t.Run("ReplayDoesNotResend", func(t *testing.T) {

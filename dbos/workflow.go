@@ -3106,8 +3106,6 @@ type sendOptions struct {
 	idempotencyKey        string
 	tx                    any
 	txSet                 bool
-	batchSize             int
-	batchSizeSet          bool
 }
 
 // SendOption is a functional option for configuring a Send call.
@@ -3157,17 +3155,8 @@ func WithSendTransaction(tx any) SendOption {
 	}
 }
 
-// WithSendBulkBatchSize sets how many notification rows each INSERT writes
-// during SendBulk. The default is 5000, which stays under SQLite and Postgres
-// bind-parameter limits. n must be positive.
-//
-// This option has no effect on Send; using it there logs a warning.
-func WithSendBulkBatchSize(n int) SendOption {
-	return func(opts *sendOptions) {
-		opts.batchSize = n
-		opts.batchSizeSet = true
-	}
-}
+// MaxSendBulkMessages is the most messages one SendBulk call accepts.
+const MaxSendBulkMessages = 10_000
 
 const (
 	sendStepName     = "DBOS.send"
@@ -3189,11 +3178,6 @@ func (c *dbosContext) Send(_ Client, destinationID string, message any, topic st
 	for _, opt := range opts {
 		opt(options)
 	}
-	if options.batchSizeSet {
-		c.logger.Warn("WithSendBulkBatchSize is a bulk-only option and has no effect on Send")
-		options.batchSize = 0
-		options.batchSizeSet = false
-	}
 	return c.sendMessages([]SendMessage{{
 		DestinationID:  destinationID,
 		Message:        message,
@@ -3210,8 +3194,8 @@ func (c *dbosContext) SendBulk(_ Client, messages []SendMessage, opts ...SendOpt
 	if options.idempotencyKey != "" {
 		return models.NewInvalidOptionError("WithIdempotencyKey is per-message; set SendMessage.IdempotencyKey when using SendBulk")
 	}
-	if options.batchSizeSet && options.batchSize <= 0 {
-		return models.NewInvalidOptionError("WithSendBulkBatchSize must be positive")
+	if len(messages) > MaxSendBulkMessages {
+		return models.NewInvalidOptionError(fmt.Sprintf("SendBulk accepts at most %d messages, got %d", MaxSendBulkMessages, len(messages)))
 	}
 	if dups := duplicateIdempotencyKeys(messages); len(dups) > 0 {
 		return models.NewInvalidOptionError("send_bulk received duplicate idempotency keys: " + strings.Join(dups, ", "))
@@ -3286,7 +3270,7 @@ func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, opti
 			IdempotencyKey: m.IdempotencyKey,
 		}
 	}
-	input := sysdb.WorkflowSendInput{Messages: rows, BatchSize: options.batchSize}
+	input := sysdb.WorkflowSendInput{Messages: rows}
 
 	var err error
 	if options.txSet {
@@ -3328,7 +3312,7 @@ func Send[P any](ctx Client, destinationID string, message P, topic string, opts
 //
 // WithPortableSend and WithSendTransaction apply to the whole batch. WithIdempotencyKey
 // is per-message: set SendMessage.IdempotencyKey. Two messages in the same call may not
-// share an idempotency key. WithSendBulkBatchSize controls rows per INSERT (default 5000).
+// share an idempotency key. A call may carry at most MaxSendBulkMessages messages.
 //
 // Example:
 //
