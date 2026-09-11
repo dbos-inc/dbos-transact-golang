@@ -309,12 +309,12 @@ func (t *gcFakeTx) Exec(_ context.Context, _ string, args ...any) (Result, error
 		}
 		return nil, errors.New("injected garbage collection failure")
 	}
-	// The final batch drops the upper bound and takes the whole tail
-	upper := int64(math.MaxInt64)
+	// The final batch drops the watermark and takes everything eligible
+	watermark, upper := int64(0), int64(math.MaxInt64)
 	if len(args) > 2 {
-		upper = args[2].(int64)
+		watermark, upper = args[1].(int64), args[2].(int64)
 	}
-	for _, v := range t.pool.eligible(args[1].(int64)) {
+	for _, v := range t.pool.eligible(watermark) {
 		if v <= upper {
 			t.staged = append(t.staged, v)
 		}
@@ -408,12 +408,12 @@ func TestGarbageCollectBatches(t *testing.T) {
 		if !reflect.DeepEqual(pool.bounds, wantBounds) {
 			t.Errorf("bound queries = %v, want %v", pool.bounds, wantBounds)
 		}
-		// The final delete drops the upper bound, taking the whole tail above the watermark
+		// The final delete is unbounded, taking everything still eligible
 		wantDeletes := [][]any{
 			{cutoff, int64(0), int64(3)},
 			{cutoff, int64(3), int64(6)},
 			{cutoff, int64(6), int64(9)},
-			{cutoff, int64(9)},
+			{cutoff},
 		}
 		if !reflect.DeepEqual(pool.deletes, wantDeletes) {
 			t.Errorf("deletes = %v, want %v", pool.deletes, wantDeletes)
@@ -476,15 +476,19 @@ func TestGarbageCollectBatches(t *testing.T) {
 		}
 	})
 
-	t.Run("deletes in one statement when unbatched", func(t *testing.T) {
+	t.Run("takes the default batch size when unset", func(t *testing.T) {
 		pool := newPool()
 		sysDB, deleted := newSysDB(pool)
 		unbatched := GarbageCollectWorkflowsInput{CutoffEpochTimestampMs: &cutoff}
 		if err := sysDB.GarbageCollectWorkflows(context.Background(), unbatched); err != nil {
 			t.Fatalf("GarbageCollectWorkflows: %v", err)
 		}
-		if len(pool.deletes) != 1 || pool.commits != 0 {
-			t.Errorf("deletes/commits = %d/%d, want 1/0", len(pool.deletes), pool.commits)
+		wantBounds := [][]any{{cutoff, int64(0), DefaultGCBatchSize - 1}}
+		if !reflect.DeepEqual(pool.bounds, wantBounds) {
+			t.Errorf("bound queries = %v, want %v", pool.bounds, wantBounds)
+		}
+		if len(pool.deletes) != 1 || pool.commits != 1 {
+			t.Errorf("deletes/commits = %d/%d, want 1/1", len(pool.deletes), pool.commits)
 		}
 		if len(pool.rows) != 0 {
 			t.Errorf("rows left = %v, want none", pool.rows)

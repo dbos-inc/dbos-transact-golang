@@ -209,7 +209,10 @@ func testAllSerializationPaths[T any](
 			// Query the database directly to check for the marker
 			ctx := context.Background()
 			schemaPrefix := sysDB.Dialect().SchemaPrefix(sysDB.Schema())
-			query := sysDB.RenderSQL(`SELECT inputs, output FROM %sworkflow_status WHERE workflow_uuid = $1`, schemaPrefix)
+			query := sysDB.RenderSQL(`SELECT workflow_input.inputs, workflow_output.output FROM %sworkflow_status
+				LEFT JOIN %sworkflow_input USING (workflow_uuid)
+				LEFT JOIN %sworkflow_output USING (workflow_uuid)
+				WHERE workflow_uuid = $1`, schemaPrefix, schemaPrefix, schemaPrefix)
 
 			var inputString, outputString *string
 			err := sysDB.Pool().QueryRow(ctx, query, workflowID).Scan(&inputString, &outputString)
@@ -1863,8 +1866,9 @@ func TestPortableInterop(t *testing.T) {
 		c := executor.(*dbosContext)
 		sysDB := c.systemDB.(*sysdb.SysDB)
 		var storedInputs, storedSerialization string
-		selectQuery := sysDB.RenderSQL(`SELECT inputs, serialization FROM %sworkflow_status WHERE workflow_uuid = $1`,
-			sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
+		selectQuery := sysDB.RenderSQL(`SELECT workflow_input.inputs, serialization FROM %sworkflow_status
+			LEFT JOIN %sworkflow_input USING (workflow_uuid) WHERE workflow_uuid = $1`,
+			sysDB.Dialect().SchemaPrefix(sysDB.Schema()), sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
 		err = sysDB.Pool().QueryRow(context.Background(), selectQuery, handle.GetWorkflowID()).Scan(&storedInputs, &storedSerialization)
 		require.NoError(t, err)
 		assert.Equal(t, PortableSerializerName, storedSerialization)
@@ -2157,8 +2161,9 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	readStoredInputs := func(t *testing.T, workflowID string) (string, string) {
 		t.Helper()
 		var storedInputs, storedSerialization string
-		q := sysDB.RenderSQL(`SELECT inputs, serialization FROM %sworkflow_status WHERE workflow_uuid = $1`,
-			sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
+		q := sysDB.RenderSQL(`SELECT workflow_input.inputs, serialization FROM %sworkflow_status
+			LEFT JOIN %sworkflow_input USING (workflow_uuid) WHERE workflow_uuid = $1`,
+			sysDB.Dialect().SchemaPrefix(sysDB.Schema()), sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
 		err := sysDB.Pool().QueryRow(context.Background(), q, workflowID).Scan(&storedInputs, &storedSerialization)
 		require.NoError(t, err)
 		return storedInputs, storedSerialization
@@ -2168,8 +2173,10 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	resetToPending := func(t *testing.T, workflowID string) {
 		t.Helper()
 		schemaPrefix := sysDB.Dialect().SchemaPrefix(sysDB.Schema())
-		q := sysDB.RenderSQL(`UPDATE %sworkflow_status SET status = $1, output = NULL, error = NULL WHERE workflow_uuid = $2`, schemaPrefix)
+		q := sysDB.RenderSQL(`UPDATE %sworkflow_status SET status = $1 WHERE workflow_uuid = $2`, schemaPrefix)
 		_, err := sysDB.Pool().Exec(context.Background(), q, string(WorkflowStatusPending), workflowID)
+		require.NoError(t, err)
+		_, err = sysDB.Pool().Exec(context.Background(), sysDB.RenderSQL(`DELETE FROM %sworkflow_output WHERE workflow_uuid = $1`, schemaPrefix), workflowID)
 		require.NoError(t, err)
 		// Also clear operation outputs so the workflow re-executes its steps.
 		dq := sysDB.RenderSQL(`DELETE FROM %soperation_outputs WHERE workflow_uuid = $1`, schemaPrefix)
@@ -2353,8 +2360,10 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 		require.Greater(t, stepCount, 0, "expected operation_outputs rows from first execution")
 
 		// Reset to PENDING but KEEP operation_outputs — steps will be replayed from DB.
-		resetQ := sysDB.RenderSQL(`UPDATE %sworkflow_status SET status = $1, output = NULL, error = NULL WHERE workflow_uuid = $2`, schemaPrefix)
+		resetQ := sysDB.RenderSQL(`UPDATE %sworkflow_status SET status = $1 WHERE workflow_uuid = $2`, schemaPrefix)
 		_, err = sysDB.Pool().Exec(context.Background(), resetQ, string(WorkflowStatusPending), workflowID)
+		require.NoError(t, err)
+		_, err = sysDB.Pool().Exec(context.Background(), sysDB.RenderSQL(`DELETE FROM %sworkflow_output WHERE workflow_uuid = $1`, schemaPrefix), workflowID)
 		require.NoError(t, err)
 
 		// Recover — each step hits checkOperationExecution and decodes from stored serialization.
@@ -2427,8 +2436,9 @@ func TestPortableWorkflowError(t *testing.T) {
 	readStoredError := func(t *testing.T, workflowID string) string {
 		t.Helper()
 		var storedError *string
-		q := sysDB.RenderSQL(`SELECT error FROM %sworkflow_status WHERE workflow_uuid = $1`,
-			sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
+		q := sysDB.RenderSQL(`SELECT workflow_output.error FROM %sworkflow_status
+			LEFT JOIN %sworkflow_output USING (workflow_uuid) WHERE workflow_uuid = $1`,
+			sysDB.Dialect().SchemaPrefix(sysDB.Schema()), sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
 		require.NoError(t, sysDB.Pool().QueryRow(context.Background(), q, workflowID).Scan(&storedError))
 		require.NotNil(t, storedError)
 		return *storedError
@@ -2772,11 +2782,11 @@ func TestListWorkflowsAndGetWorkflowStepsIsolateDecodeErrors(t *testing.T) {
 
 	const garbage = "not-valid-base64!!!"
 
-	// corruptWorkflowColumn overwrites a workflow_status column (output or inputs)
-	// with a value that cannot be base64-decoded.
+	// corruptWorkflowColumn overwrites a payload column with a value that cannot be base64-decoded.
 	corruptWorkflowColumn := func(t *testing.T, column, workflowID string) {
 		t.Helper()
-		q := sysDB.RenderSQL(`UPDATE %sworkflow_status SET `+column+` = $1 WHERE workflow_uuid = $2`, schemaPrefix)
+		table := map[string]string{"output": "workflow_output", "inputs": "workflow_input"}[column]
+		q := sysDB.RenderSQL(`UPDATE %s`+table+` SET `+column+` = $1 WHERE workflow_uuid = $2`, schemaPrefix)
 		_, err := sysDB.Pool().Exec(context.Background(), q, garbage, workflowID)
 		require.NoError(t, err)
 	}

@@ -171,6 +171,9 @@ func TestPgsqlClient(t *testing.T) {
 		result, err := handle.GetResult()
 		require.NoError(t, err)
 		assert.Equal(t, `42-test-{"First":"John","Last":"Doe","Age":30}`, result)
+
+		assert.Nil(t, rawQueryString(t, serverCtx, `SELECT inputs FROM %sworkflow_status WHERE workflow_uuid = $1`, wfID))
+		assert.NotNil(t, rawQueryString(t, serverCtx, `SELECT inputs FROM %sworkflow_input WHERE workflow_uuid = $1`, wfID))
 	})
 
 	t.Run("EnqueueWithTimeout", func(t *testing.T) {
