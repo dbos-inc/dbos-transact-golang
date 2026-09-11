@@ -1307,7 +1307,9 @@ func (c *conductor) handleExportWorkflowRequest(data []byte, requestID string) e
 			var buf bytes.Buffer
 			gz := gzip.NewWriter(&buf)
 			if _, err := gz.Write(jsonData); err != nil {
-				_ = gz.Close()
+				if closeErr := gz.Close(); closeErr != nil {
+					err = errors.Join(err, fmt.Errorf("failed to close gzip writer: %w", closeErr))
+				}
 				errStr := fmt.Sprintf("Failed to gzip exported workflow: %v", err)
 				errorMsg = &errStr
 			} else if err := gz.Close(); err != nil {
