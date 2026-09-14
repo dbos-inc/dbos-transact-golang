@@ -25,13 +25,13 @@ import (
 )
 
 const (
-	_PING_INTERVAL          = 20 * time.Second
-	_PING_TIMEOUT           = 30 * time.Second // Should be slightly greater than server's executorPingWait (25s)
-	_INITIAL_RECONNECT_WAIT = 1 * time.Second
-	_MAX_RECONNECT_WAIT     = 30 * time.Second
-	_HANDSHAKE_TIMEOUT      = 10 * time.Second
-	_WRITE_DEADLINE         = 5 * time.Second
-	_DEFAULT_GC_BATCH_SIZE  = 10_000
+	_PING_INTERVAL            = 20 * time.Second
+	_PING_TIMEOUT             = 30 * time.Second // Should be slightly greater than server's executorPingWait (25s)
+	_INITIAL_RECONNECT_WAIT   = 1 * time.Second
+	_MAX_RECONNECT_WAIT       = 30 * time.Second
+	_HANDSHAKE_TIMEOUT        = 10 * time.Second
+	_WRITE_DEADLINE           = 5 * time.Second
+	_RETENTION_SHUTDOWN_GRACE = 10 * time.Second
 )
 
 // conductorConfig contains configuration for the conductor
@@ -65,6 +65,8 @@ type conductor struct {
 
 	// pingCancel cancels the ping goroutine context
 	pingCancel context.CancelFunc
+
+	retentionSem chan struct{}
 }
 
 // launch starts the conductor main goroutine
@@ -101,6 +103,7 @@ func newConductor(dbosCtx *dbosContext, config conductorConfig) (*conductor, err
 		reconnectWait:    _INITIAL_RECONNECT_WAIT,
 		logger:           dbosCtx.logger.With("service", "conductor"),
 		executorMetadata: config.executorMetadata,
+		retentionSem:     make(chan struct{}, 1),
 	}
 
 	// Start with needsReconnect set to true so we connect on first run
@@ -126,6 +129,13 @@ func (c *conductor) shutdown(timeout time.Duration) error {
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for conductor to shut down", "timeout", timeout)
 			err = fmt.Errorf("conductor did not shut down within %v", timeout)
+		}
+
+		select {
+		case c.retentionSem <- struct{}{}:
+			<-c.retentionSem
+		case <-time.After(min(timeout, _RETENTION_SHUTDOWN_GRACE)):
+			c.logger.Warn("Retention round still running at shutdown; the next round resumes the work")
 		}
 	})
 	return err
@@ -596,61 +606,15 @@ func (c *conductor) handleRetentionRequest(data []byte, requestID string) error 
 	}
 	c.logger.Debug("Handling retention request", "request", req, "request_id", requestID)
 
-	success := true
-	var errorMsg *string
-
-	// Handle garbage collection if parameters are provided
-	if req.Body.GCCutoffEpochMs != nil || req.Body.GCRowsThreshold != nil {
-		var cutoffMs *int64
-		if req.Body.GCCutoffEpochMs != nil {
-			ms := int64(*req.Body.GCCutoffEpochMs)
-			cutoffMs = &ms
-		}
-
-		var rowsThreshold *int
-		if req.Body.GCRowsThreshold != nil {
-			rowsThreshold = req.Body.GCRowsThreshold
-		}
-
-		// Older Conductor versions may not send gc_batch_size
-		batchSize := _DEFAULT_GC_BATCH_SIZE
-		if req.Body.GCBatchSize != nil {
-			batchSize = *req.Body.GCBatchSize
-		}
-
-		input := sysdb.GarbageCollectWorkflowsInput{
-			CutoffEpochTimestampMs: cutoffMs,
-			RowsThreshold:          rowsThreshold,
-			BatchSize:              &batchSize,
-		}
-
-		err := sysdb.Retry(c.dbosCtx, func() error {
-			return c.dbosCtx.systemDB.GarbageCollectWorkflows(c.dbosCtx, input)
-		}, sysdb.WithRetrierLogger(c.logger))
-		if err != nil {
-			c.logger.Error("Failed to garbage collect workflows", "error", err)
-			errStr := fmt.Sprintf("failed to garbage collect workflows: %v", err)
-			errorMsg = &errStr
-			success = false
-		} else {
-			c.logger.Info("Successfully garbage collected workflows", "cutoff_ms", cutoffMs, "rows_threshold", rowsThreshold)
-		}
-	}
-
-	// Handle timeout enforcement if parameter is provided and garbage collection succeeded
-	if success && req.Body.TimeoutCutoffEpochMs != nil {
-		cutoffTime := time.UnixMilli(int64(*req.Body.TimeoutCutoffEpochMs))
-		err := sysdb.Retry(c.dbosCtx, func() error {
-			return c.dbosCtx.systemDB.CancelAllBefore(c.dbosCtx, cutoffTime)
-		}, sysdb.WithRetrierLogger(c.logger))
-		if err != nil {
-			c.logger.Error("Failed to timeout workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs, "error", err)
-			errStr := fmt.Sprintf("failed to timeout workflows: %v", err)
-			errorMsg = &errStr
-			success = false
-		} else {
-			c.logger.Info("Successfully timed out workflows", "cutoff_ms", *req.Body.TimeoutCutoffEpochMs)
-		}
+	// Off the message loop: a round can take minutes.
+	select {
+	case c.retentionSem <- struct{}{}:
+		go func() {
+			defer func() { <-c.retentionSem }()
+			c.runRetention(req.Body)
+		}()
+	default:
+		c.logger.Warn("Skipping retention: the previous round on this executor is still running.")
 	}
 
 	response := retentionConductorResponse{
@@ -659,12 +623,58 @@ func (c *conductor) handleRetentionRequest(data []byte, requestID string) error 
 				Type:      retentionMessage,
 				RequestID: requestID,
 			},
-			ErrorMessage: errorMsg,
 		},
-		Success: success,
+		Success: true,
+	}
+	return c.sendResponse(response, string(retentionMessage))
+}
+
+func (c *conductor) runRetention(body retentionConductorRequestBody) {
+	if body.GCCutoffEpochMs != nil || body.GCRowsThreshold != nil {
+		var cutoffMs *int64
+		if body.GCCutoffEpochMs != nil {
+			ms := int64(*body.GCCutoffEpochMs)
+			cutoffMs = &ms
+		}
+		// Absent, null, or zero all take the default.
+		var batchSize *int
+		if body.GCBatchSize != nil && *body.GCBatchSize > 0 {
+			batchSize = body.GCBatchSize
+		}
+		input := sysdb.GarbageCollectWorkflowsInput{
+			CutoffEpochTimestampMs: cutoffMs,
+			RowsThreshold:          body.GCRowsThreshold,
+			BatchSize:              batchSize,
+		}
+		err := sysdb.Retry(c.dbosCtx, func() error {
+			return c.dbosCtx.systemDB.GarbageCollectWorkflows(c.dbosCtx, input)
+		}, sysdb.WithRetrierLogger(c.logger))
+		if err != nil {
+			if c.dbosCtx.Err() != nil {
+				c.logger.Debug("Retention interrupted by shutdown", "error", err)
+				return
+			}
+			c.logger.Error("Failed to garbage collect workflows", "error", err)
+			return
+		}
+		c.logger.Info("Successfully garbage collected workflows", "cutoff_ms", cutoffMs, "rows_threshold", body.GCRowsThreshold)
 	}
 
-	return c.sendResponse(response, string(retentionMessage))
+	if body.TimeoutCutoffEpochMs != nil {
+		cutoffTime := time.UnixMilli(int64(*body.TimeoutCutoffEpochMs))
+		err := sysdb.Retry(c.dbosCtx, func() error {
+			return c.dbosCtx.systemDB.CancelAllBefore(c.dbosCtx, cutoffTime)
+		}, sysdb.WithRetrierLogger(c.logger))
+		if err != nil {
+			if c.dbosCtx.Err() != nil {
+				c.logger.Debug("Retention interrupted by shutdown", "error", err)
+				return
+			}
+			c.logger.Error("Failed to timeout workflows", "cutoff_ms", *body.TimeoutCutoffEpochMs, "error", err)
+			return
+		}
+		c.logger.Info("Successfully timed out workflows", "cutoff_ms", *body.TimeoutCutoffEpochMs)
+	}
 }
 
 func (c *conductor) handleGetMetricsRequest(data []byte, requestID string) error {

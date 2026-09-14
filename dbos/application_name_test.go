@@ -267,9 +267,8 @@ func TestApplicationNameForkInherits(t *testing.T) {
 	assert.Equal(t, "app-a", *stepOwners[0])
 }
 
-// TestApplicationNameGarbageCollectionScoping verifies one application's
-// retention policy never deletes a peer's rows.
-func TestApplicationNameGarbageCollectionScoping(t *testing.T) {
+// TestGarbageCollectionIsSystemWide verifies one application's round collects every application's rows.
+func TestGarbageCollectionIsSystemWide(t *testing.T) {
 	ctxA := setupDBOS(t, setupDBOSOptions{dropDB: true, appName: "app-a"})
 	ctxB := setupDBOS(t, setupDBOSOptions{appName: "app-b"})
 
@@ -295,14 +294,9 @@ func TestApplicationNameGarbageCollectionScoping(t *testing.T) {
 	cutoff := time.Now().Add(time.Hour).UnixMilli()
 	gcInput := sysdb.GarbageCollectWorkflowsInput{CutoffEpochTimestampMs: &cutoff, BatchSize: &batchSize}
 
-	// app-b's GC collects its own row and spares every app-a row.
 	require.NoError(t, ctxB.(*dbosContext).systemDB.GarbageCollectWorkflows(ctxB, gcInput))
-	assert.Equal(t, 3, ownedRowCount(t, ctxA, "app-a"))
-	assert.Equal(t, 0, ownedRowCount(t, ctxA, "app-b"))
-
-	// app-a's GC then collects its own three, across two batches.
-	require.NoError(t, ctxA.(*dbosContext).systemDB.GarbageCollectWorkflows(ctxA, gcInput))
 	assert.Equal(t, 0, ownedRowCount(t, ctxA, "app-a"))
+	assert.Equal(t, 0, ownedRowCount(t, ctxA, "app-b"))
 }
 
 // ownedRowCount counts the workflow_status rows an application owns.

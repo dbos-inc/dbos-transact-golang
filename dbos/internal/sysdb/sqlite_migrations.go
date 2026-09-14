@@ -169,9 +169,21 @@ var sqliteMigration107SQL string
 //go:embed migrations/sqlite/108_add_queue_partition_limits.sql
 var sqliteMigration108SQL string
 
+//go:embed migrations/sqlite/109_create_workflow_payload_tables.sql
+var sqliteMigration109SQL string
+
+//go:embed migrations/sqlite/110_add_operation_outputs_retention_timestamp.sql
+var sqliteMigration110SQL string
+
+//go:embed migrations/sqlite/111_create_operation_outputs_retention_index.sql
+var sqliteMigration111SQL string
+
+//go:embed migrations/sqlite/112_drop_operation_outputs_foreign_key.sql
+var sqliteMigration112SQL string
+
 // BuildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
-// 38, 39, 43, 44, and 105 have no SQLite counterpart and are omitted.
+// 38, 39, 43, 44, 105, and 113 have no SQLite counterpart and are omitted.
 func BuildSqliteMigrations() []MigrationFile {
 	return []MigrationFile{
 		{Version: 1, SQL: sqliteMigration1SQL},
@@ -224,6 +236,10 @@ func BuildSqliteMigrations() []MigrationFile {
 		{Version: 106, SQL: sqliteMigration106SQL},
 		{Version: 107, SQL: sqliteMigration107SQL},
 		{Version: 108, SQL: sqliteMigration108SQL},
+		{Version: 109, SQL: sqliteMigration109SQL},
+		{Version: 110, SQL: sqliteMigration110SQL},
+		{Version: 111, SQL: sqliteMigration111SQL},
+		{Version: 112, SQL: sqliteMigration112SQL},
 	}
 }
 

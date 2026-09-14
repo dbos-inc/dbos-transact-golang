@@ -2440,6 +2440,7 @@ func TestChildWorkflow(t *testing.T) {
 		})
 	}
 	RegisterWorkflow(dbosCtx, childWf)
+	RegisterWorkflow(dbosCtx, payloadTestWorkflow)
 
 	parentWf := func(ctx Context, input Inheritance) (string, error) {
 		workflowID, err := GetWorkflowID(ctx)
@@ -2955,6 +2956,13 @@ func TestChildWorkflow(t *testing.T) {
 		var dbosErr *Error
 		require.ErrorAs(t, err, &dbosErr)
 		require.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code)
+	})
+
+	t.Run("DeleteRemovesPayloads", func(t *testing.T) {
+		workflowID := runPayloadWorkflow(t, dbosCtx, "deleted")
+		require.NoError(t, DeleteWorkflows(dbosCtx, []string{workflowID}))
+		inputs, outputs, steps := payloadRowCounts(t, dbosCtx, workflowID)
+		assert.Equal(t, 0, inputs+outputs+steps, "payload rows should go with the workflow")
 	})
 
 	t.Run("DeleteNonExistentWorkflowIsNoOp", func(t *testing.T) {
@@ -4144,9 +4152,13 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 	// concurrent resume/recovery/cancel that would do it in production.
 	rewriteRow := func(t *testing.T, workflowID string, status WorkflowStatusType, output *string, errStr string) {
 		t.Helper()
-		q := sysDB.RenderSQL(`UPDATE %sworkflow_status SET status = $1, output = $2, error = $3 WHERE workflow_uuid = $4`, schemaPrefix)
-		_, err := sysDB.Pool().Exec(context.Background(), q, status, output, errStr, workflowID)
+		q := sysDB.RenderSQL(`UPDATE %sworkflow_status SET status = $1 WHERE workflow_uuid = $2`, schemaPrefix)
+		_, err := sysDB.Pool().Exec(context.Background(), q, status, workflowID)
 		require.NoError(t, err, "failed to rewrite workflow row")
+		q = sysDB.RenderSQL(`INSERT INTO %sworkflow_output (workflow_uuid, output, error) VALUES ($1, $2, $3)
+			ON CONFLICT (workflow_uuid) DO UPDATE SET output = EXCLUDED.output, error = EXCLUDED.error`, schemaPrefix)
+		_, err = sysDB.Pool().Exec(context.Background(), q, workflowID, output, errStr)
+		require.NoError(t, err, "failed to rewrite workflow outcome")
 	}
 
 	t.Run("RecordedSuccessSupersedesTheRunResult", func(t *testing.T) {
@@ -7249,6 +7261,45 @@ func gcBlockedWorkflow(dbosCtx Context, event *Event) (string, error) {
 	return workflowID, nil
 }
 
+func payloadTestWorkflow(ctx Context, input string) (string, error) {
+	return RunAsStep(ctx, func(_ context.Context) (string, error) {
+		return "step:" + input, nil
+	})
+}
+
+func payloadBlockedWorkflow(ctx Context, event *Event) (string, error) {
+	event.Wait()
+	return "unblocked", nil
+}
+
+// rawQueryInt reads a single integer from the system database.
+func rawQueryInt(t *testing.T, ctx Context, query string, args ...any) int {
+	t.Helper()
+	sdb := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	q := sdb.Dialect().RewriteQuery(fmt.Sprintf(query, sdb.Dialect().SchemaPrefix(sdb.Schema())))
+	var value int
+	require.NoError(t, sdb.Pool().QueryRow(context.Background(), q, args...).Scan(&value))
+	return value
+}
+
+func payloadRowCounts(t *testing.T, ctx Context, workflowID string) (inputs, outputs, steps int) {
+	t.Helper()
+	inputs = rawQueryInt(t, ctx, `SELECT COUNT(*) FROM %sworkflow_input WHERE workflow_uuid = $1`, workflowID)
+	outputs = rawQueryInt(t, ctx, `SELECT COUNT(*) FROM %sworkflow_output WHERE workflow_uuid = $1`, workflowID)
+	steps = rawQueryInt(t, ctx, `SELECT COUNT(*) FROM %soperation_outputs WHERE workflow_uuid = $1`, workflowID)
+	return inputs, outputs, steps
+}
+
+func runPayloadWorkflow(t *testing.T, ctx Context, input string) string {
+	t.Helper()
+	handle, err := RunWorkflow(ctx, payloadTestWorkflow, input)
+	require.NoError(t, err)
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "step:"+input, result)
+	return handle.GetWorkflowID()
+}
+
 func TestGarbageCollect(t *testing.T) {
 	t.Run("GarbageCollectWithOffset", func(t *testing.T) {
 		// Start with clean database for precise workflow counting
@@ -7948,6 +7999,54 @@ func TestGarbageCollect(t *testing.T) {
 			"expected exactly the newest completed workflows to survive")
 	})
 
+	t.Run("PayloadSweepTakesOrphansOnly", func(t *testing.T) {
+		resetTestDatabase(t, backendDatabaseURL(t))
+		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true})
+		RegisterWorkflow(dbosCtx, payloadTestWorkflow)
+		RegisterWorkflow(dbosCtx, payloadBlockedWorkflow)
+		require.NoError(t, Launch(dbosCtx))
+		event := NewEvent()
+		t.Cleanup(event.Set)
+
+		collected := make([]string, 0, 3)
+		for i := range 3 {
+			collected = append(collected, runPayloadWorkflow(t, dbosCtx, fmt.Sprintf("gc-%d", i)))
+		}
+		blockedHandle, err := RunWorkflow(dbosCtx, payloadBlockedWorkflow, event)
+		require.NoError(t, err)
+		blockedID := blockedHandle.GetWorkflowID()
+
+		// A stale orphan, as a round interrupted after its status sweep leaves behind
+		rawExec(t, dbosCtx, `INSERT INTO %sworkflow_input (workflow_uuid, inputs, retention_timestamp) VALUES ($1, $2, $3)`, "orphan-wf", "{}", int64(1))
+		rawExec(t, dbosCtx, `INSERT INTO %soperation_outputs (workflow_uuid, function_id, function_name, retention_timestamp) VALUES ($1, $2, $3, $4)`, "orphan-wf", 0, "step", int64(1))
+
+		// Two-row batches over three collected workflows plus the orphan
+		batchSize := 2
+		cutoff := time.Now().Add(time.Hour).UnixMilli()
+		require.NoError(t, dbosCtx.(*dbosContext).systemDB.GarbageCollectWorkflows(dbosCtx, sysdb.GarbageCollectWorkflowsInput{
+			CutoffEpochTimestampMs: &cutoff, BatchSize: &batchSize,
+		}))
+
+		for _, workflowID := range collected {
+			inputs, outputs, steps := payloadRowCounts(t, dbosCtx, workflowID)
+			assert.Equal(t, 0, inputs+outputs+steps, "collected workflow %s should leave no payload rows", workflowID)
+		}
+		inputs, _, steps := payloadRowCounts(t, dbosCtx, "orphan-wf")
+		assert.Equal(t, 0, inputs+steps, "orphaned rows should be collected")
+
+		// The running workflow was created before the cutoff, yet its rows stay: it still has a status row.
+		inputs, outputs, steps := payloadRowCounts(t, dbosCtx, blockedID)
+		assert.Equal(t, 1, inputs)
+		assert.Equal(t, 0, outputs)
+		assert.Equal(t, 0, steps)
+		event.Set()
+		result, err := blockedHandle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "unblocked", result)
+		_, outputs, _ = payloadRowCounts(t, dbosCtx, blockedID)
+		assert.Equal(t, 1, outputs)
+	})
+
 	t.Run("BatchSizeValidation", func(t *testing.T) {
 		dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 		require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
@@ -8432,7 +8531,57 @@ func TestAuthPropagation(t *testing.T) {
 func TestWorkflowHandles(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, slowWorkflow)
+	RegisterWorkflow(dbosCtx, payloadTestWorkflow)
 	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	t.Run("PayloadTablesHoldInputsAndOutputs", func(t *testing.T) {
+		workflowID := runPayloadWorkflow(t, dbosCtx, "hello")
+
+		assert.Nil(t, rawQueryString(t, dbosCtx, `SELECT inputs FROM %sworkflow_status WHERE workflow_uuid = $1`, workflowID))
+		assert.Nil(t, rawQueryString(t, dbosCtx, `SELECT output FROM %sworkflow_status WHERE workflow_uuid = $1`, workflowID))
+		inputs, outputs, steps := payloadRowCounts(t, dbosCtx, workflowID)
+		assert.Equal(t, 1, inputs)
+		assert.Equal(t, 1, outputs)
+		assert.Equal(t, 1, steps)
+		require.NotNil(t, rawQueryString(t, dbosCtx, `SELECT inputs FROM %sworkflow_input WHERE workflow_uuid = $1`, workflowID))
+		require.NotNil(t, rawQueryString(t, dbosCtx, `SELECT output FROM %sworkflow_output WHERE workflow_uuid = $1`, workflowID))
+
+		// Reads assemble the row from the split tables
+		statuses, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID), WithFilterLoadInput(true), WithFilterLoadOutput(true))
+		require.NoError(t, err)
+		require.Len(t, statuses, 1)
+		require.NotNil(t, statuses[0].Input)
+		assert.NotEmpty(t, statuses[0].Output)
+		handle, err := RetrieveWorkflow[string](dbosCtx, workflowID)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "step:hello", result)
+	})
+
+	t.Run("LegacyPayloadColumnsStillRead", func(t *testing.T) {
+		// A row written before the split carries its payloads on workflow_status
+		// and has no payload rows at all.
+		workflowID := runPayloadWorkflow(t, dbosCtx, "legacy")
+		legacyInputs := rawQueryString(t, dbosCtx, `SELECT inputs FROM %sworkflow_input WHERE workflow_uuid = $1`, workflowID)
+		legacyOutput := rawQueryString(t, dbosCtx, `SELECT output FROM %sworkflow_output WHERE workflow_uuid = $1`, workflowID)
+		require.NotNil(t, legacyInputs)
+		require.NotNil(t, legacyOutput)
+		rawExec(t, dbosCtx, `UPDATE %sworkflow_status SET inputs = $1, output = $2 WHERE workflow_uuid = $3`, *legacyInputs, *legacyOutput, workflowID)
+		rawExec(t, dbosCtx, `DELETE FROM %sworkflow_input WHERE workflow_uuid = $1`, workflowID)
+		rawExec(t, dbosCtx, `DELETE FROM %sworkflow_output WHERE workflow_uuid = $1`, workflowID)
+
+		statuses, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID), WithFilterLoadInput(true), WithFilterLoadOutput(true))
+		require.NoError(t, err)
+		require.Len(t, statuses, 1)
+		require.NotNil(t, statuses[0].Input)
+		assert.NotEmpty(t, statuses[0].Output)
+		handle, err := RetrieveWorkflow[string](dbosCtx, workflowID)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "step:legacy", result)
+	})
 
 	workflowSleep := 1 * time.Second
 
@@ -9810,6 +9959,7 @@ func TestExportImportWorkflow(t *testing.T) {
 	RegisterWorkflow(dbosCtx, parentWf)
 	RegisterWorkflow(dbosCtx, childWf)
 	RegisterWorkflow(dbosCtx, grandchildWf)
+	RegisterWorkflow(dbosCtx, payloadTestWorkflow)
 
 	Launch(dbosCtx)
 
@@ -10014,6 +10164,35 @@ func TestExportImportWorkflow(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "Alice", forkResult.Name)
 		assert.Equal(t, "Alice-grandchild", forkResult.Tags["grandchild_result"])
+	})
+
+	t.Run("PayloadRoundTrip", func(t *testing.T) {
+		workflowID := runPayloadWorkflow(t, dbosCtx, "exported")
+		exported, err := sdb.ExportWorkflow(dbosCtx, workflowID, false)
+		require.NoError(t, err)
+		require.Len(t, exported, 1)
+		require.NotNil(t, exported[0].WorkflowStatus["inputs"].(*string))
+		require.NotNil(t, exported[0].WorkflowStatus["output"].(*string))
+
+		require.NoError(t, DeleteWorkflows(dbosCtx, []string{workflowID}))
+		// A gap the import's own stamp must clear, so it provably postdates the original run
+		runEnd := time.Now().UnixMilli()
+		time.Sleep(100 * time.Millisecond)
+		require.NoError(t, sdb.ImportWorkflow(dbosCtx, exported))
+
+		inputs, outputs, steps := payloadRowCounts(t, dbosCtx, workflowID)
+		assert.Equal(t, 1, inputs)
+		assert.Equal(t, 1, outputs)
+		assert.Equal(t, 1, steps)
+		assert.Nil(t, rawQueryString(t, dbosCtx, `SELECT inputs FROM %sworkflow_status WHERE workflow_uuid = $1`, workflowID))
+		// Retention starts at import, not at the original timestamps
+		stamped := rawQueryInt(t, dbosCtx, `SELECT COUNT(*) FROM %soperation_outputs WHERE workflow_uuid = $1 AND retention_timestamp >= $2`, workflowID, runEnd+50)
+		assert.Equal(t, 1, stamped)
+		handle, err := RetrieveWorkflow[string](dbosCtx, workflowID)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "step:exported", result)
 	})
 }
 
@@ -10849,7 +11028,22 @@ func TestFork(t *testing.T) {
 	RegisterWorkflow(dbosCtx, blockingWorkflow, WithWorkflowName("forkTimeoutWorkflow"))
 	RegisterWorkflow(dbosCtx, multiplyChild, WithWorkflowName("replacementChildWorkflow"))
 	RegisterWorkflow(dbosCtx, sumParent, WithWorkflowName("replacementParentWorkflow"))
+	RegisterWorkflow(dbosCtx, payloadTestWorkflow)
 	require.NoError(t, Launch(dbosCtx))
+
+	t.Run("CopiesInputs", func(t *testing.T) {
+		workflowID := runPayloadWorkflow(t, dbosCtx, "forked")
+		forkHandle, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: workflowID})
+		require.NoError(t, err)
+		result, err := forkHandle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "step:forked", result)
+		original := rawQueryString(t, dbosCtx, `SELECT inputs FROM %sworkflow_input WHERE workflow_uuid = $1`, workflowID)
+		forked := rawQueryString(t, dbosCtx, `SELECT inputs FROM %sworkflow_input WHERE workflow_uuid = $1`, forkHandle.GetWorkflowID())
+		require.NotNil(t, original)
+		require.NotNil(t, forked)
+		assert.Equal(t, *original, *forked)
+	})
 
 	sysDB := dbosCtx.(*dbosContext).systemDB
 
