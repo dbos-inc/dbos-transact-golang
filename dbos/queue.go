@@ -644,6 +644,9 @@ type queueRunner struct {
 	jitterMin       float64
 	jitterMax       float64
 
+	// Supervisor tick: promotes expired DELAYED workflows and reconciles the worker set.
+	reconcileInterval time.Duration
+
 	// The DBOS internal queue: the only queue that lives in-process rather than
 	// in the queues table. Always available and always listened to.
 	internalQueue workflowQueue
@@ -669,10 +672,11 @@ type queueRunner struct {
 
 func newQueueRunner(logger *slog.Logger) *queueRunner {
 	return &queueRunner{
-		backoffFactor:   2.0,
-		scalebackFactor: 0.9,
-		jitterMin:       0.95,
-		jitterMax:       1.05,
+		backoffFactor:     2.0,
+		scalebackFactor:   0.9,
+		jitterMin:         0.95,
+		jitterMax:         1.05,
+		reconcileInterval: time.Second,
 		internalQueue: workflowQueue{
 			Name:                models.InternalQueueName,
 			basePollingInterval: models.DefaultBasePollingInterval,
@@ -704,7 +708,6 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 	// if the queue reappears.
 	workerDone := make(map[string]chan struct{})
 
-	const reconcileInterval = 1 * time.Second
 	for ctx.Err() == nil { // While ctx is not cancelled
 		// Transition any DELAYED workflows whose delay has expired to ENQUEUED.
 		if err := sysdb.Retry(ctx, func() error {
@@ -735,7 +738,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 
 		select {
 		case <-ctx.Done():
-		case <-time.After(reconcileInterval):
+		case <-time.After(qr.reconcileInterval):
 		}
 	}
 	qr.logger.Debug("Queue supervisor stopping due to context cancellation", "cause", context.Cause(ctx))

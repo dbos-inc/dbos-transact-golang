@@ -1717,6 +1717,7 @@ func TestDebouncerClient(t *testing.T) {
 
 	// Set internal queue polling interval to 10ms for faster tests
 	serverCtx.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
+	serverCtx.(*dbosContext).queueRunner.reconcileInterval = 50 * time.Millisecond
 
 	// Register test workflow with a custom name
 	debounceTestWorkflow := func(ctx Context, input string) (string, error) {
