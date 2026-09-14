@@ -8,6 +8,6 @@ CREATE TABLE queues (
     priority_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     partition_queue BOOLEAN NOT NULL DEFAULT FALSE,
     polling_interval_sec REAL NOT NULL DEFAULT 1.0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
 );

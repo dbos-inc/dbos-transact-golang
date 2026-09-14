@@ -213,7 +213,6 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 			ExecutorID:         c.GetExecutorID(),
 			Status:             WorkflowStatusEnqueued,
 			ID:                 wfID,
-			CreatedAt:          time.Now(),
 			Input:              encodedInput,
 			QueueName:          queueName,
 			Serialization:      ser.Name(),

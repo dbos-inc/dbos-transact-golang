@@ -179,7 +179,7 @@ func (ds *DataSource) completionTableStatements() []string {
 	output TEXT,
 	error TEXT,
 	serialization TEXT,
-	created_at INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
 	PRIMARY KEY (workflow_id, step_id)
 )`, table)}
 	}
@@ -337,9 +337,9 @@ func (ds *DataSource) checkCompletion(ctx context.Context, q Querier, workflowID
 // A duplicate row surfaces as a workflow-conflict error.
 func (ds *DataSource) recordCompletion(ctx context.Context, q Querier, workflowID string, stepID int, output, errStr *string, serialization string) error {
 	query := ds.dialect.RewriteQuery(fmt.Sprintf(
-		`INSERT INTO %s (workflow_id, step_id, output, error, serialization, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
-		ds.qualifiedCompletionTable()))
-	if _, err := q.Exec(ctx, query, workflowID, stepID, output, errStr, serialization, time.Now().UnixMilli()); err != nil {
+		`INSERT INTO %s (workflow_id, step_id, output, error, serialization, created_at) VALUES ($1, $2, $3, $4, $5, %s)`,
+		ds.qualifiedCompletionTable(), ds.dialect.NowMsSQL()))
+	if _, err := q.Exec(ctx, query, workflowID, stepID, output, errStr, serialization); err != nil {
 		if ds.dialect.IsUniqueViolation(err) {
 			return models.NewWorkflowConflictIDError(workflowID)
 		}
