@@ -1750,7 +1750,7 @@ func TestDebouncerClient(t *testing.T) {
 		handle, err := debouncer10sTimeout.Debounce("test-key-1", 500*time.Millisecond, "test-input-1")
 		require.NoError(t, err, "failed to call Debounce")
 
-		result, err := handle.GetResult()
+		result, err := handle.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 		require.NoError(t, err, "failed to get result")
 		assert.Equal(t, "test-input-1", result, "result should match input")
 
@@ -1808,7 +1808,7 @@ func TestDebouncerClient(t *testing.T) {
 		assert.Equal(t, handle1.GetWorkflowID(), handle4.GetWorkflowID(), "all handles should refer to the same workflow ID")
 		assert.Equal(t, handle1.GetWorkflowID(), handle5.GetWorkflowID(), "all handles should refer to the same workflow ID")
 
-		result, err := handle5.GetResult()
+		result, err := handle5.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 		require.NoError(t, err, "failed to get result")
 		assert.Equal(t, "input-5", result, "result should match latest input")
 
@@ -1824,7 +1824,7 @@ func TestDebouncerClient(t *testing.T) {
 		handle, err := debouncer200msTimeout.Debounce("test-key-4", 2*time.Second, "timeout-input")
 		require.NoError(t, err, "failed to call Debounce with delay > timeout")
 
-		result, err := handle.GetResult()
+		result, err := handle.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 		require.NoError(t, err, "failed to get result")
 		assert.Equal(t, "timeout-input", result, "result should match input")
 
@@ -1849,7 +1849,7 @@ func TestDebouncerClient(t *testing.T) {
 		assert.Equal(t, handle1.GetWorkflowID(), handle2.GetWorkflowID(), "both handles should refer to the same workflow ID")
 
 		// Verify the second call completes immediately
-		result, err := handle2.GetResult()
+		result, err := handle2.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 		require.NoError(t, err, "failed to get result")
 		assert.Equal(t, "second-input", result, "result should match latest input")
 
@@ -1874,15 +1874,15 @@ func TestDebouncerClient(t *testing.T) {
 		assert.NotEqual(t, handle1.GetWorkflowID(), handle3.GetWorkflowID(), "different keys should create different workflow IDs")
 
 		// Each handle should get its own input
-		result1, err := handle1.GetResult()
+		result1, err := handle1.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 		require.NoError(t, err, "failed to get result from first handle")
 		assert.Equal(t, "input-key-1", result1, "first handle should get its own input")
 
-		result2, err := handle2.GetResult()
+		result2, err := handle2.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 		require.NoError(t, err, "failed to get result from second handle")
 		assert.Equal(t, "input-key-2", result2, "second handle should get its own input")
 
-		result3, err := handle3.GetResult()
+		result3, err := handle3.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 		require.NoError(t, err, "failed to get result from third handle")
 		assert.Equal(t, "input-key-3", result3, "third handle should get its own input")
 	})
@@ -1896,7 +1896,7 @@ func TestDebouncerClient(t *testing.T) {
 		handle2, err := debouncer10sTimeout.Debounce("independent-key-2", 200*time.Millisecond, "independent-2")
 		require.NoError(t, err, "failed to call Debounce with second key")
 
-		result2, err := handle2.GetResult()
+		result2, err := handle2.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 		require.NoError(t, err, "failed to get result from second handle")
 		assert.Equal(t, "independent-2", result2, "second handle should get its own input")
 
@@ -1905,7 +1905,7 @@ func TestDebouncerClient(t *testing.T) {
 		assert.GreaterOrEqual(t, elapsed2, 200*time.Millisecond, "key-2 should execute after its delay")
 		assert.Less(t, elapsed2, 5*time.Second, "key-2 should not be affected by key-1's delay")
 
-		result1, err := handle1.GetResult()
+		result1, err := handle1.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 		require.NoError(t, err, "failed to get result from first handle")
 		assert.Equal(t, "independent-1", result1, "first handle should get its own input")
 	})
@@ -1945,7 +1945,7 @@ func TestDebouncerClientConfiguredInstance(t *testing.T) {
 		handle, err := debouncer.Debounce("instance-key-"+inst.channel, 100*time.Millisecond, "hi")
 		require.NoError(t, err, "failed to debounce on instance %q", inst.channel)
 
-		result, err := handle.GetResult()
+		result, err := handle.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 		require.NoError(t, err, "failed to get result for instance %q", inst.channel)
 		assert.Equal(t, inst.channel+": hi", result, "debounced workflow ran on the wrong instance")
 
@@ -2018,7 +2018,7 @@ func TestDebouncerClientWorkflowOptions(t *testing.T) {
 	assert.Equal(t, expectedWorkflowID, workflowID, "handle should return the expected workflow ID")
 
 	// Wait for the workflow to execute
-	result, err := handle.GetResult()
+	result, err := handle.GetResult(WithHandlePollingInterval(50 * time.Millisecond))
 	require.NoError(t, err, "failed to get result")
 	assert.Equal(t, testInput, result, "result should match input")
 
