@@ -241,7 +241,7 @@ type Client interface {
 	SetLatestApplicationVersion(_ Client, versionName string) error                         // Mark the named version as latest by bumping its timestamp to now
 	RenameApplication(_ Client, input RenameApplicationInput) (ApplicationRowCounts, error) // Re-own system database rows after an application is renamed
 
-	Shutdown(_ Client, timeout time.Duration) error // Gracefully shutdown all DBOS resources; returns an error if the timeout expired before they all stopped
+	Shutdown(_ Client, timeout time.Duration) error // Gracefully shutdown all DBOS resources; returns an error if the timeout expired before they all stopped. Only valid on the Context returned by NewContext
 }
 
 // Context represents a DBOS execution context that provides workflow orchestration capabilities.
@@ -254,7 +254,7 @@ type Context interface {
 	Client
 
 	// Context Lifecycle
-	Launch() error // Launch the DBOS runtime (system database, queues, scheduler) and recover this executor's PENDING workflows: interrupted workflows resume from their last completed step; queued ones are returned to their queue
+	Launch() error // Launch the DBOS runtime (system database, queues, scheduler) and recover this executor's PENDING workflows: interrupted workflows resume from their last completed step; queued ones are returned to their queue. Only valid on the Context returned by NewContext
 
 	// Workflow operations
 	RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
@@ -297,8 +297,9 @@ type Context interface {
 type dbosContext struct {
 	ctx           context.Context
 	ctxCancelFunc context.CancelCauseFunc
+	root          bool
 
-	launched atomic.Bool
+	launched *atomic.Bool
 	// Launch and shutdown are permanent, one-shot lifecycle transitions.
 	launchStarted   atomic.Bool
 	shutdownStarted atomic.Bool
@@ -416,8 +417,8 @@ func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 		applicationID:           c.applicationID,
 		queueRunner:             c.queueRunner,
 		serializer:              c.serializer,
+		launched:                c.launched,
 	}
-	childCtx.launched.Store(c.launched.Load())
 	return childCtx
 }
 
@@ -595,6 +596,8 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		workflowsWg:                 &sync.WaitGroup{},
 		ctx:                         dbosBaseCtx,
 		ctxCancelFunc:               cancelFunc,
+		root:                        true,
+		launched:                    &atomic.Bool{},
 		workflowRegistry:            &sync.Map{},
 		workflowCustomNametoFQN:     &sync.Map{},
 		activeWorkflowIDs:           &sync.Map{},
@@ -798,7 +801,13 @@ func (c *dbosContext) requestedOwner(explicit string) *string {
 // Returns an error if the context is already launched or if any component fails to start.
 // A failed Launch is terminal: the context is torn down (system database closed) and
 // cannot be relaunched — create a new context with NewContext and Launch that instead.
+//
+// Launch must be called on the Context returned by NewContext. Contexts derived from it
+// (WithValue, WithTimeout, From, ...) return an error.
 func (c *dbosContext) Launch() error {
+	if !c.root {
+		return models.NewInitializationError("Launch must be called on the Context returned by NewContext, not a derived one")
+	}
 	if !c.launchStarted.CompareAndSwap(false, true) {
 		return models.NewInitializationError("DBOS is already launched")
 	}
@@ -904,7 +913,13 @@ func (c *dbosContext) Launch() error {
 // Shutdown is a permanent, one-shot operation and should be called once, when the
 // application is terminating: only the first call performs the shutdown and reports
 // its result; subsequent calls return nil immediately without waiting for it.
+//
+// Shutdown must be called on the Context returned by NewContext. Contexts derived from it
+// (WithValue, WithTimeout, From, ...) return an error.
 func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
+	if !c.root {
+		return models.NewInitializationError("Shutdown must be called on the Context returned by NewContext, not a derived one")
+	}
 	if !c.shutdownStarted.CompareAndSwap(false, true) {
 		return nil
 	}

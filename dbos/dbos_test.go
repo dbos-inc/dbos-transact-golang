@@ -633,6 +633,71 @@ func TestRunWorkflowBeforeLaunchFails(t *testing.T) {
 	assert.Equal(t, "hello", result)
 }
 
+func TestLifecycleRequiresRootContext(t *testing.T) {
+	ctx, err := NewContext(context.Background(), Config{
+		AppName:     "test-root-only-lifecycle",
+		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+	})
+	require.NoError(t, err)
+	defer Shutdown(ctx, 5*time.Second)
+
+	wf := func(ctx Context, in string) (string, error) { return in, nil }
+	RegisterWorkflow(ctx, wf)
+
+	assertRootOnly := func(t *testing.T, err error, op string) {
+		t.Helper()
+		require.Error(t, err)
+		dbosErr := &Error{}
+		require.ErrorAs(t, err, &dbosErr)
+		assert.Equal(t, ErrorCodeInitialization, dbosErr.Code)
+		assert.Contains(t, err.Error(), op+" must be called on the Context returned by NewContext")
+	}
+
+	// Derived before Launch: cannot launch, becomes usable once the root launches.
+	derivedBefore := WithValue(ctx, "k", "v")
+	assertRootOnly(t, Launch(derivedBefore), "Launch")
+	assert.False(t, ctx.(*dbosContext).launched.Load(), "a rejected derived Launch must not mark the root launched")
+
+	require.NoError(t, Launch(ctx))
+
+	handle, err := RunWorkflow(derivedBefore, wf, "before")
+	require.NoError(t, err)
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "before", result)
+
+	// Every derivation is rejected, with and without a launched root.
+	derivedAfter := WithValue(ctx, "k", "v")
+	withTimeout, cancelTimeout := WithTimeout(ctx, time.Minute)
+	defer cancelTimeout()
+	withCancel, cancel := WithCancel(ctx)
+	defer cancel()
+	fromCtx := From(ctx, context.Background())
+	for name, derived := range map[string]Context{
+		"WithValue":     derivedAfter,
+		"WithTimeout":   withTimeout,
+		"WithCancel":    withCancel,
+		"WithoutCancel": WithoutCancel(ctx),
+		"From":          fromCtx,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertRootOnly(t, Launch(derived), "Launch")
+			assertRootOnly(t, Shutdown(derived, time.Second), "Shutdown")
+		})
+	}
+
+	// The rejected Shutdown calls must not have touched the root.
+	assert.NoError(t, ctx.Err())
+	handle, err = RunWorkflow(derivedAfter, wf, "after")
+	require.NoError(t, err)
+	result, err = handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "after", result)
+
+	require.NoError(t, Shutdown(ctx, 5*time.Second))
+	assert.False(t, derivedBefore.(*dbosContext).launched.Load(), "derived contexts share the root's launched flag")
+}
+
 func TestConcurrentShutdownDoesNotWaitTwice(t *testing.T) {
 	ctx, err := NewContext(context.Background(), Config{
 		AppName:     "test-concurrent-shutdown",
