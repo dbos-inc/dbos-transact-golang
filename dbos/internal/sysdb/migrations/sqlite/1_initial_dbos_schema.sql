@@ -3,9 +3,9 @@
 --
 -- Uses these SQLite-flavor conventions:
 --   * INTEGER for epoch-ms columns (BIGINT is an alias for INTEGER in SQLite).
---   * Timestamp / UUID columns have no DEFAULT — Go callers supply
---     time.Now().UnixMilli() and uuid.NewString() explicitly so the schema
---     does not depend on driver-side UDFs.
+--   * Creation timestamps DEFAULT to the database clock in epoch ms, as on
+--     Postgres. UUID columns have no DEFAULT: Go callers supply
+--     uuid.NewString() so the schema does not depend on driver-side UDFs.
 --   * Foreign keys require PRAGMA foreign_keys = ON, set on connect.
 
 CREATE TABLE workflow_status (
@@ -19,8 +19,8 @@ CREATE TABLE workflow_status (
     output TEXT,
     error TEXT,
     executor_id TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
     application_version TEXT,
     application_id TEXT,
     class_name TEXT DEFAULT NULL,
@@ -59,7 +59,7 @@ CREATE TABLE notifications (
     destination_uuid TEXT NOT NULL,
     topic TEXT,
     message TEXT NOT NULL,
-    created_at_epoch_ms INTEGER NOT NULL,
+    created_at_epoch_ms INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
     FOREIGN KEY (destination_uuid) REFERENCES workflow_status(workflow_uuid)
         ON UPDATE CASCADE ON DELETE CASCADE
 );

@@ -46,11 +46,13 @@ type Config struct {
 	// sqlite::memory:). Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
 	// SQLite URLs additionally require importing the driver package:
 	// import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
-	DatabaseURL                  string
-	SystemDBPool                 *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
-	SQLiteSystemDB               *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
-	DatabaseSchema               string          // Database schema name (defaults to "dbos")
-	Logger                       *slog.Logger    // Custom logger instance (defaults to a new slog logger)
+	DatabaseURL    string
+	SystemDBPool   *pgxpool.Pool // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
+	SQLiteSystemDB *sql.DB       // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
+	DatabaseSchema string        // Database schema name (defaults to "dbos")
+	Logger         *slog.Logger  // Custom logger instance (defaults to a new slog logger)
+	// Deprecated: the admin server has been deprecated since v0 and will be permanently
+	// removed in v1.5.0. Use DBOS Conductor for remote workflow management instead.
 	AdminServer                  bool            // Enable Transact admin HTTP server (disabled by default)
 	AdminServerPort              int             // Port for the admin HTTP server (default: 3001)
 	ConductorURL                 string          // DBOS conductor service URL (optional)
