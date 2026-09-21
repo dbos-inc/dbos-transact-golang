@@ -11907,9 +11907,8 @@ func TestRewind(t *testing.T) {
 		assert.Equal(t, []string{"a", "b"}, entries)
 		assert.False(t, closed)
 
-		// A peer sends to the parent while it is failed, and another blocks on an event
-		// the parent only sets on a successful pass. Neither learns a new workflow ID.
-		require.NoError(t, Send(dbosCtx, parentID, "go", "cmd"))
+		// A peer blocks on an event the parent only sets on a successful pass, without
+		// ever learning a new workflow ID.
 		answerCh := make(chan int, 1)
 		answerErrCh := make(chan error, 1)
 		go func() {
@@ -11928,6 +11927,8 @@ func TestRewind(t *testing.T) {
 
 		parentHandle, err := RewindWorkflow[int](dbosCtx, parentID)
 		require.NoError(t, err)
+		// The rewind empties the mailbox, so the peer sends once the replay is under way.
+		require.NoError(t, Send(dbosCtx, parentID, "go", "cmd"))
 		parentResult, err := parentHandle.GetResult()
 		require.NoError(t, err)
 		assert.Equal(t, 44, parentResult, "42 from the repaired child plus len(\"go\")")
@@ -11994,7 +11995,6 @@ func TestRewind(t *testing.T) {
 		}
 		require.NotEmpty(t, before)
 
-		require.NoError(t, Send(dbosCtx, parentID, "go", "cmd"))
 		childHandle, err := RewindWorkflow[int](dbosCtx, childID)
 		require.NoError(t, err)
 		_, err = childHandle.GetResult()
@@ -12004,6 +12004,8 @@ func TestRewind(t *testing.T) {
 		// stream writes, and the event: the surgical recovery for this shape.
 		parentHandle, err := RewindWorkflow[int](dbosCtx, parentID, WithRewindStartStep(uint(getResultStep)))
 		require.NoError(t, err)
+		// The rewind empties the mailbox, so the peer sends once the replay is under way.
+		require.NoError(t, Send(dbosCtx, parentID, "go", "cmd"))
 		parentResult, err := parentHandle.GetResult()
 		require.NoError(t, err)
 		assert.Equal(t, 44, parentResult)
@@ -12149,17 +12151,23 @@ func TestRewind(t *testing.T) {
 			workflowID)
 		require.Equal(t, 1, consumed, "the recv should have stamped itself on the row it took")
 
-		// Rewinding past the recv deletes the message it took delivery of. Leaving the
-		// row consumed would strand the replayed recv on a message it can never see;
-		// leaving it unconsumed would deliver it a second time.
+		// A message that lands after the cut is never taken by the replay either.
+		require.NoError(t, Send(dbosCtx, workflowID, "stray", "inbox"))
+		require.Equal(t, 1, rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1 AND consumed = false`,
+			workflowID))
+
+		// Rewinding past the recv empties the mailbox. Leaving the consumed row would
+		// strand the replayed recv on a message it can never see; leaving it unconsumed
+		// would deliver it a second time.
 		_, err = RewindWorkflow[string](dbosCtx, workflowID)
 		require.NoError(t, err)
 		require.Eventually(t, func() bool {
 			return rawQueryInt(t, dbosCtx,
 				`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1`, workflowID) == 0
-		}, 10*time.Second, 50*time.Millisecond, "the consumed message should be deleted by the rewind")
+		}, 10*time.Second, 50*time.Millisecond, "the rewind should empty the mailbox")
 
-		// So the replayed recv waits for a new message rather than re-receiving the old one.
+		// So the replayed recv waits for a new message rather than taking either of them.
 		require.Never(t, func() bool {
 			return getStatus(t, workflowID) == WorkflowStatusSuccess
 		}, 2*time.Second, 200*time.Millisecond, "the replayed recv must block, not re-consume")

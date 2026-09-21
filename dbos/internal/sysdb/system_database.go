@@ -2760,7 +2760,7 @@ type RewindWorkflowDBInput struct {
 //   - Events published at or past the cut are rolled back to the last value published
 //     below it, using workflow_events_history as an undo log. Events published after
 //     are discarded.
-//   - Notifications the discarded run consumed are deleted.
+//   - Messages the discarded run consumed or received after the rewind point are deleted.
 //   - Stream entries are untouched.
 //
 // A replayed Send still duplicates into its destination's mailbox; that side effect
@@ -2850,9 +2850,9 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 		}
 	}
 
-	// Delete the messages the discarded steps consumed.
+	// Delete messages consumed or received after the rewind point
 	consumedQuery := s.RenderSQL(`DELETE FROM %snotifications
-		WHERE destination_uuid = $1 AND consumed_by_function_id >= $2`, schemaPrefix)
+		WHERE destination_uuid = $1 AND (consumed_by_function_id >= $2 OR consumed = false)`, schemaPrefix)
 	if _, err := tx.Exec(ctx, consumedQuery, input.WorkflowID, input.StartStep); err != nil {
 		return fmt.Errorf("failed to delete consumed notifications for workflow %s: %w", input.WorkflowID, err)
 	}
