@@ -36,6 +36,11 @@ type DataSource struct {
 	dialect Dialect
 	schema  string
 
+	// True when the engine is the system database itself, in which case
+	// RunAsTransaction collapses onto the single system transaction and there is
+	// no separate transaction_completion table to maintain.
+	sharesSystemDB bool
+
 	// Guard setup (dialect resolution + completion-table creation).
 	setupMu   sync.Mutex
 	setupDone bool
@@ -134,12 +139,15 @@ func NewDataSource[E Engine](ctx Context, engine E, opts ...DataSourceOption) (*
 	// table creation until the source is used with a different system database.
 	if sysdb.SameEngine(ds.pool, c.systemDB.Pool()) {
 		c.logger.Debug("Data source shares the system database; using single-transaction durability", "datasource", ds.name)
+		ds.sharesSystemDB = true
+		c.registerDataSource(ds)
 		return ds, nil
 	}
 
 	if err := ds.setup(c); err != nil {
 		return nil, fmt.Errorf("data source %q: %w", ds.name, err)
 	}
+	c.registerDataSource(ds)
 	return ds, nil
 }
 

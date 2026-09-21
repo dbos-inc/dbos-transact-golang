@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -349,8 +350,23 @@ type dbosContext struct {
 
 	serializer Serializer[any]
 
+	dataSourcesMu sync.Mutex
+	dataSources   []*DataSource
+
 	// Alert handler
 	alertHandler AlertHandler
+}
+
+func (c *dbosContext) registerDataSource(ds *DataSource) {
+	c.dataSourcesMu.Lock()
+	defer c.dataSourcesMu.Unlock()
+	c.dataSources = append(c.dataSources, ds)
+}
+
+func (c *dbosContext) registeredDataSources() []*DataSource {
+	c.dataSourcesMu.Lock()
+	defer c.dataSourcesMu.Unlock()
+	return slices.Clone(c.dataSources)
 }
 
 // SetAlertHandler registers a handler function for alerts received from DBOS Conductor.
