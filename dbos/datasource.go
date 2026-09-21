@@ -341,6 +341,19 @@ func (ds *DataSource) checkCompletion(ctx context.Context, q Querier, workflowID
 	return &rec, nil
 }
 
+// Used by RewindWorkflow. No-op when the datasource == the system database
+func (ds *DataSource) deleteCheckpoints(ctx context.Context, workflowID string, startStep int) error {
+	if ds.sharesSystemDB {
+		return nil
+	}
+	query := ds.dialect.RewriteQuery(fmt.Sprintf(
+		`DELETE FROM %s WHERE workflow_id = $1 AND step_id >= $2`, ds.qualifiedCompletionTable()))
+	if _, err := ds.pool.Exec(ctx, query, workflowID, startStep); err != nil {
+		return fmt.Errorf("data source %q: failed to delete checkpoints for workflow %s: %w", ds.name, workflowID, err)
+	}
+	return nil
+}
+
 // recordCompletion writes the durability row for (workflowID, stepID).
 // A duplicate row surfaces as a workflow-conflict error.
 func (ds *DataSource) recordCompletion(ctx context.Context, q Querier, workflowID string, stepID int, output, errStr *string, serialization string) error {

@@ -213,6 +213,7 @@ type Client interface {
 	SetWorkflowDelay(_ Client, workflowID string, opts ...SetWorkflowDelayOption) error                          // Set or update the delay on a DELAYED workflow
 	ResumeWorkflow(_ Client, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)       // Resume a cancelled workflow
 	ResumeWorkflows(_ Client, workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error) // Resume multiple workflows in a single DB round-trip
+	RewindWorkflow(_ Client, workflowID string, opts ...RewindWorkflowOption) (WorkflowHandle[any], error)       // Drop a workflow's history from a step onwards and re-run it under the same ID
 	ForkWorkflow(_ Client, input ForkWorkflowInput) (WorkflowHandle[any], error)                                 // Fork a workflow from a specific step
 	ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]WorkflowHandle[any], error)                             // Fork multiple workflows in a single DB round-trip
 	ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                               // List workflows based on filtering criteria

@@ -3391,7 +3391,7 @@ func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration) (any,
 	// Consume the message and checkpoint the recv result in a single transaction.
 	// If another executor already checkpointed this step, runAsTxn returns the recorded result.
 	out, err := c.runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
-		message, msgSerialization, err := c.systemDB.ConsumeMessage(ctx, tx, workflowID, topic)
+		message, msgSerialization, err := c.systemDB.ConsumeMessage(ctx, tx, workflowID, topic, stepID)
 		if err != nil {
 			return nil, err
 		}
@@ -4983,6 +4983,164 @@ func ResumeWorkflows[R any](ctx Client, workflowIDs []string, opts ...ResumeWork
 		handles = append(handles, typedHandle[R](ctx, h))
 	}
 	return handles, nil
+}
+
+// WithRewindQueue re-enqueues the rewound workflow on the specified queue instead of the internal queue.
+func WithRewindQueue(queueName string) RewindWorkflowOption {
+	return func(o *models.RewindWorkflowInput) {
+		o.QueueName = queueName
+	}
+}
+
+// WithRewindQueuePartitionKey re-enqueues the rewound workflow onto the given partition
+// of a partitioned queue.
+func WithRewindQueuePartitionKey(partitionKey string) RewindWorkflowOption {
+	return func(o *models.RewindWorkflowInput) {
+		o.QueuePartitionKey = partitionKey
+	}
+}
+
+// WithRewindApplicationVersion replays the workflow under the given application version
+// instead of the one it recorded. Restamping onto the running executor's version is how
+// a workflow stranded on a retired version is brought back.
+func WithRewindApplicationVersion(applicationVersion string) RewindWorkflowOption {
+	return func(o *models.RewindWorkflowInput) {
+		o.ApplicationVersion = applicationVersion
+	}
+}
+
+// WithRewindStartStep drops the workflow's history from startStep onwards. Steps are
+// numbered from 0, and 0 is the default: it discards the whole history and replays the
+// workflow from its original input.
+func WithRewindStartStep(startStep uint) RewindWorkflowOption {
+	return func(o *models.RewindWorkflowInput) {
+		o.StartStep = startStep
+	}
+}
+
+func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...RewindWorkflowOption) (WorkflowHandle[any], error) {
+	if workflowID == "" {
+		return nil, models.NewInvalidOptionError("workflowID is required")
+	}
+	params := &models.RewindWorkflowInput{WorkflowID: workflowID}
+	for _, opt := range opts {
+		opt(params)
+	}
+	if params.StartStep > uint(math.MaxInt) {
+		return nil, models.NewInvalidOptionError(fmt.Sprintf("startStep %d exceeds maximum allowed value %d", params.StartStep, math.MaxInt))
+	}
+	startStep := int(params.StartStep)
+
+	// Drop the data sources' checkpoints before the system database's.
+	dataSources := c.registeredDataSources()
+	if len(dataSources) > 0 {
+		// Cheap check
+		if err := c.checkRewindable(workflowID); err != nil {
+			return nil, err
+		}
+		for _, ds := range dataSources {
+			if err := ds.deleteCheckpoints(c, workflowID, startStep); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	dbInput := sysdb.RewindWorkflowDBInput{
+		WorkflowID:         workflowID,
+		StartStep:          startStep,
+		ApplicationVersion: params.ApplicationVersion,
+		QueueName:          params.QueueName,
+		QueuePartitionKey:  params.QueuePartitionKey,
+	}
+
+	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
+	isWithinWorkflow := ok && workflowState != nil
+	var err error
+	if isWithinWorkflow {
+		_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+			dbInput.Tx = tx
+			return nil, c.systemDB.RewindWorkflow(ctx, dbInput)
+		}, WithStepName("DBOS.rewindWorkflow"))
+	} else {
+		err = sysdb.Retry(c, func() error {
+			return c.systemDB.RewindWorkflow(c, dbInput)
+		}, sysdb.WithRetrierLogger(c.logger))
+	}
+	if err != nil {
+		return nil, err
+	}
+	return newWorkflowPollingHandle[any](c, workflowID), nil
+}
+
+func (c *dbosContext) checkRewindable(workflowID string) error {
+	statuses, err := sysdb.RetryWithResult(c, func() ([]models.WorkflowStatus, error) {
+		return c.systemDB.ListWorkflows(c, sysdb.ListWorkflowsDBInput{WorkflowIDs: []string{workflowID}})
+	}, sysdb.WithRetrierLogger(c.logger))
+	if err != nil {
+		return err
+	}
+	if len(statuses) == 0 {
+		return models.NewNonExistentWorkflowError(workflowID)
+	}
+	switch statuses[0].Status {
+	case models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed:
+		return fmt.Errorf(
+			"cannot rewind workflow %s while it is %s: only a workflow in a terminal state can be rewound, so cancel it first",
+			workflowID, statuses[0].Status)
+	}
+	return nil
+}
+
+// RewindWorkflow drops a workflow's recorded history from a given step onwards and
+// re-runs it under the same workflow ID.
+//
+// Where ForkWorkflow copies the steps before a cut point into a new workflow,
+// RewindWorkflow discards the steps from the cut point onwards and replays in place.
+// Keeping the ID is the point: peers go on sending to, receiving from, and reading
+// events and streams off the same workflow, and child workflows keep resolving to the
+// same deterministic IDs. A child that already succeeded is adopted by the replaying
+// parent rather than re-run, so repairing one failed child and rewinding its parent
+// recovers the whole tree without touching the children that worked.
+//
+// Unlike ResumeWorkflow, this applies to workflows in a terminal state: rewinding a
+// failed -- or successful -- workflow is the intended use. An active workflow must be
+// cancelled first.
+//
+// What the discarded run did is undone as far as the history allows:
+//   - Events published at or past the cut revert to the last value published below it;
+//     a key only the discarded run ever published is unpublished outright.
+//   - Messages the discarded run consumed are deleted, so a replayed Recv waits for new
+//     ones rather than taking delivery a second time.
+//   - Checkpoints held in registered data sources are dropped along with the steps that
+//     wrote them, so the replay re-runs those transactions.
+//   - A close the discarded run wrote on a stream is undone, so the replay can append.
+//
+// Two effects outlive the rewind, both because they land in another workflow's history:
+// a replayed Send delivers a second copy to its destination's mailbox, and stream
+// entries keep their offsets, with the replay's appended after them.
+//
+// Options:
+//   - WithRewindStartStep: the step to rewind to (default 0, the whole history).
+//   - WithRewindApplicationVersion: replay under a different application version.
+//   - WithRewindQueue: re-enqueue on a named queue instead of the internal queue.
+//   - WithRewindQueuePartitionKey: re-enqueue onto a partition of that queue.
+//
+// Example:
+//
+//	// Repair a failed child, then rewind the parent onto it.
+//	_, err := dbos.RewindWorkflow[string](ctx, childID)
+//	...
+//	handle, err := dbos.RewindWorkflow[int](ctx, parentID)
+//	result, err := handle.GetResult()
+func RewindWorkflow[R any](ctx Client, workflowID string, opts ...RewindWorkflowOption) (WorkflowHandle[R], error) {
+	if ctx == nil {
+		return nil, errors.New("ctx cannot be nil")
+	}
+	handle, err := ctx.RewindWorkflow(ctx, workflowID, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return typedHandle[R](ctx, handle), nil
 }
 
 // ForkWorkflowSpec describes a single workflow to fork within a batch.

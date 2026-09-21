@@ -181,6 +181,30 @@ var sqliteMigration111SQL string
 //go:embed migrations/sqlite/112_drop_operation_outputs_foreign_key.sql
 var sqliteMigration112SQL string
 
+//go:embed migrations/sqlite/114_drop_notifications_index.sql
+var sqliteMigration114SQL string
+
+//go:embed migrations/sqlite/115_create_in_flight_index_v2.sql
+var sqliteMigration115SQL string
+
+//go:embed migrations/sqlite/116_drop_in_flight_index.sql
+var sqliteMigration116SQL string
+
+//go:embed migrations/sqlite/117_create_partition_dequeue_index_v3.sql
+var sqliteMigration117SQL string
+
+//go:embed migrations/sqlite/118_drop_partition_dequeue_index_v2.sql
+var sqliteMigration118SQL string
+
+//go:embed migrations/sqlite/119_create_operation_outputs_completed_at_index_v2.sql
+var sqliteMigration119SQL string
+
+//go:embed migrations/sqlite/120_drop_operation_outputs_completed_at_index.sql
+var sqliteMigration120SQL string
+
+//go:embed migrations/sqlite/121_add_notifications_consumed_by_function_id.sql
+var sqliteMigration121SQL string
+
 // BuildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
 // 38, 39, 43, 44, 105, and 113 have no SQLite counterpart and are omitted.
@@ -240,6 +264,14 @@ func BuildSqliteMigrations() []MigrationFile {
 		{Version: 110, SQL: sqliteMigration110SQL},
 		{Version: 111, SQL: sqliteMigration111SQL},
 		{Version: 112, SQL: sqliteMigration112SQL},
+		{Version: 114, SQL: sqliteMigration114SQL},
+		{Version: 115, SQL: sqliteMigration115SQL},
+		{Version: 116, SQL: sqliteMigration116SQL},
+		{Version: 117, SQL: sqliteMigration117SQL},
+		{Version: 118, SQL: sqliteMigration118SQL},
+		{Version: 119, SQL: sqliteMigration119SQL},
+		{Version: 120, SQL: sqliteMigration120SQL},
+		{Version: 121, SQL: sqliteMigration121SQL},
 	}
 }
 

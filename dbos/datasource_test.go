@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1136,5 +1137,117 @@ func TestRunAsTransactionSharedSystemDB(t *testing.T) {
 
 		// fn never ran, so nothing was written.
 		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv`))
+	})
+}
+
+// TestRewindDropsDataSourceCheckpoints covers the half of a rewind that lives outside
+// the system database: a transaction's durability row in the USER's database. The
+// system rewind deletes the step from operation_outputs, but the completion row is
+// what RunAsTransaction consults first, so a row left behind would be replayed as the
+// transaction's result and the transaction would never re-run.
+func TestRewindDropsDataSourceCheckpoints(t *testing.T) {
+	t.Run("DropsCheckpointsPastTheCut", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ub.dropCompletionTable(t)
+		ds := ub.register(t, ctx, "app")
+
+		var firstRuns, secondRuns atomic.Int32
+		// Two transactions, so a cut between them shows that the rewind drops exactly
+		// the checkpoints past it and leaves the earlier one to be replayed.
+		wf := func(dctx Context, _ string) (string, error) {
+			if _, err := RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				firstRuns.Add(1)
+				_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "first", "v")
+				return "first", e
+			}); err != nil {
+				return "", err
+			}
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				n := secondRuns.Add(1)
+				_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), fmt.Sprintf("second-%d", n), "v")
+				return fmt.Sprintf("second-%d", n), e
+			})
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+
+		wfID := uuid.NewString()
+		handle, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		res, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "second-1", res)
+		require.Equal(t, int32(1), firstRuns.Load())
+		require.Equal(t, int32(1), secondRuns.Load())
+		require.Equal(t, 2, ub.countRows(t,
+			fmt.Sprintf(`SELECT count(*) FROM %s WHERE workflow_id = $1`, ub.completionTable()), wfID))
+
+		// Cut at the second transaction.
+		rewound, err := RewindWorkflow[string](ctx, wfID, WithRewindStartStep(1))
+		require.NoError(t, err)
+		res, err = rewound.GetResult()
+		require.NoError(t, err)
+
+		// The second transaction re-ran and produced a new value; the first did not,
+		// because its checkpoint survived the cut and was replayed.
+		require.Equal(t, "second-2", res)
+		require.Equal(t, int32(1), firstRuns.Load(), "a transaction below the cut must be replayed, not re-run")
+		require.Equal(t, int32(2), secondRuns.Load(), "a transaction past the cut must re-run")
+
+		// One row per step again: the dropped checkpoint was rewritten by the replay.
+		require.Equal(t, 2, ub.countRows(t,
+			fmt.Sprintf(`SELECT count(*) FROM %s WHERE workflow_id = $1`, ub.completionTable()), wfID))
+		// And the application saw the second transaction's write twice, once per run.
+		require.Equal(t, 1, ub.countRows(t, `SELECT count(*) FROM kv WHERE k = 'second-1'`))
+		require.Equal(t, 1, ub.countRows(t, `SELECT count(*) FROM kv WHERE k = 'second-2'`))
+	})
+
+	t.Run("RefusesActiveWorkflowBeforeDeleting", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ub.dropCompletionTable(t)
+		ds := ub.register(t, ctx, "app")
+
+		// The checkpoint deletes run before the system rewind, so without a pre-check a
+		// running workflow would lose its live checkpoints and only then be refused.
+		checkpointed := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
+		wf := func(dctx Context, _ string) (string, error) {
+			out, err := RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "k1", "v1")
+				return "done", e
+			})
+			if err != nil {
+				return "", err
+			}
+			once.Do(func() { close(checkpointed) })
+			<-release
+			return out, nil
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+
+		wfID := uuid.NewString()
+		handle, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		<-checkpointed
+
+		_, err = RewindWorkflow[string](ctx, wfID)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "terminal state")
+
+		// The refusal came before any delete, so the running workflow's checkpoint
+		// is still there for it to finish on.
+		require.Equal(t, 1, ub.countRows(t,
+			fmt.Sprintf(`SELECT count(*) FROM %s WHERE workflow_id = $1`, ub.completionTable()), wfID))
+
+		close(release)
+		out, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "done", out)
 	})
 }
