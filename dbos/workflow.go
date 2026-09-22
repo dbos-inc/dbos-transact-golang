@@ -5095,6 +5095,9 @@ func (c *dbosContext) rewindDataSources(ctx context.Context, tx Tx, dataSources 
 	if len(dataSources) == 0 {
 		return nil
 	}
+	if startStep < 0 {
+		return models.NewInvalidOptionError(fmt.Sprintf("startStep must be >= 0, got %d", startStep))
+	}
 	statuses, err := c.systemDB.ListWorkflows(ctx, sysdb.ListWorkflowsDBInput{WorkflowIDs: []string{workflowID}, Tx: tx})
 	if err != nil {
 		return err
