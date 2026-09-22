@@ -71,6 +71,7 @@ type RewindWorkflowInput struct {
 	ApplicationVersion string // Optional: Application version to replay under (keeps the recorded one if empty)
 	QueueName          string // Optional: Queue to re-enqueue the rewound workflow on (defaults to the internal queue)
 	QueuePartitionKey  string // Optional: Partition key when re-enqueueing onto a partitioned queue
+	DataSources        []any  // Optional: *dbos.DataSource values (models cannot import dbos) whose checkpoints to drop
 }
 
 type RewindWorkflowOption func(*RewindWorkflowInput)

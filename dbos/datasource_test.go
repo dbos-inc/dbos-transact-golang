@@ -53,7 +53,7 @@ func openUserBackend(t *testing.T) *userBackend {
 // WithDataSourceName. The two concrete branches instantiate the generic
 // NewDataSource with the real engine type. NewDataSource creates the completion
 // table eagerly, so any failure is surfaced here.
-func (u *userBackend) register(t *testing.T, ctx Context, name string, opts ...DataSourceOption) *DataSource {
+func (u *userBackend) register(t *testing.T, ctx Client, name string, opts ...DataSourceOption) *DataSource {
 	t.Helper()
 	opts = append(opts, WithDataSourceName(name))
 	var (
@@ -183,19 +183,37 @@ func TestNewDataSource(t *testing.T) {
 		require.True(t, ub.completionTableExists(t))
 	})
 
-	// Dynamic creation: a data source may be created after Launch, and its
-	// completion table is still created on the spot.
-	t.Run("CreatesAfterLaunch", func(t *testing.T) {
+	// Registration feeds RewindWorkflow, so it must be complete by Launch.
+	t.Run("RefusedAfterLaunch", func(t *testing.T) {
 		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
 		require.NoError(t, Launch(ctx))
 
 		ub := openUserBackend(t)
 		ub.dropCompletionTable(t)
-		require.False(t, ub.completionTableExists(t))
 
-		ds := ub.register(t, ctx, "app")
+		var err error
+		if db := SQLDB(ub.pool); db != nil {
+			_, err = NewDataSource(ctx, db)
+		} else {
+			_, err = NewDataSource(ctx, PgxPool(ub.pool))
+		}
+		require.ErrorContains(t, err, "before Launch")
+		require.False(t, ub.completionTableExists(t))
+	})
+
+	// A Client is never launched and keeps no registry.
+	t.Run("ClientDoesNotRegister", func(t *testing.T) {
+		setupDBOS(t, setupDBOSOptions{dropDB: true})
+		client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+		require.NoError(t, err)
+		t.Cleanup(func() { client.Shutdown(client, 10*time.Second) })
+
+		ub := openUserBackend(t)
+		ub.dropCompletionTable(t)
+		ds := ub.register(t, client, "app")
 		require.NotNil(t, ds)
 		require.True(t, ub.completionTableExists(t))
+		require.Empty(t, client.(*dbosContext).registeredDataSources())
 	})
 
 	t.Run("DefaultsName", func(t *testing.T) {
@@ -1249,6 +1267,52 @@ func TestRewindDropsDataSourceCheckpoints(t *testing.T) {
 		out, err := handle.GetResult()
 		require.NoError(t, err)
 		require.Equal(t, "done", out)
+	})
+
+	t.Run("ClientDropsOnlyListedDataSources", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ub.dropCompletionTable(t)
+		ds := ub.register(t, ctx, "app")
+
+		var runs atomic.Int32
+		wf := func(dctx Context, _ string) (string, error) {
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				n := runs.Add(1)
+				_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), fmt.Sprintf("run-%d", n), "v")
+				return fmt.Sprintf("run-%d", n), e
+			})
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+
+		client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+		require.NoError(t, err)
+		t.Cleanup(func() { client.Shutdown(client, 10*time.Second) })
+		clientDS := ub.register(t, client, "app")
+
+		wfID := uuid.NewString()
+		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+
+		// Without the option the client does not know the data source, so the
+		// replay finds the old checkpoint and returns the first run's result.
+		rewound, err := RewindWorkflow[string](client, wfID)
+		require.NoError(t, err)
+		res, err := rewound.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "run-1", res)
+		require.Equal(t, int32(1), runs.Load())
+
+		rewound, err = RewindWorkflow[string](client, wfID, WithRewindDataSources(clientDS))
+		require.NoError(t, err)
+		res, err = rewound.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "run-2", res)
+		require.Equal(t, int32(2), runs.Load())
 	})
 
 	t.Run("RecoveredCallerDoesNotRedeleteCheckpoints", func(t *testing.T) {

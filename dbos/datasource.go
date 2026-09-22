@@ -83,20 +83,24 @@ type Engine interface {
 //
 // The returned handle is ready to use immediately: NewDataSource detects whether
 // the engine is the DBOS system database, resolves the dialect (CockroachDB), and
-// creates the transaction_completion table if it does not already exist. It may
-// be called at any time, before or after Launch.
+// creates the transaction_completion table if it does not already exist.
+//
+// On a Context created with NewContext, NewDataSource must be called before Launch.
 //
 // Example:
 //
 //	pool, _ := pgxpool.New(ctx, appDatabaseURL)
 //	ds, err := dbos.NewDataSource(ctx, pool, dbos.WithDataSourceName("app"))
-func NewDataSource[E Engine](ctx Context, engine E, opts ...DataSourceOption) (*DataSource, error) {
+func NewDataSource[E Engine](ctx Client, engine E, opts ...DataSourceOption) (*DataSource, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 	c, ok := ctx.(*dbosContext)
 	if !ok {
 		return nil, errors.New("NewDataSource requires a concrete DBOS context")
+	}
+	if !c.config.isClient && c.launched.Load() {
+		return nil, errors.New("NewDataSource must be called before Launch")
 	}
 
 	options := dataSourceOptions{name: defaultDataSourceName, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
@@ -140,14 +144,12 @@ func NewDataSource[E Engine](ctx Context, engine E, opts ...DataSourceOption) (*
 	if sysdb.SameEngine(ds.pool, c.systemDB.Pool()) {
 		c.logger.Debug("Data source shares the system database; using single-transaction durability", "datasource", ds.name)
 		ds.sharesSystemDB = true
-		c.registerDataSource(ds)
-		return ds, nil
-	}
-
-	if err := ds.setup(c); err != nil {
+	} else if err := ds.setup(c); err != nil {
 		return nil, fmt.Errorf("data source %q: %w", ds.name, err)
 	}
-	c.registerDataSource(ds)
+	if !c.config.isClient {
+		c.registerDataSource(ds)
+	}
 	return ds, nil
 }
 

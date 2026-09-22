@@ -5009,6 +5009,19 @@ func WithRewindApplicationVersion(applicationVersion string) RewindWorkflowOptio
 	}
 }
 
+// WithRewindDataSources names data sources whose transaction checkpoints the rewind
+// drops along with the steps that wrote them. A Context created with NewContext already
+// knows every data source registered on it with NewDataSource and drops their checkpoints
+// without this option. A Client has no such registry, so a rewind issued from a Client
+// leaves data source checkpoints in place unless they are listed here.
+func WithRewindDataSources(dataSources ...*DataSource) RewindWorkflowOption {
+	return func(o *models.RewindWorkflowInput) {
+		for _, ds := range dataSources {
+			o.DataSources = append(o.DataSources, ds)
+		}
+	}
+}
+
 // WithRewindStartStep drops the workflow's history from startStep onwards. Steps are
 // numbered from 0, and 0 is the default: it discards the whole history and replays the
 // workflow from its original input.
@@ -5039,6 +5052,15 @@ func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...Rewind
 		QueuePartitionKey:  params.QueuePartitionKey,
 	}
 	dataSources := c.registeredDataSources()
+	for _, d := range params.DataSources {
+		ds, ok := d.(*DataSource)
+		if !ok || ds == nil {
+			return nil, models.NewInvalidOptionError("WithRewindDataSources requires non-nil *DataSource values")
+		}
+		if !slices.Contains(dataSources, ds) {
+			dataSources = append(dataSources, ds)
+		}
+	}
 
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
@@ -5116,8 +5138,10 @@ func (c *dbosContext) rewindDataSources(ctx context.Context, tx Tx, dataSources 
 //     ones rather than taking delivery a second time.
 //   - Every unconsumed message is deleted too, including one sent before the rewind.
 //     Send only once the rewind has returned for the replay to receive it.
-//   - Checkpoints held in registered data sources are dropped along with the steps that
-//     wrote them, so the replay re-runs those transactions.
+//   - Checkpoints held in data sources are dropped along with the steps that wrote them,
+//     so the replay re-runs those transactions. A Context created with NewContext knows
+//     the data sources registered on it with NewDataSource; a Client must list them with
+//     WithRewindDataSources.
 //   - A close the discarded run wrote on a stream is undone, so the replay can append.
 //
 // Two effects outlive the rewind, both because they land in another workflow's history:
@@ -5129,6 +5153,7 @@ func (c *dbosContext) rewindDataSources(ctx context.Context, tx Tx, dataSources 
 //   - WithRewindApplicationVersion: replay under a different application version.
 //   - WithRewindQueue: re-enqueue on a named queue instead of the internal queue.
 //   - WithRewindQueuePartitionKey: re-enqueue onto a partition of that queue.
+//   - WithRewindDataSources: data sources whose checkpoints to drop, for a Client.
 //
 // Example:
 //
