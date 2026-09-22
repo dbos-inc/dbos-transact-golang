@@ -90,7 +90,6 @@ func main() {
 	config := dbos.Config{
 		DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 		AppName:     "cli-test",
-		AdminServer: true,
 	}
 
 	// Use schema from environment variable if set

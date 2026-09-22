@@ -29,7 +29,6 @@ import (
 )
 
 const (
-	_DEFAULT_ADMIN_SERVER_PORT         = 3001
 	_DEFAULT_SYSTEM_DB_SCHEMA          = "dbos"
 	_DEFAULT_SYSTEM_DB_STARTUP_TIMEOUT = 2 * time.Minute
 	_DBOS_DOMAIN                       = "cloud.dbos.dev"
@@ -47,15 +46,11 @@ type Config struct {
 	// sqlite::memory:). Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
 	// SQLite URLs additionally require importing the driver package:
 	// import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
-	DatabaseURL    string
-	SystemDBPool   *pgxpool.Pool // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
-	SQLiteSystemDB *sql.DB       // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
-	DatabaseSchema string        // Database schema name (defaults to "dbos")
-	Logger         *slog.Logger  // Custom logger instance (defaults to a new slog logger)
-	// Deprecated: the admin server has been deprecated since v0 and will be permanently
-	// removed in v1.5.0. Use DBOS Conductor for remote workflow management instead.
-	AdminServer                  bool            // Enable Transact admin HTTP server (disabled by default)
-	AdminServerPort              int             // Port for the admin HTTP server (default: 3001)
+	DatabaseURL                  string
+	SystemDBPool                 *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
+	SQLiteSystemDB               *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
+	DatabaseSchema               string          // Database schema name (defaults to "dbos")
+	Logger                       *slog.Logger    // Custom logger instance (defaults to a new slog logger)
 	ConductorURL                 string          // DBOS conductor service URL (optional)
 	ConductorAPIKey              string          // DBOS conductor API key (optional)
 	ConductorExecutorMetadata    map[string]any  // Metadata associated with this executor that may be used to identify it on the Conductor dashboard. Must be JSON-serializable.
@@ -89,9 +84,6 @@ func processConfig(inputConfig *Config) (*Config, error) {
 			return nil, err
 		}
 	}
-	if inputConfig.AdminServerPort == 0 {
-		inputConfig.AdminServerPort = _DEFAULT_ADMIN_SERVER_PORT
-	}
 	if inputConfig.SystemDBStartupTimeout < 0 {
 		return nil, fmt.Errorf("systemDBStartupTimeout cannot be negative")
 	}
@@ -105,8 +97,6 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		DatabaseSchema:               inputConfig.DatabaseSchema,
 		SkipMigrations:               inputConfig.SkipMigrations,
 		Logger:                       inputConfig.Logger,
-		AdminServer:                  inputConfig.AdminServer,
-		AdminServerPort:              inputConfig.AdminServerPort,
 		ConductorURL:                 inputConfig.ConductorURL,
 		ConductorAPIKey:              inputConfig.ConductorAPIKey,
 		ConductorExecutorMetadata:    inputConfig.ConductorExecutorMetadata,
@@ -308,9 +298,8 @@ type dbosContext struct {
 	launchStarted   atomic.Bool
 	shutdownStarted atomic.Bool
 
-	systemDB    sysdb.SystemDatabase
-	adminServer *adminServer
-	config      *Config
+	systemDB sysdb.SystemDatabase
+	config   *Config
 
 	// Queue runner
 	queueRunner        *queueRunner
@@ -423,7 +412,7 @@ func (c *dbosContext) Value(key any) any {
 }
 
 // clone returns a copy of the DBOS context with the underlying context.Context replaced by ctx.
-// Root-only lifecycle fields (cancel func, admin server, conductor, scheduler state, alert handler)
+// Root-only lifecycle fields (cancel func, conductor, scheduler state, alert handler)
 // are deliberately not propagated to derived contexts.
 func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 	childCtx := &dbosContext{
@@ -820,7 +809,7 @@ func (c *dbosContext) requestedOwner(explicit string) *string {
 }
 
 // Launch initializes and starts the DBOS runtime components including the system database
-// and admin server (if enabled), recovers any pending workflows on this executor, then
+// and conductor (if configured), recovers any pending workflows on this executor, then
 // starts the queue runner and workflow scheduler.
 //
 // Returns an error if the context is already launched or if any component fails to start.
@@ -860,17 +849,6 @@ func (c *dbosContext) Launch() error {
 	} else if latest.Name != c.applicationVersion {
 		c.logger.Warn("Current application version is not the latest",
 			"current", c.applicationVersion, "latest", latest.Name)
-	}
-
-	// Start the admin server if enabled
-	if c.config.AdminServer {
-		c.adminServer = newAdminServer(c, c.config.AdminServerPort)
-		err := c.adminServer.Start()
-		if err != nil {
-			c.logger.Error("Failed to start admin server", "error", err)
-			return models.NewInitializationError(fmt.Sprintf("failed to start admin server: %v", err))
-		}
-		c.logger.Debug("Admin server started", "port", c.config.AdminServerPort)
 	}
 
 	// Recover local pending workflows before starting the queue runner so
@@ -926,11 +904,10 @@ func (c *dbosContext) Launch() error {
 // recovered on the next launch rather than marked CANCELLED.
 // 2. Waits for the queue runner to complete processing
 // 3. Stops the workflow scheduler and waits for scheduled jobs to finish
-// 4. Shuts down the admin server
-// 5. Waits for in-flight workflows to finish unwinding
-// 6. Shuts down the system database connection pool and notification listener
-// 7. Shuts down conductor
-// 8. Marks the context as not launched
+// 4. Waits for in-flight workflows to finish unwinding
+// 5. Shuts down the system database connection pool and notification listener
+// 6. Shuts down conductor
+// 7. Marks the context as not launched
 //
 // Each step respects the provided timeout. If any component doesn't shut down within the timeout,
 // a warning is logged and the shutdown continues to the next component.
@@ -996,18 +973,6 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		case <-time.After(timeout):
 			c.logger.Warn("Timeout waiting for jobs to complete. Moving on", "timeout", timeout)
 			pending = append(pending, "workflow scheduler")
-		}
-	}
-
-	// Shutdown the admin server
-	if c.adminServer != nil {
-		c.logger.Debug("Shutting down admin server")
-		err := c.adminServer.Shutdown(timeout)
-		if err != nil {
-			c.logger.Error("Failed to shutdown admin server", "error", err)
-			pending = append(pending, "admin server")
-		} else {
-			c.logger.Debug("Admin server shutdown complete")
 		}
 	}
 
