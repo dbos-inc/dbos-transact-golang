@@ -351,23 +351,27 @@ type dbosContext struct {
 
 	serializer Serializer[any]
 
-	dataSourcesMu sync.Mutex
-	dataSources   []*DataSource
+	dataSources *dataSourceRegistry
 
 	// Alert handler
 	alertHandler AlertHandler
 }
 
+type dataSourceRegistry struct {
+	mu      sync.Mutex
+	sources []*DataSource
+}
+
 func (c *dbosContext) registerDataSource(ds *DataSource) {
-	c.dataSourcesMu.Lock()
-	defer c.dataSourcesMu.Unlock()
-	c.dataSources = append(c.dataSources, ds)
+	c.dataSources.mu.Lock()
+	defer c.dataSources.mu.Unlock()
+	c.dataSources.sources = append(c.dataSources.sources, ds)
 }
 
 func (c *dbosContext) registeredDataSources() []*DataSource {
-	c.dataSourcesMu.Lock()
-	defer c.dataSourcesMu.Unlock()
-	return slices.Clone(c.dataSources)
+	c.dataSources.mu.Lock()
+	defer c.dataSources.mu.Unlock()
+	return slices.Clone(c.dataSources.sources)
 }
 
 // SetAlertHandler registers a handler function for alerts received from DBOS Conductor.
@@ -437,6 +441,7 @@ func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 		queueRunner:             c.queueRunner,
 		serializer:              c.serializer,
 		launched:                c.launched,
+		dataSources:             c.dataSources,
 	}
 	return childCtx
 }
@@ -620,6 +625,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		workflowRegistry:            &sync.Map{},
 		workflowCustomNametoFQN:     &sync.Map{},
 		activeWorkflowIDs:           &sync.Map{},
+		dataSources:                 &dataSourceRegistry{},
 		workflowScheduler:           cron.New(cron.WithSeconds()),
 		scheduleEntryIDs:            make(map[string]cron.EntryID),
 		scheduleInstalledSignatures: make(map[string]scheduleSignature),
