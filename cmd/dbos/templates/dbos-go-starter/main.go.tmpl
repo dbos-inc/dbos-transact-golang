@@ -82,7 +82,6 @@ func main() {
 	dbosCtx, err = dbos.NewContext(context.Background(), dbos.Config{
 		DatabaseURL: os.Getenv("DBOS_SYSTEM_DATABASE_URL"),
 		AppName: "{{.ProjectName}}",
-		AdminServer: true,
 	})
 	if err != nil {
 		log.Fatal(err)

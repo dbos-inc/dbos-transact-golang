@@ -352,7 +352,7 @@ func decodeListingValue(encoded *string, storedSerialization string, customSer S
 }
 
 // listingValueJSON renders a listing value as JSON text for wire protocols
-// (conductor, admin server). Default JSON rows already carry their JSON text
+// (conductor). Default JSON rows already carry their JSON text
 // as a string and pass through unchanged; decoded values (portable or custom
 // serializer rows) are marshaled.
 func listingValueJSON(v any) (string, bool) {
