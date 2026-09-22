@@ -5052,12 +5052,13 @@ func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...Rewind
 			return nil, c.systemDB.RewindWorkflow(ctx, dbInput)
 		}, WithStepName("DBOS.rewindWorkflow"))
 	} else {
+		uncancellableCtx := WithoutCancel(c)
 		err = sysdb.Retry(c, func() error {
-			return c.rewindDataSources(c, nil, dataSources, workflowID, startStep)
+			return c.rewindDataSources(uncancellableCtx, nil, dataSources, workflowID, startStep)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err == nil {
 			err = sysdb.Retry(c, func() error {
-				return c.systemDB.RewindWorkflow(c, dbInput)
+				return c.systemDB.RewindWorkflow(uncancellableCtx, dbInput)
 			}, sysdb.WithRetrierLogger(c.logger))
 		}
 	}
