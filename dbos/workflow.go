@@ -5113,6 +5113,8 @@ func (c *dbosContext) rewindDataSources(ctx context.Context, tx Tx, dataSources 
 //     a key only the discarded run ever published is unpublished outright.
 //   - Messages the discarded run consumed are deleted, so a replayed Recv waits for new
 //     ones rather than taking delivery a second time.
+//   - Every unconsumed message is deleted too, including one sent before the rewind.
+//     Send only once the rewind has returned for the replay to receive it.
 //   - Checkpoints held in registered data sources are dropped along with the steps that
 //     wrote them, so the replay re-runs those transactions.
 //   - A close the discarded run wrote on a stream is undone, so the replay can append.

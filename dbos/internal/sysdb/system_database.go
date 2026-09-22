@@ -2760,7 +2760,8 @@ type RewindWorkflowDBInput struct {
 //   - Events published at or past the cut are rolled back to the last value published
 //     below it, using workflow_events_history as an undo log. Events published after
 //     are discarded.
-//   - Messages the discarded run consumed or received after the rewind point are deleted.
+//   - Messages the discarded run consumed at or past the cut are deleted, and so is
+//     every unconsumed message, whenever it was sent.
 //   - Stream entries are untouched.
 //
 // A replayed Send still duplicates into its destination's mailbox; that side effect

@@ -11945,9 +11945,8 @@ func TestRewind(t *testing.T) {
 		}
 		assert.Equal(t, childID, replayedChildID, "the replay must resolve the same deterministic child ID")
 
-		// Messages: the first run died before reaching its recv, so nothing stamped
-		// consumed_by_function_id on the pending message and the rewind left it alone
-		// for the replay to consume. A fork would have started with an empty mailbox.
+		// Messages: the rewind deletes unconsumed messages, so the only one left is the
+		// Send issued after it, which the replayed recv consumed.
 		remaining := rawQueryInt(t, dbosCtx,
 			`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1 AND consumed = false`, parentID)
 		assert.Equal(t, 0, remaining, "the replayed recv should have consumed the pending message")
