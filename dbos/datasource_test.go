@@ -1250,4 +1250,64 @@ func TestRewindDropsDataSourceCheckpoints(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "done", out)
 	})
+
+	t.Run("RecoveredCallerDoesNotRedeleteCheckpoints", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ub.dropCompletionTable(t)
+		ds := ub.register(t, ctx, "app")
+
+		var targetRuns atomic.Int32
+		target := func(dctx Context, _ string) (string, error) {
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				n := targetRuns.Add(1)
+				_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), fmt.Sprintf("target-%d", n), "v")
+				return fmt.Sprintf("target-%d", n), e
+			})
+		}
+		caller := func(dctx Context, targetID string) (string, error) {
+			if _, err := RewindWorkflow[string](dctx, targetID); err != nil {
+				return "", err
+			}
+			return "rewound", nil
+		}
+		RegisterWorkflow(ctx, target)
+		RegisterWorkflow(ctx, caller)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+
+		targetID := uuid.NewString()
+		th, err := RunWorkflow(ctx, target, "", WithWorkflowID(targetID))
+		require.NoError(t, err)
+		_, err = th.GetResult()
+		require.NoError(t, err)
+
+		callerID := uuid.NewString()
+		ch, err := RunWorkflow(ctx, caller, targetID, WithWorkflowID(callerID))
+		require.NoError(t, err)
+		_, err = ch.GetResult()
+		require.NoError(t, err)
+
+		// Let the target's replay finish, writing a fresh checkpoint.
+		rh, err := RetrieveWorkflow[string](ctx, targetID)
+		require.NoError(t, err)
+		res, err := rh.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "target-2", res)
+		countTarget := fmt.Sprintf(`SELECT count(*) FROM %s WHERE workflow_id = $1`, ub.completionTable())
+		require.Equal(t, 1, ub.countRows(t, countTarget, targetID))
+
+		// Recovering the caller replays its recorded rewind step, which must not
+		// touch the target's data sources again.
+		setWorkflowStatusPending(t, ctx, callerID)
+		handles, err := recoverPendingWorkflows(ctx.(*dbosContext), []string{"local"})
+		require.NoError(t, err)
+		require.Len(t, handles, 1)
+		_, err = handles[0].GetResult()
+		require.NoError(t, err)
+
+		require.Equal(t, int32(2), targetRuns.Load())
+		require.Equal(t, 1, ub.countRows(t, countTarget, targetID),
+			"the replayed rewind step dropped the target's fresh checkpoint")
+	})
 }
