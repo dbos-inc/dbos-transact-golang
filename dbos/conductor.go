@@ -393,6 +393,8 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleGetWorkflowRequest(data, base.RequestID)
 	case forkWorkflowMessage:
 		return c.handleForkWorkflowRequest(data, base.RequestID)
+	case rewindWorkflowMessage:
+		return c.handleRewindWorkflowRequest(data, base.RequestID)
 	case forkFromFailureMessage:
 		return c.handleForkFromFailureRequest(data, base.RequestID)
 	case existPendingWorkflowsMessage:
@@ -1148,6 +1150,60 @@ func (c *conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 	}
 
 	return c.sendResponse(response, string(forkWorkflowMessage))
+}
+
+func (c *conductor) handleRewindWorkflowRequest(data []byte, requestID string) error {
+	var req rewindWorkflowConductorRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		c.logger.Error("Failed to parse rewind workflow request", "error", err)
+		return fmt.Errorf("failed to parse rewind workflow request: %w", err)
+	}
+	c.logger.Debug("Handling rewind workflow request", "request", req)
+
+	opts := []RewindWorkflowOption{}
+	// An omitted start_step means the whole history, which WithRewindStartStep's
+	// default already is, so only an explicit value is worth validating.
+	if req.Body.StartStep != nil {
+		startStep := *req.Body.StartStep
+		if startStep < 0 {
+			return fmt.Errorf("invalid StartStep: cannot be negative")
+		}
+		opts = append(opts, WithRewindStartStep(uint(startStep))) // #nosec G115 -- validated above
+	}
+	if req.Body.ApplicationVersion != nil {
+		opts = append(opts, WithRewindApplicationVersion(*req.Body.ApplicationVersion))
+	}
+	if req.Body.QueueName != nil {
+		opts = append(opts, WithRewindQueue(*req.Body.QueueName))
+	}
+	if req.Body.QueuePartitionKey != nil {
+		opts = append(opts, WithRewindQueuePartitionKey(*req.Body.QueuePartitionKey))
+	}
+
+	success := true
+	var errorMsg *string
+
+	if _, err := c.dbosCtx.RewindWorkflow(c.dbosCtx, req.Body.WorkflowID, opts...); err != nil {
+		c.logger.Error("Failed to rewind workflow", "workflow_id", req.Body.WorkflowID, "error", err)
+		errStr := fmt.Sprintf("failed to rewind workflow: %v", err)
+		errorMsg = &errStr
+		success = false
+	} else {
+		c.logger.Info("Successfully rewound workflow", "workflow_id", req.Body.WorkflowID)
+	}
+
+	response := rewindWorkflowConductorResponse{
+		baseResponse: baseResponse{
+			baseMessage: baseMessage{
+				Type:      rewindWorkflowMessage,
+				RequestID: requestID,
+			},
+			ErrorMessage: errorMsg,
+		},
+		Success: success,
+	}
+
+	return c.sendResponse(response, string(rewindWorkflowMessage))
 }
 
 func (c *conductor) handleForkFromFailureRequest(data []byte, requestID string) error {

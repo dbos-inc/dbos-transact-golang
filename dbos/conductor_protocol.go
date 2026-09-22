@@ -47,6 +47,7 @@ const (
 	listStepsMessage             messageType = "list_steps"
 	getWorkflowMessage           messageType = "get_workflow"
 	forkWorkflowMessage          messageType = "fork_workflow"
+	rewindWorkflowMessage        messageType = "rewind_workflow"
 	forkFromFailureMessage       messageType = "fork_from_failure"
 	existPendingWorkflowsMessage messageType = "exist_pending_workflows"
 	retentionMessage             messageType = "retention"
@@ -432,6 +433,28 @@ type forkWorkflowConductorRequest struct {
 type forkWorkflowConductorResponse struct {
 	baseResponse
 	NewWorkflowID *string `json:"new_workflow_id,omitempty"`
+}
+
+// rewindWorkflowConductorRequestBody contains the rewind workflow parameters
+type rewindWorkflowConductorRequestBody struct {
+	WorkflowID         string  `json:"workflow_id"`
+	StartStep          *int    `json:"start_step,omitempty"`
+	ApplicationVersion *string `json:"application_version,omitempty"`
+	QueueName          *string `json:"queue_name,omitempty"`
+	QueuePartitionKey  *string `json:"queue_partition_key,omitempty"`
+}
+
+// rewindWorkflowConductorRequest is sent by the conductor to rewind a workflow
+type rewindWorkflowConductorRequest struct {
+	baseMessage
+	Body rewindWorkflowConductorRequestBody `json:"body"`
+}
+
+// rewindWorkflowConductorResponse is sent in response to rewind workflow requests.
+// The workflow keeps its ID, so unlike a fork there is no new ID to report.
+type rewindWorkflowConductorResponse struct {
+	baseResponse
+	Success bool `json:"success"`
 }
 
 // forkFromFailureConductorRequestBody contains the bulk fork-from-failure parameters

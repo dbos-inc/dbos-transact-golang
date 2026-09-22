@@ -177,8 +177,8 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 	}
 	conn.Release()
 
-	const targetIndex = "idx_workflow_status_in_flight"
-	const rewindTo = int64(31) // migration 32 builds the target index
+	const targetIndex = "idx_workflow_status_in_flight_v2"
+	const rewindTo = int64(114) // migration 115 builds the target index
 	migs := sysdb.BuildMigrations("dbos", false)
 	latest := migs[len(migs)-1].Version
 
@@ -188,7 +188,7 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 	_, err = pool.Exec(bg, fmt.Sprintf(`DROP INDEX IF EXISTS dbos.%q`, targetIndex))
 	require.NoError(t, err)
 	_, err = pool.Exec(bg, fmt.Sprintf(
-		`CREATE INDEX %q ON dbos.workflow_status (queue_name, status, priority, created_at) WHERE status IN ('ENQUEUED', 'PENDING')`,
+		`CREATE INDEX %q ON dbos.workflow_status (queue_name, status, priority, created_at) INCLUDE (application_name) WHERE status IN ('ENQUEUED', 'PENDING')`,
 		targetIndex))
 	require.NoError(t, err)
 	_, err = pool.Exec(bg, fmt.Sprintf(
@@ -202,12 +202,12 @@ func TestRunnerResumesAfterInvalidIndex(t *testing.T) {
 		fmt.Sprintf(`SELECT indisvalid FROM pg_index WHERE indexrelid = 'dbos.%s'::regclass`, targetIndex)).Scan(&valid))
 	assert.False(t, valid)
 
-	// Rewind so the runner re-applies migration 32.
+	// Rewind so the runner re-applies migration 115.
 	_, err = pool.Exec(bg, "UPDATE dbos.dbos_migrations SET version = $1", rewindTo)
 	require.NoError(t, err)
 
 	// Re-run migrations. cleanupInvalidIndexes should drop the invalid index,
-	// then migration 32+ rebuild it.
+	// then migration 115+ rebuild it.
 	require.NoError(t, sysdb.RunMigrations(bg, pool, "dbos", false, slog.Default()))
 
 	require.NoError(t, pool.QueryRow(bg,

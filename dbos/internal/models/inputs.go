@@ -65,6 +65,17 @@ type ResumeWorkflowInput struct {
 
 type ResumeWorkflowOption func(*ResumeWorkflowInput)
 
+type RewindWorkflowInput struct {
+	WorkflowID         string // Required: The UUID of the workflow to rewind
+	StartStep          uint   // Optional: Step to rewind to; history from this step onwards is dropped (default: 0, the whole history)
+	ApplicationVersion string // Optional: Application version to replay under (keeps the recorded one if empty)
+	QueueName          string // Optional: Queue to re-enqueue the rewound workflow on (defaults to the internal queue)
+	QueuePartitionKey  string // Optional: Partition key when re-enqueueing onto a partitioned queue
+	DataSources        []any  // Optional: *dbos.DataSource values (models cannot import dbos) whose checkpoints to drop
+}
+
+type RewindWorkflowOption func(*RewindWorkflowInput)
+
 type CancelWorkflowInput struct {
 	CancelChildren bool
 }

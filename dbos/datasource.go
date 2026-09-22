@@ -36,6 +36,11 @@ type DataSource struct {
 	dialect Dialect
 	schema  string
 
+	// True when the engine is the system database itself, in which case
+	// RunAsTransaction collapses onto the single system transaction and there is
+	// no separate transaction_completion table to maintain.
+	sharesSystemDB bool
+
 	// Guard setup (dialect resolution + completion-table creation).
 	setupMu   sync.Mutex
 	setupDone bool
@@ -78,20 +83,24 @@ type Engine interface {
 //
 // The returned handle is ready to use immediately: NewDataSource detects whether
 // the engine is the DBOS system database, resolves the dialect (CockroachDB), and
-// creates the transaction_completion table if it does not already exist. It may
-// be called at any time, before or after Launch.
+// creates the transaction_completion table if it does not already exist.
+//
+// On a Context created with NewContext, NewDataSource must be called before Launch.
 //
 // Example:
 //
 //	pool, _ := pgxpool.New(ctx, appDatabaseURL)
 //	ds, err := dbos.NewDataSource(ctx, pool, dbos.WithDataSourceName("app"))
-func NewDataSource[E Engine](ctx Context, engine E, opts ...DataSourceOption) (*DataSource, error) {
+func NewDataSource[E Engine](ctx Client, engine E, opts ...DataSourceOption) (*DataSource, error) {
 	if ctx == nil {
 		return nil, errors.New("ctx cannot be nil")
 	}
 	c, ok := ctx.(*dbosContext)
 	if !ok {
 		return nil, errors.New("NewDataSource requires a concrete DBOS context")
+	}
+	if !c.config.isClient && c.launched.Load() {
+		return nil, errors.New("NewDataSource must be called before Launch")
 	}
 
 	options := dataSourceOptions{name: defaultDataSourceName, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
@@ -134,11 +143,12 @@ func NewDataSource[E Engine](ctx Context, engine E, opts ...DataSourceOption) (*
 	// table creation until the source is used with a different system database.
 	if sysdb.SameEngine(ds.pool, c.systemDB.Pool()) {
 		c.logger.Debug("Data source shares the system database; using single-transaction durability", "datasource", ds.name)
-		return ds, nil
-	}
-
-	if err := ds.setup(c); err != nil {
+		ds.sharesSystemDB = true
+	} else if err := ds.setup(c); err != nil {
 		return nil, fmt.Errorf("data source %q: %w", ds.name, err)
+	}
+	if !c.config.isClient {
+		c.registerDataSource(ds)
 	}
 	return ds, nil
 }
@@ -331,6 +341,19 @@ func (ds *DataSource) checkCompletion(ctx context.Context, q Querier, workflowID
 		rec.serialization = *serialization
 	}
 	return &rec, nil
+}
+
+// Used by RewindWorkflow. No-op when the datasource == the system database
+func (ds *DataSource) deleteCheckpoints(ctx context.Context, workflowID string, startStep int) error {
+	if ds.sharesSystemDB {
+		return nil
+	}
+	query := ds.dialect.RewriteQuery(fmt.Sprintf(
+		`DELETE FROM %s WHERE workflow_id = $1 AND step_id >= $2`, ds.qualifiedCompletionTable()))
+	if _, err := ds.pool.Exec(ctx, query, workflowID, startStep); err != nil {
+		return fmt.Errorf("data source %q: failed to delete checkpoints for workflow %s: %w", ds.name, workflowID, err)
+	}
+	return nil
 }
 
 // recordCompletion writes the durability row for (workflowID, stepID).

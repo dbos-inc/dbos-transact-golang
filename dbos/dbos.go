@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -212,6 +213,7 @@ type Client interface {
 	SetWorkflowDelay(_ Client, workflowID string, opts ...SetWorkflowDelayOption) error                          // Set or update the delay on a DELAYED workflow
 	ResumeWorkflow(_ Client, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)       // Resume a cancelled workflow
 	ResumeWorkflows(_ Client, workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error) // Resume multiple workflows in a single DB round-trip
+	RewindWorkflow(_ Client, workflowID string, opts ...RewindWorkflowOption) (WorkflowHandle[any], error)       // Drop a workflow's history from a step onwards and re-run it under the same ID
 	ForkWorkflow(_ Client, input ForkWorkflowInput) (WorkflowHandle[any], error)                                 // Fork a workflow from a specific step
 	ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]WorkflowHandle[any], error)                             // Fork multiple workflows in a single DB round-trip
 	ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                               // List workflows based on filtering criteria
@@ -349,8 +351,27 @@ type dbosContext struct {
 
 	serializer Serializer[any]
 
+	dataSources *dataSourceRegistry
+
 	// Alert handler
 	alertHandler AlertHandler
+}
+
+type dataSourceRegistry struct {
+	mu      sync.Mutex
+	sources []*DataSource
+}
+
+func (c *dbosContext) registerDataSource(ds *DataSource) {
+	c.dataSources.mu.Lock()
+	defer c.dataSources.mu.Unlock()
+	c.dataSources.sources = append(c.dataSources.sources, ds)
+}
+
+func (c *dbosContext) registeredDataSources() []*DataSource {
+	c.dataSources.mu.Lock()
+	defer c.dataSources.mu.Unlock()
+	return slices.Clone(c.dataSources.sources)
 }
 
 // SetAlertHandler registers a handler function for alerts received from DBOS Conductor.
@@ -420,6 +441,7 @@ func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 		queueRunner:             c.queueRunner,
 		serializer:              c.serializer,
 		launched:                c.launched,
+		dataSources:             c.dataSources,
 	}
 	return childCtx
 }
@@ -603,6 +625,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		workflowRegistry:            &sync.Map{},
 		workflowCustomNametoFQN:     &sync.Map{},
 		activeWorkflowIDs:           &sync.Map{},
+		dataSources:                 &dataSourceRegistry{},
 		workflowScheduler:           cron.New(cron.WithSeconds()),
 		scheduleEntryIDs:            make(map[string]cron.EntryID),
 		scheduleInstalledSignatures: make(map[string]scheduleSignature),

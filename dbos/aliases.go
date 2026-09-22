@@ -193,6 +193,9 @@ type (
 	// CancelWorkflowOption is a functional option for CancelWorkflow.
 	CancelWorkflowOption = models.CancelWorkflowOption
 
+	// RewindWorkflowOption is a functional option for RewindWorkflow.
+	RewindWorkflowOption = models.RewindWorkflowOption
+
 	// ForkWorkflowInput is the input to ForkWorkflow. OriginalWorkflowID is
 	// required; other fields are optional.
 	ForkWorkflowInput = models.ForkWorkflowInput

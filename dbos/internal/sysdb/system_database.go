@@ -52,6 +52,7 @@ type SystemDatabase interface {
 	ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInput) ([]string, error)
 	ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) ([]string, error)
 	ForkFrom(ctx context.Context, input ForkFromDBInput) ([]string, error)
+	RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput) error
 
 	GetDeduplicatedWorkflow(ctx context.Context, queueName, deduplicationID string) (*string, error)
 
@@ -72,7 +73,7 @@ type SystemDatabase interface {
 	// Communication (special steps)
 	Send(ctx context.Context, input WorkflowSendInput) error
 	StartRecvListener(ctx context.Context, destinationID, topic string) (*NotificationWaiter, error)
-	ConsumeMessage(ctx context.Context, tx Tx, destinationID, topic string) (*string, *string, error)
+	ConsumeMessage(ctx context.Context, tx Tx, destinationID, topic string, functionID int) (*string, *string, error)
 	SetEvent(ctx context.Context, input WorkflowSetEventInput) error
 	StartEventListener(ctx context.Context, targetWorkflowID, key string) (*NotificationWaiter, error)
 	GetEventValue(ctx context.Context, q Querier, targetWorkflowID, key string) (*string, *string, error)
@@ -473,6 +474,30 @@ var migration113SQL string
 //go:embed migrations/113_set_enqueue_workflow_search_path.sql
 var migration113SearchPathSQL string
 
+//go:embed migrations/114_drop_notifications_index.sql
+var migration114SQL string
+
+//go:embed migrations/115_create_in_flight_index_v2.sql
+var migration115SQL string
+
+//go:embed migrations/116_drop_in_flight_index.sql
+var migration116SQL string
+
+//go:embed migrations/117_create_partition_dequeue_index_v3.sql
+var migration117SQL string
+
+//go:embed migrations/118_drop_partition_dequeue_index_v2.sql
+var migration118SQL string
+
+//go:embed migrations/119_create_operation_outputs_completed_at_index_v2.sql
+var migration119SQL string
+
+//go:embed migrations/120_drop_operation_outputs_completed_at_index.sql
+var migration120SQL string
+
+//go:embed migrations/121_add_notifications_consumed_by_function_id.sql
+var migration121SQL string
+
 type MigrationFile struct {
 	Version int64
 	SQL     string
@@ -649,6 +674,14 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		{Version: 111, SQL: fmt.Sprintf(migration111SQL, c, sanitizedSchema), Online: !isCockroach},
 		{Version: 112, SQL: fmt.Sprintf(migration112SQL, sanitizedSchema, sanitizedSchema)},
 		{Version: 113, SQL: migration113SQLProcessed},
+		{Version: 114, SQL: fmt.Sprintf(migration114SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 115, SQL: fmt.Sprintf(migration115SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 116, SQL: fmt.Sprintf(migration116SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 117, SQL: fmt.Sprintf(migration117SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 118, SQL: fmt.Sprintf(migration118SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 119, SQL: fmt.Sprintf(migration119SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 120, SQL: fmt.Sprintf(migration120SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 121, SQL: fmt.Sprintf(migration121SQL, sanitizedSchema)},
 	}
 }
 
@@ -2707,6 +2740,170 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 	return forkedWorkflowIDs, nil
 }
 
+type RewindWorkflowDBInput struct {
+	WorkflowID         string
+	StartStep          int
+	ApplicationVersion string
+	QueueName          string
+	QueuePartitionKey  string
+	Tx                 Tx
+}
+
+// RewindWorkflow drops a workflow's history from StartStep onwards and re-enqueues
+// it under the same workflow ID, so a replay re-executes everything from that step.
+//
+// Unlike ForkWorkflows it writes no new workflow: peers keep addressing the same ID,
+// and the workflow's mailbox, events, and streams are not copied anywhere. Unlike
+// ResumeWorkflows it applies to terminal workflows -- rewinding a SUCCESS or ERROR
+// workflow is the point -- and only to those: an active workflow must be cancelled first.
+//
+//   - Events published at or past the cut are rolled back to the last value published
+//     below it, using workflow_events_history as an undo log. Events published after
+//     are discarded.
+//   - Messages the discarded run consumed at or past the cut are deleted, and so is
+//     every unconsumed message, whenever it was sent.
+//   - Stream entries are untouched.
+//
+// A replayed Send still duplicates into its destination's mailbox; that side effect
+// lands in another workflow's history, which this rewind does not own.
+func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput) error {
+	if input.StartStep < 0 {
+		return models.NewInvalidOptionError(fmt.Sprintf("startStep must be >= 0, got %d", input.StartStep))
+	}
+
+	queueName := input.QueueName
+	if queueName == "" {
+		queueName = models.InternalQueueName
+	}
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+
+	tx := input.Tx
+	ownTx := tx == nil
+	if ownTx {
+		var err error
+		tx, err = s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
+		if err != nil {
+			return fmt.Errorf("failed to begin rewind transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+	}
+
+	var currentStatus string
+	statusQuery := s.RenderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`, schemaPrefix)
+	if err := tx.QueryRow(ctx, statusQuery, input.WorkflowID).Scan(&currentStatus); err != nil {
+		if err == pgx.ErrNoRows {
+			return models.NewNonExistentWorkflowError(input.WorkflowID)
+		}
+		return fmt.Errorf("failed to read status of workflow %s: %w", input.WorkflowID, err)
+	}
+	// Only a terminal workflow can be rewound.
+	switch models.WorkflowStatusType(currentStatus) {
+	case models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed:
+		return fmt.Errorf(
+			"cannot rewind workflow %s while it is %s: only a workflow in a terminal state can be rewound, so cancel it first",
+			input.WorkflowID, currentStatus)
+	}
+
+	// Roll workflow_events back to the value each key held below the cut, using
+	// workflow_events_history as an undo log.
+
+	// First unpublish every key the discarded run touched.
+	unpublishQuery := s.RenderSQL(`DELETE FROM %sworkflow_events
+		WHERE workflow_uuid = $1 AND EXISTS (
+			SELECT 1 FROM %sworkflow_events_history discarded
+			WHERE discarded.workflow_uuid = $1 AND discarded.key = %sworkflow_events.key
+			  AND discarded.function_id >= $2
+		)`, schemaPrefix, schemaPrefix, schemaPrefix)
+	if _, err := tx.Exec(ctx, unpublishQuery, input.WorkflowID, input.StartStep); err != nil {
+		return fmt.Errorf("failed to unpublish events for workflow %s: %w", input.WorkflowID, err)
+	}
+
+	// Then restore those keys, if any, to the last value published below the cut.
+	// A key the discarded run published for the first time has no surviving row, so
+	// it stays unpublished.
+	restoreQuery := s.RenderSQL(`INSERT INTO %sworkflow_events (workflow_uuid, key, value, serialization)
+		SELECT workflow_uuid, key, value, serialization FROM (
+			SELECT h.workflow_uuid, h.key, h.value, h.serialization,
+				ROW_NUMBER() OVER (PARTITION BY h.key ORDER BY h.function_id DESC) AS rn
+			FROM %sworkflow_events_history h
+			WHERE h.workflow_uuid = $1 AND h.function_id < $2 AND EXISTS (
+				SELECT 1 FROM %sworkflow_events_history discarded
+				WHERE discarded.workflow_uuid = $1 AND discarded.key = h.key
+				  AND discarded.function_id >= $2
+			)
+		) surviving WHERE rn = 1`, schemaPrefix, schemaPrefix, schemaPrefix)
+	if _, err := tx.Exec(ctx, restoreQuery, input.WorkflowID, input.StartStep); err != nil {
+		return fmt.Errorf("failed to restore events for workflow %s: %w", input.WorkflowID, err)
+	}
+
+	// Drop the recorded outcome so the replay's is the only one readers can see.
+	outputQuery := s.RenderSQL(`DELETE FROM %sworkflow_output WHERE workflow_uuid = $1`, schemaPrefix)
+	if _, err := tx.Exec(ctx, outputQuery, input.WorkflowID); err != nil {
+		return fmt.Errorf("failed to delete output of workflow %s: %w", input.WorkflowID, err)
+	}
+
+	// Clear up streams closed sentinels.
+	reopenQuery := s.RenderSQL(`DELETE FROM %sstreams
+		WHERE workflow_uuid = $1 AND function_id >= $2 AND value = $3`, schemaPrefix)
+	if _, err := tx.Exec(ctx, reopenQuery, input.WorkflowID, input.StartStep, StreamClosedSentinel); err != nil {
+		return fmt.Errorf("failed to reopen streams for workflow %s: %w", input.WorkflowID, err)
+	}
+
+	// delete operation_outputs and workflow_events_history
+	for _, table := range []string{"operation_outputs", "workflow_events_history"} {
+		deleteQuery := s.RenderSQL(`DELETE FROM %s`+table+` WHERE workflow_uuid = $1 AND function_id >= $2`, schemaPrefix)
+		if _, err := tx.Exec(ctx, deleteQuery, input.WorkflowID, input.StartStep); err != nil {
+			return fmt.Errorf("failed to delete %s for workflow %s: %w", table, input.WorkflowID, err)
+		}
+	}
+
+	// Delete messages consumed or received after the rewind point
+	consumedQuery := s.RenderSQL(`DELETE FROM %snotifications
+		WHERE destination_uuid = $1 AND (consumed_by_function_id >= $2 OR consumed = false)`, schemaPrefix)
+	if _, err := tx.Exec(ctx, consumedQuery, input.WorkflowID, input.StartStep); err != nil {
+		return fmt.Errorf("failed to delete consumed notifications for workflow %s: %w", input.WorkflowID, err)
+	}
+
+	// Re-enqueue the workflow. An empty ApplicationVersion leaves the recorded one in place.
+	var queuePartitionKey any
+	if input.QueuePartitionKey != "" {
+		queuePartitionKey = input.QueuePartitionKey
+	}
+	setVersion := ""
+	args := []any{
+		models.WorkflowStatusEnqueued, queueName, queuePartitionKey,
+		time.Now().UnixMilli(), input.WorkflowID, currentStatus,
+	}
+	if input.ApplicationVersion != "" {
+		setVersion = ", application_version = $7"
+		args = append(args, input.ApplicationVersion)
+	}
+	updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
+		SET status = $1, queue_name = $2, queue_partition_key = $3, recovery_attempts = 0,
+		    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
+		    started_at_epoch_ms = NULL, completed_at = NULL, updated_at = $4`+setVersion+`
+		WHERE workflow_uuid = $5 AND status = $6`, schemaPrefix)
+	result, err := tx.Exec(ctx, updateQuery, args...)
+	if err != nil {
+		return fmt.Errorf("failed to re-enqueue rewound workflow %s: %w", input.WorkflowID, err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to read rows affected after rewinding workflow %s: %w", input.WorkflowID, err)
+	}
+	if n == 0 {
+		return models.NewUnexpectedWorkflowError(input.WorkflowID,
+			fmt.Sprintf("status likely changed from %s while rewinding; retry the rewind", currentStatus))
+	}
+
+	if ownTx {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit rewind transaction: %w", err)
+		}
+	}
+	return nil
+}
+
 type ForkFromDBInput struct {
 	WorkflowIDs        []string
 	ApplicationVersion string
@@ -4281,7 +4478,7 @@ func (s *SysDB) StartRecvListener(ctx context.Context, destinationID, topic stri
 
 // ConsumeMessage finds the oldest unconsumed message for (destinationID, topic) and
 // atomically marks it consumed. Returns a nil message if none is pending.
-func (s *SysDB) ConsumeMessage(ctx context.Context, tx Tx, destinationID, topic string) (*string, *string, error) {
+func (s *SysDB) ConsumeMessage(ctx context.Context, tx Tx, destinationID, topic string, functionID int) (*string, *string, error) {
 	// Use message_uuid so we update exactly one row; created_at_epoch_ms can match multiple rows when inserts occur in the same millisecond.
 	query := s.RenderSQL(`
     WITH oldest_entry AS (
@@ -4292,13 +4489,13 @@ func (s *SysDB) ConsumeMessage(ctx context.Context, tx Tx, destinationID, topic 
         LIMIT 1
     )
     UPDATE %snotifications
-    SET consumed = true
+    SET consumed = true, consumed_by_function_id = $3
     WHERE message_uuid = (SELECT message_uuid FROM oldest_entry)
     RETURNING message, serialization`, s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
 
 	var messageString *string
 	var msgSerialization *string
-	err := tx.QueryRow(ctx, query, destinationID, topic).Scan(&messageString, &msgSerialization)
+	err := tx.QueryRow(ctx, query, destinationID, topic, functionID).Scan(&messageString, &msgSerialization)
 	if err != nil && err != pgx.ErrNoRows {
 		return nil, nil, fmt.Errorf("failed to consume message: %w", err)
 	}

@@ -11723,3 +11723,532 @@ func stepTimingParentWorkflow(ctx Context, _ string) (string, error) {
 	}
 	return "ok", nil
 }
+
+func TestRewind(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// A child that fails its first call and succeeds on every call after, standing in
+	// for a child repaired by a code fix between runs.
+	var childRuns atomic.Int64
+	repairableChild := func(ctx Context, x int) (int, error) {
+		return RunAsStep(ctx, func(ctx context.Context) (int, error) {
+			if childRuns.Add(1) == 1 {
+				return 0, errors.New("child is bogus")
+			}
+			return x * 2, nil
+		}, WithStepName("double"))
+	}
+
+	// A parent that touches every communication primitive around the failing child.
+	// The first run dies at the child's result, so the recv and everything after it
+	// only ever execute on a replay.
+	commsParent := func(ctx Context, _ string) (int, error) {
+		if err := SetEvent(ctx, "phase", "started"); err != nil {
+			return 0, err
+		}
+		if err := WriteStream(ctx, "log", "a"); err != nil {
+			return 0, err
+		}
+		if err := WriteStream(ctx, "log", "b"); err != nil {
+			return 0, err
+		}
+		handle, err := RunWorkflow(ctx, repairableChild, 21)
+		if err != nil {
+			return 0, err
+		}
+		doubled, err := handle.GetResult()
+		if err != nil {
+			return 0, err
+		}
+		cmd, err := Recv[string](ctx, "cmd", 20*time.Second)
+		if err != nil {
+			return 0, err
+		}
+		if err := WriteStream(ctx, "log", "c"); err != nil {
+			return 0, err
+		}
+		if err := CloseStream(ctx, "log"); err != nil {
+			return 0, err
+		}
+		if err := SetEvent(ctx, "phase", "done"); err != nil {
+			return 0, err
+		}
+		if err := SetEvent(ctx, "answer", doubled+len(cmd)); err != nil {
+			return 0, err
+		}
+		return doubled + len(cmd), nil
+	}
+
+	// A workflow that completes, having closed its stream: rewinding it must clear the
+	// closed sentinel, or the replay's first write fails with "stream is already closed".
+	var publisherRuns atomic.Int64
+	publisher := func(ctx Context, _ string) (int, error) {
+		run := int(publisherRuns.Add(1))
+		if err := WriteStream(ctx, "out", run); err != nil {
+			return 0, err
+		}
+		if err := CloseStream(ctx, "out"); err != nil {
+			return 0, err
+		}
+		return run, nil
+	}
+
+	// A workflow that publishes one key on both sides of a cut and another only past
+	// it, the two shapes the event undo log has to tell apart.
+	var eventRuns atomic.Int64
+	eventGate := make(chan struct{})
+	divergentPublisher := func(ctx Context, _ string) (string, error) {
+		run := eventRuns.Add(1)
+		if err := SetEvent(ctx, "stage", "one"); err != nil { // step 0, below the cut
+			return "", err
+		}
+		if run == 1 {
+			if err := SetEvent(ctx, "stage", "two"); err != nil { // step 1, at the cut
+				return "", err
+			}
+			if err := SetEvent(ctx, "transient", "published"); err != nil { // step 2
+				return "", err
+			}
+			return "first", nil
+		}
+		<-eventGate
+		if err := SetEvent(ctx, "stage", "three"); err != nil {
+			return "", err
+		}
+		return "second", nil
+	}
+
+	// Consumes one message, then blocks so the test can inspect the mailbox between
+	// the recv and the workflow's end.
+	var recvRuns atomic.Int64
+	recvGate := make(chan struct{})
+	recvWorkflow := func(ctx Context, _ string) (string, error) {
+		run := recvRuns.Add(1)
+		msg, err := Recv[string](ctx, "inbox", 20*time.Second)
+		if err != nil {
+			return "", err
+		}
+		if run > 1 {
+			<-recvGate
+		}
+		return msg, nil
+	}
+
+	// Does nothing; it only ever needs to sit in a saturated queue's backlog.
+	idleWorkflow := func(ctx Context, _ string) (string, error) {
+		return "idle", nil
+	}
+
+	// A workflow that stays PENDING until the test releases it, for the guard below.
+	blockedCtx, cancelBlocked := context.WithCancel(context.Background())
+	t.Cleanup(cancelBlocked)
+	blockerStarted := make(chan struct{})
+	blocker := func(ctx Context, _ string) (string, error) {
+		close(blockerStarted)
+		<-blockedCtx.Done()
+		return "unblocked", nil
+	}
+
+	RegisterWorkflow(dbosCtx, repairableChild, WithWorkflowName("rewindRepairableChild"))
+	RegisterWorkflow(dbosCtx, commsParent, WithWorkflowName("rewindCommsParent"))
+	RegisterWorkflow(dbosCtx, publisher, WithWorkflowName("rewindPublisherWorkflow"))
+	RegisterWorkflow(dbosCtx, divergentPublisher, WithWorkflowName("rewindDivergentPublisher"))
+	RegisterWorkflow(dbosCtx, recvWorkflow, WithWorkflowName("rewindRecvWorkflow"))
+	RegisterWorkflow(dbosCtx, idleWorkflow, WithWorkflowName("rewindIdleWorkflow"))
+	RegisterWorkflow(dbosCtx, blocker, WithWorkflowName("rewindBlockingWorkflow"))
+	// One slot, so a blocked workflow leaves everything behind it ENQUEUED.
+	gateQueue, err := registerWFQ(dbosCtx, "rewind-gate-queue", WithWorkerConcurrency(1))
+	require.NoError(t, err)
+	require.NoError(t, Launch(dbosCtx))
+
+	// runToFailure runs the parent to its first failure and returns the parent and child IDs.
+	runToFailure := func(t *testing.T) (string, string) {
+		t.Helper()
+		parentID := uuid.NewString()
+		handle, err := RunWorkflow(dbosCtx, commsParent, "", WithWorkflowID(parentID))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.ErrorContains(t, err, "child is bogus")
+
+		steps, err := GetWorkflowSteps(dbosCtx, parentID)
+		require.NoError(t, err)
+		var childID string
+		for _, step := range steps {
+			if step.ChildWorkflowID != "" {
+				childID = step.ChildWorkflowID
+			}
+		}
+		require.NotEmpty(t, childID, "parent should have recorded a child workflow")
+		return parentID, childID
+	}
+
+	getStatus := func(t *testing.T, workflowID string) WorkflowStatusType {
+		t.Helper()
+		wfs, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
+		require.NoError(t, err)
+		require.Len(t, wfs, 1)
+		return wfs[0].Status
+	}
+
+	t.Run("RepairsChildAndAdoptsItOnReplay", func(t *testing.T) {
+		childRuns.Store(0)
+		parentID, childID := runToFailure(t)
+		require.Equal(t, WorkflowStatusError, getStatus(t, parentID))
+		require.Equal(t, WorkflowStatusError, getStatus(t, childID))
+		require.Equal(t, int64(1), childRuns.Load())
+
+		// Everything the parent published before dying is still readable at the same
+		// workflow ID: this is the state a fork would have left behind.
+		phase, err := GetEvent[string](dbosCtx, parentID, "phase", 5*time.Second)
+		require.NoError(t, err)
+		assert.Equal(t, "started", phase)
+		entries, closed, err := ReadStream[string](dbosCtx, parentID, "log", WithReadStreamSnapshot())
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a", "b"}, entries)
+		assert.False(t, closed)
+
+		// A peer blocks on an event the parent only sets on a successful pass, without
+		// ever learning a new workflow ID.
+		answerCh := make(chan int, 1)
+		answerErrCh := make(chan error, 1)
+		go func() {
+			answer, err := GetEvent[int](dbosCtx, parentID, "answer", 30*time.Second)
+			answerErrCh <- err
+			answerCh <- answer
+		}()
+
+		// Repair the child in place, then rewind the parent onto it.
+		childHandle, err := RewindWorkflow[int](dbosCtx, childID)
+		require.NoError(t, err)
+		childResult, err := childHandle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 42, childResult)
+		assert.Equal(t, int64(2), childRuns.Load(), "child should have re-run exactly once")
+
+		parentHandle, err := RewindWorkflow[int](dbosCtx, parentID)
+		require.NoError(t, err)
+		assert.Equal(t, 0, rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %sworkflow_output WHERE workflow_uuid = $1`, parentID),
+			"the rewind should drop the failed run's recorded error")
+		// The rewind empties the mailbox, so the peer sends once the replay is under way.
+		require.NoError(t, Send(dbosCtx, parentID, "go", "cmd"))
+		parentResult, err := parentHandle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 44, parentResult, "42 from the repaired child plus len(\"go\")")
+
+		// The parent adopted the repaired child rather than re-running it.
+		assert.Equal(t, int64(2), childRuns.Load(), "replaying the parent must not re-run a succeeded child")
+		steps, err := GetWorkflowSteps(dbosCtx, parentID)
+		require.NoError(t, err)
+		var replayedChildID string
+		for _, step := range steps {
+			if step.ChildWorkflowID != "" {
+				replayedChildID = step.ChildWorkflowID
+			}
+		}
+		assert.Equal(t, childID, replayedChildID, "the replay must resolve the same deterministic child ID")
+
+		// Messages: the rewind deletes unconsumed messages, so the only one left is the
+		// Send issued after it, which the replayed recv consumed.
+		remaining := rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1 AND consumed = false`, parentID)
+		assert.Equal(t, 0, remaining, "the replayed recv should have consumed the pending message")
+
+		// Events: the blocked peer was released by the replay, and re-set keys hold the
+		// value from the new run.
+		require.NoError(t, <-answerErrCh)
+		assert.Equal(t, 44, <-answerCh)
+		phase, err = GetEvent[string](dbosCtx, parentID, "phase", 5*time.Second)
+		require.NoError(t, err)
+		assert.Equal(t, "done", phase)
+
+		// Streams: the discarded run's entries keep their offsets and the replay appends
+		// after them, so a peer that read offset 0 still finds what it read there.
+		entries, closed, err = ReadStream[string](dbosCtx, parentID, "log", WithReadStreamSnapshot())
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a", "b", "a", "b", "c"}, entries)
+		assert.True(t, closed)
+		rowCount := rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %sstreams WHERE workflow_uuid = $1 AND key = $2`, parentID, "log")
+		assert.Equal(t, 6, rowCount, "both runs' values plus the replay's closed sentinel")
+		maxOffset := rawQueryInt(t, dbosCtx,
+			`SELECT MAX("offset") FROM %sstreams WHERE workflow_uuid = $1 AND key = $2`, parentID, "log")
+		assert.Equal(t, 5, maxOffset, "offsets are append-only, never reused by the replay")
+	})
+
+	t.Run("PartialRewindKeepsEarlierHistory", func(t *testing.T) {
+		childRuns.Store(0)
+		parentID, childID := runToFailure(t)
+
+		steps, err := GetWorkflowSteps(dbosCtx, parentID)
+		require.NoError(t, err)
+		getResultStep := -1
+		for _, step := range steps {
+			if step.StepName == "DBOS.getResult" {
+				getResultStep = step.StepID
+			}
+		}
+		require.NotEqual(t, -1, getResultStep, "parent should have recorded a getResult step")
+		before := make(map[int]time.Time, len(steps))
+		for _, step := range steps {
+			if step.StepID < getResultStep {
+				before[step.StepID] = step.StartedAt
+			}
+		}
+		require.NotEmpty(t, before)
+
+		childHandle, err := RewindWorkflow[int](dbosCtx, childID)
+		require.NoError(t, err)
+		_, err = childHandle.GetResult()
+		require.NoError(t, err)
+
+		// Rewinding only to the failed getResult keeps the child-start checkpoint, both
+		// stream writes, and the event: the surgical recovery for this shape.
+		parentHandle, err := RewindWorkflow[int](dbosCtx, parentID, WithRewindStartStep(uint(getResultStep)))
+		require.NoError(t, err)
+		// The rewind empties the mailbox, so the peer sends once the replay is under way.
+		require.NoError(t, Send(dbosCtx, parentID, "go", "cmd"))
+		parentResult, err := parentHandle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 44, parentResult)
+		assert.Equal(t, int64(2), childRuns.Load(), "only the explicit child rewind should re-run the child")
+
+		steps, err = GetWorkflowSteps(dbosCtx, parentID)
+		require.NoError(t, err)
+		for _, step := range steps {
+			if started, ok := before[step.StepID]; ok {
+				assert.True(t, step.StartedAt.Equal(started),
+					"step %d (%s) below the rewind point must not have re-executed", step.StepID, step.StepName)
+			}
+		}
+
+		// The retained prefix's stream entries were not rewritten, so the replay appended
+		// to them rather than restarting the stream.
+		entries, closed, err := ReadStream[string](dbosCtx, parentID, "log", WithReadStreamSnapshot())
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a", "b", "c"}, entries)
+		assert.True(t, closed)
+	})
+
+	t.Run("RewindsSucceededWorkflowWithClosedStream", func(t *testing.T) {
+		publisherRuns.Store(0)
+		handle, err := RunWorkflow(dbosCtx, publisher, "")
+		require.NoError(t, err)
+		first, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 1, first)
+		workflowID := handle.GetWorkflowID()
+		require.Equal(t, WorkflowStatusSuccess, getStatus(t, workflowID))
+
+		// Rewinding a successful workflow is the point of the primitive, and the replay
+		// has to be able to reopen a stream the first run closed.
+		rewound, err := RewindWorkflow[int](dbosCtx, workflowID)
+		require.NoError(t, err)
+		second, err := rewound.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 2, second, "the replay re-executed and produced a new value")
+
+		// The sentinel the discarded run wrote is gone, so the replay's entry is
+		// visible after the surviving one rather than hidden behind the close.
+		// Offsets are addresses peers read by, so the first run's entry keeps its own.
+		entries, closed, err := ReadStream[int](dbosCtx, workflowID, "out", WithReadStreamSnapshot())
+		require.NoError(t, err)
+		assert.Equal(t, []int{1, 2}, entries)
+		assert.True(t, closed)
+
+		// Cut above the close: its step survives, so nothing replays it and the
+		// sentinel has to stay. Checked in the table, because the replay writes
+		// nothing new and a reader cannot tell the two behaviours apart.
+		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
+		require.NoError(t, err)
+		aboveEverything := 1
+		for _, step := range steps {
+			if step.StepID >= aboveEverything {
+				aboveEverything = step.StepID + 1
+			}
+		}
+		rewoundAgain, err := RewindWorkflow[int](dbosCtx, workflowID, WithRewindStartStep(uint(aboveEverything)))
+		require.NoError(t, err)
+		third, err := rewoundAgain.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 3, third)
+
+		sentinels := rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %sstreams WHERE workflow_uuid = $1 AND key = $2 AND value = $3`,
+			workflowID, "out", sysdb.StreamClosedSentinel)
+		assert.Equal(t, 1, sentinels, "a close below the cut is not the discarded run's to undo")
+	})
+
+	t.Run("RollsBackEventsPublishedPastTheCut", func(t *testing.T) {
+		eventRuns.Store(0)
+		handle, err := RunWorkflow(dbosCtx, divergentPublisher, "")
+		require.NoError(t, err)
+		first, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "first", first)
+		workflowID := handle.GetWorkflowID()
+
+		stage, err := GetEvent[string](dbosCtx, workflowID, "stage", time.Second)
+		require.NoError(t, err)
+		require.Equal(t, "two", stage)
+		transient, err := GetEvent[string](dbosCtx, workflowID, "transient", time.Second)
+		require.NoError(t, err)
+		require.Equal(t, "published", transient)
+
+		// Cut between the two SetEvents on "stage". The replay blocks before publishing
+		// anything, so whatever peers read now is the rewind's doing alone.
+		_, err = RewindWorkflow[string](dbosCtx, workflowID, WithRewindStartStep(1))
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			return getStatus(t, workflowID) == WorkflowStatusPending
+		}, 10*time.Second, 50*time.Millisecond)
+		assert.Equal(t, 0, rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %sworkflow_output WHERE workflow_uuid = $1`, workflowID),
+			"the rewind should drop the successful run's recorded output")
+
+		// workflow_events_history is an undo log: "stage" was published on both sides
+		// of the cut, so it reverts to the value it held below it.
+		stage, err = GetEvent[string](dbosCtx, workflowID, "stage", time.Second)
+		require.NoError(t, err)
+		assert.Equal(t, "one", stage)
+		// "transient" was only ever published past the cut, so there is nothing to
+		// revert to and it is unpublished outright: a reader now blocks on it, exactly
+		// as it would have before the discarded run ever ran.
+		_, err = GetEvent[string](dbosCtx, workflowID, "transient", 500*time.Millisecond)
+		require.ErrorContains(t, err, "no event found for key 'transient'")
+		published := rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %sworkflow_events WHERE workflow_uuid = $1 AND key = $2`, workflowID, "transient")
+		assert.Equal(t, 0, published, "a key only the discarded run published is unpublished")
+
+		// The history is the step log, so it is cut like any other history.
+		historyRows := rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %sworkflow_events_history WHERE workflow_uuid = $1`, workflowID)
+		assert.Equal(t, 1, historyRows, "only the SetEvent below the cut keeps its history row")
+
+		// The replay republishes "stage" and never touches "transient", which stays gone.
+		close(eventGate)
+		second, err := RetrieveWorkflow[string](dbosCtx, workflowID)
+		require.NoError(t, err)
+		result, err := second.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "second", result)
+		stage, err = GetEvent[string](dbosCtx, workflowID, "stage", time.Second)
+		require.NoError(t, err)
+		assert.Equal(t, "three", stage)
+		_, err = GetEvent[string](dbosCtx, workflowID, "transient", 500*time.Millisecond)
+		require.ErrorContains(t, err, "no event found for key 'transient'",
+			"the replay never sets 'transient', so it stays unpublished")
+	})
+
+	t.Run("DeletesMessagesConsumedPastTheCut", func(t *testing.T) {
+		recvRuns.Store(0)
+		workflowID := uuid.NewString()
+		handle, err := RunWorkflow(dbosCtx, recvWorkflow, "", WithWorkflowID(workflowID))
+		require.NoError(t, err)
+		require.NoError(t, Send(dbosCtx, workflowID, "first", "inbox"))
+		got, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "first", got)
+
+		// The recv consumed it, and recorded which step did so.
+		consumed := rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1 AND consumed_by_function_id IS NOT NULL`,
+			workflowID)
+		require.Equal(t, 1, consumed, "the recv should have stamped itself on the row it took")
+
+		// A message that lands after the cut is never taken by the replay either.
+		require.NoError(t, Send(dbosCtx, workflowID, "stray", "inbox"))
+		require.Equal(t, 1, rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1 AND consumed = false`,
+			workflowID))
+
+		// Rewinding past the recv empties the mailbox. Leaving the consumed row would
+		// strand the replayed recv on a message it can never see; leaving it unconsumed
+		// would deliver it a second time.
+		_, err = RewindWorkflow[string](dbosCtx, workflowID)
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			return rawQueryInt(t, dbosCtx,
+				`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1`, workflowID) == 0
+		}, 10*time.Second, 50*time.Millisecond, "the rewind should empty the mailbox")
+
+		// So the replayed recv waits for a new message rather than taking either of them.
+		require.Never(t, func() bool {
+			return getStatus(t, workflowID) == WorkflowStatusSuccess
+		}, 2*time.Second, 200*time.Millisecond, "the replayed recv must block, not re-consume")
+
+		require.NoError(t, Send(dbosCtx, workflowID, "second", "inbox"))
+		close(recvGate)
+		replayed, err := RetrieveWorkflow[string](dbosCtx, workflowID)
+		require.NoError(t, err)
+		result, err := replayed.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "second", result, "the replay took the new message, not the deleted one")
+		assert.Equal(t, int64(2), recvRuns.Load())
+	})
+
+	t.Run("RewindsOntoADifferentApplicationVersion", func(t *testing.T) {
+		publisherRuns.Store(0)
+		handle, err := RunWorkflow(dbosCtx, publisher, "")
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+		workflowID := handle.GetWorkflowID()
+
+		runningVersion := dbosCtx.(*dbosContext).applicationVersion
+		require.NotEmpty(t, runningVersion)
+
+		// Strand the workflow on a version no executor is running. Without a restamp a
+		// rewind would re-enqueue it where nothing will ever dequeue it.
+		rawExec(t, dbosCtx, `UPDATE %sworkflow_status SET application_version = $1 WHERE workflow_uuid = $2`,
+			"some-retired-version", workflowID)
+
+		rewound, err := RewindWorkflow[int](dbosCtx, workflowID, WithRewindApplicationVersion(runningVersion))
+		require.NoError(t, err)
+		result, err := rewound.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, 2, result)
+
+		wfs, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
+		require.NoError(t, err)
+		require.Len(t, wfs, 1)
+		assert.Equal(t, runningVersion, wfs[0].ApplicationVersion)
+	})
+
+	t.Run("RefusesActiveWorkflow", func(t *testing.T) {
+		requireRefused := func(t *testing.T, workflowID string, status WorkflowStatusType) {
+			t.Helper()
+			_, err := RewindWorkflow[string](dbosCtx, workflowID)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), string(status))
+			assert.Contains(t, err.Error(), "terminal state")
+		}
+
+		blocked, err := RunWorkflow(dbosCtx, blocker, "", WithQueue(gateQueue))
+		require.NoError(t, err)
+		<-blockerStarted
+		// PENDING: running on some executor, so its history is not ours to delete.
+		requireRefused(t, blocked.GetWorkflowID(), WorkflowStatusPending)
+
+		// ENQUEUED: the queue's only slot is held by the blocker, so this one has not
+		// started. It has a future, not a past to repair.
+		queued, err := RunWorkflow(dbosCtx, idleWorkflow, "", WithQueue(gateQueue))
+		require.NoError(t, err)
+		require.Equal(t, WorkflowStatusEnqueued, getStatus(t, queued.GetWorkflowID()))
+		requireRefused(t, queued.GetWorkflowID(), WorkflowStatusEnqueued)
+
+		cancelBlocked()
+		_, err = blocked.GetResult()
+		require.NoError(t, err)
+		_, err = queued.GetResult()
+		require.NoError(t, err)
+	})
+
+	t.Run("NonExistentWorkflow", func(t *testing.T) {
+		_, err := RewindWorkflow[int](dbosCtx, uuid.NewString())
+		require.Error(t, err)
+		var dbosErr *Error
+		require.ErrorAs(t, err, &dbosErr)
+		assert.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code)
+	})
+}
