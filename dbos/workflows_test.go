@@ -11927,6 +11927,9 @@ func TestRewind(t *testing.T) {
 
 		parentHandle, err := RewindWorkflow[int](dbosCtx, parentID)
 		require.NoError(t, err)
+		assert.Equal(t, 0, rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %sworkflow_output WHERE workflow_uuid = $1`, parentID),
+			"the rewind should drop the failed run's recorded error")
 		// The rewind empties the mailbox, so the peer sends once the replay is under way.
 		require.NoError(t, Send(dbosCtx, parentID, "go", "cmd"))
 		parentResult, err := parentHandle.GetResult()
@@ -12099,6 +12102,9 @@ func TestRewind(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return getStatus(t, workflowID) == WorkflowStatusPending
 		}, 10*time.Second, 50*time.Millisecond)
+		assert.Equal(t, 0, rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %sworkflow_output WHERE workflow_uuid = $1`, workflowID),
+			"the rewind should drop the successful run's recorded output")
 
 		// workflow_events_history is an undo log: "stage" was published on both sides
 		// of the cut, so it reverts to the value it held below it.

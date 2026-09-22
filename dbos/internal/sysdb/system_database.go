@@ -2836,6 +2836,15 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 		return fmt.Errorf("failed to restore events for workflow %s: %w", input.WorkflowID, err)
 	}
 
+	// Drop the recorded outcome so the replay's is the only one readers can see.
+	switch models.WorkflowStatusType(currentStatus) {
+	case models.WorkflowStatusSuccess, models.WorkflowStatusError:
+		outputQuery := s.RenderSQL(`DELETE FROM %sworkflow_output WHERE workflow_uuid = $1`, schemaPrefix)
+		if _, err := tx.Exec(ctx, outputQuery, input.WorkflowID); err != nil {
+			return fmt.Errorf("failed to delete output of workflow %s: %w", input.WorkflowID, err)
+		}
+	}
+
 	// Clear up streams closed sentinels.
 	reopenQuery := s.RenderSQL(`DELETE FROM %sstreams
 		WHERE workflow_uuid = $1 AND function_id >= $2 AND value = $3`, schemaPrefix)
