@@ -331,7 +331,9 @@ func WithGlobalConcurrency(concurrency int) QueueOption {
 }
 
 // WithPriorityEnabled enables priority-based scheduling for the queue.
-// When enabled, workflows with lower priority numbers are executed first.
+//
+// Deprecated: every queue dequeues in priority order, lower priority numbers
+// first, so this option no longer affects scheduling and can be removed.
 func WithPriorityEnabled() QueueOption {
 	return func(q *workflowQueue) {
 		q.PriorityEnabled = true
@@ -470,7 +472,6 @@ func validateRateLimiter(name string, rl *RateLimiter) error {
 //
 //	q, err := dbos.RegisterQueue(ctx, "email-queue",
 //	    dbos.WithWorkerConcurrency(5),
-//	    dbos.WithPriorityEnabled(),
 //	)
 func RegisterQueue(ctx Client, name string, options ...QueueOption) (Queue, error) {
 	if ctx == nil {
