@@ -34,6 +34,7 @@ const (
 	ErrorCodeQueueNotFound
 	ErrorCodeScheduleNotFound
 	ErrorCodeInvalidOption
+	ErrorCodeWorkflowPanic
 
 	// _errorCodeSentinel must remain the last value: it bounds parseErrorCode.
 	_errorCodeSentinel
@@ -82,6 +83,8 @@ func (c ErrorCode) String() string {
 		return "ScheduleNotFound"
 	case ErrorCodeInvalidOption:
 		return "InvalidOption"
+	case ErrorCodeWorkflowPanic:
+		return "WorkflowPanic"
 	default:
 		return fmt.Sprintf("ErrorCode(%d)", int(c))
 	}
@@ -307,6 +310,20 @@ func NewWorkflowExecutionError(workflowID string, err error) *Error {
 		Code:       ErrorCodeWorkflowExecution,
 		WorkflowID: workflowID,
 	}).withCause(err)
+}
+
+// NewWorkflowPanicError reports a panic recovered from a workflow function. When the
+// panic value is an error it is wrapped, so errors.Is/errors.As still reach it.
+func NewWorkflowPanicError(workflowID string, value any) *Error {
+	e := &Error{
+		Message:    fmt.Sprintf("Workflow %s panicked: %v", workflowID, value),
+		Code:       ErrorCodeWorkflowPanic,
+		WorkflowID: workflowID,
+	}
+	if cause, ok := value.(error); ok {
+		return e.withCause(cause)
+	}
+	return e
 }
 
 func NewStepExecutionError(workflowID, stepName string, err error) *Error {

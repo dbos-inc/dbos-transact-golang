@@ -9,6 +9,7 @@ import (
 	"math"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -1644,7 +1645,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 		var result any
 		var err error
 
-		result, err = fn(workflowCtx, input)
+		result, err = c.recoverPanic(workflowID, func() (any, error) { return fn(workflowCtx, input) })
 
 		// Handle DBOS ID conflict errors by waiting workflow result
 		if errors.Is(err, ErrConflictingWorkflowID) {
@@ -1733,6 +1734,18 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	}()
 
 	return newWorkflowHandle(uncancellableCtx, workflowID, outcomeChan)
+}
+
+// recoverPanic runs fn on a goroutine DBOS owns, converting a panic into a
+// WorkflowPanic error returned to the caller instead of crashing the process.
+func (c *dbosContext) recoverPanic(workflowID string, fn func() (any, error)) (result any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("Workflow panicked", "workflow_id", workflowID, "panic", r, "stack", string(debug.Stack()))
+			result, err = nil, models.NewWorkflowPanicError(workflowID, r)
+		}
+	}()
+	return fn()
 }
 
 /******************************/
@@ -2944,7 +2957,7 @@ func (c *dbosContext) Go(ctx Context, fn StepFunc, opts ...StepOption) (<-chan S
 	result := make(chan StepOutcome[any], 1)
 	go func() {
 		defer close(result)
-		res, err := ctx.RunAsStep(ctx, fn, opts...)
+		res, err := c.recoverPanic(wfState.workflowID, func() (any, error) { return ctx.RunAsStep(ctx, fn, opts...) })
 		result <- StepOutcome[any]{
 			Result: res,
 			Err:    err,

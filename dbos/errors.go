@@ -41,4 +41,5 @@ var (
 	ErrNoApplicationVersions = &Error{Code: ErrorCodeNoApplicationVersions}
 	// ErrInvalidOption matches errors from invalid or inconsistent options passed to a DBOS API.
 	ErrInvalidOption = &Error{Code: ErrorCodeInvalidOption}
+	ErrWorkflowPanic = &Error{Code: ErrorCodeWorkflowPanic}
 )
