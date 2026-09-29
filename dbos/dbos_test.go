@@ -671,15 +671,18 @@ func TestLifecycleRequiresRootContext(t *testing.T) {
 	derivedAfter := WithValue(ctx, "k", "v")
 	withTimeout, cancelTimeout := WithTimeout(ctx, time.Minute)
 	defer cancelTimeout()
+	withDeadline, cancelDeadline := WithDeadlineCause(ctx, time.Now().Add(time.Minute), errDBOSContextTimeout)
+	defer cancelDeadline()
 	withCancel, cancel := WithCancel(ctx)
 	defer cancel()
 	fromCtx := From(ctx, context.Background())
 	for name, derived := range map[string]Context{
-		"WithValue":     derivedAfter,
-		"WithTimeout":   withTimeout,
-		"WithCancel":    withCancel,
-		"WithoutCancel": WithoutCancel(ctx),
-		"From":          fromCtx,
+		"WithValue":         derivedAfter,
+		"WithTimeout":       withTimeout,
+		"WithDeadlineCause": withDeadline,
+		"WithCancel":        withCancel,
+		"WithoutCancel":     WithoutCancel(ctx),
+		"From":              fromCtx,
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertRootOnly(t, Launch(derived), "Launch")
@@ -1452,7 +1455,7 @@ func TestClientShutdownReportsSystemDBTimeout(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Release()
 
-	err = client.Shutdown(client, 500 * time.Millisecond)
+	err = client.Shutdown(client, 500*time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "system database connection pool")
 

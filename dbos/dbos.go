@@ -277,12 +277,13 @@ type Context interface {
 	GetApplicationID() string      // Get the application ID for this context
 
 	// Context management
-	From(_ Context, ctx context.Context) Context                                // Returns a copy of the current Context wrapping the provided context.Context
-	WithoutCancel(_ Context) Context                                            // Returns a copy that is not canceled when the parent is canceled
-	WithTimeout(_ Context, timeout time.Duration) (Context, context.CancelFunc) // Returns a copy that is canceled after the timeout
-	WithValue(key, val any) Context                                             // Returns a copy of the DBOS context with the given key-value pair
-	WithCancel() (Context, context.CancelFunc)                                  // Returns a copy that can be manually canceled
-	WithCancelCause() (Context, context.CancelCauseFunc)                        // Returns a copy of the DBOS context that can be canceled with a cause
+	From(_ Context, ctx context.Context) Context                                                // Returns a copy of the current Context wrapping the provided context.Context
+	WithoutCancel(_ Context) Context                                                            // Returns a copy that is not canceled when the parent is canceled
+	WithTimeout(_ Context, timeout time.Duration) (Context, context.CancelFunc)                 // Returns a copy that is canceled after the timeout
+	WithDeadlineCause(_ Context, deadline time.Time, cause error) (Context, context.CancelFunc) // Returns a copy that is canceled at the deadline with the given cause
+	WithValue(key, val any) Context                                                             // Returns a copy of the DBOS context with the given key-value pair
+	WithCancel() (Context, context.CancelFunc)                                                  // Returns a copy that can be manually canceled
+	WithCancelCause() (Context, context.CancelCauseFunc)                                        // Returns a copy of the DBOS context that can be canceled with a cause
 
 	// Alert handling
 	SetAlertHandler(handler AlertHandler) // Register a handler for alerts from DBOS Conductor (must be called before Launch)
@@ -529,6 +530,20 @@ func WithTimeout(ctx Context, timeout time.Duration) (Context, context.CancelFun
 		return nil, func() {}
 	}
 	return ctx.WithTimeout(ctx, timeout)
+}
+
+func (c *dbosContext) WithDeadlineCause(_ Context, deadline time.Time, cause error) (Context, context.CancelFunc) {
+	newCtx, cancelFunc := context.WithDeadlineCause(c.ctx, deadline, cause)
+	return c.clone(newCtx), cancelFunc
+}
+
+// WithDeadlineCause returns a copy of the DBOS context that is canceled at the given deadline,
+// with cause as the error returned by context.Cause.
+func WithDeadlineCause(ctx Context, deadline time.Time, cause error) (Context, context.CancelFunc) {
+	if ctx == nil {
+		return nil, func() {}
+	}
+	return ctx.WithDeadlineCause(ctx, deadline, cause)
 }
 
 func (c *dbosContext) getWorkflowScheduler() *cron.Cron {

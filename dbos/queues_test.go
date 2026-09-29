@@ -1308,12 +1308,96 @@ func TestQueueTimeouts(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, fastWorkflow)
 
+	var deadlineQueue *workflowQueue // database-backed; registered after Launch
+	deadlineBlockingEvent := NewEvent()
+	deadlineBlockingWorkflow := func(ctx Context, _ string) (string, error) {
+		deadlineBlockingEvent.Wait()
+		return "blocking-done", nil
+	}
+	RegisterWorkflow(dbosCtx, deadlineBlockingWorkflow)
+	enqueueChildrenWorkflow := func(ctx Context, _ string) (string, error) {
+		myID, err := GetWorkflowID(ctx)
+		if err != nil {
+			return "", err
+		}
+		if _, err := RunWorkflow(ctx, fastWorkflow, "inherited", WithQueue(deadlineQueue), WithWorkflowID(myID+"-inherited")); err != nil {
+			return "", err
+		}
+		explicitCtx, cancelExplicit := WithTimeout(ctx, 10*time.Minute)
+		defer cancelExplicit()
+		if _, err := RunWorkflow(explicitCtx, fastWorkflow, "explicit", WithQueue(deadlineQueue), WithWorkflowID(myID+"-explicit")); err != nil {
+			return "", err
+		}
+		detachedCtx, cancelDetached := WithTimeout(WithoutCancel(ctx), 2*time.Hour)
+		defer cancelDetached()
+		if _, err := RunWorkflow(detachedCtx, fastWorkflow, "detached", WithQueue(deadlineQueue), WithWorkflowID(myID+"-detached")); err != nil {
+			return "", err
+		}
+		return "enqueued", nil
+	}
+	RegisterWorkflow(dbosCtx, enqueueChildrenWorkflow)
+
 	Launch(dbosCtx)
 
 	timeoutQueue, err := registerWFQ(dbosCtx, "timeout-queue")
 	require.NoError(t, err)
 	timeoutOnDequeueQueue, err = registerWFQ(dbosCtx, "timeout-on-dequeue-queue", WithGlobalConcurrency(1))
 	require.NoError(t, err)
+	deadlineQueue, err = registerWFQ(dbosCtx, "deadline-queue", WithGlobalConcurrency(1))
+	require.NoError(t, err)
+
+	t.Run("EnqueuedChildDeadline", func(t *testing.T) {
+		blockingHandle, err := RunWorkflow(dbosCtx, deadlineBlockingWorkflow, "blocking", WithQueue(deadlineQueue))
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			status, err := blockingHandle.GetStatus()
+			return err == nil && status.Status == WorkflowStatusPending
+		}, 10*time.Second, 50*time.Millisecond, "blocking workflow was not dequeued")
+
+		parentCtx, cancelParent := WithTimeout(dbosCtx, time.Hour)
+		defer cancelParent()
+		parentHandle, err := RunWorkflow(parentCtx, enqueueChildrenWorkflow, "parent")
+		require.NoError(t, err)
+		_, err = parentHandle.GetResult()
+		require.NoError(t, err)
+		parentStatus, err := parentHandle.GetStatus()
+		require.NoError(t, err)
+		require.False(t, parentStatus.Deadline.IsZero())
+
+		childStatus := func(suffix string) WorkflowStatus {
+			h, err := RetrieveWorkflow[string](dbosCtx, parentHandle.GetWorkflowID()+"-"+suffix)
+			require.NoError(t, err)
+			status, err := h.GetStatus()
+			require.NoError(t, err)
+			require.Equal(t, WorkflowStatusEnqueued, status.Status, "%s child should still be enqueued", suffix)
+			return status
+		}
+
+		// A child on the parent's context inherits its absolute deadline.
+		inherited := childStatus("inherited")
+		assert.Equal(t, parentStatus.Deadline.UnixMilli(), inherited.Deadline.UnixMilli())
+
+		// An explicit timeout starts at dequeue, whether shorter or set on a detached context.
+		explicit := childStatus("explicit")
+		assert.True(t, explicit.Deadline.IsZero(), "explicit child should have no deadline while enqueued")
+		assert.InDelta(t, 10*time.Minute, explicit.Timeout, float64(time.Minute))
+
+		detached := childStatus("detached")
+		assert.True(t, detached.Deadline.IsZero(), "detached child should have no deadline while enqueued")
+		assert.InDelta(t, 2*time.Hour, detached.Timeout, float64(time.Minute))
+
+		deadlineBlockingEvent.Set()
+		_, err = blockingHandle.GetResult()
+		require.NoError(t, err)
+		for _, suffix := range []string{"inherited", "explicit", "detached"} {
+			h, err := RetrieveWorkflow[string](dbosCtx, parentHandle.GetWorkflowID()+"-"+suffix)
+			require.NoError(t, err)
+			result, err := h.GetResult()
+			require.NoError(t, err)
+			assert.Equal(t, "done", result)
+		}
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after test")
+	})
 
 	t.Run("EnqueueWorkflowTimeout", func(t *testing.T) {
 		// Start a workflow that will wait indefinitely
