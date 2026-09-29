@@ -248,7 +248,7 @@ type Context interface {
 	Client
 
 	// Context Lifecycle
-	Launch() error // Launch the DBOS runtime (system database, queues, scheduler) and recover this executor's PENDING workflows: interrupted workflows resume from their last completed step; queued ones are returned to their queue. Only valid on the Context returned by NewContext
+	Launch() error // Launch the DBOS runtime (system database, queues, scheduler) and recover this executor's PENDING workflows: interrupted workflows resume from their last completed step; queued ones are returned to their queue. When Conductor is configured, recovery is left to Conductor. Only valid on the Context returned by NewContext
 
 	// Workflow operations
 	RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
@@ -809,8 +809,9 @@ func (c *dbosContext) requestedOwner(explicit string) *string {
 }
 
 // Launch initializes and starts the DBOS runtime components including the system database
-// and conductor (if configured), recovers any pending workflows on this executor, then
-// starts the queue runner and workflow scheduler.
+// and conductor (if configured), recovers any pending workflows on this executor (unless
+// Conductor is configured, in which case Conductor drives recovery), then starts the queue
+// runner and workflow scheduler.
 //
 // Returns an error if the context is already launched or if any component fails to start.
 // A failed Launch is terminal: the context is torn down (system database closed) and
@@ -852,15 +853,20 @@ func (c *dbosContext) Launch() error {
 	}
 
 	// Recover local pending workflows before starting the queue runner so
-	// recovered workflows are not racing a fresh dequeue pass.
-	recoveryHandles, err := recoverPendingWorkflows(c, []string{c.executorID})
-	if err != nil {
-		return models.NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
-	}
-	if len(recoveryHandles) > 0 {
-		c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
+	// recovered workflows are not racing a fresh dequeue pass. When Conductor
+	// is configured it drives recovery, so the executor does not recover itself.
+	if c.conductor == nil {
+		recoveryHandles, err := recoverPendingWorkflows(c, []string{c.executorID})
+		if err != nil {
+			return models.NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
+		}
+		if len(recoveryHandles) > 0 {
+			c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
+		} else {
+			c.logger.Debug("No pending workflows to recover")
+		}
 	} else {
-		c.logger.Debug("No pending workflows to recover")
+		c.logger.Debug("Skipping self-recovery: Conductor is configured")
 	}
 
 	// Start the queue runner in a goroutine
