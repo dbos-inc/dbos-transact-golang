@@ -783,6 +783,7 @@ type WorkflowFunc func(ctx Context, input any) (any, error)
 type activeWorkflowEntry struct {
 	queueName         string
 	queuePartitionKey string
+	cancel            context.CancelCauseFunc
 }
 
 // countActiveWorkflowsForQueue counts this executor's running workflows on a queue, across every partition.
@@ -1557,19 +1558,22 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	}
 
 	ctx := context.WithValue(c.ctx, workflowStateKey, wfState)
+	var cancelWorkflow context.CancelCauseFunc
 	if !wfState.deadline.IsZero() {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadlineCause(ctx, wfState.deadline, errDBOSContextTimeout)
 		_ = cancel
+		ctx, cancelWorkflow = context.WithCancelCause(ctx)
 	}
 	workflowCtx := c.clone(ctx)
 	// Register a cancel function that durably cancels the workflow in the DB as soon as
-	// the context is cancelled (durable deadline, user cancel, or parent cancellation).
+	// the context is manually cancelled. Timeouts cause durable cancellation through a
+	// separate batch process (see cancelTimedOutWorkflows).
 	cancelFuncCompleted := make(chan struct{})
 	workflowCancelFunction := func() {
 		defer close(cancelFuncCompleted)
-		if errors.Is(context.Cause(workflowCtx), errShutdown) {
-			// Shutdown, not a cancellation request.
+		cause := context.Cause(workflowCtx)
+		if errors.Is(cause, errShutdown) || errors.Is(cause, context.DeadlineExceeded) {
 			return
 		}
 		c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
@@ -1594,13 +1598,16 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	// The row is known to have existed (this run inserted or read it), so a missing
 	// row means it was deleted: fail fast with a NonExistentWorkflow error rather
 	// than polling for a row that will never reappear.
-	// The park follows c's cancellation; a plain cancellation is reported as context.Canceled.
+	// The park can be cancelled by Shutdowns only, by using the root context, not the caller's.
+	// Note that a parked execution can return to the later much caller than the execution's context timout.
+	// That's because said timeout refers to the durable workflow, not its stateless executing vessel.
 	awaitExistingOutcome := func(cancelCause error) {
-		awaitOut, awaitErr := sysdb.RetryWithResult(c, func() (*sysdb.AwaitWorkflowResultOutput, error) {
-			return c.systemDB.AwaitWorkflowResult(c, workflowID, sysdb.DBRetryInterval, true)
+		parkCtx := c.clone(c.rootCtx)
+		awaitOut, awaitErr := sysdb.RetryWithResult(parkCtx, func() (*sysdb.AwaitWorkflowResultOutput, error) {
+			return c.systemDB.AwaitWorkflowResult(parkCtx, workflowID, sysdb.DBRetryInterval, true)
 		}, sysdb.WithRetrierLogger(c.logger))
-		if awaitErr != nil && errors.Is(c.Err(), context.Canceled) {
-			awaitErr = c.Err()
+		if awaitErr != nil && errors.Is(parkCtx.Err(), context.Canceled) {
+			awaitErr = parkCtx.Err()
 		}
 		err := awaitErr
 		if awaitErr == nil && awaitOut != nil && awaitOut.ErrStr != nil {
@@ -1631,7 +1638,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 
 		removeActive := func() {}
 		if c.activeWorkflowIDs != nil {
-			entry := activeWorkflowEntry{queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey}
+			entry := activeWorkflowEntry{queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey, cancel: cancelWorkflow}
 			_, loaded := c.activeWorkflowIDs.LoadOrStore(workflowID, entry)
 			if loaded {
 				// Lost a start race: a concurrent start of this workflow
@@ -1678,7 +1685,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 				// cancellation by reading the CANCELLED row (a status carries no cause)
 				// rather than from the context, and the run's own reason must not depend
 				// on which of the two noticed first.
-				awaitExistingOutcome(errors.Join(err, workflowCtx.Err()))
+				awaitExistingOutcome(errors.Join(err, context.Cause(workflowCtx)))
 				return
 			}
 			if workflowCtx.Err() != nil && isCancellationError(err) {
@@ -1752,6 +1759,49 @@ func (c *dbosContext) recoverPanic(workflowID string, fn func() (any, error)) (r
 		}
 	}()
 	return fn()
+}
+
+const (
+	_WORKFLOW_TIMEOUTS_MONITOR_INTERVAL   = 1 * time.Second
+	_WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE = 1000
+)
+
+// runWorkflowTimeoutsMonitor cancels this application's workflows past their deadline,
+// whichever executor runs them, and cancels the context of the ones running here.
+func (c *dbosContext) runWorkflowTimeoutsMonitor() {
+	ticker := time.NewTicker(_WORKFLOW_TIMEOUTS_MONITOR_INTERVAL)
+	defer ticker.Stop()
+	for {
+		c.cancelTimedOutWorkflows()
+		select {
+		case <-c.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *dbosContext) cancelTimedOutWorkflows() {
+	for {
+		cancelled, err := sysdb.RetryWithResult(c, func() ([]string, error) {
+			return c.systemDB.CancelTimedOutWorkflows(c, sysdb.CancelTimedOutWorkflowsDBInput{Limit: _WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE})
+		}, sysdb.WithRetrierLogger(c.logger))
+		if err != nil {
+			if c.Err() == nil {
+				c.logger.Warn("Failed to cancel timed-out workflows", "error", err)
+			}
+			return
+		}
+		for _, workflowID := range cancelled {
+			c.logger.Info("Workflow timed out", "workflow_id", workflowID)
+			if entry, ok := c.activeWorkflowIDs.Load(workflowID); ok && entry.(activeWorkflowEntry).cancel != nil {
+				entry.(activeWorkflowEntry).cancel(errDBOSContextTimeout)
+			}
+		}
+		if len(cancelled) < _WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE {
+			return
+		}
+	}
 }
 
 /******************************/
