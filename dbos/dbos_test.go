@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2164,4 +2165,79 @@ func TestPoolMaxConnsFromURL(t *testing.T) {
 	defer systemDB2.Shutdown(ctx, 2*time.Second)
 	require.EqualValues(t, 20, PgxPool(systemDB2.(*sysdb.SysDB).Pool()).Config().MaxConns,
 		"the default pool size should apply when the URL does not set pool_max_conns")
+}
+
+func setWorkflowExecutorID(t *testing.T, dbosCtx Context, workflowID, executorID string) {
+	t.Helper()
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(`UPDATE %sworkflow_status SET executor_id = $1 WHERE workflow_uuid = $2`,
+		sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+	_, err := sysDB.Pool().Exec(context.Background(), query, executorID, workflowID)
+	require.NoError(t, err, "failed to set workflow executor_id")
+}
+
+// With Conductor configured, Launch must leave this executor's PENDING workflows alone:
+// Conductor drives recovery. Without it, Launch recovers them.
+func TestLaunchSkipsSelfRecoveryWithConductor(t *testing.T) {
+	databaseURL := "sqlite:" + filepath.Join(t.TempDir(), "dbos.db")
+	const executorID = "self-recovery-executor"
+	var runs atomic.Int64
+	echoWorkflow := func(ctx Context, in string) (string, error) {
+		runs.Add(1)
+		return in, nil
+	}
+	newCtx := func(t *testing.T, conductorURL string) *dbosContext {
+		t.Helper()
+		cfg := Config{AppName: "test-app", DatabaseURL: databaseURL, ExecutorID: executorID}
+		if conductorURL != "" {
+			cfg.ConductorAPIKey = "test-key"
+			cfg.ConductorURL = conductorURL
+		}
+		ctx, err := NewContext(context.Background(), cfg)
+		require.NoError(t, err)
+		RegisterWorkflow(ctx, echoWorkflow)
+		return ctx.(*dbosContext)
+	}
+
+	// Run the workflow to completion, then flip it back to PENDING as if interrupted.
+	ctxA := newCtx(t, "")
+	require.NoError(t, ctxA.Launch())
+	wfid := uuid.NewString()
+	handle, err := RunWorkflow(ctxA, echoWorkflow, "hello", WithWorkflowID(wfid))
+	require.NoError(t, err)
+	res, err := handle.GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "hello", res)
+	require.EqualValues(t, 1, runs.Load())
+	setWorkflowStatusPending(t, ctxA, wfid)
+	require.NoError(t, ctxA.Shutdown(ctxA, 10*time.Second))
+
+	// Launch with Conductor: the PENDING row is left for Conductor to recover.
+	mockServer := newMockWebSocketServer()
+	t.Cleanup(mockServer.shutdown)
+	ctxB := newCtx(t, mockServer.getURL())
+	require.NotNil(t, ctxB.conductor)
+	setWorkflowExecutorID(t, ctxB, wfid, ctxB.executorID)
+	require.NoError(t, ctxB.Launch())
+	require.True(t, mockServer.waitForConnection(5*time.Second))
+	time.Sleep(500 * time.Millisecond)
+	pending, err := RetrieveWorkflow[string](ctxB, wfid)
+	require.NoError(t, err)
+	status, err := pending.GetStatus()
+	require.NoError(t, err)
+	assert.Equal(t, WorkflowStatusPending, status.Status)
+	assert.EqualValues(t, 1, runs.Load(), "workflow must not be re-run under Conductor")
+	require.NoError(t, ctxB.Shutdown(ctxB, 10*time.Second))
+
+	// Launch without Conductor: the executor recovers its own PENDING row.
+	ctxC := newCtx(t, "")
+	t.Cleanup(func() { ctxC.Shutdown(ctxC, 10*time.Second) })
+	setWorkflowExecutorID(t, ctxC, wfid, executorID)
+	require.NoError(t, ctxC.Launch())
+	recovered, err := RetrieveWorkflow[string](ctxC, wfid)
+	require.NoError(t, err)
+	res, err = recovered.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "hello", res)
+	assert.EqualValues(t, 2, runs.Load())
 }
