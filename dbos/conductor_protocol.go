@@ -117,6 +117,7 @@ type listWorkflowsConductorRequestBody struct {
 	ForkedFrom         stringOrList   `json:"forked_from,omitempty"`
 	ParentWorkflowID   stringOrList   `json:"parent_workflow_id,omitempty"`
 	WasForkedFrom      *bool          `json:"was_forked_from,omitempty"`
+	IsFork             *bool          `json:"is_fork,omitempty"`
 	HasParent          *bool          `json:"has_parent,omitempty"`
 	QueueName          stringOrList   `json:"queue_name,omitempty"`
 	Limit              *int           `json:"limit,omitempty"`
@@ -870,6 +871,7 @@ type getWorkflowAggregatesConductorRequestBody struct {
 	User                      stringOrList   `json:"user,omitempty"`
 	ApplicationName           stringOrList   `json:"application_name,omitempty"`
 	WasForkedFrom             *bool          `json:"was_forked_from,omitempty"`
+	IsFork                    *bool          `json:"is_fork,omitempty"`
 	HasParent                 *bool          `json:"has_parent,omitempty"`
 	Attributes                map[string]any `json:"attributes,omitempty"`
 }

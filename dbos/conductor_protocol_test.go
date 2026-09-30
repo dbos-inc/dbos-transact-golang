@@ -125,6 +125,7 @@ func TestGetWorkflowAggregatesConductorRequestBody_Unmarshal(t *testing.T) {
 			"parent_workflow_id":["p1"],
 			"user":"alice",
 			"was_forked_from":true,
+			"is_fork":true,
 			"has_parent":false
 		}}`), &req)
 		require.NoError(t, err)
@@ -134,6 +135,8 @@ func TestGetWorkflowAggregatesConductorRequestBody_Unmarshal(t *testing.T) {
 		assert.Equal(t, []string{"alice"}, req.Body.User.toSlice())
 		require.NotNil(t, req.Body.WasForkedFrom)
 		assert.True(t, *req.Body.WasForkedFrom)
+		require.NotNil(t, req.Body.IsFork)
+		assert.True(t, *req.Body.IsFork)
 		require.NotNil(t, req.Body.HasParent)
 		assert.False(t, *req.Body.HasParent)
 	})
