@@ -5618,6 +5618,14 @@ func WithFilterWasForkedFrom(wasForkedFrom bool) ListWorkflowsOption {
 	}
 }
 
+// WithFilterIsFork filters workflows by whether they are themselves a fork of another
+// workflow (true) or not (false).
+func WithFilterIsFork(isFork bool) ListWorkflowsOption {
+	return func(p *models.ListWorkflowsInput) {
+		p.IsFork = &isFork
+	}
+}
+
 // WithFilterHasParent filters workflows by whether they have a parent workflow (true) or not (false).
 func WithFilterHasParent(hasParent bool) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
@@ -5707,6 +5715,7 @@ func (c *dbosContext) ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]Wo
 		DequeuedAfter:      params.DequeuedAfter,
 		DequeuedBefore:     params.DequeuedBefore,
 		WasForkedFrom:      params.WasForkedFrom,
+		IsFork:             params.IsFork,
 		HasParent:          params.HasParent,
 		Attributes:         params.Attributes,
 		ScheduleName:       params.ScheduleName,
@@ -5992,6 +6001,7 @@ func (c *dbosContext) GetWorkflowAggregates(_ Client, input GetWorkflowAggregate
 		ParentWorkflowID:          input.ParentWorkflowID,
 		ApplicationName:           input.ApplicationName,
 		WasForkedFrom:             input.WasForkedFrom,
+		IsFork:                    input.IsFork,
 		HasParent:                 input.HasParent,
 		Attributes:                input.Attributes,
 	}
@@ -6016,7 +6026,7 @@ func (c *dbosContext) GetWorkflowAggregates(_ Client, input GetWorkflowAggregate
 // At least one GroupBy* flag in the input must be true, or TimeBucketSize must be > 0.
 // Filter fields (Status, StartTime, EndTime, Name, ApplicationVersion, ExecutorID,
 // QueueName, WorkflowIDPrefix, WorkflowIDs, AuthenticatedUser, ForkedFrom,
-// ParentWorkflowID, WasForkedFrom, HasParent, Attributes) narrow which workflows are
+// ParentWorkflowID, WasForkedFrom, IsFork, HasParent, Attributes) narrow which workflows are
 // counted before grouping. Attributes filtering requires a Postgres-compatible system database.
 //
 // At least one Select* flag must be true. Returns one WorkflowAggregateRow per non-empty

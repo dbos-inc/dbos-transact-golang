@@ -29,6 +29,7 @@ type ListWorkflowsInput struct {
 	DequeuedAfter    time.Time
 	DequeuedBefore   time.Time
 	WasForkedFrom    *bool
+	IsFork           *bool
 	HasParent        *bool
 	Attributes       map[string]any
 	ScheduleName     []string
@@ -130,6 +131,7 @@ type GetWorkflowAggregatesInput struct {
 	ParentWorkflowID   []string
 	ApplicationName    []string
 	WasForkedFrom      *bool
+	IsFork             *bool
 	HasParent          *bool
 
 	Attributes map[string]any

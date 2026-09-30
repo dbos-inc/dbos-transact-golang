@@ -1055,6 +1055,35 @@ func TestForkWorkflow(t *testing.T) {
 		for _, wf := range forkedFromFalse {
 			assert.NotEqual(t, originalWorkflowID, wf.ID, "WithFilterWasForkedFrom(false) must exclude forked-from workflows")
 		}
+
+		// WithFilterIsFork filters on the other end of the relationship: the forks themselves.
+		forks, err := client.ListWorkflows(client, WithFilterForkedFrom(originalWorkflowID))
+		require.NoError(t, err)
+		require.NotEmpty(t, forks, "expected forks of the original workflow")
+
+		isForkTrue, err := client.ListWorkflows(client, WithFilterIsFork(true))
+		require.NoError(t, err)
+		isForkIDs := make(map[string]bool)
+		for _, wf := range isForkTrue {
+			assert.NotEmpty(t, wf.ForkedFrom, "WithFilterIsFork(true) must only return forks")
+			isForkIDs[wf.ID] = true
+		}
+		for _, fork := range forks {
+			assert.True(t, isForkIDs[fork.ID], "fork %s should be returned by WithFilterIsFork(true)", fork.ID)
+		}
+		assert.False(t, isForkIDs[originalWorkflowID], "original workflow must not be returned by WithFilterIsFork(true)")
+
+		isForkFalse, err := client.ListWorkflows(client, WithFilterIsFork(false))
+		require.NoError(t, err)
+		nonForkIDs := make(map[string]bool)
+		for _, wf := range isForkFalse {
+			assert.Empty(t, wf.ForkedFrom, "WithFilterIsFork(false) must only return non-forks")
+			nonForkIDs[wf.ID] = true
+		}
+		assert.True(t, nonForkIDs[originalWorkflowID], "original workflow should be returned by WithFilterIsFork(false)")
+		for _, fork := range forks {
+			assert.False(t, nonForkIDs[fork.ID], "fork %s must be excluded by WithFilterIsFork(false)", fork.ID)
+		}
 	})
 
 	t.Run("ForkNonExistentWorkflow", func(t *testing.T) {

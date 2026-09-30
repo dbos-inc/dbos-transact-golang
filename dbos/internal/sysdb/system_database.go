@@ -1596,6 +1596,7 @@ type ListWorkflowsDBInput struct {
 	DequeuedAfter      time.Time
 	DequeuedBefore     time.Time
 	WasForkedFrom      *bool
+	IsFork             *bool
 	HasParent          *bool
 	Attributes         map[string]any
 	ScheduleName       []string
@@ -1710,6 +1711,13 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 	}
 	if input.IsDebounced != nil {
 		qb.addWhere("is_debounced", *input.IsDebounced)
+	}
+	if input.IsFork != nil {
+		if *input.IsFork {
+			qb.addWhereIsNotNull("forked_from")
+		} else {
+			qb.addWhereIsNull("forked_from")
+		}
 	}
 	if input.HasParent != nil {
 		if *input.HasParent {
@@ -3571,6 +3579,7 @@ type GetWorkflowAggregatesDBInput struct {
 	ParentWorkflowID          []string
 	ApplicationName           []string
 	WasForkedFrom             *bool
+	IsFork                    *bool
 	HasParent                 *bool
 	Attributes                map[string]any
 	Limit                     int64 // 0 means use _DEFAULT_AGGREGATES_LIMIT
@@ -3675,6 +3684,13 @@ func (s *SysDB) GetWorkflowAggregates(ctx context.Context, input GetWorkflowAggr
 	}
 	if input.WasForkedFrom != nil {
 		qb.addWhere("was_forked_from", *input.WasForkedFrom)
+	}
+	if input.IsFork != nil {
+		if *input.IsFork {
+			qb.addWhereIsNotNull("forked_from")
+		} else {
+			qb.addWhereIsNull("forked_from")
+		}
 	}
 	if input.HasParent != nil {
 		if *input.HasParent {
