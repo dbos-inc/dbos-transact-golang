@@ -322,8 +322,8 @@ type dbosContext struct {
 	workflowRegistry        *sync.Map // map[string]WorkflowRegistryEntry
 	workflowCustomNametoFQN *sync.Map // Maps fully qualified workflow names to custom names. Usefor when client enqueues a workflow by name because registry is indexed by FQN.
 
-	// Set of workflow IDs currently running on this context (key = workflow ID, value = activeWorkflowEntry)
-	activeWorkflowIDs *sync.Map
+	// Executions running on this context (key = ownership token, value = activeWorkflowEntry)
+	activeExecutions *sync.Map
 
 	// Workflow scheduler
 	workflowScheduler         *cron.Cron
@@ -427,7 +427,7 @@ func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 		workflowsWg:             c.workflowsWg,
 		workflowRegistry:        c.workflowRegistry,
 		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
-		activeWorkflowIDs:       c.activeWorkflowIDs,
+		activeExecutions:        c.activeExecutions,
 		applicationVersion:      c.applicationVersion,
 		executorID:              c.executorID,
 		applicationID:           c.applicationID,
@@ -632,7 +632,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		launched:                    &atomic.Bool{},
 		workflowRegistry:            &sync.Map{},
 		workflowCustomNametoFQN:     &sync.Map{},
-		activeWorkflowIDs:           &sync.Map{},
+		activeExecutions:            &sync.Map{},
 		dataSources:                 &dataSourceRegistry{},
 		workflowScheduler:           cron.New(cron.WithSeconds()),
 		scheduleEntryIDs:            make(map[string]cron.EntryID),

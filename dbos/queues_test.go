@@ -2257,12 +2257,12 @@ func TestPartitionedQueueDoesNotStarvePartitions(t *testing.T) {
 }
 
 func TestCountActiveWorkflows(t *testing.T) {
-	ctx := &dbosContext{activeWorkflowIDs: &sync.Map{}}
-	ctx.activeWorkflowIDs.Store("a", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})
-	ctx.activeWorkflowIDs.Store("b", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})
-	ctx.activeWorkflowIDs.Store("c", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p2"})
-	ctx.activeWorkflowIDs.Store("d", activeWorkflowEntry{queueName: "q"})
-	ctx.activeWorkflowIDs.Store("e", activeWorkflowEntry{queueName: "other", queuePartitionKey: "p1"})
+	ctx := &dbosContext{activeExecutions: &sync.Map{}}
+	ctx.activeExecutions.Store("a", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})
+	ctx.activeExecutions.Store("b", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})
+	ctx.activeExecutions.Store("c", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p2"})
+	ctx.activeExecutions.Store("d", activeWorkflowEntry{queueName: "q"})
+	ctx.activeExecutions.Store("e", activeWorkflowEntry{queueName: "other", queuePartitionKey: "p1"})
 
 	require.Equal(t, 4, ctx.countActiveWorkflowsForQueue("q"))
 	require.Equal(t, 2, ctx.countActiveWorkflowsForPartition("q", "p1"))

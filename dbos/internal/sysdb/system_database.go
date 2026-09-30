@@ -2077,6 +2077,7 @@ type CancelWorkflowsDBInput struct {
 	CancelChildren bool
 	WorkflowIDs    []string
 	Tx             Tx
+	OwnerXID       string
 }
 
 // CancelWorkflows cancels the given workflows in a single round-trip. Workflows that
@@ -2113,6 +2114,18 @@ func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInpu
 	if err != nil {
 		return nil, fmt.Errorf("cancel workflows: %w", err)
 	}
+	args := []any{
+		models.WorkflowStatusCancelled,
+		encodedIDs,
+		models.WorkflowStatusSuccess,
+		models.WorkflowStatusError,
+		models.WorkflowStatusCancelled,
+	}
+	ownerClause := ""
+	if input.OwnerXID != "" {
+		ownerClause = " AND owner_xid = $6"
+		args = append(args, input.OwnerXID)
+	}
 
 	// Dialects without data-modifying CTEs (sqlite) split the pg
 	// single-statement CTE into two statements (UPDATE then SELECT).
@@ -2121,16 +2134,9 @@ func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInpu
 		updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
 			SET status = $1, updated_at = %s, completed_at = %s, started_at_epoch_ms = NULL,
 			    queue_name = NULL, deduplication_id = NULL, owner_xid = NULL
-			WHERE %s AND status NOT IN ($3, $4, $5)`, schemaPrefix, nowMs, nowMs, anyClause)
+			WHERE %s AND status NOT IN ($3, $4, $5)%s`, schemaPrefix, nowMs, nowMs, anyClause, ownerClause)
 		selectAnyClause := dialectAnyClause(s.dialect, "workflow_uuid", 1)
 		selectQuery := s.RenderSQL(`SELECT workflow_uuid FROM %sworkflow_status WHERE %s`, schemaPrefix, selectAnyClause)
-		args := []any{
-			models.WorkflowStatusCancelled,
-			encodedIDs,
-			models.WorkflowStatusSuccess,
-			models.WorkflowStatusError,
-			models.WorkflowStatusCancelled,
-		}
 
 		var runner Querier
 		var localTx Tx
@@ -2185,18 +2191,10 @@ func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInpu
 			UPDATE %sworkflow_status
 			SET status = $1, updated_at = %s, completed_at = %s, started_at_epoch_ms = NULL,
 			    queue_name = NULL, deduplication_id = NULL, owner_xid = NULL
-			WHERE %s AND status NOT IN ($3, $4, $5)
+			WHERE %s AND status NOT IN ($3, $4, $5)%s
 			RETURNING workflow_uuid
 		)
-		SELECT workflow_uuid FROM existing`, schemaPrefix, anyClause, schemaPrefix, nowMs, nowMs, anyClause)
-
-	args := []any{
-		models.WorkflowStatusCancelled,
-		encodedIDs,
-		models.WorkflowStatusSuccess,
-		models.WorkflowStatusError,
-		models.WorkflowStatusCancelled,
-	}
+		SELECT workflow_uuid FROM existing`, schemaPrefix, anyClause, schemaPrefix, nowMs, nowMs, anyClause, ownerClause)
 
 	var rows Rows
 	if input.Tx != nil {
@@ -3135,7 +3133,6 @@ type RecordOperationResultDBInput struct {
 	StartedAt       time.Time
 	CompletedAt     time.Time
 	Serialization   string
-	ExecutorID      string
 	OwnerXID        string
 }
 
@@ -3196,7 +3193,6 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 		return fmt.Errorf("failed to read rows affected after recording operation result: %w", err)
 	}
 	if n > 0 {
-		s.refreshExecutorID(ctx, querier, input.WorkflowID, input.ExecutorID)
 		if input.Tx == nil {
 			return querier.Commit(ctx)
 		}
@@ -3241,19 +3237,6 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 	// A concurrent execution's row differs (at minimum in its timestamps):
 	// report the conflict so the caller parks this run.
 	return models.NewWorkflowConflictIDError(input.WorkflowID)
-}
-
-func (s *SysDB) refreshExecutorID(ctx context.Context, querier Querier, workflowID, executorID string) {
-	if executorID == "" { // Shouldn't happen!
-		return
-	}
-	query := s.RenderSQL(`UPDATE %sworkflow_status SET executor_id = $1
-		WHERE workflow_uuid = $2 AND (executor_id IS NULL OR executor_id <> $1)`,
-		s.dialect.SchemaPrefix(s.schema))
-	if _, err := querier.Exec(ctx, query, executorID, workflowID); err != nil {
-		s.logger.Warn("failed to refresh workflow executor ID after checkpoint",
-			"workflow_id", workflowID, "executor_id", executorID, "error", err)
-	}
 }
 
 // nullableStrEq compares two nullable strings, treating NULL and "" as equal.
@@ -4528,16 +4511,11 @@ func (s *SysDB) notificationWait(ctx context.Context, opName, payload string, re
 	}
 }
 
-// StartRecvListener registers the calling workflow as the sole receiver for
+// StartRecvListener registers the calling workflow as a receiver for
 // (destinationID, topic) and checks whether a message is already pending.
 func (s *SysDB) StartRecvListener(ctx context.Context, destinationID, topic string) (*NotificationWaiter, error) {
-	// A destination/topic may have only one receiver at a time.
 	payload := fmt.Sprintf("%s::%s", destinationID, topic)
-	ch, ok := s.RecvNotifier.subscribeExclusive(payload)
-	if !ok {
-		s.logger.Error("Receive already called for workflow", "destination_id", destinationID)
-		return nil, models.NewWorkflowConflictIDError(destinationID)
-	}
+	ch := s.RecvNotifier.subscribe(payload)
 	release := func() { s.RecvNotifier.unsubscribe(payload, ch) }
 
 	// recheck reports whether an unconsumed message is pending; it is used both for

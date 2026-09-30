@@ -326,7 +326,6 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			CompletedAt:     completedTime,
 			StepName:        "DBOS.getResult",
 			Serialization:   ser.Name(),
-			ExecutorID:      GetExecutorID(h.dbosContext),
 			OwnerXID:        workflowState.ownerXID,
 		}
 		uncancellableCtx := context.WithoutCancel(h.dbosContext)
@@ -440,7 +439,6 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 			CompletedAt:     completedTime,
 			StepName:        "DBOS.getResult",
 			Serialization:   serialization,
-			ExecutorID:      GetExecutorID(h.dbosContext),
 			OwnerXID:        workflowState.ownerXID,
 		}
 		uncancellableCtx := context.WithoutCancel(h.dbosContext)
@@ -784,9 +782,25 @@ type Workflow[P any, R any] func(ctx Context, input P) (R, error)
 type WorkflowFunc func(ctx Context, input any) (any, error)
 
 type activeWorkflowEntry struct {
+	workflowID        string
 	queueName         string
 	queuePartitionKey string
 	cancel            context.CancelCauseFunc
+}
+
+// activeExecutionsOf lists this executor's running executions of a workflow.
+func (c *dbosContext) activeExecutionsOf(workflowID string) []activeWorkflowEntry {
+	if c.activeExecutions == nil {
+		return nil
+	}
+	var entries []activeWorkflowEntry
+	c.activeExecutions.Range(func(_, value any) bool {
+		if entry, ok := value.(activeWorkflowEntry); ok && entry.workflowID == workflowID {
+			entries = append(entries, entry)
+		}
+		return true
+	})
+	return entries
 }
 
 // countActiveWorkflowsForQueue counts this executor's running workflows on a queue, across every partition.
@@ -802,11 +816,11 @@ func (c *dbosContext) countActiveWorkflowsForPartition(queueName, queuePartition
 }
 
 func (c *dbosContext) countActiveWorkflows(match func(activeWorkflowEntry) bool) int {
-	if c.activeWorkflowIDs == nil {
+	if c.activeExecutions == nil {
 		return 0
 	}
 	count := 0
-	c.activeWorkflowIDs.Range(func(_, value any) bool {
+	c.activeExecutions.Range(func(_, value any) bool {
 		if entry, ok := value.(activeWorkflowEntry); ok && match(entry) {
 			count++
 		}
@@ -1432,17 +1446,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			}
 		}
 
-		var loaded bool
-		if c.activeWorkflowIDs != nil {
-			_, loaded = c.activeWorkflowIDs.Load(workflowID)
-		}
-
 		shouldSkip :=
 			len(queueName) > 0 || // We are enqueueing OR
 				insertStatusResult.Status == WorkflowStatusSuccess || // workflow is in a terminal state (success) OR
 				insertStatusResult.Status == WorkflowStatusError || // workflow is in a terminal state (error) OR
-				insertStatusResult.CreatorXID != creatorXID || // the row was already there (another execution created it) OR
-				loaded // this executor is already running the workflow
+				insertStatusResult.CreatorXID != creatorXID // the row was already there (another execution created it)
 
 		if shouldSkip {
 			// Commit the transaction to update the number of attempts and/or enact the enqueue
@@ -1586,7 +1594,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 		}
 		c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
 		err := sysdb.Retry(c, func() error {
-			_, err := c.systemDB.CancelWorkflows(uncancellableCtx, sysdb.CancelWorkflowsDBInput{WorkflowIDs: []string{workflowID}})
+			_, err := c.systemDB.CancelWorkflows(uncancellableCtx, sysdb.CancelWorkflowsDBInput{WorkflowIDs: []string{workflowID}, OwnerXID: exec.ownerXID})
 			return err
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
@@ -1645,21 +1653,10 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 		defer c.workflowsWg.Done()
 
 		removeActive := func() {}
-		if c.activeWorkflowIDs != nil {
-			entry := activeWorkflowEntry{queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey, cancel: cancelWorkflow}
-			_, loaded := c.activeWorkflowIDs.LoadOrStore(workflowID, entry)
-			if loaded {
-				// Lost a start race: a concurrent start of this workflow
-				// activated itself between this run's active-ID
-				// check and here. The winner owns the active entry, so leave it alone,
-				// disarm the durable cancel, and await the winner's result.
-				stopFunc()
-				c.logger.Warn("Workflow is already executing on this executor. Waiting for the existing execution to complete", "workflow_id", workflowID)
-				awaitExistingOutcome(nil)
-				return
-			}
+		if c.activeExecutions != nil {
+			c.activeExecutions.Store(exec.ownerXID, activeWorkflowEntry{workflowID: workflowID, queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey, cancel: cancelWorkflow})
 			var removeOnce sync.Once
-			removeActive = func() { removeOnce.Do(func() { c.activeWorkflowIDs.Delete(workflowID) }) }
+			removeActive = func() { removeOnce.Do(func() { c.activeExecutions.Delete(exec.ownerXID) }) }
 		}
 		defer removeActive()
 
@@ -1672,7 +1669,9 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 		if errors.Is(err, ErrConflictingWorkflowID) {
 			// This run lost the ID conflict: it does not own the workflow, so its
 			// context must no longer durably cancel it. Disarm the cancel function.
+			// An optimization, as the durable cancel checks the execution fencing token on this path.
 			stopFunc()
+			removeActive()
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
 			awaitExistingOutcome(nil)
 			return
@@ -1803,8 +1802,10 @@ func (c *dbosContext) cancelTimedOutWorkflows() {
 		}
 		for _, workflowID := range cancelled {
 			c.logger.Info("Workflow timed out", "workflow_id", workflowID)
-			if entry, ok := c.activeWorkflowIDs.Load(workflowID); ok && entry.(activeWorkflowEntry).cancel != nil {
-				entry.(activeWorkflowEntry).cancel(errDBOSContextTimeout)
+			for _, entry := range c.activeExecutionsOf(workflowID) {
+				if entry.cancel != nil {
+					entry.cancel(errDBOSContextTimeout)
+				}
 			}
 		}
 		if len(cancelled) < _WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE {
@@ -2764,7 +2765,6 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 		CompletedAt:   stepCompletedTime,
 		Output:        encodedStepOutput,
 		Serialization: ser.Name(),
-		ExecutorID:    c.GetExecutorID(),
 		OwnerXID:      stepState.ownerXID,
 	}
 	recErr := sysdb.Retry(c, func() error {
@@ -2918,7 +2918,6 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 			Output:        encodedStepOutput,
 			Tx:            tx,
 			Serialization: serialization,
-			ExecutorID:    c.GetExecutorID(),
 			OwnerXID:      stepState.ownerXID,
 		}
 		if stepOpts.outputIsChildID {

@@ -2683,6 +2683,7 @@ func TestChildWorkflow(t *testing.T) {
 			if !ok {
 				return "", fmt.Errorf("expected recovered child handle to be of type workflowPollingHandle, got %T", childHandle)
 			}
+			return childHandle.GetResult()
 		}
 		return "", nil
 	}
@@ -4254,10 +4255,8 @@ func TestWorkflowOutcomeIsOwnedByThePendingRow(t *testing.T) {
 		// The run leaves the active set immediately before it tries to record its
 		// outcome. Waiting for that makes the check below assert that the run parked,
 		// rather than merely that it had not gotten around to the write yet.
-		activeWorkflowIDs := dbosCtx.(*dbosContext).activeWorkflowIDs
 		require.Eventually(t, func() bool {
-			_, active := activeWorkflowIDs.Load(handle.GetWorkflowID())
-			return !active
+			return len(dbosCtx.(*dbosContext).activeExecutionsOf(handle.GetWorkflowID())) == 0
 		}, 30*time.Second, 10*time.Millisecond, "the run never reached its outcome write")
 
 		select {
@@ -5047,90 +5046,52 @@ func TestSendRecv(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		require.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 	})
-
-	t.Run("ConcurrentRecvSameTopicConflicts", func(t *testing.T) {
-		// A single (destination, topic) may only have one active receiver at a time.
-		// A second concurrent registration must be rejected with a ErrorCodeConflictingID
-		// rather than silently sharing/stealing the first receiver's slot.
-		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
-		destID := uuid.NewString()
-		topic := "single-receiver-topic"
-
-		waiter1, err := sysDB.StartRecvListener(context.Background(), destID, topic)
-		require.NoError(t, err, "first receiver should register")
-		defer waiter1.Release()
-
-		_, err = sysDB.StartRecvListener(context.Background(), destID, topic)
-		require.Error(t, err, "second concurrent receiver for the same (destination, topic) must be rejected")
-		dbosErr, ok := err.(*Error)
-		require.True(t, ok, "expected *Error, got %T", err)
-		require.Equal(t, ErrorCodeConflictingID, dbosErr.Code, "expected ErrorCodeConflictingID")
-	})
 }
 
-// TestRecvStepConflict verifies that when two executors concurrently run the same
-// workflow and race to checkpoint the recv step, the loser does not fail: it either
-// replays the winner's checkpoint or loses the record race with a ErrorCodeConflictingID
-// that routes through the workflow-level conflict handler and awaits the winner's
-// result. Either way both executions converge on the delivered message.
-//
-// The two executors share one database (a single in-process guard cannot double-run
-// a workflow, so a real second executor is required). PostgreSQL row locking on
-// consumeMessage serializes consumption, making the converged outcome deterministic.
+// TestRecvStepConflict verifies that two executions of the same workflow can wait
+// in recv at once: after a claim rotates the ownership token, the stale run and the
+// live run both wake on the message, and only the live run's consume+checkpoint
+// lands. The stale run parks on the conflict and both converge on the message.
 func TestRecvStepConflict(t *testing.T) {
-	// checkLeaks is off: the two executors' lifetimes overlap, so a per-executor
-	// goroutine leak check would observe the other executor's live goroutines.
-	ctxA := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: false})
-	ctxB := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: false})
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 
 	recvConflictWorkflow := func(ctx Context, topic string) (string, error) {
 		return Recv[string](ctx, topic, 60*time.Second)
 	}
-	RegisterWorkflow(ctxA, recvConflictWorkflow)
-	RegisterWorkflow(ctxB, recvConflictWorkflow)
-	require.NoError(t, Launch(ctxA))
-	require.NoError(t, Launch(ctxB))
+	RegisterWorkflow(dbosCtx, recvConflictWorkflow)
+	require.NoError(t, Launch(dbosCtx))
 
 	topic := "recv-step-conflict-topic"
 	workflowID := uuid.NewString()
-
-	// Executor A starts the workflow; it registers as receiver and blocks in wait.
-	handleA, err := RunWorkflow(ctxA, recvConflictWorkflow, topic, WithWorkflowID(workflowID))
-	require.NoError(t, err, "failed to start recv workflow on executor A")
-
-	sysA := ctxA.(*dbosContext).systemDB.(*sysdb.SysDB)
-	sysB := ctxB.(*dbosContext).systemDB.(*sysdb.SysDB)
 	payload := fmt.Sprintf("%s::%s", workflowID, topic)
+
+	handleA, err := RunWorkflow(dbosCtx, recvConflictWorkflow, topic, WithWorkflowID(workflowID))
+	require.NoError(t, err, "failed to start recv workflow")
 	require.Eventually(t, func() bool {
-		return sysA.RecvNotifier.Has(payload)
-	}, 5*time.Second, 10*time.Millisecond, "executor A never registered as receiver")
+		return sysDB.RecvNotifier.WaiterCount(payload) == 1
+	}, 5*time.Second, 10*time.Millisecond, "the original execution never registered as receiver")
 
-	// Executor B runs the same workflow concurrently: a genuinely concurrent second
-	// execution with its own in-memory receiver map, so it proceeds to wait and
-	// later races A to consume+checkpoint the message. Recovery re-enqueues and the
-	// queue's atomic dequeue admits exactly one runner (either executor could win),
-	// so dispatch the duplicate on B directly, as if B had claimed the re-enqueued
-	// row while the zombie A still runs.
-	handleB := startDuplicateExecution(ctxB, recvConflictWorkflow, topic, workflowID)
-
-	// Executor B must actually run the body (register as receiver), not
-	// short-circuit; its separate map confirms a real concurrent execution.
+	// The duplicate claims the workflow: it registers alongside the now-stale original.
+	handleB := startDuplicateExecution(t, dbosCtx, recvConflictWorkflow, topic, workflowID)
 	require.Eventually(t, func() bool {
-		return sysB.RecvNotifier.Has(payload)
-	}, 5*time.Second, 10*time.Millisecond, "executor B (recovery) never ran the body")
+		return sysDB.RecvNotifier.WaiterCount(payload) == 2
+	}, 5*time.Second, 10*time.Millisecond, "the duplicate never registered as receiver")
 
-	// Deliver the message. Exactly one executor consumes and checkpoints it; the
-	// other replays that checkpoint or loses the checkpoint race and awaits. Both
-	// must converge on the delivered value with no permanent failure.
-	require.NoError(t, Send(ctxA, workflowID, "delivered", topic), "failed to send message")
-
-	gotA, err := handleA.GetResult()
-	require.NoError(t, err, "executor A workflow should succeed")
-	require.Equal(t, "delivered", gotA)
+	require.NoError(t, Send(dbosCtx, workflowID, "delivered", topic), "failed to send message")
 
 	gotB, err := handleB.GetResult()
-	require.NoError(t, err, "the concurrent duplicate must converge on the result, not fail")
+	require.NoError(t, err, "the live execution must receive the message")
 	require.Equal(t, "delivered", gotB)
+	gotA, err := handleA.GetResult()
+	require.NoError(t, err, "the stale execution must converge on the result, not fail")
+	require.Equal(t, "delivered", gotA)
+
+	query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1 AND consumed = true`,
+		sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+	var consumed int
+	require.NoError(t, sysDB.Pool().QueryRow(context.Background(), query, workflowID).Scan(&consumed))
+	require.Equal(t, 1, consumed, "the message must be consumed exactly once")
 }
 
 // receiveTwiceShortWorkflow receives one message (blocking up to 30s), then attempts a
@@ -11550,12 +11511,8 @@ func TestFork(t *testing.T) {
 	})
 }
 
-// TestConcurrentStartRaceSameExecutor reproduces B5: the active-workflow-ID check
-// (Load inside the insert tx) and set (LoadOrStore in the spawned goroutine) are not
-// atomic, and recovery/dequeue starts bypass the ownerXID guard. Two concurrent
-// recovery requests for the same PENDING workflow can both pass the Load check before
-// either goroutine runs LoadOrStore, so both execute the workflow body; the loser then
-// deleted the winner's active entry on completion. The workflow body must never run
+// TestConcurrentStartRaceSameExecutor fires two concurrent recovery requests for the
+// same PENDING workflow: only one claim may win, so the workflow body must never run
 // concurrently with itself on one executor, and every handle must still resolve.
 func TestConcurrentStartRaceSameExecutor(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
@@ -11585,8 +11542,7 @@ func TestConcurrentStartRaceSameExecutor(t *testing.T) {
 
 		setWorkflowStatusPending(t, dbosCtx, workflowID)
 
-		// Fire two concurrent recovery requests for the same PENDING workflow. Both
-		// bypass the ownerXID guard, so both can land in the Load/LoadOrStore window.
+		// Fire two concurrent recovery requests for the same PENDING workflow.
 		var wg sync.WaitGroup
 		recoveredHandles := make([][]WorkflowHandle[any], 2)
 		for j := range 2 {
@@ -11621,131 +11577,6 @@ func TestConcurrentStartRaceSameExecutor(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		require.Equal(t, WorkflowStatusSuccess, status.Status, "attempt %d: workflow must end SUCCESS", i)
 	}
-}
-
-// TestStepCheckpointReclaimsExecutorID verifies that recording a step checkpoint
-// re-stamps workflow_status.executor_id to the executor that wins the checkpoint,
-// so the "most recently executed by" marker follows the executor actually making
-// progress rather than lagging on a stale owner.
-//
-// It reproduces the zombie/recovery race: executor A starts a workflow and blocks
-// inside its only step; executor B runs a duplicate execution of the still-PENDING
-// workflow (as if it had dequeued the row recovery re-enqueued), whose claim
-// transfers the marker to B. Both executions are now live in the step
-// body. The still-running A ("zombie") is released first: its step checkpoint must
-// reclaim the marker for A. The duplicate's claim is not what is under test here —
-// A never re-stamps the marker itself, so only the step-checkpoint re-stamp can flip
-// executor_id back to A. B is released last; losing the checkpoint race, it must
-// not re-stamp.
-func TestStepCheckpointReclaimsExecutorID(t *testing.T) {
-	const (
-		executorA = "executor-a"
-		executorB = "executor-b"
-		appVer    = "restamp-test-v1"
-	)
-
-	dbURL := backendDatabaseURL(t)
-	if !useSqliteBackend() {
-		resetTestDatabase(t, dbURL)
-	}
-
-	// Per-executor gates: the test controls the order in which the two live
-	// executions leave the step body, making the checkpoint race deterministic.
-	aInStep := NewEvent()
-	bInStep := NewEvent()
-	releaseA := make(chan struct{})
-	releaseB := make(chan struct{})
-	var execCount atomic.Int64
-
-	blockingWorkflow := func(ctx Context, _ string) (string, error) {
-		return RunAsStep(ctx, func(context.Context) (string, error) {
-			execCount.Add(1)
-			// Route on the executor running this execution (captured outer ctx).
-			if GetExecutorID(ctx) == executorB {
-				bInStep.Set()
-				<-releaseB
-			} else {
-				aInStep.Set()
-				<-releaseA
-			}
-			return "done", nil
-		})
-	}
-
-	newExecutor := func(executorID string) Context {
-		c, err := NewContext(context.Background(), Config{
-			DatabaseURL:        dbURL,
-			AppName:            "restamp-test",
-			ApplicationVersion: appVer, // pin so recovery's version filter matches across executors
-			ExecutorID:         executorID,
-		})
-		require.NoError(t, err, "failed to create executor %s", executorID)
-		RegisterWorkflow(c, blockingWorkflow, WithWorkflowName("restamp-blocking-workflow"))
-		require.NoError(t, Launch(c), "failed to launch executor %s", executorID)
-		t.Cleanup(func() { Shutdown(c, 30*time.Second) })
-		return c
-	}
-
-	ctxA := newExecutor(executorA)
-	ctxB := newExecutor(executorB)
-
-	sysDB := ctxA.(*dbosContext).systemDB.(*sysdb.SysDB)
-	wfID := uuid.NewString()
-	readExecutorID := func() string {
-		query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(
-			`SELECT executor_id FROM %sworkflow_status WHERE workflow_uuid = $1`,
-			sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
-		var executorID *string
-		require.NoError(t, sysDB.Pool().QueryRow(context.Background(), query, wfID).Scan(&executorID))
-		if executorID == nil {
-			return ""
-		}
-		return *executorID
-	}
-
-	setExecutorID := func(executorID string) {
-		query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(
-			`UPDATE %sworkflow_status SET executor_id = $1 WHERE workflow_uuid = $2`,
-			sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
-		_, err := sysDB.Pool().Exec(context.Background(), query, executorID, wfID)
-		require.NoError(t, err)
-	}
-
-	// A starts the workflow and blocks inside the step. Baseline: A owns the marker.
-	handleA, err := RunWorkflow(ctxA, blockingWorkflow, "", WithWorkflowID(wfID))
-	require.NoError(t, err, "failed to start workflow on executor A")
-	aInStep.Wait()
-	require.Equal(t, executorA, readExecutorID(), "precondition: A owns the workflow after starting it")
-
-	// B runs the still-PENDING workflow concurrently, as if it had dequeued the row
-	// recovery re-enqueued (the shared queue's dequeue is not deterministic about
-	// which executor wins, so dispatch the duplicate on B directly). The claim is
-	// what transfers the marker to B, so stamp it the way the claim does. B now runs
-	// the step body concurrently with A and blocks.
-	setExecutorID(executorB)
-	handleB := startDuplicateExecution(ctxB, blockingWorkflow, "", wfID)
-	bInStep.Wait()
-	require.Equal(t, executorB, readExecutorID(), "precondition: B's claim owns the marker")
-
-	// Release the still-running A. Its step checkpoint is the ONLY thing that can
-	// flip the marker back to A (nothing else re-stamps it): this is the
-	// behavior under test.
-	close(releaseA)
-	resA, err := handleA.GetResult()
-	require.NoError(t, err, "A's original execution should complete successfully")
-	require.Equal(t, "done", resA)
-	require.Equal(t, executorA, readExecutorID(),
-		"the winning step checkpoint must re-stamp executor_id back to the executor that recorded it")
-
-	// Release B. It loses the checkpoint race (A already recorded the step), so it
-	// must observe the conflict, park, and NOT re-stamp the marker.
-	close(releaseB)
-	resB, err := handleB.GetResult()
-	require.NoError(t, err, "the losing execution should resolve to the winner's result via polling")
-	require.Equal(t, "done", resB)
-	require.EqualValues(t, 2, execCount.Load(), "both executions must have genuinely run the step body")
-	require.Equal(t, executorA, readExecutorID(),
-		"a losing checkpoint must not re-stamp executor_id")
 }
 
 func stepTimingChildWorkflow(ctx Context, _ string) (string, error) {
