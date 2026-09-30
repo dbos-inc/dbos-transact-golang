@@ -36,6 +36,7 @@ type workflowState struct {
 	assumedRole         string
 	authenticatedRoles  []string
 	workflowCtx         context.Context
+	deadline            time.Time
 }
 
 // nextStepID returns the next step ID and increments the counter
@@ -1311,8 +1312,12 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		}
 	}
 	// When enqueuing or delaying, we do not set a deadline. It'll be computed with the timeout during dequeue.
+	// However, we set the deadline if the workflow is a children that inherits its parent's.
 	if status == WorkflowStatusEnqueued || status == WorkflowStatusDelayed {
-		deadline = time.Time{}
+		inherited := isChildWorkflow && !parentWorkflowState.deadline.IsZero() && deadline.Equal(parentWorkflowState.deadline)
+		if !inherited {
+			deadline = time.Time{}
+		}
 	}
 
 	if params.Priority > uint(math.MaxInt) {
@@ -1543,20 +1548,21 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 		assumedRole:        exec.assumedRole,
 		authenticatedRoles: exec.authenticatedRoles,
 	}
-	workflowCtx := WithValue(c, workflowStateKey, wfState)
-
 	// If the workflow has a timeout but no deadline, compute the deadline from the timeout.
 	// Else use the durable deadline.
-	durableDeadline := time.Time{}
 	if exec.timeout > 0 && exec.deadline.IsZero() {
-		durableDeadline = time.Now().Add(exec.timeout)
+		wfState.deadline = time.Now().Add(exec.timeout)
 	} else if !exec.deadline.IsZero() {
-		durableDeadline = exec.deadline
+		wfState.deadline = exec.deadline
 	}
 
-	if !durableDeadline.IsZero() {
-		workflowCtx, _ = WithTimeout(workflowCtx, time.Until(durableDeadline))
+	ctx := context.WithValue(c.ctx, workflowStateKey, wfState)
+	if !wfState.deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadlineCause(ctx, wfState.deadline, errDBOSContextTimeout)
+		_ = cancel
 	}
+	workflowCtx := c.clone(ctx)
 	// Register a cancel function that durably cancels the workflow in the DB as soon as
 	// the context is cancelled (durable deadline, user cancel, or parent cancellation).
 	cancelFuncCompleted := make(chan struct{})
