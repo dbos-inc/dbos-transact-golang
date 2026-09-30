@@ -2100,6 +2100,7 @@ func TestQueueWideLimitHoldsAcrossExecutors(t *testing.T) {
 								ExecutorID:         fmt.Sprintf("executor-%d", i),
 								ApplicationVersion: parkedVersion,
 								QueuePartitionKey:  partition,
+								OwnerXID:           uuid.NewString(),
 							})
 						}()
 					}

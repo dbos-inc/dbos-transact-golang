@@ -5096,6 +5096,7 @@ type DequeueWorkflowsInput struct {
 	QueuePartitionKey          string
 	LocalRunningCount          int
 	PartitionLocalRunningCount int
+	OwnerXID                   string
 }
 
 // DequeueWorkflows claims enqueued workflows for this executor and returns their IDs,
@@ -5317,8 +5318,8 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 	claimSet, claimClause := "", ""
 	if s.appName != "" {
 		claimSet = `,
-		    application_name = COALESCE(application_name, $7)`
-		claimClause = ` AND ` + nameFilterSQL("application_name", 7)
+		    application_name = COALESCE(application_name, $8)`
+		claimClause = ` AND ` + nameFilterSQL("application_name", 8)
 	}
 	nowMs := s.dialect.NowMsSQL()
 	updateQuery := s.RenderSQL(`
@@ -5326,6 +5327,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		SET status = $1,
 		    application_version = $2,
 		    executor_id = $3,
+		    owner_xid = $7,
 		    started_at_epoch_ms = `+nowMs+`,
 		    updated_at = `+nowMs+`,
 		    rate_limited = $4,
@@ -5349,6 +5351,7 @@ func (s *SysDB) DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInpu
 		limits.RateLimit != nil || limits.PartitionRateLimit != nil,
 		encodedIDs,
 		models.WorkflowStatusEnqueued,
+		input.OwnerXID,
 	}
 	if s.appName != "" {
 		claimArgs = append(claimArgs, s.appName)

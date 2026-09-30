@@ -28,6 +28,7 @@ import (
 // workflowState holds the runtime state for a workflow execution
 type workflowState struct {
 	workflowID          string
+	ownerXID            string
 	stepID              int
 	isWithinStep        bool
 	isWithinTransaction bool
@@ -1500,6 +1501,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 	exec := workflowExecution{
 		workflowID:         workflowID,
+		ownerXID:           creatorXID,
 		timeout:            insertStatusResult.Timeout,
 		deadline:           insertStatusResult.WorkflowDeadline,
 		authenticatedUser:  params.AuthenticatedUser,
@@ -1520,6 +1522,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 // or the queue's claim, wrote and this phase reads back.
 type workflowExecution struct {
 	workflowID         string
+	ownerXID           string
 	queueName          string
 	queuePartitionKey  string
 	timeout            time.Duration
@@ -1543,6 +1546,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID:         workflowID,
+		ownerXID:           exec.ownerXID,
 		stepID:             -1, // Steps are O-indexed
 		isPortableWorkflow: exec.isPortableWorkflow,
 		authenticatedUser:  exec.authenticatedUser,
