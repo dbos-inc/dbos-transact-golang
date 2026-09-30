@@ -291,6 +291,7 @@ type Context interface {
 
 type dbosContext struct {
 	ctx           context.Context
+	rootCtx       context.Context
 	ctxCancelFunc context.CancelCauseFunc
 	root          bool
 
@@ -325,9 +326,10 @@ type dbosContext struct {
 	activeWorkflowIDs *sync.Map
 
 	// Workflow scheduler
-	workflowScheduler        *cron.Cron
-	workflowSchedulerStarted atomic.Bool
-	scheduleReconcilerWg     sync.WaitGroup
+	workflowScheduler         *cron.Cron
+	workflowSchedulerStarted  atomic.Bool
+	scheduleReconcilerWg      sync.WaitGroup
+	workflowTimeoutsMonitorWg sync.WaitGroup
 
 	scheduleMu sync.Mutex
 	// Schedule entry ID mapping (scheduleName -> cron.EntryID)
@@ -418,6 +420,7 @@ func (c *dbosContext) Value(key any) any {
 func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 	childCtx := &dbosContext{
 		ctx:                     ctx,
+		rootCtx:                 c.rootCtx,
 		config:                  c.config,
 		logger:                  c.logger,
 		systemDB:                c.systemDB,
@@ -623,6 +626,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	initExecutor := &dbosContext{
 		workflowsWg:                 &sync.WaitGroup{},
 		ctx:                         dbosBaseCtx,
+		rootCtx:                     dbosBaseCtx,
 		ctxCancelFunc:               cancelFunc,
 		root:                        true,
 		launched:                    &atomic.Bool{},
@@ -904,6 +908,12 @@ func (c *dbosContext) Launch() error {
 		c.runScheduleReconciler()
 	}()
 
+	c.workflowTimeoutsMonitorWg.Add(1)
+	go func() {
+		defer c.workflowTimeoutsMonitorWg.Done()
+		c.runWorkflowTimeoutsMonitor()
+	}()
+
 	// Start the conductor if it has been initialized
 	if c.conductor != nil {
 		c.conductor.launch()
@@ -967,6 +977,19 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	case <-time.After(timeout):
 		c.logger.Warn("Timeout waiting for schedule reconciler to complete", "timeout", timeout)
 		pending = append(pending, "schedule reconciler")
+	}
+
+	monitorDone := make(chan struct{})
+	go func() {
+		c.workflowTimeoutsMonitorWg.Wait()
+		close(monitorDone)
+	}()
+	select {
+	case <-monitorDone:
+		c.logger.Debug("Workflow timeouts monitor completed")
+	case <-time.After(timeout):
+		c.logger.Warn("Timeout waiting for workflow timeouts monitor to complete", "timeout", timeout)
+		pending = append(pending, "workflow timeouts monitor")
 	}
 
 	// Wait for queue runner to finish

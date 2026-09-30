@@ -102,6 +102,7 @@ type SystemDatabase interface {
 	// Queues
 	SetWorkflowDelay(ctx context.Context, input SetWorkflowDelayDBInput) error
 	TransitionDelayedWorkflows(ctx context.Context) error
+	CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]string, error)
 	DebounceDelayedWorkflow(ctx context.Context, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error)
 	DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]string, error)
 	DeadLetterWorkflows(ctx context.Context, workflowIDs []string, minAttempts int) error
@@ -498,6 +499,9 @@ var migration120SQL string
 //go:embed migrations/121_add_notifications_consumed_by_function_id.sql
 var migration121SQL string
 
+//go:embed migrations/122_add_workflow_status_deadline_index.sql
+var migration122SQL string
+
 type MigrationFile struct {
 	Version int64
 	SQL     string
@@ -682,6 +686,7 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		{Version: 119, SQL: fmt.Sprintf(migration119SQL, c, sanitizedSchema), Online: !isCockroach},
 		{Version: 120, SQL: fmt.Sprintf(migration120SQL, c, sanitizedSchema), Online: !isCockroach},
 		{Version: 121, SQL: fmt.Sprintf(migration121SQL, sanitizedSchema)},
+		{Version: 122, SQL: fmt.Sprintf(migration122SQL, c, sanitizedSchema), Online: !isCockroach},
 	}
 }
 
@@ -4887,6 +4892,53 @@ func (s *SysDB) TransitionDelayedWorkflows(ctx context.Context) error {
 		return fmt.Errorf("failed to transition delayed workflows: %w", err)
 	}
 	return nil
+}
+
+type CancelTimedOutWorkflowsDBInput struct {
+	Limit int
+}
+
+// CancelTimedOutWorkflows cancels up to Limit of this application's active workflows whose
+// deadline has passed, oldest deadline first, and returns their IDs.
+func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]string, error) {
+	nowMs := s.dialect.NowMsSQL()
+	args := []any{models.WorkflowStatusCancelled, input.Limit}
+	filterClause := ""
+	if s.appName != "" {
+		args = append(args, s.appName)
+		filterClause += " AND " + nameFilterSQL("application_name", len(args))
+	}
+	// Status literals: bound parameters would stop a generic plan from proving idx_workflow_status_deadline's predicate.
+	query := s.RenderSQL(`UPDATE %sworkflow_status
+		SET status = $1, updated_at = `+nowMs+`, completed_at = `+nowMs+`,
+		    started_at_epoch_ms = NULL, queue_name = NULL, deduplication_id = NULL
+		WHERE workflow_uuid IN (
+		    SELECT workflow_uuid FROM %sworkflow_status
+		    WHERE status IN ('`+string(models.WorkflowStatusEnqueued)+`', '`+string(models.WorkflowStatusPending)+`', '`+string(models.WorkflowStatusDelayed)+`')
+		      AND workflow_deadline_epoch_ms IS NOT NULL
+		      AND workflow_deadline_epoch_ms <= `+nowMs+filterClause+`
+		    ORDER BY workflow_deadline_epoch_ms
+		    LIMIT $2 `+s.dialect.LockSkipLocked()+`
+		)
+		RETURNING workflow_uuid`, s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
+
+	rows, err := s.pool.Query(ctx, s.dialect.RewriteQuery(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to cancel timed-out workflows: %w", err)
+	}
+	defer rows.Close()
+	var cancelled []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan timed-out workflow ID: %w", err)
+		}
+		cancelled = append(cancelled, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read timed-out workflow IDs: %w", err)
+	}
+	return cancelled, nil
 }
 
 // DebounceDelayedWorkflowDBInput identifies a debounced workflow by
