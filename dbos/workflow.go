@@ -788,6 +788,12 @@ type activeWorkflowEntry struct {
 	cancel            context.CancelCauseFunc
 }
 
+// executionKey identifies one execution
+type executionKey struct {
+	workflowID string
+	ownerXID   string
+}
+
 // activeExecutionsOf lists this executor's running executions of a workflow.
 func (c *dbosContext) activeExecutionsOf(workflowID string) []activeWorkflowEntry {
 	if c.activeExecutions == nil {
@@ -1654,9 +1660,10 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 
 		removeActive := func() {}
 		if c.activeExecutions != nil {
-			c.activeExecutions.Store(exec.ownerXID, activeWorkflowEntry{workflowID: workflowID, queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey, cancel: cancelWorkflow})
+			key := executionKey{workflowID: workflowID, ownerXID: exec.ownerXID}
+			c.activeExecutions.Store(key, activeWorkflowEntry{workflowID: workflowID, queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey, cancel: cancelWorkflow})
 			var removeOnce sync.Once
-			removeActive = func() { removeOnce.Do(func() { c.activeExecutions.Delete(exec.ownerXID) }) }
+			removeActive = func() { removeOnce.Do(func() { c.activeExecutions.Delete(key) }) }
 		}
 		defer removeActive()
 

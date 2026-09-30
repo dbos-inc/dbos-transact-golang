@@ -2181,6 +2181,7 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 
 	const numSteps = 100
 	resultChans := make([]<-chan StepOutcome[int], 0)
+	results := make([]StepOutcome[int], 0)
 	goManyStepsWorkflow := func(dbosCtx Context, input string) (string, error) {
 		for range numSteps {
 			resultChan, err := Go(dbosCtx, func(ctx context.Context) (int, error) {
@@ -2191,6 +2192,10 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 				return "", err
 			}
 			resultChans = append(resultChans, resultChan)
+		}
+		// A step still checkpointing once the workflow has returned is refused by the ownership fence.
+		for _, resultChan := range resultChans {
+			results = append(results, <-resultChan)
 		}
 
 		return "", nil
@@ -2233,13 +2238,12 @@ func TestGoRunningStepsInsideGoRoutines(t *testing.T) {
 		require.NoError(t, err, "failed to run go workflow")
 		_, err = handle.GetResult()
 		require.NoError(t, err, "failed to get result from go workflow")
-		assert.Equal(t, len(resultChans), numSteps, "expected %d results, got %d", numSteps, len(resultChans))
-		for i, resultChan := range resultChans {
-			res := <-resultChan
+		assert.Equal(t, numSteps, len(results), "expected %d results, got %d", numSteps, len(results))
+		for i, res := range results {
 			assert.Equal(t, i, res.Result, "expected step ID to be %d, got %d", i, res.Result)
 			assert.NoError(t, res.Err, "expected no error, got %v", res.Err)
 
-			res2, ok := <-resultChan
+			res2, ok := <-resultChans[i]
 			assert.False(t, ok, "channel should be closed after receiving result")
 			assert.Equal(t, StepOutcome[int]{}, res2, "closed channel should return zero value")
 		}
@@ -2417,26 +2421,25 @@ func TestSelect(t *testing.T) {
 			require.Equal(t, result1, result2, "run (iteration %d) should return the same result", i+1)
 		}
 
-		// Verify steps after execution: two Go steps and one Select step
+		// Verify steps after execution: the selected Go step and the Select step. Either
+		// Go step can win; the loser may still be checkpointing when the workflow
+		// returns, in which case the ownership fence refuses its row.
 		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
 		require.NoError(t, err, "failed to get workflow steps")
-		require.Len(t, steps, 3, "expected 3 steps (2 Go + Select)")
-		assert.Equal(t, 0, steps[0].StepID, "first step should have StepID 0")
-		assert.Equal(t, 1, steps[1].StepID, "second step should have StepID 1")
-		assert.Equal(t, "DBOS.select", steps[2].StepName, "third step should be DBOS.select")
-		assert.Equal(t, 2, steps[2].StepID, "Select step should have StepID 2")
-		var output0 string
-		err = json.Unmarshal([]byte(steps[0].Output.(string)), &output0)
-		require.NoError(t, err, "failed to decode step 0 output")
-		assert.Equal(t, "result1", output0, "first Go step should have output 'result1'")
-		var output1 string
-		err = json.Unmarshal([]byte(steps[1].Output.(string)), &output1)
-		require.NoError(t, err, "failed to decode step 1 output")
-		assert.Equal(t, "result2", output1, "second Go step should have output 'result2'")
-		var output2 string
-		err = json.Unmarshal([]byte(steps[2].Output.(string)), &output2)
-		require.NoError(t, err, "failed to decode step 2 output")
-		assert.Equal(t, result1, output2, "Select step output should match workflow result")
+		byID := make(map[int]StepInfo, len(steps))
+		for _, step := range steps {
+			byID[step.StepID] = step
+		}
+		winner := map[string]int{"result1": 0, "result2": 1}[result1]
+		require.Contains(t, byID, winner, "selected Go step should be checkpointed")
+		require.Contains(t, byID, 2, "Select step should be checkpointed")
+		assert.Equal(t, "DBOS.select", byID[2].StepName, "step 2 should be DBOS.select")
+		for _, stepID := range []int{winner, 2} {
+			var output string
+			err = json.Unmarshal([]byte(byID[stepID].Output.(string)), &output)
+			require.NoError(t, err, "failed to decode step %d output", stepID)
+			assert.Equal(t, result1, output, "step %d output should match the workflow result", stepID)
+		}
 	})
 }
 
