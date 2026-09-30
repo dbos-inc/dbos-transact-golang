@@ -1352,13 +1352,13 @@ type InsertWorkflowResult struct {
 	QueuePartitionKey *string
 	Timeout           time.Duration
 	WorkflowDeadline  time.Time
-	OwnerXID          string
+	CreatorXID        string
 }
 
 type InsertWorkflowStatusDBInput struct {
-	Status   models.WorkflowStatus
-	Tx       Tx
-	OwnerXID *string
+	Status     models.WorkflowStatus
+	Tx         Tx
+	CreatorXID *string
 }
 
 func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error) {
@@ -1441,6 +1441,12 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		queueName = &input.Status.QueueName
 	}
 
+	// A direct start acquires the fencing token, which can be the same token this process uses to detect its own write.
+	var ownerXID *string
+	if input.Status.Status == models.WorkflowStatusPending {
+		ownerXID = input.CreatorXID
+	}
+
 	nowMs := s.dialect.NowMsSQL()
 	query := s.RenderSQL(`INSERT INTO %sworkflow_status (
         workflow_uuid,
@@ -1461,6 +1467,7 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
         deduplication_id,
         priority,
         queue_partition_key,
+        creator_xid,
         owner_xid,
         parent_workflow_id,
         class_name,
@@ -1472,20 +1479,20 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
         debounce_deadline_epoch_ms,
         is_debounced,
         application_name
-    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, %s, $11, %s, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, %s, $11, %s, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status IN ($28, $29) THEN workflow_status.executor_id
+                WHEN EXCLUDED.status IN ($29, $30) THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
-        RETURNING status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid`, s.dialect.SchemaPrefix(s.schema), nowMs, nowMs)
+        RETURNING status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, creator_xid`, s.dialect.SchemaPrefix(s.schema), nowMs, nowMs)
 
 	var result InsertWorkflowResult
 	var timeoutMSResult *int64
 	var workflowDeadlineEpochMS *int64
-	var ownerXIDReturn *string
+	var creatorXIDReturn *string
 
 	// Marshal authenticated roles (slice of strings) to JSON for TEXT column
 	authenticatedRoles, err := json.Marshal(input.Status.AuthenticatedRoles)
@@ -1516,7 +1523,8 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		deduplicationID,
 		input.Status.Priority,
 		queuePartitionKey,
-		input.OwnerXID,
+		input.CreatorXID,
+		ownerXID,
 		parentWorkflowID,
 		className,
 		input.Status.ConfigName,
@@ -1536,10 +1544,10 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		&result.QueuePartitionKey,
 		&timeoutMSResult,
 		&workflowDeadlineEpochMS,
-		&ownerXIDReturn,
+		&creatorXIDReturn,
 	)
-	if ownerXIDReturn != nil {
-		result.OwnerXID = *ownerXIDReturn
+	if creatorXIDReturn != nil {
+		result.CreatorXID = *creatorXIDReturn
 	}
 	if err != nil {
 		// Handle unique constraint violation for the deduplication ID (this should be the only case)

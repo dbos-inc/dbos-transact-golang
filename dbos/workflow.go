@@ -1384,7 +1384,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	var earlyReturnPollingHandle *workflowPollingHandle[any]
 	var insertStatusResult *sysdb.InsertWorkflowResult
 	returnExisting := params.DeduplicationPolicy == DeduplicationPolicyReturnExisting
-	ownerXID := uuid.New().String()
+	creatorXID := uuid.New().String() // Generated once for retries to recognize their own writes.
 
 	// Init status and record child workflow relationship in a single transaction
 	insertWorkflowStatusTx := func() error {
@@ -1396,9 +1396,9 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 		// Insert workflow status with transaction
 		insertInput := sysdb.InsertWorkflowStatusDBInput{
-			Status:   workflowStatus,
-			Tx:       tx,
-			OwnerXID: &ownerXID,
+			Status:     workflowStatus,
+			Tx:         tx,
+			CreatorXID: &creatorXID,
 		}
 		insertStatusResult, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
@@ -1437,7 +1437,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			len(queueName) > 0 || // We are enqueueing OR
 				insertStatusResult.Status == WorkflowStatusSuccess || // workflow is in a terminal state (success) OR
 				insertStatusResult.Status == WorkflowStatusError || // workflow is in a terminal state (error) OR
-				insertStatusResult.OwnerXID != ownerXID || // another execution is already owning the workflow OR
+				insertStatusResult.CreatorXID != creatorXID || // the row was already there (another execution created it) OR
 				loaded // this executor is already running the workflow
 
 		if shouldSkip {
