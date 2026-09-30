@@ -13,6 +13,7 @@ import (
 	_ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+	"github.com/google/uuid"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
@@ -308,6 +309,17 @@ func setWorkflowStatusPending(t *testing.T, dbosCtx Context, workflowID string) 
 	_, err := sysDB.Pool().Exec(context.Background(), updateQuery,
 		WorkflowStatusPending, time.Now().UnixMilli(), workflowID)
 	require.NoError(t, err, "failed to set workflow status to PENDING")
+}
+
+// setWorkflowOwner stamps a fresh token onto the row's owner_xid and returns it.
+func setWorkflowOwner(t *testing.T, sysDB *sysdb.SysDB, workflowID string) string {
+	t.Helper()
+	ownerXID := uuid.NewString()
+	query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(`UPDATE %sworkflow_status SET owner_xid = $1 WHERE workflow_uuid = $2`,
+		sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+	_, err := sysDB.Pool().Exec(context.Background(), query, ownerXID, workflowID)
+	require.NoError(t, err, "failed to set workflow owner")
+	return ownerXID
 }
 
 func queueEntriesAreCleanedUp(ctx Context) bool {

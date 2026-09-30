@@ -3109,6 +3109,21 @@ func (s *SysDB) AwaitWorkflowResult(ctx context.Context, workflowID string, poll
 	}
 }
 
+// checkOwner fails with a conflicting-ID error unless ownerXID still owns the workflow.
+// The row stays locked until commit, so a hand-off (cancel, resume, recovery) cannot
+// land between this check and the caller's write.
+func (s *SysDB) checkOwner(ctx context.Context, q Querier, workflowID, ownerXID string) error {
+	query := s.RenderSQL(`SELECT owner_xid FROM %sworkflow_status WHERE workflow_uuid = $1 `+s.dialect.LockNoKeyUpdate(), s.dialect.SchemaPrefix(s.schema))
+	var current *string
+	if err := q.QueryRow(ctx, query, workflowID).Scan(&current); err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("failed to check workflow owner: %w", err)
+	}
+	if current == nil || *current != ownerXID {
+		return models.NewWorkflowConflictIDError(workflowID)
+	}
+	return nil
+}
+
 type RecordOperationResultDBInput struct {
 	WorkflowID      string
 	ChildWorkflowID string
@@ -3121,10 +3136,12 @@ type RecordOperationResultDBInput struct {
 	CompletedAt     time.Time
 	Serialization   string
 	ExecutorID      string
+	OwnerXID        string
 }
 
-// RecordOperationResult checkpoints a step outcome. A checkpoint already
-// existing at (workflow_uuid, function_id) is disambiguated by content:
+// RecordOperationResult checkpoints a step outcome, provided OwnerXID still owns
+// the workflow. A checkpoint already existing at (workflow_uuid, function_id) is
+// disambiguated by content:
 //   - identical to input (including the caller's timestamps) → our own earlier
 //     write whose commit ack was lost; the retry is a no-op success.
 //   - different function name → determinism violation (ErrorCodeUnexpectedStep).
@@ -3156,9 +3173,18 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 		ON CONFLICT (workflow_uuid, function_id) DO NOTHING`,
 		s.dialect.SchemaPrefix(s.schema), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
 
-	var querier Querier = s.pool
-	if input.Tx != nil {
-		querier = input.Tx
+	querier := input.Tx
+	if querier == nil {
+		tx, err := s.pool.BeginTx(ctx, TxOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to begin operation result transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+		querier = tx
+	}
+
+	if err := s.checkOwner(ctx, querier, input.WorkflowID, input.OwnerXID); err != nil {
+		return err
 	}
 
 	result, err := querier.Exec(ctx, query, args...)
@@ -3171,6 +3197,9 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 	}
 	if n > 0 {
 		s.refreshExecutorID(ctx, querier, input.WorkflowID, input.ExecutorID)
+		if input.Tx == nil {
+			return querier.Commit(ctx)
+		}
 		return nil
 	}
 
@@ -3245,6 +3274,7 @@ func derefStr(s *string) string {
 
 type RecordChildWorkflowDBInput struct {
 	ParentWorkflowID string
+	ParentOwnerXID   string
 	ChildWorkflowID  string
 	StepID           int
 	StepName         string
@@ -3252,6 +3282,7 @@ type RecordChildWorkflowDBInput struct {
 	Tx               Tx
 }
 
+// RecordChildWorkflow records the child as the parent's step, provided ParentOwnerXID still owns the parent's execution.
 func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error {
 	// Idempotent: a retry after a lost commit ack (or a concurrent recovery of
 	// the parent) re-inserts the same row; only a *different* child at the same
@@ -3263,9 +3294,18 @@ func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkfl
             VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (workflow_uuid, function_id) DO NOTHING`, s.dialect.SchemaPrefix(s.schema))
 
-	var querier Querier = s.pool
-	if input.Tx != nil {
-		querier = input.Tx
+	querier := input.Tx
+	if querier == nil {
+		tx, err := s.pool.BeginTx(ctx, TxOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to begin child workflow transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+		querier = tx
+	}
+
+	if err := s.checkOwner(ctx, querier, input.ParentWorkflowID, input.ParentOwnerXID); err != nil {
+		return err
 	}
 
 	result, err := querier.Exec(ctx, query,
@@ -3295,6 +3335,9 @@ func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkfl
 		}
 	}
 
+	if input.Tx == nil {
+		return querier.Commit(ctx)
+	}
 	return nil
 }
 
@@ -4035,26 +4078,39 @@ type PatchDBInput struct {
 	WorkflowID string
 	StepID     int
 	PatchName  string
+	OwnerXID   string
 }
 
 func (s *SysDB) DoesPatchExists(ctx context.Context, input PatchDBInput) (string, error) {
+	return s.checkpointName(ctx, s.pool, input)
+}
+
+func (s *SysDB) checkpointName(ctx context.Context, q Querier, input PatchDBInput) (string, error) {
 	var functionName string
 	query := s.RenderSQL(`SELECT function_name FROM %soperation_outputs WHERE workflow_uuid = $1 AND function_id = $2`, s.dialect.SchemaPrefix(s.schema))
-	return functionName, s.pool.QueryRow(ctx, query, input.WorkflowID, input.StepID).Scan(&functionName)
+	return functionName, q.QueryRow(ctx, query, input.WorkflowID, input.StepID).Scan(&functionName)
 }
 
 func (s *SysDB) Patch(ctx context.Context, input PatchDBInput) (bool, error) {
-	functionName, err := s.DoesPatchExists(ctx, input)
+	tx, err := s.pool.BeginTx(ctx, TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("failed to begin patch transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	functionName, err := s.checkpointName(ctx, tx, input)
 	if err != nil {
 		// No result means this is a new workflow, or an existing workflow that has not reached this step yet
 		// Insert the patch marker and return true
 		if err == pgx.ErrNoRows {
+			if err := s.checkOwner(ctx, tx, input.WorkflowID, input.OwnerXID); err != nil {
+				return false, err
+			}
 			insertQuery := s.RenderSQL(`INSERT INTO %soperation_outputs (workflow_uuid, function_id, function_name) VALUES ($1, $2, $3)`, s.dialect.SchemaPrefix(s.schema))
-			_, err = s.pool.Exec(ctx, insertQuery, input.WorkflowID, input.StepID, input.PatchName)
-			if err != nil {
+			if _, err := tx.Exec(ctx, insertQuery, input.WorkflowID, input.StepID, input.PatchName); err != nil {
 				return false, fmt.Errorf("failed to insert patch marker: %w", err)
 			}
-			return true, nil
+			return true, tx.Commit(ctx)
 		}
 		return false, fmt.Errorf("failed to check for patch: %w", err)
 	}
@@ -4539,11 +4595,22 @@ type WorkflowSetEventInput struct {
 	Serialization string
 	WorkflowID    string // Workflow that owns the event (resolved by the caller from context)
 	StepID        int    // Step ID for this setEvent (the enclosing transaction step's ID)
+	OwnerXID      string
 }
 
 func (s *SysDB) SetEvent(ctx context.Context, input WorkflowSetEventInput) error {
 	if _, ok := input.Message.(*string); !ok {
 		return fmt.Errorf("message must be a pointer to a string")
+	}
+
+	querier := input.Tx
+	if querier == nil {
+		tx, err := s.pool.BeginTx(ctx, TxOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to begin set event transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+		querier = tx
 	}
 
 	// input.Message is already encoded *string from the typed layer
@@ -4553,13 +4620,7 @@ func (s *SysDB) SetEvent(ctx context.Context, input WorkflowSetEventInput) error
 					ON CONFLICT (workflow_uuid, key)
 					DO UPDATE SET value = EXCLUDED.value, serialization = EXCLUDED.serialization`, s.dialect.SchemaPrefix(s.schema))
 
-	var err error
-	if input.Tx != nil {
-		_, err = input.Tx.Exec(ctx, insertQuery, input.WorkflowID, input.Key, input.Message, input.Serialization)
-	} else {
-		_, err = s.pool.Exec(ctx, insertQuery, input.WorkflowID, input.Key, input.Message, input.Serialization)
-	}
-	if err != nil {
+	if _, err := querier.Exec(ctx, insertQuery, input.WorkflowID, input.Key, input.Message, input.Serialization); err != nil {
 		return fmt.Errorf("failed to insert event: %w", err)
 	}
 
@@ -4569,12 +4630,20 @@ func (s *SysDB) SetEvent(ctx context.Context, input WorkflowSetEventInput) error
 					ON CONFLICT (workflow_uuid, function_id, key)
 					DO UPDATE SET value = EXCLUDED.value, serialization = EXCLUDED.serialization`, s.dialect.SchemaPrefix(s.schema))
 
-	if input.Tx != nil {
-		_, err = input.Tx.Exec(ctx, insertHistoryQuery, input.WorkflowID, input.StepID, input.Key, input.Message, input.Serialization)
-	} else {
-		_, err = s.pool.Exec(ctx, insertHistoryQuery, input.WorkflowID, input.StepID, input.Key, input.Message, input.Serialization)
+	if _, err := querier.Exec(ctx, insertHistoryQuery, input.WorkflowID, input.StepID, input.Key, input.Message, input.Serialization); err != nil {
+		return err
 	}
-	return err
+
+	if input.Tx != nil {
+		return nil
+	}
+	// Check ownership after the writes to ensure the workflow is still owned by the caller.
+	// We do the check after the write to not deadlock with a concurrent workflow competing to write on the same key outside of a step
+	// (they do: txnal step -> record operation result, which checks the ownership with a lock on wf status table)
+	if err := s.checkOwner(ctx, querier, input.WorkflowID, input.OwnerXID); err != nil {
+		return err
+	}
+	return querier.Commit(ctx)
 }
 
 // StartEventListener registers the caller as a waiter for the (targetWorkflowID, key)
@@ -4635,6 +4704,7 @@ type WriteStreamDBInput struct {
 	Serialization string
 	WorkflowID    string // Workflow that owns the stream (resolved by the caller from context)
 	StepID        int    // Step ID for this write (the enclosing transaction step's ID)
+	OwnerXID      string
 }
 
 type ReadStreamDBInput struct {
@@ -4651,20 +4721,14 @@ type StreamEntry struct {
 }
 
 func (s *SysDB) WriteStream(ctx context.Context, input WriteStreamDBInput) error {
-	// When no transaction is provided, run queries on the pool directly (no transaction).
-	tx := input.Tx
-	queryRow := func(ctx context.Context, sql string, args ...any) Row {
-		if tx != nil {
-			return tx.QueryRow(ctx, sql, args...)
+	querier := input.Tx
+	if querier == nil {
+		tx, err := s.pool.BeginTx(ctx, TxOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to begin write stream transaction: %w", err)
 		}
-		return s.pool.QueryRow(ctx, sql, args...)
-	}
-
-	exec := func(ctx context.Context, sql string, args ...any) (Result, error) {
-		if tx != nil {
-			return tx.Exec(ctx, sql, args...)
-		}
-		return s.pool.Exec(ctx, sql, args...)
+		defer tx.Rollback(ctx)
+		querier = tx
 	}
 
 	schema := s.dialect.SchemaPrefix(s.schema)
@@ -4679,22 +4743,28 @@ func (s *SysDB) WriteStream(ctx context.Context, input WriteStreamDBInput) error
 		) + 1, $4, $5`,
 		schema, schema)
 
-	var err error
 	var exists int
-
-	err = queryRow(ctx, checkClosedQuery, input.WorkflowID, input.Key, StreamClosedSentinel).Scan(&exists)
+	err := querier.QueryRow(ctx, checkClosedQuery, input.WorkflowID, input.Key, StreamClosedSentinel).Scan(&exists)
 	if err == nil && exists == 1 {
 		return fmt.Errorf("stream '%s' is already closed", input.Key)
 	} else if err != nil && err != pgx.ErrNoRows {
 		return fmt.Errorf("failed to check stream status: %w", err)
 	}
 
-	_, err = exec(ctx, insertQuery, input.WorkflowID, input.Key, input.Value, input.StepID, input.Serialization)
-	if err != nil {
+	if _, err := querier.Exec(ctx, insertQuery, input.WorkflowID, input.Key, input.Value, input.StepID, input.Serialization); err != nil {
 		return fmt.Errorf("failed to insert stream entry: %w", err)
 	}
 
-	return nil
+	if input.Tx != nil {
+		return nil
+	}
+	// Check ownership after the writes to ensure the workflow is still owned by the caller.
+	// We do the check after the write to not deadlock with a concurrent workflow competing to write on the same key outside of a step
+	// (they do: txnal step -> record operation result, which checks the ownership with a lock on wf status table)
+	if err := s.checkOwner(ctx, querier, input.WorkflowID, input.OwnerXID); err != nil {
+		return err
+	}
+	return querier.Commit(ctx)
 }
 
 // ReadStream reads stream entries starting from a given offset.

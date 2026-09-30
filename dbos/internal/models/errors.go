@@ -283,7 +283,7 @@ func NewWorkflowCancelledError(workflowID string, cause error) *Error {
 
 func NewWorkflowConflictIDError(workflowID string) *Error {
 	return &Error{
-		Message:    fmt.Sprintf("Conflicting workflow ID %s", workflowID),
+		Message:    fmt.Sprintf("Workflow %s is no longer owned by this execution", workflowID),
 		Code:       ErrorCodeConflictingID,
 		WorkflowID: workflowID,
 	}

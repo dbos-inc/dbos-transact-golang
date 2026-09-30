@@ -473,6 +473,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 			StartedAt:     startedAt,
 			CompletedAt:   time.Now(),
 			Serialization: serialization,
+			OwnerXID:      stepState.ownerXID,
 		}
 		return sysdb.Retry(c, func() error {
 			return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)

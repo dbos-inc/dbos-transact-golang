@@ -1948,6 +1948,9 @@ func TestSteps(t *testing.T) {
 		require.NotNil(t, recordedOutput)
 		require.NotNil(t, recordedSerialization)
 
+		// The workflow is finished, so give it an owner again for the checks below.
+		ownerXID := setWorkflowOwner(t, sysDB, wfID)
+
 		t.Run("IdenticalRetrySucceeds", func(t *testing.T) {
 			// Same content and timestamps as the recorded row: this is our own write
 			// re-run after a lost commit ack, and must be a no-op success.
@@ -1959,6 +1962,7 @@ func TestSteps(t *testing.T) {
 				StartedAt:     time.UnixMilli(recordedStartedAtMs),
 				CompletedAt:   time.UnixMilli(recordedCompletedAtMs),
 				Serialization: *recordedSerialization,
+				OwnerXID:      ownerXID,
 			})
 			require.NoError(t, err, "replaying our own committed write must succeed")
 		})
@@ -1975,6 +1979,7 @@ func TestSteps(t *testing.T) {
 				StartedAt:     time.Now(),
 				CompletedAt:   time.Now(),
 				Serialization: *recordedSerialization,
+				OwnerXID:      ownerXID,
 			})
 			require.Error(t, err, "a different write at a recorded step must be a conflict")
 			var dbosErr *Error
@@ -1992,8 +1997,26 @@ func TestSteps(t *testing.T) {
 				StartedAt:     time.Now(),
 				CompletedAt:   time.Now(),
 				Serialization: "json",
+				OwnerXID:      ownerXID,
 			})
 			require.NoError(t, err)
+		})
+
+		t.Run("StaleOwnerIsConflict", func(t *testing.T) {
+			payload := "stale-payload"
+			err := sysDB.RecordOperationResult(ctx, sysdb.RecordOperationResultDBInput{
+				WorkflowID:    wfID,
+				StepID:        100,
+				StepName:      "someStep",
+				Output:        &payload,
+				StartedAt:     time.Now(),
+				CompletedAt:   time.Now(),
+				Serialization: "json",
+				OwnerXID:      uuid.NewString(),
+			})
+			var dbosErr *Error
+			require.ErrorAs(t, err, &dbosErr)
+			require.Equal(t, ErrorCodeConflictingID, dbosErr.Code)
 		})
 
 		t.Run("MismatchedNameIsNonDeterminismError", func(t *testing.T) {
@@ -2004,6 +2027,7 @@ func TestSteps(t *testing.T) {
 				StartedAt:     time.Now(),
 				CompletedAt:   time.Now(),
 				Serialization: "json",
+				OwnerXID:      ownerXID,
 			})
 			require.Error(t, err, "a different step name at a recorded step must be a non-determinism error")
 			var dbosErr *Error
@@ -3191,6 +3215,9 @@ func TestChildWorkflowDeterminismCheck(t *testing.T) {
 	require.NoError(t, sysDB.Pool().QueryRow(ctx, nameQuery, parentID).Scan(&recordedName))
 	require.NotEmpty(t, recordedName, "child workflow should have a recorded function name")
 
+	// The parent is finished, so give it an owner again for the checks below.
+	parentOwnerXID := setWorkflowOwner(t, sysDB, parentID)
+
 	t.Run("MatchingNameReturnsChildID", func(t *testing.T) {
 		childID, err := sysDB.CheckChildWorkflow(ctx, parentID, 0, recordedName)
 		require.NoError(t, err, "matching child workflow name must not error")
@@ -3221,6 +3248,7 @@ func TestChildWorkflowDeterminismCheck(t *testing.T) {
 	t.Run("RecordSameChildIsIdempotent", func(t *testing.T) {
 		err := sysDB.RecordChildWorkflow(ctx, sysdb.RecordChildWorkflowDBInput{
 			ParentWorkflowID: parentID,
+			ParentOwnerXID:   parentOwnerXID,
 			ChildWorkflowID:  expectedChildID,
 			StepID:           0,
 			StepName:         recordedName,
@@ -3234,6 +3262,7 @@ func TestChildWorkflowDeterminismCheck(t *testing.T) {
 		defer tx.Rollback(ctx)
 		err = sysDB.RecordChildWorkflow(ctx, sysdb.RecordChildWorkflowDBInput{
 			ParentWorkflowID: parentID,
+			ParentOwnerXID:   parentOwnerXID,
 			ChildWorkflowID:  expectedChildID,
 			StepID:           0,
 			StepName:         recordedName,
@@ -3246,9 +3275,23 @@ func TestChildWorkflowDeterminismCheck(t *testing.T) {
 		require.NoError(t, tx.Commit(ctx))
 	})
 
+	t.Run("StaleParentIsConflict", func(t *testing.T) {
+		err := sysDB.RecordChildWorkflow(ctx, sysdb.RecordChildWorkflowDBInput{
+			ParentWorkflowID: parentID,
+			ParentOwnerXID:   uuid.NewString(),
+			ChildWorkflowID:  expectedChildID,
+			StepID:           0,
+			StepName:         recordedName,
+		})
+		var dbosErr *Error
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, ErrorCodeConflictingID, dbosErr.Code)
+	})
+
 	t.Run("RecordDifferentChildIsNonDeterminismError", func(t *testing.T) {
 		err := sysDB.RecordChildWorkflow(ctx, sysdb.RecordChildWorkflowDBInput{
 			ParentWorkflowID: parentID,
+			ParentOwnerXID:   parentOwnerXID,
 			ChildWorkflowID:  expectedChildID + "-different",
 			StepID:           0,
 			StepName:         recordedName,

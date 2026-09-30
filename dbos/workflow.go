@@ -327,6 +327,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			StepName:        "DBOS.getResult",
 			Serialization:   ser.Name(),
 			ExecutorID:      GetExecutorID(h.dbosContext),
+			OwnerXID:        workflowState.ownerXID,
 		}
 		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := sysdb.Retry(h.dbosContext, func() error {
@@ -440,6 +441,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 			StepName:        "DBOS.getResult",
 			Serialization:   serialization,
 			ExecutorID:      GetExecutorID(h.dbosContext),
+			OwnerXID:        workflowState.ownerXID,
 		}
 		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := sysdb.Retry(h.dbosContext, func() error {
@@ -1416,6 +1418,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			// Get the step ID that was used for generating the child workflow ID
 			childInput := sysdb.RecordChildWorkflowDBInput{
 				ParentWorkflowID: parentWorkflowState.workflowID,
+				ParentOwnerXID:   parentWorkflowState.ownerXID,
 				ChildWorkflowID:  workflowID,
 				StepName:         params.WorkflowName,
 				StepID:           parentWorkflowState.stepID,
@@ -1483,6 +1486,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		if isChildWorkflow {
 			childInput := sysdb.RecordChildWorkflowDBInput{
 				ParentWorkflowID: parentWorkflowState.workflowID,
+				ParentOwnerXID:   parentWorkflowState.ownerXID,
 				ChildWorkflowID:  *existingID,
 				StepName:         params.WorkflowName,
 				StepID:           parentWorkflowState.stepID,
@@ -2524,6 +2528,7 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 	}
 	stepState := workflowState{
 		workflowID:   wfState.workflowID,
+		ownerXID:     wfState.ownerXID,
 		stepID:       stepID,
 		isWithinStep: true,
 		workflowCtx:  wfState.workflowCtx,
@@ -2760,6 +2765,7 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 		Output:        encodedStepOutput,
 		Serialization: ser.Name(),
 		ExecutorID:    c.GetExecutorID(),
+		OwnerXID:      stepState.ownerXID,
 	}
 	recErr := sysdb.Retry(c, func() error {
 		return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
@@ -2913,6 +2919,7 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 			Tx:            tx,
 			Serialization: serialization,
 			ExecutorID:    c.GetExecutorID(),
+			OwnerXID:      stepState.ownerXID,
 		}
 		if stepOpts.outputIsChildID {
 			if childID, ok := stepOutput.(string); ok {
@@ -3602,6 +3609,7 @@ func (c *dbosContext) SetEvent(_ Context, key string, message any, opts ...SetEv
 				Serialization: evtSer.Name(),
 				WorkflowID:    wfState.workflowID,
 				StepID:        wfState.stepID,
+				OwnerXID:      wfState.ownerXID,
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err == nil {
@@ -3889,6 +3897,7 @@ func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...Writ
 				Serialization: ser.Name(),
 				WorkflowID:    wfState.workflowID,
 				StepID:        wfState.stepID,
+				OwnerXID:      wfState.ownerXID,
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err == nil {
@@ -4424,6 +4433,7 @@ func (c *dbosContext) Patch(_ Context, patchName string) (bool, error) {
 			WorkflowID: wfState.workflowID,
 			StepID:     wfState.stepID + 1, // We are checking if the upcoming step should use the patched code
 			PatchName:  prefixedPatchName,
+			OwnerXID:   wfState.ownerXID,
 		})
 	}, sysdb.WithRetrierLogger(c.logger))
 
