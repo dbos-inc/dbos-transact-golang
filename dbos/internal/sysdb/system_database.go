@@ -2120,7 +2120,7 @@ func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInpu
 	if !s.dialect.SupportsDataModifyingCTE() {
 		updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
 			SET status = $1, updated_at = %s, completed_at = %s, started_at_epoch_ms = NULL,
-			    queue_name = NULL, deduplication_id = NULL
+			    queue_name = NULL, deduplication_id = NULL, owner_xid = NULL
 			WHERE %s AND status NOT IN ($3, $4, $5)`, schemaPrefix, nowMs, nowMs, anyClause)
 		selectAnyClause := dialectAnyClause(s.dialect, "workflow_uuid", 1)
 		selectQuery := s.RenderSQL(`SELECT workflow_uuid FROM %sworkflow_status WHERE %s`, schemaPrefix, selectAnyClause)
@@ -2184,7 +2184,7 @@ func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInpu
 		), updated AS (
 			UPDATE %sworkflow_status
 			SET status = $1, updated_at = %s, completed_at = %s, started_at_epoch_ms = NULL,
-			    queue_name = NULL, deduplication_id = NULL
+			    queue_name = NULL, deduplication_id = NULL, owner_xid = NULL
 			WHERE %s AND status NOT IN ($3, $4, $5)
 			RETURNING workflow_uuid
 		)
@@ -2398,7 +2398,7 @@ func (s *SysDB) ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInpu
 	if !s.dialect.SupportsDataModifyingCTE() {
 		updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
-			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
+			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL,
 			    started_at_epoch_ms = NULL, updated_at = %s, completed_at = NULL
 			WHERE %s AND status NOT IN ($5, $6)`, schemaPrefix, nowMs, anyClause)
 		selectAnyClause := dialectAnyClause(s.dialect, "workflow_uuid", 1)
@@ -2456,7 +2456,7 @@ func (s *SysDB) ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInpu
 		), updated AS (
 			UPDATE %sworkflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
-			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
+			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL,
 			    started_at_epoch_ms = NULL, updated_at = %s, completed_at = NULL
 			WHERE %s AND status NOT IN ($5, $6)
 			RETURNING workflow_uuid
@@ -2902,7 +2902,7 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 	}
 	updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
 		SET status = $1, queue_name = $2, queue_partition_key = $3, recovery_attempts = 0,
-		    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
+		    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL,
 		    started_at_epoch_ms = NULL, completed_at = NULL, updated_at = $4`+setVersion+`
 		WHERE workflow_uuid = $5 AND status = $6`, schemaPrefix)
 	result, err := tx.Exec(ctx, updateQuery, args...)
@@ -4936,7 +4936,7 @@ func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOu
 	// Status literals: bound parameters would stop a generic plan from proving idx_workflow_status_deadline's predicate.
 	query := s.RenderSQL(`UPDATE %sworkflow_status
 		SET status = $1, updated_at = `+nowMs+`, completed_at = `+nowMs+`,
-		    started_at_epoch_ms = NULL, queue_name = NULL, deduplication_id = NULL
+		    started_at_epoch_ms = NULL, queue_name = NULL, deduplication_id = NULL, owner_xid = NULL
 		WHERE workflow_uuid IN (
 		    SELECT workflow_uuid FROM %sworkflow_status
 		    WHERE status IN ('`+string(models.WorkflowStatusEnqueued)+`', '`+string(models.WorkflowStatusPending)+`', '`+string(models.WorkflowStatusDelayed)+`')
@@ -5410,7 +5410,7 @@ func (s *SysDB) DeadLetterWorkflows(ctx context.Context, workflowIDs []string, m
 		minAttempts,
 	}
 	query := s.RenderSQL(`UPDATE %sworkflow_status
-		SET status = $1, deduplication_id = NULL, started_at_epoch_ms = NULL, queue_name = NULL,
+		SET status = $1, deduplication_id = NULL, started_at_epoch_ms = NULL, queue_name = NULL, owner_xid = NULL,
 		    updated_at = `+nowMs+`, completed_at = `+nowMs+`
 		WHERE `+dialectAnyClause(s.dialect, "workflow_uuid", 2)+` AND status = $3 AND recovery_attempts >= $4`, s.dialect.SchemaPrefix(s.schema))
 	if _, err := s.pool.Exec(ctx, s.dialect.RewriteQuery(query), args...); err != nil {
@@ -5449,7 +5449,7 @@ func (s *SysDB) ReenqueueForRecovery(ctx context.Context, executorIDs []string, 
 	}
 	// NULLIF: legacy rows stored not-enqueued as '' rather than NULL
 	query := s.RenderSQL(`UPDATE %sworkflow_status
-			  SET status = $1, started_at_epoch_ms = NULL, updated_at = %s,
+			  SET status = $1, started_at_epoch_ms = NULL, updated_at = %s, owner_xid = NULL,
 			      queue_name = COALESCE(NULLIF(queue_name, ''), $2)
 			  WHERE status = $3
 			    AND %s%s%s
