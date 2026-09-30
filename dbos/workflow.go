@@ -1728,6 +1728,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 					Status:     status,
 					ErrStr:     serializedErr,
 					Output:     encodedOutput,
+					OwnerXID:   exec.ownerXID,
 				})
 			}, sysdb.WithRetrierLogger(c.logger))
 			if recordErr != nil {
@@ -1737,9 +1738,9 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 				return
 			}
 			if !recorded {
-				// The row was not PENDING: this run no longer owns the workflow's
-				// outcome. It may have been cancelled, dead-lettered, completed by a
-				// concurrent execution, or handed back to the queue by a resume.
+				// The row was not PENDING under our fencing token: this run no longer owns the
+				// workflow's outcome. It may have been cancelled, dead-lettered, or handed
+				// to another execution by a resume or recovery.
 				// Park the execution and wait for the recorded outcome to become visible.
 				c.logger.Warn("Workflow outcome was not recorded: the workflow is no longer owned by this execution. Waiting for the recorded outcome", "workflow_id", workflowID)
 				awaitExistingOutcome(err)

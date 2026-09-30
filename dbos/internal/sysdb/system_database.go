@@ -1977,23 +1977,20 @@ type UpdateWorkflowOutcomeDBInput struct {
 	Status     models.WorkflowStatusType
 	Output     *string
 	ErrStr     string
+	OwnerXID   string
 	Tx         Tx
 }
 
 // UpdateWorkflowOutcome records a workflow's terminal outcome, reporting whether
-// the write landed. The write applies only to a PENDING row: a run owns its
-// workflow's outcome exactly as long as the row says that run is what the workflow
-// is doing. (Note: this does not prevent a write when another concurrent execution
-// is already running and the status is PENDING. However, both execution should be
-// deterministic and idempotent.)
+// the write landed. The write applies only to a PENDING row still owned by OwnerXID.
 //
 // Returning false means the row was CANCELLED, dead-lettered, already terminal,
-// handed to another execution (ENQUEUED/DELAYED, e.g. by a concurrent resume), or
+// handed to another execution (e.g. by a concurrent resume or recovery), or
 // gone entirely.
 func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) (bool, error) {
 	query := s.RenderSQL(`UPDATE %sworkflow_status
-			  SET status = $1, updated_at = %s, completed_at = %s, deduplication_id = NULL
-			  WHERE workflow_uuid = $2 AND status = $3`, s.dialect.SchemaPrefix(s.schema), s.dialect.NowMsSQL(), s.dialect.NowMsSQL())
+			  SET status = $1, updated_at = %s, completed_at = %s, deduplication_id = NULL, owner_xid = NULL
+			  WHERE workflow_uuid = $2 AND status = $3 AND owner_xid = $4`, s.dialect.SchemaPrefix(s.schema), s.dialect.NowMsSQL(), s.dialect.NowMsSQL())
 
 	var tx Tx
 	if input.Tx != nil {
@@ -2006,7 +2003,7 @@ func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowO
 		defer tx.Rollback(ctx)
 	}
 
-	res, err := tx.Exec(ctx, query, input.Status, input.WorkflowID, models.WorkflowStatusPending)
+	res, err := tx.Exec(ctx, query, input.Status, input.WorkflowID, models.WorkflowStatusPending, input.OwnerXID)
 	if err != nil {
 		return false, fmt.Errorf("failed to update workflow status: %w", err)
 	}
