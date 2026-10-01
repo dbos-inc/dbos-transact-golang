@@ -3831,6 +3831,95 @@ func TestWorkflowRecovery(t *testing.T) {
 	})
 }
 
+// A duplicate direct start from another executor must not take over executor_id:
+// the row keeps pointing at the executor running the workflow, so that executor's
+// recovery still finds it.
+func TestDuplicateStartKeepsExecutorID(t *testing.T) {
+	const (
+		executorA = "executor-a"
+		executorB = "executor-b"
+		appVer    = "dup-start-v1"
+	)
+
+	dbURL := backendDatabaseURL(t)
+	if !useSqliteBackend() {
+		resetTestDatabase(t, dbURL)
+	}
+
+	inStep := NewEvent()
+	release := make(chan struct{})
+	var execCount atomic.Int64
+	blockingWorkflow := func(ctx Context, _ string) (string, error) {
+		return RunAsStep(ctx, func(context.Context) (string, error) {
+			execCount.Add(1)
+			inStep.Set()
+			<-release
+			return "done", nil
+		})
+	}
+
+	newExecutor := func(executorID string) Context {
+		c, err := NewContext(context.Background(), Config{
+			DatabaseURL:        dbURL,
+			AppName:            "dup-start-test",
+			ApplicationVersion: appVer,
+			ExecutorID:         executorID,
+		})
+		require.NoError(t, err, "failed to create executor %s", executorID)
+		RegisterWorkflow(c, blockingWorkflow, WithWorkflowName("dup-start-blocking-workflow"))
+		require.NoError(t, Launch(c), "failed to launch executor %s", executorID)
+		t.Cleanup(func() { Shutdown(c, 30*time.Second) })
+		return c
+	}
+
+	ctxA := newExecutor(executorA)
+	ctxB := newExecutor(executorB)
+
+	sysDB := ctxA.(*dbosContext).systemDB.(*sysdb.SysDB)
+	wfID := uuid.NewString()
+	readExecutorID := func() string {
+		query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(
+			`SELECT executor_id FROM %sworkflow_status WHERE workflow_uuid = $1`,
+			sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+		var executorID *string
+		require.NoError(t, sysDB.Pool().QueryRow(context.Background(), query, wfID).Scan(&executorID))
+		if executorID == nil {
+			return ""
+		}
+		return *executorID
+	}
+
+	handleA, err := RunWorkflow(ctxA, blockingWorkflow, "", WithWorkflowID(wfID))
+	require.NoError(t, err, "failed to start workflow on executor A")
+	inStep.Wait()
+	require.Equal(t, executorA, readExecutorID(), "precondition: A owns the workflow after starting it")
+
+	// B's start conflicts and parks; it must leave executor_id alone.
+	handleB, err := RunWorkflow(ctxB, blockingWorkflow, "", WithWorkflowID(wfID))
+	require.NoError(t, err, "duplicate start on executor B should park, not fail")
+	require.Equal(t, executorA, readExecutorID(), "a duplicate start must not re-stamp executor_id")
+
+	// A's recovery (as a restarted A would run it) must still find the workflow.
+	recovered, err := recoverPendingWorkflows(ctxA.(*dbosContext), []string{executorA})
+	require.NoError(t, err, "failed to recover executor A's workflows")
+	require.Len(t, recovered, 1, "recovery keyed on executor A must find the workflow")
+	require.Equal(t, wfID, recovered[0].GetWorkflowID())
+
+	// The recovered execution runs the step body again alongside the stale one.
+	require.Eventually(t, func() bool { return execCount.Load() == 2 }, 10*time.Second, 50*time.Millisecond,
+		"the recovered execution must reach the step body")
+
+	close(release)
+	for _, h := range []WorkflowHandle[string]{handleA, handleB} {
+		res, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "done", res)
+	}
+	res, err := recovered[0].GetResult()
+	require.NoError(t, err)
+	require.Equal(t, "done", res)
+}
+
 var (
 	maxRecoveryAttempts = 20
 	recoveryCount       int64

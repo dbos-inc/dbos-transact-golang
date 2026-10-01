@@ -1499,12 +1499,7 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
         application_name
     ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, %s, $11, %s, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
     ON CONFLICT (workflow_uuid)
-        DO UPDATE SET
-            updated_at = EXCLUDED.updated_at,
-            executor_id = CASE
-                WHEN EXCLUDED.status IN ($29, $30) THEN workflow_status.executor_id
-                ELSE EXCLUDED.executor_id
-            END
+        DO UPDATE SET updated_at = EXCLUDED.updated_at
         RETURNING status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, creator_xid`, s.dialect.SchemaPrefix(s.schema), nowMs, nowMs)
 
 	var result InsertWorkflowResult
@@ -1553,8 +1548,6 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		debounceDeadlineEpochMs,
 		input.Status.IsDebounced,
 		owner,
-		models.WorkflowStatusEnqueued,
-		models.WorkflowStatusDelayed,
 	).Scan(
 		&result.Status,
 		&result.Name,
