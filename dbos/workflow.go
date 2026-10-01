@@ -2792,6 +2792,9 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 		return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
 	}, sysdb.WithRetrierLogger(c.logger))
 	if recErr != nil {
+		if errors.Is(recErr, ErrConflictingWorkflowID) {
+			c.logger.Debug("step outcome discarded: the workflow is no longer owned by this execution", "workflow_id", stepState.workflowID, "step_name", stepOpts.stepName, "step_id", stepState.stepID)
+		}
 		return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
 	}
 
